@@ -3810,7 +3810,8 @@ process.stdout.write(JSON.stringify({{
         "unknown": {"mode": "adaptive", "fit": "pending"},
         "absent": {"mode": "—", "fit": "pending"},
     }
-    assert '["plan-dispatch", fitState]' in renderer
+    assert '["plan-dispatch", planState]' in renderer
+    assert '["plan-dispatch", fitState]' not in renderer
 
 
 def test_decision_trace_pair_branches_require_observed_vote_truth() -> None:

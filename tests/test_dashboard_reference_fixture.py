@@ -6,9 +6,11 @@ import shutil
 import struct
 import subprocess
 import threading
+import time
 from html.parser import HTMLParser
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
 
 from chronovisor.ops import dashboard
 
@@ -899,7 +901,7 @@ process.stdout.write(JSON.stringify(Object.fromEntries(
     }
 
 
-def test_six_processing_inputs_keep_real_dashboard_paths_connected(
+def test_all_decision_and_processing_inputs_keep_real_dashboard_paths_connected(
     monkeypatch, tmp_path: Path
 ) -> None:
     cases = [
@@ -1067,6 +1069,15 @@ addEventListener("DOMContentLoaded", () => {
     });
     api.renderDecisionTraceFrame(trace);
   };
+  const requestedFixture = new URLSearchParams(location.search).get("fixture");
+  if (requestedFixture) {
+    const selected = fixtures.find(({ case: fixture }) => fixture.id === requestedFixture);
+    if (!selected) throw new Error(`unknown fixture: ${requestedFixture}`);
+    renderFixture(selected.case, selected.trace, "screenshot");
+    document.querySelector("#decision-trace-panel")?.scrollIntoView({ block: "start" });
+    document.documentElement.dataset.fixtureReady = requestedFixture;
+    return;
+  }
   const results = fixtures.map(({ case: fixture, trace }, index) => {
     renderFixture(fixture, trace, `0${index}`);
     const pathState = (node) => {
@@ -1096,7 +1107,13 @@ addEventListener("DOMContentLoaded", () => {
     };
     const paths = Object.fromEntries([...document.querySelectorAll("[data-path-key]")]
       .filter((node) => fixture.kind !== "processing"
-        || ["execution-plan-context", "plan-context"].includes(node.dataset.pathKey))
+        || [
+          "packet-preflight",
+          "preflight-execution_plan",
+          "execution-plan-context",
+          "plan-context",
+          "plan-dispatch",
+        ].includes(node.dataset.pathKey))
       .map((node) => [node.dataset.pathKey, pathState(node)]));
     const rails = Object.fromEntries([...document.querySelectorAll("[data-decision-lane]")]
       .filter((lane) => fixture.kind !== "processing"
@@ -1152,11 +1169,12 @@ addEventListener("DOMContentLoaded", () => {
 
     class Handler(dashboard.DashboardHandler):
         def do_GET(self) -> None:
-            if self.path in {"/", "/fixture-harness.js"}:
+            request_path = self.path.split("?", 1)[0]
+            if request_path in {"/", "/fixture-harness.js"}:
                 if self._browser_boundary_allows():
                     dashboard._file_response(
                         self,
-                        page_path if self.path == "/" else harness_path,
+                        page_path if request_path == "/" else harness_path,
                     )
                 return
             super().do_GET()
@@ -1204,6 +1222,7 @@ addEventListener("DOMContentLoaded", () => {
     process = None
     browser_exit = None
     received = False
+    visual_paths = []
     try:
         process = subprocess.Popen(
             [
@@ -1232,6 +1251,50 @@ addEventListener("DOMContentLoaded", () => {
             except subprocess.TimeoutExpired:
                 pass
         browser_exit = process.poll()
+        if received:
+            visual_dir = tmp_path / "processing-visuals"
+            visual_dir.mkdir()
+            for index, case in enumerate(processing_cases):
+                visual_path = visual_dir / f"{case['id'].replace('::', '__')}.png"
+                visual_process = subprocess.Popen(
+                    [
+                        chrome,
+                        "--headless=new",
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-background-networking",
+                        "--disable-component-update",
+                        "--no-first-run",
+                        "--force-prefers-reduced-motion=reduce",
+                        "--run-all-compositor-stages-before-draw",
+                        "--virtual-time-budget=1000",
+                        "--window-size=1280,960",
+                        f"--screenshot={visual_path}",
+                        f"--user-data-dir={tmp_path / f'visual-profile-{index}'}",
+                        f"http://127.0.0.1:{server.server_port}/?fixture={quote(case['id'])}",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    if visual_path.is_file() and visual_path.stat().st_size > 0:
+                        break
+                    if visual_process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                visual_process.terminate()
+                try:
+                    _, visual_stderr = visual_process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    visual_process.kill()
+                    _, visual_stderr = visual_process.communicate(timeout=2)
+                assert visual_path.is_file() and visual_path.stat().st_size > 0, (
+                    visual_stderr[-4000:]
+                )
+                visual_paths.append(visual_path)
     finally:
         if process is not None:
             process.terminate()
@@ -1258,6 +1321,8 @@ addEventListener("DOMContentLoaded", () => {
     assert not browser_errors, diagnostics
     assert len(browser_results) == len(payload), diagnostics
     assert screenshot_path.is_file() and screenshot_path.stat().st_size > 0
+
+    assert len(visual_paths) == 29
 
     branches = {
         "A": [],
@@ -1345,9 +1410,15 @@ addEventListener("DOMContentLoaded", () => {
         assert result["layout"]["rightReachable"] is True
         assert result["layout"]["fitsWidth"] is True
         assert result["layout"]["nextPanelGap"] == 12
-        for path_key in ("execution-plan-context", "plan-context"):
+        for path_key in (
+            "packet-preflight",
+            "preflight-execution_plan",
+            "execution-plan-context",
+            "plan-context",
+            "plan-dispatch",
+        ):
             path = result["paths"][path_key]
-            assert path["state"] == "active"
+            assert path["state"] in {"active", "done"}
             assert path["dash"] in {"none", ""}
             assert path["length"] > 0
         for phase, rail in zip(rail_phases, result["rails"]["primary"], strict=True):
