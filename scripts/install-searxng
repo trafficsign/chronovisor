@@ -7,10 +7,10 @@ readonly RUNTIME_ROOT="${CHRONOVISOR_SEARXNG_ROOT:-$HOME/.local/share/chronoviso
 readonly SOURCE_ROOT="$RUNTIME_ROOT/source"
 readonly VENV="$RUNTIME_ROOT/.venv"
 readonly CONFIG_ROOT="$HOME/.chronovisor/runtime/searxng"
-readonly LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.trafficsign.chronovisor-searxng.plist"
+readonly LAUNCH_AGENT="$HOME/.chronovisor/runtime/launchd-sources/com.trafficsign.chronovisor-searxng.plist"
 readonly REVISION="ef8f6470e0473a1548f175217aaa7b9346ce6973"
-readonly DOMAIN="gui/$(/usr/bin/id -u)"
 readonly UV="${CHRONOVISOR_UV:-$(command -v uv 2>/dev/null || true)}"
+readonly SERVICE_MANAGER="${CHRONOVISOR_SERVICE_MANAGER:-$PROJECT_ROOT/scripts/chronovisor-macos-services}"
 
 if [[ "$UV" != /* || ! -f "$UV" || ! -x "$UV" ]]; then
   print -u2 "uv not found; set CHRONOVISOR_UV to an absolute executable path"
@@ -45,11 +45,7 @@ fi
   "$LAUNCH_AGENT" \
   --project-root "$PROJECT_ROOT" \
   --home "$HOME"
-readonly LABEL="$(/usr/libexec/PlistBuddy -c 'Print :Label' "$LAUNCH_AGENT")"
-
-/bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
-/bin/launchctl bootstrap "$DOMAIN" "$LAUNCH_AGENT"
-/bin/launchctl kickstart -k "$DOMAIN/$LABEL"
+"$SERVICE_MANAGER" refresh searxng
 
 for _attempt in {1..20}; do
   if /usr/bin/curl --fail --silent --max-time 2 \

@@ -3,20 +3,19 @@ set -eu
 
 SERVICE="${1:-}"
 case "$SERVICE" in
-  dashboard|lan-dashboard|ingest-drain|librarian-review|library-evidence) ;;
+  dashboard|lan-dashboard|ingest-drain|librarian-review) ;;
   *)
-    printf 'usage: %s {dashboard|lan-dashboard|ingest-drain|librarian-review|library-evidence}\n' "$0" >&2
+    printf 'usage: %s {dashboard|lan-dashboard|ingest-drain|librarian-review}\n' "$0" >&2
     exit 64
     ;;
 esac
 
 SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.trafficsign.chronovisor-$SERVICE.plist"
-DOMAIN="gui/$(id -u)"
-LAUNCHCTL="${CHRONOVISOR_LAUNCHCTL:-/bin/launchctl}"
+LAUNCH_AGENT="$HOME/.chronovisor/runtime/launchd-sources/com.trafficsign.chronovisor-$SERVICE.plist"
+SERVICE_MANAGER="${CHRONOVISOR_SERVICE_MANAGER:-$PROJECT_ROOT/scripts/chronovisor-macos-services}"
 PYTHON="${CHRONOVISOR_PYTHON:-python3}"
-readonly SERVICE SCRIPT_DIR PROJECT_ROOT LAUNCH_AGENT DOMAIN LAUNCHCTL PYTHON
+readonly SERVICE SCRIPT_DIR PROJECT_ROOT LAUNCH_AGENT SERVICE_MANAGER PYTHON
 
 mkdir -p \
   "$HOME/.chronovisor/logs" \
@@ -27,19 +26,4 @@ mkdir -p \
   "$LAUNCH_AGENT" \
   --project-root "$PROJECT_ROOT" \
   --home "$HOME"
-LABEL="$("$PYTHON" -c 'import plistlib, sys; print(plistlib.load(open(sys.argv[1], "rb"))["Label"])' "$LAUNCH_AGENT")"
-readonly LABEL
-
-"$LAUNCHCTL" bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
-attempt=0
-while [ "$attempt" -lt 20 ]; do
-  if "$LAUNCHCTL" bootstrap "$DOMAIN" "$LAUNCH_AGENT" >/dev/null 2>&1; then
-    break
-  fi
-  attempt=$((attempt + 1))
-  /bin/sleep 0.25
-done
-if ! "$LAUNCHCTL" print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-  "$LAUNCHCTL" bootstrap "$DOMAIN" "$LAUNCH_AGENT"
-fi
-"$LAUNCHCTL" kickstart -k "$DOMAIN/$LABEL"
+"$SERVICE_MANAGER" refresh "$SERVICE"

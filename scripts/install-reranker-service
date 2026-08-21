@@ -3,8 +3,9 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="${0:A:h}"
 readonly PROJECT_ROOT="${SCRIPT_DIR:h}"
-readonly LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.trafficsign.chronovisor-reranker.plist"
+readonly LAUNCH_AGENT="$HOME/.chronovisor/runtime/launchd-sources/com.trafficsign.chronovisor-reranker.plist"
 readonly DOMAIN="gui/$(/usr/bin/id -u)"
+readonly SERVICE_MANAGER="${CHRONOVISOR_SERVICE_MANAGER:-$PROJECT_ROOT/scripts/chronovisor-macos-services}"
 
 mkdir -p "$HOME/.chronovisor/logs" "${LAUNCH_AGENT:h}"
 "$PROJECT_ROOT/scripts/chronovisor-render-launchd" \
@@ -12,19 +13,8 @@ mkdir -p "$HOME/.chronovisor/logs" "${LAUNCH_AGENT:h}"
   "$LAUNCH_AGENT" \
   --project-root "$PROJECT_ROOT" \
   --home "$HOME"
-readonly LABEL="$(/usr/libexec/PlistBuddy -c 'Print :Label' "$LAUNCH_AGENT")"
-
-/bin/launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
-for _attempt in {1..20}; do
-  if /bin/launchctl bootstrap "$DOMAIN" "$LAUNCH_AGENT" >/dev/null 2>&1; then
-    break
-  fi
-  /bin/sleep 0.25
-done
-if ! /bin/launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
-  /bin/launchctl bootstrap "$DOMAIN" "$LAUNCH_AGENT"
-fi
-/bin/launchctl kickstart -k "$DOMAIN/$LABEL"
+readonly LABEL="$(/usr/libexec/PlistBuddy -c 'Print :Label' "$LAUNCH_AGENT").managed"
+"$SERVICE_MANAGER" refresh reranker
 
 status_matches_launchd() {
   local pid

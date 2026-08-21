@@ -23,13 +23,12 @@ from chronovisor.ops.autonomy import runtime_service_label
 
 RUNBOOK_VERSION = 1
 SERVICE_LABELS = {
-    "dashboard": runtime_service_label("dashboard"),
-    "ingest": runtime_service_label("ingest-drain"),
-    "sleep": runtime_service_label("sleep"),
-    "watchdog": runtime_service_label("watchdog"),
-    "observer": runtime_service_label("deadman-observer"),
-    "converge": runtime_service_label("converge"),
-    "soak": runtime_service_label("soak"),
+    "dashboard": f"{runtime_service_label('dashboard')}.managed",
+    "ingest": f"{runtime_service_label('ingest-drain')}.managed",
+    "sleep": f"{runtime_service_label('sleep')}.managed",
+    "watchdog": f"{runtime_service_label('watchdog')}.managed",
+    "observer": f"{runtime_service_label('deadman-observer')}.managed",
+    "converge": f"{runtime_service_label('converge')}.managed",
 }
 SERVICE_TEMPLATES = {
     "dashboard": "com.trafficsign.chronovisor-dashboard.plist",
@@ -51,7 +50,13 @@ def _service_plist(service: str) -> Path:
     label = SERVICE_LABELS[service]
     if service in KEEPALIVE_SERVICES:
         return runtime_repo_root() / "launchd" / SERVICE_TEMPLATES[service]
-    return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+    source_label = label.removesuffix(".managed")
+    return (
+        CHRONOVISOR_ROOT
+        / "runtime"
+        / "launchd-sources"
+        / f"{source_label}.plist"
+    )
 
 
 def launchd_status(service: str) -> dict[str, Any]:
@@ -72,17 +77,11 @@ def launchd_status(service: str) -> dict[str, Any]:
         plist = {}
     keep_alive = plist.get("KeepAlive") is True
     expected_keep_alive = service in KEEPALIVE_SERVICES
-    keep_alive_policy = plist.get("KeepAlive")
     scheduled = bool(plist.get("StartInterval") or plist.get("StartCalendarInterval"))
     restart_policy_valid = (
         keep_alive
         if expected_keep_alive
         else scheduled
-        or (
-            service == "soak"
-            and isinstance(keep_alive_policy, dict)
-            and keep_alive_policy.get("SuccessfulExit") is False
-        )
     )
     return {
         "service": service,

@@ -33,7 +33,6 @@ GENERIC_SERVICES = {
     "lan-dashboard": "chronovisor-dashboard",
     "ingest-drain": "chronovisor-ingest-drain",
     "librarian-review": "chronovisor-librarian-review",
-    "library-evidence": "chronovisor-library-evidence",
 }
 UVX_SERVICES = set(SERVICES) - {"com.trafficsign.chronovisor-searxng.plist"}
 PERSONAL_HOME = re.compile(rb"/Users/trafficsign(?:/|$)")
@@ -164,7 +163,7 @@ def test_launchd_sources_and_installers_have_no_personal_checkout_path() -> None
 
 
 @pytest.mark.parametrize(("service", "wrapper"), GENERIC_SERVICES.items())
-def test_generic_installer_renders_every_supported_service_without_launchctl(
+def test_generic_installer_renders_every_supported_service_for_native_manager(
     tmp_path: Path,
     service: str,
     wrapper: str,
@@ -172,20 +171,20 @@ def test_generic_installer_renders_every_supported_service_without_launchctl(
     home = tmp_path / "home"
     home.mkdir()
     uvx = _executable(tmp_path / "tools" / "uvx")
-    launchctl_log = tmp_path / "launchctl.log"
-    launchctl = tmp_path / "tools" / "launchctl"
-    launchctl.write_text(
-        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CHRONOVISOR_TEST_LAUNCHCTL_LOG"\n',
+    manager_log = tmp_path / "manager.log"
+    manager = tmp_path / "tools" / "service-manager"
+    manager.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CHRONOVISOR_TEST_MANAGER_LOG"\n',
         encoding="utf-8",
     )
-    launchctl.chmod(0o755)
+    manager.chmod(0o755)
     env = os.environ | {
         "HOME": str(home),
         "CHRONOVISOR_UVX": str(uvx),
         "CHRONOVISOR_PYTHON": sys.executable,
-        "CHRONOVISOR_LAUNCHCTL": str(launchctl),
+        "CHRONOVISOR_SERVICE_MANAGER": str(manager),
         "CHRONOVISOR_LAUNCHD_LABEL_PREFIX": "org.example.chronovisor-",
-        "CHRONOVISOR_TEST_LAUNCHCTL_LOG": str(launchctl_log),
+        "CHRONOVISOR_TEST_MANAGER_LOG": str(manager_log),
     }
 
     subprocess.run(
@@ -196,68 +195,42 @@ def test_generic_installer_renders_every_supported_service_without_launchctl(
 
     output = (
         home
-        / "Library"
-        / "LaunchAgents"
+        / ".chronovisor"
+        / "runtime"
+        / "launchd-sources"
         / f"com.trafficsign.chronovisor-{service}.plist"
     )
     payload = plistlib.loads(output.read_bytes())
     label = f"org.example.chronovisor-{service}"
-    domain = f"gui/{os.getuid()}"
 
     assert payload["Label"] == label
     assert payload["ProgramArguments"][0] == str(ROOT / "scripts" / wrapper)
     assert "@@" not in output.read_text(encoding="utf-8")
-    assert launchctl_log.read_text(encoding="utf-8").splitlines() == [
-        f"bootout {domain}/{label}",
-        f"bootstrap {domain} {output}",
-        f"print {domain}/{label}",
-        f"kickstart -k {domain}/{label}",
+    assert manager_log.read_text(encoding="utf-8").splitlines() == [
+        f"refresh {service}"
     ]
 
 
-def test_generic_installer_retries_bootstrap_after_async_bootout(tmp_path: Path) -> None:
+def test_generic_installer_propagates_native_manager_failure(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
     uvx = _executable(tmp_path / "tools" / "uvx")
-    launchctl_log = tmp_path / "launchctl.log"
-    launchctl_state = tmp_path / "launchctl-state"
-    launchctl = tmp_path / "tools" / "launchctl"
-    launchctl.write_text(
-        """#!/bin/sh
-printf '%s\\n' \"$*\" >> \"$CHRONOVISOR_TEST_LAUNCHCTL_LOG\"
-if [ \"$1\" = bootstrap ]; then
-  count=0
-  [ -f \"$CHRONOVISOR_TEST_LAUNCHCTL_STATE\" ] && IFS= read -r count < \"$CHRONOVISOR_TEST_LAUNCHCTL_STATE\"
-  count=$((count + 1))
-  printf '%s\\n' \"$count\" > \"$CHRONOVISOR_TEST_LAUNCHCTL_STATE\"
-  [ \"$count\" -lt 3 ] && exit 37
-fi
-exit 0
-""",
-        encoding="utf-8",
-    )
-    launchctl.chmod(0o755)
+    manager = _executable(tmp_path / "tools" / "service-manager")
+    manager.write_text("#!/bin/sh\nexit 37\n", encoding="utf-8")
     env = os.environ | {
         "HOME": str(home),
         "CHRONOVISOR_UVX": str(uvx),
         "CHRONOVISOR_PYTHON": sys.executable,
-        "CHRONOVISOR_LAUNCHCTL": str(launchctl),
+        "CHRONOVISOR_SERVICE_MANAGER": str(manager),
         "CHRONOVISOR_LAUNCHD_LABEL_PREFIX": "org.example.chronovisor-",
-        "CHRONOVISOR_TEST_LAUNCHCTL_LOG": str(launchctl_log),
-        "CHRONOVISOR_TEST_LAUNCHCTL_STATE": str(launchctl_state),
     }
 
-    subprocess.run(
-        [str(ROOT / "scripts" / "install-launchd-service"), "dashboard"],
-        check=True,
-        env=env,
-    )
-
-    bootstrap_calls = [
-        line for line in launchctl_log.read_text(encoding="utf-8").splitlines()
-        if line.startswith("bootstrap ")
-    ]
-    assert len(bootstrap_calls) == 3
+    with pytest.raises(subprocess.CalledProcessError):
+        subprocess.run(
+            [str(ROOT / "scripts" / "install-launchd-service"), "dashboard"],
+            check=True,
+            env=env,
+        )
 
 
 def test_contract_manifest_and_production_files_have_no_personal_home() -> None:
@@ -288,11 +261,11 @@ def test_contract_manifest_and_production_files_have_no_personal_home() -> None:
         check=True,
         capture_output=True,
     ).stdout.split(b"\0")
+    paths = [ROOT / raw_path.decode() for raw_path in tracked if raw_path]
     offenders = [
-        raw_path.decode()
-        for raw_path in tracked
-        if raw_path
-        if PERSONAL_HOME.search((ROOT / raw_path.decode()).read_bytes())
+        str(path.relative_to(ROOT))
+        for path in paths
+        if path.is_file() and PERSONAL_HOME.search(path.read_bytes())
     ]
 
     assert offenders == []

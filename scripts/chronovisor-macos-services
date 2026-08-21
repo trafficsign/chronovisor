@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""Build the native macOS provider bundle for Chronovisor LaunchAgents."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import plistlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MANAGER_SOURCE = PROJECT_ROOT / "macos" / "ChronovisorServiceManager.swift"
+APP_NAME = "Chronovisor.app"
+APP_IDENTIFIER = "com.trafficsign.chronovisor"
+BUNDLE_PROGRAM = "Contents/MacOS/Chronovisor"
+SERVICE_SUFFIXES = (
+    "converge",
+    "dashboard",
+    "deadman-observer",
+    "ingest-drain",
+    "lan-dashboard",
+    "librarian-review",
+    "reranker",
+    "searxng",
+    "semantic",
+    "sleep",
+    "watchdog",
+)
+RETIRED_SUFFIXES = ("librarian-rollout", "library-evidence", "soak")
+
+
+def _plist_name(suffix: str) -> str:
+    return f"com.trafficsign.chronovisor-{suffix}.plist"
+
+
+def _source_plist(home: Path, installed_app: Path, suffix: str) -> Path:
+    name = _plist_name(suffix)
+    candidates = (
+        home / ".chronovisor" / "runtime" / "launchd-sources" / name,
+        home / "Library" / "LaunchAgents" / name,
+        installed_app / "Contents" / "Library" / "LaunchAgents" / name,
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    agents = installed_app / "Contents" / "Library" / "LaunchAgents"
+    for candidate in agents.glob("*.plist"):
+        try:
+            label = plistlib.loads(candidate.read_bytes()).get("Label")
+        except (OSError, plistlib.InvalidFileException):
+            continue
+        if isinstance(label, str) and label.removesuffix(".managed").endswith(
+            f"-{suffix}"
+        ):
+            return candidate
+    raise FileNotFoundError(f"missing source LaunchAgent: {name}")
+
+
+def bundled_plist(payload: dict[str, Any], suffix: str) -> dict[str, Any]:
+    label = payload.get("Label")
+    if (
+        not isinstance(label, str)
+        or not label.removesuffix(".managed").endswith(f"-{suffix}")
+    ):
+        raise ValueError(f"unexpected LaunchAgent label for {suffix}: {label!r}")
+    arguments = payload.get("ProgramArguments")
+    if (
+        payload.get("BundleProgram") == BUNDLE_PROGRAM
+        and isinstance(arguments, list)
+        and arguments[:2] == [BUNDLE_PROGRAM, "run"]
+    ):
+        arguments = arguments[2:]
+    if not isinstance(arguments, list) or not arguments:
+        program = payload.get("Program")
+        arguments = [program] if isinstance(program, str) else []
+    if not arguments or not all(isinstance(value, str) for value in arguments):
+        raise ValueError(f"invalid ProgramArguments for {label}")
+    executable = Path(arguments[0])
+    if (
+        not executable.is_absolute()
+        or not executable.is_file()
+        or not os.access(executable, os.X_OK)
+    ):
+        raise ValueError(f"service executable is unavailable: {executable}")
+    bundled = dict(payload)
+    bundled["Label"] = f"{label.removesuffix('.managed')}.managed"
+    bundled.pop("Program", None)
+    bundled["BundleProgram"] = BUNDLE_PROGRAM
+    bundled["ProgramArguments"] = [BUNDLE_PROGRAM, "run", *arguments]
+    bundled.pop("AssociatedBundleIdentifiers", None)
+    return bundled
+
+
+def _managed_service(app: Path, suffix: str) -> tuple[str, str]:
+    agents = app / "Contents" / "Library" / "LaunchAgents"
+    for path in agents.glob("*.plist"):
+        payload = plistlib.loads(path.read_bytes())
+        label = payload.get("Label")
+        if isinstance(label, str) and label.removesuffix(".managed").endswith(
+            f"-{suffix}"
+        ):
+            return path.name, label
+    raise FileNotFoundError(f"managed LaunchAgent not found for {suffix}")
+
+
+def _write_info_plist(app: Path) -> None:
+    payload = {
+        "CFBundleDevelopmentRegion": "en",
+        "CFBundleDisplayName": "Chronovisor",
+        "CFBundleExecutable": "Chronovisor",
+        "CFBundleIdentifier": APP_IDENTIFIER,
+        "CFBundleInfoDictionaryVersion": "6.0",
+        "CFBundleName": "Chronovisor",
+        "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": "1.0",
+        "CFBundleVersion": "1",
+        "LSBackgroundOnly": True,
+        "LSMinimumSystemVersion": "13.0",
+    }
+    (app / "Contents" / "Info.plist").write_bytes(
+        plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False)
+    )
+
+
+def build_app(home: Path, destination: Path) -> dict[str, Any]:
+    if destination.name != APP_NAME:
+        raise ValueError(f"app destination must end with {APP_NAME}")
+    swiftc = shutil.which("swiftc") or shutil.which("xcrun")
+    codesign = shutil.which("codesign")
+    if swiftc is None or codesign is None:
+        raise RuntimeError("Swift compiler and codesign are required")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="chronovisor-app-", dir=destination.parent
+    ) as temporary:
+        app = Path(temporary) / APP_NAME
+        executable = app / "Contents" / "MacOS" / "Chronovisor"
+        agents = app / "Contents" / "Library" / "LaunchAgents"
+        executable.parent.mkdir(parents=True)
+        agents.mkdir(parents=True)
+        _write_info_plist(app)
+        bundled_services: list[str] = []
+        for suffix in SERVICE_SUFFIXES:
+            try:
+                source = _source_plist(home, destination, suffix)
+            except FileNotFoundError:
+                continue
+            payload = plistlib.loads(source.read_bytes())
+            bundled = bundled_plist(payload, suffix)
+            (agents / f"{bundled['Label']}.plist").write_bytes(
+                plistlib.dumps(
+                    bundled,
+                    fmt=plistlib.FMT_XML,
+                    sort_keys=False,
+                )
+            )
+            bundled_services.append(suffix)
+        if not bundled_services:
+            raise RuntimeError("no Chronovisor LaunchAgent sources found")
+        compiler = [swiftc]
+        if Path(swiftc).name == "xcrun":
+            compiler.extend(["swiftc"])
+        subprocess.run(
+            [
+                *compiler,
+                "-O",
+                "-framework",
+                "ServiceManagement",
+                str(MANAGER_SOURCE),
+                "-o",
+                str(executable),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            [
+                codesign,
+                "--force",
+                "--deep",
+                "--sign",
+                "-",
+                "--identifier",
+                APP_IDENTIFIER,
+                str(app),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            [codesign, "--verify", "--deep", "--strict", str(app)], check=True
+        )
+        staged = destination.with_name(f".{APP_NAME}.new")
+        if staged.exists():
+            shutil.rmtree(staged)
+        shutil.copytree(app, staged, symlinks=True)
+        if destination.exists():
+            backup = destination.with_name(f".{APP_NAME}.previous")
+            if backup.exists():
+                shutil.rmtree(backup)
+            os.replace(destination, backup)
+        os.replace(staged, destination)
+    return {
+        "status": "ok",
+        "app": str(destination),
+        "services": bundled_services,
+        "retired": list(RETIRED_SUFFIXES),
+    }
+
+
+def _manager(
+    app: Path, command: str, *arguments: str
+) -> subprocess.CompletedProcess[str]:
+    executable = app / "Contents" / "MacOS" / "Chronovisor"
+    return subprocess.run(
+        [str(executable), command, *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def refresh_service(home: Path, app: Path, suffix: str) -> dict[str, Any]:
+    build_app(home, app)
+    plist_name, label = _managed_service(app, suffix)
+    unregister = _manager(app, "unregister-one", plist_name)
+    if unregister.returncode != 0:
+        return {
+            "status": "error",
+            "service": suffix,
+            "phase": "unregister",
+            "detail": unregister.stdout.strip() or unregister.stderr.strip(),
+        }
+    # macOS can reject an immediate unregister/register pair while smd is
+    # still committing the removal.
+    time.sleep(2)
+    register = _manager(app, "register-one", plist_name)
+    if register.returncode != 0:
+        _manager(app, "open-settings")
+        return {
+            "status": "error",
+            "service": suffix,
+            "phase": "register",
+            "detail": register.stdout.strip() or register.stderr.strip(),
+        }
+    kickstart = subprocess.run(
+        [
+            "/bin/launchctl",
+            "kickstart",
+            "-k",
+            f"gui/{os.getuid()}/{label}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        "status": "ok" if kickstart.returncode == 0 else "error",
+        "service": suffix,
+        "plist": plist_name,
+        "label": label,
+        "phase": "ready" if kickstart.returncode == 0 else "kickstart",
+        "detail": kickstart.stderr.strip(),
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "command",
+        choices=(
+            "build",
+            "refresh",
+            "register",
+            "unregister",
+            "status",
+            "open-settings",
+        ),
+    )
+    parser.add_argument("service", nargs="?", choices=SERVICE_SUFFIXES)
+    parser.add_argument("--home", type=Path, default=Path.home())
+    parser.add_argument("--app", type=Path)
+    args = parser.parse_args()
+    home = args.home.expanduser().resolve()
+    app = (
+        args.app.expanduser().resolve()
+        if args.app
+        else home / "Applications" / APP_NAME
+    )
+    if args.command == "build":
+        print(json.dumps(build_app(home, app), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "refresh":
+        if args.service is None:
+            parser.error("refresh requires a service")
+        payload = refresh_service(home, app, args.service)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if payload["status"] == "ok" else 1
+    if args.service is not None:
+        parser.error(f"{args.command} does not accept a service")
+    completed = _manager(app, args.command)
+    print(completed.stdout, end="")
+    if completed.stderr:
+        print(completed.stderr, end="", file=sys.stderr)
+    return completed.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

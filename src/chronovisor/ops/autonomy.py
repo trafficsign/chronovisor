@@ -102,7 +102,8 @@ CONVERGE_LABEL = runtime_service_label("converge")
 WATCHDOG_LABEL = runtime_service_label("watchdog")
 DEADMAN_LABEL = runtime_service_label("deadman-observer")
 SOAK_LABEL = runtime_service_label("soak")
-LAUNCH_AGENT_DIR = Path.home() / "Library" / "LaunchAgents"
+LAUNCH_AGENT_DIR = CHRONOVISOR_ROOT / "runtime" / "launchd-sources"
+LEGACY_LAUNCH_AGENT_DIR = Path.home() / "Library" / "LaunchAgents"
 WRAPPER_DIR = CHRONOVISOR_ROOT / "bin"
 DUPLICATE_FRONTIER_LANE = "autonomy_duplicate_resolution"
 RETENTION_FRONTIER_LANE = "autonomy_retention"
@@ -4318,12 +4319,10 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
     converge_path = LAUNCH_AGENT_DIR / f"{CONVERGE_LABEL}.plist"
     watchdog_path = LAUNCH_AGENT_DIR / f"{WATCHDOG_LABEL}.plist"
     deadman_path = LAUNCH_AGENT_DIR / f"{DEADMAN_LABEL}.plist"
-    soak_path = LAUNCH_AGENT_DIR / f"{SOAK_LABEL}.plist"
     sleep_wrapper = WRAPPER_DIR / "chronovisor-sleep"
     converge_wrapper = WRAPPER_DIR / "chronovisor-converge"
     watchdog_wrapper = WRAPPER_DIR / "chronovisor-watchdog"
     deadman_script = WRAPPER_DIR / "chronovisor-deadman-observer"
-    soak_wrapper = WRAPPER_DIR / "chronovisor-soak"
     legacy_deadman_script = WRAPPER_DIR / "chronovisor-deadman-observer.py"
     sleep_command = [
         *uvx_runtime_command(
@@ -4375,26 +4374,6 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         "--max-main-age-seconds",
         "1200",
     ]
-    expected_commit = str(runtime_identity().get("expected_commit") or "")
-    soak_command = [
-        *uvx_runtime_command(
-            "chronovisor-burn-monitor",
-            executable=uvx,
-            refresh=True,
-        ),
-        "--duration-seconds",
-        "604800",
-        "--sample-seconds",
-        "60",
-        "--probe-seconds",
-        "5",
-        "--preflight-wait-seconds",
-        "604800",
-        "--final-idle-wait-seconds",
-        "1800",
-        "--expected-commit",
-        expected_commit,
-    ]
     sleep_plist = _plist(
         SLEEP_LABEL,
         [str(sleep_wrapper)],
@@ -4428,15 +4407,6 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         start_interval=300,
     )
     deadman_plist["RunAtLoad"] = True
-    soak_plist = _plist(
-        SOAK_LABEL,
-        [str(soak_wrapper)],
-        stdout=logs / "soak-7d.launchd.out.log",
-        stderr=logs / "soak-7d.launchd.err.log",
-    )
-    soak_plist["RunAtLoad"] = True
-    soak_plist["KeepAlive"] = {"SuccessfulExit": False}
-    soak_plist["ThrottleInterval"] = 60
     payload: dict[str, Any] = {
         "status": "ok",
         "dry_run": dry_run,
@@ -4467,18 +4437,11 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
                 "program": deadman_plist["ProgramArguments"],
                 "stdout": deadman_plist["StandardOutPath"],
             },
-            {
-                "label": SOAK_LABEL,
-                "path": str(soak_path),
-                "program": soak_plist["ProgramArguments"],
-                "stdout": soak_plist["StandardOutPath"],
-            },
         ],
         "wrappers": [
             {"path": str(sleep_wrapper), "command": sleep_command},
             {"path": str(converge_wrapper), "command": converge_command},
             {"path": str(watchdog_wrapper), "command": watchdog_command},
-            {"path": str(soak_wrapper), "command": soak_command},
         ],
     }
     if not dry_run:
@@ -4486,7 +4449,6 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         _write_wrapper(sleep_wrapper, sleep_command)
         _write_wrapper(converge_wrapper, converge_command)
         _write_wrapper(watchdog_wrapper, watchdog_command)
-        _write_wrapper(soak_wrapper, soak_command)
         # The package-independent observer lives at the package root so the
         # standalone executable preserves this external failure boundary.
         observer_source = Path(__file__).parents[1] / "deadman_observer.py"
@@ -4498,26 +4460,20 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
         _write_plist(converge_path, converge_plist)
         _write_plist(watchdog_path, watchdog_plist)
         _write_plist(deadman_path, deadman_plist)
-        _write_plist(soak_path, soak_plist)
     if load and not dry_run:
-        uid = os.getuid()
         loads = []
-        for path in (
-            sleep_path,
-            converge_path,
-            watchdog_path,
-            deadman_path,
-            soak_path,
+        manager = PROJECT_ROOT / "scripts" / "chronovisor-macos-services"
+        for suffix, path in (
+            ("sleep", sleep_path),
+            ("converge", converge_path),
+            ("watchdog", watchdog_path),
+            ("deadman-observer", deadman_path),
         ):
-            subprocess.run(
-                ["launchctl", "bootout", f"gui/{uid}", str(path)],
-                text=True,
-                capture_output=True,
-            )
             proc = subprocess.run(
-                ["launchctl", "bootstrap", f"gui/{uid}", str(path)],
+                [str(manager), "refresh", suffix],
                 text=True,
                 capture_output=True,
+                check=False,
             )
             loads.append(
                 {
@@ -4535,8 +4491,12 @@ def install_launchd(*, dry_run: bool = False, load: bool = False) -> dict[str, A
 def uninstall_launchd(*, dry_run: bool = False, unload: bool = False) -> dict[str, Any]:
     """Unload and remove all generated autonomous service artifacts."""
 
-    labels = (SLEEP_LABEL, CONVERGE_LABEL, WATCHDOG_LABEL, DEADMAN_LABEL, SOAK_LABEL)
+    labels = (SLEEP_LABEL, CONVERGE_LABEL, WATCHDOG_LABEL, DEADMAN_LABEL)
     plists = [LAUNCH_AGENT_DIR / f"{label}.plist" for label in labels]
+    legacy_labels = (*labels, SOAK_LABEL)
+    legacy_plists = [
+        LEGACY_LAUNCH_AGENT_DIR / f"{label}.plist" for label in legacy_labels
+    ]
     wrappers = [
         WRAPPER_DIR / "chronovisor-sleep",
         WRAPPER_DIR / "chronovisor-converge",
@@ -4550,6 +4510,7 @@ def uninstall_launchd(*, dry_run: bool = False, unload: bool = False) -> dict[st
         "dry_run": dry_run,
         "unload": unload,
         "plists": [str(path) for path in plists],
+        "legacy_plists": [str(path) for path in legacy_plists],
         "wrappers": [str(path) for path in wrappers],
     }
     if dry_run:
@@ -4557,11 +4518,37 @@ def uninstall_launchd(*, dry_run: bool = False, unload: bool = False) -> dict[st
     unloads: list[dict[str, Any]] = []
     if unload:
         uid = os.getuid()
-        for path in reversed(plists):
+        manager = (
+            Path.home()
+            / "Applications"
+            / "Chronovisor.app"
+            / "Contents"
+            / "MacOS"
+            / "Chronovisor"
+        )
+        if manager.is_file():
+            for label in reversed(labels):
+                proc = subprocess.run(
+                    [str(manager), "unregister-one", f"{label}.managed.plist"],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                unloads.append(
+                    {
+                        "path": f"{label}.managed.plist",
+                        "returncode": proc.returncode,
+                        "stderr": proc.stderr.strip(),
+                    }
+                )
+        for label, path in reversed(
+            list(zip(legacy_labels, legacy_plists, strict=True))
+        ):
             proc = subprocess.run(
-                ["launchctl", "bootout", f"gui/{uid}", str(path)],
+                ["launchctl", "bootout", f"gui/{uid}/{label}"],
                 text=True,
                 capture_output=True,
+                check=False,
             )
             unloads.append(
                 {
@@ -4570,7 +4557,7 @@ def uninstall_launchd(*, dry_run: bool = False, unload: bool = False) -> dict[st
                     "stderr": proc.stderr.strip(),
                 }
             )
-    for path in (*plists, *wrappers):
+    for path in (*plists, *legacy_plists, *wrappers):
         path.unlink(missing_ok=True)
     payload["launchctl"] = unloads
     return payload
@@ -4587,7 +4574,6 @@ def status() -> dict[str, Any]:
             "converge": str(LAUNCH_AGENT_DIR / f"{CONVERGE_LABEL}.plist"),
             "watchdog": str(LAUNCH_AGENT_DIR / f"{WATCHDOG_LABEL}.plist"),
             "deadman": str(LAUNCH_AGENT_DIR / f"{DEADMAN_LABEL}.plist"),
-            "soak": str(LAUNCH_AGENT_DIR / f"{SOAK_LABEL}.plist"),
         },
     }
 

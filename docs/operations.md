@@ -67,7 +67,18 @@ directly. Install and start the general services with the allowlisted renderer:
 scripts/install-launchd-service dashboard
 scripts/install-launchd-service ingest-drain
 scripts/install-launchd-service librarian-review
-scripts/install-launchd-service library-evidence
+```
+
+On macOS 13 and later, these installers render their source plists outside
+`~/Library/LaunchAgents`, rebuild `~/Applications/Chronovisor.app`, and refresh
+only the selected service through `SMAppService`. Each process remains
+independently supervised, while System Settings shows one `Chronovisor.app`
+Background Item. To inspect or rebuild the bundle directly:
+
+```sh
+scripts/chronovisor-macos-services build
+scripts/chronovisor-macos-services register
+scripts/chronovisor-macos-services status
 ```
 
 The installer resolves the checkout, home directory, `uvx`, and Python paths

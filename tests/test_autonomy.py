@@ -2917,7 +2917,7 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(
     assert autonomy.CONVERGE_LABEL in labels
     assert autonomy.WATCHDOG_LABEL in labels
     assert autonomy.DEADMAN_LABEL in labels
-    assert autonomy.SOAK_LABEL in labels
+    assert autonomy.SOAK_LABEL not in labels
     programs = {item["label"]: item["program"] for item in payload["plists"]}
     assert Path(programs[autonomy.SLEEP_LABEL][0]).name == "chronovisor-sleep"
     assert Path(programs[autonomy.WATCHDOG_LABEL][0]).name == "chronovisor-watchdog"
@@ -2958,14 +2958,6 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(
     )
     assert "--no-sleep" in converge_wrapper["command"]
     assert "--with-sleep" not in converge_wrapper["command"]
-    soak_wrapper = next(
-        item
-        for item in payload["wrappers"]
-        if Path(item["path"]).name == "chronovisor-soak"
-    )
-    assert "chronovisor-burn-monitor" in soak_wrapper["command"]
-    assert "--expected-commit" in soak_wrapper["command"]
-    assert "--output" not in soak_wrapper["command"]
 
 
 def test_uninstall_launchd_dry_run_lists_all_generated_artifacts() -> None:
@@ -2973,9 +2965,50 @@ def test_uninstall_launchd_dry_run_lists_all_generated_artifacts() -> None:
 
     assert payload["status"] == "ok"
     assert payload["dry_run"] is True
-    assert len(payload["plists"]) == 5
-    assert any(path.endswith("chronovisor-soak.plist") for path in payload["plists"])
+    assert len(payload["plists"]) == 4
+    assert any(
+        path.endswith("chronovisor-soak.plist")
+        for path in payload["legacy_plists"]
+    )
     assert any(path.endswith("chronovisor-soak") for path in payload["wrappers"])
+
+
+def test_install_launchd_load_refreshes_only_native_production_services(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / ".chronovisor"
+    monkeypatch.setattr(autonomy, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(
+        autonomy, "LAUNCH_AGENT_DIR", root / "runtime" / "launchd-sources"
+    )
+    monkeypatch.setattr(autonomy, "WRAPPER_DIR", root / "bin")
+    monkeypatch.setattr(autonomy, "_uvx_path", lambda: "/opt/homebrew/bin/uvx")
+    python = tmp_path / "python3.14"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+    monkeypatch.setenv("CHRONOVISOR_PYTHON", str(python))
+    calls: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        calls.append([str(value) for value in command])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(autonomy.subprocess, "run", fake_run)
+
+    payload = autonomy.install_launchd(dry_run=False, load=True)
+
+    refreshes = [
+        command[-2:]
+        for command in calls
+        if Path(command[0]).name == "chronovisor-macos-services"
+    ]
+    assert payload["status"] == "ok"
+    assert refreshes == [
+        ["refresh", "sleep"],
+        ["refresh", "converge"],
+        ["refresh", "watchdog"],
+        ["refresh", "deadman-observer"],
+    ]
 
 
 def test_install_then_uninstall_launchd_round_trip_in_fixture(
@@ -2986,6 +3019,11 @@ def test_install_then_uninstall_launchd_round_trip_in_fixture(
     wrappers = root / "bin"
     monkeypatch.setattr(autonomy, "CHRONOVISOR_ROOT", root)
     monkeypatch.setattr(autonomy, "LAUNCH_AGENT_DIR", launch_agents)
+    monkeypatch.setattr(
+        autonomy,
+        "LEGACY_LAUNCH_AGENT_DIR",
+        tmp_path / "LegacyLaunchAgents",
+    )
     monkeypatch.setattr(autonomy, "WRAPPER_DIR", wrappers)
     monkeypatch.setattr(autonomy, "_uvx_path", lambda: "/opt/homebrew/bin/uvx")
     python = tmp_path / "python3.14"
@@ -3001,9 +3039,8 @@ def test_install_then_uninstall_launchd_round_trip_in_fixture(
     installed = autonomy.install_launchd(dry_run=False, load=False)
 
     assert installed["status"] == "ok"
-    assert len(list(launch_agents.glob("com.trafficsign.chronovisor-*.plist"))) == 5
-    assert (wrappers / "chronovisor-soak").exists()
-    assert "a" * 40 in (wrappers / "chronovisor-soak").read_text(encoding="utf-8")
+    assert len(list(launch_agents.glob("com.trafficsign.chronovisor-*.plist"))) == 4
+    assert not (wrappers / "chronovisor-soak").exists()
     observer = wrappers / "chronovisor-deadman-observer"
     observer_source = Path(autonomy.__file__).parents[1] / "deadman_observer.py"
     assert observer.read_bytes() == observer_source.read_bytes()
