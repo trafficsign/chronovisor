@@ -393,9 +393,9 @@ def test_single_enum_object_automatically_uses_plain_choice() -> None:
     assert result.ok is True
     assert result.value == {"selection_id": "confirmed_noop"}
     assert transport.requests[0].schema is None
-    assert "Return exactly one allowed ID" in transport.requests[0].messages[0][
-        "content"
-    ]
+    assert (
+        "Return exactly one allowed ID" in transport.requests[0].messages[0]["content"]
+    )
 
 
 def test_plain_text_contract_is_host_materialized_and_schema_validated() -> None:
@@ -567,6 +567,7 @@ def test_default_transport_routes_non_ollama_local_without_ollama_control(
     audit_root = tmp_path / "audit"
     backend = _RemoteGenerationBackend()
     backend.location = RouteLocation.LOCAL
+    backend.provider = "omlx"
     leases: list[str] = []
 
     class LocalControl:
@@ -583,7 +584,15 @@ def test_default_transport_routes_non_ollama_local_without_ollama_control(
             return False
 
     runtime = LLMRuntime(
-        generation={"review.local": GenerationRoute(backend, "native-local-model")},
+        generation={
+            "review.local": GenerationRoute(
+                backend,
+                "native-local-model",
+                protocol="openai-chat",
+                endpoint_sha256="e" * 64,
+                revision="omlx-test-v1",
+            )
+        },
         local_controls={"review.local": LocalControl()},
     )
     monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
@@ -602,6 +611,14 @@ def test_default_transport_routes_non_ollama_local_without_ollama_control(
     assert leases == ["enter", "exit"]
     assert callable(backend.requests[0].progress_callback)
     _assert_single_load_before_context(audit_root)
+    trace = [
+        json.loads(line)
+        for line in (audit_root / "trace-events.jsonl").read_text().splitlines()
+    ]
+    assert all(row["provider"] == "omlx" for row in trace)
+    assert all(row["protocol"] == "openai-chat" for row in trace)
+    assert all(row["revision"] == "omlx-test-v1" for row in trace)
+    assert all(row["location"] == "local" for row in trace)
 
 
 def test_stream_progress_persists_only_bounded_counters(tmp_path: Path) -> None:
@@ -986,6 +1003,9 @@ def test_active_marker_is_atomic_redacted_and_removed_after_session(
             "required_num_ctx",
             "requested_num_ctx",
             "context_tokens",
+            "provider",
+            "protocol",
+            "location",
         }
         assert marker["phase"] == "generate"
         assert marker["attempt"] == 0

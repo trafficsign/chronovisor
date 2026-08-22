@@ -444,9 +444,7 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     assert snapshot["summary"]["decisions"]["unresolved_quarantine"] == 1
     assert snapshot["summary"]["decisions"]["conservative_veto_fired"] == 3
     assert (
-        snapshot["summary"]["decisions"][
-            "conservative_veto_bypassed_by_lane_policy"
-        ]
+        snapshot["summary"]["decisions"]["conservative_veto_bypassed_by_lane_policy"]
         == 2
     )
     assert snapshot["summary"]["decisions"]["dissent_effect_classes"] == {
@@ -467,9 +465,7 @@ def test_local_consensus_snapshot_removes_dead_markers_and_exposes_redacted_metr
     assert session["requested_context_tokens"] == 16_384
     assert session["context_tokens"] == 16_384
     assert decision["conservative_veto_fired"] is True
-    assert (
-        decision["conservative_veto_bypassed_by_lane_policy"] is True
-    )
+    assert decision["conservative_veto_bypassed_by_lane_policy"] is True
     assert decision["dissent_effect_class"] == "conservative"
     assert all("prompt" not in row for row in snapshot["history"])
     assert all("raw_output" not in row for row in snapshot["history"])
@@ -499,6 +495,53 @@ def test_local_consensus_reads_trace_before_audit_history(
     dashboard._local_consensus_snapshot()
 
     assert reads == ["trace-events.jsonl", "audit.jsonl"]
+
+
+def test_decision_trace_uses_canonical_event_when_audit_disagrees(
+    tmp_path: Path, monkeypatch
+) -> None:
+    request = "a" * 64
+    audit = [
+        {
+            "kind": "decision",
+            "timestamp": "2026-08-22T00:00:01Z",
+            "request_sha256": request,
+            "status": "agreed",
+            "pair_agreement": True,
+        }
+    ]
+    trace = [
+        {
+            "event_id": "canonical-held",
+            "kind": "decision",
+            "phase": "decision",
+            "timestamp": "2026-08-22T00:00:01Z",
+            "request_sha256": request,
+            "role": "ingest_reconciliation",
+            "status": "error",
+            "decision_status": "quarantined",
+            "failure_class": "local_consensus_failed",
+            "quarantine_reason": "local_models_did_not_reach_two_vote_quorum",
+            "pair_agreement": False,
+            "vote_count": 2,
+            "valid_votes": 1,
+        }
+    ]
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_local_consensus_activities", lambda: [])
+    monkeypatch.setattr(dashboard, "_read_json_file", lambda _path: {})
+    monkeypatch.setattr(
+        dashboard,
+        "_read_jsonl_file",
+        lambda path, *, limit: trace if path.name == "trace-events.jsonl" else audit,
+    )
+
+    snapshot = dashboard._local_consensus_snapshot()
+
+    assert snapshot["history"][0]["status"] == "agreed"
+    assert snapshot["latest_decision"]["status"] == "quarantined"
+    assert snapshot["decision_trace"]["state"] == "quarantined"
+    assert snapshot["decision_trace"]["pair_agreement"] is False
 
 
 def test_processing_activity_projects_simultaneous_llm_workflows(monkeypatch) -> None:
@@ -598,9 +641,12 @@ def test_processing_activity_projects_simultaneous_llm_workflows(monkeypatch) ->
     assert by_key["recall"]["current_step"] == "challenger"
     assert by_key["recall"]["role"] == "recall_auto_apply:challenger"
     assert by_key["improve"]["current_step"] == "verify"
-    assert next(
-        step for step in by_key["recall"]["steps"] if step["key"] == "challenger"
-    )["status"] == "active"
+    assert (
+        next(step for step in by_key["recall"]["steps"] if step["key"] == "challenger")[
+            "status"
+        ]
+        == "active"
+    )
     assert by_key["audit"]["state"] == "idle"
     assert by_key["repair"]["state"] == "idle"
 
@@ -674,7 +720,9 @@ def test_processing_activity_cache_single_flights_concurrent_callers(
     monkeypatch.setattr(dashboard, "_build_processing_activity_snapshot", build)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = [pool.submit(dashboard._processing_activity_snapshot) for _ in range(8)]
+        futures = [
+            pool.submit(dashboard._processing_activity_snapshot) for _ in range(8)
+        ]
         assert entered.wait(timeout=2)
         release.set()
         snapshots = [future.result(timeout=2) for future in futures]
@@ -1015,8 +1063,13 @@ def test_processing_role_projection_covers_dashboard_lanes() -> None:
     assert dashboard._processing_pipeline_for_role("recall_judge") == "recall"
     assert dashboard._processing_pipeline_for_role("ingest_reconciliation") == "ingest"
     assert dashboard._processing_pipeline_for_role("model_eval:primary") == "improve"
-    assert dashboard._processing_pipeline_for_role("orphan_link:challenger") == "improve"
-    assert dashboard._processing_pipeline_for_role("content_correction_classification") == "audit"
+    assert (
+        dashboard._processing_pipeline_for_role("orphan_link:challenger") == "improve"
+    )
+    assert (
+        dashboard._processing_pipeline_for_role("content_correction_classification")
+        == "audit"
+    )
     assert dashboard._processing_pipeline_for_role("local_repair") == "repair"
     assert dashboard._processing_model_step("recall", "search") == "search"
     assert dashboard._processing_model_step("recall", "rerank") == "rerank"
@@ -1397,6 +1450,25 @@ def test_local_consensus_snapshot_keeps_redacted_failed_vote_role(
             "role": "local_repair:tie_break",
             "phase": "vote",
             "status": "error",
+            "ok": False,
+            "failure_class": "output_truncated",
+        },
+        {
+            "event_id": "decision-held",
+            "kind": "decision",
+            "timestamp": "2026-07-15T12:00:04Z",
+            "request_sha256": request,
+            "role": "local_repair",
+            "phase": "decision",
+            "status": "error",
+            "decision_status": "quarantined",
+            "quarantine_reason": "local_models_did_not_reach_two_vote_quorum",
+            "failure_class": "local_consensus_failed",
+            "vote_count": 3,
+            "valid_votes": 2,
+            "pair_agreement": False,
+            "tie_break_used": True,
+            "vote_roles": ["primary", "challenger", "tie_break"],
         },
     ]
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
@@ -1633,9 +1705,7 @@ def test_decision_trace_keeps_newer_terminal_request_until_active_updates() -> N
         "valid_votes": 2,
     }
 
-    completed_session = dashboard._decision_trace_snapshot(
-        activities, [session], None
-    )
+    completed_session = dashboard._decision_trace_snapshot(activities, [session], None)
     activities[0]["updated_at"] = "2026-07-15T12:00:10Z"
     completed_decision = dashboard._decision_trace_snapshot(
         activities, [session, decision], decision
@@ -1678,10 +1748,13 @@ def test_decision_trace_handoff_skips_completed_requests(
     ]
     history = [
         {
+            "event_id": "completed-decision",
             "kind": "decision",
+            "phase": "decision",
             "timestamp": "2026-08-12T00:00:03Z",
             "request_sha256": completed_request,
-            "status": "agreed",
+            "status": "done",
+            "decision_status": "agreed",
             "pair_agreement": True,
         }
     ]
@@ -1691,7 +1764,7 @@ def test_decision_trace_handoff_skips_completed_requests(
     monkeypatch.setattr(
         dashboard,
         "_read_jsonl_file",
-        lambda path, *, limit: history if path.name == "audit.jsonl" else [],
+        lambda path, *, limit: history if path.name == "trace-events.jsonl" else [],
     )
 
     initial = dashboard._local_consensus_snapshot(next_active=True)
@@ -1706,10 +1779,13 @@ def test_decision_trace_handoff_skips_completed_requests(
     activities.clear()
     history.append(
         {
+            "event_id": "pinned-decision",
             "kind": "decision",
+            "phase": "decision",
             "timestamp": "2026-08-12T00:00:04Z",
             "request_sha256": pinned_request,
-            "status": "agreed",
+            "status": "done",
+            "decision_status": "agreed",
             "pair_agreement": True,
         }
     )
@@ -1758,8 +1834,7 @@ def test_decision_trace_pipeline_tabs_select_concurrent_workflows(
         "typed_graph": "relation_extract:primary",
     }
     requests = {
-        pipeline: str(index) * 64
-        for index, pipeline in enumerate(roles, start=1)
+        pipeline: str(index) * 64 for index, pipeline in enumerate(roles, start=1)
     }
     activities = [
         {
@@ -1777,9 +1852,9 @@ def test_decision_trace_pipeline_tabs_select_concurrent_workflows(
     monkeypatch.setattr(dashboard, "_read_jsonl_file", lambda _path, *, limit: [])
 
     selected = {
-        pipeline: dashboard._local_consensus_snapshot(
-            preferred_pipeline=pipeline
-        )["decision_trace"]["request_sha256"]
+        pipeline: dashboard._local_consensus_snapshot(preferred_pipeline=pipeline)[
+            "decision_trace"
+        ]["request_sha256"]
         for pipeline in roles
     }
 
@@ -1794,34 +1869,9 @@ def test_decision_trace_pipeline_tabs_select_concurrent_workflows(
     assert empty["decision_trace"]["summary"] == "No Typed Graph decision yet"
 
 
-def test_decision_trace_pipeline_tabs_project_all_live_processing_lanes(
+def test_decision_trace_pipeline_tabs_ignore_noncanonical_processing_lanes(
     tmp_path: Path, monkeypatch
 ) -> None:
-    steps = {
-        "ingest": "generate",
-        "recall": "rerank",
-        "audit": "inspect",
-        "improve": "generate",
-        "repair": "local_fix",
-        "typed_graph": "extract",
-    }
-    lanes = [
-        {
-            "key": pipeline,
-            "state": "active",
-            "current_step": current_step,
-            "model": f"{pipeline}:model",
-            "role": f"{pipeline} worker",
-            "started_at": "2026-08-21T23:00:00+09:00",
-            "updated_at": "2026-08-21T23:00:01+09:00",
-            "work_item": f"{pipeline}-work",
-            "recent": False,
-            "steps": [
-                {"key": current_step, "label": current_step.title(), "status": "active"}
-            ],
-        }
-        for pipeline, current_step in steps.items()
-    ]
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
     monkeypatch.setattr(dashboard, "_local_consensus_activities", lambda: [])
     monkeypatch.setattr(dashboard, "_read_json_file", lambda _path: {})
@@ -1841,35 +1891,20 @@ def test_decision_trace_pipeline_tabs_project_all_live_processing_lanes(
     monkeypatch.setattr(
         dashboard,
         "_processing_activity_snapshot",
-        lambda: {"generated_at": "2026-08-21T23:00:01+09:00", "lanes": lanes},
+        lambda: pytest.fail("Decision Trace must not read processing activity"),
     )
 
     traces = {
         pipeline: dashboard._local_consensus_snapshot(preferred_pipeline=pipeline)[
             "decision_trace"
         ]
-        for pipeline in steps
+        for pipeline, _label, _steps in dashboard._PROCESSING_LANES
     }
 
-    assert set(traces) == set(steps)
-    assert all(trace["active"] for trace in traces.values())
-    assert all(trace["source"] == "processing_activity" for trace in traces.values())
-    assert all(trace["request_sha256"] for trace in traces.values())
-    assert traces["ingest"]["request_sha256"] != old_ingest["request_sha256"]
-    assert all(trace["event_count"] == 1 for trace in traces.values())
-    assert all(
-        trace["events"][0]["source"] == "processing_activity"
-        for trace in traces.values()
-    )
-
-    failed_lane = next(row for row in lanes if row["key"] == "repair")
-    failed_lane.update(recent=True, status="error")
-    failed = dashboard._local_consensus_snapshot(preferred_pipeline="repair")[
-        "decision_trace"
-    ]
-    assert failed["active"] is False
-    assert failed["state"] == "quarantined"
-    assert failed["events"][-1]["status"] == "error"
+    assert all(trace["active"] is False for trace in traces.values())
+    assert all(trace["request_sha256"] is None for trace in traces.values())
+    assert all(trace["event_count"] == 0 for trace in traces.values())
+    assert all("source" not in trace for trace in traces.values())
 
 
 def test_processing_lane_trace_covers_every_declared_stage() -> None:
@@ -2057,9 +2092,7 @@ def test_decision_trace_latest_execution_preserves_reused_hash_boundary() -> Non
 
     assert restarted["state"] == "active"
     assert restarted["active"] is True
-    assert [event["event_id"] for event in restarted["events"]] == [
-        "new-generate"
-    ]
+    assert [event["event_id"] for event in restarted["events"]] == ["new-generate"]
 
 
 def test_decision_trace_bounds_repeated_standalone_sessions_with_same_hash() -> None:
@@ -2362,6 +2395,46 @@ def test_decision_trace_marks_only_artifact_publish_failure_after_artifact() -> 
     )
     assert no_quorum["overall"][-2]["status"] == "skipped"
     assert no_quorum["overall"][-1]["status"] == "skipped"
+
+
+def test_decision_trace_folds_canonical_artifact_failure_event() -> None:
+    request = "8" * 64
+    decision = {
+        "event_id": "decision-agreed",
+        "kind": "decision",
+        "phase": "decision",
+        "timestamp": "2026-08-22T00:00:01Z",
+        "request_sha256": request,
+        "role": "ingest_reconciliation",
+        "status": "agreed",
+        "artifact_expected": True,
+        "valid_votes": 2,
+    }
+    artifact = {
+        "event_id": "artifact-failed",
+        "kind": "decision_artifact",
+        "phase": "artifact",
+        "timestamp": "2026-08-22T00:00:02Z",
+        "request_sha256": request,
+        "role": "ingest_reconciliation",
+        "status": "error",
+        "artifact_status": "error",
+        "failure_class": "decision_artifact_invalid",
+        "quarantine_reason": "canonical_decision_artifact_publish_failed",
+    }
+    pending = dashboard._decision_trace_snapshot([], [decision], decision, [decision])
+
+    trace = dashboard._decision_trace_snapshot(
+        [], [decision, artifact], decision, [decision, artifact]
+    )
+
+    assert pending["overall"][-2]["status"] == "pending"
+    assert pending["overall"][-1]["status"] == "pending"
+    assert trace["state"] == "quarantined"
+    assert trace["artifact_expected"] is True
+    assert trace["artifact_status"] == "error"
+    assert trace["overall"][-2]["status"] == "error"
+    assert trace["events"][-1]["label"] == "Artifact failed"
 
 
 def test_decision_trace_explains_lane_policy_veto_bypass() -> None:
@@ -2699,16 +2772,15 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert ".decision-trace-harness {\n  display: block;\n  width: 100%;" in style
     assert (
         "@media (max-width: 980px) {" in style
-        and ".decision-trace-scroll {\n    height: 607px;\n    overflow-x: auto;" in style
+        and ".decision-trace-scroll {\n    height: 607px;\n    overflow-x: auto;"
+        in style
         and ".decision-trace-harness {\n    width: 1400px;" in style
     )
     assert "height: var(--panel-height);" in style
     assert "#model-lab-panel" in style
     assert "#model-panel {\n  height: auto;\n  min-height: 500px;" in style
     assert (
-        "#model-panel .model-grid {\n"
-        "  flex: 0 0 auto;\n"
-        "  overflow: visible;"
+        "#model-panel .model-grid {\n  flex: 0 0 auto;\n  overflow: visible;"
     ) in style
     assert "min-height: 764px;" in style
     assert "min-height: 1084px;" in style
@@ -2729,7 +2801,7 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "${semanticDeferred} semantic · ${operationalDeferred} operational" in app
     assert "grid-template-columns: repeat(5, minmax(0, 1fr));" in style
     assert "No synthetic progress" in app
-    assert "lane.think = fmt(event.think, \"—\").toLowerCase();" in app
+    assert 'lane.think = fmt(event.think, "—").toLowerCase();' in app
     assert ".decision-trace-panel" in style
     assert ".processing-lane.active" in style
     assert "processing-electric-pulse" in style
@@ -2739,9 +2811,9 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'lane.recent ? "PULSE" : "ACTIVE"' in app
     assert 'details.push("just completed")' in app
     assert (
-        page.index('/static/app.js')
-        < page.index('/static/app-renderer.js')
-        < page.index('/static/app-client.js')
+        page.index("/static/app.js")
+        < page.index("/static/app-renderer.js")
+        < page.index("/static/app-client.js")
     )
 
 
@@ -2922,9 +2994,9 @@ def test_dashboard_reuses_decision_trace_poll_for_live_consensus_status() -> Non
         (dashboard.STATIC_DIR / name).read_text(encoding="utf-8")
         for name in ("app.js", "app-renderer.js", "app-client.js")
     )
-    summary_helper = app.split(
-        "function renderLocalConsensusSummary(status)", 1
-    )[1].split("function render(snapshot)", 1)[0]
+    summary_helper = app.split("function renderLocalConsensusSummary(status)", 1)[
+        1
+    ].split("function render(snapshot)", 1)[0]
     render_block = app.split("function render(snapshot)", 1)[1].split(
         "let refreshInFlight", 1
     )[0]
@@ -2951,13 +3023,15 @@ def test_dashboard_reuses_decision_trace_poll_for_live_consensus_status() -> Non
         in live_helper
     )
     assert '["error", "blocked"].includes(underlyingState)' in live_helper
-    assert 'mergedConsensus.active ? "running" : latestRenderedStatus.state' in live_helper
+    assert (
+        'mergedConsensus.active ? "running" : latestRenderedStatus.state' in live_helper
+    )
     assert "setState(displayState);" in live_helper
     assert "renderLocalConsensusSummary(latestRenderedStatus);" in live_helper
     assert "renderWorkStatus(latestRenderedStatus);" in live_helper
-    assert live_helper.rindex("renderDecisionTrace(mergedConsensus);") > live_helper.index(
-        "renderWorkStatus(latestRenderedStatus);"
-    )
+    assert live_helper.rindex(
+        "renderDecisionTrace(mergedConsensus);"
+    ) > live_helper.index("renderWorkStatus(latestRenderedStatus);")
     assert 'fetch("/api/local-consensus"' in refresh_block
     assert "renderLiveConsensus(consensus);" in refresh_block
     assert "void refreshLiveModelStatus(consensus.activities || []);" in refresh_block
@@ -2969,9 +3043,12 @@ def test_dashboard_reuses_decision_trace_poll_for_live_consensus_status() -> Non
 
 def test_decision_trace_poll_pins_until_terminal_render() -> None:
     client = (dashboard.STATIC_DIR / "app-client.js").read_text(encoding="utf-8")
-    refresh = "async function refreshDecisionTrace()" + client.split(
-        "async function refreshDecisionTrace()", 1
-    )[1].split('window.addEventListener("chronovisor:processing-lane-select"', 1)[0]
+    refresh = (
+        "async function refreshDecisionTrace()"
+        + client.split("async function refreshDecisionTrace()", 1)[1].split(
+            'window.addEventListener("chronovisor:processing-lane-select"', 1
+        )[0]
+    )
     pinned_request = "1" * 64
     newer_request = "2" * 64
     pipeline_request = "3" * 64
@@ -3155,9 +3232,12 @@ process.stdout.write(JSON.stringify({{
 def test_live_consensus_survives_later_stale_full_render() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
     client = (dashboard.STATIC_DIR / "app-client.js").read_text(encoding="utf-8")
-    live_helper = "function renderLiveConsensus(consensus)" + client.split(
-        "function renderLiveConsensus(consensus)", 1
-    )[1].split("async function refreshLiveModelStatus", 1)[0]
+    live_helper = (
+        "function renderLiveConsensus(consensus)"
+        + client.split("function renderLiveConsensus(consensus)", 1)[1].split(
+            "async function refreshLiveModelStatus", 1
+        )[0]
+    )
     hooks = """
 const seen = [];
 const noop = () => {};
@@ -3536,22 +3616,47 @@ process.stdout.write(JSON.stringify({{
     result = json.loads(completed.stdout)
 
     assert result["primary"]["lanes"]["primary"] == [
-        "done", "done", "done", "active", "pending", "pending"
+        "done",
+        "done",
+        "done",
+        "active",
+        "pending",
+        "pending",
     ]
-    assert result["interleaved"]["lanes"]["primary"] == result["primary"]["lanes"]["primary"]
+    assert (
+        result["interleaved"]["lanes"]["primary"]
+        == result["primary"]["lanes"]["primary"]
+    )
     assert result["interleaved"]["lanes"]["challenger"] == [
-        "done", "done", "done", "active", "pending", "pending"
+        "done",
+        "done",
+        "done",
+        "active",
+        "pending",
+        "pending",
     ]
     assert set(result["allLanes"]["lanes"]) == {"primary", "challenger", "tie_break"}
     assert result["allLanes"]["lanes"]["tie_break"] == [
-        "done", "active", "pending", "pending", "pending", "pending"
+        "done",
+        "active",
+        "pending",
+        "pending",
+        "pending",
+        "pending",
     ]
     assert result["stale"]["lanes"] == result["allLanes"]["lanes"]
     assert result["stale"]["eventThink"]["p-trigger"] == "medium"
     assert set(result["stale"]["eventIds"]) == {
-        "p-trigger", "p-load", "p-context", "p-generate",
-        "c-trigger", "c-load", "c-context", "c-generate",
-        "t-trigger", "t-load",
+        "p-trigger",
+        "p-load",
+        "p-context",
+        "p-generate",
+        "c-trigger",
+        "c-load",
+        "c-context",
+        "c-generate",
+        "t-trigger",
+        "t-load",
     }
     assert result["terminal"]["state"] == "agreed"
     assert result["lateActive"]["state"] == "agreed"
@@ -3641,7 +3746,9 @@ process.stdout.write(JSON.stringify({{ duringLoad, duringGenerate }}));
     }
 
 
-def test_decision_trace_same_hash_reset_uses_terminal_and_execution_boundaries() -> None:
+def test_decision_trace_same_hash_reset_uses_terminal_and_execution_boundaries() -> (
+    None
+):
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
     scenario = f"""
 const vm = require("node:vm");
@@ -3788,9 +3895,12 @@ process.stdout.write(JSON.stringify({{
 
 def test_decision_trace_reasoning_unknown_uses_bypass_route() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
-    helper = "function decisionReasoningPlanState" + renderer.split(
-        "function decisionReasoningPlanState", 1
-    )[1].split("function updateDecisionSvgHarness", 1)[0]
+    helper = (
+        "function decisionReasoningPlanState"
+        + renderer.split("function decisionReasoningPlanState", 1)[1].split(
+            "function updateDecisionSvgHarness", 1
+        )[0]
+    )
     scenario = f"""
 const vm = require("node:vm");
 const sandbox = {{}};
@@ -3882,7 +3992,10 @@ def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() 
         "  min-width: 0;\n"
         "  overflow: hidden;"
     ) in style
-    assert "text-overflow: ellipsis;\n  text-transform: uppercase;\n  white-space: nowrap;" in style
+    assert (
+        "text-overflow: ellipsis;\n  text-transform: uppercase;\n  white-space: nowrap;"
+        in style
+    )
     assert ".decision-trace-harness .decision-role {" in style
     assert "fill: #e0e5e9;\n  font-size: 12px;" in style
     assert ".decision-trace-harness .decision-model," in style
@@ -4256,19 +4369,44 @@ process.stdout.write(JSON.stringify({{
         }
         assert result["normal"][lane]["overallSnapshots"][-1]["quorum"] == "active"
     assert result["noLoad"]["final"] == [
-        "done", "pending", "done", "done", "done", "done"
+        "done",
+        "pending",
+        "done",
+        "done",
+        "done",
+        "done",
     ]
     assert result["preflightFailure"]["final"] == [
-        "done", "pending", "pending", "pending", "pending", "error"
+        "done",
+        "pending",
+        "pending",
+        "pending",
+        "pending",
+        "error",
     ]
     assert result["capacityFailure"]["final"] == [
-        "done", "done", "pending", "pending", "pending", "error"
+        "done",
+        "done",
+        "pending",
+        "pending",
+        "pending",
+        "error",
     ]
     assert result["transportFailure"]["final"] == [
-        "done", "done", "done", "done", "pending", "error"
+        "done",
+        "done",
+        "done",
+        "done",
+        "pending",
+        "error",
     ]
     assert result["repair"]["snapshots"][5] == [
-        "done", "done", "done", "done", "active", "pending"
+        "done",
+        "done",
+        "done",
+        "done",
+        "active",
+        "pending",
     ]
     assert result["repair"]["final"] == expected_done
 
@@ -4324,9 +4462,7 @@ process.stdout.write(JSON.stringify({{
     completed = _run_node_scenario(scenario)
     result = json.loads(completed.stdout)
 
-    assert result["lane"] == [
-        "done", "pending", "done", "active", "pending", "pending"
-    ]
+    assert result["lane"] == ["done", "pending", "done", "active", "pending", "pending"]
     assert result["overall"] == {
         "packet": "done",
         "dispatch": "done",
@@ -4455,9 +4591,7 @@ def test_build_snapshot_combines_runtime_and_queue(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(store, "SYSTEM_DIR", chronovisor_root / "system")
     monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "pages" / "index.md")
     monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "pages" / "log.md")
-    monkeypatch.setattr(
-        store, "ACTIVITY_FILE", runtime_dir / "activity.jsonl"
-    )
+    monkeypatch.setattr(store, "ACTIVITY_FILE", runtime_dir / "activity.jsonl")
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
@@ -4672,7 +4806,9 @@ def test_model_status_handler_reads_live_runtime_without_snapshot_cache(
         thread.join(timeout=2)
 
     payload = response.json()
-    muse = next(row for row in payload["model_status"]["models"] if row["name"] == model)
+    muse = next(
+        row for row in payload["model_status"]["models"] if row["name"] == model
+    )
     assert response.status_code == 200
     assert muse["status"] == "loaded"
     assert muse["running"] is True
@@ -4753,9 +4889,7 @@ def test_dashboard_http_origin_is_same_origin_or_absent() -> None:
     request_host = f"127.0.0.1:{port}"
     url = f"http://{host}:{port}/api/lan-access"
     try:
-        missing = dashboard.httpx.get(
-            url, headers={"Host": request_host}, timeout=2
-        )
+        missing = dashboard.httpx.get(url, headers={"Host": request_host}, timeout=2)
         same = dashboard.httpx.get(
             url,
             headers={"Host": request_host, "Origin": f"http://{request_host}"},
@@ -5238,8 +5372,7 @@ def test_dashboard_lan_websocket_accepts_basic_only_on_exact_https_origin(
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             acquired = [
-                server.dashboard_stream_slots.acquire(blocking=False)
-                for _ in range(2)
+                server.dashboard_stream_slots.acquire(blocking=False) for _ in range(2)
             ]
             for value in acquired:
                 if value:
@@ -5339,9 +5472,7 @@ def test_dashboard_parser_uses_configured_loopback_bind(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
         "runtime_identity",
-        lambda *, config_only=False: {
-            "dashboard": {"host": "localhost", "port": 9876}
-        },
+        lambda *, config_only=False: {"dashboard": {"host": "localhost", "port": 9876}},
     )
 
     args = dashboard.build_parser().parse_args([])
@@ -5399,9 +5530,7 @@ def test_snapshot_fingerprint_probe_reuses_audit_and_invalidates_source(
         return ("fingerprint", calls)
 
     monkeypatch.setattr(dashboard.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(
-        dashboard, "_snapshot_source_probe_identity", lambda: source[0]
-    )
+    monkeypatch.setattr(dashboard, "_snapshot_source_probe_identity", lambda: source[0])
     monkeypatch.setattr(
         dashboard, "_build_snapshot_source_fingerprint", build_fingerprint
     )
@@ -5777,9 +5906,7 @@ def test_snapshot_live_status_overlay_is_non_mutating_and_preserves_cold_fields(
             "current_job_started_at": "2026-08-05T10:00:00+09:00",
         },
     )
-    monkeypatch.setattr(
-        orchestrator, "ingest_process_lease_is_held", lambda _pid: True
-    )
+    monkeypatch.setattr(orchestrator, "ingest_process_lease_is_held", lambda _pid: True)
     monkeypatch.setattr(
         dashboard, "_job_process_identity_matches", lambda _pid, _started: True
     )
@@ -5817,9 +5944,7 @@ def test_snapshot_live_status_overlay_reflects_idle_to_active_next_response(
     orch = [{}]
     monkeypatch.setattr(runtime_status, "read_status", lambda: dict(live[0]))
     monkeypatch.setattr(orchestrator, "_load_state", lambda: dict(orch[0]))
-    monkeypatch.setattr(
-        orchestrator, "ingest_process_lease_is_held", lambda _pid: True
-    )
+    monkeypatch.setattr(orchestrator, "ingest_process_lease_is_held", lambda _pid: True)
     monkeypatch.setattr(
         dashboard, "_job_process_identity_matches", lambda _pid, _started: True
     )
@@ -5894,12 +6019,12 @@ def test_snapshot_routes_apply_live_overlay() -> None:
 
 def test_local_consensus_route_stays_on_direct_live_path() -> None:
     source = Path(dashboard.__file__).read_text(encoding="utf-8")
-    local_consensus_route = source.split(
-        'elif path == "/api/local-consensus":', 1
-    )[1].split('elif path == "/api/activity":', 1)[0]
-    processing_source = source.split(
-        "def _processing_activity_source_fingerprint", 1
-    )[1].split("def _processing_activity_cache_metrics_locked", 1)[0]
+    local_consensus_route = source.split('elif path == "/api/local-consensus":', 1)[
+        1
+    ].split('elif path == "/api/activity":', 1)[0]
+    processing_source = source.split("def _processing_activity_source_fingerprint", 1)[
+        1
+    ].split("def _processing_activity_cache_metrics_locked", 1)[0]
 
     assert "_local_consensus_snapshot(" in local_consensus_route
     assert "preferred_request_sha256=preferred_request_sha256" in local_consensus_route
@@ -5940,9 +6065,7 @@ def test_cached_snapshot_serves_stale_while_refreshing_in_background(
             self.target(*self.args)
 
     monkeypatch.setattr(dashboard, "build_snapshot", fake_build)
-    monkeypatch.setattr(
-        dashboard, "_snapshot_source_fingerprint", lambda: ("new",)
-    )
+    monkeypatch.setattr(dashboard, "_snapshot_source_fingerprint", lambda: ("new",))
     monkeypatch.setattr(dashboard.threading, "Thread", ImmediateThread)
 
     stale = dashboard._cached_snapshot(allow_stale=True)
@@ -6462,9 +6585,7 @@ def test_build_snapshot_surfaces_frontier_human_required(
     monkeypatch.setattr(store, "SYSTEM_DIR", chronovisor_root / "system")
     monkeypatch.setattr(store, "INDEX_FILE", chronovisor_root / "pages" / "index.md")
     monkeypatch.setattr(store, "LOG_FILE", chronovisor_root / "pages" / "log.md")
-    monkeypatch.setattr(
-        store, "ACTIVITY_FILE", runtime_dir / "activity.jsonl"
-    )
+    monkeypatch.setattr(store, "ACTIVITY_FILE", runtime_dir / "activity.jsonl")
     monkeypatch.setattr(orchestrator, "RAW_DIR", raw_dir)
     monkeypatch.setattr(
         orchestrator, "STATE_FILE", chronovisor_root / ".orchestrator_state.json"
@@ -6576,7 +6697,7 @@ def test_runtime_failure_snapshot_is_safe_exact_deterministic_and_bounded(
                 model="writer-a",
                 capability="generation",
             )
-        }
+        },
     )
     monkeypatch.setattr(dashboard.llm_config, "load_llm_config", lambda: configured)
     events = [
@@ -6917,7 +7038,7 @@ def test_runtime_failure_invalidates_model_cache_and_overlays_stale_snapshot(
                     model="writer",
                     capability="generation",
                 )
-            }
+            },
         ),
     )
     monkeypatch.setattr(orchestrator, "_load_state", lambda: {})
@@ -7169,9 +7290,7 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
     assert by_name["bge-m3:latest"]["roles"] == ["embed"]
     assert "bge-m3" not in by_name
     assert by_name["muse-glimmer:30b-nvfp4-dflash"]["status"] == "ready"
-    assert by_name["muse-glimmer:30b-nvfp4-dflash"]["roles"] == [
-        "decision-challenger"
-    ]
+    assert by_name["muse-glimmer:30b-nvfp4-dflash"]["roles"] == ["decision-challenger"]
     assert by_name["qwen3.5:4b-mlx"]["status"] == "missing"
     assert by_name["qwen3.5:4b-mlx"]["roles"] == ["gate", "rewrite"]
 
@@ -7695,7 +7814,9 @@ def test_save_history_snapshot_combines_raw_drain_and_log(
 
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(dashboard, "ACTIVITY_FILE", activity_file)
-    monkeypatch.setattr(dashboard, "_operational_deferred_raw_statuses", lambda _paths: {})
+    monkeypatch.setattr(
+        dashboard, "_operational_deferred_raw_statuses", lambda _paths: {}
+    )
 
     raw_names = [
         "20260701-120000-codex-dashboard-save-history-aaaaaaaa.md",
@@ -7825,7 +7946,9 @@ def test_save_history_snapshot_reconciles_processed_orchestrator_state(
         "ACTIVITY_FILE",
         chronovisor_root / "runtime" / "activity.jsonl",
     )
-    monkeypatch.setattr(dashboard, "_operational_deferred_raw_statuses", lambda _paths: {})
+    monkeypatch.setattr(
+        dashboard, "_operational_deferred_raw_statuses", lambda _paths: {}
+    )
 
     history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
     day = history["days"][0]
@@ -7867,7 +7990,9 @@ def test_save_history_excludes_generated_semantic_projection_children(
         "ACTIVITY_FILE",
         chronovisor_root / "runtime" / "activity.jsonl",
     )
-    monkeypatch.setattr(dashboard, "_operational_deferred_raw_statuses", lambda _paths: {})
+    monkeypatch.setattr(
+        dashboard, "_operational_deferred_raw_statuses", lambda _paths: {}
+    )
 
     history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
 
@@ -7916,7 +8041,9 @@ def test_save_history_expands_fragment_group_status_and_processed_wins(
         "ACTIVITY_FILE",
         chronovisor_root / "runtime" / "activity.jsonl",
     )
-    monkeypatch.setattr(dashboard, "_operational_deferred_raw_statuses", lambda _paths: {})
+    monkeypatch.setattr(
+        dashboard, "_operational_deferred_raw_statuses", lambda _paths: {}
+    )
 
     failed_history = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))
     assert failed_history["totals"]["failed_bytes"] == 6
@@ -7951,7 +8078,9 @@ def test_save_history_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
         "ACTIVITY_FILE",
         tmp_path / "wiki" / "runtime" / "activity.jsonl",
     )
-    monkeypatch.setattr(dashboard, "_operational_deferred_raw_statuses", lambda _paths: {})
+    monkeypatch.setattr(
+        dashboard, "_operational_deferred_raw_statuses", lambda _paths: {}
+    )
 
     history = dashboard._save_history_snapshot(days=2, today=date(2026, 7, 4))
 
@@ -7980,7 +8109,9 @@ def test_save_history_only_includes_segment_detail_for_recent_chart_window(
         "ACTIVITY_FILE",
         chronovisor_root / "runtime" / "activity.jsonl",
     )
-    monkeypatch.setattr(dashboard, "_operational_deferred_raw_statuses", lambda _paths: {})
+    monkeypatch.setattr(
+        dashboard, "_operational_deferred_raw_statuses", lambda _paths: {}
+    )
 
     history = dashboard._save_history_snapshot(days=31, today=date(2026, 7, 31))
     by_date = {row["date"]: row for row in history["days"]}
@@ -8031,7 +8162,8 @@ def test_knowledge_mix_snapshot_groups_pages_by_category(
     (pages_dir / "macos").mkdir()
     stable_texts = {
         pages_dir / "ai" / "agent-memory.md": (
-            "---\ntitle: Agent memory\nstatus: stable\ntype: knowledge\n---\n" + "a" * 20
+            "---\ntitle: Agent memory\nstatus: stable\ntype: knowledge\n---\n"
+            + "a" * 20
         ),
         pages_dir / "ai" / "evals.md": (
             "---\ntitle: Evals\nstatus: stable\ntype: knowledge\n---\n" + "b" * 10

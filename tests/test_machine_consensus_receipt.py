@@ -207,9 +207,7 @@ def _search_subject(packet: dict) -> dict:
     return {
         "schema_version": 1,
         "subject_kind": "search_label_candidate",
-        "candidate_preregistration_sha256": packet[
-            "candidate_preregistration_sha256"
-        ],
+        "candidate_preregistration_sha256": packet["candidate_preregistration_sha256"],
         "source_packet_sha256": canonical_sha256(packet),
         "source_packet": packet,
         "evidence_sha256": packet["reference_evidence_sha256"],
@@ -352,6 +350,23 @@ def test_real_router_factory_publishes_subject_bound_machine_receipt(
     )
     assert check["passed"] is True
     assert check["artifact"]["provenance"]["vote_manifest_sha256"]
+    trace = [
+        json.loads(line)
+        for line in (
+            tmp_path / "runtime" / "machine-consensus-audit" / "trace-events.jsonl"
+        )
+        .read_text()
+        .splitlines()
+    ]
+    receipt_event = trace[-1]
+    assert receipt_event["kind"] == "machine_consensus_receipt"
+    assert receipt_event["status"] == "done"
+    assert receipt_event["receipt_status"] == "accepted"
+    assert receipt_event["receipt_sha256"] == receipt["receipt_sha256"]
+    assert (
+        receipt_event["decision_artifact_seal_sha256"]
+        == receipt["decision_artifact_seal_sha256"]
+    )
 
 
 def test_false_safety_vote_is_held_before_receipt_append(
@@ -372,7 +387,10 @@ def test_false_safety_vote_is_held_before_receipt_append(
         },
     )
 
-    assert result == {"status": "held", "reason": "machine_consensus_subject_not_approved"}
+    assert result == {
+        "status": "held",
+        "reason": "machine_consensus_subject_not_approved",
+    }
     assert not ledger.exists()
 
 
@@ -603,9 +621,7 @@ def test_search_candidate_receipt_builds_offline_exact_source_ledger(
     )
     receipt_sha = result["receipt"]["receipt_sha256"]
     identity = {
-        "candidate_preregistration_sha256": packet[
-            "candidate_preregistration_sha256"
-        ],
+        "candidate_preregistration_sha256": packet["candidate_preregistration_sha256"],
         "source_packet_sha256": canonical_sha256(packet),
         "consensus_receipt_sha256": receipt_sha,
     }
@@ -1024,12 +1040,14 @@ def test_newer_packet_supersedes_same_logical_candidate_without_live_read(
     assert len(entries) == 1
     assert entries[0]["source_packet"] == new_packet
     assert len(retirements) == 1
-    assert retirements[0]["superseded_consensus_receipt_sha256"] == old_result[
-        "receipt"
-    ]["receipt_sha256"]
-    assert retirements[0]["superseded_by_consensus_receipt_sha256"] == new_result[
-        "receipt"
-    ]["receipt_sha256"]
+    assert (
+        retirements[0]["superseded_consensus_receipt_sha256"]
+        == old_result["receipt"]["receipt_sha256"]
+    )
+    assert (
+        retirements[0]["superseded_by_consensus_receipt_sha256"]
+        == new_result["receipt"]["receipt_sha256"]
+    )
 
 
 def test_future_candidate_does_not_starve_latest_valid_candidate(
@@ -1069,9 +1087,7 @@ def test_future_candidate_does_not_starve_latest_valid_candidate(
     )
     result = recall_answer_eval.adjudicate_machine_search_label_candidates(
         candidate_file=candidate_file,
-        consensus_ledger_file=tmp_path
-        / "recall"
-        / "answer-consensus-receipts.jsonl",
+        consensus_ledger_file=tmp_path / "recall" / "answer-consensus-receipts.jsonl",
         chronovisor_root=tmp_path,
         dry_run=True,
     )

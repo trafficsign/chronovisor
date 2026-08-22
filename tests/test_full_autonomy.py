@@ -22,6 +22,7 @@ from chronovisor.core.managed_hold import ManagedHoldStore
 from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.decision import decision_authority, decision_router
 from chronovisor.decision.decision_artifact import (
+    DecisionArtifactError,
     DecisionArtifactStore,
     execution_fingerprint,
 )
@@ -177,7 +178,9 @@ def test_durable_write_rejects_disk_pressure_before_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     usage = namedtuple("usage", "total used free")
-    monkeypatch.setattr(durable_state.shutil, "disk_usage", lambda _path: usage(1, 1, 0))
+    monkeypatch.setattr(
+        durable_state.shutil, "disk_usage", lambda _path: usage(1, 1, 0)
+    )
     path = tmp_path / "state.bin"
 
     with pytest.raises(DiskPressureError):
@@ -214,9 +217,7 @@ def test_decision_artifact_is_content_addressed(tmp_path: Path) -> None:
                 "returned_model": None,
                 "signature_sha256": "d" * 64,
             }
-            for role, route in zip(
-                ("primary", "challenger"), routes[:2], strict=True
-            )
+            for role, route in zip(("primary", "challenger"), routes[:2], strict=True)
         ],
         provenance={"frontier_calls": 0},
     )
@@ -262,6 +263,23 @@ def test_router_replays_same_execution_without_model_call(
     assert len(transport.calls) == first_calls
     assert second.residency["source"] == "canonical_artifact_replay"
     assert second.residency["model_invocations"] == 0
+    events = [
+        json.loads(line)
+        for line in (
+            tmp_path / "wiki" / "runtime" / "local-consensus" / "trace-events.jsonl"
+        )
+        .read_text()
+        .splitlines()
+    ]
+    artifact = next(row for row in events if row["kind"] == "decision_artifact")
+    replay = events[-1]
+    assert artifact["artifact_status"] == "sealed"
+    assert artifact["status"] == "done"
+    assert replay["kind"] == "decision_artifact_replay"
+    assert replay["artifact_status"] == "replayed"
+    assert replay["model_invocations"] == 0
+    assert replay["models"] == ["primary:test", "challenger:test"]
+    assert replay["vote_roles"] == ["primary", "challenger"]
 
 
 def test_router_does_not_replay_unfingerprintable_custom_agreement_callable(
@@ -305,6 +323,47 @@ def test_router_does_not_replay_unfingerprintable_custom_agreement_callable(
     assert not list((tmp_path / "artifacts").glob("[0-9a-f][0-9a-f]/*.json"))
 
 
+def test_router_records_canonical_artifact_publish_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        decision_router,
+        "bind_lane_contract_request",
+        lambda _lane, prompt, _schema, system: (prompt, system),
+    )
+    transport = _Transport()
+    audit_root = tmp_path / "audit"
+    router = DecisionRouter(
+        config=_config(),
+        transport=transport,
+        audit_root=audit_root,
+        resolve_adoption=False,
+        record_replay=False,
+        live_resource_control=False,
+        artifact_replay=True,
+        decision_artifact_root=tmp_path / "artifacts",
+    )
+    router._artifact_identity = lambda **_kwargs: ("a" * 64, {}, 32_768)  # type: ignore[method-assign]
+
+    def fail_publish(*_args: object, **_kwargs: object) -> None:
+        raise DecisionArtifactError("sealed failure")
+
+    router._publish_artifact = fail_publish  # type: ignore[method-assign]
+
+    result = router.decide("prompt", SCHEMA, decision_lane="test_lane")
+
+    assert result.status == "quarantined"
+    events = [
+        json.loads(line)
+        for line in (audit_root / "trace-events.jsonl").read_text().splitlines()
+    ]
+    failure = events[-1]
+    assert failure["kind"] == "decision_artifact"
+    assert failure["artifact_status"] == "error"
+    assert failure["failure_class"] == "decision_artifact_invalid"
+    assert failure["quarantine_reason"] == "canonical_decision_artifact_publish_failed"
+
+
 def test_deadman_heartbeat_detects_stale_and_bad_seal(tmp_path: Path) -> None:
     path = tmp_path / "heartbeat.json"
     base = datetime(2026, 7, 15, tzinfo=UTC)
@@ -322,45 +381,53 @@ def test_deadman_heartbeat_detects_stale_and_bad_seal(tmp_path: Path) -> None:
         now=base + timedelta(seconds=61),
     )
     assert stale["status"] == "stale"
-    assert inspect_heartbeat(
-        path,
-        expected_role="main_watchdog",
-        max_age_seconds=60,
-        now=base - timedelta(seconds=301),
-    )["status"] == "clock_regression"
-    assert inspect_heartbeat(
-        tmp_path / "missing-observer.json",
-        expected_role="independent_observer",
-        max_age_seconds=60,
-        now=base,
-    )["status"] == "missing"
+    assert (
+        inspect_heartbeat(
+            path,
+            expected_role="main_watchdog",
+            max_age_seconds=60,
+            now=base - timedelta(seconds=301),
+        )["status"]
+        == "clock_regression"
+    )
+    assert (
+        inspect_heartbeat(
+            tmp_path / "missing-observer.json",
+            expected_role="independent_observer",
+            max_age_seconds=60,
+            now=base,
+        )["status"]
+        == "missing"
+    )
 
     payload = json.loads(path.read_text())
     payload["sequence"] = 99
     path.write_text(json.dumps(payload), encoding="utf-8")
-    assert inspect_heartbeat(
-        path,
-        expected_role="main_watchdog",
-        max_age_seconds=60,
-        now=base,
-    )["status"] == "invalid"
+    assert (
+        inspect_heartbeat(
+            path,
+            expected_role="main_watchdog",
+            max_age_seconds=60,
+            now=base,
+        )["status"]
+        == "invalid"
+    )
 
 
 def test_independent_observer_has_no_package_import_and_cross_checks_main(
     tmp_path: Path,
 ) -> None:
     observer_path = (
-        Path(__file__).parents[1]
-        / "src"
-        / "chronovisor"
-        / "deadman_observer.py"
+        Path(__file__).parents[1] / "src" / "chronovisor" / "deadman_observer.py"
     )
     source = observer_path.read_text(encoding="utf-8")
     assert "import chronovisor" not in source
     assert "from chronovisor" not in source
     assert "from datetime import UTC" not in source
     assert "timezone.utc" in source
-    spec = importlib.util.spec_from_file_location("deadman_observer_test", observer_path)
+    spec = importlib.util.spec_from_file_location(
+        "deadman_observer_test", observer_path
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -388,7 +455,9 @@ def test_independent_observer_main_blocks_without_mutation_when_parent_busy(
     observer_path = (
         Path(__file__).parents[1] / "src" / "chronovisor" / "deadman_observer.py"
     )
-    spec = importlib.util.spec_from_file_location("deadman_observer_busy", observer_path)
+    spec = importlib.util.spec_from_file_location(
+        "deadman_observer_busy", observer_path
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -413,7 +482,9 @@ def test_independent_observer_allows_only_sealed_final_layout(
     observer_path = (
         Path(__file__).parents[1] / "src" / "chronovisor" / "deadman_observer.py"
     )
-    spec = importlib.util.spec_from_file_location("deadman_observer_final", observer_path)
+    spec = importlib.util.spec_from_file_location(
+        "deadman_observer_final", observer_path
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -577,7 +648,9 @@ def test_independent_observer_main_rejects_symlink_root_without_mutation(
     observer_path = (
         Path(__file__).parents[1] / "src" / "chronovisor" / "deadman_observer.py"
     )
-    spec = importlib.util.spec_from_file_location("deadman_observer_symlink", observer_path)
+    spec = importlib.util.spec_from_file_location(
+        "deadman_observer_symlink", observer_path
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -644,7 +717,9 @@ def test_independent_observer_body_error_is_not_startup_blocked(
     observer_path = (
         Path(__file__).parents[1] / "src" / "chronovisor" / "deadman_observer.py"
     )
-    spec = importlib.util.spec_from_file_location("deadman_observer_body_error", observer_path)
+    spec = importlib.util.spec_from_file_location(
+        "deadman_observer_body_error", observer_path
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -666,10 +741,7 @@ def test_observer_threshold_debounces_dedupes_and_honors_cooldown(
     tmp_path: Path,
 ) -> None:
     observer_path = (
-        Path(__file__).parents[1]
-        / "src"
-        / "chronovisor"
-        / "deadman_observer.py"
+        Path(__file__).parents[1] / "src" / "chronovisor" / "deadman_observer.py"
     )
     spec = importlib.util.spec_from_file_location(
         "deadman_observer_threshold_test", observer_path
@@ -714,8 +786,10 @@ def test_observer_threshold_debounces_dedupes_and_honors_cooldown(
     assert duplicate["incident_emitted"] is False
     assert after_cooldown["incident_emitted"] is True
     incidents = (
-        tmp_path / "autonomy" / "deadman-incidents.jsonl"
-    ).read_text(encoding="utf-8").splitlines()
+        (tmp_path / "autonomy" / "deadman-incidents.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
     assert len(incidents) == 2
     state = module.read(tmp_path / "autonomy" / "observer-threshold-state.json")
     assert state["threshold_policy"]["minimum_failure_samples"] == 2
@@ -825,7 +899,9 @@ def test_quality_corpora_are_separated_and_drift_rolls_back_without_frontier(
     assert probe["corpus"]["behavior_promoted_to_anchor"] is False
     assert len(list((root / "behavior-snapshots").glob("[0-9a-f]*.json"))) == 1
 
-    artifact_path.write_text(json.dumps(_quality_artifact(wrong=True)), encoding="utf-8")
+    artifact_path.write_text(
+        json.dumps(_quality_artifact(wrong=True)), encoding="utf-8"
+    )
     run_quality_probe(
         root=root,
         adoption_artifact=artifact_path,
@@ -961,12 +1037,17 @@ def test_managed_hold_reheld_uses_backoff_and_lane_rate_limit(tmp_path: Path) ->
     assert store.acquire(owner="worker-2", now=base + timedelta(seconds=29)) is None
     second_lease = store.acquire(owner="worker-2", now=base + timedelta(seconds=30))
     assert second_lease and second_lease["identity"] == second["identity"]
-    assert store.reconcile_authorities(
-        {"lane": "f" * 64}, now=base + timedelta(seconds=59)
-    )["count"] == 0
+    assert (
+        store.reconcile_authorities(
+            {"lane": "f" * 64}, now=base + timedelta(seconds=59)
+        )["count"]
+        == 0
+    )
 
 
-def test_managed_hold_resolves_once_from_retired_packet_evidence(tmp_path: Path) -> None:
+def test_managed_hold_resolves_once_from_retired_packet_evidence(
+    tmp_path: Path,
+) -> None:
     store = ManagedHoldStore(tmp_path / "state.json")
     entry = store.register(
         hold_sha256="a" * 64,
@@ -1171,12 +1252,17 @@ def test_provisional_recall_accepts_projection_only_and_caps_rank(
 
     deferred.clear()
     assert search_provisional("Ornith memory", chronovisor_root=tmp_path) == []
-    assert read_sealed_json(
-        tmp_path / "runtime" / "provisional-recall" / "index.json"
-    )["entries"] == []
+    assert (
+        read_sealed_json(tmp_path / "runtime" / "provisional-recall" / "index.json")[
+            "entries"
+        ]
+        == []
+    )
 
 
-def test_jsonl_integrity_rejects_partial_tail_and_complete_corruption(tmp_path: Path) -> None:
+def test_jsonl_integrity_rejects_partial_tail_and_complete_corruption(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "events.jsonl"
     path.write_bytes(b'{"ok":1}\n{"partial"')
     partial = scan_jsonl_prefix(path)
@@ -1235,9 +1321,10 @@ def test_read_back_max_zero_rebuilds_duplicate_projection_and_dashboard_kpi(
     assert rebuilt["processed"] == 0
     assert rebuilt["observed_failures"] == 2
     assert rebuilt["unique_failures"] == 1
-    assert ledger["source_cursor"]["prefix_sha256"] == rebuilt["source_cursor"][
-        "prefix_sha256"
-    ]
+    assert (
+        ledger["source_cursor"]["prefix_sha256"]
+        == rebuilt["source_cursor"]["prefix_sha256"]
+    )
 
     monkeypatch.setattr(health, "CHRONOVISOR_ROOT", tmp_path)
     dashboard_kpi = health.read_back_kpi()
@@ -1257,13 +1344,16 @@ def test_read_back_max_zero_rebuilds_duplicate_projection_and_dashboard_kpi(
     assert invalid_view["status"] == "ledger_integrity_error"
     ledger_file.write_bytes(valid_ledger)
 
-    failure_file.write_text("".join(reversed(original.splitlines(keepends=True))), encoding="utf-8")
+    failure_file.write_text(
+        "".join(reversed(original.splitlines(keepends=True))), encoding="utf-8"
+    )
     rewritten = read_back_repair.run_read_back_repair(
         failure_file=failure_file,
         ledger_file=ledger_file,
         max_items=0,
     )
     assert rewritten["status"] == "source_history_rewritten"
+
 
 def test_l1_runbook_restores_only_allowlisted_sealed_state(tmp_path: Path) -> None:
     target = tmp_path / "runtime" / "managed-holds" / "state.json"
@@ -1348,13 +1438,17 @@ def test_l1_unloads_only_local_ollama_runtime_routes(
     local_result = repair_runbook.run_l1("unload-models")
     non_ollama_result = repair_runbook.run_l1("unload-models")
 
-    assert roles_seen == [
-        (
-            "classification.primary",
-            "classification.challenger",
-            "classification.tie_break",
-        )
-    ] * 2
+    assert (
+        roles_seen
+        == [
+            (
+                "classification.primary",
+                "classification.challenger",
+                "classification.tie_break",
+            )
+        ]
+        * 2
+    )
     assert unloaded == ["ollama-model"]
     assert local_result == {
         "status": "ok",

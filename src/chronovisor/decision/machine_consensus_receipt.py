@@ -130,15 +130,13 @@ def _utc(value: object) -> str:
         return ""
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return ""
-    return parsed.astimezone(UTC).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
+    return (
+        parsed.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
     )
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="microseconds").replace(
-        "+00:00", "Z"
-    )
+    return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _sha_without_newline(value: object) -> str:
@@ -226,9 +224,7 @@ def search_label_candidate_packet_error(packet: object) -> str:
     excerpt = chunk.get("excerpt")
     excerpt_bytes = excerpt.encode("utf-8") if isinstance(excerpt, str) else b""
     reference = (
-        f"[PAGE {chunk.get('page_id')}]\n{excerpt}"
-        if isinstance(excerpt, str)
-        else ""
+        f"[PAGE {chunk.get('page_id')}]\n{excerpt}" if isinstance(excerpt, str) else ""
     )
     if (
         not isinstance(query, str)
@@ -239,8 +235,7 @@ def search_label_candidate_packet_error(packet: object) -> str:
         or candidate.get("negative_pages") != []
         or candidate.get("stale_pages") != []
         or candidate.get("source") != "recall_questions"
-        or candidate.get("split_role")
-        != "search_eval_only_not_answer_benchmark"
+        or candidate.get("split_role") != "search_eval_only_not_answer_benchmark"
         or candidate.get("projection_policy_sha256")
         != BOUNDED_EVIDENCE_PROJECTION_POLICY_SHA256
         or not _utc(candidate.get("preregistered_at"))
@@ -262,8 +257,7 @@ def search_label_candidate_packet_error(packet: object) -> str:
         or isinstance(chunk.get("byte_end"), bool)
         or chunk.get("byte_end") != len(excerpt_bytes)
         or not 0 < len(excerpt_bytes) <= 12_000
-        or chunk.get("excerpt_sha256")
-        != hashlib.sha256(excerpt_bytes).hexdigest()
+        or chunk.get("excerpt_sha256") != hashlib.sha256(excerpt_bytes).hexdigest()
         or not isinstance(chunk.get("truncated"), bool)
         or chunk.get("truncated")
         is not (len(excerpt_bytes) < int(binding.get("content_byte_length") or 0))
@@ -346,15 +340,13 @@ def _subject_shape_error(
                 "producer_policy_sha256",
                 "production_answer_used",
             }
-            or
-            not isinstance(subject.get("candidate_preregistration_sha256"), str)
+            or not isinstance(subject.get("candidate_preregistration_sha256"), str)
             or len(str(subject.get("candidate_preregistration_sha256") or "")) != 64
             or not isinstance(packet, Mapping)
             or subject.get("source_packet_sha256") != canonical_sha256(packet)
             or packet.get("candidate_preregistration_sha256")
             != subject.get("candidate_preregistration_sha256")
-            or subject.get("evidence_sha256")
-            != packet.get("reference_evidence_sha256")
+            or subject.get("evidence_sha256") != packet.get("reference_evidence_sha256")
             or search_label_candidate_packet_error(packet)
         ):
             return "machine_consensus_subject_shape_invalid"
@@ -481,7 +473,10 @@ def _vote_manifest_error(
         if len(agreeing) != 2 or first_signatures[0] != first_signatures[1]:
             return "machine_consensus_tie_break_missing"
     else:
-        if first_signatures[0] is not None and first_signatures[0] == first_signatures[1]:
+        if (
+            first_signatures[0] is not None
+            and first_signatures[0] == first_signatures[1]
+        ):
             return "machine_consensus_unnecessary_tie_break"
         if not bool(value[2].get("valid")):
             return "machine_consensus_tie_break_invalid"
@@ -593,9 +588,7 @@ def validate_machine_consensus_receipt(
 ) -> dict[str, Any]:
     """Join one receipt to its canonical DecisionArtifactStore object."""
 
-    loaded = load_machine_consensus_receipt(
-        receipt_sha256, ledger_file=ledger_file
-    )
+    loaded = load_machine_consensus_receipt(receipt_sha256, ledger_file=ledger_file)
     if loaded.get("passed") is not True:
         return loaded
     row = loaded["receipt"]
@@ -641,9 +634,7 @@ def validate_machine_consensus_receipt(
             lane, prompt, schema, system
         )
         effective_system = decision_system_with_policy(schema, bound_system)
-        request_sha = structured_request_sha256(
-            bound_prompt, schema, effective_system
-        )
+        request_sha = structured_request_sha256(bound_prompt, schema, effective_system)
     except (TypeError, ValueError):
         return {"passed": False, "reason": "machine_consensus_request_invalid"}
     producer_error = _producer_error(
@@ -665,8 +656,7 @@ def validate_machine_consensus_receipt(
         or producer_error
         or not isinstance(producer, Mapping)
         or producer.get("policy_sha256") != expected_producer_policy_sha256
-        or subject.get("producer_policy_sha256")
-        != expected_producer_policy_sha256
+        or subject.get("producer_policy_sha256") != expected_producer_policy_sha256
     ):
         return {
             "passed": False,
@@ -676,9 +666,9 @@ def validate_machine_consensus_receipt(
     if not isinstance(fingerprint, str):
         return {"passed": False, "reason": "machine_consensus_artifact_missing"}
     try:
-        artifact = DecisionArtifactStore(
-            default_store_root(chronovisor_root)
-        ).load(fingerprint)
+        artifact = DecisionArtifactStore(default_store_root(chronovisor_root)).load(
+            fingerprint
+        )
     except Exception as exc:
         return {
             "passed": False,
@@ -754,11 +744,9 @@ def append_machine_consensus_receipt(
     """Own router invocation and durable publication; never accepts vote dicts."""
 
     receipt_created_at = _utc(created_at or _now())
-    if (
-        not receipt_created_at
-        or datetime.fromisoformat(receipt_created_at.replace("Z", "+00:00"))
-        > datetime.now(UTC) + timedelta(minutes=5)
-    ):
+    if not receipt_created_at or datetime.fromisoformat(
+        receipt_created_at.replace("Z", "+00:00")
+    ) > datetime.now(UTC) + timedelta(minutes=5):
         return {"status": "held", "reason": "machine_consensus_created_at_invalid"}
     router = (
         router_factory(lane)
@@ -770,7 +758,9 @@ def append_machine_consensus_receipt(
         )
     )
 
-    def resolve_authority(*, refresh: bool = False) -> tuple[dict[str, Any] | None, str | None]:
+    def resolve_authority(
+        *, refresh: bool = False
+    ) -> tuple[dict[str, Any] | None, str | None]:
         if authority_provider is current_semantic_authority:
             if refresh:
                 return current_semantic_authority(lane)
@@ -792,9 +782,7 @@ def append_machine_consensus_receipt(
         "model": None,
         "policy_sha256": producer_policy_sha256,
     }
-    producer_error = _producer_error(
-        producer, _authority_models(authority), kind=kind
-    )
+    producer_error = _producer_error(producer, _authority_models(authority), kind=kind)
     subject_shape_error = _subject_shape_error(
         subject,
         expected_kind=kind,
@@ -845,7 +833,9 @@ def append_machine_consensus_receipt(
             "status": "waiting",
             "reason": drift_error or "canonical_decision_artifact_missing",
         }
-    bound_prompt, bound_system = bind_lane_contract_request(lane, prompt, schema, system)
+    bound_prompt, bound_system = bind_lane_contract_request(
+        lane, prompt, schema, system
+    )
     effective_system = decision_system_with_policy(schema, bound_system)
     with sidecar_exclusive_lock(ledger_file):
         rows, chain_error = _ledger_chain_error(ledger_file)
@@ -902,8 +892,32 @@ def append_machine_consensus_receipt(
         current_authority=current,
     )
     if checked.get("passed") is not True:
-        raise ValueError(str(checked.get("reason") or "machine consensus read-back failed"))
-    return {"status": "accepted", "reason": "verified_machine_consensus", "receipt": row}
+        raise ValueError(
+            str(checked.get("reason") or "machine consensus read-back failed")
+        )
+    try:
+        router.audit_store.append(
+            {
+                "kind": "machine_consensus_receipt",
+                "request_sha256": row["request_sha256"],
+                "role": router.audit_role,
+                "decision_lane": lane,
+                "status": "accepted",
+                "execution_fingerprint": row["execution_fingerprint"],
+                "decision_artifact_seal_sha256": row["decision_artifact_seal_sha256"],
+                "agreement_sha256": row["agreement_sha256"],
+                "receipt_sha256": row["receipt_sha256"],
+                "schema_sha256": row["schema_sha256"],
+            }
+        )
+    except Exception:
+        # Receipt publication is authoritative; telemetry remains best-effort.
+        pass
+    return {
+        "status": "accepted",
+        "reason": "verified_machine_consensus",
+        "receipt": row,
+    }
 
 
 __all__ = [

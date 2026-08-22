@@ -2106,15 +2106,19 @@ def _local_consensus_activities() -> list[dict[str, Any]]:
                     "request_sha256": row.get("request_sha256"),
                     "role": row.get("role"),
                     "model": row.get("model"),
+                    "provider": row.get("provider"),
+                    "protocol": row.get("protocol"),
+                    "endpoint_sha256": row.get("endpoint_sha256"),
+                    "revision": row.get("revision"),
+                    "location": row.get("location"),
+                    "decision_lane": row.get("decision_lane"),
                     "phase": row.get("phase"),
                     "attempt": row.get("attempt"),
                     "think": row.get("think"),
                     "required_context_tokens": row.get("required_num_ctx"),
                     "requested_context_tokens": row.get("requested_num_ctx"),
                     "context_tokens": row.get("context_tokens"),
-                    "generation": _decision_trace_generation(
-                        row.get("generation")
-                    ),
+                    "generation": _decision_trace_generation(row.get("generation")),
                     "started_at": row.get("started_at"),
                     "updated_at": row.get("updated_at"),
                     "pid": pid,
@@ -3060,6 +3064,7 @@ def _decision_trace_events(
         "validate": "Validating",
         "vote": "Vote ready",
         "decision": "Decision sealed",
+        "artifact": "Artifact sealed",
     }
     overall_keys = {
         "trigger": "dispatch",
@@ -3070,6 +3075,7 @@ def _decision_trace_events(
         "validate": "validate",
         "vote": "quorum",
         "decision": "decision",
+        "artifact": "artifact",
     }
     events: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -3085,15 +3091,23 @@ def _decision_trace_events(
         if (
             not event_id
             or event_id in seen
-            or phase not in {*_DECISION_TRACE_PHASES, "repair", "decision"}
-            or kind not in {"phase", "session", "decision", "decision_artifact_replay"}
+            or phase not in {*_DECISION_TRACE_PHASES, "repair", "decision", "artifact"}
+            or kind
+            not in {
+                "phase",
+                "session",
+                "decision",
+                "decision_artifact_replay",
+                "decision_artifact",
+                "machine_consensus_receipt",
+            }
             or status not in {"active", "done", "error"}
         ):
             continue
         seen.add(event_id)
         role = str(row.get("role") or "structured")
         _base, lane, explicit_lane = _decision_trace_role(role)
-        if phase == "decision" and not explicit_lane:
+        if phase in {"decision", "artifact"} and not explicit_lane:
             lane_value: str | None = None
         else:
             lane_value = lane
@@ -3109,6 +3123,10 @@ def _decision_trace_events(
             label = "Artifact replayed"
         elif kind == "decision":
             label = "Decision approved" if status == "done" else "Decision held"
+        elif kind == "decision_artifact":
+            label = "Artifact sealed" if status == "done" else "Artifact failed"
+        elif kind == "machine_consensus_receipt":
+            label = "Machine receipt sealed"
         attempt = row.get("attempt")
         event: dict[str, Any] = {
             "event_id": event_id[:80],
@@ -3126,6 +3144,9 @@ def _decision_trace_events(
             "label": label,
             "overall_key": overall_keys[phase],
         }
+        for key in ("provider", "protocol", "revision", "location"):
+            if isinstance(row.get(key), str) and row.get(key):
+                event[key] = str(row[key])[:160]
         if kind == "phase" and phase != "vote":
             last_phase_by_lane[lane] = phase
         if "think" in row:
@@ -3382,6 +3403,8 @@ def _decision_trace_overall_steps(
     seal_failed: bool,
     quorum_attempted: bool,
     validation_completed: bool,
+    artifact_expected: bool,
+    artifact_status: str,
 ) -> list[dict[str, str]]:
     active_phases = {str(row.get("phase") or "trigger") for row in active_rows}
     generating = bool(active_phases & {"trigger", "load", "context", "generate"})
@@ -3443,11 +3466,15 @@ def _decision_trace_overall_steps(
             "key": "artifact",
             "label": "Artifact",
             "status": "error"
-            if seal_failed
+            if seal_failed or artifact_status == "error"
             else "done"
-            if decision_status == "agreed"
+            if artifact_status in {"sealed", "replayed", "accepted"}
             or bool(decision and decision.get("kind") == "decision_artifact_replay")
+            or not artifact_expected
+            and decision_status == "agreed"
             or structured_completed
+            else "pending"
+            if artifact_expected and decision_status == "agreed"
             else "skipped"
             if decision_status == "quarantined"
             else "pending",
@@ -3458,7 +3485,14 @@ def _decision_trace_overall_steps(
             "status": "skipped"
             if decision_status == "quarantined"
             else "done"
-            if decision_status == "agreed" or structured_completed
+            if decision_status == "agreed"
+            and (
+                not artifact_expected
+                or artifact_status in {"sealed", "replayed", "accepted"}
+            )
+            or structured_completed
+            else "pending"
+            if decision_status == "agreed" and artifact_expected
             else "active"
             if voting and not quorum_flow
             else "pending",
@@ -3480,6 +3514,17 @@ def _decision_trace_lanes(
     pair_agreement: bool | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
     models = _decision_trace_models()
+    routes: dict[str, dict[str, Any]] = {}
+    decision_routes = decision.get("routes") if isinstance(decision, dict) else None
+    if isinstance(decision_routes, list):
+        for route in decision_routes:
+            if not isinstance(route, Mapping):
+                continue
+            lane = str(route.get("role") or "").removeprefix("classification.")
+            if lane in _DECISION_TRACE_ROLES:
+                routes[lane] = dict(route)
+                if isinstance(route.get("model"), str) and route.get("model"):
+                    models[lane] = str(route["model"])
     decision_models = decision.get("models") if isinstance(decision, dict) else None
     if isinstance(decision_models, list):
         for lane, model in zip(_DECISION_TRACE_ROLES, decision_models, strict=False):
@@ -3492,12 +3537,34 @@ def _decision_trace_lanes(
         active_by_lane[lane] = row
         if isinstance(row.get("model"), str) and row.get("model"):
             models[lane] = str(row["model"])
+        routes[lane] = {
+            key: row[key]
+            for key in (
+                "provider",
+                "protocol",
+                "endpoint_sha256",
+                "revision",
+                "location",
+            )
+            if row.get(key) is not None
+        }
     session_by_lane: dict[str, dict[str, Any]] = {}
     for row in session_rows:
         _base, lane, _explicit = _decision_trace_role(row.get("role"))
         session_by_lane[lane] = row
         if isinstance(row.get("model"), str) and row.get("model"):
             models[lane] = str(row["model"])
+        routes[lane] = {
+            key: row[key]
+            for key in (
+                "provider",
+                "protocol",
+                "endpoint_sha256",
+                "revision",
+                "location",
+            )
+            if row.get(key) is not None
+        }
 
     artifact_replay = bool(
         decision and decision.get("kind") == "decision_artifact_replay"
@@ -3635,6 +3702,11 @@ def _decision_trace_lanes(
                 "key": lane,
                 "label": lane_labels[lane],
                 "model": models[lane],
+                "provider": routes.get(lane, {}).get("provider"),
+                "protocol": routes.get(lane, {}).get("protocol"),
+                "endpoint_sha256": routes.get(lane, {}).get("endpoint_sha256"),
+                "revision": routes.get(lane, {}).get("revision"),
+                "location": routes.get(lane, {}).get("location"),
                 "think": think,
                 **token_values,
                 "state": state,
@@ -3642,11 +3714,46 @@ def _decision_trace_lanes(
                 "detail": detail,
                 "repair_turns": repair_turns,
                 "phase": phase,
-                "generation": _decision_trace_generation((observed or {}).get("generation")),
+                "generation": _decision_trace_generation(
+                    (observed or {}).get("generation")
+                ),
                 "steps": _decision_trace_steps(state, phase=phase),
             }
         )
     return lanes, events, artifact_replay
+
+
+def _decision_trace_history_from_events(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Restore semantic terminal fields from the canonical display events."""
+
+    history: list[dict[str, Any]] = []
+    for event in rows:
+        kind = event.get("kind")
+        if kind not in {
+            "session",
+            "decision",
+            "decision_artifact_replay",
+            "decision_artifact",
+            "machine_consensus_receipt",
+        }:
+            continue
+        row = dict(event)
+        if kind in {"decision", "decision_artifact_replay"}:
+            row["status"] = event.get("decision_status") or (
+                "agreed"
+                if event.get("status") == "done"
+                else "quarantined"
+                if event.get("status") == "error"
+                else None
+            )
+        elif kind == "session" and "ok" not in row:
+            row["ok"] = event.get("status") == "done"
+        row["required_context_tokens"] = event.get("required_num_ctx")
+        row["requested_context_tokens"] = event.get("requested_num_ctx")
+        history.append(row)
+    return history
 
 
 def _decision_trace_snapshot(
@@ -3692,12 +3799,40 @@ def _decision_trace_snapshot(
         observe(row, ("updated_at", "started_at"), 0)
     for row in history:
         kind = row.get("kind")
-        if kind in {"session", "decision", "decision_artifact_replay"}:
-            observe(row, ("timestamp",), 2 if kind != "session" else 1)
+        if kind in {
+            "session",
+            "decision",
+            "decision_artifact_replay",
+            "decision_artifact",
+            "machine_consensus_receipt",
+        }:
+            observe(
+                row,
+                ("timestamp",),
+                1
+                if kind == "session"
+                else 3
+                if kind in {"decision_artifact", "machine_consensus_receipt"}
+                else 2,
+            )
     for row in trace_events or []:
         kind = row.get("kind")
-        if kind in {"session", "decision", "decision_artifact_replay"}:
-            observe(row, ("timestamp",), 2 if kind != "session" else 1)
+        if kind in {
+            "session",
+            "decision",
+            "decision_artifact_replay",
+            "decision_artifact",
+            "machine_consensus_receipt",
+        }:
+            observe(
+                row,
+                ("timestamp",),
+                1
+                if kind == "session"
+                else 3
+                if kind in {"decision_artifact", "machine_consensus_receipt"}
+                else 2,
+            )
     observe(latest_decision, ("timestamp",), 2)
 
     preferred_candidates = [
@@ -3741,6 +3876,28 @@ def _decision_trace_snapshot(
         ),
         None,
     )
+    artifact = next(
+        (row for row in reversed(related) if row.get("kind") == "decision_artifact"),
+        None,
+    )
+    receipt = next(
+        (
+            row
+            for row in reversed(related)
+            if row.get("kind") == "machine_consensus_receipt"
+        ),
+        None,
+    )
+    artifact_status = str((artifact or {}).get("artifact_status") or "")
+    if decision and decision.get("kind") == "decision_artifact_replay":
+        artifact_status = str(decision.get("artifact_status") or "replayed")
+    if artifact_status == "error":
+        decision = {
+            **dict(decision or {}),
+            "status": "quarantined",
+            "failure_class": artifact.get("failure_class"),
+            "quarantine_reason": artifact.get("quarantine_reason"),
+        }
     session_rows = [row for row in related if row.get("kind") == "session"]
     latest_related_session = session_rows[-1] if session_rows else None
     quorum_flow = bool(
@@ -3765,6 +3922,7 @@ def _decision_trace_snapshot(
         pair_agreement = None
     tie_break_used = decision_facts.get("tie_break_used") is True
     decision_status = str(decision_facts.get("status") or "")
+    artifact_expected = decision_facts.get("artifact_expected") is True
     seal_failed = bool(
         decision_status == "quarantined"
         and decision_facts.get("quarantine_reason")
@@ -3853,10 +4011,14 @@ def _decision_trace_snapshot(
         seal_failed=seal_failed,
         quorum_attempted=quorum_attempted,
         validation_completed=validation_completed,
+        artifact_expected=artifact_expected,
+        artifact_status=artifact_status,
     )
     updated_at = (
         (active_rows[-1] if active_rows else {}).get("updated_at")
         or (active_rows[-1] if active_rows else {}).get("started_at")
+        or (receipt or {}).get("timestamp")
+        or (artifact or {}).get("timestamp")
         or (decision or {}).get("timestamp")
         or (session_rows[-1] if session_rows else {}).get("timestamp")
     )
@@ -3892,6 +4054,9 @@ def _decision_trace_snapshot(
         "pair_agreement": pair_agreement,
         "tie_break_used": tie_break_used,
         "artifact_replay": artifact_replay,
+        "artifact_expected": artifact_expected,
+        "artifact_status": artifact_status or None,
+        "receipt_status": (receipt or {}).get("receipt_status"),
         "outcome": outcome,
         "overall": overall,
         "lanes": lanes,
@@ -4040,6 +4205,7 @@ def _local_consensus_snapshot(
         root / "trace-events.jsonl",
         limit=max(_DECISION_TRACE_EVENT_LIMIT * 4, limit * 4),
     )
+    trace_history = _decision_trace_history_from_events(trace_events)
 
     summary = _read_json_file(root / "summary.json") or _empty_local_consensus_summary()
     history: list[dict[str, Any]] = []
@@ -4128,28 +4294,22 @@ def _local_consensus_snapshot(
     latest_decision = next(
         (
             row
-            for row in reversed(history)
+            for row in reversed(trace_history)
             if row.get("kind") in {"decision", "decision_artifact_replay"}
         ),
         None,
     )
 
-    processing_trace: dict[str, Any] | None = None
     if preferred_pipeline is not None:
-        live_pipeline_rows = [
+        pipeline_rows = [
             row
-            for row in activities
-            if _processing_pipeline_for_role(row.get("role")) == preferred_pipeline
+            for row in [*activities, *trace_history]
+            if _processing_pipeline_for_role(
+                row.get("decision_lane") or row.get("role")
+            )
+            == preferred_pipeline
             and row.get("request_sha256")
         ]
-        pipeline_rows = live_pipeline_rows
-        if not pipeline_rows:
-            pipeline_rows = [
-                row
-                for row in [*history, *trace_events]
-                if _processing_pipeline_for_role(row.get("role")) == preferred_pipeline
-                and row.get("request_sha256")
-            ]
 
         def observed_epoch(row: Mapping[str, Any]) -> float:
             for key in ("updated_at", "started_at", "timestamp"):
@@ -4162,31 +4322,11 @@ def _local_consensus_snapshot(
         preferred_request_sha256 = (
             str(selected.get("request_sha256")) if selected is not None else None
         )
-        if not live_pipeline_rows:
-            with contextlib.suppress(Exception):
-                processing = _processing_activity_snapshot()
-                selected_lane = next(
-                    (
-                        row
-                        for row in processing.get("lanes") or []
-                        if row.get("key") == preferred_pipeline
-                        and row.get("state") == "active"
-                    ),
-                    None,
-                )
-                if selected_lane is not None and (
-                    not selected_lane.get("recent") or preferred_request_sha256 is None
-                ):
-                    processing_trace = _processing_lane_trace(
-                        preferred_pipeline,
-                        selected_lane,
-                        observed_at=processing.get("generated_at"),
-                    )
 
     def build_trace(preferred: str | None = None) -> dict[str, Any]:
         return _decision_trace_snapshot(
             activities,
-            history,
+            trace_history,
             latest_decision,
             trace_events,
             preferred,
@@ -4197,12 +4337,10 @@ def _local_consensus_snapshot(
         preferred_request_sha256
         and any(
             row.get("request_sha256") == preferred_request_sha256
-            for row in [*activities, *history, *trace_events]
+            for row in [*activities, *trace_history]
         )
     )
-    if processing_trace is not None:
-        decision_trace = processing_trace
-    elif preferred_pipeline is not None and preferred_request_sha256 is None:
+    if preferred_pipeline is not None and preferred_request_sha256 is None:
         label = next(
             label
             for key, label, _steps in _PROCESSING_LANES
@@ -4215,10 +4353,14 @@ def _local_consensus_snapshot(
         }
     else:
         decision_trace = build_trace(preferred_request_sha256)
-    if next_active and preferred_pipeline is None and (
-        preferred_request_sha256 is None
-        or not preferred_present
-        or decision_trace["state"] in {"agreed", "quarantined", "ready"}
+    if (
+        next_active
+        and preferred_pipeline is None
+        and (
+            preferred_request_sha256 is None
+            or not preferred_present
+            or decision_trace["state"] in {"agreed", "quarantined", "ready"}
+        )
     ):
         active_requests = dict.fromkeys(
             str(row.get("request_sha256") or "") for row in activities
@@ -5135,10 +5277,7 @@ def _health_materialization_fingerprint(raw_paths: list[Path]) -> str:
         CHRONOVISOR_ROOT / "runtime" / "recall-distillation" / "state.json",
         CHRONOVISOR_ROOT / "runtime" / "recall-distillation" / "active-policy.json",
         CHRONOVISOR_ROOT / "runtime" / "recall-distillation" / "candidate-policy.json",
-        CHRONOVISOR_ROOT
-        / "runtime"
-        / "recall-distillation"
-        / "lkg-policy.json",
+        CHRONOVISOR_ROOT / "runtime" / "recall-distillation" / "lkg-policy.json",
     ]
     paths.extend(
         _dashboard_glob_files(
@@ -6635,7 +6774,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if preferred_pipeline is not None and (
                     preferred_request_sha256 is not None or next_trace is not None
                 ):
-                    self.send_error(HTTPStatus.BAD_REQUEST, "Conflicting trace selection")
+                    self.send_error(
+                        HTTPStatus.BAD_REQUEST, "Conflicting trace selection"
+                    )
                     return
                 if next_trace not in {None, "active"}:
                     self.send_error(HTTPStatus.BAD_REQUEST, "Invalid next")

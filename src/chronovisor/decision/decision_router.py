@@ -3683,6 +3683,21 @@ class DecisionRouter:
                     failure_class="quality_lane_frozen",
                 )
         artifact_identity: tuple[str, dict[str, Any], int] | None = None
+        request_schema: Mapping[str, Any] = schema
+        if effective_lane == "ingest_reconciliation" and ingest_repair_contract:
+            request_schema = _ingest_reconciliation_format_schema(
+                schema,
+                ingest_repair_contract,
+            )
+        execution_request_sha256 = structured_request_sha256(
+            prompt,
+            request_schema,
+            decision_system_with_policy(schema, system),
+        )
+        contract_sha256: str | None = None
+        if effective_lane is not None:
+            with contextlib.suppress(ValueError):
+                contract_sha256 = lane_contract_sha256(effective_lane)
         try:
             artifact_identity = self._artifact_identity(
                 prompt=prompt,
@@ -3706,22 +3721,28 @@ class DecisionRouter:
                         self.audit_store.append(
                             {
                                 "kind": "decision_artifact_replay",
-                                "request_sha256": structured_request_sha256(
-                                    replay_prompt,
-                                    (
-                                        _ingest_reconciliation_format_schema(
-                                            schema,
-                                            ingest_repair_contract,
-                                        )
-                                        if effective_lane == "ingest_reconciliation"
-                                        and ingest_repair_contract is not None
-                                        else schema
-                                    ),
-                                    decision_system_with_policy(schema, system),
-                                ),
+                                "request_sha256": execution_request_sha256,
                                 "role": self.audit_role,
                                 "decision_lane": effective_lane,
                                 "execution_fingerprint": fingerprint,
+                                "decision_artifact_seal_sha256": (
+                                    (replayed.residency or {}).get(
+                                        "decision_artifact_seal_sha256"
+                                    )
+                                ),
+                                "agreement_sha256": replayed.agreement_sha256,
+                                "models": [vote.model for vote in replayed.votes],
+                                "votes": [
+                                    vote.audit_record() for vote in replayed.votes
+                                ],
+                                "lane_contract_policy_version": (
+                                    LANE_CONTRACT_POLICY_VERSION
+                                    if contract_sha256 is not None
+                                    else None
+                                ),
+                                "lane_contract_sha256": contract_sha256,
+                                "artifact_expected": True,
+                                "artifact_status": "replayed",
                                 "model_invocations": 0,
                                 "status": "agreed",
                             }
@@ -3746,6 +3767,7 @@ class DecisionRouter:
                         ingest_repair_contract=ingest_repair_contract,
                         replay_prompt=replay_prompt,
                         source=source,
+                        artifact_expected=artifact_identity is not None,
                     )
             return self._decide_locked(
                 prompt,
@@ -3756,6 +3778,7 @@ class DecisionRouter:
                 ingest_repair_contract=ingest_repair_contract,
                 replay_prompt=replay_prompt,
                 source=source,
+                artifact_expected=artifact_identity is not None,
             )
 
         result = execute()
@@ -3777,7 +3800,52 @@ class DecisionRouter:
                         "decision_artifact_seal_sha256": published.get("seal_sha256"),
                     },
                 )
+                with contextlib.suppress(Exception):
+                    self.audit_store.append(
+                        {
+                            "kind": "decision_artifact",
+                            "request_sha256": execution_request_sha256,
+                            "role": self.audit_role,
+                            "decision_lane": effective_lane,
+                            "status": "sealed",
+                            "execution_fingerprint": fingerprint,
+                            "decision_artifact_seal_sha256": published.get(
+                                "seal_sha256"
+                            ),
+                            "agreement_sha256": result.agreement_sha256,
+                            "lane_contract_policy_version": (
+                                LANE_CONTRACT_POLICY_VERSION
+                                if contract_sha256 is not None
+                                else None
+                            ),
+                            "lane_contract_sha256": contract_sha256,
+                            "artifact_expected": True,
+                        }
+                    )
             except DecisionArtifactError:
+                with contextlib.suppress(Exception):
+                    self.audit_store.append(
+                        {
+                            "kind": "decision_artifact",
+                            "request_sha256": execution_request_sha256,
+                            "role": self.audit_role,
+                            "decision_lane": effective_lane,
+                            "status": "error",
+                            "execution_fingerprint": fingerprint,
+                            "agreement_sha256": result.agreement_sha256,
+                            "failure_class": "decision_artifact_invalid",
+                            "quarantine_reason": (
+                                "canonical_decision_artifact_publish_failed"
+                            ),
+                            "lane_contract_policy_version": (
+                                LANE_CONTRACT_POLICY_VERSION
+                                if contract_sha256 is not None
+                                else None
+                            ),
+                            "lane_contract_sha256": contract_sha256,
+                            "artifact_expected": True,
+                        }
+                    )
                 return self._quarantined(
                     result.votes,
                     "canonical_decision_artifact_publish_failed",
@@ -3865,6 +3933,7 @@ class DecisionRouter:
         ingest_repair_contract: _IngestRepairContract | None = None,
         replay_prompt: str | None = None,
         source: object | None = None,
+        artifact_expected: bool = False,
     ) -> DecisionRouterResult:
         started = time.monotonic()
         effective_system = decision_system_with_policy(schema, system)
@@ -4004,6 +4073,7 @@ class DecisionRouter:
                         "request_sha256": request_sha256,
                         "role": self.audit_role,
                         "decision_lane": decision_lane,
+                        "artifact_expected": artifact_expected,
                         "quorum_safety_policy_version": QUORUM_SAFETY_POLICY_VERSION,
                         "lane_contract_policy_version": (
                             LANE_CONTRACT_POLICY_VERSION

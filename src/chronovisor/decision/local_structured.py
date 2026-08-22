@@ -1,4 +1,4 @@
-"""Bounded multi-turn structured output for local Ollama models.
+"""Bounded multi-turn structured output for local generation models.
 
 The session keeps client-side chat history, returns only schema-valid JSON,
 and fails closed when its fixed input/output budget cannot be honored.  It is
@@ -29,7 +29,11 @@ import httpx
 
 from chronovisor.core import ollama
 from chronovisor.core.canonical_json import canonical_json_strict as _canonical_json
-from chronovisor.core.llm_runtime import MAX_OUTPUT_TOKENS, LLMRuntimeError
+from chronovisor.core.llm_runtime import (
+    MAX_OUTPUT_TOKENS,
+    LLMRuntimeError,
+    safe_metadata_identifier,
+)
 from chronovisor.core.ollama_lease import (
     model_resource_lease_mode as _local_resource_lease_mode,
 )
@@ -1347,16 +1351,27 @@ class LocalConsensusAuditStore:
     @staticmethod
     def _trace_event_from_audit(row: Mapping[str, Any]) -> dict[str, Any] | None:
         kind = str(row.get("kind") or "")
-        if kind not in {"session", "decision", "decision_artifact_replay"}:
+        if kind not in {
+            "session",
+            "decision",
+            "decision_artifact_replay",
+            "decision_artifact",
+            "machine_consensus_receipt",
+        }:
             return None
-        status = "done"
-        if (
-            kind == "session"
+        semantic_status = str(row.get("status") or "")
+        status = (
+            "error"
+            if kind == "session"
             and not bool(row.get("ok"))
-            or kind == "decision"
-            and row.get("status") != "agreed"
-        ):
-            status = "error"
+            or kind in {"decision", "decision_artifact_replay"}
+            and semantic_status != "agreed"
+            or kind == "decision_artifact"
+            and semantic_status not in {"sealed", "replayed"}
+            or kind == "machine_consensus_receipt"
+            and semantic_status != "accepted"
+            else "done"
+        )
         repair_turns = row.get("repair_turns")
         event = {
             "schema_version": 1,
@@ -1366,7 +1381,13 @@ class LocalConsensusAuditStore:
             "request_sha256": str(row.get("request_sha256") or ""),
             "role": str(row.get("role") or "structured"),
             "model": str(row.get("model") or ""),
-            "phase": "vote" if kind == "session" else "decision",
+            "phase": (
+                "vote"
+                if kind == "session"
+                else "artifact"
+                if kind in {"decision_artifact", "machine_consensus_receipt"}
+                else "decision"
+            ),
             "attempt": (
                 int(repair_turns)
                 if isinstance(repair_turns, int) and not isinstance(repair_turns, bool)
@@ -1375,6 +1396,41 @@ class LocalConsensusAuditStore:
             "status": status,
         }
         for key in (
+            "provider",
+            "protocol",
+            "endpoint_sha256",
+            "revision",
+            "location",
+            "decision_lane",
+            "ok",
+            "first_pass_valid",
+            "repaired",
+            "failure_class",
+            "quarantine_reason",
+            "pair_agreement",
+            "pair_safe_resolution_without_tie",
+            "signature_majority_resolution",
+            "safe_policy_resolution",
+            "tie_break_used",
+            "unresolved_quarantine",
+            "vote_count",
+            "valid_votes",
+            "first_pass_valid_votes",
+            "repaired_votes",
+            "conservative_veto_fired",
+            "conservative_veto_bypassed_by_lane_policy",
+            "dissent_effect_class",
+            "quorum_safety_policy_version",
+            "lane_contract_policy_version",
+            "lane_contract_sha256",
+            "execution_fingerprint",
+            "decision_artifact_seal_sha256",
+            "agreement_sha256",
+            "receipt_sha256",
+            "schema_sha256",
+            "model_invocations",
+            "artifact_expected",
+            "artifact_status",
             "think",
             "think_selection_reason",
             "required_num_ctx",
@@ -1383,6 +1439,47 @@ class LocalConsensusAuditStore:
         ):
             if row.get(key) is not None:
                 event[key] = row[key]
+        if kind in {"decision", "decision_artifact_replay"}:
+            event["decision_status"] = semantic_status
+        elif kind == "decision_artifact":
+            event["artifact_status"] = semantic_status
+        elif kind == "machine_consensus_receipt":
+            event["receipt_status"] = semantic_status
+        models = row.get("models")
+        if isinstance(models, list):
+            event["models"] = [
+                model for model in models if safe_metadata_identifier(model) is not None
+            ][:3]
+        votes = row.get("votes")
+        if isinstance(votes, list):
+            routes: list[dict[str, Any]] = []
+            vote_roles: list[str] = []
+            for vote in votes[:3]:
+                if not isinstance(vote, Mapping):
+                    continue
+                vote_role = str(vote.get("role") or "")
+                if vote_role in {"primary", "challenger", "tie_break"}:
+                    vote_roles.append(vote_role)
+                provenance = vote.get("route_provenance")
+                provenance = provenance if isinstance(provenance, Mapping) else {}
+                route = {
+                    key: value
+                    for key in (
+                        "role",
+                        "provider",
+                        "model",
+                        "location",
+                        "protocol",
+                        "endpoint_sha256",
+                        "revision",
+                    )
+                    if (value := provenance.get(key, vote.get(key))) is not None
+                }
+                routes.append(route)
+            if routes:
+                event["routes"] = routes
+            if vote_roles:
+                event["vote_roles"] = vote_roles
         generation = _bounded_generation_progress(row.get("generation"))
         if generation:
             event["generation"] = generation
@@ -1447,6 +1544,8 @@ class LocalConsensusAuditStore:
         required_num_ctx: int | None = None,
         requested_num_ctx: int | None = None,
         effective_num_ctx: int | None = None,
+        route: Mapping[str, Any] | None = None,
+        decision_lane: str | None = None,
     ) -> None:
         """Persist one redacted real phase transition for dashboard replay."""
 
@@ -1473,6 +1572,10 @@ class LocalConsensusAuditStore:
         ):
             if value is not None:
                 row[key] = value
+        if route:
+            row.update(route)
+        if decision_lane is not None:
+            row["decision_lane"] = decision_lane
         with self._lock():
             rows = [*self._read_trace_rows(), row][-self.max_trace_records :]
             self._write_trace_rows_locked(rows)
@@ -1544,6 +1647,8 @@ class LocalConsensusAuditStore:
         required_num_ctx: int | None = None,
         requested_num_ctx: int | None = None,
         effective_num_ctx: int | None = None,
+        route: Mapping[str, Any] | None = None,
+        decision_lane: str | None = None,
     ) -> Iterator[_ActivityUpdate]:
         """Publish a redacted, phase-aware marker while a session executes."""
 
@@ -1615,6 +1720,8 @@ class LocalConsensusAuditStore:
                         required_num_ctx=record.get("required_num_ctx"),
                         requested_num_ctx=record.get("requested_num_ctx"),
                         effective_num_ctx=record.get("context_tokens"),
+                        route=route,
+                        decision_lane=decision_lane,
                     )
                 last_transition = current
             except Exception:
@@ -1651,6 +1758,10 @@ class LocalConsensusAuditStore:
                 record["think_selection_reason"] = think_selection_reason
             if effective_num_ctx is not None:
                 record["context_tokens"] = effective_num_ctx
+            if route:
+                record.update(route)
+            if decision_lane is not None:
+                record["decision_lane"] = decision_lane
             update("trigger", 0)
         except Exception:
             path = None
@@ -1674,6 +1785,8 @@ class LocalConsensusAuditStore:
         requested_num_ctx: int | None = None,
         effective_num_ctx: int | None = None,
         generation_progress: Mapping[str, Any] | None = None,
+        route: Mapping[str, Any] | None = None,
+        decision_lane: str | None = None,
     ) -> None:
         record = {
             "kind": "session",
@@ -1703,6 +1816,10 @@ class LocalConsensusAuditStore:
             record["ollama_think"] = result.ollama_think
         if result.num_predict is not None:
             record["num_predict"] = result.num_predict
+        if route:
+            record.update(route)
+        if decision_lane is not None:
+            record["decision_lane"] = decision_lane
         generation = _bounded_generation_progress(generation_progress)
         if generation:
             record["generation"] = generation
@@ -3315,11 +3432,7 @@ class LocalStructuredSession:
         plain_text_mode = (
             plain_text_contract is not None or plain_text_decoder is not None
         )
-        if (
-            format_schema is None
-            and plain_choice_field is None
-            and not plain_text_mode
-        ):
+        if format_schema is None and plain_choice_field is None and not plain_text_mode:
             plain_choice_field = _automatic_plain_choice_field(schema)
         if (plain_text_contract is None) != (plain_text_decoder is None):
             format_schema_error = (
@@ -3327,13 +3440,16 @@ class LocalStructuredSession:
             )
         elif plain_text_decoder is not None and not callable(plain_text_decoder):
             format_schema_error = "plain_text_decoder must be callable"
-        elif sum(
-            (
-                format_schema is not None,
-                plain_choice_field is not None,
-                plain_text_mode,
+        elif (
+            sum(
+                (
+                    format_schema is not None,
+                    plain_choice_field is not None,
+                    plain_text_mode,
+                )
             )
-        ) > 1:
+            > 1
+        ):
             format_schema_error = (
                 "format_schema, plain_choice_field, and plain-text output are "
                 "mutually exclusive"
@@ -3388,6 +3504,15 @@ class LocalStructuredSession:
         preflight_failure: LocalStructuredResult | None = None
         route_failure: LocalStructuredResult | None = None
         route_provider = ""
+        route_metadata: dict[str, Any] = (
+            {
+                "provider": "custom_transport",
+                "protocol": "custom-transport",
+                "location": self.runtime_location or "local",
+            }
+            if not self._uses_default_transport
+            else {}
+        )
         if not format_schema_error and self._uses_default_transport:
             preflight_failure, _schema_copy, _messages = self._prepare_initial_request(
                 prompt,
@@ -3406,6 +3531,17 @@ class LocalStructuredSession:
                     self.model = route.model
                     self._runtime_location = route.location
                     route_provider = route.provider
+                    route_metadata = {
+                        key: value
+                        for key, value in (
+                            ("provider", route.provider),
+                            ("protocol", route.protocol),
+                            ("endpoint_sha256", route.endpoint_sha256),
+                            ("revision", route.revision),
+                            ("location", route.location),
+                        )
+                        if value is not None
+                    }
                     if (
                         self._runtime_role_explicit
                         and configured_model
@@ -3473,6 +3609,8 @@ class LocalStructuredSession:
             required_num_ctx=required_num_ctx,
             requested_num_ctx=planned_num_ctx,
             effective_num_ctx=planned_num_ctx,
+            route=route_metadata,
+            decision_lane=self.decision_lane,
         ) as activity_update:
             observed_request: dict[str, Any] = {}
             observed_generation: dict[str, Any] = {}
@@ -3597,6 +3735,8 @@ class LocalStructuredSession:
                     requested_num_ctx=observed_request.get("requested_num_ctx"),
                     effective_num_ctx=observed_request.get("effective_num_ctx"),
                     generation_progress=observed_generation,
+                    route=route_metadata,
+                    decision_lane=self.decision_lane,
                 )
             except Exception:
                 # Observability must never turn a valid local decision into a failure.
