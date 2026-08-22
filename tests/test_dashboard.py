@@ -1952,6 +1952,8 @@ def test_processing_lane_trace_covers_every_declared_stage() -> None:
             current_index = dashboard._DECISION_TRACE_PHASES.index(expected_phase)
 
             assert primary["phase"] == expected_phase
+            assert primary["think"] == "off"
+            assert all(event["think"] == "off" for event in trace["events"])
             assert primary["observed_phases"] == list(
                 dashboard._DECISION_TRACE_PHASES[: current_index + 1]
             )
@@ -3784,7 +3786,7 @@ process.stdout.write(JSON.stringify({{
     assert 'hold: safeNoQuorum || sealFailure ? "error" : "pending"' in renderer
 
 
-def test_decision_trace_reasoning_unknown_uses_observed_route() -> None:
+def test_decision_trace_reasoning_unknown_uses_bypass_route() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
     helper = "function decisionReasoningPlanState" + renderer.split(
         "function decisionReasoningPlanState", 1
@@ -3810,19 +3812,16 @@ process.stdout.write(JSON.stringify({{
         "high": {
             "mode": "high",
             "route": "high",
-            "observed": False,
             "fit": "done",
         },
         "unknown": {
-            "mode": "adaptive",
-            "route": "medium",
-            "observed": True,
+            "mode": "off",
+            "route": "off",
             "fit": "done",
         },
         "absent": {
-            "mode": "—",
+            "mode": "off",
             "route": "",
-            "observed": False,
             "fit": "pending",
         },
     }

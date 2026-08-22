@@ -700,7 +700,7 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert '["reasoning-off", "reasoning-low", "reasoning-medium", "reasoning-high"]' in harness
     assert 'node.classList.toggle("selected", value === selectedContextValue);' in harness
     assert 'node.classList.toggle("selected", node.dataset.reasoningKey === routeThink);' in harness
-    assert 'reasoning.observed ? "OBSERVED" : "MEDIUM"' in harness
+    assert 'reasoning.observed ? "OBSERVED" : "MEDIUM"' not in harness
     assert "decisionRepairState(traceState, lane, repairs, focusEvent)" in harness
     assert 'observedPhases.add("load")' not in renderer
 
@@ -1431,17 +1431,16 @@ addEventListener("DOMContentLoaded", () => {
         assert result["layout"]["rightReachable"] is True
         assert result["layout"]["fitsWidth"] is True
         assert result["layout"]["nextPanelGap"] == 12
-        assert result["reasoning"] == "medium"
-        assert result["reasoningLabel"] == "OBSERVED"
-        assert result["fitLabel"] == "OBSERVED"
+        assert result["reasoning"] == "off"
+        assert result["reasoningLabel"] == "MEDIUM"
+        assert result["fitLabel"] == "BYPASS"
         reached_paths = {
             "packet-preflight",
             "preflight-execution_plan",
             "execution-plan-context",
             "plan-context",
-            "reasoning-medium",
-            "reasoning-output-medium",
-            "plan-fit",
+            "reasoning-off",
+            "reasoning-output-off",
             "plan-dispatch",
         }
         assert {
@@ -1454,9 +1453,8 @@ addEventListener("DOMContentLoaded", () => {
             "preflight-execution_plan",
             "execution-plan-context",
             "plan-context",
-            "reasoning-medium",
-            "reasoning-output-medium",
-            "plan-fit",
+            "reasoning-off",
+            "reasoning-output-off",
             "plan-dispatch",
         ):
             path = result["paths"][path_key]

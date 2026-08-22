@@ -635,6 +635,7 @@ def test_generate_publishes_redacted_model_activity(tmp_path, monkeypatch) -> No
     assert observed["schema_version"] == 1
     assert observed["model"] == "ornith:test"
     assert observed["operation"] == "generate"
+    assert observed["think"] is False
     assert observed["component"] == __name__
     assert observed["caller"] == "test_generate_publishes_redacted_model_activity"
     assert observed["pipeline"] == "audit"
@@ -656,6 +657,7 @@ def test_generate_publishes_redacted_model_activity(tmp_path, monkeypatch) -> No
     assert recent["activity_id"] == observed["activity_id"]
     assert recent["finished_at"]
     assert recent["status"] == "done"
+    assert recent["think"] is False
 
 
 def test_model_activity_records_failure_without_swallowing_it(
@@ -812,9 +814,11 @@ def test_chat_omits_format_key_when_none(monkeypatch) -> None:
     assert "format" not in client.payload
 
 
-def test_chat_forwards_explicit_reasoning_level(monkeypatch) -> None:
+def test_chat_forwards_explicit_reasoning_level(tmp_path, monkeypatch) -> None:
     client = _ChatClient('{"decision":"apply"}')
+    chronovisor_root = tmp_path / "wiki"
     monkeypatch.setattr(ollama, "_client", lambda: client)
+    monkeypatch.setattr(ollama, "CHRONOVISOR_ROOT", chronovisor_root)
 
     result = ollama.chat(
         [{"role": "user", "content": "decide"}],
@@ -830,6 +834,12 @@ def test_chat_forwards_explicit_reasoning_level(monkeypatch) -> None:
 
     assert result == '{"decision":"apply"}'
     assert client.payload["think"] == "low"
+    marker = json.loads(
+        (
+            chronovisor_root / "runtime" / "model-activity" / "recent" / "audit.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert marker["think"] == "low"
 
 
 def test_chat_enforces_output_char_cap(monkeypatch) -> None:

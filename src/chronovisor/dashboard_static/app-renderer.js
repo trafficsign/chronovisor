@@ -670,16 +670,14 @@ function decisionSealStates(traceState, artifactPayloadState, sealFailure, noSaf
 }
 
 function decisionReasoningPlanState(lane, planState) {
-  const mode = String(lane?.think || "—").toLowerCase();
-  const known = ["off", "low", "medium", "high"].includes(mode);
-  const observed = lane != null
-    && !known
-    && ["active", "done", "error"].includes(planState);
+  const requestedMode = String(lane?.think ?? "off").toLowerCase();
+  const mode = ["off", "low", "medium", "high"].includes(requestedMode)
+    ? requestedMode
+    : "off";
   return {
     mode,
-    route: known ? mode : observed ? "medium" : "",
-    observed,
-    fit: known || observed ? planState : "pending",
+    route: lane == null ? "" : mode,
+    fit: lane == null ? "pending" : planState,
   };
 }
 
@@ -897,23 +895,13 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     "[data-plan-value=\"fit\"]",
     actualThink === "off" && fitState !== "pending"
       ? "BYPASS"
-      : reasoning.observed && fitState !== "pending"
-      ? "OBSERVED"
       : fitPassed
       ? "headroom OK"
       : fitState === "active" ? "CHECKING" : "WAITING"
   );
   harness.querySelector("[data-plan-fit-pass]")?.classList.toggle(
     "visible",
-    fitPassed && actualThink !== "off" && !reasoning.observed
-  );
-  setDecisionSvgText(
-    '[data-reasoning-key="medium"] [data-reasoning-label]',
-    reasoning.observed ? "OBSERVED" : "MEDIUM"
-  );
-  setDecisionSvgText(
-    '[data-reasoning-key="medium"] .trace-reasoning-detail',
-    reasoning.observed ? "mode unavailable · observed dispatch" : "normal semantic · default"
+    fitPassed && actualThink !== "off"
   );
 
   harness.querySelectorAll("[data-reasoning-key]").forEach((node) => {

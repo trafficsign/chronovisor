@@ -2156,6 +2156,7 @@ def _model_activities() -> list[dict[str, Any]]:
                     "caller": row.get("caller"),
                     "operation": row.get("operation"),
                     "model": row.get("model"),
+                    "think": row.get("think", False),
                     "started_at": row.get("started_at"),
                     "updated_at": row.get("updated_at"),
                     "pid": pid,
@@ -2187,6 +2188,7 @@ def _model_activities() -> list[dict[str, Any]]:
                     "caller": row.get("caller"),
                     "operation": row.get("operation"),
                     "model": row.get("model"),
+                    "think": row.get("think", False),
                     "started_at": row.get("started_at"),
                     "updated_at": row.get("updated_at"),
                     "finished_at": row.get("finished_at"),
@@ -2417,6 +2419,7 @@ def _build_processing_activity_snapshot() -> dict[str, Any]:
         active_by_lane["ingest"] = {
             "current_step": stage_aliases.get(raw_stage, "raw"),
             "model": str(llm.get("model") or ingest_model()),
+            "think": llm.get("think", False),
             "role": str(status.get("current_op") or raw_stage),
             "started_at": llm.get("started_at") or status.get("updated_at"),
             "updated_at": llm.get("updated_at") or status.get("updated_at"),
@@ -2439,6 +2442,7 @@ def _build_processing_activity_snapshot() -> dict[str, Any]:
         active_by_lane[pipeline] = {
             "current_step": current_step,
             "model": latest.get("model"),
+            "think": latest.get("think", False),
             "role": latest.get("role"),
             "phase": latest.get("phase"),
             "started_at": latest.get("started_at"),
@@ -2483,6 +2487,7 @@ def _build_processing_activity_snapshot() -> dict[str, Any]:
         active_by_lane[pipeline] = {
             "current_step": _processing_model_step(pipeline, latest.get("operation")),
             "model": latest.get("model"),
+            "think": latest.get("think", False),
             "role": _processing_component_label(latest.get("component")),
             "phase": latest.get("caller") or latest.get("operation"),
             "started_at": latest.get("started_at"),
@@ -2507,6 +2512,7 @@ def _build_processing_activity_snapshot() -> dict[str, Any]:
         active_by_lane["repair"] = {
             "current_step": repair_step,
             "model": repair_row.get("model"),
+            "think": repair_row.get("think", False),
             "role": repair_row.get("kind") or repair_row.get("component") or "repair",
             "phase": repair_status or None,
             "started_at": repair_row.get("started_at") or repair_row.get("reserved_at"),
@@ -2526,6 +2532,7 @@ def _build_processing_activity_snapshot() -> dict[str, Any]:
                 "state": "active" if active else "idle",
                 "current_step": current_step,
                 "model": (active or {}).get("model"),
+                "think": (active or {}).get("think", False) if active else None,
                 "role": (active or {}).get("role"),
                 "phase": (active or {}).get("phase"),
                 "started_at": (active or {}).get("started_at"),
@@ -3923,10 +3930,20 @@ def _processing_lane_trace(
     updated_at = lane.get("updated_at") or started_at
     role = str(lane.get("role") or pipeline)[:160]
     model = str(lane.get("model") or "local worker")[:160]
+    raw_think = lane.get("think", False)
+    effective_think: bool | str = (
+        raw_think.casefold()
+        if isinstance(raw_think, str)
+        and raw_think.casefold() in {"low", "medium", "high"}
+        else raw_think
+        if isinstance(raw_think, bool)
+        else False
+    )
     activity = {
         "request_sha256": request_sha256,
         "role": pipeline,
         "model": model,
+        "think": effective_think,
         "phase": phase,
         "started_at": started_at,
         "updated_at": updated_at,
@@ -3940,6 +3957,7 @@ def _processing_lane_trace(
             "request_sha256": request_sha256,
             "role": pipeline,
             "model": model,
+            "think": effective_think,
             "phase": _processing_trace_phase(pipeline, step.get("key")),
             "status": str(step.get("status") or "active"),
             "source": "processing_activity",
@@ -3960,6 +3978,7 @@ def _processing_lane_trace(
                 "request_sha256": request_sha256,
                 "role": pipeline,
                 "model": model,
+                "think": effective_think,
                 "ok": terminal_status == "done",
                 "failure_class": (
                     "model_activity_failed" if terminal_status == "error" else None
@@ -3974,6 +3993,7 @@ def _processing_lane_trace(
                 "request_sha256": request_sha256,
                 "role": pipeline,
                 "model": model,
+                "think": effective_think,
                 "phase": phase,
                 "status": terminal_status,
                 "source": "processing_activity",

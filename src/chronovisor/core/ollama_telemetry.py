@@ -52,6 +52,7 @@ def model_activity(
     root: Path,
     facade_module: str,
     pipeline: str | None = None,
+    think: bool | str = False,
 ) -> Iterator[None]:
     """Publish one redacted live marker for a local model inference."""
 
@@ -78,6 +79,7 @@ def model_activity(
                 "caller": caller,
                 "operation": operation,
                 "model": model,
+                "think": think,
                 "pid": os.getpid(),
                 "thread_id": threading.get_ident(),
                 "status": "active",
@@ -113,6 +115,7 @@ def model_activity(
                         "caller": caller,
                         "operation": operation,
                         "model": model,
+                        "think": think,
                         "pid": os.getpid(),
                         "thread_id": threading.get_ident(),
                         "status": status,

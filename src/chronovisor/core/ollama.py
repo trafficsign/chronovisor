@@ -493,11 +493,13 @@ def model_activity(
     model: str,
     operation: str,
     pipeline: str | None = None,
+    think: bool | str = False,
 ) -> Iterator[None]:
     with _ollama_telemetry.model_activity(
         model=model,
         operation=operation,
         pipeline=pipeline,
+        think=think,
         root=CHRONOVISOR_ROOT,
         facade_module=__name__,
     ):
@@ -635,7 +637,7 @@ def chat(
     return_metadata: bool = False,
 ) -> str | ChatResponse:
     with model_resource_lease(exclusive=False):
-        with model_activity(model=model, operation="chat"):
+        with model_activity(model=model, operation="chat", think=think):
             return _chat_unlocked(
                 messages,
                 model=model,
