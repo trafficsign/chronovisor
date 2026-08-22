@@ -699,7 +699,8 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert 'data-reasoning-output="${mode}"' in harness
     assert '["reasoning-off", "reasoning-low", "reasoning-medium", "reasoning-high"]' in harness
     assert 'node.classList.toggle("selected", value === selectedContextValue);' in harness
-    assert 'node.classList.toggle("selected", node.dataset.reasoningKey === actualThink);' in harness
+    assert 'node.classList.toggle("selected", node.dataset.reasoningKey === routeThink);' in harness
+    assert 'reasoning.observed ? "OBSERVED" : "MEDIUM"' in harness
     assert "decisionRepairState(traceState, lane, repairs, focusEvent)" in harness
     assert 'observedPhases.add("load")' not in renderer
 
@@ -910,6 +911,17 @@ def test_all_decision_and_processing_inputs_keep_real_dashboard_paths_connected(
         else case
         for case in json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"][:6]
     ]
+    reasoning_modes = {"A": "off", "B": "low", "D": "high"}
+    cases = [
+        {
+            **case,
+            "lane_think": [
+                reasoning_modes.get(case["id"], think) if think is not None else None
+                for think in case["lane_think"]
+            ],
+        }
+        for case in cases
+    ]
     roles = {
         "ingest": "ingest_reconciliation",
         "recall": "recall_auto_apply",
@@ -940,7 +952,7 @@ def test_all_decision_and_processing_inputs_keep_real_dashboard_paths_connected(
                 "request_sha256": request,
                 "role": f"{role}:{lane}",
                 "model": models[lane],
-                "think": True if case["id"] == "A" and lane == "primary" else think,
+                "think": False if think == "off" else think,
                 "required_context_tokens": tokens,
                 "requested_context_tokens": tokens,
                 "context_tokens": tokens,
@@ -1105,16 +1117,12 @@ addEventListener("DOMContentLoaded", () => {
       fitsWidth: Math.abs(harnessBounds.width - scrollerBounds.width) <= 1,
       nextPanelGap: saveHistoryBounds.top - decisionBounds.bottom,
     };
-    const paths = Object.fromEntries([...document.querySelectorAll("[data-path-key]")]
-      .filter((node) => fixture.kind !== "processing"
-        || [
-          "packet-preflight",
-          "preflight-execution_plan",
-          "execution-plan-context",
-          "plan-context",
-          "plan-dispatch",
-        ].includes(node.dataset.pathKey))
-      .map((node) => [node.dataset.pathKey, pathState(node)]));
+    const paths = Object.fromEntries([
+      ...[...document.querySelectorAll("[data-path-key]")]
+        .map((node) => [node.dataset.pathKey, node]),
+      ...[...document.querySelectorAll("[data-reasoning-output]")]
+        .map((node) => [`reasoning-output-${node.dataset.reasoningOutput}`, node]),
+    ].map(([key, node]) => [key, pathState(node)]));
     const rails = Object.fromEntries([...document.querySelectorAll("[data-decision-lane]")]
       .filter((lane) => fixture.kind !== "processing"
         || lane.dataset.decisionLane === "primary")
@@ -1131,6 +1139,10 @@ addEventListener("DOMContentLoaded", () => {
         .map((node) => node.dataset.processingLane),
       context: document.querySelector("[data-context-option].selected")?.dataset.contextTokens,
       reasoning: document.querySelector("[data-reasoning-key].selected")?.dataset.reasoningKey,
+      reasoningLabel: document.querySelector(
+        '[data-reasoning-key="medium"] [data-reasoning-label]'
+      )?.textContent,
+      fitLabel: document.querySelector('[data-plan-value="fit"]')?.textContent,
       paths,
       rails,
     };
@@ -1186,7 +1198,7 @@ addEventListener("DOMContentLoaded", () => {
             if not self._browser_boundary_allows():
                 return
             length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= 65_536:
+            if not 0 < length <= 262_144:
                 self.send_error(400)
                 return
             body = self.rfile.read(length)
@@ -1252,9 +1264,10 @@ addEventListener("DOMContentLoaded", () => {
                 pass
         browser_exit = process.poll()
         if received:
-            visual_dir = tmp_path / "processing-visuals"
+            visual_dir = tmp_path / "decision-trace-visuals"
             visual_dir.mkdir()
-            for index, case in enumerate(processing_cases):
+            for index, item in enumerate(payload):
+                case = item["case"]
                 visual_path = visual_dir / f"{case['id'].replace('::', '__')}.png"
                 visual_process = subprocess.Popen(
                     [
@@ -1322,7 +1335,7 @@ addEventListener("DOMContentLoaded", () => {
     assert len(browser_results) == len(payload), diagnostics
     assert screenshot_path.is_file() and screenshot_path.stat().st_size > 0
 
-    assert len(visual_paths) == 29
+    assert len(visual_paths) == 35
 
     branches = {
         "A": [],
@@ -1375,13 +1388,21 @@ addEventListener("DOMContentLoaded", () => {
         assert result["reasoning"] == case["lane_think"][selected_index]
 
         reached_paths = [
+            "packet-preflight",
+            "preflight-execution_plan",
             "execution-plan-context",
             "plan-context",
             f"reasoning-{case['lane_think'][selected_index]}",
-            "plan-fit",
+            f"reasoning-output-{case['lane_think'][selected_index]}",
+            *([] if case["lane_think"][selected_index] == "off" else ["plan-fit"]),
             "plan-dispatch",
             *branches[case["id"]],
         ]
+        assert {
+            key
+            for key, path in result["paths"].items()
+            if path["state"] in {"active", "done", "error"}
+        } == set(reached_paths)
         for path_key in reached_paths:
             path = result["paths"][path_key]
             assert path["state"] in {"active", "done", "error"}
@@ -1410,11 +1431,32 @@ addEventListener("DOMContentLoaded", () => {
         assert result["layout"]["rightReachable"] is True
         assert result["layout"]["fitsWidth"] is True
         assert result["layout"]["nextPanelGap"] == 12
+        assert result["reasoning"] == "medium"
+        assert result["reasoningLabel"] == "OBSERVED"
+        assert result["fitLabel"] == "OBSERVED"
+        reached_paths = {
+            "packet-preflight",
+            "preflight-execution_plan",
+            "execution-plan-context",
+            "plan-context",
+            "reasoning-medium",
+            "reasoning-output-medium",
+            "plan-fit",
+            "plan-dispatch",
+        }
+        assert {
+            key
+            for key, path in result["paths"].items()
+            if path["state"] in {"active", "done", "error"}
+        } == reached_paths
         for path_key in (
             "packet-preflight",
             "preflight-execution_plan",
             "execution-plan-context",
             "plan-context",
+            "reasoning-medium",
+            "reasoning-output-medium",
+            "plan-fit",
             "plan-dispatch",
         ):
             path = result["paths"][path_key]

@@ -3783,7 +3783,7 @@ process.stdout.write(JSON.stringify({{
     assert 'hold: safeNoQuorum || sealFailure ? "error" : "pending"' in renderer
 
 
-def test_decision_trace_reasoning_high_resolves_and_unknown_fails_closed() -> None:
+def test_decision_trace_reasoning_unknown_uses_observed_route() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
     helper = "function decisionReasoningPlanState" + renderer.split(
         "function decisionReasoningPlanState", 1
@@ -3806,9 +3806,24 @@ process.stdout.write(JSON.stringify({{
     completed = _run_node_scenario(scenario)
 
     assert json.loads(completed.stdout) == {
-        "high": {"mode": "high", "fit": "done"},
-        "unknown": {"mode": "adaptive", "fit": "pending"},
-        "absent": {"mode": "—", "fit": "pending"},
+        "high": {
+            "mode": "high",
+            "route": "high",
+            "observed": False,
+            "fit": "done",
+        },
+        "unknown": {
+            "mode": "adaptive",
+            "route": "medium",
+            "observed": True,
+            "fit": "done",
+        },
+        "absent": {
+            "mode": "—",
+            "route": "",
+            "observed": False,
+            "fit": "pending",
+        },
     }
     assert '["plan-dispatch", planState]' in renderer
     assert '["plan-dispatch", fitState]' not in renderer

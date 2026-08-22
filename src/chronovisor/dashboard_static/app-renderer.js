@@ -671,9 +671,15 @@ function decisionSealStates(traceState, artifactPayloadState, sealFailure, noSaf
 
 function decisionReasoningPlanState(lane, planState) {
   const mode = String(lane?.think || "—").toLowerCase();
+  const known = ["off", "low", "medium", "high"].includes(mode);
+  const observed = lane != null
+    && !known
+    && ["active", "done", "error"].includes(planState);
   return {
     mode,
-    fit: ["off", "low", "medium", "high"].includes(mode) ? planState : "pending",
+    route: known ? mode : observed ? "medium" : "",
+    observed,
+    fit: known || observed ? planState : "pending",
   };
 }
 
@@ -732,6 +738,7 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   const planState = decisionOverallState(overall, "dispatch");
   const reasoning = decisionReasoningPlanState(activeLane, planState);
   const actualThink = reasoning.mode;
+  const routeThink = reasoning.route;
   const laneStepState = (laneKey, phase) => fmt(
     (Array.isArray(lanes.get(laneKey)?.steps) ? lanes.get(laneKey).steps : [])
       .find((step) => step.key === phase)?.status,
@@ -890,25 +897,35 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     "[data-plan-value=\"fit\"]",
     actualThink === "off" && fitState !== "pending"
       ? "BYPASS"
+      : reasoning.observed && fitState !== "pending"
+      ? "OBSERVED"
       : fitPassed
       ? "headroom OK"
       : fitState === "active" ? "CHECKING" : "WAITING"
   );
   harness.querySelector("[data-plan-fit-pass]")?.classList.toggle(
     "visible",
-    fitPassed && actualThink !== "off"
+    fitPassed && actualThink !== "off" && !reasoning.observed
+  );
+  setDecisionSvgText(
+    '[data-reasoning-key="medium"] [data-reasoning-label]',
+    reasoning.observed ? "OBSERVED" : "MEDIUM"
+  );
+  setDecisionSvgText(
+    '[data-reasoning-key="medium"] .trace-reasoning-detail',
+    reasoning.observed ? "mode unavailable · observed dispatch" : "normal semantic · default"
   );
 
   harness.querySelectorAll("[data-reasoning-key]").forEach((node) => {
     setDecisionSvgState(
       node,
-      node.dataset.reasoningKey === actualThink ? fmt(activeLane?.state, "active") : "pending"
+      node.dataset.reasoningKey === routeThink ? fmt(activeLane?.state, "active") : "pending"
     );
-    node.classList.toggle("selected", node.dataset.reasoningKey === actualThink);
+    node.classList.toggle("selected", node.dataset.reasoningKey === routeThink);
   });
   ["reasoning-off", "reasoning-low", "reasoning-medium", "reasoning-high"].forEach((key) => {
     const mode = key.slice("reasoning-".length);
-    const state = mode === actualThink ? fmt(activeLane?.state, "active") : "pending";
+    const state = mode === routeThink ? fmt(activeLane?.state, "active") : "pending";
     setDecisionSvgState(harness.querySelector(`[data-path-key="${key}"]`), state);
     setDecisionSvgState(harness.querySelector(`[data-reasoning-output="${mode}"]`), state);
   });
