@@ -13,6 +13,10 @@ from pathlib import Path
 from urllib.parse import quote
 
 from chronovisor.ops import dashboard
+from tests.decision_trace_stepper import (
+    decision_trace_step_scenarios,
+    stepper_handler,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests/fixtures/dashboard_decision_trace_states.json"
@@ -748,6 +752,177 @@ process.stdout.write(JSON.stringify({{
     }
 
 
+def test_decision_trace_stepper_advances_and_checks_every_frame(tmp_path: Path) -> None:
+    scenarios = decision_trace_step_scenarios()
+    assert {scenario["case"]["id"] for scenario in scenarios} == set("ABCDEF")
+    assert [len(scenario["frames"]) for scenario in scenarios] == [
+        5,
+        13,
+        17,
+        21,
+        24,
+        23,
+    ]
+    for scenario in scenarios:
+        case = scenario["case"]
+        frames = scenario["frames"]
+        assert [frame["index"] for frame in frames] == list(range(len(frames)))
+        assert frames[0]["label"] == "idle"
+        assert all(
+            frame["trace"]["projection"] != previous["trace"]["projection"]
+            for previous, frame in zip(frames, frames[1:], strict=False)
+        )
+        final = frames[-1]["trace"]
+        assert final["state"] == case["state"]
+        assert [lane["state"] for lane in final["lanes"]] == case["lane_states"]
+        assert [lane["context_tokens"] for lane in final["lanes"]] == case[
+            "lane_context_tokens"
+        ]
+        for frame in frames:
+            trace = frame["trace"]
+            projection = trace["projection"]
+            if frame["label"] == "tie_break-complete":
+                assert projection["paths"]["tie_break-quorum"] == "active"
+                assert projection["nodes"]["quorum"] == "active"
+            if frame["label"] == "decision" and trace["state"] == "agreed":
+                branch_path = (
+                    "pair-artifact-join"
+                    if case["branch"] == "pair-agreement"
+                    else "quorum-artifact-join"
+                )
+                assert projection["paths"][branch_path] == "active"
+                assert projection["nodes"]["artifact"] == "pending"
+                assert projection["nodes"]["seal"] == "pending"
+                assert projection["nodes"]["decision"] == "pending"
+                assert projection["paths"]["artifact-seal"] == "pending"
+                assert projection["paths"]["seal-decision"] == "pending"
+
+    chrome = next(
+        (
+            candidate
+            for candidate in (
+                shutil.which("google-chrome"),
+                shutil.which("chromium"),
+                shutil.which("chromium-browser"),
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            )
+            if candidate and Path(candidate).is_file()
+        ),
+        None,
+    )
+    assert chrome is not None, "headless Chrome is required for Dashboard DOM tests"
+
+    browser_results: list[dict[str, object]] = []
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0), stepper_handler(scenarios, browser_results)
+    )
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    process = None
+    browser_stderr = ""
+    try:
+        process = subprocess.Popen(
+            [
+                chrome,
+                "--headless=new",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-background-networking",
+                "--disable-component-update",
+                "--no-first-run",
+                "--force-prefers-reduced-motion=reduce",
+                "--run-all-compositor-stages-before-draw",
+                "--virtual-time-budget=3000",
+                "--window-size=1280,1400",
+                f"--user-data-dir={tmp_path / 'stepper-profile'}",
+                f"http://127.0.0.1:{server.server_port}/?audit=1",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        expected_count = sum(len(scenario["frames"]) for scenario in scenarios)
+        deadline = time.monotonic() + 30
+        while len(browser_results) < expected_count and time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            time.sleep(0.05)
+        process.terminate()
+        try:
+            _, browser_stderr = process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            _, browser_stderr = process.communicate(timeout=2)
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+    expected_frames = [
+        (scenario, frame) for scenario in scenarios for frame in scenario["frames"]
+    ]
+    assert len(browser_results) == len(expected_frames), browser_stderr[-4000:]
+    for result, (scenario, frame) in zip(browser_results, expected_frames, strict=True):
+        projection = frame["trace"]["projection"]
+        assert result["case"] == scenario["case"]["id"]
+        assert result["step"] == frame["index"]
+        assert result["label"] == frame["label"]
+        assert result["projectionStatus"] == "ok"
+        assert result["layout"] == {
+            "clientWidth": result["layout"]["clientWidth"],
+            "scrollWidth": result["layout"]["clientWidth"],
+            "fitsWidth": True,
+            "rightReachable": True,
+        }
+        assert result["nodes"] == {
+            key: value
+            for key, value in projection["nodes"].items()
+            if key in result["nodes"]
+        }
+        expected_paths = {
+            **projection["paths"],
+            **{
+                f"reasoning-output-{mode}": state
+                for mode, state in projection["reasoning"]["options"].items()
+            },
+        }
+        assert {
+            key: path["state"] for key, path in result["paths"].items()
+        } == expected_paths
+        for key, path in result["paths"].items():
+            if expected_paths[key] in {"pending", "skipped"}:
+                continue
+            assert path["dash"] in {"none", ""}
+            assert path["length"] > 0
+        for lane in dashboard._DECISION_TRACE_ROLES:
+            expected_rails = projection["lanes"][lane]["rails"]
+            assert {
+                rail["key"]: rail["state"] for rail in result["rails"][lane]
+            } == expected_rails
+            for rail in result["rails"][lane]:
+                if rail["state"] in {"pending", "skipped"}:
+                    continue
+                assert rail["dash"] in {"none", ""}
+                assert rail["length"] > 0
+
+        selected_context = projection["context"]["selected_tokens"]
+        selected_reasoning = projection["reasoning"]["selected"]
+        assert result["selectedContext"] == (
+            str(selected_context) if selected_context is not None else None
+        )
+        assert result["selectedReasoning"] == selected_reasoning
+        assert result["contextCoreOpacities"].count("1") == int(
+            selected_context is not None
+        )
+        assert result["reasoningCoreOpacities"].count("1") == int(
+            selected_reasoning is not None
+        )
+
+
 def test_all_decision_inputs_keep_real_dashboard_paths_connected(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -795,7 +970,7 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         role = roles[case["workflow"]]
         activities = []
         history = []
-        active_phases = {"A": "trigger", "B": "validate", "D": "vote"}
+        active_phases = {"A": "generate", "B": "validate", "D": "vote"}
         for lane_index, lane in enumerate(dashboard._DECISION_TRACE_ROLES):
             state = case["lane_states"][lane_index]
             tokens = case["lane_context_tokens"][lane_index]

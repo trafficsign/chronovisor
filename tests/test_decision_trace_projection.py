@@ -45,6 +45,7 @@ def _trace(
     state: str = "active",
     packet: str = "done",
     dispatch: str = "done",
+    quorum: str = "pending",
     artifact: str = "pending",
     decision: str = "pending",
     lanes: list[dict[str, Any]] | None = None,
@@ -55,6 +56,7 @@ def _trace(
         "overall": [
             {"key": "packet", "status": packet},
             {"key": "dispatch", "status": dispatch},
+            {"key": "quorum", "status": quorum},
             {"key": "artifact", "status": artifact},
             {"key": "decision", "status": decision},
         ],
@@ -95,6 +97,9 @@ def test_projection_normalizes_helper_inputs() -> None:
         ]
     ) == {"valid": {"key": "valid", "value": 1}}
     assert projection._context_label(None) == "—"
+    assert projection._selected_path("pending", selected=False) == "pending"
+    assert projection._selected_path("pending", selected=True) == "active"
+    assert projection._selected_path("done", selected=True) == "done"
     assert projection._context_label(32_768) == "32K"
     assert [row["tokens"] for row in projection._context_options(None, "done")] == [
         32_768,
@@ -231,6 +236,7 @@ def test_tie_break_active_and_completed_paths() -> None:
     completed = projection.project_decision_trace(
         _trace(
             state="agreed",
+            quorum="done",
             artifact="done",
             decision="done",
             lanes=[
@@ -253,10 +259,71 @@ def test_tie_break_active_and_completed_paths() -> None:
     assert completed["nodes"]["quorum"] == "done"
 
 
+def test_tie_break_completion_and_agreement_keep_the_selected_route_connected() -> None:
+    lanes = [
+        _lane("primary", "done", think="medium", context=32_768),
+        _lane("challenger", "done", think="medium", context=32_768),
+        _lane("tie_break", "done", think="high", context=65_536),
+    ]
+    evaluating = projection.project_decision_trace(
+        _trace(
+            state="idle",
+            quorum="active",
+            lanes=lanes,
+            pair_agreement=False,
+            quorum_attempted=True,
+        )
+    )
+    agreed = projection.project_decision_trace(
+        _trace(
+            state="agreed",
+            quorum="done",
+            lanes=lanes,
+            pair_agreement=False,
+            tie_break_used=True,
+            quorum_attempted=True,
+        )
+    )
+
+    assert evaluating["paths"]["tie_break-quorum"] == "active"
+    assert evaluating["nodes"]["quorum"] == "active"
+    assert agreed["paths"]["tie_break-quorum"] == "done"
+    assert agreed["paths"]["quorum-artifact-join"] == "active"
+    assert agreed["nodes"]["quorum"] == "done"
+    assert agreed["nodes"]["artifact"] == "pending"
+    assert agreed["nodes"]["seal"] == "pending"
+    assert agreed["nodes"]["decision"] == "pending"
+    assert agreed["paths"]["artifact-seal"] == "pending"
+    assert agreed["paths"]["seal-decision"] == "pending"
+
+
+def test_pair_agreement_waits_for_the_artifact_before_lighting_the_seal() -> None:
+    result = projection.project_decision_trace(
+        _trace(
+            state="agreed",
+            quorum="done",
+            lanes=[
+                _lane("primary", "done", think="medium", context=32_768),
+                _lane("challenger", "done", think="medium", context=32_768),
+                _lane("tie_break", "skipped"),
+            ],
+            pair_agreement=True,
+            quorum_attempted=True,
+        )
+    )
+
+    assert result["paths"]["pair-artifact-join"] == "active"
+    assert result["nodes"]["artifact"] == "pending"
+    assert result["nodes"]["seal"] == "pending"
+    assert result["paths"]["artifact-seal"] == "pending"
+    assert result["paths"]["seal-decision"] == "pending"
+
+
 def test_no_safe_quorum_stops_before_artifact_and_decision() -> None:
     result = projection.project_decision_trace(
         _trace(
             state="quarantined",
+            quorum="error",
             artifact="skipped",
             decision="skipped",
             lanes=[

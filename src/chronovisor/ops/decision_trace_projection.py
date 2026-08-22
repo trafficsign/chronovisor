@@ -88,6 +88,14 @@ def _context_options(selected: int | None, state: str) -> list[dict[str, Any]]:
     ]
 
 
+def _selected_path(target_state: str, *, selected: bool) -> str:
+    """Keep a chosen branch solid while its next milestone is still pending."""
+
+    if not selected:
+        return "pending"
+    return "active" if target_state == "pending" else target_state
+
+
 def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
     """Return the complete, versioned display contract for the fixed SVG topology."""
 
@@ -102,7 +110,9 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
     outcome: Mapping[str, Any] = (
         outcome_value if isinstance(outcome_value, Mapping) else {}
     )
+    quorum_payload = overall_state("quorum")
     artifact_payload = overall_state("artifact")
+    decision_payload = overall_state("decision")
     seal_failure = trace_state == "quarantined" and (
         artifact_payload == "error"
         or "seal" in f"{outcome.get('code', '')} {outcome.get('reason', '')}".lower()
@@ -196,7 +206,7 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
         "done",
         "error",
     }
-    pair_yes = "done" if trace.get("pair_agreement") is True else "pending"
+    pair_agreement = trace.get("pair_agreement") is True
     pair_no = (
         "active"
         if tie_state == "active"
@@ -206,16 +216,22 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
         and trace.get("quorum_attempted") is True
         else "pending"
     )
-    artifact_reached = artifact_payload in {"done", "error"}
     safe_no_quorum = no_safe_quorum and not single_model
-    tie_agreement = artifact_reached and not single_model and tie_observed
-    quorum_yes = "done" if tie_agreement else "pending"
+    tie_finished = tie_state in {"done", "error"}
+    tie_quorum = _selected_path(
+        quorum_payload,
+        selected=not single_model and tie_observed and tie_finished,
+    )
+    safe_tie_quorum = tie_quorum == "done" and not safe_no_quorum
+    pair_yes = _selected_path(artifact_payload, selected=pair_agreement)
+    quorum_yes = _selected_path(artifact_payload, selected=safe_tie_quorum)
     quorum_no = "error" if safe_no_quorum else "pending"
-    seal_reached = artifact_reached or trace_state == "agreed" or seal_failure
     seal_failed = seal_failure or artifact_payload == "error"
-    seal_gate = "error" if seal_failed else "done" if seal_reached else "pending"
-    seal_input = artifact_payload if seal_reached else "pending"
-    seal_yes = "done" if seal_reached and not seal_failed else "pending"
+    seal_gate = (
+        "error" if seal_failed else "done" if artifact_payload == "done" else "pending"
+    )
+    seal_input = seal_gate
+    seal_yes = _selected_path(decision_payload, selected=seal_gate == "done")
     seal_no = "error" if seal_failed else "pending"
     artifact_state = (
         "error" if seal_failed else "skipped" if no_safe_quorum else artifact_payload
@@ -229,7 +245,7 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
         if tie_observed or lanes["challenger"]["state"] == "done"
         else "pending"
     )
-    quorum_state = "error" if safe_no_quorum else "done" if tie_agreement else "pending"
+    quorum_state = tie_quorum
 
     nodes = {
         "packet": packet_state,
@@ -242,7 +258,7 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
         "quorum": quorum_state,
         "artifact": artifact_state,
         "seal": seal_gate,
-        "decision": overall_state("decision"),
+        "decision": decision_payload,
         "hold": "error" if safe_no_quorum or seal_failure else "pending",
     }
     paths = {key: "pending" for key in TRACE_PATH_KEYS}
@@ -265,11 +281,7 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
             ),
             "pair-artifact-join": pair_yes,
             "pair-tie_break": pair_no,
-            "tie_break-quorum": "error"
-            if safe_no_quorum and tie_observed
-            else "done"
-            if tie_agreement
-            else "pending",
+            "tie_break-quorum": tie_quorum,
             "quorum-artifact-join": quorum_yes,
             "quorum-hold": quorum_no,
             "artifact-seal": seal_input,
