@@ -126,6 +126,13 @@ _CLASSIFICATION_SCHEMA_FIELDS = {
     "semantic_checks",
 }
 _DUPLICATE_SCHEMA_FIELDS = {"decision", "confidence", "summary"}
+_INGEST_SELECTION_FIELD = "selection_id"
+_INGEST_TERMINAL_SELECTIONS = (
+    "apply_available",
+    "confirmed_noop",
+    "retry",
+    "quarantined",
+)
 _DECISION_SEMANTICS_MARKER = (
     f"CHRONOVISOR_DECISION_SEMANTICS_POLICY={DECISION_SEMANTICS_POLICY_VERSION}"
 )
@@ -513,6 +520,25 @@ def decision_effective_request(
 ) -> tuple[str, str | None]:
     """Rebuild the exact prompt and system sent to a local model."""
 
+    prompt, _schema, effective_system = _decision_effective_request_parts(
+        prompt=prompt,
+        schema=schema,
+        system=system,
+        decision_lane=decision_lane,
+    )
+    return prompt, effective_system
+
+
+def _decision_effective_request_parts(
+    *,
+    prompt: str,
+    schema: Mapping[str, Any],
+    system: str | None,
+    decision_lane: str | None = None,
+) -> tuple[str, Mapping[str, Any], str | None]:
+    """Rebuild the exact prompt, schema, and system sent to a local model."""
+
+    effective_schema = schema
     if decision_lane is not None:
         prompt, system = bind_lane_contract_request(
             decision_lane,
@@ -521,9 +547,13 @@ def decision_effective_request(
             system,
         )
         if decision_lane == "ingest_reconciliation":
-            _ingest_reconciliation_repair_contract(prompt)
+            contract = _ingest_reconciliation_repair_contract(prompt)
+            effective_schema = _ingest_reconciliation_format_schema(
+                schema,
+                contract,
+            )
             prompt = _strip_ingest_repair_host_block(prompt)
-    return prompt, decision_system_with_policy(schema, system)
+    return prompt, effective_schema, decision_system_with_policy(schema, system)
 
 
 def decision_request_fingerprint_sha256(
@@ -542,7 +572,7 @@ def decision_request_fingerprint_sha256(
     attached at routing time.
     """
 
-    prompt, effective_system = decision_effective_request(
+    prompt, effective_schema, effective_system = _decision_effective_request_parts(
         prompt=prompt,
         schema=schema,
         system=system,
@@ -563,7 +593,7 @@ def decision_request_fingerprint_sha256(
                 structured_generation_policy_sha256()
             ),
             "prompt": prompt,
-            "schema": schema,
+            "schema": effective_schema,
             "system": normalized_system,
         }
     )
@@ -578,7 +608,7 @@ def decision_request_context(
 ) -> tuple[int, int]:
     """Return the exact required tokens and smallest configured bucket."""
 
-    prompt, effective_system = decision_effective_request(
+    prompt, effective_schema, effective_system = _decision_effective_request_parts(
         prompt=prompt,
         schema=schema,
         system=system,
@@ -586,7 +616,7 @@ def decision_request_context(
     )
     required = required_structured_context_tokens(
         prompt,
-        schema,
+        effective_schema,
         system=effective_system,
         num_predict=config.num_predict,
         max_output_chars=config.max_output_chars,
@@ -804,6 +834,7 @@ class _IngestRepairOption:
 @dataclass(frozen=True)
 class _IngestRepairContract:
     repair_required: bool
+    has_failed_operations: bool
     options: tuple[_IngestRepairOption, ...]
 
     def option(self, option_id: str) -> _IngestRepairOption | None:
@@ -914,12 +945,14 @@ def _ingest_reconciliation_repair_contract(prompt: str) -> _IngestRepairContract
     if _canonical_json(model) != _canonical_json(expected_model):
         raise ValueError("ingest repair projection does not match sealed evidence")
 
+    failed_operations = review.get("failed_operation_specs")
     replacements = full.get("replacement_operations")
     semantic_full = full.get("semantic_tag_options")
     semantic_model = model.get("semantic_tag_options")
     mutations = model.get("mutations")
     if (
-        not isinstance(replacements, list)
+        not isinstance(failed_operations, list)
+        or not isinstance(replacements, list)
         or not isinstance(semantic_full, list)
         or not isinstance(semantic_model, list)
         or not isinstance(mutations, list)
@@ -1062,6 +1095,7 @@ def _ingest_reconciliation_repair_contract(prompt: str) -> _IngestRepairContract
         raise ValueError("deterministic ingest repair options are ambiguous")
     return _IngestRepairContract(
         repair_required=repair_required,
+        has_failed_operations=bool(failed_operations),
         options=tuple(options),
     )
 
@@ -1070,40 +1104,47 @@ def _ingest_reconciliation_format_schema(
     schema: Mapping[str, Any],
     contract: _IngestRepairContract,
 ) -> dict[str, Any]:
-    """Constrain model output to the trusted preflight selector contract."""
+    """Reduce model output to one host-materialized decision selector."""
 
-    formatted = json.loads(_canonical_json(schema))
-    properties = formatted.get("properties")
-    required = formatted.get("required")
+    properties = schema.get("properties")
+    required = schema.get("required")
     if not isinstance(properties, dict) or not isinstance(required, list):
         raise ValueError("ingest reconciliation schema is malformed")
-
-    # These arrays are materialized by the host only after local quorum.
-    properties.pop("invalid_tags", None)
-    properties.pop("replacement_operations", None)
-
+    decision = properties.get("decision")
+    disposition = properties.get("failed_operations_disposition")
+    if (
+        not isinstance(decision, Mapping)
+        or tuple(decision.get("enum", ())) != _INGEST_TERMINAL_SELECTIONS
+        or not isinstance(disposition, Mapping)
+        or set(disposition.get("enum", ()))
+        != {"none", "confirmed_unnecessary", "retry_required"}
+    ):
+        raise ValueError("ingest reconciliation decision schema is malformed")
     option_ids = sorted(option.option_id for option in contract.options)
-    selector = properties.get("repair_option_id")
-    if option_ids:
-        if not isinstance(selector, dict):
-            raise ValueError("ingest repair selector schema is missing")
-        selector["enum"] = option_ids
-    else:
-        properties.pop("repair_option_id", None)
-
     if contract.repair_required:
         if not option_ids:
             raise ValueError("required ingest repair has no bounded option")
-        decision = properties.get("decision")
-        disposition = properties.get("failed_operations_disposition")
-        if not isinstance(decision, dict) or not isinstance(disposition, dict):
-            raise ValueError("ingest repair decision schema is missing")
-        decision["enum"] = ["retry"]
-        disposition["enum"] = ["retry_required"]
-        if "repair_option_id" not in required:
-            required.append("repair_option_id")
-
-    return formatted
+        choices = option_ids
+    else:
+        choices = [*_INGEST_TERMINAL_SELECTIONS, *option_ids]
+    example = {_INGEST_SELECTION_FIELD: choices[0]}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [_INGEST_SELECTION_FIELD],
+        "properties": {
+            _INGEST_SELECTION_FIELD: {
+                "type": "string",
+                "enum": choices,
+                "description": (
+                    "Choose exactly one allowed terminal decision ID or rp_ repair "
+                    "option ID. The host constructs the final decision object."
+                ),
+                "examples": [choices[0]],
+            }
+        },
+        "examples": [example],
+    }
 
 
 def _ingest_reconciliation_value_validator(
@@ -1263,6 +1304,55 @@ def _materialize_ingest_repair_option(
     else:
         materialized_value.pop("replacement_operations", None)
     return materialized_value
+
+
+def _materialize_ingest_selection(
+    prompt: str,
+    value: Any,
+    *,
+    contract: _IngestRepairContract | None = None,
+) -> Any:
+    """Turn one model-selected ID into the complete trusted decision value."""
+
+    if not isinstance(value, Mapping):
+        return value
+    selection_id = value.get(_INGEST_SELECTION_FIELD)
+    if not isinstance(selection_id, str):
+        raise ValueError("ingest selection id is not a string")
+    effective_contract = contract or _ingest_reconciliation_repair_contract(prompt)
+    option = effective_contract.option(selection_id)
+    if option is not None:
+        return _materialize_ingest_repair_option(
+            prompt,
+            {
+                "decision": "retry",
+                "summary": "Local quorum selected a bounded host-owned repair.",
+                "failed_operations_disposition": "retry_required",
+                "tests_run": [],
+                "risk": None,
+                "notes": None,
+                "repair_option_id": selection_id,
+            },
+            contract=effective_contract,
+        )
+    if selection_id not in _INGEST_TERMINAL_SELECTIONS:
+        raise ValueError("ingest selection id is outside the trusted contract")
+    return {
+        "decision": selection_id,
+        "summary": f"Local quorum selected {selection_id}.",
+        "failed_operations_disposition": (
+            "retry_required"
+            if selection_id in {"retry", "quarantined"}
+            else (
+                "confirmed_unnecessary"
+                if effective_contract.has_failed_operations
+                else "none"
+            )
+        ),
+        "tests_run": [],
+        "risk": None,
+        "notes": None,
+    }
 
 
 def _decision_value_validator(
@@ -1879,6 +1969,7 @@ class DecisionRouter:
         system: str | None,
         decision_lane: str | None,
         agreement_key: AgreementKey | None,
+        ingest_repair_contract: _IngestRepairContract | None,
     ) -> tuple[str, dict[str, Any], int] | None:
         """Return the exact replay identity without probing model residency."""
 
@@ -1905,9 +1996,15 @@ class DecisionRouter:
                 authority_error or "canonical decision authority is unavailable"
             )
         effective_system = decision_system_with_policy(schema, system)
+        request_schema = (
+            _ingest_reconciliation_format_schema(schema, ingest_repair_contract)
+            if decision_lane == "ingest_reconciliation"
+            and ingest_repair_contract is not None
+            else schema
+        )
         _required, context_tier = self._request_context(
             prompt,
-            schema,
+            request_schema,
             effective_system,
         )
         router_policy = (
@@ -1942,7 +2039,7 @@ class DecisionRouter:
             *execution_fingerprint(
                 request_sha256=structured_request_sha256(
                     identity_prompt,
-                    schema,
+                    request_schema,
                     effective_system,
                 ),
                 lane=decision_lane,
@@ -2229,15 +2326,19 @@ class DecisionRouter:
                 prompt,
                 format_schema or schema,
                 system=system,
-                value_validator=_decision_value_validator(
-                    decision_lane,
-                    prompt,
-                    ingest_repair_contract=ingest_repair_contract,
+                value_validator=(
+                    None
+                    if format_schema is not None
+                    else _decision_value_validator(
+                        decision_lane,
+                        prompt,
+                        ingest_repair_contract=ingest_repair_contract,
+                    )
                 ),
             )
         if result.ok and decision_lane == "ingest_reconciliation":
             try:
-                materialized = _materialize_ingest_repair_option(
+                materialized = _materialize_ingest_selection(
                     prompt,
                     result.value,
                     contract=ingest_repair_contract,
@@ -3575,6 +3676,7 @@ class DecisionRouter:
                 system=system,
                 decision_lane=effective_lane,
                 agreement_key=agreement_key,
+                ingest_repair_contract=ingest_repair_contract,
             )
             if artifact_identity is not None:
                 fingerprint, _identity, context_tier = artifact_identity
@@ -3591,7 +3693,15 @@ class DecisionRouter:
                                 "kind": "decision_artifact_replay",
                                 "request_sha256": structured_request_sha256(
                                     replay_prompt,
-                                    schema,
+                                    (
+                                        _ingest_reconciliation_format_schema(
+                                            schema,
+                                            ingest_repair_contract,
+                                        )
+                                        if effective_lane == "ingest_reconciliation"
+                                        and ingest_repair_contract is not None
+                                        else schema
+                                    ),
                                     decision_system_with_policy(schema, system),
                                 ),
                                 "role": self.audit_role,
@@ -3763,7 +3873,7 @@ class DecisionRouter:
             residency_plan,
         ) = self._request_plan(
             prompt,
-            schema,
+            request_schema,
             effective_system,
         )
 

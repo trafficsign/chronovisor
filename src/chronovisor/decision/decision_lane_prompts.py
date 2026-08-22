@@ -1701,6 +1701,11 @@ def build_ingest_reconciliation_prompt(proposal: dict[str, Any]) -> str:
     )
     return f"""\
 You are the final autonomous decision-maker for a Chronovisor ingest mutation.
+Return only one selector object in this exact shape:
+{{"selection_id":"<one ID allowed by the JSON Schema>"}}
+Use apply_available, confirmed_noop, retry, or quarantined for a terminal
+decision. Use an rp_ repair_option_id to select a bounded repair. Do not return
+the final six-field decision object; the host constructs it from selection_id.
 The local model performed triage and generation only; it cannot authorize a
 write or discard a raw. Review the exact raw evidence, triage plan, local
 generation failures, and every byte-changing hunk in every proposed page.
@@ -1740,16 +1745,15 @@ For a create whose body contains the exact raw fact plus an unsupported added
 claim, a narrow replacement removes only that added claim and returns the full
 page under the same filename. Do not quarantine merely because generated text
 added a claim that the exact raw can deterministically exclude.
-Repair selection is non-terminal. Return exactly one repair_option_id and choose
-retry with failed_operations_disposition=retry_required. When status is
-repair_required, choose either deterministic_repair_option_id for the bounded
-body repair or one semantic_tag_options repair_option_id. When status is none,
-only a semantic_tag_options repair_option_id may be selected. Do not return
-invalid_tags or replacement_operations yourself: after two local models select
-the same ID, the host materializes its byte-exact trusted arrays and builds a
-fresh postimage for another review. Never combine a repair_option_id with
-apply_available or confirmed_noop. Omit repair_option_id when selecting no
-repair. Never invent, combine, paraphrase, or extend option IDs.
+Repair selection is non-terminal. Put exactly one repair_option_id in
+selection_id. When status is repair_required, choose either
+deterministic_repair_option_id for the bounded body repair or one
+semantic_tag_options repair_option_id. When status is none, only a
+semantic_tag_options repair_option_id may be selected. The host maps it to
+retry with failed_operations_disposition=retry_required, materializes its
+byte-exact trusted arrays after two local models select the same ID, and builds
+a fresh postimage for another review. Never invent, combine, paraphrase, or
+extend option IDs.
 
 <{INGEST_REPAIR_MODEL_BLOCK}>
 {_canonical_json(repair_projection)}

@@ -171,15 +171,15 @@ _LANE_SEMANTICS: dict[str, LaneSemantics] = {
 
 # Model-visible prompt-contract versions are lane scoped. Version 7 preserves
 # the exact request identity proven by the v43 corpus for unchanged lanes.
-# Ingest advanced to 14 for complete hash-bound change projections,
-# host-materialized repair selectors, and explicit source-contradiction
-# precedence, plus canonical compact model projections that preserve the
-# 93KB structured-input safety cap. Raw replay advanced to 8 for
+# Ingest uses complete hash-bound change projections, host-materialized repair
+# selectors, explicit source-contradiction precedence, and a one-field model
+# selection envelope whose complete decision is constructed by the host. Raw
+# replay advanced to 8 for
 # process_missing/verified-receipt semantics. Future
 # changes bump only the affected lane and still invalidate the aggregate
 # manifest and adoption artifact.
 LANE_PROMPT_POLICY_VERSIONS: dict[str, int] = {lane: 8 for lane in _LANE_SEMANTICS}
-LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] = 16
+LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] = 17
 LANE_PROMPT_POLICY_VERSIONS["raw_replay_reconciliation"] = 9
 LANE_PROMPT_POLICY_VERSIONS["recall_auto_apply"] = 9
 LANE_PROMPT_POLICY_VERSIONS["autonomy_retention"] = 9

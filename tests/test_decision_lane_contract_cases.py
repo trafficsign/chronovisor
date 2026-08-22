@@ -406,7 +406,7 @@ def test_lane_contract_case_source_version_tracks_the_resealed_cases() -> None:
     assert set(LANE_PROMPT_POLICY_VERSIONS) - set(model_backed_lane_names()) == set(
         background_decision_lane_contract_cases()
     )
-    assert LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] == 16
+    assert LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] == 17
     assert LANE_PROMPT_POLICY_VERSIONS["raw_replay_reconciliation"] == 9
     assert LANE_PROMPT_POLICY_VERSIONS["recall_auto_apply"] == 9
     assert {
@@ -1966,9 +1966,16 @@ def test_ingest_prompt_orders_quarantine_retry_and_safe_apply() -> None:
         "choose quarantined with failed_operations_disposition=retry_required" in prompt
         for prompt in prompts
     )
-    assert all("Return exactly one repair_option_id" in prompt for prompt in prompts)
     assert all(
-        "Do not return\ninvalid_tags or replacement_operations yourself" in prompt
+        '{"selection_id":"<one ID allowed by the JSON Schema>"}' in prompt
+        for prompt in prompts
+    )
+    assert all(
+        "Put exactly one repair_option_id in\nselection_id" in prompt
+        for prompt in prompts
+    )
+    assert all(
+        "the final six-field decision object; the host constructs it" in prompt
         for prompt in prompts
     )
 

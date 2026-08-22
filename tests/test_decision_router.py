@@ -296,13 +296,18 @@ def _deterministic_ingest_repair_case() -> tuple[
 def test_ingest_repair_option_id_materializes_exact_host_bytes_before_quorum(
     tmp_path: Path,
 ) -> None:
-    row, selection, _option_id = _ingest_repair_case()
-    expected = dict(row["expected"])
-    selection = dict(
-        selection,
-        decision="apply_available",
-        failed_operations_disposition="none",
-    )
+    row, _selection, option_id = _ingest_repair_case()
+    expected = {
+        "decision": "retry",
+        "summary": "Local quorum selected a bounded host-owned repair.",
+        "failed_operations_disposition": "retry_required",
+        "tests_run": [],
+        "risk": None,
+        "notes": None,
+        "invalid_tags": row["expected"]["invalid_tags"],
+        "replacement_operations": row["expected"]["replacement_operations"],
+    }
+    selection = {"selection_id": option_id}
     audit_root = tmp_path / "local-consensus"
     transport = ModelTransport(
         {
@@ -331,9 +336,10 @@ def test_ingest_repair_option_id_materializes_exact_host_bytes_before_quorum(
     assert all("repair_option_id" not in vote.result.value for vote in result.votes)
     for request in transport.requests:
         properties = request.schema["properties"]
-        assert selection["repair_option_id"] in properties["repair_option_id"]["enum"]
-        assert "invalid_tags" not in properties
-        assert "replacement_operations" not in properties
+        assert set(properties) == {"selection_id"}
+        assert selection["selection_id"] in properties["selection_id"]["enum"]
+        assert request.schema["required"] == ["selection_id"]
+        assert request.schema["examples"] == [{"selection_id": "apply_available"}]
         assert '"invalid_tags"' not in request.messages[0]["content"]
         assert '"replacement_operations"' not in request.messages[0]["content"]
     audit_rows = [
@@ -346,7 +352,8 @@ def test_ingest_repair_option_id_materializes_exact_host_bytes_before_quorum(
 
 
 def test_ingest_repair_host_sidecar_is_never_sent_to_models() -> None:
-    row, selection, _option_id = _ingest_repair_case()
+    row, _selection, option_id = _ingest_repair_case()
+    selection = {"selection_id": option_id}
     sealed = _prompt_json_block(str(row["prompt"]), INGEST_REPAIR_HOST_BLOCK)
     sealed_json = json.dumps(sealed, ensure_ascii=False, sort_keys=True)
     transport = ModelTransport(
@@ -373,7 +380,8 @@ def test_ingest_repair_host_sidecar_is_never_sent_to_models() -> None:
 def test_ingest_replay_accounts_effective_model_prompt_but_retains_host_contract(
     tmp_path: Path,
 ) -> None:
-    row, selection, _option_id = _ingest_repair_case()
+    row, _selection, option_id = _ingest_repair_case()
+    selection = {"selection_id": option_id}
     full_prompt = str(row["prompt"])
     replay_path = tmp_path / "model-lab" / "replay.jsonl"
     transport = ModelTransport(
@@ -433,7 +441,18 @@ def test_ingest_replay_accounts_effective_model_prompt_but_retains_host_contract
 
 
 def test_ingest_deterministic_repair_option_id_materializes_base_action() -> None:
-    row, selection, expected = _deterministic_ingest_repair_case()
+    row, legacy_selection, legacy_expected = _deterministic_ingest_repair_case()
+    option_id = legacy_selection["repair_option_id"]
+    selection = {"selection_id": option_id}
+    expected = {
+        "decision": "retry",
+        "summary": "Local quorum selected a bounded host-owned repair.",
+        "failed_operations_disposition": "retry_required",
+        "tests_run": [],
+        "risk": None,
+        "notes": None,
+        "replacement_operations": legacy_expected["replacement_operations"],
+    }
     transport = ModelTransport(
         {
             "ornith:test": [json.dumps(selection)],
@@ -450,11 +469,9 @@ def test_ingest_deterministic_repair_option_id_materializes_base_action() -> Non
     assert result.ok is True
     assert result.decision == expected
     properties = transport.requests[0].schema["properties"]
-    assert properties["decision"]["enum"] == ["retry"]
-    assert properties["failed_operations_disposition"]["enum"] == [
-        "retry_required"
-    ]
-    assert "repair_option_id" in transport.requests[0].schema["required"]
+    assert set(properties) == {"selection_id"}
+    assert properties["selection_id"]["enum"] == [option_id]
+    assert transport.requests[0].schema["required"] == ["selection_id"]
 
 
 @pytest.mark.parametrize(
@@ -552,8 +569,9 @@ def test_ingest_repair_option_validator_rejects_invented_and_mixed_ids() -> None
 
 
 def test_ingest_repair_option_feedback_is_small_and_repairs_only_the_selector() -> None:
-    row, selection, _option_id = _ingest_repair_case()
-    invalid = dict(selection, repair_option_id="rp_" + "0" * 32)
+    row, _selection, option_id = _ingest_repair_case()
+    selection = {"selection_id": option_id}
+    invalid = {"selection_id": "rp_" + "0" * 32}
     transport = ModelTransport(
         {
             "ornith:test": [json.dumps(invalid), json.dumps(selection)],
@@ -582,8 +600,93 @@ def test_ingest_repair_option_feedback_is_small_and_repairs_only_the_selector() 
     feedback_payload = json.loads(
         feedback.split("Validator errors (RFC 6901 pointers):\n", 1)[1]
     )
-    assert feedback_payload[0]["pointer"] == "/repair_option_id"
+    assert feedback_payload[0]["pointer"] == "/selection_id"
     assert "replacement_operations" not in feedback
+
+
+def test_ingest_legacy_optional_null_is_repaired_to_one_host_owned_selection() -> None:
+    row = next(
+        candidate.row
+        for candidate in contract_candidates()
+        if candidate.row["decision_lane"] == "ingest_reconciliation"
+        and candidate.row["expected"]["decision"] == "apply_available"
+        and candidate.row["expected"]["failed_operations_disposition"] == "none"
+    )
+    legacy = {**row["expected"], "repair_option_id": None}
+    selection = {"selection_id": "apply_available"}
+    transport = ModelTransport(
+        {
+            "ornith:test": [json.dumps(legacy), json.dumps(selection)],
+            "gpt-oss:test": [json.dumps(selection)],
+        }
+    )
+
+    result = DecisionRouter(
+        config=_config(max_input_chars=50_000, num_ctx=32_768),
+        transport=transport,
+        decision_lane="ingest_reconciliation",
+    ).decide(str(row["prompt"]), dict(row["schema"]))
+
+    assert result.ok is True
+    assert result.votes[0].result.repair_turns == 1
+    assert result.value == {
+        "decision": "apply_available",
+        "summary": "Local quorum selected apply_available.",
+        "failed_operations_disposition": "none",
+        "tests_run": [],
+        "risk": None,
+        "notes": None,
+    }
+    assert set(transport.requests[0].schema["properties"]) == {"selection_id"}
+
+
+@pytest.mark.parametrize(
+    ("decision", "disposition"),
+    [
+        ("apply_available", "none"),
+        ("confirmed_noop", "none"),
+        ("retry", "retry_required"),
+        ("quarantined", "retry_required"),
+        ("apply_available", "confirmed_unnecessary"),
+    ],
+)
+def test_ingest_terminal_selection_is_fully_materialized_by_host(
+    decision: str,
+    disposition: str,
+) -> None:
+    row = next(
+        candidate.row
+        for candidate in contract_candidates()
+        if candidate.row["decision_lane"] == "ingest_reconciliation"
+        and candidate.row["expected"]["decision"] == decision
+        and candidate.row["expected"]["failed_operations_disposition"] == disposition
+        and not candidate.row["expected"].get("invalid_tags")
+        and not candidate.row["expected"].get("replacement_operations")
+    )
+    selection = {"selection_id": decision}
+    transport = ModelTransport(
+        {
+            "ornith:test": [json.dumps(selection)],
+            "gpt-oss:test": [json.dumps(selection)],
+        }
+    )
+
+    result = DecisionRouter(
+        config=_config(max_input_chars=50_000, num_ctx=32_768),
+        transport=transport,
+        decision_lane="ingest_reconciliation",
+    ).decide(str(row["prompt"]), dict(row["schema"]))
+
+    assert result.ok is True
+    assert result.value == {
+        "decision": decision,
+        "summary": f"Local quorum selected {decision}.",
+        "failed_operations_disposition": disposition,
+        "tests_run": [],
+        "risk": None,
+        "notes": None,
+    }
+    assert all(vote.result.first_pass_valid for vote in result.votes)
 
 
 def test_ingest_repair_option_duplicate_id_contract_fails_closed() -> None:
@@ -1313,12 +1416,8 @@ def test_ingest_nonmutation_vote_vetoes_mutating_majority() -> None:
         and candidate.row["expected"]["decision"] == "apply_available"
         and candidate.row["expected"]["failed_operations_disposition"] == "none"
     )
-    mutating = dict(row["expected"])
-    conservative = {
-        **mutating,
-        "decision": "confirmed_noop",
-        "summary": "No mutation is required.",
-    }
+    mutating = {"selection_id": "apply_available"}
+    conservative = {"selection_id": "confirmed_noop"}
 
     transport = ModelTransport(
         {
