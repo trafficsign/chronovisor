@@ -14,8 +14,8 @@ def test_toml_loader_uses_one_old_or_new_snapshot_during_atomic_replace(
 ) -> None:
     config = tmp_path / "config.toml"
     replacement = tmp_path / "config.next.toml"
-    old = '[decision_router]\nprimary_model = "old-primary"\n'
-    new = '[decision_router]\nprimary_model = "new-primary"\n'
+    old = '[decision_router]\nprimary_keep_alive = "21m"\n'
+    new = '[decision_router]\nprimary_keep_alive = "22m"\n'
     config.write_text(old, encoding="utf-8")
     replacement.write_text(new, encoding="utf-8")
     real_read_bytes = Path.read_bytes
@@ -34,8 +34,8 @@ def test_toml_loader_uses_one_old_or_new_snapshot_during_atomic_replace(
     first = runtime_config.load_decision_router_config(config)
     second = runtime_config.load_decision_router_config(config)
 
-    assert first.primary_model == "old-primary"
-    assert second.primary_model == "new-primary"
+    assert first.primary_keep_alive == "21m"
+    assert second.primary_keep_alive == "22m"
     assert config.read_text(encoding="utf-8") == new
 
 
@@ -478,7 +478,7 @@ def test_decision_router_config_defaults_to_local_three_model_quorum() -> None:
     assert cfg.max_resident_models == 3
 
 
-def test_decision_router_config_allows_exact_installed_tag_overrides(
+def test_decision_router_config_ignores_models_but_candidate_reads_them(
     tmp_path: Path,
 ) -> None:
     config = tmp_path / "config.toml"
@@ -503,16 +503,16 @@ adaptive_residency = false
 residency_policy_version = 2
 memory_reserve_gib = 20
 max_resident_models = 2
-adoption_artifact = "~/.chronovisor/runtime/model-lab/candidate.json"
+adoption_artifact = ""
 """,
         encoding="utf-8",
     )
 
     cfg = runtime_config.load_decision_router_config(config)
 
-    assert cfg.primary_model == "ornith-local:35b-q5"
-    assert cfg.challenger_model == "gpt-oss:20b"
-    assert cfg.tie_break_model == "gemma4:26b-mxfp8"
+    assert cfg.primary_model == runtime_config.DecisionRouterConfig.primary_model
+    assert cfg.challenger_model == runtime_config.DecisionRouterConfig.challenger_model
+    assert cfg.tie_break_model == runtime_config.DecisionRouterConfig.tie_break_model
     assert cfg.primary_keep_alive == "21m"
     assert cfg.challenger_keep_alive == "19m"
     assert cfg.tie_break_keep_alive == "90s"
@@ -528,7 +528,12 @@ adoption_artifact = "~/.chronovisor/runtime/model-lab/candidate.json"
     assert cfg.residency_policy_version == 2
     assert cfg.memory_reserve_gib == 20
     assert cfg.max_resident_models == 2
-    assert cfg.adoption_artifact == "~/.chronovisor/runtime/model-lab/candidate.json"
+    assert cfg.adoption_artifact == ""
+
+    candidate = runtime_config.load_candidate_decision_router_config(config)
+    assert candidate.primary_model == "ornith-local:35b-q5"
+    assert candidate.challenger_model == "gpt-oss:20b"
+    assert candidate.tie_break_model == "gemma4:26b-mxfp8"
 
 
 def test_decision_router_config_accepts_tie_model_alias(tmp_path: Path) -> None:
@@ -544,7 +549,7 @@ tie_keep_alive = "3m"
 
     cfg = runtime_config.load_decision_router_config(config)
 
-    assert cfg.tie_break_model == "gemma4:26b-local"
+    assert cfg.tie_break_model == runtime_config.DecisionRouterConfig.tie_break_model
     assert cfg.tie_break_keep_alive == "3m"
 
 

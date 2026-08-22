@@ -8,7 +8,7 @@ import re
 import shutil
 import subprocess
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -20,8 +20,7 @@ CONFIG_FILE = CHRONOVISOR_ROOT / "config.toml"
 FALSE_VALUES = {"0", "false", "False", "no", "NO", "off", "OFF"}
 TRUE_VALUES = {"1", "true", "True", "yes", "YES", "on", "ON"}
 DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
-DEFAULT_INGEST_MODEL = "qwen3.8:27b-axq4"
-DEFAULT_DECISION_PRIMARY_MODEL = DEFAULT_INGEST_MODEL
+DEFAULT_DECISION_PRIMARY_MODEL = "qwen3.8:27b-axq4"
 DEFAULT_DECISION_CHALLENGER_MODEL = "muse-glimmer:30b-q4k-dynamic"
 DEFAULT_DECISION_TIE_BREAK_MODEL = "gemma4:26b-optiq4"
 DEFAULT_HEAVY_NUM_CTX = 32_768
@@ -457,7 +456,7 @@ class IngestAuditConfig:
 
 @dataclass(frozen=True)
 class DecisionRouterConfig:
-    """Local-consensus model limits and memory-aware residency policy."""
+    """Evaluation model triplet plus production consensus runtime limits."""
 
     primary_model: str = DEFAULT_DECISION_PRIMARY_MODEL
     challenger_model: str = DEFAULT_DECISION_CHALLENGER_MODEL
@@ -480,9 +479,8 @@ class DecisionRouterConfig:
     residency_policy_version: int = 2
     memory_reserve_gib: int = 16
     max_resident_models: int = 3
-    # Empty means the exact TOML/default model triplet is the trusted
-    # bootstrap/current policy.  Setting this path only nominates an artifact;
-    # DecisionRouter still validates every adoption gate before switching.
+    # Evaluation callers may nominate an artifact; production model selection
+    # is resolved only from llm.roles.classification.* by DecisionRouter.
     adoption_artifact: str = ""
 
 
@@ -907,24 +905,12 @@ def load_ingest_audit_config(path: Path | str | None = None) -> IngestAuditConfi
 def load_decision_router_config(
     path: Path | str | None = None,
 ) -> DecisionRouterConfig:
-    """Load the local semantic-decision ensemble configuration.
-
-    Model names remain ordinary non-empty strings so locally installed Ollama
-    tags can be selected without a code change.  Safety-critical generation
-    settings are bounded here and the router separately rejects duplicate
-    model roles or a quorum other than two.
-    """
+    """Load production consensus limits without accepting model selectors."""
 
     data = load_toml_file(path)
     section = data.get("decision_router")
     if not isinstance(section, dict):
         return DecisionRouterConfig()
-
-    def model(name: str, default: str, *, alias: str | None = None) -> str:
-        value = section.get(name)
-        if value is None and alias is not None:
-            value = section.get(alias)
-        return value.strip() if isinstance(value, str) and value.strip() else default
 
     def keep_alive(name: str, default: str, *, alias: str | None = None) -> str:
         value = section.get(name)
@@ -933,13 +919,6 @@ def load_decision_router_config(
         return value.strip() if isinstance(value, str) and value.strip() else default
 
     return DecisionRouterConfig(
-        primary_model=model("primary_model", DecisionRouterConfig.primary_model),
-        challenger_model=model(
-            "challenger_model", DecisionRouterConfig.challenger_model
-        ),
-        tie_break_model=model(
-            "tie_break_model", DecisionRouterConfig.tie_break_model, alias="tie_model"
-        ),
         primary_keep_alive=keep_alive(
             "primary_keep_alive", DecisionRouterConfig.primary_keep_alive
         ),
@@ -1074,9 +1053,9 @@ _DECISION_ROUTER_REQUIRED_CANDIDATE_FIELDS = frozenset(
 def load_candidate_decision_router_config(path: Path | str) -> DecisionRouterConfig:
     """Load an explicit replay-gate candidate without permissive fallbacks.
 
-    Production config loading intentionally remains backwards compatible.  A
-    replay gate is different: silently evaluating defaults after a typo or a
-    missing file can spend substantial local compute on the wrong model set.
+    Production config loading intentionally ignores model selectors.  A replay
+    gate is different: silently evaluating defaults after a typo or a missing
+    file can spend substantial local compute on the wrong model set.
     """
 
     resolved = Path(path).expanduser()
@@ -1144,7 +1123,14 @@ def load_candidate_decision_router_config(path: Path | str) -> DecisionRouterCon
             + ", ".join(sorted(missing))
         )
 
-    config = load_decision_router_config(resolved)
+    config = replace(
+        load_decision_router_config(resolved),
+        primary_model=str(section["primary_model"]).strip(),
+        challenger_model=str(section["challenger_model"]).strip(),
+        tie_break_model=str(
+            section.get("tie_break_model", section.get("tie_model"))
+        ).strip(),
+    )
     if config.min_num_ctx > config.num_ctx:
         raise ValueError("candidate config min_num_ctx must not exceed num_ctx")
     models = (config.primary_model, config.challenger_model, config.tie_break_model)

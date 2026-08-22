@@ -18,7 +18,6 @@ from chronovisor.core.llm_runtime import (
 )
 from chronovisor.core.runtime_config import (
     DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_INGEST_MODEL,
     IngestConfig,
     load_embedding_config,
     load_ingest_config,
@@ -63,7 +62,6 @@ OutputTooLargeError = _ollama_transport.OutputTooLargeError
 ChatResponse = _ollama_transport.ChatResponse
 GenerateResponse = _ollama_transport.GenerateResponse
 
-MODEL = DEFAULT_INGEST_MODEL
 INGEST_GENERATION_RUNTIME_ROLE = "ingest.generation"
 
 

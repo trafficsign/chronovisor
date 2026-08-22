@@ -251,10 +251,8 @@ required_capabilities = ["structured_output"]
 # cap to avoid shrink/reload flap, but its actual context is recorded and never
 # counted as smaller-bucket evaluation evidence. The offline adoption evaluator
 # uses a separate exact-bucket mode. Production model selection comes only from
-# llm.roles.classification.primary/challenger/tie_break below.
-primary_model = "qwen3.8:27b-axq4"
-challenger_model = "muse-glimmer:30b-q4k-dynamic"
-tie_break_model = "gemma4:26b-optiq4"
+# llm.roles.classification.primary/challenger/tie_break below. Model triplets
+# belong only in explicit model-evaluation/adoption candidate files.
 primary_keep_alive = "20m"
 challenger_keep_alive = "20m"
 tie_break_keep_alive = "2m"
