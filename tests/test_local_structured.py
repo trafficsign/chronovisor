@@ -316,6 +316,64 @@ def test_transport_format_schema_does_not_weaken_client_validation() -> None:
     assert transport.requests[0].messages[0]["content"].find('"maxLength": 2') > 0
 
 
+def test_plain_choice_accepts_only_one_exact_id_and_repairs_once() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["selection_id"],
+        "properties": {
+            "selection_id": {
+                "type": "string",
+                "enum": ["apply_available", "confirmed_noop"],
+            }
+        },
+    }
+    invalid = '{"selection_id":"apply_available"}'
+    transport = QueueTransport(invalid, "apply_available")
+
+    result = _session(transport).run(
+        "decide",
+        schema,
+        plain_choice_field="selection_id",
+    )
+
+    assert result.ok is True
+    assert result.value == {"selection_id": "apply_available"}
+    assert result.repair_turns == 1
+    assert [request.schema for request in transport.requests] == [None, None]
+    assert (
+        "Return exactly one allowed ID as plain text"
+        in transport.requests[0].messages[0]["content"]
+    )
+    assert invalid not in json.dumps(transport.requests[1].messages)
+    assert "not exactly one allowed ID" in transport.requests[1].messages[-1]["content"]
+
+
+def test_plain_choice_fails_closed_after_one_repair() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["selection_id"],
+        "properties": {
+            "selection_id": {
+                "type": "string",
+                "enum": ["apply_available", "confirmed_noop"],
+            }
+        },
+    }
+    transport = QueueTransport("wrong", "still_wrong", "apply_available")
+
+    result = _session(transport).run(
+        "decide",
+        schema,
+        plain_choice_field="selection_id",
+    )
+
+    assert result.ok is False
+    assert result.failure_class == "repair_exhausted"
+    assert len(transport.requests) == 2
+
+
 @pytest.fixture(autouse=True)
 def _isolate_default_audit_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

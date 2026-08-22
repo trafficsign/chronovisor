@@ -133,6 +133,7 @@ _INGEST_TERMINAL_SELECTIONS = (
     "retry",
     "quarantined",
 )
+_INGEST_PLAIN_CHOICE_MARKER = "CHRONOVISOR_INGEST_PLAIN_CHOICE_POLICY=1"
 _DECISION_SEMANTICS_MARKER = (
     f"CHRONOVISOR_DECISION_SEMANTICS_POLICY={DECISION_SEMANTICS_POLICY_VERSION}"
 )
@@ -511,6 +512,13 @@ def decision_system_with_policy(
     return f"{base.rstrip()}\n\n{overlay}".lstrip()
 
 
+def _ingest_plain_choice_system(system: str | None) -> str:
+    base = (system or "").rstrip()
+    if _INGEST_PLAIN_CHOICE_MARKER in base:
+        return base
+    return f"{base}\n\n{_INGEST_PLAIN_CHOICE_MARKER}".lstrip()
+
+
 def decision_effective_request(
     *,
     prompt: str,
@@ -540,6 +548,8 @@ def _decision_effective_request_parts(
 
     effective_schema = schema
     if decision_lane is not None:
+        if decision_lane == "ingest_reconciliation":
+            system = _ingest_plain_choice_system(system)
         prompt, system = bind_lane_contract_request(
             decision_lane,
             prompt,
@@ -2296,13 +2306,13 @@ class DecisionRouter:
                 route_provenance=route_provenance,
                 invalid_reason="remote_route_revision_required",
             )
-        format_schema = None
+        selection_schema = None
         try:
             if (
                 decision_lane == "ingest_reconciliation"
                 and ingest_repair_contract is not None
             ):
-                format_schema = _ingest_reconciliation_format_schema(
+                selection_schema = _ingest_reconciliation_format_schema(
                     schema,
                     ingest_repair_contract,
                 )
@@ -2324,16 +2334,19 @@ class DecisionRouter:
                 reasoning_authority=route_provenance,
             ).run(
                 prompt,
-                format_schema or schema,
+                selection_schema or schema,
                 system=system,
                 value_validator=(
                     None
-                    if format_schema is not None
+                    if selection_schema is not None
                     else _decision_value_validator(
                         decision_lane,
                         prompt,
                         ingest_repair_contract=ingest_repair_contract,
                     )
+                ),
+                plain_choice_field=(
+                    _INGEST_SELECTION_FIELD if selection_schema is not None else None
                 ),
             )
         if result.ok and decision_lane == "ingest_reconciliation":
@@ -3604,6 +3617,8 @@ class DecisionRouter:
         replay_prompt = prompt
         if effective_lane is not None:
             try:
+                if effective_lane == "ingest_reconciliation":
+                    system = _ingest_plain_choice_system(system)
                 prompt, system = bind_lane_contract_request(
                     effective_lane,
                     prompt,

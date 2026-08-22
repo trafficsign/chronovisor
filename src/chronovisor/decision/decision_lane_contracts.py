@@ -179,7 +179,7 @@ _LANE_SEMANTICS: dict[str, LaneSemantics] = {
 # changes bump only the affected lane and still invalidate the aggregate
 # manifest and adoption artifact.
 LANE_PROMPT_POLICY_VERSIONS: dict[str, int] = {lane: 8 for lane in _LANE_SEMANTICS}
-LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] = 17
+LANE_PROMPT_POLICY_VERSIONS["ingest_reconciliation"] = 18
 LANE_PROMPT_POLICY_VERSIONS["raw_replay_reconciliation"] = 9
 LANE_PROMPT_POLICY_VERSIONS["recall_auto_apply"] = 9
 LANE_PROMPT_POLICY_VERSIONS["autonomy_retention"] = 9
@@ -431,8 +431,7 @@ def model_backed_lane_names() -> tuple[str, ...]:
         sorted(
             lane
             for lane, policy in DECISION_POLICIES.items()
-            if policy.kind in {"consensus", "local_batch"}
-            and policy.adoption_scoped
+            if policy.kind in {"consensus", "local_batch"} and policy.adoption_scoped
         )
     )
 

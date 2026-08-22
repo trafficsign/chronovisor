@@ -311,8 +311,8 @@ def test_ingest_repair_option_id_materializes_exact_host_bytes_before_quorum(
     audit_root = tmp_path / "local-consensus"
     transport = ModelTransport(
         {
-            "ornith:test": [json.dumps(selection)],
-            "gpt-oss:test": [json.dumps(selection)],
+            "ornith:test": [option_id],
+            "gpt-oss:test": [option_id],
         }
     )
 
@@ -335,11 +335,12 @@ def test_ingest_repair_option_id_materializes_exact_host_bytes_before_quorum(
     assert all(vote.result.first_pass_valid for vote in result.votes)
     assert all("repair_option_id" not in vote.result.value for vote in result.votes)
     for request in transport.requests:
-        properties = request.schema["properties"]
-        assert set(properties) == {"selection_id"}
-        assert selection["selection_id"] in properties["selection_id"]["enum"]
-        assert request.schema["required"] == ["selection_id"]
-        assert request.schema["examples"] == [{"selection_id": "apply_available"}]
+        assert request.schema is None
+        assert selection["selection_id"] in request.messages[0]["content"]
+        assert (
+            "Return exactly one allowed ID as plain text"
+            in request.messages[0]["content"]
+        )
         assert '"invalid_tags"' not in request.messages[0]["content"]
         assert '"replacement_operations"' not in request.messages[0]["content"]
     audit_rows = [
@@ -353,13 +354,12 @@ def test_ingest_repair_option_id_materializes_exact_host_bytes_before_quorum(
 
 def test_ingest_repair_host_sidecar_is_never_sent_to_models() -> None:
     row, _selection, option_id = _ingest_repair_case()
-    selection = {"selection_id": option_id}
     sealed = _prompt_json_block(str(row["prompt"]), INGEST_REPAIR_HOST_BLOCK)
     sealed_json = json.dumps(sealed, ensure_ascii=False, sort_keys=True)
     transport = ModelTransport(
         {
-            "ornith:test": [json.dumps(selection)],
-            "gpt-oss:test": [json.dumps(selection)],
+            "ornith:test": [option_id],
+            "gpt-oss:test": [option_id],
         }
     )
 
@@ -381,13 +381,12 @@ def test_ingest_replay_accounts_effective_model_prompt_but_retains_host_contract
     tmp_path: Path,
 ) -> None:
     row, _selection, option_id = _ingest_repair_case()
-    selection = {"selection_id": option_id}
     full_prompt = str(row["prompt"])
     replay_path = tmp_path / "model-lab" / "replay.jsonl"
     transport = ModelTransport(
         {
-            "ornith:test": [json.dumps(selection)],
-            "gpt-oss:test": [json.dumps(selection)],
+            "ornith:test": [option_id],
+            "gpt-oss:test": [option_id],
         }
     )
 
@@ -443,7 +442,6 @@ def test_ingest_replay_accounts_effective_model_prompt_but_retains_host_contract
 def test_ingest_deterministic_repair_option_id_materializes_base_action() -> None:
     row, legacy_selection, legacy_expected = _deterministic_ingest_repair_case()
     option_id = legacy_selection["repair_option_id"]
-    selection = {"selection_id": option_id}
     expected = {
         "decision": "retry",
         "summary": "Local quorum selected a bounded host-owned repair.",
@@ -455,8 +453,8 @@ def test_ingest_deterministic_repair_option_id_materializes_base_action() -> Non
     }
     transport = ModelTransport(
         {
-            "ornith:test": [json.dumps(selection)],
-            "gpt-oss:test": [json.dumps(selection)],
+            "ornith:test": [option_id],
+            "gpt-oss:test": [option_id],
         }
     )
 
@@ -468,10 +466,8 @@ def test_ingest_deterministic_repair_option_id_materializes_base_action() -> Non
 
     assert result.ok is True
     assert result.decision == expected
-    properties = transport.requests[0].schema["properties"]
-    assert set(properties) == {"selection_id"}
-    assert properties["selection_id"]["enum"] == [option_id]
-    assert transport.requests[0].schema["required"] == ["selection_id"]
+    assert transport.requests[0].schema is None
+    assert option_id in transport.requests[0].messages[0]["content"]
 
 
 @pytest.mark.parametrize(
@@ -570,12 +566,11 @@ def test_ingest_repair_option_validator_rejects_invented_and_mixed_ids() -> None
 
 def test_ingest_repair_option_feedback_is_small_and_repairs_only_the_selector() -> None:
     row, _selection, option_id = _ingest_repair_case()
-    selection = {"selection_id": option_id}
     invalid = {"selection_id": "rp_" + "0" * 32}
     transport = ModelTransport(
         {
-            "ornith:test": [json.dumps(invalid), json.dumps(selection)],
-            "gpt-oss:test": [json.dumps(selection)],
+            "ornith:test": [invalid["selection_id"], option_id],
+            "gpt-oss:test": [option_id],
         }
     )
 
@@ -596,11 +591,9 @@ def test_ingest_repair_option_feedback_is_small_and_repairs_only_the_selector() 
     feedback = transport.requests[1].messages[-1]["content"]
     feedback_bytes = len(feedback.encode("utf-8"))
     assert feedback_bytes < 1_000
-    assert '"keyword":"enum"' in feedback
-    feedback_payload = json.loads(
-        feedback.split("Validator errors (RFC 6901 pointers):\n", 1)[1]
-    )
-    assert feedback_payload[0]["pointer"] == "/selection_id"
+    assert "not exactly one allowed ID" in feedback
+    assert option_id in feedback
+    assert invalid["selection_id"] not in feedback
     assert "replacement_operations" not in feedback
 
 
@@ -616,8 +609,8 @@ def test_ingest_legacy_optional_null_is_repaired_to_one_host_owned_selection() -
     selection = {"selection_id": "apply_available"}
     transport = ModelTransport(
         {
-            "ornith:test": [json.dumps(legacy), json.dumps(selection)],
-            "gpt-oss:test": [json.dumps(selection)],
+            "ornith:test": [json.dumps(legacy), selection["selection_id"]],
+            "gpt-oss:test": [selection["selection_id"]],
         }
     )
 
@@ -637,7 +630,7 @@ def test_ingest_legacy_optional_null_is_repaired_to_one_host_owned_selection() -
         "risk": None,
         "notes": None,
     }
-    assert set(transport.requests[0].schema["properties"]) == {"selection_id"}
+    assert transport.requests[0].schema is None
 
 
 @pytest.mark.parametrize(
@@ -663,11 +656,10 @@ def test_ingest_terminal_selection_is_fully_materialized_by_host(
         and not candidate.row["expected"].get("invalid_tags")
         and not candidate.row["expected"].get("replacement_operations")
     )
-    selection = {"selection_id": decision}
     transport = ModelTransport(
         {
-            "ornith:test": [json.dumps(selection)],
-            "gpt-oss:test": [json.dumps(selection)],
+            "ornith:test": [decision],
+            "gpt-oss:test": [decision],
         }
     )
 
@@ -1421,9 +1413,9 @@ def test_ingest_nonmutation_vote_vetoes_mutating_majority() -> None:
 
     transport = ModelTransport(
         {
-            "ornith:test": [json.dumps(mutating)],
-            "gpt-oss:test": [json.dumps(conservative)],
-            "gemma:test": [json.dumps(mutating)],
+            "ornith:test": [mutating["selection_id"]],
+            "gpt-oss:test": [conservative["selection_id"]],
+            "gemma:test": [mutating["selection_id"]],
         }
     )
 
@@ -1518,9 +1510,9 @@ def test_disagreement_runs_tie_break_and_selects_matching_existing_vote(
         "gemma:test",
     ]
     assert [request.think for request in transport.requests] == ["medium"] * 3
-    assert [
-        request.think_selection_reason for request in transport.requests
-    ] == ["adaptive_canary_not_adopted"] * 3
+    assert [request.think_selection_reason for request in transport.requests] == [
+        "adaptive_canary_not_adopted"
+    ] * 3
     audits = [vote.audit_record()["session"] for vote in result.votes]
     assert [audit["think"] for audit in audits] == ["medium"] * 3
     assert [audit["think_selection_reason"] for audit in audits] == [
@@ -1698,11 +1690,14 @@ def test_production_reasoning_authority_fails_closed_on_digest_mismatch(
     assert vote.valid is True
     assert transport.requests[0].think == "medium"
     assert transport.requests[0].num_predict == 256
-    assert transport.requests[0].ollama_think == {
-        "primary": True,
-        "challenger": "medium",
-        "tie_break": True,
-    }[role]
+    assert (
+        transport.requests[0].ollama_think
+        == {
+            "primary": True,
+            "challenger": "medium",
+            "tie_break": True,
+        }[role]
+    )
     assert transport.requests[0].think_selection_reason == (
         "adaptive_canary_not_adopted"
     )
@@ -3978,9 +3973,7 @@ def test_vote_audit_is_hash_only_and_does_not_leak_payloads() -> None:
         == QUORUM_SAFETY_POLICY_VERSION
     )
     assert result.audit_record()["conservative_veto_fired"] is False
-    assert (
-        result.audit_record()["conservative_veto_bypassed_by_lane_policy"] is False
-    )
+    assert result.audit_record()["conservative_veto_bypassed_by_lane_policy"] is False
     assert result.audit_record()["dissent_effect_class"] is None
     assert secret not in serialized
     assert "secret prompt" not in serialized
