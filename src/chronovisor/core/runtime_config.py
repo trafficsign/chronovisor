@@ -417,6 +417,7 @@ class RerankerConfig:
     max_length: int = 384
     batch_size: int = 10
     device: str = ""
+    dtype: str = "float32"
     weight: float = 1.0
     service: RerankerServiceConfig = field(default_factory=RerankerServiceConfig)
 

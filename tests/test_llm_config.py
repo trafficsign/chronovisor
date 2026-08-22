@@ -135,6 +135,7 @@ def test_local_only_config_composes_ollama_and_transformer_reranker() -> None:
                         "kind": "local-transformers",
                         "backend": "transformers",
                         "batch_size": 4,
+                        "dtype": "float16",
                     },
                 },
                 "roles": {
@@ -166,6 +167,7 @@ def test_local_only_config_composes_ollama_and_transformer_reranker() -> None:
     assert isinstance(runtime._rerank["rerank"].backend, LocalRerankBackend)
     assert runtime.resolve_rerank("rerank").model == "local-reranker"
     assert runtime._rerank["rerank"].backend.config.batch_size == 4
+    assert runtime._rerank["rerank"].backend.config.dtype == "float16"
     assert resolver.calls == []
 
 

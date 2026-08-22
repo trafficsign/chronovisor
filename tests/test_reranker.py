@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +26,7 @@ from chronovisor.core.reranker import (
     apply_reranker_scores,
     rerank_results,
 )
-from chronovisor.core.runtime_config import RerankerConfig
+from chronovisor.core.runtime_config import RerankerConfig, RerankerServiceConfig
 from chronovisor.core.search import ScoredPage
 from chronovisor.hosts import server
 
@@ -139,6 +138,39 @@ def test_rerank_results_unavailable_preserves_order(monkeypatch) -> None:
     assert outcome.metadata["reason"] == "backend_error"
     assert outcome.metadata["degraded"] is True
     assert "SECRET" not in repr(outcome.metadata)
+
+
+def test_rerank_results_uses_resident_service_without_local_fallback(monkeypatch) -> None:
+    from chronovisor.core import reranker_client
+
+    candidates = [page("a"), page("b")]
+    config = RerankerConfig(
+        enabled=True,
+        service=RerankerServiceConfig(enabled=True, mode="on"),
+    )
+    monkeypatch.setattr(
+        reranker_client,
+        "rerank",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            reranker_client.RerankerServiceUnavailable("transport_error")
+        ),
+    )
+    monkeypatch.setattr(
+        llm_config,
+        "load_default_llm_runtime",
+        lambda: pytest.fail("in-process reranker loaded"),
+    )
+
+    outcome = rerank_results("query", candidates, config=config)
+
+    assert outcome.results is candidates
+    assert outcome.metadata == {
+        "status": "unavailable",
+        "reason": "transport_error",
+        "candidate_count": 2,
+        "execution": "service",
+        "degraded": True,
+    }
 
 
 def test_rerank_results_rejects_partial_score_vectors(monkeypatch) -> None:
@@ -353,30 +385,6 @@ def test_transformer_loader_allows_first_install_fallback() -> None:
         ("tokenizer", False),
         ("model", False),
     ]
-
-
-def test_start_reranker_warmup_is_single_daemon(monkeypatch) -> None:
-    started: list[bool] = []
-    release = threading.Event()
-
-    def fake_warm(config):
-        started.append(config.enabled)
-        release.wait(1)
-        return {"status": "ready"}
-
-    monkeypatch.setattr(reranker, "warm_reranker", fake_warm)
-    monkeypatch.setattr(reranker, "_WARMUP_THREAD", None)
-    config = RerankerConfig(enabled=True)
-
-    first = reranker.start_reranker_warmup(config)
-    second = reranker.start_reranker_warmup(config)
-
-    assert first is not None
-    assert first is second
-    assert first.daemon is True
-    release.set()
-    first.join(1)
-    assert started == [True]
 
 
 def test_chronovisor_search_uses_reranker_only_when_enabled(monkeypatch) -> None:

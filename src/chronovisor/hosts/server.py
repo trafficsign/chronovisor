@@ -1637,14 +1637,6 @@ def main():
 
 def _main_locked():
     init_chronovisor()
-    # Warm the fixed rerank route in parallel with existing index startup work.
-    reranker_warmup = None
-    try:
-        from chronovisor.core.reranker import start_reranker_warmup
-
-        reranker_warmup = start_reranker_warmup()
-    except Exception:
-        pass
     # job_store is in-memory: any current_job_id persisted from a previous
     # process is, by definition, stale. Clear it so a crash mid-ingest
     # doesn't permanently lock out run_pending_ingest.
@@ -1665,10 +1657,6 @@ def _main_locked():
         get_bm25().build()
     except Exception:
         pass
-    # Cached production models complete in a few seconds. Bound the wait so a
-    # first-ever model download can never prevent MCP from advertising tools.
-    if reranker_warmup is not None:
-        reranker_warmup.join(timeout=8.0)
     mcp.run(transport="stdio")
 
 

@@ -769,9 +769,12 @@ candidate/shadow. Only a valid promotion permits active Field authority.
 Install the optional local reranker dependencies with `uv sync --extra reranker`
 before enabling `[search.reranker]`. The fixed `search.rerank` LLM role is the
 only provider/model selector. For a local Transformers route, configure
-`backend`, `device`, `max_length`, and `batch_size` only on its
+`backend`, `device`, `dtype`, `max_length`, and `batch_size` only on its
 `[llm.providers.<id>]` table. Legacy copies of those keys, or `model`, under
 `[search.reranker]` are accepted but ignored.
+
+Use `dtype = "float16"` on Apple Silicon to halve the resident reranker weights;
+`float32` remains the portable default.
 
 The default topology reranks only the first 10 fused candidates with equal
 reciprocal-rank weight (`weight = 1.0`). The resident service mode is a rollout

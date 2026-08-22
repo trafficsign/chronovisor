@@ -50,10 +50,8 @@ _SYSTEM_SOURCE = SourceDataClassification(
     SourceDataClass.SYSTEM,
     SourceSensitivity.HIGH,
 )
-_MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
+_MODEL_CACHE: dict[tuple[str, str, str, str], Any] = {}
 _MODEL_LOCK = threading.RLock()
-_WARMUP_LOCK = threading.Lock()
-_WARMUP_THREAD: threading.Thread | None = None
 
 
 @dataclass(frozen=True)
@@ -179,6 +177,17 @@ def _select_torch_device(torch_mod: Any, requested: str) -> str:
     return "cpu"
 
 
+def _torch_dtype(torch_mod: Any, requested: str) -> Any:
+    dtype = {
+        "float16": torch_mod.float16,
+        "float32": torch_mod.float32,
+        "bfloat16": torch_mod.bfloat16,
+    }.get(requested)
+    if dtype is None:
+        raise RuntimeError("unsupported reranker dtype")
+    return dtype
+
+
 def _load_transformer_components(
     config: RerankerConfig,
     tokenizer_cls: Any,
@@ -208,7 +217,7 @@ def _transformer_scores(
         raise RuntimeError(f"transformers backend unavailable: {exc}") from exc
 
     device = _select_torch_device(torch, config.device)
-    key = ("transformers", config.model, device)
+    key = ("transformers", config.model, device, config.dtype)
     # Hugging Face's default path performs remote metadata checks even when
     # all weights are cached. Prefer the complete local snapshot and only use
     # the network on the first installation of a model.
@@ -220,7 +229,7 @@ def _transformer_scores(
                 AutoTokenizer,
                 AutoModelForSequenceClassification,
             )
-            model.to(device)
+            model.to(device=device, dtype=_torch_dtype(torch, config.dtype))
             model.eval()
             cached = (tokenizer, model)
             _MODEL_CACHE[key] = cached
@@ -261,7 +270,7 @@ def _flagembedding_scores(
     except Exception as exc:  # pragma: no cover - exercised via missing-dep tests
         raise RuntimeError(f"FlagEmbedding backend unavailable: {exc}") from exc
 
-    key = ("flagembedding", config.model, config.device)
+    key = ("flagembedding", config.model, config.device, "float16")
     reranker = _MODEL_CACHE.get(key)
     if reranker is None:
         kwargs: dict[str, Any] = {}
@@ -359,28 +368,6 @@ def warm_reranker(
         "route": _route_identity(route),
         "latency_ms": int(round((time.perf_counter() - started) * 1000)),
     }
-
-
-def start_reranker_warmup(
-    config: RerankerConfig | None = None,
-) -> threading.Thread | None:
-    """Start one daemon warmup per MCP process without delaying startup."""
-
-    cfg = config or load_reranker_config()
-    if not cfg.enabled:
-        return None
-    global _WARMUP_THREAD
-    with _WARMUP_LOCK:
-        if _WARMUP_THREAD is not None and _WARMUP_THREAD.is_alive():
-            return _WARMUP_THREAD
-        _WARMUP_THREAD = threading.Thread(
-            target=warm_reranker,
-            args=(cfg,),
-            name="chronovisor-reranker-warmup",
-            daemon=True,
-        )
-        _WARMUP_THREAD.start()
-        return _WARMUP_THREAD
 
 
 def apply_reranker_scores(
@@ -510,6 +497,33 @@ def rerank_results(
         )
 
     rerank_n = min(max(1, cfg.top_n), len(candidates))
+    if cfg.service.enabled:
+        from chronovisor.core import reranker_client
+
+        try:
+            return reranker_client.rerank(
+                query,
+                candidates,
+                config=cfg,
+                timeout_ms=cfg.service.timeout_ms,
+            )
+        except Exception as exc:
+            reason = (
+                exc.category
+                if isinstance(exc, reranker_client.RerankerServiceUnavailable)
+                else safe_reranker_error(exc)
+            )
+            return RerankOutcome(
+                candidates,
+                {
+                    "status": "unavailable",
+                    "reason": reason,
+                    "candidate_count": rerank_n,
+                    "execution": "service",
+                    "degraded": True,
+                },
+            )
+
     head = candidates[:rerank_n]
     started = time.perf_counter()
     try:

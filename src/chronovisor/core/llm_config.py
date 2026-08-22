@@ -329,20 +329,27 @@ def _provider(provider_id: str, value: object) -> ProviderDefinition:
             endpoint=endpoint,
         )
     if kind == "local-transformers":
-        _exact_keys(table, {"kind", "backend", "device", "max_length", "batch_size"})
+        _exact_keys(
+            table,
+            {"kind", "backend", "device", "dtype", "max_length", "batch_size"},
+        )
         backend_value = table.get("backend", "transformers")
         device_value = table.get("device", "")
+        dtype_value = table.get("dtype", RerankerConfig.dtype)
         if (
             not isinstance(backend_value, str)
             or backend_value not in {"transformers", "flagembedding"}
             or not isinstance(device_value, str)
             or any(ord(character) < 32 for character in device_value)
+            or not isinstance(dtype_value, str)
+            or dtype_value not in {"float16", "float32", "bfloat16"}
         ):
             raise _fail()
         config = RerankerConfig(
             enabled=True,
             backend=backend_value,
             device=device_value,
+            dtype=str(dtype_value),
             max_length=_positive_int(
                 table.get("max_length"), RerankerConfig.max_length
             ),
