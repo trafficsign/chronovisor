@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from collections import deque
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -122,7 +123,12 @@ def _runtime(
             "e" * 64,
             f"revision-{role}" if location is RouteLocation.REMOTE else None,
         )
-    return LLMRuntime(generation=generation), backends
+    local_controls = {
+        role: SimpleNamespace(resource_lease=lambda **_kwargs: nullcontext())
+        for role, route in generation.items()
+        if route.backend.location is RouteLocation.LOCAL
+    }
+    return LLMRuntime(generation=generation, local_controls=local_controls), backends
 
 
 def _install_runtime(monkeypatch: Any, runtime: LLMRuntime) -> None:
@@ -151,6 +157,14 @@ def _install_runtime(monkeypatch: Any, runtime: LLMRuntime) -> None:
             },
         },
     )
+    if models:
+        from chronovisor.decision import local_structured
+
+        monkeypatch.setattr(
+            local_structured,
+            "shared_model_resource_lease_mode",
+            lambda: ollama.model_resource_lease_mode(),
+        )
 
 
 def _forbid_ollama(monkeypatch: Any) -> None:
@@ -813,7 +827,9 @@ def test_hybrid_local_tie_acquires_control_only_after_remote_disagreement(
     assert [len(backends[role].calls) for role in backends] == [1, 1, 1]
 
 
-def test_local_routes_keep_lease_observation_and_unload(monkeypatch: Any) -> None:
+def test_local_routes_keep_lease_observation_and_safe_residency(
+    monkeypatch: Any,
+) -> None:
     runtime, backends = _runtime(
         {
             "classification.primary": (
@@ -856,7 +872,7 @@ def test_local_routes_keep_lease_observation_and_unload(monkeypatch: Any) -> Non
             total_bytes=10_000,
             estimated_model_bytes=tuple((model, 100) for model in models),
             role_contexts=tuple((model, num_ctx) for model in models),
-            resident_models=(),
+            resident_models=models,
             calibrated_models=models,
             source="test",
         )
@@ -876,15 +892,15 @@ def test_local_routes_keep_lease_observation_and_unload(monkeypatch: Any) -> Non
     assert events == [
         "lease",
         "plan:local-a,local-b,local-c",
-        "unload:local-a",
-        "unload:local-b",
+        "plan:local-a,local-b,local-c",
     ]
     assert [len(backends[role].calls) for role in backends] == [1, 1, 0]
+    assert result.residency["retained_models"] == ["local-a", "local-b", "local-c"]
     routes = router.authority_router()["routes"]
     assert all(route["ollama"]["digest"].startswith("digest-") for route in routes)
 
 
-def test_excluded_local_route_uses_no_generation_or_resource_control(
+def test_excluded_local_route_uses_no_generation(
     monkeypatch: Any,
 ) -> None:
     runtime, backends = _runtime(
@@ -918,7 +934,7 @@ def test_excluded_local_route_uses_no_generation_or_resource_control(
             total_bytes=10_000,
             estimated_model_bytes=tuple((model, 100) for model in models),
             role_contexts=tuple((model, num_ctx) for model in models),
-            resident_models=(),
+            resident_models=models,
             calibrated_models=models,
             source="test",
         )
@@ -944,8 +960,11 @@ def test_excluded_local_route_uses_no_generation_or_resource_control(
         "plan:local-challenger,local-tie_break",
         "observe:local-challenger",
         "observe:local-tie_break",
-        "unload:local-challenger",
-        "unload:local-tie_break",
+        "plan:local-challenger,local-tie_break",
+    ]
+    assert result.residency["retained_models"] == [
+        "local-challenger",
+        "local-tie_break",
     ]
 
 

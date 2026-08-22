@@ -4009,6 +4009,7 @@ class DecisionRouter:
             if (
                 result.ok
                 and self.live_resource_control
+                and voted_local_models
                 and residency_plan.max_resident_models > 1
             ):
                 # Reuse warm runners only while a fresh macOS pressure and

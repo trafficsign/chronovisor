@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from chronovisor.core import ollama, runtime_config
+from chronovisor.core import llm_config, ollama, runtime_config
 from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.decision import (
     decision_router,
@@ -107,6 +107,11 @@ def _use_local_runtime(monkeypatch: pytest.MonkeyPatch, chat) -> None:
         lambda roles: tuple(routes_by_role[role] for role in roles),
     )
     monkeypatch.setattr(ollama, "runtime_structured_chat", chat)
+    monkeypatch.setattr(
+        llm_config,
+        "load_default_llm_runtime",
+        lambda: SimpleNamespace(resource_lease=lambda *_args, **_kwargs: nullcontext()),
+    )
     monkeypatch.setattr(
         local_model_eval,
         "fetch_local_model_metadata",
@@ -1357,6 +1362,7 @@ def test_routine_structured_review_uses_local_transport_and_never_subprocesses(
     assert [row["role"] for row in audit_rows] == [
         "recall_auto_apply:primary",
         "recall_auto_apply:challenger",
+        "recall_auto_apply",
         "recall_auto_apply",
     ]
 

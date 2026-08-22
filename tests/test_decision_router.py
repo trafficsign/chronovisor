@@ -1485,7 +1485,7 @@ def test_successful_routine_decision_records_replay_without_extra_model_calls(
     assert rows[0]["models"] == ["ornith:test", "gpt-oss:test"]
 
 
-def test_disagreement_runs_tie_break_and_selects_matching_existing_vote(
+def test_disagreement_uses_low_until_adaptive_canary(
     tmp_path: Path,
 ) -> None:
     audit_root = tmp_path / "adaptive-reasoning-audit"
@@ -1509,12 +1509,12 @@ def test_disagreement_runs_tie_break_and_selects_matching_existing_vote(
         "gpt-oss:test",
         "gemma:test",
     ]
-    assert [request.think for request in transport.requests] == ["medium"] * 3
+    assert [request.think for request in transport.requests] == ["low"] * 3
     assert [request.think_selection_reason for request in transport.requests] == [
         "adaptive_canary_not_adopted"
     ] * 3
     audits = [vote.audit_record()["session"] for vote in result.votes]
-    assert [audit["think"] for audit in audits] == ["medium"] * 3
+    assert [audit["think"] for audit in audits] == ["low"] * 3
     assert [audit["think_selection_reason"] for audit in audits] == [
         "adaptive_canary_not_adopted"
     ] * 3
@@ -1543,7 +1543,7 @@ def test_disagreement_runs_tie_break_and_selects_matching_existing_vote(
         (
             role,
             digest,
-            "medium" if native_levels else True,
+            "low" if native_levels else True,
         )
         for role, digest, native_levels in (
             (
@@ -1564,7 +1564,7 @@ def test_disagreement_runs_tie_break_and_selects_matching_existing_vote(
         )
     ],
 )
-def test_production_reasoning_authority_keeps_medium_until_canary(
+def test_production_reasoning_authority_uses_low_until_canary(
     role: str,
     digest: str,
     expected_ollama_think: bool | str,
@@ -1619,13 +1619,13 @@ def test_production_reasoning_authority_keeps_medium_until_canary(
     )
 
     assert vote.valid is True
-    assert transport.requests[0].think == "medium"
-    assert transport.requests[0].num_predict == 256
+    assert transport.requests[0].think == "low"
+    assert transport.requests[0].num_predict == 170
     assert transport.requests[0].ollama_think == expected_ollama_think
     assert transport.requests[0].think_selection_reason == (
         "adaptive_canary_not_adopted"
     )
-    assert vote.result.audit_record()["think"] == "medium"
+    assert vote.result.audit_record()["think"] == "low"
     assert vote.result.audit_record()["think_selection_reason"] == (
         "adaptive_canary_not_adopted"
     )
@@ -1635,7 +1635,7 @@ def test_production_reasoning_authority_keeps_medium_until_canary(
     "role",
     ["primary", "challenger", "tie_break"],
 )
-def test_production_reasoning_authority_fails_closed_on_digest_mismatch(
+def test_production_reasoning_authority_stays_low_on_digest_mismatch(
     role: str,
 ) -> None:
     models = {
@@ -1688,13 +1688,13 @@ def test_production_reasoning_authority_fails_closed_on_digest_mismatch(
     )
 
     assert vote.valid is True
-    assert transport.requests[0].think == "medium"
-    assert transport.requests[0].num_predict == 256
+    assert transport.requests[0].think == "low"
+    assert transport.requests[0].num_predict == 170
     assert (
         transport.requests[0].ollama_think
         == {
             "primary": True,
-            "challenger": "medium",
+            "challenger": "low",
             "tie_break": True,
         }[role]
     )

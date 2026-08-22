@@ -12125,6 +12125,7 @@ class TestTriagePlanSchema:
     def test_production_triage_selects_native_chat_transport(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from chronovisor.decision import local_structured
         from chronovisor.ingest import ingest
 
         captured: list[dict[str, str]] = []
@@ -12157,6 +12158,11 @@ class TestTriagePlanSchema:
         monkeypatch.setattr(
             ingest.ollama_runtime,
             "model_resource_lease_mode",
+            lambda: "exclusive",
+        )
+        monkeypatch.setattr(
+            local_structured,
+            "shared_model_resource_lease_mode",
             lambda: "exclusive",
         )
         monkeypatch.setattr(

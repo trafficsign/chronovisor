@@ -93,7 +93,7 @@ class OMLXAdapter:
                 else nullcontext()
             )
             with lease:
-                if streamed:
+                if callable(progress_callback):
                     response, stream_complete = self._post_stream(
                         "/chat/completions",
                         payload,

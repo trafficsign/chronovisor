@@ -1037,11 +1037,11 @@ def project_native_transcript(
             }
         elif commit.host == "pi":
             from chronovisor.core.pi_transcript import (
-                _pi_message_view,
                 claude_semantic_view,
+                pi_message_view,
             )
 
-            item_type, content = _pi_message_view(event)
+            item_type, content = pi_message_view(event)
             role, text = claude_semantic_view(item_type, content)
             event_type = item_type
             semantic_row = {

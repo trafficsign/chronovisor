@@ -107,7 +107,7 @@ def _pi_session_meta(item: dict[str, Any]) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _pi_message_view(item: dict[str, Any]) -> tuple[str, Any]:
+def pi_message_view(item: dict[str, Any]) -> tuple[str, Any]:
     """Return (event_type, content) for a Pi message entry.
 
     Pi wraps messages as ``{"type": "message", "message": {role, content}}``.
@@ -144,7 +144,7 @@ def extract_transcript_slice(path: Path, *, after_line: int = 0) -> TranscriptSl
         if line_no <= after_line:
             continue
 
-        item_type, content = _pi_message_view(item)
+        item_type, content = pi_message_view(item)
         if item_type == "assistant" and not has_file_changes:
             has_file_changes = _content_has_file_changes(content)
 

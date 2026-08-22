@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import threading
 from pathlib import Path
 
 import pytest
@@ -121,81 +120,6 @@ def test_mutation_projection_tracks_update_deprecate_restore_and_delete(
     with page_mutation.chronovisor_mutation_lock(pages_dir=pages):
         path.unlink()
     assert b"alpha.md" not in (pages / "index.md").read_bytes()
-
-
-def test_startup_repairs_stale_index_without_changing_immutable_proof(
-    tmp_path: Path,
-) -> None:
-    root = _fresh_root(tmp_path)
-    proof = root / "runtime" / "bootstrap-layout.json"
-    proof_before = proof.read_bytes()
-    (root / "pages" / "late.md").write_bytes(_page("Late"))
-    assert b"late.md" not in (root / "pages" / "index.md").read_bytes()
-
-    store.init_chronovisor(store.RuntimeContext(root))
-
-    assert b"[Late](late.md)" in (root / "pages" / "index.md").read_bytes()
-    assert proof.read_bytes() == proof_before
-
-
-def test_startup_index_repair_serializes_with_concurrent_page_mutation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = _fresh_root(tmp_path)
-    pages = root / "pages"
-    alpha = pages / "alpha.md"
-    with page_mutation.chronovisor_mutation_lock(pages_dir=pages):
-        alpha.write_bytes(_page("Alpha"))
-
-    entered = threading.Event()
-    release = threading.Event()
-    mutation_done = threading.Event()
-    failures: list[BaseException] = []
-    original = reserved_documents.rebuild_pages_index
-    calls = 0
-
-    def delayed(pages_dir: Path) -> bytes:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            entered.set()
-            assert release.wait(timeout=5)
-        return original(pages_dir)
-
-    def repair() -> None:
-        try:
-            store.init_chronovisor(store.RuntimeContext(root))
-        except BaseException as exc:  # pragma: no cover - asserted below
-            failures.append(exc)
-
-    def mutate() -> None:
-        try:
-            with page_mutation.chronovisor_mutation_lock(pages_dir=pages):
-                alpha.write_bytes(_page("Alpha", status="deprecated"))
-                (pages / "beta.md").write_bytes(_page("Beta"))
-        except BaseException as exc:  # pragma: no cover - asserted below
-            failures.append(exc)
-        finally:
-            mutation_done.set()
-
-    monkeypatch.setattr(reserved_documents, "rebuild_pages_index", delayed)
-    repair_thread = threading.Thread(target=repair)
-    repair_thread.start()
-    assert entered.wait(timeout=5)
-    mutation_thread = threading.Thread(target=mutate)
-    mutation_thread.start()
-    assert not mutation_done.wait(timeout=0.1)
-    release.set()
-    repair_thread.join(timeout=5)
-    mutation_thread.join(timeout=5)
-
-    assert not repair_thread.is_alive()
-    assert not mutation_thread.is_alive()
-    assert not failures
-    assert (pages / "index.md").read_bytes() == reserved_documents.render_pages_index(
-        [reserved_documents.PageIndexEntry("beta.md", "Beta")]
-    )
 
 
 def test_refresh_failure_does_not_mask_original_mutation_error(

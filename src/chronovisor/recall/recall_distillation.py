@@ -645,7 +645,7 @@ def _event_semantics(host: str, event: Mapping[str, Any]) -> tuple[str, str]:
         content = message.get("content") if isinstance(message, dict) else None
         return claude_code_transcript.claude_semantic_view(event.get("type"), content)
     if host == "pi":
-        item_type, content = pi_transcript._pi_message_view(dict(event))
+        item_type, content = pi_transcript.pi_message_view(dict(event))
         return pi_transcript.claude_semantic_view(item_type, content)
     if host == "hermes":
         message = event.get("message")

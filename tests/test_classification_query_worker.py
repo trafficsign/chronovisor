@@ -19,7 +19,7 @@ def test_worker_uses_only_candidate_blind_page_fields(monkeypatch) -> None:
         lambda roles: (
             classification_query_worker.ollama.RuntimeGenerationRoute(
                 role=roles[0],
-                provider="local",
+                provider="ollama",
                 model=model,
                 location="local",
                 structured_output=True,
@@ -76,7 +76,7 @@ def test_worker_uses_only_candidate_blind_page_fields(monkeypatch) -> None:
     assert result["model_digest"] == digest
     assert result["route_identity"] == {
         "role": "classification.query",
-        "provider": "local",
+        "provider": "ollama",
         "model": model,
         "location": "local",
     }

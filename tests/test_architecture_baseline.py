@@ -1875,6 +1875,18 @@ W6U_RETIRED_DUPLICATE_REVIEW_SITE_IDS = (
 W6V_RETIRED_CLASSIFICATION_CALIBRATION_SITE_IDS = (
     "arch:1f585d240b36d2874ad555ca51ee30583886fc8a6d14344f358029de32f4f493",
 )
+W6W_RETIRED_LLM_CONSOLIDATION_SITE_IDS = (
+    "arch:0425b3310cff94434888c7fc5aecf67e6d69f9e9044211b4ae475f0400ffca72",
+    "arch:17ae89b7eff9876534c4cbf06c883431caa160324622af13e0a50f450e525cef",
+    "arch:4284e363b1cefb5353bbd597b055e7783b674f9e5b02372a55b0767d4e9b6298",
+    "arch:5f8f3ae8eaefbd57522aca2e069bdfe15efea03a8a1bd7b9589e8cb9b6b963ca",
+    "arch:60dd6fd9820a45093dbe3a87326a91a72ac60784994b0b3aa04d394d91b23e6e",
+    "arch:7225396bf77fb2cc4ba82372ea7233eeaddc20c5a5b9f7e9076b889b077d48eb",
+    "arch:76e72c612c242c7d69b2db59cc385760808901ade51235593130ef1306fdfbfe",
+    "arch:7fd5e7931ca40bb5071e217cac214e2a083c61998172e6a9366d247a95aaf67f",
+    "arch:877cdee3bf0037d8b04eff7a9be0002207788fc43cbd63f2e6314b91c1a31332",
+    "arch:b99e76202ec391898ae263b22d9d031bf417d1706eee0bbd775c8a9e843335d2",
+)
 W8_RETIRED_HOLD_REPORT_SITE_IDS = (
     "arch:134ab2e0e246b184cba1e0394294f41525a5e84c8f4447fa7401cd059b65636e",
 )
@@ -2138,6 +2150,7 @@ RETIREMENT_HISTORY = {
                 *W6T_RETIRED_KNOWLEDGE_CONSENSUS_SITE_IDS,
                 *W6U_RETIRED_DUPLICATE_REVIEW_SITE_IDS,
                 *W6V_RETIRED_CLASSIFICATION_CALIBRATION_SITE_IDS,
+                *W6W_RETIRED_LLM_CONSOLIDATION_SITE_IDS,
                 *W8_RETIRED_HOLD_REPORT_SITE_IDS,
             )
         )
@@ -2511,29 +2524,31 @@ def test_baseline_records_complete_pre_campaign_inventory(
         in baseline["captured_at_semantics"]
     )
     assert baseline["repository"]["head_at_capture"] == (
-        "d341d575f56c1f3217840e20a0dd144799244a89"
+        "981fbc4a2604d3d631d0458833ad8f2127d68b23"
     )
     assert baseline["repository"]["worktree"]["capture_phase"] == (
         "Campaign O frozen pre-full, pre-commit implementation worktree"
     )
     assert baseline["repository"]["pre_campaign_source_head"] == (
-        "a17b8704e2a69e1df1dc3466e956edee77fec870"
+        "981fbc4a2604d3d631d0458833ad8f2127d68b23"
     )
     assert baseline["source"]["totals"] == {
-        "modules": 281,
-        "lines": 200634,
-        "functions": 4743,
+        "modules": 357,
+        "lines": 241544,
+        "functions": 5925,
     }
     assert baseline["source"]["package_count"] == 13
     assert "knowledge_graph" in baseline["source"]["packages"]
     assert baseline["source"]["namespace_packages"] == []
-    assert len(baseline["source"]["modules"]) == 281
+    assert len(baseline["source"]["modules"]) == 357
     assert len(baseline["source"]["module_hotspots"]) == 25
     assert len(baseline["source"]["function_hotspots"]) == 50
     assert len(baseline["source"]["python_source_bytes_sha256"]) == 64
-    assert baseline["architecture"]["edge_count"] == 95
-    assert len(baseline["architecture"]["strongly_connected_components"][0]) == 12
-    assert baseline["architecture"]["strongly_connected_components"][1] == ["core"]
+    assert baseline["architecture"]["edge_count"] == 44
+    assert all(
+        len(component) == 1
+        for component in baseline["architecture"]["strongly_connected_components"]
+    )
     assert len(baseline["console_entrypoints"]) == 51
     assert len(baseline["tracked_launchd_plists"]) == 8
     assets = baseline["source"]["tracked_non_python_assets"]
@@ -2545,11 +2560,11 @@ def test_baseline_records_complete_pre_campaign_inventory(
         row["path"] and row["bytes"] >= 0 and len(row["sha256"]) == 64
         for row in assets["files"]
     )
-    assert assets["frontend_totals"] == {"file_count": 11, "lines": 16979}
+    assert assets["frontend_totals"] == {"file_count": 13, "lines": 18984}
     assert assets["asset_hotspots"][0]["path"] == (
         "src/chronovisor/dashboard_static/cortex.js"
     )
-    assert assets["asset_hotspots"][0]["lines"] == 5606
+    assert assets["asset_hotspots"][0]["lines"] == 5466
 
 
 def test_baseline_labels_repository_contract_hash_semantics(
@@ -2560,7 +2575,7 @@ def test_baseline_labels_repository_contract_hash_semantics(
     schema = hashes["production_schema_manifest"]
     signature = hashes["production_signature_manifest"]
     assert authority["lane_contract_case_manifest_sha256"] == (
-        "7ddc9645664c56b5b1f95714674fafbf35d5d935c4aa476796e5d4dc7953bf83"
+        "46d867f8453606ba5ac2a7a15b0b3ccbc5adf98a184bfdb2e39c5923fb2aca3c"
     )
     assert schema["canonical_mapping_sha256"]["sha256"] == (
         "e83ea1675494d831585ad74ec3dcadcd1cb05ffb97af9ee15582b62140aeaf52"
@@ -2889,7 +2904,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 44
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1415
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1458
     assert {
         field: counts[field]
         for field in (
@@ -2902,7 +2917,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 44,
-        "cross_domain_sites": 1415,
+        "cross_domain_sites": 1458,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,

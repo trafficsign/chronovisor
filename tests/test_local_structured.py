@@ -703,7 +703,7 @@ def test_resource_managed_default_local_emits_one_load_before_context(
     audit_root = tmp_path / "audit"
     _install_default_local_runtime(monkeypatch)
     monkeypatch.setattr(
-        local_structured, "_local_resource_lease_mode", lambda: "exclusive"
+        local_structured, "shared_model_resource_lease_mode", lambda: "exclusive"
     )
     monkeypatch.setattr(
         ollama,

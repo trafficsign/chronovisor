@@ -21,6 +21,7 @@ class ScoredPage:
     superseded_by: str = ""
     page_type: str = "knowledge"
     sensitivity: str = "normal"
+    content_sha256: str = ""
 
 
 _CJK_RANGES = (

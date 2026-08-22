@@ -35,7 +35,7 @@ from chronovisor.core.llm_runtime import (
     safe_metadata_identifier,
 )
 from chronovisor.core.ollama_lease import (
-    model_resource_lease_mode as _local_resource_lease_mode,
+    model_resource_lease_mode as shared_model_resource_lease_mode,
 )
 
 MAX_REPAIR_TURNS = 2
@@ -1045,7 +1045,7 @@ def _default_transport_resource_broker(
 ) -> Iterator[int | None]:
     """Exclusively admit one local-provider runner for a repair session."""
 
-    if _local_resource_lease_mode() == "shared":
+    if shared_model_resource_lease_mode() == "shared":
         raise _StructuredResourceError(
             "capacity_unavailable",
             "standalone structured session cannot upgrade a shared model lease",
@@ -3680,7 +3680,7 @@ class LocalStructuredSession:
             elif not self._uses_default_transport or self._runtime_location == "remote":
                 result = self._run_impl(prompt, schema, **run_kwargs)
             elif self.resource_managed:
-                if _local_resource_lease_mode() != "exclusive":
+                if shared_model_resource_lease_mode() != "exclusive":
                     result = self._failure(
                         "capacity_unavailable",
                         "resource-managed structured session requires "

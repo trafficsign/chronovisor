@@ -40,7 +40,7 @@ from chronovisor.core.llm_runtime import (
     SourceSensitivity,
 )
 from chronovisor.core.llm_security import MAX_REQUEST_TIMEOUT_MS
-from chronovisor.core.ollama_adapter import OllamaAdapter, compose_ollama_runtime
+from chronovisor.core.ollama_adapter import compose_ollama_runtime
 
 NORMAL_PAGE = SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL)
 NORMAL_SNIPPET = SourceDataClassification(
@@ -864,18 +864,11 @@ def test_ollama_adapter_forwards_omitted_chat_format(monkeypatch) -> None:
     }
 
 
-def test_ollama_adapter_exposes_local_control_only_to_runtime(monkeypatch) -> None:
-    adapter = OllamaAdapter()
+def test_ollama_adapter_exposes_only_resource_lease_through_runtime(monkeypatch) -> None:
     monkeypatch.setattr(ollama, "model_resource_lease", lambda **_kwargs: nullcontext())
-    monkeypatch.setattr(ollama, "resident_model_rows", lambda: {"m": (10, 4096)})
-    monkeypatch.setattr(ollama, "unload_named_model", lambda *_args, **_kwargs: True)
-    runtime = LLMRuntime(local_controls={"local": adapter})
+    runtime = compose_ollama_runtime(generation_roles={"local": "qwen:test"})
 
-    control = runtime._local_control_for("local")
-
-    assert control is adapter
-    assert control.resident_models() == {"m": (10, 4096)}
-    assert control.unload("m") is True
-    with control.resource_lease(exclusive=False):
+    with runtime.resource_lease("local", exclusive=False):
         pass
     assert not hasattr(runtime, "unload")
+    assert not hasattr(runtime, "resident_models")

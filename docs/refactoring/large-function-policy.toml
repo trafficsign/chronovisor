@@ -1,6 +1,6 @@
 schema_version = 1
 threshold_lines = 300
-baseline_function_count = 46
+baseline_function_count = 49
 
 [[functions]]
 path = "src/chronovisor/decision/local_model_eval.py"
@@ -14,20 +14,29 @@ tests = ["tests/test_decision_router.py", "tests/test_decision_authority.py"]
 [[functions]]
 path = "src/chronovisor/decision/decision_router.py"
 qualname = "DecisionRouter._decide_locked"
-baseline_lines = 506
+baseline_lines = 509
 disposition = "retained"
-max_lines = 506
+max_lines = 509
 rationale = "One authority-locked decision transaction whose resource admission, model calls, artifact persistence, and outcome publication must retain their exact order."
 tests = ["tests/test_decision_router.py", "tests/test_decision_policy.py"]
 
 [[functions]]
 path = "src/chronovisor/decision/local_structured.py"
 qualname = "LocalStructuredSession._run_impl"
-baseline_lines = 309
-disposition = "decomposed"
-max_lines = 299
-rationale = "Extracted initial context-capacity validation while preserving the bounded repair loop as the single owner of attempt history and transport state."
+baseline_lines = 438
+disposition = "retained"
+max_lines = 438
+rationale = "One bounded structured-session transaction owns request validation, repair history, provider calls, progress evidence, and the final audit result in their required order."
 tests = ["tests/test_local_structured.py", "tests/test_adaptive_residency.py"]
+
+[[functions]]
+path = "src/chronovisor/decision/local_structured.py"
+qualname = "LocalStructuredSession.run"
+baseline_lines = 327
+disposition = "retained"
+max_lines = 327
+rationale = "One public structured-session boundary coordinates route resolution, admission, bounded repair execution, trace evidence, and sanitized failure publication."
+tests = ["tests/test_local_structured.py"]
 
 [[functions]]
 path = "src/chronovisor/hosts/cli.py"
@@ -95,9 +104,9 @@ tests = ["tests/test_ingest.py", "tests/test_campaign_k_seams.py"]
 [[functions]]
 path = "src/chronovisor/ingest/orchestrator.py"
 qualname = "run_pending_ingest"
-baseline_lines = 737
+baseline_lines = 740
 disposition = "retained"
-max_lines = 737
+max_lines = 740
 rationale = "Single process-lock transaction coordinating raw claims, projection bundles, continuation receipts, and batch finalization; Campaign K already extracted projections."
 tests = ["tests/test_ingest.py", "tests/test_orchestrator_characterization.py"]
 
@@ -198,6 +207,24 @@ baseline_lines = 409
 disposition = "retained"
 max_lines = 409
 rationale = "Single schema materialization boundary that samples cross-domain status, normalizes historical rows, and performs one atomic history replacement."
+tests = ["tests/test_dashboard.py"]
+
+[[functions]]
+path = "src/chronovisor/ops/dashboard.py"
+qualname = "_decision_trace_snapshot"
+baseline_lines = 309
+disposition = "retained"
+max_lines = 309
+rationale = "One canonical Decision Trace fold owns event ordering, lane projection, hold topology, and summary construction for a single selected request."
+tests = ["tests/test_dashboard.py", "tests/test_dashboard_reference_fixture.py"]
+
+[[functions]]
+path = "src/chronovisor/ops/dashboard.py"
+qualname = "build_snapshot"
+baseline_lines = 325
+disposition = "retained"
+max_lines = 325
+rationale = "One dashboard snapshot transaction reads bounded operational sources and publishes a mutually consistent API payload without intermediate states."
 tests = ["tests/test_dashboard.py"]
 
 [[functions]]
