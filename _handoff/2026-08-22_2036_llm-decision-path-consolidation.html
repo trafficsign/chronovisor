@@ -61,13 +61,13 @@ th{background:#f3f1eb}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_0d301bb852814f2a930362020eda87d4","created_at":"2026-08-22T20:36:35+09:00","状態":"running","slug":"llm-decision-path-consolidation"}
+{"task_id":"plan_0d301bb852814f2a930362020eda87d4","created_at":"2026-08-22T20:36:35+09:00","状態":"done","slug":"llm-decision-path-consolidation"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor LLM実行・判断経路の一本化</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="running">running</span>
+<span class="badge" data-bind="状態" data-state="done">done</span>
 <span><code data-bind="task_id">plan_0d301bb852814f2a930362020eda87d4</code></span>
 <span data-bind="created_at">2026-08-22T20:36:35+09:00</span>
 </div>
@@ -159,7 +159,7 @@ Caller → LocalStructuredSession → LLMRuntime → Provider adapter → trace 
 <li><input type="checkbox" checked><span><strong>Phase 5 — 互換コードと設定を削除する。</strong> 移行済みselector parser、default model定数、feature wrapper、Dashboard fallback、古いtest fixture/docsを削る。新APIが旧経路を二つ以上消せない場合は追加せず、callsite側の直接利用を選ぶ。production codeの重複が増えたphaseは完了扱いにしない。</span></li>
 <li><input type="checkbox" checked><span><strong>Phase 5 Gate — 静的inventoryを0または明示allowlistにする。</strong> productionからのdirect provider call、<code>[llm.roles.*]</code>外のgeneration model selector、独自structured repair、model-authored durable payload、Dashboard semantic fallbackを <code>rg</code> とテストで検査する。allowlistには理由と削除条件を残す。</span></li>
 
-<li><input type="checkbox"><span><strong>Phase 6 — 全検証、commit、必要時のみdeployする。</strong> 各phaseを独立commitし、targeted suite、ruff、mypy、隔離rootで全pytestを通す。pushは明示依頼がある場合だけ行う。deploy時はlive configをrole-onlyへ原子的に更新し、push → service restart → archive commit → health → live route/Trace/Recall確認の順で照合する。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 6 — 全検証、commit、必要時のみdeployする。</strong> 各phaseを独立commitし、targeted suite、ruff、mypy、隔離rootで全pytestを通す。pushは明示依頼がある場合だけ行う。deploy時はlive configをrole-onlyへ原子的に更新し、push → service restart → archive commit → health → live route/Trace/Recall確認の順で照合する。</span></li>
 </ol>
 </section>
 
@@ -254,6 +254,9 @@ CHRONOVISOR_ROOT="$(mktemp -d -t chronovisor-test)" uv run pytest -q</pre>
 <li><time>2026-08-22 21:36</time><span>Phase 3完了。全model-backed effect laneを監査し、Ingest selector materialization、exact host proposal echo、post-quorum revalidation、sealed artifact、authority/effect lockで未検証model-authored bytes/path/mutationを遮断済みと確認。新materializerおよびcontract version bumpは不要。effect境界suite 412 passed、既存adoption evidenceはexpected-effect match 1.0 / unsafe flip 0。</span></li>
 <li><time>2026-08-22 22:10</time><span>Phase 4完了。session/decision/artifact/replay/machine receiptがprovider/model/revision/contract/holdを正規trace eventへ記録し、Dashboardはtrace-eventsだけをsemantic truthとしてfoldするよう変更。processing_activityおよびaudit historyからの意味的補完を停止。関連unit/API 314 passed、ruff成功。一時rootの実ブラウザでoMLX二者合意、Artifact → Decision、6 canonical events、console error 0を確認。</span></li>
 <li><time>2026-08-22 22:44</time><span>Phase 5完了。Decision Traceの<code>processing_activity</code>推測、旧Embedding selector/default、Research ResourceConfig/Ollama調整、LocalPlanner model引数、Recall improvement models引数、旧fixture/docsを削除し、差分は69 additions / 689 deletions。live configから未参照Ollama providerとembedding selectorを除去し、44 roles中generation 39件すべてoMLXを再確認。関連619 passed、ruff成功、Dashboard semantic fallback 0、durable effect unsafe flip 0。direct provider callはadapter/eval/lab/burn/probeだけをallowlistとし各専用機能のruntime化時に削除、旧ingest generate transportはinjected test seamだけに残しfixtureがChatTransportを直接注入した時点で削除する。</span></li>
+<li><time>2026-08-22 23:32</time><span>live Dashboardでplan/context/reasoningとlane進行の不整合を再現。server snapshotに加えてbrowser側がeventを再foldし、seal/pair/context/path stateを再推測する二重状態機械が残っていたため、Phase 4/5の完了判定を撤回。正規projectionをserver側の単一契約にし、browserを状態適用だけへ縮退するarchitecture修正を開始。</span></li>
+<li><time>2026-08-23 00:01</time><span>Phase 4/5を再完了。versionedな<code>chronovisor.decision-trace-projection.v1</code>をserver snapshotへ追加し、browser側のevent replay、same-request merge、pair/quorum/seal/context/reasoning/repair推測を削除。rendererは完全projectionをDOMへ適用するだけとし、各pollで全要素をpendingへ戻す処理とselected coreのopacity transitionも除去した。A–H全8状態の実Chrome回帰で全path・全lane railがprojectionと一致し、選択済みcontext/reasoning coreはopacity 1、未選択coreは0を確認。</span></li>
+<li><time>2026-08-23 00:14</time><span>Phase 6完了。projection unitは85 statements / 8 branchesともcoverage 100%、targeted 166 passed、隔離rootの全pytestは5088 passed / 1 skipped。全ruff、設定済みmypy 89 files、import-linter、architecture/refactor contracts 36 passed、compileall、diff checkを通過。作業ツリー版を一時portで実データへ接続し、ready traceの65K context・reasoning low・全path stateがAPI projectionとDOMで一致、両selected core opacity 1を確認。push/restartは明示依頼がないため実施せず、通常運用URLは既存runtimeのまま維持。</span></li>
 </ol>
 </section>
 

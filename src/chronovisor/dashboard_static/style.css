@@ -3318,6 +3318,7 @@ canvas {
   opacity: 0;
   filter: none;
   pointer-events: none;
+  transition: none;
 }
 
 .decision-trace-harness .trace-context-option.active .trace-selected-core,

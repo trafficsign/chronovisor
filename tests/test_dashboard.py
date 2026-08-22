@@ -1162,6 +1162,14 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
     ]
     assert trace["overall"][2]["status"] == "done"
     assert trace["overall"][3]["status"] == "active"
+    assert trace["projection"]["schema"] == "chronovisor.decision-trace-projection.v1"
+    assert trace["projection"]["context"]["selected_tokens"] == 32_768
+    assert trace["projection"]["reasoning"]["selected"] == "high"
+    assert trace["projection"]["model_routes"] == {
+        "primary": "done",
+        "challenger": "active",
+        "tie_break": "pending",
+    }
     repair_steps = dashboard._decision_trace_steps("active", phase="repair")
     assert repair_steps[3]["status"] == "done"
     assert repair_steps[4]["status"] == "active"
@@ -2176,6 +2184,8 @@ def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> N
     assert trace["overall"][4]["status"] == "done"
     assert trace["overall"][5]["status"] == "done"
     assert trace["overall"][6]["status"] == "done"
+    assert trace["projection"]["nodes"]["artifact"] == "done"
+    assert trace["projection"]["paths"]["pair-artifact-join"] == "done"
 
     held = {
         **decision,
@@ -2188,6 +2198,8 @@ def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> N
     held_trace = dashboard._decision_trace_snapshot([], [held], held)
     assert held_trace["lanes"][2]["state"] == "skipped"
     assert held_trace["lanes"][2]["detail"] == "Decision held without tie-break"
+    assert held_trace["projection"]["nodes"]["hold"] == "error"
+    assert held_trace["projection"]["paths"]["quorum-hold"] == "error"
 
 
 def test_decision_trace_hides_legacy_and_artifact_replay_reasoning(
@@ -2344,6 +2356,7 @@ def test_decision_trace_marks_only_artifact_publish_failure_after_artifact() -> 
     assert trace["outcome"]["reason"] == "Decision artifact seal failed"
     assert trace["outcome"]["code"] == "canonical_decision_artifact_publish_failed"
     assert all(lane["context_tokens"] is None for lane in trace["lanes"])
+    assert trace["projection"]["nodes"]["seal"] == "error"
 
     no_quorum_decision = {
         **decision,
@@ -2360,6 +2373,7 @@ def test_decision_trace_marks_only_artifact_publish_failure_after_artifact() -> 
     )
     assert no_quorum["overall"][-2]["status"] == "skipped"
     assert no_quorum["overall"][-1]["status"] == "skipped"
+    assert no_quorum["projection"]["paths"]["quorum-hold"] == "error"
 
 
 def test_decision_trace_folds_canonical_artifact_failure_event() -> None:
@@ -2755,7 +2769,9 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert ".decision-outcome-facts" in style
     assert ".decision-transition-event.current" in style
     assert "function updateDecisionSvgHarness" in app
-    assert "const decisionTracePlayback" in app
+    assert "DECISION_TRACE_PROJECTION_SCHEMA" in app
+    assert "const decisionTracePlayback" not in app
+    assert "mergeDecisionTraceSnapshot" not in app
     assert "const ACTIVE_DECISION_REFRESH_DELAY_MS = 800" in app
     assert 'fetch("/api/local-consensus"' in app
     assert 'new EventSource("/api/activity-stream")' in app
@@ -2765,8 +2781,8 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "els.held.textContent = fmt(held);" in app
     assert "${semanticDeferred} semantic · ${operationalDeferred} operational" in app
     assert "grid-template-columns: repeat(5, minmax(0, 1fr));" in style
-    assert "No synthetic progress" in app
-    assert 'lane.think = fmt(event.think, "—").toLowerCase();' in app
+    assert "projection.paths" in app
+    assert "projection.model_routes" in app
     assert ".decision-trace-panel" in style
     assert ".processing-lane.active" in style
     assert "processing-electric-pulse" in style
@@ -3094,6 +3110,7 @@ def test_live_model_status_survives_later_stale_full_render() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
     hooks = """
 const seen = [];
+let current = {};
 const noop = () => {};
 setState = noop;
 renderWorkStatus = noop;
@@ -3225,8 +3242,7 @@ drawBatchChart = noop;
 renderDecisionTrace = (consensus) => {
   const trace = consensus.decision_trace || {};
   const steps = decisionTimelineSteps(trace).map((step) => step.label);
-  decisionTracePlayback.request = String(trace.request_sha256 || "");
-  decisionTracePlayback.current = { request_sha256: trace.request_sha256, steps };
+  current = { request_sha256: trace.request_sha256, steps };
   seen.push({ request: trace.request_sha256, steps });
 };
 """
@@ -3249,7 +3265,7 @@ const sandbox = {{
 vm.createContext(sandbox);
 vm.runInContext(
   {json.dumps(renderer + hooks + live_helper)}
-    + "\\nthis.__test = {{ render, renderLiveConsensus, seen, playback: () => decisionTracePlayback }};",
+    + "\\nthis.__test = {{ render, renderLiveConsensus, seen, current: () => current }};",
   sandbox,
 );
 const live = {{
@@ -3287,7 +3303,7 @@ sandbox.__test.render({{
 }});
 process.stdout.write(JSON.stringify({{
   seen: sandbox.__test.seen,
-  playback: sandbox.__test.playback(),
+  current: sandbox.__test.current(),
 }}));
 """
 
@@ -3296,8 +3312,8 @@ process.stdout.write(JSON.stringify({{
 
     assert [row["request"] for row in result["seen"]] == ["f749", "f749"]
     assert result["seen"][-1]["steps"] == ["Packet", "Challenger Generate #1"]
-    assert result["playback"]["request"] == "f749"
-    assert result["playback"]["current"]["steps"] == [
+    assert result["current"]["request_sha256"] == "f749"
+    assert result["current"]["steps"] == [
         "Packet",
         "Challenger Generate #1",
     ]
@@ -3360,589 +3376,46 @@ process.stdout.write(JSON.stringify({{
     assert result["idleFallback"] == ""
 
 
-def test_decision_trace_same_request_polls_merge_monotonically() -> None:
-    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
-    scenario = f"""
-const vm = require("node:vm");
-const clearedTimers = [];
-const sandbox = {{
-  window: {{
-    matchMedia: () => ({{ matches: true }}),
-    clearTimeout: (timer) => clearedTimers.push(timer),
-  }},
-  document: {{ visibilityState: "visible" }},
-}};
-vm.createContext(sandbox);
-vm.runInContext(
-  {json.dumps(renderer)}
-    + `
-renderDecisionTraceFrame = () => {{}};
-renderDecisionTransitionFeed = () => {{}};
-setDecisionTransitionState = () => {{}};
-this.__test = {{ renderDecisionTrace, playback: decisionTracePlayback }};`,
-  sandbox,
-);
-const stepKeys = ["trigger", "load", "context", "generate", "validate", "vote"];
-const lane = (key, state = "active") => ({{
-  key,
-  label: key,
-  model: `${{key}}:model`,
-  state,
-  steps: stepKeys.map((step) => ({{ key: step, status: "pending" }})),
-}});
-const event = (id, laneKey, phase, milliseconds, extra = {{}}) => ({{
-  event_id: id,
-  lane: laneKey,
-  phase,
-  kind: "phase",
-  status: "active",
-  overall_key: ["trigger", "load"].includes(phase) ? "dispatch" : "generate",
-  timestamp: `2026-08-12T00:00:0${{milliseconds}}.000Z`,
-  ...extra,
-}});
-const overall = () => ["packet", "dispatch", "generate", "validate", "quorum"]
-  .map((key) => ({{ key, status: "pending" }}));
-const request = "shared-request";
-const render = (decision_trace) => sandbox.__test.renderDecisionTrace({{ decision_trace }});
-const snapshot = () => ({{
-  request: sandbox.__test.playback.request,
-  state: sandbox.__test.playback.current.state,
-  startedAt: sandbox.__test.playback.current.started_at || null,
-  seen: [...sandbox.__test.playback.seen].sort(),
-  queued: sandbox.__test.playback.queue.map((item) => item.event_id),
-  timer: sandbox.__test.playback.timer,
-  clearedTimers: [...clearedTimers],
-  eventIds: sandbox.__test.playback.target.events.map((item) => item.event_id),
-  eventStatuses: Object.fromEntries(sandbox.__test.playback.target.events.map((item) => [
-    item.event_id,
-    item.status,
-  ])),
-  eventThink: Object.fromEntries(sandbox.__test.playback.target.events.map((item) => [
-    item.event_id,
-    item.think || null,
-  ])),
-  lanes: Object.fromEntries(sandbox.__test.playback.current.lanes.map((item) => [
-    item.key,
-    item.steps.map((step) => step.status),
-  ])),
-}});
-
-render({{
-  request_sha256: request,
-  state: "active",
-  active: true,
-  overall: overall(),
-  lanes: [lane("primary")],
-  events: [
-    event("p-trigger", "primary", "trigger", 1),
-    event("p-load", "primary", "load", 2),
-    event("p-context", "primary", "context", 3),
-    event("p-generate", "primary", "generate", 4),
-  ],
-}});
-const primary = snapshot();
-
-render({{
-  request_sha256: request,
-  state: "active",
-  active: true,
-  overall: overall(),
-  lanes: [lane("challenger")],
-  events: [
-    event("c-trigger", "challenger", "trigger", 1),
-    event("c-load", "challenger", "load", 2),
-    event("c-context", "challenger", "context", 3),
-    event("c-generate", "challenger", "generate", 5),
-  ],
-}});
-const interleaved = snapshot();
-
-render({{
-  request_sha256: request,
-  state: "active",
-  active: true,
-  overall: overall(),
-  lanes: [lane("tie_break")],
-  events: [
-    event("t-trigger", "tie_break", "trigger", 6),
-    event("t-load", "tie_break", "load", 7),
-  ],
-}});
-const allLanes = snapshot();
-
-render({{
-  request_sha256: request,
-  state: "active",
-  active: true,
-  overall: overall(),
-  lanes: [lane("primary", "pending")],
-  events: [event(
-    "p-trigger",
-    "primary",
-    "trigger",
-    1,
-    {{ think: "medium", context_tokens: 65536 }},
-  )],
-}});
-const stale = snapshot();
-
-render({{
-  request_sha256: request,
-  state: "agreed",
-  active: false,
-  summary: "sealed",
-  started_at: "2026-08-12T00:00:00.000Z",
-  updated_at: "2026-08-12T00:00:09.000Z",
-  overall: overall(),
-  lanes: [lane("primary", "done"), lane("challenger", "done")],
-  events: [{{
-    event_id: "decision",
-    lane: null,
-    phase: "decision",
-    kind: "decision",
-    status: "done",
-    overall_key: "decision",
-    timestamp: "2026-08-12T00:00:09.000Z",
-  }}],
-}});
-const terminal = snapshot();
-
-render({{
-  request_sha256: request,
-  state: "active",
-  active: true,
-  overall: overall(),
-  lanes: [lane("primary", "pending")],
-  events: [
-    event("p-trigger", "primary", "trigger", 1),
-    {{
-      event_id: "decision",
-      lane: null,
-      phase: "decision",
-      kind: "decision",
-      status: "active",
-      overall_key: "decision",
-      timestamp: "2026-08-12T00:00:09.000Z",
-    }},
-  ],
-}});
-const lateActive = snapshot();
-
-render({{
-  request_sha256: "other-request",
-  state: "active",
-  active: true,
-  overall: overall(),
-  lanes: [lane("primary")],
-  events: [event("other-trigger", "primary", "trigger", 1)],
-}});
-const other = snapshot();
-render({{
-  request_sha256: request,
-  state: "active",
-  active: true,
-  overall: overall(),
-  lanes: [lane("primary", "pending")],
-  events: [event("p-trigger", "primary", "trigger", 1)],
-}});
-const returned = snapshot();
-sandbox.__test.playback.timer = 99;
-render({{
-  request_sha256: request,
-  state: "active",
-  active: true,
-  started_at: "2026-08-12T00:00:10.000Z",
-  updated_at: "2026-08-12T00:00:10.000Z",
-  overall: overall(),
-  lanes: [lane("primary")],
-  events: [event(
-    "next-trigger",
-    "primary",
-    "trigger",
-    9,
-    {{ timestamp: "2026-08-12T00:00:11.000Z" }},
-  )],
-}});
-const repeatedHash = snapshot();
-process.stdout.write(JSON.stringify({{
-  primary,
-  interleaved,
-  allLanes,
-  stale,
-  terminal,
-  lateActive,
-  other,
-  returned,
-  repeatedHash,
-}}));
-"""
-
-    completed = _run_node_scenario(scenario)
-    result = json.loads(completed.stdout)
-
-    assert result["primary"]["lanes"]["primary"] == [
-        "done",
-        "done",
-        "done",
-        "active",
-        "pending",
-        "pending",
-    ]
-    assert (
-        result["interleaved"]["lanes"]["primary"]
-        == result["primary"]["lanes"]["primary"]
-    )
-    assert result["interleaved"]["lanes"]["challenger"] == [
-        "done",
-        "done",
-        "done",
-        "active",
-        "pending",
-        "pending",
-    ]
-    assert set(result["allLanes"]["lanes"]) == {"primary", "challenger", "tie_break"}
-    assert result["allLanes"]["lanes"]["tie_break"] == [
-        "done",
-        "active",
-        "pending",
-        "pending",
-        "pending",
-        "pending",
-    ]
-    assert result["stale"]["lanes"] == result["allLanes"]["lanes"]
-    assert result["stale"]["eventThink"]["p-trigger"] == "medium"
-    assert set(result["stale"]["eventIds"]) == {
-        "p-trigger",
-        "p-load",
-        "p-context",
-        "p-generate",
-        "c-trigger",
-        "c-load",
-        "c-context",
-        "c-generate",
-        "t-trigger",
-        "t-load",
-    }
-    assert result["terminal"]["state"] == "agreed"
-    assert result["lateActive"]["state"] == "agreed"
-    assert result["lateActive"]["eventIds"] == result["terminal"]["eventIds"]
-    assert result["lateActive"]["eventStatuses"]["decision"] == "done"
-    assert result["other"]["request"] == "other-request"
-    assert result["other"]["eventIds"] == ["other-trigger"]
-    assert set(result["other"]["lanes"]) == {"primary"}
-    assert result["returned"]["request"] == "shared-request"
-    assert result["returned"]["state"] == "agreed"
-    assert result["returned"]["eventIds"] == result["terminal"]["eventIds"]
-    assert result["repeatedHash"]["state"] == "active"
-    assert result["repeatedHash"]["eventIds"] == ["next-trigger"]
-    assert result["repeatedHash"]["startedAt"] == "2026-08-12T00:00:10.000Z"
-    assert result["repeatedHash"]["seen"] == ["next-trigger"]
-    assert result["repeatedHash"]["queued"] == []
-    assert result["repeatedHash"]["timer"] is None
-    assert result["repeatedHash"]["clearedTimers"] == [99]
-
-
-def test_decision_trace_keeps_an_observed_load_across_partial_polls() -> None:
+def test_decision_trace_renderer_applies_each_authoritative_snapshot_directly() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
     scenario = f"""
 const vm = require("node:vm");
 const sandbox = {{
   window: {{ matchMedia: () => ({{ matches: true }}) }},
   document: {{ visibilityState: "visible" }},
+  frames: [],
 }};
 vm.createContext(sandbox);
 vm.runInContext(
   {json.dumps(renderer)}
     + `
-renderDecisionTraceFrame = () => {{}};
+renderDecisionTraceFrame = (trace) => frames.push({{
+  request: trace.request_sha256,
+  events: (trace.events || []).map((event) => event.event_id),
+}});
 renderDecisionTransitionFeed = () => {{}};
 setDecisionTransitionState = () => {{}};
-this.__test = {{ renderDecisionTrace, playback: decisionTracePlayback }};`,
+this.__test = {{ renderDecisionTrace, frames }};`,
   sandbox,
 );
-const stepKeys = ["trigger", "load", "context", "generate", "validate", "vote"];
-const event = (event_id, phase) => ({{
-  event_id,
-  lane: "primary",
-  phase,
-  kind: "phase",
-  status: "active",
-  overall_key: ["trigger", "load"].includes(phase) ? "dispatch" : "generate",
-}});
-const trace = (phase, events) => ({{
-  request_sha256: "partial-poll-request",
-  state: "active",
-  active: true,
-  events,
-  overall: ["packet", "dispatch", "generate", "validate", "quorum"]
-    .map((key) => ({{ key, status: "pending" }})),
-  lanes: [{{
-    key: "primary",
-    label: "Primary",
-    model: "primary:model",
-    state: "active",
-    phase,
-    steps: stepKeys.map((key) => ({{
-      key,
-      status: key === phase ? "active"
-        : stepKeys.indexOf(key) < stepKeys.indexOf(phase) ? "done" : "pending",
-    }})),
-  }}],
-}});
-const render = (value) => sandbox.__test.renderDecisionTrace({{ decision_trace: value }});
-const steps = () => sandbox.__test.playback.current.lanes[0].steps.map((step) => step.status);
-
-render(trace("load", [event("trigger", "trigger")]));
-const duringLoad = steps();
-render(trace("generate", [
-  event("trigger", "trigger"),
-  event("context", "context"),
-  event("generate", "generate"),
-]));
-const duringGenerate = steps();
-process.stdout.write(JSON.stringify({{ duringLoad, duringGenerate }}));
+sandbox.__test.renderDecisionTrace({{ decision_trace: {{
+  request_sha256: "same",
+  events: [{{ event_id: "trigger" }}, {{ event_id: "load" }}],
+}} }});
+sandbox.__test.renderDecisionTrace({{ decision_trace: {{
+  request_sha256: "same",
+  events: [{{ event_id: "generate" }}],
+}} }});
+process.stdout.write(JSON.stringify(sandbox.__test.frames));
 """
-
     completed = _run_node_scenario(scenario)
 
-    assert json.loads(completed.stdout) == {
-        "duringLoad": ["done", "active", "pending", "pending", "pending", "pending"],
-        "duringGenerate": ["done", "done", "done", "active", "pending", "pending"],
-    }
-
-
-def test_decision_trace_same_hash_reset_uses_terminal_and_execution_boundaries() -> (
-    None
-):
-    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
-    scenario = f"""
-const vm = require("node:vm");
-const sandbox = {{ window: {{ matchMedia: () => ({{ matches: true }}) }} }};
-vm.createContext(sandbox);
-vm.runInContext(
-  {json.dumps(renderer)}
-    + "\\nthis.__test = {{ decisionTraceIsTerminal, decisionTraceStartsNewExecution }};",
-  sandbox,
-);
-const event = (event_id, timestamp) => ({{ event_id, timestamp }});
-const terminal = {{
-  state: "agreed",
-  active: false,
-  started_at: "2026-08-12T00:00:00.000Z",
-  updated_at: "2026-08-12T00:00:09.000Z",
-  events: [event("decision", "2026-08-12T00:00:09.000Z")],
-}};
-process.stdout.write(JSON.stringify({{
-  terminalStates: {{
-    agreed: sandbox.__test.decisionTraceIsTerminal({{ state: "agreed" }}),
-    quarantined: sandbox.__test.decisionTraceIsTerminal({{ state: "quarantined" }}),
-    readySingle: sandbox.__test.decisionTraceIsTerminal({{
-      state: "ready", quorum_flow: false,
-    }}),
-    readyQuorum: sandbox.__test.decisionTraceIsTerminal({{
-      state: "ready", quorum_flow: true,
-    }}),
-    idle: sandbox.__test.decisionTraceIsTerminal({{ state: "idle", active: false }}),
-  }},
-  newerStart: sandbox.__test.decisionTraceStartsNewExecution(terminal, {{
-    state: "active",
-    active: true,
-    started_at: "2026-08-12T00:00:10.000Z",
-    events: [event("decision", "2026-08-12T00:00:09.000Z")],
-  }}),
-  newerEvent: sandbox.__test.decisionTraceStartsNewExecution(terminal, {{
-    state: "active",
-    active: true,
-    started_at: terminal.started_at,
-    events: [event("next-trigger", "2026-08-12T00:00:10.000Z")],
-  }}),
-  staleEvent: sandbox.__test.decisionTraceStartsNewExecution(terminal, {{
-    state: "active",
-    active: true,
-    started_at: terminal.started_at,
-    events: [event("late-old-poll", "2026-08-12T00:00:08.000Z")],
-  }}),
-}}));
-"""
-
-    completed = _run_node_scenario(scenario)
-
-    assert json.loads(completed.stdout) == {
-        "terminalStates": {
-            "agreed": True,
-            "quarantined": True,
-            "readySingle": True,
-            "readyQuorum": False,
-            "idle": False,
-        },
-        "newerStart": True,
-        "newerEvent": True,
-        "staleEvent": False,
-    }
-
-
-def test_decision_trace_frame_prefers_terminal_vote_facts() -> None:
-    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
-    scenario = f"""
-const vm = require("node:vm");
-const element = () => ({{ textContent: "", dataset: {{}}, title: "" }});
-const els = new Proxy({{}}, {{
-  get(target, key) {{
-    if (!(key in target)) target[key] = element();
-    return target[key];
-  }},
-}});
-const sandbox = {{
-  window: {{ matchMedia: () => ({{ matches: false }}) }},
-  document: {{ visibilityState: "visible" }},
-  els,
-}};
-vm.createContext(sandbox);
-vm.runInContext(
-  {json.dumps(renderer)}
-    + `
-updateDecisionSvgHarness = () => {{}};
-updateProcessingTraceSelection = () => {{}};
-setWorkState = () => {{}};
-this.__test = {{ renderDecisionTraceFrame, els }};`,
-  sandbox,
-);
-const capture = (trace) => {{
-  sandbox.__test.renderDecisionTraceFrame({{
-    request_sha256: "terminal-request",
-    overall: [{{ key: "decision", label: "Decision", status: "done" }}],
-    outcome: {{}},
-    ...trace,
-  }});
-  return {{
-    badge: sandbox.__test.els.decisionBadge.textContent,
-    modelCalls: sandbox.__test.els.decisionModelCalls.textContent,
-    quorum: sandbox.__test.els.decisionQuorum.textContent,
-  }};
-}};
-process.stdout.write(JSON.stringify({{
-  terminal: capture({{
-    state: "agreed",
-    active: false,
-    vote_count: 3,
-    valid_votes: 2,
-    tie_break_used: true,
-    lanes: [],
-  }}),
-  activeTie: capture({{
-    state: "active",
-    active: true,
-    vote_count: 3,
-    valid_votes: 2,
-    tie_break_used: false,
-    lanes: [{{ key: "tie_break", state: "active" }}],
-  }}),
-  singleModel: capture({{
-    state: "active",
-    active: true,
-    quorum_flow: false,
-    vote_count: 1,
-    valid_votes: 1,
-    lanes: [{{ key: "primary", state: "done" }}],
-  }}),
-}}));
-"""
-
-    completed = _run_node_scenario(scenario)
-
-    assert json.loads(completed.stdout) == {
-        "terminal": {"badge": "APPROVED", "modelCalls": "3", "quorum": "2 / 3"},
-        "activeTie": {"badge": "RESOLVING", "modelCalls": "3", "quorum": "2 / 3"},
-        "singleModel": {"badge": "WAITING", "modelCalls": "1", "quorum": "1 / 1"},
-    }
-    assert 'hold: safeNoQuorum || sealFailure ? "error" : "pending"' in renderer
-
-
-def test_decision_trace_reasoning_unknown_uses_bypass_route() -> None:
-    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
-    helper = (
-        "function decisionReasoningPlanState"
-        + renderer.split("function decisionReasoningPlanState", 1)[1].split(
-            "function updateDecisionSvgHarness", 1
-        )[0]
-    )
-    scenario = f"""
-const vm = require("node:vm");
-const sandbox = {{}};
-vm.createContext(sandbox);
-vm.runInContext(
-  {json.dumps(helper)} + "\\nthis.reasoningState = decisionReasoningPlanState;",
-  sandbox,
-);
-process.stdout.write(JSON.stringify({{
-  high: sandbox.reasoningState({{ think: "HIGH" }}, "done"),
-  unknown: sandbox.reasoningState({{ think: "adaptive" }}, "done"),
-  absent: sandbox.reasoningState(null, "active"),
-}}));
-"""
-
-    completed = _run_node_scenario(scenario)
-
-    assert json.loads(completed.stdout) == {
-        "high": {
-            "mode": "high",
-            "route": "high",
-            "fit": "done",
-        },
-        "unknown": {
-            "mode": "off",
-            "route": "off",
-            "fit": "done",
-        },
-        "absent": {
-            "mode": "off",
-            "route": "",
-            "fit": "pending",
-        },
-    }
-    assert '["plan-dispatch", planState]' in renderer
-    assert '["plan-dispatch", fitState]' not in renderer
-
-
-def test_decision_trace_pair_branches_require_observed_vote_truth() -> None:
-    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
-    helper = (
-        "function fmt"
-        + renderer.split("function fmt", 1)[1].split("function shortName", 1)[0]
-        + "function decisionPairBranchStates"
-        + renderer.split("function decisionPairBranchStates", 1)[1].split(
-            "function updateDecisionSvgHarness", 1
-        )[0]
-    )
-    scenario = f"""
-const vm = require("node:vm");
-const sandbox = {{}};
-vm.createContext(sandbox);
-vm.runInContext(
-  {json.dumps(helper)} + "\\nthis.pairStates = decisionPairBranchStates;",
-  sandbox,
-);
-const pair = (trace, state = "pending") => sandbox.pairStates(trace, {{ state }});
-process.stdout.write(JSON.stringify({{
-  artifactOnly: pair({{ pair_agreement: null, quorum_attempted: true }}),
-  explicitYes: pair({{ pair_agreement: true, quorum_attempted: true }}),
-  explicitNo: pair({{ pair_agreement: false, quorum_attempted: true }}),
-  unattemptedNo: pair({{ pair_agreement: false, quorum_attempted: false }}),
-  activeTie: pair({{ pair_agreement: null, tie_break_used: false }}, "active"),
-  finishedTie: pair({{ pair_agreement: null, tie_break_used: true }}, "done"),
-}}));
-"""
-
-    completed = _run_node_scenario(scenario)
-
-    assert json.loads(completed.stdout) == {
-        "artifactOnly": {"tieObserved": False, "yes": "pending", "no": "pending"},
-        "explicitYes": {"tieObserved": False, "yes": "done", "no": "pending"},
-        "explicitNo": {"tieObserved": False, "yes": "pending", "no": "done"},
-        "unattemptedNo": {"tieObserved": False, "yes": "pending", "no": "pending"},
-        "activeTie": {"tieObserved": True, "yes": "pending", "no": "active"},
-        "finishedTie": {"tieObserved": True, "yes": "pending", "no": "done"},
-    }
+    assert json.loads(completed.stdout) == [
+        {"request": "same", "events": ["trigger", "load"]},
+        {"request": "same", "events": ["generate"]},
+    ]
+    assert "mergeDecisionTraceSnapshot" not in renderer
+    assert "decisionTracePlayback" not in renderer
 
 
 def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() -> None:
@@ -3966,103 +3439,6 @@ def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() 
     assert ".decision-trace-harness .decision-model," in style
     assert ".decision-trace-harness .decision-think," in style
     assert "fill: #687784;\n  font-size: 8px;" in style
-
-
-def test_decision_trace_replay_uses_only_observed_context_metadata() -> None:
-    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
-    scenario = f"""
-const vm = require("node:vm");
-const sandbox = {{ window: {{ matchMedia: () => ({{ matches: false }}) }} }};
-vm.createContext(sandbox);
-vm.runInContext(
-  {json.dumps(renderer)}
-    + "\\nthis.__test = {{ decisionTraceBlank, applyDecisionTransition }};",
-  sandbox,
-);
-const target = {{
-  request_sha256: "request",
-  task_role: "ingest_review",
-  overall: [
-    {{ key: "dispatch", status: "done" }},
-    {{ key: "generate", status: "done" }},
-    {{ key: "validate", status: "done" }},
-    {{ key: "quorum", status: "done" }},
-  ],
-  context_tokens: 131072,
-  events: [
-    {{ event_id: "trigger", lane: "primary", phase: "trigger", kind: "phase", status: "active", overall_key: "dispatch" }},
-    {{ event_id: "load", lane: "primary", phase: "load", kind: "phase", status: "active", overall_key: "dispatch" }},
-    {{ event_id: "context", lane: "primary", phase: "context", kind: "phase", status: "active", overall_key: "generate", think: "medium", required_context_tokens: 12000, requested_context_tokens: 32768, context_tokens: 32768 }},
-    {{ event_id: "generate", lane: "primary", phase: "generate", kind: "phase", status: "active", overall_key: "generate", think: "medium", required_context_tokens: 12000, requested_context_tokens: 32768, context_tokens: 32768 }},
-  ],
-  lanes: [
-    {{
-      key: "primary",
-      label: "Primary",
-      model: "primary:model",
-      think: "high",
-      required_context_tokens: 64000,
-      requested_context_tokens: 131072,
-      context_tokens: 131072,
-      steps: ["trigger", "load", "context", "generate", "validate", "vote"].map(
-        (key) => ({{ key, status: "done" }}),
-      ),
-    }},
-    {{ key: "challenger", think: "low", steps: [] }},
-    {{ key: "tie_break", think: "off", steps: [] }},
-  ],
-}};
-const blank = sandbox.__test.decisionTraceBlank(target);
-let frame = blank;
-const observed = {{}};
-for (const event of target.events) {{
-  frame = sandbox.__test.applyDecisionTransition(frame, target, event);
-  observed[event.phase] = {{
-    think: frame.lanes[0].think,
-    required: frame.lanes[0].required_context_tokens,
-    requested: frame.lanes[0].requested_context_tokens,
-    effective: frame.lanes[0].context_tokens,
-    traceContext: frame.context_tokens,
-  }};
-}}
-const laneModes = [["primary", "medium"], ["challenger", "low"], ["tie_break", "off"]]
-  .map(([lane, think]) => sandbox.__test.applyDecisionTransition(
-    blank,
-    target,
-    {{ lane, phase: "context", kind: "phase", status: "active", overall_key: "generate", think, context_tokens: 32768 }},
-  ).lanes.find((item) => item.key === lane).think);
-process.stdout.write(JSON.stringify({{
-  blank: blank.lanes.map((lane) => lane.think),
-  blankContext: blank.context_tokens,
-  blankLaneContext: blank.lanes[0].context_tokens,
-  observed,
-  laneModes,
-}}));
-"""
-
-    completed = _run_node_scenario(scenario)
-    result = json.loads(completed.stdout)
-
-    assert result["blank"] == ["—", "—", "—"]
-    assert result["blankContext"] is None
-    assert result["blankLaneContext"] is None
-    assert result["observed"]["trigger"] == {
-        "think": "—",
-        "required": None,
-        "requested": None,
-        "effective": None,
-        "traceContext": None,
-    }
-    assert result["observed"]["load"] == result["observed"]["trigger"]
-    assert result["observed"]["context"] == {
-        "think": "medium",
-        "required": 12_000,
-        "requested": 32_768,
-        "effective": 32_768,
-        "traceContext": 32_768,
-    }
-    assert result["observed"]["generate"] == result["observed"]["context"]
-    assert result["laneModes"] == ["medium", "low", "off"]
 
 
 def test_decision_console_formats_observed_runtime_facts() -> None:
@@ -4109,419 +3485,43 @@ process.stdout.write(JSON.stringify(events.map(
     ]
 
 
-def test_decision_trace_timeline_is_granular_forward_only_and_bounded() -> None:
+def test_decision_trace_timeline_uses_authoritative_events_in_order() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    helper = (
+        "function decisionTimelineSteps"
+        + renderer.split("function decisionTimelineSteps", 1)[1].split(
+            "function renderDecisionTransitionFeed", 1
+        )[0]
+    )
     scenario = f"""
 const vm = require("node:vm");
-const sandbox = {{ window: {{ matchMedia: () => ({{ matches: false }}) }} }};
+const sandbox = {{ fmt: (value, fallback = "—") => value ?? fallback }};
 vm.createContext(sandbox);
 vm.runInContext(
-  {json.dumps(renderer)}
-    + "\\nthis.__test = {{ decisionTimelineSteps, decisionTimelineCurrent, decisionTraceBlank, applyDecisionTransition }};",
+  {json.dumps(helper)}
+    + "\\nthis.__test = {{ decisionTimelineSteps, decisionTimelineCurrent }};",
   sandbox,
 );
-const phases = ["generate", "validate", "repair", "validate"];
-const events = phases.map((phase, index) => ({{
-  event_id: `event-${{index + 1}}`,
-  kind: "phase",
-  lane: "primary",
-  phase,
-  status: "active",
-  attempt: index < 2 ? 0 : 1,
-  label: phase,
-}}));
-const target = {{
+const steps = sandbox.__test.decisionTimelineSteps({{
   request_sha256: "request",
   active: true,
-  events,
-  overall: [],
-  lanes: [{{
-    key: "primary",
-    label: "Primary",
-    model: "primary:model",
-    think: "medium",
-    steps: ["trigger", "load", "context", "generate", "validate", "vote"].map(
-      (key) => ({{ key, status: "pending" }}),
-    ),
-  }}],
-}};
-let frame = sandbox.__test.decisionTraceBlank(target);
-const frames = events.map((event) => {{
-  frame = sandbox.__test.applyDecisionTransition(frame, target, event);
-  return {{
-    eventIds: frame.events.map((item) => item.event_id),
-    labels: sandbox.__test.decisionTimelineSteps(frame).map((step) => step.label),
-    statuses: sandbox.__test.decisionTimelineSteps(frame).map((step) => step.status),
-    laneStatuses: frame.lanes[0].steps.map((step) => step.status),
-  }};
-}});
-const errorTimeline = sandbox.__test.decisionTimelineSteps({{
-  request_sha256: "error-request",
-  active: false,
   events: [
-    {{ event_id: "vote", kind: "phase", lane: "primary", phase: "vote", status: "active" }},
-    {{ event_id: "error", kind: "session", lane: "primary", phase: "vote", status: "error", label: "Vote rejected" }},
-  ],
-}});
-const fallback = sandbox.__test.decisionTimelineSteps({{
-  events: [],
-  overall: [
-    {{ key: "packet", label: "Packet", status: "done" }},
-    {{ key: "generate", label: "Generate", status: "active" }},
+    {{ event_id: "trigger", lane: "primary", phase: "trigger", kind: "phase", status: "done" }},
+    {{ event_id: "generate", lane: "primary", phase: "generate", kind: "phase", status: "active" }},
   ],
 }});
 process.stdout.write(JSON.stringify({{
-  frames,
-  errorTimeline,
-  errorCurrent: sandbox.__test.decisionTimelineCurrent(errorTimeline),
-  fallback,
+  labels: steps.map((step) => step.label),
+  states: steps.map((step) => step.status),
+  current: sandbox.__test.decisionTimelineCurrent(steps),
 }}));
 """
-
     completed = _run_node_scenario(scenario)
-    result = json.loads(completed.stdout)
-    frames = result["frames"]
 
-    assert frames[1]["eventIds"] == ["event-1", "event-2"]
-    assert frames[1]["labels"] == [
-        "Packet",
-        "Primary Generate #1",
-        "Primary Validate #1",
-    ]
-    assert frames[-1]["labels"] == [
-        "Packet",
-        "Primary Generate #1",
-        "Primary Validate #1",
-        "Primary Repair #1",
-        "Primary Validate #2",
-    ]
-    assert frames[-1]["statuses"] == ["done", "done", "done", "done", "active"]
-    assert frames[2]["laneStatuses"] == [
-        "pending",
-        "pending",
-        "pending",
-        "done",
-        "active",
-        "pending",
-    ]
-    assert [step["label"] for step in result["errorTimeline"]] == [
-        "Packet",
-        "Primary Vote #1",
-        "Primary Vote rejected",
-    ]
-    assert result["errorTimeline"][-1]["status"] == "error"
-    assert result["errorCurrent"] == {
-        "position": 3,
-        "label": "Primary Vote rejected",
-    }
-    assert [step["label"] for step in result["fallback"]] == [
-        "Packet",
-        "Generate",
-    ]
-
-
-def test_decision_trace_replay_colors_only_observed_phases_for_every_lane() -> None:
-    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
-    scenario = f"""
-const vm = require("node:vm");
-const sandbox = {{ window: {{ matchMedia: () => ({{ matches: false }}) }} }};
-vm.createContext(sandbox);
-vm.runInContext(
-  {json.dumps(renderer)}
-    + "\\nthis.__test = {{ decisionTraceBlank, applyDecisionTransition }};",
-  sandbox,
-);
-const laneKeys = ["primary", "challenger", "tie_break"];
-const stepKeys = ["trigger", "load", "context", "generate", "validate", "vote"];
-const overallKey = (phase) =>
-  ["trigger", "load"].includes(phase) ? "dispatch"
-    : ["context", "generate"].includes(phase) ? "generate"
-      : ["repair", "validate"].includes(phase) ? "validate" : "quorum";
-const replay = (lane, phases, terminalStatus) => {{
-  const phaseEvents = phases.map((phase, index) => ({{
-    event_id: `${{lane}}-${{index}}-${{phase}}`,
-    lane,
-    phase,
-    kind: "phase",
-    status: "active",
-    overall_key: overallKey(phase),
-  }}));
-  const events = [
-    ...phaseEvents,
-    {{
-      event_id: `${{lane}}-session`,
-      lane,
-      phase: "vote",
-      kind: "session",
-      status: terminalStatus,
-      overall_key: "quorum",
-    }},
-  ];
-  const target = {{
-    request_sha256: `${{lane}}-request`,
-    active: terminalStatus !== "done",
-    events,
-    overall: ["packet", "dispatch", "generate", "validate", "quorum"]
-      .map((key) => ({{ key, status: "done" }})),
-    lanes: laneKeys.map((key) => ({{
-      key,
-      label: key,
-      model: `${{key}}:model`,
-      think: "medium",
-      steps: stepKeys.map((step) => ({{ key: step, status: "done" }})),
-    }})),
-  }};
-  let frame = sandbox.__test.decisionTraceBlank(target);
-  const snapshots = [];
-  const overallSnapshots = [];
-  for (const event of events) {{
-    frame = sandbox.__test.applyDecisionTransition(frame, target, event);
-    snapshots.push(frame.lanes.find((item) => item.key === lane).steps.map(
-      (step) => step.status,
-    ));
-    overallSnapshots.push(Object.fromEntries(
-      frame.overall.map((step) => [step.key, step.status]),
-    ));
-  }}
-  return {{ snapshots, overallSnapshots, final: snapshots.at(-1) }};
-}};
-process.stdout.write(JSON.stringify({{
-  normal: Object.fromEntries(laneKeys.map((lane) => [lane, replay(
-    lane,
-    ["trigger", "load", "context", "generate", "validate", "vote"],
-    "done",
-  )])),
-  noLoad: replay("primary", ["trigger", "context", "generate", "validate", "vote"], "done"),
-  preflightFailure: replay("primary", ["trigger", "vote"], "error"),
-  capacityFailure: replay("primary", ["trigger", "load", "vote"], "error"),
-  transportFailure: replay(
-    "primary",
-    ["trigger", "load", "context", "generate", "vote"],
-    "error",
-  ),
-  repair: replay(
-    "primary",
-    ["trigger", "load", "context", "generate", "validate", "repair", "validate", "vote"],
-    "done",
-  ),
-}}));
-"""
-
-    completed = _run_node_scenario(scenario)
-    result = json.loads(completed.stdout)
-
-    expected_done = ["done"] * 6
-    for lane in ("primary", "challenger", "tie_break"):
-        assert result["normal"][lane]["snapshots"][:3] == [
-            ["active", "pending", "pending", "pending", "pending", "pending"],
-            ["done", "active", "pending", "pending", "pending", "pending"],
-            ["done", "done", "active", "pending", "pending", "pending"],
-        ]
-        assert result["normal"][lane]["final"] == expected_done
-        assert result["normal"][lane]["overallSnapshots"][0] == {
-            "packet": "done",
-            "dispatch": "active",
-            "generate": "pending",
-            "validate": "pending",
-            "quorum": "pending",
-        }
-        assert result["normal"][lane]["overallSnapshots"][2] == {
-            "packet": "done",
-            "dispatch": "done",
-            "generate": "active",
-            "validate": "pending",
-            "quorum": "pending",
-        }
-        assert result["normal"][lane]["overallSnapshots"][-1]["quorum"] == "active"
-    assert result["noLoad"]["final"] == [
-        "done",
-        "pending",
-        "done",
-        "done",
-        "done",
-        "done",
-    ]
-    assert result["preflightFailure"]["final"] == [
-        "done",
-        "pending",
-        "pending",
-        "pending",
-        "pending",
-        "error",
-    ]
-    assert result["capacityFailure"]["final"] == [
-        "done",
-        "done",
-        "pending",
-        "pending",
-        "pending",
-        "error",
-    ]
-    assert result["transportFailure"]["final"] == [
-        "done",
-        "done",
-        "done",
-        "done",
-        "pending",
-        "error",
-    ]
-    assert result["repair"]["snapshots"][5] == [
-        "done",
-        "done",
-        "done",
-        "done",
-        "active",
-        "pending",
-    ]
-    assert result["repair"]["final"] == expected_done
-
-
-def test_decision_trace_initial_active_render_uses_only_observed_events() -> None:
-    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
-    scenario = f"""
-const vm = require("node:vm");
-const sandbox = {{ window: {{ matchMedia: () => ({{ matches: false }}) }} }};
-vm.createContext(sandbox);
-vm.runInContext(
-  {json.dumps(renderer)}
-    + `
-const capturedFrames = [];
-renderDecisionTraceFrame = (trace) => capturedFrames.push(
-  JSON.parse(JSON.stringify(trace)),
-);
-renderDecisionTransitionFeed = () => {{}};
-setDecisionTransitionState = () => {{}};
-this.__test = {{ renderDecisionTrace, capturedFrames, decisionTracePlayback }};`,
-  sandbox,
-);
-const stepKeys = ["trigger", "load", "context", "generate", "validate", "vote"];
-const target = {{
-  request_sha256: "initial-active-request",
-  active: true,
-  events: [
-    {{ event_id: "trigger", lane: "primary", phase: "trigger", kind: "phase", status: "active", overall_key: "dispatch" }},
-    {{ event_id: "context", lane: "primary", phase: "context", kind: "phase", status: "active", overall_key: "generate" }},
-    {{ event_id: "generate", lane: "primary", phase: "generate", kind: "phase", status: "active", overall_key: "generate" }},
-  ],
-  overall: ["packet", "dispatch", "generate", "validate", "quorum"]
-    .map((key) => ({{ key, status: "done" }})),
-  lanes: [{{
-    key: "primary",
-    label: "Primary",
-    model: "primary:model",
-    steps: stepKeys.map((key) => ({{ key, status: "done" }})),
-  }}],
-}};
-sandbox.__test.renderDecisionTrace({{ decision_trace: target }});
-const frame = sandbox.__test.capturedFrames[0];
-process.stdout.write(JSON.stringify({{
-  lane: frame.lanes[0].steps.map((step) => step.status),
-  overall: Object.fromEntries(frame.overall.map((step) => [step.key, step.status])),
-  events: frame.events.map((event) => event.event_id),
-  current: sandbox.__test.decisionTracePlayback.current.lanes[0].steps.map(
-    (step) => step.status,
-  ),
-}}));
-"""
-
-    completed = _run_node_scenario(scenario)
-    result = json.loads(completed.stdout)
-
-    assert result["lane"] == ["done", "pending", "done", "active", "pending", "pending"]
-    assert result["overall"] == {
-        "packet": "done",
-        "dispatch": "done",
-        "generate": "active",
-        "validate": "pending",
-        "quorum": "pending",
-    }
-    assert result["events"] == ["trigger", "context", "generate"]
-    assert result["current"] == result["lane"]
-
-
-def test_decision_trace_batches_new_events_into_300ms_frames() -> None:
-    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
-    scenario = f"""
-const vm = require("node:vm");
-const timers = [];
-const window = {{
-  matchMedia: () => ({{ matches: false }}),
-  setTimeout: (callback, delay) => (timers.push({{ callback, delay }}), timers.length),
-  clearTimeout: () => {{}},
-}};
-const sandbox = {{ window, document: {{ visibilityState: "visible" }} }};
-vm.createContext(sandbox);
-vm.runInContext(
-  {json.dumps(renderer)}
-    + `
-const capturedFrames = [];
-renderDecisionTraceFrame = (trace) => capturedFrames.push(
-  JSON.parse(JSON.stringify(trace)),
-);
-renderDecisionTransitionFeed = () => {{}};
-setDecisionTransitionState = () => {{}};
-this.__test = {{ renderDecisionTrace, capturedFrames, decisionTracePlayback }};`,
-  sandbox,
-);
-const steps = ["trigger", "load", "context", "generate", "validate", "vote"];
-const lanes = ["primary", "challenger", "tie_break"].map((key) => ({{
-  key,
-  label: key,
-  model: `${{key}}:model`,
-  state: "active",
-  steps: steps.map((step) => ({{ key: step, status: "pending" }})),
-}}));
-const initial = {{
-  request_sha256: "request",
-  active: true,
-  state: "active",
-  events: [
-    {{ event_id: "primary-trigger", lane: "primary", phase: "trigger", kind: "phase", status: "active", overall_key: "dispatch" }},
-  ],
-  overall: ["packet", "dispatch", "generate", "validate", "quorum"]
-    .map((key) => ({{ key, status: "pending" }})),
-  lanes,
-}};
-const updated = JSON.parse(JSON.stringify(initial));
-updated.events.push(
-  {{ event_id: "challenger-context", lane: "challenger", phase: "context", kind: "phase", status: "active", overall_key: "generate" }},
-  {{ event_id: "tie-validate", lane: "tie_break", phase: "validate", kind: "phase", status: "active", overall_key: "validate" }},
-);
-sandbox.__test.renderDecisionTrace({{ decision_trace: initial }});
-sandbox.__test.renderDecisionTrace({{ decision_trace: updated }});
-const afterUpdate = {{
-  target: sandbox.__test.decisionTracePlayback.target.events.map((event) => event.event_id),
-  current: sandbox.__test.decisionTracePlayback.current.events.map((event) => event.event_id),
-  queue: sandbox.__test.decisionTracePlayback.queue.map((event) => event.event_id),
-  delays: timers.map((timer) => timer.delay),
-}};
-timers[0].callback();
-const afterTimer = {{
-  current: sandbox.__test.decisionTracePlayback.current.events.map((event) => event.event_id),
-  queue: sandbox.__test.decisionTracePlayback.queue.map((event) => event.event_id),
-  delays: timers.map((timer) => timer.delay),
-  frames: sandbox.__test.capturedFrames.map((trace) => trace.events.map((event) => event.event_id)),
-}};
-process.stdout.write(JSON.stringify({{ afterUpdate, afterTimer }}));
-"""
-
-    result = json.loads(_run_node_scenario(scenario).stdout)
-
-    assert result["afterUpdate"] == {
-        "target": ["primary-trigger", "challenger-context", "tie-validate"],
-        "current": ["primary-trigger", "challenger-context"],
-        "queue": ["tie-validate"],
-        "delays": [300],
-    }
-    assert result["afterTimer"] == {
-        "current": ["primary-trigger", "challenger-context", "tie-validate"],
-        "queue": [],
-        "delays": [300, 300],
-        "frames": [
-            ["primary-trigger"],
-            ["primary-trigger", "challenger-context"],
-            ["primary-trigger", "challenger-context", "tie-validate"],
-        ],
+    assert json.loads(completed.stdout) == {
+        "labels": ["Packet", "Primary Trigger #1", "Primary Generate #1"],
+        "states": ["done", "done", "active"],
+        "current": {"position": 3, "label": "Primary Generate #1"},
     }
 
 

@@ -146,9 +146,9 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert len(matching("data-context-tokens", "98304")) == 1
     assert len(matching("data-context-tokens", "131072")) == 1
     for tokens in ("32768", "65536", "98304", "131072"):
-        option = markup.split(f'data-context-tokens="{tokens}"', 1)[1].split(
-            "</g>", 1
-        )[0]
+        option = markup.split(f'data-context-tokens="{tokens}"', 1)[1].split("</g>", 1)[
+            0
+        ]
         assert '<circle r="10"></circle>' in option
     assert not matching("class", "trace-plan-frame")
     assert {
@@ -188,14 +188,17 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         "seal-hold",
     }.issubset(paths)
     assert all(paths[key] for key in paths)
-    assert not {
-        "pair-artifact",
-        "tie_break-artifact",
-        "pair-hold",
-        "tie_break-hold",
-        "pair-quorum",
-        "quorum-artifact",
-    } & paths.keys()
+    assert (
+        not {
+            "pair-artifact",
+            "tie_break-artifact",
+            "pair-hold",
+            "tie_break-hold",
+            "pair-quorum",
+            "quorum-artifact",
+        }
+        & paths.keys()
+    )
     assert any(
         tag == "path" and attrs.get("d") == "M1208 410 1248 450 1208 490 1168 450Z"
         for tag, attrs in elements
@@ -207,14 +210,13 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         and attrs.get("marker-end") == "url(#trace-arrow)"
         for attrs in context_generate_rails
     )
-    primary_validate_vote = markup.split(
-        'data-decision-lane="primary"', 1
-    )[1].split('data-decision-lane="challenger"', 1)[0]
+    primary_validate_vote = markup.split('data-decision-lane="primary"', 1)[1].split(
+        'data-decision-lane="challenger"', 1
+    )[0]
     assert (
         'data-lane-path="validate-vote" '
         'd="M920 0 H1086 Q1096 0 1096 10 V25" '
-        'marker-end="url(#trace-arrow)"'
-        in primary_validate_vote
+        'marker-end="url(#trace-arrow)"' in primary_validate_vote
     )
 
     expected_boundary_paths = {
@@ -238,20 +240,16 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
             "H190 Q180 512 180 522 V565 Q180 575 190 575 H220"
         ),
         "pair-artifact-join": (
-            "M1248 450 H1278 Q1288 450 1288 440 "
-            "V414 Q1288 404 1298 404 H1299"
+            "M1248 450 H1278 Q1288 450 1288 440 V414 Q1288 404 1298 404 H1299"
         ),
         "tie_break-quorum": "M1106 575 H1217",
         "quorum-artifact-join": (
-            "M1248 545 V524 Q1248 514 1258 514 "
-            "H1300 Q1310 514 1310 504 V415"
+            "M1248 545 V524 Q1248 514 1258 514 H1300 Q1310 514 1310 504 V415"
         ),
         "quorum-hold": (
             "M1278 575 H1408 Q1418 575 1418 585 V590 Q1418 600 1428 600 H1448"
         ),
-        "artifact-seal": (
-            "M1321 404 H1360 Q1370 404 1370 414 V470"
-        ),
+        "artifact-seal": ("M1321 404 H1360 Q1370 404 1370 414 V470"),
         "seal-decision": "M1404 500 H1449",
         "seal-hold": "M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588",
     }
@@ -390,11 +388,14 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         "V174 Q734 164 744 164 H766"
     )
     assert "plan-headroom" not in paths
-    assert next(
-        attrs.get("marker-end")
-        for tag, attrs in elements
-        if tag == "path" and attrs.get("data-path-key") == "plan-context"
-    ) == "url(#trace-arrow)"
+    assert (
+        next(
+            attrs.get("marker-end")
+            for tag, attrs in elements
+            if tag == "path" and attrs.get("data-path-key") == "plan-context"
+        )
+        == "url(#trace-arrow)"
+    )
     context_guides = [
         attrs
         for tag, attrs in elements
@@ -415,7 +416,10 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     )
     assert context_guides[0].get("marker-end") is None
     assert not matching("class", "trace-context-rail")
-    assert len(matching("class", "trace-label-backdrop trace-context-kicker-backdrop")) == 1
+    assert (
+        len(matching("class", "trace-label-backdrop trace-context-kicker-backdrop"))
+        == 1
+    )
     assert all(
         attrs.get("x") == "15" and attrs.get("y") == "27"
         for attrs in matching("data-context-label", "true")
@@ -446,18 +450,14 @@ def test_dashboard_reference_quorum_hold_paths_and_label_stay_in_bounds() -> Non
     }
 
     assert paths["quorum-hold"] == (
-        "M1278 575 H1408 Q1418 575 1418 585 "
-        "V590 Q1418 600 1428 600 H1448"
+        "M1278 575 H1408 Q1418 575 1418 585 V590 Q1418 600 1428 600 H1448"
     )
     assert paths["seal-hold"] == (
-        "M1370 530 V540 Q1370 550 1380 550 "
-        "H1450 Q1460 550 1460 560 V588"
+        "M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588"
     )
 
     hold_reason = next(
-        attrs
-        for _tag, attrs in elements
-        if attrs.get("data-hold-reason") == "true"
+        attrs for _tag, attrs in elements if attrs.get("data-hold-reason") == "true"
     )
     assert hold_reason["class"] == "trace-hold-reason"
     assert hold_reason["x"] == "28"
@@ -468,9 +468,9 @@ def test_dashboard_reference_quorum_hold_paths_and_label_stay_in_bounds() -> Non
     style = (ROOT / "src/chronovisor/dashboard_static/style.css").read_text(
         encoding="utf-8"
     )
-    hold_reason_style = style.split(
-        ".decision-trace-harness .trace-hold-reason {", 1
-    )[1].split("}", 1)[0]
+    hold_reason_style = style.split(".decision-trace-harness .trace-hold-reason {", 1)[
+        1
+    ].split("}", 1)[0]
     assert "text-anchor: end;" in hold_reason_style
 
 
@@ -487,11 +487,13 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert "processingTraceResizeObserver" not in renderer
     assert "ResizeObserver" not in renderer
     assert ".processing-trace-connector" not in style
-    assert 'node.className = `processing-step ${fmt(step.status, "pending")}`;' in renderer
-    assert "setDecisionSvgState(node, milestoneStates[node.dataset.overallKey]);" in renderer
-    processing_active_style = style.rsplit(
-        ".processing-step.active::before {", 1
-    )[1].split("}", 1)[0]
+    assert (
+        'node.className = `processing-step ${fmt(step.status, "pending")}`;' in renderer
+    )
+    assert "setDecisionSvgState(node, nodes[node.dataset.overallKey]);" in renderer
+    processing_active_style = style.rsplit(".processing-step.active::before {", 1)[
+        1
+    ].split("}", 1)[0]
     assert "border-color: #ff9d00;" in processing_active_style
     assert "background: #ff9d00;" in processing_active_style
 
@@ -528,7 +530,9 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert "opacity: 0.66;" in pending_repair_style
     assert "filter: none;" in pending_repair_style
     reference_style = style.split("/* ---------- reference-first", 1)[1]
-    processing_panel_style = reference_style.split(".processing-panel {", 1)[1].split("}", 1)[0]
+    processing_panel_style = reference_style.split(".processing-panel {", 1)[1].split(
+        "}", 1
+    )[0]
     assert "height: auto;" in processing_panel_style
     assert "height: 1030px;" not in style
     assert "height: 802px;" not in style
@@ -565,14 +569,13 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         "  stroke: #7d8992;"
     ) in style
     assert (
-        '.decision-trace-harness .trace-diamond [data-plan-value="fit"] {'
-        not in style
+        '.decision-trace-harness .trace-diamond [data-plan-value="fit"] {' not in style
     )
     assert "headroom OK ·" not in renderer
-    assert '? "headroom OK"' in renderer
-    active_path_style = style.split(
-        ".decision-trace-harness .active.trace-path,", 1
-    )[1].split("}", 1)[0]
+    assert 'fmt(projection.labels?.fit, "WAITING")' in renderer
+    active_path_style = style.split(".decision-trace-harness .active.trace-path,", 1)[
+        1
+    ].split("}", 1)[0]
     assert "filter: drop-shadow(" in active_path_style
     assert "filter: url(" not in active_path_style
     assert "stroke-dasharray: none;" in active_path_style
@@ -640,12 +643,14 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     ) in style
     assert ".decision-trace-harness .trace-hold-node.pending" not in style
     assert (
-        ".decision-trace-harness .trace-hold-node.error text {\n"
-        "  fill: #ff3948;"
+        ".decision-trace-harness .trace-hold-node.error text {\n  fill: #ff3948;"
     ) in style
-    assert "filter: url(#trace-glow-violet);" in style.split(
-        ".decision-trace-harness .active.trace-node circle,", 1
-    )[1].split("}", 1)[0]
+    assert (
+        "filter: url(#trace-glow-violet);"
+        in style.split(".decision-trace-harness .active.trace-node circle,", 1)[
+            1
+        ].split("}", 1)[0]
+    )
     assert ".decision-console-chrome {\n  display: grid;" in style
     assert ".decision-console-lights i:first-child {\n  background: #ff5f57;" in style
     assert "grid-template-rows: 32px 32px 142px 55px;" in style
@@ -663,187 +668,38 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     harness = renderer.split("function updateDecisionSvgHarness", 1)[1].split(
         "function decisionEventText", 1
     )[0]
-    assert 'decision: decisionOverallState(overall, "decision")' in harness
-    assert 'decision: safeNoQuorum ? "skipped"' not in harness
-    assert "decisionSealStates(" in harness
-    assert 'harness.querySelector("[data-seal-yes-label]")' in harness
-    assert 'harness.querySelector("[data-seal-no-label]")' in harness
-    assert "const pairBranches = decisionPairBranchStates(trace, tieLane);" in harness
-    assert 'const pairAgreement = pairBranches.yes === "done";' in harness
-    assert "const pairNoState = pairBranches.no;" in harness
-    assert 'harness.querySelector("[data-pair-no-label]"),\n    pairNoState' in harness
-    assert 'const safeQuorumReached = artifactReached && !singleModel;' in harness
-    assert 'quorum: safeNoQuorum ? "error" : tieAgreement ? "done" : "pending"' in harness
-    assert '["pair-artifact-join", pairAgreement ? "done" : "pending"]' in harness
-    assert '["tie_break-quorum", safeNoQuorum && tieUsed ? "error"' in harness
-    assert '["quorum-artifact-join", quorumYesState]' in harness
+    assert "const projection = decisionTraceProjection(trace);" in harness
+    assert (
+        'harness.dataset.projectionStatus = projection ? "ok" : "missing";' in harness
+    )
+    assert "projection.nodes" in harness
+    assert "projection.paths" in harness
+    assert "projection.context" in harness
+    assert "projection.reasoning" in harness
+    assert "projection.lanes" in harness
+    assert "decisionTracePlayback" not in renderer
+    assert "decisionOverallState" not in renderer
+    assert "decisionSealStates" not in renderer
+    assert "decisionPairBranchStates" not in renderer
+    assert "decisionReasoningPlanState" not in renderer
+    assert "decisionRepairState" not in renderer
+    assert '["[data-seal-yes-label]", "seal-decision"]' in harness
+    assert '["[data-seal-no-label]", "seal-hold"]' in harness
     assert "quorum-artifact-trunk" not in harness
     assert "artifact-input" not in harness
-    assert '["quorum-hold", quorumNoState]' in harness
-    assert '["artifact-seal", sealStates.input]' in harness
-    assert '["seal-decision", sealYesState]' in harness
-    assert '["seal-hold", sealNoState]' in harness
-    assert '["challenger-agree", completedStepState("challenger", "vote")]' in harness
-    assert "const reasoning = decisionReasoningPlanState(activeLane, planState);" in harness
-    assert "const fitState = reasoning.fit;" in harness
-    assert '["plan-fit", actualThink === "off" ? "pending" : fitState]' in harness
-    assert '["context-generate", "generate"]' in harness
-    assert "fmt(laneSteps.get(phase)?.status, \"pending\")" in harness
-    assert "Math.floor(tokens / 1000)" in renderer
     assert "Math.sign(contextX - 492)" in harness
     assert "Math.abs(contextX - 492) / 2" in harness
-    assert '`M492 56 V${86 - contextRadius} Q492 86 ${492 +' in harness
-    assert '${86 + contextRadius} V140`' in harness
-    assert '`M${contextX} 160 V204 Q${contextX} 214 ${contextX + 10} 214 `' in harness
+    assert "`M492 56 V${86 - contextRadius} Q492 86 ${492 +" in harness
+    assert "${86 + contextRadius} V140`" in harness
+    assert "`M${contextX} 160 V204 Q${contextX} 214 ${contextX + 10} 214 `" in harness
     assert '+ "H724 Q734 214 734 204 V174 Q734 164 744 164 H766"' in harness
     assert 'data-reasoning-output="${mode}"' in harness
-    assert '["reasoning-off", "reasoning-low", "reasoning-medium", "reasoning-high"]' in harness
-    assert 'node.classList.toggle("selected", value === selectedContextValue);' in harness
-    assert 'node.classList.toggle("selected", node.dataset.reasoningKey === routeThink);' in harness
-    assert 'reasoning.observed ? "OBSERVED" : "MEDIUM"' not in harness
-    assert "decisionRepairState(traceState, lane, repairs, focusEvent)" in harness
+    assert 'node.classList.toggle("selected", option.selected === true);' in harness
+    assert 'node.classList.toggle("selected", mode === reasoning.selected);' in harness
     assert 'observedPhases.add("load")' not in renderer
 
 
-def test_dashboard_reference_repair_state_is_event_backed_for_every_lane() -> None:
-    renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
-        encoding="utf-8"
-    )
-    helper = "function decisionRepairState" + renderer.split(
-        "function decisionRepairState", 1
-    )[1].split("function updateDecisionSvgHarness", 1)[0]
-    scenario = f"""
-const vm = require("node:vm");
-const sandbox = {{}};
-vm.createContext(sandbox);
-vm.runInContext({json.dumps(helper)} + "\\nthis.repairState = decisionRepairState;", sandbox);
-const states = Object.fromEntries(["primary", "challenger", "tie_break"].map((key) => [key, [
-  sandbox.repairState("active", {{ key, phase: "validate" }}, [], null),
-  sandbox.repairState("active", {{ key, phase: "repair" }}, [{{ phase: "repair" }}], null),
-  sandbox.repairState("agreed", {{ key, phase: "vote" }}, [{{ phase: "repair" }}], null),
-]]));
-process.stdout.write(JSON.stringify(states));
-"""
-    completed = subprocess.run(
-        ["node", "-"],
-        input=scenario,
-        check=True,
-        capture_output=True,
-        encoding="utf-8",
-    )
-
-    assert json.loads(completed.stdout) == {
-        lane: ["pending", "active", "done"]
-        for lane in ("primary", "challenger", "tie_break")
-    }
-
-
-def test_dashboard_reference_seal_paths_follow_success_failure_and_no_quorum() -> None:
-    renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
-        encoding="utf-8"
-    )
-    helper = "function decisionSealStates" + renderer.split(
-        "function decisionSealStates", 1
-    )[1].split("function updateDecisionSvgHarness", 1)[0]
-    scenario = f"""
-const vm = require("node:vm");
-const sandbox = {{}};
-vm.createContext(sandbox);
-vm.runInContext({json.dumps(helper)} + "\\nthis.sealStates = decisionSealStates;", sandbox);
-process.stdout.write(JSON.stringify({{
-  success: sandbox.sealStates("agreed", "done", false, false),
-  ready: sandbox.sealStates("ready", "done", false, false),
-  failure: sandbox.sealStates("quarantined", "error", true, false),
-  noQuorum: sandbox.sealStates("quarantined", "skipped", false, true),
-}}));
-"""
-    completed = subprocess.run(
-        ["node", "-"],
-        input=scenario,
-        check=True,
-        capture_output=True,
-        encoding="utf-8",
-    )
-
-    assert json.loads(completed.stdout) == {
-        "success": {
-            "gate": "done",
-            "input": "done",
-            "yes": "done",
-            "no": "pending",
-            "artifact": "done",
-        },
-        "ready": {
-            "gate": "done",
-            "input": "done",
-            "yes": "done",
-            "no": "pending",
-            "artifact": "done",
-        },
-        "failure": {
-            "gate": "error",
-            "input": "error",
-            "yes": "pending",
-            "no": "error",
-            "artifact": "error",
-        },
-        "noQuorum": {
-            "gate": "pending",
-            "input": "pending",
-            "yes": "pending",
-            "no": "pending",
-            "artifact": "skipped",
-        },
-    }
-
-
-def test_dashboard_reference_bypass_skips_the_central_fit_input() -> None:
-    renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
-        encoding="utf-8"
-    )
-    scenario = f"""
-const vm = require("node:vm");
-const node = () => ({{
-  dataset: {{}},
-  classList: {{ remove() {{}}, add() {{}}, toggle() {{}} }},
-  querySelector: () => node(),
-  querySelectorAll: () => [],
-  setAttribute() {{}},
-  textContent: "",
-}});
-const planFit = node();
-const harness = node();
-harness.querySelector = (selector) => selector === '[data-path-key="plan-fit"]'
-  ? planFit
-  : node();
-const sandbox = {{
-  window: {{ matchMedia: () => ({{ matches: true }}) }},
-  els: {{ decisionTraceHarness: harness }},
-}};
-vm.createContext(sandbox);
-vm.runInContext({json.dumps(renderer)}, sandbox);
-const render = (think) => {{
-  sandbox.updateDecisionSvgHarness({{
-    state: "agreed",
-    lanes: [{{ key: "primary", state: "done", think, steps: [] }}],
-    overall: [{{ key: "dispatch", status: "done" }}],
-  }});
-  return planFit.dataset.state;
-}};
-process.stdout.write(JSON.stringify({{ off: render("off"), medium: render("medium") }}));
-"""
-    completed = subprocess.run(
-        ["node", "-"],
-        input=scenario,
-        check=True,
-        capture_output=True,
-        encoding="utf-8",
-    )
-
-    assert json.loads(completed.stdout) == {"off": "pending", "medium": "done"}
-
-
-def test_dashboard_reference_no_quorum_leaves_decision_unreached() -> None:
+def test_dashboard_reference_renderer_fails_closed_without_projection() -> None:
     renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
         encoding="utf-8"
     )
@@ -857,11 +713,9 @@ const node = (traceKey = null) => ({{
   setAttribute() {{}},
   textContent: "",
 }});
-const traceNodes = Object.fromEntries(
-  ["artifact", "decision", "hold", "agree", "quorum"].map((key) => [key, node(key)])
-);
+const traceNodes = Object.fromEntries(["artifact", "decision"].map((key) => [key, node(key)]));
 const harness = node();
-harness.querySelectorAll = (selector) => selector === "[data-trace-key]"
+harness.querySelectorAll = (selector) => selector.includes("[data-trace-key]")
   ? Object.values(traceNodes)
   : [];
 harness.querySelector = () => node();
@@ -872,18 +726,13 @@ const sandbox = {{
 vm.createContext(sandbox);
 vm.runInContext({json.dumps(renderer)}, sandbox);
 sandbox.updateDecisionSvgHarness({{
-  state: "quarantined",
-  quorum_attempted: true,
-  quorum_flow: true,
-  outcome: {{ kind: "error", code: "no_safe_quorum" }},
-  overall: [
-    {{ key: "artifact", status: "skipped" }},
-    {{ key: "decision", status: "skipped" }},
-  ],
+  state: "agreed",
+  overall: [{{ key: "artifact", status: "done" }}, {{ key: "decision", status: "done" }}],
 }});
-process.stdout.write(JSON.stringify(Object.fromEntries(
-  Object.entries(traceNodes).map(([key, value]) => [key, value.dataset.state])
-)));
+process.stdout.write(JSON.stringify({{
+  status: harness.dataset.projectionStatus,
+  nodes: Object.fromEntries(Object.entries(traceNodes).map(([key, value]) => [key, value.dataset.state])),
+}}));
 """
     completed = subprocess.run(
         ["node", "-"],
@@ -894,11 +743,8 @@ process.stdout.write(JSON.stringify(Object.fromEntries(
     )
 
     assert json.loads(completed.stdout) == {
-        "artifact": "skipped",
-        "decision": "skipped",
-        "hold": "error",
-        "agree": "error",
-        "quorum": "error",
+        "status": "missing",
+        "nodes": {"artifact": "pending", "decision": "pending"},
     }
 
 
@@ -909,7 +755,7 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         {**case, "lane_context_tokens": [131_072, None, None]}
         if case["id"] == "A"
         else case
-        for case in json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"][:6]
+        for case in json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"]
     ]
     reasoning_modes = {"A": "off", "B": "low", "D": "high"}
     cases = [
@@ -939,6 +785,12 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
 
     payload = []
     for case_index, case in enumerate(cases):
+        if case["id"] == "H":
+            trace = dashboard._decision_trace_snapshot([], [], None)
+            assert trace["state"] == "idle"
+            assert [lane["state"] for lane in trace["lanes"]] == case["lane_states"]
+            payload.append({"case": {**case, "kind": "decision"}, "trace": trace})
+            continue
         request = str(case_index + 1) * 64
         role = roles[case["workflow"]]
         activities = []
@@ -998,9 +850,32 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
                 "models": list(models.values()),
             }
             if case["state"] == "quarantined":
-                decision["quarantine_reason"] = (
-                    "local_models_did_not_reach_two_vote_quorum"
-                )
+                if case["id"] == "G":
+                    decision.update(
+                        {
+                            "artifact_expected": True,
+                            "quarantine_reason": (
+                                "canonical_decision_artifact_publish_failed"
+                            ),
+                            "failure_class": "decision_artifact_invalid",
+                        }
+                    )
+                    history.append(
+                        {
+                            "kind": "decision_artifact",
+                            "timestamp": "2026-08-15T00:00:10Z",
+                            "request_sha256": request,
+                            "artifact_status": "error",
+                            "quarantine_reason": (
+                                "canonical_decision_artifact_publish_failed"
+                            ),
+                            "failure_class": "decision_artifact_invalid",
+                        }
+                    )
+                else:
+                    decision["quarantine_reason"] = (
+                        "local_models_did_not_reach_two_vote_quorum"
+                    )
             history.append(decision)
 
         trace = dashboard._decision_trace_snapshot(
@@ -1012,8 +887,7 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         assert trace["state"] == case["state"]
         assert [lane["state"] for lane in trace["lanes"]] == case["lane_states"]
         assert [
-            None if lane["think"] == "—" else lane["think"]
-            for lane in trace["lanes"]
+            None if lane["think"] == "—" else lane["think"] for lane in trace["lanes"]
         ] == case["lane_think"]
         assert [lane["context_tokens"] for lane in trace["lanes"]] == case[
             "lane_context_tokens"
@@ -1022,7 +896,7 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
 
     harness = """
 const fixtures = __FIXTURES__;
-const workflowKeys = [...new Set(fixtures.map(({ case: fixture }) => fixture.workflow))];
+const workflowKeys = [...new Set(fixtures.map(({ case: fixture }) => fixture.workflow).filter(Boolean))];
 const selectedPipelines = [];
 function browserFailure(detail) {
   fetch("/fixture-error", {
@@ -1063,6 +937,7 @@ addEventListener("DOMContentLoaded", () => {
     return;
   }
   const results = fixtures.map(({ case: fixture, trace }, index) => {
+    const selectionStart = selectedPipelines.length;
     renderFixture(fixture, trace, `0${index}`);
     const pathState = (node) => {
       const style = getComputedStyle(node);
@@ -1074,6 +949,9 @@ addEventListener("DOMContentLoaded", () => {
     };
     const scroller = document.querySelector("#decision-trace-scroll");
     const harness = document.querySelector("#decision-trace-harness");
+    const selectedContext = document.querySelector("[data-context-option].selected");
+    const selectedReasoning = document.querySelector("[data-reasoning-key].selected");
+    const opacity = (node) => node ? getComputedStyle(node).opacity : null;
     scroller.scrollLeft = scroller.scrollWidth;
     const scrollerBounds = scroller.getBoundingClientRect();
     const harnessBounds = harness.getBoundingClientRect();
@@ -1104,15 +982,30 @@ addEventListener("DOMContentLoaded", () => {
       kind: fixture.kind,
       primaryPhase: trace.lanes.find((lane) => lane.key === "primary")?.phase,
       layout,
-      selectionEvent: selectedPipelines.at(-1),
+      projectionStatus: harness.dataset.projectionStatus,
+      selectionEvent: selectedPipelines.length > selectionStart ? selectedPipelines.at(-1) : null,
       selected: [...document.querySelectorAll('[data-processing-lane][aria-selected="true"]')]
         .map((node) => node.dataset.processingLane),
-      context: document.querySelector("[data-context-option].selected")?.dataset.contextTokens,
-      reasoning: document.querySelector("[data-reasoning-key].selected")?.dataset.reasoningKey,
+      context: selectedContext?.dataset.contextTokens ?? null,
+      contextState: selectedContext?.dataset.state ?? null,
+      contextClass: selectedContext?.getAttribute("class") ?? null,
+      contextCore: opacity(selectedContext?.querySelector(".trace-selected-core")),
+      contextCoreOpacities: [...document.querySelectorAll(
+        "[data-context-option] .trace-selected-core"
+      )].map(opacity),
+      reasoning: selectedReasoning?.dataset.reasoningKey ?? null,
+      reasoningState: selectedReasoning?.dataset.state ?? null,
+      reasoningClass: selectedReasoning?.getAttribute("class") ?? null,
+      reasoningCore: opacity(selectedReasoning?.querySelector(".trace-selected-core")),
+      reasoningCoreOpacities: [...document.querySelectorAll(
+        "[data-reasoning-key] .trace-selected-core"
+      )].map(opacity),
       reasoningLabel: document.querySelector(
         '[data-reasoning-key="medium"] [data-reasoning-label]'
       )?.textContent,
       fitLabel: document.querySelector('[data-plan-value="fit"]')?.textContent,
+      nodes: Object.fromEntries([...document.querySelectorAll("[data-trace-key]")]
+        .map((node) => [node.dataset.traceKey, node.dataset.state])),
       paths,
       rails,
     };
@@ -1136,13 +1029,17 @@ addEventListener("DOMContentLoaded", () => {
   }).catch(browserFailure);
 });
 """.replace("__FIXTURES__", json.dumps(payload, ensure_ascii=False))
-    page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8").replace(
-        '<script src="/static/app-client.js"></script>',
-        '<script src="/fixture-harness.js"></script>',
+    page = (
+        (dashboard.STATIC_DIR / "index.html")
+        .read_text(encoding="utf-8")
+        .replace(
+            '<script src="/static/app-client.js"></script>',
+            '<script src="/fixture-harness.js"></script>',
+        )
     )
     page_path = tmp_path / "index.html"
     harness_path = tmp_path / "fixture-harness.js"
-    screenshot_path = tmp_path / "six-case-dashboard.png"
+    screenshot_path = tmp_path / "eight-case-dashboard.png"
     page_path.write_text(page, encoding="utf-8")
     harness_path.write_text(harness, encoding="utf-8")
     result_ready = threading.Event()
@@ -1305,89 +1202,81 @@ addEventListener("DOMContentLoaded", () => {
     assert len(browser_results) == len(payload), diagnostics
     assert screenshot_path.is_file() and screenshot_path.stat().st_size > 0
 
-    assert len(visual_paths) == 6
+    assert len(visual_paths) == 8
 
-    branches = {
-        "A": [],
-        "B": ["primary-challenger"],
-        "C": [
-            "primary-challenger",
-            "challenger-agree",
-            "pair-artifact-join",
-            "artifact-seal",
-            "seal-decision",
-        ],
-        "D": ["primary-challenger", "challenger-agree", "pair-tie_break"],
-        "E": [
-            "primary-challenger",
-            "challenger-agree",
-            "pair-tie_break",
-            "tie_break-quorum",
-            "quorum-artifact-join",
-            "artifact-seal",
-            "seal-decision",
-        ],
-        "F": [
-            "primary-challenger",
-            "challenger-agree",
-            "pair-tie_break",
-            "tie_break-quorum",
-            "quorum-hold",
-        ],
-    }
-    active_rail_counts = {"A": 0, "B": 4, "D": 5}
     by_id = {result["id"]: result for result in browser_results}
+    by_trace = {item["case"]["id"]: item["trace"] for item in payload}
     for case in cases:
         result = by_id[case["id"]]
-        assert result["selected"] == [case["workflow"]]
-        assert result["selectionEvent"] == case["workflow"]
+        trace = by_trace[case["id"]]
+        assert result["projectionStatus"] == "ok"
+        assert result["selected"] == [case["workflow"] or "ingest"]
+        if case["workflow"]:
+            assert result["selectionEvent"] == case["workflow"]
         assert result["layout"]["scrollWidth"] == result["layout"]["clientWidth"]
         assert result["layout"]["rightReachable"] is True
         assert result["layout"]["fitsWidth"] is True
         assert result["layout"]["nextPanelGap"] == 12
-        selected_index = (
-            case["lane_states"].index("active")
-            if "active" in case["lane_states"]
-            else max(
-                index
-                for index, state in enumerate(case["lane_states"])
-                if state == "done"
-            )
-        )
-        assert result["context"] == str(case["lane_context_tokens"][selected_index])
-        assert result["reasoning"] == case["lane_think"][selected_index]
-
-        reached_paths = [
-            "packet-preflight",
-            "preflight-execution_plan",
-            "execution-plan-context",
-            "plan-context",
-            f"reasoning-{case['lane_think'][selected_index]}",
-            f"reasoning-output-{case['lane_think'][selected_index]}",
-            *([] if case["lane_think"][selected_index] == "off" else ["plan-fit"]),
-            "plan-dispatch",
-            *branches[case["id"]],
-        ]
+        projection = trace["projection"]
+        assert result["nodes"] == {
+            key: value
+            for key, value in projection["nodes"].items()
+            if key in result["nodes"]
+        }
+        expected_paths = {
+            **projection["paths"],
+            **{
+                f"reasoning-output-{mode}": state
+                for mode, state in projection["reasoning"]["options"].items()
+            },
+        }
         assert {
-            key
-            for key, path in result["paths"].items()
-            if path["state"] in {"active", "done", "error"}
-        } == set(reached_paths)
-        for path_key in reached_paths:
+            key: path["state"] for key, path in result["paths"].items()
+        } == expected_paths
+        for path_key, state in expected_paths.items():
+            if state in {"pending", "skipped"}:
+                continue
             path = result["paths"][path_key]
             assert path["state"] in {"active", "done", "error"}
             assert path["dash"] in {"none", ""}
             assert path["length"] > 0
 
-        for lane_index, lane in enumerate(dashboard._DECISION_TRACE_ROLES):
-            state = case["lane_states"][lane_index]
-            if state not in {"active", "done"}:
-                continue
-            count = active_rail_counts.get(case["id"], 5) if state == "active" else 5
-            for rail in result["rails"][lane][:count]:
+        for lane in dashboard._DECISION_TRACE_ROLES:
+            expected_rails = projection["lanes"][lane]["rails"]
+            assert {
+                rail["key"]: rail["state"] for rail in result["rails"][lane]
+            } == expected_rails
+            for rail in result["rails"][lane]:
+                if rail["state"] in {"pending", "skipped"}:
+                    continue
                 assert rail["state"] in {"active", "done", "error"}
                 assert rail["dash"] in {"none", ""}
                 assert rail["length"] > 0
+
+        selected_tokens = projection["context"]["selected_tokens"]
+        selected_reasoning = projection["reasoning"]["selected"]
+        assert result["context"] == (
+            str(selected_tokens) if selected_tokens is not None else None
+        )
+        assert result["reasoning"] == selected_reasoning
+        assert result["contextCore"] == ("1" if selected_tokens else None), (
+            case["id"],
+            result["contextState"],
+            result["contextClass"],
+            projection["context"],
+        )
+        assert result["reasoningCore"] == ("1" if selected_reasoning else None), (
+            case["id"],
+            result["reasoningState"],
+            result["reasoningClass"],
+            projection["reasoning"],
+        )
+        assert result["contextCoreOpacities"].count("1") == int(
+            selected_tokens is not None
+        )
+        assert result["reasoningCoreOpacities"].count("1") == int(
+            selected_reasoning is not None
+        )
 
     assert by_id[cases[0]["id"]]["tabClick"] == {
         "event": "recall",

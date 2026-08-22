@@ -67,6 +67,7 @@ from chronovisor.ops.dashboard_http import (
     _send_security_headers,
 )
 from chronovisor.ops.dashboard_static import STATIC_DIR, _resolve_static_path
+from chronovisor.ops.decision_trace_projection import project_decision_trace
 from chronovisor.ops.health import health_snapshot
 from chronovisor.ops.model_lab import snapshot as model_lab_snapshot
 from chronovisor.recall import recall_runtime
@@ -3812,7 +3813,6 @@ def _decision_trace_snapshot(
                 else 2,
             )
     observe(latest_decision, ("timestamp",), 2)
-
     preferred_candidates = [
         candidate
         for candidate in candidates
@@ -4016,7 +4016,7 @@ def _decision_trace_snapshot(
         ),
         None,
     )
-    return {
+    snapshot = {
         "state": trace_state,
         "active": bool(active_rows),
         "request_sha256": request_sha256 or None,
@@ -4041,6 +4041,7 @@ def _decision_trace_snapshot(
         "events": events,
         "event_count": len(events),
     }
+    return snapshot | {"projection": project_decision_trace(snapshot)}
 
 
 def _local_consensus_snapshot(

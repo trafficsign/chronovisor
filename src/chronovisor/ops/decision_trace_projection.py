@@ -1,0 +1,322 @@
+"""Project one authoritative Decision Trace snapshot into SVG display state."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, Final
+
+TRACE_PROJECTION_SCHEMA: Final = "chronovisor.decision-trace-projection.v1"
+TRACE_STATES: Final = frozenset({"pending", "active", "done", "skipped", "error"})
+TRACE_ROLES: Final = ("primary", "challenger", "tie_break")
+TRACE_PHASES: Final = ("trigger", "load", "context", "generate", "validate", "vote")
+TRACE_RAILS: Final = {
+    "trigger-load": "load",
+    "load-context": "context",
+    "context-generate": "generate",
+    "generate-validate": "validate",
+    "validate-vote": "vote",
+}
+TRACE_PATH_KEYS: Final = (
+    "packet-preflight",
+    "preflight-execution_plan",
+    "execution-plan-context",
+    "plan-context",
+    "reasoning-off",
+    "reasoning-low",
+    "reasoning-medium",
+    "reasoning-high",
+    "plan-fit",
+    "plan-dispatch",
+    "primary-challenger",
+    "single-artifact",
+    "challenger-agree",
+    "pair-artifact-join",
+    "pair-tie_break",
+    "tie_break-quorum",
+    "quorum-artifact-join",
+    "quorum-hold",
+    "artifact-seal",
+    "seal-decision",
+    "seal-hold",
+)
+
+_CONTEXT_OPTIONS: Final = (32_768, 65_536, 98_304, 131_072)
+_REASONING_MODES: Final = ("off", "low", "medium", "high")
+
+
+def _state(value: object, default: str = "pending") -> str:
+    return str(value) if value in TRACE_STATES else default
+
+
+def _positive_int(value: object) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        else None
+    )
+
+
+def _rows_by_key(value: object) -> dict[str, Mapping[str, Any]]:
+    if not isinstance(value, list):
+        return {}
+    return {
+        str(row["key"]): row
+        for row in value
+        if isinstance(row, Mapping) and isinstance(row.get("key"), str)
+    }
+
+
+def _context_label(value: int | None) -> str:
+    return f"{value // 1000}K" if value else "—"
+
+
+def _context_options(selected: int | None, state: str) -> list[dict[str, Any]]:
+    displayed = list(_CONTEXT_OPTIONS)
+    if selected and selected not in displayed:
+        nearest = min(
+            range(len(displayed)), key=lambda index: abs(displayed[index] - selected)
+        )
+        displayed[nearest] = selected
+    return [
+        {
+            "tokens": tokens,
+            "label": _context_label(tokens),
+            "selected": tokens == selected,
+            "state": state if tokens == selected else "pending",
+        }
+        for tokens in displayed
+    ]
+
+
+def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the complete, versioned display contract for the fixed SVG topology."""
+
+    overall = _rows_by_key(trace.get("overall"))
+    lane_rows = _rows_by_key(trace.get("lanes"))
+
+    def overall_state(key: str) -> str:
+        return _state(overall.get(key, {}).get("status"))
+
+    trace_state = str(trace.get("state") or "idle")
+    outcome_value = trace.get("outcome")
+    outcome: Mapping[str, Any] = (
+        outcome_value if isinstance(outcome_value, Mapping) else {}
+    )
+    artifact_payload = overall_state("artifact")
+    seal_failure = trace_state == "quarantined" and (
+        artifact_payload == "error"
+        or "seal" in f"{outcome.get('code', '')} {outcome.get('reason', '')}".lower()
+    )
+    no_safe_quorum = (
+        trace_state == "quarantined"
+        and not seal_failure
+        and trace.get("quorum_attempted") is not False
+    )
+    single_model = trace.get("quorum_flow") is False
+
+    lanes: dict[str, dict[str, Any]] = {}
+    for role in TRACE_ROLES:
+        lane = lane_rows.get(role, {})
+        steps = _rows_by_key(lane.get("steps"))
+        step_states = {
+            phase: _state(steps.get(phase, {}).get("status")) for phase in TRACE_PHASES
+        }
+        repair_events = (
+            [
+                event
+                for event in trace.get("events", [])
+                if isinstance(event, Mapping)
+                and event.get("lane") == role
+                and event.get("phase") == "repair"
+            ]
+            if isinstance(trace.get("events"), list)
+            else []
+        )
+        repair_turns = lane.get("repair_turns")
+        repair_count = (
+            repair_turns
+            if isinstance(repair_turns, int)
+            and not isinstance(repair_turns, bool)
+            and repair_turns > 0
+            else 0
+        )
+        repair_count = max(
+            repair_count,
+            max(
+                (max(1, int(event.get("attempt") or 0)) for event in repair_events),
+                default=0,
+            ),
+        )
+        repair_state = (
+            "active"
+            if lane.get("state") == "active" and lane.get("phase") == "repair"
+            else "done"
+            if repair_count or repair_events
+            else "pending"
+        )
+        lanes[role] = {
+            "state": _state(lane.get("state")),
+            "steps": step_states,
+            "rails": {key: step_states[phase] for key, phase in TRACE_RAILS.items()},
+            "repair": repair_state,
+            "repair_attempt": repair_count,
+        }
+
+    selected_lane = next(
+        (
+            lane_rows[role]
+            for role in TRACE_ROLES
+            if lane_rows.get(role, {}).get("state") == "active"
+        ),
+        next(
+            (
+                lane_rows[role]
+                for role in reversed(TRACE_ROLES)
+                if lane_rows.get(role, {}).get("state") == "done"
+            ),
+            None,
+        ),
+    )
+    selected_context = _positive_int(
+        (selected_lane or {}).get("requested_context_tokens")
+    )
+    selected_context = selected_context or _positive_int(
+        (selected_lane or {}).get("context_tokens")
+    )
+    selected_context = selected_context or _positive_int(trace.get("context_tokens"))
+    requested_mode = str((selected_lane or {}).get("think") or "").lower()
+    selected_reasoning = requested_mode if requested_mode in _REASONING_MODES else None
+
+    packet_state = overall_state("packet")
+    plan_state = overall_state("dispatch")
+    fit_state = plan_state if selected_reasoning is not None else "pending"
+    tie_state = lanes["tie_break"]["state"]
+    tie_observed = trace.get("tie_break_used") is True or tie_state in {
+        "active",
+        "done",
+        "error",
+    }
+    pair_yes = "done" if trace.get("pair_agreement") is True else "pending"
+    pair_no = (
+        "active"
+        if tie_state == "active"
+        else "done"
+        if tie_observed
+        or trace.get("pair_agreement") is False
+        and trace.get("quorum_attempted") is True
+        else "pending"
+    )
+    artifact_reached = artifact_payload in {"done", "error"}
+    safe_no_quorum = no_safe_quorum and not single_model
+    tie_agreement = artifact_reached and not single_model and tie_observed
+    quorum_yes = "done" if tie_agreement else "pending"
+    quorum_no = "error" if safe_no_quorum else "pending"
+    seal_reached = artifact_reached or trace_state == "agreed" or seal_failure
+    seal_failed = seal_failure or artifact_payload == "error"
+    seal_gate = "error" if seal_failed else "done" if seal_reached else "pending"
+    seal_input = artifact_payload if seal_reached else "pending"
+    seal_yes = "done" if seal_reached and not seal_failed else "pending"
+    seal_no = "error" if seal_failed else "pending"
+    artifact_state = (
+        "error" if seal_failed else "skipped" if no_safe_quorum else artifact_payload
+    )
+    agreement_state = (
+        "done"
+        if trace_state == "agreed" or seal_failure
+        else "error"
+        if no_safe_quorum
+        else "active"
+        if tie_observed or lanes["challenger"]["state"] == "done"
+        else "pending"
+    )
+    quorum_state = "error" if safe_no_quorum else "done" if tie_agreement else "pending"
+
+    nodes = {
+        "packet": packet_state,
+        "preflight": packet_state,
+        "execution_plan": plan_state,
+        "context": plan_state,
+        "headroom": plan_state,
+        "fit": fit_state,
+        "agree": agreement_state,
+        "quorum": quorum_state,
+        "artifact": artifact_state,
+        "seal": seal_gate,
+        "decision": overall_state("decision"),
+        "hold": "error" if safe_no_quorum or seal_failure else "pending",
+    }
+    paths = {key: "pending" for key in TRACE_PATH_KEYS}
+    paths.update(
+        {
+            "packet-preflight": packet_state,
+            "preflight-execution_plan": plan_state,
+            "execution-plan-context": plan_state,
+            "plan-context": plan_state,
+            "plan-fit": fit_state
+            if selected_reasoning not in {None, "off"}
+            else "pending",
+            "plan-dispatch": plan_state,
+            "primary-challenger": lanes["challenger"]["steps"]["trigger"],
+            "single-artifact": artifact_state if single_model else "pending",
+            "challenger-agree": (
+                lanes["challenger"]["steps"]["vote"]
+                if lanes["challenger"]["steps"]["vote"] in {"done", "error"}
+                else "pending"
+            ),
+            "pair-artifact-join": pair_yes,
+            "pair-tie_break": pair_no,
+            "tie_break-quorum": "error"
+            if safe_no_quorum and tie_observed
+            else "done"
+            if tie_agreement
+            else "pending",
+            "quorum-artifact-join": quorum_yes,
+            "quorum-hold": quorum_no,
+            "artifact-seal": seal_input,
+            "seal-decision": seal_yes,
+            "seal-hold": seal_no,
+        }
+    )
+    for mode in _REASONING_MODES:
+        paths[f"reasoning-{mode}"] = (
+            plan_state if mode == selected_reasoning else "pending"
+        )
+
+    required_context = _positive_int(
+        (selected_lane or {}).get("required_context_tokens")
+    )
+    hold_reason = (
+        "Seal failed"
+        if seal_failure
+        else str(trace.get("summary") or "No safe quorum").split("·", 1)[0].strip()
+    )
+    return {
+        "schema": TRACE_PROJECTION_SCHEMA,
+        "nodes": nodes,
+        "paths": paths,
+        "lanes": lanes,
+        "model_routes": {role: lanes[role]["state"] for role in TRACE_ROLES},
+        "context": {
+            "selected_tokens": selected_context,
+            "options": _context_options(selected_context, plan_state),
+            "label": f"required {_context_label(required_context)} → selected {_context_label(selected_context)}",
+        },
+        "reasoning": {
+            "selected": selected_reasoning,
+            "options": {
+                mode: plan_state if mode == selected_reasoning else "pending"
+                for mode in _REASONING_MODES
+            },
+        },
+        "labels": {
+            "fit": "BYPASS"
+            if selected_reasoning == "off" and fit_state != "pending"
+            else "headroom OK"
+            if fit_state == "done"
+            else "CHECKING"
+            if fit_state == "active"
+            else "WAITING",
+            "fit_pass": fit_state == "done" and selected_reasoning != "off",
+            "hold": hold_reason,
+        },
+    }
