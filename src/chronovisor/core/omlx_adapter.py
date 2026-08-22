@@ -20,8 +20,9 @@ parameter mapping:
 - embeddings via ``POST /v1/embeddings`` (normalized vectors).
 
 DFlash engines are singleton per server (models swap; pinned DFlash
-models block other DFlash loads), so cross-process serialization via
-``ollama_lease.model_resource_lease`` is intentionally reused for oMLX.
+models block other DFlash loads), so separate local servers can keep one
+DFlash model resident each while cross-process serialization via
+``ollama_lease.model_resource_lease`` keeps inference exclusive.
 """
 
 from __future__ import annotations
@@ -67,9 +68,15 @@ class OMLXAdapter:
     provider = "omlx"
     location = RouteLocation.LOCAL
 
-    def __init__(self, *, transport: httpx.BaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str = OMLX_BASE_URL,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
         # `transport` is a test seam for httpx.MockTransport; production
         # callers construct OMLXAdapter() without arguments.
+        self.base_url = base_url.rstrip("/")
         self._transport = transport
 
     def generate(self, request: GenerationInput, *, model: str) -> GenerationResult:
@@ -198,7 +205,7 @@ class OMLXAdapter:
         *,
         timeout_ms: int | None,
     ) -> httpx.Response:
-        with httpx.Client(base_url=OMLX_BASE_URL, transport=self._transport) as client:
+        with httpx.Client(base_url=self.base_url, transport=self._transport) as client:
             return client.post(
                 path,
                 json=payload,
@@ -269,7 +276,7 @@ class OMLXAdapter:
                 pass
             last_emitted = now
 
-        with httpx.Client(base_url=OMLX_BASE_URL, transport=self._transport) as client:
+        with httpx.Client(base_url=self.base_url, transport=self._transport) as client:
             with client.stream(
                 "POST",
                 path,

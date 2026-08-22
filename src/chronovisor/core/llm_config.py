@@ -14,6 +14,7 @@ from functools import cache
 from pathlib import Path
 from types import MappingProxyType
 from typing import cast
+from urllib.parse import urlsplit
 
 from chronovisor.core import runtime_status
 from chronovisor.core.anthropic_adapter import compose_anthropic_adapter
@@ -43,7 +44,7 @@ from chronovisor.core.llm_security import (
 from chronovisor.core.nemotron_adapter import NemotronEmbeddingBackend
 from chronovisor.core.ollama_adapter import OllamaAdapter
 from chronovisor.core.ollama_transport import OLLAMA_URL
-from chronovisor.core.omlx_adapter import OMLXAdapter
+from chronovisor.core.omlx_adapter import OMLX_BASE_URL, OMLXAdapter
 from chronovisor.core.openai_compatible_adapter import compose_openai_compatible_adapter
 from chronovisor.core.provider_profiles import (
     CURATED_PROFILE_IDS,
@@ -120,6 +121,7 @@ class ProviderDefinition:
     profile: ProviderProfile | None = None
     reranker_config: RerankerConfig | None = None
     embedding_device: str | None = None
+    endpoint: str | None = None
 
     def capabilities_for(self, model: str) -> BackendCapabilities:
         return (
@@ -297,7 +299,24 @@ def _provider(provider_id: str, value: object) -> ProviderDefinition:
             ),
         )
     if kind == "omlx":
-        _exact_keys(table, {"kind"})
+        _exact_keys(table, {"kind", "endpoint"})
+        endpoint = _string(table.get("endpoint", OMLX_BASE_URL)).rstrip("/")
+        try:
+            parsed = urlsplit(endpoint)
+            port = parsed.port
+        except ValueError:
+            raise _fail() from None
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or parsed.username is not None
+            or parsed.password is not None
+            or port is None
+            or parsed.path != "/v1"
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise _fail()
         return ProviderDefinition(
             provider_id,
             kind,
@@ -307,6 +326,7 @@ def _provider(provider_id: str, value: object) -> ProviderDefinition:
                 structured_output=True,
                 streaming=True,
             ),
+            endpoint=endpoint,
         )
     if kind == "local-transformers":
         _exact_keys(table, {"kind", "backend", "device", "max_length", "batch_size"})
@@ -540,7 +560,9 @@ def build_llm_runtime(
         if provider.kind == "ollama":
             backends[provider_id] = OllamaAdapter()
         elif provider.kind == "omlx":
-            backends[provider_id] = OMLXAdapter()
+            backends[provider_id] = OMLXAdapter(
+                base_url=provider.endpoint or OMLX_BASE_URL
+            )
         elif provider.kind == "local-transformers":
             if provider.reranker_config is None:
                 raise _fail()
@@ -592,8 +614,11 @@ def build_llm_runtime(
                 ).hexdigest()
             elif provider.kind == "ollama":
                 protocol = "ollama-native"
+                endpoint_sha256 = hashlib.sha256(OLLAMA_URL.encode("utf-8")).hexdigest()
+            elif provider.kind == "omlx":
+                protocol = "omlx-native"
                 endpoint_sha256 = hashlib.sha256(
-                    OLLAMA_URL.encode("utf-8")
+                    (provider.endpoint or OMLX_BASE_URL).encode("utf-8")
                 ).hexdigest()
             else:
                 protocol = provider.kind

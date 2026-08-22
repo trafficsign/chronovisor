@@ -127,6 +127,21 @@ def test_generate_maps_parameters_and_drops_unsupported() -> None:
     assert urlparse(str(captured[0]["url"])).path.startswith("/v1/chat/completions")
 
 
+def test_adapter_uses_configured_local_server() -> None:
+    urls: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(200, json=_chat_json(), request=request)
+
+    OMLXAdapter(
+        base_url="http://127.0.0.1:8001/v1",
+        transport=httpx.MockTransport(handle),
+    ).generate(_minimal_message_request(), model="m")
+
+    assert urlparse(urls[0]).port == 8001
+
+
 def test_generate_maps_reasoning_level_to_omlx_controls() -> None:
     captured: list[dict[str, Any]] = []
 
@@ -442,6 +457,54 @@ model = "bge-m3-mlx-fp16"
     runtime = build_llm_runtime(config)
     assert runtime.resolve_generation("recall.gate").provider == "omlx"
     assert runtime.resolve_embedding("classification.embedding").provider == "omlx"
+
+
+def test_config_routes_distinct_local_omlx_servers() -> None:
+    payload = tomllib.loads(
+        """
+[llm.providers.omlx_qwen]
+kind = "omlx"
+endpoint = "http://127.0.0.1:8000/v1"
+
+[llm.providers.omlx_gemma]
+kind = "omlx"
+endpoint = "http://127.0.0.1:8001/v1"
+
+[llm.roles."classification.primary"]
+capability = "generation"
+provider = "omlx_qwen"
+model = "Qwen3.8-27B-4bit"
+
+[llm.roles."classification.challenger"]
+capability = "generation"
+provider = "omlx_gemma"
+model = "gemma-4-26b-a4b-it-4bit"
+"""
+    )
+
+    runtime = build_llm_runtime(parse_llm_config(payload))
+    primary = runtime.resolve_generation("classification.primary")
+    challenger = runtime.resolve_generation("classification.challenger")
+
+    assert primary.endpoint_sha256 != challenger.endpoint_sha256
+    assert primary.protocol == challenger.protocol == "omlx-native"
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://127.0.0.1:8000/v1",
+        "http://192.168.100.3:8000/v1",
+        "http://127.0.0.1:8000/admin",
+    ],
+)
+def test_config_rejects_non_loopback_omlx_endpoint(endpoint: str) -> None:
+    payload = tomllib.loads(
+        f'''\n[llm.providers.omlx]\nkind = "omlx"\nendpoint = "{endpoint}"\n'''
+    )
+
+    with pytest.raises(LLMConfigError):
+        parse_llm_config(payload)
 
 
 def test_config_rejects_unknown_keys_on_omlx_provider() -> None:
