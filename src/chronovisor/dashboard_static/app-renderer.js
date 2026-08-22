@@ -228,7 +228,6 @@ function processingLaneForTrace(trace) {
 
 function updateProcessingTraceSelection(trace = latestDecisionTrace) {
   latestDecisionTrace = trace || {};
-  const previousSelection = selectedProcessingLaneKey;
   const rows = [...els.processingLanes.querySelectorAll(".processing-lane")];
   selectedProcessingLaneKey = (
     pinnedProcessingLaneKey && latestProcessingLanes.has(pinnedProcessingLaneKey)
@@ -241,18 +240,16 @@ function updateProcessingTraceSelection(trace = latestDecisionTrace) {
     row.tabIndex = selected ? 0 : -1;
     if (selected) els.decisionTracePanel?.setAttribute("aria-labelledby", row.id);
   });
-  if (selectedProcessingLaneKey && selectedProcessingLaneKey !== previousSelection) {
-    window.dispatchEvent(new window.CustomEvent(
-      "chronovisor:processing-lane-select",
-      { detail: { pipeline: selectedProcessingLaneKey } },
-    ));
-  }
 }
 
 function selectProcessingLane(key, focus = false) {
   if (!latestProcessingLanes.has(key)) return false;
   pinnedProcessingLaneKey = key;
   updateProcessingTraceSelection();
+  window.dispatchEvent(new window.CustomEvent(
+    "chronovisor:processing-lane-select",
+    { detail: { pipeline: key } },
+  ));
   const row = els.processingLanes.querySelector(`[data-processing-lane="${key}"]`);
   if (focus) row?.focus();
   return true;

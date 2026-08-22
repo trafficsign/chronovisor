@@ -2908,7 +2908,7 @@ process.stdout.write(JSON.stringify({{
         "acceptedOldPoll": False,
         "acceptedDuplicate": False,
         "acceptedBetween": False,
-        "selectionEvents": ["ingest"],
+        "selectionEvents": [],
         "revision": "stream-new",
         "lanes": [
             {"key": key, "state": "processing-lane active"}

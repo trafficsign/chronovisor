@@ -1149,7 +1149,7 @@ addEventListener("DOMContentLoaded", () => {
                         "--force-prefers-reduced-motion=reduce",
                         "--run-all-compositor-stages-before-draw",
                         "--virtual-time-budget=1000",
-                        "--window-size=1280,960",
+                        "--window-size=1280,1400",
                         f"--screenshot={visual_path}",
                         f"--user-data-dir={tmp_path / f'visual-profile-{index}'}",
                         f"http://127.0.0.1:{server.server_port}/?fixture={quote(case['id'])}",
@@ -1173,6 +1173,10 @@ addEventListener("DOMContentLoaded", () => {
                     _, visual_stderr = visual_process.communicate(timeout=2)
                 assert visual_path.is_file() and visual_path.stat().st_size > 0, (
                     visual_stderr[-4000:]
+                )
+                assert struct.unpack(">II", visual_path.read_bytes()[16:24]) == (
+                    1280,
+                    1400,
                 )
                 visual_paths.append(visual_path)
     finally:
@@ -1211,8 +1215,7 @@ addEventListener("DOMContentLoaded", () => {
         trace = by_trace[case["id"]]
         assert result["projectionStatus"] == "ok"
         assert result["selected"] == [case["workflow"] or "ingest"]
-        if case["workflow"]:
-            assert result["selectionEvent"] == case["workflow"]
+        assert result["selectionEvent"] is None
         assert result["layout"]["scrollWidth"] == result["layout"]["clientWidth"]
         assert result["layout"]["rightReachable"] is True
         assert result["layout"]["fitsWidth"] is True
