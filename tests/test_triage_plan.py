@@ -123,12 +123,13 @@ def test_ingest_validator_requests_semantic_merge_in_same_session(
     assert len(transport.requests) == 2
     prior_response = transport.requests[1].messages[-2]
     assert prior_response["role"] == "assistant"
-    assert "fact 0" in prior_response["content"]
-    assert "fact 6" in prior_response["content"]
+    assert "invalid plain-text record omitted" in prior_response["content"]
+    assert "fact 0" not in prior_response["content"]
+    assert "fact 6" not in prior_response["content"]
     feedback = transport.requests[1].messages[-1]["content"]
     assert '"keyword":"uniqueTarget"' in feedback
     assert '"operation_indices":[0,1,2,3,4,5,6]' in feedback
-    assert "complete previous JSON" in feedback
+    assert "complete previous plan" in feedback
     assert "merge every distinct fact" in feedback
     assert "fact 0" not in feedback
     assert "fact 6" not in feedback

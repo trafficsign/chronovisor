@@ -3049,7 +3049,7 @@ def _decision_trace_events(
         "load": "Loading model",
         "context": "Building context",
         "generate": "Generating",
-        "repair": "Repairing JSON",
+        "repair": "Correcting output",
         "validate": "Validating",
         "vote": "Vote ready",
         "decision": "Decision sealed",

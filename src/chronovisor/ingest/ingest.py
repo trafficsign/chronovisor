@@ -917,8 +917,8 @@ def _triage_plan_validation_issues(
                 },
                 received=collision,
                 message=(
-                    "multiple distinct operations in your complete previous JSON "
-                    "response resolve to one target page; use the listed indices and "
+                    "multiple distinct operations in your complete previous plan "
+                    "resolve to one target page; use the listed indices and "
                     "merge every distinct fact, summary, and keyword into one "
                     "operation in this response. Do not drop an operation or split "
                     "the same page_id across folders."
@@ -2734,6 +2734,59 @@ def _fallback_recall_metadata(title: str, body: str, page_id: str) -> dict[str, 
     }
 
 
+_RECALL_METADATA_TEXT_OUTPUT_CONTRACT = """\
+Return exactly one SUMMARY line followed by 3 to 5 QUESTION lines:
+SUMMARY | one short summary
+QUESTION | a question the user may ask later
+QUESTION | another question the user may ask later
+Keep every value on one line. Do not add other line types.
+"""
+
+
+def _decode_recall_metadata_output(text: str) -> dict[str, Any]:
+    """Materialize plain metadata lines into the host-owned schema."""
+
+    stripped = text.strip()
+    lines = stripped.splitlines()
+    if (
+        len(lines) >= 2
+        and lines[0].strip().startswith("```")
+        and lines[-1].strip() == "```"
+    ):
+        stripped = "\n".join(lines[1:-1]).strip()
+        lines = stripped.splitlines()
+    if stripped.startswith(("{", "[")):
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid legacy structured response: {exc.msg}") from exc
+
+    summary: str | None = None
+    questions: list[str] = []
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("- "):
+            line = line[2:].strip()
+        key, separator, value = line.partition("|")
+        if not separator:
+            key, separator, value = line.partition(":")
+        if not separator:
+            raise ValueError(f"line {line_number} must use SUMMARY | or QUESTION |")
+        key = key.strip().casefold()
+        value = value.strip()
+        if key == "summary":
+            if summary is not None:
+                raise ValueError("SUMMARY must appear exactly once")
+            summary = value
+        elif key == "question":
+            questions.append(value)
+        else:
+            raise ValueError(f"line {line_number} has an unsupported field")
+    return {"summary": summary, "recall_questions": questions}
+
+
 def _generate_recall_metadata(
     title: str,
     body: str,
@@ -2743,18 +2796,15 @@ def _generate_recall_metadata(
 ) -> dict[str, Any]:
     fallback = _fallback_recall_metadata(title, body, page_id)
     try:
-        prompt = {
-            "task": "Create retrievability metadata for this wiki page.",
-            "rules": [
-                "summary must be one short line.",
-                "recall_questions must be 3-5 questions a user may ask later.",
-                "Return JSON only.",
-            ],
-            "page_id": page_id,
-            "title": title,
-            "body": body[:2500],
-        }
-        prompt_text = json.dumps(prompt, ensure_ascii=False)
+        prompt_text = f"""Create retrievability metadata for this wiki page.
+The summary must be one short line. Provide 3 to 5 questions a user may ask later.
+
+Page ID: {page_id}
+Title: {title}
+Page body:
+---
+{body[:2500]}
+---"""
         config = load_ingest_config()
         metadata_num_predict = min(config.num_predict, 1_024)
         required_num_ctx = required_structured_context_tokens(
@@ -2764,6 +2814,7 @@ def _generate_recall_metadata(
             num_predict=metadata_num_predict,
             max_output_chars=1_600,
             max_feedback_chars=1_600,
+            plain_text_contract=_RECALL_METADATA_TEXT_OUTPUT_CONTRACT,
         )
         selected_num_ctx = _select_ingest_context(
             required_num_ctx,
@@ -2781,8 +2832,6 @@ def _generate_recall_metadata(
             if live_transport
             else None
         )
-        if route is not None and not route.structured_output:
-            raise ollama_runtime.RuntimeBridgeError("capability_unavailable")
         local_ollama = (
             route is not None
             and route.provider == "ollama"
@@ -2819,7 +2868,12 @@ def _generate_recall_metadata(
                 max_input_chars=16_000,
                 max_output_chars=1_600,
                 max_feedback_chars=1_600,
-            ).run(prompt_text, RECALL_METADATA_SCHEMA)
+            ).run(
+                prompt_text,
+                RECALL_METADATA_SCHEMA,
+                plain_text_contract=_RECALL_METADATA_TEXT_OUTPUT_CONTRACT,
+                plain_text_decoder=_decode_recall_metadata_output,
+            )
         if not result.ok or not isinstance(result.value, dict):
             return fallback
         parsed = result.value

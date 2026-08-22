@@ -10987,6 +10987,7 @@ class TestTriagePlanSchema:
         assert "summary to 2000" in ollama.TRIAGE_SYSTEM_PROMPT
         assert "1 to 32 keywords" in ollama.TRIAGE_SYSTEM_PROMPT
         assert "each at most 200 characters" in ollama.TRIAGE_SYSTEM_PROMPT
+        assert "JSON" not in ollama.TRIAGE_SYSTEM_PROMPT
         assert _TRIAGE_PLAN_VALIDATION_SCHEMA["maxItems"] == 8
         properties = _TRIAGE_PLAN_VALIDATION_SCHEMA["items"]["properties"]
         assert properties["filename"]["maxLength"] == 200
@@ -11009,6 +11010,30 @@ class TestTriagePlanSchema:
             {"type": "update", "filename": "bar.md"},
         ]
         assert _validate_triage_plan(plan) == plan
+
+    def test_live_triage_materializes_plain_rows_without_json_format(
+        self, isolated_wiki: Path
+    ) -> None:
+        from chronovisor.ingest import ingest
+
+        transport = _QueueStructuredTransport(
+            "create | memory/plain-row.md | Plain row | plain; row | Durable fact"
+        )
+
+        assert ingest._triage("durable fact", transport=transport) == [
+            {
+                "type": "create",
+                "filename": "memory/plain-row.md",
+                "title": "Plain row",
+                "keywords": ["plain", "row"],
+                "summary": "Durable fact",
+            }
+        ]
+        assert transport.requests[0].schema is None
+        system = transport.requests[0].messages[0]["content"]
+        assert "plain-text record" in system
+        assert "Do not return JSON" in system
+        assert "JSON Schema" not in system
 
     def test_bare_create_is_rejected_with_folder_repair_contract(self) -> None:
         from chronovisor.ingest.ingest import _triage_plan_validation_issues
@@ -11087,7 +11112,7 @@ class TestTriagePlanSchema:
 
         monkeypatch.setattr(search, "search", catalog_search)
         monkeypatch.setattr(search, "search_existing_bm25", existing_bm25)
-        transport = _QueueStructuredTransport("[]")
+        transport = _QueueStructuredTransport("NOOP")
 
         assert ingest._triage("bounded catalog", transport=transport) == []
         assert calls == ["hybrid", "existing_bm25"]
@@ -11203,13 +11228,20 @@ class TestTriagePlanSchema:
             )
 
         def render_feedback(issue: object) -> str:
+            from chronovisor.ingest.ingest_triage import (
+                TRIAGE_TEXT_OUTPUT_CONTRACT,
+            )
+
             errors = json.dumps(
                 [issue.to_dict()],
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            return local_structured._REPAIR_TEMPLATE.format(errors=errors)
+            return local_structured._PLAIN_TEXT_REPAIR_TEMPLATE.format(
+                contract=TRIAGE_TEXT_OUTPUT_CONTRACT.strip(),
+                errors=errors,
+            )
 
         base_feedback = render_feedback(issue_with_message(""))
         filler = "F" * (feedback_bytes - len(base_feedback.encode("utf-8")))
@@ -11520,10 +11552,10 @@ class TestTriagePlanSchema:
         assert ingest._triage("raw content", transport=transport) == repaired
         assert len(transport.requests) == 2
         repair_request = transport.requests[1]
-        assert repair_request.messages[-2] == {
-            "role": "assistant",
-            "content": json.dumps([valid_unrelated, invalid_reserved]),
-        }
+        assert repair_request.messages[-2]["role"] == "assistant"
+        assert "invalid plain-text record omitted" in repair_request.messages[-2][
+            "content"
+        ]
         feedback = repair_request.messages[-1]["content"]
         assert '"keyword":"reservedSystemTarget"' in feedback
         assert "do not drop or alter unrelated valid operations" in feedback
@@ -11784,10 +11816,10 @@ class TestTriagePlanSchema:
         assert out == valid
         assert len(transport.requests) == 2
         repair_request = transport.requests[1]
-        assert repair_request.messages[-2] == {
-            "role": "assistant",
-            "content": json.dumps(invalid),
-        }
+        assert repair_request.messages[-2]["role"] == "assistant"
+        assert "invalid plain-text record omitted" in repair_request.messages[-2][
+            "content"
+        ]
         assert "Validator errors" in repair_request.messages[-1]["content"]
         assert "additionalProperties" in repair_request.messages[-1]["content"]
         assert "keywords: [" in repair_request.messages[-1]["content"]
@@ -13754,7 +13786,7 @@ class TestRecallMetadataStructuredSession:
             def __init__(self, **kwargs):
                 sessions.append(kwargs)
 
-            def run(self, _prompt, _schema):
+            def run(self, _prompt, _schema, **_kwargs):
                 return LocalStructuredResult(
                     ok=True,
                     model="ornith:test",
@@ -13811,21 +13843,39 @@ class TestRecallMetadataStructuredSession:
         assert leases == [True]
         assert sessions[0]["num_ctx"] == 65536
 
-    def test_malformed_json_is_repaired_in_same_session(
+    def test_plain_metadata_is_host_materialized_without_json_format(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.ingest import ingest
 
         monkeypatch.setattr(ingest, "is_available", lambda: True)
         transport = _QueueStructuredTransport(
-            '{"summary":',
-            json.dumps(
-                {
-                    "summary": "短い要約",
-                    "recall_questions": ["何を決めた?", "次に何をする?"],
-                },
-                ensure_ascii=False,
-            ),
+            "SUMMARY | 短い要約\nQUESTION | 何を決めた?\nQUESTION | 次に何をする?"
+        )
+
+        result = ingest._generate_recall_metadata(
+            "Title", "Body", "page-id", transport=transport
+        )
+
+        assert result == {
+            "summary": "短い要約",
+            "recall_questions": ["何を決めた?", "次に何をする?"],
+        }
+        assert transport.requests[0].schema is None
+        system = transport.requests[0].messages[0]["content"]
+        assert "plain-text record" in system
+        assert "Do not return JSON" in system
+        assert "JSON Schema" not in system
+
+    def test_malformed_plain_metadata_is_repaired_in_same_session(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.ingest import ingest
+
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        transport = _QueueStructuredTransport(
+            "SUMMARY without delimiter",
+            "SUMMARY | 短い要約\nQUESTION | 何を決めた?\nQUESTION | 次に何をする?",
         )
 
         result = ingest._generate_recall_metadata(

@@ -1293,6 +1293,7 @@ def test_decision_trace_exposes_only_ordered_events_for_current_request(
     assert trace["events"][0]["requested_context_tokens"] == 32_768
     assert trace["events"][0]["context_tokens"] == 32_768
     assert trace["events"][1]["overall_key"] == "validate"
+    assert trace["events"][1]["label"] == "Correcting output"
     assert trace["events"][2]["label"] == "Vote accepted"
     assert "prompt" not in trace["events"][0]
     assert "raw_output" not in trace["events"][0]

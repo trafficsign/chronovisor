@@ -374,6 +374,77 @@ def test_plain_choice_fails_closed_after_one_repair() -> None:
     assert len(transport.requests) == 2
 
 
+def test_single_enum_object_automatically_uses_plain_choice() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["selection_id"],
+        "properties": {
+            "selection_id": {
+                "type": "string",
+                "enum": ["apply_available", "confirmed_noop"],
+            }
+        },
+    }
+    transport = QueueTransport("confirmed_noop")
+
+    result = _session(transport).run("decide", schema)
+
+    assert result.ok is True
+    assert result.value == {"selection_id": "confirmed_noop"}
+    assert transport.requests[0].schema is None
+    assert "Return exactly one allowed ID" in transport.requests[0].messages[0][
+        "content"
+    ]
+
+
+def test_plain_text_contract_is_host_materialized_and_schema_validated() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["summary"],
+        "properties": {"summary": {"type": "string", "maxLength": 2}},
+    }
+
+    def decode(text: str) -> dict[str, str]:
+        prefix, separator, value = text.partition("|")
+        if not separator or prefix.strip() != "SUMMARY":
+            raise ValueError("expected SUMMARY | value")
+        return {"summary": value.strip()}
+
+    transport = QueueTransport("SUMMARY | too long", "SUMMARY | ok")
+    result = _session(transport).run(
+        "summarize",
+        schema,
+        plain_text_contract="SUMMARY | value",
+        plain_text_decoder=decode,
+    )
+
+    assert result.ok is True
+    assert result.value == {"summary": "ok"}
+    assert result.repair_turns == 1
+    assert [request.schema for request in transport.requests] == [None, None]
+    assert "Do not return JSON" in transport.requests[0].messages[0]["content"]
+    assert "JSON Schema" not in transport.requests[0].messages[0]["content"]
+    assert "plain-text record" in transport.requests[1].messages[-1]["content"]
+
+
+def test_plain_text_contract_requires_decoder_pair() -> None:
+    result = _session(QueueTransport()).run(
+        "summarize",
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["summary"],
+            "properties": {"summary": {"type": "string"}},
+        },
+        plain_text_contract="SUMMARY | value",
+    )
+
+    assert result.ok is False
+    assert result.failure_class == "schema_invalid"
+
+
 @pytest.fixture(autouse=True)
 def _isolate_default_audit_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

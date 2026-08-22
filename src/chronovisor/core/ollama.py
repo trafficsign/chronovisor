@@ -691,11 +691,10 @@ def unload_model() -> None:
 
 TRIAGE_SYSTEM_PROMPT = """\
 You are a knowledge wiki triage engine. Analyze raw session data and decide \
-what wiki pages to create or update. Do NOT generate page content — only output a structured plan.
+what wiki pages to create or update. Do NOT generate page content — only output a plan.
 
 Rules:
 - 1 entity = 1 page
-- Output valid JSON array only (no markdown fences, no explanation)
 - For every new page, emit exactly `folder/kebab-case.md`; a bare filename is forbidden
 - Prefer the best semantically matching folder from the provided existing-folder list
 - Only when no existing folder fits, create one specific new top-level folder in
@@ -703,12 +702,12 @@ Rules:
 - Do not use `misc/` merely to avoid choosing or creating a meaningful folder;
   use it only for genuinely miscellaneous knowledge
 - For updates: reference the existing page ID in a field named "filename"
-- Every update object MUST use "filename". Never emit a "page_id" field
+- Every update row MUST use "filename". Never emit a "page_id" field
 - If the target page is not listed in the catalog, use create, not update
 - Skip ephemeral conversation, greetings, and filler
 - Include brief summary of what knowledge each page should contain
 - Include keywords for finding related existing pages
-- Use only these five object keys: type, filename, title, keywords, summary
+- Use only these five fields: type, filename, title, keywords, summary
 - Every operation, including updates, MUST include non-empty title, keywords,
   and summary fields
 - Emit at most 8 operations
@@ -717,33 +716,6 @@ Rules:
 - Emit exactly one operation per case/Unicode-insensitive target page ID. If
   several facts belong on one page, preserve all of them in one combined
   summary and keyword set; never emit multiple operations for that target
-
-Output format (JSON array only):
-[
-  {
-    "type": "create",
-    "filename": "folder/kebab-case.md",
-    "title": "Page Title",
-    "keywords": ["keyword1", "keyword2"],
-    "summary": "Brief description of what this page should cover"
-  },
-  {
-    "type": "update",
-    "filename": "existing-page.md",
-    "title": "Existing Page Title",
-    "keywords": ["keyword1", "keyword2"],
-    "summary": "What new information to add"
-  }
-]
-
-WRONG output (do NOT do these):
-- Bare keyword list: ["keyword1", "keyword2"]   ← This is a list of strings, not operations
-- Single object: {"type": "create", ...}        ← Must be wrapped in an array
-- Code fences around the JSON                   ← Output raw JSON only
-- Root-level create: {"type": "create", "filename": "topic.md", ...}
-  ← Every create must use exactly one top-level folder: `folder/topic.md`
-
-Each top-level element of the array MUST be an object with a "type" field.
 """
 
 PRESERVE_SOURCE_FACTS_RULE = (

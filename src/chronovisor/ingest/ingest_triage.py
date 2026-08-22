@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from contextlib import nullcontext
 from typing import Any
@@ -36,6 +37,75 @@ all_pages = _runtime_call("all_pages")
 load_ingest_config = _runtime_call("load_ingest_config")
 required_structured_context_tokens = _runtime_call("required_structured_context_tokens")
 LocalStructuredSession = _runtime_call("LocalStructuredSession")
+
+
+TRIAGE_TEXT_OUTPUT_CONTRACT = """\
+Return NOOP when no durable page operation is warranted.
+Otherwise return one operation per line with exactly these five pipe-separated
+columns and no header:
+create | folder/page-id.md | Page title | keyword one; keyword two | Brief summary
+update | existing-page-id.md | Existing title | keyword one; keyword two | New facts
+Use semicolons only to separate keywords. Keep every operation on one line.
+"""
+
+
+def _decode_triage_output(text: str) -> list[dict[str, Any]]:
+    """Materialize the model's compact rows into the validated host plan."""
+
+    stripped = text.strip()
+    lines = stripped.splitlines()
+    if (
+        len(lines) >= 2
+        and lines[0].strip().startswith("```")
+        and lines[-1].strip() == "```"
+    ):
+        stripped = "\n".join(lines[1:-1]).strip()
+        lines = stripped.splitlines()
+    if stripped.startswith(("[", "{")):
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid legacy structured response: {exc.msg}") from exc
+    if stripped.casefold() == "noop":
+        return []
+
+    operations: list[dict[str, Any]] = []
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("- "):
+            line = line[2:].strip()
+        line = line.strip("|").strip()
+        parts = [part.strip() for part in line.split("|", 4)]
+        if len(parts) == 5 and parts[0].casefold() == "type":
+            continue
+        if parts and all(part and set(part) <= {"-", ":"} for part in parts):
+            continue
+        if len(parts) != 5:
+            raise ValueError(
+                f"line {line_number} must contain exactly five pipe-separated columns"
+            )
+        op_type, filename, title, keyword_text, summary = parts
+        op_type = op_type.casefold()
+        if op_type not in {"create", "update"}:
+            raise ValueError(f"line {line_number} type must be create or update")
+        operations.append(
+            {
+                "type": op_type,
+                "filename": filename,
+                "title": title,
+                "keywords": [
+                    keyword.strip()
+                    for keyword in keyword_text.split(";")
+                    if keyword.strip()
+                ],
+                "summary": summary,
+            }
+        )
+    if not operations:
+        raise ValueError("response must be NOOP or contain at least one operation row")
+    return operations
 
 from chronovisor.ingest.ingest import (  # noqa: E402
     _DEFAULT_GENERATE_WITH_PROGRESS,
@@ -139,7 +209,7 @@ Raw session data to triage:
 ---
 {feedback_block}
 
-Analyze the raw data above. Output a JSON array of page operations (create/update)."""
+Analyze the raw data above and return the page-operation record."""
 
     config = load_ingest_config()
     triage_num_predict = min(config.num_predict, _TRIAGE_NUM_PREDICT)
@@ -150,6 +220,7 @@ Analyze the raw data above. Output a JSON array of page operations (create/updat
         num_predict=triage_num_predict,
         max_output_chars=_TRIAGE_MAX_OUTPUT_BYTES,
         max_feedback_chars=_TRIAGE_MAX_FEEDBACK_BYTES,
+        plain_text_contract=TRIAGE_TEXT_OUTPUT_CONTRACT,
     )
     try:
         selected_num_ctx = _select_ingest_context(
@@ -169,11 +240,6 @@ Analyze the raw data above. Output a JSON array of page operations (create/updat
             if live_transport
             else None
         )
-        if route is not None and not route.structured_output:
-            raise IngestTriageFailure(
-                "capability_unavailable",
-                "ingest.generation requires structured output",
-            )
         local_ollama = (
             route is not None
             and route.provider == "ollama"
@@ -221,6 +287,8 @@ Analyze the raw data above. Output a JSON array of page operations (create/updat
                     value,
                     resolve_effective_targets=True,
                 ),
+                plain_text_contract=TRIAGE_TEXT_OUTPUT_CONTRACT,
+                plain_text_decoder=_decode_triage_output,
             )
     except IngestContextCapacityError as exc:
         failure = IngestTriageFailure("context_window_exceeded", str(exc))
