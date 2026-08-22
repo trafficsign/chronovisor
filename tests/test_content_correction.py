@@ -87,7 +87,8 @@ def test_local_proposer_repairs_invalid_json_in_same_session(tmp_path: Path) -> 
 
     assert proposal["decision"] == "ambiguous"
     assert len(prompts) == 2
-    assert "<ASSISTANT>\n{not-json" in prompts[1]
+    assert "Previous invalid JSON omitted by the client" in prompts[1]
+    assert '"snippet":"{not-json"' in prompts[1]
     assert "Validator errors" in prompts[1]
 
 
