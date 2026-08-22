@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Plan</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+h3{font-size:1rem;margin:1.2rem 0 0.35rem 0}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+pre{background:var(--code-bg);padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-height:1.45}
+table{width:100%;border-collapse:collapse;margin:0.75rem 0;font-size:0.9rem}
+th,td{border:1px solid var(--rule);padding:0.45rem 0.55rem;text-align:left;vertical-align:top}
+th{background:#f3f1eb}
+.callout{border-left:3px solid var(--accent);padding:0.6rem 0.9rem;background:#f3f1eb;border-radius:4px}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_0d301bb852814f2a930362020eda87d4","created_at":"2026-08-22T20:36:35+09:00","状態":"ready","slug":"llm-decision-path-consolidation"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">Chronovisor LLM実行・判断経路の一本化</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span><code data-bind="task_id">plan_0d301bb852814f2a930362020eda87d4</code></span>
+<span data-bind="created_at">2026-08-22T20:36:35+09:00</span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<ul>
+<li>本番のモデル選択を <code>[llm.providers.*]</code> と <code>[llm.roles.*]</code> の一箇所に限定し、機能別の旧モデル指定を廃止する。</li>
+<li>既存の <code>LLMRuntime</code>、<code>LocalStructuredSession</code>、<code>DecisionRouter</code>、<code>DecisionLaneContract</code> を正規経路にし、同じ責務を持つ迂回路を削除する。</li>
+<li>三者合意は維持する。Primary と Challenger を先に実行し、不一致時だけ Tie-break、quorum=2、conservative veto / hold は現行どおりとする。</li>
+<li>永続状態へ影響する出力はモデルに完成オブジェクトを作らせず、モデルの選択結果をホストが検証・materialize・sealする。</li>
+<li>Decision Trace は実行時の正規イベントとreceiptから生成し、Dashboardによる欠損情報の推測をなくす。</li>
+</ul>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<ul>
+<li>Pi、Hermes、DeepSeek Harnessなど、新しいエージェント／ハーネス層を追加しない。</li>
+<li>三者合意、quorum=2、mutation veto、no-safe-quorum hold、laneごとの意味論を簡略化しない。</li>
+<li><code>LLMRuntime</code>と同等の新しいFacade、Router、Factoryを作らない。既存基盤で不足する最小APIだけを追加する。</li>
+<li>全laneを同じ出力形へ無理に揃えない。永続効果を持たない説明文・分類結果までID化しない。</li>
+<li>model-eval / adoption artifact用の候補モデル指定と、本番ルーティングを混同して一括削除しない。</li>
+<li>互換レイヤーを恒久的に残さない。移行したcallsiteの旧経路は同じphaseで削除する。</li>
+<li>本計画の実装と同時に、プロンプト改善、モデル交換、検索品質改善、Dashboardのデザイン変更を行わない。</li>
+</ul>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定</h2>
+<ul>
+<li>調査基準は clean な <code>main</code> / <code>4c72823</code>。実行開始時に再確認し、driftがあればPlanへ記録する。</li>
+<li><code>DecisionRouter</code>の本番経路はすでに <code>classification.primary</code> / <code>challenger</code> / <code>tie_break</code> roleを解決し、旧 <code>DecisionRouterConfig.*_model</code> を上書きしている。</li>
+<li>Ingest、Recall、Researchの本番モデル選択もrole移行が進んでいるが、live configと一部の評価・補助経路に旧selectorが残る。</li>
+<li><code>LocalStructuredSession</code>はstructured output、repair、監査を担い、既定transportは <code>LLMRuntime</code>へ委譲している。</li>
+<li>oMLXとOllamaのadapterは既に同じlocal resource leaseを公開している。新schedulerではなく、既存controlを正規経路から利用する。</li>
+<li><code>DecisionLaneContract</code>、schema manifest、effect policy、contract hashは既存の判断契約の正本として維持する。</li>
+</ul>
+</section>
+
+<section data-section="目標構造">
+<h2>目標構造</h2>
+<pre>安全性が必要な decision lane
+Caller + DecisionLaneContract
+              ↓
+        DecisionRouter ── Primary + Challenger ── disagreement時のみ Tie-break
+              ↓                         ↑
+      LocalStructuredSession ─────── LLMRuntime ─────── Provider adapter
+              ↓
+  host materializer → canonical artifact / receipt → trace event → Dashboard
+
+単独の structured generation
+Caller → LocalStructuredSession → LLMRuntime → Provider adapter → trace event</pre>
+<p class="callout"><strong>境界:</strong> <code>DecisionRouter</code>は安全性が必要な合議だけを担当する。Research plannerやRecall gateまで三者合意へ入れず、共通化するのはモデル選択・transport・resource admission・structured validation・観測の境界だけ。</p>
+
+<table>
+<thead><tr><th>責務</th><th>正本</th><th>廃止する重複</th></tr></thead>
+<tbody>
+<tr><td>Provider / model identity</td><td><code>core/llm_config.py</code> + <code>[llm.roles.*]</code></td><td>機能別 <code>model</code> / <code>*_model</code> selector</td></tr>
+<tr><td>Provider-neutral execution / egress</td><td><code>core/llm_runtime.py</code></td><td>production callsiteからの直接provider呼び出し</td></tr>
+<tr><td>Structured validation / repair</td><td><code>decision/local_structured.py</code></td><td>lane別JSON抽出・repair loop</td></tr>
+<tr><td>Lane semantics / schema / effect</td><td><code>decision/decision_lane_contracts.py</code> + schema manifest</td><td>promptだけに埋め込まれた暗黙ルール</td></tr>
+<tr><td>Quorum / veto / hold</td><td><code>decision/decision_router.py</code></td><td>機能別の独自multi-model orchestration</td></tr>
+<tr><td>Durable effect</td><td>laneのhost materializer + sealed artifact</td><td>モデル生成の完成mutation JSON</td></tr>
+<tr><td>Operational truth</td><td>audit / machine-consensus receipt / trace event</td><td>Dashboardの別ソース横断による意味推測</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist">
+<li><input type="checkbox"><span><strong>Phase 0 — Baselineを固定する。</strong> HEAD、worktree、live configのmodel selector、全generation roleのprovider/model/revision、direct provider callsite、model-backed lane/schema一覧を採取する。関連pytest、lane-contract corpus、Decision Trace分岐テスト、foreground Recall latencyを実行し、変更前の成功数・pair agreement・unsafe flip・呼び出し数・p50/p95を実行ログへ記録する。</span></li>
+<li><input type="checkbox"><span><strong>Phase 0 Gate — selectorとcallsiteを4分類する。</strong> 各項目を「本番で有効」「既に無効な残骸」「model-eval/adoption専用」「adapter/health/labとして正当」に分類する。分類不能な項目は削除せず、callerまで追跡する。</span></li>
+
+<li><input type="checkbox"><span><strong>Phase 1 — 本番モデル選択をroleへ一本化する。</strong> Ingest、Recall、Research、Classificationの本番routeを <code>[llm.roles.*]</code> だけから解決する。live config・tracked sample・docsから旧 <code>[ingest].model</code>、Recall/Researchのmodel selector、production用 <code>[decision_router].*_model</code> を除去する。候補モデルtripletはmodel-eval/adoption専用の入力境界に隔離し、本番loaderへ逆流させない。</span></li>
+<li><input type="checkbox"><span><strong>Phase 1 Gate — 二重設定が挙動を変えられないことを固定する。</strong> role欠落、capability不足、同一identityの三役割、provider/model/revision不一致はmodel call前にfail closed。本番config内の旧selectorを静かに採用しない。既存テストへ最小のmismatch invariantを追加する。</span></li>
+
+<li><input type="checkbox"><span><strong>Phase 2 — model invocationを既存runtimeへ収束させる。</strong> structured callは <code>LocalStructuredSession</code>、非structured generationは <code>LLMRuntime.generate</code> を通す。直接 <code>ollama.chat/generate/embed</code> 等を許すのはadapter内部と明示的なlab/burn/health probeだけにし、productionの例外はcallsite移行と同時に削除する。見た目だけのmodule renameは行わない。</span></li>
+<li><input type="checkbox"><span><strong>Phase 2 Gate — provider-neutral resource admissionを通す。</strong> <code>LocalRuntimeControl.resource_lease</code> を既存runtimeから最小APIで利用し、<code>LocalStructuredSession</code>の <code>provider == "ollama"</code> 分岐をlocal provider共通にする。同期Recall等は既存 <code>foreground_lane</code>、backgroundは既存admission/leaseを使う。長いbackground prefill中もforegroundが既存budgetを超えて待たされないことを実測し、backendにないpreemption機構は新設しない。</span></li>
+
+<li><input type="checkbox"><span><strong>Phase 3 — 永続効果のmaterialization境界を揃える。</strong> 現行Ingestのhost-issued selector → host materializationを参照実装にする。各model-backed laneのschema/effect policyを監査し、ファイル内容、path、mutation配列、apply対象などの効果-bearing fieldだけをhost-issued IDまたはhost-sealed projectionへ置換する。read-only分類やsummaryはそのまま維持する。</span></li>
+<li><input type="checkbox"><span><strong>Phase 3 Gate — model outputからdurable bytesへ直結できないことを固定する。</strong> quorumはmodelのbounded decision signatureに対して取り、合意後にのみhostが完全オブジェクトを組み立て、再validation、artifact seal、effect guardを行う。affected laneだけcontract/schema policy versionをbumpし、lane-contract caseとadoption evidenceを更新する。unsafe flipは0を必須とする。</span></li>
+
+<li><input type="checkbox"><span><strong>Phase 4 — Traceの正本をproducer側へ寄せる。</strong> <code>LocalConsensusAuditStore</code>、<code>DecisionRouter</code>、machine-consensus receiptから、request/role/provider/model/revision/phase/status/contract/artifact/holdを欠落なくtrace eventへ出す。Dashboardは同一requestの正規eventをfoldして表示し、model-backed laneについて <code>processing_activity</code> や複数JSONLから不足フェーズを推測するfallbackを削除する。</span></li>
+<li><input type="checkbox"><span><strong>Phase 4 Gate — Trace全分岐を固定する。</strong> pair agreement、tie-break quorum、no-safe-quorum hold、artifact seal failure、artifact replay（0 model calls）、単独structured success/failure・non-reasoning bypassをunit/API/実ブラウザで確認する。Artifact → Decision、No quorum → Holdなど既存topologyを変えない。</span></li>
+
+<li><input type="checkbox"><span><strong>Phase 5 — 互換コードと設定を削除する。</strong> 移行済みselector parser、default model定数、feature wrapper、Dashboard fallback、古いtest fixture/docsを削る。新APIが旧経路を二つ以上消せない場合は追加せず、callsite側の直接利用を選ぶ。production codeの重複が増えたphaseは完了扱いにしない。</span></li>
+<li><input type="checkbox"><span><strong>Phase 5 Gate — 静的inventoryを0または明示allowlistにする。</strong> productionからのdirect provider call、<code>[llm.roles.*]</code>外のgeneration model selector、独自structured repair、model-authored durable payload、Dashboard semantic fallbackを <code>rg</code> とテストで検査する。allowlistには理由と削除条件を残す。</span></li>
+
+<li><input type="checkbox"><span><strong>Phase 6 — 全検証、commit、必要時のみdeployする。</strong> 各phaseを独立commitし、targeted suite、ruff、mypy、隔離rootで全pytestを通す。pushは明示依頼がある場合だけ行う。deploy時はlive configをrole-onlyへ原子的に更新し、push → service restart → archive commit → health → live route/Trace/Recall確認の順で照合する。</span></li>
+</ol>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<ul>
+<li>本番generation roleのprovider/model/revisionが <code>[llm.roles.*]</code> のみから決まり、旧selectorを変えてもroute identityが変わらない。</li>
+<li>Primary / Challenger / Tie-breakは異なるroute identityで、2票先行・不一致時だけTie-break・quorum=2・veto/holdが変更前と一致する。</li>
+<li>全production structured generationが <code>LocalStructuredSession → LLMRuntime</code> を通り、local provider共通のresource admissionを受ける。</li>
+<li>永続効果を持つlaneで、未検証のmodel-authored bytes/path/mutation arrayを直接applyできない。</li>
+<li>lane-contract corpusは全件pass、expected-effect matchは1.0、unsafe flipは0、pair agreementとmodel invocation数は変更前以上／以下をそれぞれ維持する。</li>
+<li>Decision Traceの全分岐がcanonical event/receiptだけから再現でき、対象laneのDashboard fallbackが削除されている。</li>
+<li>関連pytest、全pytest、ruff、mypyが成功し、worktreeに無関係な変更がなく、Planの全checkboxと実行ログが更新されている。</li>
+<li>deployを行った場合、running process・runtime archive・health・live route identity・live Decision Traceが同一commitを示す。</li>
+</ul>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<h3>Static / config</h3>
+<ul>
+<li><code>rg</code>で旧selector、direct provider call、独自repair/materializer、Dashboard fallbackの残存を確認する。</li>
+<li>live configの全generation roleをresolveし、provider/model/location/protocol/endpoint hash/revisionを重複なく出力する。</li>
+<li>旧selectorを故意に矛盾させたfixtureでもrole routeが変化しないこと、role欠落・identity重複はpreflightで失敗することを確認する。</li>
+</ul>
+
+<h3>Targeted tests</h3>
+<pre>uv run pytest -q \
+  tests/test_llm_config.py \
+  tests/test_runtime_config.py \
+  tests/test_local_structured.py \
+  tests/test_decision_router.py \
+  tests/test_decision_router_provider_routing.py \
+  tests/test_machine_consensus_receipt.py \
+  tests/test_ingest_drain.py \
+  tests/test_recall_runtime.py \
+  tests/test_research_orchestrator.py \
+  tests/test_dashboard.py</pre>
+
+<h3>Quality / full suite</h3>
+<pre>uv run ruff check src tests
+uv run mypy src
+CHRONOVISOR_ROOT="$(mktemp -d -t chronovisor-test)" uv run pytest -q</pre>
+<ul>
+<li>lane-contract/adoption評価は変更前artifactと比較し、case欠落なし、unsafe flip=0、expected-effect match=1.0を確認する。</li>
+<li>同じfixtureで変更前後のdecision signature、quorum status、hold reason、artifact hash対象を比較する。意図しない差分は失敗とする。</li>
+<li>foreground Recallを単独時とbackground generation重複時で反復し、既存timeout budget内で完了またはfail closedし、長時間待機しないことを確認する。</li>
+</ul>
+
+<h3>Live acceptance（pushを明示された場合のみ）</h3>
+<ul>
+<li>service restart後、health commit / drift、role route provenance、provider endpoints、ingest authority、Recall gateを確認する。</li>
+<li>pair agreementとtie-break/holdを安全なfixtureで発生させ、APIと実ブラウザのDecision Traceがreceiptと一致することを確認する。</li>
+<li>問題時は旧コードを復活させず、直前のphase commitとrole-only config snapshotへ戻す。</li>
+</ul>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>なし</li></ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul>
+<li>最初に削る対象は「既に本番では無効なのに設定・テストへ残るmodel selector」。判断ロジック自体から触らない。</li>
+<li><code>DecisionRouterConfig.*_model</code> は本番selectorとしては廃止対象だが、model-eval/adoption fixtureの候補identityとしての用途を分離してから扱う。</li>
+<li>Ingestの <code>selection_id</code> → host materializationは参照実装。全laneへ機械的にコピーせず、durable effectがあるschemaだけ適用する。</li>
+<li>oMLXのadapterはresource leaseを既に公開している。追加すべきものは既存runtimeからそのcontrolを使う最小境界であり、新schedulerではない。</li>
+<li>Dashboardのprojection自体は必要。削るのはevent foldではなく、欠損を別ソースから意味的に補完するfallback。</li>
+</ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log">
+<li><time>2026-08-22 20:36</time><span>Plan作成。HEAD <code>4c72823</code>、clean worktree、現行のrole/config/runtime/structured/quorum/materialization/Trace経路を調査し、状態を <code>ready</code> に設定。</span></li>
+</ol>
+</section>
+
+</body>
+</html>
