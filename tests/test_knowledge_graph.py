@@ -17,7 +17,6 @@ from chronovisor.core.knowledge_graph_config import (
     GraphRetrievalConfig,
     KnowledgeGraphConfig,
     knowledge_generation_sha256,
-    load_config,
 )
 from chronovisor.core.knowledge_graph_retrieval import (
     community_candidates,
@@ -553,26 +552,6 @@ def test_communities_use_only_verified_relations() -> None:
     assert len(communities) == 1
     assert communities[0].member_page_ids == ("a", "b")
     assert rows[1].relation_id not in communities[0].relation_ids
-
-
-def test_legacy_model_selectors_are_accepted_but_ignored(tmp_path: Path) -> None:
-    path = tmp_path / "config.toml"
-    path.write_text(
-        '[knowledge_graph]\nextractor_model="https://external.example/model"\n',
-        encoding="utf-8",
-    )
-
-    first = load_config(path)
-
-    path.write_text(
-        '[knowledge_graph]\nexternal_models_allowed=true\nextractor_model="gemma4:26b"\n',
-        encoding="utf-8",
-    )
-    second = load_config(path)
-
-    assert first == KnowledgeGraphConfig()
-    assert second == KnowledgeGraphConfig()
-    assert not hasattr(first, "extractor_model")
 
 
 def test_generation_identity_uses_no_ollama_metadata_for_remote_route(

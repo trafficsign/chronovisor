@@ -13,28 +13,6 @@ def test_research_config_defaults_fail_closed(tmp_path) -> None:
     assert config.enabled is True
     assert config.mode == "off"
     assert config.web.live_egress_enabled is False
-    assert config.resources.max_concurrent_generations == 1
-
-
-def test_legacy_research_model_selectors_are_accepted_but_ignored(tmp_path) -> None:
-    path = tmp_path / "config.toml"
-    path.write_text(
-        """
-[research]
-planner_model = "override-planner"
-challenge_model = "override-challenge"
-tie_break_model = "override-tie"
-""".strip()
-        + "\n",
-        encoding="utf-8",
-    )
-
-    config = load_research_config(path)
-
-    assert all(
-        not hasattr(config, key)
-        for key in ("planner_model", "challenge_model", "tie_break_model")
-    )
 
 
 def test_invalid_consolidation_mutation_mode_is_blocked(tmp_path) -> None:

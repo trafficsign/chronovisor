@@ -27,7 +27,7 @@ from chronovisor.core.llm_runtime import (
     TokenUsage,
 )
 from chronovisor.core.ollama_adapter import OllamaAdapter
-from chronovisor.core.runtime_config import EmbeddingConfig, IngestConfig
+from chronovisor.core.runtime_config import IngestConfig
 
 
 def test_runtime_structured_bridge_builds_typed_request_and_preserves_metadata(
@@ -968,19 +968,6 @@ def test_embed_uses_explicit_model(monkeypatch) -> None:
 
     assert ollama.embed(["hello"], model="bge-m3") == [[1.0, 2.0]]
     assert client.payload["model"] == "bge-m3"
-
-
-def test_embed_uses_facade_embedding_config(monkeypatch) -> None:
-    client = _PostClient()
-    monkeypatch.setattr(ollama, "_client", lambda: client)
-    monkeypatch.setattr(
-        ollama,
-        "load_embedding_config",
-        lambda: EmbeddingConfig(model="configured-embed"),
-    )
-
-    assert ollama.embed(["hello"]) == [[1.0, 2.0]]
-    assert client.payload["model"] == "configured-embed"
 
 
 def test_embed_uses_remaining_recall_timeout(monkeypatch) -> None:

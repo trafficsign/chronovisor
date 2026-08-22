@@ -13,9 +13,6 @@ audit = false
 content_correction = true
 recall_improve = false
 
-[embedding]
-model = "bge-m3"
-
 [search.embedding]
 enabled = false
 
@@ -37,13 +34,6 @@ queue_size = 8
 [ingest]
 # Numeric generation limits live here; the model is selected only by the
 # fixed llm.roles."ingest.generation" route below.
-
-[decision_router]
-# Production voters are selected only by the fixed classification roles below.
-# These model fields remain compatibility defaults for injected/offline routers.
-primary_model = "qwen3.8:27b-axq4"
-challenger_model = "muse-glimmer:30b-q4k-dynamic"
-tie_break_model = "gemma4:26b-optiq4"
 
 [research]
 enabled = false

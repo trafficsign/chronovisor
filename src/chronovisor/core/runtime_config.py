@@ -19,7 +19,6 @@ CONFIG_FILE = CHRONOVISOR_ROOT / "config.toml"
 
 FALSE_VALUES = {"0", "false", "False", "no", "NO", "off", "OFF"}
 TRUE_VALUES = {"1", "true", "True", "yes", "YES", "on", "ON"}
-DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
 DEFAULT_DECISION_PRIMARY_MODEL = "qwen3.8:27b-axq4"
 DEFAULT_DECISION_CHALLENGER_MODEL = "muse-glimmer:30b-q4k-dynamic"
 DEFAULT_DECISION_TIE_BREAK_MODEL = "gemma4:26b-optiq4"
@@ -355,15 +354,6 @@ class HookPolicy:
 
 
 @dataclass(frozen=True)
-class EmbeddingConfig:
-    """Utility embedding profile used by tags and duplicate review."""
-
-    model: str = DEFAULT_EMBEDDING_MODEL
-    document_prefix: str = ""
-    query_prefix: str = ""
-
-
-@dataclass(frozen=True)
 class SearchEmbeddingConfig:
     """Search-only semantic retrieval service profile."""
 
@@ -555,23 +545,6 @@ def load_hook_policy(path: Path | str | None = None) -> HookPolicy:
         stop_recall_improve=nested_bool(
             data, ("hooks", "stop", "recall_improve"), True
         ),
-    )
-
-
-def load_embedding_config(path: Path | str | None = None) -> EmbeddingConfig:
-    data = load_toml_file(path)
-    embedding = data.get("embedding")
-    if not isinstance(embedding, dict):
-        return EmbeddingConfig()
-    model = embedding.get("model")
-    document_prefix = embedding.get("document_prefix")
-    query_prefix = embedding.get("query_prefix")
-    return EmbeddingConfig(
-        model=model
-        if isinstance(model, str) and model.strip()
-        else DEFAULT_EMBEDDING_MODEL,
-        document_prefix=document_prefix if isinstance(document_prefix, str) else "",
-        query_prefix=query_prefix if isinstance(query_prefix, str) else "",
     )
 
 

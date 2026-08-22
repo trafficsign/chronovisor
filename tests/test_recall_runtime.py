@@ -1479,12 +1479,11 @@ def test_obvious_read_does_not_wait_for_auto_judge(monkeypatch) -> None:
     assert result.confidence >= policy.read_threshold
 
 
-def test_gate_config_ignores_legacy_models_and_loads_budget(tmp_path) -> None:
+def test_gate_config_loads_budget(tmp_path) -> None:
     config = tmp_path / "flat-config.toml"
     config.write_text(
         """
 enabled = true
-model = "flat-local-model"
 
 [budgets]
 judge_timeout_ms = 4000
@@ -1497,7 +1496,6 @@ failures = 3
 cooldown_seconds = 90
 
 [recall.gate]
-model = "qwen3.5:4b-mlx"
 think = false
 timeout_ms = 1200
 num_ctx = 2048
@@ -1506,15 +1504,12 @@ keep_alive = "1h"
 warmup_timeout_ms = 9000
 
 [recall.rewrite]
-model = "legacy-rewriter"
 timeout_ms = 1400
 """
     )
 
     policy = load_policy(config)
 
-    assert not hasattr(policy, "judge_model")
-    assert not hasattr(policy, "rewrite_model")
     assert policy.judge_think is False
     assert policy.judge_timeout_ms == 1200
     assert policy.judge_num_ctx == 2048
@@ -1570,9 +1565,7 @@ max_rich_evidence = 2
 injection_token_budget = 1200
 certificate_required = true
 judge_enabled = true
-judge_model = "judge-9b"
 judge_timeout_ms = 800
-escalation_model = "judge-35b"
 escalation_timeout_ms = 700
 """,
         encoding="utf-8",
@@ -1589,9 +1582,7 @@ escalation_timeout_ms = 700
     assert policy.processor_injection_token_budget == 1200
     assert policy.processor_certificate_required is True
     assert policy.processor_judge_enabled is True
-    assert not hasattr(policy, "processor_judge_model")
     assert policy.processor_judge_timeout_ms == 800
-    assert not hasattr(policy, "processor_escalation_model")
     assert policy.processor_escalation_timeout_ms == 700
 
 
@@ -1664,7 +1655,6 @@ def test_nested_and_flat_recall_shapes_produce_identical_policy(tmp_path) -> Non
     flat.write_text(
         """
 enabled = false
-model = "judge:test"
 
 [thresholds]
 search = 0.21
@@ -1685,7 +1675,6 @@ semantic = true
         """
 [recall]
 enabled = false
-model = "judge:test"
 semantic = true
 
 [recall.thresholds]
@@ -1712,8 +1701,6 @@ def test_gate_defaults_keep_runtime_resident_and_rewrite_timeout_longer(
 
     policy = load_policy(config)
 
-    assert not hasattr(policy, "judge_model")
-    assert not hasattr(policy, "rewrite_model")
     assert policy.judge_keep_alive == "24h"
     assert policy.warmup_timeout_ms == 15000
     assert policy.rewrite_timeout_ms == 3000

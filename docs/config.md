@@ -75,21 +75,13 @@ audit = false
 content_correction = true
 recall_improve = false
 
-[embedding]
-# Compatibility-only keys. They are accepted but ignored by provider-neutral
-# knowledge embedding; the fixed route below is the only model selector.
-model = "bge-m3"
-document_prefix = ""
-query_prefix = ""
-
 [llm.roles."knowledge.embedding"]
 capability = "embedding"
 provider = "local"
 model = "bge-m3"
 
 [ingest]
-# Ingest generation routing is fixed by llm.roles."ingest.generation". Legacy
-# `model` values are accepted but ignored and cannot select a runtime route.
+# Ingest generation routing is fixed by llm.roles."ingest.generation".
 # Select the smallest safe bucket for each complete ingest request. A larger
 # resident runner is reused so a backlog grows monotonically rather than
 # shrinking and reloading between raws.
@@ -371,8 +363,7 @@ queue_size = 8
 # auto/shadow still fail closed until protected capacity is proved.
 enabled = true
 mode = "explicit"
-# Provider/model selection is fixed by llm.roles."research.*". Legacy model
-# keys are accepted but ignored.
+# Provider/model selection is fixed by llm.roles."research.*".
 max_depth = 1
 
 [research.budgets]
@@ -386,18 +377,6 @@ max_tie_break_calls = 1
 max_repair_calls = 2
 max_total_model_calls = 10
 max_observation_bytes = 200000
-
-[research.resources]
-scheduler = "sync_first"
-max_concurrent_generations = 1
-preempt_on_sync = true
-preempt_grace_ms = 250
-protected_models = ["ornith:9b-q4_K_M", "bge-m3"]
-require_protected_residency = true
-sync_reserved_headroom_gib = 16
-sync_lease_wait_limit_ms = 50
-coordinate_ollama = true
-coordinate_mps_reranker = true
 
 [research.web]
 adapter_enabled = true
@@ -507,8 +486,7 @@ injection_token_budget = 1200
 certificate_required = true
 judge_enabled = true
 # Model routing is fixed by llm.roles."recall.certificate_judge.primary" and
-# llm.roles."recall.certificate_judge.escalation". Legacy judge_model and
-# escalation_model keys are accepted but ignored.
+# llm.roles."recall.certificate_judge.escalation".
 judge_timeout_ms = 900
 escalation_timeout_ms = 900
 
@@ -602,25 +580,21 @@ min_count = 1
 actions = ["alias", "query_hint", "page_tag"]
 ```
 
-Auditor model routing is fixed by `llm.roles."recall.auditor"`. Legacy
-`[audit].model`, `[audit].think`, `[heavy].model`, and `[heavy].think` values
-are accepted but ignored. Auditor inputs are classified as `raw/high`; remote
+Auditor model routing is fixed by `llm.roles."recall.auditor"`. Auditor inputs
+are classified as `raw/high`; remote
 providers require an explicit `recall.auditor` + `raw` egress opt-in and never
 fall back to another provider.
 
 Synchronous recall routing is fixed by `llm.roles."recall.gate"` and
-`llm.roles."recall.query_rewriter"`. Legacy top-level `model`,
-`[recall].model`, `[recall.gate].model`, and `[recall.rewrite].model` values
-are accepted but ignored. Both inputs are `raw/high`; remote providers require
+`llm.roles."recall.query_rewriter"`. Both inputs are `raw/high`; remote providers require
 an explicit role + `raw` egress opt-in and never fall back to another provider.
 
 Recall policy proposals use the fixed, ordered roles
 `llm.roles."recall.policy_proposer.primary"` and
 `llm.roles."recall.policy_proposer.challenger"`. Both require structured
 output and classify inputs as `raw/high`; remote providers require each exact
-role + `raw` opt-in and never fall back to another provider. Legacy
-`[recall_improvement].models` and `CHRONOVISOR_RECALL_IMPROVEMENT_MODELS`
-cannot select runtime models, and CLI `--models` is unavailable.
+role + `raw` opt-in and never fall back to another provider. CLI model
+selection is unavailable.
 
 Offline Recall rubric variants use only the fixed structured role
 `llm.roles."recall.rubric.variant"`; there is no model fallback. Every prompt
@@ -768,8 +742,7 @@ Install the optional local reranker dependencies with `uv sync --extra reranker`
 before enabling `[search.reranker]`. The fixed `search.rerank` LLM role is the
 only provider/model selector. For a local Transformers route, configure
 `backend`, `device`, `dtype`, `max_length`, and `batch_size` only on its
-`[llm.providers.<id>]` table. Legacy copies of those keys, or `model`, under
-`[search.reranker]` are accepted but ignored.
+`[llm.providers.<id>]` table.
 
 Use `dtype = "float16"` on Apple Silicon to halve the resident reranker weights;
 `float32` remains the portable default.
@@ -804,15 +777,13 @@ disables rewrite, semantic search, and judge while keeping BM25 available.
 ## Search embeddings
 
 The search encoder is independent from the fixed `knowledge.embedding` route
-used for duplicate and tag workflows. Legacy `[embedding]` keys are accepted
-but ignored by that provider-neutral path; `llm.roles."knowledge.embedding"`
-is its only provider/model selector. Set `enabled = false` for explicit
+used for duplicate and tag workflows. `llm.roles."knowledge.embedding"` is the
+only provider/model selector for that path. Set `enabled = false` for explicit
 BM25-only execution. When enabled, both semantic runtime roles must resolve to
 the same provider, model, location, and vector dimensions. Service or egress
 failure is reported as a semantic failure and never selects another provider
-or the old SQLite embedding path. Legacy `[search.embedding]` `backend`,
-`model`, and `fallback` keys are accepted but ignored; the two fixed roles are
-the only provider/model selectors.
+or the old SQLite embedding path. The two fixed semantic runtime roles are the
+only provider/model selectors.
 
 ```toml
 [search.embedding]
@@ -917,9 +888,7 @@ per_predicate_cap = 4
 hub_penalty = 0.15
 ```
 
-Provider and model selection is fixed by the shared runtime roles below; the
-legacy `extractor_model`, `community_summary_model`, and
-`external_models_allowed` keys are accepted but ignored.
+Provider and model selection is fixed by the shared runtime roles below.
 
 ```toml
 [llm.roles."knowledge.relation_extraction"]

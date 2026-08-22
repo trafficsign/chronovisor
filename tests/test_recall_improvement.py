@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.core import llm_config, ollama, runtime_config, store
+from chronovisor.core import llm_config, ollama, store
 from chronovisor.core.llm_runtime import (
     BackendCapabilities,
     GenerationResult,
@@ -268,7 +268,19 @@ def _remote_proposer_runtime(
         if allow_raw
         else set()
     )
-    return LLMRuntime(generation=generation, remote_egress_opt_ins=opt_ins)
+    local_controls = (
+        {
+            role: SimpleNamespace(resource_lease=lambda **_kwargs: nullcontext())
+            for role in generation
+        }
+        if backend.location is RouteLocation.LOCAL
+        else {}
+    )
+    return LLMRuntime(
+        generation=generation,
+        local_controls=local_controls,
+        remote_egress_opt_ins=opt_ins,
+    )
 
 
 def _forbid_ollama_controls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -386,68 +398,6 @@ def test_unstructured_proposer_route_fails_before_backend(
 
     assert rejected.value.category == "capability_unavailable"
     assert backend.requests == []
-
-
-def test_legacy_model_selectors_cannot_override_runtime_routes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    routes = _proposer_routes()
-    route_calls: list[tuple[str, ...]] = []
-    toml_reads = 0
-
-    def legacy_toml() -> dict[str, object]:
-        nonlocal toml_reads
-        toml_reads += 1
-        return {"recall_improvement": {"models": ["toml:attacker"]}}
-
-    def fake_propose(**kwargs: object) -> list[PolicyProposal]:
-        assert kwargs["routes"] == routes
-        return []
-
-    monkeypatch.setenv("CHRONOVISOR_RECALL_IMPROVEMENT_MODELS", "env:attacker")
-    monkeypatch.setattr(runtime_config, "load_toml_file", legacy_toml)
-    monkeypatch.setattr(
-        ollama,
-        "runtime_generation_routes",
-        lambda roles: route_calls.append(tuple(roles)) or routes,
-    )
-    monkeypatch.setattr(
-        recall_improvement,
-        "build_dataset",
-        lambda **_kwargs: [
-            recall_improvement.RecallExample(
-                prompt="remember", expected_pages=("page",), kind="missed_candidate"
-            )
-        ],
-    )
-    monkeypatch.setattr(
-        recall_improvement,
-        "load_policy",
-        lambda *_args, **_kwargs: RecallPolicy(log_decisions=False),
-    )
-    monkeypatch.setattr(
-        recall_improvement,
-        "_evaluate_cached",
-        lambda *_args, **_kwargs: {"score": 0.0, "metrics": {}, "rows": []},
-    )
-    monkeypatch.setattr(
-        recall_improvement, "propose_with_runtime_roles", fake_propose
-    )
-
-    result = recall_improvement.run_improvement(
-        models=("kwarg:attacker",),
-        include_heuristic=False,
-        runs_dir=tmp_path / "runs",
-        registry_file=tmp_path / "registry.jsonl",
-        episodes_file=tmp_path / "episodes.jsonl",
-        live_episodes_file=tmp_path / "live.jsonl",
-    )
-
-    assert result["models"] == ["ornith:test", "gemma:test"]
-    assert route_calls == [recall_improvement.PROPOSER_RUNTIME_ROLES]
-    # The distillation cutover reads its separate enablement flag; legacy
-    # recall-improvement model selectors remain ignored.
-    assert toml_reads == 1
 
 
 def test_module_cli_rejects_retired_models_flag() -> None:
@@ -596,7 +546,6 @@ def test_run_improvement_persists_runtime_budget_deferred(
     payload = recall_improvement.run_improvement(
         log_file=log_file,
         feedback_file=feedback_file,
-        models=(),
         include_heuristic=False,
         registry_file=registry_file,
         runs_dir=runs_dir,
@@ -834,7 +783,6 @@ def test_run_improvement_excludes_page_ignored_from_policy_dataset(tmp_path) -> 
     payload = recall_improvement.run_improvement(
         log_file=log_file,
         feedback_file=feedback_file,
-        models=(),
         include_heuristic=False,
         active_file=tmp_path / "active.json",
         registry_file=tmp_path / "registry.jsonl",
@@ -926,7 +874,6 @@ def test_run_improvement_adopts_candidate_policy(tmp_path, monkeypatch) -> None:
     payload = recall_improvement.run_improvement(
         log_file=log_file,
         feedback_file=feedback_file,
-        models=("qwen", "gemma"),
         include_heuristic=False,
         frontier_mode="off",
         active_file=active_file,
@@ -958,7 +905,6 @@ def test_run_improvement_adopts_candidate_policy(tmp_path, monkeypatch) -> None:
     deferred = recall_improvement.run_improvement(
         log_file=log_file,
         feedback_file=feedback_file,
-        models=("qwen", "gemma"),
         include_heuristic=False,
         frontier_mode="off",
         active_file=preserved_active,
@@ -1057,7 +1003,6 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(
     payload = recall_improvement.run_improvement(
         log_file=log_file,
         feedback_file=feedback_file,
-        models=("qwen",),
         include_heuristic=False,
         frontier_mode="always",
         active_file=active_file,
@@ -1093,7 +1038,6 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(
     retry_payload = recall_improvement.run_improvement(
         log_file=log_file,
         feedback_file=feedback_file,
-        models=("qwen",),
         include_heuristic=False,
         frontier_mode="always",
         active_file=tmp_path / "retry-active-policy.json",
@@ -1118,7 +1062,6 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(
     quarantined_payload = recall_improvement.run_improvement(
         log_file=log_file,
         feedback_file=feedback_file,
-        models=("qwen",),
         include_heuristic=False,
         frontier_mode="always",
         active_file=tmp_path / "quarantined-active-policy.json",
@@ -1143,7 +1086,6 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(
     undurable = recall_improvement.run_improvement(
         log_file=log_file,
         feedback_file=feedback_file,
-        models=("qwen",),
         include_heuristic=False,
         frontier_mode="always",
         active_file=undurable_active,
@@ -1175,7 +1117,6 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(
     deferred_payload = recall_improvement.run_improvement(
         log_file=log_file,
         feedback_file=feedback_file,
-        models=("qwen",),
         include_heuristic=False,
         frontier_mode="always",
         active_file=preserved_active,
@@ -1206,7 +1147,6 @@ def test_run_improvement_frontier_rejection_blocks_active_policy(
     frontier_deferred = recall_improvement.run_improvement(
         log_file=log_file,
         feedback_file=feedback_file,
-        models=("qwen",),
         include_heuristic=False,
         frontier_mode="always",
         active_file=preserved_active,
@@ -1303,7 +1243,6 @@ def test_run_improvement_frontier_human_required_failure_maps_to_review_retry(
     payload = recall_improvement.run_improvement(
         log_file=log_file,
         feedback_file=feedback_file,
-        models=("qwen",),
         include_heuristic=False,
         frontier_mode="always",
         active_file=tmp_path / "human-required-active-policy.json",
@@ -1412,7 +1351,6 @@ def test_run_due_executes_and_updates_schedule_when_due(tmp_path, monkeypatch) -
     payload = recall_improvement.run_due(
         log_file=tmp_path / "recall-log.jsonl",
         feedback_file=feedback_file,
-        models=("qwen", "gemma"),
         min_total_feedback=1,
         min_new_feedback=1,
         schedule_file=schedule_file,

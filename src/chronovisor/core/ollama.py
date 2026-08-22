@@ -16,12 +16,7 @@ from chronovisor.core import ollama_transport as _ollama_transport
 from chronovisor.core.llm_runtime import (
     safe_metadata_identifier as safe_metadata_identifier,
 )
-from chronovisor.core.runtime_config import (
-    DEFAULT_EMBEDDING_MODEL,
-    IngestConfig,
-    load_embedding_config,
-    load_ingest_config,
-)
+from chronovisor.core.runtime_config import IngestConfig, load_ingest_config
 from chronovisor.core.store import CHRONOVISOR_ROOT
 
 GIB = _ollama_calibration.GIB
@@ -652,31 +647,23 @@ def chat(
             )
 
 
-EMBED_MODEL = DEFAULT_EMBEDDING_MODEL
-
-
-def embedding_model() -> str:
-    return load_embedding_config().model
-
-
 def embed(
     texts: list[str],
     *,
-    model: str | None = None,
+    model: str,
     read_timeout_ms: int | None = None,
 ) -> list[list[float]]:
     """Get embedding vectors via Ollama /api/embed."""
 
-    selected_model = model or embedding_model()
     with model_resource_lease(exclusive=False):
         with model_activity(
-            model=selected_model,
+            model=model,
             operation="search",
             pipeline="recall",
         ):
             return _ollama_transport.embed(
                 texts,
-                model=selected_model,
+                model=model,
                 read_timeout_ms=read_timeout_ms,
                 client=_client,
             )

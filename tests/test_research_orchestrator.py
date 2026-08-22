@@ -154,7 +154,7 @@ def test_local_planner_preserves_transport_failure_class(monkeypatch) -> None:
         0.0,
     )
 
-    response = LocalPlanner("planner-model").plan(
+    response = LocalPlanner().plan(
         ResearchState("run-a", "goal"),
         lease=lease,
         budget=ResearchBudget(),
@@ -201,7 +201,7 @@ def test_local_planner_session_timeout_respects_run_deadline(monkeypatch) -> Non
         0.0,
     )
 
-    response = LocalPlanner("planner-model").plan(
+    response = LocalPlanner().plan(
         state,
         lease=lease,
         budget=ResearchBudget(),
@@ -212,9 +212,7 @@ def test_local_planner_session_timeout_respects_run_deadline(monkeypatch) -> Non
     assert 0 < calls[0]["timeout_seconds"] <= 5
 
 
-def test_model_planner_route_identity_is_durable_and_legacy_selector_is_ignored(
-    tmp_path, monkeypatch
-) -> None:
+def test_model_planner_route_identity_is_durable(tmp_path, monkeypatch) -> None:
     _isolate_scheduler(tmp_path, monkeypatch)
     _route_planner(monkeypatch)
     monkeypatch.setattr(
@@ -244,7 +242,7 @@ def test_model_planner_route_identity_is_durable_and_legacy_selector_is_ignored(
     result = research_orchestrator.run_research(
         "goal",
         config=ResearchConfig(enabled=True, mode="explicit"),
-        planner=LocalPlanner("ignored-selector"),
+        planner=LocalPlanner(),
         store=store,
     )
 

@@ -37,20 +37,6 @@ def _bool(data: dict[str, Any], key: str, default: bool) -> bool:
 
 
 @dataclass(frozen=True)
-class ResourceConfig:
-    scheduler: str = "sync_first"
-    max_concurrent_generations: int = 1
-    preempt_on_sync: bool = True
-    preempt_grace_ms: int = 250
-    protected_models: tuple[str, ...] = ("ornith:9b-q4_K_M", "bge-m3")
-    require_protected_residency: bool = True
-    sync_reserved_headroom_gib: int = 16
-    sync_lease_wait_limit_ms: int = 50
-    coordinate_ollama: bool = True
-    coordinate_mps_reranker: bool = True
-
-
-@dataclass(frozen=True)
 class WebConfig:
     adapter_enabled: bool = False
     live_egress_enabled: bool = False
@@ -96,7 +82,6 @@ class ResearchConfig:
     mode: str = "off"
     max_depth: int = 1
     budgets: ResearchBudget = field(default_factory=ResearchBudget)
-    resources: ResourceConfig = field(default_factory=ResourceConfig)
     web: WebConfig = field(default_factory=WebConfig)
     compaction: CompactionConfig = field(default_factory=CompactionConfig)
     consolidation_enabled: bool = False
@@ -113,9 +98,6 @@ def load_research_config(path: Path | str | None = None) -> ResearchConfig:
     root = config_data.get("research")
     data = root if isinstance(root, dict) else {}
     budget_data = data.get("budgets") if isinstance(data.get("budgets"), dict) else {}
-    resource_data = (
-        data.get("resources") if isinstance(data.get("resources"), dict) else {}
-    )
     web_data = data.get("web") if isinstance(data.get("web"), dict) else {}
     compaction_data = (
         data.get("compaction") if isinstance(data.get("compaction"), dict) else {}
@@ -152,12 +134,6 @@ def load_research_config(path: Path | str | None = None) -> ResearchConfig:
         max_fetches=_int(web_data, "max_fetches", 5),
         max_observation_bytes=_int(budget_data, "max_observation_bytes", 200_000),
     )
-    protected = resource_data.get("protected_models")
-    protected_models = (
-        tuple(item for item in protected if isinstance(item, str) and item)
-        if isinstance(protected, list)
-        else ResourceConfig().protected_models
-    )
     configured_source_packs = web_data.get("source_packs")
     source_packs = (
         tuple(
@@ -165,22 +141,6 @@ def load_research_config(path: Path | str | None = None) -> ResearchConfig:
         )
         if isinstance(configured_source_packs, list)
         else WebConfig().source_packs
-    )
-    resources = ResourceConfig(
-        scheduler=str(resource_data.get("scheduler") or "sync_first"),
-        max_concurrent_generations=1,
-        preempt_on_sync=_bool(resource_data, "preempt_on_sync", True),
-        preempt_grace_ms=_int(resource_data, "preempt_grace_ms", 250),
-        protected_models=protected_models,
-        require_protected_residency=_bool(
-            resource_data, "require_protected_residency", True
-        ),
-        sync_reserved_headroom_gib=_int(
-            resource_data, "sync_reserved_headroom_gib", 16
-        ),
-        sync_lease_wait_limit_ms=_int(resource_data, "sync_lease_wait_limit_ms", 50),
-        coordinate_ollama=_bool(resource_data, "coordinate_ollama", True),
-        coordinate_mps_reranker=_bool(resource_data, "coordinate_mps_reranker", True),
     )
     web = WebConfig(
         adapter_enabled=_bool(web_data, "adapter_enabled", False),
@@ -233,7 +193,6 @@ def load_research_config(path: Path | str | None = None) -> ResearchConfig:
         mode=mode,
         max_depth=min(1, _int(data, "max_depth", 1)),
         budgets=budget,
-        resources=resources,
         web=web,
         compaction=compaction,
         consolidation_enabled=_bool(consolidation, "enabled", False),

@@ -265,47 +265,19 @@ recall_improve = false
     assert policy.stop_recall_improve is False
 
 
-def test_embedding_config_reads_model_and_prefixes(tmp_path: Path, monkeypatch) -> None:
-    config = tmp_path / "config.toml"
-    config.write_text(
-        """
-[embedding]
-model = "bge-m3"
-document_prefix = "検索文書: "
-query_prefix = "検索クエリ: "
-""",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
-
-    cfg = runtime_config.load_embedding_config()
-
-    assert cfg.model == "bge-m3"
-    assert cfg.document_prefix == "検索文書: "
-    assert cfg.query_prefix == "検索クエリ: "
-
-
-def test_search_embedding_config_is_independent_from_utility_embedding(
+def test_search_embedding_config_reads_runtime_knobs(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = tmp_path / "config.toml"
     config.write_text(
         """
-[embedding]
-model = "bge-m3"
-document_prefix = ""
-query_prefix = ""
-
 [search.embedding]
 enabled = true
-backend = "nemotron_service"
-model = "nvidia/Nemotron-3-Embed-1B-BF16"
 revision = "abc123"
 dimensions = 2048
 storage_dtype = "float32"
 query_prefix = "query: "
 document_prefix = "passage: "
-fallback = "bm25"
 
 [search.embedding.service]
 socket = "~/.chronovisor/runtime/test-semantic.sock"
@@ -332,14 +304,8 @@ sync_recall = false
     )
     monkeypatch.setattr(runtime_config, "CONFIG_FILE", config)
 
-    utility = runtime_config.load_embedding_config()
     search = runtime_config.load_search_embedding_config()
 
-    assert utility.model == "bge-m3"
-    assert utility.query_prefix == ""
-    assert not hasattr(search, "backend")
-    assert not hasattr(search, "model")
-    assert not hasattr(search, "fallback")
     assert search.revision == "abc123"
     assert search.dimensions == 2048
     assert search.query_prefix == "query: "
@@ -364,14 +330,13 @@ def test_search_embedding_is_disabled_when_config_is_absent(
     assert runtime_config.load_search_embedding_config().enabled is False
 
 
-def test_ingest_config_reads_generation_knobs_but_ignores_legacy_model(
+def test_ingest_config_reads_generation_knobs(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = tmp_path / "config.toml"
     config.write_text(
         """
 [ingest]
-model = "qwen3.6:35b-a3b-mxfp8"
 keep_alive = "10m"
 temperature = 0.1
 num_ctx = 32768
@@ -589,12 +554,7 @@ def test_reranker_config_reads_nested_search_section(
         """
 [search.reranker]
 enabled = true
-model = "legacy-selector"
-backend = "flagembedding"
 top_n = 20
-max_length = 1024
-batch_size = 4
-device = "mps"
 weight = 0.4
 
 [search.reranker.service]

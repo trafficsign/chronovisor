@@ -161,18 +161,12 @@ def test_auditor_judge_rejects_oversized_input_before_transport(tmp_path: Path) 
     assert calls == 0
 
 
-def test_audit_policy_ignores_legacy_model_selectors(tmp_path: Path) -> None:
+def test_audit_policy_reads_audit_section(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(
         """
-[heavy]
-model = "legacy-heavy"
-think = true
-
 [audit]
 enabled = false
-model = "legacy-auditor"
-think = true
 timeout_ms = 2500
 """.strip()
         + "\n",
@@ -183,8 +177,6 @@ timeout_ms = 2500
 
     assert policy.enabled is False
     assert policy.timeout_ms == 2500
-    assert not hasattr(policy, "model")
-    assert not hasattr(policy, "think")
 
 
 def test_remote_auditor_records_actual_route_and_raw_high_source(

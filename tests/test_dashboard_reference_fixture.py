@@ -902,7 +902,7 @@ process.stdout.write(JSON.stringify(Object.fromEntries(
     }
 
 
-def test_all_decision_and_processing_inputs_keep_real_dashboard_paths_connected(
+def test_all_decision_inputs_keep_real_dashboard_paths_connected(
     monkeypatch, tmp_path: Path
 ) -> None:
     cases = [
@@ -1020,34 +1020,6 @@ def test_all_decision_and_processing_inputs_keep_real_dashboard_paths_connected(
         ]
         payload.append({"case": {**case, "kind": "decision"}, "trace": trace})
 
-    processing_cases = []
-    for pipeline, _label, definitions in dashboard._PROCESSING_LANES:
-        for current_step, _step_label, expected_phase in definitions:
-            case = {
-                "id": f"processing::{pipeline}::{current_step}",
-                "kind": "processing",
-                "workflow": pipeline,
-                "processing_stage": current_step,
-                "expected_phase": expected_phase,
-            }
-            trace = dashboard._processing_lane_trace(
-                pipeline,
-                {
-                    "state": "active",
-                    "current_step": current_step,
-                    "model": f"{pipeline}:model",
-                    "role": f"{pipeline} worker",
-                    "started_at": "2026-08-22T06:54:48+09:00",
-                    "updated_at": "2026-08-22T06:54:49+09:00",
-                    "work_item": case["id"],
-                    "recent": False,
-                    "steps": dashboard._processing_step_rows(definitions, current_step),
-                },
-            )
-            assert trace is not None
-            processing_cases.append(case)
-            payload.append({"case": case, "trace": trace})
-
     harness = """
 const fixtures = __FIXTURES__;
 const workflowKeys = [...new Set(fixtures.map(({ case: fixture }) => fixture.workflow))];
@@ -1124,8 +1096,6 @@ addEventListener("DOMContentLoaded", () => {
         .map((node) => [`reasoning-output-${node.dataset.reasoningOutput}`, node]),
     ].map(([key, node]) => [key, pathState(node)]));
     const rails = Object.fromEntries([...document.querySelectorAll("[data-decision-lane]")]
-      .filter((lane) => fixture.kind !== "processing"
-        || lane.dataset.decisionLane === "primary")
       .map((lane) => [lane.dataset.decisionLane, [...lane.querySelectorAll("[data-lane-path]")]
         .map((node) => ({ key: node.dataset.lanePath, ...pathState(node) }))]));
     scroller.scrollLeft = 0;
@@ -1335,7 +1305,7 @@ addEventListener("DOMContentLoaded", () => {
     assert len(browser_results) == len(payload), diagnostics
     assert screenshot_path.is_file() and screenshot_path.stat().st_size > 0
 
-    assert len(visual_paths) == 35
+    assert len(visual_paths) == 6
 
     branches = {
         "A": [],
@@ -1416,62 +1386,6 @@ addEventListener("DOMContentLoaded", () => {
             count = active_rail_counts.get(case["id"], 5) if state == "active" else 5
             for rail in result["rails"][lane][:count]:
                 assert rail["state"] in {"active", "done", "error"}
-                assert rail["dash"] in {"none", ""}
-                assert rail["length"] > 0
-
-    rail_phases = dashboard._DECISION_TRACE_PHASES[1:]
-    for case in processing_cases:
-        result = by_id[case["id"]]
-        current_index = dashboard._DECISION_TRACE_PHASES.index(case["expected_phase"])
-        assert result["kind"] == "processing"
-        assert result["selected"] == [case["workflow"]]
-        assert result["selectionEvent"] == case["workflow"]
-        assert result["primaryPhase"] == case["expected_phase"]
-        assert result["layout"]["scrollWidth"] == result["layout"]["clientWidth"]
-        assert result["layout"]["rightReachable"] is True
-        assert result["layout"]["fitsWidth"] is True
-        assert result["layout"]["nextPanelGap"] == 12
-        assert result["reasoning"] == "off"
-        assert result["reasoningLabel"] == "MEDIUM"
-        assert result["fitLabel"] == "BYPASS"
-        reached_paths = {
-            "packet-preflight",
-            "preflight-execution_plan",
-            "execution-plan-context",
-            "plan-context",
-            "reasoning-off",
-            "reasoning-output-off",
-            "plan-dispatch",
-        }
-        assert {
-            key
-            for key, path in result["paths"].items()
-            if path["state"] in {"active", "done", "error"}
-        } == reached_paths
-        for path_key in (
-            "packet-preflight",
-            "preflight-execution_plan",
-            "execution-plan-context",
-            "plan-context",
-            "reasoning-off",
-            "reasoning-output-off",
-            "plan-dispatch",
-        ):
-            path = result["paths"][path_key]
-            assert path["state"] in {"active", "done"}
-            assert path["dash"] in {"none", ""}
-            assert path["length"] > 0
-        for phase, rail in zip(rail_phases, result["rails"]["primary"], strict=True):
-            phase_index = dashboard._DECISION_TRACE_PHASES.index(phase)
-            expected_state = (
-                "done"
-                if phase_index < current_index
-                else "active"
-                if phase_index == current_index
-                else "pending"
-            )
-            assert rail["state"] == expected_state
-            if expected_state in {"active", "done"}:
                 assert rail["dash"] in {"none", ""}
                 assert rail["length"] > 0
 

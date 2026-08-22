@@ -595,55 +595,28 @@ AND-merged per check. Any false check changes an otherwise approved result to
 `needs_retry` and clears approved mutations, so matching action signatures can
 never hide a failed semantic precondition.
 
-The model triplet in `[decision_router]` remains the explicit
-bootstrap/current policy. To nominate a replacement after a full passing run,
-set `decision_router.adoption_artifact` to that artifact. Runtime revalidates
+Production voters are resolved only from
+`llm.roles.classification.primary/challenger/tie_break`. Candidate triplets
+exist only in explicit model-evaluation/adoption inputs. To nominate a
+replacement after a full passing run, set `decision_router.adoption_artifact`
+to that artifact. Runtime revalidates
 the artifact schema, evaluator policy, sealed per-case evidence, recomputed
 metrics/gate, full-corpus coverage, fixed minimum thresholds,
 all gate checks, and evaluated model digests before switching all three roles
 atomically. It also reopens the immutable source corpus and compares the exact
-Ollama engine version, model digests, and quantization identities. A missing,
+provider/model/revision identities and available local runtime evidence. A missing,
 modified, or drifted nominated artifact never partially switches roles:
 enabled semantic lanes quarantine before inference, while explicit shadow
-evaluation may continue on the bootstrap triplet without creating trusted
+evaluation may continue on the configured role triplet without creating trusted
 adoption labels.
 
-Decision inference also uses memory-aware residency. The router computes the
-full structured-session token requirement (system prompt, user prompt, schema,
-two possible JSON-repair turns, output reservation, and safety margin), rounds
-it to the smallest executable configured context bucket, and uses
-calibrated Ollama `/api/ps` footprints measured at that bucket plus host
-reclaimable memory to choose whether one, two, or three runners fit.
-Production applies monotonic context hysteresis: a larger runner already in
-memory is reused when its measured footprint still fits reserved capacity and
-its context is within the configured ceiling. It grows when necessary but is
-not shrunk merely because the next request is smaller, avoiding runner flap.
-After every vote, the router records the actual runner size and context reported
-by `/api/ps`; admission therefore counts the larger measured allocation rather
-than the smaller requested bucket. Missing observations do not overturn an
-otherwise safe decision, but they fail closed as adoption evidence. Likewise,
-an observed larger context cannot manufacture coverage for a requested smaller
-bucket. The evaluator starts cold and executes cases in ascending bucket order,
-then explicitly disables larger-context reuse so it measures every exact bucket
-once. Production remains grow-only; evaluation's exact mode is isolated and
-resets surviving candidate runners on both fresh and resumed runs. The corpus
-compiler and evaluator both reject a full gate before inference when any bucket
-lacks a planned case. The evaluator also preserves Ollama's per-turn
-prompt/output token counts, so production truncation checks and replay-gate
-checks use the same transport contract.
-Measurements persist by exact model digest, context bucket, Ollama version,
-platform, and daemon process epoch; a daemon restart invalidates stale
-measurements, while caller-shell environment differences do not. An
-uncalibrated model/context pair bootstraps exactly one runner only when its
-conservative 2x estimate fits currently reclaimable capacity after reserve.
-Unrelated resident models are never counted as reclaimable; a failed resource
-probe or a role that cannot fit alone quarantines before inference. Runner eviction is
-verified under a thread/process-shared lease; a failed eviction quarantines the
-decision rather than skipping a vote. Adoption artifacts must contain passing
-evidence from every context bucket before this policy can become active.
-Increasing the resident count also requires spare capacity of at least 2 GiB or
-10% of the proposed resident set, whichever is larger, so small memory changes
-do not flap repeatedly between two and three runners.
+Decision inference acquires the configured local runtime's shared resource
+lease for the complete structured session. Ollama routes additionally use
+measured `/api/ps` footprints, exact context buckets, and monotonic context
+hysteresis; oMLX admission remains owned by the oMLX runtime control. Missing
+runtime observations do not overturn an otherwise safe decision, but they fail
+closed as adoption evidence. The evaluator measures every required context
+bucket and never treats a larger observed context as smaller-bucket coverage.
 
 After a freshly generated quorum-v2/lane-contract-v27/evaluator-policy-21
 artifact reports `adopted=true`, nominate it in
@@ -657,10 +630,9 @@ lanes quarantine before inference rather than falling back to bootstrap models.
 
 Triage, page generation, and recall metadata use the fixed
 `llm.roles."ingest.generation"` route. `[ingest]` supplies generation budgets;
-its legacy `model` key is still consumed by maintenance callers outside this
-flow and will be retired in a separate bounded migration. The production
-profile selects the smallest safe 32K/64K/128K/256K context bucket for the
-complete request envelope. A local Ollama route reuses a compatible larger
+it contains no model selector. The production profile selects the smallest safe
+32K/64K/128K/256K context bucket for the complete request envelope. A local
+Ollama route reuses a compatible larger
 runner, so backlog processing grows monotonically rather than shrinking and
 reloading between raws. The 256K bucket evicts unrelated Ollama runners before
 admission. Remote and non-Ollama routes do not probe or control Ollama. Inputs
@@ -672,12 +644,11 @@ projections fan out on record boundaries, with only a single oversized record
 split at UTF-8 boundaries. Tool/event-only captures receive a durable
 content-addressed no-op receipt. A parent is retired only after every child or
 no-op artifact passes exact read-back verification.
-All default-transport `LocalStructuredSession` lanes use the same measured
-residency broker as ingest. The broker holds one exclusive process-wide lease
-for the complete initial-plus-repair session, selects the smallest complete
-context bucket, and reuses a compatible larger resident runner. Lint, tagging,
-recall, and correction therefore cannot race the same Ornith tag at different
-`num_ctx` values and force runner reloads.
+All default-transport `LocalStructuredSession` lanes use the same runtime lease
+as ingest for the complete initial-plus-repair session. Ollama routes
+additionally select the smallest complete context bucket and may reuse a
+compatible larger resident runner. Lint, tagging, recall, and correction cannot
+race the same local model at incompatible context sizes.
 
 Page apply and raw retirement are joined by a durable completion ACK under
 `runtime/raw-completion-acks/`. The ACK binds every logical source filename and

@@ -1284,7 +1284,6 @@ def run_improvement(
     config_file: Path | None = None,
     log_file: Path = RECALL_LOG_FILE,
     feedback_file: Path = RECALL_FEEDBACK_FILE,
-    models: str | list[str] | tuple[str, ...] | None = None,
     apply: bool = True,
     include_heuristic: bool = True,
     min_improvement: float = 0.05,
@@ -1932,7 +1931,6 @@ def run_due(
     config_file: Path | None = None,
     log_file: Path = RECALL_LOG_FILE,
     feedback_file: Path = RECALL_FEEDBACK_FILE,
-    models: str | list[str] | tuple[str, ...] | None = None,
     apply: bool = True,
     include_heuristic: bool = True,
     min_improvement: float = 0.05,
@@ -1948,7 +1946,6 @@ def run_due(
     lock_file: Path = RUN_DUE_LOCK_FILE,
     frontier_budget: Any | None = None,
 ) -> dict[str, Any]:
-    del models
     if not dry_run and _distillation_single_writer_active():
         return {
             "schema_version": 1,

@@ -1907,7 +1907,7 @@ def test_decision_trace_pipeline_tabs_ignore_noncanonical_processing_lanes(
     assert all("source" not in trace for trace in traces.values())
 
 
-def test_processing_lane_trace_covers_every_declared_stage() -> None:
+def test_processing_lane_definitions_cover_every_declared_stage() -> None:
     expected = {
         "ingest": {
             "raw": "trigger",
@@ -1958,48 +1958,13 @@ def test_processing_lane_trace_covers_every_declared_stage() -> None:
 
     assert declared == expected
     assert sum(len(steps) for steps in declared.values()) == 29
-    assert dashboard._processing_trace_phase("ingest", "unknown") == "trigger"
-    assert dashboard._processing_trace_phase("unknown", "raw") == "trigger"
 
-    for pipeline, _label, definitions in dashboard._PROCESSING_LANES:
+    for _pipeline, _label, definitions in dashboard._PROCESSING_LANES:
         phase_indexes = [
             dashboard._DECISION_TRACE_PHASES.index(phase)
             for _step, _step_label, phase in definitions
         ]
         assert phase_indexes == sorted(phase_indexes)
-        for current_step, _step_label, expected_phase in definitions:
-            trace = dashboard._processing_lane_trace(
-                pipeline,
-                {
-                    "state": "active",
-                    "current_step": current_step,
-                    "model": f"{pipeline}:model",
-                    "role": f"{pipeline} worker",
-                    "started_at": "2026-08-22T06:54:48+09:00",
-                    "updated_at": "2026-08-22T06:54:49+09:00",
-                    "work_item": f"{pipeline}-{current_step}",
-                    "recent": False,
-                    "steps": dashboard._processing_step_rows(definitions, current_step),
-                },
-            )
-            assert trace is not None
-            primary = next(lane for lane in trace["lanes"] if lane["key"] == "primary")
-            current_index = dashboard._DECISION_TRACE_PHASES.index(expected_phase)
-
-            assert primary["phase"] == expected_phase
-            assert primary["think"] == "off"
-            assert all(event["think"] == "off" for event in trace["events"])
-            assert primary["observed_phases"] == list(
-                dashboard._DECISION_TRACE_PHASES[: current_index + 1]
-            )
-            assert [step["status"] for step in primary["steps"]] == [
-                *(["done"] * current_index),
-                "active",
-                *(
-                    ["pending"]
-                    * (len(dashboard._DECISION_TRACE_PHASES) - current_index - 1)
-                ),
-            ]
 
 
 def test_decision_trace_pin_survives_the_gap_between_lane_markers() -> None:
@@ -3338,7 +3303,7 @@ process.stdout.write(JSON.stringify({{
     ]
 
 
-def test_processing_lane_trace_selection_maps_all_workflows_and_fallbacks() -> None:
+def test_processing_lane_selection_maps_workflows_and_active_tab() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
     scenario = f"""
 const vm = require("node:vm");
@@ -7385,11 +7350,6 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(dashboard, "runtime_generation_routes", configured_routes)
-    monkeypatch.setattr(
-        ollama,
-        "embedding_model",
-        lambda: (_ for _ in ()).throw(AssertionError("legacy selector used")),
-    )
     resolved: list[str] = []
     monkeypatch.setattr(
         dashboard.llm_config,
@@ -7459,7 +7419,7 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
         "load_reranker_config",
-        lambda: SimpleNamespace(enabled=True, model="legacy-selector"),
+        lambda: SimpleNamespace(enabled=True),
     )
     monkeypatch.setattr(
         dashboard.llm_config,
@@ -7492,7 +7452,6 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
 
     assert resolved[-1] == "search.rerank"
     assert roles["route-selected-reranker"] == {"rerank"}
-    assert "legacy-selector" not in roles
 
 
 def test_dashboard_omits_remote_and_non_ollama_generation_routes(

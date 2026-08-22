@@ -121,10 +121,6 @@ class DeterministicPlanner:
 class LocalPlanner:
     needs_model = True
 
-    def __init__(self, _legacy_model: str | None = None) -> None:
-        # Legacy callers may still pass the retired ResearchConfig selector.
-        pass
-
     def plan(
         self,
         state: ResearchState,
