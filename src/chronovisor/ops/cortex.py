@@ -30,6 +30,7 @@ from chronovisor.core.durable_state import (
 from chronovisor.core.index_store import (
     canonical_document_paths,
 )
+from chronovisor.core.jsonl import read_jsonl
 from chronovisor.core.knowledge_graph_store import KnowledgeGraphStore
 from chronovisor.core.raw_segment import RawSegmentCommit, RawSegmentCorrupt
 from chronovisor.ops.cortex_stream import (
@@ -994,16 +995,9 @@ def _read_field_events(
     if not _FIELD_SESSION_RE.fullmatch(session_hash):
         return []
     path = event_root / f"{session_hash}.jsonl"
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
     events: list[dict[str, Any]] = []
-    for line in lines[-max(1, limit) :]:
-        try:
-            projected = _project_field_event(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    for row in read_jsonl(path, limit=max(1, limit)):
+        projected = _project_field_event(row)
         if projected is not None and projected["session_hash"] == session_hash:
             events.append(projected)
     return sorted(events, key=lambda row: int(row["seq"]))
@@ -1018,18 +1012,10 @@ def _field_recall_metrics(
     """Aggregate Field latency and teacher agreement without exposing prompts."""
 
     path = root / "recall" / "recall-log.jsonl"
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        lines = []
     latencies: list[float] = []
     teacher_total = 0
     teacher_agreed = 0
-    for line in lines[-max(1, limit) :]:
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for row in read_jsonl(path, limit=max(1, limit)):
         features = row.get("evidence_features")
         field = features.get("field_shadow") if isinstance(features, dict) else None
         if not isinstance(field, dict) or field.get("session_hash") != session_hash:

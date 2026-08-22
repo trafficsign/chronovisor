@@ -69,6 +69,21 @@ def test_jsonl_helpers_preserve_exact_lf_bytes(tmp_path: Path) -> None:
     assert read_jsonl(atomic) == [{"a": "日本語", "z": 1}, {"z": 2}]
 
 
+def test_jsonl_tail_reads_only_bounded_physical_lines(tmp_path: Path) -> None:
+    path = tmp_path / "tail.jsonl"
+    path.write_bytes(
+        b'{"ignored":true}\n'
+        + '{"text":"before\u2028after"}\n'.encode()
+        + b'{"value":3}\r\n'
+        + b"torn"
+    )
+
+    assert read_jsonl(path, limit=3) == [
+        {"text": "before\u2028after"},
+        {"value": 3},
+    ]
+
+
 def test_atomic_replace_bytes_sets_private_mode(tmp_path: Path) -> None:
     path = tmp_path / "artifact"
 

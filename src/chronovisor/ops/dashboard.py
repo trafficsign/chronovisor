@@ -32,6 +32,7 @@ from urllib.parse import parse_qsl, urlparse
 import httpx
 
 from chronovisor.core import activity_log, index_store, llm_config, runtime_status
+from chronovisor.core.jsonl import read_jsonl
 from chronovisor.core.ollama import (
     OLLAMA_URL,
     ingest_model,
@@ -1018,17 +1019,7 @@ def _drain_history(limit: int = 200) -> list[dict[str, Any]]:
     logs_dir = CHRONOVISOR_ROOT / "logs"
     records: list[dict[str, Any]] = []
     for path in sorted(logs_dir.glob("ingest-drain-*.jsonl"))[-10:]:
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except Exception:
-            continue
-        for line in lines:
-            try:
-                data = json.loads(line)
-            except Exception:
-                continue
-            if not isinstance(data, dict):
-                continue
+        for data in _read_jsonl_file(path, limit=max(1, limit)):
             result = data.get("result")
             if not isinstance(result, dict):
                 result = {}
@@ -1114,19 +1105,7 @@ def _read_json_file(path: Path) -> dict[str, Any] | None:
 
 
 def _read_jsonl_file(path: Path, limit: int) -> list[dict[str, Any]]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except Exception:
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in lines[-limit:]:
-        try:
-            data = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(data, dict):
-            rows.append(data)
-    return rows
+    return read_jsonl(path, limit=max(1, limit))
 
 
 def _shorten(value: object, limit: int = 180) -> str:

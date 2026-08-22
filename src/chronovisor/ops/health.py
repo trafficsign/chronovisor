@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from chronovisor.core.index_store import canonical_document_paths, get_store
-from chronovisor.core.jsonl import count_jsonl, read_jsonl
+from chronovisor.core.jsonl import count_jsonl, iter_jsonl, read_jsonl
 from chronovisor.core.store import CHRONOVISOR_ROOT, RAW_DIR
 from chronovisor.decision.decision_authority import semantic_authority_shape_error
 from chronovisor.decision.semantic_hold import (
@@ -243,13 +243,16 @@ def capture_kpi() -> dict[str, Any]:
         host = _raw_host(path)
         by_host[host] = by_host.get(host, 0) + 1
 
-    claims = _read_jsonl(CHRONOVISOR_ROOT / "claims" / "claims.jsonl", limit=100000)
-    claimed_raws = {
-        str(row.get("source_raw"))
-        for row in claims
-        if isinstance(row.get("source_raw"), str) and row.get("source_raw")
-    }
     raw_names = {unit.raw_id for unit in raws} | {path.name for path in artifact_paths}
+    claim_rows = 0
+    claimed_raws: set[str] = set()
+    for row in iter_jsonl(
+        CHRONOVISOR_ROOT / "claims" / "claims.jsonl", limit=100_000
+    ):
+        claim_rows += 1
+        source_raw = row.get("source_raw")
+        if isinstance(source_raw, str) and source_raw in raw_names:
+            claimed_raws.add(source_raw)
     covered = raw_names & claimed_raws
     return {
         "raw_files": len(raws) + len(artifact_paths),
@@ -260,7 +263,7 @@ def capture_kpi() -> dict[str, Any]:
             else None
         ),
         "raw_by_host": by_host,
-        "claim_rows": len(claims),
+        "claim_rows": claim_rows,
     }
 
 
