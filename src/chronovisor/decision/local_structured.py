@@ -29,7 +29,10 @@ import httpx
 
 from chronovisor.core import ollama
 from chronovisor.core.canonical_json import canonical_json_strict as _canonical_json
-from chronovisor.core.llm_runtime import MAX_OUTPUT_TOKENS
+from chronovisor.core.llm_runtime import MAX_OUTPUT_TOKENS, LLMRuntimeError
+from chronovisor.core.ollama_lease import (
+    model_resource_lease_mode as _local_resource_lease_mode,
+)
 
 MAX_REPAIR_TURNS = 2
 MAX_RESPONSES = 1 + MAX_REPAIR_TURNS
@@ -1031,30 +1034,40 @@ def _default_transport_resource_request(
 @contextmanager
 def _default_transport_resource_broker(
     *,
+    runtime_role: str,
     model: str,
-    request: _StructuredResourceRequest,
+    request: _StructuredResourceRequest | None,
     lease_timeout_ms: int | None = None,
-) -> Iterator[int]:
-    """Exclusively admit one live runner for an entire repair session."""
+) -> Iterator[int | None]:
+    """Exclusively admit one local-provider runner for a repair session."""
 
-    if ollama.model_resource_lease_mode() == "shared":
+    if _local_resource_lease_mode() == "shared":
         raise _StructuredResourceError(
             "capacity_unavailable",
             "standalone structured session cannot upgrade a shared model lease",
         )
     with ExitStack() as stack:
         try:
+            from chronovisor.core.llm_config import (
+                LLMConfigError,
+                load_default_llm_runtime,
+            )
+
             stack.enter_context(
-                ollama.model_resource_lease(
+                load_default_llm_runtime().resource_lease(
+                    runtime_role,
                     exclusive=True,
                     timeout_ms=lease_timeout_ms,
                 )
             )
-        except TimeoutError as exc:
+        except (TimeoutError, LLMConfigError, LLMRuntimeError) as exc:
             raise _StructuredResourceError(
                 "capacity_unavailable",
                 "structured model resource is busy",
             ) from exc
+        if request is None:
+            yield None
+            return
         try:
             plan = ollama.plan_model_residency(
                 [model],
@@ -1093,7 +1106,7 @@ def _default_transport_resource_broker(
                 f"({admitted_num_ctx}>{request.max_num_ctx})",
             )
         # The exclusive lease deliberately spans every validation repair turn.
-        # Inner ollama.chat() shared leases are reentrant and cannot let another
+        # Nested provider calls are reentrant and cannot let another local
         # context request replace this runner between turns.
         yield admitted_num_ctx
 
@@ -3526,14 +3539,10 @@ class LocalStructuredSession:
                     resource_request_error.failure_class,
                     str(resource_request_error),
                 )
-            elif (
-                not self._uses_default_transport
-                or self._runtime_location == "remote"
-                or route_provider != "ollama"
-            ):
+            elif not self._uses_default_transport or self._runtime_location == "remote":
                 result = self._run_impl(prompt, schema, **run_kwargs)
             elif self.resource_managed:
-                if ollama.model_resource_lease_mode() != "exclusive":
+                if _local_resource_lease_mode() != "exclusive":
                     result = self._failure(
                         "capacity_unavailable",
                         "resource-managed structured session requires "
@@ -3542,19 +3551,23 @@ class LocalStructuredSession:
                 else:
                     result = self._run_impl(prompt, schema, **run_kwargs)
             else:
-                assert resource_request is not None
                 try:
                     with _default_transport_resource_broker(
+                        runtime_role=self.runtime_role,
                         model=self.model,
                         request=resource_request,
                         lease_timeout_ms=self.resource_lease_timeout_ms,
                     ) as admitted_num_ctx:
-                        result = self._run_impl(
-                            prompt,
-                            schema,
-                            num_ctx=admitted_num_ctx,
-                            requested_num_ctx=resource_request.requested_num_ctx,
-                            **run_kwargs,
+                        result = (
+                            self._run_impl(
+                                prompt,
+                                schema,
+                                num_ctx=admitted_num_ctx,
+                                requested_num_ctx=resource_request.requested_num_ctx,
+                                **run_kwargs,
+                            )
+                            if resource_request is not None
+                            else self._run_impl(prompt, schema, **run_kwargs)
                         )
                 except _StructuredResourceError as exc:
                     result = self._failure(exc.failure_class, str(exc))

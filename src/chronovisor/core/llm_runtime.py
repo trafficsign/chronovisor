@@ -624,10 +624,18 @@ class LLMRuntime:
             location=route.backend.location,
         )
 
-    def _local_control_for(self, role: str) -> LocalRuntimeControl | None:
-        """Internal operational hook; application model calls never receive it."""
+    def resource_lease(
+        self, role: str, *, exclusive: bool, timeout_ms: int | None = None
+    ) -> AbstractContextManager[None]:
+        """Acquire the configured local provider's shared admission lease."""
 
-        return self._local_controls.get(role)
+        route = _resolve(self._generation, role, "generation")
+        if route.backend.location is not RouteLocation.LOCAL:
+            raise RouteConfigurationError(role, "generation")
+        control = self._local_controls.get(role)
+        if control is None:
+            raise CapabilityUnavailableError(role, "local_control")
+        return control.resource_lease(exclusive=exclusive, timeout_ms=timeout_ms)
 
     def _validate_request(
         self,

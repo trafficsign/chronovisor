@@ -567,8 +567,24 @@ def test_default_transport_routes_non_ollama_local_without_ollama_control(
     audit_root = tmp_path / "audit"
     backend = _RemoteGenerationBackend()
     backend.location = RouteLocation.LOCAL
+    leases: list[str] = []
+
+    class LocalControl:
+        @contextmanager
+        def resource_lease(self, **_kwargs: object) -> Iterator[None]:
+            leases.append("enter")
+            yield
+            leases.append("exit")
+
+        def resident_models(self) -> dict[str, tuple[int, int]]:
+            return {}
+
+        def unload(self, _model: str, *, verify_timeout: float = 30.0) -> bool:
+            return False
+
     runtime = LLMRuntime(
-        generation={"review.local": GenerationRoute(backend, "native-local-model")}
+        generation={"review.local": GenerationRoute(backend, "native-local-model")},
+        local_controls={"review.local": LocalControl()},
     )
     monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
     _reject_ollama_control(monkeypatch)
@@ -583,6 +599,7 @@ def test_default_transport_routes_non_ollama_local_without_ollama_control(
     assert result.ok is True
     assert result.model == "native-local-model"
     assert len(backend.requests) == 1
+    assert leases == ["enter", "exit"]
     assert callable(backend.requests[0].progress_callback)
     _assert_single_load_before_context(audit_root)
 
@@ -668,7 +685,9 @@ def test_resource_managed_default_local_emits_one_load_before_context(
 ) -> None:
     audit_root = tmp_path / "audit"
     _install_default_local_runtime(monkeypatch)
-    monkeypatch.setattr(ollama, "model_resource_lease_mode", lambda: "exclusive")
+    monkeypatch.setattr(
+        local_structured, "_local_resource_lease_mode", lambda: "exclusive"
+    )
     monkeypatch.setattr(
         ollama,
         "chat",

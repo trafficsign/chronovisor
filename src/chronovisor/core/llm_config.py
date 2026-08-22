@@ -25,6 +25,7 @@ from chronovisor.core.llm_runtime import (
     GenerationBackend,
     GenerationRoute,
     LLMRuntime,
+    LocalRuntimeControl,
     RerankBackend,
     RerankRoute,
     RuntimeFailureTelemetry,
@@ -609,7 +610,7 @@ def build_llm_runtime(
     generation: dict[str, GenerationRoute] = {}
     embedding: dict[str, EmbeddingRoute] = {}
     rerank: dict[str, RerankRoute] = {}
-    local_controls: dict[str, OllamaAdapter] = {}
+    local_controls: dict[str, LocalRuntimeControl] = {}
     for role_name, role in config.roles.items():
         backend = backends[role.provider_id]
         if role.capability is RoleCapability.GENERATION:
@@ -644,7 +645,7 @@ def build_llm_runtime(
             )
         else:
             rerank[role_name] = RerankRoute(cast(RerankBackend, backend), role.model)
-        if isinstance(backend, OllamaAdapter):
+        if isinstance(backend, (OllamaAdapter, OMLXAdapter)):
             local_controls[role_name] = backend
     return LLMRuntime(
         generation=generation,

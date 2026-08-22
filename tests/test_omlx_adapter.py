@@ -429,7 +429,9 @@ def test_dflash_generation_uses_exclusive_lease_only_when_enabled(
     assert leases == [(True, 1000)]
 
 
-def test_config_parses_omlx_provider_and_builds_runtime() -> None:
+def test_config_parses_omlx_provider_and_builds_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     payload = tomllib.loads(
         """
 [llm.providers.omlx]
@@ -457,6 +459,17 @@ model = "bge-m3-mlx-fp16"
     runtime = build_llm_runtime(config)
     assert runtime.resolve_generation("recall.gate").provider == "omlx"
     assert runtime.resolve_embedding("classification.embedding").provider == "omlx"
+    leases: list[tuple[bool, int | None]] = []
+    monkeypatch.setattr(
+        omlx_adapter,
+        "model_resource_lease",
+        lambda *, exclusive, timeout_ms=None: (
+            leases.append((exclusive, timeout_ms)) or nullcontext()
+        ),
+    )
+    with runtime.resource_lease("recall.gate", exclusive=True, timeout_ms=25):
+        pass
+    assert leases == [(True, 25)]
 
 
 def test_config_routes_distinct_local_omlx_servers() -> None:
