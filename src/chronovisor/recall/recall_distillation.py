@@ -4463,7 +4463,6 @@ def _ox_ramp_state(state: Mapping[str, Any], max_inflight: int) -> tuple[int, in
     receipts = state.get("ox_ramp_valid_receipts", 0)
     attempts = state.get("ox_ramp_provider_attempts")
     allowed_caps = tuple(sorted({min(value, max_inflight) for value in (1, 2, 5, 10)}))
-    final_cap = allowed_caps[-1]
     if attempts is None and receipts == 0:
         attempts = 0
     if (
@@ -4476,12 +4475,6 @@ def _ox_ramp_state(state: Mapping[str, Any], max_inflight: int) -> tuple[int, in
         or isinstance(attempts, bool)
         or not isinstance(attempts, int)
         or attempts < receipts
-        or (cap < final_cap and receipts > OX_RAMP_RECEIPTS_PER_CAP)
-        or (
-            cap == final_cap
-            and receipts >= OX_RAMP_RECEIPTS_PER_CAP
-            and receipts * 100 < attempts * 95
-        )
     ):
         # A legacy receipt count has no trustworthy denominator.  Reset rather
         # than assuming every recorded receipt was a successful first attempt.
@@ -4494,6 +4487,17 @@ def _next_ox_ramp_cap(current_cap: int, max_inflight: int) -> int:
         if cap > current_cap:
             return cap
     return current_cap
+
+
+def _previous_ox_ramp_cap(current_cap: int, max_inflight: int) -> int:
+    return max(
+        (
+            cap
+            for cap in {min(value, max_inflight) for value in (1, 2, 5, 10)}
+            if cap <= current_cap // 2
+        ),
+        default=1,
+    )
 
 
 def _advance_ox_ramp(
@@ -4516,7 +4520,7 @@ def _advance_ox_ramp(
     ):
         return cap, valid_receipts, provider_attempts
     if rate_limited:
-        return max(1, cap // 2), 0, 0
+        return _previous_ox_ramp_cap(cap, max_inflight), 0, 0
     if stopped:
         return cap, valid_receipts, provider_attempts + actual_attempts
     receipts = valid_receipts + valid_results

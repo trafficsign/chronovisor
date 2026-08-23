@@ -2644,6 +2644,83 @@ def test_ox_ramp_requires_a_95_percent_provider_success_rate_to_advance() -> Non
     ) == (2, 0, 0)
 
 
+def test_ox_ramp_low_rate_state_survives_each_chunk_normalization() -> None:
+    state = (1, 20, 22)
+    for receipts in range(21, 38):
+        state = distill._advance_ox_ramp(
+            cap=state[0],
+            valid_receipts=state[1],
+            provider_attempts=state[2],
+            valid_results=1,
+            actual_attempts=1,
+            rate_limited=False,
+            stopped=False,
+            max_inflight=10,
+        )
+        assert state == (1, receipts, receipts + 2)
+        assert (
+            distill._ox_ramp_state(
+                {
+                    "ox_ramp_cap": state[0],
+                    "ox_ramp_valid_receipts": state[1],
+                    "ox_ramp_provider_attempts": state[2],
+                },
+                10,
+            )
+            == state
+        )
+    assert distill._advance_ox_ramp(
+        cap=state[0],
+        valid_receipts=state[1],
+        provider_attempts=state[2],
+        valid_results=1,
+        actual_attempts=1,
+        rate_limited=False,
+        stopped=False,
+        max_inflight=10,
+    ) == (2, 0, 0)
+
+
+def test_ox_ramp_final_cap_low_rate_state_recovers_then_freezes() -> None:
+    state = (10, 20, 22)
+    for receipts in range(21, 39):
+        state = distill._advance_ox_ramp(
+            cap=state[0],
+            valid_receipts=state[1],
+            provider_attempts=state[2],
+            valid_results=1,
+            actual_attempts=1,
+            rate_limited=False,
+            stopped=False,
+            max_inflight=10,
+        )
+        assert state == (10, receipts, receipts + 2)
+        assert (
+            distill._ox_ramp_state(
+                {
+                    "ox_ramp_cap": state[0],
+                    "ox_ramp_valid_receipts": state[1],
+                    "ox_ramp_provider_attempts": state[2],
+                },
+                10,
+            )
+            == state
+        )
+    assert (
+        distill._advance_ox_ramp(
+            cap=state[0],
+            valid_receipts=state[1],
+            provider_attempts=state[2],
+            valid_results=1,
+            actual_attempts=1,
+            rate_limited=False,
+            stopped=False,
+            max_inflight=10,
+        )
+        == state
+    )
+
+
 def test_ox_ramp_counts_invalid_output_and_retries_in_provider_denominator() -> None:
     assert distill._advance_ox_ramp(
         cap=1,
@@ -2677,6 +2754,16 @@ def test_ox_ramp_429_halves_and_resets_but_final_acceptance_is_stable() -> None:
         rate_limited=True,
         stopped=False,
         max_inflight=10,
+    ) == (2, 0, 0)
+    assert distill._advance_ox_ramp(
+        cap=6,
+        valid_receipts=12,
+        provider_attempts=12,
+        valid_results=1,
+        actual_attempts=1,
+        rate_limited=True,
+        stopped=False,
+        max_inflight=6,
     ) == (2, 0, 0)
     assert distill._advance_ox_ramp(
         cap=2,
