@@ -303,7 +303,11 @@ th{background:#f3f1eb}
 
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
-<ul><li>なし</li></ul>
+<ul>
+<li><strong>Phase 1 live repair:</strong> 既存 <code>chronovisor-ingest-drain</code> PID 85200 が <code>ingest-orchestrator.lock</code> を保持中。current jobは2026-08-23 20:34開始で、21:51のread-only sampleではsocket receive内。process停止・restartは行わず、canary/derived repairも未実行のためinventoryはmissing 20のまま。</li>
+<li><strong>Phase 5B / Phase 6 remote:</strong> pushは未承認。required GitHub jobs、runtime archive commit照合、service restart、HTTP/DOM/console受入は未実行。</li>
+<li><strong>Phase 6 cohort:</strong> deploy後24時間かつactive host別100件のRecall availability/signal gateは時間条件上未到達。Planは規定どおり <code>running</code> を維持する。</li>
+</ul>
 </section>
 
 <section data-section="受け渡しメモ">
@@ -324,9 +328,12 @@ th{background:#f3f1eb}
 <li><time>2026-08-23 20:04</time><span>ユーザー承認により実装開始。Planを <code>running</code> へ更新し、Phase 0 diagnostic/baselineから着手。</span></li>
 <li><time>2026-08-23 20:25</time><span>Phase 0完了。read-only <code>raw projection-status --full --json</code> を追加し、51 focused tests・ruff・差分型確認を通過。実runtime inventoryは13,622 manifest中 valid 13,602 / missing 20 / invalid 0、既存20件は全てprocessed parentかつRaw digest一致。Raw archive full verifyはerror 0。<code>baseline.json</code> と <code>projection-inventory.before.json</code> に証拠を保存。</span></li>
 <li><time>2026-08-23 20:37</time><span>Phase 2実装完了。typed <code>SemanticServiceUnavailable</code> と契約済みcapacity-busyだけを既存deterministic BM25 fallbackへ接続し、unknown exceptionはbounded errorのまま保持。focused 3件・ruff・diff checkを通過し、deadline reserve、sensitive result 0、heavy subsystem call 0を <code>recall-availability.focused.json</code> に保存。24時間かつhost別100件のlive gateはPhase 6までpending。</span></li>
-<li><time>2026-08-23 21:32</time><span>Phase 4実装完了。runtime/API/UI/CLIの5状態fixture、oMLX partial、reranker PID/Unix socket livenessを統一し、217 focused tests・ruff・Node・zsh検証を通過。外部process実測でstatusは7,341 bytes、cold 868.179ms、warm 20回p95 869.423ms。実runtimeのstale ingest / Librarian BLOCKEDはalertとして保持し、結果を <code>operational-truth.json</code> に保存。</span></li>
 <li><time>2026-08-23 21:25</time><span>Phase 3実装完了。usedをtelemetry-onlyへ分離し、source優先の4-field identityをvalidなused receiptだけで補完、answer episodeまで伝播。100件fixtureはused 50 / unused 50、false join・orphan・duplicate・identity欠落0、production replayable 50。schema/trace/MCP 34件とanswer-eval 29件、Ruff、独立security reviewを通過。既存28 usedはidentity欠落のまま改変せず、deploy後24時間かつactive host別100件のlive gateはPhase 6までpending。</span></li>
 <li><time>2026-08-23 21:27</time><span>Phase 5A完了。public HTTP/proxy/DNS rebindをrequest前に拒否し、明示loopbackだけをpin、JSONL writerをappend/0600へ固定。実pull-logとweb-egressは0600。MCPは二重opt-in、record/ingest metadata-only、全string/path/credential redactionへ統一し、focused 78件と独立security reviewでP0/P1なし。証拠を <code>security-privacy.json</code> に保存。</span></li>
+<li><time>2026-08-23 21:32</time><span>Phase 4実装完了。runtime/API/UI/CLIの5状態fixture、oMLX partial、reranker PID/Unix socket livenessを統一し、217 focused tests・ruff・Node・zsh検証を通過。外部process実測でstatusは7,341 bytes、cold 868.179ms、warm 20回p95 869.423ms。実runtimeのstale ingest / Librarian BLOCKEDはalertとして保持し、結果を <code>operational-truth.json</code> に保存。</span></li>
+<li><time>2026-08-23 22:12</time><span>Phase 1のbounded reconciler実装・focused gateは完了したが、既存PID 85200がcross-process leaseを継続保持するためproduction canaryは未実行。processを停止せず、Raw/derived/runtime stateのmutation 0を維持し、Phase 1 checkboxは未完了のまま。</span></li>
+<li><time>2026-08-23 22:12</time><span>Phase 5Bのlocal実装確認完了。QoS reverse-order 6 run失敗0、usearch 1 pass/skip 0、Python 3.11/3.12 smoke各53 pass、workflow YAML/actions pinを確認。push未承認のためrequired GitHub jobsはpendingで、Phase 5B checkboxは未完了のまま。</span></li>
+<li><time>2026-08-23 22:12</time><span>最終local gate完了。architecture ledgerとlarge-function policyを現行HEADへ同期し、非同期diagnostic順序競合をdeterministic regressionで修正。隔離full suiteは5,151 pass / 0 fail / 2 warnings（422.71秒）、Ruff、mypy 89 source files、import-linter 358 files / 1 contractが全てgreen。結果を <code>test-ci.json</code> へ保存。live/remote gate未達のためPlanは <code>running</code> を維持。</span></li>
 </ol>
 </section>
 

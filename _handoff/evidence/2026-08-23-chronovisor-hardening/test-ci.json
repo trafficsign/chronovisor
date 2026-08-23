@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
-  "captured_at": "2026-08-23T20:42:00+09:00",
+  "captured_at": "2026-08-23T22:12:49+09:00",
   "qos_order_isolation": {
     "commit": "e65f3594387ffc743514cbe1895539b0c104faa7",
     "forward_runs": 3,
@@ -25,6 +25,37 @@
       "python_3_12": {"passed": 53, "failed": 0}
     },
     "yaml_parse": "passed"
+  },
+  "full_local_gate": {
+    "head": "2764d7ae01bffd9a758b96a714a969278e1cb81b",
+    "isolated_chronovisor_root": true,
+    "pytest": {
+      "passed": 5151,
+      "failed": 0,
+      "warnings": 2,
+      "elapsed_seconds": 422.71
+    },
+    "static": {
+      "ruff": "passed",
+      "mypy": {
+        "status": "passed",
+        "source_files": 89
+      },
+      "import_linter": {
+        "status": "passed",
+        "files": 358,
+        "dependencies": 1962,
+        "contracts_kept": 1,
+        "contracts_broken": 0
+      }
+    },
+    "regression_checks": {
+      "architecture_and_large_function_policy_passed": 30,
+      "recall_runtime_passed": 197,
+      "ingest_projection_passed": 67,
+      "research_scheduler_passed": 14,
+      "research_scheduler_order_stress_runs": 30
+    }
   },
   "github_required_jobs": {
     "status": "pending",
