@@ -11,7 +11,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Generic, Literal, TypeVar, cast
 
@@ -221,21 +221,75 @@ class SingleTeacherDispatcher(Generic[T, R]):
                     ): index
                     for index in indexes
                 }
-                wave_results: list[DispatchResult[T, R]] = []
-                for future, index in futures.items():
-                    attempt = future.result()
-                    results[index] = attempt.result
-                    wave_results.append(attempt.result)
-                offset += cap
+                wave_results: dict[int, DispatchResult[T, R]] = {}
+                stop_index: int | None = None
+                cancelled_category: str | None = None
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        result = future.result().result
+                    except CancelledError:
+                        cancelled_category = stop_reason[0] if stop_reason else "kill_switch"
+                        result = DispatchResult(
+                            work[index],
+                            "deferred",
+                            error=DispatchStopped(cancelled_category),
+                            category=cancelled_category,
+                            attempts=0,
+                        )
+                    wave_results[index] = result
+                    if result.status == "stopped" and stop_index is None:
+                        stop_index = index
+                    if result.status == "stopped" or stop_event.is_set():
+                        # A running HTTP call cannot be force-cancelled, but queued
+                        # work should not start after the stop signal is observed.
+                        for pending in futures:
+                            if pending is not future:
+                                pending.cancel()
 
                 if stop_event.is_set():
+                    stop_category = stop_reason[0] if stop_reason else next(
+                        (
+                            result.category
+                            for result in wave_results.values()
+                            if result.status == "stopped"
+                        ),
+                        cancelled_category or "kill_switch",
+                    )
+                    stop_category = stop_category or "kill_switch"
+                    if stop_index is not None:
+                        for index, result in wave_results.items():
+                            if index == stop_index:
+                                results[index] = DispatchResult(
+                                    result.work,
+                                    "stopped",
+                                    error=result.error,
+                                    category=stop_category,
+                                    attempts=result.attempts,
+                                    rate_limited=result.rate_limited,
+                                )
+                            else:
+                                results[index] = self._defer_after_stop(
+                                    result, stop_category
+                                )
+                    else:
+                        for index, result in wave_results.items():
+                            results[index] = self._defer_after_stop(
+                                result, stop_category
+                            )
+                    offset += cap
                     break
-                if any(item.rate_limited for item in wave_results):
+
+                for index, result in wave_results.items():
+                    results[index] = result
+                offset += cap
+
+                if any(item.rate_limited for item in wave_results.values()):
                     next_cap = max(1, current_cap // 2)
                     current_cap = next_cap
                     valid_results_at_cap = 0
                 else:
-                    for item in wave_results:
+                    for item in wave_results.values():
                         if item.status != "ok":
                             continue
                         count = self.valid_result_count(cast(R, item.value))
@@ -272,6 +326,20 @@ class SingleTeacherDispatcher(Generic[T, R]):
                         )
 
         return [item for item in results if item is not None]
+
+    @staticmethod
+    def _defer_after_stop(
+        result: DispatchResult[T, R],
+        category: str,
+    ) -> DispatchResult[T, R]:
+        return DispatchResult(
+            result.work,
+            "deferred",
+            error=DispatchStopped(category),
+            category=category,
+            attempts=result.attempts,
+            rate_limited=result.rate_limited,
+        )
 
     def _evaluate_with_retry(
         self,

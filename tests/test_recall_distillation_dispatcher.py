@@ -51,7 +51,7 @@ def test_ramp_reaches_ten_only_after_twenty_valid_results_per_cap() -> None:
             max_active = max(max_active, active)
             if item < 20 and active > 1:
                 early_ramp.append(item)
-        time.sleep(0.002)
+        time.sleep(0.01)
         with lock:
             active -= 1
         return item
@@ -207,6 +207,68 @@ def test_stop_defers_unstarted_work_in_order(category: str) -> None:
     assert all(result.status == "deferred" for result in results[1:])
     assert all(result.category == results[0].category for result in results[1:])
     assert all(result.attempts == 0 for result in results[1:])
+
+
+def test_stop_in_cap5_defers_completed_siblings_and_cancels_tail() -> None:
+    sibling_returned = threading.Event()
+    calls: list[int] = []
+    calls_lock = threading.Lock()
+
+    def evaluate(item: int) -> int:
+        with calls_lock:
+            calls.append(item)
+        if item == 3:
+            assert sibling_returned.wait(1)
+            raise DispatchFailure("model-unavailable")
+        if item == 4:
+            sibling_returned.set()
+        return item
+
+    results = dispatch_claimed_work(
+        list(range(13)),
+        evaluate,
+        min_valid_results_per_cap=1,
+        sleep=lambda _delay: None,
+    )
+
+    assert [result.work for result in results] == list(range(13))
+    assert results[3].status == "stopped"
+    assert results[3].category == "model_unavailable"
+    assert all(result.status == "deferred" for result in results[4:])
+    assert all(result.category == "model_unavailable" for result in results[4:])
+    assert 4 in calls
+    assert all(item < 8 for item in calls)
+
+
+def test_stop_in_cap10_defers_completed_siblings_and_preserves_order() -> None:
+    sibling_returned = threading.Event()
+    calls: list[int] = []
+    calls_lock = threading.Lock()
+
+    def evaluate(item: int) -> int:
+        with calls_lock:
+            calls.append(item)
+        if item == 8:
+            assert sibling_returned.wait(1)
+            raise DispatchFailure("paid-fallback")
+        if item == 9:
+            sibling_returned.set()
+        return item
+
+    results = dispatch_claimed_work(
+        list(range(18)),
+        evaluate,
+        min_valid_results_per_cap=1,
+        sleep=lambda _delay: None,
+    )
+
+    assert [result.work for result in results] == list(range(18))
+    assert results[8].status == "stopped"
+    assert results[8].category == "paid_fallback"
+    assert all(result.status == "deferred" for result in results[9:])
+    assert all(result.category == "paid_fallback" for result in results[9:])
+    assert 9 in calls
+    assert all(item < 18 for item in calls)
 
 
 def test_timeout_retries_only_within_bounded_attempt_budget() -> None:
