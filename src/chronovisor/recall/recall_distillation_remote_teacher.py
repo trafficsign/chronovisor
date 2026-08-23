@@ -80,6 +80,20 @@ _LOCAL_PATH_TEXT = re.compile(
     r"|file:(?:/{2,3})(?:users|home|private|tmp|var|etc|opt|volumes|system)/"
     r"|[a-z]:[/\\]|\\\\[^/\\\s]+[/\\])"
 )
+_RELATIVE_PATH_TEXT = re.compile(
+    r"(?ix)(?:^|[\s(=:\"'])"
+    r"(?:\.\.?[/\\])?[A-Za-z0-9_.-]+(?:[/\\][A-Za-z0-9_.-]+)+"
+    r"(?:$|[\s)\"',;:])"
+)
+_PROMPT_INJECTION_TEXT = re.compile(
+    r"(?ix)"
+    r"\b(?:ignore|disregard|override)\s+(?:all\s+)?previous\s+"
+    r"(?:instruction|instructions|message|messages|prompt|prompts)\b"
+    r"|\b(?:system|developer)\s+(?:prompt|message|instruction|instructions)\b"
+    r"|\btool\s+(?:call|invocation)\b"
+    r"|(?:命令|指示)(?:を|は)?無視"
+    r"|システムプロンプト|開発者メッセージ|ツール(?:呼び出し|コール)"
+)
 
 
 def _json_bytes(value: object) -> bytes:
@@ -161,6 +175,7 @@ def _teacher_schema(candidate_ids: tuple[str, ...]) -> dict[str, Any]:
                         },
                         "minimal_atom_ids": {
                             "type": "array",
+                            "minItems": 0,
                             "maxItems": 8,
                             "uniqueItems": True,
                             "items": {
@@ -171,6 +186,7 @@ def _teacher_schema(candidate_ids: tuple[str, ...]) -> dict[str, Any]:
                         },
                         "missing_slots": {
                             "type": "array",
+                            "minItems": 0,
                             "maxItems": 5,
                             "uniqueItems": True,
                             "items": {
@@ -196,15 +212,19 @@ def _contains_forbidden_text(value: str) -> bool:
         or _PII_TEXT.search(value)
         or _PRIVATE_WORK_TEXT.search(value)
         or _LOCAL_PATH_TEXT.search(value)
+        or _RELATIVE_PATH_TEXT.search(value)
+        or _PROMPT_INJECTION_TEXT.search(value)
     )
 
 
-def _safe_text(value: object, *, required: bool = True) -> str | None:
+def _safe_text(
+    value: object, *, required: bool = True, max_chars: int = MAX_TEXT_CHARS
+) -> str | None:
     if not isinstance(value, str):
         return None
     if not value and not required:
         return ""
-    decision = guard_egress_query(value, max_chars=MAX_TEXT_CHARS)
+    decision = guard_egress_query(value, max_chars=max_chars)
     if not decision.allowed or _contains_forbidden_text(decision.normalized):
         return None
     return decision.normalized
@@ -294,12 +314,18 @@ def _safe_label(label: object, candidate_ids: frozenset[str]) -> dict[str, Any] 
     atoms = label.get("minimal_atom_ids")
     missing = label.get("missing_slots")
     changing = label.get("changing_claim")
-    safe_rationale = _safe_text(rationale)
-    safe_atoms = [_safe_text(item) for item in atoms] if isinstance(atoms, list) else []
-    safe_missing = (
-        [_safe_text(item) for item in missing] if isinstance(missing, list) else []
+    safe_rationale = _safe_text(rationale, max_chars=600)
+    safe_atoms = (
+        [_safe_text(item, max_chars=160) for item in atoms]
+        if isinstance(atoms, list)
+        else []
     )
-    safe_changing = _safe_text(changing, required=False)
+    safe_missing = (
+        [_safe_text(item, max_chars=160) for item in missing]
+        if isinstance(missing, list)
+        else []
+    )
+    safe_changing = _safe_text(changing, required=False, max_chars=600)
     if (
         not isinstance(candidate_id, str)
         or candidate_id not in candidate_ids
@@ -482,6 +508,16 @@ class OpenCodeOxAlphaTeacher:
         except Exception:
             return self._failure(
                 "backend_error",
+                prompt_digest=prompt_digest,
+                schema_digest=schema_digest,
+            )
+        returned_model = None
+        metadata = getattr(result, "metadata", None)
+        if isinstance(metadata, Mapping):
+            returned_model = metadata.get("returned_model")
+        if returned_model != OX_ALPHA_REQUEST_MODEL:
+            return self._failure(
+                "model_unavailable",
                 prompt_digest=prompt_digest,
                 schema_digest=schema_digest,
             )
