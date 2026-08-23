@@ -1,0 +1,206 @@
+from __future__ import annotations
+
+import threading
+import time
+
+import pytest
+
+from chronovisor.recall.recall_distillation_dispatcher import (
+    DispatchFailure,
+    SingleTeacherDispatcher,
+    dispatch_claimed_work,
+)
+
+
+def test_dispatch_preserves_input_order_and_bounds_inflight() -> None:
+    active = 0
+    max_active = 0
+    early_ramp: list[int] = []
+    lock = threading.Lock()
+
+    def evaluate(item: int) -> int:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+            if item < 20 and active > 1:
+                early_ramp.append(item)
+        time.sleep(0.001)
+        with lock:
+            active -= 1
+        return item * 2
+
+    results = dispatch_claimed_work(range(25), evaluate)
+
+    assert [result.value for result in results] == [item * 2 for item in range(25)]
+    assert all(result.status == "ok" for result in results)
+    assert early_ramp == []
+    assert max_active <= 2
+
+
+def test_ramp_reaches_ten_only_after_twenty_valid_results_per_cap() -> None:
+    active = 0
+    max_active = 0
+    early_ramp: list[int] = []
+    lock = threading.Lock()
+
+    def evaluate(item: int) -> int:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+            if item < 20 and active > 1:
+                early_ramp.append(item)
+        time.sleep(0.002)
+        with lock:
+            active -= 1
+        return item
+
+    results = dispatch_claimed_work(range(70), evaluate)
+
+    assert [result.value for result in results] == list(range(70))
+    assert early_ramp == []
+    assert max_active == 10
+
+
+def test_retry_backoff_is_bounded_and_injected() -> None:
+    attempts = 0
+    sleeps: list[float] = []
+
+    def evaluate(_: str) -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise DispatchFailure("http_429")
+        if attempts == 2:
+            raise DispatchFailure("http_5xx")
+        return "ok"
+
+    result = SingleTeacherDispatcher(
+        evaluate,
+        max_retries=2,
+        backoff_base_seconds=0.5,
+        backoff_max_seconds=0.75,
+        jitter_ratio=0,
+        sleep=sleeps.append,
+    ).dispatch(["work"])[0]
+
+    assert result.status == "ok"
+    assert result.value == "ok"
+    assert result.attempts == 3
+    assert result.rate_limited is True
+    assert sleeps == [0.5, 0.75]
+
+
+def test_redacted_teacher_failure_envelope_uses_same_retry_policy() -> None:
+    attempts = 0
+
+    def evaluate(_: str) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return {"_failure": {"class": "http_429", "labelable": False}}
+        return {"labels": []}
+
+    result = dispatch_claimed_work(
+        ["work"],
+        evaluate,
+        backoff_base_seconds=0,
+        jitter_ratio=0,
+        sleep=lambda _delay: None,
+    )[0]
+
+    assert result.status == "ok"
+    assert result.attempts == 2
+    assert result.rate_limited is True
+
+
+def test_rate_limit_halves_future_window_after_ramp() -> None:
+    calls: dict[int, int] = {}
+    active = 0
+    max_active = 0
+    post_limit_max_active = 0
+    lock = threading.Lock()
+
+    def evaluate(item: int) -> int:
+        nonlocal active, max_active, post_limit_max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+            if item in {9, 10}:
+                post_limit_max_active = max(post_limit_max_active, active)
+            calls[item] = calls.get(item, 0) + 1
+            item_attempt = calls[item]
+        time.sleep(0.001)
+        with lock:
+            active -= 1
+        if item == 6 and item_attempt == 1:
+            raise DispatchFailure("http_429")
+        return item
+
+    results = SingleTeacherDispatcher(
+        evaluate,
+        max_retries=0,
+        backoff_base_seconds=0,
+        jitter_ratio=0,
+        sleep=lambda _delay: None,
+        min_valid_results_per_cap=2,
+    ).dispatch(list(range(16)))
+
+    assert [result.value for result in results[:6]] == list(range(6))
+    assert results[6].status == "failed"
+    assert results[6].category == "http_429"
+    assert calls[6] == 1
+    assert post_limit_max_active <= 2
+    assert max_active <= 5
+
+
+@pytest.mark.parametrize(
+    "category",
+    ["http_402", "paid-fallback", "model-unavailable", "kill-switch"],
+)
+def test_stop_defers_unstarted_work_in_order(category: str) -> None:
+    calls: list[int] = []
+
+    def evaluate(item: int) -> int:
+        calls.append(item)
+        if item == 0:
+            raise DispatchFailure(category)
+        return item
+
+    results = dispatch_claimed_work(
+        list(range(8)),
+        evaluate,
+        sleep=lambda _delay: None,
+    )
+
+    assert calls == [0]
+    assert [result.work for result in results] == list(range(8))
+    assert results[0].status == "stopped"
+    expected_category = category.replace("-", "_")
+    assert results[0].category == expected_category
+    assert all(result.status == "deferred" for result in results[1:])
+    assert all(result.category == results[0].category for result in results[1:])
+    assert all(result.attempts == 0 for result in results[1:])
+
+
+def test_timeout_retries_only_within_bounded_attempt_budget() -> None:
+    attempts = 0
+
+    def evaluate(_: None) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise TimeoutError("teacher timeout")
+
+    result = dispatch_claimed_work(
+        [None],
+        evaluate,
+        max_retries=2,
+        backoff_base_seconds=0,
+        sleep=lambda _delay: None,
+    )[0]
+
+    assert result.status == "failed"
+    assert result.category == "timeout"
+    assert result.attempts == 3
+    assert attempts == 3
