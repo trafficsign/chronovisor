@@ -604,6 +604,63 @@ def test_candidate_offset_index_bootstrap_tail_noop_and_random_read(
         catalog.candidate_rally_ids(tmp_path)
 
 
+def test_candidate_index_bootstrap_uses_sealed_head_without_rehashing_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = store.distillation_dir(tmp_path) / "candidate-ledger.jsonl"
+    snapshot = _candidate_snapshot("rally-large", ["c1"])
+    candidate = snapshot["candidates"][0]
+    assert isinstance(candidate, dict)
+    candidate["text"] = "x" * 200_000
+    snapshot["snapshot_sha256"] = canonical_json_sha256_strict(
+        {key: value for key, value in snapshot.items() if key != "snapshot_sha256"}
+    )
+    store.append_chain(
+        ledger,
+        {
+            "kind": "candidate-snapshot",
+            "rally_id": "rally-large",
+            "snapshot": snapshot,
+        },
+    )
+    assert store.chain_head(ledger)["records"] == 1
+
+    original_bytes = catalog.canonical_json_bytes_strict
+    original_hash = catalog.canonical_json_sha256_strict
+
+    def reject_payload_bytes(value: object, *args: object, **kwargs: object) -> bytes:
+        if isinstance(value, dict) and ("snapshot" in value or "candidates" in value):
+            raise AssertionError("bootstrap reserialized a large candidate payload")
+        return original_bytes(value, *args, **kwargs)
+
+    def reject_payload_hash(value: object, *args: object, **kwargs: object) -> str:
+        if isinstance(value, dict) and ("snapshot" in value or "candidates" in value):
+            raise AssertionError("bootstrap rehashed a large candidate payload")
+        return original_hash(value, *args, **kwargs)
+
+    monkeypatch.setattr(catalog, "canonical_json_bytes_strict", reject_payload_bytes)
+    monkeypatch.setattr(catalog, "canonical_json_sha256_strict", reject_payload_hash)
+    result = catalog.sync_candidate_index(tmp_path, ledger)
+    assert result["status"] == "bootstrap"
+    assert result["count"] == 1
+
+
+def test_candidate_index_bootstrap_fails_closed_on_head_tamper(tmp_path: Path) -> None:
+    ledger = store.distillation_dir(tmp_path) / "candidate-ledger.jsonl"
+    store.append_chain(
+        ledger,
+        {
+            "kind": "candidate-snapshot",
+            "rally_id": "rally-1",
+            "snapshot": _candidate_snapshot("rally-1", ["c1"]),
+        },
+    )
+    tampered = ledger.read_bytes().replace(b'"rally-1"', b'"rally-x"', 1)
+    ledger.write_bytes(tampered)
+    with pytest.raises(catalog.CatalogError, match="candidate ledger head is invalid"):
+        catalog.sync_candidate_index(tmp_path, ledger)
+
+
 def test_candidate_offset_index_fails_closed_and_explicit_rebuild(
     tmp_path: Path,
 ) -> None:

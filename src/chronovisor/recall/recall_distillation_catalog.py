@@ -698,7 +698,12 @@ def _candidate_sha(value: object, *, allow_empty: bool = False) -> str:
 
 
 def _candidate_snapshot(
-    row: Mapping[str, Any], *, offset: int, length: int, expected_previous: str
+    row: Mapping[str, Any],
+    *,
+    offset: int,
+    length: int,
+    expected_previous: str,
+    verify_digests: bool = True,
 ) -> dict[str, Any]:
     """Validate one canonical candidate row and retain only index metadata."""
 
@@ -712,13 +717,16 @@ def _candidate_snapshot(
     if previous != expected_previous:
         raise CatalogError("candidate ledger chain mismatch")
     record_sha256 = _candidate_sha(row.get("record_sha256"))
-    unsigned = {key: value for key, value in row.items() if key != "record_sha256"}
-    try:
-        record_digest = canonical_json_sha256_strict(unsigned)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise CatalogError("candidate ledger record is not canonical") from exc
-    if record_sha256 != record_digest:
-        raise CatalogError("candidate ledger record digest mismatch")
+    if verify_digests:
+        unsigned = {
+            key: value for key, value in row.items() if key != "record_sha256"
+        }
+        try:
+            record_digest = canonical_json_sha256_strict(unsigned)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise CatalogError("candidate ledger record is not canonical") from exc
+        if record_sha256 != record_digest:
+            raise CatalogError("candidate ledger record digest mismatch")
     rally_id = row.get("rally_id")
     if not isinstance(rally_id, str) or not rally_id:
         raise CatalogError("candidate rally id is invalid")
@@ -737,15 +745,16 @@ def _candidate_snapshot(
         raise CatalogError("candidate snapshot shape is invalid")
     _candidate_sha(snapshot["query_feature_text_sha256"])
     snapshot_sha256 = _candidate_sha(snapshot.get("snapshot_sha256"))
-    snapshot_unsigned = {
-        key: value for key, value in snapshot.items() if key != "snapshot_sha256"
-    }
-    try:
-        snapshot_digest = canonical_json_sha256_strict(snapshot_unsigned)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise CatalogError("candidate snapshot is not canonical") from exc
-    if snapshot_sha256 != snapshot_digest:
-        raise CatalogError("candidate snapshot digest mismatch")
+    if verify_digests:
+        snapshot_unsigned = {
+            key: value for key, value in snapshot.items() if key != "snapshot_sha256"
+        }
+        try:
+            snapshot_digest = canonical_json_sha256_strict(snapshot_unsigned)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise CatalogError("candidate snapshot is not canonical") from exc
+        if snapshot_sha256 != snapshot_digest:
+            raise CatalogError("candidate snapshot digest mismatch")
     seen_candidates: set[str] = set()
     candidates = snapshot["candidates"]
     for index, candidate in enumerate(candidates):
@@ -789,8 +798,14 @@ def _scan_candidate_ledger(
     start: int,
     expected_previous: str,
     expected_count: int,
+    verified_head: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Decode a full ledger for rebuild or only its append tail."""
+    """Decode a full ledger for rebuild or only its append tail.
+
+    ``store.chain_head`` already verified the complete append-only ledger when
+    ``verified_head`` is supplied.  Keep the structural/offset checks here,
+    but do not hash each large JSON row a second time.
+    """
 
     state = _candidate_file_state(path)
     if not state["ledger_exists"]:
@@ -819,17 +834,21 @@ def _scan_candidate_ledger(
                     raise CatalogError("candidate ledger row is invalid") from exc
                 if not isinstance(decoded, dict):
                     raise CatalogError("candidate ledger row is not an object")
-                try:
-                    canonical_line = canonical_json_bytes_strict(decoded) + b"\n"
-                except (TypeError, ValueError, OverflowError) as exc:
-                    raise CatalogError("candidate ledger row is not canonical") from exc
-                if canonical_line != line:
-                    raise CatalogError("candidate ledger row is not canonical")
+                if verified_head is None:
+                    try:
+                        canonical_line = canonical_json_bytes_strict(decoded) + b"\n"
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise CatalogError(
+                            "candidate ledger row is not canonical"
+                        ) from exc
+                    if canonical_line != line:
+                        raise CatalogError("candidate ledger row is not canonical")
                 metadata = _candidate_snapshot(
                     decoded,
                     offset=offset,
                     length=len(line),
                     expected_previous=previous,
+                    verify_digests=verified_head is None,
                 )
                 metadata["record_index"] = record_index
                 parsed.append(metadata)
@@ -839,6 +858,12 @@ def _scan_candidate_ledger(
         raise
     except (OSError, UnicodeError) as exc:
         raise CatalogError("candidate ledger is unreadable") from exc
+    if verified_head is not None and (
+        verified_head.get("records") != expected_count + len(parsed)
+        or verified_head.get("head_sha256")
+        != (expected_previous if not parsed else parsed[-1]["record_sha256"])
+    ):
+        raise CatalogError("candidate ledger head conflicts with scan")
     return parsed
 
 
@@ -1106,17 +1131,22 @@ def sync_candidate_index(
             start = int(state["ledger_size"])
             expected_previous = str(state["head_sha256"])
             expected_count = int(state["record_count"])
-        tail_head: Mapping[str, Any] | None = None
-        if mode == "tail":
+        verified_head: Mapping[str, Any] | None = None
+        if mode in {"bootstrap", "tail"}:
             try:
-                tail_head = store.chain_head(path)
+                verified_head = store.chain_head(path)
             except store.DistillationStoreError as exc:
                 raise CatalogError("candidate ledger head is invalid") from exc
+            # ``chain_head`` may recover an interrupted final line while
+            # rebuilding its checkpoint; use the post-recovery file state for
+            # the immutable scan below.
+            current = _candidate_file_state(path)
         parsed = _scan_candidate_ledger(
             path,
             start=start,
             expected_previous=expected_previous,
             expected_count=expected_count,
+            verified_head=verified_head,
         )
         after = _candidate_file_state(path)
         if after != current:
@@ -1128,9 +1158,9 @@ def sync_candidate_index(
             _insert_candidate_rows(connection, parsed)
             count = expected_count + len(parsed)
         head = expected_previous if not parsed else str(parsed[-1]["record_sha256"])
-        if tail_head is not None and (
-            tail_head["records"] != count
-            or tail_head["head_sha256"] != head
+        if verified_head is not None and (
+            verified_head["records"] != count
+            or verified_head["head_sha256"] != head
         ):
             raise CatalogError("candidate ledger head conflicts with index")
         _upsert_candidate_index_state(
