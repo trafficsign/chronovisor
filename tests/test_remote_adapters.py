@@ -374,6 +374,10 @@ def test_unconfirmed_embedding_capability_fails_before_network(
             ProviderFailureCategory.UNAUTHORIZED,
         ),
         (
+            _response(body=CANARY.encode("utf-8"), status=402),
+            ProviderFailureCategory.PAYMENT_REQUIRED,
+        ),
+        (
             _response({"error": CANARY}, status=429),
             ProviderFailureCategory.RATE_LIMITED,
         ),
@@ -384,6 +388,10 @@ def test_unconfirmed_embedding_capability_fails_before_network(
         (
             _response({"redirect": CANARY}, status=302),
             ProviderFailureCategory.REDIRECT_REJECTED,
+        ),
+        (
+            _response({"error": CANARY}, status=400),
+            ProviderFailureCategory.HTTP_ERROR,
         ),
         (
             _response(body=CANARY.encode("utf-8")),

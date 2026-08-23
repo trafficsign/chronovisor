@@ -174,7 +174,7 @@ def test_egress_allowlist_is_fail_closed_and_call_free(
     [
         (301, "redirect_rejected"),
         (401, "http_401"),
-        (402, "http_error"),
+        (402, "http_402"),
         (429, "http_429"),
         (503, "http_5xx"),
     ],

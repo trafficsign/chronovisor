@@ -42,6 +42,7 @@ class ProviderFailureCategory(StrEnum):
     CAPABILITY_UNAVAILABLE = "capability_unavailable"
     INVALID_REQUEST = "invalid_request"
     UNAUTHORIZED = "http_401"
+    PAYMENT_REQUIRED = "http_402"
     RATE_LIMITED = "http_429"
     SERVER_ERROR = "http_5xx"
     HTTP_ERROR = "http_error"
@@ -416,6 +417,10 @@ def post_json(
             if status == 401:
                 raise ProviderAdapterError(
                     ProviderFailureCategory.UNAUTHORIZED, request_id=request_id
+                )
+            if status == 402:
+                raise ProviderAdapterError(
+                    ProviderFailureCategory.PAYMENT_REQUIRED, request_id=request_id
                 )
             if status == 429:
                 raise ProviderAdapterError(
