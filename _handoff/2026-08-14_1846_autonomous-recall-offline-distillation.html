@@ -61,13 +61,13 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f1eb;border:1px so
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_85e0b9241c9e4107b6bbae9aedf2eb33","created_at":"2026-08-14T18:46:47+09:00","状態":"blocked","slug":"autonomous-recall-offline-distillation"}
+{"task_id":"plan_85e0b9241c9e4107b6bbae9aedf2eb33","created_at":"2026-08-14T18:46:47+09:00","状態":"running","slug":"autonomous-recall-offline-distillation"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor 自律Recall：オフライン教師蒸留・継続学習・高速配信</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="blocked">blocked</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_85e0b9241c9e4107b6bbae9aedf2eb33</code></span>
 <span data-bind="created_at">2026-08-14T18:46:47+09:00</span>
 </div>
@@ -651,6 +651,8 @@ user query ─► BM25/anchor
 <li><time>2026-08-24 05:47</time><span>別Plan ownerとlive操作を調整し、Sleepの親PID <code>62716</code> / child PID <code>62722</code>と<code>distillation-worker.lock</code>保持を記録してから、正確なlabel <code>com.trafficsign.chronovisor-sleep.managed</code>をgraceful bootout。PID消滅とlock解放を確認した。Convergeは既にbootoutのまま、Ingestは所有外として停止せず、親PID <code>89376</code> / child PID <code>89417</code>の稼働を維持した。旧GitHub-backed Sleep/Convergeはramp後も自動restoreしない。</span></li>
 <li><time>2026-08-24 05:47</time><span>実OX ramp v5はcap 1=<code>20/21</code>、cap 2=<code>38/40</code>、cap 5=<code>20/21</code>、cap 10=<code>21/22</code>まで進んだ。唯一のcap 10 invalid応答が厳密には有効な単一<code>json</code> fenceだったため、前後proseや複数fenceを許可せずexact fenceだけを受理するv6へ更新し、旧counterをfail-closedでresetした。途中の旧executor強制終了で残ったlease 3件はpublic <code>release_unattempted</code>でreadyへ戻し、DB上leased 0・work_id重複0を確認した。</span></li>
 <li><time>2026-08-24 05:54</time><span>v6 cap 1は22 valid / 28 attempts（78.57%）で停止。失敗はtimeout 1件・<code>http_5xx</code> 5件で、5分cooldown後の単発canaryも<code>http_5xx</code>だった。quality gateを緩和せず<code>ox_enabled=false</code>へ切替え、失敗claim ready復帰、leased 0、distillation lock解放、Sleep/Converge bootout、Ingest稼働、active/LKG不変を確認した。exact free route 150/150、unexpected route・billable fallback・Raw/content field・duplicate record/workはいずれも0のためOX1だけをcheckし、OX0/OX2/OX3とR0–R8は未checkを維持。完全receiptを<code>_handoff/evidence/2026-08-23-recall-distillation-recovery/ox-alpha-ramp-v6.json</code>へ保存し、Planを<code>blocked</code>へ更新した。</span></li>
+<li><time>2026-08-24 06:09</time><span>ユーザーからPlan最後までの続行指示を受領。provider障害の安全停止を作業終了と扱った判断を訂正し、Planを<code>running</code>へ戻した。Sleep/Convergeはbootout、Ingestは所有外のまま、手動OXをcap 1の累積95%閾値からbackoff付きで再開する。</span></li>
+<li><time>2026-08-24 06:17</time><span>手動OXの追加canary 2件はvalidで、v6 cap 1は累積<code>24/30</code>になった。共有mainのpush/cutover窓と競合しないよう次のprovider callを止め、割り込み後に残ったlease 1件を公開<code>DistillationWorkset.release_unattempted</code>でreadyへ復帰。DB上leased 0、distillation process/lockなし、<code>ox_enabled=false</code>、Sleep/Converge bootoutを確認し、cutover完了通知までsource/config/runtime mutationを一時凍結した。Plan自体は未完了のため<code>running</code>を維持する。</span></li>
 </ol>
 </section>
 
