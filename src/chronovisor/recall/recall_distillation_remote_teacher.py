@@ -302,19 +302,21 @@ def _prepare_request(
     schema = _teacher_schema(candidate_ids)
     try:
         prompt_json = _json_bytes(normalized).decode("utf-8")
+        schema_json = _json_bytes(schema).decode("utf-8")
         system = (
             "You are a temporary Recall relevance teacher. Judge only the "
             "supplied point-in-time evidence. Return schema-valid JSON; use "
             "uncertain when evidence is insufficient."
         )
         prompt = (
-            "Label every candidate exactly once. Do not add facts or repeat "
-            "secrets. Input:\n" + prompt_json
+            "Label every candidate exactly once. Return only one JSON object; "
+            "do not add facts, markdown, prose, or repeat secrets. Output schema:\n"
+            + schema_json
+            + "\nInput:\n"
+            + prompt_json
         )
         if (
-            len(system.encode("utf-8"))
-            + len(prompt.encode("utf-8"))
-            + len(_json_bytes(schema))
+            len(system.encode("utf-8")) + len(prompt.encode("utf-8"))
             > MAX_REQUEST_BYTES
         ):
             return None
@@ -520,7 +522,7 @@ class OpenCodeOxAlphaTeacher:
                         SourceSensitivity.NORMAL,
                     ),
                     system=system,
-                    format=schema,
+                    format="json",
                     max_output_tokens=4_000,
                     timeout_ms=self.timeout_ms,
                     temperature=0,

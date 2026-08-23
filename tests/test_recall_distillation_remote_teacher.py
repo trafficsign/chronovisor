@@ -150,9 +150,10 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
     body = json.loads(cast(bytes, sender.calls[0].data))
     assert body["model"] == "ox-alpha-free"
     assert sender.calls[0].full_url == f"{ENDPOINT}/chat/completions"
-    assert body["response_format"]["json_schema"]["schema"]["properties"]["labels"][
-        "items"
-    ]["properties"]["candidate_id"]["enum"] == ["candidate-1"]
+    assert body["response_format"] == {"type": "json_object"}
+    prompt = body["messages"][-1]["content"]
+    assert '"candidate_id":{"enum":["candidate-1"]' in prompt
+    assert '"additionalProperties":false' in prompt
     assert CANARY not in cast(bytes, sender.calls[0].data).decode("utf-8")
 
 
