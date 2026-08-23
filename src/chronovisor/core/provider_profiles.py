@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
@@ -299,14 +300,25 @@ class HTTPXSender:
         content = request.data
         if content is not None and not isinstance(content, bytes):
             raise RuntimeError("invalid request body")
-        return httpx.request(
-            request.get_method(),
-            request.full_url,
-            content=content,
-            headers=dict(request.header_items()),
-            timeout=timeout_seconds,
-            follow_redirects=False,
-        )
+
+        async def send() -> httpx.Response:
+            try:
+                async with asyncio.timeout(timeout_seconds):
+                    async with httpx.AsyncClient() as client:
+                        return await client.request(
+                            request.get_method(),
+                            request.full_url,
+                            content=content,
+                            headers=dict(request.header_items()),
+                            timeout=timeout_seconds,
+                            follow_redirects=False,
+                        )
+            except TimeoutError:
+                raise httpx.TimeoutException(
+                    "total request deadline exceeded"
+                ) from None
+
+        return asyncio.run(send())
 
 
 @dataclass(frozen=True)

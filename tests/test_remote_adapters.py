@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -498,22 +499,61 @@ def test_httpx_sender_pins_tls_defaults_and_redirect_policy(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_request(method: str, url: str, **kwargs: object) -> httpx.Response:
-        captured.update({"method": method, "url": url, **kwargs})
-        return _openai_success()
+    class FakeAsyncClient:
+        async def __aenter__(self) -> FakeAsyncClient:
+            return self
 
-    monkeypatch.setattr(httpx, "request", fake_request)
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def request(
+            self, method: str, url: str, **kwargs: object
+        ) -> httpx.Response:
+            captured.update({"method": method, "url": url, **kwargs})
+            return _openai_success()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
     request = Request(
         "https://api.example.com/v1/chat/completions",
         data=b"{}",
         method="POST",
+        headers={"x-test-header": "test"},
     )
 
     HTTPXSender()(request, follow_redirects=False)
 
     assert captured["follow_redirects"] is False
     assert captured["timeout"] == 60.0
+    assert captured["content"] == b"{}"
+    assert captured["headers"] == {"X-test-header": "test"}
     assert "verify" not in captured
+
+
+def test_httpx_sender_normalizes_total_deadline_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[float] = []
+
+    class ExpiredDeadline:
+        async def __aenter__(self) -> None:
+            raise TimeoutError
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    def expired_timeout(seconds: float) -> ExpiredDeadline:
+        observed.append(seconds)
+        return ExpiredDeadline()
+
+    monkeypatch.setattr(asyncio, "timeout", expired_timeout)
+    request = Request("https://api.example.com/v1/chat/completions", data=b"{}")
+
+    with pytest.raises(httpx.TimeoutException) as exc:
+        HTTPXSender()(request, follow_redirects=False, timeout_seconds=0.25)
+
+    assert observed == [0.25]
+    assert "{}" not in str(exc.value)
+    assert "api.example.com" not in str(exc.value)
 
 
 def test_anthropic_native_messages_shape_and_generation_only(tmp_path: Path) -> None:
