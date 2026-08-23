@@ -431,48 +431,90 @@ def _ollama_tags_snapshot() -> dict[str, Any]:
 
 
 def _omlx_snapshot() -> dict[str, Any]:
+    endpoints: list[str] = []
     try:
-        resp = httpx.get(
-            f"{OMLX_BASE_URL}/models/status",
-            headers={"x-api-key": OMLX_API_KEY},
-            timeout=1.5,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        models = data.get("models", [])
-        if not isinstance(models, list):
-            models = []
-        models = [
-            {
-                **row,
-                "name": row.get("id"),
-                "model": row.get("id"),
-                "size": row.get("actual_size") or row.get("estimated_size"),
-                "size_vram": (
-                    row.get("actual_size") or row.get("resident_estimated_size")
-                    if row.get("loaded")
-                    else 0
-                ),
-                "context_length": row.get("max_context_window")
-                or row.get("model_context_length"),
-                "processor": row.get("engine_type"),
-                "details": {
-                    "format": "MLX",
+        config = llm_config.load_llm_config()
+        for provider in config.providers.values():
+            if getattr(provider, "kind", None) != "omlx":
+                continue
+            endpoint = getattr(provider, "endpoint", None) or OMLX_BASE_URL
+            if isinstance(endpoint, str):
+                endpoint = endpoint.rstrip("/")
+                if endpoint and endpoint not in endpoints:
+                    endpoints.append(endpoint)
+    except Exception:
+        pass
+    if not endpoints:
+        endpoints.append(OMLX_BASE_URL.rstrip("/"))
+
+    models_by_id: dict[str, dict[str, Any]] = {}
+    unkeyed_models: list[dict[str, Any]] = []
+    errors: list[str] = []
+    available = False
+    for endpoint in endpoints:
+        try:
+            resp = httpx.get(
+                f"{endpoint}/models/status",
+                headers={"x-api-key": OMLX_API_KEY},
+                timeout=1.5,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            rows = data.get("models", [])
+            if not isinstance(rows, list):
+                rows = []
+            available = True
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                normalized = {
+                    **row,
+                    "name": row.get("id"),
+                    "model": row.get("id"),
+                    "size": row.get("actual_size") or row.get("estimated_size"),
+                    "size_vram": (
+                        row.get("actual_size") or row.get("resident_estimated_size")
+                        if row.get("loaded")
+                        else 0
+                    ),
                     "context_length": row.get("max_context_window")
                     or row.get("model_context_length"),
-                },
-            }
-            for row in models
-            if isinstance(row, dict)
-        ]
-        return {"available": True, "provider": "omlx", "models": models}
-    except Exception as exc:
+                    "processor": row.get("engine_type"),
+                    "details": {
+                        "format": "MLX",
+                        "context_length": row.get("max_context_window")
+                        or row.get("model_context_length"),
+                    },
+                }
+                model_id = row.get("id")
+                if not isinstance(model_id, str) or not model_id:
+                    unkeyed_models.append(normalized)
+                    continue
+                previous = models_by_id.get(model_id)
+                if previous is None:
+                    models_by_id[model_id] = normalized
+                    continue
+                preferred, other = (
+                    (normalized, previous)
+                    if normalized.get("loaded") and not previous.get("loaded")
+                    else (previous, normalized)
+                )
+                models_by_id[model_id] = {**other, **preferred}
+        except Exception as exc:
+            errors.append(str(exc))
+
+    if available:
         return {
-            "available": False,
+            "available": True,
             "provider": "omlx",
-            "models": [],
-            "error": str(exc),
+            "models": [*models_by_id.values(), *unkeyed_models],
         }
+    return {
+        "available": False,
+        "provider": "omlx",
+        "models": [],
+        "error": "; ".join(errors),
+    }
 
 
 def _local_model_snapshot() -> dict[str, Any]:

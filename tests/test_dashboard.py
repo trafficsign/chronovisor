@@ -6261,6 +6261,11 @@ def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
 
 
 def test_model_status_snapshot_reads_five_configured_omlx_models(monkeypatch) -> None:
+    endpoints = (
+        "http://127.0.0.1:8000/v1",
+        "http://127.0.0.1:8001/v1",
+        "http://127.0.0.1:8002/v1",
+    )
     models = {
         "Qwen3.8-27B-4bit": (False, 16_000, 262_144),
         "Muse-Glimmer-30B-4bit": (True, 20_000, 131_072),
@@ -6269,31 +6274,56 @@ def test_model_status_snapshot_reads_five_configured_omlx_models(monkeypatch) ->
         "bge-m3-mlx-fp16": (True, 1_000, 8_194),
     }
     monkeypatch.setattr(
+        dashboard.llm_config,
+        "load_llm_config",
+        lambda: SimpleNamespace(
+            providers={
+                "omlx_qwen": SimpleNamespace(kind="omlx", endpoint=endpoints[0]),
+                "omlx_qwen_alias": SimpleNamespace(kind="omlx", endpoint=endpoints[0]),
+                "omlx_gemma": SimpleNamespace(kind="omlx", endpoint=endpoints[1]),
+                "omlx_broken": SimpleNamespace(kind="omlx", endpoint=endpoints[2]),
+                "ollama": SimpleNamespace(kind="ollama", endpoint="http://ollama"),
+            }
+        ),
+    )
+    monkeypatch.setattr(
         dashboard,
         "_configured_model_roles",
         lambda: {name: {"ingest"} for name in models},
     )
-    observed: dict[str, Any] = {}
+    observed: list[tuple[str, dict[str, Any]]] = []
 
     def get(url: str, **kwargs: Any):
-        observed.update(url=url, **kwargs)
+        observed.append((url, kwargs))
+        endpoint = url.removesuffix("/models/status")
+        if endpoint == endpoints[2]:
+            raise RuntimeError("omlx endpoint unavailable")
+        rows = [
+            {
+                "id": name,
+                "loaded": loaded,
+                "actual_size": size if loaded else None,
+                "estimated_size": size,
+                "resident_estimated_size": size,
+                "max_context_window": context,
+                "engine_type": "embedding" if name.startswith("bge") else "vlm",
+            }
+            for name, (loaded, size, context) in models.items()
+        ]
+        if endpoint == endpoints[1]:
+            rows = [
+                {
+                    **rows[0],
+                    "loaded": True,
+                    "actual_size": 17_000,
+                    "estimated_size": 17_000,
+                    "resident_estimated_size": 17_000,
+                }
+            ]
         return dashboard.httpx.Response(
             200,
             request=dashboard.httpx.Request("GET", url),
-            json={
-                "models": [
-                    {
-                        "id": name,
-                        "loaded": loaded,
-                        "actual_size": size if loaded else None,
-                        "estimated_size": size,
-                        "resident_estimated_size": size,
-                        "max_context_window": context,
-                        "engine_type": "embedding" if name.startswith("bge") else "vlm",
-                    }
-                    for name, (loaded, size, context) in models.items()
-                ]
-            },
+            json={"models": rows},
         )
 
     monkeypatch.setattr(dashboard.httpx, "get", get)
@@ -6302,18 +6332,51 @@ def test_model_status_snapshot_reads_five_configured_omlx_models(monkeypatch) ->
     snapshot = dashboard._model_status_snapshot(runtime)
     by_name = {row["name"]: row for row in snapshot["models"]}
 
-    assert observed["url"].endswith("/v1/models/status")
-    assert observed["headers"] == {"x-api-key": dashboard.OMLX_API_KEY}
+    assert [url for url, _kwargs in observed] == [
+        f"{endpoint}/models/status" for endpoint in endpoints
+    ]
+    assert all(
+        kwargs["headers"] == {"x-api-key": dashboard.OMLX_API_KEY}
+        for _url, kwargs in observed
+    )
+    assert len(runtime["models"]) == 5
+    runtime_by_name = {row["name"]: row for row in runtime["models"]}
+    assert runtime_by_name["Qwen3.8-27B-4bit"]["loaded"] is True
+    assert runtime_by_name["Qwen3.8-27B-4bit"]["actual_size"] == 17_000
     assert snapshot["provider"] == "omlx"
     assert snapshot["summary"]["all_installed"] == 5
     assert snapshot["summary"]["installed"] == 5
     assert snapshot["summary"]["configured"] == 5
-    assert snapshot["summary"]["loaded"] == 3
+    assert snapshot["summary"]["loaded"] == 4
     assert snapshot["summary"]["missing"] == 0
     assert set(by_name) == set(models)
-    assert by_name["Qwen3.8-27B-4bit"]["status"] == "ready"
+    assert by_name["Qwen3.8-27B-4bit"]["status"] == "loaded"
     assert by_name["Muse-Glimmer-30B-4bit"]["status"] == "loaded"
     assert by_name["bge-m3-mlx-fp16"]["context_length"] == 8_194
+
+
+def test_omlx_snapshot_falls_back_to_default_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dashboard.llm_config,
+        "load_llm_config",
+        lambda: (_ for _ in ()).throw(RuntimeError("config unavailable")),
+    )
+    observed: list[str] = []
+
+    def get(url: str, **kwargs: Any):
+        observed.append(url)
+        return dashboard.httpx.Response(
+            200,
+            request=dashboard.httpx.Request("GET", url),
+            json={"models": []},
+        )
+
+    monkeypatch.setattr(dashboard.httpx, "get", get)
+
+    runtime = dashboard._omlx_snapshot()
+
+    assert observed == [f"{dashboard.OMLX_BASE_URL}/models/status"]
+    assert runtime == {"available": True, "provider": "omlx", "models": []}
 
 
 def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
