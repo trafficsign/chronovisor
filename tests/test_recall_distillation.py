@@ -1984,6 +1984,9 @@ def test_ox_single_teacher_materialization_binds_temporal_quality_evidence(
     assert "blind_repeat_pairs_below_floor" in gate["reasons"]
     assert "teacher_models_not_distinct" not in gate["reasons"]
     assert gate["identity"]["profile_contract_id"] == profile_contract_id
+    _, ox_model_cohort = distill._active_training_cohort(
+        rows, teacher_profile=distill.OX_SINGLE_PROFILE
+    )
 
     extended_plan_id, _, _ = store.write_immutable(
         store.distillation_dir(tmp_path) / "split-plans",
@@ -1991,7 +1994,7 @@ def test_ox_single_teacher_materialization_binds_temporal_quality_evidence(
             "kind": "fixed-chronological-group-split",
             "raw_watermark": "1" * 64,
             "feature_revision": distill.TEXT_FEATURE_REVISION,
-            "model_cohort_sha256": "b" * 64,
+            "model_cohort_sha256": ox_model_cohort["cohort_sha256"],
             "split_revision": "grouped-rolling-v1",
             "assignments": {**plan["assignments"], "future-rally": "embargo"},
         },
@@ -2020,6 +2023,12 @@ def test_ox_single_teacher_materialization_binds_temporal_quality_evidence(
             "reasons"
         ]
     )
+    assert (
+        "split_plan_cohort_mismatch"
+        not in distill._offline_training_gate(extended, config, root=tmp_path)[
+            "reasons"
+        ]
+    )
 
     changed_assignments = dict(plan["assignments"])
     changed_assignments[test_row["rally_id"]] = "train"
@@ -2029,7 +2038,7 @@ def test_ox_single_teacher_materialization_binds_temporal_quality_evidence(
             "kind": "fixed-chronological-group-split",
             "raw_watermark": "2" * 64,
             "feature_revision": distill.TEXT_FEATURE_REVISION,
-            "model_cohort_sha256": "b" * 64,
+            "model_cohort_sha256": ox_model_cohort["cohort_sha256"],
             "split_revision": "grouped-rolling-v1",
             "assignments": changed_assignments,
         },
@@ -2074,7 +2083,11 @@ def test_ox_single_teacher_materialization_binds_temporal_quality_evidence(
         _snapshots=snapshots,
         _label_rows=store.read_chain(label_path),
     )["rows"]
-    assert all(row["fixed_split_plan"] is False for row in next_cohort)
+    assert all(row["fixed_split_plan"] is True for row in next_cohort)
+    assert (
+        "split_plan_cohort_mismatch"
+        in distill._offline_training_gate(next_cohort, config, root=tmp_path)["reasons"]
+    )
     store.write_sealed_state(
         store.distillation_dir(tmp_path) / "split-plan.json",
         {"kind": "split-plan-pointer", "split_plan_id": extended_plan_id},

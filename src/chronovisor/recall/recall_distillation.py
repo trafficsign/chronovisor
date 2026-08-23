@@ -2821,8 +2821,6 @@ def materialize_training_rows(
             if (
                 prior.get("feature_revision") == split_plan.get("feature_revision")
                 and prior.get("split_revision") == split_plan.get("split_revision")
-                and prior.get("model_cohort_sha256")
-                == split_plan.get("model_cohort_sha256")
                 and all(
                     split.get(str(rally_id)) == str(value)
                     for rally_id, value in prior["assignments"].items()
@@ -3020,6 +3018,19 @@ def _offline_training_gate(
             else:
                 if gate["identity"]["profile_contract_id"] != current_contract_id:
                     reasons.append("profile_contract_mismatch")
+            try:
+                split_plan = _read_split_plan(root)
+            except (DistillationError, store.DistillationStoreError, KeyError):
+                reasons.append("split_plan_unavailable")
+            else:
+                _, model_cohort = _active_training_cohort(
+                    single_rows, teacher_profile=OX_SINGLE_PROFILE
+                )
+                if (
+                    split_plan.get("model_cohort_sha256")
+                    != model_cohort["cohort_sha256"]
+                ):
+                    reasons.append("split_plan_cohort_mismatch")
         gate = {
             **gate,
             "passed": not reasons,
