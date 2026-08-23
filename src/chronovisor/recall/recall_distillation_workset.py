@@ -329,7 +329,8 @@ class DistillationWorkset:
 
     Work items store only immutable references and SHA-256 digests; callers retain
     raw prompt bodies in their existing private ledgers.  The mutating API is
-    intentionally limited to ``advance``, ``claim``, and ``commit``.
+    intentionally limited to ``advance``, ``claim``, ``release_unattempted``,
+    and ``commit``.
     """
 
     def __init__(
@@ -531,6 +532,84 @@ class DistillationWorkset:
                     connection.execute("ROLLBACK")
                 raise
         return tuple(claims)
+
+    def release_unattempted(self, claims: Sequence[WorkClaim]) -> int:
+        """Return owned leases to ready without consuming an attempt."""
+
+        work_ids = [claim.work_id for claim in claims]
+        lease_ids = [claim.lease_id for claim in claims]
+        if len(set(work_ids)) != len(work_ids):
+            raise DistillationWorksetError("release contains duplicate work_id")
+        if len(set(lease_ids)) != len(lease_ids):
+            raise DistillationWorksetError("release contains duplicate lease_id")
+        if not claims:
+            return 0
+        now = self._now()
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            committed = False
+            try:
+                for claim in claims:
+                    row = connection.execute(
+                        """
+                        SELECT kind, payload_ref, payload_digest,
+                               temporal_split_json, provenance_json, priority,
+                               state, lease_id, lease_owner, lease_expires_at,
+                               attempt_count
+                        FROM work_items WHERE work_id = ?
+                        """,
+                        (claim.work_id,),
+                    ).fetchone()
+                    if row is None or row["state"] != "leased":
+                        raise DistillationWorksetError(
+                            f"claim is no longer active: {claim.work_id}"
+                        )
+                    if (
+                        (
+                            row["kind"],
+                            row["payload_ref"],
+                            row["payload_digest"],
+                            row["temporal_split_json"],
+                            row["provenance_json"],
+                            row["priority"],
+                        )
+                        != (
+                            claim.kind,
+                            claim.payload_ref,
+                            claim.payload_digest,
+                            _metadata_json(claim.temporal_split, "temporal_split"),
+                            _metadata_json(claim.provenance, "provenance"),
+                            claim.priority,
+                        )
+                        or row["lease_expires_at"] != claim.lease_expires_at
+                        or row["lease_id"] != claim.lease_id
+                        or row["lease_owner"] != claim.owner
+                        or row["lease_expires_at"] is None
+                        or row["lease_expires_at"] <= now
+                        or row["attempt_count"] != claim.attempt
+                        or row["attempt_count"] < 1
+                    ):
+                        raise DistillationWorksetError(
+                            f"claim ownership lost: {claim.work_id}"
+                        )
+                    connection.execute(
+                        """
+                        UPDATE work_items
+                        SET state = 'ready', attempt_count = attempt_count - 1,
+                            lease_id = NULL, lease_owner = NULL,
+                            lease_expires_at = NULL, updated_at = ?
+                        WHERE work_id = ?
+                        """,
+                        (now, claim.work_id),
+                    )
+                self._secure_sqlite_files()
+                connection.execute("COMMIT")
+                committed = True
+            except Exception:
+                if not committed:
+                    connection.execute("ROLLBACK")
+                raise
+        return len(claims)
 
     def commit(
         self,

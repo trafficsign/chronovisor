@@ -66,7 +66,7 @@ OX_ALPHA_CREDENTIAL_REF = "oskeyring:codex-router-opencode-go/default"
 OX_PROFILE_SCHEMA = "chronovisor.recall-distill-ox-profile.v1"
 # Deterministic local payload rejects may be skipped in one run, but never
 # indefinitely: after this many extra claims, leave the remainder ready.
-OX_PREFLIGHT_SCAN_CLAIM_BUDGET = 16
+OX_PREFLIGHT_SCAN_CLAIM_BUDGET = 500
 UTILITY_LABELS = frozenset({"helpful", "neutral", "harmful", "uncertain"})
 RELEVANCE_LABELS = frozenset({"relevant", "irrelevant", "uncertain"})
 AUTHORITIES = frozenset({"verified", "teacher-only", "uncertain", "reject"})
@@ -4688,12 +4688,19 @@ def _run_ox_teacher_batch(
         or not 1 <= claim_limit <= 500
     ):
         raise DistillationError("teacher_claim_limit must be between 1 and 500")
+    preflight = getattr(teacher, "accepts_egress_payload", None)
+    scan_limit = claim_limit
+    if claim_limit == 1 and callable(preflight):
+        scan_limit = min(
+            OX_PREFLIGHT_SCAN_CLAIM_BUDGET,
+            _payload_scan_remaining
+            if _payload_scan_remaining is not None
+            else OX_PREFLIGHT_SCAN_CLAIM_BUDGET,
+        )
     claims = list(
         workset.claim(
             "ox",
-            min(claim_limit, _payload_scan_remaining)
-            if _payload_scan_remaining is not None
-            else claim_limit,
+            scan_limit,
             OX_TEACHER_ROLE,
             7200,
         )
@@ -5103,13 +5110,23 @@ def _run_ox_teacher_batch(
             [outcome for _claim, outcome in oversize],
         )
 
+    if claim_limit == 1:
+        single_request_batches: list[list[Any]] = []
+        for current in batches:
+            if all(
+                tasks[claim.work_id]["assignment"].get("probe") for claim in current
+            ):
+                single_request_batches.append(current)
+            else:
+                single_request_batches.extend([claim] for claim in current)
+        batches = single_request_batches
+
     def batch_payload(current: Sequence[Any]) -> dict[str, Any]:
         return {
             "schema": "chronovisor.recall-distill-teacher-batch.v1",
             "candidates": [tasks[claim.work_id]["input"] for claim in current],
         }
 
-    preflight = getattr(teacher, "accepts_egress_payload", None)
     preflight_rejected: list[list[Any]] = []
     if callable(preflight):
         accepted: list[list[Any]] = []
@@ -5123,7 +5140,9 @@ def _run_ox_teacher_batch(
         for current in batches:
             if ready_for_egress(current):
                 accepted.append(current)
-            elif all(tasks[claim.work_id]["assignment"].get("probe") for claim in current):
+            elif len(current) == 1 or all(
+                tasks[claim.work_id]["assignment"].get("probe") for claim in current
+            ):
                 preflight_rejected.append(current)
             else:
                 for claim in current:
@@ -5141,6 +5160,10 @@ def _run_ox_teacher_batch(
                 for _claim in rejected_claims
             ],
         )
+    if claim_limit == 1 and len(batches) > 1:
+        unattempted = [claim for current in batches[1:] for claim in current]
+        workset.release_unattempted(unattempted)
+        batches = batches[:1]
     if not batches:
         rejected_count = len(oversize) + sum(map(len, preflight_rejected))
         remaining = (

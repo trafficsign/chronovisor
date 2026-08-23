@@ -3116,6 +3116,82 @@ def test_ox_scans_adapter_preflight_reject_without_losing_safe_work(
     assert result.workset_status["ready"] == 2  # type: ignore[index]
 
 
+def test_ox_canary_preflights_wide_window_before_one_request(tmp_path: Path) -> None:
+    target_id = "candidate-04-3"
+
+    class GuardedTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def __init__(self) -> None:
+            self.requests: list[str] = []
+            self.preflight_calls = 0
+
+        def accepts_egress_payload(self, payload: object) -> bool:
+            self.preflight_calls += 1
+            assert isinstance(payload, dict)
+            candidates = payload["candidates"]
+            assert isinstance(candidates, list)
+            return candidates[0]["candidate_id"] == target_id
+
+        def evaluate(self, payload: object) -> dict[str, object]:
+            assert isinstance(payload, dict)
+            candidates = payload["candidates"]
+            assert isinstance(candidates, list)
+            self.requests.append(str(candidates[0]["candidate_id"]))
+            return {"_failure": {"class": "invalid_response"}}
+
+    rally_ids = [f"rally-{index:02d}" for index in range(5)]
+    candidate_ids = {
+        rally_id: [f"candidate-{index:02d}-{position}" for position in range(4)]
+        for index, rally_id in enumerate(rally_ids)
+    }
+    teacher = GuardedTeacher()
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            teacher_claim_limit=1,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: teacher},
+        snapshots={
+            rally_id: {
+                "candidates": [
+                    {"candidate_id": candidate_id, "text_sha256": candidate_id}
+                    for candidate_id in candidate_ids[rally_id]
+                ]
+            }
+            for rally_id in rally_ids
+        },
+        rally_by_id={
+            rally_id: {
+                "rally_id": rally_id,
+                "query_sha256": "query",
+                "context_refs": [],
+            }
+            for rally_id in rally_ids
+        },
+        texts={
+            "query": "what proves the claim",
+            **{
+                candidate_id: "bounded fact"
+                for ids in candidate_ids.values()
+                for candidate_id in ids
+            },
+        },
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert teacher.requests == [target_id]
+    assert teacher.preflight_calls == 20
+    assert result.model_calls == 1
+    assert result.workset_status["quarantined"] == 19  # type: ignore[index]
+    assert result.workset_status["ready"] == 1  # type: ignore[index]
+
+
 def test_ox_claim_cap_keeps_append_batch_at_or_below_500(tmp_path: Path) -> None:
     class RemoteTeacher:
         local = False

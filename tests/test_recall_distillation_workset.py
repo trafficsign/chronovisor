@@ -144,6 +144,22 @@ def test_expired_lease_is_reclaimed_and_attempt_increments(tmp_path: Path) -> No
         workset.commit([original], [_completed()])
 
 
+def test_release_unattempted_preserves_attempt_budget(tmp_path: Path) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance([_item("one")], 1)
+    original = workset.claim("label", 1, "ox-1", 60)[0]
+
+    with pytest.raises(DistillationWorksetError, match="ownership lost"):
+        workset.release_unattempted([replace(original, payload_digest="c" * 64)])
+    assert workset.status("label")["leased"] == 1
+    assert workset.release_unattempted([original]) == 1
+    reclaimed = workset.claim("label", 1, "ox-2", 60)[0]
+
+    assert reclaimed.attempt == 1
+    with pytest.raises(DistillationWorksetError, match="ownership lost"):
+        workset.commit([original], [_completed()])
+
+
 def test_concurrent_claims_are_exactly_once(tmp_path: Path) -> None:
     path = tmp_path / "workset.sqlite3"
     workset = DistillationWorkset(path)
