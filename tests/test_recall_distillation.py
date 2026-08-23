@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import stat
+import threading
+import time
 import tomllib
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -17,6 +23,7 @@ from chronovisor.core.legacy_archive import write_legacy_archive
 from chronovisor.core.raw_segment import append_capture
 from chronovisor.core.store import RuntimeContext, init_chronovisor
 from chronovisor.recall import recall_distillation as distill
+from chronovisor.recall import recall_distillation_catalog as catalog
 from chronovisor.recall import recall_distillation_store as store
 
 
@@ -38,8 +45,7 @@ def _config(root: Path, **overrides: object) -> Path:
     }
     lines = ["[recall.distillation]"]
     for key, value in values.items():
-        text = str(value).lower() if isinstance(value, bool) else str(value)
-        lines.append(f"{key} = {text}")
+        lines.append(f"{key} = {json.dumps(value, ensure_ascii=False)}")
     lines.append("rollout_stages = [5, 25, 100]")
     path = root / "config.toml"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -144,11 +150,40 @@ def test_migrate_distillation_config_dry_run_apply_and_idempotence(
     assert parsed["llm"]["roles"] == distill._DISTILLATION_ROLES
     assert config.with_name("config.toml.bak").read_bytes() == original
     assert b"enabled = false\nchunk_size" in config.read_bytes()
-    assert b"canary_min_days = 7\n\n[llm.roles" in config.read_bytes()
+    assert b'teacher_profile = "local-triad-v1"' in config.read_bytes()
+    assert b"ox_enabled = false" in config.read_bytes()
     assert distill.migrate_distillation_config(config) == {
         "status": "noop",
         "additions": [],
     }
+
+
+def test_legacy_distillation_config_migrates_profile_defaults(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    legacy = {
+        key: value
+        for key, value in distill._DISTILLATION_CONFIG.items()
+        if key not in distill._OPTIONAL_PROFILE_CONFIG
+    }
+    config.write_text(
+        "[recall.distillation]\n"
+        + "".join(
+            f"{key} = {json.dumps(value, ensure_ascii=False)}\n"
+            for key, value in legacy.items()
+        ),
+        encoding="utf-8",
+    )
+
+    migrated = distill.migrate_distillation_config(config, apply=True)
+
+    assert set(migrated["additions"]) == {
+        *(f"recall.distillation.{key}" for key in distill._OPTIONAL_PROFILE_CONFIG),
+        *distill._DISTILLATION_ROLES,
+    }
+    assert (
+        tomllib.loads(config.read_text(encoding="utf-8"))["recall"]["distillation"]
+        == distill._DISTILLATION_CONFIG
+    )
     operator_enabled = config.read_text(encoding="utf-8").replace(
         "enabled = false", "enabled = true", 1
     )
@@ -157,6 +192,49 @@ def test_migrate_distillation_config_dry_run_apply_and_idempotence(
         "status": "noop",
         "additions": [],
     }
+
+
+def test_ox_profile_contract_is_stable_and_fail_closed(tmp_path: Path) -> None:
+    config = distill.DistillationConfig(
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        ox_enabled=True,
+        ox_free_only=True,
+        teacher_max_inflight=10,
+        teacher_claim_limit=1,
+    )
+    first = distill._ensure_ox_profile_contract(tmp_path, config)
+    second = distill._ensure_ox_profile_contract(tmp_path, config)
+    bulk = distill._ensure_ox_profile_contract(
+        tmp_path,
+        distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            ox_free_only=True,
+            teacher_max_inflight=10,
+            teacher_claim_limit=500,
+        ),
+    )
+
+    assert first["artifact_id"] == second["artifact_id"] == bulk["artifact_id"]
+    assert first["endpoint"] == "https://opencode.ai/zen/go/v1/chat/completions"
+    assert first["request_model"] == first["required_returned_model"] == "ox-alpha-free"
+    assert first["expires_at"] is None
+    assert first["live_recall_model_calls"] == 0
+    assert first["kill_categories"] == [
+        "402",
+        "payment_required",
+        "model_unavailable",
+        "route_model_drift",
+        "privacy_gate",
+    ]
+    with pytest.raises(distill.DistillationError, match="unsafe"):
+        distill._ensure_ox_profile_contract(
+            tmp_path,
+            distill.DistillationConfig(
+                teacher_profile=distill.OX_SINGLE_PROFILE,
+                teacher_max_inflight=11,
+            ),
+        )
 
 
 @pytest.mark.parametrize(
@@ -297,7 +375,9 @@ def test_default_workers_keep_cold_teacher_and_counterfactual_budgets_separate(
     monkeypatch.setattr(
         ollama,
         "model_digests",
-        lambda models: {model: f"{index + 1:064x}" for index, model in enumerate(models)},
+        lambda models: {
+            model: f"{index + 1:064x}" for index, model in enumerate(models)
+        },
     )
 
     teachers, counterfactual = distill._default_workers(
@@ -353,6 +433,106 @@ def test_default_workers_accept_revision_pinned_local_omlx_routes(
         teachers["recall.distill.teacher.a"].expected_digest
         == counterfactual.digests["recall.distill.answer_generator"]
     )
+
+
+def test_ox_profile_requires_explicit_enable_and_builds_one_remote_teacher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import (
+        llm_security,
+        openai_compatible_adapter,
+    )
+    from chronovisor.recall import recall_distillation_remote_teacher as remote
+
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        openai_compatible_adapter,
+        "compose_openai_compatible_adapter",
+        lambda *_a, **_k: object(),
+    )
+    monkeypatch.setattr(remote, "OpenCodeOxAlphaTeacher", RemoteTeacher)
+    monkeypatch.setattr(
+        llm_security.CredentialResolver,
+        "resolve",
+        lambda *_args: object(),
+    )
+
+    disabled, counterfactual = distill._default_workers(
+        distill.DistillationConfig(teacher_profile=distill.OX_SINGLE_PROFILE)
+    )
+    teachers, counterfactual_enabled = distill._default_workers(
+        distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            teacher_max_inflight=10,
+        )
+    )
+
+    assert disabled == {}
+    assert counterfactual is None
+    assert set(teachers) == {distill.OX_TEACHER_ROLE}
+    assert teachers[distill.OX_TEACHER_ROLE].local is False
+    assert counterfactual_enabled is None
+
+
+def test_ox_default_worker_is_unavailable_without_keyring_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import llm_security
+
+    def missing(*_args: object) -> object:
+        raise RuntimeError("missing keyring credential")
+
+    monkeypatch.setattr(llm_security.CredentialResolver, "resolve", missing)
+
+    teachers, counterfactual = distill._default_workers(
+        distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+        )
+    )
+
+    assert teachers == {}
+    assert counterfactual is None
+
+
+def test_ox_profile_config_is_toml_safe_and_capped(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        ox_enabled=True,
+        teacher_max_inflight=10,
+    )
+
+    loaded = distill.load_distillation_config(config)
+
+    assert loaded.teacher_profile == distill.OX_SINGLE_PROFILE
+    assert loaded.ox_enabled is True
+    assert loaded.teacher_max_inflight == 10
+    assert loaded.teacher_claim_limit == 500
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "teacher_max_inflight = 10", "teacher_max_inflight = 11"
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(distill.DistillationError, match="at most 10"):
+        distill.load_distillation_config(config)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "teacher_max_inflight = 11",
+            "teacher_max_inflight = 10\nteacher_claim_limit = 501",
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(distill.DistillationError, match="at most 500"):
+        distill.load_distillation_config(config)
 
 
 def test_rally_v1_folds_assistant_and_tool_refs_without_copying_text(
@@ -758,10 +938,14 @@ def test_nonblocking_page_and_exact_receipts_write_nothing_when_busy(
         )
     finally:
         store.release_lock(lock)
-    assert page == exact == {
-        "status": "deferred",
-        "reason": "receipt_ledger_busy",
-    }
+    assert (
+        page
+        == exact
+        == {
+            "status": "deferred",
+            "reason": "receipt_ledger_busy",
+        }
+    )
     assert not ledger.exists()
     assert not (runtime_dir / "exposures").exists()
     artifact_lock = store.acquire_nonblocking_lock(
@@ -1180,7 +1364,10 @@ def test_matching_p5_baseline_rejects_current_hold_and_runtime_drift(
     assert distill._matching_p5_baseline(tmp_path, held) is None
     changed_commit = {**baseline, "runtime_commit": "1234567"}
     assert distill._matching_p5_baseline(tmp_path, changed_commit) is None
-    changed_metrics = {**baseline, "metrics": {"archive_commit": "abcdef0", "drift": True}}
+    changed_metrics = {
+        **baseline,
+        "metrics": {"archive_commit": "abcdef0", "drift": True},
+    }
     assert distill._matching_p5_baseline(tmp_path, changed_metrics) is None
     changed_contract = {**baseline, "frozen_contract": {"feature_revision": "other"}}
     assert distill._matching_p5_baseline(tmp_path, changed_contract) is None
@@ -1189,26 +1376,21 @@ def test_matching_p5_baseline_rejects_current_hold_and_runtime_drift(
 def test_chunk_hard_timeout_preserves_state_counters_and_chain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from chronovisor.recall.recall_runtime import RecallWallClockTimeout
-
     raw_dir = _raw(tmp_path)
     config = _config(tmp_path)
     distill.run_distillation_chunk(
         root=tmp_path, raw_dir=raw_dir, config_path=config, teachers={}
     )
     runtime_dir = store.distillation_dir(tmp_path)
-    state_path = runtime_dir / store.STATE_FILE
     ledger_path = runtime_dir / "rally-manifest.jsonl"
-    before_state = state_path.read_bytes()
     before_ledger = ledger_path.read_bytes()
-    before_head = store.verify_chain(ledger_path)
-    monkeypatch.setattr(
-        distill,
-        "_events",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RecallWallClockTimeout("forced pre-write timeout")
-        ),
-    )
+
+    def unavailable(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("steady chunk must use catalog and chain_head")
+
+    monkeypatch.setattr(distill, "_events", unavailable)
+    monkeypatch.setattr(distill, "build_historical_index", unavailable)
+    monkeypatch.setattr(store, "verify_chain", unavailable)
     result = distill.run_distillation_chunk(
         root=tmp_path,
         raw_dir=raw_dir,
@@ -1216,25 +1398,43 @@ def test_chunk_hard_timeout_preserves_state_counters_and_chain(
         teachers={},
         max_elapsed_seconds=60,
     )
-    assert result == {
-        "status": "deferred",
-        "processed": 0,
-        "reason": "wall_clock_timeout",
-        "atomic_progress_may_be_present": True,
-    }
-    assert state_path.read_bytes() == before_state
+    assert result["status"] == "capture_only"
+    assert result["processed"] == 0
     assert ledger_path.read_bytes() == before_ledger
-    assert store.verify_chain(ledger_path) == before_head
     lock = store.acquire_nonblocking_lock(runtime_dir / "distillation-worker.lock")
     assert lock is not None
     store.release_lock(lock)
 
 
+def test_chunk_reuses_loaded_candidates_for_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw_dir = _raw(tmp_path)
+    config = _config(tmp_path)
+    distill.run_distillation_chunk(
+        root=tmp_path, raw_dir=raw_dir, config_path=config, teachers={}
+    )
+    candidate_path = store.distillation_dir(tmp_path) / "candidate-ledger.jsonl"
+    original_read_chain = distill._read_chain
+    candidate_reads = 0
+
+    def counted_read_chain(path: Path) -> list[dict[str, Any]]:
+        nonlocal candidate_reads
+        if path == candidate_path:
+            candidate_reads += 1
+        return original_read_chain(path)
+
+    monkeypatch.setattr(distill, "_read_chain", counted_read_chain)
+    result = distill.run_distillation_chunk(
+        root=tmp_path, raw_dir=raw_dir, config_path=config, teachers={}
+    )
+    assert result["status"] == "capture_only"
+    assert candidate_reads == 1
+
+
 def test_timeout_after_atomic_batch_resumes_without_duplicate_or_cursor_advance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from chronovisor.recall.recall_runtime import RecallWallClockTimeout
-
     raw_dir = _raw(tmp_path)
     config = _config(tmp_path)
     runtime_dir = store.distillation_dir(tmp_path)
@@ -1251,16 +1451,14 @@ def test_timeout_after_atomic_batch_resumes_without_duplicate_or_cursor_advance(
             "counterfactual_model_calls": 2,
         },
     )
-    before_state = state_path.read_bytes()
-    build_index = distill.build_historical_index
     monkeypatch.setattr(
         distill,
         "build_historical_index",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RecallWallClockTimeout("forced after manifest batch")
+            AssertionError("steady chunk must use catalog historical index")
         ),
     )
-    timed_out = distill.run_distillation_chunk(
+    first = distill.run_distillation_chunk(
         root=tmp_path,
         raw_dir=raw_dir,
         config_path=config,
@@ -1268,18 +1466,11 @@ def test_timeout_after_atomic_batch_resumes_without_duplicate_or_cursor_advance(
         cold_start=True,
         max_elapsed_seconds=60,
     )
-    assert timed_out == {
-        "status": "deferred",
-        "processed": 0,
-        "reason": "wall_clock_timeout",
-        "atomic_progress_may_be_present": True,
-    }
-    assert state_path.read_bytes() == before_state
+    assert first["processed"] == 3
     manifest = runtime_dir / "rally-manifest.jsonl"
     committed = store.verify_chain(manifest)
     assert committed["records"] == 3
 
-    monkeypatch.setattr(distill, "build_historical_index", build_index)
     resumed = distill.run_distillation_chunk(
         root=tmp_path,
         raw_dir=raw_dir,
@@ -1293,7 +1484,7 @@ def test_timeout_after_atomic_batch_resumes_without_duplicate_or_cursor_advance(
     state = store.read_sealed(state_path)
     assert state["teacher_model_calls"] == 5
     assert state["counterfactual_model_calls"] == 2
-    assert state["cold_start_lane_turn"] == 8
+    assert state["cold_start_lane_turn"] == 9
     assert state["raw_watermark"] == distill.committed_raw_watermark(raw_dir)
 
 
@@ -1593,6 +1784,1103 @@ def test_teacher_routes_make_progress_across_bounded_chunks(
     assert max(counts.values()) - min(counts.values()) <= 16
 
 
+def test_ox_single_teacher_materialization_binds_temporal_quality_evidence(
+    tmp_path: Path,
+) -> None:
+    features = distill.build_fast_features(
+        query_chargram_coverage=1, candidate_chargram_precision=1
+    )
+    rallies = [
+        {
+            "rally_id": f"rally-{index}",
+            "session_cluster_id": f"session-{index}",
+            "as_of": f"2026-01-0{index + 1}T00:00:00Z",
+        }
+        for index in range(3)
+    ]
+    plan = distill._ensure_split_plan(
+        tmp_path,
+        rallies,
+        raw_watermark="a" * 64,
+        model_cohort_sha256="b" * 64,
+    )
+    snapshots = {
+        str(rally["rally_id"]): {
+            "as_of": rally["as_of"],
+            "snapshot_sha256": "c" * 64,
+            "feature_revision": distill.TEXT_FEATURE_REVISION,
+            "candidates": [
+                {
+                    "candidate_id": f"candidate-{index}",
+                    "features": features,
+                }
+            ],
+        }
+        for index, rally in enumerate(rallies)
+    }
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    config = distill.DistillationConfig(
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        ox_enabled=True,
+        hard_floor_teacher_labels=1,
+        hard_floor_teacher_per_class=1,
+        hard_floor_probe_pairs=1,
+    )
+    profile_contract_id = distill._ensure_ox_profile_contract(tmp_path, config)[
+        "artifact_id"
+    ]
+    for index, rally in enumerate(rallies):
+        store.append_chain(
+            label_path,
+            {
+                "kind": "teacher-label",
+                "status": "completed",
+                "rally_id": rally["rally_id"],
+                "candidate_id": f"candidate-{index}",
+                "route": "opencode-go/ox-alpha-free",
+                "model_digest": "d" * 64,
+                "prompt_sha256": "e" * 64,
+                "schema_sha256": "f" * 64,
+                "profile": distill.OX_SINGLE_PROFILE,
+                "cohort": distill.OX_SINGLE_COHORT,
+                "profile_contract_id": profile_contract_id,
+                "route_identity": {
+                    "provider": "opencode-go",
+                    "model": "opencode-go/ox-alpha-free",
+                    "location": "remote",
+                },
+                "as_of": rally["as_of"],
+                "group_id": rally["session_cluster_id"],
+                "split_plan_id": plan["artifact_id"],
+                "assignment": {"probe": False},
+                "dimension": "relevance",
+                "verdict": "relevant",
+                "authority": "teacher-only",
+                "features": features,
+            },
+        )
+    artifact = distill.materialize_training_rows(
+        tmp_path,
+        _rallies=rallies,
+        _snapshots=snapshots,
+        _label_rows=store.read_chain(label_path),
+    )
+    rows = artifact["rows"]
+    test_row = next(row for row in rows if row["split"] == "test")
+    assert all(row["feature_parity"] is True for row in rows)
+    assert all(row["future_leakage"] is False for row in rows)
+    assert all(row["fixed_split_plan"] is True for row in rows)
+    assert test_row["locked_test_read_only"] is True
+    assert test_row["locked_test_evidence_ref"] == f"split-plan:{plan['artifact_id']}"
+    gate = distill._offline_training_gate(
+        rows,
+        config,
+        root=tmp_path,
+    )
+    assert gate["schema"] == "chronovisor.recall-single-teacher-gate.v1"
+    assert "blind_repeat_pairs_below_floor" in gate["reasons"]
+    assert "teacher_models_not_distinct" not in gate["reasons"]
+    assert gate["identity"]["profile_contract_id"] == profile_contract_id
+
+    mismatched = [{**row, "profile_contract_id": "0" * 64} for row in rows]
+    rejected = distill._offline_training_gate(mismatched, config, root=tmp_path)
+    assert "profile_contract_mismatch" in rejected["reasons"]
+
+    disabled = distill._offline_training_gate(
+        rows, replace(config, ox_enabled=False), root=tmp_path
+    )
+    assert "ox_profile_disabled" in disabled["reasons"]
+
+    invalid = distill._offline_training_gate(
+        cast(list[dict[str, object]], [None]), config, root=tmp_path
+    )
+    assert "input_row_invalid" in invalid["reasons"]
+
+    unsafe_labels = [
+        {
+            **row,
+            "error_class": "invalid_teacher_output",
+            "negative_veto_conflict": True,
+        }
+        for row in store.read_chain(label_path)
+    ]
+    unsafe = distill.materialize_training_rows(
+        tmp_path,
+        _rallies=rallies,
+        _snapshots=snapshots,
+        _label_rows=unsafe_labels,
+    )
+    unsafe_gate = distill._offline_training_gate(unsafe["rows"], config, root=tmp_path)
+    assert unsafe_gate["labels"]["eligible"] == 0
+    assert "negative_veto_conflict" in unsafe_gate["reasons"]
+
+
+def test_ox_locked_blind_repeats_are_reversed_and_resume_without_duplicates(
+    tmp_path: Path,
+) -> None:
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def __init__(self) -> None:
+            self.requests: list[list[str]] = []
+
+        def evaluate(self, payload: object) -> dict[str, object]:
+            assert isinstance(payload, dict)
+            candidates = payload["candidates"]
+            assert isinstance(candidates, list)
+            self.requests.append([str(row["candidate_id"]) for row in candidates])
+            return {
+                "labels": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "verdict": (
+                            "relevant"
+                            if candidate["candidate_id"] == "candidate-a"
+                            else "irrelevant"
+                        ),
+                        "confidence": 0.9,
+                        "rationale": "bounded evidence",
+                        "minimal_atom_ids": [],
+                        "missing_slots": [],
+                        "changing_claim": "",
+                    }
+                    for candidate in candidates
+                ],
+                "_route_identity": {
+                    "provider": "opencode-go",
+                    "model": "opencode-go/ox-alpha-free",
+                    "location": "remote",
+                },
+                "_route_digest": "a" * 64,
+                "_model_digest": "b" * 64,
+                "_prompt_digest": "c" * 64,
+                "_schema_digest": "d" * 64,
+            }
+
+    features = distill.build_fast_features(
+        query_chargram_coverage=1, candidate_chargram_precision=1
+    )
+    rally = {
+        "rally_id": "rally-test",
+        "session_cluster_id": "session-test",
+        "as_of": "2026-01-03T00:00:00Z",
+        "query_sha256": "query",
+        "context_refs": [],
+    }
+    distill._ensure_split_plan(
+        tmp_path,
+        [rally],
+        raw_watermark="a" * 64,
+        model_cohort_sha256="b" * 64,
+    )
+    snapshot = {
+        "as_of": rally["as_of"],
+        "snapshot_sha256": "c" * 64,
+        "feature_revision": distill.TEXT_FEATURE_REVISION,
+        "candidates": [
+            {
+                "candidate_id": "candidate-a",
+                "text_sha256": "candidate-a",
+                "features": features,
+            },
+            {
+                "candidate_id": "candidate-b",
+                "text_sha256": "candidate-b",
+                "features": features,
+            },
+        ],
+    }
+    teacher = RemoteTeacher()
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    config = distill.DistillationConfig(
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        ox_enabled=True,
+        teacher_claim_limit=10,
+        hard_floor_teacher_labels=2,
+        hard_floor_teacher_per_class=1,
+        hard_floor_probe_pairs=2,
+    )
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=config,
+        teachers={distill.OX_TEACHER_ROLE: teacher},
+        snapshots={"rally-test": snapshot},
+        rally_by_id={"rally-test": rally},
+        texts={
+            "query": "what proves the claim",
+            "candidate-a": "first bounded fact",
+            "candidate-b": "second bounded fact",
+        },
+        label_path=label_path,
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+    assert result.labels_written == 6
+    assert ["candidate-a", "candidate-b"] in teacher.requests
+    assert ["candidate-b", "candidate-a"] in teacher.requests
+    labels = store.read_chain(label_path)
+    probes = [row for row in labels if row["assignment"]["probe"] is True]
+    assert len(probes) == 4
+    assert {row["assignment"]["blind_order"] for row in probes} == {
+        "a_first",
+        "b_first",
+    }
+    assert all(row["assignment"]["fixed_repeat"] is True for row in probes)
+    training = distill.materialize_training_rows(
+        tmp_path,
+        _rallies=[rally],
+        _snapshots={"rally-test": snapshot},
+        _label_rows=labels,
+    )
+    gate = distill._offline_training_gate(training["rows"], config, root=tmp_path)
+    assert gate["blind_repeat"]["complete_pairs"] == 2
+    before = len(teacher.requests)
+    resumed = distill._run_teacher_batch(
+        root=tmp_path,
+        config=config,
+        teachers={distill.OX_TEACHER_ROLE: teacher},
+        snapshots={"rally-test": snapshot},
+        rally_by_id={"rally-test": rally},
+        texts={
+            "query": "what proves the claim",
+            "candidate-a": "first bounded fact",
+            "candidate-b": "second bounded fact",
+        },
+        label_path=label_path,
+        label_rows=labels,
+        structural_verifier=lambda *_args: None,
+    )
+    assert resumed.labels_written == 0
+    assert len(teacher.requests) == before
+    assert len(store.read_chain(label_path)) == len(labels)
+
+
+def test_ox_incomplete_locked_repeat_is_not_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_distillation_workset as workset_module
+
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def evaluate(self, _payload: object) -> dict[str, object]:
+            raise AssertionError("incomplete repeat must not reach the provider")
+
+    rally = {
+        "rally_id": "rally-test",
+        "session_cluster_id": "session-test",
+        "as_of": "2026-01-03T00:00:00Z",
+        "query_sha256": "query",
+        "context_refs": [],
+    }
+    distill._ensure_split_plan(
+        tmp_path,
+        [rally],
+        raw_watermark="a" * 64,
+        model_cohort_sha256="b" * 64,
+    )
+    original_claim = workset_module.DistillationWorkset.claim
+
+    def claim_one(
+        self: object, kind: str, _limit: int, owner: str, lease: float
+    ) -> object:
+        return original_claim(self, kind, 1, owner, lease)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(workset_module.DistillationWorkset, "claim", claim_one)
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            teacher_claim_limit=1,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: RemoteTeacher()},
+        snapshots={
+            "rally-test": {
+                "candidates": [
+                    {"candidate_id": "candidate-a", "text_sha256": "candidate-a"},
+                    {"candidate_id": "candidate-b", "text_sha256": "candidate-b"},
+                ]
+            }
+        },
+        rally_by_id={"rally-test": rally},
+        texts={
+            "query": "what proves the claim",
+            "candidate-a": "first bounded fact",
+            "candidate-b": "second bounded fact",
+        },
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+    assert result.labels_written == 0
+    assert result.deferred is True
+
+
+def test_ox_ramp_counts_provider_receipts_not_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_distillation_dispatcher as dispatcher
+
+    captured: dict[str, int] = {}
+    fields = {
+        "candidate_id",
+        "verdict",
+        "confidence",
+        "rationale",
+        "minimal_atom_ids",
+        "missing_slots",
+        "changing_claim",
+    }
+
+    def dispatch(_batches: object, _evaluate: object, **kwargs: object) -> list[object]:
+        callback = kwargs["valid_result_count"]
+        assert callable(callback)
+        response = {
+            "labels": [
+                {
+                    "candidate_id": str(index),
+                    "verdict": "relevant",
+                    "confidence": 1.0,
+                    "rationale": "bounded",
+                    "minimal_atom_ids": [],
+                    "missing_slots": [],
+                    "changing_claim": "",
+                }
+                for index in range(16)
+            ]
+        }
+        assert all(set(label) == fields for label in response["labels"])
+        captured["receipt_count"] = callback(response)
+        return []
+
+    monkeypatch.setattr(dispatcher, "dispatch_claimed_work", dispatch)
+
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def evaluate(self, _payload: object) -> dict[str, object]:
+            raise AssertionError("intercepted dispatcher must not evaluate")
+
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE, ox_enabled=True
+        ),
+        teachers={distill.OX_TEACHER_ROLE: RemoteTeacher()},
+        snapshots={
+            "rally": {
+                "candidates": [
+                    {"candidate_id": "candidate", "text_sha256": "candidate"}
+                ]
+            }
+        },
+        rally_by_id={
+            "rally": {"rally_id": "rally", "query_sha256": "query", "context_refs": []}
+        },
+        texts={"query": "what proves the claim", "candidate": "bounded fact"},
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+    assert result.labels_written == 0
+    assert captured["receipt_count"] == 1
+
+    active = 0
+    peak = 0
+    active_lock = threading.Lock()
+
+    def one_receipt(_work: int) -> dict[str, object]:
+        nonlocal active, peak
+        with active_lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.01)
+        with active_lock:
+            active -= 1
+        return {"labels": []}
+
+    dispatcher.SingleTeacherDispatcher(
+        one_receipt,
+        max_inflight=10,
+        min_valid_results_per_cap=20,
+        valid_result_count=lambda _response: captured["receipt_count"],
+    ).dispatch(list(range(19)))
+    assert peak == 1
+
+
+def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_labels(
+    tmp_path: Path,
+) -> None:
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def evaluate(self, payload: object) -> dict[str, object]:
+            assert isinstance(payload, dict)
+            return {
+                "labels": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "verdict": "relevant",
+                        "confidence": 0.9,
+                        "rationale": "bounded evidence",
+                        "minimal_atom_ids": [],
+                        "missing_slots": [],
+                        "changing_claim": "",
+                    }
+                    for candidate in payload["candidates"]
+                ],
+                "_route_identity": {
+                    "provider": "opencode-go",
+                    "model": "opencode-go/ox-alpha-free",
+                    "location": "remote",
+                },
+                "_route_digest": "a" * 64,
+                "_model_digest": "b" * 64,
+                "_prompt_digest": "c" * 64,
+                "_schema_digest": "d" * 64,
+            }
+
+    rally = {
+        "rally_id": "rally-1",
+        "query_sha256": "query",
+        "context_refs": [],
+    }
+    candidates = [
+        {"candidate_id": "candidate-1", "text_sha256": "candidate-1"},
+        {"candidate_id": "candidate-2", "text_sha256": "candidate-2"},
+    ]
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    teacher = RemoteTeacher()
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            max_input_bytes=4_096,
+            teacher_max_inflight=10,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: teacher},
+        snapshots={"rally-1": {"candidates": candidates}},
+        rally_by_id={"rally-1": rally},
+        texts={
+            "query": "what proves the claim",
+            "candidate-1": "first bounded fact",
+            "candidate-2": "second bounded fact",
+        },
+        label_path=label_path,
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+    labels = store.read_chain(label_path)
+
+    assert result.labels_written == 2
+    assert result.model_calls == 1
+    assert result.workset_status == {
+        "ready": 0,
+        "leased": 0,
+        "completed": 2,
+        "quarantined": 0,
+        "backlog": 0,
+        "total": 2,
+    }
+    assert [row["candidate_id"] for row in labels] == ["candidate-1", "candidate-2"]
+    assert all(row["route"] == "opencode-go/ox-alpha-free" for row in labels)
+    assert all(row["teacher_role"] == distill.OX_TEACHER_ROLE for row in labels)
+    assert all(row["status"] == "completed" for row in labels)
+    assert all(row["profile"] == distill.OX_SINGLE_PROFILE for row in labels)
+    assert all(row["cohort"] == distill.OX_SINGLE_COHORT for row in labels)
+    assert all(len(row["prompt_sha256"]) == 64 for row in labels)
+    assert all(row["assignment"]["probe"] is False for row in labels)
+
+    with sqlite3.connect(store.distillation_dir(tmp_path) / "ox-workset.sqlite3") as db:
+        db.execute(
+            """
+            UPDATE work_items
+            SET state = 'leased', lease_id = 'crashed', lease_owner = 'crashed',
+                lease_expires_at = 0
+            """
+        )
+    calls = 0
+
+    def should_not_call(_payload: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("crash recovery must reconcile the existing label")
+
+    teacher.evaluate = should_not_call  # type: ignore[method-assign]
+    recovered = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            max_input_bytes=4_096,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: teacher},
+        snapshots={"rally-1": {"candidates": candidates}},
+        rally_by_id={"rally-1": rally},
+        texts={
+            "query": "what proves the claim",
+            "candidate-1": "first bounded fact",
+            "candidate-2": "second bounded fact",
+        },
+        label_path=label_path,
+        label_rows=labels,
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert calls == 0
+    assert recovered.labels_written == 0
+    assert recovered.workset_status["completed"] == 2  # type: ignore[index]
+    assert len(store.read_chain(label_path)) == 2
+
+
+def test_ox_indexed_workset_reads_only_delta_then_claimed_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def __init__(self) -> None:
+            self.valid = True
+            self.calls = 0
+
+        def evaluate(self, payload: object) -> dict[str, object]:
+            assert isinstance(payload, dict)
+            self.calls += 1
+            return {
+                "labels": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "verdict": "relevant" if self.valid else "uncertain",
+                        "confidence": 0.9,
+                        "rationale": "bounded evidence",
+                        "minimal_atom_ids": [],
+                        "missing_slots": [],
+                        "changing_claim": "",
+                    }
+                    for candidate in payload["candidates"]
+                ],
+                "_route_identity": {
+                    "provider": "opencode-go",
+                    "model": "opencode-go/ox-alpha-free",
+                    "location": "remote",
+                },
+                "_route_digest": "a" * 64,
+                "_model_digest": "b" * 64,
+                "_prompt_digest": "c" * 64,
+                "_schema_digest": "d" * 64,
+            }
+
+    def snapshot(rally_id: str, candidate_id: str, text_hash: str) -> dict[str, object]:
+        value: dict[str, object] = {
+            "schema": catalog.CANDIDATE_SNAPSHOT_SCHEMA,
+            "rally_id": rally_id,
+            "as_of": "2026-01-03T00:00:00Z",
+            "retriever_revision": "historical-fts-v1",
+            "feature_revision": distill.TEXT_FEATURE_REVISION,
+            "query_feature_text_sha256": "e" * 64,
+            "candidates": [
+                {
+                    "candidate_id": candidate_id,
+                    "rank": 1,
+                    "text_sha256": text_hash,
+                    "candidate_feature_text_sha256": "f" * 64,
+                }
+            ],
+        }
+        value["snapshot_sha256"] = hashlib.sha256(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return value
+
+    query_one = "1" * 64
+    text_one = "2" * 64
+    query_two = "3" * 64
+    text_two = "4" * 64
+    rallies = {
+        "rally-1": {
+            "rally_id": "rally-1",
+            "session_cluster_id": "session-1",
+            "as_of": "2026-01-03T00:00:00Z",
+            "query_sha256": query_one,
+            "context_refs": [],
+        },
+        "rally-2": {
+            "rally_id": "rally-2",
+            "session_cluster_id": "session-2",
+            "as_of": "2026-01-03T00:00:00Z",
+            "query_sha256": query_two,
+            "context_refs": [],
+        },
+    }
+    catalog.advance(_raw(tmp_path), tmp_path, 4096)
+    candidate_path = store.distillation_dir(tmp_path) / "candidate-ledger.jsonl"
+    store.append_chain(
+        candidate_path,
+        {
+            "kind": "candidate-snapshot",
+            "rally_id": "rally-1",
+            "snapshot": snapshot("rally-1", "candidate-1", text_one),
+        },
+    )
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    config = distill.DistillationConfig(
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        ox_enabled=True,
+        teacher_claim_limit=1,
+    )
+    teacher = RemoteTeacher()
+    calls: list[set[str]] = []
+    original_read = catalog.read_candidate_snapshots
+
+    def tracked_read(
+        root: Path, path: Path, rally_ids: Iterable[str]
+    ) -> dict[str, dict[str, object]]:
+        values = set(rally_ids)
+        if values:
+            calls.append(values)
+        return original_read(root, path, values)
+
+    monkeypatch.setattr(catalog, "read_candidate_snapshots", tracked_read)
+
+    def run(labels: list[dict[str, object]]) -> distill._TeacherBatchResult:
+        return distill._run_teacher_batch(
+            root=tmp_path,
+            config=config,
+            teachers={distill.OX_TEACHER_ROLE: teacher},
+            snapshots={},
+            rally_by_id=rallies,
+            texts={
+                query_one: "what proves the first claim",
+                text_one: "first bounded fact",
+                query_two: "what proves the second claim",
+                text_two: "second bounded fact",
+                "5" * 64: "what proves the third claim",
+                "6" * 64: "third bounded fact",
+            },
+            label_path=label_path,
+            label_rows=labels,
+            candidate_indexed=True,
+            structural_verifier=lambda *_args: None,
+        )
+
+    first = run([])
+    assert first.labels_written == 1
+    assert calls == [{"rally-1"}]
+    profile_contract_id = distill._ensure_ox_profile_contract(tmp_path, config)[
+        "artifact_id"
+    ]
+    assert store.read_chain(label_path)[0]["profile_contract_id"] == profile_contract_id
+    with sqlite3.connect(store.distillation_dir(tmp_path) / "ox-workset.sqlite3") as db:
+        provenance = json.loads(
+            db.execute("SELECT provenance_json FROM work_items").fetchone()[0]
+        )
+    assert provenance["profile_contract_id"] == profile_contract_id
+
+    calls.clear()
+    second = run(store.read_chain(label_path))
+    assert second.labels_written == 0
+    assert calls == []
+
+    store.append_chain(
+        candidate_path,
+        {
+            "kind": "candidate-snapshot",
+            "rally_id": "rally-2",
+            "snapshot": snapshot("rally-2", "candidate-2", text_two),
+        },
+    )
+    calls.clear()
+    third = run(store.read_chain(label_path))
+    assert third.labels_written == 1
+    assert calls == [{"rally-2"}]
+
+    teacher.valid = False
+    store.append_chain(
+        candidate_path,
+        {
+            "kind": "candidate-snapshot",
+            "rally_id": "rally-3",
+            "snapshot": snapshot("rally-3", "candidate-3", "6" * 64),
+        },
+    )
+    rallies["rally-3"] = {
+        "rally_id": "rally-3",
+        "session_cluster_id": "session-3",
+        "as_of": "2026-01-03T00:00:00Z",
+        "query_sha256": "5" * 64,
+        "context_refs": [],
+    }
+    calls.clear()
+    assert run(store.read_chain(label_path)).labels_written == 0
+    assert calls == [{"rally-3"}]
+    teacher.valid = True
+    calls.clear()
+    workset_path = store.distillation_dir(tmp_path) / "ox-workset.sqlite3"
+    with sqlite3.connect(workset_path) as db:
+        work_id, temporal_json = db.execute(
+            "SELECT work_id,temporal_split_json FROM work_items "
+            "WHERE payload_ref='candidate-snapshot:rally-3:candidate-3'"
+        ).fetchone()
+        tampered = json.loads(temporal_json)
+        tampered["split"] = "tampered"
+        db.execute(
+            "UPDATE work_items SET temporal_split_json=? WHERE work_id=?",
+            (json.dumps(tampered, sort_keys=True, separators=(",", ":")), work_id),
+        )
+    before_calls = teacher.calls
+    assert run(store.read_chain(label_path)).labels_written == 0
+    assert teacher.calls == before_calls
+    with sqlite3.connect(workset_path) as db:
+        db.execute(
+            "UPDATE work_items SET temporal_split_json=? WHERE work_id=?",
+            (temporal_json, work_id),
+        )
+    assert run(store.read_chain(label_path)).labels_written == 1
+    assert calls == [{"rally-3"}, {"rally-3"}]
+
+
+def test_ox_single_teacher_invalid_or_uncertain_output_is_deferred_without_label(
+    tmp_path: Path,
+) -> None:
+    class UncertainTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def evaluate(self, payload: object) -> dict[str, object]:
+            assert isinstance(payload, dict)
+            return {
+                "labels": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "verdict": "uncertain",
+                        "confidence": 0.5,
+                        "rationale": "insufficient evidence",
+                        "minimal_atom_ids": [],
+                        "missing_slots": [],
+                        "changing_claim": "",
+                    }
+                    for candidate in payload["candidates"]
+                ],
+                "_route_identity": {
+                    "provider": "opencode-go",
+                    "model": "opencode-go/ox-alpha-free",
+                    "location": "remote",
+                },
+                "_route_digest": "a" * 64,
+                "_model_digest": "b" * 64,
+                "_prompt_digest": "c" * 64,
+                "_schema_digest": "d" * 64,
+            }
+
+    rally = {"rally_id": "rally-1", "query_sha256": "query", "context_refs": []}
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+
+    def run() -> distill._TeacherBatchResult:
+        return distill._run_teacher_batch(
+            root=tmp_path,
+            config=distill.DistillationConfig(
+                teacher_profile=distill.OX_SINGLE_PROFILE,
+                ox_enabled=True,
+                max_input_bytes=4_096,
+            ),
+            teachers={distill.OX_TEACHER_ROLE: UncertainTeacher()},
+            snapshots={
+                "rally-1": {
+                    "candidates": [
+                        {"candidate_id": "candidate-1", "text_sha256": "candidate-1"}
+                    ]
+                }
+            },
+            rally_by_id={"rally-1": rally},
+            texts={"query": "what proves the claim", "candidate-1": "bounded fact"},
+            label_path=label_path,
+            label_rows=[],
+            structural_verifier=lambda *_args: None,
+        )
+
+    result = run()
+    second = run()
+    third = run()
+
+    assert result.labels_written == 0
+    assert result.deferred is True
+    assert result.workset_status["ready"] == 1  # type: ignore[index]
+    assert second.workset_status["ready"] == 1  # type: ignore[index]
+    assert third.workset_status["quarantined"] == 1  # type: ignore[index]
+    assert store.read_chain(label_path) == []
+
+
+def test_ox_resolves_text_only_for_claimed_work_and_uses_long_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_distillation_workset as workset_module
+
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def evaluate(self, payload: object) -> dict[str, object]:
+            assert isinstance(payload, dict)
+            return {
+                "labels": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "verdict": "relevant",
+                        "confidence": 0.9,
+                        "rationale": "bounded evidence",
+                        "minimal_atom_ids": [],
+                        "missing_slots": [],
+                        "changing_claim": "",
+                    }
+                    for candidate in payload["candidates"]
+                ],
+                "_route_identity": {
+                    "provider": "opencode-go",
+                    "model": "opencode-go/ox-alpha-free",
+                    "location": "remote",
+                },
+                "_route_digest": "a" * 64,
+                "_model_digest": "b" * 64,
+                "_prompt_digest": "c" * 64,
+                "_schema_digest": "d" * 64,
+            }
+
+    class GuardedTexts(dict[str, str]):
+        def get(self, key: str, default: object = None) -> object:
+            if key not in {"query-1", "candidate-1"}:
+                raise AssertionError(f"unclaimed text resolved: {key}")
+            return super().get(key, default)
+
+    leases: list[float] = []
+    original_claim = workset_module.DistillationWorkset.claim
+
+    def claim(
+        self: object, kind: str, limit: int, owner: str, lease_seconds: float
+    ) -> object:
+        leases.append(lease_seconds)
+        return original_claim(self, kind, limit, owner, lease_seconds)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(workset_module.DistillationWorkset, "claim", claim)
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            teacher_claim_limit=1,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: RemoteTeacher()},
+        snapshots={
+            "rally-1": {
+                "candidates": [
+                    {"candidate_id": "candidate-1", "text_sha256": "candidate-1"},
+                    {"candidate_id": "candidate-2", "text_sha256": "candidate-2"},
+                ]
+            }
+        },
+        rally_by_id={
+            "rally-1": {
+                "rally_id": "rally-1",
+                "query_sha256": "query-1",
+                "context_refs": [],
+            }
+        },
+        texts=GuardedTexts(
+            {"query-1": "what proves the claim", "candidate-1": "bounded fact"}
+        ),
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert result.labels_written == 1
+    assert leases == [7200]
+
+
+def test_ox_missing_payload_retries_then_quarantines_without_remote_call(
+    tmp_path: Path,
+) -> None:
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def evaluate(self, _payload: object) -> dict[str, object]:
+            raise AssertionError("missing payload must not reach remote teacher")
+
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+
+    def run() -> distill._TeacherBatchResult:
+        return distill._run_teacher_batch(
+            root=tmp_path,
+            config=distill.DistillationConfig(
+                teacher_profile=distill.OX_SINGLE_PROFILE,
+                ox_enabled=True,
+            ),
+            teachers={distill.OX_TEACHER_ROLE: RemoteTeacher()},
+            snapshots={
+                "rally-1": {
+                    "candidates": [
+                        {"candidate_id": "candidate-1", "text_sha256": "missing"}
+                    ]
+                }
+            },
+            rally_by_id={
+                "rally-1": {
+                    "rally_id": "rally-1",
+                    "query_sha256": "query",
+                    "context_refs": [],
+                }
+            },
+            texts={"query": "what proves the claim"},
+            label_path=label_path,
+            label_rows=[],
+            structural_verifier=lambda *_args: None,
+        )
+
+    assert run().workset_status["ready"] == 1  # type: ignore[index]
+    assert run().workset_status["ready"] == 1  # type: ignore[index]
+    assert run().workset_status["quarantined"] == 1  # type: ignore[index]
+    assert store.read_chain(label_path) == []
+
+
+def test_ox_profile_stop_returns_claims_to_ready(tmp_path: Path) -> None:
+    from chronovisor.recall.recall_distillation_dispatcher import DispatchFailure
+
+    class StoppedTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def evaluate(self, _payload: object) -> dict[str, object]:
+            raise DispatchFailure("http_402")
+
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: StoppedTeacher()},
+        snapshots={
+            "rally-1": {
+                "candidates": [
+                    {"candidate_id": "candidate-1", "text_sha256": "candidate-1"},
+                    {"candidate_id": "candidate-2", "text_sha256": "candidate-2"},
+                ]
+            }
+        },
+        rally_by_id={
+            "rally-1": {
+                "rally_id": "rally-1",
+                "query_sha256": "query",
+                "context_refs": [],
+            }
+        },
+        texts={
+            "query": "what proves the claim",
+            "candidate-1": "bounded fact",
+            "candidate-2": "another bounded fact",
+        },
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert result.profile_stopped is True
+    assert result.workset_status["ready"] == 2  # type: ignore[index]
+    assert result.labels_written == 0
+
+
+def test_ox_claim_cap_keeps_append_batch_at_or_below_500(tmp_path: Path) -> None:
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def evaluate(self, payload: object) -> dict[str, object]:
+            assert isinstance(payload, dict)
+            candidates = payload["candidates"]
+            assert isinstance(candidates, list)
+            self.batch_sizes.append(len(candidates))
+            return {
+                "labels": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "verdict": "irrelevant",
+                        "confidence": 0.8,
+                        "rationale": "bounded evidence",
+                        "minimal_atom_ids": [],
+                        "missing_slots": [],
+                        "changing_claim": "",
+                    }
+                    for candidate in candidates
+                ],
+                "_route_identity": {
+                    "provider": "opencode-go",
+                    "model": "opencode-go/ox-alpha-free",
+                    "location": "remote",
+                },
+                "_route_digest": "a" * 64,
+                "_model_digest": "b" * 64,
+                "_prompt_digest": "c" * 64,
+                "_schema_digest": "d" * 64,
+            }
+
+    snapshots: dict[str, dict[str, object]] = {}
+    rallies: dict[str, dict[str, object]] = {}
+    texts: dict[str, str] = {}
+    for index in range(125):
+        rally_id = f"rally-{index}"
+        query = f"query-{index}"
+        rallies[rally_id] = {
+            "rally_id": rally_id,
+            "query_sha256": query,
+            "context_refs": [],
+        }
+        texts[query] = "what proves the claim"
+        candidates = []
+        for candidate_index in range(4):
+            candidate_id = f"candidate-{index}-{candidate_index}"
+            candidates.append(
+                {"candidate_id": candidate_id, "text_sha256": candidate_id}
+            )
+            texts[candidate_id] = "bounded fact"
+        snapshots[rally_id] = {
+            "snapshot_sha256": f"snapshot-{index}",
+            "candidates": candidates,
+        }
+    teacher = RemoteTeacher()
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            teacher_claim_limit=500,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: teacher},
+        snapshots=snapshots,
+        rally_by_id=rallies,
+        texts=texts,
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert result.labels_written == 500
+    assert max(teacher.batch_sizes) <= 16
+    assert (
+        len(store.read_chain(store.distillation_dir(tmp_path) / "label-ledger.jsonl"))
+        == 500
+    )
+
+
 def test_transient_teacher_defer_writes_no_label_and_retries(tmp_path: Path) -> None:
     class DeferredTeacher:
         local = True
@@ -1858,9 +3146,7 @@ def test_qualified_shadow_policy_records_private_operational_receipt(
     shadow_ledger = (
         store.distillation_dir(tmp_path) / "shadow-observation-receipts.jsonl"
     )
-    lock = store.acquire_nonblocking_lock(
-        shadow_ledger.with_suffix(".jsonl.lock")
-    )
+    lock = store.acquire_nonblocking_lock(shadow_ledger.with_suffix(".jsonl.lock"))
     assert lock is not None
     try:
         deferred = distill.record_shadow_observation(
@@ -2479,7 +3765,9 @@ def test_offline_gate_uses_route_stability_and_agreed_counterfactuals(
         query_chargram_coverage=1, candidate_chargram_precision=1
     )
     negative = distill.build_fast_features()
-    digests = {role: f"{index + 1}" * 64 for index, role in enumerate(distill.TEACHER_ROLES)}
+    digests = {
+        role: f"{index + 1}" * 64 for index, role in enumerate(distill.TEACHER_ROLES)
+    }
     rows: list[dict[str, object]] = []
     for index in range(680):
         route = distill.TEACHER_ROLES[index % 3]
@@ -2591,36 +3879,37 @@ def test_offline_gate_uses_route_stability_and_agreed_counterfactuals(
     assert "probe_route_stability_below_gate" in rejected["reasons"]
 
     mixed = [{**rows[0], "split_plan_id": "f" * 64}, *rows[1:]]
-    assert "fixed_split_plan_missing" in distill._offline_training_gate(
-        mixed, config, root=tmp_path
-    )["reasons"]
+    assert (
+        "fixed_split_plan_missing"
+        in distill._offline_training_gate(mixed, config, root=tmp_path)["reasons"]
+    )
     store.write_sealed_state(
         store.distillation_dir(tmp_path) / "split-plan.json",
         {"kind": "split-plan-pointer", "split_plan_id": "e" * 64},
     )
-    assert "fixed_split_plan_missing" in distill._offline_training_gate(
-        rows, config, root=tmp_path
-    )["reasons"]
+    assert (
+        "fixed_split_plan_missing"
+        in distill._offline_training_gate(rows, config, root=tmp_path)["reasons"]
+    )
 
     updated = bind_split([*rows, {**rows[0], "model_digest": "a" * 64}])
     partial_update = distill._offline_training_gate(updated, config, root=tmp_path)
     assert partial_update["passed"] is False
     assert "probe_pairs_below_floor" in partial_update["reasons"]
     next_digests = {
-        role: f"{index + 6}" * 64
-        for index, role in enumerate(distill.TEACHER_ROLES)
+        role: f"{index + 6}" * 64 for index, role in enumerate(distill.TEACHER_ROLES)
     }
-    complete_update = bind_split([
-        *updated,
-        *[
-            {**row, "model_digest": next_digests[str(row["route"])]}
-            for row in rows
-            if row.get("source") == "teacher-label"
-        ],
-    ])
-    recovered = distill._offline_training_gate(
-        complete_update, config, root=tmp_path
+    complete_update = bind_split(
+        [
+            *updated,
+            *[
+                {**row, "model_digest": next_digests[str(row["route"])]}
+                for row in rows
+                if row.get("source") == "teacher-label"
+            ],
+        ]
     )
+    recovered = distill._offline_training_gate(complete_update, config, root=tmp_path)
     assert recovered["passed"] is True
     assert set(recovered["model_cohort"]["teacher_model_digests"].values()) == set(
         next_digests.values()
@@ -2644,7 +3933,9 @@ def test_authenticated_correction_is_negative_veto_only(tmp_path: Path) -> None:
                 "page_id": "page",
                 "page_content_sha256": hashlib.sha256(preimage).hexdigest(),
                 "rendered_context": rendered,
-                "rendered_context_sha256": hashlib.sha256(rendered.encode()).hexdigest(),
+                "rendered_context_sha256": hashlib.sha256(
+                    rendered.encode()
+                ).hexdigest(),
             }
         ],
         render_sha256="b" * 64,

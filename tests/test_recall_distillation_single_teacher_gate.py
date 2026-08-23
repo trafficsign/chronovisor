@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 from chronovisor.recall.recall_distillation_single_teacher_gate import (
     evaluate_single_teacher_gate,
 )
@@ -22,6 +24,8 @@ def _row(
     ]
     return {
         "row_id": row_id,
+        "rally_id": row_id,
+        "candidate_id": row_id,
         "status": "completed",
         "verdict": verdict,
         "probe": probe,
@@ -31,13 +35,18 @@ def _row(
         "model_digest": "a" * 64,
         "prompt_sha256": "b" * 64,
         "schema_sha256": "c" * 64,
+        "profile_contract_id": "e" * 64,
+        "route_identity_exact": True,
         "split": split,
+        "split_plan_id": "d" * 64,
+        "fixed_split_plan": True,
         "group_id": group_id or row_id,
+        "group_identity_exact": True,
         "as_of": as_of,
         "future_leakage": False,
         "feature_parity": True,
         "locked_test_read_only": split == "test",
-        "locked_test_evidence_ref": "locked-replay:1" if split == "test" else "",
+        "locked_test_evidence_ref": f"split-plan:{'d' * 64}" if split == "test" else "",
         **override,
     }
 
@@ -58,6 +67,8 @@ def _passing_rows() -> list[dict[str, object]]:
                     verdict=verdict,
                     probe=True,
                     group_id=f"repeat-{pair_id}",
+                    rally_id=f"rally-{pair_id}",
+                    candidate_id=f"candidate-{pair_id}",
                     repeat_pair_id=pair_id,
                     fixed_repeat=True,
                     order_swap=True,
@@ -69,6 +80,8 @@ def _passing_rows() -> list[dict[str, object]]:
                     verdict=verdict,
                     probe=True,
                     group_id=f"repeat-{pair_id}",
+                    rally_id=f"rally-{pair_id}",
+                    candidate_id=f"candidate-{pair_id}",
                     repeat_pair_id=pair_id,
                     fixed_repeat=True,
                     order_swap=True,
@@ -100,7 +113,7 @@ def test_single_teacher_gate_accepts_fixed_chronological_cohort() -> None:
     assert gate["locked_test"] == {
         "rows": 4,
         "read_only": True,
-        "evidence_refs": ["locked-replay:1"],
+        "evidence_refs": [f"split-plan:{'d' * 64}"],
     }
     assert gate["blind_repeat"]["complete_pairs"] == 2
 
@@ -151,6 +164,9 @@ def test_gate_fails_closed_for_repeat_identity_and_parity_contracts() -> None:
     rows[3].pop("schema_sha256")
     rows[5]["locked_test_read_only"] = False
     rows[4]["group_id"] = rows[0]["group_id"]
+    rows[0]["fixed_split_plan"] = False
+    rows[1]["route_identity_exact"] = False
+    rows[2]["group_identity_exact"] = False
 
     gate = _gate(rows)
 
@@ -160,9 +176,72 @@ def test_gate_fails_closed_for_repeat_identity_and_parity_contracts() -> None:
         "blind_repeat_pair_incomplete",
         "blind_repeat_pairs_below_floor",
         "group_split_leakage",
+        "group_identity_mismatch",
         "future_leakage_flag_missing",
         "feature_parity_failed",
+        "fixed_split_plan_missing",
         "locked_test_read_only_evidence_missing",
         "route_identity_not_exactly_one",
+        "route_identity_mismatch",
         "schema_sha256_identity_not_exactly_one",
     } <= set(gate["reasons"])
+
+
+def test_gate_rejects_noncanonical_identity_values_and_invalid_rows() -> None:
+    expected = {
+        "route": ("evil-route", "route_mismatch"),
+        "model_digest": ("not-a-digest", "model_digest_identity_invalid"),
+        "prompt_sha256": ("x", "prompt_sha256_identity_invalid"),
+        "schema_sha256": ("y", "schema_sha256_identity_invalid"),
+        "profile_contract_id": ("z", "profile_contract_id_identity_invalid"),
+    }
+    for field, (value, reason) in expected.items():
+        rows = _passing_rows()
+        for row in rows:
+            row[field] = value
+        assert reason in _gate(rows)["reasons"]
+
+    invalid = cast(list[dict[str, object]], [None])
+    assert _gate(invalid)["reasons"] == sorted(_gate(invalid)["reasons"])
+    assert "input_row_invalid" in _gate(invalid)["reasons"]
+
+    mismatched_pair = _passing_rows()
+    mismatched_pair[4]["candidate_id"] = "different-candidate"
+    mismatch_reasons = _gate(mismatched_pair)["reasons"]
+    assert "blind_repeat_identity_mismatch" in mismatch_reasons
+    assert "blind_repeat_pair_incomplete" in mismatch_reasons
+
+    malformed_boolean = _passing_rows()
+    malformed_boolean[0]["future_leakage"] = 0
+    assert "future_leakage_detected" in _gate(malformed_boolean)["reasons"]
+
+    malformed_veto = _passing_rows()
+    malformed_veto[0]["negative_veto_conflict"] = "true"
+    assert "negative_veto_conflict" in _gate(malformed_veto)["reasons"]
+
+
+def test_gate_excludes_embargo_rows_from_quality_floors() -> None:
+    rows = _passing_rows()
+    rows.extend(
+        {
+            **rows[0],
+            "row_id": f"embargo-{index}",
+            "rally_id": f"embargo-{index}",
+            "candidate_id": f"embargo-{index}",
+            "group_id": f"embargo-{index}",
+            "split": "embargo",
+            "verdict": "relevant" if index % 2 == 0 else "irrelevant",
+        }
+        for index in range(20)
+    )
+
+    gate = _gate(rows)
+
+    assert gate["passed"] is False
+    assert "split_assignment_invalid" in gate["reasons"]
+    assert gate["labels"] == {
+        "eligible": 4,
+        "relevant": 2,
+        "irrelevant": 2,
+        "excluded": 20,
+    }

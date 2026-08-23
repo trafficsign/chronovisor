@@ -204,6 +204,9 @@ def test_run_lane_defers_before_cycle_finalization_reserve(monkeypatch) -> None:
 
 def _patch_sleep_dependencies(monkeypatch) -> None:
     monkeypatch.setattr(
+        "chronovisor.recall.recall_distillation.distillation_enabled", lambda: False
+    )
+    monkeypatch.setattr(
         "chronovisor.ingest.snapshot.snapshot_chronovisor",
         lambda reason: {"status": "clean", "reason": reason},
     )

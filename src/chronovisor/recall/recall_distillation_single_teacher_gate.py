@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -28,7 +29,7 @@ def _text(value: object) -> str:
 def _complete_row(row: Mapping[str, Any]) -> bool:
     return (
         row.get("status") == "completed"
-        and not row.get("error_class")
+        and row.get("error_class") in (None, "")
         and row.get("verdict") in {"relevant", "irrelevant"}
     )
 
@@ -55,13 +56,18 @@ def evaluate_single_teacher_gate(
 
     A usable row has ``status='completed'``, no error, and a relevance verdict.
     It must carry immutable ``profile``, ``cohort``, ``route``, ``model_digest``,
-    ``prompt_sha256``, and ``schema_sha256`` identities.  Completed test rows
-    additionally need ``locked_test_read_only=True`` and a non-empty
+    ``prompt_sha256``, ``schema_sha256``, and ``profile_contract_id`` identities.
+    The captured provider/model/location route must match exactly.  Completed
+    test rows additionally need ``locked_test_read_only=True`` and a non-empty
     ``locked_test_evidence_ref``.  Repeat probes use ``repeat_pair_id``,
     ``fixed_repeat=True``, ``order_swap=True``, and opposite ``blind_order``s.
     """
 
     reasons: list[str] = []
+    valid_rows = [row for row in rows if isinstance(row, Mapping)]
+    if len(valid_rows) != len(rows):
+        reasons.append("input_row_invalid")
+    rows = valid_rows
     if not isinstance(profile, str) or not profile:
         reasons.append("profile_argument_invalid")
     if not isinstance(cohort, str) or not cohort:
@@ -72,9 +78,11 @@ def evaluate_single_teacher_gate(
         reasons.append("repeat_stability_argument_invalid")
 
     completed = [row for row in rows if _complete_row(row)]
-    excluded = len(rows) - len(completed)
-    labels = [row for row in completed if row.get("probe") is not True]
-    probes = [row for row in completed if row.get("probe") is True]
+    required_splits = {"train", "validation", "test"}
+    eligible = [row for row in completed if row.get("split") in required_splits]
+    excluded = len(rows) - len(eligible)
+    labels = [row for row in eligible if row.get("probe") is not True]
+    probes = [row for row in eligible if row.get("probe") is True]
     relevant = sum(row.get("verdict") == "relevant" for row in labels)
     irrelevant = sum(row.get("verdict") == "irrelevant" for row in labels)
 
@@ -82,7 +90,11 @@ def evaluate_single_teacher_gate(
         reasons.append("teacher_labels_below_floor")
     if relevant < min_per_class or irrelevant < min_per_class:
         reasons.append("teacher_class_below_floor")
-    if any(row.get("negative_veto_conflict") is True for row in rows):
+    if any(
+        row.get("negative_veto_conflict") is not None
+        and row.get("negative_veto_conflict") is not False
+        for row in rows
+    ):
         reasons.append("negative_veto_conflict")
 
     identities = {
@@ -94,14 +106,32 @@ def evaluate_single_teacher_gate(
             "model_digest",
             "prompt_sha256",
             "schema_sha256",
+            "split_plan_id",
+            "profile_contract_id",
         )
     }
     if identities["profile"] and identities["profile"] != profile:
         reasons.append("profile_identity_mismatch")
     if identities["cohort"] and identities["cohort"] != cohort:
         reasons.append("cohort_identity_mismatch")
+    if identities["route"] and identities["route"] != "opencode-go/ox-alpha-free":
+        reasons.append("route_mismatch")
+    for name in (
+        "model_digest",
+        "prompt_sha256",
+        "schema_sha256",
+        "split_plan_id",
+        "profile_contract_id",
+    ):
+        if identities[name] and re.fullmatch(r"[0-9a-f]{64}", identities[name]) is None:
+            reasons.append(f"{name}_identity_invalid")
+    if any(row.get("route_identity_exact") is not True for row in completed):
+        reasons.append("route_identity_mismatch")
+    if any(row.get("fixed_split_plan") is not True for row in completed):
+        reasons.append("fixed_split_plan_missing")
 
-    required_splits = {"train", "validation", "test"}
+    if len(eligible) != len(completed):
+        reasons.append("split_assignment_invalid")
     split_rows = [row for row in completed if row.get("split") in required_splits]
     if {str(row.get("split")) for row in split_rows} != required_splits:
         reasons.append("chronological_split_incomplete")
@@ -109,6 +139,8 @@ def evaluate_single_teacher_gate(
     missing_time = any(not _text(row.get("as_of")) for row in completed)
     if missing_group:
         reasons.append("group_identity_missing")
+    if any(row.get("group_identity_exact") is not True for row in completed):
+        reasons.append("group_identity_mismatch")
     if missing_time:
         reasons.append("chronological_timestamp_missing")
     groups: dict[str, set[str]] = defaultdict(set)
@@ -132,7 +164,10 @@ def evaluate_single_teacher_gate(
     completed_flags = completed
     if any("future_leakage" not in row for row in completed_flags):
         reasons.append("future_leakage_flag_missing")
-    if any(row.get("future_leakage") is True for row in completed_flags):
+    if any(
+        "future_leakage" in row and row.get("future_leakage") is not False
+        for row in completed_flags
+    ):
         reasons.append("future_leakage_detected")
     if any("feature_parity" not in row for row in completed_flags):
         reasons.append("feature_parity_flag_missing")
@@ -149,7 +184,8 @@ def evaluate_single_teacher_gate(
     )
     if not test_rows or any(
         row.get("locked_test_read_only") is not True
-        or not _text(row.get("locked_test_evidence_ref"))
+        or _text(row.get("locked_test_evidence_ref"))
+        != f"split-plan:{_text(row.get('split_plan_id'))}"
         for row in test_rows
     ):
         reasons.append("locked_test_read_only_evidence_missing")
@@ -163,13 +199,20 @@ def evaluate_single_teacher_gate(
         else:
             incomplete_pairs += 1
     complete_pairs: list[list[Mapping[str, Any]]] = []
+    pair_identity_mismatch = False
     for pair in pairs.values():
         orders = {row.get("blind_order") for row in pair}
+        targets = {
+            (_text(row.get("rally_id")), _text(row.get("candidate_id"))) for row in pair
+        }
+        identity_exact = len(targets) == 1 and all(next(iter(targets), ()))
+        pair_identity_mismatch = pair_identity_mismatch or not identity_exact
         valid = (
             len(pair) == 2
             and all(row.get("fixed_repeat") is True for row in pair)
             and all(row.get("order_swap") is True for row in pair)
             and orders == {"a_first", "b_first"}
+            and identity_exact
         )
         if valid:
             complete_pairs.append(pair)
@@ -181,6 +224,8 @@ def evaluate_single_teacher_gate(
     stability = _wilson_lower(stable, len(complete_pairs))
     if incomplete_pairs:
         reasons.append("blind_repeat_pair_incomplete")
+    if pair_identity_mismatch:
+        reasons.append("blind_repeat_identity_mismatch")
     if len(complete_pairs) < min_repeat_pairs:
         reasons.append("blind_repeat_pairs_below_floor")
     if stability < min_repeat_stability:

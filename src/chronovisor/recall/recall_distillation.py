@@ -38,6 +38,9 @@ from chronovisor.core.raw_store import (
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.recall import recall_distillation_store as store
 from chronovisor.recall.recall_calibration import sigmoid
+from chronovisor.recall.recall_distillation_single_teacher_gate import (
+    evaluate_single_teacher_gate,
+)
 
 RALLY_SCHEMA = "chronovisor.recall-rally.rally-v1"
 BASELINE_SCHEMA = "chronovisor.recall-distill-baseline.v1"
@@ -53,6 +56,14 @@ TEACHER_ROLES = (
     "recall.distill.teacher.b",
     "recall.distill.teacher.c",
 )
+OX_TEACHER_ROLE = "recall.distill.teacher.ox-alpha"
+LOCAL_TRIAD_PROFILE = "local-triad-v1"
+OX_SINGLE_PROFILE = "ox-alpha-single-v1"
+OX_SINGLE_COHORT = "ox-alpha-backfill-v1"
+TEACHER_PROFILES = frozenset({LOCAL_TRIAD_PROFILE, OX_SINGLE_PROFILE})
+OX_ALPHA_ENDPOINT = "https://opencode.ai/zen/go/v1"
+OX_ALPHA_CREDENTIAL_REF = "oskeyring:codex-router-opencode-go/default"
+OX_PROFILE_SCHEMA = "chronovisor.recall-distill-ox-profile.v1"
 UTILITY_LABELS = frozenset({"helpful", "neutral", "harmful", "uncertain"})
 RELEVANCE_LABELS = frozenset({"relevant", "irrelevant", "uncertain"})
 AUTHORITIES = frozenset({"verified", "teacher-only", "uncertain", "reject"})
@@ -389,6 +400,42 @@ def _default_workers(
     teacher_deadline_ms: int = 60_000,
     counterfactual_deadline_ms: int = 60_000,
 ) -> tuple[dict[str, Teacher], CounterfactualGenerator | None]:
+    if config.teacher_profile == OX_SINGLE_PROFILE:
+        if not config.ox_enabled or not config.ox_free_only:
+            return {}, None
+        try:
+            from chronovisor.core.llm_security import CredentialRef, CredentialResolver
+            from chronovisor.core.openai_compatible_adapter import (
+                compose_openai_compatible_adapter,
+            )
+            from chronovisor.core.provider_profiles import generic_openai_profile
+            from chronovisor.recall.recall_distillation_remote_teacher import (
+                OpenCodeOxAlphaTeacher,
+            )
+
+            profile = generic_openai_profile(
+                "opencode-go",
+                OX_ALPHA_ENDPOINT,
+                CredentialRef.parse(OX_ALPHA_CREDENTIAL_REF),
+                structured_output_models={"ox-alpha-free"},
+            )
+            resolver = CredentialResolver()
+            # Do not advertise a runnable remote teacher until the keyring entry
+            # is present. The secret is intentionally neither retained nor logged.
+            credential = resolver.resolve(profile.credential_ref)
+            del credential
+            teacher = OpenCodeOxAlphaTeacher(
+                compose_openai_compatible_adapter(profile, resolver),
+                enabled=True,
+                free_only=True,
+                allow_paid_fallback=False,
+                max_input_bytes=config.max_input_bytes,
+                timeout_ms=teacher_deadline_ms,
+            )
+        except Exception:
+            return {}, None
+        return {teacher.role: teacher}, None
+
     from chronovisor.core import ollama
 
     roles = (
@@ -454,6 +501,63 @@ class DistillationConfig:
     hard_floor_counterfactual_pairs: int = 100
     rollout_stages: tuple[int, ...] = (5, 25, 100)
     canary_min_days: int = 7
+    teacher_profile: str = LOCAL_TRIAD_PROFILE
+    teacher_max_inflight: int = 10
+    teacher_claim_limit: int = 500
+    ox_enabled: bool = False
+    ox_free_only: bool = True
+
+
+def _ensure_ox_profile_contract(
+    root: Path, config: DistillationConfig
+) -> dict[str, Any]:
+    """Seal the exact temporary remote-teacher boundary before any egress."""
+
+    if (
+        config.teacher_profile != OX_SINGLE_PROFILE
+        or config.ox_free_only is not True
+        or not 1 <= config.teacher_max_inflight <= 10
+    ):
+        raise DistillationError("OX profile contract is unsafe")
+    relevant_config = {
+        "teacher_profile": config.teacher_profile,
+        "teacher_max_inflight": config.teacher_max_inflight,
+        "ox_enabled": config.ox_enabled,
+        "ox_free_only": config.ox_free_only,
+        "max_input_bytes": config.max_input_bytes,
+        "max_candidates": config.max_candidates,
+    }
+    _, _, artifact = store.write_immutable(
+        store.distillation_dir(root) / "ox-profile-contracts",
+        {
+            "kind": "ox-alpha-free-profile",
+            "profile": OX_SINGLE_PROFILE,
+            "cohort": OX_SINGLE_COHORT,
+            "route": "opencode-go/ox-alpha-free",
+            "endpoint": f"{OX_ALPHA_ENDPOINT}/chat/completions",
+            "request_model": "ox-alpha-free",
+            "required_returned_model": "ox-alpha-free",
+            "free_only": True,
+            "no_paid_fallback": True,
+            "official_status": "limited_time",
+            "expires_at": None,
+            "docs_url": "https://opencode.ai/docs/go/",
+            "kill_categories": [
+                "402",
+                "payment_required",
+                "model_unavailable",
+                "route_model_drift",
+                "privacy_gate",
+            ],
+            "max_inflight": config.teacher_max_inflight,
+            "live_recall_model_calls": 0,
+            "relevant_config_sha256": canonical_json.canonical_json_sha256_strict(
+                relevant_config
+            ),
+        },
+        schema=OX_PROFILE_SCHEMA,
+    )
+    return artifact
 
 
 def _default_distillation_config() -> dict[str, Any]:
@@ -463,6 +567,15 @@ def _default_distillation_config() -> dict[str, Any]:
 
 
 _DISTILLATION_CONFIG = _default_distillation_config()
+_OPTIONAL_PROFILE_CONFIG = frozenset(
+    {
+        "teacher_profile",
+        "teacher_max_inflight",
+        "teacher_claim_limit",
+        "ox_enabled",
+        "ox_free_only",
+    }
+)
 
 
 def _bool_override(value: str) -> bool:
@@ -504,6 +617,19 @@ def load_distillation_config(config_path: Path | None = None) -> DistillationCon
     stages = table.get("rollout_stages", [5, 25, 100])
     if not isinstance(stages, list) or tuple(stages) != (5, 25, 100):
         raise DistillationError("rollout_stages must be [5, 25, 100]")
+    teacher_profile = table.get("teacher_profile", LOCAL_TRIAD_PROFILE)
+    if teacher_profile not in TEACHER_PROFILES:
+        raise DistillationError("recall.distillation.teacher_profile is invalid")
+    ox_enabled = table.get("ox_enabled", False)
+    ox_free_only = table.get("ox_free_only", True)
+    if not isinstance(ox_enabled, bool) or ox_free_only is not True:
+        raise DistillationError("OX Alpha must be explicitly enabled and free-only")
+    teacher_max_inflight = positive("teacher_max_inflight", 10)
+    if teacher_max_inflight > 10:
+        raise DistillationError("teacher_max_inflight must be at most 10")
+    teacher_claim_limit = positive("teacher_claim_limit", 500)
+    if teacher_claim_limit > 500:
+        raise DistillationError("teacher_claim_limit must be at most 500")
     return DistillationConfig(
         enabled=distillation_enabled(config_path),
         chunk_size=positive("chunk_size", 25),
@@ -520,6 +646,11 @@ def load_distillation_config(config_path: Path | None = None) -> DistillationCon
         ),
         rollout_stages=(5, 25, 100),
         canary_min_days=positive("canary_min_days", 7),
+        teacher_profile=str(teacher_profile),
+        teacher_max_inflight=teacher_max_inflight,
+        teacher_claim_limit=teacher_claim_limit,
+        ox_enabled=ox_enabled,
+        ox_free_only=True,
     )
 
 
@@ -543,9 +674,36 @@ def _migration_additions(data: Mapping[str, Any]) -> tuple[str, ...]:
     if "distillation" in recall:
         expected = dict(_DISTILLATION_CONFIG)
         enabled = distillation.get("enabled")
-        expected["enabled"] = enabled
-        if not isinstance(enabled, bool) or distillation != expected:
+        missing = set(expected).difference(distillation)
+        if missing.difference(_OPTIONAL_PROFILE_CONFIG):
             raise DistillationError("recall.distillation conflicts or is incomplete")
+        if not isinstance(enabled, bool) or set(distillation).difference(expected):
+            raise DistillationError("recall.distillation conflicts or is incomplete")
+        for name, value in distillation.items():
+            if name == "enabled" or name in _OPTIONAL_PROFILE_CONFIG:
+                continue
+            if value != expected[name]:
+                raise DistillationError(
+                    "recall.distillation conflicts or is incomplete"
+                )
+        profile = distillation.get("teacher_profile", LOCAL_TRIAD_PROFILE)
+        max_inflight = distillation.get("teacher_max_inflight", 10)
+        claim_limit = distillation.get("teacher_claim_limit", 500)
+        ox_enabled = distillation.get("ox_enabled", False)
+        ox_free_only = distillation.get("ox_free_only", True)
+        if (
+            profile not in TEACHER_PROFILES
+            or isinstance(max_inflight, bool)
+            or not isinstance(max_inflight, int)
+            or not 1 <= max_inflight <= 10
+            or isinstance(claim_limit, bool)
+            or not isinstance(claim_limit, int)
+            or not 1 <= claim_limit <= 500
+            or not isinstance(ox_enabled, bool)
+            or ox_free_only is not True
+        ):
+            raise DistillationError("recall.distillation profile config is invalid")
+        additions.extend(f"recall.distillation.{name}" for name in sorted(missing))
     else:
         additions.append("recall.distillation")
     for name, expected in _DISTILLATION_ROLES.items():
@@ -583,6 +741,33 @@ def _migration_appendix(additions: Sequence[str]) -> bytes:
     return ("\n\n".join(sections) + "\n").encode("utf-8")
 
 
+def _migration_insert_profile_defaults(
+    original: bytes, additions: Sequence[str]
+) -> bytes:
+    keys = [
+        name.removeprefix("recall.distillation.")
+        for name in additions
+        if name.startswith("recall.distillation.")
+    ]
+    if not keys:
+        return original
+    try:
+        text = original.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DistillationError("config TOML is unavailable or invalid") from exc
+    header = re.search(r"(?m)^\[recall\.distillation\][ \t]*(?:#.*)?$", text)
+    if header is None:
+        raise DistillationError("recall.distillation section is unavailable")
+    following = re.search(r"(?m)^\[", text[header.end() :])
+    insertion = len(text) if following is None else header.end() + following.start()
+    prefix = "" if insertion == 0 or text[:insertion].endswith("\n") else "\n"
+    block = "".join(
+        f"{key} = {json.dumps(_DISTILLATION_CONFIG[key], ensure_ascii=False)}\n"
+        for key in keys
+    )
+    return (text[:insertion] + prefix + block + text[insertion:]).encode("utf-8")
+
+
 def migrate_distillation_config(
     config_path: Path | None = None, *, apply: bool = False
 ) -> dict[str, Any]:
@@ -601,23 +786,33 @@ def migrate_distillation_config(
         additions = _migration_additions(parsed)
         if not additions:
             return {"status": "noop", "additions": []}
-        suffix = _migration_appendix(additions)
-        separator = b"" if not original or original.endswith(b"\n") else b"\n"
-        replacement = original + separator + b"\n" + suffix
+        replacement = _migration_insert_profile_defaults(original, additions)
+        section_additions = [
+            name for name in additions if not name.startswith("recall.distillation.")
+        ]
+        suffix = _migration_appendix(section_additions)
+        if suffix:
+            separator = b"" if not replacement or replacement.endswith(b"\n") else b"\n"
+            replacement += separator + b"\n" + suffix
         try:
             migrated = tomllib.loads(replacement.decode("utf-8"))
         except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
             raise DistillationError("generated distillation config is invalid") from exc
         if _migration_additions(migrated):
             raise DistillationError("generated distillation config is incomplete")
-        result = {"status": "applied" if apply else "dry_run", "additions": list(additions)}
+        result = {
+            "status": "applied" if apply else "dry_run",
+            "additions": list(additions),
+        }
         if not apply:
             return result
         atomic_write_bytes(path, replacement, backup=True)
         try:
             confirmed = tomllib.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-            raise DistillationError("migrated config failed read-back validation") from exc
+            raise DistillationError(
+                "migrated config failed read-back validation"
+            ) from exc
         if _migration_additions(confirmed):
             raise DistillationError("migrated config read-back is incomplete")
         return result
@@ -779,6 +974,10 @@ def _events(raw_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _read_chain(path: Path) -> list[dict[str, Any]]:
+    return store.read_chain(path)
+
+
 def _prompt_hash(text: str) -> str:
     normalized = re.sub(r"\s+", " ", text).strip().lower()
     return hashlib.sha1(normalized.encode()).hexdigest()[:16]
@@ -787,7 +986,7 @@ def _prompt_hash(text: str) -> str:
 def _exposure_map(root: Path) -> dict[tuple[str, str, str], list[dict[str, Any]]]:
     path = store.distillation_dir(root) / "exposure-receipts.jsonl"
     result: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
-    for row in store.read_chain(path):
+    for row in _read_chain(path):
         binding = {
             key: row.get(key)
             for key in (
@@ -1022,10 +1221,11 @@ def candidate_snapshot(
         source_index=int(rally["source_index"]),
         limit=limit,
     )
+    prefetch = getattr(candidate_texts, "prefetch", None)
+    if callable(prefetch):
+        prefetch(str(candidate["text_sha256"]) for candidate in candidates)
     feature_rows = []
-    query_feature_bytes = _bounded_normalized_text(
-        query_text, max_bytes=2_048
-    ).encode()
+    query_feature_bytes = _bounded_normalized_text(query_text, max_bytes=2_048).encode()
     for candidate in candidates:
         candidate_text = (candidate_texts or {}).get(str(candidate["text_sha256"]))
         feature_rows.append(
@@ -1523,6 +1723,7 @@ def record_exact_exposure(
     }
     root = root or CHRONOVISOR_ROOT
     _validate_exposure_policy_identity(root, policy_id)
+
     def prepare() -> Mapping[str, Any]:
         _, _, artifact = store.write_immutable(
             store.distillation_dir(root) / "exposures",
@@ -1678,9 +1879,7 @@ def record_shadow_observation(
         or qualified.get("served_policy_id") != served_policy_id
     ):
         raise DistillationError("paired policy observation is not qualified")
-    _, stage_started_us = _timestamp(
-        qualified.get("stage_started_at"), observed_at
-    )
+    _, stage_started_us = _timestamp(qualified.get("stage_started_at"), observed_at)
     if observed_us < stage_started_us:
         raise DistillationError("paired observation predates rollout stage")
     observation = {
@@ -1714,6 +1913,7 @@ def record_shadow_observation(
         ),
         "observed_at": observed_at,
     }
+
     def prepare() -> Mapping[str, Any]:
         _, _, artifact = store.write_immutable(
             store.distillation_dir(root) / "shadow-observations",
@@ -1861,8 +2061,10 @@ def record_authenticated_exact_correction_veto(
         schema="chronovisor.recall-exact-exposure.v1",
     )
     selected = exposure.get("candidate_refs")
-    if not isinstance(selected, list) or len(selected) != 1 or not isinstance(
-        selected[0], Mapping
+    if (
+        not isinstance(selected, list)
+        or len(selected) != 1
+        or not isinstance(selected[0], Mapping)
     ):
         raise DistillationError("correction veto requires one selected candidate")
     candidate = selected[0]
@@ -1924,7 +2126,7 @@ def _resolve_closed_outcome(
         or re.fullmatch(r"[0-9a-f]{64}", receipt_id) is None
     ):
         return None
-    rows = store.read_chain(store.distillation_dir(root) / "outcome-receipts.jsonl")
+    rows = _read_chain(store.distillation_dir(root) / "outcome-receipts.jsonl")
     receipt = next(
         (row for row in rows if row.get("record_sha256") == receipt_id), None
     )
@@ -2206,12 +2408,15 @@ def load_policy_observation_context(
                 served_id = incumbent_id
             else:
                 percent = int(state.get("rollout_percent") or 0)
-                bucket = int.from_bytes(
-                    hashlib.sha256(
-                        f"recall-distill-rollout-v2\0{session_id}".encode()
-                    ).digest()[:8],
-                    "big",
-                ) % 10_000
+                bucket = (
+                    int.from_bytes(
+                        hashlib.sha256(
+                            f"recall-distill-rollout-v2\0{session_id}".encode()
+                        ).digest()[:8],
+                        "big",
+                    )
+                    % 10_000
+                )
                 served_id = candidate_id if bucket < percent * 100 else incumbent_id
             return {
                 "stage": stage,
@@ -2359,25 +2564,53 @@ def train_tiny_policy(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def materialize_training_rows(
-    root: Path | None = None, *, limit: int = 10_000
+    root: Path | None = None,
+    *,
+    limit: int = 10_000,
+    _rallies: Sequence[Mapping[str, Any]] | None = None,
+    _snapshots: Mapping[str, Mapping[str, Any]] | None = None,
+    _label_rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Join labels only to byte-identical prospective live feature snapshots."""
 
     if limit <= 0 or limit > 10_000:
         raise DistillationError("training materialization limit is invalid")
     root = root or CHRONOVISOR_ROOT
-    rally_rows = store.read_chain(store.distillation_dir(root) / "rally-manifest.jsonl")
-    rallies = {
-        str(manifest["rally_id"]): manifest
-        for row in rally_rows
-        if isinstance((manifest := row.get("manifest")), Mapping)
-    }
+    rallies: dict[str, Mapping[str, Any]]
+    if _rallies is None:
+        rally_rows = _read_chain(store.distillation_dir(root) / "rally-manifest.jsonl")
+        rallies = {
+            str(manifest["rally_id"]): manifest
+            for row in rally_rows
+            if isinstance((manifest := row.get("manifest")), Mapping)
+        }
+    else:
+        rallies = {
+            str(row["rally_id"]): row
+            for row in _rallies
+            if isinstance(row, Mapping) and row.get("rally_id")
+        }
     features_by_pair: dict[tuple[str, str], dict[str, float]] = {}
-    for row in store.read_chain(
-        store.distillation_dir(root) / "candidate-ledger.jsonl"
-    ):
-        rally_id = str(row.get("rally_id") or "")
-        snapshot = row.get("snapshot")
+    snapshots = (
+        _snapshots
+        if _snapshots is not None
+        else {
+            str(row.get("rally_id") or ""): row["snapshot"]
+            for row in _read_chain(
+                store.distillation_dir(root) / "candidate-ledger.jsonl"
+            )
+            if isinstance(row.get("snapshot"), Mapping)
+        }
+    )
+    snapshot_contracts = {
+        rally_id: {
+            "as_of": str(snapshot.get("as_of") or ""),
+            "snapshot_sha256": str(snapshot.get("snapshot_sha256") or ""),
+        }
+        for rally_id, snapshot in snapshots.items()
+        if isinstance(snapshot, Mapping)
+    }
+    for rally_id, snapshot in snapshots.items():
         if (
             not rally_id
             or not isinstance(snapshot, Mapping)
@@ -2427,11 +2660,27 @@ def materialize_training_rows(
                         features
                     )
     materialized: list[dict[str, Any]] = []
-    for label in store.read_chain(store.distillation_dir(root) / "label-ledger.jsonl"):
+    labels = (
+        _label_rows
+        if _label_rows is not None
+        else _read_chain(store.distillation_dir(root) / "label-ledger.jsonl")
+    )
+    for label in labels:
+        if not isinstance(label, Mapping):
+            continue
         rally_id = str(label.get("rally_id") or "")
         candidate_id = str(label.get("candidate_id") or "")
-        rally = rallies.get(rally_id)
-        if rally is None:
+        rally_row = rallies.get(rally_id)
+        if rally_row is None:
+            continue
+        rally_as_of = str(rally_row.get("as_of") or "")
+        session_cluster_id = str(rally_row.get("session_cluster_id") or "")
+        label_record_sha256 = str(label.get("record_sha256") or "")
+        if (
+            not rally_as_of
+            or not session_cluster_id
+            or re.fullmatch(r"[0-9a-f]{64}", label_record_sha256) is None
+        ):
             continue
         raw_features = label.get("features") or features_by_pair.get(
             (rally_id, candidate_id)
@@ -2460,12 +2709,24 @@ def materialize_training_rows(
             continue
         assignment = label.get("assignment")
         probe = isinstance(assignment, Mapping) and assignment.get("probe") is True
+        is_ox = label.get("profile") == OX_SINGLE_PROFILE
+        contract = snapshot_contracts.get(rally_id, {})
+        temporal_as_of = str(label.get("as_of") or rally_as_of)
+        temporal_group_id = str(label.get("group_id") or session_cluster_id)
+        feature_parity = features_by_pair.get((rally_id, candidate_id)) == features
+        future_safe = (
+            temporal_as_of == rally_as_of
+            and contract.get("as_of") == rally_as_of
+            and re.fullmatch(r"[0-9a-f]{64}", contract.get("snapshot_sha256", ""))
+            is not None
+            and feature_parity
+        )
         materialized.append(
             {
                 "rally_id": rally_id,
                 "candidate_id": candidate_id,
-                "session_cluster_id": rally["session_cluster_id"],
-                "as_of": rally["as_of"],
+                "session_cluster_id": session_cluster_id,
+                "as_of": rally_as_of,
                 "dimension": dimension,
                 "verdict": verdict,
                 "authority": label["authority"],
@@ -2479,7 +2740,58 @@ def materialize_training_rows(
                 "probe": probe,
                 "source": str(label.get("kind") or ""),
                 "order_agreement": label.get("order_agreement") is True,
-                "label_record_sha256": label["record_sha256"],
+                "label_record_sha256": label_record_sha256,
+                **(
+                    {
+                        "status": str(label.get("status") or ""),
+                        "error_class": label.get("error_class"),
+                        "negative_veto_conflict": label.get("negative_veto_conflict")
+                        is not None
+                        and label.get("negative_veto_conflict") is not False,
+                        "profile": str(label.get("profile") or ""),
+                        "cohort": str(label.get("cohort") or ""),
+                        "profile_contract_id": str(
+                            label.get("profile_contract_id") or ""
+                        ),
+                        "route_identity_exact": label.get("route_identity")
+                        == {
+                            "provider": "opencode-go",
+                            "model": "opencode-go/ox-alpha-free",
+                            "location": "remote",
+                        },
+                        "prompt_sha256": str(label.get("prompt_sha256") or ""),
+                        "schema_sha256": str(label.get("schema_sha256") or ""),
+                        "group_id": temporal_group_id,
+                        "group_identity_exact": temporal_group_id == session_cluster_id,
+                        "label_split_plan_id": str(label.get("split_plan_id") or ""),
+                        "as_of": temporal_as_of,
+                        "feature_parity": feature_parity,
+                        "future_leakage": not future_safe,
+                        "future_leakage_evidence_ref": (
+                            f"candidate-snapshot:{contract['snapshot_sha256']}"
+                            if future_safe
+                            else ""
+                        ),
+                        "repeat_pair_id": str(assignment.get("repeat_pair_id") or "")
+                        if isinstance(assignment, Mapping)
+                        else "",
+                        "fixed_repeat": (
+                            assignment.get("fixed_repeat") is True
+                            if isinstance(assignment, Mapping)
+                            else False
+                        ),
+                        "order_swap": (
+                            assignment.get("order_swap") is True
+                            if isinstance(assignment, Mapping)
+                            else False
+                        ),
+                        "blind_order": str(assignment.get("blind_order") or "")
+                        if isinstance(assignment, Mapping)
+                        else "",
+                    }
+                    if is_ox
+                    else {}
+                ),
             }
         )
     materialized = materialized[-limit:]
@@ -2494,21 +2806,46 @@ def materialize_training_rows(
         }
     except (KeyError, DistillationError, store.DistillationStoreError):
         split = grouped_rolling_split(materialized) if materialized else {}
-    rows = [
-        {
-            **row,
-            "split": split.get(row["rally_id"], "embargo"),
-            "split_plan_id": split_plan_id,
-        }
-        for row in materialized
-    ]
+    rows = []
+    for row in materialized:
+        row_split = split.get(row["rally_id"], "embargo")
+        split_bound = (
+            row.get("profile") == OX_SINGLE_PROFILE
+            and row.get("label_split_plan_id") == split_plan_id
+            and bool(split_plan_id)
+            and row_split == "test"
+        )
+        fixed_split_plan = (
+            row.get("profile") == OX_SINGLE_PROFILE
+            and row.get("label_split_plan_id") == split_plan_id
+            and bool(split_plan_id)
+            and row_split in {"train", "validation", "test"}
+        )
+        rows.append(
+            {
+                **row,
+                "split": row_split,
+                "split_plan_id": split_plan_id,
+                **(
+                    {
+                        "fixed_split_plan": fixed_split_plan,
+                        "locked_test_read_only": split_bound,
+                        "locked_test_evidence_ref": (
+                            f"split-plan:{split_plan_id}" if split_bound else ""
+                        ),
+                    }
+                    if row.get("profile") == OX_SINGLE_PROFILE
+                    else {}
+                ),
+            }
+        )
     _, _, artifact = store.write_immutable(
         store.distillation_dir(root) / "training-snapshots",
         {
             "kind": "text-parity-training-snapshot",
             "feature_revision": TEXT_FEATURE_REVISION,
             "rows": rows,
-            "label_chain_head": store.verify_chain(
+            "label_chain_head": store.chain_head(
                 store.distillation_dir(root) / "label-ledger.jsonl"
             )["head_sha256"],
         },
@@ -2538,8 +2875,30 @@ def _wilson_upper(successes: int, total: int) -> float:
 
 def _active_training_cohort(
     rows: Sequence[Mapping[str, Any]],
+    *,
+    teacher_profile: str = LOCAL_TRIAD_PROFILE,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Select the latest coherent local-model cohort and resplit only it."""
+
+    if teacher_profile == OX_SINGLE_PROFILE:
+        single_rows = [
+            dict(row)
+            for row in rows
+            if row.get("profile") == OX_SINGLE_PROFILE
+            and row.get("cohort") == OX_SINGLE_COHORT
+        ]
+        single_cohort = {
+            "revision": "single-teacher-cohort-v1",
+            "profile": OX_SINGLE_PROFILE,
+            "cohort": OX_SINGLE_COHORT,
+            "model_digests": sorted(
+                {str(row.get("model_digest") or "") for row in single_rows}
+            ),
+        }
+        return single_rows, {
+            **single_cohort,
+            "cohort_sha256": canonical_json.canonical_json_sha256_strict(single_cohort),
+        }
 
     teacher_digests = {role: "" for role in TEACHER_ROLES}
     counterfactual_digests: tuple[str, str] | None = None
@@ -2569,10 +2928,14 @@ def _active_training_cohort(
             if row.get("model_digest") != teacher_digests.get(route):
                 continue
         elif row.get("source") == "counterfactual-label":
-            if counterfactual_digests is None or (
-                row.get("generator_model_digest"),
-                row.get("judge_model_digest"),
-            ) != counterfactual_digests:
+            if (
+                counterfactual_digests is None
+                or (
+                    row.get("generator_model_digest"),
+                    row.get("judge_model_digest"),
+                )
+                != counterfactual_digests
+            ):
                 continue
         else:
             continue
@@ -2580,10 +2943,8 @@ def _active_training_cohort(
     fixed_ids = {str(row.get("split_plan_id") or "") for row in selected}
     if len(fixed_ids) != 1 or not next(iter(fixed_ids), ""):
         split = grouped_rolling_split(selected) if selected else {}
-        selected = [
-            {**row, "split": split[str(row["rally_id"])]} for row in selected
-        ]
-    cohort = {
+        selected = [{**row, "split": split[str(row["rally_id"])]} for row in selected]
+    cohort: dict[str, Any] = {
         "revision": "latest-model-cohort-v1",
         "teacher_model_digests": teacher_digests,
         "counterfactual_model_digests": list(counterfactual_digests or ()),
@@ -2601,6 +2962,64 @@ def _offline_training_gate(
     root: Path | None = None,
 ) -> dict[str, Any]:
     """Qualify untrusted local-model data without calling it verified truth."""
+
+    if config.teacher_profile == OX_SINGLE_PROFILE:
+        invalid_input_rows = any(not isinstance(row, Mapping) for row in rows)
+        single_rows = [
+            row
+            for row in rows
+            if isinstance(row, Mapping) and row.get("profile") == OX_SINGLE_PROFILE
+        ]
+        gate = evaluate_single_teacher_gate(
+            single_rows,
+            profile=OX_SINGLE_PROFILE,
+            cohort=OX_SINGLE_COHORT,
+            min_labels=config.hard_floor_teacher_labels,
+            min_per_class=config.hard_floor_teacher_per_class,
+            min_repeat_pairs=config.hard_floor_probe_pairs,
+        )
+        reasons = list(gate["reasons"])
+        if invalid_input_rows:
+            reasons.append("input_row_invalid")
+        if config.ox_enabled is not True:
+            reasons.append("ox_profile_disabled")
+        if root is None:
+            reasons.append("profile_contract_unavailable")
+        else:
+            try:
+                current_contract_id = str(
+                    _ensure_ox_profile_contract(root, config)["artifact_id"]
+                )
+            except (DistillationError, store.DistillationStoreError, KeyError):
+                reasons.append("profile_contract_unavailable")
+            else:
+                if gate["identity"]["profile_contract_id"] != current_contract_id:
+                    reasons.append("profile_contract_mismatch")
+        gate = {
+            **gate,
+            "passed": not reasons,
+            "reasons": sorted(set(reasons)),
+        }
+        return {
+            **gate,
+            "teacher_counts": {
+                "total": gate["labels"]["eligible"],
+                **{
+                    verdict: gate["labels"][verdict]
+                    for verdict in ("relevant", "irrelevant")
+                },
+            },
+            "counterfactual_pairs": 0,
+            "probe": {
+                "pairs": gate["blind_repeat"]["complete_pairs"],
+                "locked_test_only": gate["locked_test"]["read_only"],
+                "stable": gate["blind_repeat"]["stable"],
+                "route_stability_wilson_lower": gate["blind_repeat"]["wilson_lower"],
+                "is_truth": False,
+            },
+            "route_folds": {},
+            "counterfactual_direction": {"denominator": 0, "wilson_lower": 0.0},
+        }
 
     rows, model_cohort = _active_training_cohort(rows)
 
@@ -2856,7 +3275,9 @@ def _maybe_publish_candidate(
     training = materialize_training_rows(root)
     rows = training["rows"]
     offline_gate = _offline_training_gate(rows, config, root=root)
-    active_rows, model_cohort = _active_training_cohort(rows)
+    active_rows, model_cohort = _active_training_cohort(
+        rows, teacher_profile=config.teacher_profile
+    )
     if offline_gate != baseline.get("offline_training_gate"):
         return {"status": "held", "reason": "offline_gate_baseline_mismatch"}
     if offline_gate["passed"] is not True:
@@ -2925,12 +3346,14 @@ def _operational_rollout_metrics(
     candidate_only = False
     if stage == "canary" and int(state.get("rollout_percent") or 0) == 100:
         try:
-            candidate_only = _load_policy(incumbent_id, root).get("serve_mode") == "legacy"
+            candidate_only = (
+                _load_policy(incumbent_id, root).get("serve_mode") == "legacy"
+            )
         except (store.DistillationStoreError, DistillationError):
             candidate_only = False
     pairs: list[dict[str, Any]] = []
     try:
-        shadow_receipts = store.read_chain(
+        shadow_receipts = _read_chain(
             store.distillation_dir(root) / "shadow-observation-receipts.jsonl"
         )
     except store.DistillationStoreError:
@@ -2986,10 +3409,7 @@ def _operational_rollout_metrics(
             or artifact.get("stage") != stage
             or artifact.get("stage_started_at") != stage_started_at
             or artifact.get("qualified_run_id") != qualified_run_id
-            or (
-                artifact.get("paired_eligible") is not True
-                and not candidate_only
-            )
+            or (artifact.get("paired_eligible") is not True and not candidate_only)
             or not isinstance(observation, Mapping)
             or not isinstance(candidate_selected, list)
             or not isinstance(incumbent_selected, list)
@@ -3025,30 +3445,22 @@ def _operational_rollout_metrics(
         )
     }
     if pairs:
-        candidate_coverage = sum(row["candidate_covered"] for row in pairs) / len(
-            pairs
-        )
-        incumbent_coverage = sum(row["incumbent_covered"] for row in pairs) / len(
-            pairs
-        )
+        candidate_coverage = sum(row["candidate_covered"] for row in pairs) / len(pairs)
+        incumbent_coverage = sum(row["incumbent_covered"] for row in pairs) / len(pairs)
         coverage_ok = float(candidate_coverage >= incumbent_coverage * 0.90)
         metrics["coverage_abstain"] = gate(len(pairs), coverage_ok, 1.0)
         metrics["cohort_delta"] = gate(len(pairs), coverage_ok, 1.0)
         ordered = sorted(row["latency_ms"] for row in pairs)
         p95 = ordered[math.ceil(len(ordered) * 0.95) - 1]
         timeouts = sum(row["timed_out"] for row in pairs)
-        latency_ok = float(
-            p95 <= 180 and _wilson_upper(timeouts, len(pairs)) <= 0.03
-        )
+        latency_ok = float(p95 <= 180 and _wilson_upper(timeouts, len(pairs)) <= 0.03)
         metrics["latency_timeout"] = gate(len(pairs), latency_ok, 1.0)
         metrics["feature_parity"] = gate(len(pairs), 1.0, 1.0)
     return metrics
 
 
 def _authenticated_negative_vetoes(root: Path, policy_id: str) -> int:
-    rows = store.read_chain(
-        store.distillation_dir(root) / "negative-veto-receipts.jsonl"
-    )
+    rows = _read_chain(store.distillation_dir(root) / "negative-veto-receipts.jsonl")
     valid = 0
     for row in rows:
         binding = {
@@ -3117,7 +3529,7 @@ def _automatic_rollout_evaluation(
             {
                 "kind": "authenticated-negative-veto-run-v1",
                 "policy_id": candidate_id,
-                "veto_head": store.verify_chain(
+                "veto_head": store.chain_head(
                     store.distillation_dir(root) / "negative-veto-receipts.jsonl"
                 )["head_sha256"],
             }
@@ -3126,10 +3538,10 @@ def _automatic_rollout_evaluation(
             root, veto_run_id, "authenticated_negative_veto"
         )
         return {"status": "rolled_back", "negative_vetoes": vetoes, **result}
-    label_head = store.verify_chain(
-        store.distillation_dir(root) / "label-ledger.jsonl"
-    )["head_sha256"]
-    exposure_head = store.verify_chain(
+    label_head = store.chain_head(store.distillation_dir(root) / "label-ledger.jsonl")[
+        "head_sha256"
+    ]
+    exposure_head = store.chain_head(
         store.distillation_dir(root) / "exposure-receipts.jsonl"
     )["head_sha256"]
     run_id = canonical_json.canonical_json_sha256_strict(
@@ -3140,7 +3552,7 @@ def _automatic_rollout_evaluation(
             "rollout_percent": state.get("rollout_percent", 0),
             "label_head": label_head,
             "exposure_head": exposure_head,
-            "shadow_head": store.verify_chain(
+            "shadow_head": store.chain_head(
                 store.distillation_dir(root) / "shadow-observation-receipts.jsonl"
             )["head_sha256"],
         }
@@ -3331,7 +3743,10 @@ def _read_split_plan(root: Path) -> dict[str, Any]:
     if (
         artifact.get("artifact_id") != plan_id
         or not isinstance(assignments, Mapping)
-        or any(value not in {"train", "validation", "test", "embargo"} for value in assignments.values())
+        or any(
+            value not in {"train", "validation", "test", "embargo"}
+            for value in assignments.values()
+        )
     ):
         raise DistillationError("split plan artifact is invalid")
     return artifact
@@ -3366,7 +3781,7 @@ def _ensure_split_plan(
 
 def _verified_counts(root: Path) -> dict[str, int]:
     counts = {label: 0 for label in ("helpful", "neutral", "harmful")}
-    for row in store.read_chain(store.distillation_dir(root) / "label-ledger.jsonl"):
+    for row in _read_chain(store.distillation_dir(root) / "label-ledger.jsonl"):
         if row.get("authority") == "verified" and row.get("verdict") in counts:
             counts[str(row["verdict"])] += 1
     return counts
@@ -3533,7 +3948,7 @@ def _automatic_baseline_metrics(root: Path) -> dict[str, Any]:
         }
     exact_decision_ids = {str(receipt["decision_id"]) for receipt in exact_receipts}
     try:
-        receipt_rows = store.read_chain(
+        receipt_rows = _read_chain(
             store.distillation_dir(root) / "exposure-receipts.jsonl"
         )
     except store.DistillationStoreError:
@@ -3588,7 +4003,7 @@ def _automatic_baseline_metrics(root: Path) -> dict[str, Any]:
         }
 
     try:
-        shadow_receipts = store.read_chain(
+        shadow_receipts = _read_chain(
             store.distillation_dir(root) / "shadow-observation-receipts.jsonl"
         )
     except store.DistillationStoreError:
@@ -3647,7 +4062,7 @@ def _automatic_baseline_metrics(root: Path) -> dict[str, Any]:
             }
         )
     try:
-        labels = store.read_chain(store.distillation_dir(root) / "label-ledger.jsonl")
+        labels = _read_chain(store.distillation_dir(root) / "label-ledger.jsonl")
     except store.DistillationStoreError:
         labels = []
     metrics["exact_structural_links"] = sum(
@@ -3667,6 +4082,7 @@ def preflight(
     runtime_commit: str = "",
     aggregate_metrics: Mapping[str, Any] | None = None,
     _rallies: Sequence[Mapping[str, Any]] | None = None,
+    _training_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     root = root or raw_dir.parent
     config = load_distillation_config(config_path)
@@ -3683,7 +4099,11 @@ def preflight(
     ]
     span_days = (max(dates) - min(dates)).days + 1 if dates else 0
     windows = len({(date - min(dates)).days // 7 for date in dates}) if dates else 0
-    training_snapshot = materialize_training_rows(root)
+    training_snapshot = (
+        _training_snapshot
+        if _training_snapshot is not None
+        else materialize_training_rows(root)
+    )
     offline_gate = _offline_training_gate(training_snapshot["rows"], config, root=root)
     supplied_metrics = dict(aggregate_metrics or {})
     automatic_metrics = _automatic_baseline_metrics(root)
@@ -3717,6 +4137,26 @@ def preflight(
         config_sha256 = hashlib.sha256(config_file.read_bytes()).hexdigest()
     except OSError:
         config_sha256 = hashlib.sha256(b"").hexdigest()
+    teacher_contract = {
+        "routes": list(TEACHER_ROLES),
+        "local_only": True,
+        "max_input_bytes": config.max_input_bytes,
+        "max_candidates": config.max_candidates,
+        "max_load_skew": 0.10,
+        "order_bias_max": 0.05,
+    }
+    if config.teacher_profile == OX_SINGLE_PROFILE:
+        profile_contract = _ensure_ox_profile_contract(root, config)
+        teacher_contract = {
+            "profile": OX_SINGLE_PROFILE,
+            "cohort": OX_SINGLE_COHORT,
+            "profile_contract_id": profile_contract["artifact_id"],
+            "routes": [OX_TEACHER_ROLE],
+            "local_only": False,
+            "free_only": True,
+            "max_input_bytes": config.max_input_bytes,
+            "max_candidates": config.max_candidates,
+        }
     payload = {
         "kind": "privacy-safe-baseline",
         "raw_watermark": committed_raw_watermark(raw_dir),
@@ -3753,9 +4193,7 @@ def preflight(
             "probe_pairs": offline_gate["probe"]["pairs"],
             "counterfactual_pairs": offline_gate["counterfactual_pairs"],
             "locked_test_probe_pairs": offline_gate["probe"]["pairs"],
-            "locked_test_counterfactual_pairs": offline_gate[
-                "counterfactual_pairs"
-            ],
+            "locked_test_counterfactual_pairs": offline_gate["counterfactual_pairs"],
         },
         "offline_training_gate": offline_gate,
         "hard_floor": {
@@ -3771,14 +4209,7 @@ def preflight(
             "feature_revision": TEXT_FEATURE_REVISION,
             "feature_whitelist": list(FAST_FEATURE_KEYS),
             "closed_predicates": sorted(CLOSED_PREDICATES),
-            "teacher": {
-                "routes": list(TEACHER_ROLES),
-                "local_only": True,
-                "max_input_bytes": config.max_input_bytes,
-                "max_candidates": config.max_candidates,
-                "max_load_skew": 0.10,
-                "order_bias_max": 0.05,
-            },
+            "teacher": teacher_contract,
             "promotion": {
                 "rolling_windows": config.hard_floor_windows,
                 "canary_min_days": config.canary_min_days,
@@ -3943,6 +4374,9 @@ class _TeacherBatchResult:
     labels_written: int = 0
     model_calls: int = 0
     deferred: bool = False
+    workset_status: Mapping[str, int] | None = None
+    profile_stopped: bool = False
+    profile_contract_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -3961,6 +4395,802 @@ class _CandidateCaptureResult:
     deadline_deferred: bool
 
 
+def _run_ox_teacher_batch(
+    *,
+    root: Path,
+    config: DistillationConfig,
+    teachers: Mapping[str, Teacher],
+    snapshots: Mapping[str, Mapping[str, Any]],
+    rally_by_id: Mapping[str, Mapping[str, Any]],
+    texts: Mapping[str, str],
+    label_path: Path,
+    label_rows: Sequence[Mapping[str, Any]],
+    candidate_indexed: bool = False,
+    structural_verifier: Callable[
+        [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
+    ],
+) -> _TeacherBatchResult:
+    """Advance, claim, dispatch, append, and commit OX work in that order."""
+
+    from chronovisor.recall.recall_distillation_dispatcher import dispatch_claimed_work
+    from chronovisor.recall.recall_distillation_workset import DistillationWorkset
+
+    teacher = teachers.get(OX_TEACHER_ROLE)
+    workset = DistillationWorkset(store.distillation_dir(root) / "ox-workset.sqlite3")
+    if teacher is None or teacher.local:
+        return _TeacherBatchResult(deferred=True, workset_status=workset.status("ox"))
+    profile_contract_id = str(_ensure_ox_profile_contract(root, config)["artifact_id"])
+    try:
+        if _read_worker_state(root).get("ox_profile_stopped") is True:
+            return _TeacherBatchResult(
+                deferred=True,
+                workset_status=workset.status("ox"),
+                profile_stopped=True,
+                profile_contract_id=profile_contract_id,
+            )
+    except store.DistillationStoreError:
+        pass
+    try:
+        split_plan = _read_split_plan(root)
+        assignments = split_plan["assignments"]
+        split_plan_id = str(split_plan["artifact_id"])
+    except (DistillationError, store.DistillationStoreError, KeyError):
+        assignments = {}
+        split_plan_id = ""
+
+    candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
+    candidate_state: Mapping[str, Any] = {}
+    if candidate_indexed:
+        from chronovisor.recall import recall_distillation_catalog as catalog
+
+        try:
+            catalog.sync_candidate_index(root, candidate_path)
+            candidate_state = catalog.candidate_index_state(root)
+            previous_watermark = workset.watermark()
+            prior_records = 0
+            if previous_watermark is not None:
+                if not isinstance(previous_watermark, Mapping):
+                    raise DistillationError("OX workset watermark is invalid")
+                prior_records = previous_watermark.get("candidate_records", 0)
+                prior_head = str(previous_watermark.get("candidate_head") or "")
+                if isinstance(prior_records, bool) or not isinstance(
+                    prior_records, int
+                ):
+                    raise DistillationError("OX workset candidate watermark is invalid")
+                if prior_records < 0 or prior_records > int(
+                    candidate_state["record_count"]
+                ):
+                    raise DistillationError("OX workset candidate watermark regressed")
+                if prior_records == int(candidate_state["record_count"]):
+                    current_head = str(candidate_state.get("head_sha256") or "")
+                    if prior_head and prior_head != current_head:
+                        raise DistillationError("OX candidate index head conflicts")
+                if (
+                    str(previous_watermark.get("split_plan_id") or "") != split_plan_id
+                    or str(previous_watermark.get("probe_revision") or "")
+                    != "single-teacher-repeat-v1"
+                ):
+                    prior_records = 0
+            snapshots = catalog.read_candidate_snapshots(
+                root,
+                candidate_path,
+                catalog.candidate_rally_ids(root, after_seq=prior_records),
+            )
+        except catalog.CatalogError as exc:
+            raise DistillationError("OX candidate index is unavailable") from exc
+
+    tasks: dict[str, dict[str, Any]] = {}
+    work_items: list[dict[str, Any]] = []
+
+    def add_task(
+        rally_id: str,
+        snapshot: Mapping[str, Any],
+        rally: Mapping[str, Any],
+        candidate: Mapping[str, Any],
+        assignment: Mapping[str, Any],
+        *,
+        priority: int = 0,
+        register_item: bool = True,
+        temporal_override: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if not candidate_id:
+            return None
+        source = {
+            "rally_id": rally_id,
+            "candidate_id": candidate_id,
+            "snapshot_sha256": snapshot.get("snapshot_sha256", ""),
+            "query_sha256": rally.get("query_sha256", ""),
+            "candidate_text_sha256": candidate.get("text_sha256", ""),
+            "context_sha256": [
+                ref.get("semantic_sha256", "")
+                for ref in rally.get("context_refs", [])
+                if isinstance(ref, Mapping)
+            ],
+            **({"assignment": dict(assignment)} if assignment.get("probe") else {}),
+        }
+        payload_digest = canonical_json.canonical_json_sha256_strict(source)
+        work_id = canonical_json.canonical_json_sha256_strict(
+            {
+                "kind": "ox-teacher-label-v1",
+                "profile": OX_SINGLE_PROFILE,
+                "cohort": OX_SINGLE_COHORT,
+                "route": "opencode-go/ox-alpha-free",
+                "payload_digest": payload_digest,
+            }
+        )
+        temporal = {
+            "as_of": str(rally.get("as_of") or ""),
+            "group_id": str(rally.get("session_cluster_id") or ""),
+            "split": str(assignments.get(rally_id) or "embargo"),
+            "split_plan_id": split_plan_id,
+        }
+        if temporal_override is not None:
+            temporal = dict(temporal_override)
+        task = {
+            "rally": rally,
+            "candidate": candidate,
+            "assignment": dict(assignment),
+            "temporal": temporal,
+            "probe_batch_id": str(assignment.get("probe_batch_id") or ""),
+            "work_id": work_id,
+            "payload_digest": payload_digest,
+        }
+        tasks[work_id] = task
+        if not register_item:
+            return task
+        work_items.append(
+            {
+                "work_id": work_id,
+                "kind": "ox",
+                "payload_ref": f"candidate-snapshot:{rally_id}:{candidate_id}",
+                "payload_digest": payload_digest,
+                "priority": priority,
+                "temporal_split": temporal,
+                "provenance": {
+                    "profile": OX_SINGLE_PROFILE,
+                    "cohort": OX_SINGLE_COHORT,
+                    "route": "opencode-go/ox-alpha-free",
+                    "teacher_role": OX_TEACHER_ROLE,
+                    "profile_contract_id": profile_contract_id,
+                    "probe": assignment.get("probe") is True,
+                    **{
+                        key: assignment[key]
+                        for key in (
+                            "probe_revision",
+                            "repeat_pair_id",
+                            "fixed_repeat",
+                            "order_swap",
+                            "blind_order",
+                            "probe_batch_id",
+                            "order_variant",
+                            "candidate_position",
+                        )
+                        if key in assignment
+                    },
+                },
+            }
+        )
+        return task
+
+    eligible_probe_rallies: list[
+        tuple[str, Mapping[str, Any], Mapping[str, Any], list[Mapping[str, Any]]]
+    ] = []
+    for rally_id, snapshot in snapshots.items():
+        rally = rally_by_id.get(rally_id)
+        if rally is None or assignments.get(rally_id) != "test":
+            continue
+        candidates = [
+            candidate
+            for candidate in snapshot.get("candidates", [])
+            if isinstance(candidate, Mapping)
+            and str(candidate.get("candidate_id") or "")
+        ]
+        if len(candidates) >= 2:
+            eligible_probe_rallies.append((rally_id, snapshot, rally, candidates))
+    probe_rallies = sorted(
+        eligible_probe_rallies,
+        key=lambda item: (str(item[2].get("as_of") or ""), item[0]),
+    )[: config.hard_floor_probe_pairs]
+
+    for rally_id, snapshot in sorted(snapshots.items()):
+        rally = rally_by_id.get(rally_id)
+        if rally is None:
+            continue
+        candidates = [
+            candidate
+            for candidate in snapshot.get("candidates", [])
+            if isinstance(candidate, Mapping)
+        ]
+        selected = candidates[:3]
+        if candidates[3:]:
+            selected.append(candidates[-1])
+        for candidate in selected:
+            add_task(
+                rally_id,
+                snapshot,
+                rally,
+                candidate,
+                {
+                    "revision": "single-teacher-v1",
+                    "owner": OX_TEACHER_ROLE,
+                    "probe": False,
+                    "routes": [OX_TEACHER_ROLE],
+                },
+            )
+
+    for rally_id, snapshot, rally, candidates in probe_rallies:
+        first, second = sorted(
+            candidates, key=lambda candidate: str(candidate["candidate_id"])
+        )[:2]
+        ordered_variants = (("a_first", (first, second)), ("b_first", (second, first)))
+        for order_variant, (blind_order, ordered_candidates) in enumerate(
+            ordered_variants, start=1
+        ):
+            probe_batch_id = canonical_json.canonical_json_sha256_strict(
+                {
+                    "revision": "single-teacher-repeat-v1",
+                    "split_plan_id": split_plan_id,
+                    "rally_id": rally_id,
+                    "blind_order": blind_order,
+                }
+            )
+            for position, candidate in enumerate(ordered_candidates):
+                candidate_id = str(candidate["candidate_id"])
+                repeat_pair_id = canonical_json.canonical_json_sha256_strict(
+                    {
+                        "revision": "single-teacher-repeat-v1",
+                        "split_plan_id": split_plan_id,
+                        "rally_id": rally_id,
+                        "candidate_id": candidate_id,
+                    }
+                )
+                add_task(
+                    rally_id,
+                    snapshot,
+                    rally,
+                    candidate,
+                    {
+                        "revision": "single-teacher-v1",
+                        "owner": OX_TEACHER_ROLE,
+                        "probe": True,
+                        "routes": [OX_TEACHER_ROLE],
+                        "probe_revision": "single-teacher-repeat-v1",
+                        "repeat_pair_id": repeat_pair_id,
+                        "fixed_repeat": True,
+                        "order_swap": True,
+                        "blind_order": blind_order,
+                        "probe_batch_id": probe_batch_id,
+                        "order_variant": order_variant,
+                        "candidate_position": position,
+                    },
+                    priority=100,
+                )
+    watermark: Any = canonical_json.canonical_json_sha256_strict(
+        {"work_ids": sorted(tasks)}
+    )
+    if candidate_indexed:
+        watermark = {
+            "candidate_records": int(candidate_state["record_count"]),
+            "candidate_head": str(candidate_state["head_sha256"]),
+            "split_plan_id": split_plan_id,
+            "probe_revision": "single-teacher-repeat-v1",
+        }
+    workset.advance(work_items, watermark)
+    claim_limit = config.teacher_claim_limit
+    if (
+        isinstance(claim_limit, bool)
+        or not isinstance(claim_limit, int)
+        or not 1 <= claim_limit <= 500
+    ):
+        raise DistillationError("teacher_claim_limit must be between 1 and 500")
+    claims = list(workset.claim("ox", claim_limit, OX_TEACHER_ROLE, 7200))
+    probe_claim_counts: dict[str, int] = defaultdict(int)
+    for claim in claims:
+        probe_batch_id = str(claim.provenance.get("probe_batch_id") or "")
+        if probe_batch_id:
+            probe_claim_counts[probe_batch_id] += 1
+    # A blind-order request is an atomic pair, including after a restart where
+    # no delta work items were rebuilt before pending claims were leased.
+    if any(count == 1 for count in probe_claim_counts.values()):
+        claims.extend(workset.claim("ox", 1, OX_TEACHER_ROLE, 7200))
+    existing = {
+        str(row.get("work_id")): row
+        for row in label_rows
+        if row.get("kind") == "teacher-label"
+        and row.get("status") == "completed"
+        and row.get("route") == "opencode-go/ox-alpha-free"
+        and row.get("teacher_role") == OX_TEACHER_ROLE
+    }
+    reconciled = [claim for claim in claims if claim.work_id in existing]
+    if reconciled:
+        workset.commit(
+            reconciled,
+            [
+                {
+                    "status": "completed",
+                    "completion_ref": f"label-ledger:{existing[claim.work_id]['record_sha256']}",
+                    "completion_digest": str(existing[claim.work_id]["record_sha256"]),
+                }
+                for claim in reconciled
+            ],
+        )
+    claims = [claim for claim in claims if claim not in reconciled]
+
+    def assignment_from_claim(claim: Any) -> Mapping[str, Any] | None:
+        provenance = claim.provenance
+        if not isinstance(provenance, Mapping):
+            return None
+        if (
+            provenance.get("profile") != OX_SINGLE_PROFILE
+            or provenance.get("cohort") != OX_SINGLE_COHORT
+            or provenance.get("route") != "opencode-go/ox-alpha-free"
+            or provenance.get("teacher_role") != OX_TEACHER_ROLE
+            or provenance.get("profile_contract_id") != profile_contract_id
+        ):
+            return None
+        if provenance.get("probe") is not True:
+            return {
+                "revision": "single-teacher-v1",
+                "owner": OX_TEACHER_ROLE,
+                "probe": False,
+                "routes": [OX_TEACHER_ROLE],
+            }
+        required = {
+            "probe_revision",
+            "repeat_pair_id",
+            "fixed_repeat",
+            "order_swap",
+            "blind_order",
+            "probe_batch_id",
+            "order_variant",
+            "candidate_position",
+        }
+        if (
+            not required.issubset(provenance)
+            or provenance.get("probe_revision") != "single-teacher-repeat-v1"
+            or provenance.get("fixed_repeat") is not True
+            or provenance.get("order_swap") is not True
+            or provenance.get("blind_order") not in {"a_first", "b_first"}
+            or provenance.get("order_variant") not in {1, 2}
+            or provenance.get("candidate_position") not in {0, 1}
+            or any(
+                not isinstance(provenance.get(key), str) or not provenance[key]
+                for key in ("repeat_pair_id", "probe_batch_id")
+            )
+        ):
+            return None
+        return {
+            "revision": "single-teacher-v1",
+            "owner": OX_TEACHER_ROLE,
+            "probe": True,
+            "routes": [OX_TEACHER_ROLE],
+            **{key: provenance[key] for key in required},
+        }
+
+    def claim_reference(claim: Any) -> tuple[str, str] | None:
+        parts = str(claim.payload_ref).split(":")
+        if len(parts) != 3 or parts[0] != "candidate-snapshot":
+            return None
+        if not parts[1] or not parts[2]:
+            return None
+        return parts[1], parts[2]
+
+    if candidate_indexed and claims:
+        missing = [claim for claim in claims if claim.work_id not in tasks]
+        invalid_claims = [claim for claim in missing if claim_reference(claim) is None]
+        requested_rallies = {
+            reference[0]
+            for claim in missing
+            if (reference := claim_reference(claim)) is not None
+        }
+        resolved_snapshots: Mapping[str, Mapping[str, Any]] = {}
+        if requested_rallies:
+            try:
+                resolved_snapshots = catalog.read_candidate_snapshots(
+                    root, candidate_path, requested_rallies
+                )
+            except catalog.CatalogError as exc:
+                raise DistillationError(
+                    "OX claim candidate snapshot is unavailable"
+                ) from exc
+        for claim in missing:
+            reference = claim_reference(claim)
+            if reference is None:
+                continue
+            rally_id, candidate_id = reference
+            rally = rally_by_id.get(rally_id)
+            claimed_snapshot = resolved_snapshots.get(rally_id)
+            restored_assignment = assignment_from_claim(claim)
+            temporal = claim.temporal_split
+            restored_candidate: Mapping[str, Any] | None = None
+            if isinstance(claimed_snapshot, Mapping):
+                candidate_rows = claimed_snapshot.get("candidates", [])
+                if isinstance(candidate_rows, list):
+                    restored_candidate = next(
+                        (
+                            row
+                            for row in candidate_rows
+                            if isinstance(row, Mapping)
+                            and str(row.get("candidate_id") or "") == candidate_id
+                        ),
+                        None,
+                    )
+            if (
+                rally is None
+                or not isinstance(claimed_snapshot, Mapping)
+                or not isinstance(restored_candidate, Mapping)
+                or restored_assignment is None
+                or not isinstance(temporal, Mapping)
+                or set(temporal) != {"as_of", "group_id", "split", "split_plan_id"}
+                or temporal.get("as_of") != rally.get("as_of")
+                or temporal.get("group_id") != rally.get("session_cluster_id")
+                or temporal.get("split") != str(assignments.get(rally_id) or "embargo")
+                or temporal.get("split_plan_id") != split_plan_id
+            ):
+                invalid_claims.append(claim)
+                continue
+            restored = add_task(
+                rally_id,
+                claimed_snapshot,
+                rally,
+                restored_candidate,
+                restored_assignment,
+                register_item=False,
+                temporal_override=temporal,
+            )
+            if (
+                restored is None
+                or restored["work_id"] != claim.work_id
+                or restored["payload_digest"] != claim.payload_digest
+            ):
+                invalid_claims.append(claim)
+        if invalid_claims:
+            invalid_ids = {claim.work_id for claim in invalid_claims}
+            workset.commit(
+                [claim for claim in claims if claim.work_id in invalid_ids],
+                [
+                    {
+                        "status": "quarantined" if claim.attempt >= 3 else "retry",
+                        "error_class": "remote_payload_rejected",
+                    }
+                    for claim in claims
+                    if claim.work_id in invalid_ids
+                ],
+            )
+            claims = [claim for claim in claims if claim.work_id not in invalid_ids]
+    payload_failures: list[tuple[Any, dict[str, str]]] = []
+    resolved_claims: list[Any] = []
+    for claim in claims:
+        task = tasks.get(claim.work_id)
+        payload = (
+            _teacher_payload(
+                task["rally"],
+                task["candidate"],
+                texts,
+                max_input_bytes=config.max_input_bytes,
+            )
+            if task is not None
+            else None
+        )
+        if task is None or payload is None:
+            payload_failures.append(
+                (
+                    claim,
+                    {
+                        "status": "quarantined" if claim.attempt >= 3 else "retry",
+                        "error_class": "remote_payload_rejected",
+                    },
+                )
+            )
+            continue
+        task["input"] = {
+            "candidate_id": task["candidate"]["candidate_id"],
+            "rally_id": task["rally"]["rally_id"],
+            "query": payload["query"],
+            "context": payload["context"],
+            "evidence": payload["candidate"],
+        }
+        resolved_claims.append(claim)
+    if payload_failures:
+        workset.commit(
+            [claim for claim, _outcome in payload_failures],
+            [outcome for _claim, outcome in payload_failures],
+        )
+    claims = resolved_claims
+    if not claims:
+        return _TeacherBatchResult(workset_status=workset.status("ox"))
+
+    batches: list[list[Any]] = []
+    probe_groups: dict[str, list[Any]] = defaultdict(list)
+    normal_claims: list[Any] = []
+    for claim in claims:
+        probe_batch_id = str(tasks[claim.work_id].get("probe_batch_id") or "")
+        if probe_batch_id:
+            probe_groups[probe_batch_id].append(claim)
+        else:
+            normal_claims.append(claim)
+    incomplete_probe_outcomes: list[tuple[Any, dict[str, str]]] = []
+    for probe_batch_id, group in probe_groups.items():
+        ordered = sorted(
+            group,
+            key=lambda claim: int(
+                tasks[claim.work_id]["assignment"].get("candidate_position", -1)
+            ),
+        )
+        assignments_for_batch = [
+            tasks[claim.work_id]["assignment"] for claim in ordered
+        ]
+        blind_orders = {
+            assignment.get("blind_order") for assignment in assignments_for_batch
+        }
+        probe_candidate_ids = {
+            str(tasks[claim.work_id]["candidate"].get("candidate_id") or "")
+            for claim in ordered
+        }
+        request = {
+            "schema": "chronovisor.recall-distill-teacher-batch.v1",
+            "candidates": [tasks[claim.work_id]["input"] for claim in ordered],
+        }
+        valid_probe_batch = (
+            len(ordered) == 2
+            and len(probe_candidate_ids) == 2
+            and len(blind_orders) == 1
+            and blind_orders <= {"a_first", "b_first"}
+            and all(
+                assignment.get("probe") is True
+                and assignment.get("probe_batch_id") == probe_batch_id
+                and assignment.get("fixed_repeat") is True
+                and assignment.get("order_swap") is True
+                and assignment.get("probe_revision") == "single-teacher-repeat-v1"
+                for assignment in assignments_for_batch
+            )
+            and [
+                assignment.get("candidate_position")
+                for assignment in assignments_for_batch
+            ]
+            == [0, 1]
+            and len(canonical_json.canonical_json_bytes_strict(request)) <= 12_000
+        )
+        if valid_probe_batch:
+            batches.append(ordered)
+            continue
+        incomplete_probe_outcomes.extend(
+            (
+                claim,
+                {
+                    "status": "quarantined" if claim.attempt >= 3 else "retry",
+                    "error_class": "incomplete_probe_pair",
+                },
+            )
+            for claim in ordered
+        )
+    if incomplete_probe_outcomes:
+        workset.commit(
+            [claim for claim, _outcome in incomplete_probe_outcomes],
+            [outcome for _claim, outcome in incomplete_probe_outcomes],
+        )
+
+    batch: list[Any] = []
+    candidate_ids: set[str] = set()
+    oversize: list[tuple[Any, dict[str, str]]] = []
+    for claim in normal_claims:
+        task = tasks[claim.work_id]
+        candidate_id = str(task["candidate"]["candidate_id"])
+        proposed = [*batch, claim]
+        request = {
+            "schema": "chronovisor.recall-distill-teacher-batch.v1",
+            "candidates": [tasks[item.work_id]["input"] for item in proposed],
+        }
+        if (
+            candidate_id in candidate_ids
+            or len(proposed) > 16
+            or len(canonical_json.canonical_json_bytes_strict(request)) > 12_000
+        ):
+            if batch:
+                batches.append(batch)
+            single_request = {
+                "schema": "chronovisor.recall-distill-teacher-batch.v1",
+                "candidates": [task["input"]],
+            }
+            if len(canonical_json.canonical_json_bytes_strict(single_request)) > 12_000:
+                oversize.append(
+                    (
+                        claim,
+                        {
+                            "status": "quarantined" if claim.attempt >= 3 else "retry",
+                            "error_class": "remote_payload_rejected",
+                        },
+                    )
+                )
+                batch = []
+                candidate_ids = set()
+            else:
+                batch = [claim]
+                candidate_ids = {candidate_id}
+        else:
+            batch = proposed
+            candidate_ids.add(candidate_id)
+    if batch:
+        batches.append(batch)
+    if oversize:
+        workset.commit(
+            [claim for claim, _outcome in oversize],
+            [outcome for _claim, outcome in oversize],
+        )
+    if not batches:
+        return _TeacherBatchResult(deferred=True, workset_status=workset.status("ox"))
+
+    required_label_fields = {
+        "candidate_id",
+        "verdict",
+        "confidence",
+        "rationale",
+        "minimal_atom_ids",
+        "missing_slots",
+        "changing_claim",
+    }
+
+    def valid_result_count(response: object) -> int:
+        if not isinstance(response, Mapping):
+            return 0
+        labels = response.get("labels")
+        if not isinstance(labels, list) or not all(
+            isinstance(label, Mapping) and set(label) == required_label_fields
+            for label in labels
+        ):
+            return 0
+        # One schema-valid provider response is one ramp receipt, independent of
+        # how many labels it happened to carry.
+        return 1
+
+    results = dispatch_claimed_work(
+        batches,
+        lambda current: teacher.evaluate(
+            {
+                "schema": "chronovisor.recall-distill-teacher-batch.v1",
+                "candidates": [tasks[claim.work_id]["input"] for claim in current],
+            }
+        ),
+        max_inflight=config.teacher_max_inflight,
+        min_valid_results_per_cap=20,
+        valid_result_count=valid_result_count,
+    )
+    expected_identity = {
+        "provider": "opencode-go",
+        "model": "opencode-go/ox-alpha-free",
+        "location": "remote",
+    }
+    stopped = False
+    deferred = False
+    records: list[dict[str, Any]] = []
+    completed_claims: list[Any] = []
+    outcomes: dict[str, dict[str, str]] = {}
+    for result in results:
+        batch_claims = result.work
+        if result.status != "ok" or not isinstance(result.value, Mapping):
+            category = str(result.category or "teacher_failure")
+            stopped = stopped or result.status == "stopped"
+            deferred = True
+            for claim in batch_claims:
+                outcomes[claim.work_id] = {
+                    "status": (
+                        "quarantined"
+                        if category in {"invalid_response", "remote_payload_rejected"}
+                        and claim.attempt >= 3
+                        else "retry"
+                    ),
+                    "error_class": category,
+                }
+            continue
+        response = result.value
+        labels = response.get("labels")
+        digests = {
+            "route_digest": response.get("_route_digest"),
+            "model_digest": response.get("_model_digest"),
+            "prompt_sha256": response.get("_prompt_digest"),
+            "schema_sha256": response.get("_schema_digest"),
+        }
+        expected_ids = {
+            str(tasks[claim.work_id]["candidate"]["candidate_id"])
+            for claim in batch_claims
+        }
+        valid = (
+            response.get("_route_identity") == expected_identity
+            and all(
+                re.fullmatch(r"[0-9a-f]{64}", str(value or ""))
+                for value in digests.values()
+            )
+            and isinstance(labels, list)
+            and len(labels) == len(batch_claims)
+            and all(
+                isinstance(label, Mapping) and set(label) == required_label_fields
+                for label in labels
+            )
+            and {
+                str(label.get("candidate_id"))
+                for label in labels
+                if isinstance(label, Mapping)
+            }
+            == expected_ids
+        )
+        labels_by_id = (
+            {
+                str(label["candidate_id"]): label
+                for label in labels
+                if isinstance(label, Mapping)
+            }
+            if isinstance(labels, list)
+            else {}
+        )
+        valid = valid and all(
+            label.get("verdict") in {"relevant", "irrelevant"}
+            for label in labels_by_id.values()
+        )
+        if not valid:
+            deferred = True
+            for claim in batch_claims:
+                status = "quarantined" if claim.attempt >= 3 else "retry"
+                outcomes[claim.work_id] = {
+                    "status": status,
+                    "error_class": "invalid_teacher_output",
+                }
+            continue
+        for claim in batch_claims:
+            task = tasks[claim.work_id]
+            candidate = task["candidate"]
+            rally = task["rally"]
+            label_response = labels_by_id[str(candidate["candidate_id"])]
+            predicate = structural_verifier(rally, candidate, label_response)
+            records.append(
+                {
+                    "kind": "teacher-label",
+                    "status": "completed",
+                    "work_id": claim.work_id,
+                    "rally_id": rally["rally_id"],
+                    "candidate_id": candidate["candidate_id"],
+                    "route": "opencode-go/ox-alpha-free",
+                    "teacher_role": OX_TEACHER_ROLE,
+                    "profile": OX_SINGLE_PROFILE,
+                    "cohort": OX_SINGLE_COHORT,
+                    "profile_contract_id": profile_contract_id,
+                    "route_identity": expected_identity,
+                    **digests,
+                    "assignment": task["assignment"],
+                    **task["temporal"],
+                    **_teacher_label(
+                        label_response,
+                        verified_predicate=predicate
+                        if predicate in CLOSED_PREDICATES
+                        else None,
+                    ),
+                }
+            )
+            completed_claims.append(claim)
+    appended = store.append_chain_batch(label_path, records)
+    appended_by_work = {str(row["work_id"]): row for row in appended}
+    for claim in completed_claims:
+        row = appended_by_work[claim.work_id]
+        outcomes[claim.work_id] = {
+            "status": "completed",
+            "completion_ref": f"label-ledger:{row['record_sha256']}",
+            "completion_digest": str(row["record_sha256"]),
+        }
+    active_claims = [claim for claim in claims if claim.work_id in outcomes]
+    if active_claims:
+        workset.commit(
+            active_claims, [outcomes[claim.work_id] for claim in active_claims]
+        )
+    return _TeacherBatchResult(
+        labels_written=len(appended),
+        model_calls=sum(result.attempts for result in results),
+        deferred=deferred,
+        workset_status=workset.status("ox"),
+        profile_stopped=stopped,
+        profile_contract_id=profile_contract_id,
+    )
+
+
 def _run_teacher_batch(
     *,
     root: Path,
@@ -3971,10 +5201,24 @@ def _run_teacher_batch(
     texts: Mapping[str, str],
     label_path: Path,
     label_rows: Sequence[Mapping[str, Any]],
+    candidate_indexed: bool = False,
     structural_verifier: Callable[
         [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
     ],
 ) -> _TeacherBatchResult:
+    if config.teacher_profile == OX_SINGLE_PROFILE:
+        return _run_ox_teacher_batch(
+            root=root,
+            config=config,
+            teachers=teachers,
+            snapshots=snapshots,
+            rally_by_id=rally_by_id,
+            texts=texts,
+            label_path=label_path,
+            label_rows=label_rows,
+            candidate_indexed=candidate_indexed,
+            structural_verifier=structural_verifier,
+        )
     completed = {
         (str(row.get("rally_id")), str(row.get("candidate_id")), str(row.get("route")))
         for row in label_rows
@@ -4347,20 +5591,51 @@ def _capture_candidate_snapshots(
     rallies: Sequence[Mapping[str, Any]],
     texts: Mapping[str, str],
     index_path: Path,
+    label_rows: Sequence[Mapping[str, Any]],
     cold_start: bool,
     deadline: float,
 ) -> _CandidateCaptureResult:
     candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
-    snapshots = {
-        str(row["rally_id"]): row["snapshot"]
-        for row in store.read_chain(candidate_path)
-        if isinstance(row.get("snapshot"), dict)
-    }
+    snapshots: dict[str, Mapping[str, Any]]
+    if config.teacher_profile == OX_SINGLE_PROFILE:
+        from chronovisor.recall import recall_distillation_catalog as catalog
+
+        try:
+            catalog.sync_candidate_index(root, candidate_path)
+            known_rally_ids = catalog.candidate_rally_ids(root)
+            label_rally_ids = {
+                str(row.get("rally_id") or "")
+                for row in label_rows
+                if isinstance(row.get("rally_id"), str) and row.get("rally_id")
+            }
+            snapshots = {
+                rally_id: snapshot
+                for rally_id, snapshot in catalog.read_candidate_snapshots(
+                    root, candidate_path, label_rally_ids
+                ).items()
+            }
+        except catalog.CatalogError as exc:
+            raise DistillationError("OX candidate index is unavailable") from exc
+    else:
+        snapshots = {
+            str(row["rally_id"]): row["snapshot"]
+            for row in _read_chain(candidate_path)
+            if isinstance(row.get("snapshot"), dict)
+        }
+        known_rally_ids = set(snapshots)
     candidate_limit = 100 if cold_start else config.chunk_size
-    planned = [rally for rally in rallies if rally["rally_id"] not in snapshots]
+    planned = [rally for rally in rallies if rally["rally_id"] not in known_rally_ids]
     split_plan: Mapping[str, Any] = {}
     if cold_start:
-        _, cohort = _active_training_cohort(materialize_training_rows(root)["rows"])
+        training = materialize_training_rows(
+            root,
+            _rallies=rallies,
+            _snapshots=snapshots,
+            _label_rows=label_rows,
+        )
+        _, cohort = _active_training_cohort(
+            training["rows"], teacher_profile=config.teacher_profile
+        )
         split_plan = _ensure_split_plan(
             root,
             rallies,
@@ -4399,6 +5674,11 @@ def _capture_candidate_snapshots(
         snapshots[str(rally["rally_id"])] = snapshot
         work.append(rally)
     store.append_chain_batch(candidate_path, payloads)
+    if config.teacher_profile == OX_SINGLE_PROFILE and payloads:
+        try:
+            catalog.sync_candidate_index(root, candidate_path)
+        except catalog.CatalogError as exc:
+            raise DistillationError("OX candidate index cannot advance") from exc
     return _CandidateCaptureResult(snapshots, work, split_plan, deferred)
 
 
@@ -4469,6 +5749,11 @@ def _run_distillation_chunk_impl(
     deadline = time.monotonic() + max_elapsed_seconds
     if not config.enabled:
         return {"status": "disabled", "processed": 0}
+    ox_profile_contract_id = (
+        str(_ensure_ox_profile_contract(root, config)["artifact_id"])
+        if config.teacher_profile == OX_SINGLE_PROFILE
+        else ""
+    )
     try:
         scheduler_state = _read_worker_state(root)
     except store.DistillationStoreError:
@@ -4477,15 +5762,12 @@ def _run_distillation_chunk_impl(
     counterfactual_model_calls = int(
         scheduler_state.get("counterfactual_model_calls", 0)
     )
-    # ponytail: cold start rescans Raw; add a sealed projection catalog only if the
-    # 5-minute lane ceiling is measured to fail.
-    event_rows = _events(raw_dir)
-    rallies = extract_rallies(
-        raw_dir,
-        root=root,
-        max_context_bytes=config.max_input_bytes,
-        _event_rows=event_rows,
-    )
+    # The catalog owns Raw projection and legacy bootstrap. This worker consumes
+    # the current text-free projection and resolves text only on demand.
+    from chronovisor.recall import recall_distillation_catalog as catalog
+
+    catalog.advance(raw_dir, root, config.max_input_bytes)
+    rallies = catalog.rallies(root)
     if teachers is None:
         teachers, default_counterfactual = _default_workers(
             config,
@@ -4498,7 +5780,7 @@ def _run_distillation_chunk_impl(
     ledger_path = store.distillation_dir(root) / "rally-manifest.jsonl"
     existing = {
         manifest.get("rally_id")
-        for row in store.read_chain(ledger_path)
+        for row in _read_chain(ledger_path)
         if isinstance((manifest := row.get("manifest")), dict)
     }
     manifest_limit = 500 if cold_start else config.chunk_size
@@ -4508,21 +5790,32 @@ def _run_distillation_chunk_impl(
     local_teachers = bool(teachers) and all(
         role in teachers and teachers[role].local for role in TEACHER_ROLES
     )
+    ox_teacher_available = (
+        config.teacher_profile == OX_SINGLE_PROFILE
+        and config.ox_enabled
+        and config.ox_free_only
+        and set(teachers or {}) == {OX_TEACHER_ROLE}
+        and teachers is not None
+        and teachers[OX_TEACHER_ROLE].local is False
+    )
+    teachers_available = local_teachers or ox_teacher_available
     if dry_run:
         return {
             "status": "dry_run",
             "pending": len(pending),
-            "teachers_available": local_teachers,
+            "teachers_available": teachers_available,
         }
     store.append_chain_batch(
         ledger_path,
         ({"kind": "rally-manifest", "manifest": rally} for rally in pending),
     )
-    index_path = store.distillation_dir(root) / "historical-index.sqlite"
-    index_sha256 = build_historical_index(raw_dir, index_path, _event_rows=event_rows)
-    texts = {str(row["semantic_sha256"]): str(row["text"]) for row in event_rows}
+    index_path = catalog.historical_index_path(root)
+    index_sha256 = catalog.sync_historical_index(raw_dir, root)
+    texts = catalog.CatalogTextCache(raw_dir, root)
     rally_by_id = {str(rally["rally_id"]): rally for rally in rallies}
     candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
+    label_path = store.distillation_dir(root) / "label-ledger.jsonl"
+    label_rows = _read_chain(label_path)
     capture = _capture_candidate_snapshots(
         root=root,
         raw_dir=raw_dir,
@@ -4530,6 +5823,7 @@ def _run_distillation_chunk_impl(
         rallies=rallies,
         texts=texts,
         index_path=index_path,
+        label_rows=label_rows,
         cold_start=cold_start,
         deadline=deadline,
     )
@@ -4538,8 +5832,6 @@ def _run_distillation_chunk_impl(
     split_plan = capture.split_plan
     deadline_deferred = capture.deadline_deferred
 
-    label_path = store.distillation_dir(root) / "label-ledger.jsonl"
-    label_rows = store.read_chain(label_path)
     model_snapshots = snapshots
     if cold_start and split_plan:
         prioritize_test = int(scheduler_state.get("cold_start_lane_turn", 0)) % 4 != 3
@@ -4568,13 +5860,13 @@ def _run_distillation_chunk_impl(
     )
     teacher_result = _TeacherBatchResult()
     minimum_model_seconds = 220 if prefer_counterfactual else 130
-    model_work_available = local_teachers or counterfactual_probe.pending
+    model_work_available = teachers_available or counterfactual_probe.pending
     model_deferred = deadline_deferred or (
         model_work_available
         and cold_start
         and deadline - time.monotonic() < minimum_model_seconds
     )
-    if local_teachers and not prefer_counterfactual and not model_deferred:
+    if teachers_available and not prefer_counterfactual and not model_deferred:
         teacher_result = _run_teacher_batch(
             root=root,
             config=config,
@@ -4584,11 +5876,13 @@ def _run_distillation_chunk_impl(
             texts=texts,
             label_path=label_path,
             label_rows=label_rows,
+            candidate_indexed=ox_teacher_available,
             structural_verifier=structural_verifier,
         )
     labels_written = teacher_result.labels_written
     teacher_model_calls += teacher_result.model_calls
     model_deferred = model_deferred or teacher_result.deferred
+    ox_workset = dict(teacher_result.workset_status or {})
     counterfactual_result = _CounterfactualBlockResult(
         pending=counterfactual_probe.pending
     )
@@ -4622,9 +5916,36 @@ def _run_distillation_chunk_impl(
     counterfactual_written = counterfactual_result.written
     counterfactual_model_calls += counterfactual_result.model_calls
     model_deferred = model_deferred or counterfactual_result.deferred
+    current_labels = _read_chain(label_path)
+    training_snapshots: Mapping[str, Mapping[str, Any]] = snapshots
+    candidate_index_state: Mapping[str, Any] = {}
+    if config.teacher_profile == OX_SINGLE_PROFILE:
+        try:
+            catalog.sync_candidate_index(root, candidate_path)
+            candidate_index_state = catalog.candidate_index_state(root)
+            training_snapshots = {
+                rally_id: snapshot
+                for rally_id, snapshot in catalog.read_candidate_snapshots(
+                    root,
+                    candidate_path,
+                    {
+                        str(row.get("rally_id") or "")
+                        for row in current_labels
+                        if isinstance(row.get("rally_id"), str) and row.get("rally_id")
+                    },
+                ).items()
+            }
+        except catalog.CatalogError as exc:
+            raise DistillationError("OX training snapshots are unavailable") from exc
+    training_snapshot = materialize_training_rows(
+        root,
+        _rallies=rallies,
+        _snapshots=training_snapshots,
+        _label_rows=current_labels,
+    )
     if cold_start:
         _, current_cohort = _active_training_cohort(
-            materialize_training_rows(root)["rows"]
+            training_snapshot["rows"], teacher_profile=config.teacher_profile
         )
         split_plan = _ensure_split_plan(
             root,
@@ -4632,16 +5953,31 @@ def _run_distillation_chunk_impl(
             raw_watermark=committed_raw_watermark(raw_dir),
             model_cohort_sha256=current_cohort["cohort_sha256"],
         )
+        training_snapshot = materialize_training_rows(
+            root,
+            _rallies=rallies,
+            _snapshots=training_snapshots,
+            _label_rows=current_labels,
+        )
     baseline = preflight(
         raw_dir=raw_dir,
         root=root,
         config_path=config_path,
         _rallies=rallies,
+        _training_snapshot=training_snapshot,
     )
     gate_baseline = _matching_p5_baseline(root, baseline) or baseline
     p5_allowed = bool(gate_baseline["hard_floor"]["p5_allowed"])
     manifest_backlog = max(0, len(rallies) - len(existing) - len(pending))
-    candidate_backlog = max(0, len(rallies) - len(snapshots))
+    candidate_backlog = max(
+        0,
+        len(rallies)
+        - (
+            int(candidate_index_state["record_count"])
+            if candidate_index_state
+            else len(snapshots)
+        ),
+    )
     cold_start_pending = bool(manifest_backlog or candidate_backlog or not p5_allowed)
     split_plan_id = str(
         split_plan.get("artifact_id") or scheduler_state.get("split_plan_id") or ""
@@ -4652,14 +5988,14 @@ def _run_distillation_chunk_impl(
     transition = _worker_state_transition(
         root,
         p5_allowed=p5_allowed,
-        local_teachers=local_teachers,
+        local_teachers=teachers_available,
         model_deferred=model_deferred,
         gate_baseline=gate_baseline,
         promotion=promotion,
     )
-    manifest_head = store.verify_chain(ledger_path)["head_sha256"]
-    candidate_head = store.verify_chain(candidate_path)["head_sha256"]
-    label_head = store.verify_chain(label_path)["head_sha256"]
+    manifest_head = store.chain_head(ledger_path)["head_sha256"]
+    candidate_head = store.chain_head(candidate_path)["head_sha256"]
+    label_head = store.chain_head(label_path)["head_sha256"]
     run_id, _, _ = store.write_immutable(
         store.distillation_dir(root) / "runs",
         {
@@ -4672,6 +6008,9 @@ def _run_distillation_chunk_impl(
             "processed": len(pending),
             "candidate_snapshots": len(candidate_work),
             "labels_written": labels_written,
+            "ox_workset": ox_workset,
+            "ox_profile_contract_id": ox_profile_contract_id,
+            "ox_profile_stopped": teacher_result.profile_stopped,
             "counterfactuals_written": counterfactual_written,
             "p5_allowed": p5_allowed,
         },
@@ -4700,13 +6039,14 @@ def _run_distillation_chunk_impl(
             "processed": len(pending),
             "candidate_snapshots": len(candidate_work),
             "labels_written": labels_written,
+            "ox_workset": ox_workset,
+            "ox_profile_contract_id": ox_profile_contract_id,
+            "ox_profile_stopped": teacher_result.profile_stopped,
             "counterfactuals_written": counterfactual_written,
             "teacher_model_calls": teacher_model_calls,
             "counterfactual_model_calls": counterfactual_model_calls,
             "cold_start_pending": cold_start_pending,
-            "cold_start_lane_turn": int(
-                scheduler_state.get("cold_start_lane_turn", 0)
-            )
+            "cold_start_lane_turn": int(scheduler_state.get("cold_start_lane_turn", 0))
             + int(cold_start and not model_deferred),
             "split_plan_id": split_plan_id,
             "manifest_backlog": manifest_backlog,
@@ -4717,19 +6057,36 @@ def _run_distillation_chunk_impl(
             "rollout_evaluation_status": rollout_evaluation["status"],
             "hold_reason": transition["hold_reason"],
             "capture_only_reasons": gate_baseline["hard_floor"]["reasons"]
-            + ([] if local_teachers else ["local_teachers_unavailable"]),
+            + (
+                []
+                if teachers_available
+                else [
+                    "ox_teacher_unavailable"
+                    if config.teacher_profile == OX_SINGLE_PROFILE
+                    else "local_teachers_unavailable"
+                ]
+            ),
             "last_success_at": transition["last_success_at"],
-            "error_code": "worker_deferred" if model_deferred else "",
+            "error_code": (
+                "ox_teacher_stopped"
+                if teacher_result.profile_stopped
+                else "worker_deferred"
+                if model_deferred
+                else ""
+            ),
         },
     )
     return {
         "status": transition["worker_status"],
         "processed": len(pending),
         "p5_allowed": p5_allowed,
-        "teachers_available": local_teachers,
+        "teachers_available": teachers_available,
         "counterfactual_available": bool(counterfactual and counterfactual.local),
         "candidate_snapshots": len(candidate_work),
         "labels_written": labels_written,
+        "ox_workset": ox_workset,
+        "ox_profile_contract_id": ox_profile_contract_id,
+        "ox_profile_stopped": teacher_result.profile_stopped,
         "counterfactuals_written": counterfactual_written,
         "cold_start_pending": cold_start_pending,
         "split_plan_id": split_plan_id,
