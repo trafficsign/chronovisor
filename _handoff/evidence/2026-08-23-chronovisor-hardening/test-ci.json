@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
+  "captured_at": "2026-08-23T20:42:00+09:00",
+  "qos_order_isolation": {
+    "commit": "e65f3594387ffc743514cbe1895539b0c104faa7",
+    "forward_runs": 3,
+    "reverse_runs": 3,
+    "failed_runs": 0,
+    "suite_elapsed_seconds": [0.36, 0.36, 0.38, 0.37, 0.36, 0.37],
+    "slow_receipt_contract_ms": 260
+  },
+  "workflow": {
+    "commit": "f26d6bb0721bf3d522e696dae90d72e2c684e42d",
+    "actions_full_sha_pinned": true,
+    "hnsw": {
+      "usearch": "2.26.0",
+      "numkong": "7.7.0",
+      "tqdm": "4.68.2",
+      "passed": 1,
+      "skipped": 0
+    },
+    "semantic_smoke": {
+      "python_3_11": {"passed": 53, "failed": 0},
+      "python_3_12": {"passed": 53, "failed": 0}
+    },
+    "yaml_parse": "passed"
+  },
+  "github_required_jobs": {
+    "status": "pending",
+    "reason": "No push was authorized, so the new GitHub jobs have not run on the remote commit."
+  },
+  "phase_exit": "pending_remote_required_jobs"
+}
