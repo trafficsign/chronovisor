@@ -9,6 +9,44 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+RECALL_IDENTITY_FIELDS = (
+    "model",
+    "model_revision",
+    "system_sha256",
+    "sampler_sha256",
+)
+
+
+def _valid_sha256(value: str) -> bool:
+    return len(value) == 64 and all(char in "0123456789abcdef" for char in value.casefold())
+
+
+def _identity_value(field: str, value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if field.endswith("_sha256") and not _valid_sha256(normalized):
+        return None
+    return normalized
+
+
+def recall_identity_from_record(row: Mapping[str, Any]) -> dict[str, str]:
+    """Return only well-formed generator identity fields from a receipt row."""
+
+    return {
+        key: normalized
+        for key in RECALL_IDENTITY_FIELDS
+        if (normalized := _identity_value(key, row.get(key))) is not None
+    }
+
+
+def recall_identity_is_complete(identity: Mapping[str, Any]) -> bool:
+    """Return whether all four fields can identify a production replay."""
+
+    return len(recall_identity_from_record(identity)) == len(RECALL_IDENTITY_FIELDS)
+
 
 def page_ids_from_record(row: Mapping[str, Any]) -> list[str]:
     """Return deduplicated page IDs from current and legacy recall records."""
@@ -81,11 +119,9 @@ def join_used_recall_episodes(
 ) -> dict[str, Any]:
     """Join explicit usage receipts to one unambiguous recall decision.
 
-    Positive supervision is deliberately stricter than telemetry analysis:
-    decision IDs must be unique, the session identity must be present and
-    equal whenever the recall decision has one, and duplicate event receipts
-    are ignored.  Rejected counts are returned so a silent loss of learning
-    signal becomes observable.
+    Exact telemetry analysis requires unique decision IDs, a matching session
+    whenever the recall decision has one, and deduplicated event receipts.
+    Rejected counts are returned so silent signal loss remains observable.
     """
 
     decisions: dict[str, list[Mapping[str, Any]]] = {}
@@ -129,6 +165,13 @@ def join_used_recall_episodes(
         if not pages:
             rejected["missing_page_ids"] += 1
             continue
+        # The source recall row wins per field; used receipts only amend
+        # fields absent from that source. Invalid values cannot shadow a
+        # valid amendment.
+        identity = {
+            **recall_identity_from_record(pull),
+            **recall_identity_from_record(recall),
+        }
         episode_session = pull_session or recall_session
         episode_key = (decision_id, episode_session)
         existing = episodes_by_decision.get(episode_key)
@@ -139,17 +182,37 @@ def join_used_recall_episodes(
                 "decision_id": decision_id,
                 "session_id": episode_session,
                 "page_ids": pages,
+                "identity": identity,
                 "recall": dict(recall),
                 "pull": dict(pull),
             }
             continue
         existing["event_ids"].append(event_id)
         existing["page_ids"] = list(dict.fromkeys([*existing["page_ids"], *pages]))
+        # Distinct receipts amend missing fields. The first valid value wins
+        # conflicts, while the source value already stored in ``existing``
+        # remains authoritative over every receipt.
+        existing["identity"] = {
+            **identity,
+            **existing["identity"],
+        }
 
     episodes = list(episodes_by_decision.values())
+    identity_missing = sum(
+        not recall_identity_is_complete(episode["identity"])
+        for episode in episodes
+    )
+    eligible_decisions = sum(len(rows) == 1 for rows in decisions.values())
+    used_decisions = len({episode["decision_id"] for episode in episodes})
     return {
         "episodes": episodes,
         "accepted": len(episodes),
+        "eligible_decisions": eligible_decisions,
+        "used_decisions": used_decisions,
+        "unused_decisions": max(0, eligible_decisions - used_decisions),
+        "used_rate": used_decisions / eligible_decisions if eligible_decisions else 0.0,
         "rejected": sum(rejected.values()),
         "rejected_by_reason": dict(sorted(rejected.items())),
+        "identity_missing": identity_missing,
+        "production_replayable": len(episodes) - identity_missing,
     }

@@ -46,6 +46,8 @@ from chronovisor.core.raw_store import RawStore
 from chronovisor.core.recall_log_schema import (
     join_used_recall_episodes,
     page_ids_from_record,
+    recall_identity_from_record,
+    recall_identity_is_complete,
 )
 from chronovisor.core.recall_runtime_paths import RECALL_DIR
 from chronovisor.core.save_transaction import (
@@ -1377,10 +1379,21 @@ def capture_session_answer_episodes(
                 binding_reasons.append("historical_page_uid_mismatch")
             if context_receipt_error:
                 binding_reasons.append(context_receipt_error)
+            used_identity = (used or {}).get("identity")
             source_generator = {
-                "model": str((source or {}).get("model") or ""),
-                "system_sha256": str((source or {}).get("system_sha256") or ""),
-                "sampler_sha256": str((source or {}).get("sampler_sha256") or ""),
+                **recall_identity_from_record(
+                    used_identity if isinstance(used_identity, Mapping) else {}
+                ),
+                **recall_identity_from_record(source or {}),
+            }
+            source_generator = {
+                key: source_generator.get(key, "")
+                for key in (
+                    "model",
+                    "model_revision",
+                    "system_sha256",
+                    "sampler_sha256",
+                )
             }
             row = {
                 "schema_version": ANSWER_EPISODE_SCHEMA_VERSION,
@@ -1420,11 +1433,7 @@ def capture_session_answer_episodes(
                     "policy_version": str((source or {}).get("policy_version") or ""),
                     "generator": source_generator,
                 },
-                "production_replayable": all(
-                    _valid_sha(source_generator[key])
-                    for key in ("system_sha256", "sampler_sha256")
-                )
-                and bool(source_generator["model"]),
+                "production_replayable": recall_identity_is_complete(source_generator),
                 "binding_status": "verified" if not binding_reasons else "unknown",
                 "binding_reasons": binding_reasons,
                 "join_event_ids": list((used or {}).get("event_ids", [])),
@@ -1463,6 +1472,13 @@ def capture_session_answer_episodes(
         "cursor_line": advance_line,
         "verified": sum(row["binding_status"] == "verified" for row in captured),
         "unknown": sum(row["binding_status"] != "verified" for row in captured),
+        "binding_unknown": sum(
+            row["binding_status"] != "verified" for row in captured
+        ),
+        "unassigned_split": sum(row["split"] == "unassigned" for row in captured),
+        "production_replayable": sum(
+            row["production_replayable"] is True for row in captured
+        ),
         "join": {key: value for key, value in joined.items() if key != "episodes"},
         "episode_file": str(episode_file),
     }

@@ -41,6 +41,7 @@ def test_chronovisor_recall_used_records_only_explicit_used_pages(monkeypatch) -
     )
 
     assert result["status"] == "recorded"
+    assert result["telemetry_join"] == "ready"
     assert result["event_id"] == recorded[0]["event_id"]
     assert len(result["event_id"]) == 32
     assert result["learning_join"] == "ready"
@@ -177,6 +178,7 @@ def test_chronovisor_recall_used_is_idempotent_per_decision(monkeypatch) -> None
         "decision_id": "decision-1",
         "page_ids": ["page-a"],
         "learning_join": "ready",
+        "telemetry_join": "ready",
     }
     assert recorded == []
 
@@ -252,11 +254,126 @@ def test_used_decision_validation_fills_session_and_reports_processor_overlap(
         "session_id": "session-1",
         "observable_page_ids": ["page-a"],
         "processor_shadow_page_ids": ["page-a", "page-b"],
+        "identity": {},
     }
     assert server._validate_used_recall_decision("decision-1", "wrong") == {
         "status": "error",
         "error": "recall session mismatch",
     }
+
+
+def test_used_validation_prefers_source_identity_and_fills_missing_from_prior_receipt(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source_system = "a" * 64
+    source_sampler = "b" * 64
+    prior_sampler = "c" * 64
+    recall_log = tmp_path / "recall.jsonl"
+    recall_log.write_text(
+        json.dumps(
+            {
+                "decision_id": "decision-identity",
+                "session_id": "session-identity",
+                "pages": ["page-a"],
+                "model": "trusted-source-model",
+                "system_sha256": source_system,
+                "sampler_sha256": source_sampler,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", recall_log)
+    pull_log = tmp_path / "pull.jsonl"
+    pull_log.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in (
+                {
+                    "type": "used",
+                    "decision_id": "decision-identity",
+                    "session_id": "session-identity",
+                    "page_ids": [],
+                    "model_revision": "empty-pages-must-not-win",
+                },
+                {
+                    "type": "used",
+                    "decision_id": "decision-identity",
+                    "session_id": "",
+                    "page_ids": ["page-a"],
+                    "model_revision": "empty-session-must-not-win",
+                },
+                {
+                    "type": "used",
+                    "decision_id": "decision-identity",
+                    "session_id": "session-identity",
+                    "page_ids": ["page-a"],
+                    "model": "untrusted-receipt-model",
+                    "model_revision": "receipt-revision",
+                    "sampler_sha256": prior_sampler,
+                    "system_sha256": "malformed",
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(recall_runtime, "RECALL_PULL_LOG_FILE", pull_log)
+
+    validation = server._validate_used_recall_decision(
+        "decision-identity", "session-identity"
+    )
+
+    assert validation["identity"] == {
+        "model": "trusted-source-model",
+        "model_revision": "receipt-revision",
+        "system_sha256": source_system,
+        "sampler_sha256": source_sampler,
+    }
+
+
+def test_recall_used_copies_only_derived_identity(monkeypatch) -> None:
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        server,
+        "_validate_used_recall_decision",
+        lambda *_args: {
+            "status": "ok",
+            "session_id": "session-1",
+            "observable_page_ids": ["page-a"],
+            "processor_shadow_page_ids": [],
+            "identity": {
+                "model": "trusted-model",
+                "model_revision": "trusted-revision",
+                "system_sha256": "a" * 64,
+                "sampler_sha256": "b" * 64,
+                "caller_model": "attacker-controlled",
+            },
+        },
+    )
+    monkeypatch.setattr(server, "_existing_used_receipt", lambda *_args: None)
+    monkeypatch.setattr(
+        server,
+        "_append_pull_log",
+        lambda record: recorded.append(record) or True,
+    )
+
+    result = json.loads(
+        _tool(server.chronovisor_recall_used)(
+            decision_id="decision-1",
+            session_id="session-1",
+            page_ids=["page-a"],
+            note='{"model":"attacker-controlled"}',
+        )
+    )
+
+    assert result["status"] == "recorded"
+    assert recorded[0]["model"] == "trusted-model"
+    assert recorded[0]["model_revision"] == "trusted-revision"
+    assert recorded[0]["system_sha256"] == "a" * 64
+    assert recorded[0]["sampler_sha256"] == "b" * 64
+    assert "caller_model" not in recorded[0]
 
 
 def test_chronovisor_read_forwards_turn_trace_without_marking_page_used(

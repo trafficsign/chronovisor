@@ -1784,6 +1784,10 @@ def test_capture_all_complete_turns_is_exact_once_and_binds_used_subset(
                         "content_sha256": hashlib.sha256(page_a.read_bytes()).hexdigest(),
                     }
                 ],
+                "model": "source-model",
+                "model_revision": "source-r1",
+                "system_sha256": "1" * 64,
+                "sampler_sha256": "2" * 64,
             },
             {
                 "decision_id": "d2",
@@ -1805,8 +1809,28 @@ def test_capture_all_complete_turns_is_exact_once_and_binds_used_subset(
     _write_rows(
         pulls,
         [
-            {"type": "used", "event_id": "e1", "decision_id": "d1", "session_id": "session", "page_ids": ["a"]},
-            {"type": "used", "event_id": "e2", "decision_id": "d2", "session_id": "session", "page_ids": ["b"]},
+            {
+                "type": "used",
+                "event_id": "e1",
+                "decision_id": "d1",
+                "session_id": "session",
+                "page_ids": ["a"],
+                "model": "receipt-model",
+                "model_revision": "receipt-r1",
+                "system_sha256": "3" * 64,
+                "sampler_sha256": "4" * 64,
+            },
+            {
+                "type": "used",
+                "event_id": "e2",
+                "decision_id": "d2",
+                "session_id": "session",
+                "page_ids": ["b"],
+                "model": "receipt-model",
+                "model_revision": "receipt-r1",
+                "system_sha256": "3" * 64,
+                "sampler_sha256": "4" * 64,
+            },
         ],
     )
     episodes = tmp_path / "episodes.jsonl"
@@ -1878,6 +1902,24 @@ def test_capture_all_complete_turns_is_exact_once_and_binds_used_subset(
     assert second["captured"] == 0
     assert {row["decision_id"] for row in rows} == {"d1", "d2"}
     assert all(row["exact_used_subset"] is True for row in rows)
+    by_decision = {row["decision_id"]: row for row in rows}
+    assert by_decision["d1"]["policy_identity"]["generator"] == {
+        "model": "source-model",
+        "model_revision": "source-r1",
+        "system_sha256": "1" * 64,
+        "sampler_sha256": "2" * 64,
+    }
+    assert by_decision["d2"]["policy_identity"]["generator"] == {
+        "model": "receipt-model",
+        "model_revision": "receipt-r1",
+        "system_sha256": "3" * 64,
+        "sampler_sha256": "4" * 64,
+    }
+    assert first["join"]["identity_missing"] == 0
+    assert first["join"]["used_rate"] == 1.0
+    assert first["binding_unknown"] == first["unknown"] == 2
+    assert first["unassigned_split"] == 2
+    assert first["production_replayable"] == 2
     assert all("answer one" not in json.dumps(row) for row in rows)
 
 

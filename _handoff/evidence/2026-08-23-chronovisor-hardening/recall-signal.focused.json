@@ -1,0 +1,75 @@
+{
+  "schema": "chronovisor.hardening.recall-signal-focused.v1",
+  "captured_at": "2026-08-23T21:24:46+09:00",
+  "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
+  "phase": 3,
+  "status": "implementation_complete_live_gate_pending",
+  "fixed_fixture": {
+    "decisions": 100,
+    "used_decisions": 50,
+    "unused_decisions": 50,
+    "unused_false_joins": 0,
+    "orphan_receipts": 0,
+    "duplicate_receipts": 0,
+    "identity_missing": 0,
+    "production_replayable": 50,
+    "used_rate": 0.5
+  },
+  "receipt_contract": {
+    "identity_fields": [
+      "model",
+      "model_revision",
+      "system_sha256",
+      "sampler_sha256"
+    ],
+    "source_identity_wins_per_field": true,
+    "valid_prior_receipts_fill_missing_fields": true,
+    "empty_page_or_session_receipts_ignored": true,
+    "caller_identity_injection": false,
+    "used_is_telemetry_only": true,
+    "legacy_learning_join_is_authority": false
+  },
+  "report_fields": [
+    "eligible_decisions",
+    "used_decisions",
+    "unused_decisions",
+    "used_rate",
+    "rejected_by_reason",
+    "identity_missing",
+    "binding_unknown",
+    "unassigned_split",
+    "production_replayable"
+  ],
+  "tests": {
+    "schema_trace_and_mcp": {
+      "passed": 34,
+      "failed": 0
+    },
+    "answer_eval": {
+      "passed": 29,
+      "failed": 0,
+      "elapsed_seconds": 54.27
+    },
+    "ruff": "passed",
+    "diff_check": "passed",
+    "independent_review_p0_p1": 0
+  },
+  "legacy_live_snapshot": {
+    "recall_rows": 14651,
+    "recall_rows_with_complete_identity": 0,
+    "pull_rows": 944,
+    "used_rows": 28,
+    "used_rows_with_complete_identity": 0,
+    "historical_rows_rewritten": 0
+  },
+  "commits": {
+    "used_telemetry_only": "59cb0aa"
+  },
+  "phase6_gate": {
+    "status": "pending",
+    "requires_deploy": true,
+    "minimum_hours": 24,
+    "minimum_exact_receipts_per_active_host": 100,
+    "identity_completeness_target": 1.0
+  }
+}

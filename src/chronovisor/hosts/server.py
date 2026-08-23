@@ -447,7 +447,11 @@ def _validate_used_recall_decision(
     """Resolve a used receipt to one durable Recall decision before accepting it."""
 
     from chronovisor.core.jsonl import read_jsonl
-    from chronovisor.core.recall_log_schema import page_ids_from_record
+    from chronovisor.core.recall_log_schema import (
+        page_ids_from_record,
+        recall_identity_from_record,
+        used_page_ids_from_record,
+    )
     from chronovisor.recall.recall_runtime import RECALL_LOG_FILE, RECALL_PULL_LOG_FILE
 
     matches = [
@@ -465,12 +469,19 @@ def _validate_used_recall_decision(
         return {"status": "error", "error": "recall session mismatch"}
     canonical_session = session_id or recall_session
     observable_pages = page_ids_from_record(recall)
-    for pull in read_jsonl(RECALL_PULL_LOG_FILE, limit=10_000):
+    identity = recall_identity_from_record(recall)
+    pull_rows = read_jsonl(RECALL_PULL_LOG_FILE, limit=10_000)
+    for pull in pull_rows:
         if str(pull.get("decision_id") or "") != decision_id:
             continue
         pull_session = str(pull.get("session_id") or "")
-        if canonical_session and pull_session and pull_session != canonical_session:
+        if canonical_session and pull_session != canonical_session:
             continue
+        if pull.get("type") == "used" and used_page_ids_from_record(pull):
+            for key, value in recall_identity_from_record(pull).items():
+                # The durable recall decision is authoritative. A prior
+                # server-written used receipt can only fill a missing field.
+                identity.setdefault(key, value)
         if pull.get("type") == "read":
             page_id = pull.get("page_id")
             if isinstance(page_id, str) and page_id:
@@ -497,6 +508,7 @@ def _validate_used_recall_decision(
         "session_id": canonical_session,
         "observable_page_ids": list(dict.fromkeys(observable_pages)),
         "processor_shadow_page_ids": list(dict.fromkeys(shadow_pages)),
+        "identity": identity,
     }
 
 
@@ -1031,12 +1043,14 @@ def chronovisor_recall_used(
     session_id: str | None = None,
     note: str = "",
 ) -> str:
-    """Record which recalled pages materially affected the answer.
+    """Record exposure telemetry for recalled pages that affected the answer.
 
-    This is the only pull-trace event that is positive learning evidence.
-    Search results and page reads remain exploration telemetry. The decision
-    and session are validated synchronously so a successful response is
-    guaranteed to be joinable by the growth controller.
+    Used receipts are append-only exposure telemetry, never positive learning
+    evidence. Search results and page reads remain exploration telemetry. The
+    decision and session are validated synchronously so a successful response
+    is guaranteed to be joinable by downstream diagnostics. The legacy
+    ``learning_join`` response label is retained for clients; ``telemetry_join``
+    is the authoritative status and neither grants promotion authority.
     """
 
     decision_id = decision_id.strip()
@@ -1095,6 +1109,7 @@ def chronovisor_recall_used(
                 "decision_id": decision_id,
                 "page_ids": existing.get("page_ids") or [],
                 "learning_join": "ready",
+                "telemetry_join": "ready",
             },
             ensure_ascii=False,
         )
@@ -1104,6 +1119,12 @@ def chronovisor_recall_used(
         separators=(",", ":"),
     )
     event_id = hashlib.sha256(event_identity.encode()).hexdigest()[:32]
+    from chronovisor.core.recall_log_schema import recall_identity_from_record
+
+    identity_value = validation.get("identity")
+    derived_identity = recall_identity_from_record(
+        identity_value if isinstance(identity_value, dict) else {}
+    )
     recorded = _append_pull_log(
         {
             "type": "used",
@@ -1113,6 +1134,7 @@ def chronovisor_recall_used(
             "decision_id": decision_id,
             "page_ids": new_pages,
             "note": note[:500],
+            **derived_identity,
         }
     )
     if recorded is not True:
@@ -1132,6 +1154,9 @@ def chronovisor_recall_used(
             "page_ids": [*existing_page_list, *new_pages],
             "new_page_ids": new_pages,
             "learning_join": "ready",
+            # ``learning_join`` is a legacy response label; used receipts are
+            # telemetry only and never grant promotion authority.
+            "telemetry_join": "ready",
             "processor_shadow_covered_page_ids": sorted(
                 set(pages) & set(validation.get("processor_shadow_page_ids") or [])
             ),

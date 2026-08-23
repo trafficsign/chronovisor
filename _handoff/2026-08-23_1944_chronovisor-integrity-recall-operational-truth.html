@@ -186,7 +186,7 @@ th{background:#f3f1eb}
   </ul>
 </span></li>
 
-<li><input type="checkbox"><span><strong>Phase 3 / P1-C — Recall の「実際に使われた」を end-to-end で結合する。</strong>
+<li><input type="checkbox" checked><span><strong>Phase 3 / P1-C — Recall の「実際に使われた」を end-to-end で結合する。</strong>
   <ul>
   <li>host hook → search → read → used receipt → answer episode を追い、<code>decision_id</code>、<code>session_id</code>、実使用 <code>page_ids</code>、model/system/sampler identity の欠落点だけを直す。保存する正本は append-only exact exposure receipt。</li>
   <li>候補提示と実使用を区別し、注入・表示だけで <code>used</code> を生成しない。<code>used</code>/<code>ignored</code> は label、truth、student feature、authority、promotion gate に使わない。</li>
