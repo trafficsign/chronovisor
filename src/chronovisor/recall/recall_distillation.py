@@ -5035,6 +5035,25 @@ def _run_ox_teacher_batch(
             [claim for claim, _outcome in incomplete_probe_outcomes],
             [outcome for _claim, outcome in incomplete_probe_outcomes],
         )
+        remaining = (
+            OX_PREFLIGHT_SCAN_CLAIM_BUDGET
+            if _payload_scan_remaining is None
+            else _payload_scan_remaining
+        ) - len(incomplete_probe_outcomes)
+        if not batches and not normal_claims and remaining > 0:
+            return _run_ox_teacher_batch(
+                root=root,
+                config=config,
+                teachers=teachers,
+                snapshots=snapshots,
+                rally_by_id=rally_by_id,
+                texts=texts,
+                label_path=label_path,
+                label_rows=label_rows,
+                candidate_indexed=candidate_indexed,
+                _payload_scan_remaining=remaining,
+                structural_verifier=structural_verifier,
+            )
 
     batch: list[Any] = []
     candidate_ids: set[str] = set()
