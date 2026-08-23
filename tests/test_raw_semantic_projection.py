@@ -84,6 +84,66 @@ def _write_canonical_json(path: Path, payload: dict) -> bytes:
     return raw
 
 
+def test_atomic_projection_publication_rejects_symlinked_parent_and_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.ingest import raw_semantic_projection as projection_mod
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    symlinked_output = tmp_path / "projection"
+    symlinked_output.symlink_to(outside, target_is_directory=True)
+    payload = b"canonical artifact\n"
+
+    with pytest.raises(ProjectionConflictError, match="directory is unsafe"):
+        projection_mod._atomic_create_or_verify(
+            symlinked_output / "semantic-safe.json", payload
+        )
+    assert not (outside / "semantic-safe.json").exists()
+
+    output = tmp_path / "safe-projection"
+    target = output / "semantic-safe.json"
+    real_link = projection_mod.os.link
+
+    def replace_after_link(*args, **kwargs):
+        result = real_link(*args, **kwargs)
+        target.unlink()
+        target.symlink_to(outside / "external.json")
+        return result
+
+    monkeypatch.setattr(projection_mod.os, "link", replace_after_link)
+
+    with pytest.raises(ProjectionConflictError, match="artifact is unsafe"):
+        projection_mod._atomic_create_or_verify(target, payload)
+    assert not (outside / "external.json").exists()
+
+
+def test_atomic_projection_publication_rejects_parent_directory_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.ingest import raw_semantic_projection as projection_mod
+
+    output = tmp_path / "projection"
+    output.mkdir()
+    target = output / "semantic-safe.json"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    moved = tmp_path / "projection-moved"
+    real_link = projection_mod.os.link
+
+    def replace_parent_after_link(*args, **kwargs):
+        result = real_link(*args, **kwargs)
+        output.rename(moved)
+        output.symlink_to(outside, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(projection_mod.os, "link", replace_parent_after_link)
+
+    with pytest.raises(ProjectionConflictError, match="directory changed"):
+        projection_mod._atomic_create_or_verify(target, b"canonical artifact\n")
+    assert not (outside / target.name).exists()
+
+
 def _forge_bundle_receipt_for_manifest(manifest_path: Path, manifest: dict) -> None:
     old_receipt = next(manifest_path.parent.glob("*-manifest-*.receipt.json"))
     receipt = json.loads(old_receipt.read_text(encoding="utf-8"))
@@ -157,6 +217,23 @@ def test_projects_only_nonblank_user_assistant_text_byte_exact(tmp_path: Path) -
         )
         == "completed"
     )
+
+
+def test_malformed_delegated_children_are_invalid_not_incomplete(
+    tmp_path: Path,
+) -> None:
+    path = _transcript_raw(
+        tmp_path,
+        [{"line": 1, "role": "user", "text": "malformed child row"}],
+    )
+    output = tmp_path / "projection"
+    projected = project_parent_raw(path, output_dir=output, max_child_bytes=2_000)
+    assert projected.manifest_path is not None
+    manifest = json.loads(projected.manifest_path.read_text(encoding="utf-8"))
+    manifest["children"] = {"filename": "not-a-list"}
+    _write_canonical_json(projected.manifest_path, manifest)
+
+    assert projection_bundle_state_for_parent(path, projection_dir=output) == "invalid"
 
 
 def test_tampered_transcript_heading_cannot_fall_through_to_full_raw_ingest(

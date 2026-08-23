@@ -346,6 +346,7 @@ read_timeout_ms = 120000
 memory_reserve_gib = 24
 max_related_context_bytes = 12288
 semantic_projection_max_child_bytes = 16384
+processed_projection_reconciler_enabled = false
 """,
         encoding="utf-8",
     )
@@ -363,6 +364,7 @@ semantic_projection_max_child_bytes = 16384
     assert cfg.memory_reserve_gib == 24
     assert cfg.max_related_context_bytes == 12288
     assert cfg.semantic_projection_max_child_bytes == 16384
+    assert cfg.processed_projection_reconciler_enabled is False
 
 
 def test_ingest_config_defaults_to_dynamic_context_envelope(tmp_path: Path) -> None:
@@ -387,6 +389,17 @@ def test_ingest_projection_child_envelope_rejects_unsafe_override(
     cfg = runtime_config.load_ingest_config(config)
 
     assert cfg.semantic_projection_max_child_bytes == 24000
+
+
+def test_ingest_projection_reconciler_defaults_enabled(tmp_path: Path) -> None:
+    assert runtime_config.load_ingest_config(tmp_path / "missing.toml").processed_projection_reconciler_enabled
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[ingest]\nprocessed_projection_reconciler_enabled = true\n",
+        encoding="utf-8",
+    )
+    assert runtime_config.load_ingest_config(config).processed_projection_reconciler_enabled
 
 
 def test_ingest_audit_config_reads_risk_sampling_knobs(tmp_path: Path) -> None:

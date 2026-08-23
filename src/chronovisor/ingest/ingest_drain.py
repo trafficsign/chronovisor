@@ -90,6 +90,30 @@ def _record_liveness(
     return payload
 
 
+def _publish_authority_ready_status(
+    authority_preflight: dict[str, Any], *, state: str, stage: str, pending: int
+) -> None:
+    """Clear a prior authority block only after an explicit successful proof."""
+
+    if authority_preflight.get("ok") is not True:
+        return
+    runtime_status.safe_write_status(
+        state=state,
+        stage=stage,
+        pending=max(0, int(pending)),
+        current_raw=None,
+        current_op=None,
+        current_job_id=None,
+        current_job_pid=None,
+        batch=None,
+        ollama=None,
+        llm=None,
+        authority_preflight=authority_preflight,
+        mutation_authority=authority_preflight,
+        mutation_ready=True,
+    )
+
+
 def _env_int(name: str, default: int) -> int:
     value = os.environ.get(name)
     if value is None:
@@ -234,9 +258,22 @@ def _drain(
         not local_ollama or ollama.is_available()
     )
     if not runtime_available and pending_start > 0:
+        try:
+            projection_reconcile = orchestrator.reconcile_processed_projections(
+                max_parents=orchestrator.PROCESSED_PROJECTION_RECONCILER_MAX_PARENTS
+            )
+        except Exception as exc:
+            projection_reconcile = {
+                "status": "error",
+                "disabled": False,
+                "processed": [],
+                "held": [],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        pending_after_reconcile = len(orchestrator.get_pending_raw_files())
         liveness = _record_liveness(
             "waiting_for_ingest_runtime",
-            pending=pending_start,
+            pending=pending_after_reconcile,
             error=(
                 "ingest runtime unavailable; raw capture remains durable and "
                 "drain will retry"
@@ -250,7 +287,7 @@ def _drain(
                     "kind": "ingest_liveness",
                     "status": liveness["status"],
                     "pending_before": pending_start,
-                    "pending_after": pending_start,
+                    "pending_after": pending_after_reconcile,
                     "alert": True,
                     "retryable": True,
                     "error": liveness["error"],
@@ -259,7 +296,7 @@ def _drain(
         return {
             "status": "waiting_for_ingest_runtime",
             "pending_start": pending_start,
-            "pending_after": pending_start,
+            "pending_after": pending_after_reconcile,
             "batches_run": 0,
             "files_processed": 0,
             "stop_reason": "ingest runtime unavailable",
@@ -269,14 +306,28 @@ def _drain(
             "retryable": True,
             "liveness": liveness,
             "managed_holds": managed_holds,
+            "projection_reconcile": projection_reconcile,
         }
     authority_preflight = (
         orchestrator.ingest_authority_preflight() if runtime_available else None
     )
     if authority_preflight is not None and not authority_preflight["ok"]:
+        try:
+            projection_reconcile = orchestrator.reconcile_processed_projections(
+                max_parents=orchestrator.PROCESSED_PROJECTION_RECONCILER_MAX_PARENTS
+            )
+        except Exception as exc:
+            projection_reconcile = {
+                "status": "error",
+                "disabled": False,
+                "processed": [],
+                "held": [],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        pending_after_reconcile = len(orchestrator.get_pending_raw_files())
         liveness = _record_liveness(
             "blocked_by_decision_authority",
-            pending=pending_start,
+            pending=pending_after_reconcile,
             error=str(authority_preflight["error"]),
             authority_preflight=authority_preflight,
         )
@@ -288,7 +339,7 @@ def _drain(
                     "kind": "ingest_liveness",
                     "status": liveness["status"],
                     "pending_before": pending_start,
-                    "pending_after": pending_start,
+                    "pending_after": pending_after_reconcile,
                     "alert": True,
                     "retryable": True,
                     "error": liveness["error"],
@@ -298,7 +349,7 @@ def _drain(
         return {
             "status": "blocked",
             "pending_start": pending_start,
-            "pending_after": pending_start,
+            "pending_after": pending_after_reconcile,
             "batches_run": 0,
             "files_processed": 0,
             "stop_reason": str(authority_preflight["error"]),
@@ -310,7 +361,15 @@ def _drain(
             "authority_preflight": authority_preflight,
             "liveness": liveness,
             "managed_holds": managed_holds,
+            "projection_reconcile": projection_reconcile,
         }
+    if isinstance(authority_preflight, dict) and authority_preflight.get("ok") is True:
+        _publish_authority_ready_status(
+            authority_preflight,
+            state="idle" if pending_start == 0 else "ready",
+            stage="idle" if pending_start == 0 else "waiting",
+            pending=pending_start,
+        )
     if pending_start == 0:
         liveness = _record_liveness("idle", pending=0)
     else:
@@ -388,12 +447,24 @@ def _drain(
         if sleep_seconds:
             time.sleep(sleep_seconds)
 
+    try:
+        projection_reconcile = orchestrator.reconcile_processed_projections(
+            max_parents=orchestrator.PROCESSED_PROJECTION_RECONCILER_MAX_PARENTS
+        )
+    except Exception as exc:
+        projection_reconcile = {
+            "status": "error",
+            "disabled": False,
+            "processed": [],
+            "held": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
     pending_final = len(orchestrator.get_pending_raw_files())
     if batch_authority_block is not None:
         status = "blocked"
     elif pending_final == 0:
         status = "drained"
-    elif not batches and pending_start == 0:
+    elif not batches and pending_start == 0 and pending_final == 0:
         status = "idle"
     elif stop_reason == "no batch progress":
         status = "stalled"
@@ -410,6 +481,13 @@ def _drain(
             authority_preflight=batch_authority_block,
         )
     else:
+        if isinstance(authority_preflight, dict) and authority_preflight.get("ok") is True:
+            _publish_authority_ready_status(
+                authority_preflight,
+                state="idle" if pending_final == 0 else "ready",
+                stage="idle" if pending_final == 0 else "waiting",
+                pending=pending_final,
+            )
         liveness = _record_liveness(
             "idle" if pending_final == 0 else "ready",
             pending=pending_final,
@@ -431,6 +509,7 @@ def _drain(
             "decision_authority" if batch_authority_block is not None else None
         ),
         "authority_preflight": batch_authority_block,
+        "projection_reconcile": projection_reconcile,
     }
 
 

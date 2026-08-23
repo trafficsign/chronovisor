@@ -425,6 +425,7 @@ class IngestConfig:
     memory_reserve_gib: int = 16
     max_related_context_bytes: int = 8_192
     semantic_projection_max_child_bytes: int = MAX_SEMANTIC_PROJECTION_CHILD_BYTES
+    processed_projection_reconciler_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -822,6 +823,9 @@ def load_ingest_config(path: Path | str | None = None) -> IngestConfig:
             IngestConfig.semantic_projection_max_child_bytes,
             minimum=2_048,
             maximum=MAX_SEMANTIC_PROJECTION_CHILD_BYTES,
+        ),
+        processed_projection_reconciler_enabled=(
+            section.get("processed_projection_reconciler_enabled") is not False
         ),
     )
 

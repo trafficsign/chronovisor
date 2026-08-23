@@ -7,6 +7,7 @@ this module handles when to trigger them.
 import fcntl
 import hashlib
 import json
+import math
 import os
 import threading
 import time
@@ -324,6 +325,474 @@ def get_pending_raw_files() -> list[Path]:
         ):
             pending.append(f)
     return pending
+
+
+PROCESSED_PROJECTION_RECONCILER_MAX_PARENTS = 128
+_PROCESSED_PROJECTION_RECONCILER_CURSOR = "processed_projection_reconciler_cursor"
+_PROCESSED_PROJECTION_RECONCILER_TIMINGS = "processed_projection_reconciler_timings_ms"
+_PROCESSED_PROJECTION_RECONCILER_SLOW_STREAK = (
+    "processed_projection_reconciler_slow_streak"
+)
+_PROCESSED_PROJECTION_RECONCILER_DISABLED = "processed_projection_reconciler_disabled"
+
+
+@_serialize_ingest_across_processes
+def reconcile_processed_projections(
+    *, max_parents: int = PROCESSED_PROJECTION_RECONCILER_MAX_PARENTS
+) -> dict[str, Any]:
+    """Repair deterministic projections for already-processed Raw units.
+
+    The reconciler only reads authoritative Raw bytes and writes derived
+    projection artifacts.  It deliberately does not enter the LLM ingest
+    path, alter processed markers, or call failure-supervisor quarantine code.
+    """
+
+    if (
+        isinstance(max_parents, bool)
+        or not isinstance(max_parents, int)
+        or not 1 <= max_parents <= PROCESSED_PROJECTION_RECONCILER_MAX_PARENTS
+    ):
+        raise ValueError(
+            "max_parents must be between 1 and "
+            f"{PROCESSED_PROJECTION_RECONCILER_MAX_PARENTS}"
+        )
+
+    with _INGEST_LOCK:
+        started = time.perf_counter()
+        from chronovisor.core.raw_store import RawStore, raw_layout_mode
+        from chronovisor.core.runtime_config import load_ingest_config
+        from chronovisor.ingest.raw_semantic_projection import (
+            project_native_transcript,
+            project_parent_raw,
+            verify_projection_bundle,
+        )
+
+        config = load_ingest_config()
+        if not config.processed_projection_reconciler_enabled:
+            return {
+                "status": "disabled",
+                "disabled": True,
+                "reason": "config",
+                "processed": [],
+                "held": [],
+            }
+
+        state = _load_state()
+        if state.get(_PROCESSED_PROJECTION_RECONCILER_DISABLED) is True:
+            return {
+                "status": "disabled",
+                "disabled": True,
+                "reason": "slow_pass_kill_switch",
+                "processed": [],
+                "held": [],
+                "cursor": state.get(_PROCESSED_PROJECTION_RECONCILER_CURSOR),
+            }
+
+        cursor_value = state.get(_PROCESSED_PROJECTION_RECONCILER_CURSOR)
+        cursor = cursor_value if isinstance(cursor_value, str) else None
+        processed_raw_ids = {
+            raw_id
+            for raw_id in state.get("processed_raw_files", [])
+            if isinstance(raw_id, str)
+        }
+        processed_sorted = sorted(processed_raw_ids)
+        if cursor is None:
+            candidate_ids = processed_sorted
+            wrapped = False
+        else:
+            candidate_ids = [raw_id for raw_id in processed_sorted if raw_id > cursor]
+            wrapped = not candidate_ids and bool(processed_sorted)
+            if wrapped:
+                # Wrap only after the canonical sorted tail has been fully
+                # visited.  The next pass starts at the first Raw ID.
+                cursor = None
+                candidate_ids = []
+        candidate_ids = candidate_ids[:max_parents]
+
+        from chronovisor.core.raw_store import RawUnit
+        raw_store = RawStore(RAW_DIR)
+        layout = raw_layout_mode(chronovisor_root=RAW_DIR.parent)
+        artifact_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "artifacts"
+        reference_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "parents"
+        output_dir = RAW_DIR if layout == "legacy" else artifact_dir
+        root_path = CHRONOVISOR_ROOT.expanduser().resolve(strict=False)
+
+        # Projection output and logical references are derived state.  Keep
+        # both roots beneath the Chronovisor root before allowing a builder to
+        # publish anything; a symlink or a misconfigured test path must fail
+        # closed instead of turning a projection pass into an arbitrary file
+        # writer.
+        for derived_dir in (artifact_dir, reference_dir):
+            try:
+                derived_dir.expanduser().resolve(strict=False).relative_to(root_path)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "derived projection path escapes Chronovisor root"
+                ) from exc
+        artifact_names_before = (
+            {path.name for path in output_dir.iterdir()}
+            if output_dir.is_dir()
+            else set()
+        )
+
+        def root_relative(path: Path) -> str:
+            try:
+                return str(
+                    path.expanduser()
+                    .resolve(strict=False)
+                    .relative_to(root_path)
+                )
+            except ValueError as exc:
+                raise RuntimeError(
+                    "derived projection artifact escapes Chronovisor root"
+                ) from exc
+
+        max_child_bytes = config.semantic_projection_max_child_bytes
+        # Leave a small envelope for checkpoint serialization and lock release
+        # so a normal pass does not intentionally cross the 250 ms gate.  The
+        # configured parent ceiling remains 128; a busy pass simply checkpoints
+        # the last authoritative ID and resumes on the next execution.
+        pass_budget_ms = 200.0
+        budget_exhausted = False
+        processed: list[dict[str, Any]] = []
+        held: list[dict[str, Any]] = []
+        candidates: list[tuple[RawUnit, dict[str, str]]] = []
+        advanced_ids: list[str] = []
+        scanned_ids: list[str] = []
+        blocked_ids: set[str] = set()
+        enforce_budget = len(candidate_ids) > 1
+
+        def unit_for_regular_path(path: Path, raw_id: str) -> RawUnit | None:
+            if path.is_symlink():
+                raise RuntimeError("processed Raw path is a symlink")
+            if not path.is_file():
+                return None
+            try:
+                resolved = path.expanduser().resolve(strict=True)
+                resolved.relative_to(RAW_DIR.expanduser().resolve(strict=False))
+            except (OSError, ValueError) as exc:
+                raise RuntimeError("processed Raw path is outside Raw root") from exc
+            stat = resolved.stat()
+            return RawUnit(
+                raw_id=raw_id,
+                storage="legacy_file",
+                path=resolved,
+                offset=0,
+                length=stat.st_size,
+                sha256=None,
+                captured_at=None,
+                device=stat.st_dev,
+                inode=stat.st_ino,
+            )
+
+        def nested_legacy_unit(raw_id: str) -> RawUnit | None:
+            # Do not interpolate an arbitrary ID into a glob.  The basename
+            # check above makes this a bounded date-directory probe and also
+            # keeps wildcard characters from becoming path patterns.
+            matches: list[RawUnit] = []
+            for day_dir in sorted(
+                RAW_DIR.glob(
+                    "[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]"
+                )
+            ):
+                unit = unit_for_regular_path(day_dir / raw_id, raw_id)
+                if unit is not None:
+                    matches.append(unit)
+            if len(matches) > 1:
+                raise RuntimeError("duplicate processed Raw ID")
+            return matches[0] if matches else None
+
+        def error_classification(exc: BaseException) -> str:
+            message = str(exc).lower()
+            if "digest" in message or "hash" in message:
+                return "digest_mismatch"
+            if any(
+                marker in message
+                for marker in ("schema", "malformed", "identity", "invalid")
+            ):
+                return "invalid_schema"
+            if any(marker in message for marker in ("missing", "no durable", "not found")):
+                return "missing_artifact"
+            return "hold"
+
+        for raw_id in candidate_ids:
+            if enforce_budget and (time.perf_counter() - started) * 1000 >= pass_budget_ms:
+                budget_exhausted = True
+                break
+            scanned_ids.append(raw_id)
+            if (
+                not raw_id
+                or raw_id in {".", ".."}
+                or Path(raw_id).name != raw_id
+                or "/" in raw_id
+                or "\\" in raw_id
+                or "\x00" in raw_id
+            ):
+                # Do not echo an unsafe state value or construct a path from
+                # it.  It is a held state record, not an external-path error.
+                held.append(
+                    {
+                        "status": "hold",
+                        "reason": "invalid_raw_id",
+                        "classification": "invalid_raw_id",
+                        "quarantine": {"status": "unchanged", "path": None},
+                    }
+                )
+                blocked_ids.add(raw_id)
+                continue
+            # Semantic children are derived artifacts, not authoritative Raw
+            # units.  Processed state historically contains these names; the
+            # reconciler must intersect state with resolvable RawStore units
+            # rather than creating thousands of false holds.
+            if raw_id.startswith("semantic-") and "-child-" in raw_id:
+                advanced_ids.append(raw_id)
+                continue
+            try:
+                reference_path = reference_dir / raw_id
+                if reference_path.is_symlink():
+                    raise RuntimeError("logical Raw reference is a symlink")
+                if reference_path.exists() and not reference_path.is_file():
+                    raise RuntimeError("logical Raw reference is not a file")
+                unit: RawUnit | None = None
+                resolution: dict[str, str] = {}
+                if reference_path.is_file():
+                    # References are authoritative when present.  A malformed
+                    # or conflicting reference is held; do not fall through to
+                    # a same-name flat file and bypass v2 precedence.
+                    unit = raw_store.resolve_reference(reference_path)
+                    if unit is None:
+                        raise RuntimeError("logical Raw reference is invalid")
+                    resolution["resolution"] = "reference"
+
+                # A reference can be absent for old state.  In v2, consult the
+                # segment authority before any flat path so a duplicate legacy
+                # file cannot win by path order.  RawStore implementations in
+                # focused tests may not expose this optional probe.
+                if unit is None and layout == "v2":
+                    resolve_segment = getattr(raw_store, "resolve_segment", None)
+                    if callable(resolve_segment):
+                        unit = resolve_segment(raw_id)
+                        if unit is not None:
+                            resolution["resolution"] = "segment_fallback"
+
+                if unit is None:
+                    raw_path = RAW_DIR / raw_id
+                    unit = unit_for_regular_path(raw_path, raw_id)
+                    if unit is not None:
+                        resolution["resolution"] = "legacy_flat"
+                if unit is None:
+                    unit = nested_legacy_unit(raw_id)
+                    if unit is not None:
+                        resolution["resolution"] = "legacy_nested"
+                if unit is None:
+                    resolve_legacy_archive = getattr(
+                        raw_store, "resolve_legacy_archive", None
+                    )
+                    if callable(resolve_legacy_archive):
+                        unit = resolve_legacy_archive(raw_id)
+                        if unit is not None:
+                            resolution["resolution"] = "legacy_archive"
+                if unit is None:
+                    # Stale/removed processed IDs are not authoritative Raw
+                    # units.  They are skipped (rather than held) so a legacy
+                    # child backlog cannot consume the bounded cursor.
+                    advanced_ids.append(raw_id)
+                    continue
+                candidates.append((unit, resolution))
+            except Exception as exc:
+                held.append(
+                    {
+                        "raw_id": raw_id,
+                        "status": "hold",
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "classification": error_classification(exc),
+                        "quarantine": {"status": "unchanged", "path": None},
+                    }
+                )
+                blocked_ids.add(raw_id)
+
+        for unit, resolution in candidates:
+            if enforce_budget and (time.perf_counter() - started) * 1000 >= pass_budget_ms:
+                budget_exhausted = True
+                break
+            row: dict[str, Any] = {"raw_id": unit.raw_id, **resolution}
+            row["raw_store"] = {
+                "storage": unit.storage,
+                "stored_sha256": unit.sha256,
+                "commit_sha256": unit.commit.sha256 if unit.commit is not None else None,
+            }
+            try:
+                receipt_path: Path | None = None
+                receipt_status = "not_applicable"
+                parent_path = (
+                    unit.path
+                    if unit.storage == "legacy_file"
+                    else raw_store.materialize_ingest(unit, reference_dir)
+                )
+                raw_bytes = raw_store.read_bytes(unit)
+                row["raw_sha256"] = hashlib.sha256(raw_bytes).hexdigest()
+
+                if unit.commit is not None:
+                    artifacts = project_native_transcript(
+                        parent_path,
+                        raw_bytes,
+                        unit.commit,
+                        output_dir=output_dir,
+                        max_child_bytes=max_child_bytes,
+                    )
+                else:
+                    artifacts = project_parent_raw(
+                        parent_path,
+                        output_dir=output_dir,
+                        max_child_bytes=max_child_bytes,
+                        raw_bytes=raw_bytes,
+                    )
+                row["kind"] = artifacts.kind
+                manifest_path = artifacts.manifest_path
+                child_paths = tuple(artifacts.child_paths)
+                artifact_paths = list(child_paths)
+                if manifest_path is not None:
+                    verified = verify_projection_bundle(manifest_path)
+                    artifact_paths.insert(0, manifest_path)
+                    if verified.get("status") == "delegated":
+                        manifest_bytes = manifest_path.read_bytes()
+                        projection_id = verified.get("projection_id")
+                        if isinstance(projection_id, str):
+                            receipt_path = output_dir / (
+                                f"semantic-{projection_id}-manifest-"
+                                f"{hashlib.sha256(manifest_bytes).hexdigest()}.receipt.json"
+                            )
+                            artifact_paths.append(receipt_path)
+                            receipt_status = "verified"
+                    elif verified.get("status") == "noop":
+                        noop_filename = verified.get("noop_receipt_filename")
+                        if isinstance(noop_filename, str):
+                            receipt_path = output_dir / noop_filename
+                            artifact_paths.append(receipt_path)
+                            receipt_status = "verified"
+
+                artifact_names = {path.name for path in artifact_paths}
+                all_preexisting = bool(artifact_names) and artifact_names.issubset(
+                    artifact_names_before
+                )
+                if not artifact_names:
+                    row["state_before"] = "absent"
+                    row["state_after"] = "absent"
+                    row["status"] = "passthrough"
+                    processed.append(row)
+                else:
+                    row["state_before"] = (
+                        "completed"
+                        if all_preexisting
+                        else "incomplete"
+                        if manifest_path is not None
+                        and manifest_path.name in artifact_names_before
+                        else "absent"
+                    )
+                    row["state_after"] = "completed"
+                    row["status"] = "completed" if all_preexisting else "repaired"
+                    processed.append(row)
+                advanced_ids.append(unit.raw_id)
+                row["manifest"] = (
+                    root_relative(manifest_path) if manifest_path is not None else None
+                )
+                row["children"] = [root_relative(path) for path in child_paths]
+                row["manifest_path"] = row["manifest"]
+                row["child_paths"] = list(row["children"])
+                row["parent_sha256"] = row["raw_sha256"]
+                row["receipt"] = (
+                    root_relative(receipt_path) if receipt_path is not None else None
+                )
+                row["receipt_status"] = receipt_status
+                row["children_status"] = [
+                    {"path": path, "status": "verified"}
+                    for path in row["children"]
+                ]
+                row["classification"] = (
+                    "missing_artifact_repaired"
+                    if row["status"] == "repaired"
+                    else "projection_verified"
+                    if row["status"] == "completed"
+                    else "derived_projection_not_required"
+                )
+                row["quarantine"] = {"status": "unchanged", "path": None}
+            except Exception as exc:
+                row["status"] = "hold"
+                row["error"] = f"{type(exc).__name__}: {exc}"
+                row["classification"] = error_classification(exc)
+                row["receipt"] = None
+                row["receipt_status"] = "unverified"
+                row["children_status"] = []
+                row["quarantine"] = {"status": "unchanged", "path": None}
+                held.append(row)
+                blocked_ids.add(unit.raw_id)
+
+        completed_ids = set(advanced_ids)
+        candidate_ids_by_raw_id = {unit.raw_id for unit, _resolution in candidates}
+        checkpoint: str | None = None
+        for raw_id in scanned_ids:
+            if raw_id in blocked_ids:
+                break
+            if raw_id in candidate_ids_by_raw_id and raw_id not in completed_ids:
+                break
+            if raw_id in completed_ids:
+                checkpoint = raw_id
+        if checkpoint is not None:
+            state[_PROCESSED_PROJECTION_RECONCILER_CURSOR] = checkpoint
+        elif wrapped:
+            state[_PROCESSED_PROJECTION_RECONCILER_CURSOR] = None
+
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+        timings_value = state.get(_PROCESSED_PROJECTION_RECONCILER_TIMINGS)
+        timings = [
+            float(value)
+            for value in timings_value
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ] if isinstance(timings_value, list) else []
+        timings = (timings + [elapsed_ms])[-20:]
+        slow_streak = state.get(_PROCESSED_PROJECTION_RECONCILER_SLOW_STREAK)
+        slow_streak = slow_streak if isinstance(slow_streak, int) else 0
+        slow_streak = slow_streak + 1 if elapsed_ms > 250 else 0
+        disabled = slow_streak >= 3
+        state[_PROCESSED_PROJECTION_RECONCILER_TIMINGS] = timings
+        state[_PROCESSED_PROJECTION_RECONCILER_SLOW_STREAK] = slow_streak
+        state[_PROCESSED_PROJECTION_RECONCILER_DISABLED] = disabled
+        # Re-read immediately before publishing the checkpoint.  The normal
+        # ingest worker may have advanced processed/job fields while this pass
+        # was reading Raw bytes; only the reconciler-owned additive keys are
+        # merged into that latest snapshot.
+        reconciler_keys = {
+            _PROCESSED_PROJECTION_RECONCILER_CURSOR,
+            _PROCESSED_PROJECTION_RECONCILER_TIMINGS,
+            _PROCESSED_PROJECTION_RECONCILER_SLOW_STREAK,
+            _PROCESSED_PROJECTION_RECONCILER_DISABLED,
+        }
+        latest_state = _load_state()
+        for key in reconciler_keys:
+            if key in state:
+                latest_state[key] = state[key]
+        state = latest_state
+        _save_state(state)
+        ordered_timings = sorted(timings)
+        p95 = (
+            ordered_timings[max(0, math.ceil(len(ordered_timings) * 0.95) - 1)]
+            if ordered_timings
+            else elapsed_ms
+        )
+        max_ms = max(ordered_timings, default=elapsed_ms)
+        return {
+            "status": "disabled" if disabled else "hold" if held else "ok",
+            "disabled": disabled,
+            "processed": processed,
+            "held": held,
+            "cursor": state.get(_PROCESSED_PROJECTION_RECONCILER_CURSOR),
+            "wrapped": wrapped,
+            "elapsed_ms": elapsed_ms,
+            "p95_ms": p95,
+            "max_ms": max_ms,
+            "slow_streak": slow_streak,
+            "budget_exhausted": budget_exhausted,
+        }
 
 
 def should_ingest() -> tuple[bool, str]:
@@ -1253,6 +1722,9 @@ def run_pending_ingest(
             },
             ollama=initial_ollama_status,
             llm=None,
+            authority_preflight=authority_preflight,
+            mutation_authority=authority_preflight,
+            mutation_ready=True,
         )
 
         succeeded_units = 0
@@ -1730,6 +2202,9 @@ def run_pending_ingest(
             },
             ollama=get_ollama_status(),
             llm=None,
+            authority_preflight=authority_preflight,
+            mutation_authority=authority_preflight,
+            mutation_ready=True,
         )
 
         result = _ingest_batch_result(

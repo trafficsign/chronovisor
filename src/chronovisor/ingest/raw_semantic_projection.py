@@ -16,6 +16,7 @@ import contextlib
 import json
 import os
 import re
+import stat
 import uuid
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -598,6 +599,77 @@ def _pack_children(
     return children
 
 
+def _open_projection_output_dir(path: Path) -> int:
+    """Open the lexical parent path without following a symlink component."""
+
+    parent = Path(os.path.abspath(os.fspath(path.parent.expanduser())))
+    directory = getattr(os, "O_DIRECTORY", None)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if directory is None or nofollow is None:
+        raise ProjectionConflictError("safe projection artifact publication is unavailable")
+    descriptor = os.open(parent.anchor, os.O_RDONLY | directory)
+    try:
+        for component in parent.parts[1:]:
+            try:
+                child = os.open(
+                    component,
+                    os.O_RDONLY | directory | nofollow,
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                os.mkdir(component, 0o777, dir_fd=descriptor)
+                child = os.open(
+                    component,
+                    os.O_RDONLY | directory | nofollow,
+                    dir_fd=descriptor,
+                )
+            os.close(descriptor)
+            descriptor = child
+    except OSError as exc:
+        os.close(descriptor)
+        raise ProjectionConflictError(
+            f"projection artifact directory is unsafe: {path.name}"
+        ) from exc
+    return descriptor
+
+
+def _read_projection_artifact(directory_fd: int, name: str) -> bytes:
+    """Read one regular, non-symlink artifact from an already-bound directory."""
+
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=directory_fd,
+        )
+    except OSError as exc:
+        raise ProjectionConflictError(f"projection artifact is unsafe: {name}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ProjectionConflictError(f"projection artifact is unsafe: {name}")
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
+            return stream.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _projection_output_dir_is_bound(path: Path, directory_fd: int) -> bool:
+    """Confirm the lexical parent still names the directory held by ``directory_fd``."""
+
+    try:
+        current = path.parent.stat()
+        bound = os.fstat(directory_fd)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(current.st_mode)
+        and current.st_dev == bound.st_dev
+        and current.st_ino == bound.st_ino
+    )
+
+
 def _atomic_create_or_verify(path: Path, payload: bytes) -> bool:
     """Create ``path`` without replacement, then exact-read it back.
 
@@ -606,43 +678,74 @@ def _atomic_create_or_verify(path: Path, payload: bytes) -> bool:
     without the overwrite behavior of ``os.replace``.
     """
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        observed = path.read_bytes()
-        if observed != payload:
-            raise ProjectionConflictError(
-                f"projection artifact conflict at {path.name}"
-            )
-        # A previous publication may have returned an fsync error after the
-        # hard link became visible.  Re-sync the directory before accepting an
-        # existing exact artifact so a retry can close that crash window.
-        _fsync_directory(path.parent)
-        return True
-
-    temporary = path.parent / f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    if Path(path.name).name != path.name:
+        raise ProjectionConflictError("projection artifact filename is invalid")
+    directory_fd = _open_projection_output_dir(path)
+    temporary = f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     try:
+        try:
+            observed = _read_projection_artifact(directory_fd, path.name)
+        except ProjectionConflictError as exc:
+            if not isinstance(exc.__cause__, FileNotFoundError):
+                raise
+        else:
+            if observed != payload:
+                raise ProjectionConflictError(
+                    f"projection artifact conflict at {path.name}"
+                )
+            # A previous publication may have returned an fsync error after the
+            # hard link became visible. Re-sync the bound directory before
+            # accepting an existing exact artifact.
+            os.fsync(directory_fd)
+            _fsync_directory(path.parent)
+            if not _projection_output_dir_is_bound(path, directory_fd):
+                raise ProjectionConflictError(
+                    f"projection artifact directory changed: {path.name}"
+                )
+            return True
+
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
         try:
-            os.link(temporary, path)
+            os.link(
+                temporary,
+                path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
         except FileExistsError as exc:
-            observed = path.read_bytes()
+            observed = _read_projection_artifact(directory_fd, path.name)
             if observed != payload:
                 raise ProjectionConflictError(
                     f"projection artifact conflict at {path.name}"
                 ) from exc
+        os.fsync(directory_fd)
         _fsync_directory(path.parent)
+        if _read_projection_artifact(directory_fd, path.name) != payload:
+            raise ProjectionConflictError(
+                f"projection artifact read-back mismatch at {path.name}"
+            )
+        if not _projection_output_dir_is_bound(path, directory_fd):
+            raise ProjectionConflictError(
+                f"projection artifact directory changed: {path.name}"
+            )
     finally:
         with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
+            os.unlink(temporary, dir_fd=directory_fd)
+        os.close(directory_fd)
 
-    if path.read_bytes() != payload:
-        raise ProjectionConflictError(
-            f"projection artifact read-back mismatch at {path.name}"
-        )
+    # The directory descriptor is intentionally held through publication and
+    # read-back. A swapped path can only cause the subsequent bundle verifier
+    # to fail closed; it cannot make this primitive accept a symlink target.
     return False
 
 
@@ -1654,6 +1757,7 @@ def projection_bundle_state_for_parent(
     raw_path: Path,
     *,
     projection_dir: Path | None = None,
+    raw_bytes: bytes | None = None,
 ) -> Literal["absent", "incomplete", "completed", "invalid"]:
     """Inspect current-policy projection publication for one immutable parent.
 
@@ -1663,7 +1767,9 @@ def projection_bundle_state_for_parent(
     """
 
     try:
-        parent_sha256 = _sha256(raw_path.read_bytes())
+        parent_sha256 = _sha256(
+            raw_path.read_bytes() if raw_bytes is None else raw_bytes
+        )
     except OSError:
         return "absent"
 
@@ -1732,11 +1838,40 @@ def projection_bundle_state_for_parent(
                         f"semantic-{projection_id}-manifest-*.receipt.json"
                     )
                 )
+                children = manifest.get("children")
+                children_shape_valid = isinstance(children, list) and bool(children) and all(
+                    isinstance(child, dict)
+                    and isinstance(child.get("filename"), str)
+                    and Path(child["filename"]).name == child["filename"]
+                    and isinstance(child.get("child_index"), str)
+                    and isinstance(child.get("child_count"), str)
+                    for child in children
+                )
+                if children_shape_valid:
+                    missing_child = any(
+                        not (
+                            (manifest_path.parent / child["filename"]).is_file()
+                            and not (
+                                manifest_path.parent / child["filename"]
+                            ).is_symlink()
+                        )
+                        for child in children
+                    )
+                else:
+                    missing_child = False
                 # The manifest is the first durable publication and the bundle
                 # receipt is the last.  No receipt at all therefore identifies
                 # the one safe crash-resume window.  A differently hashed
                 # receipt proves the manifest changed after completion.
-                if not expected_receipt.exists() and not any_receipt:
+                if not children_shape_valid:
+                    observed.append("invalid")
+                elif missing_child:
+                    observed.append("incomplete")
+                elif any_receipt and not expected_receipt.exists():
+                    observed.append("invalid")
+                elif not expected_receipt.exists():
+                    # A valid manifest with all child files present but no
+                    # final receipt is the other intent-first crash window.
                     observed.append("incomplete")
                 else:
                     observed.append("invalid")

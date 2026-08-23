@@ -1780,12 +1780,34 @@ def _projection_parent_can_retry(raw_path: Path, entry: dict[str, Any]) -> bool:
     ):
         return False
     try:
+        from chronovisor.core.raw_segment import RawSegmentError
         from chronovisor.ingest.raw_semantic_projection import (
             projection_bundle_state_for_parent,
         )
 
-        state = projection_bundle_state_for_parent(raw_path)
-    except (OSError, ValueError, TypeError):
+        projection_dir: Path | None = None
+        raw_bytes: bytes | None = None
+        # v2 queue entries are small logical references.  The projection
+        # identity is bound to the authoritative segment bytes, while the
+        # derived manifest lives beside the other artifacts (not beside the
+        # reference).  Resolve/read the Raw unit before asking the existing
+        # retry classifier so a moved logical reference cannot hash its JSON
+        # locator as if it were the source transcript.
+        if raw_path.parent.name == "parents":
+            from chronovisor.core.raw_store import RawStore
+
+            store = RawStore(chronovisor_store.RAW_DIR)
+            unit = store.resolve_reference(raw_path)
+            if unit is not None:
+                raw_bytes = store.read_bytes(unit)
+                projection_dir = raw_path.parent.parent / "artifacts"
+
+        state = projection_bundle_state_for_parent(
+            raw_path,
+            projection_dir=projection_dir,
+            raw_bytes=raw_bytes,
+        )
+    except (OSError, ValueError, TypeError, RawSegmentError):
         return False
     # completed: the crash happened after durable bundle publication;
     # incomplete: manifest-first publication is explicitly resumable.

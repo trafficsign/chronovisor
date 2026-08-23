@@ -25,6 +25,8 @@ def _disable_runtime_status_reset(
         "reset_stale_runtime_status",
         lambda: False,
     )
+    monkeypatch.setattr(ingest_drain, "init_chronovisor", lambda: runtime_root)
+    monkeypatch.setattr(ingest_drain.orchestrator, "reset_stale_lock", lambda: False)
     monkeypatch.setattr(ingest_drain, "CHRONOVISOR_ROOT", runtime_root)
     monkeypatch.setattr(
         ingest_drain,
@@ -70,6 +72,17 @@ def _disable_runtime_status_reset(
             "retryable": False,
             "error": None,
             "artifact_sha256": "a" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "reconcile_processed_projections",
+        lambda **_kwargs: {
+            "status": "disabled",
+            "disabled": True,
+            "reason": "test",
+            "processed": [],
+            "held": [],
         },
     )
 
@@ -225,6 +238,7 @@ def test_drain_releases_runner_when_cycle_raises(
 
 def test_drain_runs_batches_until_empty(tmp_path: Path, monkeypatch) -> None:
     state = {"pending": 25, "init": 0, "reset": 0}
+    events: list[str] = []
 
     monkeypatch.setattr(
         ingest_drain, "init_chronovisor", lambda: state.__setitem__("init", state["init"] + 1)
@@ -241,6 +255,7 @@ def test_drain_runs_batches_until_empty(tmp_path: Path, monkeypatch) -> None:
     )
 
     def fake_run_pending_ingest(*, force: bool = False, max_units: int = 10) -> dict:
+        events.append("ingest")
         assert force is True
         assert max_units == 10
         processed = min(max_units, state["pending"])
@@ -253,6 +268,12 @@ def test_drain_runs_batches_until_empty(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         ingest_drain.orchestrator, "run_pending_ingest", fake_run_pending_ingest
     )
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "reconcile_processed_projections",
+        lambda **kwargs: events.append(f"reconcile:{kwargs['max_parents']}")
+        or {"status": "ok", "disabled": False, "processed": [], "held": []},
+    )
 
     log_file = tmp_path / "drain.jsonl"
     result = ingest_drain.drain(max_batches=3, sleep_seconds=0, log_file=log_file)
@@ -264,6 +285,7 @@ def test_drain_runs_batches_until_empty(tmp_path: Path, monkeypatch) -> None:
     assert result["files_processed"] == 25
     assert state["init"] == 1
     assert state["reset"] == 1
+    assert events[-1] == "reconcile:128"
 
     records = [json.loads(line) for line in log_file.read_text().splitlines()]
     assert [record["files_processed"] for record in records] == [10, 10, 5]
@@ -305,6 +327,13 @@ def test_drain_check_mode_does_not_run_ingest(monkeypatch) -> None:
         "run_pending_ingest",
         lambda *, force=False, max_units=10: (_ for _ in ()).throw(
             AssertionError("should not run")
+        ),
+    )
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "reconcile_processed_projections",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("check mode must remain read-only")
         ),
     )
 
@@ -524,3 +553,54 @@ def test_drain_reports_authority_outage_even_when_failed_raws_are_deferred(
     assert result["pending_after"] == 0
     assert result["alert"] is True
     assert result["liveness"]["alert"] is True
+
+
+def test_successful_authority_preflight_clears_sticky_runtime_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = {
+        "ok": False,
+        "status": "blocked",
+        "blocked_by": "decision_authority",
+        "retryable": True,
+        "error": "authority unavailable",
+        "artifact_sha256": None,
+    }
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "ingest_authority_preflight",
+        lambda: dict(authority),
+    )
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "get_pending_raw_files",
+        lambda: [],
+    )
+    writes: list[dict] = []
+    monkeypatch.setattr(
+        ingest_drain.runtime_status,
+        "safe_write_status",
+        lambda **fields: writes.append(fields),
+    )
+
+    blocked = ingest_drain._drain(max_batches=1, sleep_seconds=0)
+    assert blocked["status"] == "blocked"
+
+    authority.update(
+        {
+            "ok": True,
+            "status": "ready",
+            "blocked_by": None,
+            "retryable": False,
+            "error": None,
+            "artifact_sha256": "a" * 64,
+        }
+    )
+    recovered = ingest_drain._drain(max_batches=1, sleep_seconds=0)
+
+    assert recovered["status"] == "drained"
+    assert writes[-1]["state"] == "idle"
+    assert writes[-1]["stage"] == "idle"
+    assert writes[-1]["pending"] == 0
+    assert writes[-1]["mutation_ready"] is True
+    assert writes[-1]["mutation_authority"]["ok"] is True

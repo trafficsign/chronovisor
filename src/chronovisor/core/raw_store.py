@@ -16,6 +16,7 @@ import stat
 import tomllib
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -122,6 +123,8 @@ class RawUnit:
     captured_at: str | None
     commit: RawSegmentCommit | None = None
     archive_member: object | None = None
+    device: int | None = None
+    inode: int | None = None
 
     @property
     def is_segment(self) -> bool:
@@ -142,6 +145,7 @@ class RawStore:
         self._units_cache: tuple[RawUnit, ...] | None = None
         self._units_by_id: dict[str, RawUnit] | None = None
         self._segment_units_cache: tuple[RawUnit, ...] | None = None
+        self._legacy_archive_units_by_id: dict[str, RawUnit] | None = None
         self._verified_legacy_manifests: dict[Path, tuple[int, ...]] = {}
 
     def _legacy_units(self) -> Iterator[RawUnit]:
@@ -161,6 +165,8 @@ class RawStore:
                 length=stat.st_size,
                 sha256=None,
                 captured_at=None,
+                device=stat.st_dev,
+                inode=stat.st_ino,
             )
 
     def _sealed_units(self) -> Iterator[RawUnit]:
@@ -205,6 +211,37 @@ class RawStore:
                 captured_at=f"{member.captured_date.replace('/', '-')}T00:00:00+09:00",
                 archive_member=member,
             )
+
+    def _legacy_archive_index(self) -> dict[str, RawUnit]:
+        """Index archive manifest rows without constructing segment/flat units."""
+
+        if self._legacy_archive_units_by_id is None:
+            from chronovisor.core.legacy_archive import iter_legacy_members
+
+            self._legacy_archive_units_by_id = {
+                member.raw_id: RawUnit(
+                    raw_id=member.raw_id,
+                    storage="legacy_archive",
+                    path=member.archive_path,
+                    offset=0,
+                    length=member.length,
+                    sha256=member.sha256,
+                    captured_at=(
+                        f"{member.captured_date.replace('/', '-')}T00:00:00+09:00"
+                    ),
+                    archive_member=member,
+                )
+                for member in iter_legacy_members(self.raw_dir)
+                if member.raw_id.endswith(".md")
+            }
+        return self._legacy_archive_units_by_id
+
+    def resolve_legacy_archive(self, raw_id: str) -> RawUnit | None:
+        """Resolve one archived Markdown Raw without scanning every storage kind."""
+
+        if Path(raw_id).name != raw_id or not raw_id:
+            raise ValueError("raw_id must be a basename")
+        return self._legacy_archive_index().get(raw_id)
 
     def _open_units(self) -> Iterator[RawUnit]:
         pattern = "[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/*.commits.jsonl"
@@ -322,12 +359,7 @@ class RawStore:
         if unit is None:
             raise FileNotFoundError(raw)
         if unit.storage == "legacy_file":
-            value = unit.path.read_bytes()
-            if len(value) != unit.length:
-                raise RawSegmentCorrupt(
-                    f"legacy Raw changed while reading: {unit.raw_id}"
-                )
-            return value
+            return self._read_legacy_bytes(unit)
         if unit.storage == "legacy_archive":
             from chronovisor.core.legacy_archive import (
                 LegacyArchiveMember,
@@ -347,6 +379,63 @@ class RawStore:
             raise RawSegmentCorrupt(f"segment Raw has no digest: {unit.raw_id}")
         if hashlib.sha256(value).hexdigest() != unit.sha256:
             raise RawSegmentCorrupt(f"segment Raw digest mismatch: {unit.raw_id}")
+        return value
+
+    def _read_legacy_bytes(self, unit: RawUnit) -> bytes:
+        """Read one enumerated legacy Raw through a no-follow descriptor chain."""
+
+        if unit.device is None or unit.inode is None:
+            raise RawSegmentCorrupt("legacy Raw has no inode binding")
+        try:
+            relative = unit.path.relative_to(self.raw_dir)
+        except ValueError as exc:
+            raise RawSegmentCorrupt("legacy Raw path is outside Raw root") from exc
+        if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+            raise RawSegmentCorrupt("legacy Raw relative path is invalid")
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        directory = getattr(os, "O_DIRECTORY", None)
+        if nofollow is None or directory is None:
+            raise RawSegmentCorrupt("safe legacy Raw descriptor open is unavailable")
+
+        directory_fd: int | None = None
+        file_fd: int | None = None
+        try:
+            directory_fd = os.open(self.raw_dir, os.O_RDONLY | directory | nofollow)
+            for part in relative.parts[:-1]:
+                next_fd = os.open(
+                    part,
+                    os.O_RDONLY | directory | nofollow,
+                    dir_fd=directory_fd,
+                )
+                os.close(directory_fd)
+                directory_fd = next_fd
+            file_fd = os.open(
+                relative.parts[-1], os.O_RDONLY | nofollow, dir_fd=directory_fd
+            )
+            observed = os.fstat(file_fd)
+            if (
+                not stat.S_ISREG(observed.st_mode)
+                or observed.st_dev != unit.device
+                or observed.st_ino != unit.inode
+                or observed.st_size != unit.length
+            ):
+                raise RawSegmentCorrupt(
+                    f"legacy Raw changed while reading: {unit.raw_id}"
+                )
+            with os.fdopen(file_fd, "rb") as stream:
+                file_fd = None
+                value = stream.read()
+        except OSError as exc:
+            raise RawSegmentCorrupt(
+                f"legacy Raw is missing or unsafe: {unit.raw_id}"
+            ) from exc
+        finally:
+            if file_fd is not None:
+                os.close(file_fd)
+            if directory_fd is not None:
+                os.close(directory_fd)
+        if len(value) != unit.length:
+            raise RawSegmentCorrupt(f"legacy Raw changed while reading: {unit.raw_id}")
         return value
 
     def read_exact(self, raw: str | RawUnit) -> bytes:
@@ -581,11 +670,93 @@ class RawStore:
         raw_id = payload.get("raw_id")
         if not isinstance(raw_id, str) or raw_id != path.name:
             raise RawSegmentCorrupt("logical Raw reference ID is invalid")
-        unit = (
-            self.resolve_segment(raw_id)
-            if isinstance(payload.get("commit"), dict)
-            else self.resolve(raw_id)
-        )
+        unit: RawUnit | None
+        if isinstance(payload.get("commit"), dict):
+            commit = RawSegmentCommit.from_dict(payload["commit"])
+            if commit.raw_id != raw_id:
+                raise RawSegmentCorrupt("logical Raw reference commit ID is invalid")
+            try:
+                day = datetime.fromisoformat(commit.captured_at).date()
+            except (TypeError, ValueError) as exc:
+                raise RawSegmentCorrupt(
+                    "logical Raw reference commit timestamp is invalid"
+                ) from exc
+            prefix = f"{commit.host}-{commit.session_key}"
+            base = f"{prefix}-part-{commit.part:03d}"
+            day_dir = self.raw_dir / day.strftime("%Y") / day.strftime("%m") / day.strftime("%d")
+            sealed_path = day_dir / f"{base}.jsonl.zst"
+            sealed_manifest = day_dir / f"{base}.manifest.json"
+            open_path = day_dir / f"{base}.jsonl.open"
+            open_journal = day_dir / f"{base}.commits.jsonl"
+            if (
+                sealed_path.is_file()
+                and not sealed_path.is_symlink()
+                and sealed_manifest.is_file()
+                and not sealed_manifest.is_symlink()
+            ):
+                observed = next(
+                    (item for item in manifest_commits(sealed_manifest) if item.raw_id == raw_id),
+                    None,
+                )
+                unit = RawUnit(
+                    raw_id=raw_id,
+                    storage="segment_sealed",
+                    path=sealed_path,
+                    offset=commit.offset,
+                    length=commit.length,
+                    sha256=commit.sha256,
+                    captured_at=commit.captured_at,
+                    commit=commit,
+                )
+            elif (
+                open_path.is_file()
+                and not open_path.is_symlink()
+                and open_journal.is_file()
+                and not open_journal.is_symlink()
+            ):
+                observed = next(
+                    (item for item in read_commits(open_journal) if item.raw_id == raw_id),
+                    None,
+                )
+                unit = RawUnit(
+                    raw_id=raw_id,
+                    storage="segment_open",
+                    path=open_path,
+                    offset=commit.offset,
+                    length=commit.length,
+                    sha256=commit.sha256,
+                    captured_at=commit.captured_at,
+                    commit=commit,
+                )
+            else:
+                unit = None
+                observed = None
+            if observed != commit:
+                raise RawSegmentCorrupt("logical Raw reference does not match its segment")
+        else:
+            # Legacy archive references historically carried only the logical
+            # ID, byte length, and digest.  Resolving them through ``resolve``
+            # builds the complete 20k-unit inventory for every reconciler
+            # process.  Read the small archive manifests directly instead;
+            # archive bytes remain verified by ``read_bytes`` before use.
+            if payload.get("legacy_byte_passthrough") is True:
+                expected_length = payload.get("length")
+                expected_sha256 = payload.get("sha256")
+                unit = self._legacy_archive_index().get(raw_id)
+                if unit is not None and (
+                    unit.length != expected_length or unit.sha256 != expected_sha256
+                ):
+                    raise RawSegmentCorrupt(
+                        "logical Raw reference archive evidence mismatch"
+                    )
+                if unit is None:
+                    # Preserve the historical fallback for a moved/deleted
+                    # archive; this branch is exceptional and will be held by
+                    # the caller rather than turning an invalid reference into
+                    # a flat-file projection.
+                    unit = self.resolve(raw_id)
+            else:
+                unit = self.resolve(raw_id)
         normalized_payload = dict(payload)
         normalized_payload["schema"] = RAW_REFERENCE_SCHEMA
         if unit is None or normalized_payload != self.reference_payload(unit):

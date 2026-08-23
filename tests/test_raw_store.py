@@ -65,6 +65,36 @@ def test_dual_read_precedence_is_reversible(tmp_path: Path) -> None:
     assert RawStore(raw_dir, mode="v2").read_bytes("save-shared.md") == segment
 
 
+def test_legacy_read_rejects_final_symlink_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    raw_path = raw_dir / "save-safe.md"
+    raw_path.write_bytes(b"inside Raw root\n")
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(b"must never reach projection\n")
+    store = RawStore(raw_dir, mode="legacy")
+    unit = store.resolve(raw_path.name)
+    assert unit is not None
+
+    real_open = raw_store_module.os.open
+    swapped = False
+
+    def swap_final_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if path == raw_path.name and dir_fd is not None and not swapped:
+            swapped = True
+            raw_path.unlink()
+            raw_path.symlink_to(outside)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(raw_store_module.os, "open", swap_final_open)
+
+    with pytest.raises(RawSegmentCorrupt, match="missing or unsafe"):
+        store.read_bytes(unit)
+
+
 def test_store_reads_open_and_sealed_ranges_by_logical_raw_id(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     source = tmp_path / "session.jsonl"
