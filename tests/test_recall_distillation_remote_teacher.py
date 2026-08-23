@@ -50,13 +50,17 @@ def _resolver(tmp_path: Path) -> CredentialResolver:
 
 
 def _response(
-    content: str, *, status: int = 200, model: object = "ox-alpha-free"
+    content: str,
+    *,
+    status: int = 200,
+    model: object = "ox-alpha-free",
+    finish_reason: str = "stop",
 ) -> httpx.Response:
     payload: dict[str, object] = {
         "choices": [
             {
                 "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
+                "finish_reason": finish_reason,
             }
         ],
     }
@@ -150,6 +154,7 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
         assert len(cast(str, result[key])) == 64
     body = json.loads(cast(bytes, sender.calls[0].data))
     assert body["model"] == "ox-alpha-free"
+    assert body["max_tokens"] == 16_000
     assert sender.calls[0].full_url == f"{ENDPOINT}/chat/completions"
     assert body["response_format"] == {
         "type": "json_schema",
@@ -250,6 +255,19 @@ def test_free_form_rationale_is_rejected_at_response_schema_seam(
 
     assert result["_failure"]["class"] == "invalid_response"
     assert result["_failure"]["stage"] == "teacher_label_schema"
+    assert result["_failure"]["labelable"] is False
+
+
+def test_length_limited_response_is_rejected_before_json_validation(
+    tmp_path: Path,
+) -> None:
+    sender = FakeSender(_response(_label_response(), finish_reason="length"))
+    teacher = _teacher(tmp_path, sender)
+
+    result = teacher.evaluate(_payload())
+
+    assert result["_failure"]["class"] == "invalid_response"
+    assert result["_failure"]["stage"] == "teacher_finish_reason"
     assert result["_failure"]["labelable"] is False
 
 

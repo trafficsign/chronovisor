@@ -535,7 +535,7 @@ class OpenCodeOxAlphaTeacher:
                     ),
                     system=system,
                     format=schema,
-                    max_output_tokens=4_000,
+                    max_output_tokens=16_000,
                     timeout_ms=self.timeout_ms,
                     temperature=0,
                 ),
@@ -569,6 +569,14 @@ class OpenCodeOxAlphaTeacher:
                 "model_unavailable",
                 prompt_digest=prompt_digest,
                 schema_digest=schema_digest,
+                request_id=request_id,
+            )
+        if result.finish_reason != "stop":
+            return self._failure(
+                ProviderFailureCategory.INVALID_RESPONSE.value,
+                prompt_digest=prompt_digest,
+                schema_digest=schema_digest,
+                stage="teacher_finish_reason",
                 request_id=request_id,
             )
         try:
