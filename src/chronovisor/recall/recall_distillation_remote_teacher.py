@@ -15,6 +15,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from chronovisor.core.egress_policy import guard_egress_query
 from chronovisor.core.llm_runtime import (
     GenerationBackend,
     GenerationRequest,
@@ -28,7 +29,6 @@ from chronovisor.core.provider_profiles import (
     ProviderAdapterError,
     ProviderFailureCategory,
 )
-from chronovisor.research.research_security import guard_egress_query
 
 OX_ALPHA_PROVIDER = "opencode-go"
 OX_ALPHA_ROUTE_MODEL = "opencode-go/ox-alpha-free"

@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import socket
 
+from chronovisor.core import egress_policy
 from chronovisor.research.research_security import (
+    PolicyDecision,
     _PinnedBackend,
     external_content_metadata,
     guard_egress_query,
     guard_url,
 )
+
+
+def test_egress_policy_is_reexported_without_duplication() -> None:
+    assert PolicyDecision is egress_policy.PolicyDecision
+    assert guard_egress_query is egress_policy.guard_egress_query
 
 
 def test_egress_guard_blocks_secrets_pii_paths_and_invisible_unicode() -> None:
