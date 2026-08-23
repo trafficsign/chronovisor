@@ -193,6 +193,137 @@ def verify_chain(path: Path) -> dict[str, Any]:
     return {"records": count, "head_sha256": previous}
 
 
+def _chain_checkpoint_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".head.json")
+
+
+def _ledger_file_state(path: Path) -> dict[str, int] | None:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise DistillationStoreError("ledger is unreadable") from exc
+    return {
+        "size_bytes": stat.st_size,
+        "st_dev": stat.st_dev,
+        "st_ino": stat.st_ino,
+        "st_mtime_ns": stat.st_mtime_ns,
+        "st_ctime_ns": stat.st_ctime_ns,
+    }
+
+
+def _write_chain_checkpoint(path: Path, head: Mapping[str, Any]) -> None:
+    write_sealed_state(
+        _chain_checkpoint_path(path),
+        {
+            "kind": "ledger-chain-checkpoint",
+            "ledger_name": path.name,
+            "records": head["records"],
+            "head_sha256": head["head_sha256"],
+            "file_state": _ledger_file_state(path),
+        },
+    )
+
+
+def _read_chain_checkpoint(path: Path) -> dict[str, Any] | None:
+    try:
+        checkpoint = read_sealed(
+            _chain_checkpoint_path(path), schema=DISTILLATION_SCHEMA
+        )
+    except DistillationStoreError:
+        return None
+    if (
+        checkpoint.get("kind") != "ledger-chain-checkpoint"
+        or checkpoint.get("ledger_name") != path.name
+        or not isinstance(checkpoint.get("records"), int)
+        or isinstance(checkpoint.get("records"), bool)
+        or checkpoint["records"] < 0
+        or not isinstance(checkpoint.get("head_sha256"), str)
+        or checkpoint.get("file_state") != _ledger_file_state(path)
+    ):
+        return None
+    return {
+        "records": checkpoint["records"],
+        "head_sha256": checkpoint["head_sha256"],
+    }
+
+
+def _fsync_directory(path: Path) -> None:
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _recover_chain_tail(path: Path) -> dict[str, Any]:
+    """Verify a ledger and discard only an interrupted final record."""
+
+    previous = ""
+    count = 0
+    last_good_offset = 0
+    try:
+        with path.open("rb") as handle:
+            for index, line in enumerate(iter(handle.readline, b"")):
+                end_offset = handle.tell()
+                try:
+                    row = json.loads(line)
+                except (UnicodeError, json.JSONDecodeError) as exc:
+                    if not line.endswith(b"\n"):
+                        with path.open("r+b") as writable:
+                            writable.truncate(last_good_offset)
+                            writable.flush()
+                            os.fsync(writable.fileno())
+                        _fsync_directory(path)
+                        return {"records": count, "head_sha256": previous}
+                    raise DistillationStoreError(
+                        f"ledger row {index} is invalid"
+                    ) from exc
+                if not isinstance(row, dict):
+                    raise DistillationStoreError(f"ledger row {index} is not an object")
+                digest = row.get("record_sha256")
+                unsigned = {
+                    key: value for key, value in row.items() if key != "record_sha256"
+                }
+                if row.get("previous_sha256") != previous or digest != canonical_json_sha256_strict(
+                    unsigned
+                ):
+                    if not line.endswith(b"\n"):
+                        with path.open("r+b") as writable:
+                            writable.truncate(last_good_offset)
+                            writable.flush()
+                            os.fsync(writable.fileno())
+                        _fsync_directory(path)
+                        return {"records": count, "head_sha256": previous}
+                    raise DistillationStoreError(f"ledger chain mismatch at row {index}")
+                previous = str(digest)
+                count += 1
+                last_good_offset = end_offset
+    except FileNotFoundError:
+        return {"records": 0, "head_sha256": ""}
+    except OSError as exc:
+        raise DistillationStoreError("ledger is unreadable") from exc
+    return {"records": count, "head_sha256": previous}
+
+
+def _append_fsynced(path: Path, data: bytes) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(descriptor, "ab") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _chain_separator(path: Path) -> bytes:
+    state = _ledger_file_state(path)
+    if state is None or state["size_bytes"] == 0:
+        return b""
+    with path.open("rb") as handle:
+        handle.seek(-1, os.SEEK_END)
+        return b"" if handle.read(1) == b"\n" else b"\n"
+
+
 def append_chain(path: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
     return append_chain_batch(path, (payload,))[0]
 
@@ -200,7 +331,7 @@ def append_chain(path: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
 def append_chain_batch(
     path: Path, payloads: Iterable[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Append a bounded batch with one verification, lock, and fsync."""
+    """Append a bounded batch with a checkpoint and one data fsync."""
 
     values = [dict(payload) for payload in payloads]
     if not values:
@@ -219,7 +350,10 @@ def append_chain_batch(
     lock_path = path.with_suffix(path.suffix + ".lock")
     with _locked(lock_path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        previous = str(verify_chain(path)["head_sha256"])
+        head = _read_chain_checkpoint(path) or _recover_chain_tail(path)
+        # The checkpoint is a write-ahead recovery point for an interrupted append.
+        _write_chain_checkpoint(path, head)
+        previous = str(head["head_sha256"])
         rows: list[dict[str, Any]] = []
         encoded = bytearray()
         for payload in values:
@@ -236,11 +370,11 @@ def append_chain_batch(
             rows.append(row)
             previous = row["record_sha256"]
             encoded.extend(canonical_json_bytes_strict(row) + b"\n")
-        try:
-            existing = path.read_bytes()
-        except FileNotFoundError:
-            existing = b""
-        _atomic_write(path, existing + encoded)
+        _append_fsynced(path, _chain_separator(path) + encoded)
+        _write_chain_checkpoint(
+            path,
+            {"records": head["records"] + len(rows), "head_sha256": previous},
+        )
         return rows
 
 
