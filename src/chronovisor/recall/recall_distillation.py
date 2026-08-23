@@ -435,7 +435,7 @@ def _default_workers(
                 free_only=True,
                 allow_paid_fallback=False,
                 max_input_bytes=config.max_input_bytes,
-                timeout_ms=teacher_deadline_ms,
+                timeout_ms=max(120_000, teacher_deadline_ms),
             )
         except Exception:
             return {}, None

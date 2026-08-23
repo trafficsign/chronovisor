@@ -478,6 +478,7 @@ def test_ox_profile_requires_explicit_enable_and_builds_one_remote_teacher(
     assert counterfactual is None
     assert set(teachers) == {distill.OX_TEACHER_ROLE}
     assert teachers[distill.OX_TEACHER_ROLE].local is False
+    assert teachers[distill.OX_TEACHER_ROLE].kwargs["timeout_ms"] == 120_000
     assert counterfactual_enabled is None
 
 
