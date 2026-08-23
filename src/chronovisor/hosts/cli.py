@@ -556,6 +556,20 @@ def print_plain_status(data: dict[str, Any]) -> None:
     print(f"runtime: {runtime.get('state', 'unknown')} stage={runtime.get('stage')}")
 
 
+def _configure_core_parsers(subparsers: Any) -> None:
+    status_parser = subparsers.add_parser(
+        "status", help="Show content, recall, and runtime status."
+    )
+    status_parser.add_argument("--json", action="store_true")
+    runtime_identity_parser = subparsers.add_parser(
+        "runtime-identity",
+        help="Show the installed package revision without reading Wiki content.",
+    )
+    runtime_identity_parser.add_argument("--json", action="store_true")
+    doctor_parser = subparsers.add_parser("doctor", help="Run operational checks.")
+    doctor_parser.add_argument("--json", action="store_true")
+
+
 def _configure_hold_report_parser(subparsers: Any) -> None:
     parser = subparsers.add_parser(
         "hold-report",
@@ -602,18 +616,8 @@ def _configure_okf_parser(subparsers: Any) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = SafeArgumentParser(description="Operate and inspect Chronovisor.")
     sub = parser.add_subparsers(dest="command", required=True)
-    status_parser = sub.add_parser(
-        "status", help="Show content, recall, and runtime status."
-    )
-    status_parser.add_argument("--json", action="store_true")
-    runtime_identity_parser = sub.add_parser(
-        "runtime-identity",
-        help="Show the installed package revision without reading Wiki content.",
-    )
-    runtime_identity_parser.add_argument("--json", action="store_true")
+    _configure_core_parsers(sub)
     _configure_okf_parser(sub)
-    doctor_parser = sub.add_parser("doctor", help="Run operational checks.")
-    doctor_parser.add_argument("--json", action="store_true")
     _configure_credentials_parser(sub)
     hooks_parser = sub.add_parser("hooks", help="Inspect host hook configuration.")
     hooks_sub = hooks_parser.add_subparsers(dest="hooks_command", required=True)
@@ -934,6 +938,17 @@ def _dispatch_status(as_json: bool) -> int:
     return 0
 
 
+def _dispatch_runtime_identity(as_json: bool) -> int:
+    data = runtime_identity()
+    if as_json:
+        print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
+    else:
+        print(f"commit_id\t{data.get('commit_id')}")
+        print(f"expected_commit\t{data.get('expected_commit')}")
+        print(f"archive_path\t{data.get('archive_path')}")
+    return 0 if data.get("commit_id") else 1
+
+
 def _dispatch_lifecycle_restore(args: argparse.Namespace) -> int:
     from chronovisor.ops.autonomy import restore_deprecated_page
 
@@ -1001,14 +1016,7 @@ def dispatch(args: argparse.Namespace) -> int:
     if args.command == "status":
         return _dispatch_status(args.json)
     if args.command == "runtime-identity":
-        data = runtime_identity()
-        if args.json:
-            print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
-        else:
-            print(f"commit_id\t{data.get('commit_id')}")
-            print(f"expected_commit\t{data.get('expected_commit')}")
-            print(f"archive_path\t{data.get('archive_path')}")
-        return 0 if data.get("commit_id") else 1
+        return _dispatch_runtime_identity(args.json)
     if args.command == "doctor":
         data = doctor()
         if args.json:
