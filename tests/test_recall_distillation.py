@@ -25,6 +25,7 @@ from chronovisor.core.store import RuntimeContext, init_chronovisor
 from chronovisor.recall import recall_distillation as distill
 from chronovisor.recall import recall_distillation_catalog as catalog
 from chronovisor.recall import recall_distillation_store as store
+from chronovisor.recall import recall_distillation_workset as workset
 
 
 def _config(root: Path, **overrides: object) -> Path:
@@ -1208,6 +1209,59 @@ def test_grouped_rolling_split_never_separates_a_session() -> None:
     assert {"train", "validation", "test"}.issubset(set(split.values()))
 
 
+def test_split_plan_growth_preserves_cohort_and_embargoes_new_rallies(
+    tmp_path: Path,
+) -> None:
+    rallies = [
+        {
+            "rally_id": f"r{index}",
+            "session_cluster_id": f"s{index}",
+            "as_of": f"2026-08-{index + 1:02}T00:00:00Z",
+        }
+        for index in range(10)
+    ]
+    first = distill._ensure_split_plan(
+        tmp_path,
+        rallies,
+        raw_watermark="a" * 64,
+        model_cohort_sha256="b" * 64,
+    )
+    expanded = [
+        *rallies,
+        {
+            "rally_id": "r10",
+            "session_cluster_id": "s10",
+            "as_of": "2026-08-11T00:00:00Z",
+        },
+    ]
+    second = distill._ensure_split_plan(
+        tmp_path,
+        expanded,
+        raw_watermark="c" * 64,
+        model_cohort_sha256="b" * 64,
+    )
+    assert second["artifact_id"] != first["artifact_id"]
+    assert {
+        rally_id: second["assignments"][rally_id] for rally_id in first["assignments"]
+    } == first["assignments"]
+    assert second["assignments"]["r10"] == "embargo"
+
+    next_cohort = distill._ensure_split_plan(
+        tmp_path,
+        expanded,
+        raw_watermark="c" * 64,
+        model_cohort_sha256="d" * 64,
+    )
+    assert next_cohort["assignments"] == distill.grouped_rolling_split(expanded)
+    with pytest.raises(distill.DistillationError, match="rally set regressed"):
+        distill._ensure_split_plan(
+            tmp_path,
+            expanded[1:],
+            raw_watermark="e" * 64,
+            model_cohort_sha256="d" * 64,
+        )
+
+
 def test_sealed_policy_pointer_and_nested_rollout_selection(tmp_path: Path) -> None:
     _config(tmp_path)
     policy = distill.train_tiny_policy([])
@@ -1931,6 +1985,101 @@ def test_ox_single_teacher_materialization_binds_temporal_quality_evidence(
     assert "teacher_models_not_distinct" not in gate["reasons"]
     assert gate["identity"]["profile_contract_id"] == profile_contract_id
 
+    extended_plan_id, _, _ = store.write_immutable(
+        store.distillation_dir(tmp_path) / "split-plans",
+        {
+            "kind": "fixed-chronological-group-split",
+            "raw_watermark": "1" * 64,
+            "feature_revision": distill.TEXT_FEATURE_REVISION,
+            "model_cohort_sha256": "b" * 64,
+            "split_revision": "grouped-rolling-v1",
+            "assignments": {**plan["assignments"], "future-rally": "embargo"},
+        },
+        schema=distill.SPLIT_PLAN_SCHEMA,
+    )
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / "split-plan.json",
+        {"kind": "split-plan-pointer", "split_plan_id": extended_plan_id},
+    )
+    extended = distill.materialize_training_rows(
+        tmp_path,
+        _rallies=rallies,
+        _snapshots=snapshots,
+        _label_rows=store.read_chain(label_path),
+    )["rows"]
+    assert all(row["fixed_split_plan"] is True for row in extended)
+    assert (
+        next(row for row in extended if row["split"] == "test")[
+            "locked_test_evidence_ref"
+        ]
+        == f"split-plan:{extended_plan_id}"
+    )
+    assert (
+        "fixed_split_plan_missing"
+        not in distill._offline_training_gate(extended, config, root=tmp_path)[
+            "reasons"
+        ]
+    )
+
+    changed_assignments = dict(plan["assignments"])
+    changed_assignments[test_row["rally_id"]] = "train"
+    changed_plan_id, _, _ = store.write_immutable(
+        store.distillation_dir(tmp_path) / "split-plans",
+        {
+            "kind": "fixed-chronological-group-split",
+            "raw_watermark": "2" * 64,
+            "feature_revision": distill.TEXT_FEATURE_REVISION,
+            "model_cohort_sha256": "b" * 64,
+            "split_revision": "grouped-rolling-v1",
+            "assignments": changed_assignments,
+        },
+        schema=distill.SPLIT_PLAN_SCHEMA,
+    )
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / "split-plan.json",
+        {"kind": "split-plan-pointer", "split_plan_id": changed_plan_id},
+    )
+    incompatible = distill.materialize_training_rows(
+        tmp_path,
+        _rallies=rallies,
+        _snapshots=snapshots,
+        _label_rows=store.read_chain(label_path),
+    )["rows"]
+    assert (
+        next(row for row in incompatible if row["rally_id"] == test_row["rally_id"])[
+            "fixed_split_plan"
+        ]
+        is False
+    )
+
+    next_cohort_plan_id, _, _ = store.write_immutable(
+        store.distillation_dir(tmp_path) / "split-plans",
+        {
+            "kind": "fixed-chronological-group-split",
+            "raw_watermark": "3" * 64,
+            "feature_revision": distill.TEXT_FEATURE_REVISION,
+            "model_cohort_sha256": "3" * 64,
+            "split_revision": "grouped-rolling-v1",
+            "assignments": plan["assignments"],
+        },
+        schema=distill.SPLIT_PLAN_SCHEMA,
+    )
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / "split-plan.json",
+        {"kind": "split-plan-pointer", "split_plan_id": next_cohort_plan_id},
+    )
+    next_cohort = distill.materialize_training_rows(
+        tmp_path,
+        _rallies=rallies,
+        _snapshots=snapshots,
+        _label_rows=store.read_chain(label_path),
+    )["rows"]
+    assert all(row["fixed_split_plan"] is False for row in next_cohort)
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / "split-plan.json",
+        {"kind": "split-plan-pointer", "split_plan_id": extended_plan_id},
+    )
+
     mismatched = [{**row, "profile_contract_id": "0" * 64} for row in rows]
     rejected = distill._offline_training_gate(mismatched, config, root=tmp_path)
     assert "profile_contract_mismatch" in rejected["reasons"]
@@ -2651,8 +2800,21 @@ def test_ox_indexed_workset_reads_only_delta_then_claimed_snapshots(
             "query_sha256": query_two,
             "context_refs": [],
         },
+        "rally-3": {
+            "rally_id": "rally-3",
+            "session_cluster_id": "session-3",
+            "as_of": "2026-01-03T00:00:00Z",
+            "query_sha256": "5" * 64,
+            "context_refs": [],
+        },
     }
     catalog.advance(_raw(tmp_path), tmp_path, 4096)
+    plan = distill._ensure_split_plan(
+        tmp_path,
+        list(rallies.values()),
+        raw_watermark="a" * 64,
+        model_cohort_sha256="b" * 64,
+    )
     candidate_path = store.distillation_dir(tmp_path) / "candidate-ledger.jsonl"
     store.append_chain(
         candidate_path,
@@ -2696,6 +2858,8 @@ def test_ox_indexed_workset_reads_only_delta_then_claimed_snapshots(
                 text_two: "second bounded fact",
                 "5" * 64: "what proves the third claim",
                 "6" * 64: "third bounded fact",
+                "7" * 64: "what proves the future claim",
+                "8" * 64: "future bounded fact",
             },
             label_path=label_path,
             label_rows=labels,
@@ -2721,6 +2885,123 @@ def test_ox_indexed_workset_reads_only_delta_then_claimed_snapshots(
     assert second.labels_written == 0
     assert calls == []
 
+    workset_path = store.distillation_dir(tmp_path) / "ox-workset.sqlite3"
+    with sqlite3.connect(workset_path) as db:
+        completed_before = db.execute(
+            "SELECT temporal_split_json,completion_ref,completion_digest,"
+            "attempt_count,updated_at FROM work_items"
+        ).fetchone()
+    extended_plan_id, _, _ = store.write_immutable(
+        store.distillation_dir(tmp_path) / "split-plans",
+        {
+            "kind": "fixed-chronological-group-split",
+            "raw_watermark": "c" * 64,
+            "feature_revision": distill.TEXT_FEATURE_REVISION,
+            "model_cohort_sha256": "b" * 64,
+            "split_revision": "grouped-rolling-v1",
+            "assignments": {**plan["assignments"], "future-rally": "embargo"},
+        },
+        schema=distill.SPLIT_PLAN_SCHEMA,
+    )
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / "split-plan.json",
+        {"kind": "split-plan-pointer", "split_plan_id": extended_plan_id},
+    )
+    before_calls = teacher.calls
+    rotated = run(store.read_chain(label_path))
+    assert rotated.labels_written == 0
+    assert teacher.calls == before_calls
+    assert len(store.read_chain(label_path)) == 1
+    with sqlite3.connect(workset_path) as db:
+        assert (
+            db.execute(
+                "SELECT temporal_split_json,completion_ref,completion_digest,"
+                "attempt_count,updated_at FROM work_items"
+            ).fetchone()
+            == completed_before
+        )
+        assert (
+            json.loads(
+                db.execute(
+                    "SELECT value_json FROM workset_state WHERE key='watermark'"
+                ).fetchone()[0]
+            )["split_plan_id"]
+            == extended_plan_id
+        )
+
+    changed_assignments = dict(plan["assignments"])
+    changed_assignments["rally-1"] = (
+        "test" if changed_assignments["rally-1"] != "test" else "train"
+    )
+    changed_plan_id, _, _ = store.write_immutable(
+        store.distillation_dir(tmp_path) / "split-plans",
+        {
+            "kind": "fixed-chronological-group-split",
+            "raw_watermark": "d" * 64,
+            "feature_revision": distill.TEXT_FEATURE_REVISION,
+            "model_cohort_sha256": "b" * 64,
+            "split_revision": "grouped-rolling-v1",
+            "assignments": {**changed_assignments, "future-rally": "embargo"},
+        },
+        schema=distill.SPLIT_PLAN_SCHEMA,
+    )
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / "split-plan.json",
+        {"kind": "split-plan-pointer", "split_plan_id": changed_plan_id},
+    )
+    with pytest.raises(workset.DistillationWorksetError, match="identity conflict"):
+        run(store.read_chain(label_path))
+    assert teacher.calls == before_calls
+    assert len(store.read_chain(label_path)) == 1
+    with sqlite3.connect(workset_path) as db:
+        assert (
+            db.execute(
+                "SELECT temporal_split_json,completion_ref,completion_digest,"
+                "attempt_count,updated_at FROM work_items"
+            ).fetchone()
+            == completed_before
+        )
+        assert (
+            json.loads(
+                db.execute(
+                    "SELECT value_json FROM workset_state WHERE key='watermark'"
+                ).fetchone()[0]
+            )["split_plan_id"]
+            == extended_plan_id
+        )
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / "split-plan.json",
+        {"kind": "split-plan-pointer", "split_plan_id": extended_plan_id},
+    )
+
+    rallies["future-rally"] = {
+        "rally_id": "future-rally",
+        "session_cluster_id": "future-session",
+        "as_of": "2026-01-03T00:00:00Z",
+        "query_sha256": "7" * 64,
+        "context_refs": [],
+    }
+    store.append_chain(
+        candidate_path,
+        {
+            "kind": "candidate-snapshot",
+            "rally_id": "future-rally",
+            "snapshot": snapshot("future-rally", "future-candidate", "8" * 64),
+        },
+    )
+    calls.clear()
+    assert run(store.read_chain(label_path)).labels_written == 0
+    assert teacher.calls == before_calls
+    assert calls == [{"future-rally"}]
+    with sqlite3.connect(workset_path) as db:
+        assert (
+            db.execute(
+                "SELECT COUNT(*) FROM work_items "
+                "WHERE payload_ref='candidate-snapshot:future-rally:future-candidate'"
+            ).fetchone()[0]
+            == 0
+        )
+
     store.append_chain(
         candidate_path,
         {
@@ -2743,19 +3024,11 @@ def test_ox_indexed_workset_reads_only_delta_then_claimed_snapshots(
             "snapshot": snapshot("rally-3", "candidate-3", "6" * 64),
         },
     )
-    rallies["rally-3"] = {
-        "rally_id": "rally-3",
-        "session_cluster_id": "session-3",
-        "as_of": "2026-01-03T00:00:00Z",
-        "query_sha256": "5" * 64,
-        "context_refs": [],
-    }
     calls.clear()
     assert run(store.read_chain(label_path)).labels_written == 0
     assert calls == [{"rally-3"}]
     teacher.valid = True
     calls.clear()
-    workset_path = store.distillation_dir(tmp_path) / "ox-workset.sqlite3"
     with sqlite3.connect(workset_path) as db:
         work_id, temporal_json = db.execute(
             "SELECT work_id,temporal_split_json FROM work_items "

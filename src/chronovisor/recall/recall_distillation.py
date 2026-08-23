@@ -2802,6 +2802,7 @@ def materialize_training_rows(
     materialized = materialized[-limit:]
     split_plan_id = ""
     split: dict[str, str] = {}
+    compatible_split_plan_ids: set[str] = set()
     try:
         split_plan = _read_split_plan(root)
         split_plan_id = str(split_plan["artifact_id"])
@@ -2809,6 +2810,25 @@ def materialize_training_rows(
             str(rally_id): str(value)
             for rally_id, value in split_plan["assignments"].items()
         }
+        compatible_split_plan_ids.add(split_plan_id)
+        for prior_plan_id in {
+            str(row.get("label_split_plan_id") or "") for row in materialized
+        } - {split_plan_id, ""}:
+            try:
+                prior = _read_split_plan_artifact(root, prior_plan_id)
+            except (DistillationError, store.DistillationStoreError):
+                continue
+            if (
+                prior.get("feature_revision") == split_plan.get("feature_revision")
+                and prior.get("split_revision") == split_plan.get("split_revision")
+                and prior.get("model_cohort_sha256")
+                == split_plan.get("model_cohort_sha256")
+                and all(
+                    split.get(str(rally_id)) == str(value)
+                    for rally_id, value in prior["assignments"].items()
+                )
+            ):
+                compatible_split_plan_ids.add(prior_plan_id)
     except (KeyError, DistillationError, store.DistillationStoreError):
         split = grouped_rolling_split(materialized) if materialized else {}
     rows = []
@@ -2816,13 +2836,13 @@ def materialize_training_rows(
         row_split = split.get(row["rally_id"], "embargo")
         split_bound = (
             row.get("profile") == OX_SINGLE_PROFILE
-            and row.get("label_split_plan_id") == split_plan_id
+            and row.get("label_split_plan_id") in compatible_split_plan_ids
             and bool(split_plan_id)
             and row_split == "test"
         )
         fixed_split_plan = (
             row.get("profile") == OX_SINGLE_PROFILE
-            and row.get("label_split_plan_id") == split_plan_id
+            and row.get("label_split_plan_id") in compatible_split_plan_ids
             and bool(split_plan_id)
             and row_split in {"train", "validation", "test"}
         )
@@ -3732,14 +3752,9 @@ def grouped_rolling_split(
     return result
 
 
-def _read_split_plan(root: Path) -> dict[str, Any]:
-    pointer = store.read_sealed(
-        store.distillation_dir(root) / "split-plan.json",
-        schema=store.DISTILLATION_SCHEMA,
-    )
-    plan_id = str(pointer.get("split_plan_id") or "")
+def _read_split_plan_artifact(root: Path, plan_id: str) -> dict[str, Any]:
     if re.fullmatch(r"[0-9a-f]{64}", plan_id) is None:
-        raise DistillationError("split plan pointer is invalid")
+        raise DistillationError("split plan id is invalid")
     artifact = store.read_sealed(
         store.distillation_dir(root) / "split-plans" / f"{plan_id}.json",
         schema=SPLIT_PLAN_SCHEMA,
@@ -3757,6 +3772,15 @@ def _read_split_plan(root: Path) -> dict[str, Any]:
     return artifact
 
 
+def _read_split_plan(root: Path) -> dict[str, Any]:
+    pointer = store.read_sealed(
+        store.distillation_dir(root) / "split-plan.json",
+        schema=store.DISTILLATION_SCHEMA,
+    )
+    plan_id = str(pointer.get("split_plan_id") or "")
+    return _read_split_plan_artifact(root, plan_id)
+
+
 def _ensure_split_plan(
     root: Path,
     rallies: Sequence[Mapping[str, Any]],
@@ -3765,6 +3789,29 @@ def _ensure_split_plan(
     model_cohort_sha256: str,
 ) -> dict[str, Any]:
     assignments = grouped_rolling_split(rallies)
+    rally_ids = {str(rally["rally_id"]) for rally in rallies}
+    try:
+        prior = _read_split_plan(root)
+    except (DistillationError, store.DistillationStoreError, KeyError):
+        prior = {}
+    if (
+        prior.get("feature_revision") == TEXT_FEATURE_REVISION
+        and prior.get("split_revision") == "grouped-rolling-v1"
+        and prior.get("model_cohort_sha256") == model_cohort_sha256
+        and isinstance(prior.get("assignments"), Mapping)
+    ):
+        prior_assignments = {
+            str(rally_id): str(value)
+            for rally_id, value in prior["assignments"].items()
+        }
+        if not set(prior_assignments).issubset(rally_ids):
+            raise DistillationError("split plan rally set regressed")
+        assignments = {
+            **prior_assignments,
+            **{
+                rally_id: "embargo" for rally_id in rally_ids - prior_assignments.keys()
+            },
+        }
     plan_id, _, artifact = store.write_immutable(
         store.distillation_dir(root) / "split-plans",
         {
@@ -4628,7 +4675,10 @@ def _run_ox_teacher_batch(
 
     for rally_id, snapshot in sorted(snapshots.items()):
         rally = rally_by_id.get(rally_id)
-        if rally is None:
+        if rally is None or (
+            split_plan_id
+            and assignments.get(rally_id) not in {"train", "validation", "test"}
+        ):
             continue
         candidates = [
             candidate
@@ -4876,6 +4926,10 @@ def _run_ox_teacher_batch(
                 or temporal.get("group_id") != rally.get("session_cluster_id")
                 or temporal.get("split") != str(assignments.get(rally_id) or "embargo")
                 or temporal.get("split_plan_id") != split_plan_id
+                or (
+                    split_plan_id
+                    and temporal.get("split") not in {"train", "validation", "test"}
+                )
             ):
                 invalid_claims.append(claim)
                 continue
