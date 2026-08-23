@@ -920,6 +920,7 @@ def test_all_model_repairs_use_strict_schema_without_thinking(
         initial_ollama_think,
         False,
     ]
+    assert [request.num_predict for request in transport.requests] == [170, 256]
     assert result.think is False
     assert result.think_selection_reason == "structured_repair"
 
@@ -1135,7 +1136,7 @@ def test_production_roles_use_medium_until_canary_then_strict_repair(
 
     assert result.ok is True
     assert [request.think for request in transport.requests] == ["low", False]
-    assert [request.num_predict for request in transport.requests] == [2_048, 2_048]
+    assert [request.num_predict for request in transport.requests] == [2_048, 3_072]
     assert [request.ollama_think for request in transport.requests] == [
         "low" if runtime_role == "classification.challenger" else True,
         False,
@@ -1144,10 +1145,10 @@ def test_production_roles_use_medium_until_canary_then_strict_repair(
         "adaptive_canary_not_adopted"
     )
     assert result.ollama_think is False
-    assert result.num_predict == 2_048
+    assert result.num_predict == 3_072
     audit = json.loads((tmp_path / "audit" / "audit.jsonl").read_text(encoding="utf-8"))
     assert audit["ollama_think"] == result.ollama_think
-    assert audit["num_predict"] == 2_048
+    assert audit["num_predict"] == 3_072
 
 
 @pytest.mark.parametrize(("ollama_think", "expected"), [(None, "medium"), (True, True)])

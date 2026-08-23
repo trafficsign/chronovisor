@@ -10,6 +10,7 @@ parameter mapping:
 - ``seed``                 <- ``seed`` (when present)
 - ``chat_template_kwargs.enable_thinking`` <- boolean ``think`` and
   ``reasoning_effort`` <- string reasoning levels for message requests.
+  Muse's Harmony-style template instead reads ``reasoning_strength``.
   Raw prompt requests explicitly disable thinking because their runtime type
   has no reasoning contract.
 - ``response_format``      <- ``format`` (``"json"`` -> ``json_object``,
@@ -193,7 +194,16 @@ class OMLXAdapter:
         if format_value is not None:
             payload["response_format"] = self._response_format(format_value)
         if isinstance(think, (bool, str)):
-            payload["chat_template_kwargs"] = {"enable_thinking": think is not False}
+            template_kwargs: dict[str, object] = {
+                "enable_thinking": think is not False
+            }
+            # ponytail: keep the one known Harmony-template exception inline;
+            # add a model-family registry only if another kwarg mapping appears.
+            if model.startswith("Muse-Glimmer-"):
+                template_kwargs["reasoning_strength"] = (
+                    think if isinstance(think, str) else "high" if think else "low"
+                )
+            payload["chat_template_kwargs"] = template_kwargs
             if isinstance(think, str):
                 payload["reasoning_effort"] = think
         return payload
@@ -421,7 +431,9 @@ class OMLXAdapter:
             raise SafeBackendError("invalid_response", transient=False) from None
         content = message.get("content")
         reasoning = message.get("reasoning_content")
-        if not isinstance(content, str) or content == "":
+        if not isinstance(content, str):
+            content = ""
+        if content == "" and getattr(request, "format", None) is None:
             # Thinking-only turns (e.g. small max_tokens) return an empty
             # content with a reasoning_content payload; best-effort extract.
             content = reasoning if isinstance(reasoning, str) else ""

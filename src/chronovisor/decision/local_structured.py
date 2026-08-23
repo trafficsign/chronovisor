@@ -2438,9 +2438,9 @@ def _default_transport(
 
 def _structured_repair_request(
     request: ChatRequest,
-    *,
     attempt: int,
     schema: dict[str, Any] | None,
+    configured_num_predict: int,
 ) -> ChatRequest:
     if attempt == 0:
         return request
@@ -2449,6 +2449,7 @@ def _structured_repair_request(
         schema=schema,
         think=False,
         ollama_think=False,
+        num_predict=configured_num_predict,
         think_selection_reason="structured_repair",
     )
 
@@ -3059,7 +3060,7 @@ class LocalStructuredSession:
                 messages=tuple(dict(message) for message in messages),
             )
             request = _structured_repair_request(
-                request, attempt=index, schema=transport_schema
+                request, index, transport_schema, self.num_predict
             )
             call_phase = "generate" if index == 0 else "repair"
             if generation_progress is not None:

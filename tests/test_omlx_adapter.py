@@ -44,6 +44,8 @@ def _mock_models_do_not_use_dflash(
             {
                 "models": {
                     "m": {"dflash_enabled": False},
+                    "Muse-Glimmer-30B-4bit": {"dflash_enabled": False},
+                    "Muse-Glimmer-30B-8bit": {"dflash_enabled": False},
                     "Ornith-1.5-9B-MLX-4bit": {"dflash_enabled": False},
                 }
             }
@@ -155,6 +157,34 @@ def test_generate_maps_reasoning_level_to_omlx_controls() -> None:
 
     assert captured[0]["reasoning_effort"] == "low"
     assert captured[0]["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+@pytest.mark.parametrize(
+    ("model", "think", "reasoning_strength"),
+    [
+        ("Muse-Glimmer-30B-4bit", False, "low"),
+        ("Muse-Glimmer-30B-4bit", True, "high"),
+        ("Muse-Glimmer-30B-4bit", "medium", "medium"),
+        ("Muse-Glimmer-30B-8bit", False, "low"),
+    ],
+)
+def test_generate_maps_muse_reasoning_strength(
+    model: str, think: bool | str, reasoning_strength: str
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured.append(_json(request))
+        return httpx.Response(200, json=_chat_json(), request=request)
+
+    OMLXAdapter(transport=httpx.MockTransport(handle)).generate(
+        _minimal_message_request(think=think), model=model
+    )
+
+    assert captured[0]["chat_template_kwargs"] == {
+        "enable_thinking": think is not False,
+        "reasoning_strength": reasoning_strength,
+    }
 
 
 def test_generate_sends_x_api_key_header() -> None:
@@ -315,6 +345,25 @@ def test_generate_falls_back_to_reasoning_content() -> None:
     result = adapter.generate(_minimal_message_request(), model="m")
     assert result.content == "think"
     assert result.metadata["reasoning_content"] == "think"
+
+
+def test_structured_generate_never_uses_reasoning_as_json_content() -> None:
+    adapter = OMLXAdapter(
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(
+                200, json=_chat_json("", reasoning="not json"), request=r
+            )
+        )
+    )
+    request = replace(
+        _minimal_message_request(),
+        format={"type": "object", "additionalProperties": False},
+    )
+
+    result = adapter.generate(request, model="m")
+
+    assert result.content == ""
+    assert result.metadata["reasoning_content"] == "not json"
 
 
 def test_generate_maps_http_errors_into_safe_categories() -> None:
