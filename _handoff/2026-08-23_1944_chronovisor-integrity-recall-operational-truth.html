@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Chronovisor Integrity, Recall, and Operational Truth Hardening Plan</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+.priority{font-weight:700;color:var(--warn)}
+.note{background:#fff8e1;border-left:3px solid #d6a100;padding:0.55rem 0.8rem;border-radius:4px}
+.evidence{font-size:0.9rem;color:#333}
+table{width:100%;border-collapse:collapse;margin:0.65rem 0;font-size:0.9rem}
+th,td{border:1px solid var(--rule);padding:0.45rem 0.55rem;text-align:left;vertical-align:top}
+th{background:#f3f1eb}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_596dfe01bc574196a8085d0b34acd25f","created_at":"2026-08-23T19:44:57+09:00","状態":"ready","slug":"chronovisor-integrity-recall-operational-truth"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">Chronovisor Integrity, Recall, and Operational Truth Hardening</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span><code data-bind="task_id">plan_596dfe01bc574196a8085d0b34acd25f</code></span>
+<span data-bind="created_at">2026-08-23T19:44:57+09:00</span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<ul>
+<li>Chronovisor の現行機能を増やす前に、<strong>派生データの完全性、Recall の可用性、運用状態の真実性</strong>を同じ受入契約で固める。</li>
+<li>監査で確認した P0/P1 の欠陥を、Raw を不変に保った小さい修正単位で解消し、テスト・runtime archive・API・DOM・service state の一致まで検証する。</li>
+<li>今夜の実装順を固定する。ただし時刻では完了判定せず、各 Phase の Exit Criteria を満たした時だけ完了にする。</li>
+</ul>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<ul>
+<li>Raw v2、quarantine、receipt、既存監査証跡を削除・上書きしない。repair は検証済み Raw からの derived-only 操作に限定する。</li>
+<li>全例外を BM25 fallback へ丸めない。既知の可用性例外だけを契約化し、入力不正・実装不良・sensitive filter 違反は隠さない。</li>
+<li>注入候補を自動で <code>used</code> と記録しない。実際に使用したページだけを decision/session identity と結合する。</li>
+<li>DFlash の process-global lease、sensitive filter、authority preflight、promotion gate を緩めない。</li>
+<li>新しい DB、cache、framework、単一実装の抽象層を導入しない。既存の reconciler、deterministic fallback、health snapshot、JSONL writer を深くする。</li>
+<li>無関係な dirty worktree、local-only commit、別 Plan の checkbox/state/log を変更しない。本 Plan は cross-reference と receipt だけを持ち、既存 Plan の更新は各 Plan の owner に委ねる。push、restart、GitHub 設定変更は所有者の明示承認後だけ行う。</li>
+<li>P2 Evidence Reconstruction を P0/P1 より先に production promotion しない。</li>
+</ul>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定</h2>
+<ul class="evidence">
+<li>基準 commit: <code>87872fdf4199229bda7f73c55bd066b7e9d90c6b</code>。監査時点で local HEAD、<code>origin/main</code>、live runtime archive が一致し、worktree は clean。</li>
+<li>基準検証: isolated full suite <code>5099 passed, 1 skipped</code>、ruff・mypy・import-linter・GitHub Security/quality/Python 3.14 CI は成功。</li>
+<li>稼働基準: oMLX 8000/8001/8002 は authenticated status 200、unauthenticated 401。Dashboard に console error/warning はなく、Cortex は約 60 fps。</li>
+<li><span class="priority">P0-A</span>: 13,565 manifests 中 20 manifests が child 欠損。20 child は quarantine に存在し、対応する全 parent は processed 集合にあるため通常 pending 経路から再検証されない。</li>
+<li><span class="priority">P0-B</span>: Recall 直近 5,000 行で timeout 859、degraded 312、error 8、semantic unavailable 361、BM25 fallback 333、context nonempty 1,520。</li>
+<li><span class="priority">P1-C</span>: pull-log 944 件中 search 676、read 240、used 28。answer episodes 1,934 件は production replayable 0、split unassigned 1,934、binding unknown 1,061。</li>
+<li><span class="priority">P1-D</span>: runtime は進行中でも <code>last_error=decision_authority_changed</code> が残留し得る。status 出力は約 13.43 秒、367,213 bytes。health/UI は current authority、historical failure、freshness を分離できていない。</li>
+<li><span class="priority">P1-E/F</span>: web provider は public HTTP を許容し得る。sensitive JSONL の一部が 0644。mixed oMLX failure、reranker idle、pytest main-thread QoS、floating GitHub Actions、usearch 未実行に検証欠落がある。</li>
+</ul>
+<p class="note">数値は 2026-08-23 の監査スナップショット。実装開始時に再採取して before receipt とし、変動していても「増減」ではなく根本契約の成否で判断する。</p>
+</section>
+
+<section data-section="優先順位と時間配分">
+<h2>優先順位と時間配分</h2>
+<table>
+<thead><tr><th>順序</th><th>目安</th><th>作業</th><th>次へ進む条件</th></tr></thead>
+<tbody>
+<tr><td>P0-A</td><td>約2時間</td><td>processed projection integrity の検出・repair</td><td>20件の disposition と全 inventory 再検証</td></tr>
+<tr><td>P0-B</td><td>約1時間</td><td>SemanticServiceUnavailable の deterministic fallback</td><td>期限・filter・telemetry を含む focused tests</td></tr>
+<tr><td>P1-C</td><td>約1時間</td><td>used receipt と evaluation identity の欠落防止</td><td>end-to-end fixture と signal health receipt</td></tr>
+<tr><td>P1-D</td><td>約1.5時間</td><td>runtime/authority/health/UI/CLI の正本化</td><td>API と DOM が current/historical/stale を同じ意味で表示</td></tr>
+<tr><td>P1-E</td><td>約1時間</td><td>HTTPS、0600、MCP preview boundary</td><td>trust-boundary tests</td></tr>
+<tr><td>P1-F</td><td>約45分</td><td>QoS test isolation、actions pin、compat smoke</td><td>order-independent tests とrequired CI</td></tr>
+<tr><td>Final</td><td>最後の45分を確保</td><td>full validation、rollback drill、Plan 更新</td><td>総合 Exit Criteria</td></tr>
+</tbody>
+</table>
+<p>同一 file の writer は常に1名。独立 scope の調査・テストだけを並列化し、root が全 diff と検証結果を確認する。</p>
+</section>
+
+<section data-section="所有権と成果物">
+<h2>所有権と成果物</h2>
+<p>実行証拠は <code>_handoff/evidence/2026-08-23-chronovisor-hardening/</code> に置く。本文・query・page本文・credential は保存せず、ID、digest、件数、時間、verdict、artifact path だけを記録する。</p>
+<table>
+<thead><tr><th>Phase</th><th>single writer scope</th><th>必須 receipt</th></tr></thead>
+<tbody>
+<tr><td>0</td><td>root/Sol: 既存 <code>raw</code> CLI内のread-only projection diagnosticと対応testsだけ。runtime data変更なし</td><td><code>baseline.json</code>、<code>projection-inventory.before.json</code></td></tr>
+<tr><td>1</td><td>root/Sol: <code>ingest/orchestrator.py</code>、<code>ingest/failure_supervisor.py</code>、<code>ingest/raw_semantic_projection.py</code>、対応tests</td><td><code>projection-repair.after.json</code></td></tr>
+<tr><td>2</td><td>root/Sol: <code>recall/recall_runtime.py</code> の availability mapping と対応testsだけ</td><td><code>recall-availability.focused.json</code></td></tr>
+<tr><td>3</td><td>root/Sol: Recall receipt schema/join と対応testsだけ</td><td><code>recall-signal.focused.json</code></td></tr>
+<tr><td>4</td><td>root/Sol: runtime status、health/API、Dashboard、reranker liveness と対応tests</td><td><code>operational-truth.json</code></td></tr>
+<tr><td>5A</td><td>root/Sol: research egress、JSONL mode、MCP preview boundary と対応tests</td><td><code>security-privacy.json</code></td></tr>
+<tr><td>5B</td><td>root/Sol: QoS test isolation と対象 GitHub workflows</td><td><code>test-ci.json</code></td></tr>
+<tr><td>6</td><td>root review/live closure only</td><td><code>recall-availability-canary.json</code>、<code>recall-signal-health.json</code>、<code>final-acceptance.json</code></td></tr>
+</tbody>
+</table>
+<p>各 Phase は別 commit。順番に同じ file を触る場合も同時 writer を置かず、前 Phase の commit と検証完了後に ownership を移す。</p>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist">
+<li><input type="checkbox"><span><strong>Phase 0 — baseline と変更境界を固定する。</strong>
+  <ul>
+  <li>既存 <code>chronovisor raw</code> command groupへread-onlyの <code>projection-status --full --json</code> を最小追加する。既存 <code>projection_bundle_state_for_parent</code> とprocessed stateを再利用し、total/valid/missing/invalid、parent raw_id/digest、manifest/child/receipt/quarantineのroot-relative path、processed membershipだけを返す。</li>
+  <li><code>uv run pytest -q tests/test_cli.py tests/test_raw_archive.py tests/test_raw_semantic_projection.py</code> でfixtureのmissing child、invalid receipt、processed parent、path redaction、runtime file mutation 0を固定し、diagnostic-only commitにする。</li>
+  <li><code>git status</code>、HEAD/origin、runtime archive、service PID/health、対象ログ件数を <code>baseline.json</code> に保存する。</li>
+  <li><code>uv run chronovisor raw projection-status --full --json</code> の出力を <code>projection-inventory.before.json</code> に保存し、既存20件の全fieldを確認する。Raw archive自体は別途 <code>uv run chronovisor raw verify --full --json</code> で検証する。</li>
+  <li>対象 source と test の index coverage を確認し、不足範囲は直接読む。既存の共通経路を特定してから変更する。</li>
+  <li><strong>Exit:</strong> 修正前状態を同じコマンドで再現でき、無関係な作業がない。baseline drift があれば数値だけ更新し、対象契約を勝手に変えない。</li>
+  </ul>
+</span></li>
+
+<li><input type="checkbox"><span><strong>Phase 1 / P0-A — processed parent も対象にする bounded projection reconciler を実装する。</strong>
+  <ul>
+  <li><code>get_pending_raw_files</code> の通常 ingest と分離し、processed raw_id の canonical sort を1巡する cursor を既存 <code>.orchestrator_state.json</code> へ additive に保存する。1 drain pass は128 parents・1 batchまで、batch 完了ごとに checkpoint し、末尾まで達した時だけ wrap する。</li>
+  <li>1 batch の追加wall time p95を250ms以下に保つ。20 passes のうち3回連続で250msを超えたら reconciler をdisableして Phaseを未完了に戻し、batch size以外の新しいscheduler/cacheは作らない。</li>
+  <li>manifest/receipt/child の missing・digest mismatch・invalid schema を分類し、Raw v2 digest と quarantine evidence を保持する。</li>
+  <li>既存の projection verification/requeue 経路を再利用し、verified Raw から deterministic reproject する。LLM ingest を再実行せず、重複 page mutation を作らない。</li>
+  <li><code>raw projection-status --full --json</code> dry-run inventory → 1件 canary → 全20件 repair → 同じ full inventory の順に実行し、<code>projection-repair.after.json</code> に before/after disposition を残す。</li>
+  <li><strong>Focused test:</strong> processed parent の child を欠損させると検出・修復され、Raw bytes/digest は不変、LLM call 0、再実行は idempotent。</li>
+  <li><strong>Command:</strong> <code>uv run pytest -q tests/test_orchestrator_characterization.py tests/test_failure_supervisor_characterization.py tests/test_raw_semantic_projection.py tests/test_raw_archive.py</code>。</li>
+  <li><strong>Exit:</strong> 全 manifest inventory で missing/invalid child が0。元の20件は全件 repaired。新規 duplicate、Raw mutation、quarantine deletion が0。1件でも hold が残れば Phase 1 は blocked であり完了不可。</li>
+  <li><strong>Rollback:</strong> 既存 ingest config に置く1個の boolean kill-switch で reconciler を止める。feature-flag framework は作らない。derived repair の commit 単位を戻し、Raw/quarantine/receipt はそのまま残す。</li>
+  </ul>
+</span></li>
+
+<li><input type="checkbox"><span><strong>Phase 2 / P0-B — semantic availability failure を既存 BM25 fallback へ接続する。</strong>
+  <ul>
+  <li>所有範囲は availability-exception mapping と telemetry の差分だけ。既存 Plan <a href="2026-08-13_1431_recall-precision-preserving-latency.html">precision-preserving latency</a> の commit <code>cf354b329aeab95aad77113a144a3a486f8d761b</code> で完成済みの direct BM25/L1 fallback、filter/render、副作用ゼロ経路を再実装・再構成しない。</li>
+  <li><code>RecallBudgetExhausted</code> に加え、契約済みの <code>SemanticServiceUnavailable</code> / capacity-busy 系だけを既存 <code>run_deterministic_fallback</code> へ渡す。</li>
+  <li>failure class、reason、elapsed、deadline reserve、<code>degraded=true</code>、<code>search_mode=bm25-fallback</code> を保存する。sensitive filter と query budget は元の境界を維持する。</li>
+  <li>未知の例外は error として可視化し、無条件 fallback で隠さない。</li>
+  <li><strong>Focused test:</strong> <code>uv run pytest -q tests/test_recall_runtime.py::test_semantic_service_unavailable_uses_deterministic_fallback tests/test_recall_runtime.py::test_unknown_semantic_error_is_not_fallback</code> で known unavailable → nonempty BM25、600ms reserve内、sensitive result 0、重い subsystem call 0、正しい telemetry。unknown exception は fallback されない。</li>
+  <li><strong>Implementation Exit:</strong> availability failure が空の <code>search_mode=error</code> へ落ちず、direct fallback契約とfocused testsがgreen。diffがexception mapping/telemetry/testsだけであることを <code>recall-availability.focused.json</code> に保存してcommitする。live閾値はPhase 6のdeploy後closureで判定する。</li>
+  <li><strong>Rollback:</strong> availability exception mapping の commit を戻し、旧 error path へ復帰。ログ schema は後方互換のまま残す。</li>
+  </ul>
+</span></li>
+
+<li><input type="checkbox"><span><strong>Phase 3 / P1-C — Recall の「実際に使われた」を end-to-end で結合する。</strong>
+  <ul>
+  <li>host hook → search → read → used receipt → answer episode を追い、<code>decision_id</code>、<code>session_id</code>、実使用 <code>page_ids</code>、model/system/sampler identity の欠落点だけを直す。保存する正本は append-only exact exposure receipt。</li>
+  <li>候補提示と実使用を区別し、注入・表示だけで <code>used</code> を生成しない。<code>used</code>/<code>ignored</code> は label、truth、student feature、authority、promotion gate に使わない。</li>
+  <li><a href="2026-08-14_1846_autonomous-recall-offline-distillation.html">offline distillation</a> の P5/P8/P9、<code>capture_only</code>、active/candidate/LKG pointer は一切変更しない。将来の causal utility は同Planの exact exposure/outcome predicate を満たす別経路だけが所有する。</li>
+  <li>used rate、missing decision/session/page IDs、unassigned split、binding unknown、production replayable を health/report に出す。</li>
+  <li><strong>Focused test:</strong> 100 decision の固定fixture（used 50 / unused 50）で used join 50/50、unused false join 0/50、orphan/duplicate 0、identity欠落0。<code>uv run pytest -q tests/test_recall_log_schema.py tests/test_recall_answer_eval.py</code> で固定する。</li>
+  <li><strong>Implementation Exit:</strong> fixtureのsilent signal loss 0、legacyのunassigned/binding unknown不変、distillation capture-only不変を <code>recall-signal.focused.json</code> に保存してcommitする。live cohortはPhase 6のdeploy後closureで判定する。</li>
+  <li><strong>Rollback:</strong> receipt propagation の commit を戻す。既存ログを削除せず、追加 field は reader が無視可能にする。</li>
+  </ul>
+</span></li>
+
+<li><input type="checkbox"><span><strong>Phase 4 / P1-D — operational truth を runtime/API/UI/CLI で統一する。</strong>
+  <ul>
+  <li>正本を <code>runtime_state</code>、<code>mutation_ready</code>/authority、<code>active_failure</code>、<code>last_failure</code>、<code>liveness age</code> に分離する。成功時は active failure を clear し、履歴は timestamp 付きで保持する。</li>
+  <li>health overall が current authority failure と stale liveness を評価し、Dashboard は状態・年齢・stale/refreshing を DOM と aria-live で表示する。</li>
+  <li><code>/api/health</code> に materialized_at、age、stale、refreshing、source generation を付ける。fast snapshot は thin summary、full details は明示要求に限定する。</li>
+  <li><code>chronovisor status --json</code> を bounded summary にし、巨大な full details は既存の <code>chronovisor health --json</code> だけに残す。新しいCLI modeは増やさない。</li>
+  <li>oMLX は一部 endpoint 成功でも失敗 endpoint を落とさず <code>endpoint_status</code>/<code>partial</code> を返す。reranker は launchd PID/ancestor と Unix socket connect をready判定に使い、idleな <code>observed_at</code> ageは診断値に留める。</li>
+  <li><strong>Focused test:</strong> (1) running+success+historical failure → <code>active_failure=null</code>/通常badge、(2) current authority blocked → <code>mutation_ready=false</code>/<code>alert</code>/<code>BLOCKED</code>、(3) configured TTL超過liveness → <code>stale=true</code>/<code>alert</code>/<code>STALE</code>、(4) mixed oMLX failure → <code>partial=true</code>/<code>degraded</code>/<code>DEGRADED</code>、(5) idle-but-live reranker → <code>ready=true</code>。JSON、CLI、DOM、aria-live の期待値を同一fixtureで固定する。</li>
+  <li><strong>Command:</strong> <code>uv run pytest -q tests/test_runtime_status.py tests/test_health.py tests/test_dashboard.py tests/test_reranker_service.py</code>。</li>
+  <li><strong>Exit:</strong> 5ケースで API、CLI、Dashboard が完全一致。<code>status --json</code> は64KiB以下、warm 20回のp95 &lt;=1000ms、cold単発 &lt;=3000ms。active failure と履歴を誤表示せず、結果を <code>operational-truth.json</code> に保存する。</li>
+  <li><strong>Rollback:</strong> schema は additive に保ち、consumer を旧 field へ戻せる2段階 deploy にする。表示が不一致なら UI rollout を先に戻す。</li>
+  </ul>
+</span></li>
+
+<li><input type="checkbox"><span><strong>Phase 5A / P1-E — security/privacy の必須根因修正を入れる。</strong>
+  <ul>
+  <li>research provider endpoint は HTTPS 必須。解決・pin後の全addressがloopbackである明示的 local SearXNG だけ HTTP を許可し、既存 guarded client と <code>trust_env=false</code> を再利用する。HTTP public、proxy、DNS rebind はrequest生成前に拒否する。</li>
+  <li>既存 JSONL writer を <code>O_CREAT|O_APPEND</code>/0600 にし、既存fileも0600へ矯正する。実測対象 <code>&lt;repo&gt;/runtime/research/web-egress.jsonl</code> と <code>&lt;CHRONOVISOR_ROOT&gt;/recall/pull-log.jsonl</code> を必須対象にする。</li>
+  <li>MCP は metadata-only default。Raw preview/ingest log本文は既存server configの単一boolean opt-inとtool requestの両方がある時だけ返し、path/credentialをredactする。新しい認証frameworkは作らない。</li>
+  <li><strong>Focused test:</strong> HTTPS、loopback HTTP、public HTTP、proxy、DNS rebind、existing 0644 file、new file、MCP default/opt-in を固定し、拒否ケースのnetwork call 0をspyする。</li>
+  <li><strong>Command:</strong> <code>uv run pytest -q tests/test_research_security.py tests/test_web_provider.py tests/test_utility_modules.py tests/test_server_check.py tests/test_server_validation.py</code>。</li>
+  <li><strong>Exit:</strong> HTTP credential egress 0、対象 sensitive filesと新規JSONL 0600、default MCP preview 0、opt-in出力のsecret/path leak 0。結果を <code>security-privacy.json</code> に保存する。</li>
+  <li><strong>Rollback:</strong> HTTPS/MCPは別commitで戻せるようにするが、拒否logを残し、file permissionsは緩めない。互換性問題は明示loopback設定で解消し、public HTTP許可へ戻さない。</li>
+  </ul>
+</span></li>
+
+<li><input type="checkbox"><span><strong>Phase 5B / P1-F — order-dependent test と required CI の穴だけを塞ぐ。</strong>
+  <ul>
+  <li><code>test_worker_persists_only_safe_job_failure_category</code> がpytest main threadのQoSを変更しないよう、test内のworkerをdedicated threadで実行する。production QoS codeは変更しない。</li>
+  <li>同testと <code>test_distilled_fast_path_hard_stops_slow_receipt_write</code> を両順序で各3回実行し、全runで後者が260ms未満。</li>
+  <li><strong>Command:</strong> <code>uv run pytest -q tests/test_semantic_service.py::test_worker_persists_only_safe_job_failure_category tests/test_recall_runtime.py::test_distilled_fast_path_hard_stops_slow_receipt_write</code> と逆順の同commandを各3回。</li>
+  <li><code>.github/workflows/quality.yml</code> と <code>python314.yml</code> の actions をfull SHAへpinする。quality workflow内に、usearchを明示installして <code>test_hnsw_generation_proposes_then_full_vector_rescores</code> を実行するjobと、Python 3.11/3.12の既存53-test smokeを追加する。</li>
+  <li><strong>Exit:</strong> reverse-order 6 run失敗0、usearch testがskipではなくpass、3.11/3.12 smoke各53 pass、required GitHub jobs green、結果を <code>test-ci.json</code> に保存する。</li>
+  <li><strong>Rollback:</strong> QoS test fix とworkflow変更を別commitにする。CI cost/compatibility問題時はworkflow commitだけを戻し、order-dependent test fixは維持する。</li>
+  </ul>
+</span></li>
+
+<li><input type="checkbox"><span><strong>Phase 6 — production acceptance と計画の収束。</strong>
+  <ul>
+  <li>各 Phase を独立 commit にし、focused tests → full isolated suite → static checks の順で確認する。</li>
+  <li>push 承認後だけ <strong>push → service restart → runtime archive commit 照合 → health/API → live DOM/console</strong> の順で受入する。</li>
+  <li><strong>Recall availability closure:</strong> deploy前連続7日をbaselineに固定し、実hookを確認したhostごとに最低24時間かつ100 eligible promptsを観測する。<code>deadline_pass_rate &gt;=0.99</code>、outer timeout率 &lt;1%、host-wrapper timeout=0、成功p95 &lt;=3000ms、p99 &lt;=3400ms、正常系candidate/top-k/rerank/context差分0、read/injected率・page/context coverage・teacher結果の悪化5 points以内を <code>recall-availability-canary.json</code> に保存する。</li>
+  <li><strong>Recall signal closure:</strong> deploy後最低24時間かつactive host別100 exact exposure receiptsで、新規eligible episodeのdecision/session/model identity欠落0、used page_ids欠落0、orphan/duplicate 0、新規eligible cohortの<code>production_replayable=true</code> 100%を確認する。used率は目標にせず <code>recall-signal-health.json</code> へ記述統計として保存する。</li>
+  <li>上記live cohortが未到達ならPhase 6と本Planを <code>running</code> のままにし、実装完了を偽って <code>done</code> にしない。非重複の後続Phase実装はfocused gate後に進めてよい。</li>
+  <li>rollback trigger を1件ずつ dry-run し、artifact path、before/after、command、結果を <code>final-acceptance.json</code> と実行ログへ残す。</li>
+  <li>既存 Recall Planは変更せず、各ownerが更新できるよう本Planのcommit/receipt/達成した既存Exit IDをcross-referenceとして記録する。未達を本Plan側でdone扱いしない。</li>
+  <li><strong>Exit:</strong> 下記「完了条件」をすべて満たし、plan-meta と badge を <code>done</code> に揃える。</li>
+  </ul>
+</span></li>
+</ol>
+</section>
+
+<section data-section="別承認・deferred">
+<h2>別承認・deferred</h2>
+<ul>
+<li><strong>GitHub admin gate:</strong> secret scanning、push protection、validity/non-provider patterns、Dependabot security updates の有効化は owner/admin の外部設定変更。明示承認後に別 receipt で行い、本 Plan の code Exit を待たせない。</li>
+<li><strong>型検査:</strong> mypy は現行対象を必須gateとして維持する。約89/358 filesからの段階的拡大は、違反inventoryと小分けownerを持つ別Planにする。</li>
+<li><strong>実provider CI:</strong> Ollama/oMLX 4秒E2Eはdedicated hostとisolated rootが用意できた時だけnightly/manual Planにする。通常PR jobへ混ぜない。</li>
+<li><strong>Evidence Reconstruction:</strong> P0/P1完了後の別prototype Planで、直近eligible 500 promptsをsealし、first-128現行とentity/phrase slots + multi-atom set cover + cursor選択をpaired replayする。supporting coverage +10 points以上、false positive悪化2 points以内、追加p95 &lt;=250msを満たすまでproduction canaryに入れない。</li>
+<li><strong>性能/整理:</strong> Dashboard gzip/ETag/layout、audit fsync、raw/provider重複、obsolete scriptsはP0/P1後に測定して別commitにする。新DB/cache/抽象化は作らない。</li>
+</ul>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<ul>
+<li>全 projection inventory の missing/invalid child が0で、元の20件すべてに disposition evidence がある。</li>
+<li>既知 semantic availability failure が、既存direct fallbackを変えずにdeadlineとsensitive filterを守り、24時間かつhost別100件の既存Recall gateを満たす。</li>
+<li>exact exposure/used receipt の identity が end-to-end で100% joinし、候補提示のfalse-used 0。<code>used</code>は学習label/authorityへ入らない。</li>
+<li>runtime/API/CLI/UI が5状態fixtureで一致し、status summaryは64KiB・warm p95 1秒の上限を満たす。</li>
+<li>HTTP credential egress、world/group-readable sensitive logs、unauthorized Raw preview、order-dependent QoS failure が0。</li>
+<li>focused tests、full isolated suite、ruff、mypy、import-linter、required CI が成功する。</li>
+<li>production 反映を行った場合、Git commit = pushed commit = runtime archive commit で、service/HTTP/DOM/console の受入証拠が揃う。</li>
+<li>全 checkbox、実行ログ、blocker、Plan metadata が実態と一致し、既存関連 Planには変更を加えずcross-reference receiptがある。</li>
+</ul>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<p>repo 標準の総合 gate は <code>uv run ruff check --no-cache src scripts tests</code>、<code>uv run mypy</code>、<code>uv run lint-imports --no-cache</code>、隔離した <code>CHRONOVISOR_ROOT</code> での <code>uv run pytest -q</code>。各 Phase の focused test を先に通し、最後に総合 gate を再実行する。</p>
+<table>
+<thead><tr><th>層</th><th>必須検証</th><th>失敗時</th></tr></thead>
+<tbody>
+<tr><td>Data integrity</td><td>manifest inventory、Raw digest、receipt/quarantine、idempotent second run</td><td>repair 停止。Raw 変更・duplicate があれば即 rollback</td></tr>
+<tr><td>Recall</td><td>availability fixture、deadline、filter、used join、最低24時間かつhost別100 eligible canary</td><td>fallback mapping または receipt propagation を個別 rollback</td></tr>
+<tr><td>Runtime truth</td><td>5 state fixtures、<code>/api/health</code>、CLI size/latency、Dashboard DOM/aria-live、console</td><td>schema/consumer の不一致側だけを戻す</td></tr>
+<tr><td>Security</td><td>HTTP reject before request、DNS/proxy/rebind、0600 stat、MCP unauthorized/authorized cases</td><td>production deploy 不可。security boundary は緩めない</td></tr>
+<tr><td>Tests/CI</td><td>QoS reverse-order x3、usearch optional、3.11/3.12 smoke、full suite、ruff、mypy、import-linter</td><td>該当 Phase は未完了</td></tr>
+<tr><td>Live</td><td>archive commit、PID/service、HTTP/auth、persistent artifact、DOM/SVG/console</td><td>最後の健全 commit へ戻し同じ matrix を再実行</td></tr>
+</tbody>
+</table>
+<p><strong>停止・rollback trigger:</strong> Raw digest 変化、projection corruption/duplicate、privacy filter bypass、Recall p95/p99 の既存 gate 超過、active failure の隠蔽、credential の HTTP 送信、full suite failure、live commit drift。</p>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>なし</li></ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul>
+<li>関連する既存 Plan: <a href="2026-08-13_1112_recall-l2-timeout-hardening.html">Recall L2 timeout hardening</a>、<a href="2026-08-13_1431_recall-precision-preserving-latency.html">Recall precision-preserving latency</a>、<a href="2026-08-14_1846_autonomous-recall-offline-distillation.html">offline distillation</a>。本 Plan は横断順序と共通 acceptance を定め、各 Plan 固有の閾値を上書きしない。</li>
+<li>主な source seam: <code>ingest/orchestrator.py</code>、<code>ingest/failure_supervisor.py</code>、<code>recall/recall_runtime.py</code>、<code>core/recall_log_schema.py</code>、<code>recall/recall_answer_eval.py</code>、<code>core/runtime_status.py</code>、<code>ops/health.py</code>、<code>ops/dashboard.py</code>、<code>dashboard_static/app-renderer.js</code>、<code>research/research_security.py</code>、<code>research/web_provider.py</code>、<code>core/jsonl_write.py</code>、<code>hosts/server.py</code>、<code>search/semantic_service.py</code>。</li>
+<li>P2 と dashboard compression/layout、audit fsync、raw/provider 重複整理は、P0/P1 の証拠が揃うまで deferred。DFlash lease は変更対象外。</li>
+<li>この Plan 作成自体は production mutation を含まない。push/restart/GitHub admin settings は未承認。</li>
+</ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log">
+<li><time>2026-08-23 19:44</time><span>監査結果から正式 Plan を生成。状態を <code>ready</code> に設定。実装は未着手。</span></li>
+<li><time>2026-08-23 20:01</time><span>読み取り専用reviewを2巡実施。既存Recall Planとのownership境界、24時間AND条件、数値Exit、projection diagnostic、post-push live closure、security/CI分割を修正し、必須指摘0を確認。</span></li>
+</ol>
+</section>
+
+</body>
+</html>
