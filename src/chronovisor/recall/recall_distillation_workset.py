@@ -441,11 +441,14 @@ class DistillationWorkset:
                             tuple(prior[:3]) == immutable[:3]
                             and tuple(prior[4:6]) == immutable[4:6]
                         )
-                        if (
-                            prior["state"] in {"ready", "quarantined"}
-                            and same_non_temporal
+                        if not (
+                            same_non_temporal
                             and _same_temporal_split_except_plan(prior[3], immutable[3])
                         ):
+                            raise DistillationWorksetError(
+                                f"immutable work identity conflict: {record[0]}"
+                            )
+                        if prior["state"] in {"ready", "quarantined"}:
                             # Cohort-only plan rotations may change the pointer
                             # while this uncompleted work keeps the same split.
                             connection.execute(
@@ -453,11 +456,11 @@ class DistillationWorkset:
                                 "updated_at = ? WHERE work_id = ?",
                                 (immutable[3], now, record[0]),
                             )
-                            existing += 1
-                        else:
+                        elif prior["state"] != "completed":
                             raise DistillationWorksetError(
                                 f"immutable work identity conflict: {record[0]}"
                             )
+                        existing += 1
                     else:
                         existing += 1
                 connection.execute(

@@ -101,19 +101,46 @@ def test_advance_rebinds_unfinished_identical_split_to_new_plan(
     )
 
 
-@pytest.mark.parametrize("terminal", ["leased", "completed"])
-def test_advance_refuses_split_plan_rebind_for_leased_or_completed(
-    tmp_path: Path, terminal: str
-) -> None:
+def test_advance_refuses_split_plan_rebind_for_leased(tmp_path: Path) -> None:
     workset = DistillationWorkset(tmp_path / "workset.sqlite3")
     workset.advance([_split_item("one", "a" * 64)], {"source": 1})
-    claim = workset.claim("label", 1, "ox-1", 60)[0]
-    if terminal == "completed":
-        workset.commit([claim], [_completed()])
+    workset.claim("label", 1, "ox-1", 60)
 
     with pytest.raises(DistillationWorksetError, match="identity conflict"):
         workset.advance([_split_item("one", "b" * 64)], {"source": 2})
     assert workset.watermark() == {"source": 1}
+
+
+def test_advance_completed_split_plan_rebind_keeps_completed_record(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "workset.sqlite3"
+    now = [100.0]
+    workset = DistillationWorkset(path, clock=lambda: now[0])
+    workset.advance([_split_item("one", "a" * 64)], {"source": 1})
+    claim = workset.claim("label", 1, "ox-1", 60)[0]
+    workset.commit([claim], [_completed()])
+    with sqlite3.connect(path) as connection:
+        before = connection.execute(
+            "SELECT temporal_split_json, state, attempt_count, completion_ref, "
+            "completion_digest, created_at, updated_at "
+            "FROM work_items WHERE work_id = 'one'"
+        ).fetchone()
+
+    now[0] = 200.0
+    assert workset.advance([_split_item("one", "b" * 64)], {"source": 2}) == {
+        "inserted": 0,
+        "existing": 1,
+        "watermark": {"source": 2},
+    }
+
+    with sqlite3.connect(path) as connection:
+        after = connection.execute(
+            "SELECT temporal_split_json, state, attempt_count, completion_ref, "
+            "completion_digest, created_at, updated_at "
+            "FROM work_items WHERE work_id = 'one'"
+        ).fetchone()
+    assert after == before
 
 
 def test_advance_refuses_semantic_split_change(tmp_path: Path) -> None:
@@ -150,23 +177,40 @@ def test_advance_split_rebind_rolls_back_with_later_conflict(tmp_path: Path) -> 
     path = tmp_path / "workset.sqlite3"
     workset = DistillationWorkset(path)
     workset.advance(
-        [_split_item("one", "a" * 64), _split_item("two", "a" * 64)],
+        [
+            _split_item("one", "a" * 64),
+            _split_item("two", "a" * 64),
+            _split_item("three", "a" * 64),
+        ],
         {"source": 1},
     )
-    conflicting = _split_item("two", "b" * 64)
+    claim = workset.claim("label", 1, "ox-1", 60)[0]
+    workset.commit([claim], [_completed()])
+    conflicting = _split_item("three", "b" * 64)
     conflicting["payload_ref"] = "candidate-ledger:changed"
 
     with pytest.raises(DistillationWorksetError, match="identity conflict"):
         workset.advance(
-            [_split_item("one", "b" * 64), conflicting],
+            [
+                _split_item("one", "b" * 64),
+                _split_item("two", "b" * 64),
+                conflicting,
+            ],
             {"source": 2},
         )
 
     with sqlite3.connect(path) as connection:
-        temporal = connection.execute(
-            "SELECT temporal_split_json FROM work_items WHERE work_id = 'one'"
-        ).fetchone()[0]
-    assert '"split_plan_id":"' + "a" * 64 + '"' in temporal
+        rows = connection.execute(
+            "SELECT work_id, temporal_split_json, state FROM work_items "
+            "WHERE work_id IN ('one', 'two') ORDER BY work_id"
+        ).fetchall()
+    assert [(work_id, state) for work_id, _, state in rows] == [
+        ("one", "completed"),
+        ("two", "ready"),
+    ]
+    assert all(
+        '"split_plan_id":"' + "a" * 64 + '"' in temporal for _, temporal, _ in rows
+    )
     assert workset.watermark() == {"source": 1}
 
 
