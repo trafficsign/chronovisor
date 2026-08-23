@@ -5141,8 +5141,8 @@ def _run_ox_teacher_batch(
                 outcomes[claim.work_id] = {
                     "status": (
                         "quarantined"
-                        if category in {"invalid_response", "remote_payload_rejected"}
-                        and claim.attempt >= 3
+                        if category == "remote_payload_rejected"
+                        or (category == "invalid_response" and claim.attempt >= 3)
                         else "retry"
                     ),
                     "error_class": category,

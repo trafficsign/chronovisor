@@ -2888,6 +2888,64 @@ def test_ox_profile_stop_returns_claims_to_ready(tmp_path: Path) -> None:
     assert result.labels_written == 0
 
 
+def test_ox_remote_guard_rejection_is_not_retried(tmp_path: Path) -> None:
+    class GuardedTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def evaluate(self, _payload: object) -> dict[str, object]:
+            self.calls += 1
+            return {
+                "_failure": {
+                    "class": "remote_payload_rejected",
+                    "retryable": False,
+                    "labelable": False,
+                }
+            }
+
+    teacher = GuardedTeacher()
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            teacher_claim_limit=1,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: teacher},
+        snapshots={
+            "rally-1": {
+                "candidates": [
+                    {"candidate_id": "candidate-1", "text_sha256": "candidate-1"},
+                    {"candidate_id": "candidate-2", "text_sha256": "candidate-2"},
+                ]
+            }
+        },
+        rally_by_id={
+            "rally-1": {
+                "rally_id": "rally-1",
+                "query_sha256": "query",
+                "context_refs": [],
+            }
+        },
+        texts={
+            "query": "what proves the claim",
+            "candidate-1": "bounded fact",
+            "candidate-2": "another bounded fact",
+        },
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert teacher.calls == 1
+    assert result.model_calls == 1
+    assert result.workset_status["quarantined"] == 1  # type: ignore[index]
+    assert result.workset_status["ready"] == 1  # type: ignore[index]
+
+
 def test_ox_claim_cap_keeps_append_batch_at_or_below_500(tmp_path: Path) -> None:
     class RemoteTeacher:
         local = False
