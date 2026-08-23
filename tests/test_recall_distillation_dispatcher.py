@@ -63,6 +63,31 @@ def test_ramp_reaches_ten_only_after_twenty_valid_results_per_cap() -> None:
     assert max_active == 10
 
 
+def test_ramp_counts_valid_labels_inside_each_batch() -> None:
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def evaluate(item: int) -> dict[str, list[int]]:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.002)
+        with lock:
+            active -= 1
+        return {"labels": [item] * 16}
+
+    results = dispatch_claimed_work(
+        list(range(19)),
+        evaluate,
+        valid_result_count=lambda value: len(value["labels"]),
+    )
+
+    assert all(result.status == "ok" for result in results)
+    assert max_active == 10
+
+
 def test_retry_backoff_is_bounded_and_injected() -> None:
     attempts = 0
     sleeps: list[float] = []

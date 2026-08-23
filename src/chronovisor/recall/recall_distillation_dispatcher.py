@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar, cast
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -67,7 +67,7 @@ class DispatchResult(Generic[T, R]):
 
 
 @dataclass(frozen=True)
-class _Attempt:
+class _Attempt(Generic[T, R]):
     result: DispatchResult[T, R]
 
 
@@ -168,6 +168,7 @@ class SingleTeacherDispatcher(Generic[T, R]):
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         random_fn: Callable[[], float] = _random.random,
+        valid_result_count: Callable[[R], int] | None = None,
     ) -> None:
         if not 1 <= max_inflight <= 10:
             raise ValueError("max_inflight must be between 1 and 10")
@@ -182,13 +183,16 @@ class SingleTeacherDispatcher(Generic[T, R]):
         self.evaluate = evaluate
         self.max_inflight = max_inflight
         self.max_retries = max_retries
-        self.backoff_base_seconds = backoff_base_seconds
-        self.backoff_max_seconds = max(backoff_base_seconds, backoff_max_seconds)
-        self.jitter_ratio = jitter_ratio
+        self.backoff_base_seconds: float = float(backoff_base_seconds)
+        self.backoff_max_seconds: float = float(
+            max(backoff_base_seconds, backoff_max_seconds)
+        )
+        self.jitter_ratio: float = float(jitter_ratio)
         self.min_valid_results_per_cap = min_valid_results_per_cap
         self.sleep = sleep
         self.clock = clock
-        self.random_fn = random_fn
+        self.random_fn: Callable[[], float] = random_fn
+        self.valid_result_count = valid_result_count or (lambda _value: 1)
 
     def dispatch(self, claimed_work: Sequence[T]) -> list[DispatchResult[T, R]]:
         """Evaluate all work in input order; never writes caller-owned state."""
@@ -206,7 +210,7 @@ class SingleTeacherDispatcher(Generic[T, R]):
             while offset < len(work) and not stop_event.is_set():
                 cap = min(current_cap, self.max_inflight, len(work) - offset)
                 indexes = range(offset, offset + cap)
-                futures: dict[Future[_Attempt], int] = {
+                futures: dict[Future[_Attempt[T, R]], int] = {
                     executor.submit(
                         self._evaluate_with_retry,
                         index,
@@ -231,9 +235,15 @@ class SingleTeacherDispatcher(Generic[T, R]):
                     current_cap = next_cap
                     valid_results_at_cap = 0
                 else:
-                    valid_results_at_cap += sum(
-                        item.status == "ok" for item in wave_results
-                    )
+                    for item in wave_results:
+                        if item.status != "ok":
+                            continue
+                        count = self.valid_result_count(cast(R, item.value))
+                        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                            raise ValueError(
+                                "valid_result_count must return a non-negative integer"
+                            )
+                        valid_results_at_cap += count
                     if valid_results_at_cap >= self.min_valid_results_per_cap:
                         next_cap = self._next_cap(current_cap)
                         if next_cap != current_cap:
@@ -249,9 +259,10 @@ class SingleTeacherDispatcher(Generic[T, R]):
                     ),
                     "kill_switch",
                 )
+                stop_category = stop_category or "kill_switch"
                 stopped = DispatchStopped(stop_category)
-                for index, item in enumerate(results):
-                    if item is None:
+                for index, stored in enumerate(results):
+                    if stored is None:
                         results[index] = DispatchResult(
                             work[index],
                             "deferred",
@@ -269,7 +280,7 @@ class SingleTeacherDispatcher(Generic[T, R]):
         stop_event: threading.Event,
         stop_reason: list[str],
         stop_reason_lock: threading.Lock,
-    ) -> _Attempt:
+    ) -> _Attempt[T, R]:
         del index  # Indexing is owned by the caller; evaluation stays payload-only.
         rate_limited = False
         for attempt_number in range(1, self.max_retries + 2):
@@ -334,13 +345,13 @@ class SingleTeacherDispatcher(Generic[T, R]):
         raise AssertionError("retry loop must return")
 
     def _backoff(self, attempt_number: int) -> float:
-        delay = min(
+        delay: float = min(
             self.backoff_max_seconds,
             self.backoff_base_seconds * (2 ** (attempt_number - 1)),
         )
         if not delay or not self.jitter_ratio:
             return delay
-        jitter = (self.random_fn() * 2.0 - 1.0) * self.jitter_ratio
+        jitter: float = (self.random_fn() * 2.0 - 1.0) * self.jitter_ratio
         return max(0.0, min(self.backoff_max_seconds, delay * (1.0 + jitter)))
 
     def _next_cap(self, current_cap: int) -> int:
