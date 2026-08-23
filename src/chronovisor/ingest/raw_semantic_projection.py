@@ -1001,7 +1001,8 @@ def project_parent_raw(
 
     A raw that claims a Codex/Claude transcript envelope must have a valid
     self-verifying save transaction receipt.  Non-transcript raws are not
-    rewritten and need no projection artifact.
+    rewritten and need no projection artifact.  The legacy override is only
+    for bytes accepted by ``RawStore.is_archived_legacy_markdown``.
     """
 
     source_bytes, source_text = _read_parent(raw_path, raw_bytes)
