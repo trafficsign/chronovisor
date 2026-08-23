@@ -484,8 +484,20 @@ def test_worker_persists_only_safe_job_failure_category(
         lambda job_id, error: failures.append((job_id, error)),
     )
 
-    state._worker_loop()
+    worker_errors: list[BaseException] = []
 
+    def run_worker() -> None:
+        try:
+            state._worker_loop()
+        except BaseException as error:  # pragma: no cover - assertion below reports it
+            worker_errors.append(error)
+
+    worker = threading.Thread(target=run_worker, name="semantic-worker-test")
+    worker.start()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert worker_errors == []
     assert failures == [("job", "semantic_failure")]
     assert state._last_error == "semantic_failure"
 
