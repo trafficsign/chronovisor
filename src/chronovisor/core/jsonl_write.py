@@ -111,7 +111,18 @@ def append_jsonl_durable(
     except FileNotFoundError:
         pass
 
-    with path.open("ab") as handle:
+    descriptor = os.open(
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+        0o600,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        handle = os.fdopen(descriptor, "ab")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with handle:
         if needs_separator:
             handle.write(b"\n")
         for row in encoded:

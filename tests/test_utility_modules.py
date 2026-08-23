@@ -14,6 +14,7 @@ from chronovisor.core.hashutil import (
 )
 from chronovisor.core.jsonl import encode_jsonl, read_jsonl, write_jsonl
 from chronovisor.core.jsonl_write import (
+    append_jsonl_durable,
     atomic_replace_bytes,
     atomic_write_json_payload,
     write_jsonl_atomic,
@@ -101,3 +102,25 @@ def test_atomic_write_json_payload_preserves_exact_contract(tmp_path: Path) -> N
     assert path.read_bytes() == '{"a": "日本語", "z": 1}\n'.encode()
     assert path.stat().st_mode & 0o777 == 0o600
     assert not list(tmp_path.glob(f".{path.name}.*.tmp"))
+
+
+def test_append_jsonl_durable_creates_private_file(tmp_path: Path) -> None:
+    path = tmp_path / "append.jsonl"
+
+    append_jsonl_durable(path, [{"event": "created"}])
+
+    assert path.read_text(encoding="utf-8") == '{"event": "created"}\n'
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_append_jsonl_durable_repairs_existing_file_mode(tmp_path: Path) -> None:
+    path = tmp_path / "append-existing.jsonl"
+    path.write_text('{"event": "old"}\n', encoding="utf-8")
+    path.chmod(0o644)
+
+    append_jsonl_durable(path, [{"event": "new"}])
+
+    assert path.read_text(encoding="utf-8") == (
+        '{"event": "old"}\n{"event": "new"}\n'
+    )
+    assert path.stat().st_mode & 0o777 == 0o600
