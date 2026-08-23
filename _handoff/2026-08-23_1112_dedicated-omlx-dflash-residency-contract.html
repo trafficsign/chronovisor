@@ -61,13 +61,13 @@ th{background:#f3f1eb}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_11b161cfc573491b8d1d8204aa26c5cb","created_at":"2026-08-23T11:12:17+09:00","状態":"ready","slug":"dedicated-omlx-dflash-residency-contract"}
+{"task_id":"plan_11b161cfc573491b8d1d8204aa26c5cb","created_at":"2026-08-23T11:12:17+09:00","状態":"running","slug":"dedicated-omlx-dflash-residency-contract"}
 </script>
 
 <header>
 <h1>実装契約書: <span id="plan-title">oMLX / DFlash2 モデル専用常駐化</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_11b161cfc573491b8d1d8204aa26c5cb</code></span>
 <span data-bind="created_at">2026-08-23T11:12:17+09:00</span>
 </div>
@@ -165,10 +165,10 @@ th{background:#f3f1eb}
 <section data-section="実行手順">
 <h2>実行手順</h2>
 <ol class="checklist">
-<li><input type="checkbox"><span><strong>実行権限と作業状態を確定:</strong> repo status、branch/worktree、HEAD、local-only commit、稼働中 service、runtime archive commit を記録する。push/restart権限がなければ live config は触らず、repo 実装・commit 後に blocked とする。</span></li>
-<li><input type="checkbox"><span><strong>baseline を固定:</strong> 同じ代表 prompt/output 条件で Qwen/Muse を交互に最低12 request実行し、wall time、prefill TPS、generation TPS、load count/load seconds、cache hit/cached tokens、oMLX memory、<code>memory_pressure -Q</code>、<code>sysctl vm.swapusage</code> を保存する。開始・終了log offsetも残す。</span></li>
-<li><input type="checkbox"><span><strong>repo の最小修正を test-first で実装:</strong> <code>_omlx_snapshot()</code> が configured <code>kind="omlx"</code> endpoint を一度ずつ読むようにし、同じ model id は1行へmergeする。いずれかの endpoint で <code>loaded=true</code> なら loaded row を優先。1 endpoint failure は他 endpoint の正常表示を潰さない。UI HTML、Decision Trace、route order code は変更しない。</span></li>
-<li><input type="checkbox"><span><strong>targeted/full test:</strong> multi-endpoint merge、partial failure、既存single-endpoint fallback、OMLXAdapter、Decision Trace orderを通す。続いて隔離rootでfull suiteを実行する。失敗を既存不具合として無視しない。</span></li>
+<li><input type="checkbox" checked><span><strong>実行権限と作業状態を確定:</strong> repo status、branch/worktree、HEAD、local-only commit、稼働中 service、runtime archive commit を記録する。push/restart権限がなければ live config は触らず、repo 実装・commit 後に blocked とする。</span></li>
+<li><input type="checkbox" checked><span><strong>baseline を固定:</strong> 同じ代表 prompt/output 条件で Qwen/Muse を交互に最低12 request実行し、wall time、prefill TPS、generation TPS、load count/load seconds、cache hit/cached tokens、oMLX memory、<code>memory_pressure -Q</code>、<code>sysctl vm.swapusage</code> を保存する。開始・終了log offsetも残す。</span></li>
+<li><input type="checkbox" checked><span><strong>repo の最小修正を test-first で実装:</strong> <code>_omlx_snapshot()</code> が configured <code>kind="omlx"</code> endpoint を一度ずつ読むようにし、同じ model id は1行へmergeする。いずれかの endpoint で <code>loaded=true</code> なら loaded row を優先。1 endpoint failure は他 endpoint の正常表示を潰さない。UI HTML、Decision Trace、route order code は変更しない。</span></li>
+<li><input type="checkbox" checked><span><strong>targeted/full test:</strong> multi-endpoint merge、partial failure、既存single-endpoint fallback、OMLXAdapter、Decision Trace orderを通す。続いて隔離rootでfull suiteを実行する。失敗を既存不具合として無視しない。</span></li>
 <li><input type="checkbox"><span><strong>repo変更をcommit:</strong> 差分が許可2 fileと必要な非秘密evidenceだけであることを確認し、意味のある単位でcommitする。明示権限がある時だけpushする。</span></li>
 <li><input type="checkbox"><span><strong>Muse base path を作成:</strong> <code>.omlx-gemma</code> の最小構造を踏襲し、<code>.omlx-muse/settings.json</code> は loopback:8002、共有model_dirs、現行balanced memory guard、idle timeout nullとする。<code>model_settings.json</code> は Muse の現行DFlash設定だけを持ち、L1=2 entries/2 GiB、L2=false。credentialは既存local値を安全に移し、mode 0600、証拠からredactする。</span></li>
 <li><input type="checkbox"><span><strong>LaunchAgent を追加:</strong> label <code>com.trafficsign.omlx-muse</code>、base path/working directory/log path を <code>.omlx-muse</code> に向け、mainと同じpatched runtimeを使う。model weightは共有し、複製しない。load後、8002の認証境界とhealthを確認する。</span></li>
@@ -261,6 +261,9 @@ rg -n "Unloading DFlash model|Loaded model:" \
 <ol class="log">
 <li><time>2026-08-23 11:12</time><span>契約書を生成。runtime変更なし。</span></li>
 <li><time>2026-08-23 11:18</time><span>DFlash L1のentries/byte eviction、snapshot byte内訳、effective settings、平常memory/swapを再検証。stateをreadyへ更新。</span></li>
+<li><time>2026-08-23 11:42</time><span>実行開始。mainはHEAD 9d3cc1a、origin/main e5f694f、local-only 1 commit、worktree clean。8000/8001稼働、8002未作成、production runtime archive/expected commitはともにe5f694f。pushとGitHub-backed restartは未承認のためlive cutoverは行わない。stateをrunningへ更新。</span></li>
+<li><time>2026-08-23 11:59</time><span>Dashboard multi-endpoint集約をtest-firstで実装。configured endpointの一度読み、model-id union、loaded row優先、partial/all failure、single fallbackをcommit 37cb114と7747178で固定。targeted 172+14 tests、ruff、diff-check、隔離full suite 5093 passed/1 skippedが成功。</span></li>
+<li><time>2026-08-23 12:11</time><span>設定変更前baseline v2を固定。正規chat_template_kwargsでQwen/Muse交互12件が全成功、p50 wall 37.946s、request報告load 262.37s、cached tokens 0。streaming usageでprefill/generation TPSを取得。live混在を明記し、秘密なしartifactを _handoff/evidence/2026-08-23-omlx-dedicated-baseline.json へ保存。</span></li>
 </ol>
 </section>
 

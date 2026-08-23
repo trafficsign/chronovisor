@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "status": "ok_with_live_contamination_v2",
+  "captured_at": {
+    "started": "2026-08-23T11:59:17+09:00",
+    "completed": "2026-08-23T12:07:20+09:00"
+  },
+  "control": {
+    "endpoint": "http://127.0.0.1:8000/v1",
+    "order": [
+      "Qwen3.8-27B-4bit",
+      "Muse-Glimmer-30B-4bit"
+    ],
+    "repetitions": 6,
+    "prompt_profile": "fixed_synthetic_residency_v1",
+    "prompt_tokens": {
+      "Qwen3.8-27B-4bit": 4108,
+      "Muse-Glimmer-30B-4bit": 4154
+    },
+    "max_output_tokens": 32,
+    "temperature": 0,
+    "seed": 7,
+    "chat_template_kwargs": {"enable_thinking": false},
+    "effective_reasoning_observation": {"Qwen3.8-27B-4bit": "0 reasoning chars", "Muse-Glimmer-30B-4bit": "184 reasoning chars per request despite disable flag"},
+    "raw_prompt_recorded": false,
+    "raw_response_recorded": false
+  },
+  "requests": [
+    {"ordinal": 1, "model": "Qwen3.8-27B-4bit", "http_status": 200, "wall_seconds": 21.628080, "model_load_seconds": null, "server_seconds": 21.62, "server_output_tokens_per_second": 1.5, "input_tokens": 4108, "output_tokens": 32, "cached_tokens": 0, "reasoning_chars": 0},
+    {"ordinal": 2, "model": "Muse-Glimmer-30B-4bit", "http_status": 200, "wall_seconds": 22.370662, "model_load_seconds": 2.35, "server_seconds": 20.01, "server_output_tokens_per_second": 1.6, "input_tokens": 4154, "output_tokens": 32, "cached_tokens": 0, "reasoning_chars": 184},
+    {"ordinal": 3, "model": "Qwen3.8-27B-4bit", "http_status": 200, "wall_seconds": 40.749314, "model_load_seconds": 24.51, "server_seconds": 16.23, "server_output_tokens_per_second": 2.0, "input_tokens": 4108, "output_tokens": 32, "cached_tokens": 0, "reasoning_chars": 0},
+    {"ordinal": 4, "model": "Muse-Glimmer-30B-4bit", "http_status": 200, "wall_seconds": 22.682848, "model_load_seconds": 2.59, "server_seconds": 20.08, "server_output_tokens_per_second": 1.6, "input_tokens": 4154, "output_tokens": 32, "cached_tokens": 0, "reasoning_chars": 184},
+    {"ordinal": 5, "model": "Qwen3.8-27B-4bit", "http_status": 200, "wall_seconds": 38.583043, "model_load_seconds": 23.38, "server_seconds": 15.07, "server_output_tokens_per_second": 2.1, "input_tokens": 4108, "output_tokens": 32, "cached_tokens": 0, "reasoning_chars": 0},
+    {"ordinal": 6, "model": "Muse-Glimmer-30B-4bit", "http_status": 200, "wall_seconds": 77.076550, "model_load_seconds": 56.99, "server_seconds": 19.99, "server_output_tokens_per_second": 1.6, "input_tokens": 4154, "output_tokens": 32, "cached_tokens": 0, "reasoning_chars": 184},
+    {"ordinal": 7, "model": "Qwen3.8-27B-4bit", "http_status": 200, "wall_seconds": 37.309288, "model_load_seconds": 22.71, "server_seconds": 14.56, "server_output_tokens_per_second": 2.2, "input_tokens": 4108, "output_tokens": 32, "cached_tokens": 0, "reasoning_chars": 0},
+    {"ordinal": 8, "model": "Muse-Glimmer-30B-4bit", "http_status": 200, "wall_seconds": 54.918692, "model_load_seconds": 34.54, "server_seconds": 20.28, "server_output_tokens_per_second": 1.6, "input_tokens": 4154, "output_tokens": 32, "cached_tokens": 0, "reasoning_chars": 184},
+    {"ordinal": 9, "model": "Qwen3.8-27B-4bit", "http_status": 200, "wall_seconds": 37.173850, "model_load_seconds": 22.42, "server_seconds": 14.66, "server_output_tokens_per_second": 2.2, "input_tokens": 4108, "output_tokens": 32, "cached_tokens": 0, "reasoning_chars": 0},
+    {"ordinal": 10, "model": "Muse-Glimmer-30B-4bit", "http_status": 200, "wall_seconds": 44.664157, "model_load_seconds": 22.04, "server_seconds": 22.61, "server_output_tokens_per_second": 1.4, "input_tokens": 4154, "output_tokens": 32, "cached_tokens": 0, "reasoning_chars": 184},
+    {"ordinal": 11, "model": "Qwen3.8-27B-4bit", "http_status": 200, "wall_seconds": 36.830117, "model_load_seconds": 22.34, "server_seconds": 14.48, "server_output_tokens_per_second": 2.2, "input_tokens": 4108, "output_tokens": 32, "cached_tokens": 0, "reasoning_chars": 0},
+    {"ordinal": 12, "model": "Muse-Glimmer-30B-4bit", "http_status": 200, "wall_seconds": 48.988308, "model_load_seconds": 28.50, "server_seconds": 20.37, "server_output_tokens_per_second": 1.6, "input_tokens": 4154, "output_tokens": 32, "cached_tokens": 0, "reasoning_chars": 184}
+  ],
+  "summary": {
+    "request_count": 12,
+    "success_count": 12,
+    "wall_seconds": {"p50": 37.946166, "mean": 40.247909, "min": 21.628080, "max": 77.076550, "total": 482.974909},
+    "model_load_seconds": {"reported_count": 11, "p50_including_resident_zero": 22.565, "sum": 262.37, "qwen_sum": 115.36, "muse_sum": 147.01},
+    "server_seconds": {"p50": 20.0, "mean": 18.33},
+    "server_output_tokens_per_second": {"p50": 1.6, "mean": 1.8, "qwen_p50": 2.15, "muse_p50": 1.6},
+    "qwen_wall_p50": 37.241569,
+    "muse_wall_p50": 46.826233,
+    "cached_tokens_total": 0,
+    "prefill_metric_status": "captured by matching streaming usage probes"
+  },
+  "streaming_throughput_probe": [
+    {"model": "Qwen3.8-27B-4bit", "http_status": 200, "wall_seconds": 16.336614, "input_tokens": 4108, "output_tokens": 32, "cached_tokens": 0, "time_to_first_token": 13.95, "prefill_seconds": 13.95, "generation_seconds": 2.36, "prompt_tokens_per_second": 294.58, "generation_tokens_per_second": 13.54},
+    {"model": "Muse-Glimmer-30B-4bit", "http_status": 200, "wall_seconds": 24.284682, "model_load_seconds": 2.58, "input_tokens": 4154, "output_tokens": 32, "cached_tokens": 0, "time_to_first_token": 21.25, "prefill_seconds": 21.25, "generation_seconds": 0.44, "prompt_tokens_per_second": 195.46, "generation_tokens_per_second": 73.05}
+  ],
+  "log_offsets": {
+    "launchd_stderr": {"start_line": 23595, "end_line": 23880},
+    "server_log": {"start_line": 2696, "end_line": 2926}
+  },
+  "load_unload": {
+    "request_reported_load_count": 11,
+    "request_reported_load_seconds": 262.37,
+    "window_loading_attempt_count": 19,
+    "window_loaded_completion_count": 11,
+    "window_cross_model_unload_count": 5,
+    "window_contaminated_by_live_requests": true
+  },
+  "cache": {
+    "l1_max_entries_per_model": 2,
+    "l1_max_bytes_per_model": 2147483648,
+    "request_cached_tokens_total": 0,
+    "l2_enabled": false
+  },
+  "memory": {
+    "before": {"system_free_percentage": 48, "swap_used_mib": 346.88},
+    "after": {"system_free_percentage": 75, "swap_used_mib": 346.88, "omlx_current_model_memory_bytes": 6482401140, "omlx_final_ceiling_bytes": 98029184088},
+    "swap_increment_mib": 0.0,
+    "pressure_status": "normal"
+  },
+  "contamination": {
+    "detected": true,
+    "reason": "production main oMLX served unrelated live requests inside the captured log window",
+    "request_matching": "the 12 controlled completions were matched by exact model, prompt token count, output token count, order, and HTTP success",
+    "interpretation": "controlled request wall and usage metrics are valid; aggregate log loading counts are observational and not attributed solely to the 12 requests"
+  },
+  "redaction": {
+    "credentials_recorded": false,
+    "prompt_text_recorded": false,
+    "response_text_recorded": false,
+    "raw_logs_recorded": false
+  }
+}
