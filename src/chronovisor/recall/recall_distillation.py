@@ -64,6 +64,9 @@ TEACHER_PROFILES = frozenset({LOCAL_TRIAD_PROFILE, OX_SINGLE_PROFILE})
 OX_ALPHA_ENDPOINT = "https://opencode.ai/zen/go/v1"
 OX_ALPHA_CREDENTIAL_REF = "oskeyring:codex-router-opencode-go/default"
 OX_PROFILE_SCHEMA = "chronovisor.recall-distill-ox-profile.v1"
+# Deterministic local payload rejects may be skipped in one run, but never
+# indefinitely: after this many extra claims, leave the remainder ready.
+OX_PREFLIGHT_SCAN_CLAIM_BUDGET = 16
 UTILITY_LABELS = frozenset({"helpful", "neutral", "harmful", "uncertain"})
 RELEVANCE_LABELS = frozenset({"relevant", "irrelevant", "uncertain"})
 AUTHORITIES = frozenset({"verified", "teacher-only", "uncertain", "reject"})
@@ -4406,6 +4409,7 @@ def _run_ox_teacher_batch(
     label_path: Path,
     label_rows: Sequence[Mapping[str, Any]],
     candidate_indexed: bool = False,
+    _payload_scan_remaining: int | None = None,
     structural_verifier: Callable[
         [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
     ],
@@ -4684,7 +4688,16 @@ def _run_ox_teacher_batch(
         or not 1 <= claim_limit <= 500
     ):
         raise DistillationError("teacher_claim_limit must be between 1 and 500")
-    claims = list(workset.claim("ox", claim_limit, OX_TEACHER_ROLE, 7200))
+    claims = list(
+        workset.claim(
+            "ox",
+            min(claim_limit, _payload_scan_remaining)
+            if _payload_scan_remaining is not None
+            else claim_limit,
+            OX_TEACHER_ROLE,
+            7200,
+        )
+    )
     probe_claim_counts: dict[str, int] = defaultdict(int)
     for claim in claims:
         probe_batch_id = str(claim.provenance.get("probe_batch_id") or "")
@@ -4860,25 +4873,36 @@ def _run_ox_teacher_batch(
             )
             claims = [claim for claim in claims if claim.work_id not in invalid_ids]
     payload_failures: list[tuple[Any, dict[str, str]]] = []
+    local_payload_rejects: list[Any] = []
+    claim_integrity_failure = False
     resolved_claims: list[Any] = []
     for claim in claims:
         task = tasks.get(claim.work_id)
-        payload = (
-            _teacher_payload(
-                task["rally"],
-                task["candidate"],
-                texts,
-                max_input_bytes=config.max_input_bytes,
-            )
-            if task is not None
-            else None
-        )
-        if task is None or payload is None:
+        if task is None:
+            claim_integrity_failure = True
             payload_failures.append(
                 (
                     claim,
                     {
                         "status": "quarantined" if claim.attempt >= 3 else "retry",
+                        "error_class": "remote_payload_rejected",
+                    },
+                )
+            )
+            continue
+        payload = _teacher_payload(
+            task["rally"],
+            task["candidate"],
+            texts,
+            max_input_bytes=config.max_input_bytes,
+        )
+        if payload is None:
+            local_payload_rejects.append(claim)
+            payload_failures.append(
+                (
+                    claim,
+                    {
+                        "status": "quarantined",
                         "error_class": "remote_payload_rejected",
                     },
                 )
@@ -4892,6 +4916,28 @@ def _run_ox_teacher_batch(
             "evidence": payload["candidate"],
         }
         resolved_claims.append(claim)
+    failed_probe_batches = {
+        str(task.get("probe_batch_id") or "")
+        for claim in local_payload_rejects
+        if (task := tasks.get(claim.work_id)) is not None
+        and str(task.get("probe_batch_id") or "")
+    }
+    if failed_probe_batches:
+        for claim in resolved_claims[:]:
+            if (
+                str(tasks[claim.work_id].get("probe_batch_id") or "")
+                in failed_probe_batches
+            ):
+                payload_failures.append(
+                    (
+                        claim,
+                        {
+                            "status": "quarantined",
+                            "error_class": "remote_payload_rejected",
+                        },
+                    )
+                )
+                resolved_claims.remove(claim)
     if payload_failures:
         workset.commit(
             [claim for claim, _outcome in payload_failures],
@@ -4899,6 +4945,25 @@ def _run_ox_teacher_batch(
         )
     claims = resolved_claims
     if not claims:
+        remaining = (
+            OX_PREFLIGHT_SCAN_CLAIM_BUDGET
+            if _payload_scan_remaining is None
+            else _payload_scan_remaining
+        ) - len(payload_failures)
+        if local_payload_rejects and not claim_integrity_failure and remaining > 0:
+            return _run_ox_teacher_batch(
+                root=root,
+                config=config,
+                teachers=teachers,
+                snapshots=snapshots,
+                rally_by_id=rally_by_id,
+                texts=texts,
+                label_path=label_path,
+                label_rows=label_rows,
+                candidate_indexed=candidate_indexed,
+                _payload_scan_remaining=remaining,
+                structural_verifier=structural_verifier,
+            )
         return _TeacherBatchResult(workset_status=workset.status("ox"))
 
     batches: list[list[Any]] = []

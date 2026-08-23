@@ -2703,7 +2703,7 @@ def test_ox_resolves_text_only_for_claimed_work_and_uses_long_lease(
     assert leases == [7200]
 
 
-def test_ox_missing_payload_retries_then_quarantines_without_remote_call(
+def test_ox_missing_payload_quarantines_without_remote_call(
     tmp_path: Path,
 ) -> None:
     class RemoteTeacher:
@@ -2743,10 +2743,102 @@ def test_ox_missing_payload_retries_then_quarantines_without_remote_call(
             structural_verifier=lambda *_args: None,
         )
 
-    assert run().workset_status["ready"] == 1  # type: ignore[index]
-    assert run().workset_status["ready"] == 1  # type: ignore[index]
-    assert run().workset_status["quarantined"] == 1  # type: ignore[index]
+    result = run()
+    assert result.workset_status["quarantined"] == 1  # type: ignore[index]
+    assert result.workset_status["ready"] == 0  # type: ignore[index]
     assert store.read_chain(label_path) == []
+
+
+def test_ox_canary_skips_payload_rejected_probe_before_one_safe_request(
+    tmp_path: Path,
+) -> None:
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def __init__(self) -> None:
+            self.requests: list[list[str]] = []
+
+        def evaluate(self, payload: object) -> dict[str, object]:
+            assert isinstance(payload, dict)
+            candidates = payload["candidates"]
+            assert isinstance(candidates, list)
+            self.requests.append(
+                [str(candidate["candidate_id"]) for candidate in candidates]
+            )
+            return {
+                "labels": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "verdict": "relevant",
+                        "confidence": 0.9,
+                        "rationale": "bounded evidence",
+                        "minimal_atom_ids": [],
+                        "missing_slots": [],
+                        "changing_claim": "",
+                    }
+                    for candidate in candidates
+                ],
+                "_route_identity": {
+                    "provider": "opencode-go",
+                    "model": "opencode-go/ox-alpha-free",
+                    "location": "remote",
+                },
+                "_route_digest": "a" * 64,
+                "_model_digest": "b" * 64,
+                "_prompt_digest": "c" * 64,
+                "_schema_digest": "d" * 64,
+            }
+
+    rally = {
+        "rally_id": "rally-test",
+        "session_cluster_id": "session-test",
+        "as_of": "2026-01-03T00:00:00Z",
+        "query_sha256": "query",
+        "context_refs": [],
+    }
+    distill._ensure_split_plan(
+        tmp_path,
+        [rally],
+        raw_watermark="a" * 64,
+        model_cohort_sha256="b" * 64,
+    )
+    teacher = RemoteTeacher()
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            teacher_claim_limit=1,
+            hard_floor_probe_pairs=1,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: teacher},
+        snapshots={
+            "rally-test": {
+                "snapshot_sha256": "c" * 64,
+                "candidates": [
+                    {"candidate_id": "candidate-a", "text_sha256": "missing-a"},
+                    {"candidate_id": "candidate-b", "text_sha256": "missing-b"},
+                    {"candidate_id": "candidate-c", "text_sha256": "candidate-c"},
+                ],
+            }
+        },
+        rally_by_id={"rally-test": rally},
+        texts={"query": "what proves the claim", "candidate-c": "bounded fact"},
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert result.labels_written == 1
+    assert teacher.requests == [["candidate-c"]]
+    with sqlite3.connect(store.distillation_dir(tmp_path) / "ox-workset.sqlite3") as db:
+        counts = dict(
+            db.execute("SELECT state, COUNT(*) FROM work_items GROUP BY state")
+        )
+        attempts = db.execute("SELECT MAX(attempt_count) FROM work_items").fetchone()[0]
+    assert counts == {"completed": 1, "quarantined": 6}
+    assert attempts == 1
 
 
 def test_ox_profile_stop_returns_claims_to_ready(tmp_path: Path) -> None:
