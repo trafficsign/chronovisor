@@ -65,6 +65,7 @@ TEACHER_PROFILES = frozenset({LOCAL_TRIAD_PROFILE, OX_SINGLE_PROFILE})
 OX_ALPHA_ENDPOINT = "https://opencode.ai/zen/go/v1"
 OX_ALPHA_CREDENTIAL_REF = "oskeyring:codex-router-opencode-go/default"
 OX_PROFILE_SCHEMA = "chronovisor.recall-distill-ox-profile.v1"
+OX_RAMP_RECEIPTS_PER_CAP = 20
 # Deterministic local payload rejects may be skipped in one run, but never
 # indefinitely: after this many extra claims, leave the remainder ready.
 OX_PREFLIGHT_SCAN_CLAIM_BUDGET = 500
@@ -4378,6 +4379,8 @@ class _TeacherBatchResult:
     workset_status: Mapping[str, int] | None = None
     profile_stopped: bool = False
     profile_contract_id: str = ""
+    ramp_cap: int | None = None
+    ramp_valid_receipts: int | None = None
 
 
 @dataclass(frozen=True)
@@ -4394,6 +4397,24 @@ class _CandidateCaptureResult:
     work: list[Mapping[str, Any]]
     split_plan: Mapping[str, Any]
     deadline_deferred: bool
+
+
+def _ox_ramp_state(state: Mapping[str, Any], max_inflight: int) -> tuple[int, int]:
+    cap = state.get("ox_ramp_cap", 1)
+    receipts = state.get("ox_ramp_valid_receipts", 0)
+    allowed_caps = {min(value, max_inflight) for value in (1, 2, 5, 10)}
+    if (
+        isinstance(cap, bool)
+        or not isinstance(cap, int)
+        or cap not in allowed_caps
+        or isinstance(receipts, bool)
+        or not isinstance(receipts, int)
+        or receipts < 0
+        or receipts > OX_RAMP_RECEIPTS_PER_CAP
+        or (receipts == OX_RAMP_RECEIPTS_PER_CAP and cap < max_inflight)
+    ):
+        return 1, 0
+    return cap, receipts
 
 
 def _run_ox_teacher_batch(
@@ -4423,7 +4444,8 @@ def _run_ox_teacher_batch(
         return _TeacherBatchResult(deferred=True, workset_status=workset.status("ox"))
     profile_contract_id = str(_ensure_ox_profile_contract(root, config)["artifact_id"])
     try:
-        if _read_worker_state(root).get("ox_profile_stopped") is True:
+        worker_state = _read_worker_state(root)
+        if worker_state.get("ox_profile_stopped") is True:
             return _TeacherBatchResult(
                 deferred=True,
                 workset_status=workset.status("ox"),
@@ -4431,7 +4453,16 @@ def _run_ox_teacher_batch(
                 profile_contract_id=profile_contract_id,
             )
     except store.DistillationStoreError:
-        pass
+        worker_state = {}
+    ramp_source = (
+        worker_state
+        if worker_state.get("kind") == "worker-state"
+        and worker_state.get("ox_profile_contract_id") == profile_contract_id
+        else {}
+    )
+    ramp_cap, ramp_valid_receipts = _ox_ramp_state(
+        ramp_source, config.teacher_max_inflight
+    )
     try:
         split_plan = _read_split_plan(root)
         assignments = split_plan["assignments"]
@@ -5227,12 +5258,19 @@ def _run_ox_teacher_batch(
         # how many labels it happened to carry.
         return 1
 
+    ramp_state = {
+        "current_cap": ramp_cap,
+        "valid_results_at_cap": ramp_valid_receipts,
+    }
     results = dispatch_claimed_work(
         batches,
         lambda current: teacher.evaluate(batch_payload(current)),
         max_inflight=config.teacher_max_inflight,
         max_retries=0 if config.teacher_claim_limit == 1 else 2,
-        min_valid_results_per_cap=20,
+        min_valid_results_per_cap=OX_RAMP_RECEIPTS_PER_CAP,
+        initial_cap=ramp_cap,
+        initial_valid_results=ramp_valid_receipts,
+        ramp_state=ramp_state,
         valid_result_count=valid_result_count,
     )
     expected_identity = {
@@ -5375,6 +5413,8 @@ def _run_ox_teacher_batch(
         workset_status=workset.status("ox"),
         profile_stopped=stopped,
         profile_contract_id=profile_contract_id,
+        ramp_cap=ramp_state["current_cap"],
+        ramp_valid_receipts=ramp_state["valid_results_at_cap"],
     )
 
 
@@ -6070,6 +6110,29 @@ def _run_distillation_chunk_impl(
     teacher_model_calls += teacher_result.model_calls
     model_deferred = model_deferred or teacher_result.deferred
     ox_workset = dict(teacher_result.workset_status or {})
+    ox_ramp_fields: dict[str, int] = {}
+    if config.teacher_profile == OX_SINGLE_PROFILE:
+        ramp_source: Mapping[str, Any] = (
+            scheduler_state
+            if scheduler_state.get("kind") == "worker-state"
+            and scheduler_state.get("ox_profile_contract_id") == ox_profile_contract_id
+            else {}
+        )
+        if (
+            teacher_result.ramp_cap is not None
+            or teacher_result.ramp_valid_receipts is not None
+        ):
+            ramp_source = {
+                "ox_ramp_cap": teacher_result.ramp_cap,
+                "ox_ramp_valid_receipts": teacher_result.ramp_valid_receipts,
+            }
+        ox_ramp_cap, ox_ramp_valid_receipts = _ox_ramp_state(
+            ramp_source, config.teacher_max_inflight
+        )
+        ox_ramp_fields = {
+            "ox_ramp_cap": ox_ramp_cap,
+            "ox_ramp_valid_receipts": ox_ramp_valid_receipts,
+        }
     counterfactual_result = _CounterfactualBlockResult(
         pending=counterfactual_probe.pending
     )
@@ -6198,6 +6261,7 @@ def _run_distillation_chunk_impl(
             "ox_workset": ox_workset,
             "ox_profile_contract_id": ox_profile_contract_id,
             "ox_profile_stopped": teacher_result.profile_stopped,
+            **ox_ramp_fields,
             "counterfactuals_written": counterfactual_written,
             "p5_allowed": p5_allowed,
         },
@@ -6229,6 +6293,7 @@ def _run_distillation_chunk_impl(
             "ox_workset": ox_workset,
             "ox_profile_contract_id": ox_profile_contract_id,
             "ox_profile_stopped": teacher_result.profile_stopped,
+            **ox_ramp_fields,
             "counterfactuals_written": counterfactual_written,
             "teacher_model_calls": teacher_model_calls,
             "counterfactual_model_calls": counterfactual_model_calls,
@@ -6274,6 +6339,7 @@ def _run_distillation_chunk_impl(
         "ox_workset": ox_workset,
         "ox_profile_contract_id": ox_profile_contract_id,
         "ox_profile_stopped": teacher_result.profile_stopped,
+        **ox_ramp_fields,
         "counterfactuals_written": counterfactual_written,
         "cold_start_pending": cold_start_pending,
         "split_plan_id": split_plan_id,

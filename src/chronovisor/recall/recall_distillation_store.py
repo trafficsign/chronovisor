@@ -127,7 +127,7 @@ def write_sealed_state(path: Path, payload: Mapping[str, Any]) -> dict[str, Any]
 def read_sealed(path: Path, *, schema: str | None = None) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_bytes())
-    except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+    except (OSError, ValueError, UnicodeError) as exc:
         raise DistillationStoreError(
             f"cannot read sealed artifact: {path.name}"
         ) from exc

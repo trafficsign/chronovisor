@@ -88,6 +88,50 @@ def test_ramp_counts_valid_labels_inside_each_batch() -> None:
     assert max_active == 10
 
 
+def test_ramp_state_resumes_across_bounded_dispatches() -> None:
+    ramp_state: dict[str, int] = {}
+
+    dispatch_claimed_work(
+        list(range(19)),
+        lambda item: item,
+        ramp_state=ramp_state,
+    )
+    assert ramp_state == {"current_cap": 1, "valid_results_at_cap": 19}
+
+    dispatch_claimed_work(
+        [19],
+        lambda item: item,
+        initial_cap=ramp_state["current_cap"],
+        initial_valid_results=ramp_state["valid_results_at_cap"],
+        ramp_state=ramp_state,
+    )
+    assert ramp_state == {"current_cap": 2, "valid_results_at_cap": 0}
+
+    dispatch_claimed_work(
+        [20, 21],
+        lambda item: item,
+        initial_cap=10,
+        initial_valid_results=19,
+        ramp_state=ramp_state,
+    )
+    assert ramp_state == {"current_cap": 10, "valid_results_at_cap": 20}
+
+
+@pytest.mark.parametrize(
+    ("initial_cap", "initial_valid_results"),
+    [(0, 0), (11, 0), (1, -1), (1, 20), (10, 21)],
+)
+def test_ramp_rejects_invalid_resume_state(
+    initial_cap: int, initial_valid_results: int
+) -> None:
+    with pytest.raises(ValueError):
+        SingleTeacherDispatcher(
+            lambda item: item,
+            initial_cap=initial_cap,
+            initial_valid_results=initial_valid_results,
+        )
+
+
 def test_retry_backoff_is_bounded_and_injected() -> None:
     attempts = 0
     sleeps: list[float] = []
@@ -214,6 +258,25 @@ def test_rate_limit_halves_future_window_after_ramp() -> None:
     assert calls[6] == 1
     assert post_limit_max_active <= 2
     assert max_active <= 5
+
+
+def test_rate_limit_persists_halved_resume_state() -> None:
+    ramp_state: dict[str, int] = {}
+
+    def rate_limited(_item: int) -> int:
+        raise DispatchFailure("http_429")
+
+    result = dispatch_claimed_work(
+        [0],
+        rate_limited,
+        max_retries=0,
+        initial_cap=10,
+        initial_valid_results=7,
+        ramp_state=ramp_state,
+    )[0]
+
+    assert result.status == "failed"
+    assert ramp_state == {"current_cap": 5, "valid_results_at_cap": 0}
 
 
 @pytest.mark.parametrize(

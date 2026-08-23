@@ -10,7 +10,7 @@ import random as _random
 import re
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Generic, Literal, TypeVar, cast
@@ -198,6 +198,8 @@ class SingleTeacherDispatcher(Generic[T, R]):
         backoff_max_seconds: float = 30.0,
         jitter_ratio: float = 0.1,
         min_valid_results_per_cap: int = 20,
+        initial_cap: int = 1,
+        initial_valid_results: int = 0,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         random_fn: Callable[[], float] = _random.random,
@@ -213,6 +215,23 @@ class SingleTeacherDispatcher(Generic[T, R]):
             raise ValueError("jitter_ratio must be non-negative")
         if min_valid_results_per_cap < 1:
             raise ValueError("min_valid_results_per_cap must be positive")
+        if (
+            isinstance(initial_cap, bool)
+            or not isinstance(initial_cap, int)
+            or not 1 <= initial_cap <= max_inflight
+        ):
+            raise ValueError("initial_cap must be between 1 and max_inflight")
+        if (
+            isinstance(initial_valid_results, bool)
+            or not isinstance(initial_valid_results, int)
+            or initial_valid_results < 0
+            or initial_valid_results > min_valid_results_per_cap
+            or (
+                initial_valid_results == min_valid_results_per_cap
+                and initial_cap < max_inflight
+            )
+        ):
+            raise ValueError("initial_valid_results is outside the current ramp stage")
         self.evaluate = evaluate
         self.max_inflight = max_inflight
         self.max_retries = max_retries
@@ -222,6 +241,8 @@ class SingleTeacherDispatcher(Generic[T, R]):
         )
         self.jitter_ratio: float = float(jitter_ratio)
         self.min_valid_results_per_cap = min_valid_results_per_cap
+        self.current_cap = initial_cap
+        self.valid_results_at_cap = initial_valid_results
         self.sleep = sleep
         self.clock = clock
         self.random_fn: Callable[[], float] = random_fn
@@ -236,8 +257,8 @@ class SingleTeacherDispatcher(Generic[T, R]):
         stop_event = threading.Event()
         stop_reason: list[str] = []
         stop_reason_lock = threading.Lock()
-        current_cap = 1
-        valid_results_at_cap = 0
+        current_cap = self.current_cap
+        valid_results_at_cap = self.valid_results_at_cap
         offset = 0
         with ThreadPoolExecutor(max_workers=self.max_inflight) as executor:
             while offset < len(work) and not stop_event.is_set():
@@ -346,6 +367,8 @@ class SingleTeacherDispatcher(Generic[T, R]):
                         if next_cap != current_cap:
                             current_cap = next_cap
                             valid_results_at_cap = 0
+                        else:
+                            valid_results_at_cap = self.min_valid_results_per_cap
 
             if stop_event.is_set():
                 stop_category = (
@@ -372,6 +395,8 @@ class SingleTeacherDispatcher(Generic[T, R]):
                             attempts=0,
                         )
 
+        self.current_cap = current_cap
+        self.valid_results_at_cap = valid_results_at_cap
         return [item for item in results if item is not None]
 
     @staticmethod
@@ -484,10 +509,19 @@ class SingleTeacherDispatcher(Generic[T, R]):
 def dispatch_claimed_work(
     claimed_work: Sequence[T],
     evaluate: Callable[[T], R],
+    *,
+    ramp_state: MutableMapping[str, int] | None = None,
     **kwargs: Any,
 ) -> list[DispatchResult[T, R]]:
     """Convenience wrapper for a one-shot single-teacher dispatch."""
-    return SingleTeacherDispatcher(evaluate, **kwargs).dispatch(claimed_work)
+    dispatcher = SingleTeacherDispatcher(evaluate, **kwargs)
+    results = dispatcher.dispatch(claimed_work)
+    if ramp_state is not None:
+        ramp_state.update(
+            current_cap=dispatcher.current_cap,
+            valid_results_at_cap=dispatcher.valid_results_at_cap,
+        )
+    return results
 
 
 __all__ = [

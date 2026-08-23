@@ -1562,6 +1562,54 @@ def test_final_state_is_last_commit_and_binds_completed_run(
     assert state["run_id"] == completed["run_id"]
 
 
+def test_chunk_commits_ox_ramp_with_the_completed_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw_dir = _raw(tmp_path)
+    config = _config(
+        tmp_path,
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        ox_enabled=True,
+        ox_free_only=True,
+    )
+
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def evaluate(self, _payload: object) -> dict[str, object]:
+            raise AssertionError("teacher batch is intercepted")
+
+    monkeypatch.setattr(
+        distill,
+        "_run_teacher_batch",
+        lambda **_kwargs: distill._TeacherBatchResult(
+            ramp_cap=5,
+            ramp_valid_receipts=7,
+        ),
+    )
+    result = distill.run_distillation_chunk(
+        root=tmp_path,
+        raw_dir=raw_dir,
+        config_path=config,
+        teachers={distill.OX_TEACHER_ROLE: RemoteTeacher()},
+        max_elapsed_seconds=60,
+    )
+
+    state = store.read_sealed(store.distillation_dir(tmp_path) / store.STATE_FILE)
+    run = json.loads(
+        (
+            store.distillation_dir(tmp_path) / "runs" / f"{result['run_id']}.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert result["ox_ramp_cap"] == 5
+    assert result["ox_ramp_valid_receipts"] == 7
+    assert state["ox_ramp_cap"] == 5
+    assert state["ox_ramp_valid_receipts"] == 7
+    assert run["ox_ramp_cap"] == 5
+    assert run["ox_ramp_valid_receipts"] == 7
+
+
 def test_chunk_parses_committed_raw_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2308,6 +2356,92 @@ def test_ox_ramp_counts_provider_receipts_not_labels(
         valid_result_count=lambda _response: captured["receipt_count"],
     ).dispatch(list(range(19)))
     assert peak == 1
+
+
+@pytest.mark.parametrize(
+    ("state_kind", "matching_contract", "expected_initial"),
+    [
+        ("worker-state", True, (2, 19)),
+        ("worker-state", False, (1, 0)),
+        ("forged", True, (1, 0)),
+    ],
+)
+def test_ox_ramp_resumes_only_for_the_same_profile_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state_kind: str,
+    matching_contract: bool,
+    expected_initial: tuple[int, int],
+) -> None:
+    from chronovisor.recall import recall_distillation_dispatcher as dispatcher
+
+    config = distill.DistillationConfig(
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        ox_enabled=True,
+    )
+    profile_contract_id = distill._ensure_ox_profile_contract(tmp_path, config)[
+        "artifact_id"
+    ]
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / store.STATE_FILE,
+        {
+            "kind": state_kind,
+            "status": "capture_only",
+            "ox_profile_contract_id": (
+                profile_contract_id if matching_contract else "0" * 64
+            ),
+            "ox_ramp_cap": 2,
+            "ox_ramp_valid_receipts": 19,
+        },
+    )
+    captured: dict[str, int] = {}
+
+    def dispatch(_batches: object, _evaluate: object, **kwargs: object) -> list[object]:
+        captured["initial_cap"] = cast(int, kwargs["initial_cap"])
+        captured["initial_valid_results"] = cast(int, kwargs["initial_valid_results"])
+        ramp_state = cast(dict[str, int], kwargs["ramp_state"])
+        ramp_state.update(current_cap=5, valid_results_at_cap=0)
+        return []
+
+    monkeypatch.setattr(dispatcher, "dispatch_claimed_work", dispatch)
+
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def evaluate(self, _payload: object) -> dict[str, object]:
+            raise AssertionError("intercepted dispatcher must not evaluate")
+
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=config,
+        teachers={distill.OX_TEACHER_ROLE: RemoteTeacher()},
+        snapshots={
+            "rally": {
+                "candidates": [
+                    {"candidate_id": "candidate", "text_sha256": "candidate"}
+                ]
+            }
+        },
+        rally_by_id={
+            "rally": {
+                "rally_id": "rally",
+                "query_sha256": "query",
+                "context_refs": [],
+            }
+        },
+        texts={"query": "what proves the claim", "candidate": "bounded fact"},
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert captured == {
+        "initial_cap": expected_initial[0],
+        "initial_valid_results": expected_initial[1],
+    }
+    assert result.ramp_cap == 5
+    assert result.ramp_valid_receipts == 0
 
 
 def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_labels(

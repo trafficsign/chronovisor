@@ -16,6 +16,20 @@ from chronovisor.core.canonical_json import (
 from chronovisor.recall import recall_distillation_store as store
 
 
+def test_read_sealed_wraps_json_value_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "state.json"
+    path.write_bytes(b"{}")
+
+    def invalid_integer(_payload: object) -> object:
+        raise ValueError("integer string conversion limit exceeded")
+
+    monkeypatch.setattr(store.json, "loads", invalid_integer)
+    with pytest.raises(store.DistillationStoreError, match="cannot read sealed"):
+        store.read_sealed(path)
+
+
 @pytest.mark.parametrize(
     "artifact_id",
     [
