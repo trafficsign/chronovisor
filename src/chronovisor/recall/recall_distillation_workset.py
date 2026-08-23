@@ -427,6 +427,32 @@ class DistillationWorkset:
                 raise
         return {"inserted": inserted, "existing": existing, "watermark": watermark}
 
+    def watermark(self) -> Any | None:
+        """Read and validate the durable source progress watermark."""
+
+        try:
+            with closing(self._connect()) as connection:
+                row = connection.execute(
+                    "SELECT value_json FROM workset_state WHERE key = 'watermark'"
+                ).fetchone()
+                if row is None:
+                    return None
+                value_json = row["value_json"]
+        except DistillationWorksetError:
+            raise
+        except (IndexError, KeyError, sqlite3.Error, TypeError) as exc:
+            raise DistillationWorksetError("cannot read watermark") from exc
+
+        if not isinstance(value_json, str):
+            raise DistillationWorksetError("watermark state is corrupted")
+        try:
+            value = json.loads(value_json)
+        except (RecursionError, json.JSONDecodeError) as exc:
+            raise DistillationWorksetError("watermark state is invalid JSON") from exc
+        normalized = _metadata_value(value, "watermark")
+        _json(normalized, "watermark")
+        return normalized
+
     def claim(
         self, kind: str, limit: int, owner: str, lease_seconds: float
     ) -> tuple[WorkClaim, ...]:

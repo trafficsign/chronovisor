@@ -40,21 +40,78 @@ def test_advance_is_idempotent_and_rejects_identity_mutation(tmp_path: Path) -> 
     path = tmp_path / "workset.sqlite3"
     workset = DistillationWorkset(path)
 
+    assert workset.watermark() is None
     assert workset.advance([_item("one")], {"source": 1}) == {
         "inserted": 1,
         "existing": 0,
         "watermark": {"source": 1},
     }
+    assert workset.watermark() == {"source": 1}
     assert workset.advance([_item("one")], {"source": 2})["existing"] == 1
+    assert workset.watermark() == {"source": 2}
     changed = _item("one")
     changed["payload_ref"] = "candidate-ledger:changed"
 
     with pytest.raises(DistillationWorksetError, match="identity conflict"):
         workset.advance([changed], {"source": 3})
+    assert workset.watermark() == {"source": 2}
     with sqlite3.connect(path) as connection:
         assert connection.execute(
             "SELECT value_json FROM workset_state WHERE key = 'watermark'"
         ).fetchone() == ('{"source":2}',)
+
+
+def test_failed_advance_keeps_prior_watermark(tmp_path: Path) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance([_item("one")], {"source": 1})
+    unsafe = _item("unsafe")
+    unsafe["provenance"] = {"source": "/tmp/private"}
+
+    with pytest.raises(DistillationWorksetError):
+        workset.advance([unsafe], {"source": 2})
+
+    assert workset.watermark() == {"source": 1}
+    assert workset.status()["total"] == 1
+
+
+def test_watermark_is_validated_and_returned_as_a_fresh_value(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    expected = {"source": 1, "nested": {"values": ["safe"]}}
+    workset.advance([_item("one")], expected)
+
+    value = workset.watermark()
+    assert value == expected
+    assert isinstance(value, dict)
+    assert isinstance(value["nested"], dict)
+    assert isinstance(value["nested"]["values"], list)
+    value["nested"]["values"].append("mutated")
+    assert workset.watermark() == expected
+
+
+@pytest.mark.parametrize(
+    "tampered",
+    [
+        "{",
+        '{"secret":"private"}',
+        '{"source":"/tmp/private"}',
+        sqlite3.Binary(b"{}"),
+    ],
+)
+def test_watermark_tampering_fails_closed(tmp_path: Path, tampered: object) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance([_item("one")], {"source": 1})
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE workset_state SET value_json = ? WHERE key = 'watermark'",
+            (tampered,),
+        )
+
+    with pytest.raises(DistillationWorksetError):
+        workset.watermark()
 
 
 def test_claim_obeys_priority_then_fifo_and_preserves_metadata(tmp_path: Path) -> None:
