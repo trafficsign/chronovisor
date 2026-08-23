@@ -1,0 +1,247 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-08-23T16:37:19+09:00",
+  "status": "passed",
+  "acceptance": {
+    "contract": "dedicated Muse oMLX process with native idle TTL",
+    "result": "passed_with_cold_load_swap_plateau",
+    "persistent_three_model_residency_gate": "failed_historical_not_reclassified",
+    "reason": "Two production cold cycles completed, Muse unloaded after each idle TTL, cross-model unloads were zero, and swap declined after the second cycle through a 30-minute real-workload soak."
+  },
+  "strategy": {
+    "provider": "omlx_muse",
+    "host": "127.0.0.1",
+    "port": 8002,
+    "model": "Muse-Glimmer-30B-4bit",
+    "ttl_seconds": 60,
+    "pinned": false,
+    "dflash_enabled": true,
+    "dflash_l1_entries": 2,
+    "dflash_l1_bytes": 2147483648,
+    "dflash_l2_enabled": false,
+    "custom_residency_layer_added": false
+  },
+  "commits": {
+    "ttl_cutover": "0d22e0617",
+    "structured_output_preservation": "3f817e121",
+    "shared_deadline_and_repair_budget": "9e2af77b120bdcee72867ec1283539fce60762bd",
+    "accepted_code_commit": "9e2af77b120bdcee72867ec1283539fce60762bd",
+    "origin_main_at_acceptance": "9e2af77b120bdcee72867ec1283539fce60762bd"
+  },
+  "routing": {
+    "changed_role_count": 6,
+    "changed_roles": [
+      "classification.anchor",
+      "classification.anchor.challenger",
+      "classification.tie_break",
+      "librarian.review.challenger",
+      "recall.distill.teacher.b",
+      "research.challenge"
+    ],
+    "unchanged_role_count": 38,
+    "changed_field_per_role": "provider",
+    "model_revision_capability_order_policy_unchanged": true,
+    "classification_order": [
+      "classification.primary:Qwen3.8-27B-4bit",
+      "classification.challenger:gemma-4-26b-a4b-it-4bit",
+      "classification.tie_break:Muse-Glimmer-30B-4bit"
+    ],
+    "after_endpoint_sha256": "51bfed0fa588ac39ecb813fd5220f06263488ad8b92f9dec4528ba96f0bac1cc"
+  },
+  "research_contract_fix": {
+    "root_cause": "Muse used the former 256-token budget in reasoning_content, leaving the structured answer truncated; the old outer timeout also failed to account for an initial generation plus up to two repairs.",
+    "max_single_generation_tokens": 512,
+    "max_single_generation_seconds": 30,
+    "max_total_wall_seconds": 90,
+    "summary_elapsed_is_subtracted_before_challenge": true,
+    "challenge_and_tie_share_monotonic_deadline": true,
+    "repair_and_tie_usage_counted": true,
+    "reasoning_content_excluded_from_structured_body": true
+  },
+  "production_structured_probes": [
+    {
+      "cycle": 1,
+      "role": "research.challenge",
+      "model": "Muse-Glimmer-30B-4bit",
+      "status": "completed",
+      "contract_valid": true,
+      "first_pass_valid": false,
+      "repair_turns": 1,
+      "latency_ms": 73245,
+      "verdict": "confirm"
+    },
+    {
+      "cycle": 2,
+      "role": "research.challenge",
+      "model": "Muse-Glimmer-30B-4bit",
+      "status": "completed",
+      "contract_valid": true,
+      "first_pass_valid": false,
+      "repair_turns": 1,
+      "latency_ms": 43498,
+      "verdict": "confirm"
+    }
+  ],
+  "soak": {
+    "started_at": "2026-08-23T07:06:54Z",
+    "completed_at": "2026-08-23T07:37:19Z",
+    "duration_seconds": 1825,
+    "baseline": {
+      "swap_used_mib": 5877.94,
+      "system_free_percentage": 60,
+      "compressor_pages": 337313,
+      "pageouts": 102645,
+      "swapins": 151511,
+      "swapouts": 577168
+    },
+    "first_production_window_plateau": {
+      "observed_at": "2026-08-23T07:14:55Z",
+      "swap_used_mib": 8232.81,
+      "swap_delta_from_baseline_mib": 2354.87,
+      "pageouts": 103754,
+      "swapouts": 734536,
+      "note": "This window also included real workload and service restarts, so the one-time increase is not attributed solely to Muse. It remained below the 4096 MiB abort threshold."
+    },
+    "second_cycle_after_ttl": {
+      "observed_at": "2026-08-23T07:19:58Z",
+      "swap_used_mib": 8246.56,
+      "swap_delta_from_first_plateau_mib": 13.75,
+      "pageouts": 105274,
+      "swapouts": 735928,
+      "muse_loaded_count": 0,
+      "muse_loaded_size_bytes": 0
+    },
+    "final": {
+      "swap_used_mib": 8166.56,
+      "system_free_percentage": 58,
+      "compressor_pages": 388888,
+      "pageouts": 105632,
+      "swapins": 164366,
+      "swapouts": 735928,
+      "muse_loaded_count": 0,
+      "muse_loaded_size_bytes": 0
+    },
+    "final_swap_delta_from_baseline_mib": 2288.62,
+    "final_swap_delta_from_second_ttl_mib": -80.0,
+    "post_second_ttl_pageout_delta": 358,
+    "post_second_ttl_swapout_delta": 0,
+    "continued_swap_growth": false,
+    "memory_pressure_status": "normal",
+    "abort_threshold_crossed": false
+  },
+  "omlx_log_delta": {
+    "start_lines": {
+      "main": 6416,
+      "gemma": 554,
+      "muse": 479
+    },
+    "end_lines": {
+      "main": 7196,
+      "gemma": 567,
+      "muse": 516
+    },
+    "main": {
+      "loads": 0,
+      "unloads": 0,
+      "dflash_completions": 25,
+      "errors": 0
+    },
+    "gemma": {
+      "loads": 0,
+      "unloads": 0,
+      "dflash_completions": 8,
+      "errors": 0
+    },
+    "muse": {
+      "loads": 2,
+      "ttl_expirations": 2,
+      "unloads": 2,
+      "dflash_completions": 4,
+      "errors": 0
+    },
+    "cross_model_unloads": 0
+  },
+  "ingest_read_back": {
+    "window_run_count": 6,
+    "passed": 6,
+    "failed": 0,
+    "latest_at": "2026-08-23T16:33:15+0900",
+    "liveness_status": "ok",
+    "runtime_available": true,
+    "authority_available": true,
+    "alert": false
+  },
+  "runtime_deployment": {
+    "services": [
+      "dashboard",
+      "lan_dashboard",
+      "ingest_drain",
+      "semantic",
+      "reranker"
+    ],
+    "all_service_archives_at_accepted_code_commit": true,
+    "dashboard_status": "ok",
+    "dashboard_drift": false,
+    "semantic_status": "ok",
+    "semantic_ready": true,
+    "semantic_socket_ready": true,
+    "local_root_http": 200,
+    "lan_tls_unauthenticated_http": 401,
+    "muse_health_http": 200,
+    "muse_status_unauthenticated_http": 401
+  },
+  "dashboard_acceptance": {
+    "viewport": "760x964",
+    "model_fleet_rows": 5,
+    "unique_models": 5,
+    "loaded_models": 4,
+    "ready_models": [
+      "Muse-Glimmer-30B-4bit"
+    ],
+    "body_client_scroll_width": [
+      760,
+      760
+    ],
+    "model_panel_client_scroll_width": [
+      670,
+      670
+    ],
+    "model_grid_client_scroll_width": [
+      634,
+      634
+    ],
+    "decision_trace_order": [
+      "Primary",
+      "Challenger",
+      "Tie-break"
+    ],
+    "console_errors": 0
+  },
+  "tests": {
+    "isolated_full_suite": "5099 passed, 1 skipped, 2 warnings",
+    "surrounding_targeted_suite": "172 passed",
+    "architecture_baseline": "passed",
+    "git_diff_check": "passed",
+    "ox_alpha_review_transport": "pi/opencode-go",
+    "ox_alpha_exit_review": "pass"
+  },
+  "limitations": {
+    "baseline_structured_retry_rate_available": false,
+    "retry_rate_unchanged_claimed": false,
+    "observed_production_result": "2 of 2 contract-valid; each required one bounded repair within the 90-second total wall budget"
+  },
+  "rollback": {
+    "ttl_cutover_backup": "/Users/trafficsign/.chronovisor/backups/omlx-muse-ttl-cutover-20260823-1342",
+    "research_config_backup": "/Users/trafficsign/.chronovisor/backups/config-pre-research-512-20260823-151556.toml",
+    "dashboard_health_cache_backups_created": true,
+    "data_migration": false,
+    "recoverable": true
+  },
+  "redaction": {
+    "credentials": "omitted",
+    "raw_prompts": "omitted",
+    "raw_responses": "omitted",
+    "pids": "omitted",
+    "raw_endpoints": "loopback_port_only"
+  }
+}

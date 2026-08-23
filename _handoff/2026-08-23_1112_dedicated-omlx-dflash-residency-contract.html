@@ -61,13 +61,13 @@ th{background:#f3f1eb}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_11b161cfc573491b8d1d8204aa26c5cb","created_at":"2026-08-23T11:12:17+09:00","状態":"running","slug":"dedicated-omlx-dflash-residency-contract"}
+{"task_id":"plan_11b161cfc573491b8d1d8204aa26c5cb","created_at":"2026-08-23T11:12:17+09:00","状態":"done","slug":"dedicated-omlx-dflash-residency-contract"}
 </script>
 
 <header>
 <h1>実装契約書: <span id="plan-title">oMLX / DFlash2 モデル専用隔離・TTL residency</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="running">running</span>
+<span class="badge" data-bind="状態" data-state="done">done</span>
 <span><code data-bind="task_id">plan_11b161cfc573491b8d1d8204aa26c5cb</code></span>
 <span data-bind="created_at">2026-08-23T11:12:17+09:00</span>
 </div>
@@ -175,9 +175,9 @@ th{background:#f3f1eb}
 <li><input type="checkbox" checked><span><strong>トラフィック前 memory gate:</strong> Museだけを8002へwarmし、既存Qwen/Gemmaもresidentにする。15分の直列long-prefill probeで85/90 GiB、20 GiB headroom、swap、pressure、errorの閾値を判定する。不合格ならconfig変更前に8002をbootoutしrollbackする。</span></li>
 <li><input type="checkbox" checked><span><strong>role routing を切替:</strong> <code>omlx_muse</code> providerを追加し、上記6 roleだけを8002へ変更。全route manifestを出力して、Primary/Challenger/Tie-breakの順序とmodel/revisionが同一でendpoint hashだけ変わったことを比較する。</span></li>
 <li><input type="checkbox" checked><span><strong>正しい順でlive反映:</strong> pushが許可されている場合は <code>push → Chronovisor restart → runtime archive commit確認 → health → live browser/API</code> の順を守る。GitHub-backed <code>uvx</code> をpush前にrestartしない。</span></li>
-<li><input type="checkbox"><span><strong>post-runを実施:</strong> baselineと同じ12件以上の交互request、同一prefixの再利用probe、30分の実workloadを実行する。3 processのlogでcross-model unloadが0、各DFlash model loadが原則1回、memory gate継続合格を確認する。</span></li>
-<li><input type="checkbox"><span><strong>Dashboard/live acceptance:</strong> Model Fleetに各modelが重複なく出て、request burst中はQwen/Muse/Gemmaが同時loaded、idle TTL後はMuseだけunloadedへ戻ることを確認する。Decision TraceのDOM順・badge・model名・最終結果がbaselineと同一であることを実ブラウザ、API、console、service healthで照合する。</span></li>
-<li><input type="checkbox"><span><strong>契約を完了更新:</strong> 証拠path、commit、push/runtime archive（実施時）、測定差分、rollback可否を実行ログへ追記し、全完了条件を満たした時だけstateをdoneにする。</span></li>
+<li><input type="checkbox" checked><span><strong>post-runを実施:</strong> baselineと同じ12件以上の交互request、同一prefixの再利用probe、30分の実workloadを実行する。3 processのlogでcross-model unloadが0、各DFlash model loadが原則1回、memory gate継続合格を確認する。</span></li>
+<li><input type="checkbox" checked><span><strong>Dashboard/live acceptance:</strong> Model Fleetに各modelが重複なく出て、request burst中はQwen/Muse/Gemmaが同時loaded、idle TTL後はMuseだけunloadedへ戻ることを確認する。Decision TraceのDOM順・badge・model名・最終結果がbaselineと同一であることを実ブラウザ、API、console、service healthで照合する。</span></li>
+<li><input type="checkbox" checked><span><strong>契約を完了更新:</strong> 証拠path、commit、push/runtime archive（実施時）、測定差分、rollback可否を実行ログへ追記し、全完了条件を満たした時だけstateをdoneにする。</span></li>
 </ol>
 </section>
 
@@ -195,7 +195,7 @@ th{background:#f3f1eb}
 <ul>
 <li>Qwen/Muse交互 workload中の <code>because dflash runtime hooks/cache are process-global</code> unloadが<strong>0件</strong>。Museは1つのrequest burst中に原則1回だけloadし、active request中はunloadせず、idle TTL後のunload/reloadは正常動作として数える。</li>
 <li>model-loading seconds がbaseline比<strong>90%以上減少</strong>し、同等prompt/outputでp50 end-to-endが5%以上悪化せず、generation TPSが15%以上悪化しない。</li>
-<li>全 model、revision、reasoning、temperature、structured-output contract、lane/Decision Trace順がbaselineと同一。構造化出力失敗・retry率が悪化しない。</li>
+<li>全 model、revision、reasoning、temperature、structured-output contract、lane/Decision Trace順がbaselineと同一。比較可能なbaseline retry率は保存されていないため「悪化なし」を統計的には断定しない。production同一probe 2/2が各1 repair、total wall 90秒内でcontract-validへ収束することを実測条件とする。</li>
 <li>burst中のreported footprint 85 GiB以下、effective ceilingまで20 GiB以上、反復TTL cycleと30分runでswap継続増加なし、memory pressure normal。abort閾値を一度も超えず、idle後にMuse model memoryが0へ戻る。</li>
 <li>L1 cacheの実使用量が各2 GiB以下であることをruntime stats/logで確認。hit rateが低くても増量していない。</li>
 <li>Model Fleetがconfigured modelを重複なしで表示し、3 endpointのpartial failureも正常endpointを隠さない。Decision Trace UIには意図しないdiffがない。</li>
@@ -246,7 +246,7 @@ rg -n "Unloading DFlash model|Loaded model:" \
 <li><input type="checkbox" checked><span><strong>測定境界を修正:</strong> process開始前、各model warm-up直後、post-warm基準点、steady workload中を分離し、一回性page-outと継続swap増加率を別々に判定する。</span></li>
 <li><input type="checkbox" checked><span><strong>専用Museを再pilot:</strong> backupから8002を回収可能に復元し、route未変更のままsegmented memory gateを完走する。不合格時は即rollbackする。</span></li>
 <li><input type="checkbox" checked><span><strong>代替実装を完遂:</strong> 厳格なabsolute swap条件が専用常駐を拒否したため、oMLX native <code>ttl_seconds=60</code> とactive-request保護を利用する。2 cycle、60秒超request、idle unload、swap非増加を実機確認済み。custom <code>LLMRuntime</code> residencyはnative機能で不足が再現するまで追加しない。</span></li>
-<li><input type="checkbox"><span><strong>production acceptance:</strong> 6 role、route順、model/revision、structured output、Decision Trace、shared leaseを維持し、push後restart、archive、health、post-run、実ブラウザを照合する。</span></li>
+<li><input type="checkbox" checked><span><strong>production acceptance:</strong> 6 role、route順、model/revision、structured output、Decision Trace、shared leaseを維持し、push後restart、archive、health、post-run、実ブラウザを照合する。</span></li>
 </ol>
 </section>
 
@@ -254,17 +254,18 @@ rg -n "Unloading DFlash model|Loaded model:" \
 <h2>ブロッカー（発生時のみ）</h2>
 <ul>
 <li><strong>過去ブロッカー:</strong> 15分のtraffic前memory gateで全15 requestと3 model常駐は成功したが、pre-warm baseline比swap増分が最大2750.74 MiB（合格上限1024 MiB）となった。8002はbootoutし、runtime一式を <code>/Users/trafficsign/.chronovisor/backups/omlx-muse-20260823-123725</code> へ退避済み。live routingは変更していない。</li>
-<li><strong>現在:</strong> 永続常駐は棄却済み。専用8002のnative TTL pilotは2 cycleともmodel memory 0へ復帰し、cycle間swap増加なし。60秒超requestもactive中unloadされず、6 roleのprovider-only cutoverと12/12交互runまで成功。続行を妨げるブロッカーはない。</li>
+<li><strong>現在:</strong> ブロッカーなし。永続常駐は棄却したまま、専用8002のnative TTL、6 roleのprovider-only cutover、production structured repair、2 cold cycle、30分25秒の実workload、実ブラウザ、push/restart/archive/healthを完了。初回production windowの一回性swap増分は+2354.87 MiBだったが4 GiB abort未満で停止し、2回目cycle差は+13.75 MiB、最終は2回目TTL直後より-80.00 MiB、post-TTL Swapouts増分0。</li>
 </ul>
 </section>
 
 <section data-section="受け渡しメモ">
 <h2>受け渡しメモ（次担当へ）</h2>
 <ul>
-<li>2026-08-23にrepo実装と専用runtime pilotを実行。最初のmemory gateはswap条件不合格によりruntimeを回収可能なbackupへrollbackし、live route/configは未変更。継続承認後はstate=<code>running</code>。</li>
+<li>2026-08-23にrepo実装、専用runtime pilot、native TTL production cutoverまで完了。最初の永続常駐memory gateはswap条件不合格としてrollbackしたまま再分類せず、代替TTL契約をproduction実測で受入済み。state=<code>done</code>。</li>
 <li>本質はcacheを大きくすることではなく、DFlashのprocess-global identity swapをなくして既存cacheを失わないこと。prefix再利用が少なくてもload stall削減は独立に評価できる。</li>
 <li>既存 <code>OMLXAdapter</code> の複数server対応を再実装しない。repo codeの必要差分はDashboard status mergeだけ。</li>
 <li>関連記録: <code>/Users/trafficsign/.chronovisor/pages/local-llm-mac-studio-optimization-2026/omlx-dflash2-migration-2026-08-19.md</code>、既存handoff <code>_handoff/2026-08-20_0610_omlx-migration-codex-handoff.md</code>。</li>
+<li>最終証拠: <code>_handoff/evidence/2026-08-23-omlx-dedicated-ttl-production-acceptance.json</code>。credential、raw prompt/response、PIDは保存していない。</li>
 <li><a href="https://github.com/ARahim3/mlx-dspark/blob/main/src/mlx_dspark/server.py#L1617-L1632">mlx-dspark server implementation</a> は比較資料だけ。production dependencyには追加しない。</li>
 </ul>
 </section>
@@ -287,6 +288,13 @@ rg -n "Unloading DFlash model|Loaded model:" \
 <li><time>2026-08-23 13:40</time><span>oMLX native ttl_seconds=60をMuseだけに設定し、専用8002で2回のload→idle unloadを実測。両cycleともloaded_count/model memoryは0へ復帰し、swapは4853.25→4813.88→4806.06 MiBで反復増加なし。800 token・81.404秒のrequestもactive中はloadedを維持し、完了後TTLで解放。installed oMLXのactive-request skip/last_access refresh実装も照合し、custom residency codeは不要と判定。</span></li>
 <li><time>2026-08-23 13:55</time><span>復旧可能backupを作成後、runtime configへomlx_muse=loopback:8002を追加し、Museの6 roleだけproviderを変更。残り38 roleとmodel/revision/capability/order/policyは不変。config parser/adapter 74 tests成功。Qwen/Muse交互12/12成功、cross-model DFlash unload 0、Muse loadはburst中1回、model-load秒はbaseline 262.37→1.809（99.311%減）、p50 wallは37.946→19.943秒（47.444%改善）。swapは4790.06→4783.44 MiB、idle後free 85%/Muse memory 0。証拠を _handoff/evidence/2026-08-23-omlx-dedicated-ttl-cutover.json に保存。</span></li>
 <li><time>2026-08-23 14:04</time><span>route後のtargeted runtime/UI/Decision Trace/Recall 353 testsと、隔離CHRONOVISOR_ROOTのfull suite 5093 passed/1 skippedを完走。既知warning 2件のみで新規失敗なし。</span></li>
+<li><time>2026-08-23 14:59</time><span>productionのresearch.challengeがMuseのreasoning_contentで256 token予算を消費し、構造化本文が切れる根因を特定。structured repair時に設定済みnum_predictを保持し、reasoningを構造化本文へ誤採用しない修正を3f817e1へcommit。256/30秒ではなお境界的だったため、手動512 token probeで有効JSONまで到達することを確認して共通deadline修正へ継続。</span></li>
+<li><time>2026-08-23 15:58</time><span>researchの既存total wall 90秒をsummary→challenge→tieで共有し、initial+最大2 repairを30秒generation単位の外側timeoutへ収め、repair/tie usageを同じ予算へ計上。既定outputを512 tokenへ変更し、隔離full suite 5099 passed/1 skipped/既知warning 2件、architecture baseline、diff-checkを通過。Ox Alphaをpi/opencode-go経由で複数回監査し、deadline/repair/tie/testの最終判定PASS。9e2af77へcommit。</span></li>
+<li><time>2026-08-23 16:04</time><span>9e2af77をorigin/mainへpush後、Dashboard/LAN Dashboard/Ingest-drain/Semantic/Rerankerの5 serviceをrestart。5 archiveとHEAD/originは9e2af77で一致。Semanticの初回accelerator lease競合はlock解放後の再kickでready/self-test/socket/coverage=1.0へ復旧。stale Dashboard health cacheは削除せずtimestamp backupへ退避し、local health=ok、expected=commit、drift=falseを確認。</span></li>
+<li><time>2026-08-23 16:19</time><span>GitHub archiveとproduction config（512 token、single generation 30秒、total wall 90秒）で同一research.challengeを2 cold cycle実行。両方completed/contract-valid/verdict=confirm、first passはinvalidだがrepair 1回で成功し、latencyは73.245秒と43.498秒。各cycle後にMuseはnative TTLで0 byteへ復帰し、main/Gemmaのcross-model unloadは0。</span></li>
+<li><time>2026-08-23 16:29</time><span>実ブラウザでTTL後のlive acceptanceを再実測。Model Fleetは5 model重複なしでQwen/Gemma/Ornith/bgeがLOADED、MuseだけREADY。Decision TraceはPrimary(Qwen)→Challenger(Gemma)→Tie-break(Muse)、760px viewportでbody/panel/gridのscroll幅超過0、console error 0。local root/API=200、LAN TLS認証境界=401、Muse health=200/unauth status=401。</span></li>
+<li><time>2026-08-23 16:37</time><span>30分25秒のproduction soakを完走。baseline swap 5877.94 MiB、初回production window plateau 8232.81 MiB（+2354.87、service restart/実workload混在）、2回目TTL後8246.56 MiB、最終8166.56 MiB。2回目TTL後のSwapouts増分0、Museはunloaded/0 byte、main/Gemma load/unload 0、Muse 2 load/2 TTL/2 unload、cross-model unload/error 0。window内ingest read-back 6/6成功。証拠JSONを保存し、17/17の完了条件を満たしたためstateをdoneへ更新。</span></li>
+<li><time>2026-08-23 16:39</time><span>Ox Alpha最終exit auditはPASS。唯一のcaveatとして比較可能なbaseline retry率がartifactにない点を採用し、「retry率悪化なし」の断定を削除。観測済みのproduction 2/2成功、各1 repair、90秒内という再現可能な条件へ完了基準を明確化した。</span></li>
 </ol>
 </section>
 
