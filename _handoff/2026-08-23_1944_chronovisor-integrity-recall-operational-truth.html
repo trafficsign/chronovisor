@@ -174,7 +174,7 @@ th{background:#f3f1eb}
   </ul>
 </span></li>
 
-<li><input type="checkbox"><span><strong>Phase 2 / P0-B — semantic availability failure を既存 BM25 fallback へ接続する。</strong>
+<li><input type="checkbox" checked><span><strong>Phase 2 / P0-B — semantic availability failure を既存 BM25 fallback へ接続する。</strong>
   <ul>
   <li>所有範囲は availability-exception mapping と telemetry の差分だけ。既存 Plan <a href="2026-08-13_1431_recall-precision-preserving-latency.html">precision-preserving latency</a> の commit <code>cf354b329aeab95aad77113a144a3a486f8d761b</code> で完成済みの direct BM25/L1 fallback、filter/render、副作用ゼロ経路を再実装・再構成しない。</li>
   <li><code>RecallBudgetExhausted</code> に加え、契約済みの <code>SemanticServiceUnavailable</code> / capacity-busy 系だけを既存 <code>run_deterministic_fallback</code> へ渡す。</li>
@@ -323,6 +323,7 @@ th{background:#f3f1eb}
 <li><time>2026-08-23 20:01</time><span>読み取り専用reviewを2巡実施。既存Recall Planとのownership境界、24時間AND条件、数値Exit、projection diagnostic、post-push live closure、security/CI分割を修正し、必須指摘0を確認。</span></li>
 <li><time>2026-08-23 20:04</time><span>ユーザー承認により実装開始。Planを <code>running</code> へ更新し、Phase 0 diagnostic/baselineから着手。</span></li>
 <li><time>2026-08-23 20:25</time><span>Phase 0完了。read-only <code>raw projection-status --full --json</code> を追加し、51 focused tests・ruff・差分型確認を通過。実runtime inventoryは13,622 manifest中 valid 13,602 / missing 20 / invalid 0、既存20件は全てprocessed parentかつRaw digest一致。Raw archive full verifyはerror 0。<code>baseline.json</code> と <code>projection-inventory.before.json</code> に証拠を保存。</span></li>
+<li><time>2026-08-23 20:37</time><span>Phase 2実装完了。typed <code>SemanticServiceUnavailable</code> と契約済みcapacity-busyだけを既存deterministic BM25 fallbackへ接続し、unknown exceptionはbounded errorのまま保持。focused 3件・ruff・diff checkを通過し、deadline reserve、sensitive result 0、heavy subsystem call 0を <code>recall-availability.focused.json</code> に保存。24時間かつhost別100件のlive gateはPhase 6までpending。</span></li>
 </ol>
 </section>
 

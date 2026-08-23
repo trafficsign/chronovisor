@@ -31,6 +31,7 @@ from chronovisor.core.llm_runtime import (
 )
 from chronovisor.core.raw_segment import append_capture
 from chronovisor.core.search import ScoredPage
+from chronovisor.core.semantic_client import SemanticServiceUnavailable
 from chronovisor.core.store import RuntimeContext, init_chronovisor
 from chronovisor.hosts import evidence_composition
 from chronovisor.recall import recall_distillation, recall_runtime
@@ -3973,6 +3974,145 @@ def test_evidence_search_error_preserves_failed_stage_timing(monkeypatch) -> Non
 
     assert result.search_mode == "error"
     assert "evidence_search" in result.evidence_features["stage_timings_ms"]
+
+
+def test_semantic_service_unavailable_uses_deterministic_fallback(monkeypatch) -> None:
+    candidates = [
+        ScoredPage("safe", "Safe", "", "", 1.0),
+        ScoredPage("sensitive", "Sensitive", "", "", 0.9, sensitivity="high"),
+    ]
+
+    def unavailable(**_kwargs):
+        raise SemanticServiceUnavailable("service_busy")
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("availability fallback started a heavy recall subsystem")
+
+    monkeypatch.setattr(recall_runtime, "_run_evidence_search", unavailable)
+    monkeypatch.setattr(
+        recall_runtime, "search_existing_bm25", lambda *_args, **_kwargs: candidates
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "context_item_from_page_id",
+        lambda page_id, *_args, **_kwargs: ContextItem(
+            page_id,
+            page_id.title(),
+            "",
+            1.0,
+            sensitivity="high" if page_id == "sensitive" else "normal",
+        ),
+    )
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_args: "")
+    for name in (
+        "run_search",
+        "collect_context",
+        "observe_evidence_reconstruction",
+        "observe_processor_shadow",
+    ):
+        monkeypatch.setattr(recall_runtime, name, forbidden)
+
+    telemetry: dict[str, object] = {}
+    started = time.monotonic()
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="昨日Chronovisorの続き",
+            cwd="/projects/work/private",
+        ),
+        RecallPolicy(
+            total_timeout_ms=1_000,
+            deterministic_fallback_reserve_ms=600,
+            judge_mode="off",
+            rewrite_enabled=False,
+            log_decisions=False,
+        ),
+        _started_at=started,
+        _final_deadline_at=started + 1.0,
+        _telemetry=telemetry,
+    )
+
+    assert result.status == "degraded"
+    assert result.search_mode == "bm25-fallback"
+    assert result.evidence_features["degraded"] is True
+    assert result.evidence_features["failure_class"] == "SemanticServiceUnavailable"
+    assert result.evidence_features["failure_reason"] == "service_busy"
+    assert result.evidence_features["fallback_reserve_ms"] == 600
+    assert result.evidence_features["deadline_reserve_ms"] == 600
+    assert result.latency_ms <= 600
+    assert result.error == "SemanticServiceUnavailable: service_busy"
+    assert [item.page_id for item in result.context_items] == ["safe"]
+    assert telemetry["fallback_started"] is True
+    assert telemetry["fallback_completed"] is True
+
+
+def test_availability_fallback_telemetry_caps_configured_reserve(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fallback(*_args, **kwargs):
+        captured.update(kwargs)
+        return RecallResult(
+            status="degraded",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=[],
+            matched_terms={},
+            search_mode="bm25-fallback",
+        )
+
+    monkeypatch.setattr(recall_runtime, "run_deterministic_fallback", fallback)
+    telemetry: dict[str, object] = {}
+    started = time.monotonic()
+    result = recall_runtime._fail_open_recall_budget(
+        "SemanticServiceUnavailable: service_busy",
+        {},
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="query"),
+        RecallPolicy(deterministic_fallback_reserve_ms=900, log_decisions=False),
+        started,
+        started + 2.0,
+        True,
+        True,
+        telemetry,
+        failure_class="SemanticServiceUnavailable",
+        failure_reason="service_busy",
+        fallback_reserve_ms=900,
+    )
+
+    assert captured["timeout_ms"] > 600
+    assert telemetry["configured_fallback_reserve_ms"] == 900
+    assert telemetry["fallback_reserve_ms"] == 600
+    assert telemetry["deadline_reserve_ms"] == 600
+    assert result.evidence_features["deadline_reserve_ms"] == 600
+
+
+def test_unknown_semantic_error_is_not_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(
+        recall_runtime,
+        "_run_evidence_search",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("semantic bug")),
+    )
+    monkeypatch.setattr(recall_runtime, "collect_context", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_args: "")
+
+    fallback_calls: list[bool] = []
+
+    def forbidden_fallback(*_args, **_kwargs):
+        fallback_calls.append(True)
+        pytest.fail("unknown semantic exception was hidden by fallback")
+
+    monkeypatch.setattr(recall_runtime, "run_deterministic_fallback", forbidden_fallback)
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="昨日の続き"),
+        RecallPolicy(judge_mode="off", rewrite_enabled=False, log_decisions=False),
+    )
+
+    assert fallback_calls == []
+    assert result.status == "error"
+    assert result.error == "RuntimeError: semantic bug"
+    assert result.search_mode == "error"
+    assert "evidence gate failed: RuntimeError" in result.reasons
 
 
 def test_merge_search_stage_timings_accumulates() -> None:

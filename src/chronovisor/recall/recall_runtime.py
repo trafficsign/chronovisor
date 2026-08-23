@@ -42,6 +42,7 @@ from chronovisor.core.search import (
     search_existing_lexical,
 )
 from chronovisor.core.search import search as run_search
+from chronovisor.core.semantic_client import SemanticServiceUnavailable
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     init_chronovisor,
@@ -1930,6 +1931,36 @@ def _require_remaining_budget(deadline_at: float | None, stage: str) -> int | No
     return remaining_ms
 
 
+def _known_availability_failure_class(exc: BaseException) -> str | None:
+    """Return only typed semantic capacity failures eligible for degraded recall."""
+
+    if isinstance(exc, SemanticServiceUnavailable):
+        return type(exc).__name__
+    exc_type = type(exc)
+    # The resident semantic/reranker services raise ServiceBusy in-process;
+    # their Unix-socket clients convert the same producer failure to a typed
+    # client-unavailable exception.
+    if (
+        exc_type.__module__
+        in {
+            "chronovisor.search.semantic_service",
+            "chronovisor.search.reranker_service",
+        }
+        and exc_type.__name__ == "ServiceBusy"
+    ):
+        return exc_type.__name__
+    # Reranker client exposes the only other typed capacity-busy contract. It
+    # normally becomes RecallBudgetExhausted in _run_evidence_search, but keep
+    # a direct propagation fail-open without accepting arbitrary exceptions.
+    if (
+        exc_type.__module__ == "chronovisor.core.reranker_client"
+        and exc_type.__name__ == "RerankerServiceUnavailable"
+        and getattr(exc, "category", "") == "service_busy"
+    ):
+        return exc_type.__name__
+    return None
+
+
 def _stage_started(
     telemetry: dict[str, Any] | None,
     stage: str,
@@ -1984,30 +2015,61 @@ def _fail_open_recall_budget(
     allow_timeout_fallback: bool,
     perform_search: bool,
     telemetry: dict[str, Any] | None = None,
+    *,
+    failure_class: str | None = None,
+    failure_reason: str | None = None,
+    fallback_reserve_ms: int | None = None,
 ) -> RecallResult:
     """Return deterministic fallback context or an explicit fail-open timeout."""
 
+    remaining_ms = _remaining_budget_ms(final_deadline_at)
+    if failure_class:
+        if telemetry is None:
+            telemetry = {}
+        configured_reserve_ms = max(0, int(policy.deterministic_fallback_reserve_ms))
+        if allow_timeout_fallback and perform_search:
+            reserve_limits = [600, configured_reserve_ms]
+            if fallback_reserve_ms is not None:
+                reserve_limits.append(max(0, int(fallback_reserve_ms)))
+            if remaining_ms is not None:
+                reserve_limits.append(max(0, remaining_ms))
+            effective_reserve_ms = max(1, min(reserve_limits))
+        else:
+            effective_reserve_ms = 0
+        telemetry.update(
+            {
+                "failure_class": failure_class,
+                "failure_reason": failure_reason or reason,
+                "failure_elapsed_ms": _elapsed_ms(started),
+                "configured_fallback_reserve_ms": configured_reserve_ms,
+                "fallback_reserve_ms": effective_reserve_ms,
+                "deadline_reserve_ms": effective_reserve_ms,
+            }
+        )
     _stage_interrupted(telemetry)
-    if allow_timeout_fallback and perform_search:
-        remaining_ms = _remaining_budget_ms(final_deadline_at)
-        if remaining_ms is not None and remaining_ms >= 100:
-            if telemetry is not None:
-                telemetry["fallback_started"] = True
-            fallback = run_deterministic_fallback(
-                request,
-                policy,
-                perform_search=True,
-                timeout_ms=remaining_ms,
-                reason=reason,
-                _started_at=started,
-                _final_deadline_at=final_deadline_at,
-                _telemetry=telemetry,
-            )
-            if telemetry is not None:
-                telemetry["fallback_completed"] = True
-                _merge_telemetry(fallback.evidence_features, telemetry)
-            fallback.latency_ms = _elapsed_ms(started)
-            return fallback
+    if (
+        allow_timeout_fallback
+        and perform_search
+        and remaining_ms is not None
+        and remaining_ms >= 100
+    ):
+        if telemetry is not None:
+            telemetry["fallback_started"] = True
+        fallback = run_deterministic_fallback(
+            request,
+            policy,
+            perform_search=True,
+            timeout_ms=remaining_ms,
+            reason=reason,
+            _started_at=started,
+            _final_deadline_at=final_deadline_at,
+            _telemetry=telemetry,
+        )
+        if telemetry is not None:
+            telemetry["fallback_completed"] = True
+            _merge_telemetry(fallback.evidence_features, telemetry)
+        fallback.latency_ms = _elapsed_ms(started)
+        return fallback
     result = RecallResult(
         status="timeout",
         decision="none",
@@ -4063,6 +4125,7 @@ def _run_recall_impl(
     reranker_metadata: dict[str, Any] = {}
     field_shadow_metadata: dict[str, Any] = {}
     post_authority: dict[str, Any] = {}
+    error = ""
 
     if policy.gate_mode == "evidence" and perform_search:
         try:
@@ -4100,10 +4163,28 @@ def _run_recall_impl(
                 _telemetry,
             )
         except Exception as exc:
+            failure_class = _known_availability_failure_class(exc)
+            if failure_class is not None:
+                failure_reason = _one_line(str(exc), limit=220)
+                return _fail_open_recall_budget(
+                    f"{failure_class}: {failure_reason}",
+                    matched,
+                    request,
+                    policy,
+                    started,
+                    final_deadline_at,
+                    _allow_timeout_fallback,
+                    perform_search,
+                    _telemetry,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                    fallback_reserve_ms=reserve_ms,
+                )
             _stage_interrupted(_telemetry)
             reasons.append(f"evidence gate failed: {exc.__class__.__name__}")
             pre_results = []
             search_mode = "error"
+            error = f"{exc.__class__.__name__}: {_one_line(str(exc), limit=220)}"
 
     if not processor_authority and should_run_judge(score, policy, evidence_features):
         try:
@@ -4183,7 +4264,6 @@ def _run_recall_impl(
     )
 
     context_items: list[ContextItem] = []
-    error = ""
     if perform_search and decision != "none":
         try:
             _stage_started(_telemetry, "context", deadline_at)
@@ -4227,8 +4307,25 @@ def _run_recall_impl(
                 _telemetry,
             )
         except Exception as exc:
+            failure_class = _known_availability_failure_class(exc)
+            if failure_class is not None:
+                failure_reason = _one_line(str(exc), limit=220)
+                return _fail_open_recall_budget(
+                    f"{failure_class}: {failure_reason}",
+                    matched,
+                    request,
+                    policy,
+                    started,
+                    final_deadline_at,
+                    _allow_timeout_fallback,
+                    perform_search,
+                    _telemetry,
+                    failure_class=failure_class,
+                    failure_reason=failure_reason,
+                    fallback_reserve_ms=reserve_ms,
+                )
             _stage_interrupted(_telemetry)
-            error = f"{exc.__class__.__name__}: {exc}"
+            error = f"{exc.__class__.__name__}: {_one_line(str(exc), limit=220)}"
             reasons.append("search failed")
 
     result = RecallResult(

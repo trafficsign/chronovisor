@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
+  "captured_at": "2026-08-23T20:26:00+09:00",
+  "scope": [
+    "src/chronovisor/recall/recall_runtime.py",
+    "tests/test_recall_runtime.py"
+  ],
+  "known_availability_failure": {
+    "exception": "SemanticServiceUnavailable",
+    "reason": "service_busy",
+    "status": "degraded",
+    "search_mode": "bm25-fallback",
+    "nonempty_context": true,
+    "sensitive_result_count": 0,
+    "heavy_subsystem_calls": 0,
+    "configured_fallback_reserve_ms": 600,
+    "effective_deadline_reserve_ms": 600,
+    "latency_within_reserve": true
+  },
+  "configured_reserve_cap": {
+    "configured_fallback_reserve_ms": 900,
+    "effective_deadline_reserve_ms": 600,
+    "telemetry_overstates_execution_window": false
+  },
+  "unknown_failure": {
+    "exception": "RuntimeError",
+    "fallback_calls": 0,
+    "status": "error",
+    "search_mode": "error",
+    "typed_bounded_error": true
+  },
+  "verification": {
+    "command": "CHRONOVISOR_ROOT=<isolated> uv run pytest -q tests/test_recall_runtime.py::test_semantic_service_unavailable_uses_deterministic_fallback tests/test_recall_runtime.py::test_unknown_semantic_error_is_not_fallback tests/test_recall_runtime.py::test_availability_fallback_telemetry_caps_configured_reserve",
+    "passed": 3,
+    "failed": 0,
+    "ruff": "passed",
+    "diff_check": "passed"
+  },
+  "live_acceptance": {
+    "status": "pending",
+    "gate": "Phase 6 requires a deployed cohort for at least 24 hours and 100 eligible prompts per active host."
+  }
+}
