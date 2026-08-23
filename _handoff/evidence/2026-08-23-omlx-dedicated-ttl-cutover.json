@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-08-23T13:55:23+09:00",
+  "strategy": {
+    "name": "dedicated_omlx_native_ttl",
+    "reason": "Persistent three-model residency failed the strict startup swap gate twice; the native oMLX TTL preserves process isolation while releasing Muse after an idle burst.",
+    "port": 8002,
+    "model": "Muse-Glimmer-30B-4bit",
+    "ttl_seconds": 60,
+    "pinned": false,
+    "custom_runtime_residency_code_added": false
+  },
+  "route_manifest": {
+    "provider_added": "omlx_muse",
+    "provider_kind": "omlx",
+    "before_endpoint_sha256": "87459d11adee7bce23cb37e9d210800e77403ecd52229858300b9215af0ed0fd",
+    "after_endpoint_sha256": "51bfed0fa588ac39ecb813fd5220f06263488ad8b92f9dec4528ba96f0bac1cc",
+    "changed_roles": [
+      "classification.anchor",
+      "classification.anchor.challenger",
+      "classification.tie_break",
+      "librarian.review.challenger",
+      "recall.distill.teacher.b",
+      "research.challenge"
+    ],
+    "changed_fields_per_role": [
+      "provider"
+    ],
+    "unchanged_role_count": 38,
+    "model_revision_capabilities_order_policy_unchanged": true
+  },
+  "ttl_pilot": {
+    "initial": {
+      "swap_used_mib": 4853.25,
+      "pageouts": 88577,
+      "swapouts": 377596,
+      "loaded_count": 0,
+      "model_memory_bytes": 0
+    },
+    "cycle_1": {
+      "request_success": true,
+      "wall_seconds": 17.441,
+      "input_tokens": 62,
+      "output_tokens": 8,
+      "immediate_swap_used_mib": 4821.88,
+      "after_unload_swap_used_mib": 4813.88,
+      "after_unload_pageouts": 89142,
+      "after_unload_swapouts": 377636,
+      "after_unload_loaded_count": 0,
+      "after_unload_model_memory_bytes": 0
+    },
+    "cycle_2": {
+      "request_success": true,
+      "wall_seconds": 11.889,
+      "input_tokens": 62,
+      "output_tokens": 8,
+      "immediate_swap_used_mib": 4814.06,
+      "after_unload_swap_used_mib": 4806.06,
+      "after_unload_pageouts": 89362,
+      "after_unload_swapouts": 377648,
+      "after_unload_loaded_count": 0,
+      "after_unload_model_memory_bytes": 0
+    },
+    "repeated_cycle_swap_growth_mib": -7.82,
+    "active_request_guard": {
+      "request_success": true,
+      "wall_seconds": 81.404,
+      "server_generation_seconds": 54.74,
+      "output_tokens": 800,
+      "model_remained_loaded_while_active": true,
+      "unloaded_after_idle": true
+    }
+  },
+  "post_run": {
+    "control": {
+      "order": [
+        "Qwen3.8-27B-4bit",
+        "Muse-Glimmer-30B-4bit"
+      ],
+      "repetitions": 6,
+      "request_count": 12,
+      "success_count": 12,
+      "qwen_input_tokens": 4108,
+      "muse_input_tokens": 4155,
+      "baseline_muse_input_tokens": 4154,
+      "max_output_tokens": 32,
+      "temperature": 0,
+      "seed": 7,
+      "think": false,
+      "live_workload_contamination_observed": true
+    },
+    "requests": [
+      {"ordinal": 1, "model": "Qwen3.8-27B-4bit", "wall_seconds": 23.653328, "input_tokens": 4108, "output_tokens": 32},
+      {"ordinal": 2, "model": "Muse-Glimmer-30B-4bit", "wall_seconds": 26.846456, "input_tokens": 4155, "output_tokens": 32},
+      {"ordinal": 3, "model": "Qwen3.8-27B-4bit", "wall_seconds": 3.569994, "input_tokens": 4108, "output_tokens": 32},
+      {"ordinal": 4, "model": "Muse-Glimmer-30B-4bit", "wall_seconds": 20.053143, "input_tokens": 4155, "output_tokens": 32},
+      {"ordinal": 5, "model": "Qwen3.8-27B-4bit", "wall_seconds": 1.937866, "input_tokens": 4108, "output_tokens": 32},
+      {"ordinal": 6, "model": "Muse-Glimmer-30B-4bit", "wall_seconds": 19.993467, "input_tokens": 4155, "output_tokens": 32},
+      {"ordinal": 7, "model": "Qwen3.8-27B-4bit", "wall_seconds": 1.988373, "input_tokens": 4108, "output_tokens": 32},
+      {"ordinal": 8, "model": "Muse-Glimmer-30B-4bit", "wall_seconds": 20.117674, "input_tokens": 4155, "output_tokens": 32},
+      {"ordinal": 9, "model": "Qwen3.8-27B-4bit", "wall_seconds": 1.990658, "input_tokens": 4108, "output_tokens": 32},
+      {"ordinal": 10, "model": "Muse-Glimmer-30B-4bit", "wall_seconds": 20.197653, "input_tokens": 4155, "output_tokens": 32},
+      {"ordinal": 11, "model": "Qwen3.8-27B-4bit", "wall_seconds": 1.956618, "input_tokens": 4108, "output_tokens": 32},
+      {"ordinal": 12, "model": "Muse-Glimmer-30B-4bit", "wall_seconds": 19.892648, "input_tokens": 4155, "output_tokens": 32}
+    ],
+    "summary": {
+      "overall_wall_p50_seconds": 19.943058,
+      "overall_wall_mean_seconds": 13.51649,
+      "overall_wall_total_seconds": 162.197878,
+      "qwen_wall_p50_seconds": 1.989515,
+      "muse_wall_p50_seconds": 20.085408,
+      "baseline_overall_wall_p50_seconds": 37.946166,
+      "baseline_muse_wall_p50_seconds": 46.826233,
+      "overall_p50_improvement_percent": 47.444,
+      "muse_p50_improvement_percent": 57.107,
+      "baseline_reported_model_load_seconds": 262.37,
+      "post_run_muse_load_seconds": 1.809,
+      "model_load_seconds_reduction_percent": 99.311,
+      "cross_model_dflash_unloads": 0,
+      "muse_loads_during_measured_burst": 1,
+      "prefix_cache_entries_max": 0,
+      "prefix_cache_bytes_max": 0
+    },
+    "memory": {
+      "before": {
+        "swap_used_mib": 4790.06,
+        "system_free_percentage": 61,
+        "pageouts": 89610,
+        "swapouts": 377648
+      },
+      "after_requests": {
+        "swap_used_mib": 4783.44,
+        "system_free_percentage": 42,
+        "pageouts": 90793,
+        "swapouts": 378248,
+        "combined_reported_model_memory_gib": 58.888
+      },
+      "after_ttl_unload": {
+        "swap_used_mib": 4783.44,
+        "system_free_percentage": 85,
+        "pageouts": 90851,
+        "swapouts": 378248,
+        "muse_loaded_count": 0,
+        "muse_model_memory_bytes": 0
+      },
+      "swap_delta_mib": -6.62,
+      "memory_pressure_status": "normal",
+      "abort_threshold_crossed": false
+    }
+  },
+  "tests": {
+    "config_route_validation": "passed",
+    "llm_config_and_omlx_adapter": "74 passed",
+    "targeted_runtime_and_ui": "353 passed",
+    "isolated_full_suite": "5093 passed, 1 skipped",
+    "long_active_request": "passed",
+    "route_burst": "12 of 12 passed"
+  },
+  "rollback": {
+    "backup_path": "/Users/trafficsign/.chronovisor/backups/omlx-muse-ttl-cutover-20260823-1342",
+    "data_migration": false,
+    "recoverable": true
+  },
+  "redaction": {
+    "credentials": "omitted",
+    "raw_prompts": "omitted",
+    "raw_responses": "omitted",
+    "pids": "omitted"
+  }
+}

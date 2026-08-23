@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "status": "failed_startup_gate_and_rolled_back",
+  "captured_at": {
+    "service_started": "2026-08-23T13:25:23+09:00",
+    "muse_warm_started": "2026-08-23T13:27:14+09:00",
+    "muse_request_completed": "2026-08-23T13:27:27+09:00",
+    "service_stopped": "2026-08-23T13:28:41+09:00"
+  },
+  "control": {
+    "routing_changed": false,
+    "measurement_boundary": "post-warm startup delta separated from steady workload delta",
+    "prompt_profile": "fixed_synthetic_short_warmup_v1",
+    "max_output_tokens": 16,
+    "temperature": 0,
+    "seed": 7,
+    "thinking": false,
+    "raw_prompt_recorded": false,
+    "raw_response_recorded": false
+  },
+  "thresholds": {
+    "startup_swap_delta_mib_max": 1024,
+    "steady_swap_delta_mib_max": 1024,
+    "abort_swap_delta_mib": 4096,
+    "reported_model_gib_max": 85,
+    "planning_headroom_gib_min": 20,
+    "free_percentage_abort": 10
+  },
+  "phases": [
+    {
+      "phase": "pre_restore",
+      "swap_used_mib": 3006.62,
+      "free_percentage": 62,
+      "pageouts": 87730,
+      "reported_model_memory_bytes": {
+        "qwen_endpoint": 26737054471,
+        "gemma_endpoint": 16108266064
+      }
+    },
+    {
+      "phase": "after_process_start",
+      "swap_used_mib": 3006.62,
+      "free_percentage": 61,
+      "pageouts": 87785,
+      "muse_process_rss_gib": 0.146,
+      "muse_model_memory_bytes": 0,
+      "muse_loaded": false
+    },
+    {
+      "phase": "pre_warm_background_60s_start",
+      "measurement_note": "The 60-second window starts after process-start housekeeping; this is distinct from the earlier after_process_start snapshot.",
+      "swap_used_mib": 3006.62,
+      "pageouts": 87942,
+      "swapouts": 250180
+    },
+    {
+      "phase": "pre_warm_background_60s_end",
+      "swap_used_mib": 3006.62,
+      "free_percentage": 90,
+      "pageouts": 87942,
+      "swapins": 42662,
+      "swapouts": 250180,
+      "compressor_pages": 340493,
+      "background_window_swap_delta_mib": 0,
+      "background_window_pageout_delta": 0,
+      "background_window_swapout_delta": 0
+    },
+    {
+      "phase": "after_muse_warm_immediate",
+      "swap_used_mib": 4979.62,
+      "free_percentage": 46,
+      "pageouts": 88281,
+      "swapins": 43536,
+      "swapouts": 377476,
+      "compressor_pages": 3874780,
+      "muse_model_memory_bytes": 20385544318,
+      "muse_loaded": true
+    },
+    {
+      "phase": "after_muse_warm_settle_30s",
+      "swap_used_mib": 4981.5,
+      "free_percentage": 28,
+      "pageouts": 88577,
+      "swapins": 43869,
+      "swapouts": 377596,
+      "compressor_pages": 2749041,
+      "combined_reported_model_gib": 58.888,
+      "planning_headroom_gib": 46.112,
+      "all_targets_loaded": true
+    },
+    {
+      "phase": "after_rollback",
+      "swap_used_mib": 4973.5,
+      "free_percentage": 75,
+      "pageouts": 88577,
+      "swapins": 44684,
+      "swapouts": 377596,
+      "compressor_pages": 1577986,
+      "muse_service_running": false
+    }
+  ],
+  "warmup_request": {
+    "success": true,
+    "wall_seconds": 13.214,
+    "model_load_seconds": 2.11,
+    "input_tokens": 62,
+    "output_tokens": 16
+  },
+  "summary": {
+    "startup_swap_delta_mib": 1974.88,
+    "startup_pageout_delta": 635,
+    "startup_swapout_delta": 127416,
+    "reported_model_gib": 58.888,
+    "planning_headroom_gib": 46.112,
+    "startup_gate_pass": false,
+    "steady_gate_executed": false,
+    "steady_gate_skip_reason": "startup swap delta already exceeded the strict 1 GiB acceptance limit",
+    "failure_reason": "dedicated persistent Muse residency reproducibly adds more than 1 GiB of swap during warm-up"
+  },
+  "rollback": {
+    "performed": true,
+    "service": "com.trafficsign.omlx-muse",
+    "port_8002_reachable_after": false,
+    "port_8000_health_after": 200,
+    "port_8001_health_after": 200,
+    "backup_path": "/Users/trafficsign/.chronovisor/backups/omlx-muse-segmented-fail-20260823-1328",
+    "live_routing_changed": false
+  },
+  "redaction": {
+    "credentials_recorded": false,
+    "prompt_text_recorded": false,
+    "response_text_recorded": false,
+    "raw_logs_recorded": false,
+    "process_commands_recorded": false
+  }
+}
