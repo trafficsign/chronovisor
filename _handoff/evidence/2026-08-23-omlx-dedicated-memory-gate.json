@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "status": "failed_and_rolled_back",
+  "captured_at": {
+    "started": "2026-08-23T12:21:49+09:00",
+    "completed": "2026-08-23T12:37:23+09:00",
+    "duration_seconds": 934.258
+  },
+  "control": {
+    "request_order": ["qwen", "muse", "gemma"],
+    "repetitions": 5,
+    "request_count": 15,
+    "prompt_profile": "fixed_synthetic_long_prefill_v1",
+    "max_output_tokens": 32,
+    "temperature": 0,
+    "seed": 7,
+    "chat_template_kwargs": {"enable_thinking": false},
+    "serialization": "shared OMLXAdapter model_resource_lease",
+    "raw_prompt_recorded": false,
+    "raw_response_recorded": false
+  },
+  "warmup": {
+    "order": ["muse:8002", "qwen:8000", "gemma:8001"],
+    "all_succeeded": true,
+    "wall_seconds": {"muse": 36.54, "qwen": 26.476, "gemma": 16.915},
+    "reported_model_memory_bytes": {
+      "qwen_endpoint": 26737054471,
+      "gemma_endpoint": 16108266064,
+      "muse_endpoint": 20385544318
+    },
+    "combined_reported_model_gib": 58.888,
+    "planning_headroom_gib": 46.112
+  },
+  "baseline_memory": {
+    "swap_used_mib": 346.88,
+    "source": "2026-08-23-omlx-dedicated-baseline.json"
+  },
+  "samples": [
+    {"iteration": 1, "alias": "qwen", "elapsed_seconds": 1.795, "wall_seconds": 1.579, "input_tokens": 7692, "output_tokens": 24, "model_load_seconds": null, "free_percentage": 49, "swap_delta_mib": 2743.68, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.962, "all_targets_loaded": true},
+    {"iteration": 2, "alias": "muse", "elapsed_seconds": 97.792, "wall_seconds": 37.576, "input_tokens": 7738, "output_tokens": 32, "model_load_seconds": null, "free_percentage": 71, "swap_delta_mib": 2745.12, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.605, "all_targets_loaded": true},
+    {"iteration": 3, "alias": "gemma", "elapsed_seconds": 189.432, "wall_seconds": 69.19, "input_tokens": 7692, "output_tokens": 32, "model_load_seconds": null, "free_percentage": 70, "swap_delta_mib": 2750.74, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.59, "all_targets_loaded": true},
+    {"iteration": 4, "alias": "qwen", "elapsed_seconds": 191.221, "wall_seconds": 1.557, "input_tokens": 7692, "output_tokens": 24, "model_load_seconds": null, "free_percentage": 57, "swap_delta_mib": 2750.74, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.59, "all_targets_loaded": true},
+    {"iteration": 5, "alias": "muse", "elapsed_seconds": 276.685, "wall_seconds": 36.448, "input_tokens": 7738, "output_tokens": 32, "model_load_seconds": null, "free_percentage": 71, "swap_delta_mib": 2750.74, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.606, "all_targets_loaded": true},
+    {"iteration": 6, "alias": "gemma", "elapsed_seconds": 317.979, "wall_seconds": 17.752, "input_tokens": 7692, "output_tokens": 32, "model_load_seconds": null, "free_percentage": 75, "swap_delta_mib": 2750.74, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.608, "all_targets_loaded": true},
+    {"iteration": 7, "alias": "qwen", "elapsed_seconds": 388.801, "wall_seconds": 28.557, "input_tokens": 7692, "output_tokens": 24, "model_load_seconds": null, "free_percentage": 33, "swap_delta_mib": 2737.06, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.6, "all_targets_loaded": true},
+    {"iteration": 8, "alias": "muse", "elapsed_seconds": 497.984, "wall_seconds": 77.767, "input_tokens": 7738, "output_tokens": 32, "model_load_seconds": null, "free_percentage": 59, "swap_delta_mib": 2729.06, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.608, "all_targets_loaded": true},
+    {"iteration": 9, "alias": "gemma", "elapsed_seconds": 567.566, "wall_seconds": 69.366, "input_tokens": 7692, "output_tokens": 32, "model_load_seconds": null, "free_percentage": 75, "swap_delta_mib": 2729.06, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.611, "all_targets_loaded": true},
+    {"iteration": 10, "alias": "qwen", "elapsed_seconds": 616.408, "wall_seconds": 48.639, "input_tokens": 7692, "output_tokens": 24, "model_load_seconds": null, "free_percentage": 37, "swap_delta_mib": 2734.93, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.604, "all_targets_loaded": true},
+    {"iteration": 11, "alias": "muse", "elapsed_seconds": 658.987, "wall_seconds": 42.342, "input_tokens": 7738, "output_tokens": 32, "model_load_seconds": null, "free_percentage": 65, "swap_delta_mib": 2734.93, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.61, "all_targets_loaded": true},
+    {"iteration": 12, "alias": "gemma", "elapsed_seconds": 666.972, "wall_seconds": 6.716, "input_tokens": 7692, "output_tokens": 32, "model_load_seconds": null, "free_percentage": 69, "swap_delta_mib": 2734.93, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.61, "all_targets_loaded": true},
+    {"iteration": 13, "alias": "qwen", "elapsed_seconds": 817.948, "wall_seconds": 97.719, "input_tokens": 7692, "output_tokens": 24, "model_load_seconds": null, "free_percentage": 41, "swap_delta_mib": 2747.74, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.621, "all_targets_loaded": true},
+    {"iteration": 14, "alias": "muse", "elapsed_seconds": 880.353, "wall_seconds": 62.19, "input_tokens": 7738, "output_tokens": 32, "model_load_seconds": null, "free_percentage": 62, "swap_delta_mib": 2739.74, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.61, "all_targets_loaded": true},
+    {"iteration": 15, "alias": "gemma", "elapsed_seconds": 934.049, "wall_seconds": 53.468, "input_tokens": 7692, "output_tokens": 32, "model_load_seconds": null, "free_percentage": 76, "swap_delta_mib": 2739.74, "reported_model_gib": 58.888, "planning_headroom_gib": 46.112, "process_rss_gib": 3.613, "all_targets_loaded": true}
+  ],
+  "summary": {
+    "request_count": 15,
+    "success_count": 15,
+    "resident_without_reload_count": 15,
+    "max_reported_model_gib": 58.888,
+    "min_planning_headroom_gib": 46.112,
+    "min_free_percentage": 33,
+    "max_swap_delta_mib": 2750.74,
+    "final_swap_delta_mib": 2739.74,
+    "abort_threshold_crossed": false,
+    "gate_pass": false,
+    "criteria": {
+      "reported_model_gib_le_85": true,
+      "planning_headroom_gib_ge_20": true,
+      "swap_delta_mib_le_1024": false,
+      "free_percentage_gt_10": true,
+      "all_targets_resident": true,
+      "all_requests_succeeded": true
+    },
+    "failure_reason": "steady swap increment exceeded the 1 GiB acceptance limit"
+  },
+  "discarded_probe": {
+    "runtime_request_succeeded": true,
+    "excluded_from_gate": true,
+    "reason": "measurement harness accessed a nonexistent TokenUsage.cached_tokens attribute after the request; corrected runner completed all 15 samples"
+  },
+  "rollback": {
+    "performed": true,
+    "service": "com.trafficsign.omlx-muse",
+    "port_8002_reachable_after": false,
+    "port_8000_health_after": 200,
+    "port_8001_health_after": 200,
+    "backup_path": "/Users/trafficsign/.chronovisor/backups/omlx-muse-20260823-123725",
+    "live_routing_changed": false,
+    "push_performed": false,
+    "restart_performed": false
+  },
+  "redaction": {
+    "credentials_recorded": false,
+    "prompt_text_recorded": false,
+    "response_text_recorded": false,
+    "raw_logs_recorded": false
+  }
+}
