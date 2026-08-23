@@ -4607,6 +4607,7 @@ def test_feedback_lock_covers_tail_probe_append_and_both_fsyncs(
     monkeypatch.setattr(recall_runtime, "RECALL_FEEDBACK_FILE", feedback_file)
     original_lock = recall_runtime._feedback_exclusive_lock
     original_path_open = Path.open
+    original_os_open = jsonl_write.os.open
     original_fsync = jsonl_write.os.fsync
     locked = False
     events: list[str] = []
@@ -4624,10 +4625,19 @@ def test_feedback_lock_covers_tail_probe_append_and_both_fsyncs(
                 locked = False
 
     def tracked_path_open(path: Path, mode: str = "r", *args, **kwargs):
-        if path == feedback_file and mode in {"rb", "ab"}:
+        if path == feedback_file and mode == "rb":
             assert locked
             events.append(f"open-{mode}")
         return original_path_open(path, mode, *args, **kwargs)
+
+    def tracked_os_open(path, flags, mode=0o777, *args, **kwargs):
+        if path == feedback_file and flags & jsonl_write.os.O_APPEND:
+            assert locked
+            assert flags & jsonl_write.os.O_WRONLY
+            assert flags & jsonl_write.os.O_CREAT
+            assert mode == 0o600
+            events.append("open-append")
+        return original_os_open(path, flags, mode, *args, **kwargs)
 
     def tracked_fsync(descriptor: int) -> None:
         assert locked
@@ -4637,6 +4647,7 @@ def test_feedback_lock_covers_tail_probe_append_and_both_fsyncs(
 
     monkeypatch.setattr(recall_runtime, "_feedback_exclusive_lock", tracked_lock)
     monkeypatch.setattr(Path, "open", tracked_path_open)
+    monkeypatch.setattr(jsonl_write.os, "open", tracked_os_open)
     monkeypatch.setattr(jsonl_write.os, "fsync", tracked_fsync)
 
     append_feedback("missed", prompt="ordered durability")
@@ -4644,7 +4655,7 @@ def test_feedback_lock_covers_tail_probe_append_and_both_fsyncs(
     assert events == [
         "lock-enter",
         "open-rb",
-        "open-ab",
+        "open-append",
         "fsync-file",
         "fsync-dir",
         "lock-exit",
