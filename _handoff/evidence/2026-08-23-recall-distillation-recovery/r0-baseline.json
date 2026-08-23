@@ -1,0 +1,84 @@
+{
+  "schema": "chronovisor.recall-distillation-recovery-baseline.v1",
+  "captured_at": "2026-08-23T22:40:00+09:00",
+  "capture_mode": "read_only_no_chunk_no_lock_no_restart",
+  "git": {
+    "head": "3db90319ae804e3c6c51459af98259ae281e9db8",
+    "branch": "main",
+    "ahead_origin_main": 22,
+    "worktree": "clean"
+  },
+  "runtime": {
+    "commit_id": "87872fdf4199229bda7f73c55bd066b7e9d90c6b",
+    "expected_commit_id": "87872fdf4199229bda7f73c55bd066b7e9d90c6b",
+    "drift": false,
+    "health": "ok",
+    "distillation_worker_process_present": false,
+    "distillation_lock_held": false,
+    "ingest_processes": [85100, 85200]
+  },
+  "ledgers": {
+    "rally-manifest.jsonl": {
+      "records": 8042,
+      "bytes": 382327600,
+      "head_sha256": "bfc33769a339ea7298ef9fcffba5c530b0cdd4cfcdecc0d3ef4651c43bd3bb8e",
+      "invalid_json": 0,
+      "chain_mismatch": 0
+    },
+    "candidate-ledger.jsonl": {
+      "records": 8042,
+      "bytes": 1679033681,
+      "head_sha256": "32a64e6a9b90f888a911fd08b1ae57600c3b56abcab6e36c13cf5e8d5011efa9",
+      "invalid_json": 0,
+      "chain_mismatch": 0
+    },
+    "label-ledger.jsonl": {
+      "records": 5,
+      "bytes": 4819,
+      "head_sha256": "35a0ad97a42ba38ab2453a20f2bf8b3eed71b8a26c65914aa0be4fb586d497a4",
+      "invalid_json": 0,
+      "chain_mismatch": 0,
+      "teacher_labels": 4,
+      "counterfactual_labels": 1,
+      "valid_non_uncertain_labels": 1,
+      "invalid_teacher_output": 3
+    },
+    "exposure-receipts.jsonl": {
+      "records": 816,
+      "bytes": 972421,
+      "head_sha256": "2b4ffacf5679d29457384368e1a5ba24492aa6603ad9f5067484371765a42231",
+      "invalid_json": 0,
+      "chain_mismatch": 0
+    }
+  },
+  "derived": {
+    "historical_index_bytes": 90103808,
+    "candidate_full_scan_wall_seconds": 1.37,
+    "candidate_tail_16_parse_wall_seconds": 0.10
+  },
+  "state": {
+    "status": "capture_only",
+    "worker_status": "deferred",
+    "rollout_percent": 0,
+    "promotion_status": "held",
+    "promotion_reason": "p5_hard_floor",
+    "hold_reason": "chronological_split_incomplete",
+    "error_code": "worker_deferred",
+    "last_success_at": "2026-08-22T18:54:27.228727Z",
+    "teacher_model_calls": 3,
+    "counterfactual_model_calls": 1,
+    "labels_written": 0,
+    "processed": 0,
+    "candidate_backlog": 0,
+    "manifest_backlog": 0,
+    "raw_watermark_prefix": "232a8b7e",
+    "active_policy_prefix": "a0893f2e",
+    "candidate_policy_present": false
+  },
+  "observed_inconsistencies": [
+    "state manifest_chain_head does not match the verified rally-manifest tail",
+    "state and health expose zero teacher labels while the verified ledger contains four teacher rows",
+    "zero manifest and candidate backlog means capture complete, not teacher backlog complete"
+  ],
+  "seal_sha256": "532fd3c946399a9b0619ef0cc5320d6cc0d762a16d170bb43f539b1553a00815"
+}

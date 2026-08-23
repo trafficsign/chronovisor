@@ -1,0 +1,238 @@
+{
+  "schema": "chronovisor.recall-distillation-ox-ramp-receipt.v1",
+  "captured_at": "2026-08-24T05:53:09+09:00",
+  "outcome": "provider_degraded_ramp_paused_fail_closed",
+  "git": {
+    "branch": "main",
+    "implementation_head": "25b6dcb7f24a78c6397f665238f24dba708731ac",
+    "implementation_range": "c487f6d..25b6dcb",
+    "ahead_origin_main_at_capture": 77,
+    "pushed_by_this_task": false
+  },
+  "implementation": {
+    "checkpointed_append": true,
+    "incremental_catalog_and_candidate_offsets": true,
+    "durable_sqlite_workset": true,
+    "single_writer_parallel_dispatcher": true,
+    "free_only_remote_teacher_adapter": true,
+    "strict_json_schema": true,
+    "exact_single_json_fence_normalization": true,
+    "total_http_deadline": true,
+    "timeout_shutdown_does_not_join_running_http_workers": true,
+    "cumulative_valid_rate_ramp_gate": true,
+    "new_queue_or_http_infrastructure": false
+  },
+  "verification": {
+    "focused_suites": 11,
+    "tests_passed": 395,
+    "ruff_lint": "passed",
+    "git_diff_check": "passed",
+    "ruff_format": {
+      "status": "existing_committed_baseline_diff",
+      "files": [
+        "src/chronovisor/recall/recall_distillation_catalog.py",
+        "tests/test_llm_config.py",
+        "tests/test_recall_distillation_catalog.py"
+      ],
+      "changed_for_this_receipt": false
+    }
+  },
+  "profile_contract": {
+    "artifact_id": "f62cb8e7f16106d5134b9d221ea2496b2ff4f81d404393e99de2ffcc9b9bc64f",
+    "profile": "ox-alpha-single-v1",
+    "cohort": "ox-alpha-backfill-v1",
+    "route": "opencode-go/ox-alpha-free",
+    "request_model": "ox-alpha-free",
+    "required_returned_model": "ox-alpha-free",
+    "free_only": true,
+    "no_paid_fallback": true,
+    "official_status": "limited_time",
+    "expires_at": null,
+    "live_recall_model_calls": 0,
+    "max_inflight": 10,
+    "request_revision": "json-schema-core-label-abstain-16k-240s-v6",
+    "contract_config_sha256_before_pause": "a442428a6e79e7729cacb249832fbed17d5c998b8dfc1639ce33ceaa6a0eb5ee",
+    "request_revision_persisted_per_label": false,
+    "limitation": "The sealed worker state binds v6 counters to the profile contract, while individual legacy and OX label rows do not carry request_revision. OX0 therefore remains unchecked."
+  },
+  "services": {
+    "sleep_before_bootout": {
+      "label": "com.trafficsign.chronovisor-sleep.managed",
+      "parent_pid": 62716,
+      "child_pid": 62722,
+      "distillation_lock_owner_pid": 62722
+    },
+    "sleep_final": {
+      "launchctl": "not_found_bootout",
+      "process_present": false,
+      "distillation_lock_held": false,
+      "auto_restored": false
+    },
+    "converge_final": {
+      "label": "com.trafficsign.chronovisor-converge.managed",
+      "launchctl": "not_found_bootout",
+      "auto_restored": false
+    },
+    "ingest_final": {
+      "label": "com.trafficsign.chronovisor-ingest-drain.managed",
+      "launchctl": "running",
+      "parent_pid": 89376,
+      "child_pid": 89417,
+      "mutated_by_this_task": false
+    }
+  },
+  "v5_predecessor_ramp": {
+    "superseded_by_v6": true,
+    "cap_1": {"valid": 20, "attempts": 21, "valid_rate": 0.9523809523809523},
+    "cap_2": {"valid": 38, "attempts": 40, "valid_rate": 0.95},
+    "cap_5": {"valid": 20, "attempts": 21, "valid_rate": 0.9523809523809523},
+    "cap_10": {"valid": 21, "attempts": 22, "valid_rate": 0.9545454545454546},
+    "migration_reason": "The only cap-10 invalid response was an otherwise valid single fenced JSON object. v6 accepts only that exact fence form and rejects prose, multiple fences, language-free fences, and unclosed fences.",
+    "used_for_v6_acceptance": false
+  },
+  "v6_ramp": {
+    "started_at": "2026-08-24T05:08:55+09:00",
+    "ended_at": "2026-08-24T05:51:15+09:00",
+    "final_run_id": "e440907c41319fb21d349f560fe442602942006000d7e00845a1720cab140099",
+    "final_state_sha256": "cd7b03a8e346b3d4613f300bdbce57846007d793b22bfb18659be915f0d912b7",
+    "cap": 1,
+    "valid_receipts": 22,
+    "provider_attempts": 28,
+    "valid_rate": 0.7857142857142857,
+    "required_valid_rate": 0.95,
+    "accepted": false,
+    "failure_counts": {
+      "timeout": 1,
+      "http_5xx": 5
+    },
+    "failure_timeline": [
+      {"at": "2026-08-24T05:17:26+09:00", "class": "timeout", "counter_after": "6/7"},
+      {"at": "2026-08-24T05:27:09+09:00", "class": "http_5xx", "counter_after": "11/13"},
+      {"at": "2026-08-24T05:29:02+09:00", "class": "http_5xx", "counter_after": "12/15"},
+      {"at": "2026-08-24T05:29:12+09:00", "class": "http_5xx", "counter_after": "12/16"},
+      {"at": "2026-08-24T05:45:43+09:00", "class": "http_5xx", "counter_after": "22/27"},
+      {"at": "2026-08-24T05:51:15+09:00", "class": "http_5xx", "counter_after": "22/28", "after_cooldown_canary": true}
+    ],
+    "cap_acceptance": {
+      "1": "failed_valid_rate",
+      "2": "not_started_in_v6",
+      "5": "not_started_in_v6",
+      "10": "not_started_in_v6"
+    }
+  },
+  "final_config": {
+    "distillation_enabled": true,
+    "teacher_profile": "ox-alpha-single-v1",
+    "teacher_max_inflight": 10,
+    "teacher_claim_limit": 1,
+    "ox_enabled": false,
+    "ox_free_only": true,
+    "kill_switch_reason": "Repeated provider http_5xx after a bounded cooldown canary; keep the pipeline installed but prevent remote egress until an explicit resumed ramp.",
+    "rollback_backup": "/Users/trafficsign/.chronovisor/config.toml.pre-ox-alpha-20260824T0027.bak"
+  },
+  "labels": {
+    "records_total": 156,
+    "baseline_records": 5,
+    "records_delta": 151,
+    "ox_rows": 150,
+    "ox_status_completed": 150,
+    "ox_verdicts": {"relevant": 77, "irrelevant": 58, "uncertain": 15},
+    "ox_authority": {"teacher-only": 135, "uncertain": 15},
+    "exact_route_rows": 150,
+    "unexpected_route_rows": 0,
+    "billable_or_fallback_rows": 0,
+    "raw_content_field_rows": 0,
+    "duplicate_record_sha256": 0,
+    "duplicate_work_id": 0,
+    "duplicate_rally_candidate_work_tuple": 0,
+    "reused_candidate_ids": {
+      "groups": 12,
+      "rows": 27,
+      "extra_rows": 15,
+      "interpretation": "The same evidence candidate is evaluated for distinct rally/query/as_of work. These are distinct work IDs, not duplicate commits."
+    },
+    "legacy_safe_reason_code_model_rationale_rows": 8,
+    "head_sha256": "f5048443b932b3eea2dd06bc330f1ba46848703fbde4d2948ffcd04371dd56f4"
+  },
+  "workset": {
+    "total": 32522,
+    "distinct_work_id": 32522,
+    "distinct_payload_digest": 32522,
+    "completed": 150,
+    "ready": 19541,
+    "quarantined": 12831,
+    "leased": 0,
+    "interrupted_run_released_unattempted": 3
+  },
+  "ledgers": {
+    "rally_manifest": {
+      "records": 8050,
+      "baseline_records": 8042,
+      "records_delta": 8,
+      "bytes": 383284887,
+      "bytes_delta": 957287,
+      "head_sha256": "cacd9e7b78e645f4094d2365354b13a10f4dcd9f9a9f475f97dd5cc5882e6b1a"
+    },
+    "candidate": {
+      "records": 8050,
+      "baseline_records": 8042,
+      "records_delta": 8,
+      "bytes": 1680839826,
+      "bytes_delta": 1806145,
+      "head_sha256": "b124d7d3c0f47c6b6048203646970d18e1be03d516a09c005ee515a02d1672d3"
+    },
+    "label": {
+      "records": 156,
+      "baseline_records": 5,
+      "records_delta": 151,
+      "bytes": 273981,
+      "bytes_delta": 269162,
+      "head_sha256": "f5048443b932b3eea2dd06bc330f1ba46848703fbde4d2948ffcd04371dd56f4"
+    },
+    "exposure_receipts": {
+      "records": 831,
+      "baseline_records": 816,
+      "records_delta": 15,
+      "bytes": 990406,
+      "bytes_delta": 17985,
+      "head_sha256": "be43e3b04b86171028a80ad075b42260d0ac5efc956708bbb195fefa6e5b3c0e",
+      "attribution": "Concurrent live Recall/ingest activity; not attributed to OX."
+    }
+  },
+  "raw": {
+    "baseline_state_watermark_prefix": "232a8b7e",
+    "committed_watermark": "829fdd8cbcf025280af14a0f023cee3f1bcc9eaef8cb8168714eab970afead69",
+    "stat_watermark": "bea75a6c4ccb4d2487929c7ff8a9de03bfa8ba34c2ca647ea8ee79b042e44fe4",
+    "regular_files": 8188,
+    "symlinks": 0,
+    "bytes": 3612464425,
+    "verification_scope": "Receipt inventory plus filesystem metadata only; no 3.4 GiB full-content hash.",
+    "attribution": "Ingest remained live and changed Raw concurrently, so the watermark delta is evidence of a moving source, not proof of an OX write. Distillation treats Raw as read-only."
+  },
+  "policy_safety": {
+    "status": "capture_only",
+    "worker_status": "deferred",
+    "promotion_status": "held",
+    "promotion_reason": "p5_hard_floor",
+    "rollout_percent": 0,
+    "candidate_policy_exists": false,
+    "active_policy_id": "a0893f2ef935d458f524add5e7122f81e8af0669b66fcfb512197277ecae5232",
+    "lkg_policy_id": "a0893f2ef935d458f524add5e7122f81e8af0669b66fcfb512197277ecae5232",
+    "active_lkg_unchanged": true
+  },
+  "plan_acceptance": {
+    "OX0": "incomplete_request_revision_not_bound_per_label",
+    "OX1": "passed_code_tests_and_runtime_route_receipts",
+    "OX2": "failed_v6_cap1_valid_rate",
+    "OX3": "not_started",
+    "R0_R8": "remain_unchecked_until_each_evidence_gate_is_met"
+  },
+  "desired_runtime_end_state": {
+    "sleep": "bootout_until_owner_coordination",
+    "converge": "bootout_until_owner_coordination",
+    "ingest": "running_unchanged",
+    "ox_remote_egress": "disabled",
+    "distillation_pipeline": "installed_and_tested",
+    "resume": "Set ox_enabled=true only for an explicit cap-1 resumed ramp after provider health recovers; do not reuse v5 as v6 acceptance."
+  }
+}
