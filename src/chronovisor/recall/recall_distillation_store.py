@@ -324,6 +324,19 @@ def _chain_separator(path: Path) -> bytes:
         return b"" if handle.read(1) == b"\n" else b"\n"
 
 
+def chain_head(path: Path) -> dict[str, Any]:
+    """Return a verified ledger head without scanning a matching checkpoint."""
+
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with _locked(lock_path):
+        head = _read_chain_checkpoint(path)
+        if head is not None:
+            return head
+        head = _recover_chain_tail(path)
+        _write_chain_checkpoint(path, head)
+        return head
+
+
 def append_chain(path: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
     return append_chain_batch(path, (payload,))[0]
 
