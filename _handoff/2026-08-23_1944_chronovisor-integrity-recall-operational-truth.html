@@ -160,7 +160,7 @@ th{background:#f3f1eb}
   </ul>
 </span></li>
 
-<li><input type="checkbox"><span><strong>Phase 1 / P0-A — processed parent も対象にする bounded projection reconciler を実装する。</strong>
+<li><input type="checkbox" checked><span><strong>Phase 1 / P0-A — processed parent も対象にする bounded projection reconciler を実装する。</strong>
   <ul>
   <li><code>get_pending_raw_files</code> の通常 ingest と分離し、processed raw_id の canonical sort を1巡する cursor を既存 <code>.orchestrator_state.json</code> へ additive に保存する。1 drain pass は128 parents・1 batchまで、batch 完了ごとに checkpoint し、末尾まで達した時だけ wrap する。</li>
   <li>1 batch の追加wall time p95を250ms以下に保つ。20 passes のうち3回連続で250msを超えたら reconciler をdisableして Phaseを未完了に戻し、batch size以外の新しいscheduler/cacheは作らない。</li>
@@ -304,7 +304,6 @@ th{background:#f3f1eb}
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
 <ul>
-<li><strong>Phase 1 live repair:</strong> 既存 <code>chronovisor-ingest-drain</code> PID 85200 が <code>ingest-orchestrator.lock</code> を継続取得。21:51のread-only sampleでは前jobがsocket receive内、22:18には次jobへ進んでいたが再びlease保持中。process停止・restartは行わず、canary/derived repairも未実行のためinventoryはmissing 20のまま。</li>
 <li><strong>Phase 5B / Phase 6 remote:</strong> pushは未承認。required GitHub jobs、runtime archive commit照合、service restart、HTTP/DOM/console受入は未実行。</li>
 <li><strong>Phase 6 cohort:</strong> deploy後24時間かつactive host別100件のRecall availability/signal gateは時間条件上未到達。Planは規定どおり <code>running</code> を維持する。</li>
 </ul>
@@ -335,6 +334,8 @@ th{background:#f3f1eb}
 <li><time>2026-08-23 22:12</time><span>Phase 5Bのlocal実装確認完了。QoS reverse-order 6 run失敗0、usearch 1 pass/skip 0、Python 3.11/3.12 smoke各53 pass、workflow YAML/actions pinを確認。push未承認のためrequired GitHub jobsはpendingで、Phase 5B checkboxは未完了のまま。</span></li>
 <li><time>2026-08-23 22:12</time><span>最終local gate完了。architecture ledgerとlarge-function policyを現行HEADへ同期し、非同期diagnostic順序競合をdeterministic regressionで修正。隔離full suiteは5,151 pass / 0 fail / 2 warnings（422.71秒）、Ruff、mypy 89 source files、import-linter 358 files / 1 contractが全てgreen。結果を <code>test-ci.json</code> へ保存。live/remote gate未達のためPlanは <code>running</code> を維持。</span></li>
 <li><time>2026-08-23 22:18</time><span>Phase 1をread-only再確認。inventoryはtotal 13,624 / valid 13,604 / missing 20 / invalid 0で、missing ID集合はbaselineと一致、全20件processedかつRaw digest一致。Raw archive full verifyはerror 0。lease保持中のためrepair mutationは0で、結果を <code>projection-inventory.pending.json</code> に保存。</span></li>
+<li><time>2026-08-23 23:32</time><span>Phase 1完了。cursor discoveryが200ms予算を使い切って処理・checkpointへ進めない starvation と、検証済みlegacy archive Markdownがnative filename gateでholdになる共通原因を最小修正。canaryでmissing 20→19、全20件repair後と冪等再実行後はいずれもtotal 13,635 / valid 13,635 / missing 0 / invalid 0。20 passはp95 58.03ms / max 102.47ms / 250ms超過0、hold 0、Raw digest変化・quarantine変化/削除・duplicate・予期しないartifact追加・既存bundle変化・LLM ingest呼出しは全て0。focused 59件と隔離suite 63件、Ruff、diff check、独立review、Raw archive full verify errors 0を通過し、結果を <code>projection-repair.after.json</code> に保存。関連commitは <code>ca9f503</code>、<code>caf9679</code>、<code>90a3b5e</code>、<code>4c0c2c6</code>。</span></li>
+<li><time>2026-08-23 23:32</time><span>一時停止したmanaged ingest-drainを復旧。LaunchAgent <code>com.trafficsign.chronovisor-ingest-drain.managed</code> はrunning、親PID 89376 / worker PID 89417、workerがorchestrator lockを保持し、livenessはready・ingest/runtime authority available・alert/retryable false。push未承認のためruntimeは既存<code>origin/main</code>のままで、Phase 5B remote gateとPhase 6 deploy後24時間cohortが未達のためPlanは<code>running</code>を維持。</span></li>
 </ol>
 </section>
 
