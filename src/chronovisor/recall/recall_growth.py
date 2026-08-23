@@ -62,6 +62,8 @@ MIN_STRONG_POSITIVES = 200
 MIN_STRONG_SESSIONS = 20
 MIN_CANDIDATE_TRACES = 100
 MIN_CANDIDATE_SESSIONS = 20
+MIN_CANDIDATE_PRECISION = 0.90
+MIN_CANDIDATE_PRECISION_LCB = 0.85
 MIN_PROCESSOR_USED_EPISODES = 50
 MIN_TEACHER_COVERAGE = 0.99
 MIN_PROCESSOR_USED_COVERAGE = 0.99
@@ -407,7 +409,7 @@ def candidate_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "field_precision": cluster_rate_wilson_interval(
             confidence_rows,
             value_key="field_precision",
-            success_threshold=MIN_PROCESSOR_USED_PRECISION,
+            success_threshold=MIN_CANDIDATE_PRECISION,
         ),
         "commit_coverage": cluster_rate_wilson_interval(
             confidence_rows,
@@ -988,7 +990,7 @@ def processor_used_metrics(
     recall_rows: Sequence[Mapping[str, Any]],
     pull_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Measure whether shadow Processor retained pages explicitly used later."""
+    """Report used-receipt diagnostics; never authorize or promote a Field."""
 
     joined = join_used_recall_episodes(list(recall_rows), list(pull_rows))
     observed: list[tuple[str, set[str], set[str]]] = []
@@ -1143,7 +1145,6 @@ def processor_used_metrics(
 
 def _promotion_payload(metrics: dict[str, Any]) -> dict[str, Any]:
     candidate = metrics["candidate"]
-    used = metrics["processor_used"]
     learning = metrics["learning"]
     return {
         "schema_version": 3,
@@ -1169,12 +1170,9 @@ def _promotion_payload(metrics: dict[str, Any]) -> dict[str, Any]:
             "over_4s": int(candidate["over_4s"]),
             "fallback_rate": float(candidate["fallback_rate"]),
             "full_search_rate": float(candidate["full_search_rate"]),
-            "processor_used_page_coverage": float(used["used_page_coverage"]),
-            "processor_used_precision_proxy": float(used["used_precision_proxy"]),
         },
         "confidence_evidence": {
             "candidate": candidate["confidence"],
-            "processor_used": used["confidence"],
             "answer_reward": learning["confidence_bounds"]["answer_reward"],
         },
         "answer_evaluation": learning["answer_evaluation"],
@@ -1304,7 +1302,6 @@ def _failed_promotion(reason: str, metrics: dict[str, Any]) -> dict[str, Any]:
         },
         "confidence_evidence": {
             "candidate": metrics["candidate"]["confidence"],
-            "processor_used": metrics["processor_used"]["confidence"],
             "answer_reward": metrics["learning"]["confidence_bounds"][
                 "answer_reward"
             ],
@@ -1706,8 +1703,9 @@ def run_growth_cycle(
     proposed_policy = {
         "spread_gain": current_policy["spread_gain"]
         + (0.01 if candidate["teacher_commit_coverage"] >= 0.99 else -0.02),
-        "global_inhibition": current_policy["global_inhibition"]
-        + (0.01 if processor["used_precision_proxy"] < 0.90 else -0.005),
+        # Used receipts are diagnostics only; they never steer a student
+        # policy proposal or its promotion decision.
+        "global_inhibition": current_policy["global_inhibition"],
         "turn_decay": current_policy["turn_decay"]
         + (0.01 if candidate["full_search_rate"] > 0.25 else 0.0),
     }
@@ -1836,11 +1834,11 @@ def run_growth_cycle(
             >= MIN_TEACHER_COVERAGE_LCB
         ),
         "candidate_precision": candidate["field_precision_against_teacher"]
-        >= MIN_PROCESSOR_USED_PRECISION,
+        >= MIN_CANDIDATE_PRECISION,
         "candidate_precision_lcb": (
             candidate_precision_bound.get("valid") is True
             and float(candidate_precision_bound.get("lower") or 0.0)
-            >= MIN_PROCESSOR_USED_PRECISION_LCB
+            >= MIN_CANDIDATE_PRECISION_LCB
         ),
         "candidate_confidence_manifest": (
             candidate_confidence.get("samples", 0) >= MIN_CANDIDATE_TRACES
@@ -1858,27 +1856,23 @@ def run_growth_cycle(
         "full_search_rate": candidate["full_search_rate"] < 1.0,
         "p95_improvement": isinstance(candidate["p95_improvement_ms"], int | float)
         and float(candidate["p95_improvement_ms"]) > 0.0,
-        "processor_used_samples": (
-            processor["episodes"] >= MIN_PROCESSOR_USED_EPISODES
-        ),
-        "processor_used_sessions": (processor["sessions"] >= MIN_STRONG_SESSIONS),
-        "processor_used_coverage": (
-            processor["used_page_coverage"] >= MIN_PROCESSOR_USED_COVERAGE
-        ),
-        "processor_used_coverage_lcb": (
+    }
+    processor_diagnostics = {
+        "samples": processor["episodes"] >= MIN_PROCESSOR_USED_EPISODES,
+        "sessions": processor["sessions"] >= MIN_STRONG_SESSIONS,
+        "coverage": processor["used_page_coverage"] >= MIN_PROCESSOR_USED_COVERAGE,
+        "coverage_lcb": (
             processor_coverage_bound.get("valid") is True
             and float(processor_coverage_bound.get("lower") or 0.0)
             >= MIN_PROCESSOR_USED_COVERAGE_LCB
         ),
-        "processor_used_precision": (
-            processor["used_precision_proxy"] >= MIN_PROCESSOR_USED_PRECISION
-        ),
-        "processor_used_precision_lcb": (
+        "precision": processor["used_precision_proxy"] >= MIN_PROCESSOR_USED_PRECISION,
+        "precision_lcb": (
             processor_precision_bound.get("valid") is True
             and float(processor_precision_bound.get("lower") or 0.0)
             >= MIN_PROCESSOR_USED_PRECISION_LCB
         ),
-        "processor_confidence_manifest": (
+        "confidence_manifest": (
             processor_confidence.get("samples", 0) >= MIN_PROCESSOR_USED_EPISODES
             and processor_confidence.get("clusters", 0) >= MIN_STRONG_SESSIONS
             and len(str(processor_confidence.get("manifest_sha256") or "")) == 64
@@ -1944,19 +1938,6 @@ def run_growth_cycle(
         )
     ):
         stage = "collecting_candidate_evidence"
-    elif not all(
-        gates[key]
-        for key in (
-            "processor_used_samples",
-            "processor_used_sessions",
-            "processor_used_coverage",
-            "processor_used_coverage_lcb",
-            "processor_used_precision",
-            "processor_used_precision_lcb",
-            "processor_confidence_manifest",
-        )
-    ):
-        stage = "collecting_processor_evidence"
     else:
         stage = "canary" if canary_percent < 100 else "active"
     observed_at = now or datetime.now(UTC)
@@ -2003,6 +1984,7 @@ def run_growth_cycle(
             "quality_window": QUALITY_WINDOW,
         },
         "metrics": metrics,
+        "processor_used_diagnostics": processor_diagnostics,
         "learning": {
             **learning_decision,
             "metrics": learning_metrics,

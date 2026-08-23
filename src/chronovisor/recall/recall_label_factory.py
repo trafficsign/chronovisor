@@ -433,19 +433,6 @@ def _opposing_relation_labels(path: Path | None) -> list[dict[str, Any]]:
     return labels
 
 
-def _recall_page_identity(
-    recall: Mapping[str, Any], page_id: str
-) -> tuple[str, str]:
-    for item in recall.get("context_items", []):
-        if not isinstance(item, Mapping) or item.get("page_id") != page_id:
-            continue
-        return (
-            str(item.get("page_uid") or ""),
-            str(item.get("content_sha256") or item.get("page_sha256") or ""),
-        )
-    return "", ""
-
-
 def _summarize_label_ledger(
     labels: list[dict[str, Any]],
     joined: dict[str, Any],
@@ -566,6 +553,10 @@ def _summarize_label_ledger(
         ),
         "embargo_excluded": counts_by_split["embargo"]["total"],
         "answer_artifacts": dict(answer_diagnostics),
+        "used_receipts": {
+            "joined": int(joined["accepted"]),
+            "rejected": int(joined["rejected"]),
+        },
     }
     learning_counts = {
         "scope": "train",
@@ -573,8 +564,6 @@ def _summarize_label_ledger(
         "strong_positive": len(strong_positive),
         "gold_positive": len(trusted_positive) - len(strong_positive),
         "strong_positive_sessions": len(sessions),
-        "joined_used": int(joined["accepted"]),
-        "rejected_used": int(joined["rejected"]),
         "by_subject_kind": subject_counts,
     }
     return {
@@ -633,38 +622,9 @@ def build_label_ledger(
 
     recall_rows = _read_jsonl(recall_log_file)
     pull_rows = _read_jsonl(pull_log_file)
+    # ``used`` receipts are append-only exposure telemetry.  They must never
+    # become labels: a page being selected later is not outcome evidence.
     joined = join_used_recall_episodes(recall_rows, pull_rows)
-    for episode in joined["episodes"]:
-        recall = episode["recall"]
-        query_sha = str(
-            recall.get("prompt_sha256")
-            or recall.get("prompt_hash")
-            or recall.get("query_sha256")
-            or ""
-        )
-        session = _session_hash(episode.get("session_id"))
-        for page_id in episode["page_ids"]:
-            page_uid, content_sha = _recall_page_identity(recall, page_id)
-            labels.append(
-                _label(
-                    page_id=page_id,
-                    query_sha256=query_sha,
-                    session_hash=session,
-                    # Explicit use is valuable telemetry, but is not evidence
-                    # that Recall improved the resulting answer.
-                    polarity="exposure",
-                    quality="strong",
-                    provenance={
-                        "source": "recall_used",
-                        "event_id": episode["event_id"],
-                        "decision_id": episode["decision_id"],
-                        "usage_telemetry_only": True,
-                    },
-                    observed_at=str(episode.get("pull", {}).get("ts") or ""),
-                    page_uid=page_uid,
-                    content_sha256=content_sha,
-                )
-            )
     for row in pull_rows:
         if row.get("type") != "read":
             continue
@@ -766,24 +726,14 @@ def build_label_ledger(
         )
 
     path_rows = _read_jsonl(relation_path_file or RELATION_PATH_LEDGER)
-    pull_used = {
-        str(row.get("decision_id") or ""): row
-        for row in pull_rows
-        if row.get("type") == "used" and str(row.get("decision_id") or "")
-    }
     for row in path_rows:
-        decision_id = str(row.get("decision_id") or "")
-        used = pull_used.get(decision_id)
         relation_ids = row.get("relation_ids")
         if not isinstance(relation_ids, list):
             continue
-        used_pages = {
-            str(value)
-            for value in (used or {}).get("page_ids", [])
-            if isinstance(value, str)
-        }
         page_id = str(row.get("page_id") or "")
-        actually_used = bool(used is not None and page_id and page_id in used_pages)
+        session_hash = _session_hash(row.get("session_id")) or str(
+            row.get("session_hash") or ""
+        )
         for relation_id in relation_ids:
             if not isinstance(relation_id, str) or not relation_id:
                 continue
@@ -791,24 +741,17 @@ def build_label_ledger(
                 _label(
                     page_id=page_id,
                     query_sha256=str(row.get("query_sha256") or ""),
-                    session_hash=(
-                        _session_hash(used.get("session_id"))
-                        if used is not None
-                        else str(row.get("session_hash") or "")
-                    ),
+                    session_hash=session_hash,
                     polarity="exposure",
                     quality="silver",
                     subject_kind="relation",
                     subject_id=relation_id,
                     provenance={
-                        "source": "used_relation_path"
-                        if actually_used
-                        else "relation_path_exposure",
-                        "decision_id": decision_id,
+                        "source": "relation_path_exposure",
+                        "decision_id": str(row.get("decision_id") or ""),
                         "path_id": str(row.get("path_id") or ""),
-                        "usage_telemetry_only": actually_used,
                     },
-                    observed_at=str((used or row).get("ts") or ""),
+                    observed_at=str(row.get("ts") or ""),
                 )
             )
         entity_merge_ids = {
@@ -821,24 +764,17 @@ def build_label_ledger(
                 _label(
                     page_id=page_id,
                     query_sha256=str(row.get("query_sha256") or ""),
-                    session_hash=(
-                        _session_hash(used.get("session_id"))
-                        if used is not None
-                        else str(row.get("session_hash") or "")
-                    ),
+                    session_hash=session_hash,
                     polarity="exposure",
                     quality="silver",
                     subject_kind="entity_merge",
                     subject_id=merge_id,
                     provenance={
-                        "source": "used_entity_merge_path"
-                        if actually_used
-                        else "entity_merge_path_exposure",
-                        "decision_id": decision_id,
+                        "source": "entity_merge_path_exposure",
+                        "decision_id": str(row.get("decision_id") or ""),
                         "path_id": str(row.get("path_id") or ""),
-                        "usage_telemetry_only": actually_used,
                     },
-                    observed_at=str((used or row).get("ts") or ""),
+                    observed_at=str(row.get("ts") or ""),
                 )
             )
 

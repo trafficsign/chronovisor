@@ -391,7 +391,7 @@ def semantic_verify(
 
 
 def context_seed_results(query: str, *, limit: int = 4) -> list[ScoredPage]:
-    """Use only explicit recall-used evidence as a weak independent entrance."""
+    """Use recalled exposure as a weak independent entrance."""
 
     try:
         from chronovisor.core.index_store import get_store
@@ -403,8 +403,8 @@ def context_seed_results(query: str, *, limit: int = 4) -> list[ScoredPage]:
             queries=[query],
             prompt=query,
             limit=max(1, min(8, limit)),
-            positive_weight=1,
-            exposure_weight=0,
+            positive_weight=0,
+            exposure_weight=1,
         )
         if not page_ids:
             return []

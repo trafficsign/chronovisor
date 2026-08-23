@@ -143,12 +143,12 @@ def test_label_factory_keeps_exposure_non_negative_and_deduplicates(tmp_path) ->
     assert not any(
         row["page_id"] == "page-b" and row["polarity"] == "negative" for row in labels
     )
-    used = [
-        row
-        for row in labels
-        if row["page_id"] == "page-a" and row["provenance"]["source"] == "recall_used"
-    ]
-    assert used[0]["quality"] == "strong"
+    assert not any(
+        row["provenance"].get("source") == "recall_used" for row in labels
+    )
+    assert not any(
+        row["provenance"].get("source") == "used_relation_path" for row in labels
+    )
     assert any(
         row["page_id"] == "page-c"
         and row["quality"] == "gold"
@@ -197,13 +197,11 @@ def test_same_session_never_crosses_temporal_split(tmp_path) -> None:
         pull_log_file=pulls,
         golden_file=golden,
     )
-    used_splits = {
-        row["split"]
+    assert not any(
+        row["provenance"].get("source") == "recall_used"
         for row in payload["labels"]
-        if row["provenance"]["source"] == "recall_used"
-    }
-
-    assert len(used_splits) == 1
+    )
+    assert payload["diagnostics"]["used_receipts"]["joined"] == 2
     assert payload["gates"]["field_learning_allowed"] is False
     assert payload["gates"]["calibration_allowed"] is False
 
@@ -279,7 +277,9 @@ def test_relation_labels_cannot_inflate_page_learning_gate(tmp_path) -> None:
     assert all(row["subject_kind"] == "relation" for row in payload["labels"])
 
 
-def test_used_relation_and_entity_paths_remain_silver_without_unlocking(tmp_path) -> None:
+def test_relation_and_entity_paths_are_structural_exposure_without_used_receipt(
+    tmp_path,
+) -> None:
     certificates = tmp_path / "certificates.jsonl"
     recalls = tmp_path / "recall.jsonl"
     pulls = tmp_path / "pull.jsonl"
@@ -290,17 +290,7 @@ def test_used_relation_and_entity_paths_remain_silver_without_unlocking(tmp_path
     rubrics = tmp_path / "rubrics.jsonl"
     for path in (certificates, recalls, golden, receipts, entities, rubrics):
         write_rows(path, [])
-    write_rows(
-        pulls,
-        [
-            {
-                "type": "used",
-                "decision_id": "decision-entity",
-                "session_id": "session-entity",
-                "page_ids": ["target"],
-            }
-        ],
-    )
+    write_rows(pulls, [])
     write_rows(
         paths,
         [
@@ -333,8 +323,10 @@ def test_used_relation_and_entity_paths_remain_silver_without_unlocking(tmp_path
     ]
     assert entity_labels[0]["quality"] == "silver"
     assert entity_labels[0]["polarity"] == "exposure"
+    assert entity_labels[0]["provenance"]["source"] == "entity_merge_path_exposure"
     assert relation_labels[0]["quality"] == "silver"
     assert relation_labels[0]["polarity"] == "exposure"
+    assert relation_labels[0]["provenance"]["source"] == "relation_path_exposure"
     assert payload["counts"]["strong_positive"] == 0
     assert payload["gates"]["field_learning_allowed"] is False
     assert payload["gates"]["relation_learning_allowed"] is False

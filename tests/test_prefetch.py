@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import chronovisor.core.prefetch as prefetch
 from chronovisor.core.prefetch import build_prefetch_cache, prefetch_page_ids
 
 
@@ -31,11 +32,13 @@ def test_prefetch_cache_matches_project_bucket_and_tokens(tmp_path: Path) -> Non
     )
 
     assert payload["episodes"] == 1
-    assert payload["positive_episodes"] == 0
+    assert "positive_used" not in payload.get("features", {})
     assert pages == ["recall-runtime"]
 
 
-def test_prefetch_keeps_used_supervision_separate_from_exposure(tmp_path: Path) -> None:
+def test_prefetch_ignores_used_receipts_and_keeps_exposure_only(
+    tmp_path: Path, monkeypatch
+) -> None:
     log_file = tmp_path / "recall-log.jsonl"
     pull_file = tmp_path / "pull-log.jsonl"
     out_file = tmp_path / "prefetch.json"
@@ -73,7 +76,46 @@ def test_prefetch_keeps_used_supervision_separate_from_exposure(tmp_path: Path) 
         output_file=out_file,
     )
 
-    positive = payload["features"]["positive_used"]["buckets"]["codex|project"]
     exposure = payload["features"]["exposure"]["buckets"]["codex|project"]
-    assert positive == [{"page_id": "used-page", "count": 1}]
     assert exposure == [{"page_id": "exposed-page", "count": 1}]
+    assert "positive_used" not in payload["features"]
+    assert "used-page" not in json.dumps(payload)
+    assert (
+        prefetch_page_ids(
+            host="codex",
+            cwd="/tmp/project",
+            queries=["recall"],
+            path=out_file,
+            positive_weight=100,
+            exposure_weight=0,
+        )
+        == []
+    )
+
+    db_file = tmp_path / "prefetch.sqlite"
+    monkeypatch.setattr(prefetch, "PREFETCH_FILE", out_file)
+    monkeypatch.setattr(prefetch, "PREFETCH_DB_FILE", db_file)
+    build_prefetch_cache(
+        log_file=log_file,
+        pull_log_file=pull_file,
+        output_file=out_file,
+    )
+    assert (
+        prefetch_page_ids(
+            host="codex",
+            cwd="/tmp/project",
+            queries=["recall"],
+            path=out_file,
+            positive_weight=100,
+            exposure_weight=0,
+        )
+        == []
+    )
+    assert prefetch_page_ids(
+        host="codex",
+        cwd="/tmp/project",
+        queries=["recall"],
+        path=out_file,
+        positive_weight=100,
+        exposure_weight=1,
+    ) == ["exposed-page"]

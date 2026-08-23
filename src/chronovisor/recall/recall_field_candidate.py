@@ -146,11 +146,9 @@ def authority_allowed(path: Path | None = None) -> bool:
         manifest_sha256,
     )
     from chronovisor.recall.recall_growth import (
-        _append_only_prefix_rows,
         _candidate_growth_metrics,
         _file_sha256,
         _validated_candidate_trace_rows,
-        processor_used_metrics,
         retrieval_locked_e2e_status,
     )
 
@@ -177,17 +175,15 @@ def authority_allowed(path: Path | None = None) -> bool:
     if not isinstance(sources, dict) or not isinstance(candidate_source, dict):
         return False
     resolved: dict[str, Path] = {}
-    source_prefix_rows: dict[str, list[dict[str, Any]]] = {}
     for name, value in sources.items():
+        # Recall/pull logs are diagnostic sources.  Used receipts must not be
+        # consulted or freshness-gated by the Field authority check.
+        if name in {"recall_log", "pull_log"}:
+            continue
         if not isinstance(value, dict) or not str(value.get("path") or ""):
             return False
         source_path = Path(str(value["path"])).expanduser().resolve(strict=False)
-        if name in {"recall_log", "pull_log"}:
-            prefix_rows, prefix_error = _append_only_prefix_rows(source_path, value)
-            if prefix_error:
-                return False
-            source_prefix_rows[name] = prefix_rows
-        elif _file_sha256(source_path) != value.get("file_sha256"):
+        if _file_sha256(source_path) != value.get("file_sha256"):
             return False
         resolved[name] = source_path
     candidate_path = Path(str(candidate_source.get("path") or "")).expanduser().resolve(strict=False)
@@ -212,10 +208,6 @@ def authority_allowed(path: Path | None = None) -> bool:
         return False
     candidate_prefix = candidate_rows[: prefix_end + 1]
     live_candidate = _candidate_growth_metrics(candidate_prefix)
-    live_processor = processor_used_metrics(
-        source_prefix_rows.get("recall_log", []),
-        source_prefix_rows.get("pull_log", []),
-    )
     manual_check = retrieval_locked_e2e_status(resolved["manual94"])
     train_check = validate_answer_outcome_artifact(
         resolved["train_answer"],
@@ -277,14 +269,11 @@ def authority_allowed(path: Path | None = None) -> bool:
         "over_4s": int(live_candidate["over_4s"]),
         "fallback_rate": float(live_candidate["fallback_rate"]),
         "full_search_rate": float(live_candidate["full_search_rate"]),
-        "processor_used_page_coverage": float(live_processor["used_page_coverage"]),
-        "processor_used_precision_proxy": float(live_processor["used_precision_proxy"]),
     }
     if (
         metrics != expected_live_metrics
         or not isinstance(confidence, dict)
         or confidence.get("candidate") != live_candidate["confidence"]
-        or confidence.get("processor_used") != live_processor["confidence"]
     ):
         return False
 
@@ -368,12 +357,10 @@ def authority_allowed(path: Path | None = None) -> bool:
 
     try:
         candidate_confidence = confidence["candidate"]
-        processor_confidence = confidence["processor_used"]
         answer_confidence = confidence["answer_reward"]
         precision_delta = number(metrics.get("precision_delta_points"))
         recall_delta = number(metrics.get("recall_delta_points"))
         teacher_commit = number(metrics.get("teacher_commit_coverage"))
-        processor_precision = number(metrics.get("processor_used_precision_proxy"))
         answer_point = number(answer_confidence.get("point"))
         answer_lower = number(answer_confidence.get("lower"))
         answer_upper = number(answer_confidence.get("upper"))
@@ -405,10 +392,6 @@ def authority_allowed(path: Path | None = None) -> bool:
                 },
             )
             and answer_confidence == expected_answer_confidence
-            and confidence_summary_valid(
-                processor_confidence,
-                {"coverage": 0.99, "precision": 0.90},
-            )
             and isinstance(answer, dict)
             and answer.get("passed") is True
             and isinstance(locked_answer, dict)
@@ -445,8 +428,6 @@ def authority_allowed(path: Path | None = None) -> bool:
             and recall_delta is not None
             and recall_delta >= -1.0
             and int(metrics.get("over_4s") or 0) == 0
-            and processor_precision is not None
-            and processor_precision >= 0.90
             and confidence_bound(
                 candidate_confidence["teacher_coverage"],
                 methods={"connected-cluster-wilson-score"},
@@ -464,19 +445,6 @@ def authority_allowed(path: Path | None = None) -> bool:
             )
             and int(candidate_confidence.get("samples") or 0) >= MIN_PROMOTION_TRACES
             and int(candidate_confidence.get("clusters") or 0)
-            >= MIN_PROMOTION_SESSIONS
-            and confidence_bound(
-                processor_confidence["coverage"],
-                methods={"connected-cluster-wilson-score"},
-                lower_floor=0.95,
-            )
-            and confidence_bound(
-                processor_confidence["precision"],
-                methods={"connected-cluster-wilson-score"},
-                lower_floor=0.85,
-            )
-            and int(processor_confidence.get("samples") or 0) >= 50
-            and int(processor_confidence.get("clusters") or 0)
             >= MIN_PROMOTION_SESSIONS
             and answer_confidence.get("valid") is True
             and answer_confidence.get("method")
@@ -497,7 +465,6 @@ def authority_allowed(path: Path | None = None) -> bool:
                 len(str(item.get("manifest_sha256") or "")) == 64
                 for item in (
                     candidate_confidence,
-                    processor_confidence,
                     answer_confidence,
                 )
             )

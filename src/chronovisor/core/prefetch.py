@@ -14,7 +14,6 @@ from typing import Any
 
 from chronovisor.core.recall_log_schema import (
     canonicalize_page_ids,
-    join_used_recall_episodes,
     page_ids_from_record,
 )
 from chronovisor.core.recall_runtime_paths import RECALL_DIR
@@ -33,34 +32,33 @@ def _prefetch_from_db(
     prompt: str,
     path: Path,
     limit: int,
-    positive_weight: int,
     exposure_weight: int,
 ) -> list[str]:
+    if exposure_weight <= 0:
+        return []
     scores: Counter[str] = Counter()
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         bucket = f"{host}|{Path(cwd).name if cwd else ''}"
         query_tokens = sorted(prefetch_tokens(" ".join(queries) + " " + prompt))
-        for supervision, weight in (
-            ("positive_used", positive_weight),
-            ("exposure", exposure_weight),
+        # The prefetch cache is an exposure-only student input.  Keep a
+        # positive weight at the public API for compatibility, but never read
+        # a used receipt here.
+        weight = int(exposure_weight)
+        for page_id, count in connection.execute(
+            "SELECT page_id, count FROM buckets "
+            "WHERE supervision = 'exposure' AND bucket = ?",
+            (bucket,),
         ):
-            if weight <= 0:
-                continue
+            scores[str(page_id)] += weight * int(count)
+        if query_tokens:
+            placeholders = ",".join("?" for _ in query_tokens)
             for page_id, count in connection.execute(
-                "SELECT page_id, count FROM buckets "
-                "WHERE supervision = ? AND bucket = ?",
-                (supervision, bucket),
+                "SELECT page_id, count FROM tokens "
+                f"WHERE supervision = 'exposure' AND token IN ({placeholders})",
+                query_tokens,
             ):
                 scores[str(page_id)] += weight * int(count)
-            if query_tokens:
-                placeholders = ",".join("?" for _ in query_tokens)
-                for page_id, count in connection.execute(
-                    f"SELECT page_id, count FROM tokens "
-                    f"WHERE supervision = ? AND token IN ({placeholders})",
-                    (supervision, *query_tokens),
-                ):
-                    scores[str(page_id)] += weight * int(count)
     finally:
         connection.close()
     return [page_id for page_id, _count in scores.most_common(limit)]
@@ -88,6 +86,8 @@ def prefetch_page_ids(
     positive_weight: int = 4,
     exposure_weight: int = 1,
 ) -> list[str]:
+    if exposure_weight <= 0:
+        return []
     if path == PREFETCH_FILE and PREFETCH_DB_FILE.is_file():
         try:
             return _prefetch_from_db(
@@ -97,7 +97,6 @@ def prefetch_page_ids(
                 prompt=prompt,
                 path=PREFETCH_DB_FILE,
                 limit=limit,
-                positive_weight=positive_weight,
                 exposure_weight=exposure_weight,
             )
         except (OSError, sqlite3.DatabaseError):
@@ -133,7 +132,7 @@ def prefetch_page_ids(
 
     features = payload.get("features")
     if isinstance(features, dict):
-        score_feature(features.get("positive_used"), weight=positive_weight)
+        # Used receipts are telemetry only; score recalled exposure.
         score_feature(features.get("exposure"), weight=exposure_weight)
     else:
         score_feature(
@@ -173,16 +172,14 @@ def _write_prefetch_db(payload: dict[str, Any], path: Path) -> None:
             )
             features = payload.get("features")
             if isinstance(features, dict):
-                for supervision in ("positive_used", "exposure"):
-                    feature = features.get(supervision)
-                    if not isinstance(feature, dict):
-                        continue
+                feature = features.get("exposure")
+                if isinstance(feature, dict):
                     for bucket, rows in (feature.get("buckets") or {}).items():
                         connection.executemany(
                             "INSERT INTO buckets VALUES (?, ?, ?, ?)",
                             (
                                 (
-                                    supervision,
+                                    "exposure",
                                     str(bucket),
                                     str(row["page_id"]),
                                     int(row.get("count") or 1),
@@ -196,7 +193,7 @@ def _write_prefetch_db(payload: dict[str, Any], path: Path) -> None:
                             "INSERT INTO tokens VALUES (?, ?, ?, ?)",
                             (
                                 (
-                                    supervision,
+                                    "exposure",
                                     str(token),
                                     str(row["page_id"]),
                                     int(row.get("count") or 1),
@@ -240,10 +237,6 @@ def build_prefetch_cache(
     write: bool = True,
 ) -> dict[str, Any]:
     recall_rows = _read_recent_jsonl(log_file, limit=limit)
-    joined = join_used_recall_episodes(
-        recall_rows,
-        _read_recent_jsonl(pull_log_file, limit=limit),
-    )
     from chronovisor.core.alias_store import load_aliases
 
     aliases = load_aliases()
@@ -293,31 +286,16 @@ def build_prefetch_cache(
         for row in recall_rows
         if page_ids_from_record(row)
     ]
-    positive_rows = [
-        (
-            episode["recall"],
-            canonicalize_page_ids(episode["page_ids"], aliases),
-        )
-        for episode in joined["episodes"]
-    ]
     exposure_buckets, exposure_tokens, exposure_episodes = compile_rows(exposure_rows)
-    positive_buckets, positive_tokens, positive_episodes = compile_rows(positive_rows)
 
     payload: dict[str, Any] = {
         "schema_version": 2,
         "status": "ok",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "episodes": exposure_episodes,
-        "positive_episodes": positive_episodes,
-        "join": {key: value for key, value in joined.items() if key != "episodes"},
         "features": {
-            "positive_used": {
-                "supervision": "explicit_used_receipt",
-                "buckets": positive_buckets,
-                "tokens": positive_tokens,
-            },
             "exposure": {
-                "supervision": "recalled_not_confirmed_used",
+                "supervision": "recalled_exposure",
                 "buckets": exposure_buckets,
                 "tokens": exposure_tokens,
             },
@@ -342,16 +320,6 @@ def build_prefetch_cache(
                     "database": str(PREFETCH_DB_FILE),
                     "bucket_count": len(payload.get("buckets", {})),
                     "token_count": len(payload.get("tokens", {})),
-                    "positive_bucket_count": len(
-                        payload.get("features", {})
-                        .get("positive_used", {})
-                        .get("buckets", {})
-                    ),
-                    "positive_token_count": len(
-                        payload.get("features", {})
-                        .get("positive_used", {})
-                        .get("tokens", {})
-                    ),
                 }
             )
         else:
