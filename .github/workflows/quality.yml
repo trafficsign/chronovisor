@@ -14,10 +14,10 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
           python-version: "3.13"
@@ -56,8 +56,69 @@ jobs:
           --junitxml=${{ runner.temp }}/chronovisor-junit.xml
       - name: Upload pytest JUnit
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: chronovisor-pytest-junit
           path: ${{ runner.temp }}/chronovisor-junit.xml
           if-no-files-found: warn
+
+  semantic-hnsw:
+    name: Semantic HNSW
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - name: Set isolated Chronovisor root
+        shell: bash
+        run: printf 'CHRONOVISOR_ROOT=%s\n' "$RUNNER_TEMP/chronovisor-hnsw-test-root" >> "$GITHUB_ENV"
+      - run: uv sync --frozen
+      - name: Install usearch for HNSW coverage
+        run: >-
+          uv pip install --python .venv/bin/python
+          "usearch==2.26.0"
+          "numkong==7.7.0"
+          "tqdm==4.68.2"
+      - name: HNSW candidate and exact-rescore contract
+        run: >-
+          uv run --frozen pytest -q
+          tests/test_semantic_index.py::test_hnsw_generation_proposes_then_full_vector_rescores
+
+  semantic-python-smoke:
+    name: Semantic smoke (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - name: Set isolated Chronovisor root
+        shell: bash
+        run: printf 'CHRONOVISOR_ROOT=%s\n' "$RUNNER_TEMP/chronovisor-semantic-${{ matrix.python-version }}-test-root" >> "$GITHUB_ENV"
+      - run: uv sync --frozen
+      - name: Install usearch for complete semantic smoke
+        run: >-
+          uv pip install --python .venv/bin/python
+          "usearch==2.26.0"
+          "numkong==7.7.0"
+          "tqdm==4.68.2"
+      - name: Semantic smoke (53 tests)
+        run: >-
+          uv run --frozen pytest -q
+          tests/test_semantic_client.py
+          tests/test_semantic_index.py
+          tests/test_semantic_jobs.py
+          tests/test_semantic_service.py

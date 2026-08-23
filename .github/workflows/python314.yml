@@ -14,10 +14,10 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
           python-version: "3.14"
@@ -56,7 +56,7 @@ jobs:
           --junitxml=${{ runner.temp }}/chronovisor-python314-junit.xml
       - name: Upload Python 3.14 pytest JUnit
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: chronovisor-python314-pytest-junit
           path: ${{ runner.temp }}/chronovisor-python314-junit.xml
