@@ -27,6 +27,7 @@ from chronovisor.core.provider_profiles import (
     ProviderAdapterError,
     ProviderFailureCategory,
 )
+from chronovisor.research.research_security import guard_egress_query
 
 OX_ALPHA_PROVIDER = "opencode-go"
 OX_ALPHA_ROUTE_MODEL = "opencode-go/ox-alpha-free"
@@ -198,13 +199,15 @@ def _contains_forbidden_text(value: str) -> bool:
     )
 
 
-def _valid_text(value: object, *, required: bool = True) -> bool:
-    return (
-        isinstance(value, str)
-        and (bool(value) if required else True)
-        and len(value) <= MAX_TEXT_CHARS
-        and not _contains_forbidden_text(value)
-    )
+def _safe_text(value: object, *, required: bool = True) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if not value and not required:
+        return ""
+    decision = guard_egress_query(value, max_chars=MAX_TEXT_CHARS)
+    if not decision.allowed or _contains_forbidden_text(decision.normalized):
+        return None
+    return decision.normalized
 
 
 def _validate_payload(
@@ -228,6 +231,13 @@ def _validate_payload(
         candidate_id = candidate.get("candidate_id")
         rally_id = candidate.get("rally_id")
         context = candidate.get("context")
+        query = _safe_text(candidate.get("query"))
+        evidence = _safe_text(candidate.get("evidence"))
+        safe_context = (
+            [_safe_text(item) for item in context]
+            if isinstance(context, list)
+            else []
+        )
         if (
             not isinstance(candidate_id, str)
             or _SAFE_ID.fullmatch(candidate_id) is None
@@ -235,11 +245,11 @@ def _validate_payload(
             or not isinstance(rally_id, str)
             or _SAFE_ID.fullmatch(rally_id) is None
             or _contains_forbidden_text(rally_id)
-            or not _valid_text(candidate.get("query"))
-            or not _valid_text(candidate.get("evidence"))
+            or query is None
+            or evidence is None
             or not isinstance(context, list)
             or len(context) > MAX_TEACHER_CANDIDATES
-            or any(not _valid_text(item) for item in context)
+            or any(item is None for item in safe_context)
         ):
             return None
         if candidate_id in candidate_ids:
@@ -249,9 +259,9 @@ def _validate_payload(
             {
                 "candidate_id": candidate_id,
                 "rally_id": rally_id,
-                "query": candidate["query"],
-                "context": list(context),
-                "evidence": candidate["evidence"],
+                "query": query,
+                "context": safe_context,
+                "evidence": evidence,
             }
         )
     result = {"schema": TEACHER_BATCH_SCHEMA, "candidates": normalized}
@@ -284,6 +294,12 @@ def _safe_label(label: object, candidate_ids: frozenset[str]) -> dict[str, Any] 
     atoms = label.get("minimal_atom_ids")
     missing = label.get("missing_slots")
     changing = label.get("changing_claim")
+    safe_rationale = _safe_text(rationale)
+    safe_atoms = [_safe_text(item) for item in atoms] if isinstance(atoms, list) else []
+    safe_missing = (
+        [_safe_text(item) for item in missing] if isinstance(missing, list) else []
+    )
+    safe_changing = _safe_text(changing, required=False)
     if (
         not isinstance(candidate_id, str)
         or candidate_id not in candidate_ids
@@ -292,26 +308,26 @@ def _safe_label(label: object, candidate_ids: frozenset[str]) -> dict[str, Any] 
         or not isinstance(confidence, (int, float))
         or not math.isfinite(confidence)
         or not 0 <= confidence <= 1
-        or not _valid_text(rationale)
+        or safe_rationale is None
         or not isinstance(atoms, list)
         or len(atoms) > 8
-        or any(not _valid_text(item) for item in atoms)
-        or len(set(atoms)) != len(atoms)
+        or any(item is None for item in safe_atoms)
+        or len(set(safe_atoms)) != len(safe_atoms)
         or not isinstance(missing, list)
         or len(missing) > 5
-        or any(not _valid_text(item) for item in missing)
-        or len(set(missing)) != len(missing)
-        or not _valid_text(changing, required=False)
+        or any(item is None for item in safe_missing)
+        or len(set(safe_missing)) != len(safe_missing)
+        or safe_changing is None
     ):
         return None
     return {
         "candidate_id": candidate_id,
         "verdict": verdict,
         "confidence": confidence,
-        "rationale": rationale,
-        "minimal_atom_ids": list(atoms),
-        "missing_slots": list(missing),
-        "changing_claim": changing,
+        "rationale": safe_rationale,
+        "minimal_atom_ids": safe_atoms,
+        "missing_slots": safe_missing,
+        "changing_claim": safe_changing,
     }
 
 
