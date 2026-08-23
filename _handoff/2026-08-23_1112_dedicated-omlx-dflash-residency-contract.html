@@ -174,7 +174,7 @@ th{background:#f3f1eb}
 <li><input type="checkbox" checked><span><strong>LaunchAgent を追加:</strong> label <code>com.trafficsign.omlx-muse</code>、base path/working directory/log path を <code>.omlx-muse</code> に向け、mainと同じpatched runtimeを使う。model weightは共有し、複製しない。load後、8002の認証境界とhealthを確認する。</span></li>
 <li><input type="checkbox" checked><span><strong>トラフィック前 memory gate:</strong> Museだけを8002へwarmし、既存Qwen/Gemmaもresidentにする。15分の直列long-prefill probeで85/90 GiB、20 GiB headroom、swap、pressure、errorの閾値を判定する。不合格ならconfig変更前に8002をbootoutしrollbackする。</span></li>
 <li><input type="checkbox"><span><strong>role routing を切替:</strong> <code>omlx_muse</code> providerを追加し、上記6 roleだけを8002へ変更。全route manifestを出力して、Primary/Challenger/Tie-breakの順序とmodel/revisionが同一でendpoint hashだけ変わったことを比較する。</span></li>
-<li><input type="checkbox"><span><strong>正しい順でlive反映:</strong> pushが許可されている場合は <code>push → Chronovisor restart → runtime archive commit確認 → health → live browser/API</code> の順を守る。GitHub-backed <code>uvx</code> をpush前にrestartしない。</span></li>
+<li><input type="checkbox" checked><span><strong>正しい順でlive反映:</strong> pushが許可されている場合は <code>push → Chronovisor restart → runtime archive commit確認 → health → live browser/API</code> の順を守る。GitHub-backed <code>uvx</code> をpush前にrestartしない。</span></li>
 <li><input type="checkbox"><span><strong>post-runを実施:</strong> baselineと同じ12件以上の交互request、同一prefixの再利用probe、30分の実workloadを実行する。3 processのlogでcross-model unloadが0、各DFlash model loadが原則1回、memory gate継続合格を確認する。</span></li>
 <li><input type="checkbox"><span><strong>Dashboard/live acceptance:</strong> Model Fleetに各modelが重複なく出てQwen/Muse/Gemmaが同時loaded、Decision TraceのDOM順・badge・model名・最終結果がbaselineと同一であることを実ブラウザ、API、console、service healthで照合する。</span></li>
 <li><input type="checkbox"><span><strong>契約を完了更新:</strong> 証拠path、commit、push/runtime archive（実施時）、測定差分、rollback可否を実行ログへ追記し、全完了条件を満たした時だけstateをdoneにする。</span></li>
@@ -268,6 +268,7 @@ rg -n "Unloading DFlash model|Loaded model:" \
 <li><time>2026-08-23 12:13</time><span>.omlx-museを0700で作成。Gemma設定を権限保持copyしてportだけ8002へ変更し、loopback/shared model_dirs/balanced guard/idle nullを確認。MuseだけのDFlash設定を0600で作成し、L1 2 entries/2 GiB、L2 false、main設定との完全一致を秘密値なしで検証。</span></li>
 <li><time>2026-08-23 12:14</time><span>com.trafficsign.omlx-muse plistを作成しplutil検証後にbootstrap。patched switch runtimeでPID 82037が127.0.0.1:8002をlisten。/health=200、models/statusはunauth 401/auth 200で認証境界を確認。</span></li>
 <li><time>2026-08-23 12:37</time><span>15分のtraffic前memory gateを完走。15/15 request成功、3 modelは全sampleでreloadなし、最大reported 58.888 GiB、最小headroom 46.112 GiB、最低free 33%、abort閾値超過なし。一方swap増分は最大2750.74 MiBで合格上限1024 MiBを超えたため不合格。8002をbootoutし、base/plistをtimestamp付きbackupへ退避。8000/8001 health=200、8002停止、live routing/push/restart未実施。証拠を _handoff/evidence/2026-08-23-omlx-dedicated-memory-gate.json に保存しstateをblockedへ更新。</span></li>
+<li><time>2026-08-23 12:58</time><span>ユーザー承認後、mainを8a06579までpushし、変更対象のlocal/LAN Dashboardだけを順にrestart。両process archive、HEAD、origin/mainは8a06579で一致しdrift=false、local root/API=200、LAN TLS認証境界=401。実ブラウザのModel Fleetは5 configured / 4 loaded / 0 missing、5 modelを重複なしで表示しconsole error 0。materialized healthの旧commit表示はTTL後も残ったため、本進捗commitをpush後、cacheを削除せずbackupへ退避して最終HEADで両Dashboardを再restartする。</span></li>
 </ol>
 </section>
 
