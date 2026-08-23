@@ -12,7 +12,12 @@ import pytest
 
 from chronovisor.core import index_store, runtime_config, runtime_status, store
 from chronovisor.core.durable_state import canonical_sha256, write_sealed_json
+from chronovisor.core.save_transaction import (
+    attach_save_transaction_marker,
+    make_save_transaction,
+)
 from chronovisor.hosts import cli
+from chronovisor.ingest.raw_semantic_projection import project_parent_raw
 from chronovisor.recall import recall_runtime
 
 
@@ -59,6 +64,81 @@ def test_raw_status_cli_reports_archive_inventory(
     assert output["legacy_units"] == 1
     assert output["logical_units"] == 1
     assert output["open_segments"] == 0
+
+
+def test_raw_projection_status_cli_is_json_and_read_only(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    patch_wiki(tmp_path, monkeypatch)
+    root = store.CHRONOVISOR_ROOT
+    session_file = root / "session.jsonl"
+    transaction = make_save_transaction(
+        host="codex",
+        session_file=session_file,
+        session_id="session",
+        after_line=0,
+        until_line=1,
+    )
+    parent = root / "raw" / f"save-{transaction.idempotency_key}.md"
+    content = "\n".join(
+        [
+            "# Codex Session Transcript Delta",
+            "",
+            "## Transcript Delta",
+            "",
+            "```json",
+            json.dumps([{"line": 1, "role": "user", "text": "do not emit"}]),
+            "```",
+            "",
+        ]
+    )
+    parent.write_text(attach_save_transaction_marker(transaction, content))
+    projection = project_parent_raw(parent, output_dir=parent.parent, max_child_bytes=32_000)
+    (root / ".orchestrator_state.json").write_text(
+        json.dumps(
+            {
+                "processed_raw_files": [
+                    parent.name,
+                    *(path.name for path in projection.child_paths),
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in (root, *sorted(root.rglob("*")))
+        if path.is_file()
+    }
+
+    assert cli.main(["raw", "projection-status", "--full", "--json"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    after = {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in (root, *sorted(root.rglob("*")))
+        if path.is_file()
+    }
+
+    assert output["total"] == 1
+    assert output["valid"] == 1
+    assert output["projections"][0]["parent"]["processed"] is True
+    assert all(
+        not isinstance(value, str) or not value.startswith("/")
+        for value in _walk_json_values(output)
+    )
+    assert "do not emit" not in json.dumps(output)
+    assert before == after
+
+
+def _walk_json_values(value: object):
+    if isinstance(value, dict):
+        for child in value.values():
+            yield from _walk_json_values(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_json_values(child)
+    else:
+        yield value
 
 
 def test_lifecycle_restore_cli_forwards_exact_request_as_json(

@@ -14,12 +14,16 @@ from chronovisor.core.save_transaction import (
     attach_save_transaction_marker,
     make_save_transaction,
 )
-from chronovisor.ingest.raw_semantic_projection import project_parent_raw
+from chronovisor.ingest.raw_semantic_projection import (
+    project_native_transcript,
+    project_parent_raw,
+)
 from chronovisor.raw import record_raw as raw_record
 from chronovisor.raw.raw_archive import (
     archive_status,
     export_raw,
     migrate_legacy,
+    projection_status,
     restore_segment,
     seal_eligible,
     verify_archive,
@@ -216,3 +220,183 @@ def test_completed_projection_json_archives_with_processed_bundle(
     assert not list(raw_dir.glob("semantic-*.json"))
     store = RawStore(raw_dir)
     assert {unit.raw_id for unit in store.iter_units()} == set(processed)
+
+
+def test_projection_status_reports_missing_and_invalid_without_runtime_mutation(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    projections: list[tuple[Path, Path]] = []
+    for index in range(2):
+        session_file = tmp_path / f"session-{index}.jsonl"
+        transaction = make_save_transaction(
+            host="codex",
+            session_file=session_file,
+            session_id=f"session-{index}",
+            after_line=0,
+            until_line=1,
+        )
+        parent = raw_dir / f"save-{transaction.idempotency_key}.md"
+        content = "\n".join(
+            [
+                "# Codex Session Transcript Delta",
+                "",
+                "## Transcript Delta",
+                "",
+                "```json",
+                json.dumps(
+                    [{"line": 1, "role": "user", "text": f"secret-{index}"}]
+                ),
+                "```",
+                "",
+            ]
+        )
+        parent.write_text(attach_save_transaction_marker(transaction, content))
+        projection = project_parent_raw(
+            parent,
+            output_dir=raw_dir,
+            max_child_bytes=32_000,
+        )
+        assert projection.manifest_path is not None
+        assert projection.child_paths
+        projections.append((projection.manifest_path, projection.child_paths[0]))
+
+    (tmp_path / ".orchestrator_state.json").write_text(
+        json.dumps(
+            {
+                "processed_raw_files": [
+                    path.name
+                    for manifest, child in projections
+                    for path in (manifest, child)
+                ]
+                + [
+                    path.name
+                    for path in raw_dir.glob("save-*.md")
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    projections[0][1].unlink()
+    projections[1][1].with_name(
+        next(
+            path.name
+            for path in raw_dir.glob("semantic-*.receipt.json")
+            if projections[1][1].stem.split("-child-")[0] in path.name
+        )
+    ).write_text("{}\n", encoding="utf-8")
+
+    before = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (tmp_path, *sorted(tmp_path.rglob("*")))
+        if path.is_file()
+    }
+    report = projection_status(raw_dir, full=True)
+    after = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (tmp_path, *sorted(tmp_path.rglob("*")))
+        if path.is_file()
+    }
+
+    assert report["total"] == 2
+    assert report["valid"] == 0
+    assert report["missing"] == 1
+    assert report["invalid"] == 1
+    assert before == after
+    serialized = json.dumps(report, ensure_ascii=False)
+    assert "secret-0" not in serialized
+    assert "secret-1" not in serialized
+    assert all(
+        not isinstance(value, str) or not value.startswith("/")
+        for value in _walk_values(report)
+    )
+
+
+def _walk_values(value: object):
+    if isinstance(value, dict):
+        for child in value.values():
+            yield from _walk_values(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_values(child)
+    else:
+        yield value
+
+
+def test_projection_status_resolves_v2_segment_parent_without_reference_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import nullcontext
+
+    monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
+    monkeypatch.setattr(
+        "chronovisor.core.store.okf_runtime_operation",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+    raw_dir = tmp_path / "raw"
+    payload = (
+        json.dumps(
+            {
+                "timestamp": "2026-07-17T00:00:00Z",
+                "message": {"role": "user", "content": "v2 secret"},
+            }
+        )
+        + "\n"
+    ).encode()
+    source_file = tmp_path / "session.jsonl"
+    source_file.write_bytes(payload)
+    receipt = append_capture(
+        raw_dir=raw_dir,
+        raw_id="save-hermes-v2-test.md",
+        idempotency_key="hermes-v2-test",
+        host="hermes",
+        session_key="a" * 24,
+        session_id="session",
+        source_file=source_file,
+        after_line=0,
+        until_line=1,
+        source_bytes=payload,
+        record_count=1,
+        now=datetime(2026, 7, 17, tzinfo=ZoneInfo("Asia/Tokyo")),
+    )
+    unit = next(iter(RawStore(raw_dir, mode="v2").iter_units()))
+    artifact_dir = tmp_path / "runtime" / "raw-projections" / "artifacts"
+    projection = project_native_transcript(
+        Path(unit.raw_id),
+        payload,
+        receipt.commit,
+        output_dir=artifact_dir,
+        max_child_bytes=32_000,
+    )
+    (tmp_path / ".orchestrator_state.json").write_text(
+        json.dumps(
+            {
+                "processed_raw_files": [
+                    unit.raw_id,
+                    *(path.name for path in projection.child_paths),
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (tmp_path, *sorted(tmp_path.rglob("*")))
+        if path.is_file()
+    }
+    report = projection_status(raw_dir, full=True)
+    after = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (tmp_path, *sorted(tmp_path.rglob("*")))
+        if path.is_file()
+    }
+
+    assert report["total"] == 1
+    assert report["valid"] == 1
+    item = report["projections"][0]
+    assert item["parent"]["raw_id"] == unit.raw_id
+    assert item["parent"]["processed"] is True
+    assert item["manifest"].startswith("runtime/raw-projections/artifacts/")
+    assert before == after
+    assert "v2 secret" not in json.dumps(report)

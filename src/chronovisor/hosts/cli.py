@@ -669,6 +669,12 @@ def build_parser() -> argparse.ArgumentParser:
     raw_verify = raw_sub.add_parser("verify", help="Verify segment receipts and manifests.")
     raw_verify.add_argument("--full", action="store_true")
     raw_verify.add_argument("--json", action="store_true")
+    raw_projection_status = raw_sub.add_parser(
+        "projection-status",
+        help="Inventory semantic projection manifests without changing runtime state.",
+    )
+    raw_projection_status.add_argument("--full", action="store_true")
+    raw_projection_status.add_argument("--json", action="store_true")
     raw_seal = raw_sub.add_parser("seal", help="Seal date-eligible open segments.")
     raw_seal.add_argument("--before", help="Exclusive cutoff in YYYY/MM/DD.")
     raw_seal.add_argument("--apply", action="store_true")
@@ -1132,6 +1138,11 @@ def dispatch(args: argparse.Namespace) -> int:
             data = raw_archive.archive_status(chronovisor_store.RAW_DIR)
         elif args.raw_command == "verify":
             data = raw_archive.verify_archive(chronovisor_store.RAW_DIR, full=args.full)
+        elif args.raw_command == "projection-status":
+            data = raw_archive.projection_status(
+                chronovisor_store.RAW_DIR,
+                full=args.full,
+            )
         elif args.raw_command in {"seal", "archive"}:
             if args.apply and args.dry_run:
                 raise ValueError("--apply and --dry-run are mutually exclusive")
@@ -1632,6 +1643,8 @@ def _okf_lease_bypass(args: argparse.Namespace) -> bool:
         "credentials",
         "runtime-identity",
     }:
+        return True
+    if command == "raw" and args.raw_command == "projection-status":
         return True
     return bool(command == "hooks" and args.hooks_command == "inspect")
 

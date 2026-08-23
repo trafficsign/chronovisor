@@ -31,7 +31,9 @@ from chronovisor.core.raw_store import RawStore
 _PROJECTION_MANIFEST_RE = re.compile(
     r"^semantic-(?P<projection>[0-9a-f]{64})\.manifest\.json$"
 )
-
+_PROJECTION_RECEIPT_RE = re.compile(
+    r"^semantic-(?P<projection>[0-9a-f]{64})-manifest-.*\.receipt\.json$"
+)
 
 
 
@@ -194,6 +196,357 @@ def archive_status(raw_dir: Path) -> dict[str, Any]:
             "pending_or_deferred": len(raw_ids - processed),
             "dead_letter_files": dead_letter_files,
         },
+    }
+
+
+def _projection_artifact_dirs(raw_dir: Path) -> tuple[Path, ...]:
+    candidates = (
+        raw_dir,
+        raw_dir.parent / "runtime" / "raw-projections" / "artifacts",
+    )
+    seen: set[Path] = set()
+    roots: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve(strict=False)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        roots.append(resolved)
+    return tuple(roots)
+
+
+def _root_relative_path(path: Path, root: Path) -> str | None:
+    try:
+        resolved = path.expanduser().resolve(strict=False)
+        relative = resolved.relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return relative.as_posix()
+
+
+def _read_projection_json(path: Path) -> dict[str, Any] | None:
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _projection_parent_raw_id(row: object) -> str | None:
+    if not isinstance(row, dict):
+        return None
+    receipt = row.get("receipt")
+    key = receipt.get("idempotency_key") if isinstance(receipt, dict) else None
+    if not isinstance(key, str) or not key or Path(key).name != key:
+        return None
+    return f"save-{key}.md"
+
+
+def _projection_quarantine_paths(raw_dir: Path, raw_id: str) -> tuple[Path, ...]:
+    roots = (
+        raw_dir / ".dead-letter",
+        raw_dir.parent / "runtime" / "failures" / "quarantined-raw",
+    )
+    paths = tuple(root / raw_id for root in roots)
+    return tuple(path for path in paths if path.is_file() and not path.is_symlink())
+
+
+def _projection_status_parent(
+    row: object,
+    *,
+    raw_store: RawStore,
+    units_by_id: dict[str, Any],
+    units_by_digest: dict[str, list[Any]],
+    raw_dir: Path,
+    processed: set[str],
+) -> tuple[dict[str, Any], str]:
+    expected_digest = row.get("raw_sha256") if isinstance(row, dict) else None
+    expected_digest = expected_digest if isinstance(expected_digest, str) else None
+    raw_id = (
+        row.get("raw_id")
+        if isinstance(row, dict)
+        and isinstance(row.get("raw_id"), str)
+        and Path(str(row["raw_id"])).name == str(row["raw_id"])
+        else _projection_parent_raw_id(row)
+    )
+    unit = units_by_id.get(raw_id) if raw_id is not None else None
+    quarantine_paths = (
+        _projection_quarantine_paths(raw_dir, raw_id) if raw_id is not None else ()
+    )
+    observed_digest: str | None = None
+    source_missing = unit is None
+
+    if unit is not None:
+        observed_digest = unit.sha256
+        if observed_digest is None:
+            try:
+                observed_digest = _sha256(raw_store.read_bytes(unit))
+            except (OSError, RawSegmentCorrupt, ValueError):
+                source_missing = True
+    elif raw_id is None and expected_digest:
+        matches = units_by_digest.get(expected_digest, [])
+        if len(matches) == 1:
+            unit = matches[0]
+            raw_id = unit.raw_id
+            try:
+                observed_digest = _sha256(raw_store.read_bytes(unit))
+                source_missing = False
+            except (OSError, RawSegmentCorrupt, ValueError):
+                source_missing = True
+    if source_missing and quarantine_paths:
+        for candidate in quarantine_paths:
+            try:
+                observed_digest = _sha256(candidate.read_bytes())
+                source_missing = False
+                break
+            except (OSError, ValueError):
+                continue
+
+    digest_invalid = (
+        expected_digest is None
+        or (observed_digest is not None and observed_digest != expected_digest)
+    )
+    parent = {
+        "raw_id": raw_id,
+        "raw_sha256": expected_digest,
+        "digest": expected_digest,
+        "observed_sha256": observed_digest,
+        "processed": bool(raw_id and raw_id in processed),
+        "quarantine": sorted(
+            path
+            for path in (
+                _root_relative_path(candidate, raw_dir.parent)
+                for candidate in quarantine_paths
+            )
+            if path is not None
+        ),
+    }
+    if digest_invalid:
+        return parent, "invalid"
+    return parent, "missing" if source_missing else "valid"
+
+
+def projection_status(raw_dir: Path, *, full: bool = False) -> dict[str, Any]:
+    """Inventory semantic projection manifests without changing runtime state."""
+
+    raw_dir = raw_dir.expanduser().resolve(strict=False)
+    root = raw_dir.parent
+    artifact_dirs = _projection_artifact_dirs(raw_dir)
+    from chronovisor.ingest.raw_semantic_projection import (
+        projection_bundle_state_for_parent,
+        verify_projection_bundle,
+    )
+
+    raw_store = RawStore(raw_dir)
+    try:
+        units = tuple(raw_store.iter_units())
+    except (OSError, RawSegmentCorrupt, ValueError):
+        units = ()
+    units_by_id = {unit.raw_id: unit for unit in units}
+    units_by_digest: dict[str, list[Any]] = {}
+    for unit in units:
+        digest = unit.sha256
+        if digest is None:
+            try:
+                digest = _sha256(raw_store.read_bytes(unit))
+            except (OSError, RawSegmentCorrupt, ValueError):
+                digest = None
+        if isinstance(digest, str):
+            units_by_digest.setdefault(digest, []).append(unit)
+
+    state_path = root / ".orchestrator_state.json"
+    state = _read_projection_json(state_path) or {}
+    processed_value = state.get("processed_raw_files")
+    processed = (
+        {value for value in processed_value if isinstance(value, str)}
+        if isinstance(processed_value, list)
+        else set()
+    )
+
+    rows: list[dict[str, Any]] = []
+    for artifact_dir in artifact_dirs:
+        manifest_paths = sorted(artifact_dir.glob("semantic-*.manifest.json"))
+        receipts_by_projection: dict[str, list[Path]] = {}
+        for receipt_path in artifact_dir.glob("semantic-*-manifest-*.receipt.json"):
+            receipt_match = _PROJECTION_RECEIPT_RE.fullmatch(receipt_path.name)
+            if receipt_match is not None:
+                receipts_by_projection.setdefault(
+                    receipt_match.group("projection"), []
+                ).append(receipt_path)
+        for manifest_path in manifest_paths:
+            payload = _read_projection_json(manifest_path)
+            match = _PROJECTION_MANIFEST_RE.fullmatch(manifest_path.name)
+            projection_id = match.group("projection") if match else None
+            parent_rows = (
+                payload.get("source", {}).get("parents")
+                if isinstance(payload, dict)
+                and isinstance(payload.get("source"), dict)
+                else None
+            )
+            parent_rows = parent_rows if isinstance(parent_rows, list) else []
+            parents: list[dict[str, Any]] = []
+            parent_states: list[str] = []
+            for parent_row in parent_rows:
+                parent, parent_state = _projection_status_parent(
+                    parent_row,
+                    raw_store=raw_store,
+                    units_by_id=units_by_id,
+                    units_by_digest=units_by_digest,
+                    raw_dir=raw_dir,
+                    processed=processed,
+                )
+                parents.append(parent)
+                parent_states.append(parent_state)
+
+            children: list[dict[str, Any]] = []
+            child_names: list[str] = []
+            if isinstance(payload, dict) and isinstance(payload.get("children"), list):
+                for child_row in payload["children"]:
+                    if not isinstance(child_row, dict):
+                        continue
+                    filename = child_row.get("filename")
+                    if not isinstance(filename, str) or Path(filename).name != filename:
+                        continue
+                    child_names.append(filename)
+                    child_path = artifact_dir / filename
+                    children.append(
+                        {
+                            "raw_id": filename,
+                            "path": _root_relative_path(child_path, root),
+                            "processed": filename in processed,
+                        }
+                    )
+
+            manifest_digest: str | None = None
+            try:
+                manifest_digest = _sha256(manifest_path.read_bytes())
+            except OSError:
+                pass
+            receipt_paths: set[str] = set()
+            if (
+                projection_id is not None
+                and isinstance(payload, dict)
+                and payload.get("status") == "delegated"
+            ):
+                if manifest_digest is not None:
+                    receipt_paths.add(
+                        _root_relative_path(
+                            artifact_dir
+                            / f"semantic-{projection_id}-manifest-{manifest_digest}.receipt.json",
+                            root,
+                        )
+                        or ""
+                    )
+                receipt_paths.update(
+                    _root_relative_path(path, root) or ""
+                    for path in receipts_by_projection.get(projection_id, [])
+                )
+            if isinstance(payload, dict):
+                noop = payload.get("noop_receipt_filename")
+                if isinstance(noop, str) and Path(noop).name == noop:
+                    receipt_paths.add(
+                        _root_relative_path(artifact_dir / noop, root) or ""
+                    )
+            receipt_paths.discard("")
+
+            expected_receipts = [artifact_dir / child_name for child_name in child_names]
+            if (
+                projection_id is not None
+                and manifest_digest is not None
+                and isinstance(payload, dict)
+                and payload.get("status") == "delegated"
+            ):
+                expected_receipts.append(
+                    artifact_dir
+                    / f"semantic-{projection_id}-manifest-{manifest_digest}.receipt.json"
+                )
+            if isinstance(payload, dict):
+                noop = payload.get("noop_receipt_filename")
+                if isinstance(noop, str) and Path(noop).name == noop:
+                    expected_receipts.append(artifact_dir / noop)
+            missing_artifacts = [
+                path
+                for path in expected_receipts
+                if not path.is_file() or path.is_symlink()
+            ]
+
+            verify_ok = False
+            if full and payload is not None and match is not None:
+                try:
+                    verify_projection_bundle(manifest_path)
+                    verify_ok = True
+                except Exception:
+                    verify_ok = False
+
+            helper_states: list[str] = []
+            if not verify_ok and parents:
+                for parent in parents:
+                    raw_id = parent.get("raw_id")
+                    if not isinstance(raw_id, str):
+                        continue
+                    parent_unit = units_by_id.get(raw_id)
+                    if parent_unit is None or parent_unit.storage != "legacy_file":
+                        continue
+                    try:
+                        helper_states.append(
+                            projection_bundle_state_for_parent(
+                                parent_unit.path,
+                                projection_dir=artifact_dir,
+                            )
+                        )
+                    except (OSError, TypeError, ValueError):
+                        helper_states.append("invalid")
+
+            if payload is None or match is None or not parent_rows or any(
+                state == "invalid" for state in parent_states
+            ) or any(state == "invalid" for state in helper_states):
+                disposition = "invalid"
+            elif any(state == "missing" for state in parent_states) or missing_artifacts or any(
+                state in {"incomplete", "absent"} for state in helper_states
+            ):
+                disposition = "missing"
+            elif verify_ok or not full:
+                disposition = "valid"
+            else:
+                disposition = "invalid"
+
+            rows.append(
+                {
+                    "projection_id": projection_id,
+                    "parent": parents[0] if len(parents) == 1 else None,
+                    "parents": parents,
+                    "manifest": _root_relative_path(manifest_path, root),
+                    "children": children,
+                    "receipts": sorted(receipt_paths),
+                    "quarantine": sorted(
+                        {
+                            path
+                            for parent in parents
+                            for path in parent.get("quarantine", [])
+                        }
+                    ),
+                    "processed": bool(parents) and all(
+                        parent.get("processed") is True for parent in parents
+                    ),
+                    "state": disposition,
+                }
+            )
+
+    counts = {
+        "total": len(rows),
+        "valid": sum(row["state"] == "valid" for row in rows),
+        "missing": sum(row["state"] == "missing" for row in rows),
+        "invalid": sum(row["state"] == "invalid" for row in rows),
+    }
+    return {
+        "schema": "chronovisor.raw-projection-status.v1",
+        "status": "ok",
+        "full": full,
+        **counts,
+        "counts": counts,
+        "projections": rows,
     }
 
 

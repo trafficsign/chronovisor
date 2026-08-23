@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
+  "repository": {
+    "captured_at": "2026-08-23T20:04:00+09:00",
+    "branch": "main",
+    "head": "0c5543463d22bd43a2e7c45f678c61b29f7bca17",
+    "origin_main": "87872fdf4199229bda7f73c55bd066b7e9d90c6b",
+    "ahead_by": 1,
+    "working_tree": {
+      "modified": [
+        "_handoff/2026-08-23_1944_chronovisor-integrity-recall-operational-truth.html"
+      ],
+      "unrelated_changes": 0,
+      "note": "The only change at implementation start was the Plan state transition from ready to running."
+    }
+  },
+  "codebase_index": {
+    "project": "Users-trafficsign-projects-personal-chronovisor",
+    "generation": "2026-08-23T11:01:47Z",
+    "tier": 2,
+    "coverage": "no_recorded_issue_except_scripts/install-reranker-service:19-85",
+    "coverage_fallback": "The reported installer range was read directly before implementation."
+  },
+  "runtime_archives": {
+    "captured_at": "2026-08-23T20:10:55+09:00",
+    "commit_id": "87872fdf4199229bda7f73c55bd066b7e9d90c6b",
+    "archives": {
+      "dashboard_ingest_converge": "lBAlBqlDoZyylvaRkhP5T",
+      "reranker": "2obwZt5pQ-_rczvAHeCMH",
+      "semantic": "lo6TxHKEh06IrzY_Qp154"
+    }
+  },
+  "services": {
+    "captured_at": "2026-08-23T20:10:55+09:00",
+    "launchd": {
+      "dashboard": 85217,
+      "lan_dashboard": 85219,
+      "ingest_drain": 85100,
+      "reranker": 85174,
+      "semantic": 86037,
+      "converge": 50792,
+      "searxng": 819,
+      "omlx_patched": 19347,
+      "omlx_gemma": 20472,
+      "omlx_muse": 38484
+    },
+    "semantic_worker_pid": 86072
+  },
+  "health_before_source_changes": {
+    "captured_at": "2026-08-23T20:04:00+09:00",
+    "status": "ok",
+    "runtime_expected_commit": "87872fdf4199229bda7f73c55bd066b7e9d90c6b",
+    "runtime_drift": false,
+    "ingest_liveness": {
+      "status": "ok",
+      "runtime_status": "ready",
+      "authority_available": true,
+      "pending_raws": 2218,
+      "observed_at": "2026-08-23T17:56:33"
+    },
+    "semantic_index": {
+      "status": "ok",
+      "coverage": 0.999795584627964,
+      "generation_id": "20260811T043448Z-f94f352690dd-46626a",
+      "missing_page_count": 1
+    }
+  },
+  "logs": {
+    "captured_at": "2026-08-23T20:09:00+09:00",
+    "recall_log_rows": 14651,
+    "pull_log_rows": 944,
+    "answer_episode_rows": 1934,
+    "web_egress_rows": 25,
+    "projection_manifest_count": 13565,
+    "raw_file_count": 8182,
+    "raw_size": "3.4G",
+    "projection_artifact_size": "157M"
+  },
+  "baseline_commands": [
+    "git status --short --branch",
+    "git rev-parse HEAD",
+    "git rev-parse origin/main",
+    "launchctl list",
+    "uv run chronovisor status --json",
+    "uv run chronovisor health --json",
+    "wc -l <target-jsonl>",
+    "find <projection-artifacts> -name '*.manifest.json'"
+  ]
+}

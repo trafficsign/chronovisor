@@ -61,13 +61,13 @@ th{background:#f3f1eb}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_596dfe01bc574196a8085d0b34acd25f","created_at":"2026-08-23T19:44:57+09:00","状態":"ready","slug":"chronovisor-integrity-recall-operational-truth"}
+{"task_id":"plan_596dfe01bc574196a8085d0b34acd25f","created_at":"2026-08-23T19:44:57+09:00","状態":"running","slug":"chronovisor-integrity-recall-operational-truth"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor Integrity, Recall, and Operational Truth Hardening</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_596dfe01bc574196a8085d0b34acd25f</code></span>
 <span data-bind="created_at">2026-08-23T19:44:57+09:00</span>
 </div>
@@ -149,7 +149,7 @@ th{background:#f3f1eb}
 <section data-section="実行手順">
 <h2>実行手順</h2>
 <ol class="checklist">
-<li><input type="checkbox"><span><strong>Phase 0 — baseline と変更境界を固定する。</strong>
+<li><input type="checkbox" checked><span><strong>Phase 0 — baseline と変更境界を固定する。</strong>
   <ul>
   <li>既存 <code>chronovisor raw</code> command groupへread-onlyの <code>projection-status --full --json</code> を最小追加する。既存 <code>projection_bundle_state_for_parent</code> とprocessed stateを再利用し、total/valid/missing/invalid、parent raw_id/digest、manifest/child/receipt/quarantineのroot-relative path、processed membershipだけを返す。</li>
   <li><code>uv run pytest -q tests/test_cli.py tests/test_raw_archive.py tests/test_raw_semantic_projection.py</code> でfixtureのmissing child、invalid receipt、processed parent、path redaction、runtime file mutation 0を固定し、diagnostic-only commitにする。</li>
@@ -321,6 +321,8 @@ th{background:#f3f1eb}
 <ol class="log">
 <li><time>2026-08-23 19:44</time><span>監査結果から正式 Plan を生成。状態を <code>ready</code> に設定。実装は未着手。</span></li>
 <li><time>2026-08-23 20:01</time><span>読み取り専用reviewを2巡実施。既存Recall Planとのownership境界、24時間AND条件、数値Exit、projection diagnostic、post-push live closure、security/CI分割を修正し、必須指摘0を確認。</span></li>
+<li><time>2026-08-23 20:04</time><span>ユーザー承認により実装開始。Planを <code>running</code> へ更新し、Phase 0 diagnostic/baselineから着手。</span></li>
+<li><time>2026-08-23 20:25</time><span>Phase 0完了。read-only <code>raw projection-status --full --json</code> を追加し、51 focused tests・ruff・差分型確認を通過。実runtime inventoryは13,622 manifest中 valid 13,602 / missing 20 / invalid 0、既存20件は全てprocessed parentかつRaw digest一致。Raw archive full verifyはerror 0。<code>baseline.json</code> と <code>projection-inventory.before.json</code> に証拠を保存。</span></li>
 </ol>
 </section>
 
