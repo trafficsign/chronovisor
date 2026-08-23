@@ -2569,45 +2569,43 @@ def train_tiny_policy(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def materialize_training_rows(
-    root: Path | None = None,
-    *,
-    limit: int = 10_000,
-    _rallies: Sequence[Mapping[str, Any]] | None = None,
-    _snapshots: Mapping[str, Mapping[str, Any]] | None = None,
-    _label_rows: Sequence[Mapping[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Join labels only to byte-identical prospective live feature snapshots."""
-
-    if limit <= 0 or limit > 10_000:
-        raise DistillationError("training materialization limit is invalid")
-    root = root or CHRONOVISOR_ROOT
-    rallies: dict[str, Mapping[str, Any]]
-    if _rallies is None:
+def _materialization_rallies(
+    root: Path, supplied: Sequence[Mapping[str, Any]] | None
+) -> dict[str, Mapping[str, Any]]:
+    if supplied is None:
         rally_rows = _read_chain(store.distillation_dir(root) / "rally-manifest.jsonl")
-        rallies = {
+        return {
             str(manifest["rally_id"]): manifest
             for row in rally_rows
             if isinstance((manifest := row.get("manifest")), Mapping)
         }
-    else:
-        rallies = {
-            str(row["rally_id"]): row
-            for row in _rallies
-            if isinstance(row, Mapping) and row.get("rally_id")
-        }
+    return {
+        str(row["rally_id"]): row
+        for row in supplied
+        if isinstance(row, Mapping) and row.get("rally_id")
+    }
+
+
+def _materialization_snapshots(
+    root: Path, supplied: Mapping[str, Mapping[str, Any]] | None
+) -> Mapping[str, Mapping[str, Any]]:
+    if supplied is not None:
+        return supplied
+    return {
+        str(row.get("rally_id") or ""): row["snapshot"]
+        for row in _read_chain(
+            store.distillation_dir(root) / "candidate-ledger.jsonl"
+        )
+        if isinstance(row.get("snapshot"), Mapping)
+    }
+
+
+def _materialization_feature_pairs(
+    root: Path,
+    rallies: Mapping[str, Mapping[str, Any]],
+    snapshots: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[tuple[str, str], dict[str, float]], dict[str, dict[str, str]]]:
     features_by_pair: dict[tuple[str, str], dict[str, float]] = {}
-    snapshots = (
-        _snapshots
-        if _snapshots is not None
-        else {
-            str(row.get("rally_id") or ""): row["snapshot"]
-            for row in _read_chain(
-                store.distillation_dir(root) / "candidate-ledger.jsonl"
-            )
-            if isinstance(row.get("snapshot"), Mapping)
-        }
-    )
     snapshot_contracts = {
         rally_id: {
             "as_of": str(snapshot.get("as_of") or ""),
@@ -2665,141 +2663,151 @@ def materialize_training_rows(
                     features_by_pair[(rally_id, str(row.get("candidate_id") or ""))] = (
                         features
                     )
-    materialized: list[dict[str, Any]] = []
-    labels = (
-        _label_rows
-        if _label_rows is not None
-        else _read_chain(store.distillation_dir(root) / "label-ledger.jsonl")
+    return features_by_pair, snapshot_contracts
+
+
+def _materialization_label_row(
+    label: Mapping[str, Any],
+    rallies: Mapping[str, Mapping[str, Any]],
+    features_by_pair: Mapping[tuple[str, str], Mapping[str, float]],
+    snapshot_contracts: Mapping[str, Mapping[str, str]],
+) -> dict[str, Any] | None:
+    rally_id = str(label.get("rally_id") or "")
+    candidate_id = str(label.get("candidate_id") or "")
+    rally_row = rallies.get(rally_id)
+    if rally_row is None:
+        return None
+    rally_as_of = str(rally_row.get("as_of") or "")
+    session_cluster_id = str(rally_row.get("session_cluster_id") or "")
+    label_record_sha256 = str(label.get("record_sha256") or "")
+    if (
+        not rally_as_of
+        or not session_cluster_id
+        or re.fullmatch(r"[0-9a-f]{64}", label_record_sha256) is None
+    ):
+        return None
+    raw_features = label.get("features") or features_by_pair.get(
+        (rally_id, candidate_id)
     )
-    for label in labels:
-        if not isinstance(label, Mapping):
-            continue
-        rally_id = str(label.get("rally_id") or "")
-        candidate_id = str(label.get("candidate_id") or "")
-        rally_row = rallies.get(rally_id)
-        if rally_row is None:
-            continue
-        rally_as_of = str(rally_row.get("as_of") or "")
-        session_cluster_id = str(rally_row.get("session_cluster_id") or "")
-        label_record_sha256 = str(label.get("record_sha256") or "")
-        if (
-            not rally_as_of
-            or not session_cluster_id
-            or re.fullmatch(r"[0-9a-f]{64}", label_record_sha256) is None
-        ):
-            continue
-        raw_features = label.get("features") or features_by_pair.get(
-            (rally_id, candidate_id)
-        )
-        if not isinstance(raw_features, Mapping):
-            continue
-        try:
-            features = build_fast_features(raw_features)
-        except DistillationError:
-            continue
-        if (
-            set(raw_features) != set(FAST_FEATURE_KEYS)
-            or dict(raw_features) != features
-        ):
-            continue
-        verdict = str(label.get("verdict") or "")
-        dimension = str(label.get("dimension") or "")
-        if (
-            label.get("authority") != "teacher-only"
-            or verdict == "uncertain"
-            or verdict
-            not in (
-                UTILITY_LABELS if dimension == "answer_utility" else RELEVANCE_LABELS
-            )
-        ):
-            continue
-        assignment = label.get("assignment")
-        probe = isinstance(assignment, Mapping) and assignment.get("probe") is True
-        is_ox = label.get("profile") == OX_SINGLE_PROFILE
-        contract = snapshot_contracts.get(rally_id, {})
-        temporal_as_of = str(label.get("as_of") or rally_as_of)
-        temporal_group_id = str(label.get("group_id") or session_cluster_id)
-        feature_parity = features_by_pair.get((rally_id, candidate_id)) == features
-        future_safe = (
-            temporal_as_of == rally_as_of
-            and contract.get("as_of") == rally_as_of
-            and re.fullmatch(r"[0-9a-f]{64}", contract.get("snapshot_sha256", ""))
-            is not None
-            and feature_parity
-        )
-        materialized.append(
+    if not isinstance(raw_features, Mapping):
+        return None
+    try:
+        features = build_fast_features(raw_features)
+    except DistillationError:
+        return None
+    if set(raw_features) != set(FAST_FEATURE_KEYS) or dict(raw_features) != features:
+        return None
+    verdict = str(label.get("verdict") or "")
+    dimension = str(label.get("dimension") or "")
+    if (
+        label.get("authority") != "teacher-only"
+        or verdict == "uncertain"
+        or verdict
+        not in (UTILITY_LABELS if dimension == "answer_utility" else RELEVANCE_LABELS)
+    ):
+        return None
+    assignment = label.get("assignment")
+    probe = isinstance(assignment, Mapping) and assignment.get("probe") is True
+    is_ox = label.get("profile") == OX_SINGLE_PROFILE
+    contract = snapshot_contracts.get(rally_id, {})
+    temporal_as_of = str(label.get("as_of") or rally_as_of)
+    temporal_group_id = str(label.get("group_id") or session_cluster_id)
+    feature_parity = features_by_pair.get((rally_id, candidate_id)) == features
+    future_safe = (
+        temporal_as_of == rally_as_of
+        and contract.get("as_of") == rally_as_of
+        and re.fullmatch(r"[0-9a-f]{64}", contract.get("snapshot_sha256", ""))
+        is not None
+        and feature_parity
+    )
+    return {
+        "rally_id": rally_id,
+        "candidate_id": candidate_id,
+        "session_cluster_id": session_cluster_id,
+        "as_of": rally_as_of,
+        "dimension": dimension,
+        "verdict": verdict,
+        "authority": label["authority"],
+        "features": features,
+        "route": str(label.get("route") or ""),
+        "model_digest": str(label.get("model_digest") or ""),
+        "generator_model_digest": str(label.get("generator_model_digest") or ""),
+        "judge_model_digest": str(label.get("judge_model_digest") or ""),
+        "probe": probe,
+        "source": str(label.get("kind") or ""),
+        "order_agreement": label.get("order_agreement") is True,
+        "label_record_sha256": label_record_sha256,
+        **(
             {
-                "rally_id": rally_id,
-                "candidate_id": candidate_id,
-                "session_cluster_id": session_cluster_id,
-                "as_of": rally_as_of,
-                "dimension": dimension,
-                "verdict": verdict,
-                "authority": label["authority"],
-                "features": features,
-                "route": str(label.get("route") or ""),
-                "model_digest": str(label.get("model_digest") or ""),
-                "generator_model_digest": str(
-                    label.get("generator_model_digest") or ""
+                "status": str(label.get("status") or ""),
+                "error_class": label.get("error_class"),
+                "negative_veto_conflict": label.get("negative_veto_conflict")
+                is not None
+                and label.get("negative_veto_conflict") is not False,
+                "profile": str(label.get("profile") or ""),
+                "cohort": str(label.get("cohort") or ""),
+                "profile_contract_id": str(label.get("profile_contract_id") or ""),
+                "route_identity_exact": label.get("route_identity")
+                == {
+                    "provider": "opencode-go",
+                    "model": "opencode-go/ox-alpha-free",
+                    "location": "remote",
+                },
+                "prompt_sha256": str(label.get("prompt_sha256") or ""),
+                "schema_sha256": str(label.get("schema_sha256") or ""),
+                "group_id": temporal_group_id,
+                "group_identity_exact": temporal_group_id == session_cluster_id,
+                "label_split_plan_id": str(label.get("split_plan_id") or ""),
+                "as_of": temporal_as_of,
+                "feature_parity": feature_parity,
+                "future_leakage": not future_safe,
+                "future_leakage_evidence_ref": (
+                    f"candidate-snapshot:{contract['snapshot_sha256']}"
+                    if future_safe
+                    else ""
                 ),
-                "judge_model_digest": str(label.get("judge_model_digest") or ""),
-                "probe": probe,
-                "source": str(label.get("kind") or ""),
-                "order_agreement": label.get("order_agreement") is True,
-                "label_record_sha256": label_record_sha256,
-                **(
-                    {
-                        "status": str(label.get("status") or ""),
-                        "error_class": label.get("error_class"),
-                        "negative_veto_conflict": label.get("negative_veto_conflict")
-                        is not None
-                        and label.get("negative_veto_conflict") is not False,
-                        "profile": str(label.get("profile") or ""),
-                        "cohort": str(label.get("cohort") or ""),
-                        "profile_contract_id": str(
-                            label.get("profile_contract_id") or ""
-                        ),
-                        "route_identity_exact": label.get("route_identity")
-                        == {
-                            "provider": "opencode-go",
-                            "model": "opencode-go/ox-alpha-free",
-                            "location": "remote",
-                        },
-                        "prompt_sha256": str(label.get("prompt_sha256") or ""),
-                        "schema_sha256": str(label.get("schema_sha256") or ""),
-                        "group_id": temporal_group_id,
-                        "group_identity_exact": temporal_group_id == session_cluster_id,
-                        "label_split_plan_id": str(label.get("split_plan_id") or ""),
-                        "as_of": temporal_as_of,
-                        "feature_parity": feature_parity,
-                        "future_leakage": not future_safe,
-                        "future_leakage_evidence_ref": (
-                            f"candidate-snapshot:{contract['snapshot_sha256']}"
-                            if future_safe
-                            else ""
-                        ),
-                        "repeat_pair_id": str(assignment.get("repeat_pair_id") or "")
-                        if isinstance(assignment, Mapping)
-                        else "",
-                        "fixed_repeat": (
-                            assignment.get("fixed_repeat") is True
-                            if isinstance(assignment, Mapping)
-                            else False
-                        ),
-                        "order_swap": (
-                            assignment.get("order_swap") is True
-                            if isinstance(assignment, Mapping)
-                            else False
-                        ),
-                        "blind_order": str(assignment.get("blind_order") or "")
-                        if isinstance(assignment, Mapping)
-                        else "",
-                    }
-                    if is_ox
-                    else {}
+                "repeat_pair_id": str(assignment.get("repeat_pair_id") or "")
+                if isinstance(assignment, Mapping)
+                else "",
+                "fixed_repeat": (
+                    assignment.get("fixed_repeat") is True
+                    if isinstance(assignment, Mapping)
+                    else False
                 ),
+                "order_swap": (
+                    assignment.get("order_swap") is True
+                    if isinstance(assignment, Mapping)
+                    else False
+                ),
+                "blind_order": str(assignment.get("blind_order") or "")
+                if isinstance(assignment, Mapping)
+                else "",
             }
-        )
+            if is_ox
+            else {}
+        ),
+    }
+
+
+def _materialization_rows(
+    labels: Sequence[Mapping[str, Any]],
+    rallies: Mapping[str, Mapping[str, Any]],
+    features_by_pair: Mapping[tuple[str, str], Mapping[str, float]],
+    snapshot_contracts: Mapping[str, Mapping[str, str]],
+) -> list[dict[str, Any]]:
+    return [
+        row
+        for label in labels
+        if isinstance(label, Mapping)
+        if (row := _materialization_label_row(
+            label, rallies, features_by_pair, snapshot_contracts
+        )) is not None
+    ]
+
+
+def _finalize_materialized_training_rows(
+    root: Path, materialized: list[dict[str, Any]], limit: int
+) -> dict[str, Any]:
     materialized = materialized[-limit:]
     split_plan_id = ""
     split: dict[str, str] = {}
@@ -2876,6 +2884,35 @@ def materialize_training_rows(
         schema="chronovisor.recall-distill-training.v1",
     )
     return artifact
+
+
+def materialize_training_rows(
+    root: Path | None = None,
+    *,
+    limit: int = 10_000,
+    _rallies: Sequence[Mapping[str, Any]] | None = None,
+    _snapshots: Mapping[str, Mapping[str, Any]] | None = None,
+    _label_rows: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Join labels only to byte-identical prospective live feature snapshots."""
+
+    if limit <= 0 or limit > 10_000:
+        raise DistillationError("training materialization limit is invalid")
+    root = root or CHRONOVISOR_ROOT
+    rallies = _materialization_rallies(root, _rallies)
+    snapshots = _materialization_snapshots(root, _snapshots)
+    features_by_pair, snapshot_contracts = _materialization_feature_pairs(
+        root, rallies, snapshots
+    )
+    labels = (
+        _label_rows
+        if _label_rows is not None
+        else _read_chain(store.distillation_dir(root) / "label-ledger.jsonl")
+    )
+    materialized = _materialization_rows(
+        labels, rallies, features_by_pair, snapshot_contracts
+    )
+    return _finalize_materialized_training_rows(root, materialized, limit)
 
 
 def _wilson_lower(successes: int, total: int) -> float:
@@ -4536,102 +4573,17 @@ def _advance_ox_ramp(
     return next_cap, 0, 0
 
 
-def _run_ox_teacher_batch(
+def _ox_prepare_tasks(
     *,
-    root: Path,
     config: DistillationConfig,
-    teachers: Mapping[str, Teacher],
     snapshots: Mapping[str, Mapping[str, Any]],
     rally_by_id: Mapping[str, Mapping[str, Any]],
-    texts: Mapping[str, str],
-    label_path: Path,
-    label_rows: Sequence[Mapping[str, Any]],
-    candidate_indexed: bool = False,
-    _payload_scan_remaining: int | None = None,
-    structural_verifier: Callable[
-        [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
-    ],
-) -> _TeacherBatchResult:
-    """Advance, claim, dispatch, append, and commit OX work in that order."""
-
-    from chronovisor.recall.recall_distillation_dispatcher import dispatch_claimed_work
-    from chronovisor.recall.recall_distillation_workset import DistillationWorkset
-
-    teacher = teachers.get(OX_TEACHER_ROLE)
-    workset = DistillationWorkset(store.distillation_dir(root) / "ox-workset.sqlite3")
-    if teacher is None or teacher.local:
-        return _TeacherBatchResult(deferred=True, workset_status=workset.status("ox"))
-    profile_contract_id = str(_ensure_ox_profile_contract(root, config)["artifact_id"])
-    try:
-        worker_state = _read_worker_state(root)
-        if worker_state.get("ox_profile_stopped") is True:
-            return _TeacherBatchResult(
-                deferred=True,
-                workset_status=workset.status("ox"),
-                profile_stopped=True,
-                profile_contract_id=profile_contract_id,
-            )
-    except store.DistillationStoreError:
-        worker_state = {}
-    ramp_source = (
-        worker_state
-        if worker_state.get("kind") == "worker-state"
-        and worker_state.get("ox_profile_contract_id") == profile_contract_id
-        and worker_state.get("ox_ramp_request_revision") == OX_RAMP_REQUEST_REVISION
-        else {}
-    )
-    ramp_cap, ramp_valid_receipts, ramp_provider_attempts = _ox_ramp_state(
-        ramp_source, config.teacher_max_inflight
-    )
-    try:
-        split_plan = _read_split_plan(root)
-        assignments = split_plan["assignments"]
-        split_plan_id = str(split_plan["artifact_id"])
-    except (DistillationError, store.DistillationStoreError, KeyError):
-        assignments = {}
-        split_plan_id = ""
-
-    candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
-    candidate_state: Mapping[str, Any] = {}
-    if candidate_indexed:
-        from chronovisor.recall import recall_distillation_catalog as catalog
-
-        try:
-            catalog.sync_candidate_index(root, candidate_path)
-            candidate_state = catalog.candidate_index_state(root)
-            previous_watermark = workset.watermark()
-            prior_records = 0
-            if previous_watermark is not None:
-                if not isinstance(previous_watermark, Mapping):
-                    raise DistillationError("OX workset watermark is invalid")
-                prior_records = previous_watermark.get("candidate_records", 0)
-                prior_head = str(previous_watermark.get("candidate_head") or "")
-                if isinstance(prior_records, bool) or not isinstance(
-                    prior_records, int
-                ):
-                    raise DistillationError("OX workset candidate watermark is invalid")
-                if prior_records < 0 or prior_records > int(
-                    candidate_state["record_count"]
-                ):
-                    raise DistillationError("OX workset candidate watermark regressed")
-                if prior_records == int(candidate_state["record_count"]):
-                    current_head = str(candidate_state.get("head_sha256") or "")
-                    if prior_head and prior_head != current_head:
-                        raise DistillationError("OX candidate index head conflicts")
-                if (
-                    str(previous_watermark.get("split_plan_id") or "") != split_plan_id
-                    or str(previous_watermark.get("probe_revision") or "")
-                    != OX_PROBE_REVISION
-                ):
-                    prior_records = 0
-            snapshots = catalog.read_candidate_snapshots(
-                root,
-                candidate_path,
-                catalog.candidate_rally_ids(root, after_seq=prior_records),
-            )
-        except catalog.CatalogError as exc:
-            raise DistillationError("OX candidate index is unavailable") from exc
-
+    assignments: Mapping[str, Any],
+    split_plan_id: str,
+    profile_contract_id: str,
+    candidate_indexed: bool,
+    candidate_state: Mapping[str, Any],
+) -> dict[str, Any]:
     tasks: dict[str, dict[str, Any]] = {}
     work_items: list[dict[str, Any]] = []
 
@@ -4745,7 +4697,6 @@ def _run_ox_teacher_batch(
         eligible_probe_rallies,
         key=lambda item: (str(item[2].get("as_of") or ""), item[0]),
     )[: config.hard_floor_probe_pairs]
-
     for rally_id, snapshot in sorted(snapshots.items()):
         rally = rally_by_id.get(rally_id)
         if rally is None or (
@@ -4774,7 +4725,6 @@ def _run_ox_teacher_batch(
                     "routes": [OX_TEACHER_ROLE],
                 },
             )
-
     for rally_id, snapshot, rally, candidates in probe_rallies:
         first, second = sorted(
             candidates, key=lambda candidate: str(candidate["candidate_id"])
@@ -4832,63 +4782,24 @@ def _run_ox_teacher_batch(
             "split_plan_id": split_plan_id,
             "probe_revision": OX_PROBE_REVISION,
         }
-    workset.advance(work_items, watermark)
-    claim_limit = config.teacher_claim_limit
-    if (
-        isinstance(claim_limit, bool)
-        or not isinstance(claim_limit, int)
-        or not 1 <= claim_limit <= 500
-    ):
-        raise DistillationError("teacher_claim_limit must be between 1 and 500")
-    preflight = getattr(teacher, "accepts_egress_payload", None)
-    scan_limit = claim_limit
-    if claim_limit == 1 and callable(preflight):
-        scan_limit = min(
-            OX_PREFLIGHT_SCAN_CLAIM_BUDGET,
-            _payload_scan_remaining
-            if _payload_scan_remaining is not None
-            else OX_PREFLIGHT_SCAN_CLAIM_BUDGET,
-        )
-    claims = list(
-        workset.claim(
-            "ox",
-            scan_limit,
-            OX_TEACHER_ROLE,
-            7200,
-        )
-    )
-    probe_claim_counts: dict[str, int] = defaultdict(int)
-    for claim in claims:
-        probe_batch_id = str(claim.provenance.get("probe_batch_id") or "")
-        if probe_batch_id:
-            probe_claim_counts[probe_batch_id] += 1
-    # A blind-order request is an atomic pair, including after a restart where
-    # no delta work items were rebuilt before pending claims were leased.
-    if any(count == 1 for count in probe_claim_counts.values()):
-        claims.extend(workset.claim("ox", 1, OX_TEACHER_ROLE, 7200))
-    existing = {
-        str(row.get("work_id")): row
-        for row in label_rows
-        if row.get("kind") == "teacher-label"
-        and row.get("status") == "completed"
-        and row.get("route") == "opencode-go/ox-alpha-free"
-        and row.get("teacher_role") == OX_TEACHER_ROLE
-    }
-    reconciled = [claim for claim in claims if claim.work_id in existing]
-    if reconciled:
-        workset.commit(
-            reconciled,
-            [
-                {
-                    "status": "completed",
-                    "completion_ref": f"label-ledger:{existing[claim.work_id]['record_sha256']}",
-                    "completion_digest": str(existing[claim.work_id]["record_sha256"]),
-                }
-                for claim in reconciled
-            ],
-        )
-    claims = [claim for claim in claims if claim not in reconciled]
+    return {"tasks": tasks, "work_items": work_items, "watermark": watermark, "add_task": add_task}
 
+
+def _ox_restore_claims(
+    *,
+    root: Path,
+    candidate_path: Path,
+    catalog: Any,
+    candidate_indexed: bool,
+    claims: list[Any],
+    tasks: dict[str, dict[str, Any]],
+    add_task: Callable[..., dict[str, Any] | None],
+    workset: Any,
+    rally_by_id: Mapping[str, Mapping[str, Any]],
+    assignments: Mapping[str, Any],
+    split_plan_id: str,
+    profile_contract_id: str,
+) -> list[Any]:
     def assignment_from_claim(claim: Any) -> Mapping[str, Any] | None:
         provenance = claim.provenance
         if not isinstance(provenance, Mapping):
@@ -4948,93 +4859,104 @@ def _run_ox_teacher_batch(
             return None
         return parts[1], parts[2]
 
-    if candidate_indexed and claims:
-        missing = [claim for claim in claims if claim.work_id not in tasks]
-        invalid_claims = [claim for claim in missing if claim_reference(claim) is None]
-        requested_rallies = {
-            reference[0]
-            for claim in missing
-            if (reference := claim_reference(claim)) is not None
-        }
-        resolved_snapshots: Mapping[str, Mapping[str, Any]] = {}
-        if requested_rallies:
-            try:
-                resolved_snapshots = catalog.read_candidate_snapshots(
-                    root, candidate_path, requested_rallies
-                )
-            except catalog.CatalogError as exc:
-                raise DistillationError(
-                    "OX claim candidate snapshot is unavailable"
-                ) from exc
-        for claim in missing:
-            reference = claim_reference(claim)
-            if reference is None:
-                continue
-            rally_id, candidate_id = reference
-            rally = rally_by_id.get(rally_id)
-            claimed_snapshot = resolved_snapshots.get(rally_id)
-            restored_assignment = assignment_from_claim(claim)
-            temporal = claim.temporal_split
-            restored_candidate: Mapping[str, Any] | None = None
-            if isinstance(claimed_snapshot, Mapping):
-                candidate_rows = claimed_snapshot.get("candidates", [])
-                if isinstance(candidate_rows, list):
-                    restored_candidate = next(
-                        (
-                            row
-                            for row in candidate_rows
-                            if isinstance(row, Mapping)
-                            and str(row.get("candidate_id") or "") == candidate_id
-                        ),
-                        None,
-                    )
-            if (
-                rally is None
-                or not isinstance(claimed_snapshot, Mapping)
-                or not isinstance(restored_candidate, Mapping)
-                or restored_assignment is None
-                or not isinstance(temporal, Mapping)
-                or set(temporal) != {"as_of", "group_id", "split", "split_plan_id"}
-                or temporal.get("as_of") != rally.get("as_of")
-                or temporal.get("group_id") != rally.get("session_cluster_id")
-                or temporal.get("split") != str(assignments.get(rally_id) or "embargo")
-                or temporal.get("split_plan_id") != split_plan_id
-                or (
-                    split_plan_id
-                    and temporal.get("split") not in {"train", "validation", "test"}
-                )
-            ):
-                invalid_claims.append(claim)
-                continue
-            restored = add_task(
-                rally_id,
-                claimed_snapshot,
-                rally,
-                restored_candidate,
-                restored_assignment,
-                register_item=False,
-                temporal_override=temporal,
+    if not candidate_indexed or not claims:
+        return claims
+    missing = [claim for claim in claims if claim.work_id not in tasks]
+    invalid_claims = [claim for claim in missing if claim_reference(claim) is None]
+    requested_rallies = {
+        reference[0]
+        for claim in missing
+        if (reference := claim_reference(claim)) is not None
+    }
+    resolved_snapshots: Mapping[str, Mapping[str, Any]] = {}
+    if requested_rallies:
+        try:
+            resolved_snapshots = catalog.read_candidate_snapshots(
+                root, candidate_path, requested_rallies
             )
-            if (
-                restored is None
-                or restored["work_id"] != claim.work_id
-                or restored["payload_digest"] != claim.payload_digest
-            ):
-                invalid_claims.append(claim)
-        if invalid_claims:
-            invalid_ids = {claim.work_id for claim in invalid_claims}
-            workset.commit(
-                [claim for claim in claims if claim.work_id in invalid_ids],
-                [
-                    {
-                        "status": "quarantined" if claim.attempt >= 3 else "retry",
-                        "error_class": "remote_payload_rejected",
-                    }
-                    for claim in claims
-                    if claim.work_id in invalid_ids
-                ],
+        except catalog.CatalogError as exc:
+            raise DistillationError("OX claim candidate snapshot is unavailable") from exc
+    for claim in missing:
+        reference = claim_reference(claim)
+        if reference is None:
+            continue
+        rally_id, candidate_id = reference
+        rally = rally_by_id.get(rally_id)
+        claimed_snapshot = resolved_snapshots.get(rally_id)
+        restored_assignment = assignment_from_claim(claim)
+        temporal = claim.temporal_split
+        restored_candidate: Mapping[str, Any] | None = None
+        if isinstance(claimed_snapshot, Mapping):
+            candidate_rows = claimed_snapshot.get("candidates", [])
+            if isinstance(candidate_rows, list):
+                restored_candidate = next(
+                    (
+                        row
+                        for row in candidate_rows
+                        if isinstance(row, Mapping)
+                        and str(row.get("candidate_id") or "") == candidate_id
+                    ),
+                    None,
+                )
+        if (
+            rally is None
+            or not isinstance(claimed_snapshot, Mapping)
+            or not isinstance(restored_candidate, Mapping)
+            or restored_assignment is None
+            or not isinstance(temporal, Mapping)
+            or set(temporal) != {"as_of", "group_id", "split", "split_plan_id"}
+            or temporal.get("as_of") != rally.get("as_of")
+            or temporal.get("group_id") != rally.get("session_cluster_id")
+            or temporal.get("split") != str(assignments.get(rally_id) or "embargo")
+            or temporal.get("split_plan_id") != split_plan_id
+            or (
+                split_plan_id
+                and temporal.get("split") not in {"train", "validation", "test"}
             )
-            claims = [claim for claim in claims if claim.work_id not in invalid_ids]
+        ):
+            invalid_claims.append(claim)
+            continue
+        restored = add_task(
+            rally_id,
+            claimed_snapshot,
+            rally,
+            restored_candidate,
+            restored_assignment,
+            register_item=False,
+            temporal_override=temporal,
+        )
+        if (
+            restored is None
+            or restored["work_id"] != claim.work_id
+            or restored["payload_digest"] != claim.payload_digest
+        ):
+            invalid_claims.append(claim)
+    if invalid_claims:
+        invalid_ids = {claim.work_id for claim in invalid_claims}
+        workset.commit(
+            [claim for claim in claims if claim.work_id in invalid_ids],
+            [
+                {
+                    "status": "quarantined" if claim.attempt >= 3 else "retry",
+                    "error_class": "remote_payload_rejected",
+                }
+                for claim in claims
+                if claim.work_id in invalid_ids
+            ],
+        )
+        claims = [claim for claim in claims if claim.work_id not in invalid_ids]
+    return claims
+
+
+def _ox_resolve_claim_payloads(
+    *,
+    claims: Sequence[Any],
+    tasks: Mapping[str, dict[str, Any]],
+    texts: Mapping[str, str],
+    config: DistillationConfig,
+    workset: Any,
+) -> tuple[list[Any], list[tuple[Any, dict[str, str]]], list[Any], bool]:
+    # BEGIN payload resolution block
     payload_failures: list[tuple[Any, dict[str, str]]] = []
     local_payload_rejects: list[Any] = []
     claim_integrity_failure = False
@@ -5106,10 +5028,7 @@ def _run_ox_teacher_batch(
     }
     if failed_probe_batches:
         for claim in resolved_claims[:]:
-            if (
-                str(tasks[claim.work_id].get("probe_batch_id") or "")
-                in failed_probe_batches
-            ):
+            if str(tasks[claim.work_id].get("probe_batch_id") or "") in failed_probe_batches:
                 payload_failures.append(
                     (
                         claim,
@@ -5125,29 +5044,27 @@ def _run_ox_teacher_batch(
             [claim for claim, _outcome in payload_failures],
             [outcome for _claim, outcome in payload_failures],
         )
-    claims = resolved_claims
-    if not claims:
-        remaining = (
-            OX_PREFLIGHT_SCAN_CLAIM_BUDGET
-            if _payload_scan_remaining is None
-            else _payload_scan_remaining
-        ) - len(payload_failures)
-        if local_payload_rejects and not claim_integrity_failure and remaining > 0:
-            return _run_ox_teacher_batch(
-                root=root,
-                config=config,
-                teachers=teachers,
-                snapshots=snapshots,
-                rally_by_id=rally_by_id,
-                texts=texts,
-                label_path=label_path,
-                label_rows=label_rows,
-                candidate_indexed=candidate_indexed,
-                _payload_scan_remaining=remaining,
-                structural_verifier=structural_verifier,
-            )
-        return _TeacherBatchResult(workset_status=workset.status("ox"))
+    return resolved_claims, payload_failures, local_payload_rejects, claim_integrity_failure
 
+
+def _ox_batch_payload(
+    tasks: Mapping[str, Mapping[str, Any]], current: Sequence[Any]
+) -> dict[str, Any]:
+    return {
+        "schema": "chronovisor.recall-distill-teacher-batch.v1",
+        "candidates": [tasks[claim.work_id]["input"] for claim in current],
+    }
+
+
+def _ox_prepare_batches(
+    *,
+    claims: Sequence[Any],
+    tasks: Mapping[str, Mapping[str, Any]],
+    workset: Any,
+    claim_limit: int,
+    preflight: Callable[[Mapping[str, Any]], bool] | None,
+    payload_scan_remaining: int | None,
+) -> tuple[list[list[Any]], int]:
     batches: list[list[Any]] = []
     probe_groups: dict[str, list[Any]] = defaultdict(list)
     normal_claims: list[Any] = []
@@ -5175,10 +5092,6 @@ def _run_ox_teacher_batch(
             str(tasks[claim.work_id]["candidate"].get("candidate_id") or "")
             for claim in ordered
         }
-        request = {
-            "schema": "chronovisor.recall-distill-teacher-batch.v1",
-            "candidates": [tasks[claim.work_id]["input"] for claim in ordered],
-        }
         valid_probe_batch = (
             len(ordered) == 2
             and len(probe_candidate_ids) == 2
@@ -5197,7 +5110,12 @@ def _run_ox_teacher_batch(
                 for assignment in assignments_for_batch
             ]
             == [0, 1]
-            and len(canonical_json.canonical_json_bytes_strict(request)) <= 12_000
+            and len(
+                canonical_json.canonical_json_bytes_strict(
+                    _ox_batch_payload(tasks, ordered)
+                )
+            )
+            <= 12_000
         )
         if valid_probe_batch:
             batches.append(ordered)
@@ -5217,26 +5135,14 @@ def _run_ox_teacher_batch(
             [claim for claim, _outcome in incomplete_probe_outcomes],
             [outcome for _claim, outcome in incomplete_probe_outcomes],
         )
-        remaining = (
-            OX_PREFLIGHT_SCAN_CLAIM_BUDGET
-            if _payload_scan_remaining is None
-            else _payload_scan_remaining
-        ) - len(incomplete_probe_outcomes)
-        if not batches and not normal_claims and remaining > 0:
-            return _run_ox_teacher_batch(
-                root=root,
-                config=config,
-                teachers=teachers,
-                snapshots=snapshots,
-                rally_by_id=rally_by_id,
-                texts=texts,
-                label_path=label_path,
-                label_rows=label_rows,
-                candidate_indexed=candidate_indexed,
-                _payload_scan_remaining=remaining,
-                structural_verifier=structural_verifier,
-            )
-
+        if not batches and not normal_claims:
+            remaining = (
+                OX_PREFLIGHT_SCAN_CLAIM_BUDGET
+                if payload_scan_remaining is None
+                else payload_scan_remaining
+            ) - len(incomplete_probe_outcomes)
+            if remaining > 0:
+                return [], len(incomplete_probe_outcomes)
     batch: list[Any] = []
     candidate_ids: set[str] = set()
     oversize: list[tuple[Any, dict[str, str]]] = []
@@ -5244,10 +5150,7 @@ def _run_ox_teacher_batch(
         task = tasks[claim.work_id]
         candidate_id = str(task["candidate"]["candidate_id"])
         proposed = [*batch, claim]
-        request = {
-            "schema": "chronovisor.recall-distill-teacher-batch.v1",
-            "candidates": [tasks[item.work_id]["input"] for item in proposed],
-        }
+        request = _ox_batch_payload(tasks, proposed)
         if (
             candidate_id in candidate_ids
             or len(proposed) > 16
@@ -5255,10 +5158,7 @@ def _run_ox_teacher_batch(
         ):
             if batch:
                 batches.append(batch)
-            single_request = {
-                "schema": "chronovisor.recall-distill-teacher-batch.v1",
-                "candidates": [task["input"]],
-            }
+            single_request = _ox_batch_payload(tasks, [claim])
             if len(canonical_json.canonical_json_bytes_strict(single_request)) > 12_000:
                 oversize.append(
                     (
@@ -5284,31 +5184,21 @@ def _run_ox_teacher_batch(
             [claim for claim, _outcome in oversize],
             [outcome for _claim, outcome in oversize],
         )
-
     if claim_limit == 1:
         single_request_batches: list[list[Any]] = []
         for current in batches:
-            if all(
-                tasks[claim.work_id]["assignment"].get("probe") for claim in current
-            ):
+            if all(tasks[claim.work_id]["assignment"].get("probe") for claim in current):
                 single_request_batches.append(current)
             else:
                 single_request_batches.extend([claim] for claim in current)
         batches = single_request_batches
-
-    def batch_payload(current: Sequence[Any]) -> dict[str, Any]:
-        return {
-            "schema": "chronovisor.recall-distill-teacher-batch.v1",
-            "candidates": [tasks[claim.work_id]["input"] for claim in current],
-        }
-
     preflight_rejected: list[list[Any]] = []
     if callable(preflight):
         accepted: list[list[Any]] = []
 
         def ready_for_egress(current: Sequence[Any]) -> bool:
             try:
-                return preflight(batch_payload(current)) is True
+                return preflight(_ox_batch_payload(tasks, current)) is True
             except Exception:
                 return False
 
@@ -5322,9 +5212,9 @@ def _run_ox_teacher_batch(
             else:
                 for claim in current:
                     target = [claim]
-                    (
-                        accepted if ready_for_egress(target) else preflight_rejected
-                    ).append(target)
+                    (accepted if ready_for_egress(target) else preflight_rejected).append(
+                        target
+                    )
         batches = accepted
     if preflight_rejected:
         rejected_claims = [claim for batch in preflight_rejected for claim in batch]
@@ -5336,49 +5226,57 @@ def _run_ox_teacher_batch(
             ],
         )
     if claim_limit == 1 and len(batches) > 1:
-        unattempted = [claim for current in batches[1:] for claim in current]
-        workset.release_unattempted(unattempted)
+        workset.release_unattempted(
+            [claim for current in batches[1:] for claim in current]
+        )
         batches = batches[:1]
     if not batches:
         rejected_count = len(oversize) + sum(map(len, preflight_rejected))
         remaining = (
             OX_PREFLIGHT_SCAN_CLAIM_BUDGET
-            if _payload_scan_remaining is None
-            else _payload_scan_remaining
+            if payload_scan_remaining is None
+            else payload_scan_remaining
         ) - rejected_count
         if rejected_count and remaining > 0:
-            return _run_ox_teacher_batch(
-                root=root,
-                config=config,
-                teachers=teachers,
-                snapshots=snapshots,
-                rally_by_id=rally_by_id,
-                texts=texts,
-                label_path=label_path,
-                label_rows=label_rows,
-                candidate_indexed=candidate_indexed,
-                _payload_scan_remaining=remaining,
-                structural_verifier=structural_verifier,
-            )
-        return _TeacherBatchResult(deferred=True, workset_status=workset.status("ox"))
+            return [], rejected_count
+    return batches, 0
 
+
+def _ox_dispatch_and_commit(
+    *,
+    claims: Sequence[Any],
+    batches: Sequence[Sequence[Any]],
+    ramp_cap: int,
+    ramp_valid_receipts: int,
+    ramp_provider_attempts: int,
+    teacher: Teacher,
+    tasks: Mapping[str, Mapping[str, Any]],
+    config: DistillationConfig,
+    workset: Any,
+    profile_contract_id: str,
+    structural_verifier: Callable[
+        [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
+    ],
+    label_path: Path,
+) -> _TeacherBatchResult:
     required_label_fields = {
         "candidate_id",
         "verdict",
         "confidence",
         "rationale",
     }
-
     # Dispatch one fixed-cap wave at a time.  The generic dispatcher remains a
     # transport primitive; only this OX layer can promote a cap after deep
     # identity, digest, and label validation below.
+    from chronovisor.recall.recall_distillation_dispatcher import dispatch_claimed_work
+
     results: list[Any] = []
     dispatched_batches = 0
     for start in range(0, len(batches), ramp_cap):
         wave = batches[start : start + ramp_cap]
         wave_results = dispatch_claimed_work(
             wave,
-            lambda current: teacher.evaluate(batch_payload(current)),
+            lambda current: teacher.evaluate(_ox_batch_payload(tasks, current)),
             max_inflight=ramp_cap,
             max_retries=0 if config.teacher_claim_limit == 1 else 2,
             min_valid_results_per_cap=OX_RAMP_RECEIPTS_PER_CAP,
@@ -5551,6 +5449,265 @@ def _run_ox_teacher_batch(
         ramp_cap=ramp_cap,
         ramp_valid_receipts=ramp_valid_receipts,
         ramp_provider_attempts=ramp_provider_attempts,
+    )
+
+
+def _run_ox_teacher_batch(
+    *,
+    root: Path,
+    config: DistillationConfig,
+    teachers: Mapping[str, Teacher],
+    snapshots: Mapping[str, Mapping[str, Any]],
+    rally_by_id: Mapping[str, Mapping[str, Any]],
+    texts: Mapping[str, str],
+    label_path: Path,
+    label_rows: Sequence[Mapping[str, Any]],
+    candidate_indexed: bool = False,
+    _payload_scan_remaining: int | None = None,
+    structural_verifier: Callable[
+        [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
+    ],
+) -> _TeacherBatchResult:
+    """Advance, claim, dispatch, append, and commit OX work in that order."""
+
+    from chronovisor.recall.recall_distillation_workset import DistillationWorkset
+
+    teacher = teachers.get(OX_TEACHER_ROLE)
+    workset = DistillationWorkset(store.distillation_dir(root) / "ox-workset.sqlite3")
+    if teacher is None or teacher.local:
+        return _TeacherBatchResult(deferred=True, workset_status=workset.status("ox"))
+    profile_contract_id = str(_ensure_ox_profile_contract(root, config)["artifact_id"])
+    try:
+        worker_state = _read_worker_state(root)
+        if worker_state.get("ox_profile_stopped") is True:
+            return _TeacherBatchResult(
+                deferred=True,
+                workset_status=workset.status("ox"),
+                profile_stopped=True,
+                profile_contract_id=profile_contract_id,
+            )
+    except store.DistillationStoreError:
+        worker_state = {}
+    ramp_source = (
+        worker_state
+        if worker_state.get("kind") == "worker-state"
+        and worker_state.get("ox_profile_contract_id") == profile_contract_id
+        and worker_state.get("ox_ramp_request_revision") == OX_RAMP_REQUEST_REVISION
+        else {}
+    )
+    ramp_cap, ramp_valid_receipts, ramp_provider_attempts = _ox_ramp_state(
+        ramp_source, config.teacher_max_inflight
+    )
+    try:
+        split_plan = _read_split_plan(root)
+        assignments = split_plan["assignments"]
+        split_plan_id = str(split_plan["artifact_id"])
+    except (DistillationError, store.DistillationStoreError, KeyError):
+        assignments = {}
+        split_plan_id = ""
+
+    candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
+    candidate_state: Mapping[str, Any] = {}
+    if candidate_indexed:
+        from chronovisor.recall import recall_distillation_catalog as catalog
+
+        try:
+            catalog.sync_candidate_index(root, candidate_path)
+            candidate_state = catalog.candidate_index_state(root)
+            previous_watermark = workset.watermark()
+            prior_records = 0
+            if previous_watermark is not None:
+                if not isinstance(previous_watermark, Mapping):
+                    raise DistillationError("OX workset watermark is invalid")
+                prior_records = previous_watermark.get("candidate_records", 0)
+                prior_head = str(previous_watermark.get("candidate_head") or "")
+                if isinstance(prior_records, bool) or not isinstance(
+                    prior_records, int
+                ):
+                    raise DistillationError("OX workset candidate watermark is invalid")
+                if prior_records < 0 or prior_records > int(
+                    candidate_state["record_count"]
+                ):
+                    raise DistillationError("OX workset candidate watermark regressed")
+                if prior_records == int(candidate_state["record_count"]):
+                    current_head = str(candidate_state.get("head_sha256") or "")
+                    if prior_head and prior_head != current_head:
+                        raise DistillationError("OX candidate index head conflicts")
+                if (
+                    str(previous_watermark.get("split_plan_id") or "") != split_plan_id
+                    or str(previous_watermark.get("probe_revision") or "")
+                    != OX_PROBE_REVISION
+                ):
+                    prior_records = 0
+            snapshots = catalog.read_candidate_snapshots(
+                root,
+                candidate_path,
+                catalog.candidate_rally_ids(root, after_seq=prior_records),
+            )
+        except catalog.CatalogError as exc:
+            raise DistillationError("OX candidate index is unavailable") from exc
+
+    prepared = _ox_prepare_tasks(
+        config=config,
+        snapshots=snapshots,
+        rally_by_id=rally_by_id,
+        assignments=assignments,
+        split_plan_id=split_plan_id,
+        profile_contract_id=profile_contract_id,
+        candidate_indexed=candidate_indexed,
+        candidate_state=candidate_state,
+    )
+    tasks = prepared["tasks"]
+    work_items = prepared["work_items"]
+    watermark = prepared["watermark"]
+    add_task = prepared["add_task"]
+    workset.advance(work_items, watermark)
+    # Prepared tasks already contain candidate and probe work.
+    claim_limit = config.teacher_claim_limit
+    if (
+        isinstance(claim_limit, bool)
+        or not isinstance(claim_limit, int)
+        or not 1 <= claim_limit <= 500
+    ):
+        raise DistillationError("teacher_claim_limit must be between 1 and 500")
+    preflight = getattr(teacher, "accepts_egress_payload", None)
+    scan_limit = claim_limit
+    if claim_limit == 1 and callable(preflight):
+        scan_limit = min(
+            OX_PREFLIGHT_SCAN_CLAIM_BUDGET,
+            _payload_scan_remaining
+            if _payload_scan_remaining is not None
+            else OX_PREFLIGHT_SCAN_CLAIM_BUDGET,
+        )
+    claims = list(
+        workset.claim(
+            "ox",
+            scan_limit,
+            OX_TEACHER_ROLE,
+            7200,
+        )
+    )
+    probe_claim_counts: dict[str, int] = defaultdict(int)
+    for claim in claims:
+        probe_batch_id = str(claim.provenance.get("probe_batch_id") or "")
+        if probe_batch_id:
+            probe_claim_counts[probe_batch_id] += 1
+    # A blind-order request is an atomic pair, including after a restart where
+    # no delta work items were rebuilt before pending claims were leased.
+    if any(count == 1 for count in probe_claim_counts.values()):
+        claims.extend(workset.claim("ox", 1, OX_TEACHER_ROLE, 7200))
+    existing = {
+        str(row.get("work_id")): row
+        for row in label_rows
+        if row.get("kind") == "teacher-label"
+        and row.get("status") == "completed"
+        and row.get("route") == "opencode-go/ox-alpha-free"
+        and row.get("teacher_role") == OX_TEACHER_ROLE
+    }
+    reconciled = [claim for claim in claims if claim.work_id in existing]
+    if reconciled:
+        workset.commit(
+            reconciled,
+            [
+                {
+                    "status": "completed",
+                    "completion_ref": f"label-ledger:{existing[claim.work_id]['record_sha256']}",
+                    "completion_digest": str(existing[claim.work_id]["record_sha256"]),
+                }
+                for claim in reconciled
+            ],
+        )
+    claims = [claim for claim in claims if claim not in reconciled]
+    claims = _ox_restore_claims(
+        root=root,
+        candidate_path=candidate_path,
+        catalog=catalog if candidate_indexed else None,
+        candidate_indexed=candidate_indexed,
+        claims=claims,
+        tasks=tasks,
+        add_task=add_task,
+        workset=workset,
+        rally_by_id=rally_by_id,
+        assignments=assignments,
+        split_plan_id=split_plan_id,
+        profile_contract_id=profile_contract_id,
+    )
+    # Restore and provenance validation are delegated to _ox_restore_claims.
+    # payload resolution delegated to _ox_resolve_claim_payloads
+    resolved_claims, payload_failures, local_payload_rejects, claim_integrity_failure = _ox_resolve_claim_payloads(
+        claims=claims,
+        tasks=tasks,
+        texts=texts,
+        config=config,
+        workset=workset,
+    )
+    claims = resolved_claims
+    if not claims:
+        remaining = (
+            OX_PREFLIGHT_SCAN_CLAIM_BUDGET
+            if _payload_scan_remaining is None
+            else _payload_scan_remaining
+        ) - len(payload_failures)
+        if local_payload_rejects and not claim_integrity_failure and remaining > 0:
+            return _run_ox_teacher_batch(
+                root=root,
+                config=config,
+                teachers=teachers,
+                snapshots=snapshots,
+                rally_by_id=rally_by_id,
+                texts=texts,
+                label_path=label_path,
+                label_rows=label_rows,
+                candidate_indexed=candidate_indexed,
+                _payload_scan_remaining=remaining,
+                structural_verifier=structural_verifier,
+            )
+        return _TeacherBatchResult(workset_status=workset.status("ox"))
+
+    batches, rescan_count = _ox_prepare_batches(
+        claims=claims,
+        tasks=tasks,
+        workset=workset,
+        claim_limit=claim_limit,
+        preflight=preflight,
+        payload_scan_remaining=_payload_scan_remaining,
+    )
+    # Probe/normal grouping is handled by _ox_prepare_batches.
+    if not batches:
+        remaining = (
+            OX_PREFLIGHT_SCAN_CLAIM_BUDGET
+            if _payload_scan_remaining is None
+            else _payload_scan_remaining
+        ) - rescan_count
+        if rescan_count and remaining > 0:
+            return _run_ox_teacher_batch(
+                root=root,
+                config=config,
+                teachers=teachers,
+                snapshots=snapshots,
+                rally_by_id=rally_by_id,
+                texts=texts,
+                label_path=label_path,
+                label_rows=label_rows,
+                candidate_indexed=candidate_indexed,
+                _payload_scan_remaining=remaining,
+                structural_verifier=structural_verifier,
+            )
+        return _TeacherBatchResult(deferred=True, workset_status=workset.status("ox"))
+
+    return _ox_dispatch_and_commit(
+        claims=claims,
+        batches=batches,
+        ramp_cap=ramp_cap,
+        ramp_valid_receipts=ramp_valid_receipts,
+        ramp_provider_attempts=ramp_provider_attempts,
+        teacher=teacher,
+        tasks=tasks,
+        config=config,
+        workset=workset,
+        profile_contract_id=profile_contract_id,
+        structural_verifier=structural_verifier,
+        label_path=label_path,
     )
 
 
@@ -6091,27 +6248,27 @@ def _worker_state_transition(
     }
 
 
-def _run_distillation_chunk_impl(
+def _prepare_distillation_chunk(
     *,
-    root: Path | None = None,
-    raw_dir: Path | None = None,
-    config_path: Path | None = None,
-    teachers: Mapping[str, Teacher] | None = None,
-    counterfactual: CounterfactualGenerator | None = None,
+    root: Path | None,
+    raw_dir: Path | None,
+    config_path: Path | None,
+    teachers: Mapping[str, Teacher] | None,
+    counterfactual: CounterfactualGenerator | None,
     structural_verifier: (
         Callable[[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None]
         | None
-    ) = None,
-    dry_run: bool = False,
-    cold_start: bool = False,
-    max_elapsed_seconds: int = 300,
+    ),
+    dry_run: bool,
+    cold_start: bool,
+    max_elapsed_seconds: int,
 ) -> dict[str, Any]:
     root = root or CHRONOVISOR_ROOT
     raw_dir = raw_dir or root / "raw"
     config = load_distillation_config(config_path)
     deadline = time.monotonic() + max_elapsed_seconds
     if not config.enabled:
-        return {"status": "disabled", "processed": 0}
+        return {"early": {"status": "disabled", "processed": 0}}
     ox_profile_contract_id = (
         str(_ensure_ox_profile_contract(root, config)["artifact_id"])
         if config.teacher_profile == OX_SINGLE_PROFILE
@@ -6164,9 +6321,11 @@ def _run_distillation_chunk_impl(
     teachers_available = local_teachers or ox_teacher_available
     if dry_run:
         return {
-            "status": "dry_run",
-            "pending": len(pending),
-            "teachers_available": teachers_available,
+            "early": {
+                "status": "dry_run",
+                "pending": len(pending),
+                "teachers_available": teachers_available,
+            }
         }
     store.append_chain_batch(
         ledger_path,
@@ -6194,7 +6353,6 @@ def _run_distillation_chunk_impl(
     candidate_work = capture.work
     split_plan = capture.split_plan
     deadline_deferred = capture.deadline_deferred
-
     model_snapshots = snapshots
     if cold_start and split_plan:
         prioritize_test = int(scheduler_state.get("cold_start_lane_turn", 0)) % 4 != 3
@@ -6221,7 +6379,6 @@ def _run_distillation_chunk_impl(
         counterfactual_model_calls,
         available=counterfactual_probe.pending,
     )
-    teacher_result = _TeacherBatchResult()
     minimum_model_seconds = 220 if prefer_counterfactual else 130
     model_work_available = teachers_available or counterfactual_probe.pending
     model_deferred = deadline_deferred or (
@@ -6229,6 +6386,364 @@ def _run_distillation_chunk_impl(
         and cold_start
         and deadline - time.monotonic() < minimum_model_seconds
     )
+    return {
+        "root": root,
+        "raw_dir": raw_dir,
+        "config": config,
+        "deadline": deadline,
+        "ox_profile_contract_id": ox_profile_contract_id,
+        "scheduler_state": scheduler_state,
+        "teacher_model_calls": teacher_model_calls,
+        "counterfactual_model_calls": counterfactual_model_calls,
+        "catalog": catalog,
+        "rallies": rallies,
+        "teachers": teachers,
+        "counterfactual": counterfactual,
+        "structural_verifier": structural_verifier,
+        "ledger_path": ledger_path,
+        "existing": existing,
+        "pending": pending,
+        "teachers_available": teachers_available,
+        "ox_teacher_available": ox_teacher_available,
+        "index_sha256": index_sha256,
+        "texts": texts,
+        "rally_by_id": rally_by_id,
+        "candidate_path": candidate_path,
+        "label_path": label_path,
+        "label_rows": label_rows,
+        "snapshots": snapshots,
+        "candidate_work": candidate_work,
+        "split_plan": split_plan,
+        "model_snapshots": model_snapshots,
+        "counterfactual_probe": counterfactual_probe,
+        "prefer_counterfactual": prefer_counterfactual,
+        "model_deferred": model_deferred,
+        "cold_start": cold_start,
+        "config_path": config_path,
+    }
+
+
+def _prepare_distillation_training(
+    *,
+    root: Path,
+    raw_dir: Path,
+    config_path: Path | None,
+    config: DistillationConfig,
+    catalog: Any,
+    candidate_path: Path,
+    label_path: Path,
+    rallies: Sequence[Mapping[str, Any]],
+    snapshots: Mapping[str, Mapping[str, Any]],
+    split_plan: Mapping[str, Any],
+    scheduler_state: Mapping[str, Any],
+    existing: set[Any],
+    pending: Sequence[Mapping[str, Any]],
+    candidate_work: Sequence[Mapping[str, Any]],
+    teachers_available: bool,
+    model_deferred: bool,
+    cold_start: bool,
+) -> dict[str, Any]:
+    current_labels = _read_chain(label_path)
+    training_snapshots: Mapping[str, Mapping[str, Any]] = snapshots
+    candidate_index_state: Mapping[str, Any] = {}
+    if config.teacher_profile == OX_SINGLE_PROFILE:
+        try:
+            catalog.sync_candidate_index(root, candidate_path)
+            candidate_index_state = catalog.candidate_index_state(root)
+            training_snapshots = {
+                rally_id: snapshot
+                for rally_id, snapshot in catalog.read_candidate_snapshots(
+                    root,
+                    candidate_path,
+                    {
+                        str(row.get("rally_id") or "")
+                        for row in current_labels
+                        if isinstance(row.get("rally_id"), str) and row.get("rally_id")
+                    },
+                ).items()
+            }
+        except catalog.CatalogError as exc:
+            raise DistillationError("OX training snapshots are unavailable") from exc
+    training_snapshot = materialize_training_rows(
+        root,
+        _rallies=rallies,
+        _snapshots=training_snapshots,
+        _label_rows=current_labels,
+    )
+    if cold_start:
+        _, current_cohort = _active_training_cohort(
+            training_snapshot["rows"], teacher_profile=config.teacher_profile
+        )
+        split_plan = _ensure_split_plan(
+            root,
+            rallies,
+            raw_watermark=committed_raw_watermark(raw_dir),
+            model_cohort_sha256=current_cohort["cohort_sha256"],
+        )
+        training_snapshot = materialize_training_rows(
+            root,
+            _rallies=rallies,
+            _snapshots=training_snapshots,
+            _label_rows=current_labels,
+        )
+    baseline = preflight(
+        raw_dir=raw_dir,
+        root=root,
+        config_path=config_path,
+        _rallies=rallies,
+        _training_snapshot=training_snapshot,
+    )
+    gate_baseline = _matching_p5_baseline(root, baseline) or baseline
+    p5_allowed = bool(gate_baseline["hard_floor"]["p5_allowed"])
+    manifest_backlog = max(0, len(rallies) - len(existing) - len(pending))
+    candidate_backlog = max(
+        0,
+        len(rallies)
+        - (
+            int(candidate_index_state["record_count"])
+            if candidate_index_state
+            else len(snapshots)
+        ),
+    )
+    cold_start_pending = bool(manifest_backlog or candidate_backlog or not p5_allowed)
+    split_plan_id = str(
+        split_plan.get("artifact_id") or scheduler_state.get("split_plan_id") or ""
+    )
+    bootstrap = _ensure_bootstrap_policy(root, gate_baseline)
+    promotion = _maybe_publish_candidate(root, config, gate_baseline)
+    rollout_evaluation = _automatic_rollout_evaluation(root, gate_baseline, promotion)
+    transition = _worker_state_transition(
+        root,
+        p5_allowed=p5_allowed,
+        local_teachers=teachers_available,
+        model_deferred=model_deferred,
+        gate_baseline=gate_baseline,
+        promotion=promotion,
+    )
+    return {
+        "current_labels": current_labels,
+        "training_snapshots": training_snapshots,
+        "candidate_index_state": candidate_index_state,
+        "training_snapshot": training_snapshot,
+        "split_plan": split_plan,
+        "baseline": baseline,
+        "gate_baseline": gate_baseline,
+        "p5_allowed": p5_allowed,
+        "manifest_backlog": manifest_backlog,
+        "candidate_backlog": candidate_backlog,
+        "cold_start_pending": cold_start_pending,
+        "split_plan_id": split_plan_id,
+        "bootstrap": bootstrap,
+        "promotion": promotion,
+        "rollout_evaluation": rollout_evaluation,
+        "transition": transition,
+    }
+
+
+def _persist_distillation_chunk(
+    *,
+    setup: Mapping[str, Any],
+    training: Mapping[str, Any],
+    teacher_result: _TeacherBatchResult,
+    ox_workset: Mapping[str, Any],
+    ox_ramp_fields: Mapping[str, int | str],
+    counterfactual_written: int,
+    teacher_model_calls: int,
+    counterfactual_model_calls: int,
+    model_deferred: bool,
+) -> dict[str, Any]:
+    root = setup["root"]
+    config = setup["config"]
+    scheduler_state = setup["scheduler_state"]
+    index_sha256 = setup["index_sha256"]
+    ledger_path = setup["ledger_path"]
+    candidate_path = setup["candidate_path"]
+    pending = setup["pending"]
+    candidate_work = setup["candidate_work"]
+    teachers_available = setup["teachers_available"]
+    ox_profile_contract_id = setup["ox_profile_contract_id"]
+    counterfactual = setup["counterfactual"]
+    baseline = training["baseline"]
+    gate_baseline = training["gate_baseline"]
+    transition = training["transition"]
+    split_plan_id = training["split_plan_id"]
+    bootstrap = training["bootstrap"]
+    promotion = training["promotion"]
+    rollout_evaluation = training["rollout_evaluation"]
+    p5_allowed = training["p5_allowed"]
+    cold_start_pending = training["cold_start_pending"]
+    manifest_backlog = training["manifest_backlog"]
+    candidate_backlog = training["candidate_backlog"]
+    manifest_head = store.chain_head(ledger_path)["head_sha256"]
+    candidate_head = store.chain_head(candidate_path)["head_sha256"]
+    label_path = setup["label_path"]
+    label_head = store.chain_head(label_path)["head_sha256"]
+    run_id, _, _ = store.write_immutable(
+        store.distillation_dir(root) / "runs",
+        {
+            "kind": "bounded-chunk",
+            "raw_watermark": baseline["raw_watermark"],
+            "baseline_artifact_id": gate_baseline["artifact_id"],
+            "manifest_head": manifest_head,
+            "candidate_head": candidate_head,
+            "label_head": label_head,
+            "processed": len(pending),
+            "candidate_snapshots": len(candidate_work),
+            "labels_written": teacher_result.labels_written,
+            "ox_workset": ox_workset,
+            "ox_profile_contract_id": ox_profile_contract_id,
+            "ox_profile_stopped": teacher_result.profile_stopped,
+            **ox_ramp_fields,
+            "counterfactuals_written": counterfactual_written,
+            "p5_allowed": p5_allowed,
+        },
+        schema="chronovisor.recall-distill-run.v1",
+    )
+    # ponytail: the final small state commit is uninterruptible; isolate the worker
+    # process only if a storage stall at this boundary is measured.
+    if (
+        threading.current_thread() is threading.main_thread()
+        and hasattr(signal, "setitimer")
+        and hasattr(signal, "ITIMER_REAL")
+    ):
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    state = store.write_sealed_state(
+        store.distillation_dir(root) / store.STATE_FILE,
+        {
+            **transition["previous"],
+            "status": transition["rollout_status"],
+            "worker_status": transition["worker_status"],
+            "rollout_percent": int(transition["previous"].get("rollout_percent", 0)),
+            "raw_watermark": baseline["raw_watermark"],
+            "baseline_artifact_id": gate_baseline["artifact_id"],
+            "historical_index_sha256": index_sha256,
+            "manifest_chain_head": manifest_head,
+            "run_id": run_id,
+            "processed": len(pending),
+            "candidate_snapshots": len(candidate_work),
+            "labels_written": teacher_result.labels_written,
+            "ox_workset": ox_workset,
+            "ox_profile_contract_id": ox_profile_contract_id,
+            "ox_profile_stopped": teacher_result.profile_stopped,
+            **ox_ramp_fields,
+            "counterfactuals_written": counterfactual_written,
+            "teacher_model_calls": teacher_model_calls,
+            "counterfactual_model_calls": counterfactual_model_calls,
+            "cold_start_pending": cold_start_pending,
+            "cold_start_lane_turn": int(scheduler_state.get("cold_start_lane_turn", 0))
+            + int(setup["cold_start"] and not model_deferred),
+            "split_plan_id": split_plan_id,
+            "manifest_backlog": manifest_backlog,
+            "candidate_backlog": candidate_backlog,
+            "promotion_status": promotion["status"],
+            "promotion_reason": promotion.get("reason", ""),
+            "incumbent_policy_id": bootstrap["artifact_id"],
+            "rollout_evaluation_status": rollout_evaluation["status"],
+            "hold_reason": transition["hold_reason"],
+            "capture_only_reasons": gate_baseline["hard_floor"]["reasons"]
+            + (
+                []
+                if teachers_available
+                else [
+                    "ox_teacher_unavailable"
+                    if config.teacher_profile == OX_SINGLE_PROFILE
+                    else "local_teachers_unavailable"
+                ]
+            ),
+            "last_success_at": transition["last_success_at"],
+            "error_code": (
+                "ox_teacher_stopped"
+                if teacher_result.profile_stopped
+                else "worker_deferred"
+                if model_deferred
+                else ""
+            ),
+        },
+    )
+    return {
+        "status": transition["worker_status"],
+        "processed": len(pending),
+        "p5_allowed": p5_allowed,
+        "teachers_available": teachers_available,
+        "counterfactual_available": bool(counterfactual and counterfactual.local),
+        "candidate_snapshots": len(candidate_work),
+        "labels_written": teacher_result.labels_written,
+        "ox_workset": ox_workset,
+        "ox_profile_contract_id": ox_profile_contract_id,
+        "ox_profile_stopped": teacher_result.profile_stopped,
+        **ox_ramp_fields,
+        "counterfactuals_written": counterfactual_written,
+        "cold_start_pending": cold_start_pending,
+        "split_plan_id": split_plan_id,
+        "manifest_backlog": manifest_backlog,
+        "candidate_backlog": candidate_backlog,
+        "promotion": promotion,
+        "rollout_evaluation": rollout_evaluation,
+        "run_id": run_id,
+        "state_sha256": state["seal_sha256"],
+    }
+
+
+def _run_distillation_chunk_impl(
+    *,
+    root: Path | None = None,
+    raw_dir: Path | None = None,
+    config_path: Path | None = None,
+    teachers: Mapping[str, Teacher] | None = None,
+    counterfactual: CounterfactualGenerator | None = None,
+    structural_verifier: (
+        Callable[[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None]
+        | None
+    ) = None,
+    dry_run: bool = False,
+    cold_start: bool = False,
+    max_elapsed_seconds: int = 300,
+) -> dict[str, Any]:
+    setup = _prepare_distillation_chunk(
+        root=root,
+        raw_dir=raw_dir,
+        config_path=config_path,
+        teachers=teachers,
+        counterfactual=counterfactual,
+        structural_verifier=structural_verifier,
+        dry_run=dry_run,
+        cold_start=cold_start,
+        max_elapsed_seconds=max_elapsed_seconds,
+    )
+    if "early" in setup:
+        return dict(setup["early"])
+    root = setup["root"]
+    raw_dir = setup["raw_dir"]
+    config = setup["config"]
+    deadline = setup["deadline"]
+    ox_profile_contract_id = setup["ox_profile_contract_id"]
+    scheduler_state = setup["scheduler_state"]
+    teacher_model_calls = setup["teacher_model_calls"]
+    counterfactual_model_calls = setup["counterfactual_model_calls"]
+    catalog = setup["catalog"]
+    rallies = setup["rallies"]
+    teachers = setup["teachers"]
+    counterfactual = setup["counterfactual"]
+    structural_verifier = setup["structural_verifier"]
+    existing = setup["existing"]
+    pending = setup["pending"]
+    teachers_available = setup["teachers_available"]
+    ox_teacher_available = setup["ox_teacher_available"]
+    texts = setup["texts"]
+    rally_by_id = setup["rally_by_id"]
+    candidate_path = setup["candidate_path"]
+    label_path = setup["label_path"]
+    label_rows = setup["label_rows"]
+    snapshots = setup["snapshots"]
+    candidate_work = setup["candidate_work"]
+    split_plan = setup["split_plan"]
+    model_snapshots = setup["model_snapshots"]
+    counterfactual_probe = setup["counterfactual_probe"]
+    prefer_counterfactual = setup["prefer_counterfactual"]
+    cold_start = setup["cold_start"]
+    config_path = setup["config_path"]
+    model_deferred = setup["model_deferred"]
+    teacher_result = _TeacherBatchResult()
     if teachers_available and not prefer_counterfactual and not model_deferred:
         teacher_result = _run_teacher_batch(
             root=root,
@@ -6311,190 +6826,36 @@ def _run_distillation_chunk_impl(
     counterfactual_written = counterfactual_result.written
     counterfactual_model_calls += counterfactual_result.model_calls
     model_deferred = model_deferred or counterfactual_result.deferred
-    current_labels = _read_chain(label_path)
-    training_snapshots: Mapping[str, Mapping[str, Any]] = snapshots
-    candidate_index_state: Mapping[str, Any] = {}
-    if config.teacher_profile == OX_SINGLE_PROFILE:
-        try:
-            catalog.sync_candidate_index(root, candidate_path)
-            candidate_index_state = catalog.candidate_index_state(root)
-            training_snapshots = {
-                rally_id: snapshot
-                for rally_id, snapshot in catalog.read_candidate_snapshots(
-                    root,
-                    candidate_path,
-                    {
-                        str(row.get("rally_id") or "")
-                        for row in current_labels
-                        if isinstance(row.get("rally_id"), str) and row.get("rally_id")
-                    },
-                ).items()
-            }
-        except catalog.CatalogError as exc:
-            raise DistillationError("OX training snapshots are unavailable") from exc
-    training_snapshot = materialize_training_rows(
-        root,
-        _rallies=rallies,
-        _snapshots=training_snapshots,
-        _label_rows=current_labels,
-    )
-    if cold_start:
-        _, current_cohort = _active_training_cohort(
-            training_snapshot["rows"], teacher_profile=config.teacher_profile
-        )
-        split_plan = _ensure_split_plan(
-            root,
-            rallies,
-            raw_watermark=committed_raw_watermark(raw_dir),
-            model_cohort_sha256=current_cohort["cohort_sha256"],
-        )
-        training_snapshot = materialize_training_rows(
-            root,
-            _rallies=rallies,
-            _snapshots=training_snapshots,
-            _label_rows=current_labels,
-        )
-    baseline = preflight(
-        raw_dir=raw_dir,
+    training = _prepare_distillation_training(
         root=root,
+        raw_dir=raw_dir,
         config_path=config_path,
-        _rallies=rallies,
-        _training_snapshot=training_snapshot,
-    )
-    gate_baseline = _matching_p5_baseline(root, baseline) or baseline
-    p5_allowed = bool(gate_baseline["hard_floor"]["p5_allowed"])
-    manifest_backlog = max(0, len(rallies) - len(existing) - len(pending))
-    candidate_backlog = max(
-        0,
-        len(rallies)
-        - (
-            int(candidate_index_state["record_count"])
-            if candidate_index_state
-            else len(snapshots)
-        ),
-    )
-    cold_start_pending = bool(manifest_backlog or candidate_backlog or not p5_allowed)
-    split_plan_id = str(
-        split_plan.get("artifact_id") or scheduler_state.get("split_plan_id") or ""
-    )
-    bootstrap = _ensure_bootstrap_policy(root, gate_baseline)
-    promotion = _maybe_publish_candidate(root, config, gate_baseline)
-    rollout_evaluation = _automatic_rollout_evaluation(root, gate_baseline, promotion)
-    transition = _worker_state_transition(
-        root,
-        p5_allowed=p5_allowed,
-        local_teachers=teachers_available,
+        config=config,
+        catalog=catalog,
+        candidate_path=candidate_path,
+        label_path=label_path,
+        rallies=rallies,
+        snapshots=snapshots,
+        split_plan=split_plan,
+        scheduler_state=scheduler_state,
+        existing=existing,
+        pending=pending,
+        candidate_work=candidate_work,
+        teachers_available=teachers_available,
         model_deferred=model_deferred,
-        gate_baseline=gate_baseline,
-        promotion=promotion,
+        cold_start=cold_start,
     )
-    manifest_head = store.chain_head(ledger_path)["head_sha256"]
-    candidate_head = store.chain_head(candidate_path)["head_sha256"]
-    label_head = store.chain_head(label_path)["head_sha256"]
-    run_id, _, _ = store.write_immutable(
-        store.distillation_dir(root) / "runs",
-        {
-            "kind": "bounded-chunk",
-            "raw_watermark": baseline["raw_watermark"],
-            "baseline_artifact_id": gate_baseline["artifact_id"],
-            "manifest_head": manifest_head,
-            "candidate_head": candidate_head,
-            "label_head": label_head,
-            "processed": len(pending),
-            "candidate_snapshots": len(candidate_work),
-            "labels_written": labels_written,
-            "ox_workset": ox_workset,
-            "ox_profile_contract_id": ox_profile_contract_id,
-            "ox_profile_stopped": teacher_result.profile_stopped,
-            **ox_ramp_fields,
-            "counterfactuals_written": counterfactual_written,
-            "p5_allowed": p5_allowed,
-        },
-        schema="chronovisor.recall-distill-run.v1",
+    return _persist_distillation_chunk(
+        setup=setup,
+        training=training,
+        teacher_result=teacher_result,
+        ox_workset=ox_workset,
+        ox_ramp_fields=ox_ramp_fields,
+        counterfactual_written=counterfactual_written,
+        teacher_model_calls=teacher_model_calls,
+        counterfactual_model_calls=counterfactual_model_calls,
+        model_deferred=model_deferred,
     )
-    # ponytail: the final small state commit is uninterruptible; isolate the worker
-    # process only if a storage stall at this boundary is measured.
-    if (
-        threading.current_thread() is threading.main_thread()
-        and hasattr(signal, "setitimer")
-        and hasattr(signal, "ITIMER_REAL")
-    ):
-        signal.setitimer(signal.ITIMER_REAL, 0)
-    state = store.write_sealed_state(
-        store.distillation_dir(root) / store.STATE_FILE,
-        {
-            **transition["previous"],
-            "status": transition["rollout_status"],
-            "worker_status": transition["worker_status"],
-            "rollout_percent": int(transition["previous"].get("rollout_percent", 0)),
-            "raw_watermark": baseline["raw_watermark"],
-            "baseline_artifact_id": gate_baseline["artifact_id"],
-            "historical_index_sha256": index_sha256,
-            "manifest_chain_head": manifest_head,
-            "run_id": run_id,
-            "processed": len(pending),
-            "candidate_snapshots": len(candidate_work),
-            "labels_written": labels_written,
-            "ox_workset": ox_workset,
-            "ox_profile_contract_id": ox_profile_contract_id,
-            "ox_profile_stopped": teacher_result.profile_stopped,
-            **ox_ramp_fields,
-            "counterfactuals_written": counterfactual_written,
-            "teacher_model_calls": teacher_model_calls,
-            "counterfactual_model_calls": counterfactual_model_calls,
-            "cold_start_pending": cold_start_pending,
-            "cold_start_lane_turn": int(scheduler_state.get("cold_start_lane_turn", 0))
-            + int(cold_start and not model_deferred),
-            "split_plan_id": split_plan_id,
-            "manifest_backlog": manifest_backlog,
-            "candidate_backlog": candidate_backlog,
-            "promotion_status": promotion["status"],
-            "promotion_reason": promotion.get("reason", ""),
-            "incumbent_policy_id": bootstrap["artifact_id"],
-            "rollout_evaluation_status": rollout_evaluation["status"],
-            "hold_reason": transition["hold_reason"],
-            "capture_only_reasons": gate_baseline["hard_floor"]["reasons"]
-            + (
-                []
-                if teachers_available
-                else [
-                    "ox_teacher_unavailable"
-                    if config.teacher_profile == OX_SINGLE_PROFILE
-                    else "local_teachers_unavailable"
-                ]
-            ),
-            "last_success_at": transition["last_success_at"],
-            "error_code": (
-                "ox_teacher_stopped"
-                if teacher_result.profile_stopped
-                else "worker_deferred"
-                if model_deferred
-                else ""
-            ),
-        },
-    )
-    return {
-        "status": transition["worker_status"],
-        "processed": len(pending),
-        "p5_allowed": p5_allowed,
-        "teachers_available": teachers_available,
-        "counterfactual_available": bool(counterfactual and counterfactual.local),
-        "candidate_snapshots": len(candidate_work),
-        "labels_written": labels_written,
-        "ox_workset": ox_workset,
-        "ox_profile_contract_id": ox_profile_contract_id,
-        "ox_profile_stopped": teacher_result.profile_stopped,
-        **ox_ramp_fields,
-        "counterfactuals_written": counterfactual_written,
-        "cold_start_pending": cold_start_pending,
-        "split_plan_id": split_plan_id,
-        "manifest_backlog": manifest_backlog,
-        "candidate_backlog": candidate_backlog,
-        "promotion": promotion,
-        "rollout_evaluation": rollout_evaluation,
-        "run_id": run_id,
-        "state_sha256": state["seal_sha256"],
-    }
 
 
 def cold_start_due(root: Path | None = None) -> bool:
