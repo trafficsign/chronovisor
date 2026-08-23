@@ -60,6 +60,7 @@ OX_TEACHER_ROLE = "recall.distill.teacher.ox-alpha"
 LOCAL_TRIAD_PROFILE = "local-triad-v1"
 OX_SINGLE_PROFILE = "ox-alpha-single-v1"
 OX_SINGLE_COHORT = "ox-alpha-backfill-v1"
+OX_PROBE_REVISION = "single-teacher-repeat-v2"
 TEACHER_PROFILES = frozenset({LOCAL_TRIAD_PROFILE, OX_SINGLE_PROFILE})
 OX_ALPHA_ENDPOINT = "https://opencode.ai/zen/go/v1"
 OX_ALPHA_CREDENTIAL_REF = "oskeyring:codex-router-opencode-go/default"
@@ -4469,7 +4470,7 @@ def _run_ox_teacher_batch(
                 if (
                     str(previous_watermark.get("split_plan_id") or "") != split_plan_id
                     or str(previous_watermark.get("probe_revision") or "")
-                    != "single-teacher-repeat-v1"
+                    != OX_PROBE_REVISION
                 ):
                     prior_records = 0
             snapshots = catalog.read_candidate_snapshots(
@@ -4630,7 +4631,7 @@ def _run_ox_teacher_batch(
         ):
             probe_batch_id = canonical_json.canonical_json_sha256_strict(
                 {
-                    "revision": "single-teacher-repeat-v1",
+                    "revision": OX_PROBE_REVISION,
                     "split_plan_id": split_plan_id,
                     "rally_id": rally_id,
                     "blind_order": blind_order,
@@ -4640,7 +4641,7 @@ def _run_ox_teacher_batch(
                 candidate_id = str(candidate["candidate_id"])
                 repeat_pair_id = canonical_json.canonical_json_sha256_strict(
                     {
-                        "revision": "single-teacher-repeat-v1",
+                        "revision": OX_PROBE_REVISION,
                         "split_plan_id": split_plan_id,
                         "rally_id": rally_id,
                         "candidate_id": candidate_id,
@@ -4656,7 +4657,7 @@ def _run_ox_teacher_batch(
                         "owner": OX_TEACHER_ROLE,
                         "probe": True,
                         "routes": [OX_TEACHER_ROLE],
-                        "probe_revision": "single-teacher-repeat-v1",
+                        "probe_revision": OX_PROBE_REVISION,
                         "repeat_pair_id": repeat_pair_id,
                         "fixed_repeat": True,
                         "order_swap": True,
@@ -4675,7 +4676,7 @@ def _run_ox_teacher_batch(
             "candidate_records": int(candidate_state["record_count"]),
             "candidate_head": str(candidate_state["head_sha256"]),
             "split_plan_id": split_plan_id,
-            "probe_revision": "single-teacher-repeat-v1",
+            "probe_revision": OX_PROBE_REVISION,
         }
     workset.advance(work_items, watermark)
     claim_limit = config.teacher_claim_limit
@@ -4765,7 +4766,7 @@ def _run_ox_teacher_batch(
         }
         if (
             not required.issubset(provenance)
-            or provenance.get("probe_revision") != "single-teacher-repeat-v1"
+            or provenance.get("probe_revision") != OX_PROBE_REVISION
             or provenance.get("fixed_repeat") is not True
             or provenance.get("order_swap") is not True
             or provenance.get("blind_order") not in {"a_first", "b_first"}
@@ -5030,7 +5031,7 @@ def _run_ox_teacher_batch(
                 and assignment.get("probe_batch_id") == probe_batch_id
                 and assignment.get("fixed_repeat") is True
                 and assignment.get("order_swap") is True
-                and assignment.get("probe_revision") == "single-teacher-repeat-v1"
+                and assignment.get("probe_revision") == OX_PROBE_REVISION
                 for assignment in assignments_for_batch
             )
             and [

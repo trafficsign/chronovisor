@@ -2065,7 +2065,11 @@ def test_ox_incomplete_locked_repeat_is_not_sent(
         local = False
         role = distill.OX_TEACHER_ROLE
 
+        def __init__(self) -> None:
+            self.calls = 0
+
         def evaluate(self, _payload: object) -> dict[str, object]:
+            self.calls += 1
             raise AssertionError("incomplete repeat must not reach the provider")
 
     rally = {
@@ -2082,13 +2086,19 @@ def test_ox_incomplete_locked_repeat_is_not_sent(
         model_cohort_sha256="b" * 64,
     )
     original_claim = workset_module.DistillationWorkset.claim
+    claim_calls = 0
 
     def claim_one(
         self: object, kind: str, _limit: int, owner: str, lease: float
     ) -> object:
+        nonlocal claim_calls
+        claim_calls += 1
+        if claim_calls > 1:
+            return ()
         return original_claim(self, kind, 1, owner, lease)  # type: ignore[arg-type]
 
     monkeypatch.setattr(workset_module.DistillationWorkset, "claim", claim_one)
+    teacher = RemoteTeacher()
     result = distill._run_teacher_batch(
         root=tmp_path,
         config=distill.DistillationConfig(
@@ -2096,7 +2106,7 @@ def test_ox_incomplete_locked_repeat_is_not_sent(
             ox_enabled=True,
             teacher_claim_limit=1,
         ),
-        teachers={distill.OX_TEACHER_ROLE: RemoteTeacher()},
+        teachers={distill.OX_TEACHER_ROLE: teacher},
         snapshots={
             "rally-test": {
                 "candidates": [
@@ -2116,7 +2126,95 @@ def test_ox_incomplete_locked_repeat_is_not_sent(
         structural_verifier=lambda *_args: None,
     )
     assert result.labels_written == 0
-    assert result.deferred is True
+    assert result.workset_status["quarantined"] == 1  # type: ignore[index]
+    assert teacher.calls == 0
+
+
+def test_ox_probe_revision_reissues_terminal_pairs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def __init__(self) -> None:
+            self.accept = False
+            self.calls = 0
+
+        def accepts_egress_payload(self, _payload: object) -> bool:
+            return self.accept
+
+        def evaluate(self, _payload: object) -> dict[str, object]:
+            self.calls += 1
+            return {"_failure": {"class": "invalid_response"}}
+
+    rally = {
+        "rally_id": "rally-test",
+        "session_cluster_id": "session-test",
+        "as_of": "2026-01-03T00:00:00Z",
+        "query_sha256": "query",
+        "context_refs": [],
+    }
+    distill._ensure_split_plan(
+        tmp_path,
+        [rally],
+        raw_watermark="a" * 64,
+        model_cohort_sha256="b" * 64,
+    )
+    config = distill.DistillationConfig(
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        ox_enabled=True,
+        teacher_claim_limit=1,
+        hard_floor_probe_pairs=1,
+    )
+    snapshots = {
+        "rally-test": {
+            "snapshot_sha256": "c" * 64,
+            "candidates": [
+                {"candidate_id": "candidate-a", "text_sha256": "candidate-a"},
+                {"candidate_id": "candidate-b", "text_sha256": "candidate-b"},
+            ],
+        }
+    }
+    texts = {
+        "query": "what proves the claim",
+        "candidate-a": "first bounded fact",
+        "candidate-b": "second bounded fact",
+    }
+    teacher = RemoteTeacher()
+    monkeypatch.setattr(
+        distill, "OX_PROBE_REVISION", "single-teacher-repeat-v1", raising=False
+    )
+    distill._run_teacher_batch(
+        root=tmp_path,
+        config=config,
+        teachers={distill.OX_TEACHER_ROLE: teacher},
+        snapshots=snapshots,
+        rally_by_id={"rally-test": rally},
+        texts=texts,
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+    teacher.accept = True
+    monkeypatch.setattr(distill, "OX_PROBE_REVISION", "single-teacher-repeat-v2")
+
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=config,
+        teachers={distill.OX_TEACHER_ROLE: teacher},
+        snapshots=snapshots,
+        rally_by_id={"rally-test": rally},
+        texts=texts,
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert teacher.calls == 1
+    assert result.model_calls == 1
+    assert result.workset_status["quarantined"] == 6  # type: ignore[index]
+    assert result.workset_status["ready"] == 4  # type: ignore[index]
 
 
 def test_ox_ramp_counts_provider_receipts_not_labels(
