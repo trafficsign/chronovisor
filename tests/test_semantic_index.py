@@ -284,7 +284,23 @@ def test_hnsw_generation_proposes_then_full_vector_rescores(tmp_path: Path) -> N
 
     assert manifest.ann_kind == "usearch_hnsw_f16"
     assert manifest.ann_dimensions == 32
+    original_index = loaded.ann_index
+    exact_modes: list[bool] = []
+
+    class RecordingIndex:
+        def search(
+            self,
+            vector: np.ndarray,
+            *,
+            count: int,
+            exact: bool = False,
+        ) -> object:
+            exact_modes.append(exact)
+            return original_index.search(vector, count=count, exact=exact)
+
+    loaded.ann_index = RecordingIndex()
     assert loaded.search(vectors[37], top_n=5)[0][0] == "page-37"
+    assert exact_modes == [True]
     assert loaded.score_pages(vectors[37], ["page-37"])[0] == (
         "page-37",
         pytest.approx(1.0),

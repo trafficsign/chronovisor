@@ -756,7 +756,11 @@ class LoadedGeneration:
             len(self.vectors),
             max(512, max(1, top_n) * 16),
         )
-        matches = self.ann_index.search(coarse, count=candidate_count)
+        matches = self.ann_index.search(
+            coarse,
+            count=candidate_count,
+            exact=candidate_count == len(self.vectors),
+        )
         return np.asarray(matches.keys, dtype=np.int64)
 
     def _score_base_rows(
