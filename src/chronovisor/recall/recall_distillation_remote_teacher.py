@@ -40,6 +40,13 @@ MAX_PAYLOAD_BYTES = 12_000
 MAX_REQUEST_BYTES = 18_000
 MAX_TEXT_CHARS = 8_000
 MAX_TIMEOUT_MS = 660_000
+OX_RATIONALE_CODES = (
+    "direct_match",
+    "partial_match",
+    "insufficient_evidence",
+    "contradictory_evidence",
+    "not_relevant",
+)
 
 _CANDIDATE_KEYS = frozenset(
     {"candidate_id", "rally_id", "query", "context", "evidence"}
@@ -171,8 +178,7 @@ def _teacher_schema(candidate_ids: tuple[str, ...]) -> dict[str, Any]:
                         },
                         "rationale": {
                             "type": "string",
-                            "minLength": 1,
-                            "maxLength": 600,
+                            "enum": list(OX_RATIONALE_CODES),
                         },
                         "minimal_atom_ids": {
                             "type": "array",
@@ -306,11 +312,13 @@ def _prepare_request(
         system = (
             "You are a temporary Recall relevance teacher. Judge only the "
             "supplied point-in-time evidence. Return schema-valid JSON; use "
-            "uncertain when evidence is insufficient."
+            "uncertain when evidence is insufficient. The rationale field "
+            "must contain one fixed snake_case code, never free text."
         )
         prompt = (
             "Label every candidate exactly once. Return only one JSON object; "
-            "do not add facts, markdown, prose, or repeat secrets. Output schema:\n"
+            "do not add facts, markdown, prose, or repeat secrets. Use only "
+            "the fixed rationale codes in the schema. Output schema:\n"
             + schema_json
             + "\nInput:\n"
             + prompt_json
@@ -366,6 +374,7 @@ def _safe_label(label: object, candidate_ids: frozenset[str]) -> dict[str, Any] 
         or not isinstance(confidence, (int, float))
         or not math.isfinite(confidence)
         or not 0 <= confidence <= 1
+        or rationale not in OX_RATIONALE_CODES
         or safe_rationale is None
         or not isinstance(atoms, list)
         or len(atoms) > 8

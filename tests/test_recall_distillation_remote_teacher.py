@@ -14,6 +14,7 @@ from chronovisor.core.provider_profiles import generic_openai_profile
 from chronovisor.recall.recall_distillation_remote_teacher import (
     OX_ALPHA_ENDPOINT,
     OX_ALPHA_ROUTE_MODEL,
+    OX_RATIONALE_CODES,
     OpenCodeOxAlphaTeacher,
 )
 
@@ -85,7 +86,7 @@ def _payload(*, query: str = "which note answers the query") -> dict[str, object
 
 def _label_response(
     *,
-    rationale: str = "The evidence directly answers the query.",
+    rationale: str = OX_RATIONALE_CODES[0],
     atom: str = "atom-1",
     missing: list[str] | None = None,
     changing_claim: str = "",
@@ -196,8 +197,7 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
                                 },
                                 "rationale": {
                                     "type": "string",
-                                    "minLength": 1,
-                                    "maxLength": 600,
+                                    "enum": list(OX_RATIONALE_CODES),
                                 },
                                 "minimal_atom_ids": {
                                     "type": "array",
@@ -236,6 +236,21 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
     assert '"candidate_id":{"enum":["candidate-1"]' in prompt
     assert '"additionalProperties":false' in prompt
     assert CANARY not in cast(bytes, sender.calls[0].data).decode("utf-8")
+
+
+def test_free_form_rationale_is_rejected_at_response_schema_seam(
+    tmp_path: Path,
+) -> None:
+    sender = FakeSender(
+        _response(_label_response(rationale="The evidence directly answers the query."))
+    )
+    teacher = _teacher(tmp_path, sender)
+
+    result = teacher.evaluate(_payload())
+
+    assert result["_failure"]["class"] == "invalid_response"
+    assert result["_failure"]["stage"] == "teacher_label_schema"
+    assert result["_failure"]["labelable"] is False
 
 
 @pytest.mark.parametrize(
