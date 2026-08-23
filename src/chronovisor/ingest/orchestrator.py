@@ -542,6 +542,10 @@ def _reconcile_processed_projection_candidates(
             )
             raw_bytes = raw_store.read_bytes(unit)
             row["raw_sha256"] = hashlib.sha256(raw_bytes).hexdigest()
+            archived_legacy_markdown = unit.commit is not None and (
+                raw_store.is_archived_legacy_markdown(unit, raw_bytes)
+            )
+            project_as_native = unit.commit is not None and not archived_legacy_markdown
             artifacts = (
                 project_native_transcript(
                     parent_path,
@@ -550,12 +554,13 @@ def _reconcile_processed_projection_candidates(
                     output_dir=output_dir,
                     max_child_bytes=max_child_bytes,
                 )
-                if unit.commit is not None
+                if project_as_native
                 else project_parent_raw(
                     parent_path,
                     output_dir=output_dir,
                     max_child_bytes=max_child_bytes,
                     raw_bytes=raw_bytes,
+                    allow_verified_legacy_markdown=archived_legacy_markdown,
                 )
             )
             row["kind"] = artifacts.kind

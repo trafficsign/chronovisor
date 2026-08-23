@@ -279,6 +279,23 @@ def test_deterministic_save_filename_without_receipt_fails_closed(
         )
 
 
+def test_verified_archived_legacy_markdown_can_passthrough(tmp_path: Path) -> None:
+    path = tmp_path / "save-codex-0123456789abcdef01234567-from4-to8.md"
+    raw_bytes = b"---\nraw_keywords: [historical]\n---\nLegacy transcript envelope.\n"
+
+    result = project_parent_raw(
+        path,
+        raw_bytes=raw_bytes,
+        output_dir=tmp_path / "projection",
+        max_child_bytes=2_000,
+        allow_verified_legacy_markdown=True,
+    )
+
+    assert result.kind == "passthrough"
+    assert result.manifest_path is None
+    assert result.child_paths == ()
+
+
 def test_deterministic_save_filename_must_match_verified_receipt(
     tmp_path: Path,
 ) -> None:

@@ -578,6 +578,71 @@ def test_reconcile_resolves_ref_missing_legacy_archive_without_full_inventory(
     assert result["processed"][0]["resolution"] == "legacy_archive"
 
 
+def test_reconcile_projects_verified_archived_markdown_as_parent_raw(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root, raw_dir = _configure_reconciler(
+        tmp_path,
+        monkeypatch,
+        processed=["archived.md"],
+    )
+    reference = root / "runtime" / "raw-projections" / "parents" / "archived.md"
+    reference.parent.mkdir(parents=True)
+    reference.write_text("{}", encoding="utf-8")
+    raw_bytes = b"verified archived Markdown\n"
+    unit = SimpleNamespace(
+        raw_id="archived.md",
+        storage="segment_sealed",
+        path=raw_dir / "segment.jsonl.zst",
+        sha256="a" * 64,
+        commit=SimpleNamespace(sha256="a" * 64),
+    )
+
+    class FakeRawStore:
+        def __init__(self, _raw_dir: Path) -> None:
+            pass
+
+        def resolve_reference(self, _path: Path):
+            return unit
+
+        def materialize_ingest(self, _unit, _reference_dir: Path) -> Path:
+            return reference
+
+        def read_bytes(self, _unit) -> bytes:
+            return raw_bytes
+
+        def is_archived_legacy_markdown(self, _unit, value: bytes) -> bool:
+            assert value == raw_bytes
+            return True
+
+    monkeypatch.setattr(raw_store_module, "RawStore", FakeRawStore)
+    monkeypatch.setattr(
+        "chronovisor.ingest.raw_semantic_projection.project_native_transcript",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("verified archived Markdown is not native JSONL")
+        ),
+    )
+
+    def project_archived_markdown(*_args, **kwargs):
+        assert kwargs["allow_verified_legacy_markdown"] is True
+        return SimpleNamespace(
+            kind="passthrough",
+            manifest_path=None,
+            child_paths=(),
+        )
+
+    monkeypatch.setattr(
+        "chronovisor.ingest.raw_semantic_projection.project_parent_raw",
+        project_archived_markdown,
+    )
+
+    result = orchestrator.reconcile_processed_projections(max_parents=1)
+
+    assert result["held"] == []
+    assert result["processed"][0]["raw_id"] == "archived.md"
+    assert result["processed"][0]["status"] == "passthrough"
+
+
 def test_reconcile_skips_unresolved_id_without_full_inventory(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -995,6 +995,7 @@ def project_parent_raw(
     output_dir: Path,
     max_child_bytes: int,
     raw_bytes: bytes | None = None,
+    allow_verified_legacy_markdown: bool = False,
 ) -> ProjectionArtifacts:
     """Project one saver raw, or return ``passthrough`` for a normal wiki raw.
 
@@ -1019,7 +1020,7 @@ def project_parent_raw(
             ) from exc
         if child is not None:
             return child
-        if (
+        if not allow_verified_legacy_markdown and (
             _SAVE_TRANSACTION_MARKER_PREFIX in source_text
             or _SAVE_TRANSACTION_FILENAME_RE.fullmatch(raw_path.name) is not None
         ):
