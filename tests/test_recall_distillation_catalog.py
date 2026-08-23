@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from chronovisor.core.canonical_json import canonical_json_sha256_strict
 from chronovisor.core.raw_segment import append_capture
 from chronovisor.core.store import RuntimeContext, init_chronovisor
 from chronovisor.recall import recall_distillation_catalog as catalog
@@ -478,4 +479,175 @@ def test_historical_index_checkpoint_mismatch_revalidates(
     assert catalog.sync_historical_index(raw_dir, tmp_path) == digest
     assert calls == 2
     assert catalog.sync_historical_index(raw_dir, tmp_path) == digest
-    assert calls == 2
+
+
+def _candidate_snapshot(rally_id: str, candidate_ids: list[str]) -> dict[str, object]:
+    snapshot: dict[str, object] = {
+        "schema": catalog.CANDIDATE_SNAPSHOT_SCHEMA,
+        "rally_id": rally_id,
+        "as_of": "2026-08-23T00:00:00Z",
+        "retriever_revision": "historical-fts-v1",
+        "feature_revision": "recall-distill-text-v2",
+        "query_feature_text_sha256": "a" * 64,
+        "candidates": [
+            {
+                "candidate_id": candidate_id,
+                "rank": index + 1,
+                "text_sha256": (str(index + 1) * 64)[:64],
+                "candidate_feature_text_sha256": "b" * 64,
+            }
+            for index, candidate_id in enumerate(candidate_ids)
+        ],
+    }
+    snapshot["snapshot_sha256"] = canonical_json_sha256_strict(snapshot)
+    return snapshot
+
+
+def test_candidate_offset_index_bootstrap_tail_noop_and_random_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = store.distillation_dir(tmp_path) / "candidate-ledger.jsonl"
+    first = {
+        "kind": "candidate-snapshot",
+        "rally_id": "rally-1",
+        "snapshot": _candidate_snapshot("rally-1", ["c1", "c2", "c3", "c4"]),
+    }
+    store.append_chain(ledger, first)
+    bootstrap = catalog.sync_candidate_index(tmp_path, ledger)
+    assert bootstrap["count"] == 1
+    assert bootstrap["head_sha256"]
+    assert catalog.catalog_path(tmp_path).stat().st_mode & 0o777 == 0o600
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM candidate_records").fetchone()[0] == 1
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(candidate_records)")
+        }
+        assert "snapshot" not in columns
+        assert "features" not in columns
+
+    original_loads = catalog.json.loads
+    monkeypatch.setattr(
+        catalog.json,
+        "loads",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("no-change sync decoded the ledger")
+        ),
+    )
+    assert catalog.sync_candidate_index(tmp_path, ledger)["status"] == "noop"
+    monkeypatch.setattr(catalog.json, "loads", original_loads)
+
+    second = {
+        "kind": "candidate-snapshot",
+        "rally_id": "rally-2",
+        "snapshot": _candidate_snapshot("rally-2", ["c5"]),
+    }
+    store.append_chain(ledger, second)
+    loads = 0
+
+    def count_loads(value: object, *args: object, **kwargs: object) -> object:
+        nonlocal loads
+        loads += 1
+        return original_loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(catalog.json, "loads", count_loads)
+    advanced = catalog.sync_candidate_index(tmp_path, ledger)
+    assert advanced["status"] == "advanced"
+    assert advanced["count"] == 2
+    assert loads <= 2
+    claim = next(
+        row
+        for row in store.read_chain(ledger)
+        if row["rally_id"] == "rally-2"
+    )
+    assert catalog.read_candidate_snapshots(
+        tmp_path,
+        ledger,
+        [{"rally_id": "rally-2", "record_sha256": claim["record_sha256"]}],
+    )["rally-2"]["rally_id"] == "rally-2"
+    assert catalog.read_candidate_snapshots(
+        tmp_path,
+        ledger,
+        [
+            {"payload_ref": "candidate-snapshot:rally-2:c5"},
+            {"payload_ref": "candidate-snapshot:rally-2:c5"},
+        ],
+    )["rally-2"]["rally_id"] == "rally-2"
+    with pytest.raises(catalog.CatalogError, match="absent from snapshot"):
+        catalog.read_candidate_snapshots(
+            tmp_path,
+            ledger,
+            [{"payload_ref": "candidate-snapshot:rally-2:wrong"}],
+        )
+    with pytest.raises(catalog.CatalogError, match="reference"):
+        catalog.read_candidate_snapshots(
+            tmp_path,
+            ledger,
+            [{"rally_id": "rally-2", "payload_ref": "garbage"}],
+        )
+    with pytest.raises(catalog.CatalogError, match="conflicts"):
+        catalog.read_candidate_snapshots(
+            tmp_path,
+            ledger,
+            [
+                {
+                    "rally_id": "rally-1",
+                    "payload_ref": "candidate-snapshot:rally-2:c5",
+                }
+            ],
+        )
+    assert catalog.candidate_rally_ids(tmp_path, after_seq=1) == {"rally-2"}
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        connection.execute(
+            "UPDATE candidate_records SET rally_id='tampered' WHERE rally_id='rally-1'"
+        )
+    with pytest.raises(catalog.CatalogError, match="index row"):
+        catalog.candidate_rally_ids(tmp_path)
+
+
+def test_candidate_offset_index_fails_closed_and_explicit_rebuild(
+    tmp_path: Path,
+) -> None:
+    ledger = store.distillation_dir(tmp_path) / "candidate-ledger.jsonl"
+    store.append_chain(
+        ledger,
+        {
+            "kind": "candidate-snapshot",
+            "rally_id": "rally-1",
+            "snapshot": _candidate_snapshot("rally-1", ["c1"]),
+        },
+    )
+    catalog.sync_candidate_index(tmp_path, ledger)
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        offset = connection.execute(
+            "SELECT offset FROM candidate_records WHERE rally_id='rally-1'"
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE candidate_records SET offset=? WHERE rally_id='rally-1'",
+            (offset + 1,),
+        )
+    with pytest.raises(catalog.CatalogError, match="offset index"):
+        catalog.read_candidate_snapshots(tmp_path, ledger, ["rally-1"])
+
+    original_ledger = ledger.read_bytes()
+    ledger.write_bytes(original_ledger[:-3])
+    with pytest.raises(
+        catalog.CatalogError, match="rollback|changed|truncated|offset index"
+    ):
+        catalog.sync_candidate_index(tmp_path, ledger)
+
+    ledger.write_bytes(original_ledger)
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        connection.execute("DELETE FROM candidate_records")
+    repaired = catalog.sync_candidate_index(tmp_path, ledger, rebuild=True)
+    assert repaired["status"] == "bootstrap"
+
+
+def test_candidate_offset_index_rejects_symlinked_catalog(tmp_path: Path) -> None:
+    path = catalog.catalog_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    target = tmp_path / "outside.sqlite"
+    target.touch()
+    path.symlink_to(target)
+
+    with pytest.raises(catalog.CatalogError, match="unsafe"):
+        catalog.candidate_index_state(tmp_path)

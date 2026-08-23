@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-from chronovisor.core.canonical_json import canonical_json_sha256_strict
+from chronovisor.core.canonical_json import (
+    canonical_json_bytes_strict,
+    canonical_json_sha256_strict,
+)
 from chronovisor.core.raw_segment import RawSegmentCorrupt
 from chronovisor.core.raw_store import (
     RawStore,
@@ -25,6 +28,8 @@ from chronovisor.recall import recall_distillation_store as store
 CATALOG_SCHEMA = "chronovisor.recall-distillation-catalog.v1"
 HISTORICAL_INDEX_SCHEMA = "chronovisor.recall-historical-fts.v1"
 HISTORICAL_INDEX_CHECKPOINT_KIND = "historical-index-checkpoint"
+CANDIDATE_SNAPSHOT_SCHEMA = "chronovisor.recall-candidate-snapshot.v1"
+CANDIDATE_INDEX_SCHEMA = "chronovisor.recall-candidate-offset-index.v1"
 
 
 class CatalogError(ValueError):
@@ -113,7 +118,17 @@ def _read_index_checkpoint(path: Path, watermark: str) -> dict[str, Any] | None:
 def _connect(root: Path) -> sqlite3.Connection:
     path = catalog_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise CatalogError("historical catalog path is unsafe")
+    try:
+        connection = sqlite3.connect(path)
+    except sqlite3.Error as exc:
+        raise CatalogError("historical catalog is unavailable") from exc
+    try:
+        path.chmod(0o600)
+    except OSError as exc:
+        connection.close()
+        raise CatalogError("historical catalog is unavailable") from exc
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("PRAGMA journal_mode=DELETE")
@@ -165,6 +180,31 @@ def _connect(root: Path) -> sqlite3.Connection:
             rally_id TEXT PRIMARY KEY,
             as_of_us INTEGER NOT NULL,
             row_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS candidate_records(
+            record_index INTEGER PRIMARY KEY,
+            rally_id TEXT NOT NULL UNIQUE,
+            previous_sha256 TEXT NOT NULL,
+            record_sha256 TEXT NOT NULL UNIQUE,
+            snapshot_sha256 TEXT NOT NULL,
+            offset INTEGER NOT NULL CHECK(offset >= 0),
+            length INTEGER NOT NULL CHECK(length > 0),
+            index_sha256 TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS candidate_records_rally
+            ON candidate_records(rally_id);
+        CREATE TABLE IF NOT EXISTS candidate_index_state(
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            index_schema TEXT NOT NULL,
+            ledger_path TEXT NOT NULL,
+            ledger_exists INTEGER NOT NULL CHECK(ledger_exists IN (0,1)),
+            ledger_size INTEGER NOT NULL CHECK(ledger_size >= 0),
+            ledger_dev INTEGER NOT NULL,
+            ledger_ino INTEGER NOT NULL,
+            ledger_mtime_ns INTEGER NOT NULL,
+            ledger_ctime_ns INTEGER NOT NULL,
+            record_count INTEGER NOT NULL CHECK(record_count >= 0),
+            head_sha256 TEXT NOT NULL
         );
         """
     )
@@ -615,6 +655,719 @@ def rallies(root: Path, ids: Iterable[str] | None = None) -> list[dict[str, Any]
                 "SELECT row_json FROM rallies ORDER BY as_of_us,rally_id"
             )
         return [json.loads(row[0]) for row in rows]
+
+
+def _candidate_file_state(path: Path) -> dict[str, int]:
+    """Return a cheap identity/size tuple for the append-only candidate ledger."""
+
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return {
+            "ledger_exists": 0,
+            "ledger_size": 0,
+            "ledger_dev": -1,
+            "ledger_ino": -1,
+            "ledger_mtime_ns": -1,
+            "ledger_ctime_ns": -1,
+        }
+    except OSError as exc:
+        raise CatalogError("candidate ledger is unreadable") from exc
+    if not path.is_file():
+        raise CatalogError("candidate ledger is not a regular file")
+    return {
+        "ledger_exists": 1,
+        "ledger_size": stat.st_size,
+        "ledger_dev": stat.st_dev,
+        "ledger_ino": stat.st_ino,
+        "ledger_mtime_ns": stat.st_mtime_ns,
+        "ledger_ctime_ns": stat.st_ctime_ns,
+    }
+
+
+def _candidate_sha(value: object, *, allow_empty: bool = False) -> str:
+    if allow_empty and value == "":
+        return ""
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise CatalogError("candidate ledger digest is invalid")
+    return value
+
+
+def _candidate_snapshot(
+    row: Mapping[str, Any], *, offset: int, length: int, expected_previous: str
+) -> dict[str, Any]:
+    """Validate one canonical candidate row and retain only index metadata."""
+
+    if (
+        row.get("schema") != store.DISTILLATION_SCHEMA
+        or row.get("namespace") != "recall-distillation"
+        or row.get("kind") != "candidate-snapshot"
+    ):
+        raise CatalogError("candidate ledger row metadata is invalid")
+    previous = _candidate_sha(row.get("previous_sha256"), allow_empty=True)
+    if previous != expected_previous:
+        raise CatalogError("candidate ledger chain mismatch")
+    record_sha256 = _candidate_sha(row.get("record_sha256"))
+    unsigned = {key: value for key, value in row.items() if key != "record_sha256"}
+    try:
+        record_digest = canonical_json_sha256_strict(unsigned)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise CatalogError("candidate ledger record is not canonical") from exc
+    if record_sha256 != record_digest:
+        raise CatalogError("candidate ledger record digest mismatch")
+    rally_id = row.get("rally_id")
+    if not isinstance(rally_id, str) or not rally_id:
+        raise CatalogError("candidate rally id is invalid")
+    snapshot = row.get("snapshot")
+    if not isinstance(snapshot, Mapping):
+        raise CatalogError("candidate snapshot is not an object")
+    if (
+        snapshot.get("schema") != CANDIDATE_SNAPSHOT_SCHEMA
+        or snapshot.get("rally_id") != rally_id
+        or not isinstance(snapshot.get("as_of"), str)
+        or not isinstance(snapshot.get("retriever_revision"), str)
+        or not isinstance(snapshot.get("feature_revision"), str)
+        or not isinstance(snapshot.get("query_feature_text_sha256"), str)
+        or not isinstance(snapshot.get("candidates"), list)
+    ):
+        raise CatalogError("candidate snapshot shape is invalid")
+    _candidate_sha(snapshot["query_feature_text_sha256"])
+    snapshot_sha256 = _candidate_sha(snapshot.get("snapshot_sha256"))
+    snapshot_unsigned = {
+        key: value for key, value in snapshot.items() if key != "snapshot_sha256"
+    }
+    try:
+        snapshot_digest = canonical_json_sha256_strict(snapshot_unsigned)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise CatalogError("candidate snapshot is not canonical") from exc
+    if snapshot_sha256 != snapshot_digest:
+        raise CatalogError("candidate snapshot digest mismatch")
+    seen_candidates: set[str] = set()
+    candidates = snapshot["candidates"]
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, Mapping):
+            raise CatalogError("candidate item is not an object")
+        candidate_id = candidate.get("candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            raise CatalogError("candidate id is invalid")
+        if candidate_id in seen_candidates:
+            raise CatalogError("candidate id is duplicated within rally")
+        seen_candidates.add(candidate_id)
+        rank = candidate.get("rank", index + 1)
+        if isinstance(rank, bool) or not isinstance(rank, int) or rank <= 0:
+            raise CatalogError("candidate rank is invalid")
+        text_sha256 = candidate.get("text_sha256")
+        if text_sha256 is not None:
+            _candidate_sha(text_sha256)
+        feature_text_sha256 = candidate.get("candidate_feature_text_sha256")
+        if feature_text_sha256 is not None:
+            _candidate_sha(feature_text_sha256)
+        source_index = candidate.get("source_index")
+        if source_index is not None and (
+            isinstance(source_index, bool) or not isinstance(source_index, int)
+        ):
+            raise CatalogError("candidate source index is invalid")
+    if offset < 0 or length <= 0:
+        raise CatalogError("candidate ledger offset is invalid")
+    return {
+        "rally_id": rally_id,
+        "previous_sha256": previous,
+        "record_sha256": record_sha256,
+        "snapshot_sha256": snapshot_sha256,
+        "offset": offset,
+        "length": length,
+    }
+
+
+def _scan_candidate_ledger(
+    path: Path,
+    *,
+    start: int,
+    expected_previous: str,
+    expected_count: int,
+) -> list[dict[str, Any]]:
+    """Decode a full ledger for rebuild or only its append tail."""
+
+    state = _candidate_file_state(path)
+    if not state["ledger_exists"]:
+        if start or expected_count or expected_previous:
+            raise CatalogError("candidate ledger was truncated")
+        return []
+    if start < 0 or start > state["ledger_size"]:
+        raise CatalogError("candidate ledger offset is invalid")
+    parsed: list[dict[str, Any]] = []
+    try:
+        with path.open("rb") as handle:
+            if start:
+                handle.seek(start)
+            previous = expected_previous
+            record_index = expected_count
+            while True:
+                offset = handle.tell()
+                line = handle.readline()
+                if not line:
+                    break
+                if not line.endswith(b"\n"):
+                    raise CatalogError("candidate ledger tail is truncated")
+                try:
+                    decoded = json.loads(line)
+                except (UnicodeError, json.JSONDecodeError) as exc:
+                    raise CatalogError("candidate ledger row is invalid") from exc
+                if not isinstance(decoded, dict):
+                    raise CatalogError("candidate ledger row is not an object")
+                try:
+                    canonical_line = canonical_json_bytes_strict(decoded) + b"\n"
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise CatalogError("candidate ledger row is not canonical") from exc
+                if canonical_line != line:
+                    raise CatalogError("candidate ledger row is not canonical")
+                metadata = _candidate_snapshot(
+                    decoded,
+                    offset=offset,
+                    length=len(line),
+                    expected_previous=previous,
+                )
+                metadata["record_index"] = record_index
+                parsed.append(metadata)
+                previous = str(metadata["record_sha256"])
+                record_index += 1
+    except CatalogError:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise CatalogError("candidate ledger is unreadable") from exc
+    return parsed
+
+
+def _candidate_index_digest(row: Mapping[str, Any]) -> str:
+    return canonical_json_sha256_strict(
+        {
+            key: row[key]
+            for key in (
+                "record_index",
+                "rally_id",
+                "previous_sha256",
+                "record_sha256",
+                "snapshot_sha256",
+                "offset",
+                "length",
+            )
+        }
+    )
+
+
+def _verify_candidate_index_row(row: sqlite3.Row) -> dict[str, Any]:
+    value = dict(row)
+    if _candidate_sha(value.get("index_sha256")) != _candidate_index_digest(value):
+        raise CatalogError("candidate offset index row is invalid")
+    return value
+
+
+def _candidate_index_state_row(
+    connection: sqlite3.Connection,
+) -> dict[str, Any] | None:
+    try:
+        rows = list(connection.execute("SELECT * FROM candidate_index_state"))
+    except sqlite3.DatabaseError as exc:
+        raise CatalogError("candidate index state is unreadable") from exc
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise CatalogError("candidate index state is duplicated")
+    row = dict(rows[0])
+    if row.get("singleton") != 1 or row.get("index_schema") != CANDIDATE_INDEX_SCHEMA:
+        raise CatalogError("candidate index schema conflicts")
+    if not isinstance(row.get("ledger_path"), str) or not row["ledger_path"]:
+        raise CatalogError("candidate index ledger path is invalid")
+    if row.get("ledger_exists") not in (0, 1):
+        raise CatalogError("candidate index file state is invalid")
+    for key in (
+        "ledger_size",
+        "ledger_dev",
+        "ledger_ino",
+        "ledger_mtime_ns",
+        "ledger_ctime_ns",
+        "record_count",
+    ):
+        if isinstance(row.get(key), bool) or not isinstance(row.get(key), int):
+            raise CatalogError("candidate index file state is invalid")
+    _candidate_sha(row.get("head_sha256"), allow_empty=True)
+    if (row["record_count"] == 0) != (row["head_sha256"] == ""):
+        raise CatalogError("candidate index count/head mismatch")
+    return row
+
+
+def _candidate_db_summary(
+    connection: sqlite3.Connection, state: Mapping[str, Any]
+) -> tuple[int, str]:
+    try:
+        count = int(
+            connection.execute("SELECT COUNT(*) FROM candidate_records").fetchone()[0]
+        )
+        raw_row = connection.execute(
+            "SELECT * FROM candidate_records ORDER BY record_index DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.DatabaseError as exc:
+        raise CatalogError("candidate index is unreadable") from exc
+    row = None if raw_row is None else _verify_candidate_index_row(raw_row)
+    head = "" if row is None else str(row["record_sha256"])
+    if count != int(state["record_count"]) or head != state["head_sha256"]:
+        raise CatalogError("candidate index state conflicts with records")
+    if row is not None and int(row["record_index"]) != count - 1:
+        raise CatalogError("candidate index sequence is invalid")
+    if row is not None and (
+        int(row["offset"]) < 0
+        or int(row["length"]) <= 0
+        or int(row["offset"]) + int(row["length"]) != int(state["ledger_size"])
+    ):
+        raise CatalogError("candidate offset index size conflicts with ledger")
+    return count, head
+
+
+def _candidate_state_values(
+    path: Path,
+    file_state: Mapping[str, int],
+    *,
+    record_count: int,
+    head_sha256: str,
+) -> tuple[Any, ...]:
+    return (
+        1,
+        CANDIDATE_INDEX_SCHEMA,
+        str(path),
+        file_state["ledger_exists"],
+        file_state["ledger_size"],
+        file_state["ledger_dev"],
+        file_state["ledger_ino"],
+        file_state["ledger_mtime_ns"],
+        file_state["ledger_ctime_ns"],
+        record_count,
+        head_sha256,
+    )
+
+
+def _upsert_candidate_index_state(
+    connection: sqlite3.Connection, values: tuple[Any, ...]
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO candidate_index_state(
+            singleton,index_schema,ledger_path,ledger_exists,ledger_size,
+            ledger_dev,ledger_ino,ledger_mtime_ns,ledger_ctime_ns,
+            record_count,head_sha256
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(singleton) DO UPDATE SET
+            index_schema=excluded.index_schema,
+            ledger_path=excluded.ledger_path,
+            ledger_exists=excluded.ledger_exists,
+            ledger_size=excluded.ledger_size,
+            ledger_dev=excluded.ledger_dev,
+            ledger_ino=excluded.ledger_ino,
+            ledger_mtime_ns=excluded.ledger_mtime_ns,
+            ledger_ctime_ns=excluded.ledger_ctime_ns,
+            record_count=excluded.record_count,
+            head_sha256=excluded.head_sha256
+        """,
+        values,
+    )
+
+
+def _insert_candidate_rows(
+    connection: sqlite3.Connection,
+    rows: Iterable[dict[str, Any]],
+) -> None:
+    for metadata in rows:
+        try:
+            connection.execute(
+                """
+                INSERT INTO candidate_records(
+                    record_index,rally_id,previous_sha256,record_sha256,
+                    snapshot_sha256,offset,length,index_sha256
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    metadata["record_index"],
+                    metadata["rally_id"],
+                    metadata["previous_sha256"],
+                    metadata["record_sha256"],
+                    metadata["snapshot_sha256"],
+                    metadata["offset"],
+                    metadata["length"],
+                    _candidate_index_digest(metadata),
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise CatalogError("candidate rally is duplicated") from exc
+
+
+def sync_candidate_index(
+    root: Path, ledger_path: Path, *, rebuild: bool = False
+) -> dict[str, Any]:
+    """Project candidate ledger offsets without copying snapshot bodies."""
+
+    path = ledger_path.expanduser().resolve(strict=False)
+    connection = _connect(root)
+    status = "noop"
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        state = _candidate_index_state_row(connection)
+        current = _candidate_file_state(path)
+        if rebuild:
+            connection.execute("DELETE FROM candidate_records")
+            connection.execute("DELETE FROM candidate_index_state")
+            state = None
+            mode = "bootstrap"
+        elif state is None:
+            if connection.execute(
+                "SELECT COUNT(*) FROM candidate_records"
+            ).fetchone()[0]:
+                raise CatalogError("candidate index state is missing")
+            mode = "bootstrap"
+        else:
+            if state["ledger_path"] != str(path):
+                raise CatalogError("candidate index ledger path conflicts")
+            count, head = _candidate_db_summary(connection, state)
+            stored = {
+                key: state[key]
+                for key in (
+                    "ledger_exists",
+                    "ledger_size",
+                    "ledger_dev",
+                    "ledger_ino",
+                    "ledger_mtime_ns",
+                    "ledger_ctime_ns",
+                )
+            }
+            if current == stored:
+                connection.rollback()
+                return {
+                    "status": "noop",
+                    "count": count,
+                    "record_count": count,
+                    "indexed_seq": count,
+                    "indexed_offset": int(state["ledger_size"]),
+                    "head_sha256": head,
+                }
+            if (
+                current["ledger_exists"] == 0
+                or current["ledger_size"] < state["ledger_size"]
+                or (
+                    current["ledger_dev"],
+                    current["ledger_ino"],
+                )
+                != (state["ledger_dev"], state["ledger_ino"])
+            ):
+                if count == 0 and state["ledger_size"] == 0:
+                    mode = "bootstrap"
+                    connection.execute("DELETE FROM candidate_records")
+                else:
+                    raise CatalogError("candidate ledger rollback or replacement")
+            elif current["ledger_size"] == state["ledger_size"]:
+                try:
+                    verified_head = store.chain_head(path)
+                except store.DistillationStoreError as exc:
+                    raise CatalogError("candidate ledger head is invalid") from exc
+                if (
+                    verified_head["records"] != count
+                    or verified_head["head_sha256"] != head
+                ):
+                    raise CatalogError("candidate ledger head conflicts with index")
+                _upsert_candidate_index_state(
+                    connection,
+                    _candidate_state_values(
+                        path,
+                        current,
+                        record_count=count,
+                        head_sha256=head,
+                    ),
+                )
+                connection.commit()
+                catalog_path(root).chmod(0o600)
+                return {
+                    "status": "noop",
+                    "count": count,
+                    "record_count": count,
+                    "indexed_seq": count,
+                    "indexed_offset": int(current["ledger_size"]),
+                    "head_sha256": head,
+                }
+            else:
+                mode = "tail"
+        if mode == "bootstrap":
+            start = 0
+            expected_previous = ""
+            expected_count = 0
+        else:
+            # ``state`` is present for the only remaining path: an append tail.
+            assert state is not None
+            start = int(state["ledger_size"])
+            expected_previous = str(state["head_sha256"])
+            expected_count = int(state["record_count"])
+        tail_head: Mapping[str, Any] | None = None
+        if mode == "tail":
+            try:
+                tail_head = store.chain_head(path)
+            except store.DistillationStoreError as exc:
+                raise CatalogError("candidate ledger head is invalid") from exc
+        parsed = _scan_candidate_ledger(
+            path,
+            start=start,
+            expected_previous=expected_previous,
+            expected_count=expected_count,
+        )
+        after = _candidate_file_state(path)
+        if after != current:
+            raise CatalogError("candidate ledger changed during indexing")
+        if mode == "bootstrap":
+            _insert_candidate_rows(connection, parsed)
+            count = len(parsed)
+        else:
+            _insert_candidate_rows(connection, parsed)
+            count = expected_count + len(parsed)
+        head = expected_previous if not parsed else str(parsed[-1]["record_sha256"])
+        if tail_head is not None and (
+            tail_head["records"] != count
+            or tail_head["head_sha256"] != head
+        ):
+            raise CatalogError("candidate ledger head conflicts with index")
+        _upsert_candidate_index_state(
+            connection,
+            _candidate_state_values(
+                path,
+                current,
+                record_count=count,
+                head_sha256=head,
+            ),
+        )
+        connection.commit()
+        status = "bootstrap" if mode == "bootstrap" else "advanced"
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+    catalog_path(root).chmod(0o600)
+    return {
+        "status": status,
+        "count": count,
+        "record_count": count,
+        "indexed_seq": count,
+        "indexed_offset": int(current["ledger_size"]),
+        "head_sha256": head,
+    }
+
+
+def candidate_index_state(root: Path) -> dict[str, Any]:
+    """Return indexed count/head metadata without touching the ledger body."""
+
+    connection = _connect(root)
+    try:
+        state = _candidate_index_state_row(connection)
+        if state is None:
+            return {
+                "count": 0,
+                "record_count": 0,
+                "indexed_seq": 0,
+                "indexed_offset": 0,
+                "ledger_size": 0,
+                "ledger_ino": -1,
+                "head_sha256": "",
+            }
+        count, head = _candidate_db_summary(connection, state)
+        return {
+            **state,
+            "count": count,
+            "record_count": count,
+            "indexed_seq": count,
+            "indexed_offset": state["ledger_size"],
+            "head_sha256": head,
+        }
+    finally:
+        connection.close()
+
+
+def candidate_rally_ids(root: Path, *, after_seq: int = 0) -> set[str]:
+    """Return rally ids already projected into the candidate offset index."""
+
+    if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
+        raise CatalogError("candidate index sequence is invalid")
+    connection = _connect(root)
+    try:
+        state = _candidate_index_state_row(connection)
+        if state is None:
+            return set()
+        _candidate_db_summary(connection, state)
+        rows = connection.execute(
+            "SELECT * FROM candidate_records WHERE record_index >= ? "
+            "ORDER BY record_index",
+            (after_seq,),
+        )
+        return {
+            str(_verify_candidate_index_row(row)["rally_id"])
+            for row in rows
+        }
+    except sqlite3.DatabaseError as exc:
+        raise CatalogError("candidate index is unreadable") from exc
+    finally:
+        connection.close()
+
+
+def read_candidate_snapshots(
+    root: Path,
+    ledger_path: Path,
+    rally_ids: Iterable[str | Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Read exact candidate snapshot rows by indexed offset/length."""
+
+    path = ledger_path.expanduser().resolve(strict=False)
+    requested: dict[str, list[Mapping[str, Any]]] = {}
+    expected_candidates: dict[str, set[str]] = defaultdict(set)
+    if isinstance(rally_ids, (str, Mapping)):
+        values: Iterable[str | Mapping[str, Any]] = (rally_ids,)
+    elif hasattr(rally_ids, "payload_ref"):
+        values = ({"payload_ref": rally_ids.payload_ref},)
+    else:
+        values = rally_ids
+    for value in values:
+        if isinstance(value, Mapping):
+            rally_id = value.get("rally_id")
+            payload_ref = value.get("payload_ref")
+            candidate_id = value.get("candidate_id")
+            if payload_ref is not None:
+                if not isinstance(payload_ref, str):
+                    raise CatalogError("candidate claim reference is invalid")
+                parts = payload_ref.split(":")
+                if (
+                    len(parts) not in (2, 3)
+                    or parts[0] != "candidate-snapshot"
+                    or not parts[1]
+                    or (len(parts) == 3 and not parts[2])
+                ):
+                    raise CatalogError("candidate claim reference is invalid")
+                if isinstance(rally_id, str) and rally_id != parts[1]:
+                    raise CatalogError("candidate claim reference conflicts")
+                rally_id = parts[1]
+                if len(parts) == 3:
+                    if isinstance(candidate_id, str) and candidate_id != parts[2]:
+                        raise CatalogError("candidate claim reference conflicts")
+                    candidate_id = parts[2]
+            if not isinstance(rally_id, str) or not rally_id:
+                raise CatalogError("candidate claim reference is invalid")
+            if candidate_id is not None:
+                if not isinstance(candidate_id, str) or not candidate_id:
+                    raise CatalogError("candidate claim reference is invalid")
+                expected_candidates[rally_id].add(candidate_id)
+            requested.setdefault(rally_id, []).append(value)
+        elif isinstance(value, str) and value:
+            requested.setdefault(value, [])
+        else:
+            raise CatalogError("candidate rally id is invalid")
+    if not requested:
+        return {}
+    connection = _connect(root)
+    try:
+        state = _candidate_index_state_row(connection)
+        if state is None or state["ledger_path"] != str(path):
+            raise CatalogError("candidate index is not synchronized")
+        _candidate_db_summary(connection, state)
+        current = _candidate_file_state(path)
+        stored = {
+            key: state[key]
+            for key in (
+                "ledger_exists",
+                "ledger_size",
+                "ledger_dev",
+                "ledger_ino",
+                "ledger_mtime_ns",
+                "ledger_ctime_ns",
+            )
+        }
+        if current != stored:
+            raise CatalogError("candidate ledger changed after indexing")
+        placeholders = ",".join("?" for _ in requested)
+        rows = [
+            _verify_candidate_index_row(row)
+            for row in connection.execute(
+                "SELECT * FROM candidate_records WHERE rally_id IN ("
+                + placeholders
+                + ")",
+                tuple(requested),
+            )
+        ]
+        if len(rows) != len(requested):
+            raise CatalogError("candidate rally is absent from index")
+    except sqlite3.DatabaseError as exc:
+        raise CatalogError("candidate index is unreadable") from exc
+    finally:
+        connection.close()
+    result: dict[str, dict[str, Any]] = {}
+    try:
+        with path.open("rb") as handle:
+            for row in rows:
+                offset = int(row["offset"])
+                length = int(row["length"])
+                if (
+                    offset < 0
+                    or length <= 0
+                    or offset + length > int(state["ledger_size"])
+                ):
+                    raise CatalogError("candidate offset index is invalid")
+                handle.seek(offset)
+                encoded = handle.read(length)
+                if len(encoded) != length or not encoded.endswith(b"\n"):
+                    raise CatalogError("candidate ledger row is truncated")
+                try:
+                    decoded = json.loads(encoded)
+                except (UnicodeError, json.JSONDecodeError) as exc:
+                    raise CatalogError("candidate ledger row is invalid") from exc
+                if not isinstance(decoded, dict):
+                    raise CatalogError("candidate ledger row is not an object")
+                try:
+                    canonical_line = canonical_json_bytes_strict(decoded) + b"\n"
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise CatalogError("candidate ledger row is not canonical") from exc
+                if canonical_line != encoded:
+                    raise CatalogError("candidate ledger row is not canonical")
+                metadata = _candidate_snapshot(
+                    decoded,
+                    offset=offset,
+                    length=length,
+                    expected_previous=str(row["previous_sha256"]),
+                )
+                if (
+                    metadata["rally_id"] != row["rally_id"]
+                    or metadata["record_sha256"] != row["record_sha256"]
+                    or metadata["snapshot_sha256"] != row["snapshot_sha256"]
+                ):
+                    raise CatalogError("candidate index row conflicts with ledger")
+                rally_id = str(row["rally_id"])
+                for claim in requested[rally_id]:
+                    for key in ("record_sha256", "snapshot_sha256"):
+                        if key in claim and claim[key] != row[key]:
+                            raise CatalogError("candidate claim conflicts with index")
+                    claim_offset = claim.get("offset")
+                    claim_length = claim.get("length")
+                    if claim_offset is not None and claim_offset != offset:
+                        raise CatalogError("candidate claim offset conflicts")
+                    if claim_length is not None and claim_length != length:
+                        raise CatalogError("candidate claim length conflicts")
+                snapshot = cast(dict[str, Any], decoded["snapshot"])
+                actual_candidates = {
+                    str(candidate.get("candidate_id"))
+                    for candidate in snapshot.get("candidates", [])
+                    if isinstance(candidate, Mapping)
+                }
+                if not expected_candidates[rally_id] <= actual_candidates:
+                    raise CatalogError("candidate claim is absent from snapshot")
+                result[rally_id] = snapshot
+    except CatalogError:
+        raise
+    except OSError as exc:
+        raise CatalogError("candidate ledger is unreadable") from exc
+    return result
 
 
 def texts(
