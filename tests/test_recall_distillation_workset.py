@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import sqlite3
@@ -36,6 +37,17 @@ def _completed() -> dict[str, str]:
     }
 
 
+def _split_item(work_id: str, plan_id: str) -> dict[str, object]:
+    item = _item(work_id)
+    item["temporal_split"] = {
+        "as_of": "2026-08-20T00:00:00Z",
+        "group_id": "group-1",
+        "split": "train",
+        "split_plan_id": plan_id,
+    }
+    return item
+
+
 def test_advance_is_idempotent_and_rejects_identity_mutation(tmp_path: Path) -> None:
     path = tmp_path / "workset.sqlite3"
     workset = DistillationWorkset(path)
@@ -59,6 +71,103 @@ def test_advance_is_idempotent_and_rejects_identity_mutation(tmp_path: Path) -> 
         assert connection.execute(
             "SELECT value_json FROM workset_state WHERE key = 'watermark'"
         ).fetchone() == ('{"source":2}',)
+
+
+@pytest.mark.parametrize("quarantined", [False, True])
+def test_advance_rebinds_unfinished_identical_split_to_new_plan(
+    tmp_path: Path, quarantined: bool
+) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance([_split_item("one", "a" * 64)], {"source": 1})
+    if quarantined:
+        claim = workset.claim("label", 1, "ox-1", 60)[0]
+        workset.commit(
+            [claim],
+            [{"status": "quarantined", "error_class": "invalid_response"}],
+        )
+
+    result = workset.advance([_split_item("one", "b" * 64)], {"source": 2})
+
+    assert result["existing"] == 1
+    with sqlite3.connect(path) as connection:
+        temporal, state, attempt, error = connection.execute(
+            "SELECT temporal_split_json, state, attempt_count, last_error_class "
+            "FROM work_items WHERE work_id = 'one'"
+        ).fetchone()
+    assert '"split_plan_id":"' + "b" * 64 + '"' in temporal
+    assert (state, attempt, error) == (
+        ("quarantined", 1, "invalid_response") if quarantined else ("ready", 0, "")
+    )
+
+
+@pytest.mark.parametrize("terminal", ["leased", "completed"])
+def test_advance_refuses_split_plan_rebind_for_leased_or_completed(
+    tmp_path: Path, terminal: str
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance([_split_item("one", "a" * 64)], {"source": 1})
+    claim = workset.claim("label", 1, "ox-1", 60)[0]
+    if terminal == "completed":
+        workset.commit([claim], [_completed()])
+
+    with pytest.raises(DistillationWorksetError, match="identity conflict"):
+        workset.advance([_split_item("one", "b" * 64)], {"source": 2})
+    assert workset.watermark() == {"source": 1}
+
+
+def test_advance_refuses_semantic_split_change(tmp_path: Path) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance([_split_item("one", "a" * 64)], {"source": 1})
+    changed = _split_item("one", "b" * 64)
+    assert isinstance(changed["temporal_split"], dict)
+    changed["temporal_split"]["split"] = "test"
+
+    with pytest.raises(DistillationWorksetError, match="identity conflict"):
+        workset.advance([changed], {"source": 2})
+    assert workset.watermark() == {"source": 1}
+
+
+def test_advance_split_rebind_rejects_tampered_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance([_split_item("one", "a" * 64)], {"source": 1})
+    tampered = _split_item("one", "a" * 64)["temporal_split"]
+    assert isinstance(tampered, dict)
+    tampered["note"] = "/tmp/private"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE work_items SET temporal_split_json = ? WHERE work_id = 'one'",
+            (json.dumps(tampered, sort_keys=True, separators=(",", ":")),),
+        )
+
+    with pytest.raises(DistillationWorksetError, match="identity conflict"):
+        workset.advance([_split_item("one", "b" * 64)], {"source": 2})
+    assert workset.watermark() == {"source": 1}
+
+
+def test_advance_split_rebind_rolls_back_with_later_conflict(tmp_path: Path) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance(
+        [_split_item("one", "a" * 64), _split_item("two", "a" * 64)],
+        {"source": 1},
+    )
+    conflicting = _split_item("two", "b" * 64)
+    conflicting["payload_ref"] = "candidate-ledger:changed"
+
+    with pytest.raises(DistillationWorksetError, match="identity conflict"):
+        workset.advance(
+            [_split_item("one", "b" * 64), conflicting],
+            {"source": 2},
+        )
+
+    with sqlite3.connect(path) as connection:
+        temporal = connection.execute(
+            "SELECT temporal_split_json FROM work_items WHERE work_id = 'one'"
+        ).fetchone()[0]
+    assert '"split_plan_id":"' + "a" * 64 + '"' in temporal
+    assert workset.watermark() == {"source": 1}
 
 
 def test_failed_advance_keeps_prior_watermark(tmp_path: Path) -> None:

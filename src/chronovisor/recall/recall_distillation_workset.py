@@ -324,6 +324,36 @@ def _item(value: Mapping[str, Any], watermark_json: str) -> tuple[Any, ...]:
     )
 
 
+def _same_temporal_split_except_plan(prior_json: str, current_json: str) -> bool:
+    try:
+        prior = _metadata_value(json.loads(prior_json), "prior temporal_split")
+        current = _metadata_value(json.loads(current_json), "current temporal_split")
+    except (
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        RecursionError,
+        DistillationWorksetError,
+    ):
+        return False
+    if not isinstance(prior, dict) or not isinstance(current, dict):
+        return False
+    prior_plan = prior.pop("split_plan_id", None)
+    current_plan = current.pop("split_plan_id", None)
+    try:
+        prior_digest = _digest(prior_plan, "prior split_plan_id")
+        current_digest = _digest(current_plan, "current split_plan_id")
+        return (
+            prior_plan == prior_digest
+            and current_plan == current_digest
+            and prior_digest != current_digest
+            and _metadata_json(prior, "prior temporal_split")
+            == _metadata_json(current, "current temporal_split")
+        )
+    except DistillationWorksetError:
+        return False
+
+
 class DistillationWorkset:
     """A SQLite/WAL queue shared by local-triad and single-teacher backfills.
 
@@ -388,7 +418,7 @@ class DistillationWorkset:
                     prior = connection.execute(
                         """
                         SELECT kind, payload_ref, payload_digest, temporal_split_json,
-                               provenance_json, priority
+                               provenance_json, priority, state
                         FROM work_items WHERE work_id = ?
                         """,
                         (record[0],),
@@ -406,10 +436,28 @@ class DistillationWorkset:
                             (*record, now, now),
                         )
                         inserted += 1
-                    elif tuple(prior) != immutable:
-                        raise DistillationWorksetError(
-                            f"immutable work identity conflict: {record[0]}"
+                    elif tuple(prior[:6]) != immutable:
+                        same_non_temporal = (
+                            tuple(prior[:3]) == immutable[:3]
+                            and tuple(prior[4:6]) == immutable[4:6]
                         )
+                        if (
+                            prior["state"] in {"ready", "quarantined"}
+                            and same_non_temporal
+                            and _same_temporal_split_except_plan(prior[3], immutable[3])
+                        ):
+                            # Cohort-only plan rotations may change the pointer
+                            # while this uncompleted work keeps the same split.
+                            connection.execute(
+                                "UPDATE work_items SET temporal_split_json = ?, "
+                                "updated_at = ? WHERE work_id = ?",
+                                (immutable[3], now, record[0]),
+                            )
+                            existing += 1
+                        else:
+                            raise DistillationWorksetError(
+                                f"immutable work identity conflict: {record[0]}"
+                            )
                     else:
                         existing += 1
                 connection.execute(
