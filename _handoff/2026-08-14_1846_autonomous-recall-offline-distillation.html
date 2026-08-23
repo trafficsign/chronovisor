@@ -114,6 +114,92 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f1eb;border:1px so
 </table>
 </section>
 
+<section data-section="2026-08-23運用実測">
+<h2>2026-08-23 運用実測（回復計画の基準点）</h2>
+<table>
+<thead><tr><th>観測</th><th>実測</th><th>判断</th></tr></thead>
+<tbody>
+<tr><td>runtime</td><td>2026-08-23 22:14 JST、health=<code>ok</code>、runtime/expected commit=<code>87872fdf4199…</code>、<code>drift=false</code></td><td>配備driftではなく、配備済み処理の構造が原因</td></tr>
+<tr><td>distillation state</td><td><code>worker_status=deferred</code>、<code>rollout_status=capture_only</code>、rollout 0%、candidate policyなし、active/LKG=<code>a0893f2ef935…</code></td><td>P5/P8/P9へ進んでいない</td></tr>
+<tr><td>派生artifact</td><td>rally manifest 8,042件 / 382,327,600 bytes、candidate snapshot 8,042件 / 1,679,033,681 bytes</td><td>captureは進んだが、巨大ledgerが次のrunをさらに重くしている</td></tr>
+<tr><td>教師結果</td><td>label ledger 5件のみ。teacher-only 1件、uncertain 4件。内訳は<code>invalid_teacher_output</code> 3、<code>counterfactual_failed</code> 1、valid model rationale 1</td><td>8,042 snapshotから有効label 1件で、学習datasetになっていない</td></tr>
+<tr><td>進捗表示</td><td>healthはmanifest/candidate backlogを0、teacher-onlyを0と表示する一方、ledgerにはteacher-only 1件がある</td><td>snapshot backlogとteacher backlogが混同され、baseline由来countもstale。0 backlogは健全性を意味しない</td></tr>
+<tr><td>直近run</td><td><code>processed=0</code>、candidate/label/counterfactual write 0、<code>worker_deferred</code>。last successは2026-08-23 03:54 JST相当</td><td>現在の5分laneはatomic learning progressを保証していない</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="回復設計">
+<h2>回復設計（2026-08-23 採用案）</h2>
+<div class="decision">
+<strong>採用案は、既存の <code>run_distillation_chunk</code> と <code>Teacher</code> runtimeを残し、その間を三操作の深い <code>DistillationWorkset</code> に置換する。</strong>
+公開契約は <code>advance</code>（Raw差分をsealed generationへ進める）、<code>claim</code>（期限付きteacher workを取得する）、<code>commit</code>（結果を冪等確定する）だけにする。Raw全走査、全ledger読込、FTS全再構築、cursor、lease、retry、provenanceはこの境界の内側へ隠す。
+</div>
+
+<h3>現行経路の直接原因</h3>
+<ul>
+<li><code>_run_distillation_chunk_impl</code> は各runで <code>_events(raw_dir)</code>、全rally抽出、manifest/candidate/labelの全読込、historical FTS全再構築を行い、candidate capture後に初めて教師へ進む。</li>
+<li><code>append_chain_batch</code> はappendごとに <code>verify_chain</code> で全ledgerを読み、さらに旧file全体を読み直して <code>existing + encoded</code> をatomic再書込する。candidate ledger 1.67GBでは一回のbounded appendもO(total bytes)である。</li>
+<li><code>read_chain</code> も全chain検証後に全fileを再読込してlist化する。watermarkやsidecarだけを追加しても、このwrite/read amplificationが残る限り根治しない。</li>
+<li>snapshot完成とteacher完了を分離したdurable queueがなく、<code>candidate_backlog=0</code>でも未label workを直接claimできない。</li>
+<li>schema不正を<code>uncertain</code> labelとしてcompletion扱いするため、壊れた出力がretryされず、有効label数と失敗attempt数が混ざる。</li>
+</ul>
+
+<h3>設計比較</h3>
+<table>
+<thead><tr><th>案</th><th>長所</th><th>不採用理由 / 扱い</th></tr></thead>
+<tbody>
+<tr><td>A. watermark・tail cacheだけを追加</td><td>変更が小さい</td><td>巨大JSONLの全検証・全再書込、全snapshot materialize、未label work探索が残るため不採用</td></tr>
+<tr><td>B. segmented audit ledger + incremental catalog/FTS + SQLite queue/index + deep Workset</td><td>O(delta)で再開でき、既存hash/provenance・Teacher・LKGを再利用できる</td><td><strong>採用。</strong>SQLiteは再構築可能な検索/lease projectionに限定し、immutable segmentを監査正本にする</td></tr>
+<tr><td>C. 汎用DAG、Redis/Kafka、常駐teacher service、fine-tuneを同時導入</td><td>将来の拡張幅は大きい</td><td>現時点の単一host・single-writerには過剰。専用workerはBでresource SLO未達を実測した時だけ同じqueue consumerをLaunchAgent one-shotへ切り出す</td></tr>
+</tbody>
+</table>
+
+<h3>採用境界</h3>
+<pre>committed Raw v2
+      │
+      ▼
+DistillationWorkset.advance ──► incremental event/rally catalog + assistant FTS
+      │                                      │
+      │                                      └──► rebuildable SQLite entity/work index
+      ▼
+DistillationWorkset.claim ───► leased snapshot/teacher/CF/train/eval work
+      │
+      ▼
+existing Teacher / LocalStructuredSession / LLMRuntime resource lease
+      │
+      ▼
+DistillationWorkset.commit ──► bounded immutable segment + sealed head/receipt
+      │
+      └──► valid label sets ─► dataset ─► student candidate ─► replay/shadow/canary/LKG</pre>
+<ul>
+<li>旧single-file ledgerはchain headを検証して<code>legacy-v0</code> sealed segmentとしてread-only化する。以後はbounded segmentを新規作成し、<code>head.json</code>とentity indexだけをatomic更新する。warm appendで旧ledger bytesを読み書きしない。</li>
+<li>SQLiteはevent/rally/candidate status、segment offset、lease、attempt、retry時刻、dataset lineageを持つ再構築可能projectionとする。Raw本文・回答本文を複製せず、本文はRawと既存assistant FTSの一箇所に限定する。</li>
+<li>同一sessionの未確定tailだけを再materializeし、sealed rallyはgeneration/versionを固定する。Raw rewrite・順序破壊・as-of違反は新generationをquarantineし、cursorを進めない。</li>
+<li>work stateは少なくとも<code>snapshot_pending</code>、<code>teacher_pending</code>、<code>cf_pending</code>、<code>retry_wait</code>、<code>quarantined</code>、<code>label_valid</code>、<code>dataset_ready</code>、<code>terminal</code>を区別する。age-aware fairnessでcaptureだけがteacherを飢餓させない。</li>
+<li>既存 <code>Teacher</code>/<code>_WorkerTeacher</code>、<code>LocalStructuredSession</code>、<code>research_lane</code>、<code>LLMRuntime.resource_lease</code>を再利用する。新しいmodel adapterや独自JSON parserは作らない。</li>
+<li><code>invalid_teacher_output</code>、timeout、capacity、foreground preemption、route/model mismatchをvalid/uncertain labelへ変換しない。attempt receiptへ分離し、bounded retry、backoff、profile別circuit breaker、quarantineを適用する。</li>
+<li>教師同時実行はまず1、モデル開始前に残時間とcommit reserveを確保し、foreground preemption時はattempt/label/cursorを消費しない。既存laneでSLO未達が続く場合だけ、同じqueue consumerを専用one-shot workerへ切り出す。</li>
+</ul>
+</section>
+
+<section data-section="回復SLO">
+<h2>回復SLO・hard gate</h2>
+<table>
+<thead><tr><th>境界</th><th>受入閾値</th><th>失敗時</th></tr></thead>
+<tbody>
+<tr><td>storage</td><td>warm appendで旧ledger read/write 0 bytes。write amplificationは新segment payload + 固定metadataのみ。crash/retry後の重複record・chain境界不一致0</td><td>新segment/headをquarantineし、legacy-v0 read pathへ戻す</td></tr>
+<tr><td>advance</td><td>no-new-data p95 ≤1秒、現行corpus + 1,000 new event p95 ≤15秒。既存Raw全走査・既存FTS全再構築0</td><td>indexed generationを破棄せずquarantineし、offline full-scan repair</td></tr>
+<tr><td>claim/handoff</td><td>claim p95 ≤500ms、teacher handoff ≤10秒。healthy lock/storeのadmitted cycleの99%以上がdurable receiptを1件以上残す</td><td>進捗種別とstage blockerを記録し、capture-only/LKG維持</td></tr>
+<tr><td>idempotency/provenance</td><td>restart、lease expiry、SIGTERM、commit再送で重複work/label 0。全outcomeにRaw watermark、byte ref/hash、as-of、split、route/model/prompt revision</td><td>cursor据え置き、generation quarantine</td></tr>
+<tr><td>teacher validity</td><td>各profileの初期20件でschema/coverage/route identity valid率 ≥95%。invalid attemptはvalid label countへ0件。三routeの有効進捗が個別に可観測</td><td>profile circuit open、retry/quarantine。別教師のvalid workは継続</td></tr>
+<tr><td>resource</td><td>教師稼働中の通常Recall p95悪化を目標≤5%、hard stop &gt;10%。同時teacher ≤1、foreground preemption時のlabel/cursor増分0</td><td>worker defer。3連続healthy windowでqueue age SLOを満たせなければ専用one-shot laneを導入</td></tr>
+<tr><td>truthful health</td><td>snapshot/teacher/CF/dataset/policy backlogを分離し、API countとsealed artifact/queue countが100%一致。<code>processed=0</code>をsuccessと表示しない</td><td>昇格停止、health=<code>degraded</code></td></tr>
+<tr><td>learning/promotion</td><td>既存P5 hard floor、future leakage 0、feature bytes parity 100%、locked replay非劣化、P8のshadow/canary gateをすべて維持</td><td>candidate rejectまたはLKG rollback</td></tr>
+</tbody>
+</table>
+</section>
+
 <section data-section="やってはいけないこと">
 <h2>やってはいけないこと（必須）</h2>
 <ul>
@@ -342,24 +428,42 @@ user query ─► BM25/anchor
 </section>
 
 <section data-section="実装面">
-<h2>実装面（最小差分）</h2>
+<h2>実装面（推奨境界）</h2>
 <table>
 <thead><tr><th>変更先</th><th>内容</th></tr></thead>
 <tbody>
-<tr><td><code>src/chronovisor/recall/recall_distillation.py</code></td><td>RallyManifest境界、answer-utility contracts、closed predicates、historical candidate計算、三教師 shard/probe、counterfactual/ablation、rolling-origin build/evaluate、policy publication</td></tr>
-<tr><td><code>src/chronovisor/recall/recall_distillation_store.py</code></td><td>derived FTS、cursor、append-only hash-chain ledger、immutable run/policy、atomic pointer I/Oを分離する</td></tr>
+<tr><td><code>src/chronovisor/recall/recall_distillation_workset.py</code>（新規deep module）</td><td><code>advance/claim/commit</code>、incremental event/rally catalog、session tail revision、work state/lease/idempotency、as-of/provenance gateを所有する。productionはIndexed、migration/repairだけFullScanの二実装にする</td></tr>
+<tr><td><code>src/chronovisor/recall/recall_distillation_store.py</code></td><td>現行single-file chainをlegacy adapterとして凍結し、bounded immutable segment、sealed head、segment iterator、SQLite entity/work projection、incremental FTS、rebuild/reconcileを実装する。policy/LKGの既存sealは再利用する</td></tr>
+<tr><td><code>src/chronovisor/recall/recall_distillation.py</code></td><td>既存のrally/teacher/CF/train/eval/publish semanticsは維持し、巨大I/Oとstage schedulingをWorksetへ移す。<code>run_distillation_chunk</code>はdeadline、single-writer、fair stage dispatch、progress receiptだけを調整する</td></tr>
+<tr><td><code>src/chronovisor/recall/recall_distillation_worker.py</code> / 既存 <code>Teacher</code> seam</td><td>LocalStructuredSession、route/model identity、schema validator、research lane、resource leaseを再利用する。valid outcome、retryable deferred、invalid/quarantineを型として分け、invalidをlabel completionにしない</td></tr>
 <tr><td><code>src/chronovisor/recall/recall_runtime.py</code></td><td>既存 feature/score/decision を拡張し active tiny policy を読む。teacher-free deadline と BM25 fallback を実装する</td></tr>
-<tr><td><code>src/chronovisor/ops/sleep_cycle.py</code></td><td>既存 Recall growth artifact lane を bounded distillation chunk job へ置換する。新しい常駐 scheduler は作らない</td></tr>
+<tr><td><code>src/chronovisor/ops/sleep_cycle.py</code> / Converge worker</td><td>初期cutoverでは既存callerを維持し、stage別budget/receiptだけ読む。R4のresource/queue-age gateを3連続windowで満たせない場合だけ、同じconsumerを専用LaunchAgent one-shotへ切り出す</td></tr>
+<tr><td>health / Dashboard</td><td>snapshot、teacher、CF、retry/quarantine、valid label、dataset、policy backlogを分離し、sealed artifact/queueとのreconcile、stage latency、last durable progress、model profile healthをprivacy-safeに表示する</td></tr>
 <tr><td><code>src/chronovisor/recall/recall_field*.py</code> / <code>recall_improvement.py</code></td><td>旧 Field/feedback/frontier authority をまず観測専用にし、新経路100%採用後に削除する</td></tr>
-<tr><td><code>tests/test_recall_distillation.py</code></td><td>rally境界、時点漏洩、historical index rebuild、cursor idempotency、hash chain、shard/probe、counterfactual order/attribution、closed predicates、uncertain除外、promotion/rollback</td></tr>
+<tr><td><code>tests/test_recall_distillation_workset.py</code>（新規focused suite）</td><td>delta-only I/O、legacy→segment migration、crash recovery、lease expiry、duplicate commit、generation quarantine、future leakage、queue fairness、health reconcileをWorkset interface越しに検証する</td></tr>
+<tr><td><code>tests/test_recall_distillation.py</code> / worker tests</td><td>既存rally/teacher/CF/train/promotion semanticsを保持し、invalid output、preemption、route mismatch、retry/quarantine、valid label count、P5/P8 gatesを追加する</td></tr>
 <tr><td>既存 focused tests</td><td><code>test_evidence_reconstruction.py</code>、<code>test_recall_calibration.py</code>、<code>test_recall_runtime.py</code>、<code>test_sleep_cycle.py</code>、search pipeline testsへ各境界のregressionを追加する</td></tr>
-<tr><td>既存 Evidence Reconstruction / search / calibration / policy seal</td><td>新規抽象化を作らず、Raw verification、候補 feature、pure Python logistic、atomic/LKG pattern を直接再利用する</td></tr>
+<tr><td>作らないもの</td><td>Redis/Kafka、汎用DAG、別vector DB、独自model adapter/JSON parser、Raw本文複製、無制限三教師並列、初期fine-tune。stdlib SQLite/FTS5と既存seal/lease/runtimeを使う</td></tr>
 </tbody>
 </table>
 </section>
 
 <section data-section="実行手順">
 <h2>実行手順</h2>
+<p><strong>2026-08-23以後は次のRecovery trackを先に完了する。</strong> 下のP0–P4/P6/P7のcheckは旧v2機能を実装した履歴であり、現在のthroughputや運用健全性を証明しない。R0–R6を満たすまでP5へ進まず、R7完了までP8、R8完了までP9をcheckしない。</p>
+<h3>Recovery track</h3>
+<ol class="checklist">
+<li><input type="checkbox"><span><strong>R0 — 現行artifactをsealし、回復baselineを凍結する。</strong> 旧三ledgerのfull chain/head/count/bytes、Raw watermark、FTS digest、active/candidate/LKG、stage別wall time・read/write bytes・RSS、通常Recall latencyをimmutable evidenceへ保存する。変更前にcurrent checkout、GitHub runtime commit、live API/healthの差を記録し、旧artifactを削除しない。</span></li>
+<li><input type="checkbox"><span><strong>R1 — O(total bytes) ledgerをsegmented v2へ移行する。</strong> 既存single-fileを検証済み<code>legacy-v0</code> segmentとして凍結し、以後はbounded segment + previous head + sealed <code>head.json</code>へappendする。entity/offset indexはchainから再構築可能にし、kill/restart、partial tail、head不一致、duplicate commitをfail-closedで回復する。dual-read parity後に新write pathへ切り替える。</span></li>
+<li><input type="checkbox"><span><strong>R2 — Raw/rally/FTSを真に増分化する。</strong> event byte ref/hash/watermarkのcatalogを一度だけbounded bootstrapし、新規Rawと未確定session tailだけをmaterializeする。assistant FTSへdelta insert/upsertし、通常runから<code>_events</code>全走査、全rally抽出、<code>create_historical_index</code>全再構築を外す。FullScanはmigration/repair用fallbackだけにする。</span></li>
+<li><input type="checkbox"><span><strong>R3 — durable work queueと三操作Worksetへ切り替える。</strong> snapshot/teacher/CF/retry/dataset/evalを別stateにし、lease/idempotency/fairness/oldest-ageを持つ。<code>advance → claim → commit</code>の各commitにbefore/after cursor、ledger heads、generation、provenance、progress kindをsealし、timeout後も最後の確定進捗を正確に返す。</span></li>
+<li><input type="checkbox"><span><strong>R4 — 三教師を有効に動かし、失敗とresource競合を分離する。</strong> existing Teacher/LocalStructuredSession/LLMRuntime leaseを使い、valid/deferred/invalidを分離する。invalid schema/coverageはretry/quarantine、capacity/timeout/preemptionはattempt未消費deferとし、route/model/prompt identityを固定する。同時実行1から計測し、通常Recallのresource SLOを守る。既存laneでqueue-age SLOを3連続healthy windowで外した場合だけ専用one-shot consumerを追加する。</span></li>
+<li><input type="checkbox"><span><strong>R5 — backfillを完走し、truthful datasetを作る。</strong> recent/locked-test/old-historyをage-awareに配分し、三routeのvalid teacher label、probe、blind CFを増やす。invalid attemptやuncertainをtraining countへ入れず、label set/profile/assignment revisionをappend-onlyでversioningする。health/APIとqueue/ledger countをreconcileし、既存P5 hard floorを実データで満たす。</span></li>
+<li><input type="checkbox"><span><strong>R6 — 初期student candidateを生成する。</strong> nonzero training/validation/locked-test rows、source lineage、feature parity、route-separated probe、blind CF consistency、negative vetoをsealし、fine-tuneなしのtiny policyをcandidate pointerへだけ公開する。0-row bootstrapやstale baselineをcandidateにしない。</span></li>
+<li><input type="checkbox"><span><strong>R7 — shadow/canary/rollbackを実時間で完走する。</strong> locked replay → shadow → 5% → 25% → 100%を既存P8 gateで進め、各stageのpaired denominator、quality/coverage/latency/resource/integrityを保存する。forced failureでLKG rollbackを実証し、GitHub commit、runtime archive、process、health、live Recall DOM/APIを一致させる。</span></li>
+<li><input type="checkbox"><span><strong>R8 — 旧経路と移行adapterを整理する。</strong> 100%運用・観測window・rollback drill後だけ旧full-scan hot path、single-file writer、旧Field/Growth authority、不要なcompat codeを削除する。legacy-v0 audit artifactとLKGは保持し、docs/config/dashboard/planを最終正本へ合わせる。</span></li>
+</ol>
+<h3>Original milestone state</h3>
 <ol class="checklist">
 <li><input type="checkbox" checked><span><strong>P0 — Baseline と契約を凍結する。</strong> native rally/独立session-task cluster/期間/host、teacher/probe/counterfactual発生率、coverage、abstain、p50/p95/timeoutをimmutable artifactへ記録する。rally-v1境界、cluster基準hard floor、v2 feature、negative-veto predicate、teacher schema/input上限、order-bias上限、load skew、fixed cohort/min pairs/CI/window、昇格閾値、privacy preflightを固定する。</span></li>
 <li><input type="checkbox" checked><span><strong>P1 — Historical rally/candidate dataset を実装する。</strong> Raw v2からRallyManifestを増分生成し、assistant/tool EpisodeProjectionだけのderived FTS5を固定tokenizer/normalizer revisionで構築する。current Page/semantic/graphを使わず、Q_tより前だけのwide poolを再現可能なsnapshotとして保存する。</span></li>
@@ -386,6 +490,11 @@ user query ─► BM25/anchor
 <section data-section="完了条件">
 <h2>完了条件</h2>
 <ul>
+<li>R0–R8が順番に完了し、旧P0–P4/P6/P7の実装履歴だけを根拠にP5/P8/P9を完了扱いしていない。</li>
+<li>warm runで既存Raw/ledger/FTSの全走査・全再書込が0で、no-new-data p95 ≤1秒、1,000 event delta p95 ≤15秒、claim p95 ≤500ms、teacher handoff ≤10秒を満たす。</li>
+<li>legacy-v0 + segmented v2のcombined chain、head、entity indexが一致し、process kill、lease expiry、commit再送、sidecar削除から重複0で再構築できる。</li>
+<li>snapshot、teacher、CF、retry/quarantine、valid label、dataset、policy backlogが別々に観測され、API/Dashboardとsealed artifact/queueのcountが一致する。</li>
+<li>invalid output、timeout、capacity、foreground preemption、route/model mismatchがvalid/uncertain labelへ混入せず、retry/quarantine/deferredとして再開可能である。</li>
 <li>committed Raw の初期 backfill と以後の増分が、再実行しても同じ rally/candidate/label ledger head を生成する。</li>
 <li><code>rally-v1</code> が連続user、連続assistant、tool call/result、missing answerを決定的にfoldし、同一sessionの全ラリーが同じsplit componentに入る。</li>
 <li>P0 hard floor以上のeligible native rally、非probe teacher relevance各class、distinct 3-route probe、blind CFが存在するか、未達ならcapture-only状態でP5以降が自動停止している。これらをverified truthとは表示しない。</li>
@@ -405,6 +514,11 @@ user query ─► BM25/anchor
 <section data-section="検証手順">
 <h2>検証手順</h2>
 <ul>
+<li>current private artifactのread-only copyでlegacy chainを検証し、legacy-v0 import → segmented append → combined iteratorのhead/count/content digest parityを二回確認する。元artifactは変更しない。</li>
+<li>I/O counter付きで同一watermarkの<code>advance</code>を二回実行し、二回目がold Raw/ledger bytesを読まず、old FTS DBを書き換えないことを確認する。1,000 event差分では追加eventだけがcatalog/FTSへ入る。</li>
+<li>segment作成、head更新、SQLite projection更新の各境界でprocessをkillし、restart後にorphan segmentのreconcile、期限切れleaseの再claim、idempotent commit、duplicate 0を確認する。</li>
+<li><code>CHRONOVISOR_ROOT="$(mktemp -d -t chronovisor-workset)" uv run pytest -q tests/test_recall_distillation_workset.py tests/test_recall_distillation.py tests/test_recall_distillation_worker.py tests/test_sleep_cycle.py</code> を隔離実行する。</li>
+<li>teacherのschema不足、candidate coverage不足、model identity mismatch、capacity unavailable、timeout、foreground preemptionを個別注入し、valid label count、attempt count、retry時刻、cursorが契約どおり分離されることを確認する。</li>
 <li><code>CHRONOVISOR_ROOT="$(mktemp -d -t chronovisor-test)" uv run pytest -q tests/test_recall_distillation.py</code> で新規境界を隔離検証する。</li>
 <li>既存の <code>tests/test_evidence_reconstruction.py</code>、<code>tests/test_recall_log_schema.py</code>、Recall/search/calibration/policy store/sleep cycle の focused tests を実行する。</li>
 <li>Raw projection と historical index を二回 rebuild し、Raw不変性、rally manifest、candidate pool、label ledger、policy artifact、active pointer source lineage の canonical digest が一致することを確認する。</li>
@@ -424,6 +538,8 @@ user query ─► BM25/anchor
 <section data-section="観測指標">
 <h2>観測指標</h2>
 <ul>
+<li>workset: stage別<code>advance/claim/model/commit</code> latency、read/write bytes、generation/watermark lag、last durable progress、queue depth/oldest age、lease expiry、retry/quarantine、segment count/head、projection reconcile。</li>
+<li>truth: snapshot backlog、teacher backlog、CF backlog、valid label、invalid attempt、deferred/preempted、dataset row、candidate policyを別metricにし、stale baselineで上書きしない。</li>
 <li>data: raw watermark lag、rally/eligible/missing-answer/missing-exposure counts、独立session-task cluster数、rally当たり派生行数と正規化weight、pool miss、teacher-only/probe/uncertain/negative-veto 比率、chain integrity、future-leak rejects。</li>
 <li>teachers: assignment skew、probe agreement matrix、flip rate、parse failure、route latency、model/prompt revision、per-route calibration、A/B order bias、length/style preference。</li>
 <li>quality: route-separated relevance stability、blind CF order consistency、negative-veto件数、paired anchor retention、coverage、abstain、latency/timeout、0/1/2/3-card分布。model scoreはnot-truthとして表示する。</li>
@@ -435,6 +551,9 @@ user query ─► BM25/anchor
 <section data-section="移行と削除境界">
 <h2>移行と削除境界</h2>
 <ul>
+<li>移行順は <code>legacy seal → segmented dual-read → indexed catalog/FTS shadow parity → queue/Workset cutover → teacher backfill → student/shadow/canary → cleanup</code> とし、storage移行とteacher service化を同時に行わない。</li>
+<li>SQLite projectionはいつでもimmutable segmentとRawから再構築できるcache/queue正本とし、学習authorityやpolicy lineageの唯一の正本にしない。schema migrationはadditiveにし、旧readerでrollback可能にする。</li>
+<li>専用teacher workerは既定で作らない。R4で既存lease/laneを使っても、runtime利用可能な3連続healthy windowでoldest queue age/foreground SLOを満たせない証拠が出た場合にだけ、同じconsumerをLaunchAgent one-shotへ切り出す。</li>
 <li>Campaign Y の Evidence Reconstruction は廃止せず、ライブの重い evidence scan からオフライン verifier/teacher evidence composer へ役割を移す。</li>
 <li>現行 Recall Field/Growth、manual reviewed artifacts、feedback usage prior は新 policy の authority から先に外す。canary前に旧active-policy writerをconfig/entrypointでhard offにしてsingle-writerを保証し、新経路が100%とrollback drillを完了するまではコードを削除しない。</li>
 <li>既存の Recall latency plan は本計画へ包含する。本計画が live fast path を採用した時点で、同期 local-model gate の高速化案は historical として終了する。</li>
@@ -446,19 +565,22 @@ user query ─► BM25/anchor
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
 <ul>
-<li>外部ブロッカーはない。<code>qwen3.8:27b-mxfp8</code>（digest <code>464021588235…</code>）をOllama 0.32.12へ導入し、Ornith 35Bの現行role/defaultをQwenへ交換したcommit <code>da775a7</code>をGitHub <code>main</code>へpushした。Dashboard/LAN Dashboard/Ingest Drain/Convergeの実行archiveも同commitへ更新し、runtime identityは<code>drift=false</code>である。</li>
-<li>2026-08-15 07:18時点のlive private artifactは実Raw 4,837 rally中、manifest 3,500件、candidate snapshot 700件、label ledger 3件。enable後のcold-start run <code>c73d1048…</code>は500 rally・100 candidate・3 teacher call・1 labelをatomic追加した。manifest backlog 1,337件、candidate backlog 4,137件、counterfactual 0件で、<code>capture_only</code>・<code>chronological_split_incomplete</code>・rollout 0を維持している。active/LKGは同じlegacy bootstrap <code>a0893f2e…</code>、candidate policyは空である。</li>
-<li>P5は残りbackfillとteacher/probe/blind-CFの固定floorを必要とする。P8/P9はその後のshadowと各7日・500 pairedの5%/25%/100% gate、rollback drillが必要である。Convergeと日次Sleepが自動継続中であり、データや時間を偽装して完了扱いしない。</li>
+<li>外部ブロッカーはない。2026-08-23 22:14 JSTのruntime healthは<code>ok</code>、archive/expected commit=<code>87872fdf4199…</code>、<code>drift=false</code>。現ブロッカーは配備ではなく、pre-teacher hot pathとsingle-file ledgerのO(total bytes)設計である。</li>
+<li>live stateは<code>deferred/capture_only</code>、rollout 0、candidate policyなし、active/LKG=<code>a0893f2ef935…</code>。manifest/candidateは各8,042件まで増えたがlabelは5件、有効teacher-onlyは1件だけである。</li>
+<li>healthのmanifest/candidate backlog 0はsnapshot完成だけを示し、未label teacher/CF backlogを示さない。health teacher-only 0とledger 1の不一致もあるため、R0でobservability truthを凍結し、R3/R5でreconcileする。</li>
+<li>P5/P8/P9はRecovery trackのR0–R8と既存hard gateを満たすまで未checkを維持する。現在の5件を水増しせず、実時間backfill/canaryを完走する。</li>
 </ul>
 </section>
 
 <section data-section="受け渡しメモ">
 <h2>受け渡しメモ（次担当へ）</h2>
 <ul>
-<li>P0–P4/P6/P7のv2実装と検証、本番push、Qwen 3.8 MLXへの交換、distillation有効化は完了。P5は固定floor未達時の自動停止まで実証済みで、teacher/probe/blind-CF backfillが揃うまでcandidateを作らない。Qwen workerとclassification primaryはthinking有効・repair 0でschema-valid JSON、returned model、model digestを返すところまで確認済み。P8/P9は実運用gate完走まで未checkを維持する。</li>
+<li>P0–P4/P6/P7は旧v2の機能実装履歴として完了済みだが、2026-08-23実測で運用throughputは不合格。以後はR0–R8を正本の実行順とし、P5/P8/P9は対応するRecovery gate完了時だけcheckする。</li>
+<li>最初の実装単位はR0/R1で、1.67GB candidate ledgerを毎run全読込・全再書込する経路を止める。watermark cacheだけの局所修正や、先行する専用model service化では根治しない。</li>
+<li>唯一の新しい深い境界は<code>DistillationWorkset.advance/claim/commit</code>。Teacher/LocalStructuredSession/LLMRuntime resource lease、Raw verification、SQLite/FTS5、immutable seal、policy/LKGは既存を再利用する。</li>
 <li>最重要条件は完全自立。human review を安全弁として復活させず、不確実なら abstain/昇格待ち/LKG維持で処理する。</li>
 <li>Kimi K3は2026-08-14にラリー単位案を採用推奨（conditional OK）と判定。条件は決定的rally境界、A_tのoffline-only化、同一session component、teacher input上限であり、本planへhard gateとして反映済み。</li>
-<li>初期版の新規面は <code>recall_distillation.py</code>、I/Oを分離した <code>recall_distillation_store.py</code>、focused testsに限定する。SQLite FTS以外の新DB/別サービスを作らず、既存 search/Evidence/calibration/atomic policy/sleep cycle を再利用する。</li>
+<li>新規面はdeep workset 1 module、segmented store/SQLite projection、focused testsに限定する。Redis/Kafka/汎用DAG/別vector DB/独自model adapterを作らない。</li>
 <li>教師の具体的モデル割当は P0 probe で決めるが、artifact は model名でなく stable role + route revision を正本にする。モデル交換でデータ契約を変えない。</li>
 <li>実行中は各 P 項目の完了証拠を確認した直後に checkbox と実行ログを更新する。Exit Criteria を満たさない項目は未完のまま残す。</li>
 </ul>
@@ -493,6 +615,7 @@ user query ─► BM25/anchor
 <li><time>2026-08-15 07:12</time><span>モデル交換とQwen structured compatibilityをcommit <code>da775a7</code>（<code>feat(models): adopt Qwen 3.8 MLX</code>）としてGitHub <code>main</code>へpush。統合suiteは488 passed、Ruff・py_compile・diff-check成功。Dashboard/LAN Dashboard/Ingest Drainを再起動し、3 archiveの<code>direct_url.json</code>が<code>da775a7</code>、materialized healthが<code>runtime_commit=expected_commit</code>・<code>drift=false</code>であることを確認した。</span></li>
 <li><time>2026-08-15 07:18</time><span>live configの<code>[recall.distillation].enabled</code>だけを<code>true</code>へ変更し、5つのroleがlocal structured、teacher 3 digestとgenerator/judge digestがdistinctであることを再検証してConvergeを起動。cold-start run <code>c73d1048…</code>は500 rally・100 candidate・3 teacher call・1 labelを追加し、seal済みstateを<code>capture_only</code>・rollout 0・candidateなし・legacy LKG維持で更新した。Planは自動backfill継続中のため<code>running</code>へ更新し、P5/P8/P9は未checkを維持する。</span></li>
 <li><time>2026-08-15 13:36</time><span>Qwen/Muse/Gemmaを指定されたHF MLX 4bit artifact（<code>qwen3.8:27b-axq4</code>、<code>muse-glimmer:30b-q4k-dynamic</code>、<code>gemma4:26b-optiq4</code>）へ交換し、mixed-quant対応Ollama <code>0.32.12-mixedmlx.1eeb7aad</code>を本番LaunchAgentへ導入。共有<code>LocalStructuredSession</code>の実model検証でQwenは初回成功、Muse/Gemmaはvalidator理由を渡したrepair 1回でschema-validとなった。code commit <code>5d83f30</code>をGitHub <code>main</code>へpushし、runtime healthのcommit一致・<code>drift=false</code>を確認。旧Qwen/Muse/Gemmaタグは削除済み。distillationは有効のままrun <code>470173fb…</code>でcandidate 100件をatomic追加し、<code>capture_only</code>・rollout 0・candidate policyなし・legacy LKG維持で安全にdeferしたため、P5/P8/P9は未checkを維持する。</span></li>
+<li><time>2026-08-23 22:20</time><span>live runtime、state、ledger、API、現行call pathを再監査。manifest/candidate各8,042件に対しlabel 5件・candidate policyなし、直近run processed 0を確認した。原因をRaw/FTS全再構築だけでなく、<code>append_chain_batch</code>/<code>read_chain</code>/<code>verify_chain</code>の巨大ledger全読込・全再書込、未label queue欠如、invalid出力のcompletion扱いまで確定。watermark局所修正、deep Workset、将来pipeline、runtime portの4案を比較し、segmented ledger + incremental catalog/FTS + SQLite queue/index +既存Teacher/resource leaseを採用。Recovery track R0–R8、受入閾値、rollbackを追加した。code/runtime/configは変更していない。</span></li>
 </ol>
 </section>
 
