@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from chronovisor.core.llm_runtime import (
+    GenerationBackend,
     GenerationRequest,
     RouteLocation,
     SourceDataClass,
@@ -23,7 +24,6 @@ from chronovisor.core.llm_runtime import (
     SourceSensitivity,
     safe_metadata_identifier,
 )
-from chronovisor.core.openai_compatible_adapter import OpenAICompatibleAdapter
 from chronovisor.core.provider_profiles import (
     ProviderAdapterError,
     ProviderFailureCategory,
@@ -397,7 +397,7 @@ class OpenCodeOxAlphaTeacher:
 
     def __init__(
         self,
-        backend: OpenAICompatibleAdapter,
+        backend: GenerationBackend,
         *,
         configured_model: str = OX_ALPHA_ROUTE_MODEL,
         enabled: bool = True,
@@ -406,12 +406,11 @@ class OpenCodeOxAlphaTeacher:
         max_input_bytes: int = MAX_PAYLOAD_BYTES,
         timeout_ms: int = 60_000,
     ) -> None:
-        if not isinstance(backend, OpenAICompatibleAdapter):
-            raise TypeError("OpenCode Ox Alpha requires OpenAICompatibleAdapter")
         profile = getattr(backend, "_profile", None)
         endpoint = getattr(profile, "endpoint", None)
         if (
-            backend.provider != OX_ALPHA_PROVIDER
+            not callable(getattr(backend, "generate", None))
+            or backend.provider != OX_ALPHA_PROVIDER
             or backend.location is not RouteLocation.REMOTE
             or endpoint != OX_ALPHA_ENDPOINT
         ):
@@ -432,7 +431,11 @@ class OpenCodeOxAlphaTeacher:
             raise ValueError("invalid teacher timeout")
         self._backend = backend
         self._request_model = resolve_ox_alpha_model(backend.provider, configured_model)
-        if not backend.capabilities_for(self._request_model).structured_output:
+        capabilities_for = getattr(backend, "capabilities_for", None)
+        if not callable(capabilities_for) or (
+            getattr(capabilities_for(self._request_model), "structured_output", False)
+            is not True
+        ):
             raise ValueError("O× Alpha route lacks structured output")
         self.role = "recall.distill.teacher.ox-alpha"
         self.provider = OX_ALPHA_PROVIDER

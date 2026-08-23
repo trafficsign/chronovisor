@@ -409,10 +409,10 @@ def _default_workers(
         if not config.ox_enabled or not config.ox_free_only:
             return {}, None
         try:
-            from chronovisor.core.llm_security import CredentialRef, CredentialResolver
-            from chronovisor.core.openai_compatible_adapter import (
-                compose_openai_compatible_adapter,
+            from chronovisor.core.llm_config import (
+                compose_remote_generation_backend,
             )
+            from chronovisor.core.llm_security import CredentialRef, CredentialResolver
             from chronovisor.core.provider_profiles import generic_openai_profile
             from chronovisor.recall.recall_distillation_remote_teacher import (
                 OpenCodeOxAlphaTeacher,
@@ -430,7 +430,7 @@ def _default_workers(
             credential = resolver.resolve(profile.credential_ref)
             del credential
             teacher = OpenCodeOxAlphaTeacher(
-                compose_openai_compatible_adapter(profile, resolver),
+                compose_remote_generation_backend(profile, resolver),
                 enabled=True,
                 free_only=True,
                 allow_paid_fallback=False,

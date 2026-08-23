@@ -516,6 +516,22 @@ def load_llm_config(path: Path | str | None = None) -> LLMConfig:
     raise _fail(LLMConfigFailureCategory.PARSE_ERROR)
 
 
+def compose_remote_generation_backend(
+    profile: ProviderProfile,
+    resolver: CredentialResolver,
+    *,
+    sender: RequestSender | None = None,
+) -> GenerationBackend:
+    """Compose one remote generation adapter inside the provider seam."""
+
+    return cast(
+        GenerationBackend,
+        compose_anthropic_adapter(profile, resolver, sender=sender)
+        if profile.protocol is ProviderProtocol.ANTHROPIC_MESSAGES
+        else compose_openai_compatible_adapter(profile, resolver, sender=sender),
+    )
+
+
 def build_llm_runtime(
     config: LLMConfig,
     *,
@@ -598,12 +614,8 @@ def build_llm_runtime(
             sender = (
                 sender_factory(provider.profile) if sender_factory is not None else None
             )
-            backends[provider_id] = (
-                compose_anthropic_adapter(provider.profile, resolver, sender=sender)
-                if provider.profile.protocol is ProviderProtocol.ANTHROPIC_MESSAGES
-                else compose_openai_compatible_adapter(
-                    provider.profile, resolver, sender=sender
-                )
+            backends[provider_id] = compose_remote_generation_backend(
+                provider.profile, resolver, sender=sender
             )
         else:
             raise _fail()

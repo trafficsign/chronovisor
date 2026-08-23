@@ -440,8 +440,8 @@ def test_ox_profile_requires_explicit_enable_and_builds_one_remote_teacher(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from chronovisor.core import (
+        llm_config,
         llm_security,
-        openai_compatible_adapter,
     )
     from chronovisor.recall import recall_distillation_remote_teacher as remote
 
@@ -453,8 +453,8 @@ def test_ox_profile_requires_explicit_enable_and_builds_one_remote_teacher(
             self.kwargs = kwargs
 
     monkeypatch.setattr(
-        openai_compatible_adapter,
-        "compose_openai_compatible_adapter",
+        llm_config,
+        "compose_remote_generation_backend",
         lambda *_a, **_k: object(),
     )
     monkeypatch.setattr(remote, "OpenCodeOxAlphaTeacher", RemoteTeacher)
