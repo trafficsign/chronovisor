@@ -88,14 +88,22 @@ def test_service_never_returns_empty_answer_after_planner_terminal(
             "stop_reason": "duplicate_action",
             "usage": {},
             "artifact_ids": [artifact.artifact_id],
+            "elapsed_ms": 60_000,
         },
     )
+    seen: dict[str, float] = {}
+
+    def fake_challenge(_bundle, *, config, **_kwargs):
+        seen["max_total_wall_seconds"] = config.budgets.max_total_wall_seconds
+        return {"status": "skipped", "reason": "test"}
+
+    monkeypatch.setattr(research_service, "challenge_bundle", fake_challenge)
 
     result = run_evidence_research(
         "check publication",
         claims=["chronovisor_research is published by fresh MCP"],
         config=ResearchConfig(enabled=True, mode="explicit"),
-        challenge=False,
+        challenge=True,
         run_id="terminal-run",
         store=store,
     )
@@ -103,6 +111,7 @@ def test_service_never_returns_empty_answer_after_planner_terminal(
     assert result["answer"]
     assert result["answer_mode"] == "deterministic_claim_assessment"
     assert "[supported]" in result["answer"]
+    assert seen["max_total_wall_seconds"] == 30.0
 
 
 def test_cli_defaults_to_durable_background_queue(monkeypatch, capsys) -> None:

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 from chronovisor.core import ollama
@@ -65,7 +67,10 @@ def _default_runner(
         [sys.executable, "-m", "chronovisor.research.research_model_worker"],
         json.dumps(request, ensure_ascii=False),
         lease,
-        timeout_seconds=config.budgets.max_single_generation_seconds,
+        timeout_seconds=min(
+            config.budgets.max_total_wall_seconds,
+            config.budgets.max_single_generation_seconds * 3,
+        ),
     )
     if outcome.status != "completed" or not isinstance(outcome.value, dict):
         status = (
@@ -98,6 +103,20 @@ def challenge_bundle(
     store = store or ResearchStore()
     runner = runner or _default_runner
     run_id = bundle.research_run_id
+    deadline = time.monotonic() + config.budgets.max_total_wall_seconds
+
+    def remaining_config() -> ResearchConfig | None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        return replace(
+            config,
+            budgets=replace(
+                config.budgets,
+                max_total_wall_seconds=remaining,
+            ),
+        )
+
     result: dict[str, Any] = {"status": "skipped", "reason": "budget"}
     with research_lane(
         f"{run_id}-challenge-{uuid.uuid4().hex[:8]}",
@@ -108,6 +127,8 @@ def challenge_bundle(
     ) as lease:
         if not lease.admission.admitted:
             result = {"status": "deferred", "reason": lease.admission.reason}
+        elif (runner_config := remaining_config()) is None:
+            result = {"status": "skipped", "reason": "wall_time_budget_exhausted"}
         elif not usage.consume(config.budgets, "challenge_calls"):
             result = {"status": "skipped", "reason": "challenge_budget_exhausted"}
         else:
@@ -116,45 +137,63 @@ def challenge_bundle(
                 "challenge",
                 prompt,
                 lease,
-                config,
+                runner_config,
             )
             repairs = int(challenge.get("repair_turns") or 0)
-            if repairs and usage.can_consume(config.budgets, "repair_calls", repairs):
-                usage.consume(config.budgets, "repair_calls", repairs)
-            value = (
-                challenge.get("value")
-                if isinstance(challenge.get("value"), dict)
-                else {}
-            )
-            result = {"status": challenge.get("status", "error"), "challenger": value}
-            if isinstance(challenge.get("route"), dict):
-                result["route"] = challenge["route"]
-            disagreement = (
-                challenge.get("status") == "completed"
-                and challenge.get("ok") is not False
-                and value.get("verdict") in {"confirm", "reject", "inconclusive"}
-                and isinstance(value.get("contradictions"), list)
-                and (
-                    value.get("verdict") in {"reject", "inconclusive"}
-                    or bool(value["contradictions"])
+            if repairs and not usage.consume(
+                config.budgets, "repair_calls", repairs
+            ):
+                result = {"status": "skipped", "reason": "repair_budget_exhausted"}
+                if isinstance(challenge.get("route"), dict):
+                    result["route"] = challenge["route"]
+            else:
+                value = (
+                    challenge.get("value")
+                    if isinstance(challenge.get("value"), dict)
+                    else {}
                 )
-            )
-            if disagreement and usage.consume(config.budgets, "tie_break_calls"):
-                tie_prompt = json.dumps(
-                    {"bundle": bundle.to_dict(), "challenger": value},
-                    ensure_ascii=False,
-                )[:60_000]
-                tie = runner(
-                    "tie_break",
-                    tie_prompt,
-                    lease,
-                    config,
+                result = {
+                    "status": challenge.get("status", "error"),
+                    "challenger": value,
+                }
+                if isinstance(challenge.get("route"), dict):
+                    result["route"] = challenge["route"]
+                disagreement = (
+                    challenge.get("status") == "completed"
+                    and challenge.get("ok") is not False
+                    and value.get("verdict") in {"confirm", "reject", "inconclusive"}
+                    and isinstance(value.get("contradictions"), list)
+                    and (
+                        value.get("verdict") in {"reject", "inconclusive"}
+                        or bool(value["contradictions"])
+                    )
                 )
-                result["tie_break"] = (
-                    tie.get("value") if isinstance(tie.get("value"), dict) else {}
-                )
-                if isinstance(tie.get("route"), dict):
-                    result["tie_route"] = tie["route"]
+                tie_config = remaining_config() if disagreement else None
+                if (
+                    tie_config is not None
+                    and usage.consume(config.budgets, "tie_break_calls")
+                ):
+                    tie_prompt = json.dumps(
+                        {"bundle": bundle.to_dict(), "challenger": value},
+                        ensure_ascii=False,
+                    )[:60_000]
+                    tie = runner(
+                        "tie_break",
+                        tie_prompt,
+                        lease,
+                        tie_config,
+                    )
+                    tie_repairs = int(tie.get("repair_turns") or 0)
+                    if not tie_repairs or usage.consume(
+                        config.budgets, "repair_calls", tie_repairs
+                    ):
+                        result["tie_break"] = (
+                            tie.get("value")
+                            if isinstance(tie.get("value"), dict)
+                            else {}
+                        )
+                        if isinstance(tie.get("route"), dict):
+                            result["tie_route"] = tie["route"]
     result["usage"] = usage.to_dict()
     store.append_event(
         run_id,

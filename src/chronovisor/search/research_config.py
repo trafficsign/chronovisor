@@ -123,7 +123,7 @@ def load_research_config(path: Path | str | None = None) -> ResearchConfig:
             budget_data, "max_single_generation_seconds", 30.0, 1.0
         ),
         max_single_generation_tokens=_int(
-            budget_data, "max_single_generation_tokens", 256, 1
+            budget_data, "max_single_generation_tokens", 512, 1
         ),
         max_planner_calls=_int(budget_data, "max_planner_calls", 5),
         max_challenge_calls=_int(budget_data, "max_challenge_calls", 2),

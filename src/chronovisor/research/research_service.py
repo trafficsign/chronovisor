@@ -160,13 +160,38 @@ def run_evidence_research(
     )
     challenge_result: dict[str, Any] = {"status": "disabled"}
     if challenge and artifacts and config.budgets.max_challenge_calls > 0:
-        challenge_result = challenge_bundle(
-            provisional,
-            config=config,
-            usage=_usage_from_summary(summary),
-            store=store,
-            runner=challenge_runner,
+        elapsed_ms = summary.get("elapsed_ms")
+        elapsed_seconds = (
+            max(0.0, float(elapsed_ms)) / 1000
+            if isinstance(elapsed_ms, (int, float))
+            else 0.0
         )
+        remaining_wall_seconds = max(
+            0.0,
+            config.budgets.max_total_wall_seconds - elapsed_seconds,
+        )
+        usage = _usage_from_summary(summary)
+        if remaining_wall_seconds <= 0:
+            challenge_result = {
+                "status": "skipped",
+                "reason": "wall_time_budget_exhausted",
+                "usage": usage.to_dict(),
+            }
+        else:
+            challenge_config = replace(
+                config,
+                budgets=replace(
+                    config.budgets,
+                    max_total_wall_seconds=remaining_wall_seconds,
+                ),
+            )
+            challenge_result = challenge_bundle(
+                provisional,
+                config=challenge_config,
+                usage=usage,
+                store=store,
+                runner=challenge_runner,
+            )
     final_claims = _reconcile(assessed, challenge_result)
     bundle = build_bundle(
         run_id=run_id,
