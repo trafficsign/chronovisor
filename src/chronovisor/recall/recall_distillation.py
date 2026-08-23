@@ -4439,6 +4439,7 @@ class _TeacherBatchResult:
     profile_contract_id: str = ""
     ramp_cap: int | None = None
     ramp_valid_receipts: int | None = None
+    ramp_provider_attempts: int | None = None
 
 
 @dataclass(frozen=True)
@@ -4457,10 +4458,14 @@ class _CandidateCaptureResult:
     deadline_deferred: bool
 
 
-def _ox_ramp_state(state: Mapping[str, Any], max_inflight: int) -> tuple[int, int]:
+def _ox_ramp_state(state: Mapping[str, Any], max_inflight: int) -> tuple[int, int, int]:
     cap = state.get("ox_ramp_cap", 1)
     receipts = state.get("ox_ramp_valid_receipts", 0)
-    allowed_caps = {min(value, max_inflight) for value in (1, 2, 5, 10)}
+    attempts = state.get("ox_ramp_provider_attempts")
+    allowed_caps = tuple(sorted({min(value, max_inflight) for value in (1, 2, 5, 10)}))
+    final_cap = allowed_caps[-1]
+    if attempts is None and receipts == 0:
+        attempts = 0
     if (
         isinstance(cap, bool)
         or not isinstance(cap, int)
@@ -4468,11 +4473,60 @@ def _ox_ramp_state(state: Mapping[str, Any], max_inflight: int) -> tuple[int, in
         or isinstance(receipts, bool)
         or not isinstance(receipts, int)
         or receipts < 0
-        or receipts > OX_RAMP_RECEIPTS_PER_CAP
-        or (receipts == OX_RAMP_RECEIPTS_PER_CAP and cap < max_inflight)
+        or isinstance(attempts, bool)
+        or not isinstance(attempts, int)
+        or attempts < receipts
+        or (cap < final_cap and receipts > OX_RAMP_RECEIPTS_PER_CAP)
+        or (
+            cap == final_cap
+            and receipts >= OX_RAMP_RECEIPTS_PER_CAP
+            and receipts * 100 < attempts * 95
+        )
     ):
-        return 1, 0
-    return cap, receipts
+        # A legacy receipt count has no trustworthy denominator.  Reset rather
+        # than assuming every recorded receipt was a successful first attempt.
+        return 1, 0, 0
+    return cap, receipts, attempts
+
+
+def _next_ox_ramp_cap(current_cap: int, max_inflight: int) -> int:
+    for cap in sorted({min(value, max_inflight) for value in (1, 2, 5, 10)}):
+        if cap > current_cap:
+            return cap
+    return current_cap
+
+
+def _advance_ox_ramp(
+    *,
+    cap: int,
+    valid_receipts: int,
+    provider_attempts: int,
+    valid_results: int,
+    actual_attempts: int,
+    rate_limited: bool,
+    stopped: bool,
+    max_inflight: int,
+) -> tuple[int, int, int]:
+    """Apply the OX-only quality gate after deep response validation."""
+    final_cap = max(min(value, max_inflight) for value in (1, 2, 5, 10))
+    if (
+        cap == final_cap
+        and valid_receipts >= OX_RAMP_RECEIPTS_PER_CAP
+        and valid_receipts * 100 >= provider_attempts * 95
+    ):
+        return cap, valid_receipts, provider_attempts
+    if rate_limited:
+        return max(1, cap // 2), 0, 0
+    if stopped:
+        return cap, valid_receipts, provider_attempts + actual_attempts
+    receipts = valid_receipts + valid_results
+    attempts = provider_attempts + actual_attempts
+    if receipts < OX_RAMP_RECEIPTS_PER_CAP or receipts * 100 < attempts * 95:
+        return cap, receipts, attempts
+    next_cap = _next_ox_ramp_cap(cap, max_inflight)
+    if next_cap == cap:
+        return cap, receipts, attempts
+    return next_cap, 0, 0
 
 
 def _run_ox_teacher_batch(
@@ -4518,7 +4572,7 @@ def _run_ox_teacher_batch(
         and worker_state.get("ox_profile_contract_id") == profile_contract_id
         else {}
     )
-    ramp_cap, ramp_valid_receipts = _ox_ramp_state(
+    ramp_cap, ramp_valid_receipts, ramp_provider_attempts = _ox_ramp_state(
         ramp_source, config.teacher_max_inflight
     )
     try:
@@ -5310,34 +5364,33 @@ def _run_ox_teacher_batch(
         "changing_claim",
     }
 
-    def valid_result_count(response: object) -> int:
-        if not isinstance(response, Mapping):
-            return 0
-        labels = response.get("labels")
-        if not isinstance(labels, list) or not all(
-            isinstance(label, Mapping) and set(label) == required_label_fields
-            for label in labels
+    # Dispatch one fixed-cap wave at a time.  The generic dispatcher remains a
+    # transport primitive; only this OX layer can promote a cap after deep
+    # identity, digest, and label validation below.
+    results: list[Any] = []
+    dispatched_batches = 0
+    for start in range(0, len(batches), ramp_cap):
+        wave = batches[start : start + ramp_cap]
+        wave_results = dispatch_claimed_work(
+            wave,
+            lambda current: teacher.evaluate(batch_payload(current)),
+            max_inflight=ramp_cap,
+            max_retries=0 if config.teacher_claim_limit == 1 else 2,
+            min_valid_results_per_cap=OX_RAMP_RECEIPTS_PER_CAP,
+            initial_cap=ramp_cap,
+            initial_valid_results=0,
+            valid_result_count=lambda _response: 0,
+        )
+        results.extend(wave_results)
+        dispatched_batches += len(wave)
+        if any(
+            result.rate_limited or result.status == "stopped" for result in wave_results
         ):
-            return 0
-        # One schema-valid provider response is one ramp receipt, independent of
-        # how many labels it happened to carry.
-        return 1
-
-    ramp_state = {
-        "current_cap": ramp_cap,
-        "valid_results_at_cap": ramp_valid_receipts,
-    }
-    results = dispatch_claimed_work(
-        batches,
-        lambda current: teacher.evaluate(batch_payload(current)),
-        max_inflight=config.teacher_max_inflight,
-        max_retries=0 if config.teacher_claim_limit == 1 else 2,
-        min_valid_results_per_cap=OX_RAMP_RECEIPTS_PER_CAP,
-        initial_cap=ramp_cap,
-        initial_valid_results=ramp_valid_receipts,
-        ramp_state=ramp_state,
-        valid_result_count=valid_result_count,
-    )
+            break
+    if dispatched_batches < len(batches):
+        workset.release_unattempted(
+            [claim for batch in batches[dispatched_batches:] for claim in batch]
+        )
     expected_identity = {
         "provider": "opencode-go",
         "model": "opencode-go/ox-alpha-free",
@@ -5348,6 +5401,7 @@ def _run_ox_teacher_batch(
     records: list[dict[str, Any]] = []
     completed_claims: list[Any] = []
     outcomes: dict[str, dict[str, str]] = {}
+    valid_provider_results = 0
     for result in results:
         batch_claims = result.work
         if result.status != "ok" or not isinstance(result.value, Mapping):
@@ -5426,6 +5480,7 @@ def _run_ox_teacher_batch(
                     "error_class": "invalid_teacher_output",
                 }
             continue
+        valid_provider_results += 1
         for claim in batch_claims:
             task = tasks[claim.work_id]
             candidate = task["candidate"]
@@ -5471,6 +5526,16 @@ def _run_ox_teacher_batch(
         workset.commit(
             active_claims, [outcomes[claim.work_id] for claim in active_claims]
         )
+    ramp_cap, ramp_valid_receipts, ramp_provider_attempts = _advance_ox_ramp(
+        cap=ramp_cap,
+        valid_receipts=ramp_valid_receipts,
+        provider_attempts=ramp_provider_attempts,
+        valid_results=valid_provider_results,
+        actual_attempts=sum(result.attempts for result in results),
+        rate_limited=any(result.rate_limited for result in results),
+        stopped=stopped,
+        max_inflight=config.teacher_max_inflight,
+    )
     return _TeacherBatchResult(
         labels_written=len(appended),
         model_calls=sum(result.attempts for result in results),
@@ -5478,8 +5543,9 @@ def _run_ox_teacher_batch(
         workset_status=workset.status("ox"),
         profile_stopped=stopped,
         profile_contract_id=profile_contract_id,
-        ramp_cap=ramp_state["current_cap"],
-        ramp_valid_receipts=ramp_state["valid_results_at_cap"],
+        ramp_cap=ramp_cap,
+        ramp_valid_receipts=ramp_valid_receipts,
+        ramp_provider_attempts=ramp_provider_attempts,
     )
 
 
@@ -6186,17 +6252,22 @@ def _run_distillation_chunk_impl(
         if (
             teacher_result.ramp_cap is not None
             or teacher_result.ramp_valid_receipts is not None
+            or teacher_result.ramp_provider_attempts is not None
         ):
             ramp_source = {
                 "ox_ramp_cap": teacher_result.ramp_cap,
                 "ox_ramp_valid_receipts": teacher_result.ramp_valid_receipts,
+                "ox_ramp_provider_attempts": teacher_result.ramp_provider_attempts,
             }
-        ox_ramp_cap, ox_ramp_valid_receipts = _ox_ramp_state(
-            ramp_source, config.teacher_max_inflight
-        )
+        (
+            ox_ramp_cap,
+            ox_ramp_valid_receipts,
+            ox_ramp_provider_attempts,
+        ) = _ox_ramp_state(ramp_source, config.teacher_max_inflight)
         ox_ramp_fields = {
             "ox_ramp_cap": ox_ramp_cap,
             "ox_ramp_valid_receipts": ox_ramp_valid_receipts,
+            "ox_ramp_provider_attempts": ox_ramp_provider_attempts,
         }
     counterfactual_result = _CounterfactualBlockResult(
         pending=counterfactual_probe.pending

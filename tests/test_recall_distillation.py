@@ -1641,6 +1641,7 @@ def test_chunk_commits_ox_ramp_with_the_completed_run(
         lambda **_kwargs: distill._TeacherBatchResult(
             ramp_cap=5,
             ramp_valid_receipts=7,
+            ramp_provider_attempts=9,
         ),
     )
     result = distill.run_distillation_chunk(
@@ -1659,10 +1660,13 @@ def test_chunk_commits_ox_ramp_with_the_completed_run(
     )
     assert result["ox_ramp_cap"] == 5
     assert result["ox_ramp_valid_receipts"] == 7
+    assert result["ox_ramp_provider_attempts"] == 9
     assert state["ox_ramp_cap"] == 5
     assert state["ox_ramp_valid_receipts"] == 7
+    assert state["ox_ramp_provider_attempts"] == 9
     assert run["ox_ramp_cap"] == 5
     assert run["ox_ramp_valid_receipts"] == 7
+    assert run["ox_ramp_provider_attempts"] == 9
 
 
 def test_chunk_parses_committed_raw_once(
@@ -2463,6 +2467,7 @@ def test_ox_ramp_counts_provider_receipts_not_labels(
         }
         assert all(set(label) == fields for label in response["labels"])
         captured["receipt_count"] = callback(response)
+        captured["max_inflight"] = cast(int, kwargs["max_inflight"])
         return []
 
     monkeypatch.setattr(dispatcher, "dispatch_claimed_work", dispatch)
@@ -2496,7 +2501,7 @@ def test_ox_ramp_counts_provider_receipts_not_labels(
         structural_verifier=lambda *_args: None,
     )
     assert result.labels_written == 0
-    assert captured["receipt_count"] == 1
+    assert captured == {"receipt_count": 0, "max_inflight": 1}
 
     active = 0
     peak = 0
@@ -2516,17 +2521,18 @@ def test_ox_ramp_counts_provider_receipts_not_labels(
         one_receipt,
         max_inflight=10,
         min_valid_results_per_cap=20,
-        valid_result_count=lambda _response: captured["receipt_count"],
+        valid_result_count=lambda _response: 1,
     ).dispatch(list(range(19)))
     assert peak == 1
 
 
 @pytest.mark.parametrize(
-    ("state_kind", "matching_contract", "expected_initial"),
+    ("state_kind", "matching_contract", "provider_attempts", "expected_initial"),
     [
-        ("worker-state", True, (2, 19)),
-        ("worker-state", False, (1, 0)),
-        ("forged", True, (1, 0)),
+        ("worker-state", True, 20, (2, 19, 20)),
+        ("worker-state", True, None, (1, 0, 0)),
+        ("worker-state", False, 20, (1, 0, 0)),
+        ("forged", True, 20, (1, 0, 0)),
     ],
 )
 def test_ox_ramp_resumes_only_for_the_same_profile_contract(
@@ -2534,7 +2540,8 @@ def test_ox_ramp_resumes_only_for_the_same_profile_contract(
     monkeypatch: pytest.MonkeyPatch,
     state_kind: str,
     matching_contract: bool,
-    expected_initial: tuple[int, int],
+    provider_attempts: int | None,
+    expected_initial: tuple[int, int, int],
 ) -> None:
     from chronovisor.recall import recall_distillation_dispatcher as dispatcher
 
@@ -2555,6 +2562,11 @@ def test_ox_ramp_resumes_only_for_the_same_profile_contract(
             ),
             "ox_ramp_cap": 2,
             "ox_ramp_valid_receipts": 19,
+            **(
+                {"ox_ramp_provider_attempts": provider_attempts}
+                if provider_attempts is not None
+                else {}
+            ),
         },
     )
     captured: dict[str, int] = {}
@@ -2562,8 +2574,7 @@ def test_ox_ramp_resumes_only_for_the_same_profile_contract(
     def dispatch(_batches: object, _evaluate: object, **kwargs: object) -> list[object]:
         captured["initial_cap"] = cast(int, kwargs["initial_cap"])
         captured["initial_valid_results"] = cast(int, kwargs["initial_valid_results"])
-        ramp_state = cast(dict[str, int], kwargs["ramp_state"])
-        ramp_state.update(current_cap=5, valid_results_at_cap=0)
+        captured["max_inflight"] = cast(int, kwargs["max_inflight"])
         return []
 
     monkeypatch.setattr(dispatcher, "dispatch_claimed_work", dispatch)
@@ -2601,10 +2612,176 @@ def test_ox_ramp_resumes_only_for_the_same_profile_contract(
 
     assert captured == {
         "initial_cap": expected_initial[0],
-        "initial_valid_results": expected_initial[1],
+        "initial_valid_results": 0,
+        "max_inflight": expected_initial[0],
     }
-    assert result.ramp_cap == 5
-    assert result.ramp_valid_receipts == 0
+    assert result.ramp_cap == expected_initial[0]
+    assert result.ramp_valid_receipts == expected_initial[1]
+    assert result.ramp_provider_attempts == expected_initial[2]
+
+
+def test_ox_ramp_requires_a_95_percent_provider_success_rate_to_advance() -> None:
+    held = distill._advance_ox_ramp(
+        cap=1,
+        valid_receipts=0,
+        provider_attempts=0,
+        valid_results=20,
+        actual_attempts=22,
+        rate_limited=False,
+        stopped=False,
+        max_inflight=10,
+    )
+    assert held == (1, 20, 22)
+    assert distill._advance_ox_ramp(
+        cap=held[0],
+        valid_receipts=held[1],
+        provider_attempts=held[2],
+        valid_results=18,
+        actual_attempts=18,
+        rate_limited=False,
+        stopped=False,
+        max_inflight=10,
+    ) == (2, 0, 0)
+
+
+def test_ox_ramp_counts_invalid_output_and_retries_in_provider_denominator() -> None:
+    assert distill._advance_ox_ramp(
+        cap=1,
+        valid_receipts=19,
+        provider_attempts=19,
+        valid_results=0,
+        actual_attempts=1,
+        rate_limited=False,
+        stopped=False,
+        max_inflight=10,
+    ) == (1, 19, 20)
+    assert distill._advance_ox_ramp(
+        cap=1,
+        valid_receipts=19,
+        provider_attempts=19,
+        valid_results=1,
+        actual_attempts=3,
+        rate_limited=False,
+        stopped=False,
+        max_inflight=10,
+    ) == (1, 20, 22)
+
+
+def test_ox_ramp_429_halves_and_resets_but_final_acceptance_is_stable() -> None:
+    assert distill._advance_ox_ramp(
+        cap=5,
+        valid_receipts=12,
+        provider_attempts=12,
+        valid_results=1,
+        actual_attempts=1,
+        rate_limited=True,
+        stopped=False,
+        max_inflight=10,
+    ) == (2, 0, 0)
+    assert distill._advance_ox_ramp(
+        cap=2,
+        valid_receipts=19,
+        provider_attempts=19,
+        valid_results=1,
+        actual_attempts=1,
+        rate_limited=False,
+        stopped=True,
+        max_inflight=10,
+    ) == (2, 19, 20)
+    accepted = (10, 20, 21)
+    assert (
+        distill._advance_ox_ramp(
+            cap=accepted[0],
+            valid_receipts=accepted[1],
+            provider_attempts=accepted[2],
+            valid_results=10,
+            actual_attempts=10,
+            rate_limited=False,
+            stopped=False,
+            max_inflight=10,
+        )
+        == accepted
+    )
+
+
+def test_ox_ramp_only_counts_deep_valid_provider_responses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_distillation_dispatcher as dispatcher
+
+    def dispatch(batches: object, _evaluate: object, **_kwargs: object) -> list[object]:
+        batch = cast(list[list[object]], batches)[0]
+        return [
+            dispatcher.DispatchResult(
+                batch,
+                "ok",
+                value={
+                    "labels": [
+                        {
+                            "candidate_id": "wrong-candidate",
+                            "verdict": "relevant",
+                            "confidence": 1.0,
+                            "rationale": "bounded",
+                            "minimal_atom_ids": [],
+                            "missing_slots": [],
+                            "changing_claim": "",
+                        }
+                    ],
+                    "_route_identity": {
+                        "provider": "not-opencode-go",
+                        "model": "opencode-go/ox-alpha-free",
+                        "location": "remote",
+                    },
+                    "_route_digest": "a" * 64,
+                    "_model_digest": "b" * 64,
+                    "_prompt_digest": "c" * 64,
+                    "_schema_digest": "d" * 64,
+                },
+                attempts=1,
+            )
+        ]
+
+    monkeypatch.setattr(dispatcher, "dispatch_claimed_work", dispatch)
+
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def evaluate(self, _payload: object) -> dict[str, object]:
+            raise AssertionError("intercepted dispatcher must not evaluate")
+
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE, ox_enabled=True
+        ),
+        teachers={distill.OX_TEACHER_ROLE: RemoteTeacher()},
+        snapshots={
+            "rally": {
+                "candidates": [
+                    {"candidate_id": "candidate", "text_sha256": "candidate"}
+                ]
+            }
+        },
+        rally_by_id={
+            "rally": {"rally_id": "rally", "query_sha256": "query", "context_refs": []}
+        },
+        texts={"query": "what proves the claim", "candidate": "bounded fact"},
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert result.labels_written == 0
+    assert (
+        result.ramp_cap,
+        result.ramp_valid_receipts,
+        result.ramp_provider_attempts,
+    ) == (
+        1,
+        0,
+        1,
+    )
 
 
 def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_labels(
