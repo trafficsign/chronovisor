@@ -1661,12 +1661,15 @@ def test_chunk_commits_ox_ramp_with_the_completed_run(
     assert result["ox_ramp_cap"] == 5
     assert result["ox_ramp_valid_receipts"] == 7
     assert result["ox_ramp_provider_attempts"] == 9
+    assert result["ox_ramp_request_revision"] == distill.OX_RAMP_REQUEST_REVISION
     assert state["ox_ramp_cap"] == 5
     assert state["ox_ramp_valid_receipts"] == 7
     assert state["ox_ramp_provider_attempts"] == 9
+    assert state["ox_ramp_request_revision"] == distill.OX_RAMP_REQUEST_REVISION
     assert run["ox_ramp_cap"] == 5
     assert run["ox_ramp_valid_receipts"] == 7
     assert run["ox_ramp_provider_attempts"] == 9
+    assert run["ox_ramp_request_revision"] == distill.OX_RAMP_REQUEST_REVISION
 
 
 def test_chunk_parses_committed_raw_once(
@@ -2527,19 +2530,28 @@ def test_ox_ramp_counts_provider_receipts_not_labels(
 
 
 @pytest.mark.parametrize(
-    ("state_kind", "matching_contract", "provider_attempts", "expected_initial"),
+    (
+        "state_kind",
+        "matching_contract",
+        "request_revision",
+        "provider_attempts",
+        "expected_initial",
+    ),
     [
-        ("worker-state", True, 20, (2, 19, 20)),
-        ("worker-state", True, None, (1, 0, 0)),
-        ("worker-state", False, 20, (1, 0, 0)),
-        ("forged", True, 20, (1, 0, 0)),
+        ("worker-state", True, distill.OX_RAMP_REQUEST_REVISION, 20, (2, 19, 20)),
+        ("worker-state", True, distill.OX_RAMP_REQUEST_REVISION, None, (1, 0, 0)),
+        ("worker-state", True, None, 20, (1, 0, 0)),
+        ("worker-state", True, "json-object-v1", 20, (1, 0, 0)),
+        ("worker-state", False, distill.OX_RAMP_REQUEST_REVISION, 20, (1, 0, 0)),
+        ("forged", True, distill.OX_RAMP_REQUEST_REVISION, 20, (1, 0, 0)),
     ],
 )
-def test_ox_ramp_resumes_only_for_the_same_profile_contract(
+def test_ox_ramp_resumes_only_for_the_same_profile_contract_and_request_revision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     state_kind: str,
     matching_contract: bool,
+    request_revision: str | None,
     provider_attempts: int | None,
     expected_initial: tuple[int, int, int],
 ) -> None:
@@ -2562,6 +2574,11 @@ def test_ox_ramp_resumes_only_for_the_same_profile_contract(
             ),
             "ox_ramp_cap": 2,
             "ox_ramp_valid_receipts": 19,
+            **(
+                {"ox_ramp_request_revision": request_revision}
+                if request_revision is not None
+                else {}
+            ),
             **(
                 {"ox_ramp_provider_attempts": provider_attempts}
                 if provider_attempts is not None
@@ -2664,6 +2681,7 @@ def test_ox_ramp_low_rate_state_survives_each_chunk_normalization() -> None:
                     "ox_ramp_cap": state[0],
                     "ox_ramp_valid_receipts": state[1],
                     "ox_ramp_provider_attempts": state[2],
+                    "ox_ramp_request_revision": distill.OX_RAMP_REQUEST_REVISION,
                 },
                 10,
             )
@@ -2697,11 +2715,12 @@ def test_ox_ramp_final_cap_low_rate_state_recovers_then_freezes() -> None:
         assert state == (10, receipts, receipts + 2)
         assert (
             distill._ox_ramp_state(
-                {
-                    "ox_ramp_cap": state[0],
-                    "ox_ramp_valid_receipts": state[1],
-                    "ox_ramp_provider_attempts": state[2],
-                },
+            {
+                "ox_ramp_cap": state[0],
+                "ox_ramp_valid_receipts": state[1],
+                "ox_ramp_provider_attempts": state[2],
+                "ox_ramp_request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            },
                 10,
             )
             == state

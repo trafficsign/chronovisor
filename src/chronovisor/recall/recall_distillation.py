@@ -61,6 +61,7 @@ LOCAL_TRIAD_PROFILE = "local-triad-v1"
 OX_SINGLE_PROFILE = "ox-alpha-single-v1"
 OX_SINGLE_COHORT = "ox-alpha-backfill-v1"
 OX_PROBE_REVISION = "single-teacher-repeat-v2"
+OX_RAMP_REQUEST_REVISION = "json-schema-strict-v1"
 TEACHER_PROFILES = frozenset({LOCAL_TRIAD_PROFILE, OX_SINGLE_PROFILE})
 OX_ALPHA_ENDPOINT = "https://opencode.ai/zen/go/v1"
 OX_ALPHA_CREDENTIAL_REF = "oskeyring:codex-router-opencode-go/default"
@@ -4459,6 +4460,8 @@ class _CandidateCaptureResult:
 
 
 def _ox_ramp_state(state: Mapping[str, Any], max_inflight: int) -> tuple[int, int, int]:
+    if state.get("ox_ramp_request_revision") != OX_RAMP_REQUEST_REVISION:
+        return 1, 0, 0
     cap = state.get("ox_ramp_cap", 1)
     receipts = state.get("ox_ramp_valid_receipts", 0)
     attempts = state.get("ox_ramp_provider_attempts")
@@ -4574,6 +4577,8 @@ def _run_ox_teacher_batch(
         worker_state
         if worker_state.get("kind") == "worker-state"
         and worker_state.get("ox_profile_contract_id") == profile_contract_id
+        and worker_state.get("ox_ramp_request_revision")
+        == OX_RAMP_REQUEST_REVISION
         else {}
     )
     ramp_cap, ramp_valid_receipts, ramp_provider_attempts = _ox_ramp_state(
@@ -6245,12 +6250,14 @@ def _run_distillation_chunk_impl(
     teacher_model_calls += teacher_result.model_calls
     model_deferred = model_deferred or teacher_result.deferred
     ox_workset = dict(teacher_result.workset_status or {})
-    ox_ramp_fields: dict[str, int] = {}
+    ox_ramp_fields: dict[str, int | str] = {}
     if config.teacher_profile == OX_SINGLE_PROFILE:
         ramp_source: Mapping[str, Any] = (
             scheduler_state
             if scheduler_state.get("kind") == "worker-state"
             and scheduler_state.get("ox_profile_contract_id") == ox_profile_contract_id
+            and scheduler_state.get("ox_ramp_request_revision")
+            == OX_RAMP_REQUEST_REVISION
             else {}
         )
         if (
@@ -6262,6 +6269,7 @@ def _run_distillation_chunk_impl(
                 "ox_ramp_cap": teacher_result.ramp_cap,
                 "ox_ramp_valid_receipts": teacher_result.ramp_valid_receipts,
                 "ox_ramp_provider_attempts": teacher_result.ramp_provider_attempts,
+                "ox_ramp_request_revision": OX_RAMP_REQUEST_REVISION,
             }
         (
             ox_ramp_cap,
@@ -6272,6 +6280,7 @@ def _run_distillation_chunk_impl(
             "ox_ramp_cap": ox_ramp_cap,
             "ox_ramp_valid_receipts": ox_ramp_valid_receipts,
             "ox_ramp_provider_attempts": ox_ramp_provider_attempts,
+            "ox_ramp_request_revision": OX_RAMP_REQUEST_REVISION,
         }
     counterfactual_result = _CounterfactualBlockResult(
         pending=counterfactual_probe.pending
