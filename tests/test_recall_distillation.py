@@ -2637,6 +2637,10 @@ def test_ox_ramp_resumes_only_for_the_same_profile_contract_and_request_revision
     assert result.ramp_provider_attempts == expected_initial[2]
 
 
+def test_ox_ramp_request_revision_tracks_safe_reason_code_schema() -> None:
+    assert distill.OX_RAMP_REQUEST_REVISION == "json-schema-reason-code-v2"
+
+
 def test_ox_ramp_requires_a_95_percent_provider_success_rate_to_advance() -> None:
     held = distill._advance_ox_ramp(
         cap=1,
