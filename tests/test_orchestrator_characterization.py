@@ -433,6 +433,40 @@ def test_reconcile_128_parent_batch_stays_within_wall_time_budget(
     assert result["max_ms"] >= result["p95_ms"]
 
 
+def test_reconcile_budget_is_not_spent_listing_all_projection_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root, raw_dir = _configure_reconciler(
+        tmp_path,
+        monkeypatch,
+        processed=["a.md", "b.md"],
+    )
+    _write_transcript(raw_dir, "a.md", "first source")
+    _write_transcript(raw_dir, "b.md", "second source")
+    artifact_dir = root / "runtime" / "raw-projections" / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "existing-artifact").write_bytes(b"existing")
+
+    elapsed = 0.0
+    original_iterdir = Path.iterdir
+
+    def expensive_iterdir(path: Path):
+        nonlocal elapsed
+        if path == artifact_dir:
+            elapsed += 0.300
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", expensive_iterdir)
+    monkeypatch.setattr(orchestrator.time, "perf_counter", lambda: elapsed)
+
+    result = orchestrator.reconcile_processed_projections(max_parents=2)
+
+    assert result["cursor"] == "b.md"
+    assert len(result["processed"]) == 2
+    assert result["budget_exhausted"] is False
+    assert result["elapsed_ms"] < 250
+
+
 def test_reconcile_rejects_symlink_swap_before_builder_receives_bytes(
     tmp_path: Path, monkeypatch
 ) -> None:

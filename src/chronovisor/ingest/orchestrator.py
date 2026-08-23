@@ -730,7 +730,7 @@ def reconcile_processed_projections(
                     "derived projection path escapes Chronovisor root"
                 ) from exc
         artifact_names_before = (
-            {path.name for path in output_dir.iterdir()}
+            set(os.listdir(output_dir))
             if output_dir.is_dir()
             else set()
         )
