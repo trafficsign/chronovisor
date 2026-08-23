@@ -296,6 +296,50 @@ def test_verified_archived_legacy_markdown_can_passthrough(tmp_path: Path) -> No
     assert result.child_paths == ()
 
 
+def test_verified_archived_legacy_transcript_envelope_can_passthrough(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "save-claude-code-0123456789abcdef01234567-from4-to8.md"
+    raw_bytes = b"""---
+raw_keywords: [historical]
+---
+<!-- llm-wiki-save-transaction: legacy -->
+# Claude Code Session Transcript Delta
+
+## Transcript Delta
+
+```json
+[{"line":1,"role":"user","text":"historical"}]
+```
+"""
+
+    with pytest.raises(
+        RawSemanticProjectionError,
+        match="save transaction receipt",
+    ):
+        project_parent_raw(
+            path,
+            raw_bytes=raw_bytes,
+            output_dir=tmp_path / "unverified",
+            max_child_bytes=2_000,
+        )
+
+    result = project_parent_raw(
+        path,
+        raw_bytes=raw_bytes,
+        output_dir=tmp_path / "verified",
+        max_child_bytes=2_000,
+        allow_verified_legacy_markdown=True,
+    )
+
+    assert result.kind == "passthrough"
+    assert result.parent_paths == (path,)
+    assert result.parent_sha256 == hashlib.sha256(raw_bytes).hexdigest()
+    assert result.manifest_path is None
+    assert result.child_paths == ()
+    assert not (tmp_path / "verified").exists()
+
+
 def test_deterministic_save_filename_must_match_verified_receipt(
     tmp_path: Path,
 ) -> None:

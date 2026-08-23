@@ -1006,7 +1006,11 @@ def project_parent_raw(
     """
 
     source_bytes, source_text = _read_parent(raw_path, raw_bytes)
-    extracted = _extract_transcript_payload(source_text)
+    extracted = (
+        None
+        if allow_verified_legacy_markdown
+        else _extract_transcript_payload(source_text)
+    )
     if extracted is None:
         try:
             child = _projected_child_passthrough(raw_path, source_bytes)
