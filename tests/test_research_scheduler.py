@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 
 from chronovisor.core import research_scheduler
@@ -58,6 +59,26 @@ def test_foreground_diagnostics_do_not_use_durable_append(tmp_path, monkeypatch)
         "append_jsonl_durable",
         lambda *_args, **_kwargs: durable_calls.append(True),
     )
+    original_thread = threading.Thread
+    pending: list[object] = []
+
+    class ReverseStartThread:
+        def __init__(self, *, target, daemon) -> None:
+            self.target = target
+
+        def start(self) -> None:
+            pending.append(self.target)
+            if len(pending) != 2:
+                return
+            second = original_thread(target=pending[1], daemon=True)
+            second.start()
+            time.sleep(0.01)
+            first = original_thread(target=pending[0], daemon=True)
+            first.start()
+            first.join(timeout=1)
+            second.join(timeout=1)
+
+    monkeypatch.setattr(research_scheduler.threading, "Thread", ReverseStartThread)
 
     with research_scheduler.foreground_lane(preempt_grace_ms=0):
         pass

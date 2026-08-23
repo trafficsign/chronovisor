@@ -31,6 +31,8 @@ _FOREGROUND_ACTIVE: ContextVar[bool] = ContextVar(
     "chronovisor_foreground_active",
     default=False,
 )
+_DIAGNOSTIC_ORDER_LOCK = threading.Lock()
+_DIAGNOSTIC_TAIL: threading.Event | None = None
 
 
 def _iso() -> str:
@@ -48,27 +50,40 @@ def _event(kind: str, **payload: Any) -> None:
 def _diagnostic_event(kind: str, **payload: Any) -> None:
     """Append prompt-path diagnostics without waiting for filesystem durability."""
 
+    global _DIAGNOSTIC_TAIL
+
     row = json.dumps(
         {"ts": _iso(), "kind": kind, "pid": os.getpid(), **payload},
         ensure_ascii=False,
         default=str,
     ).encode("utf-8") + b"\n"
+    completed = threading.Event()
+    with _DIAGNOSTIC_ORDER_LOCK:
+        previous = _DIAGNOSTIC_TAIL
+        _DIAGNOSTIC_TAIL = completed
 
     def append() -> None:
-        with suppress(OSError):
-            SCHEDULER_LOG.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(
-                SCHEDULER_LOG,
-                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                0o600,
-            )
-            try:
-                os.write(descriptor, row)
-            finally:
-                os.close(descriptor)
+        if previous is not None:
+            previous.wait()
+        try:
+            with suppress(OSError):
+                SCHEDULER_LOG.parent.mkdir(parents=True, exist_ok=True)
+                descriptor = os.open(
+                    SCHEDULER_LOG,
+                    os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                    0o600,
+                )
+                try:
+                    os.write(descriptor, row)
+                finally:
+                    os.close(descriptor)
+        finally:
+            completed.set()
 
-    with suppress(RuntimeError):
+    try:
         threading.Thread(target=append, daemon=True).start()
+    except RuntimeError:
+        completed.set()
 
 
 def _atomic_ephemeral_json(path: Path, payload: dict[str, Any]) -> None:
