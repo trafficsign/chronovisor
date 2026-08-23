@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>oMLX / DFlash2 モデル専用常駐化 実装契約書</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+pre{background:var(--code-bg);padding:0.8rem 1rem;border-radius:6px;overflow:auto;font-size:0.82rem;line-height:1.5}
+table{width:100%;border-collapse:collapse;margin:0.75rem 0;font-size:0.9rem}
+th,td{padding:0.45rem 0.55rem;border:1px solid var(--rule);text-align:left;vertical-align:top}
+th{background:#f3f1eb}
+.callout{border-left:4px solid var(--accent);background:#f3f1eb;padding:0.65rem 0.9rem;border-radius:4px}
+.ok{border-left-color:var(--ok)}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_11b161cfc573491b8d1d8204aa26c5cb","created_at":"2026-08-23T11:12:17+09:00","状態":"ready","slug":"dedicated-omlx-dflash-residency-contract"}
+</script>
+
+<header>
+<h1>実装契約書: <span id="plan-title">oMLX / DFlash2 モデル専用常駐化</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span><code data-bind="task_id">plan_11b161cfc573491b8d1d8204aa26c5cb</code></span>
+<span data-bind="created_at">2026-08-23T11:12:17+09:00</span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<ul>
+<li>Qwen3.8 と Muse が同一 oMLX プロセス内で交互に DFlash runtime を奪い合う状態を止め、モデル本体・draft model・DFlash prefix cache をモデルごとに保持する。</li>
+<li>分類モデル、処理順、Decision Trace、構造化出力契約を変えずに、モデル再ロード待ちだけを除去する。</li>
+<li>128 GB unified memory 内で長文 prefill の一時メモリを残せることを実測で証明し、危険ならトラフィック切替前に中止できる実行手順にする。</li>
+</ul>
+<p class="callout ok"><strong>固定する最小構成:</strong> <code>8000 = Qwen3.8 + Ornith + bge</code>、既存 <code>8001 = Gemma</code>、新規 <code>8002 = Muse</code>。Chronovisor からの生成は既存の process 間共通 <code>model_resource_lease</code> で直列のままとする。</p>
+</section>
+
+<section data-section="契約判断">
+<h2>契約判断</h2>
+<table>
+<thead><tr><th>論点</th><th>決定</th><th>理由</th></tr></thead>
+<tbody>
+<tr><td>高速化方式</td><td>DFlash モデルを別 oMLX process に常駐</td><td>DFlash runtime hooks/cache は process-global。現状ログが Qwen と Muse の相互 unload を直接示す。</td></tr>
+<tr><td>モデル</td><td>現行 Qwen / Muse / Gemma を維持</td><td>小型モデル化による品質低下を持ち込まない。</td></tr>
+<tr><td>実行順</td><td>現行順序・直列 lease を維持</td><td>Decision Trace と unified-memory peak を変えない。</td></tr>
+<tr><td>DFlash L1 cache</td><td>各モデル <code>2 entries / 2 GiB</code> のまま</td><td>実装上の hard byte cap があり、増量の根拠となる hit rate はまだない。</td></tr>
+<tr><td>SSD L2 cache</td><td>pilot では無効</td><td>RAM 問題の解決にはならず、I/O・SSD wear・障害面を増やす。</td></tr>
+<tr><td>mlx-dspark</td><td>本番 backend に採用しない</td><td>現行 oMLX の Qwen 実測と速度差がほぼなく、Chronovisor が使う embeddings / JSON schema API の drop-in replacement ではない。</td></tr>
+<tr><td>Dashboard</td><td>Model Fleet の endpoint 集約だけ変更</td><td>UI・Decision Trace は触らず、3 process の実状態だけ正しく表示する。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<ul>
+<li>classification / research / librarian / recall の段階、lane 順、Primary / Challenger / Tie-break のモデル、revision、reasoning 設定を変更しない。</li>
+<li>stage batching、最大50件化、複数 DFlash 推論の同時実行をこの変更へ混ぜない。別実験で扱う。</li>
+<li><code>src/chronovisor/core/omlx_adapter.py</code> や lease 実装を、再現テストで既存機能の不足が証明されない限り変更しない。複数 endpoint routing は既に実装・テスト済み。</li>
+<li>L1 cache を 2 GiB/model より増やさない。SSD L2、TurboQuant KV、context window、sampling 値を変更しない。</li>
+<li>モデル weight を複製しない。新しい base path も <code>/Users/trafficsign/.omlx/models</code> を共有する。</li>
+<li>oMLX の <code>settings.json</code> にある credential / secret を repo、handoff、ログ抜粋、commit へ入れない。</li>
+<li>dirty worktree の無関係な変更を触らない。rollback に <code>git reset --hard</code> や broad delete を使わない。</li>
+<li>明示された push 権限がない状態で push、GitHub-backed runtime restart、live cutover を行わない。</li>
+</ul>
+</section>
+
+<section data-section="前提・仮定">
+<h2>確認済みの前提・根拠</h2>
+<ul>
+<li><code>/Users/trafficsign/.omlx/logs/launchd-stderr.log:20713</code> 以降に <code>because dflash runtime hooks/cache are process-global</code> と Qwen ↔ Muse の相互 unload が反復している。</li>
+<li>同ログの load estimate は Qwen <strong>24.90 GB</strong>、Muse <strong>25.02 GB</strong>。Gemma process のログは約 <strong>15.00 GB</strong>。Ornith + bge は status estimate で約 <strong>6.5 GB</strong>。</li>
+<li>現 process 観測窓では Qwen load 22回、Muse load 23回、model-loading stall 合計は約576秒。実装セッションは切替直前に同じ集計を再取得し、baseline artifact として残す。</li>
+<li><code>/Users/trafficsign/.omlx/model_settings.json:26-32,90-94</code> と Gemma 側設定で L1 は有効、各 <code>max_entries=2</code>、<code>max_bytes=2147483648</code>、L2 は無効。</li>
+<li>DFlash L1 実装 <code>.../dflash_mlx/cache/prefix_l1.py</code> は挿入後に entries と <code>snapshot.nbytes</code> 合計の両方を検査し、上限以下になるまで eviction する。単一 snapshot が 2 GiB を超えれば挿入した本人も eviction され、保持されない。</li>
+<li><code>snapshot.nbytes</code> は FA KV、GDN state、draft context、logits、sidecar array を加算する。ただし Python object、allocator fragmentation、実行中 request の live KV/prefill allocation は cap 外なので、2 GiB は process 全体の上限ではない。</li>
+<li>2026-08-23 11時台の平常 baseline は swap used <strong>346.88 MiB</strong>、<code>memory_pressure -Q</code> の free percentage <strong>91%</strong>。oMLX が示した effective memory ceiling は約 <strong>105 GiB</strong>。</li>
+<li><code>OMLXAdapter</code> は endpoint ごとの runtime を既に構築でき、DFlash request は process 間共通 lease を取得する。<code>tests/test_omlx_adapter.py::test_config_routes_distinct_local_omlx_servers</code> が既存契約。</li>
+<li>Dashboard の <code>src/chronovisor/ops/dashboard.py::_omlx_snapshot()</code> だけが現在 <code>OMLX_BASE_URL</code> 1件を直接参照するため、Model Fleet のみ小さな集約修正が必要。Decision Trace の data path とは独立している。</li>
+</ul>
+</section>
+
+<section data-section="メモリ契約">
+<h2>メモリとキャッシュの契約</h2>
+<table>
+<thead><tr><th>項目</th><th>保守的な計画値</th><th>扱い</th></tr></thead>
+<tbody>
+<tr><td>Qwen DFlash residency</td><td>24.90 GB</td><td>8000 に保持</td></tr>
+<tr><td>Muse DFlash residency</td><td>25.02 GB</td><td>8002 に保持</td></tr>
+<tr><td>Gemma DFlash residency</td><td>15.00 GB</td><td>8001 に保持</td></tr>
+<tr><td>Ornith + bge</td><td>約6.5 GB</td><td>8000。現行挙動を維持</td></tr>
+<tr><td>L1 cache hard cap</td><td>最大6 GiB（2 GiB × 3）</td><td>増量禁止。実使用量は endpoint ごとに記録</td></tr>
+<tr><td>steady planning envelope</td><td>約78 GB class</td><td>oMLX 表示値と cache cap の保守的合算。厳密な RSS とはみなさない</td></tr>
+<tr><td>effective ceiling</td><td>約105 GiB</td><td>最低20 GiBの余裕を常時残す</td></tr>
+</tbody>
+</table>
+<p class="callout"><strong>回答:</strong> 現在の cache 設定そのものはメモリ的に制御可能。3 process 全部を満杯にしても cache は最大6 GiBで止まる。危険要因は cache より、3モデル常駐に長文 prefill の一時 allocation が重なることなので、以下の実測 gate を満たした場合だけ cutover する。</p>
+<ul>
+<li><strong>合格:</strong> warm-up 後の steady footprint が 85 GiB 以下、effective ceiling まで20 GiB以上の余裕、swap 増分1 GiB以下、memory pressure normal。</li>
+<li><strong>即時中止:</strong> footprint 90 GiB超、swap 増分4 GiB超、free percentage 10%以下が60秒継続、Metal allocation error / process kill、同等 workload で generation throughput が15%以上悪化。</li>
+<li>cache efficiency は成功条件の主目的にしない。現在値は約0.5%であり、prefix 再利用が少ない workload では cache を残しても速くならない。まず model swap 消滅を評価する。</li>
+<li>専用化後も hit rate が5%未満なら2 GiBのまま、または縮小候補。10%以上かつ prefill wall time 改善が再現し、24 GiB以上の余裕がある場合に限り、別契約で4 GiB/modelまで検討する。</li>
+</ul>
+</section>
+
+<section data-section="変更範囲">
+<h2>許可された変更範囲</h2>
+<ul>
+<li><strong>local runtime:</strong> <code>/Users/trafficsign/.omlx-muse/</code>、<code>/Users/trafficsign/Library/LaunchAgents/com.trafficsign.omlx-muse.plist</code> を新規作成。既存 main/Gemma の設定値は変更せず参照元にする。</li>
+<li><strong>Chronovisor runtime config:</strong> <code>/Users/trafficsign/.chronovisor/config.toml</code> に <code>omlx_muse = http://127.0.0.1:8002/v1</code> を追加し、Muse を使う6 roleだけ provider を変更。</li>
+<li><strong>repo:</strong> 原則 <code>src/chronovisor/ops/dashboard.py</code> と <code>tests/test_dashboard.py</code> の2 fileだけ。複数 oMLX endpoint の status merge に限定。</li>
+<li><strong>証拠:</strong> repo の既存 <code>_handoff/evidence/</code> 配下へ秘密を含まない baseline/post-run JSON または text を保存してよい。</li>
+</ul>
+<p>Muse route の完全な対象は <code>librarian.review.challenger</code>、<code>research.challenge</code>、<code>classification.tie_break</code>、<code>classification.anchor</code>、<code>classification.anchor.challenger</code>、<code>recall.distill.teacher.b</code>。model / revision / required_capabilities は変更しない。</p>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist">
+<li><input type="checkbox"><span><strong>実行権限と作業状態を確定:</strong> repo status、branch/worktree、HEAD、local-only commit、稼働中 service、runtime archive commit を記録する。push/restart権限がなければ live config は触らず、repo 実装・commit 後に blocked とする。</span></li>
+<li><input type="checkbox"><span><strong>baseline を固定:</strong> 同じ代表 prompt/output 条件で Qwen/Muse を交互に最低12 request実行し、wall time、prefill TPS、generation TPS、load count/load seconds、cache hit/cached tokens、oMLX memory、<code>memory_pressure -Q</code>、<code>sysctl vm.swapusage</code> を保存する。開始・終了log offsetも残す。</span></li>
+<li><input type="checkbox"><span><strong>repo の最小修正を test-first で実装:</strong> <code>_omlx_snapshot()</code> が configured <code>kind="omlx"</code> endpoint を一度ずつ読むようにし、同じ model id は1行へmergeする。いずれかの endpoint で <code>loaded=true</code> なら loaded row を優先。1 endpoint failure は他 endpoint の正常表示を潰さない。UI HTML、Decision Trace、route order code は変更しない。</span></li>
+<li><input type="checkbox"><span><strong>targeted/full test:</strong> multi-endpoint merge、partial failure、既存single-endpoint fallback、OMLXAdapter、Decision Trace orderを通す。続いて隔離rootでfull suiteを実行する。失敗を既存不具合として無視しない。</span></li>
+<li><input type="checkbox"><span><strong>repo変更をcommit:</strong> 差分が許可2 fileと必要な非秘密evidenceだけであることを確認し、意味のある単位でcommitする。明示権限がある時だけpushする。</span></li>
+<li><input type="checkbox"><span><strong>Muse base path を作成:</strong> <code>.omlx-gemma</code> の最小構造を踏襲し、<code>.omlx-muse/settings.json</code> は loopback:8002、共有model_dirs、現行balanced memory guard、idle timeout nullとする。<code>model_settings.json</code> は Muse の現行DFlash設定だけを持ち、L1=2 entries/2 GiB、L2=false。credentialは既存local値を安全に移し、mode 0600、証拠からredactする。</span></li>
+<li><input type="checkbox"><span><strong>LaunchAgent を追加:</strong> label <code>com.trafficsign.omlx-muse</code>、base path/working directory/log path を <code>.omlx-muse</code> に向け、mainと同じpatched runtimeを使う。model weightは共有し、複製しない。load後、8002の認証境界とhealthを確認する。</span></li>
+<li><input type="checkbox"><span><strong>トラフィック前 memory gate:</strong> Museだけを8002へwarmし、既存Qwen/Gemmaもresidentにする。15分の直列long-prefill probeで85/90 GiB、20 GiB headroom、swap、pressure、errorの閾値を判定する。不合格ならconfig変更前に8002をbootoutしrollbackする。</span></li>
+<li><input type="checkbox"><span><strong>role routing を切替:</strong> <code>omlx_muse</code> providerを追加し、上記6 roleだけを8002へ変更。全route manifestを出力して、Primary/Challenger/Tie-breakの順序とmodel/revisionが同一でendpoint hashだけ変わったことを比較する。</span></li>
+<li><input type="checkbox"><span><strong>正しい順でlive反映:</strong> pushが許可されている場合は <code>push → Chronovisor restart → runtime archive commit確認 → health → live browser/API</code> の順を守る。GitHub-backed <code>uvx</code> をpush前にrestartしない。</span></li>
+<li><input type="checkbox"><span><strong>post-runを実施:</strong> baselineと同じ12件以上の交互request、同一prefixの再利用probe、30分の実workloadを実行する。3 processのlogでcross-model unloadが0、各DFlash model loadが原則1回、memory gate継続合格を確認する。</span></li>
+<li><input type="checkbox"><span><strong>Dashboard/live acceptance:</strong> Model Fleetに各modelが重複なく出てQwen/Muse/Gemmaが同時loaded、Decision TraceのDOM順・badge・model名・最終結果がbaselineと同一であることを実ブラウザ、API、console、service healthで照合する。</span></li>
+<li><input type="checkbox"><span><strong>契約を完了更新:</strong> 証拠path、commit、push/runtime archive（実施時）、測定差分、rollback可否を実行ログへ追記し、全完了条件を満たした時だけstateをdoneにする。</span></li>
+</ol>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<ul>
+<li>Qwen/Muse交互 workload中の <code>because dflash runtime hooks/cache are process-global</code> unloadが<strong>0件</strong>。各専用processのDFlash loadは起動/warm-up時の原則1回だけ。</li>
+<li>model-loading seconds がbaseline比<strong>90%以上減少</strong>し、同等prompt/outputでp50 end-to-endが5%以上悪化せず、generation TPSが15%以上悪化しない。</li>
+<li>全 model、revision、reasoning、temperature、structured-output contract、lane/Decision Trace順がbaselineと同一。構造化出力失敗・retry率が悪化しない。</li>
+<li>warm-up後steady footprint 85 GiB以下、effective ceilingまで20 GiB以上、swap増分1 GiB以下、30分memory pressure normal。abort閾値を一度も超えない。</li>
+<li>L1 cacheの実使用量が各2 GiB以下であることをruntime stats/logで確認。hit rateが低くても増量していない。</li>
+<li>Model Fleetがconfigured modelを重複なしで表示し、3 endpointのpartial failureも正常endpointを隠さない。Decision Trace UIには意図しないdiffがない。</li>
+<li>targeted testと隔離full suiteが成功し、repo変更がcommit済み。push/restartを行った場合はremote HEAD、runtime archive、live healthが同じcommitを指す。</li>
+</ul>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<pre>uv run pytest -q tests/test_omlx_adapter.py tests/test_dashboard.py
+uv run pytest -q tests/test_decision_trace_projection.py
+CHRONOVISOR_ROOT="$(mktemp -d -t chronovisor-test)" uv run pytest -q
+
+memory_pressure -Q
+sysctl vm.swapusage
+launchctl print "gui/$(id -u)/com.trafficsign.omlx-muse"
+
+# API keyは環境から渡し、command/evidenceへ値を展開して保存しない。
+curl -fsS -H "x-api-key: $OMLX_API_KEY" http://127.0.0.1:8000/v1/models/status
+curl -fsS -H "x-api-key: $OMLX_API_KEY" http://127.0.0.1:8001/v1/models/status
+curl -fsS -H "x-api-key: $OMLX_API_KEY" http://127.0.0.1:8002/v1/models/status
+
+rg -n "Unloading DFlash model|Loaded model:" \
+  /Users/trafficsign/.omlx/logs/launchd-stderr.log \
+  /Users/trafficsign/.omlx-gemma/logs/launchd-stderr.log \
+  /Users/trafficsign/.omlx-muse/logs/launchd-stderr.log</pre>
+<ul>
+<li>測定はすべて直列で行い、prompt token数、max output、thinking、temperature、seedをbaseline/post-runで一致させる。</li>
+<li>cache probeは同一long prefixを各modelで2回、別modelを挟んで再度1回実行し、hit/cached tokensとprefill時間を比較する。</li>
+<li>Dashboardはscreenshotだけでなく、Model Fleet DOM、Decision Trace DOM order、browser console、Dashboard API、launchd service、runtime logを照合する。</li>
+<li>oMLXのreported model totalとOS footprintは意味が異なるため、片方だけでmemory合格にしない。</li>
+</ul>
+</section>
+
+<section data-section="rollback">
+<h2>Rollback</h2>
+<ol>
+<li>6つのMuse roleをprovider <code>omlx</code>（8000）へ戻し、route manifestがbaselineと一致することを確認する。</li>
+<li>live反映済みなら通常のrevert commitをpushし、同じ <code>push → restart → archive → health → live</code> 順で戻す。hard resetは使わない。</li>
+<li><code>launchctl bootout "gui/$(id -u)/com.trafficsign.omlx-muse"</code>。plistと<code>.omlx-muse</code>は即削除せずtimestamp付きbackupへ移し、復旧可能にする。</li>
+<li>8000/8001、Dashboard、ingest、Recall、Decision Traceのhealthを再確認する。page/raw artifactのmigrationはないためdata rollbackは不要。</li>
+</ol>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>なし</li></ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul>
+<li>これは<strong>実装契約</strong>であり、2026-08-23時点ではruntime/config/serviceを変更していない。state=<code>ready</code> から開始する。</li>
+<li>本質はcacheを大きくすることではなく、DFlashのprocess-global identity swapをなくして既存cacheを失わないこと。prefix再利用が少なくてもload stall削減は独立に評価できる。</li>
+<li>既存 <code>OMLXAdapter</code> の複数server対応を再実装しない。repo codeの必要差分はDashboard status mergeだけ。</li>
+<li>関連記録: <code>/Users/trafficsign/.chronovisor/pages/local-llm-mac-studio-optimization-2026/omlx-dflash2-migration-2026-08-19.md</code>、既存handoff <code>_handoff/2026-08-20_0610_omlx-migration-codex-handoff.md</code>。</li>
+<li><a href="https://github.com/ARahim3/mlx-dspark/blob/main/src/mlx_dspark/server.py#L1617-L1632">mlx-dspark server implementation</a> は比較資料だけ。production dependencyには追加しない。</li>
+</ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log">
+<li><time>2026-08-23 11:12</time><span>契約書を生成。runtime変更なし。</span></li>
+<li><time>2026-08-23 11:18</time><span>DFlash L1のentries/byte eviction、snapshot byte内訳、effective settings、平常memory/swapを再検証。stateをreadyへ更新。</span></li>
+</ol>
+</section>
+
+</body>
+</html>
