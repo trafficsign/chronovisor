@@ -3045,6 +3045,77 @@ def test_ox_canary_failure_is_single_attempt(
     assert result.workset_status[terminal_state] == terminal_count  # type: ignore[index]
 
 
+@pytest.mark.parametrize(
+    ("claim_limit", "expected_requests"),
+    [(1, [["candidate-2"]]), (3, [["candidate-2"], ["candidate-3"]])],
+)
+def test_ox_scans_adapter_preflight_reject_without_losing_safe_work(
+    tmp_path: Path, claim_limit: int, expected_requests: list[list[str]]
+) -> None:
+    class GuardedTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def __init__(self) -> None:
+            self.requests: list[list[str]] = []
+
+        def accepts_egress_payload(self, payload: object) -> bool:
+            assert isinstance(payload, dict)
+            candidates = payload["candidates"]
+            assert isinstance(candidates, list)
+            return all(candidate["candidate_id"] != "candidate-1" for candidate in candidates)
+
+        def evaluate(self, payload: object) -> dict[str, object]:
+            assert isinstance(payload, dict)
+            candidates = payload["candidates"]
+            assert isinstance(candidates, list)
+            self.requests.append(
+                [str(candidate["candidate_id"]) for candidate in candidates]
+            )
+            return {"_failure": {"class": "invalid_response"}}
+
+    teacher = GuardedTeacher()
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            teacher_claim_limit=claim_limit,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: teacher},
+        snapshots={
+            "rally-1": {
+                "candidates": [
+                    {"candidate_id": "candidate-1", "text_sha256": "candidate-1"},
+                    {"candidate_id": "candidate-2", "text_sha256": "candidate-2"},
+                    {"candidate_id": "candidate-3", "text_sha256": "candidate-3"},
+                ]
+            }
+        },
+        rally_by_id={
+            "rally-1": {
+                "rally_id": "rally-1",
+                "query_sha256": "query",
+                "context_refs": [],
+            }
+        },
+        texts={
+            "query": "what proves the claim",
+            "candidate-1": "blocked before egress",
+            "candidate-2": "safe request",
+            "candidate-3": "another safe request",
+        },
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert teacher.requests == expected_requests
+    assert result.model_calls == len(expected_requests)
+    assert result.workset_status["quarantined"] == 1  # type: ignore[index]
+    assert result.workset_status["ready"] == 2  # type: ignore[index]
+
+
 def test_ox_claim_cap_keeps_append_batch_at_or_below_500(tmp_path: Path) -> None:
     class RemoteTeacher:
         local = False

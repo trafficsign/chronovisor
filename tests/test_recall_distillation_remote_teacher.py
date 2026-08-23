@@ -135,6 +135,8 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
     sender = FakeSender(_response(_label_response()))
     teacher = _teacher(tmp_path, sender)
 
+    assert teacher.accepts_egress_payload(_payload()) is True
+    assert sender.calls == []
     result = teacher.evaluate(_payload())
 
     assert result["labels"][0]["verdict"] == "relevant"
@@ -188,6 +190,8 @@ def test_egress_allowlist_is_fail_closed_and_call_free(
     sender = FakeSender(_response(_label_response()))
     teacher = _teacher(tmp_path, sender)
 
+    assert teacher.accepts_egress_payload(payload) is False
+    assert sender.calls == []
     result = teacher.evaluate(payload)
 
     assert result["_failure"]["class"] == "remote_payload_rejected"

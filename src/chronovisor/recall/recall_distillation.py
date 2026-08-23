@@ -5082,7 +5082,7 @@ def _run_ox_teacher_batch(
                     (
                         claim,
                         {
-                            "status": "quarantined" if claim.attempt >= 3 else "retry",
+                            "status": "quarantined",
                             "error_class": "remote_payload_rejected",
                         },
                     )
@@ -5102,7 +5102,66 @@ def _run_ox_teacher_batch(
             [claim for claim, _outcome in oversize],
             [outcome for _claim, outcome in oversize],
         )
+
+    def batch_payload(current: Sequence[Any]) -> dict[str, Any]:
+        return {
+            "schema": "chronovisor.recall-distill-teacher-batch.v1",
+            "candidates": [tasks[claim.work_id]["input"] for claim in current],
+        }
+
+    preflight = getattr(teacher, "accepts_egress_payload", None)
+    preflight_rejected: list[list[Any]] = []
+    if callable(preflight):
+        accepted: list[list[Any]] = []
+
+        def ready_for_egress(current: Sequence[Any]) -> bool:
+            try:
+                return preflight(batch_payload(current)) is True
+            except Exception:
+                return False
+
+        for current in batches:
+            if ready_for_egress(current):
+                accepted.append(current)
+            elif all(tasks[claim.work_id]["assignment"].get("probe") for claim in current):
+                preflight_rejected.append(current)
+            else:
+                for claim in current:
+                    target = [claim]
+                    (accepted if ready_for_egress(target) else preflight_rejected).append(
+                        target
+                    )
+        batches = accepted
+    if preflight_rejected:
+        rejected_claims = [claim for batch in preflight_rejected for claim in batch]
+        workset.commit(
+            rejected_claims,
+            [
+                {"status": "quarantined", "error_class": "remote_payload_rejected"}
+                for _claim in rejected_claims
+            ],
+        )
     if not batches:
+        rejected_count = len(oversize) + sum(map(len, preflight_rejected))
+        remaining = (
+            OX_PREFLIGHT_SCAN_CLAIM_BUDGET
+            if _payload_scan_remaining is None
+            else _payload_scan_remaining
+        ) - rejected_count
+        if rejected_count and remaining > 0:
+            return _run_ox_teacher_batch(
+                root=root,
+                config=config,
+                teachers=teachers,
+                snapshots=snapshots,
+                rally_by_id=rally_by_id,
+                texts=texts,
+                label_path=label_path,
+                label_rows=label_rows,
+                candidate_indexed=candidate_indexed,
+                _payload_scan_remaining=remaining,
+                structural_verifier=structural_verifier,
+            )
         return _TeacherBatchResult(deferred=True, workset_status=workset.status("ox"))
 
     required_label_fields = {
@@ -5130,12 +5189,7 @@ def _run_ox_teacher_batch(
 
     results = dispatch_claimed_work(
         batches,
-        lambda current: teacher.evaluate(
-            {
-                "schema": "chronovisor.recall-distill-teacher-batch.v1",
-                "candidates": [tasks[claim.work_id]["input"] for claim in current],
-            }
-        ),
+        lambda current: teacher.evaluate(batch_payload(current)),
         max_inflight=config.teacher_max_inflight,
         max_retries=0 if config.teacher_claim_limit == 1 else 2,
         min_valid_results_per_cap=20,

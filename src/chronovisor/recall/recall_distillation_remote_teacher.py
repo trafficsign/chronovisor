@@ -293,6 +293,37 @@ def _validate_payload(
     return result, tuple(candidate_ids)
 
 
+def _prepare_request(
+    payload: Mapping[str, Any], *, max_input_bytes: int
+) -> tuple[tuple[str, ...], dict[str, Any], str, str] | None:
+    validated = _validate_payload(payload, max_input_bytes=max_input_bytes)
+    if validated is None:
+        return None
+    normalized, candidate_ids = validated
+    schema = _teacher_schema(candidate_ids)
+    try:
+        prompt_json = _json_bytes(normalized).decode("utf-8")
+        system = (
+            "You are a temporary Recall relevance teacher. Judge only the "
+            "supplied point-in-time evidence. Return schema-valid JSON; use "
+            "uncertain when evidence is insufficient."
+        )
+        prompt = (
+            "Label every candidate exactly once. Do not add facts or repeat "
+            "secrets. Input:\n" + prompt_json
+        )
+        if (
+            len(system.encode("utf-8"))
+            + len(prompt.encode("utf-8"))
+            + len(_json_bytes(schema))
+            > MAX_REQUEST_BYTES
+        ):
+            return None
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return candidate_ids, schema, system, prompt
+
+
 def _safe_label(label: object, candidate_ids: frozenset[str]) -> dict[str, Any] | None:
     if not isinstance(label, Mapping):
         return None
@@ -452,36 +483,27 @@ class OpenCodeOxAlphaTeacher:
             ),
         }
 
+    def accepts_egress_payload(self, payload: Mapping[str, Any]) -> bool:
+        """Return whether the exact adapter checks can reach HTTP."""
+
+        return (
+            isinstance(payload, Mapping)
+            and _prepare_request(payload, max_input_bytes=self.max_input_bytes)
+            is not None
+        )
+
     def evaluate(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         if not self.enabled:
             return self._failure("remote_teacher_disabled")
         if not isinstance(payload, Mapping):
             return self._failure("remote_payload_rejected")
-        validated = _validate_payload(payload, max_input_bytes=self.max_input_bytes)
-        if validated is None:
+        prepared = _prepare_request(payload, max_input_bytes=self.max_input_bytes)
+        if prepared is None:
             return self._failure("remote_payload_rejected")
-        normalized, candidate_ids = validated
-        schema = _teacher_schema(candidate_ids)
+        candidate_ids, schema, system, prompt = prepared
         prompt_digest = ""
         schema_digest = ""
         try:
-            prompt_json = _json_bytes(normalized).decode("utf-8")
-            system = (
-                "You are a temporary Recall relevance teacher. Judge only the "
-                "supplied point-in-time evidence. Return schema-valid JSON; use "
-                "uncertain when evidence is insufficient."
-            )
-            prompt = (
-                "Label every candidate exactly once. Do not add facts or repeat "
-                "secrets. Input:\n" + prompt_json
-            )
-            if (
-                len(system.encode("utf-8"))
-                + len(prompt.encode("utf-8"))
-                + len(_json_bytes(schema))
-                > MAX_REQUEST_BYTES
-            ):
-                return self._failure("remote_payload_rejected")
             prompt_digest = _sha256({"system": system, "prompt": prompt})
             schema_digest = _sha256(schema)
             result = self._backend.generate(
