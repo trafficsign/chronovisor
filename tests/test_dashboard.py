@@ -6298,7 +6298,7 @@ def test_model_status_snapshot_reads_five_configured_omlx_models(monkeypatch) ->
         endpoint = url.removesuffix("/models/status")
         if endpoint == endpoints[2]:
             raise RuntimeError("omlx endpoint unavailable")
-        rows = [
+        all_rows = [
             {
                 "id": name,
                 "loaded": loaded,
@@ -6310,15 +6310,18 @@ def test_model_status_snapshot_reads_five_configured_omlx_models(monkeypatch) ->
             }
             for name, (loaded, size, context) in models.items()
         ]
-        if endpoint == endpoints[1]:
+        if endpoint == endpoints[0]:
+            rows = all_rows[:3]
+        else:
             rows = [
                 {
-                    **rows[0],
+                    **all_rows[0],
                     "loaded": True,
                     "actual_size": 17_000,
                     "estimated_size": 17_000,
                     "resident_estimated_size": 17_000,
-                }
+                },
+                *all_rows[3:],
             ]
         return dashboard.httpx.Response(
             200,
@@ -6341,8 +6344,11 @@ def test_model_status_snapshot_reads_five_configured_omlx_models(monkeypatch) ->
     )
     assert len(runtime["models"]) == 5
     runtime_by_name = {row["name"]: row for row in runtime["models"]}
+    assert set(runtime_by_name) == set(models)
     assert runtime_by_name["Qwen3.8-27B-4bit"]["loaded"] is True
     assert runtime_by_name["Qwen3.8-27B-4bit"]["actual_size"] == 17_000
+    assert runtime_by_name["Qwen3.8-27B-4bit"]["size"] == 17_000
+    assert runtime_by_name["Qwen3.8-27B-4bit"]["size_vram"] == 17_000
     assert snapshot["provider"] == "omlx"
     assert snapshot["summary"]["all_installed"] == 5
     assert snapshot["summary"]["installed"] == 5
@@ -6377,6 +6383,39 @@ def test_omlx_snapshot_falls_back_to_default_endpoint(monkeypatch) -> None:
 
     assert observed == [f"{dashboard.OMLX_BASE_URL}/models/status"]
     assert runtime == {"available": True, "provider": "omlx", "models": []}
+
+
+def test_omlx_snapshot_reports_all_endpoint_failures(monkeypatch) -> None:
+    endpoints = (
+        "http://127.0.0.1:8003/v1",
+        "http://127.0.0.1:8004/v1",
+    )
+    monkeypatch.setattr(
+        dashboard.llm_config,
+        "load_llm_config",
+        lambda: SimpleNamespace(
+            providers={
+                "omlx_a": SimpleNamespace(kind="omlx", endpoint=endpoints[0]),
+                "omlx_b": SimpleNamespace(kind="omlx", endpoint=endpoints[1]),
+            }
+        ),
+    )
+    observed: list[str] = []
+
+    def get(url: str, **_kwargs: Any):
+        observed.append(url)
+        raise RuntimeError("omlx endpoint unavailable")
+
+    monkeypatch.setattr(dashboard.httpx, "get", get)
+
+    runtime = dashboard._omlx_snapshot()
+
+    assert observed == [
+        f"{endpoint}/models/status" for endpoint in endpoints
+    ]
+    assert runtime["available"] is False
+    assert runtime["models"] == []
+    assert runtime["error"]
 
 
 def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
