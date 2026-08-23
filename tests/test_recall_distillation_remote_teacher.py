@@ -150,7 +150,88 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
     body = json.loads(cast(bytes, sender.calls[0].data))
     assert body["model"] == "ox-alpha-free"
     assert sender.calls[0].full_url == f"{ENDPOINT}/chat/completions"
-    assert body["response_format"] == {"type": "json_object"}
+    assert body["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "response",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["labels"],
+                "properties": {
+                    "labels": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 1,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "candidate_id",
+                                "verdict",
+                                "confidence",
+                                "rationale",
+                                "minimal_atom_ids",
+                                "missing_slots",
+                                "changing_claim",
+                            ],
+                            "properties": {
+                                "candidate_id": {
+                                    "type": "string",
+                                    "enum": ["candidate-1"],
+                                },
+                                "verdict": {
+                                    "type": "string",
+                                    "enum": [
+                                        "relevant",
+                                        "irrelevant",
+                                        "uncertain",
+                                    ],
+                                },
+                                "confidence": {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1,
+                                },
+                                "rationale": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 600,
+                                },
+                                "minimal_atom_ids": {
+                                    "type": "array",
+                                    "minItems": 0,
+                                    "maxItems": 8,
+                                    "uniqueItems": True,
+                                    "items": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 160,
+                                    },
+                                },
+                                "missing_slots": {
+                                    "type": "array",
+                                    "minItems": 0,
+                                    "maxItems": 5,
+                                    "uniqueItems": True,
+                                    "items": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 160,
+                                    },
+                                },
+                                "changing_claim": {
+                                    "type": "string",
+                                    "maxLength": 600,
+                                },
+                            },
+                        },
+                    }
+                },
+            },
+        },
+    }
     prompt = body["messages"][-1]["content"]
     assert '"candidate_id":{"enum":["candidate-1"]' in prompt
     assert '"additionalProperties":false' in prompt

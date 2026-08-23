@@ -525,7 +525,7 @@ class OpenCodeOxAlphaTeacher:
                         SourceSensitivity.NORMAL,
                     ),
                     system=system,
-                    format="json",
+                    format=schema,
                     max_output_tokens=4_000,
                     timeout_ms=self.timeout_ms,
                     temperature=0,
