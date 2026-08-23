@@ -43,6 +43,7 @@ def test_ramp_reaches_ten_only_after_twenty_valid_results_per_cap() -> None:
     max_active = 0
     early_ramp: list[int] = []
     lock = threading.Lock()
+    final_wave = threading.Barrier(10)
 
     def evaluate(item: int) -> int:
         nonlocal active, max_active
@@ -51,6 +52,8 @@ def test_ramp_reaches_ten_only_after_twenty_valid_results_per_cap() -> None:
             max_active = max(max_active, active)
             if item < 20 and active > 1:
                 early_ramp.append(item)
+        if item >= 60:
+            final_wave.wait(timeout=30)
         time.sleep(0.01)
         with lock:
             active -= 1
