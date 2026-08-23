@@ -68,8 +68,10 @@ class ProviderAdapterError(SafeBackendError):
         category: ProviderFailureCategory,
         *,
         request_id: str | None = None,
+        stage: str | None = None,
     ) -> None:
         self.category = category
+        self.stage = stage if safe_metadata_identifier(stage) is not None else None
         super().__init__(
             category.value,
             request_id=request_id,
@@ -408,7 +410,10 @@ def post_json(
             if isinstance(response, _TransportFailure):
                 raise ProviderAdapterError(response.category)
             if not isinstance(response, httpx.Response):
-                raise ProviderAdapterError(ProviderFailureCategory.INVALID_RESPONSE)
+                raise ProviderAdapterError(
+                    ProviderFailureCategory.INVALID_RESPONSE,
+                    stage="transport_response",
+                )
             request_id = safe_metadata_identifier(
                 response.headers.get("x-request-id")
                 or response.headers.get("request-id")
@@ -450,7 +455,9 @@ def post_json(
                         cast(Mapping[str, object], decoded), request_id
                     )
             raise ProviderAdapterError(
-                ProviderFailureCategory.INVALID_RESPONSE, request_id=request_id
+                ProviderFailureCategory.INVALID_RESPONSE,
+                request_id=request_id,
+                stage="http_json",
             )
         try:
             category = ProviderFailureCategory(security_category)

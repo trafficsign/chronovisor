@@ -3143,6 +3143,65 @@ def test_ox_canary_failure_is_single_attempt(
     assert result.workset_status[terminal_state] == terminal_count  # type: ignore[index]
 
 
+def test_ox_failure_stage_is_durable_without_changing_retry_policy(
+    tmp_path: Path,
+) -> None:
+    class GuardedTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def evaluate(self, _payload: object) -> dict[str, object]:
+            return {
+                "_failure": {
+                    "class": "invalid_response",
+                    "stage": "teacher_json_parse",
+                    "request_id": "ox_req_1",
+                    "labelable": False,
+                }
+            }
+
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            teacher_claim_limit=1,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: GuardedTeacher()},
+        snapshots={
+            "rally-1": {
+                "candidates": [
+                    {"candidate_id": "candidate-1", "text_sha256": "candidate-1"},
+                    {"candidate_id": "candidate-2", "text_sha256": "candidate-2"},
+                ]
+            }
+        },
+        rally_by_id={
+            "rally-1": {
+                "rally_id": "rally-1",
+                "query_sha256": "query",
+                "context_refs": [],
+            }
+        },
+        texts={
+            "query": "what proves the claim",
+            "candidate-1": "bounded fact",
+            "candidate-2": "another bounded fact",
+        },
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert result.workset_status["ready"] == 2  # type: ignore[index]
+    with sqlite3.connect(store.distillation_dir(tmp_path) / "ox-workset.sqlite3") as db:
+        rows = db.execute(
+            "SELECT DISTINCT last_error_class FROM work_items "
+            "WHERE last_error_class != ''"
+        ).fetchall()
+    assert rows == [("invalid_response.teacher_json_parse",)]
+
+
 @pytest.mark.parametrize(
     ("claim_limit", "expected_requests"),
     [(1, [["candidate-2"]]), (3, [["candidate-2"], ["candidate-3"]])],
@@ -3161,7 +3220,9 @@ def test_ox_scans_adapter_preflight_reject_without_losing_safe_work(
             assert isinstance(payload, dict)
             candidates = payload["candidates"]
             assert isinstance(candidates, list)
-            return all(candidate["candidate_id"] != "candidate-1" for candidate in candidates)
+            return all(
+                candidate["candidate_id"] != "candidate-1" for candidate in candidates
+            )
 
         def evaluate(self, payload: object) -> dict[str, object]:
             assert isinstance(payload, dict)

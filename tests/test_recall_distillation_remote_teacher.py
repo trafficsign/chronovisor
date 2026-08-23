@@ -150,9 +150,9 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
     body = json.loads(cast(bytes, sender.calls[0].data))
     assert body["model"] == "ox-alpha-free"
     assert sender.calls[0].full_url == f"{ENDPOINT}/chat/completions"
-    assert body["response_format"]["json_schema"]["schema"]["properties"][
-        "labels"
-    ]["items"]["properties"]["candidate_id"]["enum"] == ["candidate-1"]
+    assert body["response_format"]["json_schema"]["schema"]["properties"]["labels"][
+        "items"
+    ]["properties"]["candidate_id"]["enum"] == ["candidate-1"]
     assert CANARY not in cast(bytes, sender.calls[0].data).decode("utf-8")
 
 
@@ -243,6 +243,27 @@ def test_invalid_provider_content_is_not_reflected(tmp_path: Path) -> None:
     result = teacher.evaluate(_payload())
 
     assert result["_failure"]["class"] == "invalid_response"
+    assert result["_failure"]["stage"] == "teacher_json_parse"
+    assert result["_failure"]["request_id"] == "ox_req_1"
+    assert result["_failure"]["labelable"] is False
+    assert CANARY not in repr(result)
+
+
+def test_invalid_provider_envelope_stage_is_propagated_safely(tmp_path: Path) -> None:
+    sender = FakeSender(
+        httpx.Response(
+            200,
+            json={"choices": []},
+            headers={"x-request-id": "ox_req_1"},
+        )
+    )
+    teacher = _teacher(tmp_path, sender)
+
+    result = teacher.evaluate(_payload())
+
+    assert result["_failure"]["class"] == "invalid_response"
+    assert result["_failure"]["stage"] == "choices_shape"
+    assert result["_failure"]["request_id"] == "ox_req_1"
     assert result["_failure"]["labelable"] is False
     assert CANARY not in repr(result)
 

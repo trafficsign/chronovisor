@@ -5164,9 +5164,9 @@ def _run_ox_teacher_batch(
             else:
                 for claim in current:
                     target = [claim]
-                    (accepted if ready_for_egress(target) else preflight_rejected).append(
-                        target
-                    )
+                    (
+                        accepted if ready_for_egress(target) else preflight_rejected
+                    ).append(target)
         batches = accepted
     if preflight_rejected:
         rejected_claims = [claim for batch in preflight_rejected for claim in batch]
@@ -5249,6 +5249,14 @@ def _run_ox_teacher_batch(
         batch_claims = result.work
         if result.status != "ok" or not isinstance(result.value, Mapping):
             category = str(result.category or "teacher_failure")
+            stage = getattr(result.error, "stage", None)
+            error_class = (
+                f"{category}.{stage}"
+                if category == "invalid_response"
+                and isinstance(stage, str)
+                and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", stage) is not None
+                else category
+            )
             stopped = stopped or result.status == "stopped"
             deferred = True
             for claim in batch_claims:
@@ -5259,7 +5267,7 @@ def _run_ox_teacher_batch(
                         or (category == "invalid_response" and claim.attempt >= 3)
                         else "retry"
                     ),
-                    "error_class": category,
+                    "error_class": error_class,
                 }
             continue
         response = result.value

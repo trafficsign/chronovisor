@@ -21,6 +21,7 @@ from chronovisor.core.llm_runtime import (
     SourceDataClass,
     SourceDataClassification,
     SourceSensitivity,
+    safe_metadata_identifier,
 )
 from chronovisor.core.openai_compatible_adapter import OpenAICompatibleAdapter
 from chronovisor.core.provider_profiles import (
@@ -254,9 +255,7 @@ def _validate_payload(
         query = _safe_text(candidate.get("query"))
         evidence = _safe_text(candidate.get("evidence"))
         safe_context = (
-            [_safe_text(item) for item in context]
-            if isinstance(context, list)
-            else []
+            [_safe_text(item) for item in context] if isinstance(context, list) else []
         )
         if (
             not isinstance(candidate_id, str)
@@ -469,12 +468,19 @@ class OpenCodeOxAlphaTeacher:
         *,
         prompt_digest: str = "",
         schema_digest: str = "",
+        stage: str | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         failure: dict[str, Any] = {
             "class": category,
             "retryable": category in _FAILURE_TRANSIENT,
             "labelable": False,
         }
+        if safe_metadata_identifier(stage) is not None:
+            failure["stage"] = stage
+        safe_request_id = safe_metadata_identifier(request_id)
+        if safe_request_id is not None:
+            failure["request_id"] = safe_request_id
         return {
             "_failure": failure,
             **self._metadata(
@@ -526,6 +532,8 @@ class OpenCodeOxAlphaTeacher:
                 exc.category.value,
                 prompt_digest=prompt_digest,
                 schema_digest=schema_digest,
+                stage=exc.stage,
+                request_id=exc.request_id,
             )
         except Exception:
             return self._failure(
@@ -537,11 +545,17 @@ class OpenCodeOxAlphaTeacher:
         metadata = getattr(result, "metadata", None)
         if isinstance(metadata, Mapping):
             returned_model = metadata.get("returned_model")
+        request_id = (
+            safe_metadata_identifier(metadata.get("request_id"))
+            if isinstance(metadata, Mapping)
+            else None
+        )
         if returned_model != OX_ALPHA_REQUEST_MODEL:
             return self._failure(
                 "model_unavailable",
                 prompt_digest=prompt_digest,
                 schema_digest=schema_digest,
+                request_id=request_id,
             )
         try:
             decoded = json.loads(result.content)
@@ -550,12 +564,16 @@ class OpenCodeOxAlphaTeacher:
                 ProviderFailureCategory.INVALID_RESPONSE.value,
                 prompt_digest=prompt_digest,
                 schema_digest=schema_digest,
+                stage="teacher_json_parse",
+                request_id=request_id,
             )
         if not isinstance(decoded, Mapping) or set(decoded) != {"labels"}:
             return self._failure(
                 ProviderFailureCategory.INVALID_RESPONSE.value,
                 prompt_digest=prompt_digest,
                 schema_digest=schema_digest,
+                stage="teacher_response_shape",
+                request_id=request_id,
             )
         labels = decoded.get("labels")
         if not isinstance(labels, list) or len(labels) != len(candidate_ids):
@@ -563,19 +581,19 @@ class OpenCodeOxAlphaTeacher:
                 ProviderFailureCategory.INVALID_RESPONSE.value,
                 prompt_digest=prompt_digest,
                 schema_digest=schema_digest,
+                stage="teacher_label_count",
+                request_id=request_id,
             )
-        safe_labels = [
-            _safe_label(label, frozenset(candidate_ids)) for label in labels
-        ]
-        if (
-            any(label is None for label in safe_labels)
-            or {label["candidate_id"] for label in safe_labels if label is not None}
-            != set(candidate_ids)
-        ):
+        safe_labels = [_safe_label(label, frozenset(candidate_ids)) for label in labels]
+        if any(label is None for label in safe_labels) or {
+            label["candidate_id"] for label in safe_labels if label is not None
+        } != set(candidate_ids):
             return self._failure(
                 ProviderFailureCategory.INVALID_RESPONSE.value,
                 prompt_digest=prompt_digest,
                 schema_digest=schema_digest,
+                stage="teacher_label_schema",
+                request_id=request_id,
             )
         return {
             "labels": [label for label in safe_labels if label is not None],

@@ -38,10 +38,13 @@ def _invalid_request() -> ProviderAdapterError:
     return ProviderAdapterError(ProviderFailureCategory.INVALID_REQUEST)
 
 
-def _invalid_response(response: ProviderJSONResponse) -> ProviderAdapterError:
+def _invalid_response(
+    response: ProviderJSONResponse, stage: str | None = None
+) -> ProviderAdapterError:
     return ProviderAdapterError(
         ProviderFailureCategory.INVALID_RESPONSE,
         request_id=response.request_id,
+        stage=stage,
     )
 
 
@@ -194,30 +197,32 @@ class OpenAICompatibleAdapter:
     ) -> GenerationResult:
         choices = response.payload.get("choices")
         if not isinstance(choices, list) or len(choices) != 1:
-            raise _invalid_response(response)
+            raise _invalid_response(response, "choices_shape")
         choice = choices[0]
         if not isinstance(choice, Mapping):
-            raise _invalid_response(response)
+            raise _invalid_response(response, "choice_shape")
         message = choice.get("message")
         if not isinstance(message, Mapping):
-            raise _invalid_response(response)
+            raise _invalid_response(response, "message_shape")
         content = message.get("content")
+        if not isinstance(content, str):
+            raise _invalid_response(response, "content_shape")
         raw_finish_reason = choice.get("finish_reason")
         finish_reason = safe_finish_reason(
             raw_finish_reason,
             allowed=frozenset({"stop", "length", "content_filter"}),
         )
-        if not isinstance(content, str) or finish_reason is None:
-            raise _invalid_response(response)
+        if finish_reason is None:
+            raise _invalid_response(response, "finish_reason")
         usage = response.payload.get("usage")
         token_usage = TokenUsage()
         if usage is not None:
             if not isinstance(usage, Mapping):
-                raise _invalid_response(response)
+                raise _invalid_response(response, "usage_shape")
             input_tokens = _token_count(usage.get("prompt_tokens"))
             output_tokens = _token_count(usage.get("completion_tokens"))
             if input_tokens is None or output_tokens is None:
-                raise _invalid_response(response)
+                raise _invalid_response(response, "usage_tokens")
             token_usage = TokenUsage(input_tokens, output_tokens)
         return GenerationResult(
             content=content,

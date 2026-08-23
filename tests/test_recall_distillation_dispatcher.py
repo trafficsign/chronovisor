@@ -140,6 +140,42 @@ def test_redacted_teacher_failure_envelope_uses_same_retry_policy() -> None:
     assert result.rate_limited is True
 
 
+def test_redacted_failure_preserves_safe_stage_without_changing_category() -> None:
+    result = dispatch_claimed_work(
+        ["work"],
+        lambda _: {
+            "_failure": {
+                "class": "invalid_response",
+                "stage": "teacher_json_parse",
+                "request_id": "ox_req_1",
+                "labelable": False,
+            }
+        },
+    )[0]
+
+    assert result.status == "failed"
+    assert result.category == "invalid_response"
+    assert isinstance(result.error, DispatchFailure)
+    assert result.error.stage == "teacher_json_parse"
+    assert result.error.request_id == "ox_req_1"
+
+
+def test_redacted_failure_drops_unknown_stage() -> None:
+    result = dispatch_claimed_work(
+        ["work"],
+        lambda _: {
+            "_failure": {
+                "class": "invalid_response",
+                "stage": "secret_token",
+                "labelable": False,
+            }
+        },
+    )[0]
+
+    assert isinstance(result.error, DispatchFailure)
+    assert result.error.stage is None
+
+
 def test_rate_limit_halves_future_window_after_ramp() -> None:
     calls: dict[int, int] = {}
     active = 0

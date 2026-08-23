@@ -429,6 +429,53 @@ def test_openai_failures_are_safe_and_body_free(
     assert CANARY not in str(json_exc.value)
 
 
+@pytest.mark.parametrize(
+    ("payload", "stage"),
+    [
+        ({}, "choices_shape"),
+        ({"choices": [CANARY]}, "choice_shape"),
+        ({"choices": [{"message": CANARY}]}, "message_shape"),
+        (
+            {"choices": [{"message": {"content": [CANARY]}, "finish_reason": "stop"}]},
+            "content_shape",
+        ),
+        (
+            {"choices": [{"message": {"content": CANARY}, "finish_reason": "unsafe"}]},
+            "finish_reason",
+        ),
+        (
+            {
+                "choices": [{"message": {"content": CANARY}, "finish_reason": "stop"}],
+                "usage": CANARY,
+            },
+            "usage_shape",
+        ),
+        (
+            {
+                "choices": [{"message": {"content": CANARY}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": -1, "completion_tokens": 1},
+            },
+            "usage_tokens",
+        ),
+    ],
+)
+def test_openai_invalid_generation_shape_reports_safe_stage(
+    payload: dict[str, object], stage: str, tmp_path: Path
+) -> None:
+    adapter = compose_openai_compatible_adapter(
+        _curated("openai"), _resolver(tmp_path), sender=FakeSender(_response(payload))
+    )
+
+    with pytest.raises(ProviderAdapterError) as exc:
+        adapter.generate(GenerationRequest("prompt", NORMAL_PAGE), model="model")
+
+    assert exc.value.category is ProviderFailureCategory.INVALID_RESPONSE
+    assert exc.value.stage == stage
+    assert exc.value.request_id == "req_fixture_1"
+    assert CANARY not in str(exc.value)
+    assert CANARY not in repr(exc.value)
+
+
 def test_timeout_and_transport_failure_are_distinct_and_redacted(
     tmp_path: Path,
 ) -> None:

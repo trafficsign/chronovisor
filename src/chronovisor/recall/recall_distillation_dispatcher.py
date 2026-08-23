@@ -15,6 +15,8 @@ from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_co
 from dataclasses import dataclass
 from typing import Any, Generic, Literal, TypeVar, cast
 
+from chronovisor.core.llm_runtime import safe_metadata_identifier
+
 T = TypeVar("T")
 R = TypeVar("R")
 Status = Literal["ok", "failed", "stopped", "deferred"]
@@ -28,6 +30,27 @@ _STOPPED = {
     "model_unavailable",
     "kill_switch",
 }
+_FAILURE_STAGES = frozenset(
+    {
+        "transport_response",
+        "http_json",
+        "choices_shape",
+        "choice_shape",
+        "message_shape",
+        "content_shape",
+        "finish_reason",
+        "usage_shape",
+        "usage_tokens",
+        "teacher_json_parse",
+        "teacher_response_shape",
+        "teacher_label_count",
+        "teacher_label_schema",
+    }
+)
+
+
+def _safe_stage(value: object) -> str | None:
+    return value if isinstance(value, str) and value in _FAILURE_STAGES else None
 
 
 class DispatchFailure(RuntimeError):
@@ -39,9 +62,13 @@ class DispatchFailure(RuntimeError):
         message: str | None = None,
         *,
         status_code: int | None = None,
+        stage: str | None = None,
+        request_id: str | None = None,
     ) -> None:
         self.category = _normalize_category(category)
         self.status_code = status_code
+        self.stage = _safe_stage(stage)
+        self.request_id = safe_metadata_identifier(request_id)
         super().__init__(message or self.category)
 
 
@@ -136,7 +163,7 @@ def _category(error: BaseException) -> str:
     return "error"
 
 
-def _result_category(value: object) -> str | None:
+def _result_failure(value: object) -> tuple[str, str | None, str | None] | None:
     """Read the redacted failure envelope used by teacher adapters."""
     if not isinstance(value, Mapping):
         return None
@@ -145,11 +172,17 @@ def _result_category(value: object) -> str | None:
         return None
     category = failure.get("class")
     if not isinstance(category, str) or not category:
-        return "error"
+        return "error", None, None
     normalized = _normalize_category(category)
     if normalized == "remote_teacher_disabled":
-        return "kill_switch"
-    return normalized
+        normalized = "kill_switch"
+    stage = failure.get("stage")
+    request_id = failure.get("request_id")
+    return (
+        normalized,
+        _safe_stage(stage),
+        safe_metadata_identifier(request_id),
+    )
 
 
 class SingleTeacherDispatcher(Generic[T, R]):
@@ -229,7 +262,9 @@ class SingleTeacherDispatcher(Generic[T, R]):
                     try:
                         result = future.result().result
                     except CancelledError:
-                        cancelled_category = stop_reason[0] if stop_reason else "kill_switch"
+                        cancelled_category = (
+                            stop_reason[0] if stop_reason else "kill_switch"
+                        )
                         result = DispatchResult(
                             work[index],
                             "deferred",
@@ -248,13 +283,17 @@ class SingleTeacherDispatcher(Generic[T, R]):
                                 pending.cancel()
 
                 if stop_event.is_set():
-                    stop_category = stop_reason[0] if stop_reason else next(
-                        (
-                            result.category
-                            for result in wave_results.values()
-                            if result.status == "stopped"
-                        ),
-                        cancelled_category or "kill_switch",
+                    stop_category = (
+                        stop_reason[0]
+                        if stop_reason
+                        else next(
+                            (
+                                result.category
+                                for result in wave_results.values()
+                                if result.status == "stopped"
+                            ),
+                            cancelled_category or "kill_switch",
+                        )
                     )
                     stop_category = stop_category or "kill_switch"
                     if stop_index is not None:
@@ -293,7 +332,11 @@ class SingleTeacherDispatcher(Generic[T, R]):
                         if item.status != "ok":
                             continue
                         count = self.valid_result_count(cast(R, item.value))
-                        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                        if (
+                            isinstance(count, bool)
+                            or not isinstance(count, int)
+                            or count < 0
+                        ):
                             raise ValueError(
                                 "valid_result_count must return a non-negative integer"
                             )
@@ -305,13 +348,17 @@ class SingleTeacherDispatcher(Generic[T, R]):
                             valid_results_at_cap = 0
 
             if stop_event.is_set():
-                stop_category = stop_reason[0] if stop_reason else next(
-                    (
-                        result.category
-                        for result in results
-                        if result is not None and result.status == "stopped"
-                    ),
-                    "kill_switch",
+                stop_category = (
+                    stop_reason[0]
+                    if stop_reason
+                    else next(
+                        (
+                            result.category
+                            for result in results
+                            if result is not None and result.status == "stopped"
+                        ),
+                        "kill_switch",
+                    )
                 )
                 stop_category = stop_category or "kill_switch"
                 stopped = DispatchStopped(stop_category)
@@ -366,9 +413,14 @@ class SingleTeacherDispatcher(Generic[T, R]):
                 )
             try:
                 value = self.evaluate(work)
-                failure_category = _result_category(value)
-                if failure_category is not None:
-                    raise DispatchFailure(failure_category)
+                failure = _result_failure(value)
+                if failure is not None:
+                    failure_category, stage, request_id = failure
+                    raise DispatchFailure(
+                        failure_category,
+                        stage=stage,
+                        request_id=request_id,
+                    )
             except Exception as error:
                 category = _category(error)
                 if category in _STOPPED:
