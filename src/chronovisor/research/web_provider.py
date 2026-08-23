@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -19,7 +20,14 @@ import httpx
 
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.store import CHRONOVISOR_ROOT
-from chronovisor.research.research_security import guard_egress_query, guard_url
+from chronovisor.research.research_security import (
+    EgressPolicyError,
+    Resolver,
+    guard_egress_query,
+    guard_url,
+    guarded_http_client,
+    resolve_host,
+)
 from chronovisor.search.research_config import WebConfig
 
 WEB_TRACE = CHRONOVISOR_ROOT / "runtime" / "research" / "web-egress.jsonl"
@@ -144,6 +152,7 @@ class HttpSearchProvider:
         user_agent: str = "Chronovisor/0.1",
         timeout_seconds: float = 8.0,
         client: httpx.Client | None = None,
+        resolver: Resolver | None = None,
     ) -> None:
         self.name = name
         self.endpoint = endpoint
@@ -151,16 +160,41 @@ class HttpSearchProvider:
         self.user_agent = user_agent
         self.timeout_seconds = timeout_seconds
         self.last_statuses: dict[str, str] = {}
-        self.client = client or httpx.Client(
-            timeout=timeout_seconds,
-            follow_redirects=False,
-            headers={"User-Agent": self.user_agent},
+        # An injected client is an offline-test seam. Production requests use
+        # the shared DNS-pinned client below, which also disables proxy env vars.
+        self.client = client
+        self.resolver = resolver
+
+    def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        parsed = urlsplit(url)
+        local_loopback = (
+            self.name == "searxng"
+            and parsed.scheme == "http"
+            and parsed.hostname in {"127.0.0.1", "::1"}
         )
+        if parsed.scheme != "https" and not local_loopback:
+            raise EgressPolicyError("https_required")
+        resolver = self.resolver or resolve_host
+        with guarded_http_client(
+            url,
+            resolver=resolver,
+            allow_private_network=local_loopback,
+            client=self.client,
+        ) as (client, addresses):
+            if local_loopback and not _all_loopback(addresses):
+                raise EgressPolicyError("local_endpoint_not_loopback")
+            return client.request(
+                method,
+                url,
+                timeout=self.timeout_seconds,
+                **kwargs,
+            )
 
     def search(self, query: str, *, limit: int) -> list[SearchResult]:
         self.last_statuses = {}
         if self.name == "mediawiki":
-            response = self.client.get(
+            response = self._request(
+                "GET",
                 self.endpoint,
                 params={
                     "action": "query",
@@ -210,7 +244,8 @@ class HttpSearchProvider:
             }
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
-            response = self.client.get(
+            response = self._request(
+                "GET",
                 self.endpoint,
                 params={"q": query, "per_page": limit},
                 headers=headers,
@@ -246,7 +281,8 @@ class HttpSearchProvider:
                     break
             return results
         if self.name == "arxiv":
-            response = self.client.get(
+            response = self._request(
+                "GET",
                 self.endpoint,
                 params={
                     "search_query": f"all:{query}",
@@ -300,7 +336,8 @@ class HttpSearchProvider:
                     break
             return results
         if self.name == "crossref":
-            response = self.client.get(
+            response = self._request(
+                "GET",
                 self.endpoint,
                 params={
                     "query.bibliographic": query,
@@ -372,12 +409,14 @@ class HttpSearchProvider:
                     break
             return results
         if self.name == "brave":
-            response = self.client.get(
+            response = self._request(
+                "GET",
                 self.endpoint,
                 params={"q": query, "count": limit},
                 headers={
                     "X-Subscription-Token": self.api_key,
                     "Accept": "application/json",
+                    "User-Agent": self.user_agent,
                 },
             )
             response.raise_for_status()
@@ -391,8 +430,10 @@ class HttpSearchProvider:
                 rows, provider=self.name, limit=limit, snippet_key="description"
             )
         if self.name == "tavily":
-            response = self.client.post(
+            response = self._request(
+                "POST",
                 self.endpoint,
+                headers={"User-Agent": self.user_agent},
                 json={
                     "api_key": self.api_key,
                     "query": query,
@@ -406,8 +447,10 @@ class HttpSearchProvider:
             return _normalize_rows(
                 rows, provider=self.name, limit=limit, snippet_key="content"
             )
-        response = self.client.get(
+        response = self._request(
+            "GET",
             self.endpoint.rstrip("/") + "/search",
+            headers={"User-Agent": self.user_agent},
             params={"q": query, "format": "json", "language": "all"},
         )
         response.raise_for_status()
@@ -553,6 +596,16 @@ def _loopback_search_endpoint_allowed(
     )
 
 
+def _all_loopback(addresses: tuple[str, ...]) -> bool:
+    try:
+        return bool(addresses) and all(
+            ipaddress.ip_address(address.split("%", 1)[0]).is_loopback
+            for address in addresses
+        )
+    except ValueError:
+        return False
+
+
 def _provider_endpoint_allowed(
     provider: SearchProvider,
     config: WebConfig,
@@ -560,9 +613,23 @@ def _provider_endpoint_allowed(
     endpoint = str(getattr(provider, "endpoint", ""))
     if not endpoint:
         return True, "allowed"
-    if _loopback_search_endpoint_allowed(provider, config):
+    local_loopback = _loopback_search_endpoint_allowed(provider, config)
+    try:
+        parsed = urlsplit(endpoint)
+    except ValueError:
+        return False, "invalid_url"
+    if parsed.scheme == "http" and not local_loopback:
+        return False, "https_required"
+    resolver = getattr(provider, "resolver", None) or resolve_host
+    policy, addresses = guard_url(
+        endpoint,
+        allow_private_network=local_loopback,
+        resolver=resolver,
+    )
+    if local_loopback and policy.allowed and not _all_loopback(addresses):
+        return False, "local_endpoint_not_loopback"
+    if local_loopback and policy.allowed:
         return True, "local_search_backend"
-    policy, _addresses = guard_url(endpoint, allow_private_network=False)
     return policy.allowed, policy.reason
 
 
@@ -851,6 +918,10 @@ def search_web(
                         )
                     else:
                         status = "ok"
+                    break
+                except EgressPolicyError as exc:
+                    error = f"{exc.__class__.__name__}: {exc}"
+                    status = "blocked"
                     break
                 except (
                     httpx.HTTPError,

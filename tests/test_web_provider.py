@@ -410,3 +410,168 @@ def test_loopback_exception_is_limited_to_local_searxng_search(
 
     assert allowed.status == "ok"
     assert blocked.status == "blocked"
+
+
+def test_public_http_provider_is_rejected_before_transport_call(tmp_path, monkeypatch) -> None:
+    import httpx
+
+    from chronovisor.research import web_provider
+
+    monkeypatch.setattr(web_provider, "WEB_TRACE", tmp_path / "trace.jsonl")
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"results": []})
+
+    provider = HttpSearchProvider(
+        name="searxng",
+        endpoint="http://search.example.test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        resolver=lambda _host, _port: ["93.184.216.34"],
+    )
+
+    result = search_web(
+        "public query",
+        config=WebConfig(
+            adapter_enabled=True,
+            live_egress_enabled=True,
+            provider="searxng",
+        ),
+        provider=provider,
+    )
+
+    assert result.status == "blocked"
+    assert result.error == "provider endpoint blocked: https_required"
+    assert calls == 0
+
+
+def test_local_searxng_requires_all_resolved_addresses_to_be_loopback(
+    tmp_path, monkeypatch
+) -> None:
+    import httpx
+
+    from chronovisor.research import web_provider
+
+    monkeypatch.setattr(web_provider, "WEB_TRACE", tmp_path / "trace.jsonl")
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"results": []})
+
+    provider = HttpSearchProvider(
+        name="searxng",
+        endpoint="http://127.0.0.1:8888",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        resolver=lambda _host, _port: ["127.0.0.1", "93.184.216.34"],
+    )
+
+    result = search_web(
+        "public query",
+        config=WebConfig(
+            adapter_enabled=True,
+            live_egress_enabled=True,
+            provider="searxng",
+            allow_local_search_backend=True,
+        ),
+        provider=provider,
+    )
+
+    assert result.status == "blocked"
+    assert result.error == "provider endpoint blocked: local_endpoint_not_loopback"
+    assert calls == 0
+
+
+def test_dns_rebinding_is_rejected_without_retrying_into_network(
+    tmp_path, monkeypatch
+) -> None:
+    import httpx
+
+    from chronovisor.research import web_provider
+
+    monkeypatch.setattr(web_provider, "WEB_TRACE", tmp_path / "trace.jsonl")
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"results": []})
+
+    resolver_calls = 0
+
+    def rebind(_host: str, _port: int) -> list[str]:
+        nonlocal resolver_calls
+        resolver_calls += 1
+        # First validation sees a public address; the request-time check sees
+        # a private address. A retry must not turn that into a network call.
+        return ["93.184.216.34"] if resolver_calls == 1 else ["127.0.0.1"]
+
+    provider = HttpSearchProvider(
+        name="searxng",
+        endpoint="https://search.example.test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        resolver=rebind,
+    )
+
+    result = search_web(
+        "public query",
+        config=WebConfig(
+            adapter_enabled=True,
+            live_egress_enabled=True,
+            provider="searxng",
+        ),
+        provider=provider,
+    )
+
+    assert result.status == "blocked"
+    assert result.error == "EgressPolicyError: private_or_special_address"
+    assert calls == 0
+
+
+def test_production_provider_ignores_proxy_environment(tmp_path, monkeypatch) -> None:
+    import httpx
+
+    from chronovisor.research import research_security, web_provider
+
+    monkeypatch.setattr(web_provider, "WEB_TRACE", tmp_path / "trace.jsonl")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    real_client = research_security.httpx.Client
+    created: dict[str, object] = {}
+    transport_calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal transport_calls
+        transport_calls += 1
+        return httpx.Response(200, json={"results": []})
+
+    def client_factory(**kwargs: object) -> httpx.Client:
+        created.update(kwargs)
+        return real_client(
+            transport=httpx.MockTransport(handler),
+            follow_redirects=bool(kwargs["follow_redirects"]),
+            trust_env=bool(kwargs["trust_env"]),
+        )
+
+    monkeypatch.setattr(research_security.httpx, "Client", client_factory)
+    provider = HttpSearchProvider(
+        name="searxng",
+        endpoint="https://search.example.test",
+        resolver=lambda _host, _port: ["93.184.216.34"],
+    )
+
+    result = search_web(
+        "public query",
+        config=WebConfig(
+            adapter_enabled=True,
+            live_egress_enabled=True,
+            provider="searxng",
+        ),
+        provider=provider,
+    )
+
+    assert result.status == "ok"
+    assert created["trust_env"] is False
+    assert transport_calls == 1
