@@ -4577,8 +4577,7 @@ def _run_ox_teacher_batch(
         worker_state
         if worker_state.get("kind") == "worker-state"
         and worker_state.get("ox_profile_contract_id") == profile_contract_id
-        and worker_state.get("ox_ramp_request_revision")
-        == OX_RAMP_REQUEST_REVISION
+        and worker_state.get("ox_ramp_request_revision") == OX_RAMP_REQUEST_REVISION
         else {}
     )
     ramp_cap, ramp_valid_receipts, ramp_provider_attempts = _ox_ramp_state(

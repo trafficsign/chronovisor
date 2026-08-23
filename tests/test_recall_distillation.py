@@ -2715,12 +2715,12 @@ def test_ox_ramp_final_cap_low_rate_state_recovers_then_freezes() -> None:
         assert state == (10, receipts, receipts + 2)
         assert (
             distill._ox_ramp_state(
-            {
-                "ox_ramp_cap": state[0],
-                "ox_ramp_valid_receipts": state[1],
-                "ox_ramp_provider_attempts": state[2],
-                "ox_ramp_request_revision": distill.OX_RAMP_REQUEST_REVISION,
-            },
+                {
+                    "ox_ramp_cap": state[0],
+                    "ox_ramp_valid_receipts": state[1],
+                    "ox_ramp_provider_attempts": state[2],
+                    "ox_ramp_request_revision": distill.OX_RAMP_REQUEST_REVISION,
+                },
                 10,
             )
             == state
