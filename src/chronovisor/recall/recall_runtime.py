@@ -2092,6 +2092,53 @@ def _fail_open_recall_budget(
     return result
 
 
+def _fail_open_for_known_recall_failure(
+    exc: BaseException,
+    matched: dict[str, list[str]] | None,
+    request: RecallRequest,
+    policy: RecallPolicy,
+    started: float,
+    final_deadline_at: float,
+    allow_timeout_fallback: bool,
+    perform_search: bool,
+    telemetry: dict[str, Any] | None,
+    *,
+    fallback_reserve_ms: int | None = None,
+) -> RecallResult | None:
+    """Fail open only for exhausted budgets and typed capacity failures."""
+
+    if isinstance(exc, RecallBudgetExhausted):
+        return _fail_open_recall_budget(
+            str(exc),
+            matched,
+            request,
+            policy,
+            started,
+            final_deadline_at,
+            allow_timeout_fallback,
+            perform_search,
+            telemetry,
+        )
+    failure_class = _known_availability_failure_class(exc)
+    if failure_class is None:
+        return None
+    failure_reason = _one_line(str(exc), limit=220)
+    return _fail_open_recall_budget(
+        f"{failure_class}: {failure_reason}",
+        matched,
+        request,
+        policy,
+        started,
+        final_deadline_at,
+        allow_timeout_fallback,
+        perform_search,
+        telemetry,
+        failure_class=failure_class,
+        failure_reason=failure_reason,
+        fallback_reserve_ms=fallback_reserve_ms,
+    )
+
+
 def observe_evidence_reconstruction(
     result: RecallResult,
     *,
@@ -4151,35 +4198,20 @@ def _run_recall_impl(
             post_authority = evidence_outcome.post_authority
             _stage_completed(_telemetry, "evidence_search", deadline_at)
         except RecallBudgetExhausted as exc:
-            return _fail_open_recall_budget(
-                str(exc),
-                matched,
-                request,
-                policy,
-                started,
-                final_deadline_at,
-                _allow_timeout_fallback,
-                perform_search,
-                _telemetry,
+            result = _fail_open_for_known_recall_failure(
+                exc, matched, request, policy, started, final_deadline_at,
+                _allow_timeout_fallback, perform_search, _telemetry,
             )
+            assert result is not None
+            return result
         except Exception as exc:
-            failure_class = _known_availability_failure_class(exc)
-            if failure_class is not None:
-                failure_reason = _one_line(str(exc), limit=220)
-                return _fail_open_recall_budget(
-                    f"{failure_class}: {failure_reason}",
-                    matched,
-                    request,
-                    policy,
-                    started,
-                    final_deadline_at,
-                    _allow_timeout_fallback,
-                    perform_search,
-                    _telemetry,
-                    failure_class=failure_class,
-                    failure_reason=failure_reason,
-                    fallback_reserve_ms=reserve_ms,
-                )
+            result = _fail_open_for_known_recall_failure(
+                exc, matched, request, policy, started, final_deadline_at,
+                _allow_timeout_fallback, perform_search, _telemetry,
+                fallback_reserve_ms=reserve_ms,
+            )
+            if result is not None:
+                return result
             _stage_interrupted(_telemetry)
             reasons.append(f"evidence gate failed: {exc.__class__.__name__}")
             pre_results = []
@@ -4191,17 +4223,12 @@ def _run_recall_impl(
             _stage_started(_telemetry, "judge", deadline_at)
             judge_timeout_ms = _require_remaining_budget(deadline_at, "judge")
         except RecallBudgetExhausted as exc:
-            return _fail_open_recall_budget(
-                str(exc),
-                matched,
-                request,
-                policy,
-                started,
-                final_deadline_at,
-                _allow_timeout_fallback,
-                perform_search,
-                _telemetry,
+            result = _fail_open_for_known_recall_failure(
+                exc, matched, request, policy, started, final_deadline_at,
+                _allow_timeout_fallback, perform_search, _telemetry,
             )
+            assert result is not None
+            return result
         judge_score, judge_queries, judge_reason = run_local_judge(
             active_request,
             score,
@@ -4295,35 +4322,20 @@ def _run_recall_impl(
                 reasons.append("no matching pages")
             _stage_completed(_telemetry, "context", deadline_at)
         except RecallBudgetExhausted as exc:
-            return _fail_open_recall_budget(
-                str(exc),
-                matched,
-                request,
-                policy,
-                started,
-                final_deadline_at,
-                _allow_timeout_fallback,
-                perform_search,
-                _telemetry,
+            result = _fail_open_for_known_recall_failure(
+                exc, matched, request, policy, started, final_deadline_at,
+                _allow_timeout_fallback, perform_search, _telemetry,
             )
+            assert result is not None
+            return result
         except Exception as exc:
-            failure_class = _known_availability_failure_class(exc)
-            if failure_class is not None:
-                failure_reason = _one_line(str(exc), limit=220)
-                return _fail_open_recall_budget(
-                    f"{failure_class}: {failure_reason}",
-                    matched,
-                    request,
-                    policy,
-                    started,
-                    final_deadline_at,
-                    _allow_timeout_fallback,
-                    perform_search,
-                    _telemetry,
-                    failure_class=failure_class,
-                    failure_reason=failure_reason,
-                    fallback_reserve_ms=reserve_ms,
-                )
+            result = _fail_open_for_known_recall_failure(
+                exc, matched, request, policy, started, final_deadline_at,
+                _allow_timeout_fallback, perform_search, _telemetry,
+                fallback_reserve_ms=reserve_ms,
+            )
+            if result is not None:
+                return result
             _stage_interrupted(_telemetry)
             error = f"{exc.__class__.__name__}: {_one_line(str(exc), limit=220)}"
             reasons.append("search failed")
