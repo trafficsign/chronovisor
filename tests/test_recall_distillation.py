@@ -2841,6 +2841,65 @@ def test_ox_canary_skips_payload_rejected_probe_before_one_safe_request(
     assert attempts == 1
 
 
+def test_ox_oversize_probe_pair_is_terminal_without_remote_request(
+    tmp_path: Path,
+) -> None:
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def evaluate(self, _payload: object) -> dict[str, object]:
+            self.calls += 1
+            return {"labels": []}
+
+    rally = {
+        "rally_id": "rally-test",
+        "session_cluster_id": "session-test",
+        "as_of": "2026-01-03T00:00:00Z",
+        "query_sha256": "query",
+        "context_refs": [],
+    }
+    distill._ensure_split_plan(
+        tmp_path,
+        [rally],
+        raw_watermark="a" * 64,
+        model_cohort_sha256="b" * 64,
+    )
+    teacher = RemoteTeacher()
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            teacher_claim_limit=1,
+            hard_floor_probe_pairs=1,
+            max_input_bytes=20_000,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: teacher},
+        snapshots={
+            "rally-test": {
+                "snapshot_sha256": "c" * 64,
+                "candidates": [
+                    {"candidate_id": "candidate-a", "text_sha256": "candidate-a"},
+                    {"candidate_id": "candidate-b", "text_sha256": "candidate-b"},
+                ],
+            }
+        },
+        rally_by_id={"rally-test": rally},
+        texts={"query": "q", "candidate-a": "a" * 6_000, "candidate-b": "b" * 6_000},
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert teacher.calls == 0
+    assert result.workset_status["quarantined"] == 2  # type: ignore[index]
+    assert result.workset_status["ready"] == 4  # type: ignore[index]
+
+
 def test_ox_profile_stop_returns_claims_to_ready(tmp_path: Path) -> None:
     from chronovisor.recall.recall_distillation_dispatcher import DispatchFailure
 
@@ -2888,7 +2947,13 @@ def test_ox_profile_stop_returns_claims_to_ready(tmp_path: Path) -> None:
     assert result.labels_written == 0
 
 
-def test_ox_remote_guard_rejection_is_not_retried(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("category", "terminal_state", "terminal_count"),
+    [("remote_payload_rejected", "quarantined", 1), ("http_429", "ready", 2)],
+)
+def test_ox_canary_failure_is_single_attempt(
+    tmp_path: Path, category: str, terminal_state: str, terminal_count: int
+) -> None:
     class GuardedTeacher:
         local = False
         role = distill.OX_TEACHER_ROLE
@@ -2900,8 +2965,8 @@ def test_ox_remote_guard_rejection_is_not_retried(tmp_path: Path) -> None:
             self.calls += 1
             return {
                 "_failure": {
-                    "class": "remote_payload_rejected",
-                    "retryable": False,
+                    "class": category,
+                    "retryable": category == "http_429",
                     "labelable": False,
                 }
             }
@@ -2942,8 +3007,7 @@ def test_ox_remote_guard_rejection_is_not_retried(tmp_path: Path) -> None:
 
     assert teacher.calls == 1
     assert result.model_calls == 1
-    assert result.workset_status["quarantined"] == 1  # type: ignore[index]
-    assert result.workset_status["ready"] == 1  # type: ignore[index]
+    assert result.workset_status[terminal_state] == terminal_count  # type: ignore[index]
 
 
 def test_ox_claim_cap_keeps_append_batch_at_or_below_500(tmp_path: Path) -> None:

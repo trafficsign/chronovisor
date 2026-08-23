@@ -5024,7 +5024,7 @@ def _run_ox_teacher_batch(
             (
                 claim,
                 {
-                    "status": "quarantined" if claim.attempt >= 3 else "retry",
+                    "status": "quarantined",
                     "error_class": "incomplete_probe_pair",
                 },
             )
@@ -5118,6 +5118,7 @@ def _run_ox_teacher_batch(
             }
         ),
         max_inflight=config.teacher_max_inflight,
+        max_retries=0 if config.teacher_claim_limit == 1 else 2,
         min_valid_results_per_cap=20,
         valid_result_count=valid_result_count,
     )
