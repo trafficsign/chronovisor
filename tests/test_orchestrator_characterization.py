@@ -467,6 +467,49 @@ def test_reconcile_budget_is_not_spent_listing_all_projection_artifacts(
     assert result["elapsed_ms"] < 250
 
 
+def test_reconcile_checkpoints_before_candidate_discovery_exhausts_budget(
+    tmp_path: Path, monkeypatch
+) -> None:
+    raw_ids = [f"parent-{index:03d}.md" for index in range(20)]
+    _root, raw_dir = _configure_reconciler(
+        tmp_path,
+        monkeypatch,
+        processed=raw_ids,
+    )
+    for raw_id in raw_ids:
+        _write_transcript(raw_dir, raw_id, "ordinary source")
+
+    elapsed = 0.0
+    original_regular_unit = orchestrator._processed_projection_regular_unit
+
+    def slow_regular_unit(path: Path, raw_id: str, source_dir: Path):
+        nonlocal elapsed
+        elapsed += 0.210 if raw_id == raw_ids[0] else 0.012
+        return original_regular_unit(path, raw_id, source_dir)
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_processed_projection_regular_unit",
+        slow_regular_unit,
+    )
+    monkeypatch.setattr(orchestrator.time, "perf_counter", lambda: elapsed)
+    monkeypatch.setattr(
+        "chronovisor.ingest.raw_semantic_projection.project_parent_raw",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            kind="passthrough",
+            manifest_path=None,
+            child_paths=(),
+        ),
+    )
+
+    result = orchestrator.reconcile_processed_projections(max_parents=20)
+
+    assert result["cursor"] == raw_ids[0]
+    assert len(result["processed"]) == 1
+    assert result["budget_exhausted"] is True
+    assert result["elapsed_ms"] < 250
+
+
 def test_reconcile_rejects_symlink_swap_before_builder_receives_bytes(
     tmp_path: Path, monkeypatch
 ) -> None:

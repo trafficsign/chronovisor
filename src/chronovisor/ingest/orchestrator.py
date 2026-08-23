@@ -739,47 +739,65 @@ def reconcile_processed_projections(
         # so a normal pass does not intentionally cross the 250 ms gate.
         pass_budget_ms = 200.0
         enforce_budget = len(candidate_ids) > 1
-        (
-            candidates,
-            advanced_ids,
-            scanned_ids,
-            blocked_ids,
-            held,
-            budget_exhausted,
-        ) = _processed_projection_candidates(
-            candidate_ids=candidate_ids,
-            raw_store=raw_store,
-            layout=layout,
-            reference_dir=reference_dir,
-            raw_dir=RAW_DIR,
-            started=started,
-            enforce_budget=enforce_budget,
-            pass_budget_ms=pass_budget_ms,
-        )
-        processed, processing_budget_exhausted = (
-            _reconcile_processed_projection_candidates(
-                candidates=candidates,
+        processed: list[dict[str, Any]] = []
+        advanced_ids: list[str] = []
+        scanned_ids: list[str] = []
+        blocked_ids: set[str] = set()
+        held: list[dict[str, Any]] = []
+        candidate_ids_by_raw_id: set[str] = set()
+        budget_exhausted = False
+        for raw_id in candidate_ids:
+            first_attempt = not scanned_ids
+            (
+                candidates,
+                candidate_advanced_ids,
+                candidate_scanned_ids,
+                candidate_blocked_ids,
+                candidate_held,
+                discovery_budget_exhausted,
+            ) = _processed_projection_candidates(
+                candidate_ids=[raw_id],
                 raw_store=raw_store,
+                layout=layout,
                 reference_dir=reference_dir,
-                output_dir=output_dir,
-                max_child_bytes=max_child_bytes,
-                artifact_names_before=artifact_names_before,
-                root_path=root_path,
+                raw_dir=RAW_DIR,
                 started=started,
-                enforce_budget=enforce_budget,
+                enforce_budget=enforce_budget and not first_attempt,
                 pass_budget_ms=pass_budget_ms,
-                project_native_transcript=project_native_transcript,
-                project_parent_raw=project_parent_raw,
-                verify_projection_bundle=verify_projection_bundle,
-                held=held,
-                advanced_ids=advanced_ids,
-                blocked_ids=blocked_ids,
             )
-        )
-        budget_exhausted = budget_exhausted or processing_budget_exhausted
+            advanced_ids.extend(candidate_advanced_ids)
+            scanned_ids.extend(candidate_scanned_ids)
+            blocked_ids.update(candidate_blocked_ids)
+            held.extend(candidate_held)
+            candidate_ids_by_raw_id.update(unit.raw_id for unit, _ in candidates)
+            candidate_processed, processing_budget_exhausted = (
+                _reconcile_processed_projection_candidates(
+                    candidates=candidates,
+                    raw_store=raw_store,
+                    reference_dir=reference_dir,
+                    output_dir=output_dir,
+                    max_child_bytes=max_child_bytes,
+                    artifact_names_before=artifact_names_before,
+                    root_path=root_path,
+                    started=started,
+                    enforce_budget=enforce_budget and not first_attempt,
+                    pass_budget_ms=pass_budget_ms,
+                    project_native_transcript=project_native_transcript,
+                    project_parent_raw=project_parent_raw,
+                    verify_projection_bundle=verify_projection_bundle,
+                    held=held,
+                    advanced_ids=advanced_ids,
+                    blocked_ids=blocked_ids,
+                )
+            )
+            processed.extend(candidate_processed)
+            budget_exhausted = (
+                discovery_budget_exhausted or processing_budget_exhausted
+            )
+            if budget_exhausted:
+                break
 
         completed_ids = set(advanced_ids)
-        candidate_ids_by_raw_id = {unit.raw_id for unit, _resolution in candidates}
         checkpoint: str | None = None
         for raw_id in scanned_ids:
             if raw_id in blocked_ids:
