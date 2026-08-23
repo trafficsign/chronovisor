@@ -260,11 +260,13 @@ class SingleTeacherDispatcher(Generic[T, R]):
         current_cap = self.current_cap
         valid_results_at_cap = self.valid_results_at_cap
         offset = 0
-        with ThreadPoolExecutor(max_workers=self.max_inflight) as executor:
+        executor = ThreadPoolExecutor(max_workers=self.max_inflight)
+        futures: dict[Future[_Attempt[T, R]], int] = {}
+        try:
             while offset < len(work) and not stop_event.is_set():
                 cap = min(current_cap, self.max_inflight, len(work) - offset)
                 indexes = range(offset, offset + cap)
-                futures: dict[Future[_Attempt[T, R]], int] = {
+                futures = {
                     executor.submit(
                         self._evaluate_with_retry,
                         index,
@@ -394,6 +396,15 @@ class SingleTeacherDispatcher(Generic[T, R]):
                             category=stop_category,
                             attempts=0,
                         )
+        except BaseException:
+            # The Recall deadline is a BaseException; do not wait for a hung call.
+            stop_event.set()
+            for future in futures:
+                future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
 
         self.current_cap = current_cap
         self.valid_results_at_cap = valid_results_at_cap

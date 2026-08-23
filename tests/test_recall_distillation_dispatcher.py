@@ -10,6 +10,7 @@ from chronovisor.recall.recall_distillation_dispatcher import (
     SingleTeacherDispatcher,
     dispatch_claimed_work,
 )
+from chronovisor.recall.recall_runtime import RecallWallClockTimeout
 
 
 def test_dispatch_preserves_input_order_and_bounds_inflight() -> None:
@@ -393,3 +394,41 @@ def test_timeout_retries_only_within_bounded_attempt_budget() -> None:
     assert result.category == "timeout"
     assert result.attempts == 3
     assert attempts == 3
+
+
+def test_base_exception_returns_without_waiting_for_running_work() -> None:
+    running_work_started = threading.Event()
+    release_running_work = threading.Event()
+    dispatch_finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def evaluate(item: int) -> int:
+        if item == 0:
+            assert running_work_started.wait(1)
+            raise RecallWallClockTimeout("deadline reached")
+        running_work_started.set()
+        assert release_running_work.wait(5)
+        return item
+
+    def dispatch() -> None:
+        try:
+            SingleTeacherDispatcher(
+                evaluate,
+                max_inflight=2,
+                initial_cap=2,
+            ).dispatch([0, 1])
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            dispatch_finished.set()
+
+    thread = threading.Thread(target=dispatch)
+    thread.start()
+    try:
+        assert dispatch_finished.wait(1)
+        assert len(errors) == 1
+        assert isinstance(errors[0], RecallWallClockTimeout)
+    finally:
+        release_running_work.set()
+        thread.join(1)
+    assert not thread.is_alive()
