@@ -24,23 +24,23 @@ status_matches_launchd() {
   )"
   [[ "$pid" == <-> ]] || return 1
   /bin/kill -0 "$pid" 2>/dev/null || return 1
-  /usr/bin/python3 - "$HOME/.chronovisor/runtime/reranker-service-status.json" "$pid" <<'PY'
+  /usr/bin/python3 - "$HOME/.chronovisor/runtime/reranker-service-status.json" "$pid" "$HOME/.chronovisor/runtime/reranker.sock" <<'PY'
 import json
 import os
+import socket
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 path = Path(sys.argv[1])
 launchd_pid = int(sys.argv[2])
+socket_path = Path(sys.argv[3])
 try:
     status = json.loads(path.read_text(encoding="utf-8"))
-    age = time.time() - float(status["observed_at_epoch"])
     service_pid = int(status.get("pid") or 0)
 except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
     raise SystemExit(1)
-if status.get("ready") is not True or not 0 <= age <= 30 or service_pid <= 0:
+if status.get("ready") is not True or service_pid <= 0:
     raise SystemExit(1)
 try:
     os.kill(service_pid, 0)
@@ -54,7 +54,7 @@ pid = service_pid
 seen = set()
 for _depth in range(8):
     if pid == launchd_pid:
-        raise SystemExit(0)
+        break
     if pid <= 1 or pid in seen:
         break
     seen.add(pid)
@@ -68,7 +68,19 @@ for _depth in range(8):
         pid = int(parent)
     except (OSError, subprocess.CalledProcessError, ValueError):
         break
-raise SystemExit(1)
+if pid != launchd_pid:
+    raise SystemExit(1)
+
+try:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(1.0)
+        client.connect(str(socket_path))
+        client.sendall(b'{"method":"health"}\n')
+        response = client.recv(65536)
+        payload = json.loads(response)
+except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+raise SystemExit(0 if payload.get("status") in {"ok", "ready"} and payload.get("ready") is True else 1)
 PY
 }
 

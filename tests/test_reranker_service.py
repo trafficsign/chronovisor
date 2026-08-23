@@ -153,6 +153,24 @@ def test_service_state_returns_page_keyed_raw_scores(tmp_path, monkeypatch) -> N
     assert controls == {"lease": 1, "activity": 1}
 
 
+def test_idle_service_readiness_does_not_depend_on_status_age(tmp_path, monkeypatch) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    state, status_file, _backend, _runtime, _controls = prepare_state(
+        tmp_path, monkeypatch, cfg
+    )
+    status = json.loads(status_file.read_text(encoding="utf-8"))
+    status["observed_at_epoch"] = 0
+    status_file.write_text(json.dumps(status), encoding="utf-8")
+
+    assert state.ready is True
+    assert state._status_payload()["ready"] is True
+
+    installer = Path(__file__).parents[1] / "scripts" / "install-reranker-service"
+    source = installer.read_text(encoding="utf-8")
+    assert "not 0 <= age <= 30" not in source
+    assert "client.connect(str(socket_path))" in source
+
+
 def test_service_and_client_round_trip_preserves_raw_scores(
     tmp_path, monkeypatch
 ) -> None:

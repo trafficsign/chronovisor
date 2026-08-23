@@ -58,7 +58,8 @@ def _age_seconds(value: object) -> float | None:
     timestamp = _parse_iso_datetime(value)
     if timestamp is None:
         return None
-    return (datetime.now() - timestamp).total_seconds()
+    now = datetime.now(timestamp.tzinfo) if timestamp.tzinfo else datetime.now()
+    return max(0.0, (now - timestamp).total_seconds())
 
 
 def _ensure_runtime_dir() -> None:
@@ -99,6 +100,7 @@ def _default_status() -> dict[str, Any]:
     return {
         "schema_version": 1,
         "state": "unknown",
+        "runtime_state": "unknown",
         "stage": None,
         "pending": None,
         "current_raw": None,
@@ -109,19 +111,111 @@ def _default_status() -> dict[str, Any]:
         "ollama": None,
         "llm": None,
         "last_event": None,
+        "mutation_ready": None,
+        "mutation_authority": None,
+        "active_failure": None,
+        "last_failure": None,
+        "last_failure_at": None,
+        "last_failure_age_seconds": None,
         "updated_at": None,
     }
 
 
+def _failure_record(
+    message: object, *, timestamp: str, state: object, stage: object, kind: str
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "message": str(message),
+        "timestamp": timestamp,
+        "runtime_state": state,
+        "stage": stage,
+    }
+
+
+def _project_status(status: dict[str, Any]) -> dict[str, Any]:
+    """Add canonical observability fields without changing legacy fields."""
+
+    projected = dict(status)
+    runtime_state = projected.get("runtime_state")
+    if runtime_state is None or runtime_state == "unknown":
+        projected["runtime_state"] = projected.get("state") or "unknown"
+
+    authority = projected.get("mutation_authority")
+    if authority is None:
+        authority = projected.get("authority_preflight")
+        if authority is not None:
+            projected["mutation_authority"] = authority
+    if projected.get("mutation_ready") is None:
+        if isinstance(authority, dict) and isinstance(authority.get("ok"), bool):
+            projected["mutation_ready"] = authority["ok"]
+        elif (
+            projected.get("state") == "blocked"
+            and projected.get("stage") == "decision-authority"
+        ):
+            projected["mutation_ready"] = False
+
+    last_failure = projected.get("last_failure")
+    if last_failure is None:
+        problem = projected.get("last_problem")
+        if isinstance(problem, dict) and problem.get("level") == "error":
+            last_failure = problem
+            projected["last_failure"] = problem
+    last_failure_at = projected.get("last_failure_at")
+    if last_failure_at is None and isinstance(last_failure, dict):
+        last_failure_at = last_failure.get("timestamp")
+        projected["last_failure_at"] = last_failure_at
+    age = _age_seconds(last_failure_at)
+    projected["last_failure_age_seconds"] = round(age, 3) if age is not None else None
+    return projected
+
+
 def read_status() -> dict[str, Any]:
-    return _read_json(STATUS_FILE, _default_status())
+    return _project_status(_read_json(STATUS_FILE, _default_status()))
 
 
 def write_status(fields: dict[str, Any]) -> dict[str, Any]:
     status = read_status()
-    status.update(fields)
+    timestamp = now_iso()
+    updates = dict(fields)
+    if "runtime_state" not in updates and "state" in updates:
+        updates["runtime_state"] = updates["state"]
+    if "state" not in updates and "runtime_state" in updates:
+        updates["state"] = updates["runtime_state"]
+
+    authority = updates.get("mutation_authority", updates.get("authority_preflight"))
+    if authority is not None:
+        updates["mutation_authority"] = authority
+    if "mutation_ready" not in updates:
+        if isinstance(authority, dict) and isinstance(authority.get("ok"), bool):
+            updates["mutation_ready"] = authority["ok"]
+        elif (
+            updates.get("state") == "blocked"
+            and updates.get("stage") == "decision-authority"
+        ):
+            updates["mutation_ready"] = False
+
+    failure_message = updates.get("last_error")
+    if failure_message:
+        failure = _failure_record(
+            failure_message,
+            timestamp=timestamp,
+            state=updates.get("runtime_state", status.get("runtime_state")),
+            stage=updates.get("stage", status.get("stage")),
+            kind="runtime_error",
+        )
+        updates.update(
+            active_failure=failure,
+            last_failure=failure,
+            last_failure_at=timestamp,
+        )
+    elif "last_error" in updates and updates["last_error"] is None:
+        updates["active_failure"] = None
+
+    status.update(updates)
     status["schema_version"] = 1
-    status["updated_at"] = now_iso()
+    status["updated_at"] = timestamp
+    status = _project_status(status)
     _atomic_write_text(
         STATUS_FILE,
         json.dumps(status, ensure_ascii=False, indent=2, default=str) + "\n",
@@ -137,9 +231,17 @@ def append_event(level: str, message: str, **fields: Any) -> dict[str, Any]:
         **fields,
     }
     _append_jsonl(EVENTS_FILE, record, max_lines=MAX_EVENTS)
-    status_fields = {"last_event": record}
+    status_fields: dict[str, Any] = {"last_event": record}
     if level in {"error", "warn"}:
         status_fields["last_problem"] = record
+    if level == "error":
+        status_fields.update(
+            active_failure=record,
+            last_failure=record,
+            last_failure_at=record["timestamp"],
+        )
+    elif level == "success":
+        status_fields["active_failure"] = None
     write_status(status_fields)
     return record
 

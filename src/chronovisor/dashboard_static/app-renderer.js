@@ -2417,6 +2417,63 @@ function healthPercent(value) {
 
 function renderHealth(health) {
   const data = health || {};
+  const materialization = data.materialization || data.materialized || data._dashboard || {};
+  const runtimeStatus = data.runtime_status || {};
+  const ingestLiveness = data.ingest_liveness || {};
+  const librarian = data.librarian || {};
+  const authorityValue = data.current_authority
+    ?? data.authority
+    ?? materialization.current_authority
+    ?? materialization.authority
+    ?? runtimeStatus.current_authority
+    ?? runtimeStatus.mutation_authority
+    ?? runtimeStatus.authority_preflight
+    ?? ingestLiveness.current_authority
+    ?? ingestLiveness.mutation_authority
+    ?? ingestLiveness.authority_preflight
+    ?? librarian.authority;
+  const authorityBlocked = runtimeStatus.mutation_ready === false
+    || (runtimeStatus.mutation_authority
+      && typeof runtimeStatus.mutation_authority === "object"
+      && runtimeStatus.mutation_authority.ok === false);
+  const authorityLabel = authorityBlocked
+    ? "BLOCKED"
+    : authorityValue && typeof authorityValue === "object"
+    ? fmt(
+        authorityValue.status
+          || authorityValue.id
+          || authorityValue.authority_digest
+          || authorityValue.digest
+          || authorityValue.epoch,
+        "--",
+      )
+    : fmt(authorityValue, "--");
+  const staleValue = data.stale ?? materialization.stale;
+  const livenessStale = ingestLiveness.stale ?? ingestLiveness.liveness?.stale;
+  const staleDisplay = staleValue === undefined
+    ? livenessStale
+    : Boolean(staleValue) || livenessStale === true;
+  const refreshingValue = data.refreshing ?? materialization.refreshing;
+  const materializedAgeValue = data.age
+    ?? data.materialized_age_seconds
+    ?? data.materialized_age
+    ?? materialization.materialized_age_seconds
+    ?? materialization.age_seconds
+    ?? materialization.materialized_age
+    ?? data.materialized_at
+    ?? materialization.materialized_at;
+  const materializedAge = numeric(materializedAgeValue)
+    ? `${Math.round(Math.max(0, materializedAgeValue))}s`
+    : typeof materializedAgeValue === "string" && /(?:ago|[smhd])$/u.test(materializedAgeValue)
+      ? materializedAgeValue
+      : ageLabel(materializedAgeValue);
+  const healthMeta = [
+    `status=${fmt(data.status ?? runtimeStatus.status ?? ingestLiveness.status, "unknown")}`,
+    `authority=${authorityLabel}`,
+    `stale=${staleDisplay === undefined ? "--" : staleDisplay ? "yes" : "no"}${staleDisplay === true ? " · STALE" : ""}`,
+    `refreshing=${refreshingValue === undefined ? "--" : refreshingValue ? "yes" : "no"}`,
+    `materialized=${materializedAge}`,
+  ].join(" · ");
   const coverage = data.coverage || {};
   const capture = data.capture || {};
   const integrity = data.memory_integrity || {};
@@ -2449,9 +2506,14 @@ function renderHealth(health) {
         `${intValue(convergence.human_required).toLocaleString()} human`,
       ]
     : [];
-  els.healthCaption.textContent = rawFiles
+  const healthSummary = rawFiles
     ? `${claimed.toLocaleString()} / ${rawFiles.toLocaleString()} raw claimed${convergenceBits.length ? ` · ${convergenceBits.join(" · ")}` : ""}`
     : (convergenceBits.length ? convergenceBits.join(" · ") : "waiting");
+  if (typeof els.healthCaption?.setAttribute === "function") {
+    els.healthCaption.setAttribute("aria-live", "polite");
+    els.healthCaption.setAttribute("aria-atomic", "true");
+  }
+  els.healthCaption.textContent = `${healthMeta} · ${healthSummary}`;
   els.healthSummaryCoverage.textContent = healthPercent(coverage.summary_coverage);
   els.healthCapture.textContent = healthPercent(numeric(integrity.capture_rate) ? integrity.capture_rate : capture.claim_coverage);
   els.healthReadback.textContent = checked
@@ -2985,7 +3047,19 @@ function renderLocalRuntimeMetric(modelStatus, runtime) {
   const model = models.find((item) => !String(item.name || item.model || "").includes("embed"))
     || models[0]
     || {};
-  els.ollama.textContent = modelStatus?.available || runtime?.available ? "online" : "offline";
+  const degraded = runtime?.partial === true
+    || runtime?.status === "degraded"
+    || modelStatus?.partial === true
+    || modelStatus?.status === "degraded";
+  els.ollama.textContent = degraded
+    ? "DEGRADED"
+    : modelStatus?.available || runtime?.available
+      ? "online"
+      : "offline";
+  if (typeof els.ollama?.setAttribute === "function") {
+    els.ollama.setAttribute("aria-live", "polite");
+    els.ollama.setAttribute("aria-atomic", "true");
+  }
   els.ollamaSub.textContent = summary.installed !== undefined
     ? `${intValue(summary.loaded)} loaded · ${intValue(summary.installed)} installed`
     : model.name || model.model || "no model";

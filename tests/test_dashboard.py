@@ -5230,6 +5230,97 @@ def test_health_materialization_fingerprint_changes_with_runtime(
     assert before != after
 
 
+def test_health_materialization_fingerprint_tracks_runtime_authority(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    runtime_dir = chronovisor_root / "runtime"
+    runtime_dir.mkdir(parents=True)
+    status_file = runtime_dir / "status.json"
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(runtime_status, "STATUS_FILE", status_file)
+    monkeypatch.setattr(
+        dashboard,
+        "runtime_identity",
+        lambda: {
+            "commit_id": "a" * 40,
+            "module_path": "/archive/a/chronovisor/runtime_config.py",
+            "package_version": "0.1.1",
+        },
+    )
+    status_file.write_text(
+        json.dumps(
+            {
+                "mutation_ready": True,
+                "mutation_authority": {"authority_digest": "digest-a"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = dashboard._health_materialization_fingerprint([])
+    status_file.write_text(
+        json.dumps(
+            {
+                "mutation_ready": False,
+                "mutation_authority": {"authority_digest": "digest-b"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    after = dashboard._health_materialization_fingerprint([])
+
+    assert before != after
+
+
+def test_health_materialized_snapshot_projects_operational_truth(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard.time, "time", lambda: 100.0)
+    monkeypatch.setattr(
+        dashboard,
+        "_health_materialization_fingerprint",
+        lambda _raw_paths: "generation-a",
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_materialized_component",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "runtime_status": {
+                "mutation_authority": {
+                    "status": "active",
+                    "authority_digest": "digest-runtime",
+                }
+            },
+            "librarian": {
+                "authority": {"status": "active", "authority_digest": "digest-a"}
+            },
+        },
+    )
+    cache_key = (str(chronovisor_root), "health")
+    dashboard._MATERIALIZED_COMPONENTS[cache_key] = {
+        "fingerprint": "generation-a",
+        "built_at_epoch": 95.0,
+    }
+
+    health = dashboard._health_materialized_snapshot([])
+
+    assert health["status"] == "ok"
+    assert health["current_authority"]["authority_digest"] == "digest-runtime"
+    assert health["stale"] is False
+    assert health["refreshing"] is False
+    assert health["materialized_at"] == "1970-01-01T00:01:35Z"
+    assert health["age"] == 5.0
+    assert health["source_generation"] == "generation-a"
+
+    dashboard._MATERIALIZED_COMPONENTS[cache_key]["fingerprint"] = "generation-old"
+    stale = dashboard._health_materialized_snapshot([])
+    assert stale["stale"] is True
+    assert stale["source_generation"] == "generation-old"
+
+
 def test_health_materialization_fingerprint_tracks_ingest_liveness(
     tmp_path: Path,
     monkeypatch,
@@ -5314,6 +5405,93 @@ def test_dashboard_static_renders_compact_distillation_health_status() -> None:
     assert "paired" in renderer
     assert "feature_revision" in renderer
     assert "hold_reason" in renderer
+    assert "current_authority" in renderer
+    assert "materialized_age_seconds" in renderer
+    assert 'setAttribute("aria-live", "polite")' in renderer
+
+
+def test_dashboard_static_projects_blocked_and_stale_health_truth() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    renderer_test = renderer + "\nthis.__test = { renderHealth };"
+    scenario = f"""
+const vm = require("node:vm");
+const attributes = {{}};
+const element = () => ({{
+  textContent: "",
+  setAttribute: (name, value) => {{ attributes[name] = value; }},
+}});
+const els = new Proxy({{}}, {{
+  get(target, key) {{
+    if (!(key in target)) target[key] = element();
+    return target[key];
+  }},
+}});
+const sandbox = {{ els, window: {{}} }};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(renderer_test)}, sandbox);
+sandbox.__test.renderHealth({{
+  status: "alert",
+  current_authority: {{ status: "ok", authority_digest: "digest-top" }},
+  runtime_status: {{
+    mutation_ready: false,
+    mutation_authority: {{ status: "blocked", authority_digest: "digest-runtime" }},
+  }},
+  ingest_liveness: {{ stale: true }},
+  age: 65,
+}});
+process.stdout.write(JSON.stringify({{
+  caption: sandbox.els.healthCaption.textContent,
+  attributes,
+}}));
+"""
+
+    rendered = json.loads(_run_node_scenario(scenario).stdout)
+
+    assert "status=alert" in rendered["caption"]
+    assert "authority=BLOCKED" in rendered["caption"]
+    assert "stale=yes" in rendered["caption"]
+    assert "STALE" in rendered["caption"]
+    assert "materialized=65s" in rendered["caption"]
+    assert rendered["attributes"] == {"aria-live": "polite", "aria-atomic": "true"}
+
+
+def test_dashboard_static_projects_degraded_runtime_with_aria_live() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    renderer_test = renderer + "\nthis.__test = { renderLocalRuntimeMetric };"
+    scenario = f"""
+const vm = require("node:vm");
+const attributes = {{}};
+const element = () => ({{
+  textContent: "",
+  setAttribute: (name, value) => {{ attributes[name] = value; }},
+}});
+const els = new Proxy({{}}, {{
+  get(target, key) {{
+    if (!(key in target)) target[key] = element();
+    return target[key];
+  }},
+}});
+const sandbox = {{ els, window: {{}} }};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(renderer_test)}, sandbox);
+sandbox.__test.renderLocalRuntimeMetric(
+  {{ available: true, summary: {{ loaded: 1, installed: 3 }} }},
+  {{ available: true, status: "degraded", partial: true, models: [] }},
+);
+process.stdout.write(JSON.stringify({{
+  state: sandbox.els.ollama.textContent,
+  detail: sandbox.els.ollamaSub.textContent,
+  attributes,
+}}));
+"""
+
+    rendered = json.loads(_run_node_scenario(scenario).stdout)
+
+    assert rendered == {
+        "state": "DEGRADED",
+        "detail": "1 loaded · 3 installed",
+        "attributes": {"aria-live": "polite", "aria-atomic": "true"},
+    }
 
 
 def test_materialized_component_returns_stale_while_audit_refreshes(
@@ -6343,6 +6521,10 @@ def test_model_status_snapshot_reads_five_configured_omlx_models(monkeypatch) ->
         for _url, kwargs in observed
     )
     assert len(runtime["models"]) == 5
+    assert runtime["partial"] is True
+    assert runtime["status"] == "degraded"
+    assert runtime["endpoint_status"][endpoints[2]]["status"] == "error"
+    assert runtime["endpoint_status"][endpoints[0]]["status"] == "ok"
     runtime_by_name = {row["name"]: row for row in runtime["models"]}
     assert set(runtime_by_name) == set(models)
     assert runtime_by_name["Qwen3.8-27B-4bit"]["loaded"] is True

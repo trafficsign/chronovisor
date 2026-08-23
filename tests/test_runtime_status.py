@@ -31,6 +31,26 @@ def test_status_event_and_metric_roundtrip(tmp_path: Path, monkeypatch) -> None:
     assert runtime_status.read_metrics()[0]["pending_after"] == 6
 
 
+def test_success_clears_active_failure_but_keeps_failure_history(
+    tmp_path: Path, monkeypatch
+) -> None:
+    patch_runtime(tmp_path, monkeypatch)
+
+    runtime_status.write_status(
+        {"state": "running", "stage": "triage", "last_error": "timeout"}
+    )
+    failed = runtime_status.read_status()
+    runtime_status.append_event("success", "ingest | completed: 1 created")
+    recovered = runtime_status.read_status()
+
+    assert failed["runtime_state"] == "running"
+    assert failed["active_failure"]["message"] == "timeout"
+    assert recovered["active_failure"] is None
+    assert recovered["last_failure"] == failed["last_failure"]
+    assert recovered["last_failure_at"] == failed["last_failure_at"]
+    assert recovered["last_failure_age_seconds"] is not None
+
+
 def test_safe_helpers_swallow_io_errors(monkeypatch) -> None:
     monkeypatch.setattr(runtime_status, "write_status", lambda _fields: (_ for _ in ()).throw(OSError("nope")))
     monkeypatch.setattr(runtime_status, "append_event", lambda *_a, **_kw: (_ for _ in ()).throw(OSError("nope")))

@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
+  "captured_at": "2026-08-23T21:32:05+09:00",
+  "focused_verification": {
+    "command": "uv run pytest -q tests/test_runtime_status.py tests/test_health.py tests/test_dashboard.py tests/test_reranker_service.py tests/test_cli.py",
+    "passed": 217,
+    "failed": 0,
+    "ruff": "passed",
+    "node_check": "passed",
+    "zsh_syntax": "passed",
+    "diff_check": "passed"
+  },
+  "state_matrix": {
+    "historical_failure_then_success": "active_failure cleared; last_failure retained",
+    "current_authority_blocked": "mutation_ready false; health alert; DOM BLOCKED",
+    "configured_ttl_stale": "liveness stale true; health alert; DOM STALE",
+    "mixed_omlx": "endpoint failure retained; partial true; degraded",
+    "idle_live_reranker": "launchd ancestry and Unix socket ready; age diagnostic only"
+  },
+  "status_cli": {
+    "utf8_bytes": 7341,
+    "limit_bytes": 65536,
+    "cold_ms": 868.179,
+    "cold_limit_ms": 3000,
+    "warm_samples": 20,
+    "warm_p95_ms": 869.423,
+    "warm_max_ms": 869.575,
+    "warm_median_ms": 836.397,
+    "warm_limit_ms": 1000,
+    "contains_full_health": false,
+    "counter_reader": "streaming JSONL with invalid-line skip semantics",
+    "import_path": "lightweight recall_runtime_paths"
+  },
+  "health_cli": {
+    "utf8_bytes": 357113,
+    "full_details_preserved": true,
+    "contains_runtime_status": true
+  },
+  "live_snapshot": {
+    "status": "alert",
+    "reason": "Current ingest liveness is stale and Librarian reports BLOCKED; the implementation preserves rather than masks this runtime truth.",
+    "deployment_performed": false
+  }
+}

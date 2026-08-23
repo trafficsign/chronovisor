@@ -16,17 +16,16 @@ from typing import Any, Never
 
 from chronovisor.core import durable_state, runtime_status
 from chronovisor.core import store as chronovisor_store
+from chronovisor.core.recall_runtime_paths import RECALL_DIR
 from chronovisor.core.runtime_config import (
     config_summary,
     load_hook_policy,
     runtime_identity,
     uvx_runtime_command,
 )
-from chronovisor.recall.recall_runtime import (
-    RECALL_DIR,
-    RECALL_FEEDBACK_FILE,
-    RECALL_LOG_FILE,
-)
+
+RECALL_LOG_FILE = RECALL_DIR / "recall-log.jsonl"
+RECALL_FEEDBACK_FILE = RECALL_DIR / "feedback.jsonl"
 
 
 def _codex_home() -> Path:
@@ -68,16 +67,17 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
 def read_jsonl_counter(path: Path, field: str) -> Counter[str]:
     counts: Counter[str] = Counter()
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        stream = path.open(encoding="utf-8")
     except OSError:
         return counts
-    for line in lines:
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict):
-            counts[str(data.get(field, ""))] += 1
+    with stream:
+        for line in stream:
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                counts[str(data.get(field, ""))] += 1
     counts.pop("", None)
     return counts
 
@@ -89,8 +89,6 @@ def count_files(path: Path) -> int:
 
 
 def build_status() -> dict[str, Any]:
-    from chronovisor.ops.health import health_snapshot
-
     return {
         "chronovisor": {
             "root": str(chronovisor_store.CHRONOVISOR_ROOT),
@@ -107,7 +105,6 @@ def build_status() -> dict[str, Any]:
             "auto_apply_log": str(RECALL_DIR / "auto-apply.jsonl"),
         },
         "runtime": runtime_status.read_status(),
-        "health": health_snapshot(),
     }
 
 
@@ -473,6 +470,8 @@ def _has_stop_hook(entries: list[dict[str, Any]]) -> bool:
 
 
 def doctor() -> dict[str, Any]:
+    from chronovisor.recall.librarian_status import build_librarian_status
+
     status = build_status()
     hooks = inspect_hooks()
     checks: list[dict[str, Any]] = []
@@ -521,7 +520,7 @@ def doctor() -> dict[str, Any]:
         status["recall"]["feedback"].get("missed_candidate", 0) >= 0,
         str(status["recall"]["feedback"]),
     )
-    librarian = status["health"].get("librarian") or {}
+    librarian = build_librarian_status(chronovisor_store.CHRONOVISOR_ROOT)
     check(
         "librarian.state",
         librarian.get("state") != "BLOCKED",

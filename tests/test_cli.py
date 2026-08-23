@@ -197,11 +197,11 @@ def patch_wiki(tmp_path: Path, monkeypatch) -> None:
     (pages / "p.md").write_text("---\ntitle: P\n---\n", encoding="utf-8")
     (system / "user-profile.md").write_text("# User\n", encoding="utf-8")
     (recall / "recall-log.jsonl").write_text(
-        json.dumps({"decision": "read"}, ensure_ascii=False) + "\n",
+        json.dumps({"decision": "read"}, ensure_ascii=False) + "\nnot-json\n",
         encoding="utf-8",
     )
     (recall / "feedback.jsonl").write_text(
-        json.dumps({"kind": "missed_candidate"}, ensure_ascii=False) + "\n",
+        json.dumps({"kind": "missed_candidate"}, ensure_ascii=False) + "\nnot-json\n",
         encoding="utf-8",
     )
     config = root / "config.toml"
@@ -239,13 +239,64 @@ def test_status_json_reports_wiki_and_recall_counts(tmp_path, monkeypatch, capsy
     patch_wiki(tmp_path, monkeypatch)
 
     assert cli.main(["status", "--json"]) == 0
-    output = json.loads(capsys.readouterr().out)
+    rendered = capsys.readouterr().out
+    output = json.loads(rendered)
 
     assert output["chronovisor"]["raw_files"] == 1
     assert output["chronovisor"]["pages"] == 1
     assert output["config"]["mode"] == "canonical"
     assert output["recall"]["decisions"] == {"read": 1}
     assert output["recall"]["feedback"] == {"missed_candidate": 1}
+    assert "health" not in output
+    assert len(rendered.encode("utf-8")) <= 64 * 1024
+
+
+def test_doctor_fetches_librarian_status_without_health_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    patch_wiki(tmp_path, monkeypatch)
+    status = {
+        "chronovisor": {
+            "root": str(store.CHRONOVISOR_ROOT),
+            "raw_files": 1,
+            "pages": 1,
+            "system_files": 1,
+        },
+        "config": {
+            "path": str(runtime_config.CONFIG_FILE),
+            "exists": True,
+        },
+        "recall": {"feedback": {"missed_candidate": 0}},
+    }
+    monkeypatch.setattr(cli, "build_status", lambda: status)
+    monkeypatch.setattr(
+        cli,
+        "inspect_hooks",
+        lambda: {
+            "codex": {"entries": []},
+            "claude_code": {"entries": []},
+        },
+    )
+    from chronovisor.recall import librarian_status
+
+    seen_roots: list[Path] = []
+
+    def fake_librarian_status(root: Path) -> dict[str, str]:
+        seen_roots.append(root)
+        return {"state": "READY", "detail": "ok"}
+
+    monkeypatch.setattr(
+        librarian_status, "build_librarian_status", fake_librarian_status
+    )
+
+    result = cli.doctor()
+
+    assert result["summary"]["librarian"] == {"state": "READY", "detail": "ok"}
+    librarian_check = next(
+        item for item in result["checks"] if item["name"] == "librarian.state"
+    )
+    assert librarian_check["ok"] is True
+    assert seen_roots == [store.CHRONOVISOR_ROOT]
 
 
 def test_status_plain_uses_chronovisor_response_key(

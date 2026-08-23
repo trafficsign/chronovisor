@@ -20,6 +20,8 @@ from chronovisor.decision.semantic_hold import (
     persisted_semantic_no_quorum_hold,
 )
 
+INGEST_LIVENESS_TTL_SECONDS = 5 * 60
+
 
 def _jsonl_count(path: Path) -> int:
     return count_jsonl(path)
@@ -739,6 +741,38 @@ def capture_pipeline_kpi() -> dict[str, Any]:
     return {"background_jobs": job_snapshot(), "session_sweeper": sweeper}
 
 
+def _timestamp_age_seconds(value: object) -> float | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    now = datetime.now(timestamp.tzinfo) if timestamp.tzinfo else datetime.now()
+    return max(0.0, (now - timestamp).total_seconds())
+
+
+def _liveness_failure(
+    payload: dict[str, Any], *, authority_blocked: bool
+) -> object:
+    active_failure = payload.get("active_failure")
+    if active_failure is not None:
+        return active_failure
+    error = payload.get("error")
+    authority = payload.get("mutation_authority")
+    if authority is None:
+        authority = payload.get("authority_preflight")
+    if not error and isinstance(authority, dict):
+        error = authority.get("error")
+    if authority_blocked and error:
+        return {
+            "kind": "authority",
+            "message": str(error),
+            "timestamp": payload.get("observed_at"),
+        }
+    return None
+
+
 def ingest_liveness_kpi() -> dict[str, Any]:
     path = CHRONOVISOR_ROOT / "runtime" / "ingest-liveness.json"
     try:
@@ -748,24 +782,89 @@ def ingest_liveness_kpi() -> dict[str, Any]:
             "status": "unknown",
             "path": str(path),
             "alert": False,
+            "stale": False,
             "pending_raws": None,
         }
     if not isinstance(payload, dict):
-        return {"status": "invalid", "path": str(path), "alert": False}
-    runtime_state = payload.get("status")
+        return {
+            "status": "invalid",
+            "path": str(path),
+            "alert": False,
+            "stale": False,
+        }
+    runtime_state = payload.get("runtime_state")
+    if runtime_state is None:
+        runtime_state = payload.get("status")
     waiting = runtime_state in {
         "waiting_for_ingest_runtime",
         "waiting_for_ollama",
     }
-    authority_blocked = runtime_state == "blocked_by_decision_authority"
+    authority = payload.get("mutation_authority")
+    if authority is None:
+        authority = payload.get("authority_preflight")
+    mutation_ready = payload.get("mutation_ready")
+    if not isinstance(mutation_ready, bool):
+        if isinstance(authority, dict) and isinstance(authority.get("ok"), bool):
+            mutation_ready = authority["ok"]
+        elif isinstance(payload.get("authority_available"), bool):
+            mutation_ready = payload["authority_available"]
+        else:
+            mutation_ready = None
+    authority_blocked = (
+        runtime_state == "blocked_by_decision_authority" or mutation_ready is False
+    )
     pending = int(payload.get("pending_raws") or 0)
-    alert = authority_blocked or (waiting and pending > 0)
+    age = _timestamp_age_seconds(payload.get("observed_at"))
+    liveness_fresh = age is not None and age <= INGEST_LIVENESS_TTL_SECONDS
+    stale = age is not None and not liveness_fresh
+    active_failure = _liveness_failure(payload, authority_blocked=authority_blocked)
+    last_failure = payload.get("last_failure")
+    if last_failure is None:
+        last_failure = active_failure
+    last_failure_at = payload.get("last_failure_at")
+    if last_failure_at is None and isinstance(last_failure, dict):
+        last_failure_at = last_failure.get("timestamp")
+    last_failure_age = _timestamp_age_seconds(last_failure_at)
+    alert = authority_blocked or (waiting and pending > 0) or stale
     return {
         **payload,
         "status": "alert" if alert else "ok",
         "runtime_status": runtime_state,
+        "runtime_state": runtime_state,
+        "mutation_ready": mutation_ready,
+        "mutation_authority": authority,
+        "active_failure": active_failure,
+        "last_failure": last_failure,
+        "last_failure_at": last_failure_at,
+        "last_failure_age_seconds": round(last_failure_age, 3)
+        if last_failure_age is not None
+        else None,
+        "liveness": {
+            "observed_at": payload.get("observed_at"),
+            "age_seconds": round(age, 3) if age is not None else None,
+            "fresh": liveness_fresh if age is not None else None,
+            "stale": stale,
+            "ttl_seconds": INGEST_LIVENESS_TTL_SECONDS,
+        },
+        "stale": stale,
         "alert": alert,
         "path": str(path),
+    }
+
+
+def runtime_status_kpi() -> dict[str, Any]:
+    """Expose current runtime authority without treating failure history as live."""
+
+    from chronovisor.core.runtime_status import read_status
+
+    payload = read_status()
+    mutation_ready = payload.get("mutation_ready")
+    authority_blocked = mutation_ready is False
+    return {
+        **payload,
+        "status": "alert" if authority_blocked else "ok",
+        "authority_blocked": authority_blocked,
+        "alert": authority_blocked,
     }
 
 
@@ -990,8 +1089,9 @@ def health_snapshot() -> dict[str, Any]:
         CHRONOVISOR_ROOT / "runtime" / "convergence" / "state.json",
     )
     ingest_liveness = ingest_liveness_kpi()
+    runtime_status = runtime_status_kpi()
     semantic_index = semantic_index_kpi()
-    overall_alert = bool(ingest_liveness.get("alert")) or (
+    overall_alert = bool(ingest_liveness.get("alert")) or bool(runtime_status.get("alert")) or (
         semantic_index.get("status") == "alert"
     )
     return {
@@ -1010,6 +1110,7 @@ def health_snapshot() -> dict[str, Any]:
         "convergence": convergence_kpi(),
         "capture_pipeline": capture_pipeline_kpi(),
         "ingest_liveness": ingest_liveness,
+        "runtime_status": runtime_status,
         "semantic_index": semantic_index,
         "librarian": build_librarian_status(CHRONOVISOR_ROOT),
         "research": research_kpi(),

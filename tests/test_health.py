@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -377,6 +378,146 @@ def test_ingest_liveness_kpi_alerts_on_invalid_authority_without_pending_raws(
     assert payload["runtime_status"] == "blocked_by_decision_authority"
     assert payload["pending_raws"] == 0
     assert payload["alert"] is True
+
+
+def test_ingest_liveness_kpi_alerts_on_current_mutation_authority_block(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    state_path = chronovisor_root / "runtime" / "ingest-liveness.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "runtime_state": "ready",
+                "mutation_ready": False,
+                "mutation_authority": {"ok": False, "error": "authority changed"},
+                "pending_raws": 0,
+                "observed_at": datetime.now(UTC).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "CHRONOVISOR_ROOT", chronovisor_root)
+
+    payload = health.ingest_liveness_kpi()
+
+    assert payload["status"] == "alert"
+    assert payload["mutation_ready"] is False
+    assert payload["active_failure"]["kind"] == "authority"
+    assert payload["stale"] is False
+
+
+def test_ingest_liveness_kpi_alerts_when_observation_is_stale(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    state_path = chronovisor_root / "runtime" / "ingest-liveness.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "status": "ready",
+                "authority_available": True,
+                "pending_raws": 0,
+                "observed_at": (
+                    datetime.now(UTC)
+                    - timedelta(seconds=health.INGEST_LIVENESS_TTL_SECONDS + 1)
+                ).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "CHRONOVISOR_ROOT", chronovisor_root)
+
+    payload = health.ingest_liveness_kpi()
+
+    assert payload["status"] == "alert"
+    assert payload["liveness"]["fresh"] is False
+    assert payload["liveness"]["stale"] is True
+    assert payload["stale"] is True
+
+
+def test_ingest_liveness_kpi_uses_legacy_values_when_canonical_fields_are_null(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    state_path = chronovisor_root / "runtime" / "ingest-liveness.json"
+    state_path.parent.mkdir(parents=True)
+    active_failure = {"kind": "authority", "timestamp": datetime.now(UTC).isoformat()}
+    state_path.write_text(
+        json.dumps(
+            {
+                "status": "blocked_by_decision_authority",
+                "runtime_state": None,
+                "authority_preflight": {"ok": False},
+                "mutation_authority": None,
+                "active_failure": active_failure,
+                "last_failure": None,
+                "observed_at": datetime.now(UTC).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "CHRONOVISOR_ROOT", chronovisor_root)
+
+    payload = health.ingest_liveness_kpi()
+
+    assert payload["runtime_state"] == "blocked_by_decision_authority"
+    assert payload["mutation_authority"] == {"ok": False}
+    assert payload["mutation_ready"] is False
+    assert payload["last_failure"] == active_failure
+
+
+def test_health_snapshot_alerts_on_current_runtime_authority_block(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from chronovisor.core import runtime_config, runtime_status
+    from chronovisor.recall import librarian_status
+
+    monkeypatch.setattr(health, "CHRONOVISOR_ROOT", tmp_path / "wiki")
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setattr(runtime_status, "RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(runtime_status, "STATUS_FILE", runtime_dir / "status.json")
+    runtime_status.write_status(
+        {
+            "state": "blocked",
+            "stage": "decision-authority",
+            "authority_preflight": {"ok": False, "error": "authority changed"},
+        }
+    )
+    for name in (
+        "summary_coverage",
+        "capture_kpi",
+        "latest_memory_integrity",
+        "cofire_kpi",
+        "prefetch_kpi",
+        "derived_memory_kpi",
+        "read_back_kpi",
+        "autonomy_hardening_kpi",
+        "recall_feedback_kpi",
+        "recall_distillation_kpi",
+        "convergence_kpi",
+        "capture_pipeline_kpi",
+        "research_kpi",
+    ):
+        monkeypatch.setattr(health, name, dict)
+    monkeypatch.setattr(health, "_queue_status_counts", lambda *_args: {})
+    monkeypatch.setattr(
+        health,
+        "_lint_queue_kpi",
+        lambda *_args: {"actionable": 0, "total": 0, "active": 0, "untracked": 0, "handled": 0},
+    )
+    monkeypatch.setattr(health, "ingest_liveness_kpi", lambda: {"alert": False})
+    monkeypatch.setattr(health, "semantic_index_kpi", lambda: {"status": "ok"})
+    monkeypatch.setattr(runtime_config, "runtime_identity", dict)
+    monkeypatch.setattr(librarian_status, "build_librarian_status", lambda _root: {})
+
+    payload = health.health_snapshot()
+
+    assert payload["status"] == "alert"
+    assert payload["runtime_status"]["mutation_ready"] is False
+    assert payload["runtime_status"]["authority_blocked"] is True
 
 
 def test_cofire_kpi_reads_graph_summary(tmp_path: Path, monkeypatch) -> None:

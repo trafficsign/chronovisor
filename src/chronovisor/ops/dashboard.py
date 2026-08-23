@@ -21,7 +21,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Mapping
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -450,6 +450,7 @@ def _omlx_snapshot() -> dict[str, Any]:
     models_by_id: dict[str, dict[str, Any]] = {}
     unkeyed_models: list[dict[str, Any]] = []
     errors: list[str] = []
+    endpoint_status: dict[str, dict[str, Any]] = {}
     available = False
     for endpoint in endpoints:
         try:
@@ -464,6 +465,11 @@ def _omlx_snapshot() -> dict[str, Any]:
             if not isinstance(rows, list):
                 rows = []
             available = True
+            endpoint_status[endpoint] = {
+                "status": "ok",
+                "available": True,
+                "model_count": len(rows),
+            }
             for row in rows:
                 if not isinstance(row, dict):
                     continue
@@ -501,20 +507,40 @@ def _omlx_snapshot() -> dict[str, Any]:
                 )
                 models_by_id[model_id] = {**other, **preferred}
         except Exception as exc:
-            errors.append(str(exc))
+            error = str(exc)
+            errors.append(error)
+            endpoint_status[endpoint] = {
+                "status": "error",
+                "available": False,
+                "error": error,
+            }
 
     if available:
-        return {
+        snapshot = {
             "available": True,
             "provider": "omlx",
             "models": [*models_by_id.values(), *unkeyed_models],
         }
-    return {
+        if len(endpoint_status) > 1:
+            snapshot["endpoint_status"] = endpoint_status
+        if errors:
+            snapshot.update(
+                {
+                    "status": "degraded",
+                    "partial": True,
+                    "error": "; ".join(errors),
+                }
+            )
+        return snapshot
+    snapshot = {
         "available": False,
         "provider": "omlx",
         "models": [],
         "error": "; ".join(errors),
     }
+    if len(endpoint_status) > 1:
+        snapshot["endpoint_status"] = endpoint_status
+    return snapshot
 
 
 def _local_model_snapshot() -> dict[str, Any]:
@@ -5156,6 +5182,7 @@ def _save_history_materialization_fingerprint(raw_paths: list[Path]) -> str:
 def _health_materialization_fingerprint(raw_paths: list[Path]) -> str:
     paths = [
         CHRONOVISOR_ROOT / "config.toml",
+        runtime_status.STATUS_FILE,
         CHRONOVISOR_ROOT / "pages",
         CHRONOVISOR_ROOT / "claims",
         CHRONOVISOR_ROOT / "recall",
@@ -5210,6 +5237,80 @@ def _health_materialization_fingerprint(raw_paths: list[Path]) -> str:
         paths,
         identities=[runtime_cache_identity, *(path.name for path in raw_paths)],
     )
+
+
+def _health_materialized_snapshot(raw_paths: list[Path]) -> dict[str, Any]:
+    fingerprint = _health_materialization_fingerprint(raw_paths)
+    value = _materialized_component(
+        "health",
+        fingerprint=fingerprint,
+        builder=health_snapshot,
+        audit_seconds=DASHBOARD_HEALTH_AUDIT_SECONDS,
+        min_refresh_seconds=DASHBOARD_HEALTH_MIN_REFRESH_SECONDS,
+    )
+    cache_key = (str(CHRONOVISOR_ROOT), "health")
+    with _MATERIALIZED_COMPONENT_LOCK:
+        payload = _MATERIALIZED_COMPONENTS.get(cache_key)
+        refreshing = cache_key in _MATERIALIZED_COMPONENT_REFRESHING
+    if not isinstance(payload, dict):
+        return value
+    try:
+        built_at = float(payload.get("built_at_epoch") or 0.0)
+    except (TypeError, ValueError):
+        built_at = 0.0
+    materialized_age = max(0.0, time.time() - built_at) if built_at else None
+    payload_fingerprint = payload.get("fingerprint")
+    result = dict(value)
+    liveness = result.get("ingest_liveness")
+    liveness_stale = (
+        isinstance(liveness, dict)
+        and (
+            liveness.get("stale") is True
+            or isinstance(liveness.get("liveness"), dict)
+            and liveness["liveness"].get("stale") is True
+        )
+    )
+    result["stale"] = bool(
+        payload_fingerprint != fingerprint
+        or refreshing
+        or (
+            materialized_age is not None
+            and materialized_age >= DASHBOARD_HEALTH_AUDIT_SECONDS
+        )
+        or liveness_stale
+    )
+    result["refreshing"] = refreshing
+    result["materialized_at"] = (
+        datetime.fromtimestamp(built_at, tz=UTC).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        )
+        if built_at
+        else None
+    )
+    result["age"] = materialized_age
+    result["source_generation"] = payload_fingerprint
+    result["materialized_at_epoch"] = built_at or None
+    authority = result.get("current_authority")
+    if authority is None:
+        authority = result.get("authority")
+    for section_name in ("runtime_status", "ingest_liveness"):
+        if authority is not None:
+            break
+        section = result.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        authority = section.get("current_authority")
+        if authority is None:
+            authority = section.get("mutation_authority")
+        if authority is None:
+            authority = section.get("authority_preflight")
+    if authority is None:
+        librarian = result.get("librarian")
+        if isinstance(librarian, dict):
+            authority = librarian.get("authority")
+    if authority is not None:
+        result["current_authority"] = authority
+    return result
 
 
 def _model_status_materialization_fingerprint(runtime: dict[str, Any]) -> str:
@@ -5570,13 +5671,7 @@ def build_snapshot() -> dict[str, Any]:
         ),
         "health": _safe_snapshot_component(
             "health",
-            lambda: _materialized_component(
-                "health",
-                fingerprint=_health_materialization_fingerprint(raw_paths),
-                builder=health_snapshot,
-                audit_seconds=DASHBOARD_HEALTH_AUDIT_SECONDS,
-                min_refresh_seconds=DASHBOARD_HEALTH_MIN_REFRESH_SECONDS,
-            ),
+            lambda: _health_materialized_snapshot(raw_paths),
         ),
         "paths": {
             "chronovisor_root": str(CHRONOVISOR_ROOT),
