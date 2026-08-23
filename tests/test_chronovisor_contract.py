@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from chronovisor.core import sealed_artifact_decoder, store
+from chronovisor.core import runtime_config, sealed_artifact_decoder, store
 
 
 def test_direct_search_revalidates_exact_stable_namespace_path(
@@ -234,6 +234,115 @@ def test_provenance_stringifies_typed_yaml_and_guards_non_string_title(
 
     assert payload["page_updated"] == "2026-08-11"
     assert payload["raw_sources"] == []
+
+
+def test_mcp_log_raw_content_requires_both_opt_ins_and_redacts_secret_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.hosts import server
+
+    row = {
+        "event_id": "event-1",
+        "timestamp": "2026-08-23T20:00:00+09:00",
+        "level": "info",
+        "source": "mcp",
+        "message": "api_key=super-secret /Users/test/.chronovisor/raw/one.md",
+    }
+    monkeypatch.setattr(server.activity_log, "read_activity", lambda *_args, **_kw: [row])
+    monkeypatch.setattr(
+        runtime_config,
+        "load_mcp_config",
+        lambda *_args, **_kwargs: runtime_config.McpConfig(expose_raw_content=False),
+    )
+    log = getattr(server.chronovisor_log, "fn", server.chronovisor_log)
+
+    default = json.loads(log(limit=1))
+    one_sided = json.loads(log(limit=1, include_raw_content=True))
+    assert "message" not in default["entries"][0]
+    assert "message" not in one_sided["entries"][0]
+
+    monkeypatch.setattr(
+        runtime_config,
+        "load_mcp_config",
+        lambda *_args, **_kwargs: runtime_config.McpConfig(expose_raw_content=True),
+    )
+    opted_in = json.loads(log(limit=1, include_raw_content=True))
+    assert "super-secret" not in opted_in["entries"][0]["message"]
+    assert "/Users/test" not in opted_in["entries"][0]["message"]
+    assert "[REDACTED]" in opted_in["entries"][0]["message"]
+
+
+def test_mcp_record_and_ingest_are_metadata_only_even_when_exposure_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from chronovisor.hosts import server
+
+    monkeypatch.setattr(server, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(
+        runtime_config,
+        "load_mcp_config",
+        lambda *_args, **_kwargs: runtime_config.McpConfig(expose_raw_content=True),
+    )
+    monkeypatch.setattr(
+        server,
+        "record_raw",
+        lambda *_args, **_kwargs: {
+            "saved": "raw-safe.md",
+            "path": str(tmp_path / "raw" / "raw-safe.md"),
+            "raw_slug": "top-secret-slug",
+            "rejected_keywords": ["credential=secret"],
+            "accepted_keywords": ["also-secret"],
+            "content": "raw body secret",
+            "ingest_pending": False,
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "ingest_raw",
+        lambda *_args, **_kwargs: {
+            "saved": "ingest-safe.md",
+            "path": str(tmp_path / "raw" / "ingest-safe.md"),
+            "content": "ingest body secret",
+            "raw_slug": "ingest-secret-slug",
+            "ingest": {
+                "status": "ok",
+                "path": str(tmp_path / "runtime" / "result.json"),
+                "manifest": str(tmp_path / "runtime" / "manifest.json"),
+                "reason": f"read failed: {tmp_path}/private api_key=reason-secret",
+                "preview": "nested secret",
+            },
+        },
+    )
+    record = getattr(server.chronovisor_record, "fn", server.chronovisor_record)
+    ingest = getattr(server.chronovisor_ingest, "fn", server.chronovisor_ingest)
+
+    record_payload = json.loads(record("raw body secret", trigger_ingest=False))
+    ingest_payload = json.loads(ingest("ingest body secret", force=False))
+
+    for payload in (record_payload, ingest_payload):
+        encoded = json.dumps(payload, ensure_ascii=False)
+        assert "secret" not in encoded
+        assert str(tmp_path) not in encoded
+        assert "raw_slug" not in encoded
+        assert "rejected_keywords" not in encoded
+        assert "content" not in encoded
+    assert record_payload["path"] == "raw/raw-safe.md"
+    assert ingest_payload["ingest"]["path"] == "runtime/result.json"
+    assert ingest_payload["ingest"]["manifest"] == "runtime/manifest.json"
+
+
+def test_provenance_not_found_does_not_echo_requested_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.hosts import server
+
+    monkeypatch.setattr(server, "_find_page_with_alias", lambda _page: None)
+    provenance = getattr(server.chronovisor_provenance, "fn", server.chronovisor_provenance)
+
+    payload = json.loads(provenance("/Users/test/.chronovisor/secret-page"))
+
+    assert payload == {"error": "page not found"}
 
 
 def test_server_alias_read_returns_and_traces_only_canonical_page_id(

@@ -1,0 +1,50 @@
+{
+  "schema": "chronovisor.hardening.security-privacy.v1",
+  "captured_at": "2026-08-23T21:27:00+09:00",
+  "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
+  "phase": "5A",
+  "status": "passed",
+  "research_egress": {
+    "public_http_rejected_before_request": true,
+    "loopback_http_requires_all_pinned_addresses_loopback": true,
+    "https_pinned": true,
+    "proxy_environment_disabled": true,
+    "dns_rebind_rejected": true,
+    "credential_egress_count": 0,
+    "commit": "23d77a8"
+  },
+  "jsonl_permissions": {
+    "open_flags": [
+      "O_CREAT",
+      "O_APPEND"
+    ],
+    "created_mode": "0600",
+    "existing_mode_corrected": true,
+    "targets": {
+      "<CHRONOVISOR_ROOT>/recall/pull-log.jsonl": "0600",
+      "<CHRONOVISOR_ROOT>/runtime/research/web-egress.jsonl": "0600"
+    },
+    "commit": "1c9aed0"
+  },
+  "mcp": {
+    "default_raw_preview_count": 0,
+    "one_sided_opt_in_raw_preview_count": 0,
+    "dual_opt_in_redacted": true,
+    "record_and_ingest_metadata_only": true,
+    "absolute_path_leak_count": 0,
+    "credential_leak_count": 0,
+    "not_found_input_reflection_count": 0,
+    "manifest_paths_root_relative": true,
+    "error_and_reason_strings_redacted": true
+  },
+  "validation": {
+    "focused_tests": {
+      "passed": 78,
+      "failed": 0,
+      "elapsed_seconds": 0.92
+    },
+    "ruff": "passed",
+    "diff_check": "passed",
+    "independent_review_p0_p1": 0
+  }
+}

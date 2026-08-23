@@ -212,7 +212,7 @@ th{background:#f3f1eb}
   </ul>
 </span></li>
 
-<li><input type="checkbox"><span><strong>Phase 5A / P1-E — security/privacy の必須根因修正を入れる。</strong>
+<li><input type="checkbox" checked><span><strong>Phase 5A / P1-E — security/privacy の必須根因修正を入れる。</strong>
   <ul>
   <li>research provider endpoint は HTTPS 必須。解決・pin後の全addressがloopbackである明示的 local SearXNG だけ HTTP を許可し、既存 guarded client と <code>trust_env=false</code> を再利用する。HTTP public、proxy、DNS rebind はrequest生成前に拒否する。</li>
   <li>既存 JSONL writer を <code>O_CREAT|O_APPEND</code>/0600 にし、既存fileも0600へ矯正する。実測対象 <code>&lt;repo&gt;/runtime/research/web-egress.jsonl</code> と <code>&lt;CHRONOVISOR_ROOT&gt;/recall/pull-log.jsonl</code> を必須対象にする。</li>

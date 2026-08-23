@@ -182,6 +182,18 @@ port = 70000
     )
 
 
+def test_mcp_raw_content_exposure_is_explicit_opt_in(tmp_path: Path) -> None:
+    missing = runtime_config.load_mcp_config(tmp_path / "missing.toml")
+    assert missing.expose_raw_content is False
+
+    config = tmp_path / "config.toml"
+    config.write_text("[mcp]\nexpose_raw_content = true\n", encoding="utf-8")
+    assert runtime_config.load_mcp_config(config).expose_raw_content is True
+
+    config.write_text("[mcp]\nexpose_raw_content = \"true\"\n", encoding="utf-8")
+    assert runtime_config.load_mcp_config(config).expose_raw_content is False
+
+
 def test_dashboard_lan_config_is_separate_and_requires_absolute_secret_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

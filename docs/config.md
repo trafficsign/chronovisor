@@ -2,6 +2,15 @@
 
 The runtime config is `~/.chronovisor/config.toml`.
 
+MCP responses are metadata-only by default. Raw previews and activity messages
+require both an explicit tool request and this local opt-in (returned text is
+still redacted):
+
+```toml
+[mcp]
+expose_raw_content = false
+```
+
 The default `[dashboard]` section remains loopback-only. Secure LAN access uses
 a separate section so it cannot change the existing service boundary:
 

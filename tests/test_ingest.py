@@ -14421,7 +14421,7 @@ class TestWikiSaveRawRouting:
         assert result["saved"].startswith("20")
         assert "-codex-chronovisor-dashboard-self-heal-" in result["saved"]
         assert result["saved"].endswith(".md")
-        assert result["raw_slug"] == "chronovisor-dashboard-self-heal"
+        assert "raw_slug" not in result
 
     def test_save_raw_filename_falls_back_to_content_slug(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch

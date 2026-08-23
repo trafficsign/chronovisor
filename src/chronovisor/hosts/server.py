@@ -3,6 +3,7 @@
 import contextlib
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -46,6 +47,150 @@ mcp = FastMCP(
         "materially affected the answer; never mark exposure-only pages used."
     ),
 )
+
+_MCP_DROP = object()
+_MCP_BODY_KEYS = frozenset(
+    {
+        "body",
+        "content",
+        "log_entries",
+        "message",
+        "preview",
+        "raw",
+        "raw_content",
+        "text",
+    }
+)
+_MCP_ALWAYS_DROP_KEYS = frozenset(
+    {"accepted_keywords", "rejected_keywords", "raw_slug"}
+)
+_MCP_PATH_KEYS = frozenset(
+    {
+        "archive_path",
+        "chronovisor_root",
+        "manifest",
+        "module_path",
+        "path",
+        "raw_path",
+        "raw_file",
+        "root",
+        "saved",
+        "session_file",
+        "source_path",
+        "transcript_path",
+    }
+)
+_MCP_FILE_URI_RE = re.compile(r"file:///(?:[^\s\"'<>]+)")
+_MCP_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w:])/(?!/)(?:[^\s\"'<>]+)")
+
+
+def _mcp_raw_content_allowed(include_raw_content: bool) -> bool:
+    """Require both the local opt-in and an explicit tool request."""
+
+    if include_raw_content is not True:
+        return False
+    try:
+        from chronovisor.core.runtime_config import load_mcp_config
+
+        return load_mcp_config().expose_raw_content
+    except Exception:
+        return False
+
+
+def _mcp_redact_text(value: str) -> str:
+    """Redact known credentials and absolute paths from opt-in text."""
+
+    from chronovisor.core.background_jobs import redact_sensitive_text
+
+    redacted = redact_sensitive_text(value)
+    root = str(CHRONOVISOR_ROOT)
+    resolved_root = str(CHRONOVISOR_ROOT.resolve())
+    redacted = redacted.replace(resolved_root, "<chronovisor-root>")
+    if root != resolved_root:
+        redacted = redacted.replace(root, "<chronovisor-root>")
+    redacted = _MCP_FILE_URI_RE.sub("file:///<path>", redacted)
+    return _MCP_ABSOLUTE_PATH_RE.sub("<path>", redacted)
+
+
+def _mcp_safe_relative_path(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    candidate = Path(value).expanduser()
+    root = CHRONOVISOR_ROOT.resolve()
+    if candidate.is_absolute():
+        try:
+            return candidate.resolve(strict=False).relative_to(root).as_posix()
+        except (OSError, ValueError):
+            return None
+    if any(part in {"", ".", ".."} for part in candidate.parts):
+        return None
+    return candidate.as_posix()
+
+
+def _mcp_project_response(
+    value: object,
+    *,
+    allow_raw_content: bool = False,
+    metadata_only: bool = False,
+    _key: str = "",
+) -> object:
+    """Project MCP results into bounded metadata or explicitly opted-in text."""
+
+    if metadata_only:
+        allow_raw_content = False
+    key = _key.casefold()
+    if isinstance(value, dict):
+        projected: dict[str, object] = {}
+        for raw_name, item in value.items():
+            name = str(raw_name)
+            folded = name.casefold()
+            if folded in _MCP_ALWAYS_DROP_KEYS:
+                continue
+            if folded in _MCP_BODY_KEYS and not allow_raw_content:
+                continue
+            if folded in _MCP_PATH_KEYS or folded.endswith("_path"):
+                safe_path = _mcp_safe_relative_path(item)
+                if safe_path is not None:
+                    projected[name] = safe_path
+                continue
+            child = _mcp_project_response(
+                item,
+                allow_raw_content=allow_raw_content,
+                metadata_only=metadata_only,
+                _key=name,
+            )
+            if child is not _MCP_DROP:
+                projected[name] = child
+        return projected
+    if isinstance(value, list):
+        if key in _MCP_BODY_KEYS and not allow_raw_content:
+            return _MCP_DROP
+        return [
+            child
+            for item in value
+            if (
+                child := _mcp_project_response(
+                    item,
+                    allow_raw_content=allow_raw_content,
+                    metadata_only=metadata_only,
+                    _key=_key,
+                )
+            )
+            is not _MCP_DROP
+        ]
+    if isinstance(value, tuple):
+        projected_tuple = _mcp_project_response(
+            list(value),
+            allow_raw_content=allow_raw_content,
+            metadata_only=metadata_only,
+            _key=_key,
+        )
+        return projected_tuple
+    if isinstance(value, str):
+        if key in _MCP_BODY_KEYS and not allow_raw_content:
+            return _MCP_DROP
+        return _mcp_redact_text(value)
+    return value
 
 
 def _mcp_client_host(ctx: Context | None) -> str:
@@ -295,14 +440,20 @@ def chronovisor_index(limit: int = 50, cursor: int = 0) -> str:
 
 
 @mcp.tool()
-def chronovisor_log(limit: int = 20) -> str:
+def chronovisor_log(limit: int = 20, include_raw_content: bool = False) -> str:
     """Return recent change history.
 
     Args:
         limit: Number of recent log entries to return
+        include_raw_content: Request redacted message bodies when the local
+            ``[mcp]`` exposure opt-in is enabled.
     """
+    allow_raw_content = _mcp_raw_content_allowed(include_raw_content)
     return json.dumps(
-        {"entries": activity_log.read_activity(ACTIVITY_FILE, limit=limit)},
+        _mcp_project_response(
+            {"entries": activity_log.read_activity(ACTIVITY_FILE, limit=limit)},
+            allow_raw_content=allow_raw_content,
+        ),
         ensure_ascii=False,
     )
 
@@ -1230,7 +1381,10 @@ def chronovisor_ingest(content: str, force: bool = True) -> str:
             ``INGEST_THRESHOLD``. Pass ``force=False`` to defer to the
             normal threshold check.
     """
-    return json.dumps(ingest_raw(content, force=force), ensure_ascii=False)
+    return json.dumps(
+        _mcp_project_response(ingest_raw(content, force=force), metadata_only=True),
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()
@@ -1517,15 +1671,23 @@ def chronovisor_research(
 
 
 @mcp.tool()
-def chronovisor_provenance(page: str) -> str:
+def chronovisor_provenance(
+    page: str,
+    include_raw_content: bool = False,
+) -> str:
     """Trace the provenance of a wiki page back to raw session data.
 
     Args:
         page: Page ID to trace
+        include_raw_content: Request redacted raw previews and activity
+            messages when the local ``[mcp]`` exposure opt-in is enabled.
     """
     page_path = _find_page_with_alias(page)
     if not page_path:
-        return json.dumps({"error": f"Page '{page}' not found"})
+        return json.dumps({"error": "page not found"})
+
+    allow_raw_content = _mcp_raw_content_allowed(include_raw_content)
+    canonical_page_id = page_path.stem
 
     page_mtime = datetime.fromtimestamp(page_path.stat().st_mtime)
 
@@ -1533,8 +1695,12 @@ def chronovisor_provenance(page: str) -> str:
     page_content = page_path.read_text()
     page_fm = _parse_frontmatter(page_content)
     page_title = page_fm.get("title")
-    page_title_lower = page_title.lower() if isinstance(page_title, str) else page.lower()
-    page_dehyphen = page.replace("-", " ")
+    page_title_lower = (
+        page_title.lower()
+        if isinstance(page_title, str)
+        else canonical_page_id.lower()
+    )
+    page_dehyphen = canonical_page_id.replace("-", " ")
     page_updated = page_fm.get("updated", "unknown")
     threshold = page_mtime + timedelta(minutes=30)
 
@@ -1574,17 +1740,20 @@ def chronovisor_provenance(page: str) -> str:
     log_entries = []
     for row in activity_log.iter_activity(ACTIVITY_FILE):
         message = row["message"]
-        if page in message and "ingest" in message:
+        if canonical_page_id in message and "ingest" in message:
             log_entries.append(message)
 
     return json.dumps(
-        {
-            "page_id": page,
-            "page_updated": page_updated,
-            "page_mtime": page_mtime.isoformat(),
-            "raw_sources": raw_candidates[:5],
-            "log_entries": log_entries,
-        },
+        _mcp_project_response(
+            {
+                "page_id": canonical_page_id,
+                "page_updated": page_updated,
+                "page_mtime": page_mtime.isoformat(),
+                "raw_sources": raw_candidates[:5],
+                "log_entries": log_entries,
+            },
+            allow_raw_content=allow_raw_content,
+        ),
         ensure_ascii=False,
         default=str,
     )
@@ -1610,8 +1779,8 @@ def chronovisor_record(
             Items are written to the raw frontmatter as ``raw_keywords: [...]``.
             Keywords containing characters that would break inline-list
             serialization (``,[]:#{}\\n\\r`` or control chars) or that are
-            empty/whitespace-only are rejected; rejected items are returned
-            in the ``rejected_keywords`` field of the result.
+            empty/whitespace-only are rejected and kept out of the metadata
+            response.
         trigger_ingest: When True, preserve the historical behavior of
             running pending ingest immediately if the raw threshold is met.
             Set False for hooks that must not block on local LLM ingestion.
@@ -1639,7 +1808,9 @@ def chronovisor_record(
         except Exception:
             result["field_activity"] = {"status": "error"}
 
-    return json.dumps(result, ensure_ascii=False)
+    return json.dumps(
+        _mcp_project_response(result, metadata_only=True), ensure_ascii=False
+    )
 
 
 @mcp.tool()

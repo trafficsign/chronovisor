@@ -4,6 +4,10 @@
 [raw]
 layout = "v2"
 
+[mcp]
+# Raw previews and activity messages require this opt-in plus a per-call flag.
+expose_raw_content = false
+
 [hooks.user_prompt]
 recall = true
 

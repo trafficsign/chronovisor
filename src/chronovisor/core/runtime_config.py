@@ -67,6 +67,13 @@ class DashboardLanConfig:
     credentials_file: Path | None = None
 
 
+@dataclass(frozen=True)
+class McpConfig:
+    """MCP response exposure policy."""
+
+    expose_raw_content: bool = False
+
+
 def _clean_text(value: object, default: str) -> str:
     if (
         isinstance(value, str)
@@ -166,6 +173,16 @@ def load_dashboard_config(path: Path | str | None = None) -> DashboardConfig:
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         port = DEFAULT_DASHBOARD_PORT
     return DashboardConfig(host=host, port=port)
+
+
+def load_mcp_config(path: Path | str | None = None) -> McpConfig:
+    """Load the opt-in MCP raw-content exposure policy."""
+
+    data = load_toml_file(path)
+    section = data.get("mcp")
+    if not isinstance(section, dict):
+        return McpConfig()
+    return McpConfig(expose_raw_content=section.get("expose_raw_content") is True)
 
 
 def dashboard_url(path: Path | str | None = None) -> str:
