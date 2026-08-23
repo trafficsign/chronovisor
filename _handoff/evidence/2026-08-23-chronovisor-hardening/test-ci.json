@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
-  "captured_at": "2026-08-24T07:19:00+09:00",
+  "captured_at": "2026-08-24T07:41:00+09:00",
   "code_freeze": {
-    "head": "26f8337a01ec48209c65a6c49dfd0764ccaa1bd8",
+    "head": "c3a6432c2130f0cb30e38a24e0ecac5613e41083",
     "working_tree": "clean",
-    "note": "Subsequent pre-deploy changes are limited to Plan and evidence files."
+    "note": "Final code SHA after the Linux HNSW complete-scan fix; subsequent pre-deploy changes are limited to Plan and evidence files."
   },
   "qos_order_isolation": {
     "forward_runs": 3,
@@ -90,17 +90,123 @@
       "distillation_and_architecture_focused_passed": 351
     }
   },
-  "github_required_jobs": {
-    "status": "pending",
-    "authorized": true,
-    "contexts": [
-      "quality / frozen-quality-gates",
-      "quality / Semantic HNSW",
-      "quality / Semantic smoke (Python 3.11)",
-      "quality / Semantic smoke (Python 3.12)",
-      "Python 3.14 compatibility / cpython-314-gil"
-    ],
-    "reason": "Push is authorized; the required jobs have not yet run for the pre-deploy evidence commit."
+  "final_c3a_gate": {
+    "head": "c3a6432c2130f0cb30e38a24e0ecac5613e41083",
+    "working_tree_before": "clean",
+    "working_tree_after": "clean",
+    "isolated_chronovisor_root": true,
+    "python_3_14_free_threaded": {
+      "version": "3.14.3",
+      "gil_enabled": false,
+      "pytest": {
+        "passed": 5373,
+        "failed": 0,
+        "skipped": 1,
+        "warnings": 2,
+        "elapsed_seconds": 430.85
+      },
+      "note": "A separate required GitHub job below verifies standard-GIL CPython 3.14."
+    },
+    "static": {
+      "compileall": "passed",
+      "ruff": "passed",
+      "mypy": {
+        "status": "passed",
+        "source_files": 90
+      },
+      "import_linter": {
+        "status": "passed",
+        "files": 364,
+        "dependencies": 1980,
+        "contracts_kept": 1,
+        "contracts_broken": 0
+      },
+      "architecture_and_refactor_contracts_passed": 36,
+      "diff_check": "passed"
+    }
   },
-  "phase_exit": "pending_remote_required_jobs"
+  "ci_incident_and_root_fix": {
+    "failed_run": {
+      "run_id": 32670329487,
+      "head": "8ed738370a911f62619822579fa8bb35f39b6a3e",
+      "job": "Semantic smoke (Python 3.12)",
+      "failure": "test_hnsw_generation_proposes_then_full_vector_rescores returned page-2 instead of page-37"
+    },
+    "root_cause": "USearch approximate mode could omit a row even when candidate_count equaled the full vector count, so exact vector rescoring never saw that row.",
+    "fix": {
+      "commit": "c3a6432c2130f0cb30e38a24e0ecac5613e41083",
+      "behavior": "Use USearch exact mode only when candidate_count equals the full vector count; keep bounded production scans approximate.",
+      "local_python_3_12_repetitions": 100,
+      "local_python_3_12_failures": 0
+    }
+  },
+  "github_required_jobs": {
+    "status": "passed",
+    "authorized": true,
+    "head": "c3a6432c2130f0cb30e38a24e0ecac5613e41083",
+    "quality": {
+      "run_id": 32670681224,
+      "conclusion": "success",
+      "jobs": {
+        "frozen-quality-gates": {
+          "job_id": 97270968287,
+          "pytest": {
+            "passed": 5373,
+            "failed": 0,
+            "skipped": 1,
+            "warnings": 1,
+            "elapsed_seconds": 630.51
+          },
+          "ruff": "passed",
+          "mypy_source_files": 90,
+          "import_linter": "364 files / 1980 dependencies / 1 kept / 0 broken",
+          "architecture_and_refactor_contracts_passed": 36
+        },
+        "Semantic HNSW": {
+          "job_id": 97270968122,
+          "passed": 1,
+          "skipped": 0,
+          "elapsed_seconds": 0.47
+        },
+        "Semantic smoke (Python 3.11)": {
+          "job_id": 97270968170,
+          "passed": 53,
+          "failed": 0,
+          "skipped": 0,
+          "elapsed_seconds": 10.94
+        },
+        "Semantic smoke (Python 3.12)": {
+          "job_id": 97270968190,
+          "passed": 53,
+          "failed": 0,
+          "skipped": 0,
+          "elapsed_seconds": 1.53
+        }
+      }
+    },
+    "python_3_14": {
+      "run_id": 32670681250,
+      "job_id": 97270968154,
+      "conclusion": "success",
+      "standard_gil_assertion": "passed",
+      "architecture_and_runtime_contracts_passed": 29,
+      "pytest": {
+        "passed": 5373,
+        "failed": 0,
+        "skipped": 1,
+        "warnings": 1,
+        "elapsed_seconds": 637.22
+      }
+    },
+    "security": {
+      "run_id": 32670681208,
+      "conclusion": "success",
+      "jobs": [
+        "Dependency audit (locked release gate)",
+        "CodeQL (Python)",
+        "Secret scan (tree, history, release artifacts)"
+      ]
+    }
+  },
+  "phase_exit": "passed_remote_required_jobs"
 }
