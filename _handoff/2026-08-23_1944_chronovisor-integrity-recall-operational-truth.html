@@ -304,7 +304,7 @@ th{background:#f3f1eb}
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
 <ul>
-<li><strong>Phase 5B / Phase 6 remote:</strong> pushは未承認。required GitHub jobs、runtime archive commit照合、service restart、HTTP/DOM/console受入は未実行。</li>
+<li><strong>Phase 5B / Phase 6 remote:</strong> pushは承認済み。required GitHub jobs、runtime archive commit照合、service restart、HTTP/DOM/console受入は未実行。</li>
 <li><strong>Phase 6 cohort:</strong> deploy後24時間かつactive host別100件のRecall availability/signal gateは時間条件上未到達。Planは規定どおり <code>running</code> を維持する。</li>
 </ul>
 </section>
@@ -338,6 +338,7 @@ th{background:#f3f1eb}
 <li><time>2026-08-23 23:32</time><span>Phase 1完了。cursor discoveryが200ms予算を使い切って処理・checkpointへ進めない starvation と、検証済みlegacy archive Markdownがnative filename gateでholdになる共通原因を最小修正。canaryでmissing 20→19、全20件repair後と冪等再実行後はいずれもtotal 13,635 / valid 13,635 / missing 0 / invalid 0。20 passはp95 58.03ms / max 102.47ms / 250ms超過0、hold 0、Raw digest変化・quarantine変化/削除・duplicate・予期しないartifact追加・既存bundle変化・LLM ingest呼出しは全て0。focused 59件と隔離suite 63件、Ruff、diff check、独立review、Raw archive full verify errors 0を通過し、結果を <code>projection-repair.after.json</code> に保存。関連commitは <code>ca9f503</code>、<code>caf9679</code>、<code>90a3b5e</code>、<code>4c0c2c6</code>。</span></li>
 <li><time>2026-08-23 23:32</time><span>一時停止したmanaged ingest-drainを復旧。LaunchAgent <code>com.trafficsign.chronovisor-ingest-drain.managed</code> はrunning、親PID 89376 / worker PID 89417、workerがorchestrator lockを保持し、livenessはready・ingest/runtime authority available・alert/retryable false。push未承認のためruntimeは既存<code>origin/main</code>のままで、Phase 5B remote gateとPhase 6 deploy後24時間cohortが未達のためPlanは<code>running</code>を維持。</span></li>
 <li><time>2026-08-24 05:58</time><span>offline distillation ownerの最終receiptをcross-reference。commit <code>99e6e29</code> / 実装head <code>25b6dcb</code>はlocalのみでworktree clean。OX v6 cap 1は22 valid / 28 attempts（78.57%）で95% gate未達、timeout 1・HTTP 5xx 5、cooldown後canaryも5xxのため閾値を緩和せず<code>ox_enabled=false</code>へfail-closed停止し、OX1だけ完了、OX0/OX2/OX3は未完。live照合でSleep/Convergeはbootout、distillation process/lockなし、Workset 32,522件はdistinct 32,522・leased 0、duplicate record/work・unexpected route・billable fallback・Raw/content fieldは0、Ingestは親PID 89376 / child PID 89417で継続稼働。Phase 6は両serviceを自動restoreせず、本Planは6/8・<code>running</code>を維持。</span></li>
+<li><time>2026-08-24 07:19</time><span>最終code freeze <code>26f8337</code> を隔離再検証。Python 3.13/3.14はいずれも5,373 pass / optional HNSW skip 1、Ruff、mypy 90 files、import-linter 364 files / 1 contract、architecture、QoS両順序6 run、usearch実装HNSW 1 pass / skip 0、Python 3.11/3.12 smoke各53 passがgreen。deploy直前の連続7日baselineを551 records / 492 eligibleで固定し、deadline pass 491/492、outer timeout観測1、host-wrapper timeoutはsource schema上観測不能であることを含めて <code>recall-availability-canary.json</code> に保存。required GitHub jobsはこれから実行するためPhase 5Bは未チェック、Planは6/8・<code>running</code>を維持。</span></li>
 </ol>
 </section>
 

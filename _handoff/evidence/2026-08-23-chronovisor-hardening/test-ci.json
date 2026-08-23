@@ -1,18 +1,24 @@
 {
   "schema_version": 1,
   "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
-  "captured_at": "2026-08-23T22:12:49+09:00",
+  "captured_at": "2026-08-24T07:19:00+09:00",
+  "code_freeze": {
+    "head": "26f8337a01ec48209c65a6c49dfd0764ccaa1bd8",
+    "working_tree": "clean",
+    "note": "Subsequent pre-deploy changes are limited to Plan and evidence files."
+  },
   "qos_order_isolation": {
-    "commit": "e65f3594387ffc743514cbe1895539b0c104faa7",
     "forward_runs": 3,
     "reverse_runs": 3,
     "failed_runs": 0,
-    "suite_elapsed_seconds": [0.36, 0.36, 0.38, 0.37, 0.36, 0.37],
-    "slow_receipt_contract_ms": 260
+    "suite_elapsed_seconds": [0.50, 0.50, 0.50, 0.52, 0.51, 0.51],
+    "slow_receipt_contract_ms": 260,
+    "slow_receipt_contract_passed_runs": 6
   },
   "workflow": {
-    "commit": "f26d6bb0721bf3d522e696dae90d72e2c684e42d",
     "actions_full_sha_pinned": true,
+    "pinned_action_references": 10,
+    "unpinned_action_references": 0,
     "hnsw": {
       "usearch": "2.26.0",
       "numkong": "7.7.0",
@@ -21,45 +27,80 @@
       "skipped": 0
     },
     "semantic_smoke": {
-      "python_3_11": {"passed": 53, "failed": 0},
-      "python_3_12": {"passed": 53, "failed": 0}
+      "python_3_11": {
+        "version": "3.11.14",
+        "passed": 53,
+        "failed": 0,
+        "skipped": 0
+      },
+      "python_3_12": {
+        "version": "3.12.12",
+        "passed": 53,
+        "failed": 0,
+        "skipped": 0
+      }
     },
     "yaml_parse": "passed"
   },
   "full_local_gate": {
-    "head": "2764d7ae01bffd9a758b96a714a969278e1cb81b",
+    "head": "26f8337a01ec48209c65a6c49dfd0764ccaa1bd8",
     "isolated_chronovisor_root": true,
-    "pytest": {
-      "passed": 5151,
-      "failed": 0,
-      "warnings": 2,
-      "elapsed_seconds": 422.71
+    "python_3_13": {
+      "version": "3.13.12",
+      "pytest": {
+        "passed": 5373,
+        "failed": 0,
+        "skipped": 1,
+        "warnings": 2,
+        "elapsed_seconds": 409.42
+      }
+    },
+    "python_3_14": {
+      "version": "3.14.7",
+      "gil_enabled": true,
+      "py_gil_disabled": 0,
+      "pytest": {
+        "total": 5374,
+        "passed": 5373,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 1,
+        "elapsed_seconds": 443.575
+      },
+      "optional_skip": "tests/test_semantic_index.py::test_hnsw_generation_proposes_then_full_vector_rescores; passed separately with usearch installed"
     },
     "static": {
+      "compileall": "passed",
       "ruff": "passed",
       "mypy": {
         "status": "passed",
-        "source_files": 89
+        "source_files": 90
       },
       "import_linter": {
         "status": "passed",
-        "files": 358,
-        "dependencies": 1962,
+        "files": 364,
+        "dependencies": 1980,
         "contracts_kept": 1,
         "contracts_broken": 0
       }
     },
     "regression_checks": {
-      "architecture_and_large_function_policy_passed": 30,
-      "recall_runtime_passed": 197,
-      "ingest_projection_passed": 67,
-      "research_scheduler_passed": 14,
-      "research_scheduler_order_stress_runs": 30
+      "architecture_and_refactor_contracts_passed": 36,
+      "python_3_14_architecture_tests_passed": 29,
+      "distillation_and_architecture_focused_passed": 351
     }
   },
   "github_required_jobs": {
     "status": "pending",
-    "reason": "No push was authorized, so the new GitHub jobs have not run on the remote commit."
+    "authorized": true,
+    "contexts": [
+      "quality / frozen-quality-gates",
+      "quality / Semantic HNSW",
+      "quality / Semantic smoke (Python 3.11)",
+      "quality / Semantic smoke (Python 3.12)",
+      "Python 3.14 compatibility / cpython-314-gil"
+    ],
+    "reason": "Push is authorized; the required jobs have not yet run for the pre-deploy evidence commit."
   },
   "phase_exit": "pending_remote_required_jobs"
 }

@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
+  "captured_at": "2026-08-24T07:19:00+09:00",
+  "status": "baseline_captured_pending_deploy",
+  "privacy": {
+    "prompt_content_persisted": false,
+    "query_content_persisted": false,
+    "page_ids_persisted": false,
+    "aggregation_only": true
+  },
+  "baseline": {
+    "definition": {
+      "window": "continuous seven days ending at the latest complete pre-deploy Recall record",
+      "start_utc": "2026-08-16T21:16:12+00:00",
+      "end_utc": "2026-08-23T21:16:12+00:00",
+      "duration_hours": 168,
+      "eligible": "UserPromptSubmit with prompt_chars > 0, excluding status disabled or skipped",
+      "deadline_pass": "latency_ms < 4000 and status ok, or deterministic degraded with search_mode bm25-fallback",
+      "quantile": "linear interpolation at (n - 1) * q"
+    },
+    "source": {
+      "path": "~/.chronovisor/recall/recall-log.jsonl",
+      "schema_version": 2,
+      "sha256": "19e2efc190892b79a2c57fea65bfcf1ff552cb8e276ce80584c00de7bd8d048d",
+      "total_file_rows": 14690,
+      "window_rows": 551,
+      "invalid_rows": 0
+    },
+    "aggregate": {
+      "eligible": 492,
+      "excluded_disabled_or_skipped": 59,
+      "status_counts": {
+        "ok": 343,
+        "degraded": 148,
+        "timeout": 1
+      },
+      "deterministic_degraded": 148,
+      "deadline_pass_count": 491,
+      "deadline_pass_rate": 0.9979674796747967,
+      "outer_timeout_observed_count": 1,
+      "outer_timeout_observed_rate": 0.0020325203252032522,
+      "outer_timeout_classification": "Recall status timeout; the schema does not distinguish SIGALRM from inner timeout",
+      "host_wrapper_timeout_count": null,
+      "host_wrapper_timeout_observability": "not represented in Recall, live-episode, or LaunchAgent structured records",
+      "success_latency_ms": {
+        "count": 491,
+        "p50": 3130.0,
+        "p95": 3736.0,
+        "p99": 3797.2,
+        "max": 3960.0
+      },
+      "ok_only_latency_ms": {
+        "count": 343,
+        "p50": 3075.0,
+        "p95": 3134.0,
+        "p99": 3147.58
+      },
+      "decision_read_count": 277,
+      "decision_read_rate": 0.5630081300813008,
+      "injected_count": 401,
+      "injected_rate": 0.8150406504065041,
+      "page_coverage_count": 401,
+      "page_coverage_rate": 0.8150406504065041,
+      "context_item_coverage_count": 401,
+      "context_item_coverage_rate": 0.8150406504065041,
+      "page_total": 1203,
+      "query_nonempty_count": 491
+    },
+    "by_host": {
+      "codex": {
+        "eligible": 277,
+        "ok": 171,
+        "degraded": 105,
+        "timeout": 1,
+        "ok_latency_p95_ms": 3135.5,
+        "ok_latency_p99_ms": 3149.6
+      },
+      "claude-code": {
+        "eligible": 167,
+        "ok": 137,
+        "degraded": 30,
+        "timeout": 0,
+        "ok_latency_p95_ms": 3132.0,
+        "ok_latency_p99_ms": 3135.56
+      },
+      "hermes": {
+        "eligible": 48,
+        "ok": 35,
+        "degraded": 13,
+        "timeout": 0,
+        "ok_latency_p95_ms": 3132.0,
+        "ok_latency_p99_ms": 3139.92
+      }
+    },
+    "teacher_and_quality": {
+      "evidence_reconstruction_records": 343,
+      "field_teacher_queue_records": 272,
+      "shadow_teacher_records": 251,
+      "quality_source": "unlabeled-live",
+      "quality_label": "unknown",
+      "quality_delta_observability": "unavailable until a labeled post-deploy cohort exists"
+    },
+    "related_signal_sources": {
+      "exposure_receipts": {
+        "path": "~/.chronovisor/runtime/recall-distillation/exposure-receipts.jsonl",
+        "sha256": "2bd00bfab53a2b996c525c84143c5b639b5a6ec39cf817d861c00d52da38dfec",
+        "window_rows": 470,
+        "exact_exposure_rows": 10,
+        "duplicate_record_or_idempotency_keys": 0,
+        "eligible_recall_matches": 447,
+        "descriptive_orphans": 23
+      },
+      "pull_log_sha256": "a13dbb78348f569935769f3b8e00e568d6037e3535e6e0d8d6114bf89a0bef1a",
+      "answer_episodes_sha256": "ae6d5ea958ee4dc7ccf081a085efa3c12bc85dbc62bfd887e5cadcd487505e58",
+      "live_episodes_sha256": "1a31f92d5a356a4fea821a4269554e7a0deee6eb1cc3717eeeeb551d1060eeae",
+      "used_and_production_replayable_baseline": "unavailable: no answer episodes and no used pull events in the fixed window"
+    }
+  },
+  "deployment": {
+    "commit": null,
+    "started_at": null,
+    "active_hosts": [],
+    "status": "pending"
+  },
+  "canary": {
+    "minimum_hours": 24,
+    "minimum_eligible_per_active_host": 100,
+    "observed_hours": 0,
+    "by_host": {},
+    "gate": "pending_deploy"
+  }
+}
