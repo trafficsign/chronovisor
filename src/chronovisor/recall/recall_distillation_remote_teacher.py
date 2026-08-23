@@ -60,6 +60,7 @@ _FAILURE_TRANSIENT = frozenset(
     }
 )
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}\Z")
+_SINGLE_JSON_FENCE = re.compile(r"\A```json\n((?:(?!```).)*)\n```\Z", re.DOTALL)
 _SECRET_TEXT = re.compile(
     r"(?ix)"
     r"(?:api[_ -]?key|access[_ -]?token|authorization|bearer|password|"
@@ -521,8 +522,13 @@ class OpenCodeOxAlphaTeacher:
                 stage="teacher_finish_reason",
                 request_id=request_id,
             )
+        content = result.content
+        if isinstance(content, str):
+            fenced = _SINGLE_JSON_FENCE.fullmatch(content.strip())
+            if fenced is not None:
+                content = fenced.group(1)
         try:
-            decoded = json.loads(result.content)
+            decoded = json.loads(content)
         except (TypeError, ValueError, json.JSONDecodeError):
             return self._failure(
                 ProviderFailureCategory.INVALID_RESPONSE.value,

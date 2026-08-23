@@ -209,6 +209,36 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
     assert CANARY not in cast(bytes, sender.calls[0].data).decode("utf-8")
 
 
+def test_exact_single_json_fence_is_decoded(tmp_path: Path) -> None:
+    teacher = _teacher(
+        tmp_path,
+        FakeSender(_response(f"\n  ```json\n{_label_response()}\n```  \n")),
+    )
+
+    result = teacher.evaluate(_payload())
+
+    assert result["labels"][0]["verdict"] == "relevant"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        f"Leading prose.\n```json\n{_label_response()}\n```",
+        f"```json\n{_label_response()}\n```\n```json\n{_label_response()}\n```",
+        f"```json\n{_label_response()}",
+        f"```\n{_label_response()}\n```",
+    ],
+    ids=("leading_prose", "multiple_fences", "unclosed_fence", "language_free"),
+)
+def test_nonexact_json_fences_are_rejected(tmp_path: Path, content: str) -> None:
+    teacher = _teacher(tmp_path, FakeSender(_response(content)))
+
+    result = teacher.evaluate(_payload())
+
+    assert result["_failure"]["class"] == "invalid_response"
+    assert result["_failure"]["stage"] == "teacher_json_parse"
+
+
 def test_free_form_rationale_is_rejected_at_response_schema_seam(
     tmp_path: Path,
 ) -> None:

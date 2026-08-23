@@ -2532,7 +2532,13 @@ def test_ox_ramp_counts_provider_receipts_not_labels(
         ("worker-state", True, distill.OX_RAMP_REQUEST_REVISION, 20, (2, 19, 20)),
         ("worker-state", True, distill.OX_RAMP_REQUEST_REVISION, None, (1, 0, 0)),
         ("worker-state", True, None, 20, (1, 0, 0)),
-        ("worker-state", True, "json-object-v1", 20, (1, 0, 0)),
+        (
+            "worker-state",
+            True,
+            "json-schema-core-label-abstain-16k-240s-v5",
+            20,
+            (1, 0, 0),
+        ),
         ("worker-state", False, distill.OX_RAMP_REQUEST_REVISION, 20, (1, 0, 0)),
         ("forged", True, distill.OX_RAMP_REQUEST_REVISION, 20, (1, 0, 0)),
     ],
@@ -2630,7 +2636,7 @@ def test_ox_ramp_resumes_only_for_the_same_profile_contract_and_request_revision
 
 def test_ox_ramp_request_revision_tracks_core_label_schema() -> None:
     assert (
-        distill.OX_RAMP_REQUEST_REVISION == "json-schema-core-label-abstain-16k-240s-v5"
+        distill.OX_RAMP_REQUEST_REVISION == "json-schema-core-label-abstain-16k-240s-v6"
     )
 
 
