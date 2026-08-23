@@ -14,7 +14,7 @@ import os
 import re
 import stat
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -302,11 +302,16 @@ class RawStore:
             )
         yield from self._segment_units_cache
 
-    def iter_segment_bytes(self) -> Iterator[tuple[RawUnit, bytes]]:
-        """Read each physical v2 segment once and verify every logical unit."""
+    def iter_segment_bytes(
+        self, raw_ids: Iterable[str] | None = None
+    ) -> Iterator[tuple[RawUnit, bytes]]:
+        """Read selected physical v2 segments once and verify their logical units."""
 
+        requested = set(raw_ids) if raw_ids is not None else None
         groups: dict[tuple[RawStorageKind, Path], list[RawUnit]] = {}
         for unit in self.iter_segment_units():
+            if requested is not None and unit.raw_id not in requested:
+                continue
             groups.setdefault((unit.storage, unit.path), []).append(unit)
         for (storage, path), units in sorted(
             groups.items(), key=lambda item: (str(item[0][1]), item[0][0])

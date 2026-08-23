@@ -168,6 +168,16 @@ def test_store_decompresses_one_physical_segment_once_for_all_units(
     }
     assert calls == 1
 
+    calls = 0
+    selected = {
+        unit.raw_id: value
+        for unit, value in RawStore(raw_dir, mode="v2").iter_segment_bytes(
+            {"save-second.md"}
+        )
+    }
+    assert selected == {"save-second.md": second_payload}
+    assert calls == 1
+
     def corrupted_read(path: Path, offset: int, length: int) -> bytes:
         value = bytearray(original(path, offset, length))
         value[-2] ^= 1

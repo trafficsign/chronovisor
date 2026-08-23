@@ -430,44 +430,51 @@ def _resolve_rows(raw_dir: Path, rows: Iterable[Mapping[str, Any]]) -> dict[str,
     by_raw: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in rows:
         by_raw[str(row["raw_id"])].append(row)
-    for raw_id, event_rows in by_raw.items():
-        unit = raw_store.resolve_segment(raw_id)
-        if unit is None:
-            raise CatalogError("catalog Raw is unavailable")
-        raw_sha256, receipt_sha256 = _unit_identity(unit)
-        if any(
-            row["raw_sha256"] != raw_sha256 or row["receipt_sha256"] != receipt_sha256
-            for row in event_rows
-        ):
-            raise CatalogError("catalog Raw digest conflicts with source")
-        try:
-            raw = raw_store.read_bytes(unit)
+    seen: set[str] = set()
+    try:
+        for unit, raw in raw_store.iter_segment_bytes(by_raw):
+            raw_id = unit.raw_id
+            seen.add(raw_id)
+            event_rows = by_raw[raw_id]
+            raw_sha256, receipt_sha256 = _unit_identity(unit)
+            if any(
+                row["raw_sha256"] != raw_sha256
+                or row["receipt_sha256"] != receipt_sha256
+                for row in event_rows
+            ):
+                raise CatalogError("catalog Raw digest conflicts with source")
             assert unit.commit is not None
             spans = committed_event_spans(raw, unit.commit.record_count)
-        except (RawSegmentCorrupt, OSError) as exc:
-            raise CatalogError("catalog Raw cannot be read") from exc
-        for row in event_rows:
-            index = int(row["event_index"])
-            if index >= len(spans):
-                raise CatalogError("catalog event index is invalid")
-            start, encoded = spans[index]
-            if start != row["byte_start"] or start + len(encoded) != row["byte_end"]:
-                raise CatalogError("catalog event range conflicts with source")
-            try:
-                event = json.loads(encoded)
-                role, text = distill._event_semantics(unit.commit.host, event)
-            except (
-                UnicodeError,
-                json.JSONDecodeError,
-                distill.DistillationError,
-            ) as exc:
-                raise CatalogError("catalog event cannot be decoded") from exc
-            if (
-                role != row["role"]
-                or hashlib.sha256(text.encode()).hexdigest() != row["semantic_sha256"]
-            ):
-                raise CatalogError("catalog event semantics conflict with source")
-            resolved[str(row["semantic_sha256"])] = text
+            for row in event_rows:
+                index = int(row["event_index"])
+                if index >= len(spans):
+                    raise CatalogError("catalog event index is invalid")
+                start, encoded = spans[index]
+                if (
+                    start != row["byte_start"]
+                    or start + len(encoded) != row["byte_end"]
+                ):
+                    raise CatalogError("catalog event range conflicts with source")
+                try:
+                    event = json.loads(encoded)
+                    role, text = distill._event_semantics(unit.commit.host, event)
+                except (
+                    UnicodeError,
+                    json.JSONDecodeError,
+                    distill.DistillationError,
+                ) as exc:
+                    raise CatalogError("catalog event cannot be decoded") from exc
+                if (
+                    role != row["role"]
+                    or hashlib.sha256(text.encode()).hexdigest()
+                    != row["semantic_sha256"]
+                ):
+                    raise CatalogError("catalog event semantics conflict with source")
+                resolved[str(row["semantic_sha256"])] = text
+    except (RawSegmentCorrupt, OSError) as exc:
+        raise CatalogError("catalog Raw cannot be read") from exc
+    if seen != set(by_raw):
+        raise CatalogError("catalog Raw is unavailable")
     return resolved
 
 

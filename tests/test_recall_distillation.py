@@ -3119,6 +3119,14 @@ def test_ox_scans_adapter_preflight_reject_without_losing_safe_work(
 def test_ox_canary_preflights_wide_window_before_one_request(tmp_path: Path) -> None:
     target_id = "candidate-04-3"
 
+    class PrefetchingTexts(dict[str, str]):
+        def __init__(self, values: dict[str, str]) -> None:
+            super().__init__(values)
+            self.prefetches: list[set[str]] = []
+
+        def prefetch(self, hashes: Iterable[str]) -> None:
+            self.prefetches.append(set(hashes))
+
     class GuardedTeacher:
         local = False
         role = distill.OX_TEACHER_ROLE
@@ -3147,6 +3155,16 @@ def test_ox_canary_preflights_wide_window_before_one_request(tmp_path: Path) -> 
         for index, rally_id in enumerate(rally_ids)
     }
     teacher = GuardedTeacher()
+    texts = PrefetchingTexts(
+        {
+            "query": "what proves the claim",
+            **{
+                candidate_id: "bounded fact"
+                for ids in candidate_ids.values()
+                for candidate_id in ids
+            },
+        }
+    )
     result = distill._run_teacher_batch(
         root=tmp_path,
         config=distill.DistillationConfig(
@@ -3172,14 +3190,7 @@ def test_ox_canary_preflights_wide_window_before_one_request(tmp_path: Path) -> 
             }
             for rally_id in rally_ids
         },
-        texts={
-            "query": "what proves the claim",
-            **{
-                candidate_id: "bounded fact"
-                for ids in candidate_ids.values()
-                for candidate_id in ids
-            },
-        },
+        texts=texts,
         label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
         label_rows=[],
         structural_verifier=lambda *_args: None,
@@ -3187,9 +3198,62 @@ def test_ox_canary_preflights_wide_window_before_one_request(tmp_path: Path) -> 
 
     assert teacher.requests == [target_id]
     assert teacher.preflight_calls == 20
+    assert texts.prefetches == [{"query", *set().union(*candidate_ids.values())}]
     assert result.model_calls == 1
     assert result.workset_status["quarantined"] == 19  # type: ignore[index]
     assert result.workset_status["ready"] == 1  # type: ignore[index]
+
+
+def test_teacher_payload_does_not_resolve_context_older_than_bounded_suffix() -> None:
+    class TrackingTexts(dict[str, str]):
+        def __init__(self) -> None:
+            super().__init__(
+                query="question",
+                candidate="answer",
+                oldest="oldest context",
+                old="old context",
+                new="new context",
+            )
+            self.reads: list[str] = []
+
+        def get(self, key: str, default: str = "") -> str:
+            self.reads.append(key)
+            return super().get(key, default)
+
+    texts = TrackingTexts()
+    rally = {
+        "rally_id": "rally-1",
+        "query_sha256": "query",
+        "context_refs": [
+            {"semantic_sha256": "oldest"},
+            {"semantic_sha256": "old"},
+            {"semantic_sha256": "new"},
+        ],
+    }
+    candidate = {"candidate_id": "candidate-1", "text_sha256": "candidate"}
+    limit = len(
+        distill.canonical_json.canonical_json_bytes_strict(
+            {
+                "schema": "chronovisor.recall-distill-teacher-input.v1",
+                "rally_id": "rally-1",
+                "candidate_id": "candidate-1",
+                "query": "question",
+                "context": ["new context"],
+                "candidate": "answer",
+            }
+        )
+    )
+
+    payload = distill._teacher_payload(
+        rally,
+        candidate,
+        texts,
+        max_input_bytes=limit,
+    )
+
+    assert payload is not None
+    assert payload["context"] == ["new context"]
+    assert texts.reads == ["query", "candidate", "new", "old"]
 
 
 def test_ox_claim_cap_keeps_append_batch_at_or_below_500(tmp_path: Path) -> None:

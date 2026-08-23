@@ -4278,10 +4278,7 @@ def _teacher_payload(
 ) -> dict[str, Any] | None:
     query = texts.get(str(rally["query_sha256"]), "")
     candidate_text = texts.get(str(candidate["text_sha256"]), "")
-    context = [
-        texts.get(str(ref["semantic_sha256"]), "")
-        for ref in rally.get("context_refs", [])
-    ]
+    context: list[str] = []
     payload = {
         "schema": "chronovisor.recall-distill-teacher-input.v1",
         "rally_id": rally["rally_id"],
@@ -4290,17 +4287,17 @@ def _teacher_payload(
         "context": context,
         "candidate": candidate_text,
     }
-    while (
-        context
-        and len(canonical_json.canonical_json_bytes_strict(payload)) > max_input_bytes
-    ):
-        context.pop(0)
     if (
         not query
         or not candidate_text
         or len(canonical_json.canonical_json_bytes_strict(payload)) > max_input_bytes
     ):
         return None
+    for ref in reversed(rally.get("context_refs", [])):
+        context.insert(0, texts.get(str(ref["semantic_sha256"]), ""))
+        if len(canonical_json.canonical_json_bytes_strict(payload)) > max_input_bytes:
+            context.pop(0)
+            break
     return payload
 
 
@@ -4883,6 +4880,25 @@ def _run_ox_teacher_batch(
     local_payload_rejects: list[Any] = []
     claim_integrity_failure = False
     resolved_claims: list[Any] = []
+    prefetch = getattr(texts, "prefetch", None)
+    if callable(prefetch):
+        hashes: list[str] = []
+        for claim in claims:
+            task = tasks.get(claim.work_id)
+            if task is None:
+                continue
+            hashes.extend(
+                (
+                    str(task["rally"].get("query_sha256") or ""),
+                    str(task["candidate"].get("text_sha256") or ""),
+                    *(
+                        str(ref.get("semantic_sha256") or "")
+                        for ref in task["rally"].get("context_refs", [])
+                        if isinstance(ref, Mapping)
+                    ),
+                )
+            )
+        prefetch(hashes)
     for claim in claims:
         task = tasks.get(claim.work_id)
         if task is None:

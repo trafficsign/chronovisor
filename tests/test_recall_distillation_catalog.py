@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterable, Iterator
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -121,16 +122,19 @@ def test_text_cache_reads_only_requested_raw_once(
             "AND role='assistant'"
         ).fetchone()[0]
 
-    from chronovisor.core.raw_store import RawStore
+    from chronovisor.core.raw_store import RawStore, RawUnit
 
-    original_read = RawStore.read_bytes
+    original_read = RawStore.iter_segment_bytes
     reads: list[str] = []
 
-    def record_read(self: RawStore, raw: object) -> bytes:
-        reads.append(getattr(raw, "raw_id", str(raw)))
-        return original_read(self, raw)
+    def record_read(
+        self: RawStore, raw_ids: Iterable[str] | None = None
+    ) -> Iterator[tuple[RawUnit, bytes]]:
+        for unit, raw in original_read(self, raw_ids):
+            reads.append(unit.raw_id)
+            yield unit, raw
 
-    monkeypatch.setattr(RawStore, "read_bytes", record_read)
+    monkeypatch.setattr(RawStore, "iter_segment_bytes", record_read)
     cache = catalog.CatalogTextCache(raw_dir, tmp_path)
 
     assert cache.get(first_hash) == "first answer"
@@ -342,10 +346,13 @@ def test_historical_index_adopts_exact_catalog_parity_without_raw_read(
     catalog.advance(raw_dir, tmp_path, 4096)
     first = catalog.sync_historical_index(raw_dir, tmp_path)
 
-    from chronovisor.core.raw_store import RawStore
+    from chronovisor.core.raw_store import RawStore, RawUnit
 
-    def unexpected_read(self: RawStore, raw: object) -> bytes:
-        raise AssertionError(f"exact parity reread Raw: {raw}")
+    def unexpected_read(
+        self: RawStore, raw_ids: Iterable[str] | None = None
+    ) -> Iterator[tuple[RawUnit, bytes]]:
+        raise AssertionError(f"exact parity reread Raw: {raw_ids}")
+        yield from ()
 
     original_connect = catalog.sqlite3.connect
 
@@ -361,7 +368,7 @@ def test_historical_index_adopts_exact_catalog_parity_without_raw_read(
         kwargs["factory"] = NoIndexScan
         return original_connect(*args, **kwargs)
 
-    monkeypatch.setattr(RawStore, "read_bytes", unexpected_read)
+    monkeypatch.setattr(RawStore, "iter_segment_bytes", unexpected_read)
     monkeypatch.setattr(catalog.sqlite3, "connect", guarded_connect)
     monkeypatch.setattr(
         store,
@@ -397,16 +404,19 @@ def test_historical_index_reads_only_delta_raw_and_is_searchable(
     )
     catalog.advance(raw_dir, tmp_path, 4096)
 
-    from chronovisor.core.raw_store import RawStore
+    from chronovisor.core.raw_store import RawStore, RawUnit
 
-    original_read = RawStore.read_bytes
+    original_read = RawStore.iter_segment_bytes
     reads: list[str] = []
 
-    def record_read(self: RawStore, raw: object) -> bytes:
-        reads.append(getattr(raw, "raw_id", str(raw)))
-        return original_read(self, raw)
+    def record_read(
+        self: RawStore, raw_ids: Iterable[str] | None = None
+    ) -> Iterator[tuple[RawUnit, bytes]]:
+        for unit, raw in original_read(self, raw_ids):
+            reads.append(unit.raw_id)
+            yield unit, raw
 
-    monkeypatch.setattr(RawStore, "read_bytes", record_read)
+    monkeypatch.setattr(RawStore, "iter_segment_bytes", record_read)
     digest = catalog.sync_historical_index(raw_dir, tmp_path)
 
     assert reads == ["save-codex-two.md"]
