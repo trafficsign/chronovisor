@@ -304,7 +304,7 @@ th{background:#f3f1eb}
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
 <ul>
-<li><strong>Phase 1 live repair:</strong> 既存 <code>chronovisor-ingest-drain</code> PID 85200 が <code>ingest-orchestrator.lock</code> を保持中。current jobは2026-08-23 20:34開始で、21:51のread-only sampleではsocket receive内。process停止・restartは行わず、canary/derived repairも未実行のためinventoryはmissing 20のまま。</li>
+<li><strong>Phase 1 live repair:</strong> 既存 <code>chronovisor-ingest-drain</code> PID 85200 が <code>ingest-orchestrator.lock</code> を継続取得。21:51のread-only sampleでは前jobがsocket receive内、22:18には次jobへ進んでいたが再びlease保持中。process停止・restartは行わず、canary/derived repairも未実行のためinventoryはmissing 20のまま。</li>
 <li><strong>Phase 5B / Phase 6 remote:</strong> pushは未承認。required GitHub jobs、runtime archive commit照合、service restart、HTTP/DOM/console受入は未実行。</li>
 <li><strong>Phase 6 cohort:</strong> deploy後24時間かつactive host別100件のRecall availability/signal gateは時間条件上未到達。Planは規定どおり <code>running</code> を維持する。</li>
 </ul>
@@ -334,6 +334,7 @@ th{background:#f3f1eb}
 <li><time>2026-08-23 22:12</time><span>Phase 1のbounded reconciler実装・focused gateは完了したが、既存PID 85200がcross-process leaseを継続保持するためproduction canaryは未実行。processを停止せず、Raw/derived/runtime stateのmutation 0を維持し、Phase 1 checkboxは未完了のまま。</span></li>
 <li><time>2026-08-23 22:12</time><span>Phase 5Bのlocal実装確認完了。QoS reverse-order 6 run失敗0、usearch 1 pass/skip 0、Python 3.11/3.12 smoke各53 pass、workflow YAML/actions pinを確認。push未承認のためrequired GitHub jobsはpendingで、Phase 5B checkboxは未完了のまま。</span></li>
 <li><time>2026-08-23 22:12</time><span>最終local gate完了。architecture ledgerとlarge-function policyを現行HEADへ同期し、非同期diagnostic順序競合をdeterministic regressionで修正。隔離full suiteは5,151 pass / 0 fail / 2 warnings（422.71秒）、Ruff、mypy 89 source files、import-linter 358 files / 1 contractが全てgreen。結果を <code>test-ci.json</code> へ保存。live/remote gate未達のためPlanは <code>running</code> を維持。</span></li>
+<li><time>2026-08-23 22:18</time><span>Phase 1をread-only再確認。inventoryはtotal 13,624 / valid 13,604 / missing 20 / invalid 0で、missing ID集合はbaselineと一致、全20件processedかつRaw digest一致。Raw archive full verifyはerror 0。lease保持中のためrepair mutationは0で、結果を <code>projection-inventory.pending.json</code> に保存。</span></li>
 </ol>
 </section>
 

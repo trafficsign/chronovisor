@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
+  "captured_at": "2026-08-23T22:18:26+09:00",
+  "status": "pending_live_repair",
+  "blocker": {
+    "kind": "cross_process_ingest_lease",
+    "owner_pid": 85200,
+    "process": "chronovisor-ingest-drain",
+    "lease_held": true,
+    "process_stopped_or_restarted": false
+  },
+  "inventory": {
+    "total": 13624,
+    "valid": 13604,
+    "missing": 20,
+    "invalid": 0,
+    "same_missing_ids_as_baseline": true,
+    "missing_processed_all": true,
+    "missing_parent_digest_matches_observed_all": true,
+    "missing_parent_raw_sha_matches_observed_all": true
+  },
+  "raw_archive_verification": {
+    "command": "uv run chronovisor raw verify --full --json",
+    "status": "ok",
+    "full": true,
+    "error_count": 0
+  },
+  "repair": {
+    "canary_run": false,
+    "derived_mutations": 0,
+    "raw_mutations": 0,
+    "runtime_state_mutations": 0
+  }
+}
