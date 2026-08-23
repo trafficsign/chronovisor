@@ -324,7 +324,9 @@ def _item(value: Mapping[str, Any], watermark_json: str) -> tuple[Any, ...]:
     )
 
 
-def _same_temporal_split_except_plan(prior_json: str, current_json: str) -> bool:
+def _same_temporal_split_except_plan(
+    prior_json: str, current_json: str, *, allow_split_change: bool = False
+) -> bool:
     try:
         prior = _metadata_value(json.loads(prior_json), "prior temporal_split")
         current = _metadata_value(json.loads(current_json), "current temporal_split")
@@ -343,12 +345,26 @@ def _same_temporal_split_except_plan(prior_json: str, current_json: str) -> bool
     try:
         prior_digest = _digest(prior_plan, "prior split_plan_id")
         current_digest = _digest(current_plan, "current split_plan_id")
-        return (
-            prior_plan == prior_digest
-            and current_plan == current_digest
-            and prior_digest != current_digest
-            and _metadata_json(prior, "prior temporal_split")
-            == _metadata_json(current, "current temporal_split")
+        if (
+            prior_plan != prior_digest
+            or current_plan != current_digest
+            or prior_digest == current_digest
+        ):
+            return False
+        if allow_split_change:
+            prior_split = prior.pop("split", None)
+            current_split = current.pop("split", None)
+            if (
+                prior_split not in {"train", "validation", "test", "embargo"}
+                or current_split not in {"train", "validation", "test", "embargo"}
+                or "as_of" not in prior
+                or "as_of" not in current
+                or "group_id" not in prior
+                or "group_id" not in current
+            ):
+                return False
+        return _metadata_json(prior, "prior temporal_split") == _metadata_json(
+            current, "current temporal_split"
         )
     except DistillationWorksetError:
         return False
@@ -441,16 +457,18 @@ class DistillationWorkset:
                             tuple(prior[:3]) == immutable[:3]
                             and tuple(prior[4:6]) == immutable[4:6]
                         )
+                        unfinished = prior["state"] in {"ready", "quarantined"}
                         if not (
                             same_non_temporal
-                            and _same_temporal_split_except_plan(prior[3], immutable[3])
+                            and _same_temporal_split_except_plan(
+                                prior[3], immutable[3], allow_split_change=unfinished
+                            )
                         ):
                             raise DistillationWorksetError(
                                 f"immutable work identity conflict: {record[0]}"
                             )
-                        if prior["state"] in {"ready", "quarantined"}:
-                            # Cohort-only plan rotations may change the pointer
-                            # while this uncompleted work keeps the same split.
+                        if unfinished:
+                            # Cohort plan rotations may rebind an uncompleted split.
                             connection.execute(
                                 "UPDATE work_items SET temporal_split_json = ?, "
                                 "updated_at = ? WHERE work_id = ?",

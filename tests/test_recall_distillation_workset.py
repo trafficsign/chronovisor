@@ -37,12 +37,14 @@ def _completed() -> dict[str, str]:
     }
 
 
-def _split_item(work_id: str, plan_id: str) -> dict[str, object]:
+def _split_item(
+    work_id: str, plan_id: str, *, split: str = "train"
+) -> dict[str, object]:
     item = _item(work_id)
     item["temporal_split"] = {
         "as_of": "2026-08-20T00:00:00Z",
         "group_id": "group-1",
-        "split": "train",
+        "split": split,
         "split_plan_id": plan_id,
     }
     return item
@@ -74,12 +76,12 @@ def test_advance_is_idempotent_and_rejects_identity_mutation(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("quarantined", [False, True])
-def test_advance_rebinds_unfinished_identical_split_to_new_plan(
+def test_advance_rebinds_unfinished_plan_and_split_to_new_plan(
     tmp_path: Path, quarantined: bool
 ) -> None:
     path = tmp_path / "workset.sqlite3"
     workset = DistillationWorkset(path)
-    workset.advance([_split_item("one", "a" * 64)], {"source": 1})
+    workset.advance([_split_item("one", "a" * 64, split="embargo")], {"source": 1})
     if quarantined:
         claim = workset.claim("label", 1, "ox-1", 60)[0]
         workset.commit(
@@ -87,7 +89,9 @@ def test_advance_rebinds_unfinished_identical_split_to_new_plan(
             [{"status": "quarantined", "error_class": "invalid_response"}],
         )
 
-    result = workset.advance([_split_item("one", "b" * 64)], {"source": 2})
+    result = workset.advance(
+        [_split_item("one", "b" * 64, split="test")], {"source": 2}
+    )
 
     assert result["existing"] == 1
     with sqlite3.connect(path) as connection:
@@ -96,6 +100,7 @@ def test_advance_rebinds_unfinished_identical_split_to_new_plan(
             "FROM work_items WHERE work_id = 'one'"
         ).fetchone()
     assert '"split_plan_id":"' + "b" * 64 + '"' in temporal
+    assert '"split":"test"' in temporal
     assert (state, attempt, error) == (
         ("quarantined", 1, "invalid_response") if quarantined else ("ready", 0, "")
     )
@@ -142,13 +147,23 @@ def test_advance_completed_split_plan_rebind_keeps_completed_record(
         ).fetchone()
     assert after == before
 
+    with pytest.raises(DistillationWorksetError, match="identity conflict"):
+        workset.advance([_split_item("one", "b" * 64, split="test")], {"source": 3})
+    assert workset.watermark() == {"source": 2}
 
-def test_advance_refuses_semantic_split_change(tmp_path: Path) -> None:
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("as_of", "2026-08-21T00:00:00Z"), ("group_id", "group-2"), ("split", "other")],
+)
+def test_advance_refuses_incompatible_temporal_split_rebind(
+    tmp_path: Path, field: str, value: str
+) -> None:
     workset = DistillationWorkset(tmp_path / "workset.sqlite3")
-    workset.advance([_split_item("one", "a" * 64)], {"source": 1})
+    workset.advance([_split_item("one", "a" * 64, split="embargo")], {"source": 1})
     changed = _split_item("one", "b" * 64)
     assert isinstance(changed["temporal_split"], dict)
-    changed["temporal_split"]["split"] = "test"
+    changed["temporal_split"][field] = value
 
     with pytest.raises(DistillationWorksetError, match="identity conflict"):
         workset.advance([changed], {"source": 2})
