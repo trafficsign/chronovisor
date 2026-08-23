@@ -9,7 +9,7 @@ import os
 import sqlite3
 import tempfile
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -37,12 +37,32 @@ class DistillationStoreBusy(RuntimeError):
     """A nonblocking private-store write could not acquire its lock."""
 
 
+def _validate_artifact_id(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or Path(value).name != value
+        or "/" in value
+        or "\\" in value
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise DistillationStoreError("invalid artifact id")
+    return value
+
+
 def _reject_reserved(payload: Mapping[str, Any], reserved: set[str]) -> None:
     conflict = reserved.intersection(payload)
     if conflict:
         raise DistillationStoreError(
             f"reserved artifact fields are caller-controlled: {sorted(conflict)}"
         )
+
+
+def _require_chain_metadata(row: Mapping[str, Any], index: int) -> None:
+    if row.get("schema") != DISTILLATION_SCHEMA:
+        raise DistillationStoreError(f"ledger row {index} schema mismatch")
+    if row.get("namespace") != "recall-distillation":
+        raise DistillationStoreError(f"ledger row {index} namespace mismatch")
 
 
 def distillation_dir(root: Path | None = None) -> Path:
@@ -128,7 +148,9 @@ def write_immutable(
         "namespace": "recall-distillation",
         **payload,
     }
-    identity = artifact_id or canonical_json_sha256_strict(unsigned)
+    identity = _validate_artifact_id(
+        artifact_id or canonical_json_sha256_strict(unsigned)
+    )
     artifact = _sealed({"artifact_id": identity, **unsigned})
     encoded = canonical_json_bytes_strict(artifact) + b"\n"
     path = directory / f"{identity}.json"
@@ -156,7 +178,7 @@ def write_immutable(
 
 
 @contextlib.contextmanager
-def _locked(path: Path):
+def _locked(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -182,6 +204,7 @@ def verify_chain(path: Path) -> dict[str, Any]:
             raise DistillationStoreError(f"ledger row {index} is invalid") from exc
         if not isinstance(row, dict):
             raise DistillationStoreError(f"ledger row {index} is not an object")
+        _require_chain_metadata(row, index)
         digest = row.get("record_sha256")
         unsigned = {key: value for key, value in row.items() if key != "record_sha256"}
         if row.get(
@@ -240,6 +263,17 @@ def _read_chain_checkpoint(path: Path) -> dict[str, Any] | None:
         or isinstance(checkpoint.get("records"), bool)
         or checkpoint["records"] < 0
         or not isinstance(checkpoint.get("head_sha256"), str)
+        or (
+            checkpoint["head_sha256"] != ""
+            and (
+                len(checkpoint["head_sha256"]) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in checkpoint["head_sha256"]
+                )
+            )
+        )
+        or (checkpoint["records"] == 0) != (checkpoint["head_sha256"] == "")
         or checkpoint.get("file_state") != _ledger_file_state(path)
     ):
         return None
@@ -282,13 +316,14 @@ def _recover_chain_tail(path: Path) -> dict[str, Any]:
                     ) from exc
                 if not isinstance(row, dict):
                     raise DistillationStoreError(f"ledger row {index} is not an object")
+                _require_chain_metadata(row, index)
                 digest = row.get("record_sha256")
                 unsigned = {
                     key: value for key, value in row.items() if key != "record_sha256"
                 }
-                if row.get("previous_sha256") != previous or digest != canonical_json_sha256_strict(
-                    unsigned
-                ):
+                if row.get(
+                    "previous_sha256"
+                ) != previous or digest != canonical_json_sha256_strict(unsigned):
                     if not line.endswith(b"\n"):
                         with path.open("r+b") as writable:
                             writable.truncate(last_good_offset)
@@ -296,7 +331,9 @@ def _recover_chain_tail(path: Path) -> dict[str, Any]:
                             os.fsync(writable.fileno())
                         _fsync_directory(path)
                         return {"records": count, "head_sha256": previous}
-                    raise DistillationStoreError(f"ledger chain mismatch at row {index}")
+                    raise DistillationStoreError(
+                        f"ledger chain mismatch at row {index}"
+                    )
                 previous = str(digest)
                 count += 1
                 last_good_offset = end_offset
@@ -346,11 +383,13 @@ def append_chain_batch(
 ) -> list[dict[str, Any]]:
     """Append a bounded batch with a checkpoint and one data fsync."""
 
-    values = [dict(payload) for payload in payloads]
+    values: list[dict[str, Any]] = []
+    for index, payload in enumerate(payloads):
+        if index >= 500:
+            raise DistillationStoreError("ledger batch is too large")
+        values.append(dict(payload))
     if not values:
         return []
-    if len(values) > 500:
-        raise DistillationStoreError("ledger batch is too large")
     reserved = {
         "schema",
         "namespace",
@@ -454,6 +493,8 @@ def append_chain_unique_locked(
     existing = path.read_bytes() if path.exists() else b""
     for line in existing.splitlines():
         row = json.loads(line)
+        if not isinstance(row, dict):
+            raise DistillationStoreError("ledger row is not an object")
         if row.get(unique_field) != identity:
             continue
         if row.get(binding_field) == binding:
@@ -471,10 +512,38 @@ def append_chain_unique_locked(
 
 
 def read_chain(path: Path) -> list[dict[str, Any]]:
-    verify_chain(path)
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line]
+    """Decode a stable ledger snapshot after checkpoint-backed verification."""
+
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with _locked(lock_path):
+        head = _read_chain_checkpoint(path)
+        if head is None:
+            head = _recover_chain_tail(path)
+            _write_chain_checkpoint(path, head)
+        try:
+            lines = path.read_bytes().splitlines()
+        except FileNotFoundError:
+            lines = []
+        except OSError as exc:
+            raise DistillationStoreError("ledger is unreadable") from exc
+        rows: list[dict[str, Any]] = []
+        for index, line in enumerate(lines):
+            try:
+                row = json.loads(line)
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise DistillationStoreError(f"ledger row {index} is invalid") from exc
+            if not isinstance(row, dict):
+                raise DistillationStoreError(f"ledger row {index} is not an object")
+            _require_chain_metadata(row, index)
+            rows.append(row)
+        if (
+            len(rows) != head["records"]
+            or (rows[-1].get("record_sha256") if rows else "") != head["head_sha256"]
+        ):
+            raise DistillationStoreError(
+                "ledger checkpoint does not match decoded rows"
+            )
+        return rows
 
 
 def write_pointer(
@@ -510,6 +579,13 @@ def clear_pointer(root: Path, kind: str) -> None:
 
 
 def create_historical_index(path: Path, atoms: Iterable[Mapping[str, Any]]) -> str:
+    with _locked(path.with_suffix(path.suffix + ".lock")):
+        return _create_historical_index_locked(path, atoms)
+
+
+def _create_historical_index_locked(
+    path: Path, atoms: Iterable[Mapping[str, Any]]
+) -> str:
     """Build one deterministic assistant-only point-in-time FTS5 cache."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -527,8 +603,12 @@ def create_historical_index(path: Path, atoms: Iterable[Mapping[str, Any]]) -> s
                 return rows_digest
         except (OSError, sqlite3.DatabaseError):
             pass
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.unlink(missing_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    os.fchmod(descriptor, 0o600)
+    os.close(descriptor)
     try:
         with sqlite3.connect(temporary) as conn:
             conn.executescript(
