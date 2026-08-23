@@ -90,22 +90,17 @@ def _payload(*, query: str = "which note answers the query") -> dict[str, object
 
 def _label_response(
     *,
+    verdict: str = "relevant",
     rationale: str = OX_RATIONALE_CODES[0],
-    atom: str = "atom-1",
-    missing: list[str] | None = None,
-    changing_claim: str = "",
 ) -> str:
     return json.dumps(
         {
             "labels": [
                 {
                     "candidate_id": "candidate-1",
-                    "verdict": "relevant",
+                    "verdict": verdict,
                     "confidence": 0.9,
                     "rationale": rationale,
-                    "minimal_atom_ids": [atom],
-                    "missing_slots": [] if missing is None else missing,
-                    "changing_claim": changing_claim,
                 }
             ]
         }
@@ -178,9 +173,6 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
                                 "verdict",
                                 "confidence",
                                 "rationale",
-                                "minimal_atom_ids",
-                                "missing_slots",
-                                "changing_claim",
                             ],
                             "properties": {
                                 "candidate_id": {
@@ -204,32 +196,6 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
                                     "type": "string",
                                     "enum": list(OX_RATIONALE_CODES),
                                 },
-                                "minimal_atom_ids": {
-                                    "type": "array",
-                                    "minItems": 0,
-                                    "maxItems": 8,
-                                    "uniqueItems": True,
-                                    "items": {
-                                        "type": "string",
-                                        "minLength": 1,
-                                        "maxLength": 160,
-                                    },
-                                },
-                                "missing_slots": {
-                                    "type": "array",
-                                    "minItems": 0,
-                                    "maxItems": 5,
-                                    "uniqueItems": True,
-                                    "items": {
-                                        "type": "string",
-                                        "minLength": 1,
-                                        "maxLength": 160,
-                                    },
-                                },
-                                "changing_claim": {
-                                    "type": "string",
-                                    "maxLength": 600,
-                                },
                             },
                         },
                     }
@@ -250,6 +216,37 @@ def test_free_form_rationale_is_rejected_at_response_schema_seam(
         _response(_label_response(rationale="The evidence directly answers the query."))
     )
     teacher = _teacher(tmp_path, sender)
+
+    result = teacher.evaluate(_payload())
+
+    assert result["_failure"]["class"] == "invalid_response"
+    assert result["_failure"]["stage"] == "teacher_label_schema"
+    assert result["_failure"]["labelable"] is False
+
+
+def test_schema_valid_uncertain_is_preserved_as_an_abstention(tmp_path: Path) -> None:
+    teacher = _teacher(
+        tmp_path, FakeSender(_response(_label_response(verdict="uncertain")))
+    )
+
+    result = teacher.evaluate(_payload())
+
+    assert result["labels"] == [
+        {
+            "candidate_id": "candidate-1",
+            "verdict": "uncertain",
+            "confidence": 0.9,
+            "rationale": OX_RATIONALE_CODES[0],
+        }
+    ]
+
+
+def test_legacy_unused_label_fields_are_rejected_at_response_schema_seam(
+    tmp_path: Path,
+) -> None:
+    response = json.loads(_label_response())
+    response["labels"][0]["changing_claim"] = "legacy field"
+    teacher = _teacher(tmp_path, FakeSender(_response(json.dumps(response))))
 
     result = teacher.evaluate(_payload())
 
@@ -398,17 +395,7 @@ def test_returned_model_is_required_and_must_be_the_free_route(
     assert len(sender.calls) == 1
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"rationale": "r" * 601},
-        {"changing_claim": "c" * 601},
-        {"atom": "a" * 161},
-        {"missing": ["m" * 161]},
-        {"rationale": "ﬃ" * 201},
-        {"atom": "ﬃ" * 54},
-    ],
-)
+@pytest.mark.parametrize("kwargs", [{"rationale": "r" * 601}, {"rationale": "ﬃ" * 201}])
 def test_label_schema_limits_apply_after_nfkc_normalization(
     tmp_path: Path, kwargs: dict[str, object]
 ) -> None:

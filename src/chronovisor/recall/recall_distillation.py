@@ -61,7 +61,7 @@ LOCAL_TRIAD_PROFILE = "local-triad-v1"
 OX_SINGLE_PROFILE = "ox-alpha-single-v1"
 OX_SINGLE_COHORT = "ox-alpha-backfill-v1"
 OX_PROBE_REVISION = "single-teacher-repeat-v2"
-OX_RAMP_REQUEST_REVISION = "json-schema-reason-code-16k-240s-v4"
+OX_RAMP_REQUEST_REVISION = "json-schema-core-label-abstain-16k-240s-v5"
 TEACHER_PROFILES = frozenset({LOCAL_TRIAD_PROFILE, OX_SINGLE_PROFILE})
 OX_ALPHA_ENDPOINT = "https://opencode.ai/zen/go/v1"
 OX_ALPHA_CREDENTIAL_REF = "oskeyring:codex-router-opencode-go/default"
@@ -5367,9 +5367,6 @@ def _run_ox_teacher_batch(
         "verdict",
         "confidence",
         "rationale",
-        "minimal_atom_ids",
-        "missing_slots",
-        "changing_claim",
     }
 
     # Dispatch one fixed-cap wave at a time.  The generic dispatcher remains a
@@ -5476,7 +5473,7 @@ def _run_ox_teacher_batch(
             else {}
         )
         valid = valid and all(
-            label.get("verdict") in {"relevant", "irrelevant"}
+            label.get("verdict") in {"relevant", "irrelevant", "uncertain"}
             for label in labels_by_id.values()
         )
         if not valid:

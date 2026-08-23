@@ -2159,9 +2159,6 @@ def test_ox_locked_blind_repeats_are_reversed_and_resume_without_duplicates(
                         ),
                         "confidence": 0.9,
                         "rationale": "bounded evidence",
-                        "minimal_atom_ids": [],
-                        "missing_slots": [],
-                        "changing_claim": "",
                     }
                     for candidate in candidates
                 ],
@@ -2446,9 +2443,6 @@ def test_ox_ramp_counts_provider_receipts_not_labels(
         "verdict",
         "confidence",
         "rationale",
-        "minimal_atom_ids",
-        "missing_slots",
-        "changing_claim",
     }
 
     def dispatch(_batches: object, _evaluate: object, **kwargs: object) -> list[object]:
@@ -2461,9 +2455,6 @@ def test_ox_ramp_counts_provider_receipts_not_labels(
                     "verdict": "relevant",
                     "confidence": 1.0,
                     "rationale": "bounded",
-                    "minimal_atom_ids": [],
-                    "missing_slots": [],
-                    "changing_claim": "",
                 }
                 for index in range(16)
             ]
@@ -2637,8 +2628,10 @@ def test_ox_ramp_resumes_only_for_the_same_profile_contract_and_request_revision
     assert result.ramp_provider_attempts == expected_initial[2]
 
 
-def test_ox_ramp_request_revision_tracks_safe_reason_code_schema() -> None:
-    assert distill.OX_RAMP_REQUEST_REVISION == "json-schema-reason-code-16k-240s-v4"
+def test_ox_ramp_request_revision_tracks_core_label_schema() -> None:
+    assert (
+        distill.OX_RAMP_REQUEST_REVISION == "json-schema-core-label-abstain-16k-240s-v5"
+    )
 
 
 def test_ox_ramp_requires_a_95_percent_provider_success_rate_to_advance() -> None:
@@ -2832,9 +2825,6 @@ def test_ox_ramp_only_counts_deep_valid_provider_responses(
                             "verdict": "relevant",
                             "confidence": 1.0,
                             "rationale": "bounded",
-                            "minimal_atom_ids": [],
-                            "missing_slots": [],
-                            "changing_claim": "",
                         }
                     ],
                     "_route_identity": {
@@ -2910,9 +2900,6 @@ def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_label
                         "verdict": "relevant",
                         "confidence": 0.9,
                         "rationale": "bounded evidence",
-                        "minimal_atom_ids": [],
-                        "missing_slots": [],
-                        "changing_claim": "",
                     }
                     for candidate in payload["candidates"]
                 ],
@@ -3039,12 +3026,9 @@ def test_ox_indexed_workset_reads_only_delta_then_claimed_snapshots(
                 "labels": [
                     {
                         "candidate_id": candidate["candidate_id"],
-                        "verdict": "relevant" if self.valid else "uncertain",
+                        "verdict": "relevant" if self.valid else "invalid",
                         "confidence": 0.9,
                         "rationale": "bounded evidence",
-                        "minimal_atom_ids": [],
-                        "missing_slots": [],
-                        "changing_claim": "",
                     }
                     for candidate in payload["candidates"]
                 ],
@@ -3352,7 +3336,7 @@ def test_ox_indexed_workset_reads_only_delta_then_claimed_snapshots(
     assert calls == [{"rally-3"}, {"rally-3"}]
 
 
-def test_ox_single_teacher_invalid_or_uncertain_output_is_deferred_without_label(
+def test_ox_single_teacher_uncertain_output_completes_as_non_training_abstention(
     tmp_path: Path,
 ) -> None:
     class UncertainTeacher:
@@ -3367,10 +3351,7 @@ def test_ox_single_teacher_invalid_or_uncertain_output_is_deferred_without_label
                         "candidate_id": candidate["candidate_id"],
                         "verdict": "uncertain",
                         "confidence": 0.5,
-                        "rationale": "insufficient evidence",
-                        "minimal_atom_ids": [],
-                        "missing_slots": [],
-                        "changing_claim": "",
+                        "rationale": "insufficient_evidence",
                     }
                     for candidate in payload["candidates"]
                 ],
@@ -3385,7 +3366,36 @@ def test_ox_single_teacher_invalid_or_uncertain_output_is_deferred_without_label
                 "_schema_digest": "d" * 64,
             }
 
-    rally = {"rally_id": "rally-1", "query_sha256": "query", "context_refs": []}
+    features = distill.build_fast_features(
+        query_chargram_coverage=1, candidate_chargram_precision=1
+    )
+    rally = {
+        "rally_id": "rally-1",
+        "session_cluster_id": "session-1",
+        "as_of": "2026-01-03T00:00:00Z",
+        "query_sha256": "query",
+        "context_refs": [],
+    }
+    distill._ensure_split_plan(
+        tmp_path,
+        [rally],
+        raw_watermark="a" * 64,
+        model_cohort_sha256="b" * 64,
+    )
+    snapshots = {
+        "rally-1": {
+            "as_of": rally["as_of"],
+            "snapshot_sha256": "c" * 64,
+            "feature_revision": distill.TEXT_FEATURE_REVISION,
+            "candidates": [
+                {
+                    "candidate_id": "candidate-1",
+                    "text_sha256": "candidate-1",
+                    "features": features,
+                }
+            ],
+        }
+    }
     label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
 
     def run() -> distill._TeacherBatchResult:
@@ -3397,13 +3407,7 @@ def test_ox_single_teacher_invalid_or_uncertain_output_is_deferred_without_label
                 max_input_bytes=4_096,
             ),
             teachers={distill.OX_TEACHER_ROLE: UncertainTeacher()},
-            snapshots={
-                "rally-1": {
-                    "candidates": [
-                        {"candidate_id": "candidate-1", "text_sha256": "candidate-1"}
-                    ]
-                }
-            },
+            snapshots=snapshots,
             rally_by_id={"rally-1": rally},
             texts={"query": "what proves the claim", "candidate-1": "bounded fact"},
             label_path=label_path,
@@ -3412,15 +3416,23 @@ def test_ox_single_teacher_invalid_or_uncertain_output_is_deferred_without_label
         )
 
     result = run()
-    second = run()
-    third = run()
+    labels = store.read_chain(label_path)
+    training = distill.materialize_training_rows(
+        tmp_path,
+        _rallies=[rally],
+        _snapshots=snapshots,
+        _label_rows=labels,
+    )
 
-    assert result.labels_written == 0
-    assert result.deferred is True
-    assert result.workset_status["ready"] == 1  # type: ignore[index]
-    assert second.workset_status["ready"] == 1  # type: ignore[index]
-    assert third.workset_status["quarantined"] == 1  # type: ignore[index]
-    assert store.read_chain(label_path) == []
+    assert result.labels_written == 1
+    assert result.deferred is False
+    assert result.workset_status["completed"] == 1  # type: ignore[index]
+    assert result.ramp_valid_receipts == 1
+    assert result.ramp_provider_attempts == 1
+    assert labels[0]["verdict"] == "uncertain"
+    assert labels[0]["authority"] == "uncertain"
+    assert training["rows"] == []
+    assert distill.train_tiny_policy(training["rows"])["training_rows"] == 0
 
 
 def test_ox_resolves_text_only_for_claimed_work_and_uses_long_lease(
@@ -3441,9 +3453,6 @@ def test_ox_resolves_text_only_for_claimed_work_and_uses_long_lease(
                         "verdict": "relevant",
                         "confidence": 0.9,
                         "rationale": "bounded evidence",
-                        "minimal_atom_ids": [],
-                        "missing_slots": [],
-                        "changing_claim": "",
                     }
                     for candidate in payload["candidates"]
                 ],
@@ -3579,9 +3588,6 @@ def test_ox_canary_skips_payload_rejected_probe_before_one_safe_request(
                         "verdict": "relevant",
                         "confidence": 0.9,
                         "rationale": "bounded evidence",
-                        "minimal_atom_ids": [],
-                        "missing_slots": [],
-                        "changing_claim": "",
                     }
                     for candidate in candidates
                 ],
@@ -3671,9 +3677,6 @@ def test_ox_canary_skips_oversize_probe_before_one_request(
                         "verdict": "relevant",
                         "confidence": 0.9,
                         "rationale": "bounded evidence",
-                        "minimal_atom_ids": [],
-                        "missing_slots": [],
-                        "changing_claim": "",
                     }
                     for candidate in candidates
                 ],
@@ -4143,9 +4146,6 @@ def test_ox_claim_cap_keeps_append_batch_at_or_below_500(tmp_path: Path) -> None
                         "verdict": "irrelevant",
                         "confidence": 0.8,
                         "rationale": "bounded evidence",
-                        "minimal_atom_ids": [],
-                        "missing_slots": [],
-                        "changing_claim": "",
                     }
                     for candidate in candidates
                 ],

@@ -158,9 +158,6 @@ def _teacher_schema(candidate_ids: tuple[str, ...]) -> dict[str, Any]:
                         "verdict",
                         "confidence",
                         "rationale",
-                        "minimal_atom_ids",
-                        "missing_slots",
-                        "changing_claim",
                     ],
                     "properties": {
                         "candidate_id": {
@@ -179,32 +176,6 @@ def _teacher_schema(candidate_ids: tuple[str, ...]) -> dict[str, Any]:
                         "rationale": {
                             "type": "string",
                             "enum": list(OX_RATIONALE_CODES),
-                        },
-                        "minimal_atom_ids": {
-                            "type": "array",
-                            "minItems": 0,
-                            "maxItems": 8,
-                            "uniqueItems": True,
-                            "items": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 160,
-                            },
-                        },
-                        "missing_slots": {
-                            "type": "array",
-                            "minItems": 0,
-                            "maxItems": 5,
-                            "uniqueItems": True,
-                            "items": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 160,
-                            },
-                        },
-                        "changing_claim": {
-                            "type": "string",
-                            "maxLength": 600,
                         },
                     },
                 },
@@ -341,9 +312,6 @@ def _safe_label(label: object, candidate_ids: frozenset[str]) -> dict[str, Any] 
         "verdict",
         "confidence",
         "rationale",
-        "minimal_atom_ids",
-        "missing_slots",
-        "changing_claim",
     }
     if set(label) != allowed:
         return None
@@ -351,21 +319,7 @@ def _safe_label(label: object, candidate_ids: frozenset[str]) -> dict[str, Any] 
     verdict = label.get("verdict")
     confidence = label.get("confidence")
     rationale = label.get("rationale")
-    atoms = label.get("minimal_atom_ids")
-    missing = label.get("missing_slots")
-    changing = label.get("changing_claim")
     safe_rationale = _safe_text(rationale, max_chars=600)
-    safe_atoms = (
-        [_safe_text(item, max_chars=160) for item in atoms]
-        if isinstance(atoms, list)
-        else []
-    )
-    safe_missing = (
-        [_safe_text(item, max_chars=160) for item in missing]
-        if isinstance(missing, list)
-        else []
-    )
-    safe_changing = _safe_text(changing, required=False, max_chars=600)
     if (
         not isinstance(candidate_id, str)
         or candidate_id not in candidate_ids
@@ -376,15 +330,6 @@ def _safe_label(label: object, candidate_ids: frozenset[str]) -> dict[str, Any] 
         or not 0 <= confidence <= 1
         or rationale not in OX_RATIONALE_CODES
         or safe_rationale is None
-        or not isinstance(atoms, list)
-        or len(atoms) > 8
-        or any(item is None for item in safe_atoms)
-        or len(set(safe_atoms)) != len(safe_atoms)
-        or not isinstance(missing, list)
-        or len(missing) > 5
-        or any(item is None for item in safe_missing)
-        or len(set(safe_missing)) != len(safe_missing)
-        or safe_changing is None
     ):
         return None
     return {
@@ -392,9 +337,6 @@ def _safe_label(label: object, candidate_ids: frozenset[str]) -> dict[str, Any] 
         "verdict": verdict,
         "confidence": confidence,
         "rationale": safe_rationale,
-        "minimal_atom_ids": safe_atoms,
-        "missing_slots": safe_missing,
-        "changing_claim": safe_changing,
     }
 
 
