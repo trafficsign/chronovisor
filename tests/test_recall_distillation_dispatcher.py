@@ -73,7 +73,7 @@ def test_ramp_counts_valid_labels_inside_each_batch() -> None:
         with lock:
             active += 1
             max_active = max(max_active, active)
-        time.sleep(0.002)
+        time.sleep(0.01)
         with lock:
             active -= 1
         return {"labels": [item] * 16}
