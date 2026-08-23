@@ -336,6 +336,313 @@ _PROCESSED_PROJECTION_RECONCILER_SLOW_STREAK = (
 _PROCESSED_PROJECTION_RECONCILER_DISABLED = "processed_projection_reconciler_disabled"
 
 
+def _processed_projection_error_classification(exc: BaseException) -> str:
+    message = str(exc).lower()
+    if "digest" in message or "hash" in message:
+        return "digest_mismatch"
+    if any(
+        marker in message for marker in ("schema", "malformed", "identity", "invalid")
+    ):
+        return "invalid_schema"
+    if any(marker in message for marker in ("missing", "no durable", "not found")):
+        return "missing_artifact"
+    return "hold"
+
+
+def _processed_projection_regular_unit(
+    path: Path, raw_id: str, raw_dir: Path
+) -> Any | None:
+    from chronovisor.core.raw_store import RawUnit
+
+    if path.is_symlink():
+        raise RuntimeError("processed Raw path is a symlink")
+    if not path.is_file():
+        return None
+    try:
+        resolved = path.expanduser().resolve(strict=True)
+        resolved.relative_to(raw_dir.expanduser().resolve(strict=False))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("processed Raw path is outside Raw root") from exc
+    stat = resolved.stat()
+    return RawUnit(
+        raw_id=raw_id,
+        storage="legacy_file",
+        path=resolved,
+        offset=0,
+        length=stat.st_size,
+        sha256=None,
+        captured_at=None,
+        device=stat.st_dev,
+        inode=stat.st_ino,
+    )
+
+
+def _processed_projection_nested_legacy_unit(raw_id: str, raw_dir: Path) -> Any | None:
+    # Do not interpolate an arbitrary ID into a glob. The caller has already
+    # checked its basename, keeping this a bounded date-directory probe.
+    matches = [
+        unit
+        for day_dir in sorted(
+            raw_dir.glob("[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]")
+        )
+        if (unit := _processed_projection_regular_unit(day_dir / raw_id, raw_id, raw_dir))
+        is not None
+    ]
+    if len(matches) > 1:
+        raise RuntimeError("duplicate processed Raw ID")
+    return matches[0] if matches else None
+
+
+def _processed_projection_candidates(
+    *,
+    candidate_ids: list[str],
+    raw_store: Any,
+    layout: str,
+    reference_dir: Path,
+    raw_dir: Path,
+    started: float,
+    enforce_budget: bool,
+    pass_budget_ms: float,
+) -> tuple[
+    list[tuple[Any, dict[str, str]]],
+    list[str],
+    list[str],
+    set[str],
+    list[dict[str, Any]],
+    bool,
+]:
+    candidates: list[tuple[Any, dict[str, str]]] = []
+    advanced_ids: list[str] = []
+    scanned_ids: list[str] = []
+    blocked_ids: set[str] = set()
+    held: list[dict[str, Any]] = []
+    budget_exhausted = False
+    for raw_id in candidate_ids:
+        if enforce_budget and (time.perf_counter() - started) * 1000 >= pass_budget_ms:
+            budget_exhausted = True
+            break
+        scanned_ids.append(raw_id)
+        if (
+            not raw_id
+            or raw_id in {".", ".."}
+            or Path(raw_id).name != raw_id
+            or "/" in raw_id
+            or "\\" in raw_id
+            or "\x00" in raw_id
+        ):
+            held.append(
+                {
+                    "status": "hold",
+                    "reason": "invalid_raw_id",
+                    "classification": "invalid_raw_id",
+                    "quarantine": {"status": "unchanged", "path": None},
+                }
+            )
+            blocked_ids.add(raw_id)
+            continue
+        if raw_id.startswith("semantic-") and "-child-" in raw_id:
+            advanced_ids.append(raw_id)
+            continue
+        try:
+            reference_path = reference_dir / raw_id
+            if reference_path.is_symlink():
+                raise RuntimeError("logical Raw reference is a symlink")
+            if reference_path.exists() and not reference_path.is_file():
+                raise RuntimeError("logical Raw reference is not a file")
+            unit = None
+            resolution: dict[str, str] = {}
+            if reference_path.is_file():
+                unit = raw_store.resolve_reference(reference_path)
+                if unit is None:
+                    raise RuntimeError("logical Raw reference is invalid")
+                resolution["resolution"] = "reference"
+            if unit is None and layout == "v2":
+                resolve_segment = getattr(raw_store, "resolve_segment", None)
+                if callable(resolve_segment):
+                    unit = resolve_segment(raw_id)
+                    if unit is not None:
+                        resolution["resolution"] = "segment_fallback"
+            if unit is None:
+                unit = _processed_projection_regular_unit(raw_dir / raw_id, raw_id, raw_dir)
+                if unit is not None:
+                    resolution["resolution"] = "legacy_flat"
+            if unit is None:
+                unit = _processed_projection_nested_legacy_unit(raw_id, raw_dir)
+                if unit is not None:
+                    resolution["resolution"] = "legacy_nested"
+            if unit is None:
+                resolve_legacy_archive = getattr(raw_store, "resolve_legacy_archive", None)
+                if callable(resolve_legacy_archive):
+                    unit = resolve_legacy_archive(raw_id)
+                    if unit is not None:
+                        resolution["resolution"] = "legacy_archive"
+            if unit is None:
+                advanced_ids.append(raw_id)
+                continue
+            candidates.append((unit, resolution))
+        except Exception as exc:
+            held.append(
+                {
+                    "raw_id": raw_id,
+                    "status": "hold",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "classification": _processed_projection_error_classification(exc),
+                    "quarantine": {"status": "unchanged", "path": None},
+                }
+            )
+            blocked_ids.add(raw_id)
+    return candidates, advanced_ids, scanned_ids, blocked_ids, held, budget_exhausted
+
+
+def _processed_projection_root_relative(path: Path, root_path: Path) -> str:
+    try:
+        return str(path.expanduser().resolve(strict=False).relative_to(root_path))
+    except ValueError as exc:
+        raise RuntimeError("derived projection artifact escapes Chronovisor root") from exc
+
+
+def _reconcile_processed_projection_candidates(
+    *,
+    candidates: list[tuple[Any, dict[str, str]]],
+    raw_store: Any,
+    reference_dir: Path,
+    output_dir: Path,
+    max_child_bytes: int,
+    artifact_names_before: set[str],
+    root_path: Path,
+    started: float,
+    enforce_budget: bool,
+    pass_budget_ms: float,
+    project_native_transcript: Callable[..., Any],
+    project_parent_raw: Callable[..., Any],
+    verify_projection_bundle: Callable[..., Any],
+    held: list[dict[str, Any]],
+    advanced_ids: list[str],
+    blocked_ids: set[str],
+) -> tuple[list[dict[str, Any]], bool]:
+    processed: list[dict[str, Any]] = []
+    budget_exhausted = False
+    for unit, resolution in candidates:
+        if enforce_budget and (time.perf_counter() - started) * 1000 >= pass_budget_ms:
+            budget_exhausted = True
+            break
+        row: dict[str, Any] = {"raw_id": unit.raw_id, **resolution}
+        row["raw_store"] = {
+            "storage": unit.storage,
+            "stored_sha256": unit.sha256,
+            "commit_sha256": unit.commit.sha256 if unit.commit is not None else None,
+        }
+        try:
+            receipt_path: Path | None = None
+            receipt_status = "not_applicable"
+            parent_path = (
+                unit.path
+                if unit.storage == "legacy_file"
+                else raw_store.materialize_ingest(unit, reference_dir)
+            )
+            raw_bytes = raw_store.read_bytes(unit)
+            row["raw_sha256"] = hashlib.sha256(raw_bytes).hexdigest()
+            artifacts = (
+                project_native_transcript(
+                    parent_path,
+                    raw_bytes,
+                    unit.commit,
+                    output_dir=output_dir,
+                    max_child_bytes=max_child_bytes,
+                )
+                if unit.commit is not None
+                else project_parent_raw(
+                    parent_path,
+                    output_dir=output_dir,
+                    max_child_bytes=max_child_bytes,
+                    raw_bytes=raw_bytes,
+                )
+            )
+            row["kind"] = artifacts.kind
+            manifest_path = artifacts.manifest_path
+            child_paths = tuple(artifacts.child_paths)
+            artifact_paths = list(child_paths)
+            if manifest_path is not None:
+                verified = verify_projection_bundle(manifest_path)
+                artifact_paths.insert(0, manifest_path)
+                if verified.get("status") == "delegated":
+                    manifest_bytes = manifest_path.read_bytes()
+                    projection_id = verified.get("projection_id")
+                    if isinstance(projection_id, str):
+                        receipt_path = output_dir / (
+                            f"semantic-{projection_id}-manifest-"
+                            f"{hashlib.sha256(manifest_bytes).hexdigest()}.receipt.json"
+                        )
+                        artifact_paths.append(receipt_path)
+                        receipt_status = "verified"
+                elif verified.get("status") == "noop":
+                    noop_filename = verified.get("noop_receipt_filename")
+                    if isinstance(noop_filename, str):
+                        receipt_path = output_dir / noop_filename
+                        artifact_paths.append(receipt_path)
+                        receipt_status = "verified"
+            artifact_names = {path.name for path in artifact_paths}
+            all_preexisting = bool(artifact_names) and artifact_names.issubset(
+                artifact_names_before
+            )
+            if not artifact_names:
+                row["state_before"] = "absent"
+                row["state_after"] = "absent"
+                row["status"] = "passthrough"
+            else:
+                row["state_before"] = (
+                    "completed"
+                    if all_preexisting
+                    else "incomplete"
+                    if manifest_path is not None
+                    and manifest_path.name in artifact_names_before
+                    else "absent"
+                )
+                row["state_after"] = "completed"
+                row["status"] = "completed" if all_preexisting else "repaired"
+            processed.append(row)
+            advanced_ids.append(unit.raw_id)
+            row["manifest"] = (
+                _processed_projection_root_relative(manifest_path, root_path)
+                if manifest_path is not None
+                else None
+            )
+            row["children"] = [
+                _processed_projection_root_relative(path, root_path) for path in child_paths
+            ]
+            row["manifest_path"] = row["manifest"]
+            row["child_paths"] = list(row["children"])
+            row["parent_sha256"] = row["raw_sha256"]
+            row["receipt"] = (
+                _processed_projection_root_relative(receipt_path, root_path)
+                if receipt_path is not None
+                else None
+            )
+            row["receipt_status"] = receipt_status
+            row["children_status"] = [
+                {"path": path, "status": "verified"} for path in row["children"]
+            ]
+            row["classification"] = (
+                "missing_artifact_repaired"
+                if row["status"] == "repaired"
+                else "projection_verified"
+                if row["status"] == "completed"
+                else "derived_projection_not_required"
+            )
+            row["quarantine"] = {"status": "unchanged", "path": None}
+        except Exception as exc:
+            row["status"] = "hold"
+            row["error"] = f"{type(exc).__name__}: {exc}"
+            row["classification"] = _processed_projection_error_classification(exc)
+            row["receipt"] = None
+            row["receipt_status"] = "unverified"
+            row["children_status"] = []
+            row["quarantine"] = {"status": "unchanged", "path": None}
+            held.append(row)
+            blocked_ids.add(unit.raw_id)
+    return processed, budget_exhausted
+
+
 @_serialize_ingest_across_processes
 def reconcile_processed_projections(
     *, max_parents: int = PROCESSED_PROJECTION_RECONCILER_MAX_PARENTS
@@ -409,19 +716,12 @@ def reconcile_processed_projections(
                 candidate_ids = []
         candidate_ids = candidate_ids[:max_parents]
 
-        from chronovisor.core.raw_store import RawUnit
         raw_store = RawStore(RAW_DIR)
         layout = raw_layout_mode(chronovisor_root=RAW_DIR.parent)
         artifact_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "artifacts"
         reference_dir = RAW_DIR.parent / "runtime" / "raw-projections" / "parents"
         output_dir = RAW_DIR if layout == "legacy" else artifact_dir
         root_path = CHRONOVISOR_ROOT.expanduser().resolve(strict=False)
-
-        # Projection output and logical references are derived state.  Keep
-        # both roots beneath the Chronovisor root before allowing a builder to
-        # publish anything; a symlink or a misconfigured test path must fail
-        # closed instead of turning a projection pass into an arbitrary file
-        # writer.
         for derived_dir in (artifact_dir, reference_dir):
             try:
                 derived_dir.expanduser().resolve(strict=False).relative_to(root_path)
@@ -434,298 +734,49 @@ def reconcile_processed_projections(
             if output_dir.is_dir()
             else set()
         )
-
-        def root_relative(path: Path) -> str:
-            try:
-                return str(
-                    path.expanduser()
-                    .resolve(strict=False)
-                    .relative_to(root_path)
-                )
-            except ValueError as exc:
-                raise RuntimeError(
-                    "derived projection artifact escapes Chronovisor root"
-                ) from exc
-
         max_child_bytes = config.semantic_projection_max_child_bytes
         # Leave a small envelope for checkpoint serialization and lock release
-        # so a normal pass does not intentionally cross the 250 ms gate.  The
-        # configured parent ceiling remains 128; a busy pass simply checkpoints
-        # the last authoritative ID and resumes on the next execution.
+        # so a normal pass does not intentionally cross the 250 ms gate.
         pass_budget_ms = 200.0
-        budget_exhausted = False
-        processed: list[dict[str, Any]] = []
-        held: list[dict[str, Any]] = []
-        candidates: list[tuple[RawUnit, dict[str, str]]] = []
-        advanced_ids: list[str] = []
-        scanned_ids: list[str] = []
-        blocked_ids: set[str] = set()
         enforce_budget = len(candidate_ids) > 1
-
-        def unit_for_regular_path(path: Path, raw_id: str) -> RawUnit | None:
-            if path.is_symlink():
-                raise RuntimeError("processed Raw path is a symlink")
-            if not path.is_file():
-                return None
-            try:
-                resolved = path.expanduser().resolve(strict=True)
-                resolved.relative_to(RAW_DIR.expanduser().resolve(strict=False))
-            except (OSError, ValueError) as exc:
-                raise RuntimeError("processed Raw path is outside Raw root") from exc
-            stat = resolved.stat()
-            return RawUnit(
-                raw_id=raw_id,
-                storage="legacy_file",
-                path=resolved,
-                offset=0,
-                length=stat.st_size,
-                sha256=None,
-                captured_at=None,
-                device=stat.st_dev,
-                inode=stat.st_ino,
+        (
+            candidates,
+            advanced_ids,
+            scanned_ids,
+            blocked_ids,
+            held,
+            budget_exhausted,
+        ) = _processed_projection_candidates(
+            candidate_ids=candidate_ids,
+            raw_store=raw_store,
+            layout=layout,
+            reference_dir=reference_dir,
+            raw_dir=RAW_DIR,
+            started=started,
+            enforce_budget=enforce_budget,
+            pass_budget_ms=pass_budget_ms,
+        )
+        processed, processing_budget_exhausted = (
+            _reconcile_processed_projection_candidates(
+                candidates=candidates,
+                raw_store=raw_store,
+                reference_dir=reference_dir,
+                output_dir=output_dir,
+                max_child_bytes=max_child_bytes,
+                artifact_names_before=artifact_names_before,
+                root_path=root_path,
+                started=started,
+                enforce_budget=enforce_budget,
+                pass_budget_ms=pass_budget_ms,
+                project_native_transcript=project_native_transcript,
+                project_parent_raw=project_parent_raw,
+                verify_projection_bundle=verify_projection_bundle,
+                held=held,
+                advanced_ids=advanced_ids,
+                blocked_ids=blocked_ids,
             )
-
-        def nested_legacy_unit(raw_id: str) -> RawUnit | None:
-            # Do not interpolate an arbitrary ID into a glob.  The basename
-            # check above makes this a bounded date-directory probe and also
-            # keeps wildcard characters from becoming path patterns.
-            matches: list[RawUnit] = []
-            for day_dir in sorted(
-                RAW_DIR.glob(
-                    "[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]"
-                )
-            ):
-                unit = unit_for_regular_path(day_dir / raw_id, raw_id)
-                if unit is not None:
-                    matches.append(unit)
-            if len(matches) > 1:
-                raise RuntimeError("duplicate processed Raw ID")
-            return matches[0] if matches else None
-
-        def error_classification(exc: BaseException) -> str:
-            message = str(exc).lower()
-            if "digest" in message or "hash" in message:
-                return "digest_mismatch"
-            if any(
-                marker in message
-                for marker in ("schema", "malformed", "identity", "invalid")
-            ):
-                return "invalid_schema"
-            if any(marker in message for marker in ("missing", "no durable", "not found")):
-                return "missing_artifact"
-            return "hold"
-
-        for raw_id in candidate_ids:
-            if enforce_budget and (time.perf_counter() - started) * 1000 >= pass_budget_ms:
-                budget_exhausted = True
-                break
-            scanned_ids.append(raw_id)
-            if (
-                not raw_id
-                or raw_id in {".", ".."}
-                or Path(raw_id).name != raw_id
-                or "/" in raw_id
-                or "\\" in raw_id
-                or "\x00" in raw_id
-            ):
-                # Do not echo an unsafe state value or construct a path from
-                # it.  It is a held state record, not an external-path error.
-                held.append(
-                    {
-                        "status": "hold",
-                        "reason": "invalid_raw_id",
-                        "classification": "invalid_raw_id",
-                        "quarantine": {"status": "unchanged", "path": None},
-                    }
-                )
-                blocked_ids.add(raw_id)
-                continue
-            # Semantic children are derived artifacts, not authoritative Raw
-            # units.  Processed state historically contains these names; the
-            # reconciler must intersect state with resolvable RawStore units
-            # rather than creating thousands of false holds.
-            if raw_id.startswith("semantic-") and "-child-" in raw_id:
-                advanced_ids.append(raw_id)
-                continue
-            try:
-                reference_path = reference_dir / raw_id
-                if reference_path.is_symlink():
-                    raise RuntimeError("logical Raw reference is a symlink")
-                if reference_path.exists() and not reference_path.is_file():
-                    raise RuntimeError("logical Raw reference is not a file")
-                unit: RawUnit | None = None
-                resolution: dict[str, str] = {}
-                if reference_path.is_file():
-                    # References are authoritative when present.  A malformed
-                    # or conflicting reference is held; do not fall through to
-                    # a same-name flat file and bypass v2 precedence.
-                    unit = raw_store.resolve_reference(reference_path)
-                    if unit is None:
-                        raise RuntimeError("logical Raw reference is invalid")
-                    resolution["resolution"] = "reference"
-
-                # A reference can be absent for old state.  In v2, consult the
-                # segment authority before any flat path so a duplicate legacy
-                # file cannot win by path order.  RawStore implementations in
-                # focused tests may not expose this optional probe.
-                if unit is None and layout == "v2":
-                    resolve_segment = getattr(raw_store, "resolve_segment", None)
-                    if callable(resolve_segment):
-                        unit = resolve_segment(raw_id)
-                        if unit is not None:
-                            resolution["resolution"] = "segment_fallback"
-
-                if unit is None:
-                    raw_path = RAW_DIR / raw_id
-                    unit = unit_for_regular_path(raw_path, raw_id)
-                    if unit is not None:
-                        resolution["resolution"] = "legacy_flat"
-                if unit is None:
-                    unit = nested_legacy_unit(raw_id)
-                    if unit is not None:
-                        resolution["resolution"] = "legacy_nested"
-                if unit is None:
-                    resolve_legacy_archive = getattr(
-                        raw_store, "resolve_legacy_archive", None
-                    )
-                    if callable(resolve_legacy_archive):
-                        unit = resolve_legacy_archive(raw_id)
-                        if unit is not None:
-                            resolution["resolution"] = "legacy_archive"
-                if unit is None:
-                    # Stale/removed processed IDs are not authoritative Raw
-                    # units.  They are skipped (rather than held) so a legacy
-                    # child backlog cannot consume the bounded cursor.
-                    advanced_ids.append(raw_id)
-                    continue
-                candidates.append((unit, resolution))
-            except Exception as exc:
-                held.append(
-                    {
-                        "raw_id": raw_id,
-                        "status": "hold",
-                        "error": f"{type(exc).__name__}: {exc}",
-                        "classification": error_classification(exc),
-                        "quarantine": {"status": "unchanged", "path": None},
-                    }
-                )
-                blocked_ids.add(raw_id)
-
-        for unit, resolution in candidates:
-            if enforce_budget and (time.perf_counter() - started) * 1000 >= pass_budget_ms:
-                budget_exhausted = True
-                break
-            row: dict[str, Any] = {"raw_id": unit.raw_id, **resolution}
-            row["raw_store"] = {
-                "storage": unit.storage,
-                "stored_sha256": unit.sha256,
-                "commit_sha256": unit.commit.sha256 if unit.commit is not None else None,
-            }
-            try:
-                receipt_path: Path | None = None
-                receipt_status = "not_applicable"
-                parent_path = (
-                    unit.path
-                    if unit.storage == "legacy_file"
-                    else raw_store.materialize_ingest(unit, reference_dir)
-                )
-                raw_bytes = raw_store.read_bytes(unit)
-                row["raw_sha256"] = hashlib.sha256(raw_bytes).hexdigest()
-
-                if unit.commit is not None:
-                    artifacts = project_native_transcript(
-                        parent_path,
-                        raw_bytes,
-                        unit.commit,
-                        output_dir=output_dir,
-                        max_child_bytes=max_child_bytes,
-                    )
-                else:
-                    artifacts = project_parent_raw(
-                        parent_path,
-                        output_dir=output_dir,
-                        max_child_bytes=max_child_bytes,
-                        raw_bytes=raw_bytes,
-                    )
-                row["kind"] = artifacts.kind
-                manifest_path = artifacts.manifest_path
-                child_paths = tuple(artifacts.child_paths)
-                artifact_paths = list(child_paths)
-                if manifest_path is not None:
-                    verified = verify_projection_bundle(manifest_path)
-                    artifact_paths.insert(0, manifest_path)
-                    if verified.get("status") == "delegated":
-                        manifest_bytes = manifest_path.read_bytes()
-                        projection_id = verified.get("projection_id")
-                        if isinstance(projection_id, str):
-                            receipt_path = output_dir / (
-                                f"semantic-{projection_id}-manifest-"
-                                f"{hashlib.sha256(manifest_bytes).hexdigest()}.receipt.json"
-                            )
-                            artifact_paths.append(receipt_path)
-                            receipt_status = "verified"
-                    elif verified.get("status") == "noop":
-                        noop_filename = verified.get("noop_receipt_filename")
-                        if isinstance(noop_filename, str):
-                            receipt_path = output_dir / noop_filename
-                            artifact_paths.append(receipt_path)
-                            receipt_status = "verified"
-
-                artifact_names = {path.name for path in artifact_paths}
-                all_preexisting = bool(artifact_names) and artifact_names.issubset(
-                    artifact_names_before
-                )
-                if not artifact_names:
-                    row["state_before"] = "absent"
-                    row["state_after"] = "absent"
-                    row["status"] = "passthrough"
-                    processed.append(row)
-                else:
-                    row["state_before"] = (
-                        "completed"
-                        if all_preexisting
-                        else "incomplete"
-                        if manifest_path is not None
-                        and manifest_path.name in artifact_names_before
-                        else "absent"
-                    )
-                    row["state_after"] = "completed"
-                    row["status"] = "completed" if all_preexisting else "repaired"
-                    processed.append(row)
-                advanced_ids.append(unit.raw_id)
-                row["manifest"] = (
-                    root_relative(manifest_path) if manifest_path is not None else None
-                )
-                row["children"] = [root_relative(path) for path in child_paths]
-                row["manifest_path"] = row["manifest"]
-                row["child_paths"] = list(row["children"])
-                row["parent_sha256"] = row["raw_sha256"]
-                row["receipt"] = (
-                    root_relative(receipt_path) if receipt_path is not None else None
-                )
-                row["receipt_status"] = receipt_status
-                row["children_status"] = [
-                    {"path": path, "status": "verified"}
-                    for path in row["children"]
-                ]
-                row["classification"] = (
-                    "missing_artifact_repaired"
-                    if row["status"] == "repaired"
-                    else "projection_verified"
-                    if row["status"] == "completed"
-                    else "derived_projection_not_required"
-                )
-                row["quarantine"] = {"status": "unchanged", "path": None}
-            except Exception as exc:
-                row["status"] = "hold"
-                row["error"] = f"{type(exc).__name__}: {exc}"
-                row["classification"] = error_classification(exc)
-                row["receipt"] = None
-                row["receipt_status"] = "unverified"
-                row["children_status"] = []
-                row["quarantine"] = {"status": "unchanged", "path": None}
-                held.append(row)
-                blocked_ids.add(unit.raw_id)
+        )
+        budget_exhausted = budget_exhausted or processing_budget_exhausted
 
         completed_ids = set(advanced_ids)
         candidate_ids_by_raw_id = {unit.raw_id for unit, _resolution in candidates}
@@ -1478,6 +1529,19 @@ def _post_ingest_lint_summary() -> dict[str, Any]:
         return {"status": "error", "error_category": error_category}
 
 
+def _resume_fragment_quarantines_or_error() -> tuple[list[dict], dict[str, Any] | None]:
+    try:
+        return _resume_prepared_capture_fragment_quarantines(), None
+    except Exception as exc:
+        return [], {
+            "triggered": False,
+            "reason": (
+                "prepared capture fragment quarantine could not resume: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+        }
+
+
 @_serialize_ingest_across_processes
 def run_pending_ingest(
     force: bool = False,
@@ -1516,18 +1580,9 @@ def run_pending_ingest(
             raise ValueError(
                 f"max_units must be between 1 and {MAX_INGEST_BATCH_UNITS}"
             )
-        try:
-            resumed_fragment_quarantines = (
-                _resume_prepared_capture_fragment_quarantines()
-            )
-        except Exception as exc:
-            return {
-                "triggered": False,
-                "reason": (
-                    "prepared capture fragment quarantine could not resume: "
-                    f"{type(exc).__name__}: {exc}"
-                ),
-            }
+        resumed_fragment_quarantines, resume_error = _resume_fragment_quarantines_or_error()
+        if resume_error is not None:
+            return resume_error
         if force:
             pending_now = get_pending_raw_files()
             if not pending_now:

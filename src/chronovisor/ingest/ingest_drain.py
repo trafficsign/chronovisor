@@ -196,6 +196,21 @@ def _release_ingest_runner() -> dict[str, Any]:
     return result
 
 
+def _reconcile_processed_projections() -> dict[str, Any]:
+    try:
+        return orchestrator.reconcile_processed_projections(
+            max_parents=orchestrator.PROCESSED_PROJECTION_RECONCILER_MAX_PARENTS
+        )
+    except Exception as exc:
+        return {
+            "status": "error",
+            "disabled": False,
+            "processed": [],
+            "held": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def _drain(
     *,
     max_batches: int = DEFAULT_MAX_BATCHES,
@@ -258,18 +273,7 @@ def _drain(
         not local_ollama or ollama.is_available()
     )
     if not runtime_available and pending_start > 0:
-        try:
-            projection_reconcile = orchestrator.reconcile_processed_projections(
-                max_parents=orchestrator.PROCESSED_PROJECTION_RECONCILER_MAX_PARENTS
-            )
-        except Exception as exc:
-            projection_reconcile = {
-                "status": "error",
-                "disabled": False,
-                "processed": [],
-                "held": [],
-                "error": f"{type(exc).__name__}: {exc}",
-            }
+        projection_reconcile = _reconcile_processed_projections()
         pending_after_reconcile = len(orchestrator.get_pending_raw_files())
         liveness = _record_liveness(
             "waiting_for_ingest_runtime",
@@ -312,18 +316,7 @@ def _drain(
         orchestrator.ingest_authority_preflight() if runtime_available else None
     )
     if authority_preflight is not None and not authority_preflight["ok"]:
-        try:
-            projection_reconcile = orchestrator.reconcile_processed_projections(
-                max_parents=orchestrator.PROCESSED_PROJECTION_RECONCILER_MAX_PARENTS
-            )
-        except Exception as exc:
-            projection_reconcile = {
-                "status": "error",
-                "disabled": False,
-                "processed": [],
-                "held": [],
-                "error": f"{type(exc).__name__}: {exc}",
-            }
+        projection_reconcile = _reconcile_processed_projections()
         pending_after_reconcile = len(orchestrator.get_pending_raw_files())
         liveness = _record_liveness(
             "blocked_by_decision_authority",
@@ -447,18 +440,7 @@ def _drain(
         if sleep_seconds:
             time.sleep(sleep_seconds)
 
-    try:
-        projection_reconcile = orchestrator.reconcile_processed_projections(
-            max_parents=orchestrator.PROCESSED_PROJECTION_RECONCILER_MAX_PARENTS
-        )
-    except Exception as exc:
-        projection_reconcile = {
-            "status": "error",
-            "disabled": False,
-            "processed": [],
-            "held": [],
-            "error": f"{type(exc).__name__}: {exc}",
-        }
+    projection_reconcile = _reconcile_processed_projections()
     pending_final = len(orchestrator.get_pending_raw_files())
     if batch_authority_block is not None:
         status = "blocked"
