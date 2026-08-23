@@ -290,6 +290,52 @@ def test_reconcile_disables_after_three_slow_passes(
     )
 
 
+def test_reconcile_old_revision_disabled_state_retries_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _root, _raw_dir = _configure_reconciler(tmp_path, monkeypatch, processed=[])
+    state = _state(
+        processed_projection_reconciler_cursor="keep.md",
+        processed_projection_reconciler_timings_ms=[301.0, 302.0, 303.0],
+        processed_projection_reconciler_slow_streak=3,
+        processed_projection_reconciler_disabled=True,
+        failure_quarantine={"keep": True},
+    )
+    orchestrator.STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+    ticks = iter((0.0, 0.010))
+    monkeypatch.setattr(orchestrator.time, "perf_counter", lambda: next(ticks))
+
+    result = orchestrator.reconcile_processed_projections()
+
+    persisted = json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8"))
+    assert result["disabled"] is False
+    assert result["revision"] == 1
+    assert persisted["processed_projection_reconciler_cursor"] == "keep.md"
+    assert persisted["failure_quarantine"] == {"keep": True}
+    assert persisted["processed_projection_reconciler_slow_streak"] == 0
+    assert persisted["processed_projection_reconciler_disabled"] is False
+    assert persisted["processed_projection_reconciler_revision"] == 1
+
+
+def test_reconcile_current_revision_disabled_state_stays_fail_closed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _root, _raw_dir = _configure_reconciler(tmp_path, monkeypatch, processed=[])
+    state = _state(
+        processed_projection_reconciler_slow_streak=3,
+        processed_projection_reconciler_disabled=True,
+        processed_projection_reconciler_revision=1,
+    )
+    orchestrator.STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+
+    first = orchestrator.reconcile_processed_projections()
+    second = orchestrator.reconcile_processed_projections()
+
+    assert first["reason"] == "slow_pass_kill_switch"
+    assert second["reason"] == "slow_pass_kill_switch"
+    assert json.loads(orchestrator.STATE_FILE.read_text(encoding="utf-8")) == state
+
+
 def test_reconcile_p95_uses_nearest_rank_for_two_samples(
     tmp_path: Path, monkeypatch
 ) -> None:

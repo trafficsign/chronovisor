@@ -123,6 +123,70 @@ def test_store_reads_open_and_sealed_ranges_by_logical_raw_id(tmp_path: Path) ->
     assert sealed_store.resolve_reference(reference) == sealed_unit
 
 
+def test_segment_snapshot_cache_reuses_then_invalidates_authoritative_indexes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw_dir = tmp_path / "raw"
+    source = tmp_path / "session.jsonl"
+    first_payload = b'{"source":"first"}\n'
+    second_payload = b'{"source":"second"}\n'
+    source.write_bytes(first_payload + second_payload)
+    receipt = _append(
+        raw_dir,
+        source,
+        first_payload,
+        raw_id="save-first.md",
+        idempotency_key="first",
+    )
+
+    original_read_commits = raw_store_module.read_commits
+    journal_reads = 0
+
+    def counted_read_commits(path: Path):
+        nonlocal journal_reads
+        journal_reads += 1
+        return original_read_commits(path)
+
+    monkeypatch.setattr(raw_store_module, "read_commits", counted_read_commits)
+    assert [unit.raw_id for unit in RawStore(raw_dir, mode="v2").iter_segment_units()] == [
+        "save-first.md"
+    ]
+    assert [unit.raw_id for unit in RawStore(raw_dir, mode="v2").iter_segment_units()] == [
+        "save-first.md"
+    ]
+    assert journal_reads == 1
+
+    _append(
+        raw_dir,
+        source,
+        second_payload,
+        raw_id="save-second.md",
+        idempotency_key="second",
+        after_line=1,
+    )
+    assert [unit.raw_id for unit in RawStore(raw_dir, mode="v2").iter_segment_units()] == [
+        "save-first.md",
+        "save-second.md",
+    ]
+    assert journal_reads == 2
+
+    original_manifest_commits = raw_store_module.manifest_commits
+    manifest_reads = 0
+
+    def counted_manifest_commits(path: Path):
+        nonlocal manifest_reads
+        manifest_reads += 1
+        return original_manifest_commits(path)
+
+    monkeypatch.setattr(
+        raw_store_module, "manifest_commits", counted_manifest_commits
+    )
+    seal_segment(receipt.data_path, remove_open=True)
+    sealed = tuple(RawStore(raw_dir, mode="v2").iter_segment_units())
+    assert {unit.storage for unit in sealed} == {"segment_sealed"}
+    assert manifest_reads == 1
+
+
 def test_store_decompresses_one_physical_segment_once_for_all_units(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -13,7 +13,9 @@ import json
 import os
 import re
 import stat
+import threading
 import tomllib
+from collections import OrderedDict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -37,6 +39,7 @@ RawStorageKind = Literal[
 ]
 RAW_REFERENCE_SCHEMA = "chronovisor.raw-reference.v1"
 _LEGACY_ARCHIVE_BASENAME_RE = re.compile(r"^legacy-part-[0-9]{3}\.tar\.zst$")
+_SEGMENT_SNAPSHOT_CACHE_SIZE = 8
 
 
 def committed_event_spans(
@@ -138,6 +141,14 @@ class RawStore:
     the same logical Raw ID.  ``v2`` prefers a segment commit.  This makes the
     feature flag reversible while shadow comparison is running.
     """
+
+    # Segment commits are immutable after their journal/manifest is published.
+    # Reuse that parsed snapshot across short-lived stores, but only while the
+    # authoritative index files retain the same lstat identities.
+    _segment_snapshots: OrderedDict[
+        Path, tuple[tuple[tuple[str, int, int, int, int], ...], tuple[RawUnit, ...]]
+    ] = OrderedDict()
+    _segment_snapshots_lock = threading.Lock()
 
     def __init__(self, raw_dir: Path, *, mode: RawLayoutMode | str | None = None):
         self.raw_dir = raw_dir.expanduser().resolve(strict=False)
@@ -264,6 +275,44 @@ class RawStore:
                     commit=commit,
                 )
 
+    def _segment_snapshot_signature(self) -> tuple[tuple[str, int, int, int, int], ...]:
+        """Identify the two durable indexes that define segment membership."""
+
+        journal_pattern = (
+            "[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/*.commits.jsonl"
+        )
+        manifest_pattern = (
+            "[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/*.manifest.json"
+        )
+        paths = [*self.raw_dir.glob(journal_pattern)]
+        paths.extend(
+            path
+            for path in self.raw_dir.glob(manifest_pattern)
+            if not path.name.startswith("legacy-part-")
+        )
+        signature: list[tuple[str, int, int, int, int]] = []
+        for path in sorted(paths):
+            try:
+                identity = path.lstat()
+            except FileNotFoundError:
+                continue
+            signature.append(
+                (
+                    path.relative_to(self.raw_dir).as_posix(),
+                    identity.st_dev,
+                    identity.st_ino,
+                    identity.st_size,
+                    identity.st_mtime_ns,
+                )
+            )
+        return tuple(signature)
+
+    def _load_segment_units(self) -> tuple[RawUnit, ...]:
+        selected: dict[str, RawUnit] = {}
+        for unit in tuple(self._open_units()) + tuple(self._sealed_units()):
+            selected[unit.raw_id] = unit
+        return tuple(selected[raw_id] for raw_id in sorted(selected))
+
     def iter_units(self) -> Iterator[RawUnit]:
         if self._units_cache is None:
             legacy = tuple(self._legacy_archive_units()) + tuple(self._legacy_units())
@@ -294,12 +343,26 @@ class RawStore:
         """List v2 logical units without touching the legacy flat directory."""
 
         if self._segment_units_cache is None:
-            selected: dict[str, RawUnit] = {}
-            for unit in tuple(self._open_units()) + tuple(self._sealed_units()):
-                selected[unit.raw_id] = unit
-            self._segment_units_cache = tuple(
-                selected[raw_id] for raw_id in sorted(selected)
-            )
+            signature = self._segment_snapshot_signature()
+            cached_units: tuple[RawUnit, ...] | None = None
+            with self._segment_snapshots_lock:
+                cached = self._segment_snapshots.get(self.raw_dir)
+                if cached is not None and cached[0] == signature:
+                    cached_units = cached[1]
+                    self._segment_snapshots.move_to_end(self.raw_dir)
+            if cached_units is not None:
+                self._segment_units_cache = cached_units
+            else:
+                units = self._load_segment_units()
+                # Never retain a snapshot whose authoritative indexes changed
+                # while it was parsed; a following store will parse afresh.
+                if self._segment_snapshot_signature() == signature:
+                    with self._segment_snapshots_lock:
+                        self._segment_snapshots[self.raw_dir] = (signature, units)
+                        self._segment_snapshots.move_to_end(self.raw_dir)
+                        while len(self._segment_snapshots) > _SEGMENT_SNAPSHOT_CACHE_SIZE:
+                            self._segment_snapshots.popitem(last=False)
+                self._segment_units_cache = units
         yield from self._segment_units_cache
 
     def iter_segment_bytes(

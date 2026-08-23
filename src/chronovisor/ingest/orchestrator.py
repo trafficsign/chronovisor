@@ -334,6 +334,8 @@ _PROCESSED_PROJECTION_RECONCILER_SLOW_STREAK = (
     "processed_projection_reconciler_slow_streak"
 )
 _PROCESSED_PROJECTION_RECONCILER_DISABLED = "processed_projection_reconciler_disabled"
+_PROCESSED_PROJECTION_RECONCILER_REVISION = "processed_projection_reconciler_revision"
+_PROCESSED_PROJECTION_RECONCILER_IMPLEMENTATION_REVISION = 1
 
 
 def _processed_projection_error_classification(exc: BaseException) -> str:
@@ -690,6 +692,18 @@ def reconcile_processed_projections(
             }
 
         state = _load_state()
+        if (
+            state.get(_PROCESSED_PROJECTION_RECONCILER_REVISION)
+            != _PROCESSED_PROJECTION_RECONCILER_IMPLEMENTATION_REVISION
+        ):
+            # A new bounded implementation earns one retry, without disturbing
+            # its cursor, history, quarantine, or normal ingest-owned fields.
+            state[_PROCESSED_PROJECTION_RECONCILER_REVISION] = (
+                _PROCESSED_PROJECTION_RECONCILER_IMPLEMENTATION_REVISION
+            )
+            state[_PROCESSED_PROJECTION_RECONCILER_SLOW_STREAK] = 0
+            state[_PROCESSED_PROJECTION_RECONCILER_DISABLED] = False
+            _save_state(state)
         if state.get(_PROCESSED_PROJECTION_RECONCILER_DISABLED) is True:
             return {
                 "status": "disabled",
@@ -698,6 +712,7 @@ def reconcile_processed_projections(
                 "processed": [],
                 "held": [],
                 "cursor": state.get(_PROCESSED_PROJECTION_RECONCILER_CURSOR),
+                "revision": _PROCESSED_PROJECTION_RECONCILER_IMPLEMENTATION_REVISION,
             }
 
         cursor_value = state.get(_PROCESSED_PROJECTION_RECONCILER_CURSOR)
@@ -840,6 +855,7 @@ def reconcile_processed_projections(
             _PROCESSED_PROJECTION_RECONCILER_TIMINGS,
             _PROCESSED_PROJECTION_RECONCILER_SLOW_STREAK,
             _PROCESSED_PROJECTION_RECONCILER_DISABLED,
+            _PROCESSED_PROJECTION_RECONCILER_REVISION,
         }
         latest_state = _load_state()
         for key in reconciler_keys:
@@ -866,6 +882,7 @@ def reconcile_processed_projections(
             "max_ms": max_ms,
             "slow_streak": slow_streak,
             "budget_exhausted": budget_exhausted,
+            "revision": _PROCESSED_PROJECTION_RECONCILER_IMPLEMENTATION_REVISION,
         }
 
 
