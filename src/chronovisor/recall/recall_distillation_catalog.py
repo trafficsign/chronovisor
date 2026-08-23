@@ -6,14 +6,14 @@ import hashlib
 import json
 import sqlite3
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from chronovisor.core.canonical_json import canonical_json_sha256_strict
+from chronovisor.core.raw_segment import RawSegmentCorrupt
 from chronovisor.core.raw_store import (
-    RawSegmentCorrupt,
     RawStore,
     RawUnit,
     committed_event_spans,
@@ -71,7 +71,9 @@ def _index_file_state(path: Path) -> dict[str, int] | None:
     }
 
 
-def _write_index_checkpoint(path: Path, watermark: str, digest: str, count: int) -> None:
+def _write_index_checkpoint(
+    path: Path, watermark: str, digest: str, count: int
+) -> None:
     store.write_sealed_state(
         _index_checkpoint_path(path),
         {
@@ -176,14 +178,18 @@ def _unit_identity(unit: RawUnit) -> tuple[str, str]:
     return unit.sha256, canonical_json_sha256_strict(commit.to_dict())
 
 
-def _event_row(unit: RawUnit, event: Mapping[str, Any], *, start: int, end: int, index: int) -> dict[str, Any] | None:
+def _event_row(
+    unit: RawUnit, event: Mapping[str, Any], *, start: int, end: int, index: int
+) -> dict[str, Any] | None:
     commit = unit.commit
     raw_sha256, receipt_sha256 = _unit_identity(unit)
     assert commit is not None
     role, text = distill._event_semantics(commit.host, event)
     if role not in {"user", "assistant", "tool"}:
         return None
-    timestamp, timestamp_us = distill._timestamp(event.get("timestamp"), commit.captured_at)
+    timestamp, timestamp_us = distill._timestamp(
+        event.get("timestamp"), commit.captured_at
+    )
     return {
         "raw_id": unit.raw_id,
         "event_index": index,
@@ -212,7 +218,9 @@ def _event_row(unit: RawUnit, event: Mapping[str, Any], *, start: int, end: int,
     }
 
 
-def _read_unit_events(raw_store: RawStore, unit: RawUnit) -> tuple[str, list[dict[str, Any]]]:
+def _read_unit_events(
+    raw_store: RawStore, unit: RawUnit
+) -> tuple[str, list[dict[str, Any]]]:
     try:
         raw = raw_store.read_bytes(unit)
         if raw_store.is_archived_legacy_markdown(unit, raw):
@@ -231,15 +239,15 @@ def _read_unit_events(raw_store: RawStore, unit: RawUnit) -> tuple[str, list[dic
             raise CatalogError("committed Raw event is invalid") from exc
         if not isinstance(event, dict):
             raise CatalogError("committed Raw event is not an object")
-        row = _event_row(unit, event, start=start, end=start + len(encoded), index=index)
+        row = _event_row(
+            unit, event, start=start, end=start + len(encoded), index=index
+        )
         if row is not None:
             rows.append(row)
     return "indexed", rows
 
 
-def _store_unit(
-    connection: sqlite3.Connection, unit: RawUnit, *, status: str
-) -> None:
+def _store_unit(connection: sqlite3.Connection, unit: RawUnit, *, status: str) -> None:
     raw_sha256, receipt_sha256 = _unit_identity(unit)
     assert unit.commit is not None and unit.captured_at is not None
     connection.execute(
@@ -257,7 +265,9 @@ def _store_unit(
     )
 
 
-def _store_events(connection: sqlite3.Connection, rows: Iterable[Mapping[str, Any]]) -> None:
+def _store_events(
+    connection: sqlite3.Connection, rows: Iterable[Mapping[str, Any]]
+) -> None:
     connection.executemany(
         """INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
@@ -287,12 +297,17 @@ def _store_events(connection: sqlite3.Connection, rows: Iterable[Mapping[str, An
     )
 
 
-def _store_rallies(connection: sqlite3.Connection, rows: Iterable[Mapping[str, Any]]) -> tuple[str, ...]:
+def _store_rallies(
+    connection: sqlite3.Connection, rows: Iterable[Mapping[str, Any]]
+) -> tuple[str, ...]:
     values = sorted(rows, key=lambda row: str(row["rally_id"]))
     encoded: dict[str, tuple[int, str]] = {}
     for row in values:
         rally_id = str(row["rally_id"])
-        value = (int(row["as_of_us"]), json.dumps(row, sort_keys=True, separators=(",", ":")))
+        value = (
+            int(row["as_of_us"]),
+            json.dumps(row, sort_keys=True, separators=(",", ":")),
+        )
         prior = encoded.get(rally_id)
         if prior is not None and prior != value:
             raise CatalogError("rally duplicate conflicts within delta")
@@ -340,21 +355,34 @@ def _bootstrap(
 def _catalog_event(row: Mapping[str, Any]) -> dict[str, Any]:
     text = str(row["text"])
     return {
-        **{key: row[key] for key in (
-            "raw_id", "raw_sha256", "receipt_sha256", "event_index", "host",
-            "session_key", "session_cluster_id", "session_id_sha256", "source_index",
-            "byte_start", "byte_end", "timestamp", "timestamp_us", "role",
-            "semantic_sha256", "structural",
-        )},
+        **{
+            key: row[key]
+            for key in (
+                "raw_id",
+                "raw_sha256",
+                "receipt_sha256",
+                "event_index",
+                "host",
+                "session_key",
+                "session_cluster_id",
+                "session_id_sha256",
+                "source_index",
+                "byte_start",
+                "byte_end",
+                "timestamp",
+                "timestamp_us",
+                "role",
+                "semantic_sha256",
+                "structural",
+            )
+        },
         "text_bytes": len(text.encode("utf-8")),
         "nonempty": bool(text.strip()),
         "prompt_hash": distill._prompt_hash(text) if row["role"] == "user" else None,
     }
 
 
-def _resolve_rows(
-    raw_dir: Path, rows: Iterable[Mapping[str, Any]]
-) -> dict[str, str]:
+def _resolve_rows(raw_dir: Path, rows: Iterable[Mapping[str, Any]]) -> dict[str, str]:
     """Resolve only the verified Raw units referenced by ``rows``."""
 
     raw_store = RawStore(raw_dir, mode="v2")
@@ -388,9 +416,16 @@ def _resolve_rows(
             try:
                 event = json.loads(encoded)
                 role, text = distill._event_semantics(unit.commit.host, event)
-            except (UnicodeError, json.JSONDecodeError, distill.DistillationError) as exc:
+            except (
+                UnicodeError,
+                json.JSONDecodeError,
+                distill.DistillationError,
+            ) as exc:
                 raise CatalogError("catalog event cannot be decoded") from exc
-            if role != row["role"] or hashlib.sha256(text.encode()).hexdigest() != row["semantic_sha256"]:
+            if (
+                role != row["role"]
+                or hashlib.sha256(text.encode()).hexdigest() != row["semantic_sha256"]
+            ):
                 raise CatalogError("catalog event semantics conflict with source")
             resolved[str(row["semantic_sha256"])] = text
     return resolved
@@ -488,7 +523,9 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
         else:
             existing_sessions = {
                 (str(row[0]), str(row[1]))
-                for row in connection.execute("SELECT DISTINCT host,session_key FROM events")
+                for row in connection.execute(
+                    "SELECT DISTINCT host,session_key FROM events"
+                )
             }
             delta: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
             deferred_set: set[tuple[str, str]] = set()
@@ -513,7 +550,9 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
                             raw_dir,
                             root=root,
                             max_context_bytes=max_context_bytes,
-                            _event_rows=sorted(rows, key=lambda row: int(row["source_index"])),
+                            _event_rows=sorted(
+                                rows, key=lambda row: int(row["source_index"])
+                            ),
                         )
                     )
                 except distill.DistillationError as exc:
@@ -572,7 +611,9 @@ def rallies(root: Path, ids: Iterable[str] | None = None) -> list[dict[str, Any]
                 selected,
             )
         else:
-            rows = connection.execute("SELECT row_json FROM rallies ORDER BY as_of_us,rally_id")
+            rows = connection.execute(
+                "SELECT row_json FROM rallies ORDER BY as_of_us,rally_id"
+            )
         return [json.loads(row[0]) for row in rows]
 
 
@@ -610,7 +651,59 @@ def texts(
                 if ref.get(key) != row[key]:
                     raise CatalogError("text reference conflicts with catalog")
             rows[(raw_id, event_index)] = row
-    return _resolve_rows(raw_dir, rows.values())
+    return _resolve_rows(raw_dir, cast(Iterable[Mapping[str, Any]], rows.values()))
+
+
+class CatalogTextCache(Mapping[str, str]):
+    """Resolve only requested catalog text and retain it for the current run."""
+
+    def __init__(self, raw_dir: Path, root: Path) -> None:
+        self._raw_dir = raw_dir
+        self._root = root
+        self._cache: dict[str, str] = {}
+
+    def __getitem__(self, key: str) -> str:
+        if key not in self._cache:
+            self.prefetch((key,))
+        return self._cache[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._cache)
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def prefetch(self, hashes: Iterable[str]) -> None:
+        missing = sorted(
+            {
+                value
+                for value in hashes
+                if isinstance(value, str) and value and value not in self._cache
+            }
+        )
+        if not missing:
+            return
+        selected: dict[str, sqlite3.Row] = {}
+        path = catalog_path(self._root)
+        try:
+            with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+                connection.row_factory = sqlite3.Row
+                for offset in range(0, len(missing), 500):
+                    chunk = missing[offset : offset + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    for row in connection.execute(
+                        f"SELECT * FROM events WHERE semantic_sha256 IN ({placeholders})",
+                        chunk,
+                    ):
+                        selected.setdefault(str(row["semantic_sha256"]), row)
+        except sqlite3.DatabaseError as exc:
+            raise CatalogError("historical catalog is unreadable") from exc
+        self._cache.update(
+            _resolve_rows(
+                self._raw_dir,
+                cast(Iterable[Mapping[str, Any]], selected.values()),
+            )
+        )
 
 
 def _catalog_watermark(raw_dir: Path, root: Path) -> str:
@@ -715,7 +808,17 @@ def _index_atoms(
         raise CatalogError("historical index FTS rows conflict")
     atoms: dict[str, dict[str, Any]] = {}
     for record in records:
-        rowid, atom_id, host, cluster, source_index, timestamp_us, text_sha256, ref_json, text = record
+        (
+            rowid,
+            atom_id,
+            host,
+            cluster,
+            source_index,
+            timestamp_us,
+            text_sha256,
+            ref_json,
+            text,
+        ) = record
         try:
             ref = json.loads(ref_json)
         except (TypeError, json.JSONDecodeError) as exc:
@@ -737,7 +840,10 @@ def _index_atoms(
             expected_atom["ref"],
         ):
             raise CatalogError("historical index assistant atom conflicts")
-        if not isinstance(text, str) or hashlib.sha256(text.encode()).hexdigest() != text_sha256:
+        if (
+            not isinstance(text, str)
+            or hashlib.sha256(text.encode()).hexdigest() != text_sha256
+        ):
             raise CatalogError("historical index text conflicts")
         if fts[rowid] != store._search_terms(text):
             raise CatalogError("historical index FTS text conflicts")
@@ -770,9 +876,9 @@ def _resolved_atoms(
         text = texts_by_hash.get(str(atom["text_sha256"]))
         if text is None:
             raise CatalogError("catalog assistant text is unavailable")
-        atoms[atom_id] = {key: value for key, value in atom.items() if key != "catalog_row"} | {
-            "text": text
-        }
+        atoms[atom_id] = {
+            key: value for key, value in atom.items() if key != "catalog_row"
+        } | {"text": text}
     return atoms
 
 
@@ -795,8 +901,8 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
         atoms = _resolved_atoms(raw_dir, expected)
         digest = store.create_historical_index(path, atoms.values())
         try:
-            with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
-                _atoms, verified = _index_atoms(connection, expected)
+            with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as readonly:
+                _atoms, verified = _index_atoms(readonly, expected)
         except sqlite3.DatabaseError as exc:
             raise CatalogError("historical index bootstrap is unreadable") from exc
         if digest != verified:
@@ -810,7 +916,11 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("BEGIN IMMEDIATE")
         indexed, digest = _index_atoms(connection, expected)
-        pending = {atom_id: atom for atom_id, atom in expected.items() if atom_id not in indexed}
+        pending = {
+            atom_id: atom
+            for atom_id, atom in expected.items()
+            if atom_id not in indexed
+        }
         if not pending:
             connection.rollback()
             connection.close()

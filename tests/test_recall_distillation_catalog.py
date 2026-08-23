@@ -23,7 +23,10 @@ def _message(role: str, text: str, timestamp: str) -> dict[str, object]:
             "type": "message",
             "role": role,
             "content": [
-                {"type": "input_text" if role == "user" else "output_text", "text": text}
+                {
+                    "type": "input_text" if role == "user" else "output_text",
+                    "text": text,
+                }
             ],
         },
     }
@@ -39,7 +42,9 @@ def _capture(
 ) -> Path:
     raw_dir = root / "raw"
     source = root / f"{raw_id}.jsonl"
-    payload = b"".join(json.dumps(event, separators=(",", ":")).encode() + b"\n" for event in events)
+    payload = b"".join(
+        json.dumps(event, separators=(",", ":")).encode() + b"\n" for event in events
+    )
     source.write_bytes(payload)
     append_capture(
         raw_dir=raw_dir,
@@ -58,7 +63,9 @@ def _capture(
     return raw_dir
 
 
-def test_bootstrap_catalog_keeps_text_out_of_sqlite_and_resolves_refs(tmp_path: Path) -> None:
+def test_bootstrap_catalog_keeps_text_out_of_sqlite_and_resolves_refs(
+    tmp_path: Path,
+) -> None:
     init_chronovisor(RuntimeContext(tmp_path))
     raw_dir = _capture(
         tmp_path,
@@ -81,8 +88,53 @@ def test_bootstrap_catalog_keeps_text_out_of_sqlite_and_resolves_refs(tmp_path: 
         answer_ref["semantic_sha256"]: "alpha answer"
     }
     with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
-        event_columns = {row[1] for row in connection.execute("PRAGMA table_info(events)")}
+        event_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(events)")
+        }
     assert "text" not in event_columns
+
+
+def test_text_cache_reads_only_requested_raw_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [
+            _message("user", "first query", "2026-08-01T00:00:00Z"),
+            _message("assistant", "first answer", "2026-08-01T00:00:01Z"),
+        ],
+    )
+    _capture(
+        tmp_path,
+        "save-codex-two.md",
+        "b" * 24,
+        [_message("assistant", "second answer", "2026-08-02T00:00:01Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        first_hash = connection.execute(
+            "SELECT semantic_sha256 FROM events WHERE raw_id='save-codex-one.md' "
+            "AND role='assistant'"
+        ).fetchone()[0]
+
+    from chronovisor.core.raw_store import RawStore
+
+    original_read = RawStore.read_bytes
+    reads: list[str] = []
+
+    def record_read(self: RawStore, raw: object) -> bytes:
+        reads.append(getattr(raw, "raw_id", str(raw)))
+        return original_read(self, raw)
+
+    monkeypatch.setattr(RawStore, "read_bytes", record_read)
+    cache = catalog.CatalogTextCache(raw_dir, tmp_path)
+
+    assert cache.get(first_hash) == "first answer"
+    assert cache.get(first_hash) == "first answer"
+    assert reads == ["save-codex-one.md"]
 
 
 def test_steady_state_same_watermark_reads_no_raw_and_new_session_is_delta(
@@ -297,7 +349,9 @@ def test_historical_index_adopts_exact_catalog_parity_without_raw_read(
     original_connect = catalog.sqlite3.connect
 
     class NoIndexScan(sqlite3.Connection):
-        def execute(self, statement: str, *args: object, **kwargs: object) -> sqlite3.Cursor:
+        def execute(
+            self, statement: str, *args: object, **kwargs: object
+        ) -> sqlite3.Cursor:
             if "from atoms" in statement.lower():
                 raise AssertionError("exact parity scanned historical index")
             return super().execute(statement, *args, **kwargs)
@@ -388,7 +442,9 @@ def test_historical_index_conflicting_atom_fails_closed(tmp_path: Path) -> None:
         catalog.sync_historical_index(raw_dir, tmp_path)
 
 
-def test_historical_index_checkpoint_mismatch_revalidates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_historical_index_checkpoint_mismatch_revalidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     init_chronovisor(RuntimeContext(tmp_path))
     raw_dir = _capture(
         tmp_path,
