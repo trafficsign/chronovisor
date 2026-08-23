@@ -479,7 +479,7 @@ def test_ox_profile_requires_explicit_enable_and_builds_one_remote_teacher(
     assert counterfactual is None
     assert set(teachers) == {distill.OX_TEACHER_ROLE}
     assert teachers[distill.OX_TEACHER_ROLE].local is False
-    assert teachers[distill.OX_TEACHER_ROLE].kwargs["timeout_ms"] == 120_000
+    assert teachers[distill.OX_TEACHER_ROLE].kwargs["timeout_ms"] == 240_000
     assert counterfactual_enabled is None
 
 
@@ -2638,7 +2638,7 @@ def test_ox_ramp_resumes_only_for_the_same_profile_contract_and_request_revision
 
 
 def test_ox_ramp_request_revision_tracks_safe_reason_code_schema() -> None:
-    assert distill.OX_RAMP_REQUEST_REVISION == "json-schema-reason-code-16k-v3"
+    assert distill.OX_RAMP_REQUEST_REVISION == "json-schema-reason-code-16k-240s-v4"
 
 
 def test_ox_ramp_requires_a_95_percent_provider_success_rate_to_advance() -> None:

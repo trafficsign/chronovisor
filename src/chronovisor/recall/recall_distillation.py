@@ -61,7 +61,7 @@ LOCAL_TRIAD_PROFILE = "local-triad-v1"
 OX_SINGLE_PROFILE = "ox-alpha-single-v1"
 OX_SINGLE_COHORT = "ox-alpha-backfill-v1"
 OX_PROBE_REVISION = "single-teacher-repeat-v2"
-OX_RAMP_REQUEST_REVISION = "json-schema-reason-code-16k-v3"
+OX_RAMP_REQUEST_REVISION = "json-schema-reason-code-16k-240s-v4"
 TEACHER_PROFILES = frozenset({LOCAL_TRIAD_PROFILE, OX_SINGLE_PROFILE})
 OX_ALPHA_ENDPOINT = "https://opencode.ai/zen/go/v1"
 OX_ALPHA_CREDENTIAL_REF = "oskeyring:codex-router-opencode-go/default"
@@ -436,7 +436,7 @@ def _default_workers(
                 free_only=True,
                 allow_paid_fallback=False,
                 max_input_bytes=config.max_input_bytes,
-                timeout_ms=max(120_000, teacher_deadline_ms),
+                timeout_ms=max(240_000, teacher_deadline_ms),
             )
         except Exception:
             return {}, None
