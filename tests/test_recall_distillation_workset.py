@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import math
+import os
 import sqlite3
+import stat
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -160,7 +164,9 @@ def test_status_reports_backlog_by_kind_and_state(tmp_path: Path) -> None:
     }
 
 
-def test_commit_distinguishes_retry_quarantine_and_label_invalid_output(tmp_path: Path) -> None:
+def test_commit_distinguishes_retry_quarantine_and_label_invalid_output(
+    tmp_path: Path,
+) -> None:
     workset = DistillationWorkset(tmp_path / "workset.sqlite3")
     workset.advance([_item("retry"), _item("quarantine"), _item("invalid")], 3)
     claims = workset.claim("label", 3, "ox-1", 60)
@@ -180,7 +186,9 @@ def test_commit_distinguishes_retry_quarantine_and_label_invalid_output(tmp_path
     assert [claim.work_id for claim in retry] == ["retry", "invalid"]
 
 
-def test_payload_bodies_and_invalid_teacher_completion_are_rejected(tmp_path: Path) -> None:
+def test_payload_bodies_and_invalid_teacher_completion_are_rejected(
+    tmp_path: Path,
+) -> None:
     workset = DistillationWorkset(tmp_path / "workset.sqlite3")
     with sqlite3.connect(tmp_path / "workset.sqlite3") as connection:
         columns = {
@@ -207,3 +215,202 @@ def test_payload_bodies_and_invalid_teacher_completion_are_rejected(tmp_path: Pa
         )
     assert workset.status()["completed"] == 0
     assert workset.status()["leased"] == 1
+
+
+@pytest.mark.parametrize("lease_seconds", [math.nan, math.inf, -math.inf])
+def test_claim_rejects_nonfinite_lease_without_stranding_work(
+    tmp_path: Path, lease_seconds: float
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance([_item("one")], 1)
+
+    with pytest.raises(DistillationWorksetError, match="finite number"):
+        workset.claim("label", 1, "ox-1", lease_seconds)
+
+    assert workset.status("label")["ready"] == 1
+    assert workset.status("label")["leased"] == 0
+
+
+@pytest.mark.parametrize("clock_value", [math.nan, math.inf, -math.inf])
+def test_nonfinite_clock_is_rejected_before_mutation(
+    tmp_path: Path, clock_value: float
+) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path, clock=lambda: clock_value)
+
+    with pytest.raises(DistillationWorksetError, match="finite number"):
+        workset.advance([_item("one")], 1)
+
+    assert workset.status()["total"] == 0
+
+
+def test_lease_overflow_is_rejected_without_stranding_work(tmp_path: Path) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path, clock=lambda: 1e308)
+    workset.advance([_item("one")], 1)
+
+    with pytest.raises(DistillationWorksetError, match="lease expiry"):
+        workset.claim("label", 1, "ox-1", 1e308)
+
+    assert workset.status("label")["ready"] == 1
+
+
+def test_sqlite_database_and_sidecars_are_private_and_existing_mode_is_narrowed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance([_item("one")], 1)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{path}{suffix}")
+        if sidecar.exists():
+            assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+
+    os.chmod(path, 0o644)
+    DistillationWorkset(path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_permission_failure_rolls_back_before_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    original = workset._secure_sqlite_files
+    calls = 0
+
+    def fail_before_commit() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise DistillationWorksetError("cannot secure SQLite path")
+        original()
+
+    monkeypatch.setattr(workset, "_secure_sqlite_files", fail_before_commit)
+    with pytest.raises(DistillationWorksetError, match="cannot secure"):
+        workset.advance([_item("one")], 1)
+
+    monkeypatch.setattr(workset, "_secure_sqlite_files", original)
+    assert workset.status()["total"] == 0
+
+
+def test_sqlite_symlink_and_nonregular_paths_fail_closed(tmp_path: Path) -> None:
+    target = tmp_path / "target.sqlite3"
+    target.write_bytes(b"not a workset")
+    link = tmp_path / "workset.sqlite3"
+    link.symlink_to(target)
+    with pytest.raises(DistillationWorksetError, match="symlink"):
+        DistillationWorkset(link)
+
+    directory = tmp_path / "directory.sqlite3"
+    directory.mkdir()
+    with pytest.raises(DistillationWorksetError, match="regular file"):
+        DistillationWorkset(directory)
+
+
+def test_commit_rejects_duplicate_work_and_lease_ids_before_transaction(
+    tmp_path: Path,
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance([_item("one"), _item("two")], 1)
+    first, second = workset.claim("label", 2, "ox-1", 60)
+
+    with pytest.raises(DistillationWorksetError, match="duplicate work_id"):
+        workset.commit([first, first], [_completed(), _completed()])
+    assert workset.status("label")["leased"] == 2
+
+    duplicate_lease = replace(second, lease_id=first.lease_id)
+    with pytest.raises(DistillationWorksetError, match="duplicate lease_id"):
+        workset.commit([first, duplicate_lease], [_completed(), _completed()])
+    assert workset.status("label")["leased"] == 2
+
+
+@pytest.mark.parametrize(
+    "payload_ref",
+    [
+        "/tmp/private",
+        "../private",
+        "C:\\private\\payload",
+        "https://example.test/secret",
+    ],
+)
+def test_payload_reference_paths_are_rejected_without_persistence(
+    tmp_path: Path, payload_ref: str
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    item = _item("unsafe")
+    item["payload_ref"] = payload_ref
+
+    with pytest.raises(DistillationWorksetError, match="safe ledger reference"):
+        workset.advance([item], 1)
+    assert workset.status()["total"] == 0
+
+
+def test_main_candidate_snapshot_reference_is_allowed(tmp_path: Path) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    item = _item("snapshot")
+    item["payload_ref"] = "candidate-snapshot:" + "a" * 64 + ":" + "b" * 64
+    assert workset.advance([item], 1)["inserted"] == 1
+
+
+def test_profile_provenance_key_is_allowed(tmp_path: Path) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    item = _item("profile")
+    item["provenance"] = {
+        "profile": "ox-alpha-single-v1",
+        "route": "opencode-go/ox-alpha-free",
+    }
+    assert workset.advance([item], 1)["inserted"] == 1
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        {"api_key": "private"},
+        {"note": "private secret value"},
+        {"source": "/Users/private/raw.json"},
+        {"source": "relative/path.json"},
+        {"blob": "x" * 257},
+    ],
+)
+def test_provenance_is_bounded_and_payload_free(
+    tmp_path: Path, provenance: dict[str, object]
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    item = _item("unsafe-provenance")
+    item["provenance"] = provenance
+
+    with pytest.raises(DistillationWorksetError):
+        workset.advance([item], 1)
+    assert workset.status()["total"] == 0
+
+
+def test_error_class_and_completion_reference_cannot_persist_payloads(
+    tmp_path: Path,
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance([_item("one")], 1)
+    claim = workset.claim("label", 1, "ox-1", 60)[0]
+
+    with pytest.raises(DistillationWorksetError):
+        workset.commit(
+            [claim],
+            [{"status": "retry", "error_class": "private secret value"}],
+        )
+    with pytest.raises(DistillationWorksetError):
+        workset.commit(
+            [claim],
+            [
+                {
+                    **_completed(),
+                    "completion_ref": "/tmp/private-label",
+                }
+            ],
+        )
+
+    assert workset.status()["leased"] == 1
+    with sqlite3.connect(tmp_path / "workset.sqlite3") as connection:
+        row = connection.execute(
+            "SELECT last_error_class, completion_ref FROM work_items WHERE work_id = 'one'"
+        ).fetchone()
+    assert row == ("", "")

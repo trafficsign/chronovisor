@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
+import os
+import re
 import sqlite3
+import stat
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -67,11 +71,201 @@ CREATE TABLE IF NOT EXISTS workset_state (
 """
 
 
-def _json(value: Any) -> str:
+_MAX_TEXT_BYTES = 256
+_MAX_JSON_BYTES = 4_096
+_MAX_METADATA_DEPTH = 3
+_MAX_METADATA_ITEMS = 32
+_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z")
+_REFERENCE_RE = re.compile(
+    r"(?:candidate-snapshot|candidate-ledger|label-ledger):"
+    r"[A-Za-z0-9_.-]{1,128}(?::[A-Za-z0-9_.-]{1,128})?\Z"
+)
+_METADATA_KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}\Z")
+_METADATA_VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+,@-]{0,255}\Z")
+_ROUTE_VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:+,@/-]{0,255}\Z")
+_ERROR_CLASS_RE = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
+_SENSITIVE_MARKERS = (
+    "secret",
+    "token",
+    "password",
+    "credential",
+    "api_key",
+    "authorization",
+    "bearer",
+)
+_PATH_RE = re.compile(
+    r"(?:^[/~]|^[A-Za-z]:[\\/]|(?:^|[\\/])\.{1,2}(?:[\\/]|$)|"
+    r"(?:^|:)file://|(?:^|:)https?://)",
+    re.IGNORECASE,
+)
+_SENSITIVE_KEY_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:secret|token|password|credential|api_key|"
+    r"authorization|bearer|path|file|filepath|directory|prompt|payload|body|content)"
+    r"(?![A-Za-z0-9])"
+)
+
+
+def _json(value: Any, field: str = "metadata") -> str:
     try:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        encoded = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
     except (TypeError, ValueError) as exc:
-        raise DistillationWorksetError("metadata must be JSON serializable") from exc
+        raise DistillationWorksetError(f"{field} must be JSON serializable") from exc
+    if len(encoded.encode("utf-8")) > _MAX_JSON_BYTES:
+        raise DistillationWorksetError(f"{field} exceeds payload-free size limit")
+    return encoded
+
+
+def _identifier(value: object, field: str) -> str:
+    text = _text(value, field)
+    if (
+        len(text.encode("utf-8")) > _MAX_TEXT_BYTES
+        or _IDENTIFIER_RE.fullmatch(text) is None
+    ):
+        raise DistillationWorksetError(f"{field} must be a bounded safe identifier")
+    return text
+
+
+def _reference(value: object, field: str) -> str:
+    text = _text(value, field)
+    if (
+        len(text.encode("utf-8")) > _MAX_TEXT_BYTES
+        or _REFERENCE_RE.fullmatch(text) is None
+        or any(marker in text.lower() for marker in _SENSITIVE_MARKERS)
+    ):
+        raise DistillationWorksetError(f"{field} must be a safe ledger reference")
+    return text
+
+
+def _metadata_key(value: object, field: str) -> str:
+    if not isinstance(value, str) or _METADATA_KEY_RE.fullmatch(value) is None:
+        raise DistillationWorksetError(f"{field} contains an unsafe metadata key")
+    if _SENSITIVE_KEY_RE.search(value.lower()):
+        raise DistillationWorksetError(f"{field} contains a sensitive metadata key")
+    return value
+
+
+def _metadata_value(value: object, field: str, *, key: str = "", depth: int = 0) -> Any:
+    if depth > _MAX_METADATA_DEPTH:
+        raise DistillationWorksetError(f"{field} metadata is too deeply nested")
+    if isinstance(value, Mapping):
+        if len(value) > _MAX_METADATA_ITEMS:
+            raise DistillationWorksetError(f"{field} metadata has too many entries")
+        return {
+            _metadata_key(raw_key, field): _metadata_value(
+                raw_value,
+                field,
+                key=str(raw_key),
+                depth=depth + 1,
+            )
+            for raw_key, raw_value in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        if len(value) > _MAX_METADATA_ITEMS:
+            raise DistillationWorksetError(f"{field} metadata has too many entries")
+        return [
+            _metadata_value(item, field, key=key, depth=depth + 1) for item in value
+        ]
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if abs(value) > 1_000_000_000:
+            raise DistillationWorksetError(f"{field} metadata integer is too large")
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value) or abs(value) > 1_000_000_000_000:
+            raise DistillationWorksetError(f"{field} metadata number is invalid")
+        return value
+    if isinstance(value, str):
+        if len(value.encode("utf-8")) > _MAX_TEXT_BYTES or any(
+            ord(character) < 0x20 or ord(character) == 0x7F for character in value
+        ):
+            raise DistillationWorksetError(f"{field} metadata string is unsafe")
+        lowered = value.lower()
+        if any(marker in lowered for marker in _SENSITIVE_MARKERS) or _PATH_RE.search(
+            value
+        ):
+            raise DistillationWorksetError(
+                f"{field} metadata contains secret or path data"
+            )
+        if value and (
+            _ROUTE_VALUE_RE.fullmatch(value) is None
+            if key == "route"
+            else _METADATA_VALUE_RE.fullmatch(value) is None
+        ):
+            raise DistillationWorksetError(
+                f"{field} metadata string is not a safe token"
+            )
+        if key == "route" and ("//" in value or "/../" in value or "/./" in value):
+            raise DistillationWorksetError(f"{field} metadata route is unsafe")
+        return value
+    raise DistillationWorksetError(f"{field} metadata contains unsupported data")
+
+
+def _metadata_json(value: object, field: str) -> str:
+    return _json(_metadata_value(value, field), field)
+
+
+def _finite(value: object, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise DistillationWorksetError(f"{field} must be a finite number")
+    try:
+        parsed = float(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise DistillationWorksetError(f"{field} must be a finite number") from exc
+    if not math.isfinite(parsed):
+        raise DistillationWorksetError(f"{field} must be a finite number")
+    return parsed
+
+
+def _error_class(value: object) -> str:
+    if not isinstance(value, str) or _ERROR_CLASS_RE.fullmatch(value) is None:
+        raise DistillationWorksetError("error_class must be a bounded safe token")
+    if any(marker in value.lower() for marker in _SENSITIVE_MARKERS):
+        raise DistillationWorksetError("error_class must not contain secret data")
+    return value
+
+
+def _secure_regular_file(path: Path) -> None:
+    """Reject links/non-regular files and narrow existing SQLite files to 0600."""
+
+    try:
+        initial = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(initial.st_mode):
+        raise DistillationWorksetError(
+            f"SQLite path must not be a symlink: {path.name}"
+        )
+    if not stat.S_ISREG(initial.st_mode):
+        raise DistillationWorksetError(
+            f"SQLite path must be a regular file: {path.name}"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise DistillationWorksetError(
+            f"cannot securely open SQLite path: {path.name}"
+        ) from exc
+    try:
+        current = os.fstat(descriptor)
+        if not stat.S_ISREG(current.st_mode):
+            raise DistillationWorksetError(
+                f"SQLite path must be a regular file: {path.name}"
+            )
+        os.fchmod(descriptor, 0o600)
+    except OSError as exc:
+        raise DistillationWorksetError(
+            f"cannot secure SQLite path: {path.name}"
+        ) from exc
+    finally:
+        os.close(descriptor)
 
 
 def _mapping(value: object, field: str) -> dict[str, Any]:
@@ -88,7 +282,9 @@ def _text(value: object, field: str) -> str:
 
 def _digest(value: object, field: str) -> str:
     digest = _text(value, field).lower()
-    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
         raise DistillationWorksetError(f"{field} must be a sha256 hex digest")
     return digest
 
@@ -112,12 +308,17 @@ def _item(value: Mapping[str, Any], watermark_json: str) -> tuple[Any, ...]:
     if not isinstance(priority, int) or isinstance(priority, bool):
         raise DistillationWorksetError("priority must be an integer")
     return (
-        _text(value.get("work_id"), "work_id"),
-        _text(value.get("kind"), "kind"),
-        _text(value.get("payload_ref"), "payload_ref"),
+        _identifier(value.get("work_id"), "work_id"),
+        _identifier(value.get("kind"), "kind"),
+        _reference(value.get("payload_ref"), "payload_ref"),
         _digest(value.get("payload_digest"), "payload_digest"),
-        _json(_mapping(value.get("temporal_split", {}), "temporal_split")),
-        _json(_mapping(value.get("provenance", {}), "provenance")),
+        _metadata_json(
+            _mapping(value.get("temporal_split", {}), "temporal_split"),
+            "temporal_split",
+        ),
+        _metadata_json(
+            _mapping(value.get("provenance", {}), "provenance"), "provenance"
+        ),
         priority,
         watermark_json,
     )
@@ -131,33 +332,56 @@ class DistillationWorkset:
     intentionally limited to ``advance``, ``claim``, and ``commit``.
     """
 
-    def __init__(self, path: Path | str, *, clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self, path: Path | str, *, clock: Callable[[], float] = time.time
+    ) -> None:
         self.path = Path(path)
         self._clock = clock
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:
             connection.executescript(_SCHEMA)
+            self._secure_sqlite_files()
+
+    def _now(self) -> float:
+        return _finite(self._clock(), "clock now")
+
+    def _secure_sqlite_files(self) -> None:
+        for path in (
+            self.path,
+            self.path.with_name(f"{self.path.name}-wal"),
+            self.path.with_name(f"{self.path.name}-shm"),
+        ):
+            _secure_regular_file(path)
 
     def _connect(self) -> sqlite3.Connection:
+        self._secure_sqlite_files()
         connection = sqlite3.connect(self.path, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=FULL")
-        connection.execute("PRAGMA busy_timeout=5000")
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("PRAGMA busy_timeout=5000")
+            self._secure_sqlite_files()
+            return connection
+        except Exception:
+            connection.close()
+            raise
 
-    def advance(self, items: Iterable[Mapping[str, Any]], watermark: Any) -> dict[str, Any]:
+    def advance(
+        self, items: Iterable[Mapping[str, Any]], watermark: Any
+    ) -> dict[str, Any]:
         """Idempotently record immutable work and its source progress watermark."""
 
-        watermark_json = _json(watermark)
+        watermark_json = _metadata_json(watermark, "watermark")
         records = [_item(item, watermark_json) for item in items]
         if len({record[0] for record in records}) != len(records):
             raise DistillationWorksetError("work_id repeats within one advance")
-        now = self._clock()
+        now = self._now()
         inserted = 0
         existing = 0
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            committed = False
             try:
                 for record in records:
                     prior = connection.execute(
@@ -194,9 +418,12 @@ class DistillationWorkset:
                     """,
                     (watermark_json,),
                 )
+                self._secure_sqlite_files()
                 connection.execute("COMMIT")
+                committed = True
             except Exception:
-                connection.execute("ROLLBACK")
+                if not committed:
+                    connection.execute("ROLLBACK")
                 raise
         return {"inserted": inserted, "existing": existing, "watermark": watermark}
 
@@ -205,21 +432,21 @@ class DistillationWorkset:
     ) -> tuple[WorkClaim, ...]:
         """Claim FIFO work of one kind, reclaiming expired leases atomically."""
 
-        kind = _text(kind, "kind")
-        owner = _text(owner, "owner")
+        kind = _identifier(kind, "kind")
+        owner = _identifier(owner, "owner")
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise DistillationWorksetError("limit must be a positive integer")
-        if (
-            not isinstance(lease_seconds, (int, float))
-            or isinstance(lease_seconds, bool)
-            or lease_seconds <= 0
-        ):
+        lease_seconds_float = _finite(lease_seconds, "lease_seconds")
+        if lease_seconds_float <= 0:
             raise DistillationWorksetError("lease_seconds must be positive")
-        now = self._clock()
-        expires_at = now + float(lease_seconds)
+        now = self._now()
+        expires_at = now + lease_seconds_float
+        if not math.isfinite(expires_at):
+            raise DistillationWorksetError("lease expiry must be finite")
         claims: list[WorkClaim] = []
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            committed = False
             try:
                 connection.execute(
                     """
@@ -270,9 +497,12 @@ class DistillationWorkset:
                             lease_expires_at=expires_at,
                         )
                     )
+                self._secure_sqlite_files()
                 connection.execute("COMMIT")
+                committed = True
             except Exception:
-                connection.execute("ROLLBACK")
+                if not committed:
+                    connection.execute("ROLLBACK")
                 raise
         return tuple(claims)
 
@@ -292,14 +522,21 @@ class DistillationWorkset:
 
         if len(claims) != len(outcomes):
             raise DistillationWorksetError("claims and outcomes must have equal length")
+        work_ids = [claim.work_id for claim in claims]
+        lease_ids = [claim.lease_id for claim in claims]
+        if len(set(work_ids)) != len(work_ids):
+            raise DistillationWorksetError("commit contains duplicate work_id")
+        if len(set(lease_ids)) != len(lease_ids):
+            raise DistillationWorksetError("commit contains duplicate lease_id")
         normalized = [
             self._outcome(claim, outcome)
             for claim, outcome in zip(claims, outcomes, strict=True)
         ]
         totals = {"completed": 0, "retry": 0, "quarantined": 0}
-        now = self._clock()
+        now = self._now()
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            committed = False
             try:
                 for claim, outcome in zip(claims, normalized, strict=True):
                     row = connection.execute(
@@ -311,7 +548,9 @@ class DistillationWorkset:
                         (claim.work_id,),
                     ).fetchone()
                     if row is None:
-                        raise DistillationWorksetError(f"claim is no longer active: {claim.work_id}")
+                        raise DistillationWorksetError(
+                            f"claim is no longer active: {claim.work_id}"
+                        )
                     if row["state"] == "completed":
                         if (
                             outcome["status"] != "completed"
@@ -324,14 +563,18 @@ class DistillationWorkset:
                         totals["completed"] += 1
                         continue
                     if row["state"] != "leased":
-                        raise DistillationWorksetError(f"claim is no longer active: {claim.work_id}")
+                        raise DistillationWorksetError(
+                            f"claim is no longer active: {claim.work_id}"
+                        )
                     if (
                         row["lease_id"] != claim.lease_id
                         or row["lease_owner"] != claim.owner
                         or row["lease_expires_at"] is None
                         or row["lease_expires_at"] <= now
                     ):
-                        raise DistillationWorksetError(f"claim ownership lost: {claim.work_id}")
+                        raise DistillationWorksetError(
+                            f"claim ownership lost: {claim.work_id}"
+                        )
                     if outcome["status"] == "completed":
                         connection.execute(
                             """
@@ -342,10 +585,17 @@ class DistillationWorkset:
                                 lease_expires_at = NULL, updated_at = ?
                             WHERE work_id = ?
                             """,
-                            (outcome["completion_ref"], outcome["completion_digest"], now, claim.work_id),
+                            (
+                                outcome["completion_ref"],
+                                outcome["completion_digest"],
+                                now,
+                                claim.work_id,
+                            ),
                         )
                     else:
-                        state = "ready" if outcome["status"] == "retry" else "quarantined"
+                        state = (
+                            "ready" if outcome["status"] == "retry" else "quarantined"
+                        )
                         connection.execute(
                             """
                             UPDATE work_items
@@ -357,9 +607,12 @@ class DistillationWorkset:
                             (state, outcome["error_class"], now, claim.work_id),
                         )
                     totals[outcome["status"]] += 1
+                self._secure_sqlite_files()
                 connection.execute("COMMIT")
+                committed = True
             except Exception:
-                connection.execute("ROLLBACK")
+                if not committed:
+                    connection.execute("ROLLBACK")
                 raise
         return totals
 
@@ -400,16 +653,17 @@ class DistillationWorkset:
         status = _text(value.get("status"), "status")
         if status not in {"completed", "retry", "quarantined"}:
             raise DistillationWorksetError("outcome status is invalid")
-        error_class = value.get("error_class", "")
-        if error_class and not isinstance(error_class, str):
-            raise DistillationWorksetError("error_class must be a string")
+        error_class_value = value.get("error_class", "")
+        error_class = _error_class(error_class_value) if error_class_value != "" else ""
         if status == "completed" and error_class:
             raise DistillationWorksetError("completed work cannot have an error_class")
         if status == "completed":
             return {
                 "status": status,
                 "error_class": "",
-                "completion_ref": _text(value.get("completion_ref"), "completion_ref"),
+                "completion_ref": _reference(
+                    value.get("completion_ref"), "completion_ref"
+                ),
                 "completion_digest": _digest(
                     value.get("completion_digest"), "completion_digest"
                 ),
