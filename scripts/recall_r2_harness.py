@@ -1228,7 +1228,24 @@ def _clone_from_root(source: Path) -> Path:
         raise R2Error("clone temp parent is unavailable") from exc
     if temp_parent == source_resolved or temp_parent.is_relative_to(source_resolved):
         raise R2Error("clone temp destination overlaps source")
-    required = (source / "raw", source / "runtime" / "recall-distillation")
+    required = [source / "raw", source / "runtime" / "recall-distillation"]
+    required_files = [
+        source / "pages" / "index.md",
+        source / "pages" / "log.md",
+        source / "system" / "schema.md",
+        source / "runtime" / "activity.jsonl",
+        source / "runtime" / "okf-writer.lock",
+    ]
+    migrations = source / "runtime" / "migrations"
+    bootstrap_proof = source / "runtime" / "bootstrap-layout.json"
+    if migrations.is_symlink():
+        raise R2Error("clone source OKF proof is unsafe")
+    if migrations.is_dir():
+        required.append(migrations)
+    elif bootstrap_proof.is_symlink() or not bootstrap_proof.is_file():
+        raise R2Error("clone source has no OKF startup proof")
+    else:
+        required_files.append(bootstrap_proof)
     files: list[Path] = []
     directories: set[Path] = set()
     for subtree in required:
@@ -1246,6 +1263,10 @@ def _clone_from_root(source: Path) -> Path:
                 if child.is_symlink() or not child.is_file():
                     raise R2Error("clone source contains an unsafe file")
                 files.append(child)
+    for child in required_files:
+        if child.is_symlink() or not child.is_file():
+            raise R2Error("clone source OKF layout is unsafe")
+        files.append(child)
     destination = Path(tempfile.mkdtemp(prefix="chronovisor-r2-", dir=temp_parent))
     try:
         for directory in sorted(directories):
@@ -1255,6 +1276,7 @@ def _clone_from_root(source: Path) -> Path:
         flags = COPYFILE_ALL | COPYFILE_NOFOLLOW | COPYFILE_CLONE_FORCE
         for path in files:
             target = destination / path.relative_to(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
             _copyfile_clone(path, target, flags)
         if any(path.is_symlink() for path in destination.rglob("*")):
             raise R2Error("APFS clone contains a symlink")

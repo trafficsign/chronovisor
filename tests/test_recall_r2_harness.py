@@ -281,9 +281,11 @@ def test_clone_temp_preflight_rejects_source_as_temp_parent(
 def test_clone_uses_the_resolved_temp_parent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from chronovisor.core.store import RuntimeContext, init_chronovisor
+
     source = tmp_path / "source"
-    (source / "raw").mkdir(parents=True)
-    (source / "runtime" / "recall-distillation").mkdir(parents=True)
+    init_chronovisor(RuntimeContext(source))
+    (source / "runtime" / "recall-distillation").mkdir()
     (source / "raw" / "event.bin").write_bytes(b"raw")
     real_temp = tmp_path / "real-temp"
     real_temp.mkdir()
@@ -301,5 +303,46 @@ def test_clone_uses_the_resolved_temp_parent(
     try:
         assert not HARNESS._has_symlink_component(clone)
         assert clone.parent == real_temp.resolve()
+    finally:
+        HARNESS._cleanup_clone(clone)
+
+
+def test_clone_preserves_okf_startup_proof_for_raw_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.core import raw_segment
+    from chronovisor.core.okf_cutover import discover_okf_startup
+    from chronovisor.core.store import RuntimeContext, init_chronovisor
+
+    source = tmp_path / "source"
+    init_chronovisor(RuntimeContext(source))
+    (source / "runtime" / "recall-distillation").mkdir()
+    (source / "runtime" / "recall-distillation" / "state.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    temp_parent = tmp_path / "temp"
+    temp_parent.mkdir()
+    monkeypatch.setattr(HARNESS.sys, "platform", "darwin")
+    monkeypatch.setattr(HARNESS.tempfile, "gettempdir", lambda: str(temp_parent))
+
+    def copyfile(source_path: Path, destination: Path, _flags: int) -> None:
+        destination.write_bytes(source_path.read_bytes())
+
+    monkeypatch.setattr(HARNESS, "_copyfile_clone", copyfile)
+
+    clone = HARNESS._clone_from_root(source)
+    try:
+        assert (clone / "runtime" / "okf-writer.lock").is_file()
+        startup = discover_okf_startup(clone, clone / "runtime")
+        assert startup.allowed
+        raw_id, _receipt_sha256 = HARNESS._append_events(
+            raw_segment,
+            clone,
+            session_key="0123456789abcdef01234567",
+            after_line=0,
+            events=[HARNESS._message("user", "probe", 0)],
+            tag="okf-proof",
+        )
+        assert raw_id.startswith("save-codex-")
     finally:
         HARNESS._cleanup_clone(clone)
