@@ -428,7 +428,7 @@ def _run_clone_workset_cycles(
         "claim_threshold_ns": CLAIM_P95_LIMIT_NS,
         "empty_probe": {
             "kind": "r3-empty-probe",
-            "observed_empty": True,
+            "scope": "kind-only",
             "elapsed_ns": empty_probe_ns,
             "excluded_from_p95": True,
         },
