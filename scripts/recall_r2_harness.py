@@ -945,16 +945,21 @@ def _instrument(
             yield unit, value
 
     patch(raw_store_module.RawStore, "iter_segment_bytes", iter_segment_bytes)
-    for name in ("read_open_range", "read_sealed_range"):
-        original_range = getattr(raw_store_module, name)
+    original_open_range = raw_store_module.read_open_range
 
-        def range_read(
-            path: Path, offset: int, length: int, *, _f=original_range
-        ) -> bytes:
-            counters.record_range(path, int(offset), int(length))
-            return _f(path, offset, length)
+    def open_range_read(path: Path, offset: int, length: int) -> bytes:
+        counters.record_range(path, int(offset), int(length))
+        return original_open_range(path, offset, length)
 
-        patch(raw_store_module, name, range_read)
+    patch(raw_store_module, "read_open_range", open_range_read)
+    original_sealed_range = raw_store_module.read_sealed_range
+
+    def sealed_range_read(path: Path, offset: int, length: int) -> bytes:
+        logical_end = int(offset) + int(length)
+        counters.record_range(path, 0, logical_end)
+        return original_sealed_range(path, offset, length)
+
+    patch(raw_store_module, "read_sealed_range", sealed_range_read)
 
     for name in ("_events", "extract_rallies"):
         if not hasattr(distill, name):
@@ -1244,7 +1249,62 @@ def _new_clone_destination(source: Path) -> Path:
     return destination
 
 
-def _populate_clone(source: Path, destination: Path) -> Path:
+def _rebind_clone_checkpoints(catalog: Any, source: Path, destination: Path) -> None:
+    """Re-seal valid copied checkpoints against clone-local file identities."""
+
+    source_catalog = catalog._read_catalog_checkpoint(source)
+    if source_catalog is None:
+        return
+    source_catalog_state = source_catalog.get("file_state")
+    clone_catalog_path = catalog.catalog_path(destination)
+    clone_catalog_state = catalog._index_file_state(clone_catalog_path)
+    if not isinstance(source_catalog_state, Mapping) or clone_catalog_state is None:
+        raise R2Error("cloned catalog checkpoint source is incomplete")
+    for key in ("size_bytes", "st_dev", "st_mtime_ns"):
+        if source_catalog_state.get(key) != clone_catalog_state.get(key):
+            raise R2Error("cloned catalog bytes differ from checkpoint source")
+
+    source_index_path = catalog.historical_index_path(source)
+    source_index = catalog._read_index_checkpoint(source_index_path)
+    clone_index_path = catalog.historical_index_path(destination)
+    if source_index is not None:
+        clone_index_state = catalog._index_file_state(clone_index_path)
+        source_index_state = source_index.get("file_state")
+        if not isinstance(source_index_state, Mapping) or clone_index_state is None:
+            raise R2Error("cloned FTS checkpoint source is incomplete")
+        for key in ("size_bytes", "st_dev", "st_mtime_ns"):
+            if source_index_state.get(key) != clone_index_state.get(key):
+                raise R2Error("cloned FTS bytes differ from checkpoint source")
+        if (
+            source_index.get("catalog_watermark") != source_catalog["catalog_watermark"]
+            or source_index.get("catalog_event_rowid") != source_catalog["event_rowid"]
+            or source_index.get("catalog_file_state") != source_catalog_state
+        ):
+            raise R2Error("source catalog and FTS checkpoints differ")
+
+    catalog._write_catalog_checkpoint(
+        destination,
+        str(source_catalog["catalog_watermark"]),
+        int(source_catalog["event_rowid"]),
+    )
+    rebound_catalog = catalog._read_catalog_checkpoint(destination)
+    if rebound_catalog is None:
+        raise R2Error("cloned catalog checkpoint rebind failed")
+    if source_index is None:
+        return
+    catalog._write_index_checkpoint(
+        clone_index_path,
+        rebound_catalog,
+        str(source_index["content_sha256"]),
+        int(source_index["atom_count"]),
+    )
+    if catalog._read_index_checkpoint(clone_index_path) is None:
+        raise R2Error("cloned FTS checkpoint rebind failed")
+
+
+def _populate_clone(
+    source: Path, destination: Path, *, catalog: Any | None = None
+) -> Path:
     try:
         from chronovisor.core.durable_state import okf_writer_lock
         from chronovisor.core.okf_cutover import discover_okf_startup
@@ -1326,6 +1386,8 @@ def _populate_clone(source: Path, destination: Path) -> Path:
             clone_startup = discover_okf_startup(destination, destination / "runtime")
             if not clone_startup.allowed:
                 raise R2Error("APFS clone OKF startup proof is invalid")
+            if catalog is not None:
+                _rebind_clone_checkpoints(catalog, source, destination)
         return destination
     except Exception as exc:
         _cleanup_clone(destination)
@@ -1334,8 +1396,8 @@ def _populate_clone(source: Path, destination: Path) -> Path:
         raise R2Error("APFS clone failed") from exc
 
 
-def _clone_from_root(source: Path) -> Path:
-    return _populate_clone(source, _new_clone_destination(source))
+def _clone_from_root(source: Path, *, catalog: Any | None = None) -> Path:
+    return _populate_clone(source, _new_clone_destination(source), catalog=catalog)
 
 
 def _cleanup_clone(path: Path) -> None:
@@ -1440,7 +1502,7 @@ def _tamper_repair(
 ) -> tuple[Path, dict[str, Any]]:
     """Verify that ordinary catalog/FTS SQL tamper cannot enter the warm path."""
 
-    root = _clone_from_root(base)
+    root = _clone_from_root(base, catalog=catalog)
     catalog_path = catalog.catalog_path(root)
     try:
         _assert_raw_state_parity(
@@ -1569,9 +1631,9 @@ def _run_post_commit_crash(
 ) -> tuple[Path, dict[str, Any], Path]:
     """Kill a child immediately after durable commit, then recover in parent."""
 
-    root = _clone_from_root(base)
+    root = _clone_from_root(base, catalog=catalog)
     try:
-        clean_root = _clone_from_root(base)
+        clean_root = _clone_from_root(base, catalog=catalog)
     except Exception:
         _cleanup_clone(root)
         raise
@@ -1725,7 +1787,7 @@ def _old_raw_hash_tamper(
 ) -> tuple[Path, dict[str, Any]]:
     """Flip one committed text byte and require source resolution to fail closed."""
 
-    root = _clone_from_root(base)
+    root = _clone_from_root(base, catalog=catalog)
     try:
         _assert_raw_state_parity(
             _raw_tree_state_digest(root),
@@ -1860,7 +1922,7 @@ def _full_rebuild_parity(
     raw_store_module: Any,
     context_bytes: int,
 ) -> tuple[Path, dict[str, Any]]:
-    root = _clone_from_root(base)
+    root = _clone_from_root(base, catalog=catalog)
     try:
         _assert_raw_state_parity(
             _raw_tree_state_digest(root),
@@ -2002,7 +2064,7 @@ def _run_once(
             }
         ):
             parity, distill, store, catalog, raw_store = R0._load(source_root)
-            _populate_clone(production, clone)
+            _populate_clone(production, clone, catalog=catalog)
             raw_segment = __import__(
                 "chronovisor.core.raw_segment", fromlist=["append_capture"]
             )
@@ -2109,7 +2171,7 @@ def _run_once(
             delta_roots: list[Path] = []
             delta_ids: list[str] = []
             for sample in range(delta_samples):
-                sample_root = _clone_from_root(clone)
+                sample_root = _clone_from_root(clone, catalog=catalog)
                 clones.append(sample_root)
                 _assert_root_matrix(production, source_root, output, iter(clones))
                 _assert_raw_state_parity(
@@ -2197,9 +2259,9 @@ def _run_once(
             if delta_p95 > 15_000_000_000:
                 raise R2Error("1,000-event delta p95 exceeded 15 seconds")
 
-            tail_root = _clone_from_root(clone)
+            tail_root = _clone_from_root(clone, catalog=catalog)
             clones.append(tail_root)
-            tail_clean_root = _clone_from_root(clone)
+            tail_clean_root = _clone_from_root(clone, catalog=catalog)
             clones.append(tail_clean_root)
             _assert_root_matrix(
                 production,
@@ -2284,7 +2346,7 @@ def _run_once(
             _assert_repair_parity(
                 tail_snapshot, tail_clean_snapshot, "session-tail projection"
             )
-            fault_root = _clone_from_root(clone)
+            fault_root = _clone_from_root(clone, catalog=catalog)
             clones.append(fault_root)
             _assert_root_matrix(production, source_root, output, iter(clones))
             _assert_raw_state_parity(

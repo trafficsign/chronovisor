@@ -211,14 +211,32 @@ def test_store_decompresses_one_physical_segment_once_for_all_units(
         after_line=1,
     )
     assert second.data_path == first.data_path
+
+    original_open = raw_store_module.read_open_range
+    open_calls: list[tuple[int, int]] = []
+
+    def counted_open(path: Path, offset: int, length: int) -> bytes:
+        open_calls.append((offset, length))
+        return original_open(path, offset, length)
+
+    monkeypatch.setattr(raw_store_module, "read_open_range", counted_open)
+    selected_open = {
+        unit.raw_id: value
+        for unit, value in RawStore(raw_dir, mode="v2").iter_segment_bytes(
+            {"save-second.md"}
+        )
+    }
+    assert selected_open == {second.commit.raw_id: second_payload}
+    assert open_calls == [(second.commit.offset, second.commit.length)]
+    monkeypatch.setattr(raw_store_module, "read_open_range", original_open)
+
     seal_segment(first.data_path, remove_open=True)
 
     original = raw_store_module.read_sealed_range
-    calls = 0
+    calls: list[tuple[int, int]] = []
 
     def counted_read(path: Path, offset: int, length: int) -> bytes:
-        nonlocal calls
-        calls += 1
+        calls.append((offset, length))
         return original(path, offset, length)
 
     monkeypatch.setattr(raw_store_module, "read_sealed_range", counted_read)
@@ -230,9 +248,19 @@ def test_store_decompresses_one_physical_segment_once_for_all_units(
         "save-first.md": first_payload,
         "save-second.md": second_payload,
     }
-    assert calls == 1
+    assert calls == [(0, len(first_payload) + len(second_payload))]
 
-    calls = 0
+    calls.clear()
+    selected_both = {
+        unit.raw_id: value
+        for unit, value in RawStore(raw_dir, mode="v2").iter_segment_bytes(
+            {"save-first.md", "save-second.md"}
+        )
+    }
+    assert selected_both == values
+    assert calls == [(0, len(first_payload) + len(second_payload))]
+
+    calls.clear()
     selected = {
         unit.raw_id: value
         for unit, value in RawStore(raw_dir, mode="v2").iter_segment_bytes(
@@ -240,7 +268,7 @@ def test_store_decompresses_one_physical_segment_once_for_all_units(
         )
     }
     assert selected == {"save-second.md": second_payload}
-    assert calls == 1
+    assert calls == [(0, second.commit.offset + second.commit.length)]
 
     def corrupted_read(path: Path, offset: int, length: int) -> bytes:
         value = bytearray(original(path, offset, length))

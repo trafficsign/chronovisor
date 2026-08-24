@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -36,6 +37,42 @@ def test_read_counters_separate_logical_and_physical_old_bytes() -> None:
     assert counters.logical_new_bytes == 4
     assert counters.physical_old_bytes == 10
     assert counters.range_overlaps[0]["old_overlap_bytes"] == 10
+
+
+def test_instrument_counts_sealed_prefix_as_physical_io() -> None:
+    path = Path("/tmp/r2-sealed-segment")
+    counters = HARNESS.ReadCounters(
+        old_ids=frozenset(), old_ranges={path.resolve(): ((0, 10),)}
+    )
+
+    class FakeRawStore:
+        def read_bytes(self, raw: object) -> bytes:
+            return b""
+
+        def iter_segment_bytes(self, raw_ids: object = None):
+            return iter(())
+
+    raw_store_module = SimpleNamespace(
+        RawStore=FakeRawStore,
+        read_open_range=lambda _path, _offset, length: b"x" * length,
+        read_sealed_range=lambda _path, _offset, length: b"x" * length,
+    )
+    catalog = SimpleNamespace(sqlite3=HARNESS.sqlite3)
+    with HARNESS._instrument(
+        catalog, SimpleNamespace(), raw_store_module, SimpleNamespace(), counters
+    ):
+        raw_store_module.read_sealed_range(path, 10, 5)
+
+    assert counters.physical_bytes == 15
+    assert counters.physical_old_bytes == 10
+    assert counters.range_overlaps == [
+        {
+            "path": path.name,
+            "offset": 0,
+            "length": 15,
+            "old_overlap_bytes": 10,
+        }
+    ]
 
 
 def test_evidence_digest_does_not_depend_on_row_order() -> None:
@@ -152,6 +189,68 @@ def test_delta_read_failure_reports_bounded_safe_counters() -> None:
     assert "logical_old_reads=1" in message
     assert f"old_id_sha256={'a' * 64}" in message
     assert "overlap_path=segment.open" in message
+
+
+def test_clone_checkpoint_rebind_keeps_delta_incremental(tmp_path: Path) -> None:
+    from chronovisor.core import raw_segment
+    from chronovisor.core.raw_store import RawStore
+    from chronovisor.core.store import RuntimeContext, init_chronovisor
+    from chronovisor.recall import recall_distillation as distill
+    from chronovisor.recall import recall_distillation_catalog as catalog
+    from chronovisor.recall import recall_distillation_store as store
+
+    base = (tmp_path / "base").resolve()
+    clone = (tmp_path / "clone").resolve()
+    init_chronovisor(RuntimeContext(base))
+    HARNESS._append_events(
+        raw_segment,
+        base,
+        session_key="a" * 24,
+        after_line=0,
+        events=[
+            HARNESS._message("user", "baseline query", 0),
+            HARNESS._message("assistant", "baseline answer", 1),
+        ],
+        tag="baseline",
+    )
+    catalog.advance(base / "raw", base, 4096)
+    catalog.sync_historical_index(base / "raw", base)
+    shutil.copytree(base, clone, copy_function=shutil.copy2)
+
+    assert catalog._read_catalog_checkpoint(base) is not None
+    assert catalog._read_catalog_checkpoint(clone) is None
+    HARNESS._rebind_clone_checkpoints(catalog, base, clone)
+    assert catalog._read_catalog_checkpoint(clone) is not None
+    assert catalog._read_index_checkpoint(catalog.historical_index_path(clone))
+
+    raw_store_module = sys.modules[RawStore.__module__]
+    old_units = HARNESS._raw_units(raw_store_module, clone / "raw")
+    new_id, _receipt_sha256 = HARNESS._append_events(
+        raw_segment,
+        clone,
+        session_key="b" * 24,
+        after_line=0,
+        events=[
+            HARNESS._message("user", "delta query", 0),
+            HARNESS._message("assistant", "delta answer", 1),
+        ],
+        tag="delta",
+    )
+    result, metrics = HARNESS._measure(
+        "clone-delta",
+        lambda: (
+            catalog.advance(clone / "raw", clone, 4096),
+            catalog.sync_historical_index(clone / "raw", clone),
+        ),
+        catalog=catalog,
+        distill=distill,
+        raw_store_module=raw_store_module,
+        store=store,
+        old_units=old_units,
+    )
+
+    HARNESS._assert_delta(metrics, new_id)
+    assert result[0].status == "advanced"
 
 
 def test_clone_cleanup_is_verified(tmp_path: Path) -> None:

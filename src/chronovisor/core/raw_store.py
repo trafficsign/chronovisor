@@ -368,7 +368,7 @@ class RawStore:
     def iter_segment_bytes(
         self, raw_ids: Iterable[str] | None = None
     ) -> Iterator[tuple[RawUnit, bytes]]:
-        """Read selected physical v2 segments once and verify their logical units."""
+        """Batch sealed/full segments, but range-read selected open units."""
 
         requested = set(raw_ids) if raw_ids is not None else None
         groups: dict[tuple[RawStorageKind, Path], list[RawUnit]] = {}
@@ -379,14 +379,25 @@ class RawStore:
         for (storage, path), units in sorted(
             groups.items(), key=lambda item: (str(item[0][1]), item[0][0])
         ):
-            logical_end = max(unit.offset + unit.length for unit in units)
-            segment = (
-                read_open_range(path, 0, logical_end)
-                if storage == "segment_open"
-                else read_sealed_range(path, 0, logical_end)
+            reader = (
+                read_open_range if storage == "segment_open" else read_sealed_range
             )
+            if requested is None or storage == "segment_sealed":
+                logical_end = max(unit.offset + unit.length for unit in units)
+                segment = reader(path, 0, logical_end)
+                values = {
+                    unit.raw_id: segment[unit.offset : unit.offset + unit.length]
+                    for unit in units
+                }
+            else:
+                # ponytail: exact open-unit reads; coalesce adjacent selections only
+                # if open-tail throughput becomes material.
+                values = {
+                    unit.raw_id: reader(path, unit.offset, unit.length)
+                    for unit in units
+                }
             for unit in sorted(units, key=lambda item: item.raw_id):
-                value = segment[unit.offset : unit.offset + unit.length]
+                value = values[unit.raw_id]
                 if len(value) != unit.length:
                     raise RawSegmentCorrupt(
                         f"segment Raw range is truncated: {unit.raw_id}"
