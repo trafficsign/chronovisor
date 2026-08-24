@@ -12,7 +12,9 @@ import pytest
 
 from chronovisor.core.canonical_json import canonical_json_sha256_strict
 from chronovisor.core.raw_segment import append_capture
+from chronovisor.core.raw_store import RawStore
 from chronovisor.core.store import RuntimeContext, init_chronovisor
+from chronovisor.recall import recall_distillation as distill
 from chronovisor.recall import recall_distillation_catalog as catalog
 from chronovisor.recall import recall_distillation_store as store
 
@@ -189,7 +191,7 @@ def test_steady_state_same_watermark_reads_no_raw_and_new_session_is_delta(
     assert reads == ["save-codex-two.md"]
 
 
-def test_post_commit_crash_retries_as_noop_without_duplicate_or_raw_read(
+def test_post_commit_crash_repairs_catalog_on_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     init_chronovisor(RuntimeContext(tmp_path))
@@ -235,16 +237,8 @@ def test_post_commit_crash_retries_as_noop_without_duplicate_or_raw_read(
 
     monkeypatch.setattr(catalog, "_connect", real_connect)
 
-    from chronovisor.core.raw_store import RawStore
-
-    def unexpected_read(self: RawStore, raw: object) -> bytes:
-        raise AssertionError(f"retry reread Raw: {raw}")
-
-    monkeypatch.setattr(RawStore, "read_bytes", unexpected_read)
     result = catalog.advance(raw_dir, tmp_path, 4096)
-
-    assert result.status == "noop"
-    assert result.indexed_raw_ids == ()
+    assert result.status == "repaired"
     with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
         assert connection.execute("SELECT COUNT(*) FROM raw_units").fetchone()[0] == 2
         assert connection.execute("SELECT COUNT(*) FROM rallies").fetchone()[0] == 2
@@ -268,11 +262,142 @@ def test_digest_conflict_fails_closed(tmp_path: Path) -> None:
     with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
         connection.execute("UPDATE raw_units SET raw_sha256='conflict'")
 
-    with pytest.raises(catalog.CatalogError, match="digest"):
-        catalog.advance(raw_dir, tmp_path, 4096)
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "repaired"
     with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM raw_units").fetchone()[0] == 1
-        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM raw_units").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 2
+
+
+def test_catalog_event_metadata_tamper_requires_repair(tmp_path: Path) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [_message("user", "first", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        connection.execute("UPDATE events SET source_index=999")
+
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "repaired"
+
+
+def test_catalog_direct_reads_fail_closed_after_metadata_tamper(tmp_path: Path) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [
+            _message("user", "question", "2026-08-01T00:00:00Z"),
+            _message("assistant", "answer", "2026-08-01T00:00:01Z"),
+        ],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    answer = catalog.rallies(tmp_path)[0]["actual_answer_refs"][0]
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        connection.execute("UPDATE events SET source_index=999 WHERE role='assistant'")
+
+    with pytest.raises(catalog.CatalogError, match="checkpoint requires repair"):
+        catalog.rallies(tmp_path)
+    with pytest.raises(catalog.CatalogError, match="checkpoint requires repair"):
+        catalog.texts(raw_dir, tmp_path, refs=[answer])
+    with pytest.raises(catalog.CatalogError, match="checkpoint requires repair"):
+        catalog.CatalogTextCache(raw_dir, tmp_path).prefetch([answer["semantic_sha256"]])
+
+
+def test_catalog_text_cache_hit_fails_closed_after_tamper(tmp_path: Path) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [
+            _message("user", "question", "2026-08-01T00:00:00Z"),
+            _message("assistant", "answer", "2026-08-01T00:00:01Z"),
+        ],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    answer = catalog.rallies(tmp_path)[0]["actual_answer_refs"][0]
+    cache = catalog.CatalogTextCache(raw_dir, tmp_path)
+    assert cache[answer["semantic_sha256"]] == "answer"
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        connection.execute("UPDATE events SET source_index=999 WHERE role='assistant'")
+
+    with pytest.raises(catalog.CatalogError, match="checkpoint requires repair"):
+        cache[answer["semantic_sha256"]]
+
+
+@pytest.mark.parametrize("sidecar_action", ["unlink", "rewrite"])
+def test_catalog_text_cache_hit_checks_checkpoint_sidecar(
+    tmp_path: Path, sidecar_action: str
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [
+            _message("user", "question", "2026-08-01T00:00:00Z"),
+            _message("assistant", "answer", "2026-08-01T00:00:01Z"),
+        ],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    answer = catalog.rallies(tmp_path)[0]["actual_answer_refs"][0]
+    cache = catalog.CatalogTextCache(raw_dir, tmp_path)
+    assert cache[answer["semantic_sha256"]] == "answer"
+    sidecar = catalog._catalog_checkpoint_path(tmp_path)
+    if sidecar_action == "unlink":
+        sidecar.unlink()
+    else:
+        sidecar.write_bytes(sidecar.read_bytes())
+
+    with pytest.raises(catalog.CatalogError, match="checkpoint requires repair"):
+        cache[answer["semantic_sha256"]]
+    with pytest.raises(catalog.CatalogError, match="checkpoint requires repair"):
+        len(cache)
+    with pytest.raises(catalog.CatalogError, match="checkpoint requires repair"):
+        iter(cache)
+
+
+def test_legacy_catalog_and_checkpoint_loss_rebuild_once(tmp_path: Path) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [
+            _message("user", "question", "2026-08-01T00:00:00Z"),
+            _message("assistant", "answer", "2026-08-01T00:00:01Z"),
+        ],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    answer = catalog.rallies(tmp_path)[0]["actual_answer_refs"][0]
+    cache = catalog.CatalogTextCache(raw_dir, tmp_path)
+    assert cache[answer["semantic_sha256"]] == "answer"
+    path = catalog.catalog_path(tmp_path)
+    catalog._catalog_checkpoint_path(tmp_path).unlink()
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "repaired"
+
+    path.unlink()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """CREATE TABLE raw_units(
+                raw_id TEXT PRIMARY KEY,raw_sha256 TEXT,receipt_sha256 TEXT,
+                host TEXT,session_key TEXT,captured_at TEXT,record_count INTEGER,status TEXT
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO raw_units VALUES(?,?,?,?,?,?,?,?)",
+            ("old", "x", "y", "codex", "legacy", "now", 1, "indexed"),
+        )
+        connection.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        connection.execute(
+            "INSERT INTO metadata VALUES('schema',?)", (catalog.CATALOG_SCHEMA,)
+        )
+        connection.execute("INSERT INTO metadata VALUES('watermark','legacy')")
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "repaired"
 
 
 def test_existing_session_delta_is_deferred_without_false_rally_boundary(
@@ -307,6 +432,184 @@ def test_existing_session_delta_is_deferred_without_false_rally_boundary(
     ]
 
 
+def test_warm_existing_session_uses_metadata_tail_and_matches_full_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [
+            _message("user", "first", "2026-08-01T00:00:00Z"),
+            _message("assistant", "first answer", "2026-08-01T00:00:01Z"),
+        ],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    catalog.sync_historical_index(raw_dir, tmp_path)
+    _capture(
+        tmp_path,
+        "save-codex-two.md",
+        "a" * 24,
+        [
+            _message("tool", "tool output", "2026-08-01T00:00:02Z"),
+            _message("user", "second", "2026-08-01T00:00:03Z"),
+            _message("assistant", "second answer", "2026-08-01T00:00:04Z"),
+        ],
+        after_line=2,
+    )
+    expected = distill.extract_rallies(raw_dir, root=tmp_path, max_context_bytes=4096)
+
+    from chronovisor.core.raw_store import RawStore
+
+    original_read = RawStore.read_bytes
+    reads: list[str] = []
+
+    def only_new_raw(self: RawStore, raw: object) -> bytes:
+        raw_id = getattr(raw, "raw_id", str(raw))
+        reads.append(raw_id)
+        if raw_id != "save-codex-two.md":
+            raise AssertionError(f"warm path reread old Raw: {raw_id}")
+        return original_read(self, raw)
+
+    monkeypatch.setattr(RawStore, "read_bytes", only_new_raw)
+    monkeypatch.setattr(
+        catalog,
+        "_session_events",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("warm path rebuilt the full session")
+        ),
+    )
+    monkeypatch.setattr(
+        distill,
+        "extract_rallies",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("warm path replayed all rallies")
+        ),
+    )
+    monkeypatch.setattr(
+        store,
+        "create_historical_index",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("warm path rebuilt the full FTS index")
+        ),
+    )
+
+    result = catalog.advance(raw_dir, tmp_path, 4096)
+    catalog.sync_historical_index(raw_dir, tmp_path)
+
+    assert result.status == "advanced"
+    assert result.deferred_session_keys == (("codex", "a" * 24),)
+    assert catalog.rallies(tmp_path) == expected
+    assert reads == ["save-codex-two.md"]
+
+
+def test_warm_existing_session_rejects_out_of_order_source_gap(tmp_path: Path) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [
+            _message("user", "first", "2026-08-01T00:00:00Z"),
+            {"type": "unknown", "timestamp": "2026-08-01T00:00:01Z"},
+            _message("assistant", "first answer", "2026-08-01T00:00:02Z"),
+        ],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    _capture(
+        tmp_path,
+        "save-codex-two.md",
+        "a" * 24,
+        [_message("assistant", "late", "2026-08-01T00:00:03Z")],
+        after_line=1,
+    )
+
+    with pytest.raises(catalog.CatalogError, match="source interval"):
+        catalog.advance(raw_dir, tmp_path, 4096)
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM raw_units").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 2
+
+
+def test_historical_gaps_and_unknown_only_overlap_are_distinct(tmp_path: Path) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [_message("user", "first", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    _capture(
+        tmp_path,
+        "save-codex-two.md",
+        "a" * 24,
+        [_message("assistant", "late", "2026-08-01T00:00:01Z")],
+        after_line=180,
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    _capture(
+        tmp_path,
+        "save-codex-three.md",
+        "a" * 24,
+        [{"type": "unknown", "timestamp": "2026-08-01T00:00:02Z"}],
+        after_line=180,
+    )
+
+    with pytest.raises(catalog.CatalogError, match="source interval"):
+        catalog.advance(raw_dir, tmp_path, 4096)
+
+
+def test_warm_old_raw_tamper_is_deferred_to_text_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [
+            _message("user", "first", "2026-08-01T00:00:00Z"),
+            _message("assistant", "first answer", "2026-08-01T00:00:01Z"),
+        ],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    first_answer = catalog.rallies(tmp_path)[0]["actual_answer_refs"][0]
+    _capture(
+        tmp_path,
+        "save-codex-two.md",
+        "a" * 24,
+        [_message("assistant", "second", "2026-08-01T00:00:02Z")],
+        after_line=2,
+    )
+    first_raw = next(
+        unit
+        for unit in RawStore(raw_dir, mode="v2").iter_segment_units()
+        if unit.raw_id == "save-codex-one.md"
+    )
+    assert first_raw.path is not None
+    first_raw.path.write_bytes(
+        first_raw.path.read_bytes().replace(b"first answer", b"wrong answer")
+    )
+
+    original_read = RawStore.read_bytes
+
+    def only_new_raw(self: RawStore, raw: object) -> bytes:
+        if getattr(raw, "raw_id", str(raw)) != "save-codex-two.md":
+            raise AssertionError("warm path reread old Raw")
+        return original_read(self, raw)
+
+    monkeypatch.setattr(RawStore, "read_bytes", only_new_raw)
+    catalog.advance(raw_dir, tmp_path, 4096)
+    monkeypatch.setattr(RawStore, "read_bytes", original_read)
+
+    with pytest.raises(
+        catalog.CatalogError, match="conflict|cannot be decoded|cannot be read"
+    ):
+        catalog.texts(raw_dir, tmp_path, refs=[first_answer])
+
+
 def test_overlapping_session_source_position_fails_closed(tmp_path: Path) -> None:
     init_chronovisor(RuntimeContext(tmp_path))
     raw_dir = _capture(
@@ -323,7 +626,7 @@ def test_overlapping_session_source_position_fails_closed(tmp_path: Path) -> Non
         [_message("assistant", "overlap", "2026-08-01T00:00:01Z")],
     )
 
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(catalog.CatalogError, match="source interval"):
         catalog.advance(raw_dir, tmp_path, 4096)
 
     with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
@@ -417,6 +720,23 @@ def test_historical_index_reads_only_delta_raw_and_is_searchable(
             yield unit, raw
 
     monkeypatch.setattr(RawStore, "iter_segment_bytes", record_read)
+    monkeypatch.setattr(
+        catalog,
+        "_index_atoms",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("delta sync scanned existing FTS atoms")
+        ),
+    )
+    original_atoms = catalog._catalog_assistant_atoms
+
+    def only_delta_atoms(
+        root: Path, *, after_rowid: int | None = None
+    ) -> dict[str, dict[str, object]]:
+        if after_rowid is None:
+            raise AssertionError("delta sync scanned all catalog assistants")
+        return original_atoms(root, after_rowid=after_rowid)
+
+    monkeypatch.setattr(catalog, "_catalog_assistant_atoms", only_delta_atoms)
     digest = catalog.sync_historical_index(raw_dir, tmp_path)
 
     assert reads == ["save-codex-two.md"]
@@ -451,6 +771,65 @@ def test_historical_index_conflicting_atom_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(catalog.CatalogError, match="assistant atom"):
         catalog.sync_historical_index(raw_dir, tmp_path)
+
+
+def test_historical_index_rebuild_has_the_same_digest(tmp_path: Path) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [_message("assistant", "first", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    first = catalog.sync_historical_index(raw_dir, tmp_path)
+    _capture(
+        tmp_path,
+        "save-codex-two.md",
+        "b" * 24,
+        [_message("assistant", "second", "2026-08-02T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    advanced = catalog.sync_historical_index(raw_dir, tmp_path)
+    index_path = catalog.historical_index_path(tmp_path)
+    index_path.unlink()
+    catalog._index_checkpoint_path(index_path).unlink()
+
+    assert first != advanced
+    assert catalog.sync_historical_index(raw_dir, tmp_path) == advanced
+
+
+def test_index_checkpoint_loss_inserts_pending_atoms(tmp_path: Path) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [_message("assistant", "first", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    catalog.sync_historical_index(raw_dir, tmp_path)
+    _capture(
+        tmp_path,
+        "save-codex-two.md",
+        "b" * 24,
+        [_message("assistant", "checkpoint recovery", "2026-08-02T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    index_path = catalog.historical_index_path(tmp_path)
+    catalog._index_checkpoint_path(index_path).unlink()
+
+    catalog.sync_historical_index(raw_dir, tmp_path)
+    found = store.search_historical_index(
+        index_path,
+        query="checkpoint recovery",
+        as_of_us=9_999_999_999_999_999,
+        host="other",
+        session_cluster_id="other",
+        source_index=0,
+        limit=10,
+    )
+    assert found
 
 
 def test_historical_index_checkpoint_mismatch_revalidates(
@@ -612,6 +991,59 @@ def test_candidate_offset_index_bootstrap_tail_noop_and_random_read(
         )
     with pytest.raises(catalog.CatalogError, match="index row"):
         catalog.candidate_rally_ids(tmp_path)
+
+
+def test_candidate_sync_keeps_catalog_checkpoint_warm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [
+            _message("user", "question", "2026-08-01T00:00:00Z"),
+            _message("assistant", "answer", "2026-08-01T00:00:01Z"),
+        ],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    answer = catalog.rallies(tmp_path)[0]["actual_answer_refs"][0]
+    cache = catalog.CatalogTextCache(raw_dir, tmp_path)
+    assert cache[answer["semantic_sha256"]] == "answer"
+    ledger = store.distillation_dir(tmp_path) / "candidate-ledger.jsonl"
+    store.append_chain(
+        ledger,
+        {
+            "kind": "candidate-snapshot",
+            "rally_id": "rally-1",
+            "snapshot": _candidate_snapshot("rally-1", ["c1"]),
+        },
+    )
+    assert catalog.sync_candidate_index(tmp_path, ledger)["status"] == "bootstrap"
+    assert cache[answer["semantic_sha256"]] == "answer"
+    checkpoint = catalog._read_catalog_checkpoint(tmp_path)
+    assert checkpoint is not None
+
+    from chronovisor.core.raw_store import RawStore
+
+    monkeypatch.setattr(
+        RawStore,
+        "read_bytes",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("candidate sync invalidated warm catalog")
+        ),
+    )
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "noop"
+    assert catalog._read_catalog_checkpoint(tmp_path) is not None
+    store.append_chain(
+        ledger,
+        {
+            "kind": "candidate-snapshot",
+            "rally_id": "rally-2",
+            "snapshot": _candidate_snapshot("rally-2", ["c2"]),
+        },
+    )
+    assert catalog.sync_candidate_index(tmp_path, ledger)["status"] == "advanced"
+    assert cache[answer["semantic_sha256"]] == "answer"
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "noop"
 
 
 def test_candidate_index_bootstrap_uses_sealed_head_without_rehashing_payload(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import stat
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -28,12 +29,17 @@ from chronovisor.recall import recall_distillation_store as store
 CATALOG_SCHEMA = "chronovisor.recall-distillation-catalog.v1"
 HISTORICAL_INDEX_SCHEMA = "chronovisor.recall-historical-fts.v1"
 HISTORICAL_INDEX_CHECKPOINT_KIND = "historical-index-checkpoint"
+HISTORICAL_INDEX_DIGEST_SCHEMA = "historical-fts-chain-v1"
 CANDIDATE_SNAPSHOT_SCHEMA = "chronovisor.recall-candidate-snapshot.v1"
 CANDIDATE_INDEX_SCHEMA = "chronovisor.recall-candidate-offset-index.v1"
 
 
 class CatalogError(ValueError):
     """The derived catalog cannot safely represent the committed Raw inventory."""
+
+
+class _CatalogRepairRequired(CatalogError):
+    """The text-backed session rebuild is needed to repair a missing tail."""
 
 
 @dataclass(frozen=True)
@@ -60,6 +66,24 @@ def _index_checkpoint_path(path: Path) -> Path:
     return path.with_suffix(path.suffix + ".checkpoint.json")
 
 
+def _catalog_checkpoint_path(root: Path) -> Path:
+    return _index_checkpoint_path(catalog_path(root))
+
+
+def _candidate_catalog_state_path(root: Path) -> Path:
+    return catalog_path(root).with_suffix(".sqlite.candidate-state.json")
+
+
+def _ensure_private_file(path: Path) -> None:
+    """Set private permissions only when needed; chmod mutates ctime."""
+
+    try:
+        if stat.S_IMODE(path.stat().st_mode) != 0o600:
+            path.chmod(0o600)
+    except OSError as exc:
+        raise CatalogError("historical catalog is unavailable") from exc
+
+
 def _index_file_state(path: Path) -> dict[str, int] | None:
     try:
         stat = path.stat()
@@ -76,8 +100,77 @@ def _index_file_state(path: Path) -> dict[str, int] | None:
     }
 
 
+def _write_catalog_checkpoint(root: Path, watermark: str, event_rowid: int) -> None:
+    store.write_sealed_state(
+        _catalog_checkpoint_path(root),
+        {
+            "kind": "historical-catalog-checkpoint",
+            "catalog_name": catalog_path(root).name,
+            "catalog_schema": CATALOG_SCHEMA,
+            "catalog_watermark": watermark,
+            "event_rowid": event_rowid,
+            "file_state": _index_file_state(catalog_path(root)),
+        },
+    )
+
+
+def _read_catalog_checkpoint(root: Path) -> dict[str, Any] | None:
+    try:
+        checkpoint = store.read_sealed(
+            _catalog_checkpoint_path(root), schema=store.DISTILLATION_SCHEMA
+        )
+    except store.DistillationStoreError:
+        return None
+    if (
+        checkpoint.get("kind") != "historical-catalog-checkpoint"
+        or checkpoint.get("catalog_name") != catalog_path(root).name
+        or checkpoint.get("catalog_schema") != CATALOG_SCHEMA
+        or not isinstance(checkpoint.get("catalog_watermark"), str)
+        or not isinstance(checkpoint.get("event_rowid"), int)
+        or isinstance(checkpoint.get("event_rowid"), bool)
+        or checkpoint["event_rowid"] < 0
+        or checkpoint.get("file_state") != _index_file_state(catalog_path(root))
+    ):
+        return None
+    return checkpoint
+
+
+def _write_candidate_catalog_state(
+    root: Path, checkpoint: Mapping[str, Any]
+) -> None:
+    store.write_sealed_state(
+        _candidate_catalog_state_path(root),
+        {
+            "kind": "candidate-catalog-state",
+            "catalog_watermark": checkpoint["catalog_watermark"],
+            "event_rowid": checkpoint["event_rowid"],
+            "catalog_file_state": _index_file_state(catalog_path(root)),
+        },
+    )
+
+
+def _read_candidate_catalog_state(root: Path) -> dict[str, Any] | None:
+    try:
+        state = store.read_sealed(
+            _candidate_catalog_state_path(root), schema=store.DISTILLATION_SCHEMA
+        )
+    except store.DistillationStoreError:
+        return None
+    if (
+        state.get("kind") != "candidate-catalog-state"
+        or not isinstance(state.get("catalog_watermark"), str)
+        or not isinstance(state.get("event_rowid"), int)
+        or state.get("catalog_file_state") != _index_file_state(catalog_path(root))
+    ):
+        return None
+    return state
+
+
 def _write_index_checkpoint(
-    path: Path, watermark: str, digest: str, count: int
+    path: Path,
+    catalog_checkpoint: Mapping[str, Any],
+    digest: str,
+    count: int,
 ) -> None:
     store.write_sealed_state(
         _index_checkpoint_path(path),
@@ -85,7 +178,10 @@ def _write_index_checkpoint(
             "kind": HISTORICAL_INDEX_CHECKPOINT_KIND,
             "index_name": path.name,
             "historical_index_schema": HISTORICAL_INDEX_SCHEMA,
-            "catalog_watermark": watermark,
+            "content_digest_schema": HISTORICAL_INDEX_DIGEST_SCHEMA,
+            "catalog_watermark": catalog_checkpoint["catalog_watermark"],
+            "catalog_event_rowid": catalog_checkpoint["event_rowid"],
+            "catalog_file_state": catalog_checkpoint["file_state"],
             "content_sha256": digest,
             "atom_count": count,
             "file_state": _index_file_state(path),
@@ -93,7 +189,7 @@ def _write_index_checkpoint(
     )
 
 
-def _read_index_checkpoint(path: Path, watermark: str) -> dict[str, Any] | None:
+def _read_index_checkpoint(path: Path) -> dict[str, Any] | None:
     try:
         checkpoint = store.read_sealed(
             _index_checkpoint_path(path), schema=store.DISTILLATION_SCHEMA
@@ -104,11 +200,17 @@ def _read_index_checkpoint(path: Path, watermark: str) -> dict[str, Any] | None:
         checkpoint.get("kind") != HISTORICAL_INDEX_CHECKPOINT_KIND
         or checkpoint.get("index_name") != path.name
         or checkpoint.get("historical_index_schema") != HISTORICAL_INDEX_SCHEMA
-        or checkpoint.get("catalog_watermark") != watermark
+        or checkpoint.get("content_digest_schema") != HISTORICAL_INDEX_DIGEST_SCHEMA
+        or not isinstance(checkpoint.get("catalog_watermark"), str)
+        or not isinstance(checkpoint.get("catalog_event_rowid"), int)
+        or isinstance(checkpoint.get("catalog_event_rowid"), bool)
+        or checkpoint["catalog_event_rowid"] < 0
         or not isinstance(checkpoint.get("content_sha256"), str)
+        or len(checkpoint["content_sha256"]) != 64
         or not isinstance(checkpoint.get("atom_count"), int)
         or isinstance(checkpoint.get("atom_count"), bool)
         or checkpoint["atom_count"] < 0
+        or not isinstance(checkpoint.get("catalog_file_state"), dict)
         or checkpoint.get("file_state") != _index_file_state(path)
     ):
         return None
@@ -125,10 +227,10 @@ def _connect(root: Path) -> sqlite3.Connection:
     except sqlite3.Error as exc:
         raise CatalogError("historical catalog is unavailable") from exc
     try:
-        path.chmod(0o600)
-    except OSError as exc:
+        _ensure_private_file(path)
+    except CatalogError:
         connection.close()
-        raise CatalogError("historical catalog is unavailable") from exc
+        raise
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys=ON")
     connection.execute("PRAGMA journal_mode=DELETE")
@@ -147,7 +249,11 @@ def _connect(root: Path) -> sqlite3.Connection:
             session_key TEXT NOT NULL,
             captured_at TEXT NOT NULL,
             record_count INTEGER NOT NULL,
-            status TEXT NOT NULL
+            status TEXT NOT NULL,
+            source_after_line INTEGER NOT NULL,
+            source_until_line INTEGER NOT NULL,
+            CHECK(source_after_line >= 0),
+            CHECK(source_until_line >= source_after_line)
         );
         CREATE TABLE IF NOT EXISTS events(
             raw_id TEXT NOT NULL,
@@ -291,7 +397,7 @@ def _store_unit(connection: sqlite3.Connection, unit: RawUnit, *, status: str) -
     raw_sha256, receipt_sha256 = _unit_identity(unit)
     assert unit.commit is not None and unit.captured_at is not None
     connection.execute(
-        """INSERT INTO raw_units VALUES(?,?,?,?,?,?,?,?)""",
+        """INSERT INTO raw_units VALUES(?,?,?,?,?,?,?,?,?,?)""",
         (
             unit.raw_id,
             raw_sha256,
@@ -301,8 +407,77 @@ def _store_unit(connection: sqlite3.Connection, unit: RawUnit, *, status: str) -
             unit.captured_at,
             unit.commit.record_count,
             status,
+            unit.commit.after_line,
+            unit.commit.until_line,
         ),
     )
+
+
+def _validate_new_unit_intervals(
+    connection: sqlite3.Connection, units: Iterable[RawUnit]
+) -> None:
+    """Require only newly committed intervals to append within each session.
+
+    Historical committed inventories may intentionally omit source ranges.  A
+    new interval may follow that history, but it may never overlap or precede
+    an already cataloged Raw interval, including a Raw containing only unknown
+    events.
+    """
+
+    try:
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(raw_units)")
+        }
+    except sqlite3.DatabaseError as exc:
+        raise CatalogError("historical catalog is unreadable") from exc
+    if {"source_after_line", "source_until_line"} - columns:
+        raise CatalogError("catalog source range migration requires repair")
+
+    prior_until: dict[tuple[str, str], int] = {}
+    for unit in sorted(
+        units,
+        key=lambda value: (
+            value.commit.host if value.commit is not None else "",
+            value.commit.session_key if value.commit is not None else "",
+            value.commit.after_line if value.commit is not None else -1,
+            value.raw_id,
+        ),
+    ):
+        assert unit.commit is not None
+        commit = unit.commit
+        after, until = int(commit.after_line), int(commit.until_line)
+        if after < 0 or until < after:
+            raise CatalogError("committed Raw source interval is invalid")
+        key = (commit.host, commit.session_key)
+        if key not in prior_until:
+            row = connection.execute(
+                """SELECT MAX(source_until_line) FROM raw_units
+                   WHERE host=? AND session_key=?""",
+                key,
+            ).fetchone()
+            if row is not None and row[0] is not None:
+                prior_until[key] = int(row[0])
+        if after < prior_until.get(key, after):
+            raise CatalogError("catalog session source interval is not append-only")
+        prior_until[key] = max(prior_until.get(key, after), until)
+
+
+def _reset_catalog_for_repair(connection: sqlite3.Connection) -> None:
+    """Make an old or unsealed derived catalog safe for one full Raw rebuild."""
+
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(raw_units)")}
+    for name in ("source_after_line", "source_until_line"):
+        if name not in columns:
+            connection.execute(f"ALTER TABLE raw_units ADD COLUMN {name} INTEGER")
+    for table in (
+        "candidate_index_state",
+        "candidate_records",
+        "rallies",
+        "events",
+        "raw_units",
+        "metadata",
+    ):
+        connection.execute(f"DELETE FROM {table}")
 
 
 def _store_events(
@@ -507,6 +682,297 @@ def _session_events(
     return events
 
 
+def _catalog_session_events(
+    connection: sqlite3.Connection,
+    host: str,
+    session_key: str,
+) -> list[dict[str, Any]]:
+    """Read one session's event metadata without resolving its Raw text."""
+
+    try:
+        rows = list(
+            connection.execute(
+                """
+                SELECT * FROM events
+                WHERE host=? AND session_key=?
+                ORDER BY source_index,raw_id,event_index
+                """,
+                (host, session_key),
+            )
+        )
+    except sqlite3.DatabaseError as exc:
+        raise CatalogError("historical catalog is unreadable") from exc
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        event = dict(row)
+        try:
+            event["structural"] = json.loads(str(event.pop("structural_json")))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise CatalogError("catalog structural tokens are invalid") from exc
+        try:
+            for key in (
+                "event_index",
+                "source_index",
+                "byte_start",
+                "byte_end",
+                "timestamp_us",
+                "text_bytes",
+            ):
+                event[key] = int(event[key])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CatalogError("catalog event metadata is invalid") from exc
+        if (
+            event["event_index"] < 0
+            or event["source_index"] < 0
+            or event["byte_start"] < 0
+            or event["byte_end"] < event["byte_start"]
+            or event["text_bytes"] < 0
+        ):
+            raise CatalogError("catalog event metadata is invalid")
+        event["nonempty"] = bool(event["nonempty"])
+        events.append(event)
+    return events
+
+
+def _catalog_event_ref(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Build a text-free event reference from catalog metadata."""
+
+    return distill._event_ref(row)
+
+
+def _rally_id_for_query(row: Mapping[str, Any]) -> str:
+    return canonical_json_sha256_strict(
+        {
+            "schema": distill.RALLY_SCHEMA,
+            "host": row["host"],
+            "session_key": row["session_key"],
+            "raw_id": row["raw_id"],
+            "event_index": row["event_index"],
+            "raw_sha256": row["raw_sha256"],
+        }
+    )
+
+
+def _materialize_catalog_rally(
+    query: Mapping[str, Any],
+    prefix: list[Mapping[str, Any]],
+    answer_rows: list[Mapping[str, Any]],
+    tool_rows: list[Mapping[str, Any]],
+    *,
+    max_context_bytes: int,
+    exposure: Mapping[tuple[str, str, str], list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Materialize one rally from metadata and the changed tail only."""
+
+    full_refs = [_catalog_event_ref(row) for row in prefix]
+    selected: list[dict[str, Any]] = []
+    context_suffix_bytes = 0
+    for row in reversed(prefix):
+        text_bytes = int(row["text_bytes"])
+        if context_suffix_bytes + text_bytes > max_context_bytes:
+            break
+        selected.append(_catalog_event_ref(row))
+        context_suffix_bytes += text_bytes
+    selected.reverse()
+
+    answer_refs = [_catalog_event_ref(row) for row in answer_rows]
+    tool_refs = [_catalog_event_ref(row) for row in tool_rows]
+    as_of_us = int(query["timestamp_us"])
+    query_sha256 = str(query["semantic_sha256"])
+    possible_receipts = exposure.get(
+        (
+            str(query["host"]),
+            str(query["session_id_sha256"]),
+            query_sha256,
+        ),
+        [],
+    )
+    answer_end_us = max(
+        (int(ref["timestamp_us"]) for ref in answer_refs), default=-1
+    )
+    receipt_rows = [
+        row
+        for row in possible_receipts
+        if as_of_us
+        <= distill._timestamp(row["observed_at"], row["observed_at"])[1]
+        <= answer_end_us
+    ]
+    exposure_ambiguous = len(receipt_rows) > 1
+    if len(receipt_rows) != 1:
+        receipt_rows = []
+    has_answer = bool(answer_refs)
+    has_exposure = bool(receipt_rows)
+    rally_id = _rally_id_for_query(query)
+    return {
+        "host": query["host"],
+        "session_cluster_id": query["session_cluster_id"],
+        "session_id_sha256": query["session_id_sha256"],
+        "as_of": query["timestamp"],
+        "as_of_us": as_of_us,
+        "source_index": query["source_index"],
+        "query_sha256": query_sha256,
+        "prompt_hash": query["prompt_hash"],
+        "context_suffix_bytes": context_suffix_bytes,
+        "full_context": {
+            "event_count": len(full_refs),
+            "refs_sha256": canonical_json_sha256_strict(full_refs),
+            "first_ref": full_refs[0] if full_refs else None,
+            "last_ref": full_refs[-1] if full_refs else None,
+        },
+        "schema": distill.RALLY_SCHEMA,
+        "boundary_revision": "rally-v1",
+        "rally_id": rally_id,
+        "query_ref": _catalog_event_ref(query),
+        "context_refs": selected,
+        "actual_answer_refs": answer_refs,
+        "tool_refs": tool_refs,
+        "exposure_receipts": receipt_rows,
+        "eligibility": {
+            "relevance": True,
+            "answer_utility": has_answer and has_exposure,
+            "reason": (
+                "eligible"
+                if has_answer and has_exposure
+                else "missing_answer"
+                if not has_answer
+                else "ambiguous_exact_exposure"
+                if exposure_ambiguous
+                else "missing_exact_exposure"
+            ),
+        },
+    }
+
+
+def _incremental_session_rallies(
+    connection: sqlite3.Connection,
+    root: Path,
+    host: str,
+    session_key: str,
+    new_rows: list[Mapping[str, Any]],
+    max_context_bytes: int,
+) -> list[dict[str, Any]]:
+    """Project only the changed rally tail using catalog metadata.
+
+    Existing event text is deliberately not resolved here.  The catalog keeps
+    enough byte/role/reference metadata to append answers and form the next
+    query context without rereading committed Raw prefixes.
+    """
+
+    all_rows = _catalog_session_events(connection, host, session_key)
+    new_keys = {
+        (str(row["raw_id"]), int(row["event_index"])) for row in new_rows
+    }
+    by_key = {
+        (str(row["raw_id"]), int(row["event_index"])): row for row in all_rows
+    }
+    if not new_keys <= set(by_key):
+        raise CatalogError("catalog session delta is incomplete")
+    existing_rows = [
+        row
+        for row in all_rows
+        if (str(row["raw_id"]), int(row["event_index"])) not in new_keys
+    ]
+    if existing_rows and new_rows:
+        old_max = max(int(row["source_index"]) for row in existing_rows)
+        new_min = min(int(row["source_index"]) for row in new_rows)
+        if new_min <= old_max:
+            raise CatalogError("catalog session source interval is not append-only")
+
+    ordered = sorted(
+        all_rows,
+        key=lambda row: (
+            int(row["source_index"]),
+            str(row["raw_id"]),
+            int(row["event_index"]),
+        ),
+    )
+    new_source = {
+        int(row["source_index"])
+        for row in new_rows
+    }
+    queries = [
+        row
+        for row in ordered
+        if row["role"] == "user"
+        and bool(row["nonempty"])
+        and int(row["source_index"]) in new_source
+    ]
+    old_queries = [
+        row
+        for row in existing_rows
+        if row["role"] == "user" and bool(row["nonempty"])
+    ]
+    old_query = old_queries[-1] if old_queries else None
+    first_new_query = queries[0] if queries else None
+    changed_old = False
+    if old_query is not None:
+        old_source = int(old_query["source_index"])
+        changed_old = any(
+            int(row["source_index"]) > old_source
+            and (
+                first_new_query is None
+                or int(row["source_index"])
+                < int(first_new_query["source_index"])
+            )
+            for row in new_rows
+        )
+    affected_queries: list[Mapping[str, Any]] = []
+    if changed_old:
+        affected_queries.append(old_query)
+    affected_queries.extend(queries)
+    if not affected_queries:
+        return []
+
+    exposure = distill._exposure_map(root)
+    materialized: list[dict[str, Any]] = []
+    for index, query in enumerate(affected_queries):
+        query_source = int(query["source_index"])
+        next_query_source = (
+            int(affected_queries[index + 1]["source_index"])
+            if index + 1 < len(affected_queries)
+            else None
+        )
+        prefix = [
+            row for row in ordered if int(row["source_index"]) < query_source
+        ]
+        answer_rows: list[Mapping[str, Any]] = []
+        tool_rows: list[Mapping[str, Any]] = []
+        for row in ordered:
+            source = int(row["source_index"])
+            if source <= query_source:
+                continue
+            if next_query_source is not None and source >= next_query_source:
+                break
+            if row["role"] == "assistant" and bool(row["nonempty"]):
+                answer_rows.append(row)
+            elif row["role"] == "tool":
+                tool_rows.append(row)
+        if query is old_query:
+            rally_id = _rally_id_for_query(query)
+            stored = connection.execute(
+                "SELECT row_json FROM rallies WHERE rally_id=?", (rally_id,)
+            ).fetchone()
+            if stored is None:
+                raise _CatalogRepairRequired("existing rally is absent from catalog")
+            try:
+                prior = json.loads(str(stored[0]))
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise _CatalogRepairRequired("existing rally is invalid") from exc
+            if not isinstance(prior, dict) or prior.get("rally_id") != rally_id:
+                raise _CatalogRepairRequired("existing rally conflicts with query")
+        materialized.append(
+            _materialize_catalog_rally(
+                query,
+                prefix,
+                answer_rows,
+                tool_rows,
+                max_context_bytes=max_context_bytes,
+                exposure=exposure,
+            )
+        )
+    return materialized
+
+
 def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance:
     """Add newly committed Raw v2 units without duplicating transcript text."""
 
@@ -519,21 +985,37 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
     except RawSegmentCorrupt as exc:
         raise CatalogError("committed Raw inventory is invalid") from exc
     current = {unit.raw_id: unit for unit in units}
+    prior_checkpoint = (
+        _read_catalog_checkpoint(root) if catalog_path(root).exists() else None
+    )
     connection = _connect(root)
     try:
         connection.execute("BEGIN IMMEDIATE")
         metadata = dict(connection.execute("SELECT key,value FROM metadata"))
         schema = metadata.get("schema")
-        if schema not in {None, CATALOG_SCHEMA}:
-            raise CatalogError("catalog schema mismatch")
         stored = {
             str(row["raw_id"]): row
             for row in connection.execute(
                 "SELECT raw_id,raw_sha256,receipt_sha256 FROM raw_units"
             )
         }
-        if schema is None and stored:
-            raise CatalogError("catalog metadata is missing")
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(raw_units)")}
+        repairing = (
+            schema not in {None, CATALOG_SCHEMA}
+            or (schema is None and bool(stored))
+            or (
+                schema is not None
+                and (
+                    prior_checkpoint is None
+                    or prior_checkpoint["catalog_watermark"] != metadata.get("watermark")
+                )
+            )
+            or bool({"source_after_line", "source_until_line"} - columns)
+        )
+        if repairing:
+            _reset_catalog_for_repair(connection)
+            schema = None
+            stored = {}
         if schema is not None and set(stored) - set(current):
             raise CatalogError("committed Raw inventory removed from catalog")
         new_units: list[RawUnit] = []
@@ -566,15 +1048,19 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
                 (archived if status == "archived" else indexed).append(unit.raw_id)
             rally_ids = _store_rallies(connection, rally_rows)
             deferred: tuple[tuple[str, str], ...] = ()
-            status = "bootstrap"
+            status = "repaired" if repairing else "bootstrap"
         else:
+            _validate_new_unit_intervals(connection, new_units)
             existing_sessions = {
                 (str(row[0]), str(row[1]))
                 for row in connection.execute(
-                    "SELECT DISTINCT host,session_key FROM events"
+                    "SELECT DISTINCT host,session_key FROM raw_units"
                 )
             }
             delta: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+            session_new_rows: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(
+                list
+            )
             deferred_set: set[tuple[str, str]] = set()
             for unit in new_units:
                 unit_status, rows = _read_unit_events(raw_store, unit)
@@ -583,42 +1069,57 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
                 (archived if unit_status == "archived" else indexed).append(unit.raw_id)
                 for row in rows:
                     key = (str(row["host"]), str(row["session_key"]))
+                    session_new_rows[key].append(row)
                     if key in existing_sessions:
                         deferred_set.add(key)
                     else:
                         delta[key].append(row)
             rally_rows = []
             for key, rows in sorted(delta.items()):
-                if key in deferred_set:
-                    continue
                 try:
                     rally_rows.extend(
-                        distill.extract_rallies(
-                            raw_dir,
-                            root=root,
-                            max_context_bytes=max_context_bytes,
-                            _event_rows=sorted(
-                                rows, key=lambda row: int(row["source_index"])
-                            ),
+                        _incremental_session_rallies(
+                            connection,
+                            root,
+                            key[0],
+                            key[1],
+                            rows,
+                            max_context_bytes,
                         )
                     )
-                except distill.DistillationError as exc:
+                except CatalogError as exc:
                     raise CatalogError("cannot derive delta rallies") from exc
             for host, session_key in sorted(deferred_set):
                 try:
-                    session_rows = _session_events(
-                        connection, raw_dir, host, session_key
-                    )
                     rally_rows.extend(
-                        distill.extract_rallies(
-                            raw_dir,
-                            root=root,
-                            max_context_bytes=max_context_bytes,
-                            _event_rows=session_rows,
+                        _incremental_session_rallies(
+                            connection,
+                            root,
+                            host,
+                            session_key,
+                            session_new_rows[(host, session_key)],
+                            max_context_bytes,
                         )
                     )
-                except (CatalogError, distill.DistillationError) as exc:
-                    raise CatalogError("cannot rebuild existing session tail") from exc
+                except _CatalogRepairRequired:
+                    try:
+                        session_rows = _session_events(
+                            connection, raw_dir, host, session_key
+                        )
+                        rally_rows.extend(
+                            distill.extract_rallies(
+                                raw_dir,
+                                root=root,
+                                max_context_bytes=max_context_bytes,
+                                _event_rows=session_rows,
+                            )
+                        )
+                    except (CatalogError, distill.DistillationError) as exc:
+                        raise CatalogError(
+                            "cannot rebuild existing session tail"
+                        ) from exc
+                except CatalogError as exc:
+                    raise CatalogError(str(exc)) from exc
             rally_ids = _store_rallies(connection, rally_rows)
             deferred = tuple(sorted(deferred_set))
             status = "advanced"
@@ -626,13 +1127,17 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
             "INSERT OR REPLACE INTO metadata VALUES(?,?)",
             (("schema", CATALOG_SCHEMA), ("watermark", watermark)),
         )
+        event_rowid = int(
+            connection.execute("SELECT COALESCE(MAX(rowid),0) FROM events").fetchone()[0]
+        )
         connection.commit()
     except Exception:
         connection.rollback()
         raise
     finally:
         connection.close()
-    catalog_path(root).chmod(0o600)
+    _ensure_private_file(catalog_path(root))
+    _write_catalog_checkpoint(root, watermark, event_rowid)
     return CatalogAdvance(
         status,
         watermark,
@@ -643,9 +1148,15 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
     )
 
 
+def _require_catalog_checkpoint(root: Path) -> None:
+    if _read_catalog_checkpoint(root) is None:
+        raise CatalogError("catalog checkpoint requires repair")
+
+
 def rallies(root: Path, ids: Iterable[str] | None = None) -> list[dict[str, Any]]:
     """Read text-free Rally manifests already derived by :func:`advance`."""
 
+    _require_catalog_checkpoint(root)
     selected = None if ids is None else tuple(ids)
     with _connect(root) as connection:
         if selected is not None:
@@ -1041,6 +1552,7 @@ def sync_candidate_index(
     """Project candidate ledger offsets without copying snapshot bodies."""
 
     path = ledger_path.expanduser().resolve(strict=False)
+    catalog_checkpoint = _read_catalog_checkpoint(root)
     connection = _connect(root)
     status = "noop"
     try:
@@ -1117,7 +1629,14 @@ def sync_candidate_index(
                     ),
                 )
                 connection.commit()
-                catalog_path(root).chmod(0o600)
+                _ensure_private_file(catalog_path(root))
+                if catalog_checkpoint is not None:
+                    _write_candidate_catalog_state(root, catalog_checkpoint)
+                    _write_catalog_checkpoint(
+                        root,
+                        str(catalog_checkpoint["catalog_watermark"]),
+                        int(catalog_checkpoint["event_rowid"]),
+                    )
                 return {
                     "status": "noop",
                     "count": count,
@@ -1186,7 +1705,14 @@ def sync_candidate_index(
         raise
     finally:
         connection.close()
-    catalog_path(root).chmod(0o600)
+    _ensure_private_file(catalog_path(root))
+    if catalog_checkpoint is not None:
+        _write_candidate_catalog_state(root, catalog_checkpoint)
+        _write_catalog_checkpoint(
+            root,
+            str(catalog_checkpoint["catalog_watermark"]),
+            int(catalog_checkpoint["event_rowid"]),
+        )
     return {
         "status": status,
         "count": count,
@@ -1415,6 +1941,7 @@ def texts(
 ) -> dict[str, str]:
     """Resolve requested catalog text from verified Raw bytes on demand."""
 
+    _require_catalog_checkpoint(root)
     requested_hashes = set(hashes or ())
     requested_refs = list(refs or ())
     with _connect(root) as connection:
@@ -1448,22 +1975,64 @@ class CatalogTextCache(Mapping[str, str]):
     """Resolve only requested catalog text and retain it for the current run."""
 
     def __init__(self, raw_dir: Path, root: Path) -> None:
+        checkpoint = _read_catalog_checkpoint(root)
+        if checkpoint is None:
+            raise CatalogError("catalog checkpoint requires repair")
         self._raw_dir = raw_dir
         self._root = root
+        self._catalog_file_state = checkpoint["file_state"]
+        self._checkpoint_file_state = _index_file_state(_catalog_checkpoint_path(root))
+        self._candidate_state_file_state = _index_file_state(
+            _candidate_catalog_state_path(root)
+        )
+        self._watermark = checkpoint["catalog_watermark"]
+        self._event_rowid = checkpoint["event_rowid"]
         self._cache: dict[str, str] = {}
 
+    def _require_current_catalog(self) -> None:
+        catalog_state = _index_file_state(catalog_path(self._root))
+        checkpoint_state = _index_file_state(_catalog_checkpoint_path(self._root))
+        if (
+            catalog_state == self._catalog_file_state
+            and checkpoint_state == self._checkpoint_file_state
+        ):
+            return
+        candidate_state = _index_file_state(_candidate_catalog_state_path(self._root))
+        if candidate_state == self._candidate_state_file_state:
+            raise CatalogError("catalog checkpoint requires repair")
+        bridge = _read_candidate_catalog_state(self._root)
+        checkpoint = _read_catalog_checkpoint(self._root)
+        if (
+            bridge is None
+            or checkpoint is None
+            or bridge["catalog_watermark"] != self._watermark
+            or bridge["event_rowid"] != self._event_rowid
+            or checkpoint["catalog_watermark"] != self._watermark
+            or checkpoint["event_rowid"] != self._event_rowid
+        ):
+            raise CatalogError("catalog checkpoint requires repair")
+        self._catalog_file_state = checkpoint["file_state"]
+        self._checkpoint_file_state = checkpoint_state
+        self._candidate_state_file_state = candidate_state
+
     def __getitem__(self, key: str) -> str:
+        # Raw is immutable after resolution; rereading it per cache hit would
+        # break the warm-path contract. A new cache resolution verifies Raw.
+        self._require_current_catalog()
         if key not in self._cache:
             self.prefetch((key,))
         return self._cache[key]
 
     def __iter__(self) -> Iterator[str]:
+        self._require_current_catalog()
         return iter(self._cache)
 
     def __len__(self) -> int:
+        self._require_current_catalog()
         return len(self._cache)
 
     def prefetch(self, hashes: Iterable[str]) -> None:
+        self._require_current_catalog()
         missing = sorted(
             {
                 value
@@ -1520,21 +2089,11 @@ def _catalog_watermark(raw_dir: Path, root: Path) -> str:
     return watermark
 
 
-def _catalog_assistant_atoms(root: Path) -> dict[str, dict[str, Any]]:
-    """Read catalog assistant metadata after the small watermark preflight."""
+def _catalog_assistant_atoms_from_rows(
+    rows: Iterable[sqlite3.Row],
+) -> dict[str, dict[str, Any]]:
+    """Convert selected catalog assistant rows into text-free atom metadata."""
 
-    path = catalog_path(root)
-    try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
-            connection.row_factory = sqlite3.Row
-            rows = list(
-                connection.execute(
-                    "SELECT * FROM events WHERE role='assistant' AND nonempty=1 "
-                    "ORDER BY raw_id,event_index"
-                )
-            )
-    except sqlite3.DatabaseError as exc:
-        raise CatalogError("historical catalog is unreadable") from exc
     atoms: dict[str, dict[str, Any]] = {}
     for row in rows:
         try:
@@ -1566,11 +2125,33 @@ def _catalog_assistant_atoms(root: Path) -> dict[str, dict[str, Any]]:
             "text_sha256": row["semantic_sha256"],
             "ref": ref,
             "catalog_row": row,
+            "catalog_rowid": int(row["catalog_rowid"]),
         }
         if atom_id in atoms:
             raise CatalogError("catalog assistant atom conflicts")
         atoms[atom_id] = atom
     return atoms
+
+
+def _catalog_assistant_atoms(
+    root: Path, *, after_rowid: int | None = None
+) -> dict[str, dict[str, Any]]:
+    """Read all assistants for rebuild, or only catalog rows after a cursor."""
+
+    path = catalog_path(root)
+    query = "SELECT rowid AS catalog_rowid,* FROM events WHERE role='assistant' AND nonempty=1"
+    parameters: tuple[int, ...] = ()
+    if after_rowid is not None:
+        query += " AND rowid>?"
+        parameters = (after_rowid,)
+    query += " ORDER BY rowid"
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = list(connection.execute(query, parameters))
+    except sqlite3.DatabaseError as exc:
+        raise CatalogError("historical catalog is unreadable") from exc
+    return _catalog_assistant_atoms_from_rows(rows)
 
 
 def _index_atoms(
@@ -1647,10 +2228,11 @@ def _index_atoms(
             "ref": ref,
             "text": text,
         }
-    digest = canonical_json_sha256_strict(
+    digest = _index_digest({atom_id: expected[atom_id] for atom_id in atoms})
+    legacy_digest = canonical_json_sha256_strict(
         sorted(atoms.values(), key=lambda atom: str(atom["atom_id"]))
     )
-    if metadata.get("content_sha256") != digest:
+    if metadata.get("content_sha256") not in {digest, legacy_digest}:
         raise CatalogError("historical index content digest conflicts")
     return atoms, digest
 
@@ -1673,23 +2255,58 @@ def _resolved_atoms(
 
 
 def _index_digest(atoms: Mapping[str, Mapping[str, Any]]) -> str:
-    return canonical_json_sha256_strict(
-        sorted(atoms.values(), key=lambda atom: str(atom["atom_id"]))
+    """Hash the catalog-row ordered atom chain without scanning old FTS rows."""
+
+    return _advance_index_digest(
+        hashlib.sha256(HISTORICAL_INDEX_DIGEST_SCHEMA.encode()).hexdigest(), atoms.values()
     )
+
+
+def _advance_index_digest(previous: str, added: Iterable[Mapping[str, Any]]) -> str:
+    if len(previous) != 64:
+        raise CatalogError("historical index digest is invalid")
+    try:
+        state = bytes.fromhex(previous)
+    except ValueError as exc:
+        raise CatalogError("historical index digest is invalid") from exc
+    for atom in sorted(added, key=lambda value: int(value["catalog_rowid"])):
+        state = hashlib.sha256(
+            state + str(atom["atom_id"]).encode() + b"\0"
+        ).digest()
+    return state.hex()
 
 
 def sync_historical_index(raw_dir: Path, root: Path) -> str:
     """Incrementally synchronize the existing assistant FTS from the catalog."""
 
     watermark = _catalog_watermark(raw_dir, root)
+    catalog_checkpoint = _read_catalog_checkpoint(root)
+    if (
+        catalog_checkpoint is None
+        or catalog_checkpoint["catalog_watermark"] != watermark
+    ):
+        raise CatalogError("catalog checkpoint requires repair")
     path = historical_index_path(root)
-    checkpoint = _read_index_checkpoint(path, watermark)
-    if checkpoint is not None:
+    checkpoint = _read_index_checkpoint(path)
+    if (
+        checkpoint is not None
+        and checkpoint["catalog_watermark"] == watermark
+        and checkpoint["catalog_file_state"] == catalog_checkpoint["file_state"]
+        and checkpoint["catalog_event_rowid"] == catalog_checkpoint["event_rowid"]
+    ):
         return str(checkpoint["content_sha256"])
-    expected = _catalog_assistant_atoms(root)
     if not path.exists():
+        expected = _catalog_assistant_atoms(root)
         atoms = _resolved_atoms(raw_dir, expected)
-        digest = store.create_historical_index(path, atoms.values())
+        store.create_historical_index(path, atoms.values())
+        digest = _index_digest(atoms)
+        try:
+            with sqlite3.connect(path) as writable:
+                writable.execute(
+                    "UPDATE metadata SET value=? WHERE key='content_sha256'", (digest,)
+                )
+        except sqlite3.DatabaseError as exc:
+            raise CatalogError("historical index bootstrap is unavailable") from exc
         try:
             with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as readonly:
                 _atoms, verified = _index_atoms(readonly, expected)
@@ -1697,8 +2314,77 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
             raise CatalogError("historical index bootstrap is unreadable") from exc
         if digest != verified:
             raise CatalogError("historical index bootstrap digest conflicts")
-        _write_index_checkpoint(path, watermark, verified, len(atoms))
+        _ensure_private_file(path)
+        _write_index_checkpoint(path, catalog_checkpoint, verified, len(atoms))
         return verified
+
+    if (
+        checkpoint is not None
+        and checkpoint["catalog_event_rowid"] <= catalog_checkpoint["event_rowid"]
+    ):
+        pending = _catalog_assistant_atoms(
+            root, after_rowid=int(checkpoint["catalog_event_rowid"])
+        )
+        if not pending:
+            _write_index_checkpoint(
+                path,
+                catalog_checkpoint,
+                str(checkpoint["content_sha256"]),
+                int(checkpoint["atom_count"]),
+            )
+            return str(checkpoint["content_sha256"])
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(path)
+            connection.execute("PRAGMA journal_mode=DELETE")
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("BEGIN IMMEDIATE")
+            added = _resolved_atoms(raw_dir, pending)
+            digest = _advance_index_digest(str(checkpoint["content_sha256"]), added.values())
+            for atom in added.values():
+                cursor = connection.execute(
+                    """INSERT INTO atoms(
+                        atom_id,host,session_cluster_id,source_index,timestamp_us,
+                        text_sha256,ref_json,text
+                    ) VALUES(?,?,?,?,?,?,?,?)""",
+                    (
+                        atom["atom_id"],
+                        atom["host"],
+                        atom["session_cluster_id"],
+                        atom["source_index"],
+                        atom["timestamp_us"],
+                        atom["text_sha256"],
+                        json.dumps(atom["ref"], sort_keys=True, separators=(",", ":")),
+                        atom["text"],
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO atoms_fts(rowid,search_text) VALUES(?,?)",
+                    (cursor.lastrowid, store._search_terms(str(atom["text"]))),
+                )
+            connection.execute(
+                "UPDATE metadata SET value=? WHERE key='content_sha256'", (digest,)
+            )
+            connection.commit()
+        except sqlite3.DatabaseError as exc:
+            if connection is not None:
+                connection.rollback()
+            raise CatalogError("historical index update failed") from exc
+        finally:
+            if connection is not None:
+                connection.close()
+        _ensure_private_file(path)
+        _write_index_checkpoint(
+            path,
+            catalog_checkpoint,
+            digest,
+            int(checkpoint["atom_count"]) + len(added),
+        )
+        return digest
+
+    # Missing or altered index state cannot be safely incremented.  This is
+    # the only existing-index path allowed to inspect every atom.
+    expected = _catalog_assistant_atoms(root)
     connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(path)
@@ -1712,14 +2398,17 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
             if atom_id not in indexed
         }
         if not pending:
-            connection.rollback()
+            connection.execute(
+                "UPDATE metadata SET value=? WHERE key='content_sha256'", (digest,)
+            )
+            connection.commit()
             connection.close()
             connection = None
-            _write_index_checkpoint(path, watermark, digest, len(expected))
+            _ensure_private_file(path)
+            _write_index_checkpoint(path, catalog_checkpoint, digest, len(expected))
             return digest
         added = _resolved_atoms(raw_dir, pending)
-        all_atoms = indexed | added
-        digest = _index_digest(all_atoms)
+        digest = _index_digest(expected)
         for atom in added.values():
             cursor = connection.execute(
                 """INSERT INTO atoms(
@@ -1752,6 +2441,6 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
     finally:
         if connection is not None:
             connection.close()
-    path.chmod(0o600)
-    _write_index_checkpoint(path, watermark, digest, len(expected))
+    _ensure_private_file(path)
+    _write_index_checkpoint(path, catalog_checkpoint, digest, len(expected))
     return digest
