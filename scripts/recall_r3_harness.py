@@ -28,9 +28,10 @@ import time
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 R3_SCHEMA = "chronovisor.recall-r3.v1"
+R3_CLONE_SCHEMA = "chronovisor.recall-r3-workset-clone.v1"
 R3_COMPLETION_SCHEMA = "chronovisor.recall-r3-completion.v1"
 R2_FROZEN_CLONE_SCHEMA = "chronovisor.recall-r2-frozen-clone.v1"
 DEFAULT_SAMPLES = 100
@@ -165,7 +166,10 @@ def _load_runtime(source_root: Path) -> tuple[Any, Any]:
     except (ImportError, OSError) as exc:
         raise R3Error("R3 runtime modules are unavailable") from exc
     for module in (workset, store):
-        module_path = Path(module.__file__).resolve()
+        module_file = getattr(module, "__file__", None)
+        if not isinstance(module_file, str):
+            raise R3Error("R3 runtime module has no source path")
+        module_path = Path(module_file).resolve()
         if not module_path.is_relative_to(source_root / "src"):
             raise R3Error("R3 runtime module escaped source root")
     return workset, store
@@ -532,7 +536,10 @@ def _git_head(source_root: Path) -> str:
 
 def _source_snapshot(source_root: Path) -> dict[str, Any]:
     try:
-        return R2._source_tree_digest(source_root)
+        snapshot = R2._source_tree_digest(source_root)
+        if not isinstance(snapshot, dict):
+            raise R3Error("source snapshot shape is invalid")
+        return dict(snapshot)
     except Exception as exc:
         raise R3Error("source snapshot failed") from exc
 
@@ -878,6 +885,9 @@ def _production_scope_identity(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         or not isinstance(lock_files, Mapping)
     ):
         raise R3Error("production Workset state/pointer/lock evidence is incomplete")
+    workset = protected.get("workset")
+    if not isinstance(workset, Mapping):
+        raise R3Error("production Workset identity evidence is incomplete")
     normalized_pointers: dict[str, Any] = {}
     for name, value in pointers.items():
         if value is None:
@@ -896,7 +906,10 @@ def _production_scope_identity(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(value, Mapping)
     }
     return {
-        "workset": protected.get("workset"),
+        # APFS clone inode/device/mtime values are expected to differ.  Keep
+        # the logical/security-column digest and schema only for cross-root
+        # parity; each side's raw file state remains in its own TOCTOU probe.
+        "workset": _workset_identity(workset),
         "state_pointers": normalized_pointers,
         "locks": normalized_locks,
     }
@@ -943,7 +956,8 @@ def _clone_from_root(source: Path) -> Path:
     """Use the existing forced APFS clone implementation."""
 
     try:
-        return R2._clone_from_root(source)
+        clone = R2._clone_from_root(source)
+        return Path(clone)
     except Exception as exc:
         raise R3Error(str(exc)) from exc
 
@@ -985,9 +999,48 @@ def _clone_workset_path(clone: Path) -> Path:
     return path
 
 
-def _normalize_clone_workset(path: Path) -> dict[str, Any]:
-    """Checkpoint clone-only SQLite WAL state before multiprocessing access."""
+def _sqlite_sidecar_snapshot(path: Path) -> dict[str, Any]:
+    """Capture clone-only SQLite sidecars without trusting their generation."""
 
+    sidecars: dict[str, Any] = {}
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = path.with_name(path.name + suffix)
+        try:
+            sidecar.lstat()
+        except FileNotFoundError:
+            sidecars[suffix] = None
+            continue
+        if _has_symlink_component(sidecar):
+            raise R3Error("clone Workset SQLite sidecar contains a symlink")
+        sidecars[suffix] = _regular_file_state(sidecar)
+    return sidecars
+
+
+def _assert_checkpointed_clone_sidecars(path: Path) -> None:
+    """Reject untrusted copied WAL/journal frames before any SQLite open."""
+
+    sidecars = _sqlite_sidecar_snapshot(path)
+    for suffix in ("-wal", "-journal"):
+        state = sidecars[suffix]
+        if isinstance(state, Mapping) and state.get("st_size") != 0:
+            raise R3Error("clone Workset SQLite sidecar is not checkpointed")
+
+
+def _normalize_clone_workset(
+    path: Path, *, expected_identity: Mapping[str, Any], allow_wal: bool = False
+) -> dict[str, Any]:
+    """Checkpoint clone-only SQLite WAL state without discarding semantic rows."""
+
+    expected = _workset_identity(expected_identity)
+    sidecars_before = _sqlite_sidecar_snapshot(path)
+    if not allow_wal:
+        for suffix in ("-wal", "-journal"):
+            state = sidecars_before[suffix]
+            if isinstance(state, Mapping) and state.get("st_size") != 0:
+                raise R3Error("clone Workset SQLite sidecar is not checkpointed")
+    pre_inventory = _clone_workset_inventory(path)
+    if _workset_identity(pre_inventory) != expected:
+        raise R3Error("clone Workset identity changed before SQLite normalization")
     before = _regular_file_state(path)
     try:
         with sqlite3.connect(path, timeout=30.0) as connection:
@@ -1004,12 +1057,26 @@ def _normalize_clone_workset(path: Path) -> dict[str, Any]:
     ):
         raise R3Error("clone Workset SQLite normalization is not healthy")
     after = _regular_file_state(path)
+    sidecars_after = _sqlite_sidecar_snapshot(path)
+    if (
+        before["st_dev"] != after["st_dev"]
+        or before["st_ino"] != after["st_ino"]
+    ):
+        raise R3Error("clone Workset SQLite identity changed during normalization")
+    post_inventory = _clone_workset_inventory(path)
+    post_identity = _workset_identity(post_inventory)
+    if post_identity != expected or post_identity != _workset_identity(pre_inventory):
+        raise R3Error("clone Workset identity changed during SQLite normalization")
     return {
         "journal_mode": journal_mode,
         "wal_checkpoint": [int(value) for value in checkpoint],
         "integrity": integrity,
         "file_state_before": before,
         "file_state_after": after,
+        "sidecars_before": sidecars_before,
+        "sidecars_after": sidecars_after,
+        "semantic_before": _workset_identity(pre_inventory),
+        "semantic_after": post_identity,
         "clone_only": True,
     }
 
@@ -1035,7 +1102,7 @@ def _probe_apfs_clone(path: Path) -> str:
         raise R3Error("clone filesystem probe failed") from exc
     if filesystem != "apfs":
         raise R3Error("trusted clone is not on APFS")
-    return filesystem
+    return cast(str, filesystem)
 
 
 def _artifact_file_snapshot(path: Path) -> dict[str, Any]:
@@ -1882,8 +1949,9 @@ _SIGTERM_CHILD = r'''
 import dataclasses, json, sys, time
 from chronovisor.recall.recall_distillation_workset import DistillationWorkset
 path = sys.argv[1]
+kind = sys.argv[2] if len(sys.argv) > 2 else "r3-sigterm"
 workset = DistillationWorkset(path)
-claims = workset.claim("r3-sigterm", 1, "sigterm-child", 0.5)
+claims = workset.claim(kind, 1, "sigterm-child", 0.5)
 if len(claims) != 1:
     raise SystemExit(3)
 print(json.dumps({"ready": True, "claim": dataclasses.asdict(claims[0])}, separators=(",", ":")), flush=True)
@@ -1999,7 +2067,11 @@ def _clone_teacher_handoff(
     # A cycle/child boundary must not inherit an APFS-copied WAL/SHM frame.
     # Checkpoint only the owned clone before handing the DB to the child; the
     # production Workset is never opened for this normalization.
-    normalization_before_child = _normalize_clone_workset(path)
+    normalization_before_child = _normalize_clone_workset(
+        path,
+        expected_identity=_workset_identity(before_inventory),
+        allow_wal=True,
+    )
     started = time.perf_counter_ns()
     try:
         process = subprocess.run(
@@ -2039,7 +2111,14 @@ def _clone_teacher_handoff(
         and response.get("legacy_unverified_excluded") is not True
     ):
         raise R3Error("clone teacher handoff response coverage is invalid")
-    normalization_after_child = _normalize_clone_workset(path)
+    after_child_pre_inventory = _clone_workset_inventory(
+        path, expected_rows=OX_WORKSET_EXPECTED_ROWS, require_receipts=True
+    )
+    normalization_after_child = _normalize_clone_workset(
+        path,
+        expected_identity=_workset_identity(after_child_pre_inventory),
+        allow_wal=True,
+    )
     reopened = workset_module.DistillationWorkset(path)
     status = reopened.status()
     if status.get("leased") != 0:
@@ -2142,14 +2221,31 @@ def _read_child_line(process: subprocess.Popen[str], timeout: float) -> str:
         selector.close()
     if not line:
         raise R3Error("SIGTERM child exited before readiness")
-    return line
+    return str(line)
 
 
-def _sigterm_reopen(workset_module: Any, source_root: Path, path: Path) -> dict[str, Any]:
+def _sigterm_reopen(
+    workset_module: Any,
+    source_root: Path,
+    path: Path,
+    kind: str | None = None,
+) -> dict[str, Any]:
+    if kind is None:
+        try:
+            with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+                dedicated = connection.execute(
+                    "SELECT 1 FROM work_items WHERE kind = 'r3-sigterm' "
+                    "AND state = 'ready' LIMIT 1"
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise R3Error("SIGTERM kind probe failed") from exc
+        kind = "r3-sigterm" if dedicated is not None else "ox"
     workset = workset_module.DistillationWorkset(path)
+    before_status = workset.status(kind)
+    before_completed = int(before_status.get("completed", 0))
     started = time.perf_counter_ns()
     process = subprocess.Popen(
-        [sys.executable, "-c", _SIGTERM_CHILD, str(path)],
+        [sys.executable, "-c", _SIGTERM_CHILD, str(path), kind],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -2189,7 +2285,7 @@ def _sigterm_reopen(workset_module: Any, source_root: Path, path: Path) -> dict[
     while time.time() <= expiry:
         time.sleep(min(0.05, max(0.001, expiry - time.time())))
     reopened = workset_module.DistillationWorkset(path)
-    claims = reopened.claim("r3-sigterm", 1, "reopened-owner", 5.0)
+    claims = reopened.claim(kind, 1, "reopened-owner", 5.0)
     if len(claims) != 1 or claims[0].attempt != old_claim.attempt + 1:
         raise R3Error("expired SIGTERM lease was not reclaimed")
     reclaimed = claims[0]
@@ -2206,8 +2302,11 @@ def _sigterm_reopen(workset_module: Any, source_root: Path, path: Path) -> dict[
     second = reopened.commit([reclaimed], [outcome])
     if first != second or first.get("completed") != 1:
         raise R3Error("idempotent commit failed after lease reclaim")
-    status = reopened.status("r3-sigterm")
-    if status.get("completed") != 1 or status.get("leased") != 0:
+    status = reopened.status(kind)
+    if (
+        status.get("completed") != before_completed + 1
+        or status.get("leased") != 0
+    ):
         raise R3Error("reopened workset status is invalid")
     lock_holder = {
         "before_sigterm": old_claim.owner,
@@ -2234,12 +2333,15 @@ def _sigterm_reopen(workset_module: Any, source_root: Path, path: Path) -> dict[
             "returncode": process.returncode,
             "expected_returncode": -signal.SIGTERM,
             "asserted": True,
+            "kind": kind,
             "lock_holder": lock_holder,
             "release": release,
             "reclaim": reclaim,
         },
         "old_owner_rejected": old_owner_rejected,
         "reclaimed_attempt": reclaimed.attempt,
+        "completed_before": before_completed,
+        "completed_after": int(status["completed"]),
         "idempotent_commit": True,
         "lock_holder": lock_holder,
         "release": release,
@@ -2482,7 +2584,10 @@ def _assert_payload_free(payload: Mapping[str, Any]) -> None:
 
 
 def _assert_formal_acceptance(
-    result: Mapping[str, Any], source: Mapping[str, Any]
+    result: Mapping[str, Any],
+    source: Mapping[str, Any],
+    *,
+    require_completion: bool = True,
 ) -> None:
     claim = result.get("claim")
     clone = result.get("clone_workset")
@@ -2515,6 +2620,8 @@ def _assert_formal_acceptance(
         raise R3Error("formal artifact lacks clone workset evidence")
     legacy_status = clone.get("legacy_status")
     migration = clone.get("migration")
+    progress_coverage_pct = clone.get("progress_coverage_pct")
+    normalization = clone.get("normalization")
     if (
         clone.get("relative_path") != OX_WORKSET_RELATIVE.as_posix()
         or clone.get("row_count") != OX_WORKSET_EXPECTED_ROWS
@@ -2528,8 +2635,8 @@ def _assert_formal_acceptance(
         or clone.get("legacy_unverified_excluded") is not True
         or clone.get("progress_receipt_count")
         != clone.get("expected_progress_receipt_count")
-        or not isinstance(clone.get("progress_coverage_pct"), (int, float))
-        or clone.get("progress_coverage_pct") < RECEIPT_COVERAGE_LIMIT
+        or not isinstance(progress_coverage_pct, (int, float))
+        or progress_coverage_pct < RECEIPT_COVERAGE_LIMIT
         or not isinstance(clone.get("progress_before"), Mapping)
         or not isinstance(clone.get("progress_after"), Mapping)
         or not isinstance(clone.get("progress_receipt_generations"), Mapping)
@@ -2546,6 +2653,22 @@ def _assert_formal_acceptance(
         or not isinstance(migration, Mapping)
         or migration.get("status_unchanged") is not True
         or clone.get("final_status", {}).get("leased") != 0
+        or not isinstance(normalization, Mapping)
+        or normalization.get("clone_only") is not True
+        or normalization.get("journal_mode") != "wal"
+        or normalization.get("integrity") != "ok"
+        or not isinstance(normalization.get("semantic_before"), Mapping)
+        or not isinstance(normalization.get("semantic_after"), Mapping)
+        or normalization.get("semantic_before")
+        != _workset_identity(clone.get("legacy_inventory", {}))
+        or normalization.get("semantic_after")
+        != normalization.get("semantic_before")
+        or not isinstance(normalization.get("sidecars_before"), Mapping)
+        or not isinstance(normalization.get("sidecars_after"), Mapping)
+        or not isinstance(normalization.get("file_state_before"), Mapping)
+        or not isinstance(normalization.get("file_state_after"), Mapping)
+        or normalization["file_state_before"].get("st_ino")
+        != normalization["file_state_after"].get("st_ino")
     ):
         raise R3Error("clone workset certification is incomplete")
     if not isinstance(sigterm, Mapping) or (
@@ -2637,6 +2760,7 @@ def _assert_formal_acceptance(
     if (
         manifest.get("raw_parity") is not None
         or manifest.get("static_parity") is not None
+        or manifest.get("schema") != R3_CLONE_SCHEMA
         or manifest.get("scope") != "Workset DB/receipt chain/state/pointers/locks"
         or manifest.get("excluded_not_evaluated") != R3_EXCLUDED_NOT_EVALUATED
     ):
@@ -2705,7 +2829,16 @@ def _assert_formal_acceptance(
         or not isinstance(clone_tree["after"].get("workset"), Mapping)
     ):
         raise R3Error("clone tree evidence is incomplete")
-    formal_wall = result.get("formal_wall")
+    before_scope = clone_tree["before"].get("scope")
+    after_scope = clone_tree["after"].get("scope")
+    if (
+        not isinstance(before_scope, Mapping)
+        or not isinstance(after_scope, Mapping)
+        or before_scope.get("state_pointers") != after_scope.get("state_pointers")
+        or before_scope.get("locks") != after_scope.get("locks")
+    ):
+        raise R3Error("clone Workset state/pointer/lock parity is incomplete")
+    formal_wall = result.get("formal_wall") or result.get("pre_publication_wall")
     if (
         not isinstance(formal_wall, Mapping)
         or not isinstance(formal_wall.get("started_at_ns"), int)
@@ -2715,6 +2848,25 @@ def _assert_formal_acceptance(
         != formal_wall["finished_at_ns"] - formal_wall["started_at_ns"]
     ):
         raise R3Error("formal wall timing evidence is incomplete")
+    completion = result.get("completion_receipt")
+    through_main = (
+        completion.get("through_main_readback_wall")
+        if isinstance(completion, Mapping)
+        else None
+    )
+    if require_completion and (
+        not isinstance(completion, Mapping)
+        or completion.get("readback_verified") is not True
+        or completion.get("sealed_artifact_id") != completion.get("main_artifact_id")
+        or completion.get("sealed_artifact_sha256")
+        != completion.get("main_artifact_sha256")
+        or completion.get("main_artifact_persistence_included") is not True
+        or completion.get("main_artifact_readback_included") is not True
+        or not isinstance(through_main, Mapping)
+        or through_main.get("main_artifact_persistence_included") is not True
+        or through_main.get("main_artifact_readback_included") is not True
+    ):
+        raise R3Error("completion receipt evidence is incomplete")
     cleanup = result.get("cleanup")
     if (
         not isinstance(cleanup, Mapping)
@@ -2899,13 +3051,11 @@ def _run_once_guarded(
             raise
     try:
         clone_identity_before = _clone_root_identity(clone_root)
-        # Normalize the owned clone before any inventory/open.  APFS copies
-        # SQLite's main DB and WAL/SHM sidecars independently; a mixed
-        # generation must fail closed and be cleaned up, never repaired by
-        # mutating production or by unlinking an uncheckpointed WAL.
-        normalization = _normalize_clone_workset(
-            clone_root / OX_WORKSET_RELATIVE
-        )
+        _assert_checkpointed_clone_sidecars(clone_root / OX_WORKSET_RELATIVE)
+        # First capture the clone's read-only semantic prestate.  APFS copies
+        # SQLite's main DB and WAL/SHM sidecars independently; normalization
+        # may discard a stale sidecar frame, so this parity gate must precede
+        # checkpointing and fail closed on malformed input.
         clone_workset_before = _clone_workset_inventory(clone_root / OX_WORKSET_RELATIVE)
         if production is not None:
             production_protected_clone_boundary = _production_snapshot(
@@ -2933,6 +3083,17 @@ def _run_once_guarded(
             clone_workset_before
         ) != _workset_identity(production_workset_before):
             raise R3Error("APFS clone Workset prestate differs from production")
+        # Only after semantic parity is proven, checkpoint the owned clone.  A
+        # post-normalization inventory must remain byte-independent but
+        # logically identical, proving no stale WAL data was silently lost.
+        normalization = _normalize_clone_workset(
+            clone_root / OX_WORKSET_RELATIVE,
+            expected_identity=_workset_identity(clone_workset_before),
+        )
+        if production_workset_before is not None and normalization["semantic_after"] != _workset_identity(
+            production_workset_before
+        ):
+            raise R3Error("normalized clone Workset differs from production prestate")
     except BaseException:
         if clone_owned and clone_root.exists():
             _cleanup_clone(clone_root)
@@ -3070,7 +3231,7 @@ def _run_once_guarded(
         }
         result["manifest"] = {
             "external": external_clone,
-            "schema": manifest["schema"] if manifest else R2_FROZEN_CLONE_SCHEMA,
+            "schema": manifest["schema"] if manifest else R3_CLONE_SCHEMA,
             "artifact_id": manifest["artifact_id"] if manifest else None,
             "seal_sha256": manifest["seal_sha256"] if manifest else None,
             "content_sha256": manifest_bytes_sha,
@@ -3175,14 +3336,16 @@ def _run_once_guarded(
         )
         if _git_head(source_root) != source_head_before:
             raise R3Error("source HEAD changed at R3 exit")
+        if _has_symlink_component(output):
+            raise R3Error("output path contains a symlink before artifact write")
         _assert_output_safe(output)
+        if production is not None:
+            _assert_root_matrix(production, source_root, output)
         run_formal_finished_ns = time.time_ns()
-        result["formal_wall"] = {
+        result["pre_publication_wall"] = {
             "started_at_ns": formal_started_ns,
             "finished_at_ns": run_formal_finished_ns,
             "elapsed_ns": run_formal_finished_ns - formal_started_ns,
-            "artifact_persistence_included": False,
-            "artifact_readback_included": False,
         }
         payload = {
             "runtime": {"source_commit": source_commit, "external_provider_calls": 0},
@@ -3247,7 +3410,7 @@ def _run_once_guarded(
                 },
             },
             "manifest": result["manifest"],
-            "formal_wall": result["formal_wall"],
+            "pre_publication_wall": result["pre_publication_wall"],
             "phases": result["phases"],
             "claim": result["claim"],
             "teacher_handoff": result["teacher_handoff"],
@@ -3269,11 +3432,18 @@ def _run_once_guarded(
                 "durable_coverage_pct": RECEIPT_COVERAGE_LIMIT,
             },
         }
-        _assert_formal_acceptance(result, payload["source"])
+        _assert_formal_acceptance(
+            result, payload["source"], require_completion=False
+        )
         _assert_payload_free(payload)
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         if len(encoded) > 2 * 1024 * 1024:
             raise R3Error("R3 evidence exceeds bounded size")
+        if _has_symlink_component(output):
+            raise R3Error("output path contains a symlink before artifact write")
+        _assert_output_safe(output)
+        if production is not None:
+            _assert_root_matrix(production, source_root, output)
         artifact_id, artifact_path, artifact = store.write_immutable(
             output, payload, schema=R3_SCHEMA
         )
@@ -3284,7 +3454,11 @@ def _run_once_guarded(
             raise R3Error("R3 immutable artifact changed during readback")
         if readback != artifact or readback.get("artifact_id") != artifact_id:
             raise R3Error("R3 immutable artifact readback mismatch")
+        if _has_symlink_component(output):
+            raise R3Error("output path contains a symlink before completion write")
         _assert_output_safe(output)
+        if production is not None:
+            _assert_root_matrix(production, source_root, output)
         completion_started_ns = time.time_ns()
         completion_probe = {
             "started_at_ns": completion_started_ns,
@@ -3299,6 +3473,22 @@ def _run_once_guarded(
             "readback_verified": True,
             "source_commit": source_commit,
         }
+        through_main_readback_wall = {
+            "started_at_ns": formal_started_ns,
+            "finished_at_ns": completion_started_ns,
+            "elapsed_ns": completion_started_ns - formal_started_ns,
+            "main_artifact_persistence_included": True,
+            "main_artifact_readback_included": True,
+        }
+        completion_payload.update(
+            {
+                "main_artifact_id": artifact_id,
+                "main_artifact_sha256": artifact_after["sha256"],
+                "main_artifact_persistence_included": True,
+                "main_artifact_readback_included": True,
+                "through_main_readback_wall": through_main_readback_wall,
+            }
+        )
         completion_id, completion_path, completion_artifact = store.write_immutable(
             output, completion_payload, schema=R3_COMPLETION_SCHEMA
         )
@@ -3309,7 +3499,14 @@ def _run_once_guarded(
         completion_after = _artifact_file_snapshot(completion_path)
         if completion_before != completion_after:
             raise R3Error("R3 completion receipt changed during readback")
-        if completion_readback != completion_artifact:
+        if (
+            completion_readback != completion_artifact
+            or completion_readback.get("main_artifact_id") != artifact_id
+            or completion_readback.get("main_artifact_sha256")
+            != artifact_after["sha256"]
+            or completion_readback.get("through_main_readback_wall")
+            != through_main_readback_wall
+        ):
             raise R3Error("R3 completion receipt readback mismatch")
         final_artifact_probe = _artifact_file_snapshot(artifact_path)
         if final_artifact_probe != artifact_after:
@@ -3324,28 +3521,32 @@ def _run_once_guarded(
             "completion_receipt_persisted_and_readback": True,
             "main_artifact_rechecked": True,
         }
-        outer_formal_wall = {
+        outer_end_to_end_wall = {
             "started_at_ns": formal_started_ns,
             "finished_at_ns": completion_finished_ns,
             "elapsed_ns": completion_finished_ns - formal_started_ns,
-            "artifact_persistence_included": True,
-            "artifact_readback_included": True,
-            "completion_receipt_persistence_included": True,
-            "completion_receipt_readback_included": True,
-            "main_artifact_rechecked": True,
-            "completion_wall": completion_wall,
+            "sealed_scope": "external_completion_readback",
+            "through_main_readback_wall": through_main_readback_wall,
+            "completion_receipt_readback_observed": True,
         }
-        result["formal_wall"] = outer_formal_wall
+        result["formal_wall"] = outer_end_to_end_wall
         result["completion_receipt"] = {
             "schema": completion_artifact["schema"],
             "artifact_id": completion_id,
+            "sealed_artifact_id": artifact_id,
+            "main_artifact_id": artifact_id,
             "path": str(completion_path),
             "artifact_file_state": completion_after["file_state"],
             "artifact_sha256": completion_after["sha256"],
+            "sealed_artifact_sha256": artifact_after["sha256"],
+            "main_artifact_sha256": artifact_after["sha256"],
             "readback_verified": True,
+            "main_artifact_persistence_included": True,
+            "main_artifact_readback_included": True,
             "probe": completion_probe,
             "completion_wall": completion_wall,
-            "formal_wall": outer_formal_wall,
+            "through_main_readback_wall": through_main_readback_wall,
+            "outer_end_to_end_wall": outer_end_to_end_wall,
         }
         _assert_formal_acceptance(result, payload["source"])
         _assert_payload_free(result["completion_receipt"])

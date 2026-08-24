@@ -22,6 +22,7 @@ SPEC.loader.exec_module(HARNESS)
 
 def test_r3_contract_constants_are_bounded() -> None:
     assert HARNESS.R3_SCHEMA == "chronovisor.recall-r3.v1"
+    assert HARNESS.R3_CLONE_SCHEMA == "chronovisor.recall-r3-workset-clone.v1"
     assert HARNESS.DEFAULT_SAMPLES == HARNESS.MIN_SAMPLES == 100
     assert HARNESS.CLAIM_P95_LIMIT_NS == 500_000_000
     assert HARNESS.TEACHER_HANDOFF_LIMIT_NS == 10_000_000_000
@@ -298,20 +299,98 @@ def test_clone_inventory_is_bounded_and_payload_free(tmp_path: Path) -> None:
     HARNESS._assert_payload_free(inventory)
 
 
+def test_production_scope_identity_is_path_neutral_for_apfs_clone(tmp_path: Path) -> None:
+    from chronovisor.recall import recall_distillation_workset as workset
+
+    path = tmp_path / "ox-workset.sqlite3"
+    queue = workset.DistillationWorkset(path)
+    queue.advance([HARNESS._item("scope-1", "ox")], {"source": "test"})
+    inventory = HARNESS._clone_workset_inventory(path)
+    left = {
+        "protected": {
+            "workset": {
+                **inventory,
+                "file_state": {"st_dev": 1, "st_ino": 11, "st_mtime_ns": 101},
+            },
+            "state_pointers": {"state.json": None},
+            "locks": {
+                "files": {
+                    "workset.lock": {
+                        "st_dev": 1,
+                        "st_ino": 12,
+                        "st_size": 0,
+                        "st_mtime_ns": 102,
+                    }
+                }
+            },
+        }
+    }
+    right = {
+        "protected": {
+            "workset": {
+                **inventory,
+                "file_state": {"st_dev": 2, "st_ino": 22, "st_mtime_ns": 201},
+            },
+            "state_pointers": {"state.json": None},
+            "locks": {
+                "files": {
+                    "workset.lock": {
+                        "st_dev": 2,
+                        "st_ino": 23,
+                        "st_size": 0,
+                        "st_mtime_ns": 202,
+                    }
+                }
+            },
+        }
+    }
+    assert HARNESS._production_scope_identity(left) == HARNESS._production_scope_identity(
+        right
+    )
+
+
 def test_clone_workset_normalization_and_cleanup_are_clone_only(tmp_path: Path) -> None:
+    from chronovisor.recall import recall_distillation_workset as workset
+
     clone = tmp_path / "owned-clone"
     workset_path = clone / HARNESS.OX_WORKSET_RELATIVE
     workset_path.parent.mkdir(parents=True)
-    with sqlite3.connect(workset_path) as connection:
-        assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
-        connection.execute("PRAGMA wal_autocheckpoint=0")
-        connection.execute("CREATE TABLE probe(value TEXT NOT NULL)")
-        connection.executemany("INSERT INTO probe VALUES (?)", [(str(i),) for i in range(3)])
-    normalized = HARNESS._normalize_clone_workset(workset_path)
+    queue = workset.DistillationWorkset(workset_path)
+    queue.advance([HARNESS._item("normalize-1", "ox")], {"source": "test"})
+    inventory = HARNESS._clone_workset_inventory(workset_path)
+    normalized = HARNESS._normalize_clone_workset(
+        workset_path, expected_identity=HARNESS._workset_identity(inventory)
+    )
     assert normalized["clone_only"] is True
     assert normalized["integrity"] == "ok"
     assert normalized["journal_mode"] == "wal"
     assert normalized["wal_checkpoint"] == [0, 0, 0]
+    HARNESS._cleanup_clone(clone)
+    assert not clone.exists()
+
+
+def test_clone_nonempty_wal_fails_before_normalization_and_preserves_state(
+    tmp_path: Path,
+) -> None:
+    from chronovisor.recall import recall_distillation_workset as workset
+
+    clone = tmp_path / "owned-clone"
+    workset_path = clone / HARNESS.OX_WORKSET_RELATIVE
+    workset_path.parent.mkdir(parents=True)
+    queue = workset.DistillationWorkset(workset_path)
+    queue.advance([HARNESS._item("stale-wal-1", "ox")], {"source": "test"})
+    inventory = HARNESS._clone_workset_inventory(workset_path)
+    db_state = HARNESS._regular_file_state(workset_path)
+    wal = workset_path.with_name(workset_path.name + "-wal")
+    wal.write_bytes(b"stale-generation")
+    with pytest.raises(HARNESS.R3Error, match="not checkpointed"):
+        HARNESS._assert_checkpointed_clone_sidecars(workset_path)
+    with pytest.raises(HARNESS.R3Error, match="not checkpointed"):
+        HARNESS._normalize_clone_workset(
+            workset_path, expected_identity=HARNESS._workset_identity(inventory)
+        )
+    assert wal.read_bytes() == b"stale-generation"
+    assert HARNESS._regular_file_state(workset_path) == db_state
     HARNESS._cleanup_clone(clone)
     assert not clone.exists()
 
