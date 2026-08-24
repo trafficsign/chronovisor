@@ -2959,6 +2959,15 @@ def _materialization_label_row(
         "source": str(label.get("kind") or ""),
         "profile": str(label.get("profile") or label.get("teacher_profile") or ""),
         "cohort": str(label.get("cohort") or label.get("teacher_profile") or ""),
+        "assignment_revision": str(
+            label.get("assignment_revision")
+            or (assignment.get("revision") if isinstance(assignment, Mapping) else "")
+            or ""
+        ),
+        "profile_contract_id": str(label.get("profile_contract_id") or ""),
+        "expires_at": str(label.get("expires_at") or ""),
+        "identity_revision": str(label.get("identity_revision") or ""),
+        "request_revision": str(label.get("request_revision") or ""),
         "order_agreement": label.get("order_agreement") is True,
         "label_record_sha256": label_record_sha256,
         "payload_digest": str(label.get("payload_digest") or ""),
@@ -3352,7 +3361,32 @@ def _configured_local_route_binding(row: Mapping[str, Any]) -> bool:
     generator = "recall.distill.answer_generator"
     judge = "recall.distill.utility_judge"
     return (
-        row.get("counterfactual_producer") == "chronovisor-local-blind-v1"
+        row.get("profile") in {LOCAL_TRIAD_PROFILE, OX_SINGLE_PROFILE}
+        and row.get("cohort")
+        == (
+            OX_SINGLE_COHORT
+            if row.get("profile") == OX_SINGLE_PROFILE
+            else LOCAL_TRIAD_PROFILE
+        )
+        and row.get("assignment_revision") == ASSIGNMENT_REVISION
+        and row.get("identity_revision") == "local-blind-counterfactual-v1"
+        and row.get("request_revision") == "local-blind-counterfactual-v1"
+        and (
+            (
+                row.get("profile") == LOCAL_TRIAD_PROFILE
+                and row.get("profile_contract_id") == ""
+                and row.get("expires_at") == ""
+            )
+            or (
+                row.get("profile") == OX_SINGLE_PROFILE
+                and re.fullmatch(
+                    r"[0-9a-f]{64}", str(row.get("profile_contract_id") or "")
+                )
+                is not None
+                and _same_future_ox_expiry(row.get("expires_at"), row.get("expires_at"))
+            )
+        )
+        and row.get("counterfactual_producer") == "chronovisor-local-blind-v1"
         and row.get("counterfactual_revision") == "two-order-locked-v1"
         and set(row.get("blind_orders") or []) == {"a0_first", "a1_first"}
         and row.get("generator_route_identity") == expected[generator]
@@ -3422,7 +3456,35 @@ def _materialized_row_integrity(
             semantic = True
     else:
         semantic = (
-            row.get("order_agreement") is True
+            row.get("profile") in {LOCAL_TRIAD_PROFILE, OX_SINGLE_PROFILE}
+            and row.get("cohort")
+            == (
+                OX_SINGLE_COHORT
+                if row.get("profile") == OX_SINGLE_PROFILE
+                else LOCAL_TRIAD_PROFILE
+            )
+            and row.get("assignment_revision") == ASSIGNMENT_REVISION
+            and row.get("identity_revision") == "local-blind-counterfactual-v1"
+            and row.get("request_revision") == "local-blind-counterfactual-v1"
+            and (
+                (
+                    row.get("profile") == LOCAL_TRIAD_PROFILE
+                    and row.get("profile_contract_id") == ""
+                    and row.get("expires_at") == ""
+                )
+                or (
+                    row.get("profile") == OX_SINGLE_PROFILE
+                    and re.fullmatch(
+                        r"[0-9a-f]{64}",
+                        str(row.get("profile_contract_id") or ""),
+                    )
+                    is not None
+                    and _same_future_ox_expiry(
+                        row.get("expires_at"), row.get("expires_at")
+                    )
+                )
+            )
+            and row.get("order_agreement") is True
             and re.fullmatch(r"[0-9a-f]{64}", str(row.get("counterfactual_ref") or ""))
             is not None
             and re.fullmatch(r"[0-9a-f]{64}", str(row.get("a0_sha256") or ""))
@@ -7963,6 +8025,8 @@ def _compare_and_commit_counterfactual(
             else LOCAL_TRIAD_PROFILE,
             "profile_contract_id": ox_contract_id,
             "identity_revision": "local-blind-counterfactual-v1",
+            "request_revision": "local-blind-counterfactual-v1",
+            "assignment_revision": ASSIGNMENT_REVISION,
             "expires_at": config.ox_expires_at
             if config.teacher_profile == OX_SINGLE_PROFILE
             else "",

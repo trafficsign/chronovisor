@@ -2663,6 +2663,13 @@ def test_configured_local_route_binding_rejects_evil_canonical_identities(
     }
     counterfactual = {
         "source": "counterfactual-label",
+        "profile": distill.LOCAL_TRIAD_PROFILE,
+        "cohort": distill.LOCAL_TRIAD_PROFILE,
+        "profile_contract_id": "",
+        "expires_at": "",
+        "identity_revision": "local-blind-counterfactual-v1",
+        "request_revision": "local-blind-counterfactual-v1",
+        "assignment_revision": distill.ASSIGNMENT_REVISION,
         "counterfactual_producer": "chronovisor-local-blind-v1",
         "counterfactual_revision": "two-order-locked-v1",
         "blind_orders": ["a0_first", "a1_first"],
@@ -2679,6 +2686,18 @@ def test_configured_local_route_binding_rejects_evil_canonical_identities(
                 **teacher,
                 "route_identity": {**teacher["route_identity"], "model": "evil"},
             }
+        )
+        is False
+    )
+    assert (
+        distill._configured_local_route_binding(
+            {**counterfactual, "profile": "evil-profile", "cohort": "evil-cohort"}
+        )
+        is False
+    )
+    assert (
+        distill._configured_local_route_binding(
+            {**counterfactual, "identity_revision": "evil-revision"}
         )
         is False
     )
@@ -5904,6 +5923,13 @@ def test_offline_gate_uses_route_stability_and_agreed_counterfactuals(
                     "counterfactual_producer": "chronovisor-local-blind-v1",
                     "counterfactual_revision": "two-order-locked-v1",
                     "blind_orders": ["a0_first", "a1_first"],
+                    "profile": distill.LOCAL_TRIAD_PROFILE,
+                    "cohort": distill.LOCAL_TRIAD_PROFILE,
+                    "profile_contract_id": "",
+                    "expires_at": "",
+                    "identity_revision": "local-blind-counterfactual-v1",
+                    "request_revision": "local-blind-counterfactual-v1",
+                    "assignment_revision": distill.ASSIGNMENT_REVISION,
                     "generator_route_identity": {
                         "role": "generator",
                         "provider": "test",
