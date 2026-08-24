@@ -128,6 +128,48 @@ def test_clone_tree_digest_detects_same_size_content_tamper(tmp_path: Path) -> N
     assert before["state_sha256"] != after["state_sha256"]
 
 
+def test_clone_tree_digest_uses_sealed_checkpoint_for_large_ledger(
+    tmp_path: Path, monkeypatch
+) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    ledger = clone / "candidate-ledger.jsonl"
+    with ledger.open("wb") as handle:
+        handle.truncate(HARNESS.CLONE_TREE_FILE_BYTES_LIMIT + 1)
+    evidence = {
+        "ledger_name": ledger.name,
+        "records": 3,
+        "head_sha256": "a" * 64,
+        "bytes": ledger.stat().st_size,
+        "file_state": {"size_bytes": ledger.stat().st_size},
+        "checkpoint_file_state": {"size_bytes": 1},
+        "representation": HARNESS.CLONE_TREE_LEDGER_REPRESENTATION,
+        "body_hashed": False,
+    }
+    monkeypatch.setattr(
+        HARNESS,
+        "_ledger_checkpoint_evidence",
+        lambda *_args, **_kwargs: evidence,
+    )
+    digest = HARNESS._clone_tree_state_digest(clone, store=object())
+    assert digest["hashed_bytes"] == 0
+    assert digest["omitted_bytes"] == ledger.stat().st_size
+    assert digest["omitted_file_count"] == 1
+    assert digest["representation"] == HARNESS.CLONE_TREE_DIGEST_REPRESENTATION
+
+
+def test_catalog_metadata_fallback_is_bounded(tmp_path: Path) -> None:
+    catalog = tmp_path / "historical-catalog.sqlite"
+    with sqlite3.connect(catalog) as connection:
+        connection.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT)")
+        connection.execute("INSERT INTO metadata VALUES ('watermark', 'sealed')")
+        connection.commit()
+    evidence = HARNESS._catalog_metadata_evidence(catalog)
+    assert evidence["representation"] == "r2.catalog-metadata+file-state-v1"
+    assert evidence["body_hashed"] is False
+    assert evidence["metadata_keys"] == ["watermark"]
+
+
 def test_artifact_probe_rejects_completion_toctou(tmp_path: Path, monkeypatch) -> None:
     artifact = tmp_path / "artifact.json"
     artifact.write_bytes(b"sealed")
@@ -156,7 +198,7 @@ def test_production_raw_drift_is_classified_without_failing_closed(
     raw.mkdir(parents=True)
     monkeypatch.setattr(
         HARNESS.R2,
-        "_raw_tree_digest",
+        "_raw_tree_state_digest",
         lambda _root: (_ for _ in ()).throw(
             HARNESS.R2.R2Error("Raw file changed during capture")
         ),

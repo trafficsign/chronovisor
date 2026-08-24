@@ -2,10 +2,10 @@
 """Run the offline Recall R3 workset durability/performance gate.
 
 The default path takes a production root, creates the existing forced APFS
-clone, and mutates only that clone.  A trusted R2 frozen clone plus manifest
-may be supplied instead.  No teacher/provider is called; evidence is sealed
-with the normal immutable-artifact writer and contains bounded digests/counts,
-never work payloads.
+clone, and mutates only that clone.  The legacy frozen-clone plus manifest
+options fail closed as non-certifying because their provenance is unkeyed.  No
+teacher/provider is called; evidence is sealed with the normal immutable-
+artifact writer and contains bounded digests/counts, never work payloads.
 """
 
 from __future__ import annotations
@@ -50,6 +50,17 @@ OX_WORKSET_EXPECTED_STATES = {
 OX_WORKSET_ROW_LIMIT = 100_000
 CLONE_TREE_FILE_LIMIT = 100_000
 CLONE_TREE_FILE_BYTES_LIMIT = 512 * 1024 * 1024
+# A formal run may inventory production-sized files, but it must never read an
+# unbounded amount of append-only data merely to prove clone identity.  The
+# bounded body budget applies only to files represented by a content digest;
+# Raw and sealed ledgers use their existing R1/R2 checkpoints instead.
+# Keep the total body read bounded while leaving room for the existing
+# sub-512MiB FTS/workset files in a production clone.
+CLONE_TREE_HASH_BYTES_LIMIT = 1024 * 1024 * 1024
+CLONE_TREE_DIGEST_REPRESENTATION = "bounded-content+sealed-checkpoint-v1"
+CLONE_TREE_RAW_REPRESENTATION = "r2.raw-tree-state+committed-watermark-v1"
+CLONE_TREE_LEDGER_REPRESENTATION = "r2.sealed-ledger-checkpoint-v1"
+CLONE_TREE_CATALOG_REPRESENTATION = "r2.sealed-catalog-checkpoint-v1"
 _WORKSET_SECURITY_COLUMNS = (
     "sequence",
     "work_id",
@@ -559,8 +570,171 @@ def _assert_source_clean(snapshot: Mapping[str, Any], *, when: str) -> None:
         raise R3Error(f"source checkout is dirty {when}")
 
 
+def _bounded_raw_identity(root: Path, label: str) -> dict[str, Any]:
+    """Capture Raw identity through R2's state/watermark contract only.
+
+    Raw is an ingest-owned append-only boundary and can be multi-gigabyte.  A
+    formal R3 run therefore records the existing R2 metadata state and
+    committed watermark instead of reopening every payload body.
+    """
+
+    try:
+        state = R2._raw_tree_state_digest(root)
+        raw_store = __import__("chronovisor.core.raw_store", fromlist=["RawStore"])
+        watermark = raw_store.committed_raw_watermark(root / "raw")
+    except Exception as exc:
+        raise R3Error(f"{label} bounded Raw checkpoint failed") from exc
+    file_count = _bounded_integer(state.get("file_count"), f"{label}.file_count")
+    if file_count > CLONE_TREE_FILE_LIMIT:
+        raise R3Error(f"{label} exceeds bounded file inventory")
+    raw_bytes = _bounded_integer(state.get("bytes"), f"{label}.bytes")
+    state_sha256 = _hex_digest(state.get("state_sha256"), f"{label}.state_sha256")
+    watermark = _hex_digest(watermark, f"{label}.raw_watermark")
+    return {
+        "bytes": raw_bytes,
+        "content_sha256": None,
+        "file_count": file_count,
+        "state_sha256": state_sha256,
+        "raw_watermark": watermark,
+        "representation": CLONE_TREE_RAW_REPRESENTATION,
+        "body_hashed": False,
+    }
+
+
+def _ledger_checkpoint_evidence(
+    store: Any, path: Path, *, require_checkpoint_file_state: bool
+) -> dict[str, Any]:
+    """Read an R2 ledger checkpoint without opening its JSONL body."""
+
+    try:
+        bounded = R2._bounded_chain(
+            store,
+            path,
+            require_checkpoint_file_state=require_checkpoint_file_state,
+        )
+        checkpoint_path = store._chain_checkpoint_path(path)
+        checkpoint_file_state = R2.R0._stat(checkpoint_path)
+    except Exception as exc:
+        raise R3Error(f"sealed ledger checkpoint unavailable: {path.name}") from exc
+    if checkpoint_file_state is None:
+        raise R3Error(f"sealed ledger checkpoint missing: {path.name}")
+    return {
+        "ledger_name": path.name,
+        "records": int(bounded["records"]),
+        "head_sha256": str(bounded["head_sha256"]),
+        "bytes": int(bounded["bytes"]),
+        "file_state": dict(bounded["file_state"]),
+        "checkpoint_file_state": checkpoint_file_state,
+        "representation": CLONE_TREE_LEDGER_REPRESENTATION,
+        "body_hashed": False,
+    }
+
+
+def _catalog_checkpoint_evidence(
+    root: Path, path: Path, store: Any, *, require_checkpoint_file_state: bool
+) -> dict[str, Any]:
+    """Read the sealed historical-catalog checkpoint without scanning SQLite."""
+
+    try:
+        catalog = __import__(
+            "chronovisor.recall.recall_distillation_catalog",
+            fromlist=["catalog_path"],
+        )
+        before = R2.R0._stat(path)
+        if before is None:
+            raise R3Error(f"historical catalog missing: {path.name}")
+        checkpoint_path = (
+            catalog._catalog_checkpoint_path(root)
+            if root.name != "recall-distillation"
+            else catalog._index_checkpoint_path(path)
+        )
+        if not checkpoint_path.exists():
+            return _catalog_metadata_evidence(path)
+        checkpoint = store.read_sealed(checkpoint_path, schema=store.DISTILLATION_SCHEMA)
+        after = R2.R0._stat(path)
+        checkpoint_file_state = R2.R0._stat(checkpoint_path)
+    except R3Error:
+        raise
+    except Exception as exc:
+        raise R3Error("sealed historical catalog checkpoint unavailable") from exc
+    checkpoint_state = checkpoint.get("file_state")
+    lineage = checkpoint.get("catalog_lineage")
+    if lineage is not None and getattr(catalog, "_catalog_lineage", lambda _: None)(
+        checkpoint
+    ) is None:
+        raise R3Error("historical catalog checkpoint lineage is invalid")
+    if (
+        checkpoint.get("kind") != "historical-catalog-checkpoint"
+        or checkpoint.get("catalog_name") != path.name
+        or not isinstance(checkpoint.get("catalog_watermark"), str)
+        or not isinstance(checkpoint.get("event_rowid"), int)
+        or isinstance(checkpoint.get("event_rowid"), bool)
+        or checkpoint.get("event_rowid", -1) < 0
+        or not isinstance(checkpoint_state, Mapping)
+        or checkpoint_state.get("size_bytes") != before["size_bytes"]
+        or (require_checkpoint_file_state and dict(checkpoint_state) != before)
+        or after != before
+        or checkpoint_file_state is None
+    ):
+        raise R3Error("historical catalog checkpoint is stale")
+    return {
+        "catalog_name": path.name,
+        "event_rowid": int(checkpoint["event_rowid"]),
+        "catalog_watermark": checkpoint["catalog_watermark"],
+        "catalog_lineage": lineage,
+        "bytes": int(before["size_bytes"]),
+        "file_state": before,
+        "checkpoint_file_state": checkpoint_file_state,
+        "representation": CLONE_TREE_CATALOG_REPRESENTATION,
+        "body_hashed": False,
+    }
+
+
+def _catalog_metadata_evidence(path: Path) -> dict[str, Any]:
+    """Use the catalog's tiny sealed metadata projection when no checkpoint exists.
+
+    Some legacy production roots predate the catalog checkpoint.  The fallback
+    remains bounded: it reads only the metadata table and binds the complete
+    file-state, never the 500MiB+ SQLite body.  A later run can upgrade this
+    representation once the normal checkpoint is present.
+    """
+
+    before = R2.R0._stat(path)
+    if before is None:
+        raise R3Error(f"historical catalog missing: {path.name}")
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            rows = tuple(
+                (str(key), str(value))
+                for key, value in connection.execute(
+                    "SELECT key,value FROM metadata ORDER BY key"
+                )
+            )
+        after = R2.R0._stat(path)
+    except sqlite3.DatabaseError as exc:
+        raise R3Error("historical catalog metadata projection failed") from exc
+    if after != before:
+        raise R3Error("historical catalog changed during metadata projection")
+    return {
+        "catalog_name": path.name,
+        "metadata_sha256": hashlib.sha256(
+            json.dumps(rows, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "metadata_keys": [key for key, _ in rows],
+        "bytes": int(before["size_bytes"]),
+        "file_state": before,
+        "checkpoint_file_state": None,
+        "representation": "r2.catalog-metadata+file-state-v1",
+        "body_hashed": False,
+    }
+
+
 def _production_snapshot(
-    production: Path, *, include_raw: bool = True
+    production: Path,
+    *,
+    include_raw: bool = True,
+    store: Any | None = None,
+    require_checkpoint_file_state: bool = False,
 ) -> dict[str, Any]:
     """Digest only R3's protected production boundary.
 
@@ -580,7 +754,21 @@ def _production_snapshot(
         if _has_symlink_component(path) or not path.is_dir():
             raise R3Error(f"production protected boundary is unavailable: {name}")
         try:
-            snapshots[name] = R2._tree_digest(path, label=f"production.{name}")
+            if name == "raw":
+                # Unit fixtures do not have a committed RawStore.  Keep the
+                # old bounded fixture path while real runs use the R2 state /
+                # watermark projection above the payload body.
+                snapshots[name] = (
+                    R2._tree_digest(path, label=f"production.{name}")
+                    if store is None
+                    else _bounded_raw_identity(production, "production.raw_tree")
+                )
+            else:
+                snapshots[name] = _clone_tree_state_digest(
+                    path,
+                    store=store,
+                    require_checkpoint_file_state=require_checkpoint_file_state,
+                )
         except Exception as exc:
             raise R3Error(f"production protected snapshot failed: {name}") from exc
     return {
@@ -618,11 +806,14 @@ def _production_raw_after_observation(
     if _has_symlink_component(raw_root) or not raw_root.is_dir():
         raise R3Error("production Raw root is unsafe")
     try:
-        value = _manifest_raw_tree(
-            R2._raw_tree_digest(production), "production.raw_tree.after"
-        )
+        value = _bounded_raw_identity(production, "production.raw_tree.after")
     except Exception as exc:
-        message = str(exc).lower()
+        messages: list[str] = []
+        current: BaseException | None = exc
+        while current is not None:
+            messages.append(str(current).lower())
+            current = current.__cause__
+        message = " ".join(messages)
         if not any(
             marker in message
             for marker in ("changed during", "disappeared", "capture")
@@ -783,15 +974,30 @@ def _artifact_file_snapshot(path: Path) -> dict[str, Any]:
 
 
 def _clone_tree_state_digest(
-    root: Path, *, ignore_mutable_workset: bool = False
+    root: Path,
+    *,
+    ignore_mutable_workset: bool = False,
+    store: Any | None = None,
+    require_checkpoint_file_state: bool = False,
 ) -> dict[str, Any]:
-    """Capture a bounded path/state digest without retaining clone payloads."""
+    """Capture bounded clone identity without replaying append-only bodies.
+
+    Small files are content-hashed.  R2 ledger/catalog/FTS checkpoints and Raw
+    state/watermark bind production-sized files without reading their bodies.
+    Every file is lstat'ed again after observation and the returned
+    representation makes the distinction explicit in the sealed artifact.
+    """
 
     if _has_symlink_component(root) or not root.is_dir():
         raise R3Error("clone tree root is unsafe")
     digest = hashlib.sha256()
     file_count = 0
     total_bytes = 0
+    hashed_bytes = 0
+    omitted_bytes = 0
+    omitted_file_count = 0
+    raw_checkpoint: dict[str, Any] | None = None
+    logical_digest = hashlib.sha256()
     for path in sorted(root.rglob("*")):
         try:
             state = path.lstat()
@@ -813,16 +1019,52 @@ def _clone_tree_state_digest(
             continue
         if file_count >= CLONE_TREE_FILE_LIMIT:
             raise R3Error("clone tree exceeds bounded file inventory")
-        if int(state.st_size) > CLONE_TREE_FILE_BYTES_LIMIT:
+        size_bytes = int(state.st_size)
+        parts = Path(relative).parts
+        evidence: dict[str, Any] | None = None
+        representation = "content-sha256"
+        content_sha256: str | None = None
+        # R2's append-only ledgers are checkpointed even when they are below
+        # the per-file body limit.  This keeps repeated before/after scans
+        # bounded and binds their head/count/file-state exactly.
+        if store is not None and parts and parts[0] == "raw":
+            if raw_checkpoint is None:
+                raw_checkpoint = _bounded_raw_identity(root, "clone.raw_tree")
+            evidence = raw_checkpoint
+            representation = CLONE_TREE_RAW_REPRESENTATION
+        elif store is not None and path.name in R2.R0.LEDGERS:
+            evidence = _ledger_checkpoint_evidence(
+                store,
+                path,
+                require_checkpoint_file_state=require_checkpoint_file_state,
+            )
+            representation = CLONE_TREE_LEDGER_REPRESENTATION
+        elif store is not None and path.name == "historical-catalog.sqlite":
+            evidence = _catalog_checkpoint_evidence(
+                root,
+                path,
+                store,
+                require_checkpoint_file_state=require_checkpoint_file_state,
+            )
+            representation = CLONE_TREE_CATALOG_REPRESENTATION
+        elif size_bytes > CLONE_TREE_FILE_BYTES_LIMIT:
             raise R3Error("clone tree file exceeds bounded hash limit")
-        content = hashlib.sha256()
+        else:
+            if hashed_bytes + size_bytes > CLONE_TREE_HASH_BYTES_LIMIT:
+                raise R3Error("clone tree body hash budget exceeded")
+            content = hashlib.sha256()
+            try:
+                with path.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        content.update(chunk)
+                content_sha256 = content.hexdigest()
+            except OSError as exc:
+                raise R3Error("clone tree file changed during hashing") from exc
+            hashed_bytes += size_bytes
         try:
-            with path.open("rb") as handle:
-                while chunk := handle.read(1024 * 1024):
-                    content.update(chunk)
             after = path.lstat()
         except OSError as exc:
-            raise R3Error("clone tree file changed during hashing") from exc
+            raise R3Error("clone tree file changed during state capture") from exc
         if (
             state.st_dev != after.st_dev
             or state.st_ino != after.st_ino
@@ -833,17 +1075,45 @@ def _clone_tree_state_digest(
         row = {
             "mode": int(state.st_mode & 0o7777),
             "path": relative,
-            "size_bytes": int(state.st_size),
-            "sha256": content.hexdigest(),
+            "size_bytes": size_bytes,
+            "representation": representation,
         }
+        if content_sha256 is not None:
+            row["sha256"] = content_sha256
+        if evidence is not None:
+            row["checkpoint"] = evidence
         digest.update(json.dumps(row, sort_keys=True, separators=(",", ":")).encode())
         digest.update(b"\n")
+        logical_row = dict(row)
+        if evidence is not None:
+            logical_row["checkpoint"] = {
+                key: value
+                for key, value in evidence.items()
+                if key not in {"file_state", "checkpoint_file_state"}
+            }
+        logical_digest.update(
+            json.dumps(
+                logical_row, sort_keys=True, separators=(",", ":")
+            ).encode()
+        )
+        logical_digest.update(b"\n")
         file_count += 1
-        total_bytes += int(state.st_size)
+        total_bytes += size_bytes
+        if evidence is not None:
+            omitted_bytes += size_bytes
+            omitted_file_count += 1
     return {
         "file_count": file_count,
         "bytes": total_bytes,
         "state_sha256": digest.hexdigest(),
+        "logical_sha256": logical_digest.hexdigest(),
+        "representation": CLONE_TREE_DIGEST_REPRESENTATION,
+        "hashed_bytes": hashed_bytes,
+        "omitted_bytes": omitted_bytes,
+        "omitted_file_count": omitted_file_count,
+        "hash_byte_limit": CLONE_TREE_HASH_BYTES_LIMIT,
+        "file_byte_limit": CLONE_TREE_FILE_BYTES_LIMIT,
+        "raw_checkpoint": raw_checkpoint,
     }
 
 
@@ -2094,8 +2364,14 @@ def _assert_formal_acceptance(
     clone_tree = result.get("clone_tree")
     if (
         not isinstance(clone_tree, Mapping)
+        or clone_tree.get("representation") != CLONE_TREE_DIGEST_REPRESENTATION
+        or clone_tree.get("hash_byte_limit") != CLONE_TREE_HASH_BYTES_LIMIT
         or clone_tree.get("root_identity_unchanged") is not True
         or clone_tree.get("immutable_unchanged") is not True
+        or not isinstance(clone_tree.get("before"), Mapping)
+        or not isinstance(clone_tree.get("after"), Mapping)
+        or clone_tree["before"].get("logical_sha256") is None
+        or clone_tree["after"].get("logical_sha256") is None
     ):
         raise R3Error("clone tree evidence is incomplete")
     formal_wall = result.get("formal_wall")
@@ -2201,12 +2477,17 @@ def _run_once_guarded(
     _assert_source_clean(source_before, when="before run")
     workset_module, store = _load_runtime(source_root)
     production_before = (
-        _production_snapshot(production, include_raw=False)
+        _production_snapshot(
+            production,
+            include_raw=False,
+            store=store,
+            require_checkpoint_file_state=True,
+        )
         if production is not None
         else None
     )
     production_raw_before = (
-        _manifest_raw_tree(R2._raw_tree_digest(production), "production.raw_tree")
+        _bounded_raw_identity(production, "production.raw_tree")
         if production is not None
         else None
     )
@@ -2241,6 +2522,8 @@ def _run_once_guarded(
     production_raw_clone_boundary: dict[str, Any] | None = None
     production_owned_clone_boundary: dict[str, Any] | None = None
     production_static_clone_boundary: dict[str, Any] | None = None
+    production_protected_clone_boundary: dict[str, Any] | None = None
+    clone_runtime_tree_before: dict[str, Any] | None = None
     if external_clone:
         assert clone_root is not None and manifest_path is not None
         external_input_root = clone_root
@@ -2258,10 +2541,12 @@ def _run_once_guarded(
         )
         external_input_identity_before = _clone_root_identity(clone_root)
         external_input_stable_tree_before = _clone_tree_state_digest(
-            clone_root, ignore_mutable_workset=True
+            clone_root,
+            ignore_mutable_workset=True,
+            store=store,
         )
-        external_input_raw_before = _manifest_raw_tree(
-            R2._raw_tree_digest(clone_root), "external clone.raw_tree"
+        external_input_raw_before = _bounded_raw_identity(
+            clone_root, "external clone.raw_tree"
         )
         external_input_static_before = _clone_static_identity(store, clone_root)
         external_input_workset_before = _clone_workset_inventory(
@@ -2290,13 +2575,11 @@ def _run_once_guarded(
             raise
     try:
         clone_identity_before = _clone_root_identity(clone_root)
-        clone_tree_before = _clone_tree_state_digest(clone_root)
+        clone_tree_before = _clone_tree_state_digest(clone_root, store=store)
         clone_stable_tree_before = _clone_tree_state_digest(
-            clone_root, ignore_mutable_workset=True
+            clone_root, ignore_mutable_workset=True, store=store
         )
-        clone_raw_before = _manifest_raw_tree(
-            R2._raw_tree_digest(clone_root), "clone.raw_tree"
-        )
+        clone_raw_before = _bounded_raw_identity(clone_root, "clone.raw_tree")
         clone_static_before = _clone_static_identity(store, clone_root)
         if external_clone:
             assert manifest is not None
@@ -2310,13 +2593,28 @@ def _run_once_guarded(
         elif production_raw_before is not None and clone_raw_before != production_raw_before:
             raise R3Error("APFS clone Raw tree differs from production before run")
         if production is not None:
-            production_raw_clone_boundary = _manifest_raw_tree(
-                R2._raw_tree_digest(production), "production.raw_tree.clone_boundary"
+            clone_runtime_tree_before = _clone_tree_state_digest(
+                clone_root / "runtime" / "recall-distillation",
+                store=store,
+                require_checkpoint_file_state=False,
+            )
+            production_raw_clone_boundary = _bounded_raw_identity(
+                production, "production.raw_tree.clone_boundary"
+            )
+            production_protected_clone_boundary = _production_snapshot(
+                production,
+                include_raw=False,
+                store=store,
+                require_checkpoint_file_state=True,
             )
             production_static_clone_boundary = _clone_static_identity(store, production)
             production_owned_clone_boundary = _production_owned_snapshot(production, store)
             if production_raw_clone_boundary != production_raw_before:
                 raise R3Error("production Raw changed during clone creation")
+            if not _production_protected_equal(
+                production_before, production_protected_clone_boundary
+            ):
+                raise R3Error("production protected runtime changed during clone creation")
             if (
                 production_owned_before is not None
                 and production_owned_clone_boundary != production_owned_before
@@ -2324,6 +2622,18 @@ def _run_once_guarded(
                 raise R3Error("production Workset changed during clone creation")
             if clone_static_before != production_static_clone_boundary:
                 raise R3Error("APFS clone static identity differs from production")
+            production_runtime_tree = (
+                production_before.get("protected", {}).get("recall_distillation")
+                if isinstance(production_before, Mapping)
+                else None
+            )
+            if (
+                not isinstance(production_runtime_tree, Mapping)
+                or not isinstance(clone_runtime_tree_before, Mapping)
+                or clone_runtime_tree_before.get("logical_sha256")
+                != production_runtime_tree.get("logical_sha256")
+            ):
+                raise R3Error("APFS clone protected runtime prestate differs from production")
         clone_workset_before = _clone_workset_inventory(clone_root / OX_WORKSET_RELATIVE)
         if external_clone:
             if _workset_identity(clone_workset_before) != _workset_identity(
@@ -2359,15 +2669,13 @@ def _run_once_guarded(
         }
         result["clone_workset"] = clone_workset
         result["sigterm_process"] = result["sigterm_reopen"]["sigterm_process"]
-        clone_raw_after = _manifest_raw_tree(
-            R2._raw_tree_digest(clone_root), "clone.raw_tree"
-        )
+        clone_raw_after = _bounded_raw_identity(clone_root, "clone.raw_tree")
         clone_static_after = _clone_static_identity(store, clone_root)
         if clone_raw_after != clone_raw_before or clone_static_after != clone_static_before:
             raise R3Error("frozen clone static/Raw identity changed during R3")
-        clone_tree_after = _clone_tree_state_digest(clone_root)
+        clone_tree_after = _clone_tree_state_digest(clone_root, store=store)
         clone_stable_tree_after = _clone_tree_state_digest(
-            clone_root, ignore_mutable_workset=True
+            clone_root, ignore_mutable_workset=True, store=store
         )
         clone_identity_after = _clone_root_identity(clone_root)
         if clone_identity_after != clone_identity_before:
@@ -2402,11 +2710,12 @@ def _run_once_guarded(
             assert external_input_root is not None
             external_input_identity_after = _clone_root_identity(external_input_root)
             external_input_stable_tree_after = _clone_tree_state_digest(
-                external_input_root, ignore_mutable_workset=True
+                external_input_root,
+                ignore_mutable_workset=True,
+                store=store,
             )
-            external_input_raw_after = _manifest_raw_tree(
-                R2._raw_tree_digest(external_input_root),
-                "external clone.raw_tree.after",
+            external_input_raw_after = _bounded_raw_identity(
+                external_input_root, "external clone.raw_tree.after"
             )
             external_input_static_after = _clone_static_identity(
                 store, external_input_root
@@ -2426,7 +2735,12 @@ def _run_once_guarded(
                 raise R3Error("external frozen clone changed during R3")
             external_input_verified_after = True
         production_after = (
-            _production_snapshot(production, include_raw=False)
+            _production_snapshot(
+                production,
+                include_raw=False,
+                store=store,
+                require_checkpoint_file_state=True,
+            )
             if production is not None
             else None
         )
@@ -2535,6 +2849,10 @@ def _run_once_guarded(
             },
         }
         result["clone_tree"] = {
+            "scope": "clone-root regular files excluding mutable Workset for immutable view",
+            "representation": CLONE_TREE_DIGEST_REPRESENTATION,
+            "hash_byte_limit": CLONE_TREE_HASH_BYTES_LIMIT,
+            "file_byte_limit": CLONE_TREE_FILE_BYTES_LIMIT,
             "before": clone_tree_before,
             "after": clone_tree_after,
             "immutable_before": clone_stable_tree_before,
@@ -2622,6 +2940,26 @@ def _run_once_guarded(
                     "raw_after": production_raw_clone_boundary,
                     "raw_unchanged": production is None
                     or production_raw_clone_boundary == production_raw_before,
+                    "protected_before": production_before,
+                    "protected_after": production_protected_clone_boundary,
+                    "protected_unchanged": production is None
+                    or _production_protected_equal(
+                        production_before, production_protected_clone_boundary
+                    ),
+                    "runtime_tree_logical_sha256": (
+                        clone_runtime_tree_before.get("logical_sha256")
+                        if isinstance(clone_runtime_tree_before, Mapping)
+                        else None
+                    ),
+                    "runtime_tree_prestate_verified": production is None
+                    or (
+                        isinstance(clone_runtime_tree_before, Mapping)
+                        and isinstance(production_before, Mapping)
+                        and clone_runtime_tree_before.get("logical_sha256")
+                        == production_before.get("protected", {})
+                        .get("recall_distillation", {})
+                        .get("logical_sha256")
+                    ),
                     "owned_before": production_owned_before,
                     "owned_after": production_owned_clone_boundary,
                     "owned_unchanged": production is None
@@ -2788,12 +3126,13 @@ def _run_once_guarded(
                     _clone_root_identity(external_input_root)
                     != external_input_identity_before
                     or _clone_tree_state_digest(
-                        external_input_root, ignore_mutable_workset=True
+                        external_input_root,
+                        ignore_mutable_workset=True,
+                        store=store,
                     )
                     != external_input_stable_tree_before
-                    or _manifest_raw_tree(
-                        R2._raw_tree_digest(external_input_root),
-                        "external clone.raw_tree.failure",
+                    or _bounded_raw_identity(
+                        external_input_root, "external clone.raw_tree.failure"
                     )
                     != external_input_raw_before
                     or _clone_static_identity(store, external_input_root)
