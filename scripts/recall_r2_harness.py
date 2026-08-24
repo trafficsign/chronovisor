@@ -18,28 +18,179 @@ import json
 import math
 import os
 import shutil
+import signal
 import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+import uuid
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from zoneinfo import ZoneInfo
 
 R2_SCHEMA = "chronovisor.recall-r2.v1"
+FROZEN_CLONE_SCHEMA = "chronovisor.recall-r2-frozen-clone.v1"
+R2_COMPLETION_KIND = "chronovisor.recall-r2-completion"
+R2_COMPLETION_SUFFIX = ".completion.receipt"
 MAX_EVIDENCE_BYTES = 2 * 1024 * 1024
 DEFAULT_CONTEXT_BYTES = 4096
 DEFAULT_NOOP_SAMPLES = 20
 DEFAULT_DELTA_SAMPLES = 20
+_T = TypeVar("_T")
+_ACTIVE_CLONE_PREFIX: str | None = None
 
 
 class R2Error(ValueError):
     """An R2 contract failed closed."""
+
+
+class _CooperativeSignal(R2Error):
+    """A first termination signal that must unwind clone cleanup."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"received signal {signum}")
+        self.signum = signum
+
+
+class _PhaseReceipt:
+    """Write bounded phase telemetry outside the protected production root."""
+
+    def __init__(self, path: Path | None) -> None:
+        self.path = path
+        self.started_ns = time.monotonic_ns()
+        self._intervals: list[tuple[int, int, str]] = []
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _write(self, payload: Mapping[str, Any]) -> None:
+        if self.path is None:
+            return
+        line = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def event(self, event: str, **fields: Any) -> None:
+        self._write({"event": event, **fields})
+
+    def _record_interval(self, started_ns: int, finished_ns: int, name: str) -> None:
+        self._intervals.append((started_ns, max(started_ns, finished_ns), name))
+
+    def summary(self, finished_ns: int | None = None) -> dict[str, Any]:
+        end_ns = finished_ns or time.monotonic_ns()
+        ordered = sorted((start, end) for start, end, _ in self._intervals)
+        union_ns = 0
+        current_start: int | None = None
+        current_end: int | None = None
+        for start, end in ordered:
+            if current_start is None or current_end is None:
+                current_start, current_end = start, end
+            elif start <= current_end:
+                current_end = max(current_end, end)
+            else:
+                union_ns += current_end - current_start
+                current_start, current_end = start, end
+        if current_start is not None and current_end is not None:
+            union_ns += current_end - current_start
+        elapsed_ns = max(0, end_ns - self.started_ns)
+        return {
+            "started_ns": self.started_ns,
+            "finished_ns": end_ns,
+            "elapsed_ns": elapsed_ns,
+            "phase_union_ns": min(elapsed_ns, union_ns),
+            "unaccounted_ns": max(0, elapsed_ns - union_ns),
+            "interval_count": len(self._intervals),
+        }
+
+    def close(self) -> dict[str, Any]:
+        summary = self.summary()
+        self.event("summary", **summary)
+        return summary
+
+    @contextlib.contextmanager
+    def phase(self, name: str, **fields: Any) -> Iterator[None]:
+        started_ns = time.monotonic_ns()
+        self._write({"event": "start", "phase": name, "started_ns": started_ns, **fields})
+        try:
+            yield
+        except BaseException as exc:
+            finished_ns = time.monotonic_ns()
+            self._record_interval(started_ns, finished_ns, name)
+            self._write(
+                {
+                    "event": "error",
+                    "phase": name,
+                    "started_ns": started_ns,
+                    "elapsed_ns": finished_ns - started_ns,
+                    "error_type": type(exc).__name__,
+                    **fields,
+                }
+            )
+            raise
+        else:
+            finished_ns = time.monotonic_ns()
+            self._record_interval(started_ns, finished_ns, name)
+            self._write(
+                {
+                    "event": "finish",
+                    "phase": name,
+                    "started_ns": started_ns,
+                    "elapsed_ns": finished_ns - started_ns,
+                    **fields,
+                }
+            )
+
+    def measure(self, name: str, call: Callable[[], _T], **fields: Any) -> _T:
+        with self.phase(name, **fields):
+            return call()
+
+
+class _SignalGuard:
+    """Turn the first SIGTERM/SIGINT into cleanup unwinding, then fail hard."""
+
+    def __init__(self, receipt: _PhaseReceipt, *, grace_seconds: float = 30.0) -> None:
+        self.receipt = receipt
+        self.grace_seconds = max(0.1, float(grace_seconds))
+        self._old: dict[int, Any] = {}
+        self._interrupted = False
+        self._closed = False
+        self._timer: threading.Timer | None = None
+
+    def _force_exit(self, signum: int) -> None:
+        if self._closed:
+            return
+        os.kill(os.getpid(), signum)
+
+    def _handle(self, signum: int, _frame: Any) -> None:
+        if self._interrupted:
+            os._exit(128 + signum)
+        self._interrupted = True
+        self.receipt.event("signal", signum=signum, action="cooperative-unwind")
+        self._timer = threading.Timer(self.grace_seconds, self._force_exit, args=(signum,))
+        self._timer.daemon = True
+        self._timer.start()
+        raise _CooperativeSignal(signum)
+
+    def __enter__(self) -> _SignalGuard:
+        for signum in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
+            if signum is not None:
+                self._old[int(signum)] = signal.getsignal(signum)
+                signal.signal(signum, self._handle)
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self._closed = True
+        if self._timer is not None:
+            self._timer.cancel()
+        for signum, handler in self._old.items():
+            signal.signal(signum, handler)
 
 
 def _load_r0() -> Any:
@@ -318,7 +469,7 @@ def _assert_raw_digest_parity(
 
 
 def _has_symlink_component(path: Path) -> bool:
-    current = path.expanduser()
+    current = Path(os.path.abspath(path.expanduser()))
     while True:
         if current.is_symlink():
             return True
@@ -338,11 +489,155 @@ def _path_overlap(left: Path, right: Path) -> bool:
     )
 
 
+def _cli_path_record(path: Path) -> dict[str, str]:
+    """Keep the user spelling while checking its lexical and resolved paths."""
+
+    expanded = path.expanduser()
+    lexical = Path(os.path.abspath(expanded))
+    if _has_symlink_component(lexical):
+        raise R2Error(f"CLI path contains a symlink: {path}")
+    return {
+        "original": str(path),
+        "expanded": str(expanded),
+        "resolved": str(expanded.resolve(strict=False)),
+    }
+
+
+def _assert_artifact_id(value: object, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise R2Error(f"{label} artifact ID is not 64 lowercase hex")
+    return value
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _read_content_addressed_artifact(
+    store: Any, path: Path, *, schema: str, label: str
+) -> dict[str, Any]:
+    """Read back an immutable artifact and independently bind ID, path, seal, schema."""
+
+    if _has_symlink_component(path) or not path.is_file():
+        raise R2Error(f"{label} artifact path is unsafe")
+    if path.suffix != ".json" or path.stem != path.name[:-5]:
+        raise R2Error(f"{label} artifact filename is malformed")
+    expected_id = _assert_artifact_id(path.stem, label=label)
+    try:
+        artifact = store.read_sealed(path, schema=schema)
+        persisted = store.read_sealed(path, schema=schema)
+    except Exception as exc:
+        raise R2Error(f"{label} artifact readback failed") from exc
+    if persisted != artifact:
+        raise R2Error(f"{label} artifact changed during readback")
+    actual_id = _assert_artifact_id(artifact.get("artifact_id"), label=label)
+    if actual_id != expected_id:
+        raise R2Error(f"{label} artifact ID does not match filename")
+    unsigned = {
+        key: value for key, value in artifact.items() if key not in {"artifact_id", "seal_sha256"}
+    }
+    if _canonical_json_sha256(unsigned) != actual_id:
+        raise R2Error(f"{label} artifact ID is not content addressed")
+    seal = artifact.get("seal_sha256")
+    _assert_artifact_id(seal, label=f"{label} seal")
+    unsigned_with_id = {key: value for key, value in artifact.items() if key != "seal_sha256"}
+    if _canonical_json_sha256(unsigned_with_id) != seal:
+        raise R2Error(f"{label} artifact seal is invalid")
+    if artifact.get("schema") != schema:
+        raise R2Error(f"{label} artifact schema mismatch")
+    return dict(artifact)
+
+
+def _write_completion_receipt(
+    store: Any,
+    output: Path,
+    artifact: Mapping[str, Any],
+    artifact_path: Path,
+    phase_timing: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Seal a post-artifact completion receipt without a circular artifact hash."""
+
+    artifact_id = _assert_artifact_id(artifact.get("artifact_id"), label="R2 evidence")
+    artifact_seal = _assert_artifact_id(
+        artifact.get("seal_sha256"), label="R2 evidence seal"
+    )
+    path = output / f"{artifact_id}{R2_COMPLETION_SUFFIX}"
+    _assert_symlink_free_tree(output, label="R2 output")
+    if _has_symlink_component(path) or (path.exists() and not path.is_file()):
+        raise R2Error("R2 completion receipt path is unsafe")
+    started_ns = time.monotonic_ns()
+    payload = {
+        "kind": R2_COMPLETION_KIND,
+        "r2_schema": R2_SCHEMA,
+        "r2_artifact_id": artifact_id,
+        "r2_artifact_path": str(artifact_path),
+        "r2_artifact_seal_sha256": artifact_seal,
+        "phase_timing": dict(phase_timing),
+        "completion_started_ns": started_ns,
+    }
+    try:
+        store.write_sealed_state(path, payload)
+        store.read_sealed(path, schema=store.DISTILLATION_SCHEMA)
+        finished_ns = time.monotonic_ns()
+        final_payload = {
+            **payload,
+            "completion_finished_ns": finished_ns,
+            "completion_elapsed_ns": finished_ns - started_ns,
+        }
+        store.write_sealed_state(path, final_payload)
+        persisted = store.read_sealed(path, schema=store.DISTILLATION_SCHEMA)
+    except Exception as exc:
+        raise R2Error("R2 completion receipt seal/readback failed") from exc
+    if (
+        persisted.get("kind") != R2_COMPLETION_KIND
+        or persisted.get("r2_schema") != R2_SCHEMA
+        or persisted.get("r2_artifact_id") != artifact_id
+        or persisted.get("r2_artifact_path") != str(artifact_path)
+        or persisted.get("r2_artifact_seal_sha256") != artifact_seal
+        or persisted.get("completion_started_ns") != started_ns
+        or persisted.get("completion_finished_ns") != finished_ns
+        or persisted.get("completion_elapsed_ns") != finished_ns - started_ns
+    ):
+        raise R2Error("R2 completion receipt binding mismatch")
+    return {
+        "schema": persisted["schema"],
+        "path": str(path),
+        "artifact_id": artifact_id,
+        "artifact_seal_sha256": artifact_seal,
+        "completion_elapsed_ns": finished_ns - started_ns,
+        "phase_timing": dict(persisted["phase_timing"]),
+    }
+
+
+def _assert_symlink_free_tree(root: Path, *, label: str) -> None:
+    """Reject recursive symlink entries, including ignored clone subtrees."""
+
+    if _has_symlink_component(root) or not root.is_dir():
+        raise R2Error(f"{label} root is unsafe")
+    for base, directories, files in os.walk(root, followlinks=False):
+        for name in (*directories, *files):
+            if (Path(base) / name).is_symlink():
+                raise R2Error(f"{label} tree contains a symlink")
+
+
 def _assert_root_matrix(
     production: Path,
     source_root: Path,
     output: Path,
-    clones: Iterator[Path] = (),
+    clones: Iterable[Path] = (),
+    other_paths: Mapping[str, Path] | None = None,
 ) -> None:
     """Reject every protected-root overlap and symlink entry point."""
 
@@ -352,6 +647,8 @@ def _assert_root_matrix(
         "output": output,
         **{f"clone[{index}]": path for index, path in enumerate(clones)},
     }
+    if other_paths:
+        paths.update(other_paths)
     for name, path in paths.items():
         if _has_symlink_component(path):
             raise R2Error(f"{name} path contains a symlink")
@@ -360,8 +657,9 @@ def _assert_root_matrix(
         for right_name, right in protected[index + 1 :]:
             if _path_overlap(left, right):
                 raise R2Error(f"{left_name}/{right_name} paths overlap")
+    external_names = set(other_paths or {})
     for name, path in paths.items():
-        if name == "output" or name.startswith("clone["):
+        if name == "output" or name.startswith("clone[") or name in external_names:
             continue
         if not path.is_dir():
             raise R2Error(f"{name} root is not a directory")
@@ -749,6 +1047,7 @@ def _raw_inventory_id_snapshot(
     root: Path,
     *,
     expected_new_raw_id: str | None = None,
+    expected_inventory: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate Raw/catalog ID parity without reading committed Raw bodies."""
 
@@ -775,6 +1074,21 @@ def _raw_inventory_id_snapshot(
             raise R2Error("delta Raw ID is absent from catalog inventory")
         if rows.get(expected_new_raw_id) != "indexed":
             raise R2Error("delta Raw ID status is not indexed")
+    if expected_inventory is not None:
+        expected_ids = set(expected_inventory.get("ids", ()))
+        if expected_new_raw_id is None:
+            if raw_ids != expected_ids:
+                raise R2Error("Raw inventory IDs changed during clone-only phase")
+            expected_rows = dict(expected_inventory.get("statuses", {}))
+            if rows != expected_rows:
+                raise R2Error("Raw inventory statuses changed during clone-only phase")
+        else:
+            if raw_ids - {expected_new_raw_id} != expected_ids:
+                raise R2Error("delta Raw inventory changed an existing ID")
+            expected_rows = dict(expected_inventory.get("statuses", {}))
+            observed_rows = {key: value for key, value in rows.items() if key != expected_new_raw_id}
+            if observed_rows != expected_rows:
+                raise R2Error("delta Raw inventory changed an existing status")
     status_counts: dict[str, int] = {}
     for status in rows.values():
         status_counts[status] = status_counts.get(status, 0) + 1
@@ -786,6 +1100,80 @@ def _raw_inventory_id_snapshot(
     }
 
 
+def _raw_inventory_baseline(
+    catalog: Any, raw_store_module: Any, raw_dir: Path, root: Path
+) -> dict[str, Any]:
+    """Capture Raw IDs/statuses once; later clone checks must stay metadata-only."""
+
+    snapshot = _raw_inventory_snapshot(catalog, raw_store_module, raw_dir, root)
+    try:
+        raw_ids = {
+            str(unit.raw_id)
+            for unit in raw_store_module.RawStore(raw_dir, mode="v2").iter_segment_units()
+        }
+        with sqlite3.connect(
+            f"file:{catalog.catalog_path(root)}?mode=ro", uri=True
+        ) as connection:
+            statuses = {
+                str(row[0]): str(row[1])
+                for row in connection.execute("SELECT raw_id,status FROM raw_units")
+            }
+    except Exception as exc:
+        raise R2Error("Raw inventory baseline capture failed") from exc
+    if raw_ids != set(statuses):
+        raise R2Error("Raw inventory baseline IDs differ from catalog")
+    if len(raw_ids) != int(snapshot["count"]):
+        raise R2Error("Raw inventory baseline count differs from snapshot")
+    return {"ids": frozenset(raw_ids), "statuses": statuses, **snapshot}
+
+
+def _catalog_integrity_snapshot(catalog: Any, root: Path) -> dict[str, Any]:
+    """Check counts/duplicates without hashing 200k historical rows per clone."""
+
+    path = catalog.catalog_path(root)
+    state = R0._stat(path)
+    if state is None:
+        return {"exists": False, "rows": {}, "duplicates": {}, "columns": [], "digest": None}
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            columns = {
+                table: [str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")]
+                for table in ("raw_units", "events", "rallies", "metadata")
+                if connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                ).fetchone()
+            }
+            counts = {
+                table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                for table in columns
+            }
+            duplicate_keys = {
+                "raw_units": "raw_id",
+                "events": "raw_id,event_index",
+                "rallies": "rally_id",
+            }
+            duplicates = {
+                table: int(
+                    connection.execute(
+                        "SELECT COALESCE(SUM(n-1),0) FROM "
+                        f"(SELECT COUNT(*) AS n FROM {table} GROUP BY {keys})",
+                    ).fetchone()[0]
+                )
+                for table, keys in duplicate_keys.items()
+                if table in columns
+            }
+    except sqlite3.DatabaseError as exc:
+        raise R2Error("historical catalog integrity snapshot failed") from exc
+    return {
+        "exists": True,
+        "file_state": state,
+        "rows": counts,
+        "duplicates": duplicates,
+        "columns": columns,
+        "digest": None,
+    }
+
+
 def _derived_snapshot(
     catalog: Any,
     store: Any,
@@ -794,15 +1182,27 @@ def _derived_snapshot(
     root: Path,
     *,
     include_inventory: bool = True,
+    inventory_baseline: Mapping[str, Any] | None = None,
+    expected_new_raw_id: str | None = None,
 ) -> dict[str, Any]:
     snapshot = {
         "catalog": _catalog_snapshot(catalog, root),
         "fts": _index_snapshot(catalog, store, raw_store_module, raw_dir, root),
     }
     if include_inventory:
-        snapshot["inventory"] = _raw_inventory_snapshot(
-            catalog, raw_store_module, raw_dir, root
-        )
+        if inventory_baseline is None:
+            snapshot["inventory"] = _raw_inventory_snapshot(
+                catalog, raw_store_module, raw_dir, root
+            )
+        else:
+            snapshot["inventory"] = _raw_inventory_id_snapshot(
+                catalog,
+                raw_store_module,
+                raw_dir,
+                root,
+                expected_new_raw_id=expected_new_raw_id,
+                expected_inventory=inventory_baseline,
+            )
     _assert_no_duplicates(snapshot["catalog"])
     return snapshot
 
@@ -1239,7 +1639,7 @@ def _copyfile_clone(source: Path, destination: Path, flags: int) -> None:
         raise R2Error(f"forced APFS clone failed: errno={ctypes.get_errno()}")
 
 
-def _new_clone_destination(source: Path) -> Path:
+def _new_clone_destination(source: Path, *, prefix: str | None = None) -> Path:
     if sys.platform != "darwin":
         raise R2Error("unsupported environment: Darwin/APFS is required")
     if _has_symlink_component(source) or not source.is_dir():
@@ -1251,11 +1651,21 @@ def _new_clone_destination(source: Path) -> Path:
         raise R2Error("clone temp parent is unavailable") from exc
     if temp_parent == source_resolved or temp_parent.is_relative_to(source_resolved):
         raise R2Error("clone temp destination overlaps source")
-    destination = Path(tempfile.mkdtemp(prefix="chronovisor-r2-", dir=temp_parent))
-    if _path_overlap(source, destination):
-        _cleanup_clone(destination)
-        raise R2Error("APFS clone overlaps source")
-    return destination
+    destination: Path | None = None
+    try:
+        destination = Path(
+            tempfile.mkdtemp(
+                prefix=prefix or _ACTIVE_CLONE_PREFIX or "chronovisor-r2-",
+                dir=temp_parent,
+            )
+        )
+        if _path_overlap(source, destination):
+            raise R2Error("APFS clone overlaps source")
+        return destination
+    except BaseException:
+        if destination is not None:
+            _cleanup_clone(destination)
+        raise
 
 
 def _rebind_clone_checkpoints(catalog: Any, source: Path, destination: Path) -> None:
@@ -1445,6 +1855,214 @@ def _cleanup_clone(path: Path) -> None:
         raise R2Error("clone cleanup left an artifact")
 
 
+def _cleanup_owned_temp_clones(
+    parent: Path, prefix: str, *, protected: Iterable[Path] = ()
+) -> int:
+    """Clean only this run's uniquely prefixed temporary clone directories."""
+
+    if _has_symlink_component(parent) or not parent.is_dir():
+        raise R2Error("clone temp parent is unsafe")
+    protected_resolved = {path.resolve(strict=False) for path in protected}
+    cleaned = 0
+    for candidate in sorted(parent.iterdir()):
+        if not candidate.name.startswith(prefix):
+            continue
+        if candidate.resolve(strict=False) in protected_resolved:
+            continue
+        _cleanup_clone(candidate)
+        cleaned += 1
+    return cleaned
+
+
+def _cleanup_clone_set(
+    paths: list[Path], parent: Path, prefix: str
+) -> int:
+    """Attempt every owned path, then re-scan the uniquely owned temp prefix."""
+
+    failure: BaseException | None = None
+    for path in reversed(paths):
+        try:
+            _cleanup_clone(path)
+        except BaseException as exc:  # preserve the first failure after best-effort cleanup
+            failure = failure or exc
+    paths.clear()
+    try:
+        owned_count = _cleanup_owned_temp_clones(parent, prefix)
+    except BaseException as exc:
+        failure = failure or exc
+        owned_count = 0
+    if failure is not None:
+        raise failure
+    return owned_count
+
+
+def _static_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop live dashboard fields before comparing a frozen clone seal."""
+
+    snapshot = dict(value)
+    for key in ("fast_snapshot", "live_health"):
+        snapshot.pop(key, None)
+    return snapshot
+
+
+def _prepare_frozen_clone(
+    *,
+    production: Path,
+    source_root: Path,
+    source_commit: str,
+    dashboard_url: str,
+    clone_root: Path,
+    manifest_directory: Path,
+    cli_paths: Mapping[str, Mapping[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Create and seal one APFS clone while production remains live."""
+
+    _assert_root_matrix(
+        production,
+        source_root,
+        manifest_directory,
+        (clone_root,),
+    )
+    _require_supported_environment(production)
+    _require_supported_environment(clone_root.parent)
+    if clone_root.exists() or clone_root.is_symlink():
+        raise R2Error("frozen clone destination already exists")
+    if _path_overlap(manifest_directory, production) or _path_overlap(
+        manifest_directory, source_root
+    ):
+        raise R2Error("frozen clone manifest overlaps protected root")
+    clone_root.mkdir(parents=True, mode=0o700)
+    try:
+        previous_dont_write_bytecode = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        with R0._env(
+            {
+                "CHRONOVISOR_ROOT": str(clone_root),
+                "CHRONOVISOR_RECALL_DISTILLATION": "true",
+                "CHRONOVISOR_READ_ONLY": "0",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            }
+        ):
+            parity, _distill, store, catalog, raw_store = R0._load(source_root)
+            identity_before = parity._runtime_identity(source_root, source_commit)
+            production_before = _bounded_production(
+                store, catalog, raw_store, production, dashboard_url
+            )
+            raw_before = _raw_tree_digest(production)
+            _populate_clone(production, clone_root, catalog=catalog)
+            clone_snapshot = _bounded_production(
+                store, catalog, raw_store, clone_root, dashboard_url, clone_copy=True
+            )
+            clone_raw = _raw_tree_digest(clone_root)
+            if R0._clone_identity(clone_snapshot) != R0._clone_identity(
+                production_before
+            ):
+                raise R2Error("frozen APFS clone identity differs from production")
+            _assert_raw_digest_parity(clone_raw, raw_before, "frozen APFS clone")
+            production_after = _bounded_production(
+                store, catalog, raw_store, production, dashboard_url
+            )
+            raw_after = _raw_tree_digest(production)
+            if _static_snapshot(production_before) != _static_snapshot(production_after):
+                raise R2Error("production changed while freezing APFS clone")
+            if raw_before != raw_after:
+                raise R2Error("production Raw changed while freezing APFS clone")
+            source_tree = _source_tree_digest(source_root)
+            payload = {
+                "captured_at": datetime.now().astimezone().isoformat(),
+                "clone_root": str(clone_root.resolve(strict=True)),
+                "source_commit": source_commit,
+                "source_tree": source_tree,
+                "runtime_identity": identity_before,
+                "production": {
+                    "static": _static_snapshot(production_before),
+                    "raw_tree": raw_before,
+                },
+                "clone": {
+                    "static": _static_snapshot(clone_snapshot),
+                    "raw_tree": clone_raw,
+                    "filesystem": R0._filesystem_type(clone_root),
+                    "clone_backend": "copyfile(3):COPYFILE_CLONE_FORCE",
+                },
+                "cli_paths": dict(cli_paths or {}),
+                "threshold": {
+                    "production_unchanged_during_freeze": True,
+                    "raw_parity": True,
+                },
+            }
+            artifact_id, artifact_path, artifact = store.write_immutable(
+                manifest_directory, payload, schema=FROZEN_CLONE_SCHEMA
+            )
+            persisted = _read_content_addressed_artifact(
+                store,
+                artifact_path,
+                schema=FROZEN_CLONE_SCHEMA,
+                label="frozen clone manifest",
+            )
+            return {
+                "schema": persisted["schema"],
+                "artifact_id": persisted["artifact_id"],
+                "path": str(artifact_path),
+                "clone_root": str(clone_root),
+                "cli_paths": dict(cli_paths or {}),
+            }
+    except Exception:
+        _cleanup_clone(clone_root)
+        raise
+    finally:
+        sys.dont_write_bytecode = previous_dont_write_bytecode
+
+
+def _verify_frozen_clone(
+    *,
+    manifest_path: Path,
+    clone_root: Path,
+    production: Path,
+    source_root: Path,
+    source_commit: str,
+    parity: Any,
+    store: Any,
+    catalog: Any,
+    raw_store: Any,
+    dashboard_url: str,
+) -> dict[str, Any]:
+    """Verify a sealed external clone before allowing any derived mutation."""
+
+    manifest = _read_content_addressed_artifact(
+        store,
+        manifest_path,
+        schema=FROZEN_CLONE_SCHEMA,
+        label="frozen clone manifest",
+    )
+    expected_root = manifest.get("clone_root")
+    if not isinstance(expected_root, str) or Path(expected_root).resolve(strict=False) != clone_root:
+        raise R2Error("frozen clone manifest root mismatch")
+    if manifest.get("source_commit") != source_commit:
+        raise R2Error("frozen clone source commit mismatch")
+    _assert_symlink_free_tree(clone_root, label="frozen clone")
+    _assert_root_matrix(production, source_root, manifest_path, (clone_root,))
+    _require_supported_environment(clone_root)
+    source_tree = manifest.get("source_tree")
+    if not isinstance(source_tree, Mapping) or _source_tree_digest(source_root) != source_tree:
+        raise R2Error("frozen clone source tree changed")
+    identity = parity._runtime_identity(source_root, source_commit)
+    if identity != manifest.get("runtime_identity"):
+        raise R2Error("frozen clone runtime identity changed")
+    clone_snapshot = _bounded_production(
+        store, catalog, raw_store, clone_root, dashboard_url, clone_copy=True
+    )
+    expected_clone = manifest.get("clone")
+    if not isinstance(expected_clone, Mapping):
+        raise R2Error("frozen clone manifest payload is incomplete")
+    if _static_snapshot(clone_snapshot) != expected_clone.get("static"):
+        raise R2Error("frozen clone derived state changed")
+    if _raw_tree_digest(clone_root) != expected_clone.get("raw_tree"):
+        raise R2Error("frozen clone Raw changed")
+    if expected_clone.get("filesystem") != R0._filesystem_type(clone_root):
+        raise R2Error("frozen clone filesystem changed")
+    return manifest
+
+
 def _catalog_session_tail(catalog: Any, root: Path) -> tuple[str, int]:
     path = catalog.catalog_path(root)
     try:
@@ -1474,6 +2092,7 @@ def _fault_repair(
     context_bytes: int,
     old_units: tuple[Any, ...],
     reference_snapshot: Mapping[str, Any] | None = None,
+    inventory_baseline: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Exercise checkpoint/DB recovery on this clone, never the live root."""
 
@@ -1509,7 +2128,14 @@ def _fault_repair(
         store=store,
         old_units=repair_old_units,
     )
-    snapshot = _derived_snapshot(catalog, store, raw_store_module, raw_dir, root)
+    snapshot = _derived_snapshot(
+        catalog,
+        store,
+        raw_store_module,
+        raw_dir,
+        root,
+        inventory_baseline=inventory_baseline,
+    )
     if reference_snapshot is not None:
         _assert_repair_parity(snapshot, reference_snapshot, "checkpoint repair")
     return {
@@ -1530,6 +2156,7 @@ def _tamper_repair(
     context_bytes: int,
     old_units: tuple[Any, ...],
     reference_snapshot: Mapping[str, Any] | None = None,
+    inventory_baseline: Mapping[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """Verify that ordinary catalog/FTS SQL tamper cannot enter the warm path."""
 
@@ -1583,7 +2210,12 @@ def _tamper_repair(
             old_units=repair_old_units,
         )
         snapshot = _derived_snapshot(
-            catalog, store, raw_store_module, root / "raw", root
+            catalog,
+            store,
+            raw_store_module,
+            root / "raw",
+            root,
+            inventory_baseline=inventory_baseline,
         )
         if reference_snapshot is not None:
             _assert_repair_parity(snapshot, reference_snapshot, "DB tamper repair")
@@ -1659,6 +2291,7 @@ def _run_post_commit_crash(
     raw_store_module: Any,
     context_bytes: int,
     old_units: tuple[Any, ...],
+    inventory_baseline: Mapping[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any], Path]:
     """Kill a child immediately after durable commit, then recover in parent."""
 
@@ -1764,10 +2397,22 @@ def _run_post_commit_crash(
         catalog.advance(clean_root / "raw", clean_root, context_bytes)
         catalog.sync_historical_index(clean_root / "raw", clean_root)
         clean_snapshot = _derived_snapshot(
-            catalog, store, raw_store_module, clean_root / "raw", clean_root
+            catalog,
+            store,
+            raw_store_module,
+            clean_root / "raw",
+            clean_root,
+            inventory_baseline=inventory_baseline,
+            expected_new_raw_id=crash_raw_id,
         )
         snapshot = _derived_snapshot(
-            catalog, store, raw_store_module, root / "raw", root
+            catalog,
+            store,
+            raw_store_module,
+            root / "raw",
+            root,
+            inventory_baseline=inventory_baseline,
+            expected_new_raw_id=crash_raw_id,
         )
         _assert_repair_parity(snapshot, clean_snapshot, "post-commit repair")
         return (
@@ -1960,6 +2605,8 @@ def _full_rebuild_parity(
     store: Any,
     raw_store_module: Any,
     context_bytes: int,
+    inventory_baseline: Mapping[str, Any] | None = None,
+    expected_new_raw_id: str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     root = _clone_from_root(base, catalog=catalog)
     try:
@@ -1986,7 +2633,15 @@ def _full_rebuild_parity(
             raise R2Error("full rebuild did not bootstrap catalog")
         return root, {
             "metrics": metrics,
-            **_derived_snapshot(catalog, store, raw_store_module, root / "raw", root),
+            **_derived_snapshot(
+                catalog,
+                store,
+                raw_store_module,
+                root / "raw",
+                root,
+                inventory_baseline=inventory_baseline,
+                expected_new_raw_id=expected_new_raw_id,
+            ),
             "fts_digest": fts_digest,
         }
     except Exception:
@@ -2072,6 +2727,28 @@ def _assert_delta(metrics: Mapping[str, Any], new_raw_id: str) -> None:
         raise R2Error("delta path scanned/rebuilt existing derived data")
 
 
+def _validate_delta_outcome(
+    outcome: dict[str, Any],
+    sample_root: Path,
+    *,
+    catalog: Any,
+    raw_store_module: Any,
+    inventory_baseline: Mapping[str, Any],
+    new_raw_id: str,
+) -> None:
+    outcome["catalog"] = _catalog_integrity_snapshot(catalog, sample_root)
+    _assert_no_duplicates(outcome["catalog"])
+    outcome["fts"] = _index_sqlite_snapshot(catalog, sample_root)
+    outcome["inventory"] = _raw_inventory_id_snapshot(
+        catalog,
+        raw_store_module,
+        sample_root / "raw",
+        sample_root,
+        expected_new_raw_id=new_raw_id,
+        expected_inventory=inventory_baseline,
+    )
+
+
 def _run_once(
     *,
     production: Path,
@@ -2082,17 +2759,55 @@ def _run_once(
     noop_samples: int,
     delta_samples: int,
     context_bytes: int,
+    phase_receipt: Path | None = None,
+    frozen_clone_root: Path | None = None,
+    frozen_clone_manifest: Path | None = None,
+    cli_paths: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[str, Any]:
-    _assert_root_matrix(production, source_root, output)
+    global _ACTIVE_CLONE_PREFIX
+    if (frozen_clone_root is None) != (frozen_clone_manifest is None):
+        raise R2Error("frozen clone root and manifest must be provided together")
+    other_paths = {
+        name: path
+        for name, path in {
+            "phase_receipt": phase_receipt,
+            "frozen_clone_manifest": frozen_clone_manifest,
+        }.items()
+        if path is not None
+    }
+    _assert_root_matrix(
+        production,
+        source_root,
+        output,
+        (frozen_clone_root,) if frozen_clone_root is not None else (),
+        other_paths,
+    )
+    phases = _PhaseReceipt(phase_receipt)
+    phases.event("run-start", cli_paths=dict(cli_paths or {}))
     _require_supported_environment(production)
     if noop_samples < 20 or delta_samples < 20:
         raise R2Error("R2 sample counts are below the required minimum")
-    source_before = _source_tree_digest(source_root)
-    clone = _new_clone_destination(production)
-    clones: list[Path] = [clone]
+    source_before = phases.measure(
+        "source-preflight", lambda: _source_tree_digest(source_root)
+    )
+    clones: list[Path] = []
+    owned_temp_parent = Path(tempfile.gettempdir()).expanduser().resolve(strict=True)
+    owned_temp_prefix = f"chronovisor-r2-{os.getpid()}-{uuid.uuid4().hex[:12]}-"
+    previous_clone_prefix = _ACTIVE_CLONE_PREFIX
+    _ACTIVE_CLONE_PREFIX = owned_temp_prefix
     previous_dont_write_bytecode = sys.dont_write_bytecode
     sys.dont_write_bytecode = True
+    cleanup_recorded = False
+    owned_cleanup_count = 0
     try:
+        clone = (
+            frozen_clone_root.expanduser().resolve(strict=True)
+            if frozen_clone_root is not None
+            else phases.measure(
+                "initial-clone-destination", lambda: _new_clone_destination(production)
+            )
+        )
+        clones.append(clone)
         _assert_root_matrix(production, source_root, output, iter(clones))
         with R0._env(
             {
@@ -2102,27 +2817,66 @@ def _run_once(
                 "PYTHONDONTWRITEBYTECODE": "1",
             }
         ):
-            parity, distill, store, catalog, raw_store = R0._load(source_root)
-            _populate_clone(production, clone, catalog=catalog)
+            parity, distill, store, catalog, raw_store = phases.measure(
+                "runtime-load", lambda: R0._load(source_root)
+            )
+            frozen_manifest = None
+            if frozen_clone_manifest is None:
+                phases.measure(
+                    "initial-clone-populate",
+                    lambda: _populate_clone(production, clone, catalog=catalog),
+                )
+            else:
+                frozen_manifest = phases.measure(
+                    "frozen-clone-verify",
+                    lambda: _verify_frozen_clone(
+                        manifest_path=frozen_clone_manifest.expanduser().resolve(strict=True),
+                        clone_root=clone,
+                        production=production,
+                        source_root=source_root,
+                        source_commit=source_commit,
+                        parity=parity,
+                        store=store,
+                        catalog=catalog,
+                        raw_store=raw_store,
+                        dashboard_url=dashboard_url,
+                    ),
+                )
             raw_segment = __import__(
                 "chronovisor.core.raw_segment", fromlist=["append_capture"]
             )
             raw_store_module = sys.modules[raw_store.RawStore.__module__]
-            identity_before = parity._runtime_identity(source_root, source_commit)
-            production_before = _bounded_production(
-                store, catalog, raw_store, production, dashboard_url
+            identity_before = phases.measure(
+                "runtime-identity-before",
+                lambda: parity._runtime_identity(source_root, source_commit),
             )
-            clone_before = _bounded_production(
-                store, catalog, raw_store, clone, dashboard_url, clone_copy=True
+            production_before = phases.measure(
+                "production-derived-before",
+                lambda: _bounded_production(
+                    store, catalog, raw_store, production, dashboard_url
+                ),
             )
-            if R0._clone_identity(clone_before) != R0._clone_identity(
+            clone_before = phases.measure(
+                "clone-derived-before",
+                lambda: _bounded_production(
+                    store, catalog, raw_store, clone, dashboard_url, clone_copy=True
+                ),
+            )
+            if frozen_manifest is None and R0._clone_identity(clone_before) != R0._clone_identity(
                 production_before
             ):
                 raise R2Error("APFS clone is not point-in-time coherent")
-            raw_before = _raw_tree_digest(production)
-            clone_raw_before = _raw_tree_digest(clone)
-            _assert_raw_digest_parity(clone_raw_before, raw_before, "APFS clone")
-            old_catalog = _catalog_snapshot(catalog, production)
+            raw_before = phases.measure(
+                "production-raw-before", lambda: _raw_tree_digest(production)
+            )
+            clone_raw_before = phases.measure(
+                "clone-raw-before", lambda: _raw_tree_digest(clone)
+            )
+            if frozen_manifest is None:
+                _assert_raw_digest_parity(clone_raw_before, raw_before, "APFS clone")
+            old_catalog = phases.measure(
+                "production-catalog-baseline", lambda: _catalog_snapshot(catalog, production)
+            )
             if (
                 old_catalog.get("columns", {}).get("raw_units")
                 != [
@@ -2140,27 +2894,36 @@ def _run_once(
                 raise R2Error(
                     "production catalog is not the expected legacy 8-column baseline"
                 )
-            old_units = _raw_units(raw_store, clone / "raw")
+            old_units = phases.measure(
+                "raw-unit-baseline", lambda: _raw_units(raw_store, clone / "raw")
+            )
             old_range_map = _old_range_map(iter(old_units))
             del old_range_map  # recalculated per stage by _measure
 
-            migration_catalog, migration_metrics = _measure(
+            migration_catalog, migration_metrics = phases.measure(
                 "catalog-migration",
-                lambda: catalog.advance(clone / "raw", clone, context_bytes),
-                catalog=catalog,
-                distill=distill,
-                raw_store_module=raw_store_module,
-                store=store,
-                old_units=old_units,
+                lambda: _measure(
+                    "catalog-migration",
+                    lambda: catalog.advance(clone / "raw", clone, context_bytes),
+                    catalog=catalog,
+                    distill=distill,
+                    raw_store_module=raw_store_module,
+                    store=store,
+                    old_units=old_units,
+                ),
+                units=len(old_units),
             )
-            migration_fts, fts_metrics = _measure(
+            migration_fts, fts_metrics = phases.measure(
                 "fts-migration",
-                lambda: catalog.sync_historical_index(clone / "raw", clone),
-                catalog=catalog,
-                distill=distill,
-                raw_store_module=raw_store_module,
-                store=store,
-                old_units=old_units,
+                lambda: _measure(
+                    "fts-migration",
+                    lambda: catalog.sync_historical_index(clone / "raw", clone),
+                    catalog=catalog,
+                    distill=distill,
+                    raw_store_module=raw_store_module,
+                    store=store,
+                    old_units=old_units,
+                ),
             )
             if getattr(migration_catalog, "status", None) not in {
                 "bootstrap",
@@ -2177,22 +2940,43 @@ def _run_once(
                 clone,
                 include_inventory=False,
             )
+            # The bootstrap already read every committed Raw unit.  Retain
+            # that one authoritative status/ID check and make all subsequent
+            # clone validations metadata-only; repeating the 8+ GB Raw
+            # decode on every repair clone was the R2 timeout bottleneck.
+            inventory_baseline = phases.measure(
+                "raw-inventory-baseline",
+                lambda: _raw_inventory_baseline(
+                    catalog, raw_store_module, clone / "raw", clone
+                ),
+                units=len(old_units),
+            )
+            migration_snapshot["inventory"] = {
+                key: value
+                for key, value in inventory_baseline.items()
+                if key in {"count", "ids_sha256", "status_counts"}
+            }
 
             noop_metrics: list[dict[str, Any]] = []
             prior_catalog_state = migration_snapshot["catalog"].get("file_state")
             prior_index_state = migration_snapshot["fts"].get("file_state")
-            for _ in range(noop_samples):
-                _, metrics = _measure(
+            for sample in range(noop_samples):
+                _, metrics = phases.measure(
                     "warm-no-new",
-                    lambda: (
-                        catalog.advance(clone / "raw", clone, context_bytes),
-                        catalog.sync_historical_index(clone / "raw", clone),
+                    lambda: _measure(
+                        "warm-no-new",
+                        lambda: (
+                            catalog.advance(clone / "raw", clone, context_bytes),
+                            catalog.sync_historical_index(clone / "raw", clone),
+                        ),
+                        catalog=catalog,
+                        distill=distill,
+                        raw_store_module=raw_store_module,
+                        store=store,
+                        old_units=old_units,
                     ),
-                    catalog=catalog,
-                    distill=distill,
-                    raw_store_module=raw_store_module,
-                    store=store,
-                    old_units=old_units,
+                    sample=sample,
+                    samples=noop_samples,
                 )
                 _assert_warm(metrics)
                 if R0._stat(catalog.catalog_path(clone)) != prior_catalog_state:
@@ -2208,13 +2992,20 @@ def _run_once(
                     f"threshold_ns=1000000000 {_latency_summary(noop_values)}"
                 )
 
-            session_key, tail_after = _catalog_session_tail(catalog, clone)
+            session_key, tail_after = phases.measure(
+                "session-tail-selection", lambda: _catalog_session_tail(catalog, clone)
+            )
             delta_metrics: list[dict[str, Any]] = []
             delta_outcomes: list[dict[str, Any]] = []
             delta_roots: list[Path] = []
             delta_ids: list[str] = []
             for sample in range(delta_samples):
-                sample_root = _clone_from_root(clone, catalog=catalog)
+                sample_root = phases.measure(
+                    "delta-clone",
+                    lambda: _clone_from_root(clone, catalog=catalog),
+                    sample=sample,
+                    samples=delta_samples,
+                )
                 clones.append(sample_root)
                 _assert_root_matrix(production, source_root, output, iter(clones))
                 _assert_raw_state_parity(
@@ -2231,25 +3022,35 @@ def _run_once(
                     _message("assistant", "r2 synthetic answer", index)
                     for index in range(1, 1000)
                 ]
-                new_id, new_receipt_sha = _append_events(
-                    raw_segment,
-                    sample_root,
-                    session_key=new_session,
-                    after_line=0,
-                    events=events,
-                    tag=f"delta-{sample}",
-                )
-                result, metrics = _measure(
-                    "delta-1000-events",
-                    lambda root=sample_root: (
-                        catalog.advance(root / "raw", root, context_bytes),
-                        catalog.sync_historical_index(root / "raw", root),
+                new_id, new_receipt_sha = phases.measure(
+                    "delta-event-append",
+                    lambda sample_root=sample_root, new_session=new_session, events=events, sample=sample: _append_events(  # type: ignore[misc]
+                        raw_segment,
+                        sample_root,
+                        session_key=new_session,
+                        after_line=0,
+                        events=events,
+                        tag=f"delta-{sample}",
                     ),
-                    catalog=catalog,
-                    distill=distill,
-                    raw_store_module=raw_store_module,
-                    store=store,
-                    old_units=sample_old_units,
+                    sample=sample,
+                    samples=delta_samples,
+                )
+                result, metrics = phases.measure(
+                    "delta-1000-events",
+                    lambda root=sample_root, sample_old_units=sample_old_units: _measure(  # type: ignore[misc]
+                        "delta-1000-events",
+                        lambda: (
+                            catalog.advance(root / "raw", root, context_bytes),
+                            catalog.sync_historical_index(root / "raw", root),
+                        ),
+                        catalog=catalog,
+                        distill=distill,
+                        raw_store_module=raw_store_module,
+                        store=store,
+                        old_units=sample_old_units,
+                    ),
+                    sample=sample,
+                    samples=delta_samples,
                 )
                 _assert_delta(metrics, new_id)
                 delta_metrics.append(metrics)
@@ -2265,39 +3066,66 @@ def _run_once(
                     }
                 )
             reference_root = sample_root
-            baseline_inventory_ids = _raw_inventory_id_snapshot(
-                catalog, raw_store_module, clone / "raw", clone
+            baseline_inventory_ids = phases.measure(
+                "delta-baseline-validation",
+                lambda: _raw_inventory_id_snapshot(
+                    catalog,
+                    raw_store_module,
+                    clone / "raw",
+                    clone,
+                    expected_inventory=inventory_baseline,
+                ),
             )
             for index, (outcome, sample_root) in enumerate(
                 zip(delta_outcomes, delta_roots, strict=True)
             ):
                 outcome["validation_stage"] = "post-delta-derived-validation"
-                outcome["catalog"] = _catalog_snapshot(catalog, sample_root)
-                _assert_no_duplicates(outcome["catalog"])
-                outcome["fts"] = _index_snapshot(
-                    catalog, store, raw_store_module, sample_root / "raw", sample_root
-                )
-                outcome["inventory"] = _raw_inventory_id_snapshot(
-                    catalog,
-                    raw_store_module,
-                    sample_root / "raw",
-                    sample_root,
-                    expected_new_raw_id=delta_ids[index],
+                phases.measure(
+                    "delta-validation",
+                    lambda outcome=outcome, sample_root=sample_root, index=index: _validate_delta_outcome(  # type: ignore[misc]
+                        outcome,
+                        sample_root,
+                        catalog=catalog,
+                        raw_store_module=raw_store_module,
+                        inventory_baseline=inventory_baseline,
+                        new_raw_id=delta_ids[index],
+                    ),
+                    sample=index,
+                    samples=delta_samples,
                 )
                 if outcome["inventory"]["count"] != baseline_inventory_ids["count"] + 1:
                     raise R2Error(
                         "delta Raw inventory count is not one-unit incremental"
                     )
-            migration_snapshot["inventory"] = _raw_inventory_snapshot(
-                catalog, raw_store_module, clone / "raw", clone
-            )
             delta_inventory_validation = {
                 "stage": "post-delta-raw-inventory-validation",
-                "snapshot": _raw_inventory_snapshot(
-                    catalog, raw_store_module, reference_root / "raw", reference_root
+                "snapshot": _raw_inventory_id_snapshot(
+                    catalog,
+                    raw_store_module,
+                    reference_root / "raw",
+                    reference_root,
+                    expected_new_raw_id=delta_ids[-1],
+                    expected_inventory=inventory_baseline,
                 ),
             }
             delta_outcomes[-1]["inventory"] = delta_inventory_validation["snapshot"]
+            # Keep one full reference digest for independent rebuild parity;
+            # all other per-sample snapshots remain compact and bounded.
+            reference_snapshot = phases.measure(
+                "reference-snapshot",
+                lambda: _derived_snapshot(
+                    catalog,
+                    store,
+                    raw_store_module,
+                    reference_root / "raw",
+                    reference_root,
+                    inventory_baseline=inventory_baseline,
+                    expected_new_raw_id=delta_ids[-1],
+                ),
+                raw_units=len(old_units) + 1,
+            )
+            delta_outcomes[-1]["catalog"] = reference_snapshot["catalog"]
+            delta_outcomes[-1]["fts"] = reference_snapshot["fts"]
             delta_values = [int(row["wall_time_ns"]) for row in delta_metrics]
             delta_p95 = _p95(delta_values)
             if delta_p95 > 15_000_000_000:
@@ -2306,9 +3134,15 @@ def _run_once(
                     f"threshold_ns=15000000000 {_latency_summary(delta_values)}"
                 )
 
-            tail_root = _clone_from_root(clone, catalog=catalog)
+            tail_root = phases.measure(
+                "session-tail-clone",
+                lambda: _clone_from_root(clone, catalog=catalog),
+            )
             clones.append(tail_root)
-            tail_clean_root = _clone_from_root(clone, catalog=catalog)
+            tail_clean_root = phases.measure(
+                "session-tail-clean-clone",
+                lambda: _clone_from_root(clone, catalog=catalog),
+            )
             clones.append(tail_clean_root)
             _assert_root_matrix(
                 production,
@@ -2331,36 +3165,45 @@ def _run_once(
                 _message("assistant", "r2 tail answer", 1),
                 {"type": "unknown"},
             ]
-            tail_id, tail_receipt_sha = _append_events(
-                raw_segment,
-                tail_root,
-                session_key=session_key,
-                after_line=tail_after,
-                events=tail_events,
-                tag="session-tail",
-                logical_source_file=Path("r2-session-tail.jsonl"),
-            )
-            _, tail_metrics = _measure(
-                "existing-session-tail",
-                lambda: (
-                    catalog.advance(tail_root / "raw", tail_root, context_bytes),
-                    catalog.sync_historical_index(tail_root / "raw", tail_root),
+            tail_id, tail_receipt_sha = phases.measure(
+                "session-tail-event-append",
+                lambda: _append_events(
+                    raw_segment,
+                    tail_root,
+                    session_key=session_key,
+                    after_line=tail_after,
+                    events=tail_events,
+                    tag="session-tail",
+                    logical_source_file=Path("r2-session-tail.jsonl"),
                 ),
-                catalog=catalog,
-                distill=distill,
-                raw_store_module=raw_store_module,
-                store=store,
-                old_units=tail_units,
+            )
+            _, tail_metrics = phases.measure(
+                "existing-session-tail",
+                lambda: _measure(
+                    "existing-session-tail",
+                    lambda: (
+                        catalog.advance(tail_root / "raw", tail_root, context_bytes),
+                        catalog.sync_historical_index(tail_root / "raw", tail_root),
+                    ),
+                    catalog=catalog,
+                    distill=distill,
+                    raw_store_module=raw_store_module,
+                    store=store,
+                    old_units=tail_units,
+                ),
             )
             _assert_delta(tail_metrics, tail_id)
-            tail_clean_id, tail_clean_receipt_sha = _append_events(
-                raw_segment,
-                tail_clean_root,
-                session_key=session_key,
-                after_line=tail_after,
-                events=tail_events,
-                tag="session-tail",
-                logical_source_file=Path("r2-session-tail.jsonl"),
+            tail_clean_id, tail_clean_receipt_sha = phases.measure(
+                "session-tail-clean-event-append",
+                lambda: _append_events(
+                    raw_segment,
+                    tail_clean_root,
+                    session_key=session_key,
+                    after_line=tail_after,
+                    events=tail_events,
+                    tag="session-tail",
+                    logical_source_file=Path("r2-session-tail.jsonl"),
+                ),
             )
             if (tail_id, tail_receipt_sha) != (
                 tail_clean_id,
@@ -2368,17 +3211,37 @@ def _run_once(
             ):
                 raise R2Error("session-tail paired Raw receipt identity differs")
             _remove_derived_allowlist(catalog, tail_clean_root)
-            catalog.advance(tail_clean_root / "raw", tail_clean_root, context_bytes)
-            catalog.sync_historical_index(tail_clean_root / "raw", tail_clean_root)
-            tail_snapshot = _derived_snapshot(
-                catalog, store, raw_store_module, tail_root / "raw", tail_root
+            phases.measure(
+                "session-tail-clean-rebuild",
+                lambda: (
+                    catalog.advance(tail_clean_root / "raw", tail_clean_root, context_bytes),
+                    catalog.sync_historical_index(tail_clean_root / "raw", tail_clean_root),
+                ),
+                raw_units=len(old_units) + 1,
             )
-            tail_clean_snapshot = _derived_snapshot(
-                catalog,
-                store,
-                raw_store_module,
-                tail_clean_root / "raw",
-                tail_clean_root,
+            tail_snapshot = phases.measure(
+                "session-tail-snapshot",
+                lambda: _derived_snapshot(
+                    catalog,
+                    store,
+                    raw_store_module,
+                    tail_root / "raw",
+                    tail_root,
+                    inventory_baseline=inventory_baseline,
+                    expected_new_raw_id=tail_id,
+                ),
+            )
+            tail_clean_snapshot = phases.measure(
+                "session-tail-clean-snapshot",
+                lambda: _derived_snapshot(
+                    catalog,
+                    store,
+                    raw_store_module,
+                    tail_clean_root / "raw",
+                    tail_clean_root,
+                    inventory_baseline=inventory_baseline,
+                    expected_new_raw_id=tail_clean_id,
+                ),
             )
             with sqlite3.connect(
                 f"file:{catalog.catalog_path(tail_root)}?mode=ro", uri=True
@@ -2393,7 +3256,10 @@ def _run_once(
             _assert_repair_parity(
                 tail_snapshot, tail_clean_snapshot, "session-tail projection"
             )
-            fault_root = _clone_from_root(clone, catalog=catalog)
+            fault_root = phases.measure(
+                "checkpoint-clone",
+                lambda: _clone_from_root(clone, catalog=catalog),
+            )
             clones.append(fault_root)
             _assert_root_matrix(production, source_root, output, iter(clones))
             _assert_raw_state_parity(
@@ -2401,50 +3267,69 @@ def _run_once(
                 _raw_tree_state_digest(clone),
                 "checkpoint clone",
             )
-            fault = _fault_repair(
-                catalog,
-                distill,
-                store,
-                raw_store_module,
-                fault_root,
-                fault_root / "raw",
-                context_bytes,
-                old_units,
-                migration_snapshot,
+            fault = phases.measure(
+                "checkpoint-repair",
+                lambda: _fault_repair(
+                    catalog,
+                    distill,
+                    store,
+                    raw_store_module,
+                    fault_root,
+                    fault_root / "raw",
+                    context_bytes,
+                    old_units,
+                    migration_snapshot,
+                    inventory_baseline,
+                ),
+                raw_units=len(old_units),
             )
-            tamper_root, tamper = _tamper_repair(
-                base=clone,
-                catalog=catalog,
-                distill=distill,
-                store=store,
-                raw_store_module=raw_store_module,
-                context_bytes=context_bytes,
-                old_units=old_units,
-                reference_snapshot=migration_snapshot,
+            tamper_root, tamper = phases.measure(
+                "database-tamper-repair",
+                lambda: _tamper_repair(
+                    base=clone,
+                    catalog=catalog,
+                    distill=distill,
+                    store=store,
+                    raw_store_module=raw_store_module,
+                    context_bytes=context_bytes,
+                    old_units=old_units,
+                    reference_snapshot=migration_snapshot,
+                    inventory_baseline=inventory_baseline,
+                ),
+                raw_units=len(old_units),
             )
             clones.append(tamper_root)
             _assert_root_matrix(production, source_root, output, iter(clones))
-            old_hash_root, old_hash_tamper = _old_raw_hash_tamper(
-                base=clone,
-                catalog=catalog,
-                store=store,
-                raw_store_module=raw_store_module,
-                raw_segment_module=raw_segment,
-                context_bytes=context_bytes,
-                old_units=old_units,
+            old_hash_root, old_hash_tamper = phases.measure(
+                "old-raw-hash-tamper",
+                lambda: _old_raw_hash_tamper(
+                    base=clone,
+                    catalog=catalog,
+                    store=store,
+                    raw_store_module=raw_store_module,
+                    raw_segment_module=raw_segment,
+                    context_bytes=context_bytes,
+                    old_units=old_units,
+                ),
+                raw_units=len(old_units),
             )
             clones.append(old_hash_root)
             _assert_root_matrix(production, source_root, output, iter(clones))
-            crash_root, crash, crash_clean_root = _run_post_commit_crash(
-                base=clone,
-                source_root=source_root,
-                raw_segment=raw_segment,
-                catalog=catalog,
-                distill=distill,
-                store=store,
-                raw_store_module=raw_store_module,
-                context_bytes=context_bytes,
-                old_units=old_units,
+            crash_root, crash, crash_clean_root = phases.measure(
+                "post-commit-crash-recovery",
+                lambda: _run_post_commit_crash(
+                    base=clone,
+                    source_root=source_root,
+                    raw_segment=raw_segment,
+                    catalog=catalog,
+                    distill=distill,
+                    store=store,
+                    raw_store_module=raw_store_module,
+                    context_bytes=context_bytes,
+                    old_units=old_units,
+                    inventory_baseline=inventory_baseline,
+                ),
+                raw_units=len(old_units) + 1,
             )
             clones.append(crash_root)
             clones.append(crash_clean_root)
@@ -2454,28 +3339,40 @@ def _run_once(
                 output,
                 iter(clones),
             )
-            rebuild_root, rebuild = _full_rebuild_parity(
-                base=reference_root,
-                catalog=catalog,
-                distill=distill,
-                store=store,
-                raw_store_module=raw_store_module,
-                context_bytes=context_bytes,
+            rebuild_root, rebuild = phases.measure(
+                "full-rebuild-parity",
+                lambda: _full_rebuild_parity(
+                    base=reference_root,
+                    catalog=catalog,
+                    distill=distill,
+                    store=store,
+                    raw_store_module=raw_store_module,
+                    context_bytes=context_bytes,
+                    inventory_baseline=inventory_baseline,
+                    expected_new_raw_id=delta_ids[-1],
+                ),
+                raw_units=len(old_units) + 1,
             )
             clones.append(rebuild_root)
             _assert_root_matrix(production, source_root, output, iter(clones))
-            rebuild_root_2, rebuild_2 = _full_rebuild_parity(
-                base=reference_root,
-                catalog=catalog,
-                distill=distill,
-                store=store,
-                raw_store_module=raw_store_module,
-                context_bytes=context_bytes,
+            rebuild_root_2, rebuild_2 = phases.measure(
+                "full-rebuild-parity-independent",
+                lambda: _full_rebuild_parity(
+                    base=reference_root,
+                    catalog=catalog,
+                    distill=distill,
+                    store=store,
+                    raw_store_module=raw_store_module,
+                    context_bytes=context_bytes,
+                    inventory_baseline=inventory_baseline,
+                    expected_new_raw_id=delta_ids[-1],
+                ),
+                raw_units=len(old_units) + 1,
             )
             clones.append(rebuild_root_2)
             _assert_root_matrix(production, source_root, output, iter(clones))
-            reference_catalog_digest = str(delta_outcomes[-1]["catalog"]["digest"])
-            reference_fts_digest = str(delta_outcomes[-1]["fts"]["digest"])
+            reference_catalog_digest = str(reference_snapshot["catalog"]["digest"])
+            reference_fts_digest = str(reference_snapshot["fts"]["digest"])
             if rebuild["catalog"].get("digest") != rebuild_2["catalog"].get(
                 "digest"
             ) or rebuild["fts"].get("digest") != rebuild_2["fts"].get("digest"):
@@ -2490,18 +3387,31 @@ def _run_once(
                     "full FTS rebuild digest differs from incremental projection"
                 )
 
-            identity_after = parity._runtime_identity(source_root, source_commit)
+            identity_after = phases.measure(
+                "source-runtime-integrity",
+                lambda: parity._runtime_identity(source_root, source_commit),
+            )
             R0._assert_identity_stable(identity_before, identity_after)
-            source_after = _source_tree_digest(source_root)
+            source_after = phases.measure(
+                "source-tree-integrity", lambda: _source_tree_digest(source_root)
+            )
             if source_before != source_after:
                 raise R2Error("source tree changed during clone-only run")
-            production_after = _bounded_production(
-                store, catalog, raw_store, production, dashboard_url
+            production_after = phases.measure(
+                "production-derived-integrity",
+                lambda: _bounded_production(
+                    store, catalog, raw_store, production, dashboard_url
+                ),
             )
-            raw_after = _raw_tree_digest(production)
+            raw_after = phases.measure(
+                "production-raw-integrity", lambda: _raw_tree_digest(production)
+            )
             if raw_before != raw_after:
                 raise R2Error("production Raw tree changed")
-            production_catalog_after = _catalog_snapshot(catalog, production)
+            production_catalog_after = phases.measure(
+                "production-catalog-integrity",
+                lambda: _catalog_snapshot(catalog, production),
+            )
             if production_catalog_after != old_catalog:
                 raise R2Error("production catalog changed")
             static_before = dict(production_before)
@@ -2515,6 +3425,14 @@ def _run_once(
             payload = {
                 "captured_at": datetime.now().astimezone().isoformat(),
                 "runtime_identity": identity_before,
+                "frozen_clone": (
+                    {
+                        "manifest": str(frozen_clone_manifest),
+                        "artifact_id": frozen_manifest.get("artifact_id"),
+                    }
+                    if frozen_manifest is not None
+                    else None
+                ),
                 "runtime_comparison": R0._runtime_comparison(
                     identity_after, production_after["live_health"]
                 ),
@@ -2576,36 +3494,86 @@ def _run_once(
                 "raw_inventory_validation": delta_inventory_validation,
             }
             cleanup_count = len(clones)
-            for path in reversed(clones):
-                _cleanup_clone(path)
-            clones.clear()
+
+            def cleanup_clones() -> None:
+                nonlocal cleanup_recorded, owned_cleanup_count
+                owned_cleanup_count = _cleanup_clone_set(
+                    clones, owned_temp_parent, owned_temp_prefix
+                )
+                cleanup_recorded = True
+
+            phases.measure("clone-cleanup", cleanup_clones, count=cleanup_count)
             payload["clone_cleanup"] = {
                 "count": cleanup_count,
                 "verified": True,
+                "owned_temp_count": owned_cleanup_count,
+            }
+            payload["phase_timing"] = phases.summary()
+            payload["cli_paths"] = dict(cli_paths or {})
+            payload["completion_receipt"] = {
+                "kind": R2_COMPLETION_KIND,
+                "schema": store.DISTILLATION_SCHEMA,
+                "path_template": "{artifact_id}" + R2_COMPLETION_SUFFIX,
             }
             encoded = json.dumps(
                 payload, sort_keys=True, separators=(",", ":")
             ).encode()
             if len(encoded) > MAX_EVIDENCE_BYTES:
                 raise R2Error("R2 evidence is unexpectedly large")
-            artifact_id, artifact_path, artifact = store.write_immutable(
-                output, payload, schema=R2_SCHEMA
+            if output.exists():
+                _assert_symlink_free_tree(output, label="R2 output")
+            artifact_id, artifact_path, artifact = phases.measure(
+                "artifact-seal",
+                lambda: store.write_immutable(output, payload, schema=R2_SCHEMA),
+            )
+            persisted = phases.measure(
+                "artifact-readback",
+                lambda: _read_content_addressed_artifact(
+                    store,
+                    artifact_path,
+                    schema=R2_SCHEMA,
+                    label="R2 evidence",
+                ),
+            )
+            completion = _write_completion_receipt(
+                store,
+                output,
+                persisted,
+                artifact_path,
+                phases.summary(),
             )
             return {
-                "schema": artifact["schema"],
-                "artifact_id": artifact_id,
+                "schema": persisted["schema"],
+                "artifact_id": persisted["artifact_id"],
                 "path": str(artifact_path),
                 "warm_p95_ns": noop_p95,
                 "delta_p95_ns": delta_p95,
                 "clone_cleanup_verified": True,
+                "phase_timing": phases.summary(),
+                "completion_receipt": completion,
             }
     finally:
         try:
-            for path in reversed(clones):
-                if path != production:
-                    _cleanup_clone(path)
+            if not cleanup_recorded:
+                def cleanup_after_failure() -> None:
+                    nonlocal cleanup_recorded, owned_cleanup_count
+                    owned_cleanup_count = _cleanup_clone_set(
+                        clones, owned_temp_parent, owned_temp_prefix
+                    )
+                    cleanup_recorded = True
+
+                phases.measure(
+                    "clone-cleanup",
+                    cleanup_after_failure,
+                    count=len(clones),
+                    outcome="failure-or-signal",
+                )
         finally:
-            sys.dont_write_bytecode = previous_dont_write_bytecode
+            try:
+                phases.close()
+            finally:
+                _ACTIVE_CLONE_PREFIX = previous_clone_prefix
+                sys.dont_write_bytecode = previous_dont_write_bytecode
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2619,28 +3587,112 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--noop-samples", type=int, default=DEFAULT_NOOP_SAMPLES)
     parser.add_argument("--delta-samples", type=int, default=DEFAULT_DELTA_SAMPLES)
     parser.add_argument("--max-context-bytes", type=int, default=DEFAULT_CONTEXT_BYTES)
+    parser.add_argument(
+        "--phase-receipt",
+        type=Path,
+        help="append bounded phase start/finish/error events outside protected roots",
+    )
+    parser.add_argument(
+        "--frozen-clone-root",
+        type=Path,
+        help="consume one externally sealed APFS clone instead of cloning production",
+    )
+    parser.add_argument(
+        "--frozen-clone-manifest",
+        type=Path,
+        help="sealed clone manifest (or destination directory with --prepare-frozen-clone)",
+    )
+    parser.add_argument(
+        "--prepare-frozen-clone",
+        type=Path,
+        help="create and seal an APFS clone while production remains live",
+    )
     args = parser.parse_args(argv)
     if args.isolated_root is not None:
         raise R2Error("--isolated-root is intentionally unsupported; use APFS clones")
     try:
-        if any(
-            _has_symlink_component(path.expanduser())
-            for path in (args.production_root, args.source_root, args.output)
-        ):
-            raise R2Error("root/output path contains a symlink")
-        production = args.production_root.expanduser().resolve(strict=True)
-        source = args.source_root.expanduser().resolve(strict=True)
-        output = args.output.expanduser().resolve(strict=False)
-        result = _run_once(
-            production=production,
-            source_root=source,
-            source_commit=args.source_commit,
-            dashboard_url=args.dashboard_url,
-            output=output,
-            noop_samples=args.noop_samples,
-            delta_samples=args.delta_samples,
-            context_bytes=args.max_context_bytes,
+        raw_cli_paths = {
+            "production_root": args.production_root,
+            "source_root": args.source_root,
+            "output": args.output,
+            "phase_receipt": args.phase_receipt,
+            "frozen_clone_root": args.frozen_clone_root,
+            "frozen_clone_manifest": args.frozen_clone_manifest,
+            "prepare_frozen_clone": args.prepare_frozen_clone,
+        }
+        cli_paths = {
+            name: _cli_path_record(path)
+            for name, path in raw_cli_paths.items()
+            if path is not None
+        }
+        expanded = {name: Path(record["expanded"]) for name, record in cli_paths.items()}
+        production = expanded["production_root"].resolve(strict=True)
+        source = expanded["source_root"].resolve(strict=True)
+        output = expanded["output"].resolve(strict=False)
+        phase_path = (
+            expanded["phase_receipt"].resolve(strict=False)
+            if "phase_receipt" in expanded
+            else None
         )
+        preflight_inputs = {
+            name: path
+            for name, path in {
+                "phase_receipt": phase_path,
+                "frozen_clone_manifest": expanded.get("frozen_clone_manifest"),
+                "prepare_frozen_clone": expanded.get("prepare_frozen_clone"),
+            }.items()
+            if path is not None
+        }
+        _assert_root_matrix(
+            production,
+            source,
+            output,
+            (expanded["frozen_clone_root"],)
+            if "frozen_clone_root" in expanded
+            else (),
+            preflight_inputs,
+        )
+        signal_receipt = _PhaseReceipt(phase_path)
+        with _SignalGuard(signal_receipt):
+            if args.prepare_frozen_clone is not None:
+                if args.frozen_clone_root is not None:
+                    raise R2Error("--prepare-frozen-clone cannot consume --frozen-clone-root")
+                if args.frozen_clone_manifest is None:
+                    raise R2Error("--prepare-frozen-clone requires --frozen-clone-manifest")
+                result = _prepare_frozen_clone(
+                    production=production,
+                    source_root=source,
+                    source_commit=args.source_commit,
+                    dashboard_url=args.dashboard_url,
+                    clone_root=expanded["prepare_frozen_clone"].resolve(strict=False),
+                    manifest_directory=expanded["frozen_clone_manifest"].resolve(strict=False),
+                    cli_paths=cli_paths,
+                )
+            else:
+                if (args.frozen_clone_root is None) != (args.frozen_clone_manifest is None):
+                    raise R2Error("frozen clone root and manifest must be provided together")
+                result = _run_once(
+                    production=production,
+                    source_root=source,
+                    source_commit=args.source_commit,
+                    dashboard_url=args.dashboard_url,
+                    output=output,
+                    noop_samples=args.noop_samples,
+                    delta_samples=args.delta_samples,
+                    context_bytes=args.max_context_bytes,
+                    phase_receipt=phase_path,
+                    frozen_clone_root=(
+                        expanded["frozen_clone_root"].resolve(strict=True)
+                        if "frozen_clone_root" in expanded
+                        else None
+                    ),
+                    frozen_clone_manifest=(
+                        expanded["frozen_clone_manifest"].resolve(strict=True)
+                        if "frozen_clone_manifest" in expanded
+                        else None
+                    ),
+                    cli_paths=cli_paths,
+                )
         print(json.dumps(result, sort_keys=True))
     except (R2Error, OSError, ValueError, sqlite3.Error) as exc:
         print(f"r2 harness failed: {str(exc).split(':', 1)[0]}", file=sys.stderr)

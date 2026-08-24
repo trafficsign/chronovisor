@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import shutil
 import subprocess
 import sys
@@ -741,3 +742,182 @@ def test_clone_walk_errors_fail_closed_and_cleanup(
         return
     HARNESS._cleanup_clone(clone)
     pytest.fail("clone source walk error was ignored")
+
+
+def test_root_matrix_rejects_receipt_and_manifest_overlap(tmp_path: Path) -> None:
+    production = tmp_path / "production"
+    source = tmp_path / "source"
+    production.mkdir()
+    source.mkdir()
+    receipt = production / "phase.jsonl"
+    with pytest.raises(HARNESS.R2Error, match="overlap"):
+        HARNESS._assert_root_matrix(
+            production,
+            source,
+            tmp_path / "output",
+            other_paths={"phase_receipt": receipt},
+        )
+    manifest = source / "manifest"
+    with pytest.raises(HARNESS.R2Error, match="overlap"):
+        HARNESS._assert_root_matrix(
+            production,
+            source,
+            tmp_path / "output",
+            other_paths={"frozen_clone_manifest": manifest},
+        )
+
+
+def test_cli_path_record_keeps_original_and_resolved_forms(tmp_path: Path) -> None:
+    entered = Path("./") / tmp_path.name
+    record = HARNESS._cli_path_record(entered)
+    assert record["original"] == str(entered)
+    assert Path(record["resolved"]).is_absolute()
+
+
+def test_cli_path_record_rejects_leaf_or_parent_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    parent = tmp_path / "parent"
+    parent.symlink_to(target, target_is_directory=True)
+    with pytest.raises(HARNESS.R2Error, match="symlink"):
+        HARNESS._cli_path_record(parent / "receipt.jsonl")
+    leaf = tmp_path / "leaf"
+    leaf.symlink_to(target, target_is_directory=True)
+    with pytest.raises(HARNESS.R2Error, match="symlink"):
+        HARNESS._cli_path_record(leaf)
+
+
+def test_artifact_readback_binds_filename_content_and_seal(tmp_path: Path) -> None:
+    from chronovisor.recall import recall_distillation_store as store
+
+    schema = "chronovisor.test-r2-artifact.v1"
+    artifact_id, artifact_path, _ = store.write_immutable(
+        tmp_path, {"value": "safe"}, schema=schema
+    )
+    checked = HARNESS._read_content_addressed_artifact(
+        store, artifact_path, schema=schema, label="test"
+    )
+    assert checked["artifact_id"] == artifact_id == artifact_path.stem
+    tampered = dict(checked)
+    tampered["value"] = "changed"
+    artifact_path.write_text(
+        __import__("json").dumps(tampered), encoding="utf-8"
+    )
+    with pytest.raises(HARNESS.R2Error, match="readback|seal|content"):
+        HARNESS._read_content_addressed_artifact(
+            store, artifact_path, schema=schema, label="test"
+        )
+
+
+def test_completion_receipt_is_sealed_and_bound_to_artifact(tmp_path: Path) -> None:
+    from chronovisor.recall import recall_distillation_store as store
+
+    artifact_id, artifact_path, artifact = store.write_immutable(
+        tmp_path, {"value": "safe"}, schema=HARNESS.R2_SCHEMA
+    )
+    receipt = HARNESS._write_completion_receipt(
+        store,
+        tmp_path,
+        artifact,
+        artifact_path,
+        {"elapsed_ns": 7, "phase_union_ns": 6, "unaccounted_ns": 1},
+    )
+    path = Path(receipt["path"])
+    assert path.name == f"{artifact_id}{HARNESS.R2_COMPLETION_SUFFIX}"
+    persisted = store.read_sealed(path, schema=store.DISTILLATION_SCHEMA)
+    assert persisted["r2_artifact_id"] == artifact_id
+    assert persisted["r2_artifact_seal_sha256"] == artifact["seal_sha256"]
+
+    original_write = store.write_sealed_state
+
+    def write_tampered(path: Path, payload: object) -> object:
+        result = original_write(path, payload)  # type: ignore[arg-type]
+        tampered = json.loads(path.read_text(encoding="utf-8"))
+        tampered["r2_artifact_id"] = "0" * 64
+        path.write_text(json.dumps(tampered), encoding="utf-8")
+        return result
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(store, "write_sealed_state", write_tampered)
+    try:
+        with pytest.raises(HARNESS.R2Error, match="completion receipt"):
+            HARNESS._write_completion_receipt(
+                store,
+                tmp_path,
+                artifact,
+                artifact_path,
+                {"elapsed_ns": 7},
+            )
+    finally:
+        monkeypatch.undo()
+
+
+def test_owned_prefix_cleanup_catches_unregistered_clone(tmp_path: Path) -> None:
+    prefix = "chronovisor-r2-owned-"
+    leaked = tmp_path / f"{prefix}orphan"
+    leaked.mkdir()
+    (leaked / "marker").write_text("x", encoding="utf-8")
+    assert HARNESS._cleanup_owned_temp_clones(tmp_path, prefix) == 1
+    assert not leaked.exists()
+
+
+def test_external_clone_rejects_recursive_symlink(tmp_path: Path) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    nested = clone / "nested"
+    nested.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    (nested / "linked").symlink_to(target, target_is_directory=True)
+    with pytest.raises(HARNESS.R2Error, match="symlink"):
+        HARNESS._assert_symlink_free_tree(clone, label="clone")
+
+
+def test_phase_receipt_union_records_unaccounted_gap() -> None:
+    receipt = HARNESS._PhaseReceipt(None)
+    receipt.measure("first", lambda: None)
+    summary = receipt.summary()
+    assert summary["phase_union_ns"] <= summary["elapsed_ns"]
+    assert summary["unaccounted_ns"] >= 0
+    assert summary["interval_count"] == 1
+
+
+def test_signal_unwinds_and_cleans_clone_in_subprocess(tmp_path: Path) -> None:
+    receipt = tmp_path / "phase.jsonl"
+    clone = tmp_path / "clone"
+    code = f"""
+import importlib.util
+import pathlib
+import sys
+import time
+spec = importlib.util.spec_from_file_location('r2_signal', {str(ROOT / 'scripts' / 'recall_r2_harness.py')!r})
+assert spec is not None and spec.loader is not None
+h = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = h
+spec.loader.exec_module(h)
+clone = pathlib.Path({str(clone)!r})
+clone.mkdir()
+receipt = h._PhaseReceipt(pathlib.Path({str(receipt)!r}))
+try:
+    with h._SignalGuard(receipt, grace_seconds=1.0):
+        try:
+            time.sleep(30)
+        finally:
+            h._cleanup_clone(clone)
+except h._CooperativeSignal:
+    pass
+    """
+    process = subprocess.Popen([sys.executable, "-c", code])
+    try:
+        for _ in range(200):
+            if receipt.exists():
+                break
+            __import__("time").sleep(0.01)
+        process.send_signal(__import__("signal").SIGTERM)
+        assert process.wait(timeout=5) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    assert not clone.exists()
+    assert '"event":"signal"' in receipt.read_text(encoding="utf-8")
