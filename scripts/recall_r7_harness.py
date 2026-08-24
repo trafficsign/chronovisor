@@ -14,7 +14,6 @@ import importlib.util
 import json
 import re
 import shutil
-import subprocess
 import sys
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -31,6 +30,7 @@ STORE_SCHEMA = "chronovisor.recall-distillation.v1"
 MAX_INPUT_BYTES = 12 * 1024 * 1024
 MIN_DAYS = 7
 MIN_PAIRED = 500
+MIN_STRATUM_PAIRED = 500
 MAX_SCORE_P95_MS = 180
 MAX_LIVE_P50_MS = 400
 MAX_LIVE_P95_MS = 900
@@ -462,6 +462,7 @@ def _validate_rows(
     last: datetime,
     reused: set[str],
     minimums: Mapping[str, Any],
+    trusted_roster: Mapping[str, frozenset[str]] | None,
 ) -> dict[str, Any]:
     if not isinstance(rows, list) or len(rows) < MIN_PAIRED:
         raise R7Error(f"{stage} paired denominator is below {MIN_PAIRED}")
@@ -587,7 +588,13 @@ def _validate_rows(
         live.append(live_latency)
     for name, counts in (("host", host_counts), ("cohort", cohort_counts)):
         minimum = _int(minimums.get(name), f"{stage} {name} stratum minimum", 1)
-        if not counts or any(count < minimum for count in counts.values()):
+        expected = trusted_roster.get(name) if trusted_roster is not None else None
+        if (
+            minimum != MIN_STRATUM_PAIRED
+            or not counts
+            or any(count < minimum for count in counts.values())
+            or (expected is not None and set(counts) != expected)
+        ):
             raise R7Error(f"{stage} {name} stratum threshold failed")
     if len(observed_times) < 2:
         raise R7Error(f"{stage} paired rows use one synthetic timestamp")
@@ -639,6 +646,8 @@ def _validate_stage(
     previous: Mapping[str, Any] | None,
     reused: set[str],
     reused_polls: set[str],
+    stage_run_ids: set[str],
+    trusted_roster: Mapping[str, frozenset[str]] | None,
 ) -> dict[str, Any]:
     keys = {
         "schema",
@@ -675,6 +684,8 @@ def _validate_stage(
     ):
         raise R7Error(f"{expected_stage} stage identity/matrix drift")
     run_id = _id(receipt.get("run_id"), f"{expected_stage} run id")
+    if run_id in stage_run_ids:
+        raise R7Error(f"{expected_stage} run id is globally reused")
     rows_sha = _digest(receipt.get("rows"))
     first, last, poll_seal = _poll_history(
         receipt.get("poll_history"),
@@ -688,6 +699,7 @@ def _validate_stage(
         raise R7Error(
             f"{expected_stage} stage start is self-attested, not poll-derived"
         )
+    stage_run_ids.add(run_id)
     if previous is None:
         if receipt.get("previous_run_id") is not None:
             raise R7Error("shadow reset reference is invalid")
@@ -739,6 +751,7 @@ def _validate_stage(
         last=last,
         reused=reused,
         minimums=minimums,
+        trusted_roster=trusted_roster,
     )
     return {
         **data,
@@ -747,6 +760,29 @@ def _validate_stage(
         "stage_seal_sha256": seal,
         "last_poll_seal_sha256": poll_seal,
     }
+
+
+def _trusted_roster(
+    collector: Mapping[str, Any] | None,
+) -> Mapping[str, frozenset[str]] | None:
+    """Only an authoritative collector may define active rollout strata."""
+    if collector is None or collector.get("certification") is not True:
+        return None
+    roster = _map(collector.get("active_host_cohort_roster"), "active roster")
+    if set(roster) != {"hosts", "cohorts"}:
+        raise R7Error("active roster schema is incomplete")
+    result: dict[str, frozenset[str]] = {}
+    for output, key in (("host", "hosts"), ("cohort", "cohorts")):
+        values = roster[key]
+        if (
+            not isinstance(values, list)
+            or not values
+            or any(not isinstance(value, str) or not value for value in values)
+            or len(values) != len(set(values))
+        ):
+            raise R7Error(f"active {output} roster is invalid")
+        result[output] = frozenset(values)
+    return result
 
 
 def _validate_rollback(
@@ -819,6 +855,9 @@ def validate_bundle(
     lkg_id: str,
     source_commit: str,
     now: datetime,
+    collector_evidence_root: Path | None = None,
+    collector_runtime_root: Path | None = None,
+    source_tree_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Pure validator; CLI supplies system UTC, tests may supply a fixed clock."""
     baseline_id = _id(baseline_id, "baseline id")
@@ -832,6 +871,8 @@ def validate_bundle(
         or now.utcoffset() != timedelta(0)
     ):
         raise R7Error("policy/source/clock identity is invalid")
+    if source_tree_sha256 is not None:
+        _id(source_tree_sha256, "source tree identity")
     artifact_refs = _validate_artifacts(
         artifacts,
         baseline_id=baseline_id,
@@ -855,8 +896,35 @@ def validate_bundle(
     )
     if len(stages) != len(STAGES):
         raise R7Error("stage receipt count is incomplete")
+    collector: Mapping[str, Any] | None = None
+    if collector_evidence_root is not None:
+        from chronovisor.recall.recall_r7_evidence import validate_collector
+
+        collector = validate_collector(
+            collector_evidence_root, root=collector_runtime_root
+        )
+        if collector.get("certification") is True:
+            expected_source = {
+                "source_commit": source_commit,
+                "source_clean": "true",
+                "source_tree_sha256": source_tree_sha256,
+            }
+            if (
+                source_tree_sha256 is None
+                or collector.get("identity")
+                != {
+                    "baseline_id": baseline_id,
+                    "candidate_id": candidate_id,
+                    "lkg_id": lkg_id,
+                    "candidate_feature_contract_sha256": feature,
+                }
+                or collector.get("source") != expected_source
+            ):
+                raise R7Error("collector identity/source binding mismatch")
+    trusted_roster = _trusted_roster(collector)
     reused: set[str] = set()
     reused_polls: set[str] = set()
+    stage_run_ids: set[str] = set()
     checked: list[dict[str, Any]] = []
     previous: Mapping[str, Any] | None = None
     for receipt, (stage, percent) in zip(stages, STAGES, strict=True):
@@ -871,6 +939,8 @@ def validate_bundle(
             previous=previous,
             reused=reused,
             reused_polls=reused_polls,
+            stage_run_ids=stage_run_ids,
+            trusted_roster=trusted_roster,
         )
         checked.append(result)
         previous = result
@@ -881,17 +951,28 @@ def validate_bundle(
         identity_refs=identity_refs,
         now=now,
     )
+    hold_reason = (
+        str(collector.get("certification_reason"))
+        if collector is not None
+        else "trusted_active_host_cohort_inventory_unavailable"
+    )
+    if trusted_roster is None and collector is not None:
+        hold_reason = "trusted_active_host_cohort_inventory_unavailable"
+    for stage in checked:
+        stage["certified"] = False
+        stage["reason"] = hold_reason
     return {
         # A local harness can validate joins but cannot independently attest
         # that a captured live body came from its claimed endpoint. Never turn
         # self-provided sealed receipts into a production certification.
         "certification": False,
-        "certification_reason": "independent_live_input_attestation_unavailable",
+        "certification_reason": (hold_reason),
         "synthetic_fixture": False,
         "locked_replay_sha256": locked_sha,
         "identity_refs": identity_refs,
         "stages": checked,
         "forced_failure_sha256": rollback_sha,
+        "collector": collector,
     }
 
 
@@ -935,25 +1016,16 @@ def _source_identity(source: Path, commit: str) -> dict[str, str]:
     if _COMMIT.fullmatch(commit) is None:
         raise R7Error("source commit format is invalid")
     try:
-        actual = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=source,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        dirty = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=source,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:
+        from chronovisor.recall.recall_r7_evidence import source_identity
+
+        identity = source_identity(source)
+    except ValueError as exc:
+        raise R7Error(str(exc)) from exc
+    except (ImportError, OSError) as exc:
         raise R7Error("source repository cannot be verified") from exc
-    if actual != commit or dirty:
+    if identity["source_commit"] != commit:
         raise R7Error("source commit drift or dirty checkout")
-    return {"source_commit": actual}
+    return identity
 
 
 def _tree_state(root: Path) -> dict[str, Any]:
@@ -995,6 +1067,13 @@ def _clone_state(root: Path) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The collector owns real wall-clock evidence.  Keep the original bundle
+    # validator receipt-only; this merely exposes its safe record/validate CLI.
+    arguments = sys.argv[1:] if argv is None else argv
+    if arguments and arguments[0] in {"record-poll", "validate"}:
+        from chronovisor.recall.recall_r7_evidence import main as evidence_main
+
+        return evidence_main(arguments)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--production-root", type=Path, required=True)
     parser.add_argument("--source-root", type=Path, required=True)
@@ -1005,6 +1084,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--baseline-id", required=True)
     parser.add_argument("--candidate-id", required=True)
     parser.add_argument("--lkg-id", required=True)
+    parser.add_argument("--collector-evidence-root", type=Path)
     parser.add_argument("--locked-replay", type=Path, required=True)
     parser.add_argument("--stage-receipt", type=Path, action="append", required=True)
     parser.add_argument("--forced-failure-receipt", type=Path, required=True)
@@ -1014,7 +1094,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument(f"--{name}-artifact", type=Path, required=True)
     for name in ("active", "candidate", "lkg"):
         parser.add_argument(f"--{name}-pointer", type=Path, required=True)
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
     clone: Path | None = None
     previous_bytecode = sys.dont_write_bytecode
     try:
@@ -1047,6 +1127,8 @@ def main(argv: list[str] | None = None) -> int:
             *artifact_paths.values(),
             *pointer_paths.values(),
         ]
+        if args.collector_evidence_root is not None:
+            inputs.append(args.collector_evidence_root)
         _assert_paths(args.production_root, args.source_root, args.output, inputs)
         production = args.production_root.resolve(strict=True)
         source = args.source_root.resolve(strict=True)
@@ -1078,6 +1160,9 @@ def main(argv: list[str] | None = None) -> int:
             lkg_id=args.lkg_id,
             source_commit=args.source_commit,
             now=datetime.now(UTC),
+            collector_evidence_root=args.collector_evidence_root,
+            collector_runtime_root=production,
+            source_tree_sha256=source_before["source_tree_sha256"],
         )
         production_after = _clone_state(production)
         if (
@@ -1092,7 +1177,7 @@ def main(argv: list[str] | None = None) -> int:
         _, _, store, _, _ = R0._load(source)
         payload = {
             "captured_at": datetime.now(UTC).isoformat(),
-            "certification": False,
+            "certification": verdict.get("certification", False),
             "certification_reason": verdict.get(
                 "certification_reason",
                 "independent_live_input_attestation_unavailable",

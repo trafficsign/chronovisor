@@ -267,7 +267,7 @@ def test_happy_real_receipt_fixture_recomputes_all_fixed_gates() -> None:
     assert result["certification"] is False
     assert (
         result["certification_reason"]
-        == "independent_live_input_attestation_unavailable"
+        == "trusted_active_host_cohort_inventory_unavailable"
     )
     assert result["stages"][-1]["metrics"]["candidate_score_p95_ms"] == 180
     assert result["stages"][-1]["metrics"]["live_p95_ms"] == 300
@@ -370,6 +370,23 @@ def test_identity_pointer_and_rollback_binding_fail_closed() -> None:
         _validate(fixture)
 
 
+def test_rejects_nonadjacent_stage_run_reuse_and_missing_trusted_roster() -> None:
+    fixture = _fixture()
+    reused = fixture["stages"][2]
+    reused["run_id"] = fixture["stages"][0]["run_id"]
+    for poll in reused["poll_history"]:
+        poll["run_id"] = reused["run_id"]
+    _stage_seal(reused)
+    with pytest.raises(HARNESS.R7Error, match="globally reused"):
+        _validate(fixture)
+    result = _validate(_fixture())
+    assert result["certification"] is False
+    assert all(
+        stage["reason"] == "trusted_active_host_cohort_inventory_unavailable"
+        for stage in result["stages"]
+    )
+
+
 def test_100_percent_legacy_incumbent_requires_and_honors_sealed_proof() -> None:
     fixture = _fixture()
     stage = fixture["stages"][-1]
@@ -437,7 +454,9 @@ def test_paths_dirty_source_and_cleanup(
     monkeypatch.setattr(HARNESS.R0, "_clone", lambda *_args: (clone, True))
     monkeypatch.setattr(HARNESS, "_clone_state", lambda _path: {"ok": True})
     monkeypatch.setattr(
-        HARNESS, "_source_identity", lambda *_args: {"source_commit": "a" * 40}
+        HARNESS,
+        "_source_identity",
+        lambda *_args: {"source_commit": "a" * 40, "source_tree_sha256": _id(4)},
     )
     monkeypatch.setattr(HARNESS, "_read_json", lambda *_args: {})
     monkeypatch.setattr(HARNESS, "validate_bundle", lambda **_kwargs: {"ok": True})
@@ -481,3 +500,57 @@ def test_paths_dirty_source_and_cleanup(
         arguments.extend((f"--{name}-pointer", str(tmp_path / f"{name}-pointer.json")))
     assert HARNESS.main(arguments) == 0
     assert not clone.exists()
+
+
+def test_source_identity_allows_ignored_environment_but_rejects_ignored_code(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    (source / "src" / "chronovisor").mkdir(parents=True)
+    (source / "src" / "chronovisor" / "__init__.py").write_text("")
+    (source / ".gitignore").write_text(
+        ".venv/\nsrc/chronovisor/injected\nsrc/chronovisor/injected.*\n"
+        "scripts/recall_r7_payload\nsrc/chronovisor/__pycache__/\n"
+        "src/chronovisor/.pytest_cache/\nsrc/chronovisor/.mypy_cache/\n"
+    )
+    subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "x"],
+        cwd=source,
+        check=True,
+    )
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (source / ".venv").mkdir()
+    (source / ".venv" / "cache.py").write_text("cache")
+    for cache in ("__pycache__", ".pytest_cache", ".mypy_cache"):
+        cache_dir = source / "src" / "chronovisor" / cache
+        cache_dir.mkdir()
+        (cache_dir / "cache.pyc").write_text("cache")
+    clean = HARNESS._source_identity(source, commit)
+    assert clean["source_commit"] == commit
+    assert HARNESS._HEX.fullmatch(clean["source_tree_sha256"])
+    for name in (
+        "injected.py",
+        "injected.pyc",
+        "injected.so",
+        "injected.dylib",
+        "injected.pyd",
+        "injected",
+    ):
+        path = source / "src" / "chronovisor" / name
+        path.write_text("payload")
+        with pytest.raises(HARNESS.R7Error, match="ignored protected source drift"):
+            HARNESS._source_identity(source, commit)
+        path.unlink()
+    payload = source / "scripts" / "recall_r7_payload"
+    payload.parent.mkdir()
+    payload.write_text("payload")
+    with pytest.raises(HARNESS.R7Error, match="ignored protected source drift"):
+        HARNESS._source_identity(source, commit)
