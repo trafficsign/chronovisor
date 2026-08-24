@@ -9,12 +9,19 @@ OpenAI-compatible adapter.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
+import os
 import re
+import stat
+import subprocess
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
+from chronovisor.core import runtime_config
 from chronovisor.core.egress_policy import guard_egress_query
 from chronovisor.core.llm_runtime import (
     GenerationBackend,
@@ -25,6 +32,7 @@ from chronovisor.core.llm_runtime import (
     SourceSensitivity,
     safe_metadata_identifier,
 )
+from chronovisor.core.openai_compatible_adapter import OpenAICompatibleAdapter
 from chronovisor.core.provider_profiles import (
     ProviderAdapterError,
     ProviderFailureCategory,
@@ -239,6 +247,217 @@ OX_ALPHA_FIXED_IDENTITY = {
 }
 
 
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
+
+
+def _git_snapshot_entries(
+    source: Path, command: list[str]
+) -> tuple[tuple[bytes, bytes, bytes], ...]:
+    """Return the exact mode/blob/path snapshot, rejecting non-stage-zero index rows."""
+
+    output = subprocess.run(
+        command,
+        cwd=source,
+        check=True,
+        capture_output=True,
+        timeout=5,
+    ).stdout.split(b"\0")
+    entries: list[tuple[bytes, bytes, bytes]] = []
+    for entry in output:
+        if not entry:
+            continue
+        try:
+            metadata, path = entry.split(b"\t", 1)
+            fields = metadata.split(b" ")
+            if command[2] == "-s":
+                mode, blob, stage = fields
+                if stage != b"0":
+                    raise ValueError("index contains an unresolved entry")
+            else:
+                mode, _kind, blob = fields
+        except ValueError as exc:
+            raise ValueError("installed OX source index is invalid") from exc
+        entries.append((mode, blob, path))
+    return tuple(sorted(entries))
+
+
+def _has_symlink_component(path: Path) -> bool:
+    current = path.expanduser().absolute()
+    while True:
+        if current.is_symlink():
+            return True
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
+
+
+def ox_alpha_source_binding() -> dict[str, str]:
+    """Return the clean, installed source identity required for OX egress.
+
+    The worktree is deliberately required to match the installed archive and
+    origin/main.  A local edit must never acquire remote labels that later look
+    like production evidence.
+    """
+
+    runtime = runtime_config.runtime_identity()
+    commit = runtime.get("commit_id")
+    expected = runtime.get("expected_commit")
+    if (
+        not isinstance(commit, str)
+        or _COMMIT_RE.fullmatch(commit) is None
+        or commit != expected
+        or runtime.get("drift") is not False
+    ):
+        raise ValueError("installed OX source identity is unavailable")
+    try:
+        source_root = runtime_config.runtime_repo_root()
+        if _has_symlink_component(source_root):
+            raise ValueError("installed OX source root contains a symlink")
+        source = source_root.resolve(strict=True)
+        root_stat = source.stat()
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=source,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        origin = subprocess.run(
+            ["git", "rev-parse", "origin/main"],
+            cwd=source,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=source,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+        # `status` honors assume-unchanged.  These two index comparisons and
+        # the blob check below deliberately do not trust that optimization.
+        dirty = [
+            subprocess.run(
+                command,
+                cwd=source,
+                capture_output=True,
+                timeout=5,
+            ).returncode
+            for command in (
+                ["git", "diff-files", "--quiet", "--no-ext-diff"],
+                ["git", "diff-index", "--cached", "--quiet", "HEAD", "--"],
+            )
+        ]
+        index_entries = _git_snapshot_entries(source, ["git", "ls-files", "-s", "-z"])
+        head_entries = _git_snapshot_entries(
+            source, ["git", "ls-tree", "-r", "-z", "HEAD"]
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("installed OX source identity is unavailable") from exc
+    if (
+        head != commit
+        or origin != commit
+        or status
+        or any(dirty)
+        or index_entries != head_entries
+    ):
+        raise ValueError("installed OX source checkout is not exact")
+    module_path = Path(__file__).resolve(strict=True)
+    installed_bytes = module_path.read_bytes()
+    installed_digest = hashlib.sha256(installed_bytes).hexdigest()
+    digest = hashlib.sha256()
+    remote_sha256 = ""
+    for _mode, blob, raw_path in index_entries:
+        relative = os.fsdecode(raw_path)
+        if Path(relative).is_absolute() or ".." in Path(relative).parts:
+            raise ValueError("installed OX source index is unsafe")
+        path = source / relative
+        try:
+            before = path.lstat()
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError("installed OX source contains a non-file")
+            content = path.read_bytes()
+            after = path.lstat()
+        except OSError as exc:
+            raise ValueError("installed OX source is unreadable") from exc
+        if (
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise ValueError("installed OX source changed while reading")
+        content_sha256 = hashlib.sha256(content).hexdigest()
+        git_blob = (
+            hashlib.sha1(f"blob {len(content)}\0".encode("ascii") + content)
+            .hexdigest()
+            .encode("ascii")
+        )
+        if git_blob != blob:
+            raise ValueError("installed OX source blob differs from index")
+        digest.update(
+            _json_bytes(
+                {
+                    "kind": "file",
+                    "path": relative,
+                    "size": int(before.st_size),
+                    "sha256": content_sha256,
+                }
+            )
+        )
+        digest.update(b"\n")
+        if relative == "src/chronovisor/recall/recall_distillation_remote_teacher.py":
+            remote_sha256 = content_sha256
+    after_root = source.stat()
+    if (after_root.st_dev, after_root.st_ino) != (root_stat.st_dev, root_stat.st_ino):
+        raise ValueError("installed OX source root changed while reading")
+    try:
+        index_after = _git_snapshot_entries(source, ["git", "ls-files", "-s", "-z"])
+        head_tree_after = _git_snapshot_entries(
+            source, ["git", "ls-tree", "-r", "-z", "HEAD"]
+        )
+        head_after = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=source,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        origin_after = subprocess.run(
+            ["git", "rev-parse", "origin/main"],
+            cwd=source,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("installed OX source identity is unavailable") from exc
+    if (
+        index_after != index_entries
+        or head_tree_after != head_entries
+        or head_after != head
+        or index_after != head_tree_after
+    ):
+        raise ValueError("installed OX source index changed while reading")
+    if not hmac.compare_digest(origin, origin_after) or origin_after != commit:
+        raise ValueError("installed OX origin/main changed while reading")
+    if not remote_sha256 or remote_sha256 != installed_digest:
+        raise ValueError("installed OX source identity is incomplete")
+    return {
+        "source_commit": commit,
+        "source_tree_sha256": digest.hexdigest(),
+        "source_ox_identity_sha256": remote_sha256,
+    }
+
+
 def _contains_forbidden_text(value: str) -> bool:
     return bool(
         _SECRET_TEXT.search(value)
@@ -434,6 +653,9 @@ class OpenCodeOxAlphaTeacher:
         enabled: bool = True,
         free_only: bool = True,
         allow_paid_fallback: bool = False,
+        test_only: bool = False,
+        simulation_attestation: Path | None = None,
+        owned_root: Path | None = None,
         max_input_bytes: int = MAX_PAYLOAD_BYTES,
         timeout_ms: int = 60_000,
     ) -> None:
@@ -446,6 +668,14 @@ class OpenCodeOxAlphaTeacher:
             or endpoint != OX_ALPHA_ENDPOINT
         ):
             raise ValueError("invalid OX Alpha route")
+        if type(backend) is not OpenAICompatibleAdapter and test_only is not True:
+            raise ValueError("untrusted OX Alpha backend")
+        if test_only is not True and (
+            simulation_attestation is not None or owned_root is not None
+        ):
+            raise ValueError("simulation attestation is test-only")
+        if (simulation_attestation is None) != (owned_root is None):
+            raise ValueError("simulation attestation root is incomplete")
         if free_only is not True or allow_paid_fallback is not False:
             raise ValueError("paid fallback is forbidden for the temporary route")
         if (
@@ -472,6 +702,9 @@ class OpenCodeOxAlphaTeacher:
         self.provider = OX_ALPHA_PROVIDER
         self.model = OX_ALPHA_ROUTE_MODEL
         self.enabled = bool(enabled)
+        self.test_only = bool(test_only)
+        self._simulation_attestation = simulation_attestation
+        self._owned_root = owned_root
         self.max_input_bytes = max_input_bytes
         self.timeout_ms = timeout_ms
         self._route_identity = dict(OX_ALPHA_FIXED_IDENTITY["route_identity"])
@@ -480,6 +713,72 @@ class OpenCodeOxAlphaTeacher:
         """Trip the temporary route kill switch without touching provider state."""
 
         self.enabled = False
+
+    def receipt_binding(self) -> dict[str, str]:
+        """Bind remote labels to the exact installed source before egress."""
+        if self.test_only and self._simulation_attestation is not None:
+            path = self._simulation_attestation
+            root = self._owned_root
+            if (
+                root is None
+                or path.is_symlink()
+                or not path.is_file()
+                or root.is_symlink()
+            ):
+                raise ValueError("simulation attestation is unavailable")
+            before = path.stat()
+            root_stat = root.resolve(strict=True).stat()
+            try:
+                payload = json.loads(path.read_bytes())
+            except (OSError, ValueError, UnicodeError) as exc:
+                raise ValueError("simulation attestation is invalid") from exc
+            after = path.stat()
+            if before != after or not isinstance(payload, Mapping):
+                raise ValueError("simulation attestation changed during read")
+            unsigned = {
+                key: value for key, value in payload.items() if key != "seal_sha256"
+            }
+            binding = payload.get("source_binding")
+            try:
+                expires = datetime.fromisoformat(
+                    str(payload.get("expires_at")).replace("Z", "+00:00")
+                )
+            except ValueError as exc:
+                raise ValueError("simulation attestation expiry is invalid") from exc
+            if (
+                payload.get("schema")
+                != "chronovisor.recall-r4-simulation-attestation.v1"
+                or payload.get("namespace") != "recall-distillation"
+                or payload.get("seal_sha256") != _sha256(unsigned)
+                or payload.get("owned_root")
+                != {"st_dev": root_stat.st_dev, "st_ino": root_stat.st_ino}
+                or expires.tzinfo is None
+                or expires <= datetime.now(UTC)
+                or expires > datetime.now(UTC) + timedelta(minutes=10)
+                or not isinstance(binding, Mapping)
+                or set(binding)
+                != {"source_commit", "source_tree_sha256", "source_ox_identity_sha256"}
+                or not isinstance(binding.get("source_commit"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", binding["source_commit"]) is None
+                or any(
+                    not isinstance(binding.get(key), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", str(binding.get(key))) is None
+                    for key in ("source_tree_sha256", "source_ox_identity_sha256")
+                )
+            ):
+                raise ValueError("simulation attestation binding is invalid")
+            try:
+                expected_binding = ox_alpha_source_binding()
+            except ValueError as exc:
+                raise ValueError("simulation attestation binding is invalid") from exc
+            if dict(binding) != expected_binding:
+                raise ValueError("simulation attestation binding is invalid")
+            # This short-lived schema is explicitly non-certifying: callers
+            # retain `_test_only` metadata and the production collector rejects
+            # every simulation artifact.  Formal OX identity remains available
+            # only through `ox_alpha_source_binding()` on the non-test path.
+            return {key: str(value) for key, value in binding.items()}
+        return ox_alpha_source_binding()
 
     def _metadata(self, *, request_digest: str = "") -> dict[str, Any]:
         return {
@@ -490,6 +789,7 @@ class OpenCodeOxAlphaTeacher:
             "_prompt_digest": OX_ALPHA_FIXED_IDENTITY["prompt_template_sha256"],
             "_schema_digest": OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"],
             "_request_digest": request_digest,
+            "_test_only": self.test_only,
         }
 
     def _failure(
@@ -629,6 +929,7 @@ class OpenCodeOxAlphaTeacher:
         return {
             "labels": safe_labels,
             **response_metadata,
+            "_test_only": self.test_only,
         }
 
 

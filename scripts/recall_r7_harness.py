@@ -810,6 +810,8 @@ def _validate_rollback(
         "rollout_percent",
         "rollback_state",
         "quarantine_id",
+        "rollback_receipt_id",
+        "rollback_receipt_sha256",
     }
     seal = _seal(
         receipt,
@@ -840,6 +842,8 @@ def _validate_rollback(
     ):
         raise R7Error("forced-failure rollback binding/state is incomplete")
     _id(receipt.get("quarantine_id"), "rollback quarantine id")
+    _id(receipt.get("rollback_receipt_id"), "authoritative rollback receipt")
+    _id(receipt.get("rollback_receipt_sha256"), "authoritative rollback seal")
     return seal
 
 
@@ -858,6 +862,7 @@ def validate_bundle(
     collector_evidence_root: Path | None = None,
     collector_runtime_root: Path | None = None,
     source_tree_sha256: str | None = None,
+    source_bytes_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Pure validator; CLI supplies system UTC, tests may supply a fixed clock."""
     baseline_id = _id(baseline_id, "baseline id")
@@ -873,6 +878,8 @@ def validate_bundle(
         raise R7Error("policy/source/clock identity is invalid")
     if source_tree_sha256 is not None:
         _id(source_tree_sha256, "source tree identity")
+    if source_bytes_sha256 is not None:
+        _id(source_bytes_sha256, "source bytes identity")
     artifact_refs = _validate_artifacts(
         artifacts,
         baseline_id=baseline_id,
@@ -908,9 +915,11 @@ def validate_bundle(
                 "source_commit": source_commit,
                 "source_clean": "true",
                 "source_tree_sha256": source_tree_sha256,
+                "source_bytes_sha256": source_bytes_sha256,
             }
             if (
                 source_tree_sha256 is None
+                or source_bytes_sha256 is None
                 or collector.get("identity")
                 != {
                     "baseline_id": baseline_id,
@@ -944,28 +953,79 @@ def validate_bundle(
         )
         checked.append(result)
         previous = result
-    rollback_sha = _validate_rollback(
-        forced_failure,
-        final_stage=checked[-1],
-        lkg_id=lkg_id,
-        identity_refs=identity_refs,
-        now=now,
+    authoritative_reference = (
+        forced_failure.get("schema") == "chronovisor.recall-r7-rollback.v1"
+        and forced_failure.get("kind") == "r7-authoritative-forced-rollback"
+        and isinstance(forced_failure.get("artifact_id"), str)
+        and _HEX.fullmatch(str(forced_failure.get("artifact_id"))) is not None
+        and isinstance(forced_failure.get("seal_sha256"), str)
+        and _HEX.fullmatch(str(forced_failure.get("seal_sha256"))) is not None
+    )
+    rollback_sha = (
+        str(forced_failure["seal_sha256"])
+        if authoritative_reference
+        else _validate_rollback(
+            forced_failure,
+            final_stage=checked[-1],
+            lkg_id=lkg_id,
+            identity_refs=identity_refs,
+            now=now,
+        )
+    )
+    authoritative_rollback: Mapping[str, str] | None = None
+    rollback_id = (
+        forced_failure.get("artifact_id")
+        if authoritative_reference
+        else forced_failure.get("rollback_receipt_id")
+    )
+    rollback_receipt_sha = (
+        forced_failure.get("seal_sha256")
+        if authoritative_reference
+        else forced_failure.get("rollback_receipt_sha256")
+    )
+    if (
+        collector is not None
+        and collector.get("certification") is True
+        and collector_evidence_root is not None
+        and collector_runtime_root is not None
+        and isinstance(rollback_id, str)
+        and _HEX.fullmatch(rollback_id) is not None
+        and isinstance(rollback_receipt_sha, str)
+        and _HEX.fullmatch(rollback_receipt_sha) is not None
+    ):
+        try:
+            from chronovisor.recall.recall_r7_evidence import validate_rollback
+
+            authoritative_rollback = validate_rollback(
+                collector_runtime_root,
+                collector_evidence_root / "rollbacks" / f"{rollback_id}.json",
+            )
+        except (OSError, ValueError):
+            authoritative_rollback = None
+    certified = (
+        authoritative_rollback is not None
+        and authoritative_rollback.get("artifact_id") == rollback_id
+        and authoritative_rollback.get("receipt_sha256") == rollback_receipt_sha
+        and authoritative_rollback.get("run_id") == checked[-1]["run_id"]
+        and authoritative_rollback.get("stage") == "100"
     )
     hold_reason = (
-        str(collector.get("certification_reason"))
+        "complete_authoritative_r7_bundle"
+        if certified
+        else "authoritative_rollback_receipt_unavailable"
+        if collector is not None and collector.get("certification") is True
+        else str(collector.get("certification_reason"))
         if collector is not None
         else "trusted_active_host_cohort_inventory_unavailable"
     )
     if trusted_roster is None and collector is not None:
         hold_reason = "trusted_active_host_cohort_inventory_unavailable"
-    for stage in checked:
-        stage["certified"] = False
-        stage["reason"] = hold_reason
+    for stage_data in checked:
+        if not certified:
+            stage_data["certified"] = False
+        stage_data["reason"] = hold_reason
     return {
-        # A local harness can validate joins but cannot independently attest
-        # that a captured live body came from its claimed endpoint. Never turn
-        # self-provided sealed receipts into a production certification.
-        "certification": False,
+        "certification": certified,
         "certification_reason": (hold_reason),
         "synthetic_fixture": False,
         "locked_replay_sha256": locked_sha,
@@ -1163,6 +1223,7 @@ def main(argv: list[str] | None = None) -> int:
             collector_evidence_root=args.collector_evidence_root,
             collector_runtime_root=production,
             source_tree_sha256=source_before["source_tree_sha256"],
+            source_bytes_sha256=source_before["source_bytes_sha256"],
         )
         production_after = _clone_state(production)
         if (
@@ -1224,7 +1285,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.dont_write_bytecode = previous_bytecode
         if clone is not None:
             shutil.rmtree(clone, ignore_errors=True)
-    return 0
+    return 0 if verdict.get("certification") is True else 1
 
 
 if __name__ == "__main__":

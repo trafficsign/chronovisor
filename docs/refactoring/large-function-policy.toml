@@ -1,6 +1,6 @@
 schema_version = 1
 threshold_lines = 300
-baseline_function_count = 49
+baseline_function_count = 59
 
 [[functions]]
 path = "src/chronovisor/decision/local_model_eval.py"
@@ -442,3 +442,93 @@ disposition = "retained"
 max_lines = 446
 rationale = "One replay-gated tuning experiment owns baseline metrics, candidate weights, holdout gates, policy artifact publication, and rejection reasons."
 tests = ["tests/test_search_eval.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_distillation.py"
+qualname = "_ox_event_projection"
+baseline_lines = 511
+disposition = "retained"
+max_lines = 511
+rationale = "One fail-closed projection validates the complete provider event envelope, rederives every semantic field, and returns one immutable receipt-shaped result."
+tests = ["tests/test_recall_distillation.py", "tests/test_recall_distillation_remote_teacher.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_distillation.py"
+qualname = "_offline_training_gate"
+baseline_lines = 317
+disposition = "retained"
+max_lines = 317
+rationale = "One offline admission boundary binds dataset identity, split evidence, teacher receipts, counterfactual coverage, and promotion eligibility before training starts."
+tests = ["tests/test_recall_distillation.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_distillation.py"
+qualname = "_ox_dispatch_and_commit"
+baseline_lines = 524
+disposition = "retained"
+max_lines = 524
+rationale = "One leased work-item transaction keeps provider dispatch, response validation, artifact persistence, receipt publication, and lease completion in strict order."
+tests = ["tests/test_recall_distillation.py", "tests/test_recall_distillation_remote_teacher.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_distillation.py"
+qualname = "_run_ox_teacher_batch"
+baseline_lines = 338
+disposition = "retained"
+max_lines = 338
+rationale = "One bounded remote-teacher batch owns eligibility, claim selection, concurrency, provider failure accounting, and the terminal batch receipt under one lock scope."
+tests = ["tests/test_recall_distillation.py", "tests/test_recall_distillation_remote_teacher.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_distillation.py"
+qualname = "_run_local_teacher_route"
+baseline_lines = 303
+disposition = "retained"
+max_lines = 303
+rationale = "One local-teacher route preserves model selection, prompt construction, schema repair, evidence sealing, and terminal work-item transition as one auditable transaction."
+tests = ["tests/test_recall_distillation.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_distillation_rollout.py"
+qualname = "_shadow_row"
+baseline_lines = 343
+disposition = "retained"
+max_lines = 343
+rationale = "One shadow replay row binds policy and source identities, recomputes paired metrics, validates sealed observations, and emits a deterministic comparison record."
+tests = ["tests/test_recall_distillation_rollout.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_distillation_single_teacher_gate.py"
+qualname = "evaluate_single_teacher_gate"
+baseline_lines = 314
+disposition = "retained"
+max_lines = 314
+rationale = "One formal gate evaluates all preregistered cohorts, quality floors, failure classes, provider receipts, and the final single-teacher verdict without partial acceptance."
+tests = ["tests/test_recall_distillation_single_teacher_gate.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_r7_evidence.py"
+qualname = "_poll_dimensions"
+baseline_lines = 399
+disposition = "retained"
+max_lines = 399
+rationale = "One observation poll captures every service, process, lease, rollout, and dashboard dimension into a mutually consistent signed evidence sample."
+tests = ["tests/test_recall_r7_evidence.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_r7_evidence.py"
+qualname = "_record_forced_rollback_locked"
+baseline_lines = 337
+disposition = "retained"
+max_lines = 337
+rationale = "One exclusive rollback transaction validates the trigger and cohort, restores the last-known-good policy, seals evidence, and publishes the resulting state atomically."
+tests = ["tests/test_recall_r7_evidence.py"]
+
+[[functions]]
+path = "src/chronovisor/recall/recall_r7_evidence.py"
+qualname = "validate_rollback"
+baseline_lines = 419
+disposition = "retained"
+max_lines = 419
+rationale = "One fail-closed validator rederives rollback timing, policy lineage, service observations, lease cleanup, and signed artifact identity before certification."
+tests = ["tests/test_recall_r7_evidence.py"]

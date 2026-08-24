@@ -387,7 +387,9 @@ def _cursor_relation(before: Any, after: Any) -> int:
         return 1 if after > before else -1
     if isinstance(before, Mapping) and isinstance(after, Mapping):
         if set(before) != set(after):
-            raise DistillationWorksetError("progress cursor identity rewrite is invalid")
+            raise DistillationWorksetError(
+                "progress cursor identity rewrite is invalid"
+            )
         numeric: list[str] = []
         for key in before:
             left, right = before[key], after[key]
@@ -398,7 +400,9 @@ def _cursor_relation(before: Any, after: Any) -> int:
                     raise DistillationWorksetError("progress cursor is invalid")
                 numeric.append(key)
             elif _json(left, "progress cursor") != _json(right, "progress cursor"):
-                raise DistillationWorksetError("progress cursor identity rewrite is invalid")
+                raise DistillationWorksetError(
+                    "progress cursor identity rewrite is invalid"
+                )
         if numeric:
             if any(after[key] < before[key] for key in numeric):
                 return -1
@@ -447,8 +451,7 @@ def _is_legacy_ox_progress_upgrade(
         and target_provenance["profile_contract_id"]
         == provenance["profile_contract_id"]
         and isinstance(provenance["profile_contract_id"], str)
-        and re.fullmatch(r"[0-9a-f]{64}", provenance["profile_contract_id"])
-        is not None
+        and re.fullmatch(r"[0-9a-f]{64}", provenance["profile_contract_id"]) is not None
         and target_provenance["probe_revision"] == "single-teacher-repeat-v2"
         and (
             target_provenance["split_plan_id"] == ""
@@ -591,10 +594,17 @@ class DistillationWorkset:
     """
 
     def __init__(
-        self, path: Path | str, *, clock: Callable[[], float] = time.time
+        self,
+        path: Path | str,
+        *,
+        clock: Callable[[], float] = time.time,
+        migrate: bool = True,
     ) -> None:
         self.path = Path(path)
         self._clock = clock
+        if not migrate:
+            self._preflight_non_migrating_schema()
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:
             connection.executescript(_SCHEMA)
@@ -602,6 +612,11 @@ class DistillationWorkset:
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(work_items)")
             }
+            missing = {"next_attempt_at", "stage"} - columns
+            if missing and not migrate:
+                raise DistillationWorksetError(
+                    "workset migration preflight is required"
+                )
             if "next_attempt_at" not in columns:
                 connection.execute(
                     "ALTER TABLE work_items ADD COLUMN next_attempt_at REAL"
@@ -623,6 +638,57 @@ class DistillationWorkset:
                 "ON work_items(kind, state, next_attempt_at, priority DESC, sequence ASC)"
             )
             self._secure_sqlite_files()
+
+    def _preflight_non_migrating_schema(self) -> None:
+        """Validate a complete OX queue without creating files or sidecars."""
+
+        try:
+            before = self.path.lstat()
+        except OSError as exc:
+            raise DistillationWorksetError(
+                "workset migration preflight is required"
+            ) from exc
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            raise DistillationWorksetError("workset migration preflight is required")
+        try:
+            connection = sqlite3.connect(f"file:{self.path}?immutable=1", uri=True)
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            indexes = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                )
+            }
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(work_items)")
+            }
+        except sqlite3.Error as exc:
+            raise DistillationWorksetError(
+                "workset migration preflight is required"
+            ) from exc
+        finally:
+            if "connection" in locals():
+                connection.close()
+        try:
+            after = self.path.lstat()
+        except OSError as exc:
+            raise DistillationWorksetError(
+                "workset changed during migration preflight"
+            ) from exc
+        if (
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            or not {"work_items", "workset_state", "workset_receipts"}.issubset(tables)
+            or not {"work_items_claim_order", "work_items_expiry"}.issubset(indexes)
+            or not {"next_attempt_at", "stage"}.issubset(columns)
+        ):
+            raise DistillationWorksetError("workset migration preflight is required")
 
     def _now(self) -> float:
         return _finite(self._clock(), "clock now")
@@ -746,11 +812,14 @@ class DistillationWorkset:
 
     @staticmethod
     def _validate_stages(connection: sqlite3.Connection) -> None:
-        if connection.execute(
-            "SELECT 1 FROM work_items WHERE stage NOT IN "
-            "('snapshot', 'teacher', 'counterfactual', 'retry_wait', 'dataset', 'evaluation') "
-            "LIMIT 1"
-        ).fetchone() is not None:
+        if (
+            connection.execute(
+                "SELECT 1 FROM work_items WHERE stage NOT IN "
+                "('snapshot', 'teacher', 'counterfactual', 'retry_wait', 'dataset', 'evaluation') "
+                "LIMIT 1"
+            ).fetchone()
+            is not None
+        ):
             raise DistillationWorksetError("workset stage is corrupted")
 
     @classmethod
@@ -841,7 +910,11 @@ class DistillationWorkset:
         bootstrap = payload.get("bootstrap") is True
 
         def snapshot(value: object, *, before: bool) -> dict[str, Any]:
-            expected = {"counts", "watermark"} if version == 1 else {"counts", "watermark", "progress"}
+            expected = (
+                {"counts", "watermark"}
+                if version == 1
+                else {"counts", "watermark", "progress"}
+            )
             if not isinstance(value, Mapping) or set(value) != expected:
                 raise DistillationWorksetError("workset receipt snapshot is corrupted")
             raw_counts = value["counts"]
@@ -862,7 +935,9 @@ class DistillationWorkset:
             if version == 2:
                 if before and bootstrap:
                     if value["progress"] is not None:
-                        raise DistillationWorksetError("workset receipt bootstrap is corrupted")
+                        raise DistillationWorksetError(
+                            "workset receipt bootstrap is corrupted"
+                        )
                     result["progress"] = None
                 else:
                     result["progress"] = _strict_progress(
@@ -894,7 +969,9 @@ class DistillationWorkset:
                 "watermark_changed",
                 "selection_sha256",
             }
-            expected_keys = base_keys | ({"progress_changed"} if version == 2 else set())
+            expected_keys = base_keys | (
+                {"progress_changed"} if version == 2 else set()
+            )
             if set(details) != expected_keys:
                 raise DistillationWorksetError("workset advance receipt is corrupted")
             inserted = details["inserted"]
@@ -924,7 +1001,10 @@ class DistillationWorkset:
             if version == 2 and (
                 not isinstance(details["progress_changed"], bool)
                 or details["progress_changed"]
-                != (_json(before["progress"], "receipt progress") != _json(after["progress"], "receipt progress"))
+                != (
+                    _json(before["progress"], "receipt progress")
+                    != _json(after["progress"], "receipt progress")
+                )
             ):
                 raise DistillationWorksetError("workset advance receipt is corrupted")
             _digest(details["selection_sha256"], "receipt selection_sha256")
@@ -1088,7 +1168,9 @@ class DistillationWorkset:
                 before, after, _, _ = self._validate_receipt_payload(operation, payload)
                 version = payload.get("version", 1)
                 if saw_v2 and version == 1:
-                    raise DistillationWorksetError("workset receipt progress downgraded")
+                    raise DistillationWorksetError(
+                        "workset receipt progress downgraded"
+                    )
                 if version == 2:
                     if payload.get("bootstrap") is True:
                         if prior_after is not None and "progress" in prior_after:
@@ -1105,9 +1187,7 @@ class DistillationWorkset:
                                     "workset receipt progress continuity failed"
                                 )
                             legacy_origin = True
-                        elif _json(
-                            before["progress"], "receipt progress"
-                        ) != _json(
+                        elif _json(before["progress"], "receipt progress") != _json(
                             prior_after["progress"], "receipt progress"
                         ):
                             raise DistillationWorksetError(
@@ -1157,7 +1237,9 @@ class DistillationWorkset:
             if "progress" in prior_after and _json(
                 prior_after["progress"], "receipt progress"
             ) != _json(current_progress, "receipt progress"):
-                raise DistillationWorksetError("workset receipt final progress mismatch")
+                raise DistillationWorksetError(
+                    "workset receipt final progress mismatch"
+                )
             result = {
                 "status": "legacy-unverified" if legacy_origin else "verified",
                 "receipts": len(rows),
@@ -1173,6 +1255,52 @@ class DistillationWorkset:
                     "head_sha256": previous_sha256,
                 }
             return result
+
+    def recent_transition_receipts(self, limit: int = 2) -> tuple[dict[str, Any], ...]:
+        """Return the last payload-free transition summaries for an event ledger."""
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 8:
+            raise DistillationWorksetError("receipt limit is invalid")
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT generation, previous_sha256, operation, payload_json, "
+                "receipt_sha256 FROM workset_receipts ORDER BY generation DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise DistillationWorksetError("workset receipt is corrupted") from exc
+            if (
+                _json(payload, "workset receipt", max_bytes=_MAX_RECEIPT_JSON_BYTES)
+                != row["payload_json"]
+            ):
+                raise DistillationWorksetError("workset receipt is corrupted")
+            before, after, delta, details = self._validate_receipt_payload(
+                row["operation"], payload
+            )
+            envelope = {
+                "generation": row["generation"],
+                "previous_sha256": row["previous_sha256"],
+                "operation": row["operation"],
+                "payload": payload,
+            }
+            if row["receipt_sha256"] != canonical_json_sha256_strict(envelope):
+                raise DistillationWorksetError("workset receipt is corrupted")
+            result.append(
+                {
+                    "generation": row["generation"],
+                    "receipt_sha256": row["receipt_sha256"],
+                    "operation": row["operation"],
+                    "before": before,
+                    "after": after,
+                    "delta": delta,
+                    "details": details,
+                }
+            )
+        return tuple(result)
 
     def advance(
         self,
@@ -1432,7 +1560,10 @@ class DistillationWorkset:
                         "GROUP BY kind ORDER BY oldest ASC LIMIT 1",
                         (now,),
                     ).fetchone()
-                    if oldest is not None and now - float(oldest["oldest"]) >= _FAIRNESS_AGE_SECONDS:
+                    if (
+                        oldest is not None
+                        and now - float(oldest["oldest"]) >= _FAIRNESS_AGE_SECONDS
+                    ):
                         chosen_kind = str(oldest["kind"])
                 rows = connection.execute(
                     """
@@ -1799,7 +1930,9 @@ class DistillationWorkset:
                 ).fetchall()
                 stage_rows = connection.execute(
                     "SELECT stage, state, next_attempt_at, created_at, COUNT(*) AS count "
-                    "FROM work_items" + where + " GROUP BY stage, state, next_attempt_at, created_at",
+                    "FROM work_items"
+                    + where
+                    + " GROUP BY stage, state, next_attempt_at, created_at",
                     parameters,
                 ).fetchall()
         for row in rows:
@@ -1827,7 +1960,10 @@ class DistillationWorkset:
             ]
             counts["retry_wait"] = len(waiting)
             counts["oldest_backlog_age_seconds"] = int(
-                max((max(0.0, now - row["created_at"]) for row in timing_rows), default=0)
+                max(
+                    (max(0.0, now - row["created_at"]) for row in timing_rows),
+                    default=0,
+                )
             )
             counts["oldest_ready_age_seconds"] = int(
                 max((max(0.0, now - row["created_at"]) for row in due), default=0)
@@ -1840,8 +1976,7 @@ class DistillationWorkset:
             )
             stages: dict[str, dict[str, int]] = {
                 stage: {
-                    state: 0
-                    for state in (*_RECEIPT_STATES, "retry_wait", "backlog")
+                    state: 0 for state in (*_RECEIPT_STATES, "retry_wait", "backlog")
                 }
                 for stage in _STAGES
             }
@@ -1852,7 +1987,11 @@ class DistillationWorkset:
                 state = str(row["state"])
                 count = int(row["count"])
                 stages[stage][state] += count
-                if state == "ready" and row["next_attempt_at"] is not None and row["next_attempt_at"] > now:
+                if (
+                    state == "ready"
+                    and row["next_attempt_at"] is not None
+                    and row["next_attempt_at"] > now
+                ):
                     stages[stage]["retry_wait"] += count
             for stage in _STAGES:
                 stages[stage]["backlog"] = (

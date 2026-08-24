@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 from urllib.request import Request
 
@@ -11,6 +14,7 @@ import pytest
 from chronovisor.core.llm_security import CredentialRef, CredentialResolver
 from chronovisor.core.openai_compatible_adapter import compose_openai_compatible_adapter
 from chronovisor.core.provider_profiles import generic_openai_profile
+from chronovisor.recall import recall_distillation_remote_teacher as remote
 from chronovisor.recall.recall_distillation_remote_teacher import (
     _PROMPT_INPUT_SEPARATOR,
     _PROMPT_PREFIX,
@@ -25,6 +29,7 @@ from chronovisor.recall.recall_distillation_remote_teacher import (
     _schema_revision_digest,
     _teacher_schema,
     ox_alpha_response_metadata,
+    ox_alpha_source_binding,
 )
 
 CANARY = "sk-CANARY-REMOTE-TEACHER"
@@ -136,6 +141,261 @@ def _teacher(
         sender=sender,
     )
     return OpenCodeOxAlphaTeacher(backend, configured_model=configured_model)
+
+
+def test_source_binding_requires_a_clean_installed_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    from chronovisor.recall import recall_distillation_remote_teacher as remote
+
+    module = source / "src/chronovisor/recall/recall_distillation_remote_teacher.py"
+    module.parent.mkdir(parents=True)
+    module.write_bytes(Path(remote.__file__).read_bytes())
+    for command in (
+        ["git", "init"],
+        ["git", "config", "user.email", "test@example.invalid"],
+        ["git", "config", "user.name", "test"],
+        ["git", "add", "."],
+        ["git", "commit", "-m", "source"],
+    ):
+        subprocess.run(command, cwd=source, check=True, capture_output=True)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", commit],
+        cwd=source,
+        check=True,
+        capture_output=True,
+    )
+
+    monkeypatch.setattr(
+        remote.runtime_config,
+        "runtime_identity",
+        lambda: {"commit_id": commit, "expected_commit": commit, "drift": False},
+    )
+    monkeypatch.setattr(remote.runtime_config, "runtime_repo_root", lambda: source)
+
+    binding = ox_alpha_source_binding()
+
+    assert binding["source_commit"] == commit
+    assert (
+        binding["source_ox_identity_sha256"]
+        == __import__("hashlib").sha256(module.read_bytes()).hexdigest()
+    )
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "advanced origin"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+    )
+    advanced = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "reset", "--hard", commit],
+        cwd=source,
+        check=True,
+        capture_output=True,
+    )
+    original_run = remote.subprocess.run
+    advanced_origin = False
+
+    def mutate_origin_after_scan(
+        command: object, *args: object, **kwargs: object
+    ) -> object:
+        nonlocal advanced_origin
+        result = original_run(command, *args, **kwargs)
+        if command == ["git", "ls-files", "-s", "-z"] and not advanced_origin:
+            advanced_origin = True
+            original_run(
+                ["git", "update-ref", "refs/remotes/origin/main", advanced],
+                cwd=source,
+                check=True,
+                capture_output=True,
+            )
+        return result
+
+    monkeypatch.setattr(remote.subprocess, "run", mutate_origin_after_scan)
+    with pytest.raises(ValueError, match="origin/main changed"):
+        ox_alpha_source_binding()
+    monkeypatch.setattr(remote.subprocess, "run", original_run)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", commit],
+        cwd=source,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "update-index", "--assume-unchanged", str(module.relative_to(source))],
+        cwd=source,
+        check=True,
+        capture_output=True,
+    )
+    module.write_text("identity = 'drift'\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="blob differs"):
+        ox_alpha_source_binding()
+
+
+def test_distillation_rejects_fake_ox_adapter_binding() -> None:
+    from chronovisor.recall import recall_distillation as distill
+
+    class FakeTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+        _route_identity = dict(OX_ALPHA_FIXED_IDENTITY["route_identity"])
+
+        def receipt_binding(self) -> dict[str, str]:
+            return {
+                "source_commit": "a" * 40,
+                "source_tree_sha256": "b" * 64,
+                "source_ox_identity_sha256": "c" * 64,
+            }
+
+    with pytest.raises(distill.DistillationError, match="untrusted OX teacher"):
+        distill._ox_teacher_source_binding(FakeTeacher())
+
+
+def test_fabricated_backend_requires_explicit_test_only_seam() -> None:
+    from chronovisor.core.llm_runtime import RouteLocation
+
+    class FabricatedBackend:
+        provider = "opencode-go"
+        location = RouteLocation.REMOTE
+        _profile = SimpleNamespace(endpoint=OX_ALPHA_ENDPOINT)
+
+        def generate(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("provider must not be called")
+
+        def capabilities_for(self, _model: str) -> object:
+            return SimpleNamespace(structured_output=True)
+
+    with pytest.raises(ValueError, match="untrusted OX Alpha backend"):
+        OpenCodeOxAlphaTeacher(FabricatedBackend())
+    assert OpenCodeOxAlphaTeacher(FabricatedBackend(), test_only=True).test_only is True
+
+
+@pytest.mark.parametrize(
+    "source_binding",
+    [
+        {
+            "source_commit": "not-a-commit",
+            "source_tree_sha256": "a" * 64,
+            "source_ox_identity_sha256": "b" * 64,
+        },
+        {
+            "source_commit": "a" * 40,
+            "source_tree_sha256": "not-a-digest",
+            "source_ox_identity_sha256": "b" * 64,
+        },
+    ],
+)
+def test_test_only_attestation_rejects_noncanonical_source_identity(
+    tmp_path: Path, source_binding: dict[str, str]
+) -> None:
+    from chronovisor.core.llm_runtime import RouteLocation
+
+    class Backend:
+        provider = "opencode-go"
+        location = RouteLocation.REMOTE
+        _profile = SimpleNamespace(endpoint=OX_ALPHA_ENDPOINT)
+
+        def capabilities_for(self, _model: str) -> SimpleNamespace:
+            return SimpleNamespace(structured_output=True)
+
+        def generate(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("attestation validation must precede generation")
+
+    root = tmp_path / "owned"
+    root.mkdir()
+    identity = root.stat()
+    unsigned = {
+        "schema": "chronovisor.recall-r4-simulation-attestation.v1",
+        "namespace": "recall-distillation",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "owned_root": {"st_dev": identity.st_dev, "st_ino": identity.st_ino},
+        "source_binding": source_binding,
+    }
+    attestation = root / "attestation.json"
+    attestation.write_text(
+        json.dumps({**unsigned, "seal_sha256": remote._sha256(unsigned)}),
+        encoding="utf-8",
+    )
+    teacher = OpenCodeOxAlphaTeacher(
+        Backend(),
+        test_only=True,
+        simulation_attestation=attestation,
+        owned_root=root,
+    )
+    with pytest.raises(ValueError, match="attestation binding"):
+        teacher.receipt_binding()
+
+
+def test_test_only_attestation_rejects_long_lived_fake_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core.llm_runtime import RouteLocation
+
+    class Backend:
+        provider = "opencode-go"
+        location = RouteLocation.REMOTE
+        _profile = SimpleNamespace(endpoint=OX_ALPHA_ENDPOINT)
+
+        def capabilities_for(self, _model: str) -> SimpleNamespace:
+            return SimpleNamespace(structured_output=True)
+
+        def generate(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("attestation validation must precede generation")
+
+    root = tmp_path / "owned"
+    root.mkdir()
+    identity = root.stat()
+    fake = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    monkeypatch.setattr(
+        remote,
+        "ox_alpha_source_binding",
+        lambda: {
+            "source_commit": "d" * 40,
+            "source_tree_sha256": "e" * 64,
+            "source_ox_identity_sha256": "f" * 64,
+        },
+    )
+    unsigned = {
+        "schema": "chronovisor.recall-r4-simulation-attestation.v1",
+        "namespace": "recall-distillation",
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=5))
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "owned_root": {"st_dev": identity.st_dev, "st_ino": identity.st_ino},
+        "source_binding": fake,
+    }
+    attestation = root / "attestation.json"
+    attestation.write_text(
+        json.dumps({**unsigned, "seal_sha256": remote._sha256(unsigned)}),
+        encoding="utf-8",
+    )
+    teacher = OpenCodeOxAlphaTeacher(
+        Backend(),
+        test_only=True,
+        simulation_attestation=attestation,
+        owned_root=root,
+    )
+    with pytest.raises(ValueError, match="attestation binding"):
+        teacher.receipt_binding()
 
 
 def test_success_uses_shared_adapter_and_records_safe_digests(

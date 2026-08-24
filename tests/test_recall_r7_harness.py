@@ -242,6 +242,8 @@ def _fixture() -> dict[str, Any]:
                 "lkg_policy_id": lkg,
             },
             "quarantine_id": _id(90_000),
+            "rollback_receipt_id": _id(90_001),
+            "rollback_receipt_sha256": _id(90_002),
         }
     )
     return {
@@ -456,7 +458,11 @@ def test_paths_dirty_source_and_cleanup(
     monkeypatch.setattr(
         HARNESS,
         "_source_identity",
-        lambda *_args: {"source_commit": "a" * 40, "source_tree_sha256": _id(4)},
+        lambda *_args: {
+            "source_commit": "a" * 40,
+            "source_tree_sha256": _id(4),
+            "source_bytes_sha256": _id(5),
+        },
     )
     monkeypatch.setattr(HARNESS, "_read_json", lambda *_args: {})
     monkeypatch.setattr(HARNESS, "validate_bundle", lambda **_kwargs: {"ok": True})
@@ -498,7 +504,7 @@ def test_paths_dirty_source_and_cleanup(
         arguments.extend((f"--{name}-artifact", str(tmp_path / f"{name}.json")))
     for name in ("active", "candidate", "lkg"):
         arguments.extend((f"--{name}-pointer", str(tmp_path / f"{name}-pointer.json")))
-    assert HARNESS.main(arguments) == 0
+    assert HARNESS.main(arguments) == 1
     assert not clone.exists()
 
 

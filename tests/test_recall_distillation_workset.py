@@ -66,6 +66,31 @@ def test_retry_wait_is_due_before_reclaim_and_sealed_in_receipt(tmp_path: Path) 
     assert workset.claim("label", 1, "worker", 60)[0].work_id == "retry"
 
 
+def test_recent_transition_receipts_expose_only_verified_reclaim_summary(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3", clock=lambda: now[0])
+    workset.advance([_item("reclaim")], {"source": 1})
+    workset.claim("label", 1, "worker", 1)
+    now[0] += 2
+    workset.claim("label", 1, "worker", 1)
+
+    recent = workset.recent_transition_receipts()
+
+    assert [row["operation"] for row in recent] == ["claim", "claim_reclaim"]
+    assert recent[1]["details"]["count"] == 1
+    assert set(recent[1]) == {
+        "generation",
+        "receipt_sha256",
+        "operation",
+        "before",
+        "after",
+        "delta",
+        "details",
+    }
+
+
 def test_terminal_retry_attempt_quarantines_without_retry_delay(tmp_path: Path) -> None:
     workset = DistillationWorkset(tmp_path / "workset.sqlite3")
     workset.advance([_item("invalid")], {"source": 1})
@@ -809,6 +834,33 @@ def test_transition_receipts_cover_progress_and_skip_noops(tmp_path: Path) -> No
     )
 
 
+def test_non_migrating_open_rejects_missing_and_legacy_without_mutation(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing" / "ox-workset.sqlite3"
+    with pytest.raises(DistillationWorksetError, match="migration preflight"):
+        DistillationWorkset(missing, migrate=False)
+    assert not missing.parent.exists()
+
+    legacy = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(legacy) as connection:
+        connection.execute("CREATE TABLE work_items (sequence INTEGER PRIMARY KEY)")
+    before = legacy.stat()
+    before_bytes = legacy.read_bytes()
+    with pytest.raises(DistillationWorksetError, match="migration preflight"):
+        DistillationWorkset(legacy, migrate=False)
+    after = legacy.stat()
+    assert legacy.read_bytes() == before_bytes
+    assert (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    )
+    assert not legacy.with_name(f"{legacy.name}-wal").exists()
+    assert not legacy.with_name(f"{legacy.name}-shm").exists()
+
+
 def test_transition_receipt_accepts_maximum_legal_watermark(tmp_path: Path) -> None:
     workset = DistillationWorkset(tmp_path / "workset.sqlite3")
     watermark = {f"k{index}": "x" * 110 for index in range(32)}
@@ -967,7 +1019,9 @@ def test_v2_progress_is_durable_monotonic_and_payload_free(tmp_path: Path) -> No
     workset.commit([claim], [_completed()], progress=_progress(1))
 
     assert workset.progress() == _progress(1)
-    assert workset.status("label", include_timing=True)["last_durable_progress"] == _progress(1)
+    assert workset.status("label", include_timing=True)[
+        "last_durable_progress"
+    ] == _progress(1)
     assert workset.audit_transition_receipts()["progress"] == _progress(1)
     with sqlite3.connect(path) as connection:
         payload = json.loads(
@@ -977,12 +1031,17 @@ def test_v2_progress_is_durable_monotonic_and_payload_free(tmp_path: Path) -> No
         )
     assert payload["version"] == 2
     assert set(payload["after"]["progress"]) == {
-        "cursor", "ledger_heads", "provenance", "progress_kind"
+        "cursor",
+        "ledger_heads",
+        "provenance",
+        "progress_kind",
     }
     assert "payload_ref" not in json.dumps(payload)
 
 
-def test_progress_rejects_cursor_regression_and_same_cursor_rewrite(tmp_path: Path) -> None:
+def test_progress_rejects_cursor_regression_and_same_cursor_rewrite(
+    tmp_path: Path,
+) -> None:
     workset = DistillationWorkset(tmp_path / "workset.sqlite3")
     workset.advance([], {"source": 1}, progress=_progress(2))
     with pytest.raises(DistillationWorksetError, match="regressed"):
@@ -991,7 +1050,9 @@ def test_progress_rejects_cursor_regression_and_same_cursor_rewrite(tmp_path: Pa
     rewritten["provenance"] = {"profile": "other"}
     with pytest.raises(DistillationWorksetError, match="identity rewrite"):
         workset.advance([], {"source": 2}, progress=rewritten)
-    assert workset.advance([], {"source": 1}, progress=_progress(2))["progress"] == _progress(2)
+    assert workset.advance([], {"source": 1}, progress=_progress(2))[
+        "progress"
+    ] == _progress(2)
 
 
 def test_legacy_ox_progress_seals_once_into_current_shape(tmp_path: Path) -> None:
@@ -1119,7 +1180,9 @@ def test_legacy_ox_progress_upgrade_rejects_non_digest_contract_ids(
         workset.advance([], {"source": 1}, progress=current)
 
 
-def test_v2_progress_receipts_cover_claim_release_commit_and_replay(tmp_path: Path) -> None:
+def test_v2_progress_receipts_cover_claim_release_commit_and_replay(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "workset.sqlite3"
     workset = DistillationWorkset(path)
     workset.advance([_item("one")], {"source": 1}, progress=_progress(1))
@@ -1129,7 +1192,9 @@ def test_v2_progress_receipts_cover_claim_release_commit_and_replay(tmp_path: Pa
     workset.commit([claim], [_completed()], progress=_progress(1))
     receipt = workset.status()["last_durable_receipt"]
 
-    assert workset.commit([claim], [_completed()], progress=_progress(1))["completed"] == 1
+    assert (
+        workset.commit([claim], [_completed()], progress=_progress(1))["completed"] == 1
+    )
     assert workset.status()["last_durable_receipt"] == receipt
     changed = _progress(2)
     with pytest.raises(DistillationWorksetError, match="active completion"):
@@ -1149,7 +1214,9 @@ def test_v2_progress_receipts_cover_claim_release_commit_and_replay(tmp_path: Pa
 
 
 @pytest.mark.parametrize("cursor", [True, math.nan, math.inf, -math.inf])
-def test_progress_rejects_boolean_and_nonfinite_cursors(tmp_path: Path, cursor: object) -> None:
+def test_progress_rejects_boolean_and_nonfinite_cursors(
+    tmp_path: Path, cursor: object
+) -> None:
     workset = DistillationWorkset(tmp_path / "workset.sqlite3")
     progress = _progress(1)
     progress["cursor"] = cursor
@@ -1196,7 +1263,11 @@ def test_audit_rejects_v2_to_v1_receipt_downgrade(tmp_path: Path) -> None:
         connection.execute(
             "UPDATE workset_receipts SET payload_json = ?, receipt_sha256 = ? "
             "WHERE generation = ?",
-            (json.dumps(payload, sort_keys=True, separators=(",", ":")), digest, generation),
+            (
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                digest,
+                generation,
+            ),
         )
 
     with pytest.raises(DistillationWorksetError, match="downgraded"):
@@ -1214,7 +1285,13 @@ def test_cross_kind_claim_fairness_and_stage_retry_visibility(tmp_path: Path) ->
     assert claim.work_id == "old"
     workset.commit(
         [claim],
-        [{"status": "retry", "error_class": "transport_error", "retry_after_seconds": 10}],
+        [
+            {
+                "status": "retry",
+                "error_class": "transport_error",
+                "retry_after_seconds": 10,
+            }
+        ],
     )
     stages = workset.status(include_timing=True)["stages"]
     assert stages["teacher"]["retry_wait"] == 1

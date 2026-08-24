@@ -5492,6 +5492,7 @@ def test_distilled_fast_path_hard_stops_slow_shadow_receipt(monkeypatch) -> None
         return {"status": "recorded"}
 
     module.record_shadow_observation = slow_shadow
+    module.ShadowOperationalEvidence = recall_distillation.ShadowOperationalEvidence
     module.record_exact_exposure = lambda **_kwargs: calls.append("exact")
     monkeypatch.setitem(sys.modules, module.__name__, module)
     import chronovisor.recall as recall_package
@@ -5632,6 +5633,7 @@ def test_shadow_policy_observation_never_mutates_fast_result(
     module.record_exact_exposure = lambda **_kwargs: {}
     shadow_records: list[dict[str, object]] = []
     module.record_shadow_observation = lambda **kwargs: shadow_records.append(kwargs)
+    module.ShadowOperationalEvidence = recall_distillation.ShadowOperationalEvidence
     monkeypatch.setitem(sys.modules, module.__name__, module)
     import chronovisor.recall as recall_package
 
@@ -5715,6 +5717,7 @@ def test_bootstrap_incumbent_pairing_respects_served_arm(
     module.score_fast_features = lambda _features, _policy: 0.9
     records: list[dict[str, object]] = []
     module.record_shadow_observation = lambda **kwargs: records.append(kwargs)
+    module.ShadowOperationalEvidence = recall_distillation.ShadowOperationalEvidence
     monkeypatch.setitem(sys.modules, module.__name__, module)
     import chronovisor.recall as recall_package
 
@@ -5786,6 +5789,7 @@ def test_shadow_observation_records_empty_failure_without_mutating_result(monkey
     module.score_fast_features = lambda *_args: (_ for _ in ()).throw(RuntimeError("bad"))
     records: list[dict[str, object]] = []
     module.record_shadow_observation = lambda **kwargs: records.append(kwargs)
+    module.ShadowOperationalEvidence = recall_distillation.ShadowOperationalEvidence
     monkeypatch.setitem(sys.modules, module.__name__, module)
     import chronovisor.recall as recall_package
 
@@ -5874,6 +5878,7 @@ def test_legacy_capture_failure_still_records_one_empty_shadow_observation(
     }
     records: list[dict[str, object]] = []
     module.record_shadow_observation = lambda **kwargs: records.append(kwargs)
+    module.ShadowOperationalEvidence = recall_distillation.ShadowOperationalEvidence
     monkeypatch.setitem(sys.modules, module.__name__, module)
     import chronovisor.recall as recall_package
 
@@ -6032,6 +6037,7 @@ def test_distilled_early_none_records_one_paired_shadow_observation(monkeypatch)
     module = ModuleType("chronovisor.recall.recall_distillation")
     module.record_exact_exposure = lambda **kwargs: exact_receipts.append(kwargs)
     module.record_shadow_observation = lambda **kwargs: shadow_receipts.append(kwargs)
+    module.ShadowOperationalEvidence = recall_distillation.ShadowOperationalEvidence
     monkeypatch.setitem(sys.modules, module.__name__, module)
     import chronovisor.recall as recall_package
 

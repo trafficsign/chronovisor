@@ -3500,6 +3500,56 @@ def _observe_shadow_distillation_policy(
         return
 
     def write() -> None:
+        feature_rows = [
+            {
+                "candidate_id": str(row["candidate_id"]),
+                "features": dict(row["features"]),
+            }
+            for row in snapshot
+        ]
+        baseline_rows = [
+            {
+                "candidate_id": str(row["candidate_id"]),
+                "features": dict(row["features"]),
+            }
+            for row in snapshot
+        ]
+        baseline_pool_refs = [
+            {
+                **row,
+                "selected": str(row["candidate_id"]) in incumbent_selected_ids,
+            }
+            for row in pool_refs
+        ]
+        deadline_ms = (
+            max(1, min(1_200, int((deadline_at - started) * 1000)))
+            if deadline_at is not None
+            else 1_200
+        )
+        operational_evidence = recall_distillation.ShadowOperationalEvidence(
+            # Quality/resource/veto are intentionally false when no
+            # independent producer observed them.  This records the real
+            # unknown instead of allowing a caller-supplied pass bit.
+            candidate_quality=False,
+            baseline_quality=False,
+            candidate_covered=bool(selected_ids),
+            baseline_covered=bool(incumbent_selected_ids),
+            candidate_anchor_retained=bool(selected_ids),
+            baseline_anchor_retained=bool(incumbent_selected_ids),
+            candidate_abstained=not bool(selected_ids),
+            baseline_abstained=not bool(incumbent_selected_ids),
+            candidate_score_ms=_elapsed_ms(started),
+            live_latency_ms=max(0, int(result.latency_ms)),
+            resource_ok=False,
+            integrity_ok=not timed_out and not error_code and paired_eligible,
+            negative_veto=False,
+            deadline_ms=deadline_ms,
+            stage=str(context.get("stage") or ""),
+            run_id=str(context.get("qualified_run_id") or ""),
+            cohort=str(context.get("cohort") or ""),
+            host=request.host,
+            feature_parity=bool(incumbent_policy) and bool(snapshot),
+        )
         recall_distillation.record_shadow_observation(
             decision_id=result.decision_id,
             host=request.host,
@@ -3511,12 +3561,15 @@ def _observe_shadow_distillation_policy(
             paired_eligible=paired_eligible,
             selected_candidate_ids=sorted(selected_ids),
             incumbent_selected_candidate_ids=sorted(incumbent_selected_ids),
-            candidate_feature_snapshot=snapshot,
+            candidate_feature_snapshot=feature_rows,
             candidate_pool_refs=pool_refs,
+            baseline_feature_snapshot=baseline_rows,
+            baseline_pool_refs=baseline_pool_refs,
             observed_at=datetime.now(UTC).isoformat(),
             decision_latency_ms=_elapsed_ms(started),
             timed_out=timed_out,
             error_code=error_code,
+            operational_evidence=operational_evidence,
             nonblocking=True,
             root=CHRONOVISOR_ROOT,
         )

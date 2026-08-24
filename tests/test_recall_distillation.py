@@ -32,11 +32,446 @@ from chronovisor.recall.recall_distillation_remote_teacher import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _trusted_ox_test_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep legacy in-process stubs outside the production egress authority."""
+
+    binding = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    monkeypatch.setattr(distill, "ox_alpha_source_binding", lambda: dict(binding))
+    monkeypatch.setattr(
+        distill, "_ox_teacher_source_binding", lambda _teacher: dict(binding)
+    )
+    monkeypatch.setattr(distill, "_ox_source_binding_matches", lambda *_args: True)
+
+
+@pytest.fixture(autouse=True)
+def _bootstrap_ox_workset_for_direct_batch_tests(
+    request: pytest.FixtureRequest, tmp_path: Path
+) -> None:
+    """Direct batch tests own an explicit queue bootstrap; workers never migrate."""
+
+    nested_batch_tests = {
+        "test_ox_single_teacher_uncertain_output_completes_as_non_training_abstention",
+        "test_ox_missing_payload_quarantines_without_remote_call",
+    }
+    if (
+        "_run_teacher_batch" in request.node.function.__code__.co_names
+        or request.node.originalname in nested_batch_tests
+    ):
+        workset.DistillationWorkset(
+            store.distillation_dir(tmp_path) / "ox-workset.sqlite3"
+        )
+
+
 def _ox_metadata(payload: object) -> dict[str, object]:
     assert isinstance(payload, dict)
     metadata = ox_alpha_response_metadata(payload)
     assert metadata is not None
     return metadata
+
+
+def test_ox_receipt_projection_cannot_promote_shallow_forgery(tmp_path: Path) -> None:
+    """One forged label/pointer must not replace the authoritative gate."""
+
+    source = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    contract = distill._ensure_ox_profile_contract(
+        tmp_path,
+        distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            ox_free_only=True,
+            ox_expires_at="2099-01-01T00:00:00Z",
+        ),
+        source_binding=source,
+    )
+    profile_contract_id = str(contract["artifact_id"])
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "profile_contract_id": profile_contract_id,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            **source,
+            "assignment": {"repeat_pair_id": "fake", "fixed_repeat": True},
+        },
+    )
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / "active-policy.json",
+        {"kind": "shallow-forgery", "artifact_id": "e" * 64},
+    )
+    projection = distill._ox_event_projection(
+        tmp_path,
+        profile_contract_id=profile_contract_id,
+        source_binding=source,
+        workset={"leased": 0},
+        label_path=label_path,
+        authoritative_gate={"passed": True, "reasons": []},
+    )
+    quality = projection["quality_gates"]
+    assert quality["passed"] is False
+    assert "ramp_receipts_incomplete" in quality["reasons"]
+    assert "failure_receipts_incomplete" in quality["reasons"]
+
+
+def test_ox_event_projection_rederives_provider_receipt_from_workset(
+    tmp_path: Path,
+) -> None:
+    source = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    config = distill.DistillationConfig(
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        ox_enabled=True,
+        ox_free_only=True,
+        ox_expires_at="2099-01-01T00:00:00Z",
+    )
+    contract = distill._ensure_ox_profile_contract(
+        tmp_path, config, source_binding=source
+    )
+    payload_digest = "d" * 64
+    work_id = canonical_json.canonical_json_sha256_strict(
+        {
+            "kind": "ox-teacher-label-v1",
+            "profile": distill.OX_SINGLE_PROFILE,
+            "cohort": distill.OX_SINGLE_COHORT,
+            "route": "opencode-go/ox-alpha-free",
+            "profile_contract_id": contract["artifact_id"],
+            "payload_digest": payload_digest,
+        }
+    )
+    queue = workset.DistillationWorkset(
+        store.distillation_dir(tmp_path) / "ox-workset.sqlite3"
+    )
+    queue.advance(
+        [
+            {
+                "work_id": work_id,
+                "kind": "ox",
+                "payload_ref": "candidate-snapshot:rally:candidate",
+                "payload_digest": payload_digest,
+                "temporal_split": {
+                    "as_of": "2026-01-01T00:00:00Z",
+                    "group_id": "group",
+                    "split": "embargo",
+                    "split_plan_id": "",
+                },
+                "provenance": {
+                    "profile": distill.OX_SINGLE_PROFILE,
+                    "cohort": distill.OX_SINGLE_COHORT,
+                    "route": "opencode-go/ox-alpha-free",
+                    "profile_contract_id": contract["artifact_id"],
+                },
+            }
+        ],
+        {
+            "candidate_records": 1,
+            "candidate_head": "e" * 64,
+            "split_plan_id": "",
+            "probe_revision": distill.OX_PROBE_REVISION,
+        },
+    )
+    forged_receipt = "f" * 64
+    distill._append_ox_event(
+        tmp_path,
+        "ox-failure-receipts.jsonl",
+        {
+            "kind": "ox-provider-failure",
+            "profile_contract_id": contract["artifact_id"],
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+            "category": "5xx",
+            "status": "deferred",
+            "attempts": 1,
+            "bounded": True,
+            "before_cap": 1,
+            "after_cap": 1,
+            "work_ids": [work_id],
+            "attempts_by_work": {work_id: 1},
+            "provider_receipts": {work_id: forged_receipt},
+            "captured_at": "2026-08-25T00:00:00Z",
+        },
+    )
+    with pytest.raises(distill.DistillationError, match="provider receipt"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+def test_ox_terminal_ramp_receipt_is_idempotent(tmp_path: Path) -> None:
+    """A resumed cap-10 completion reuses its immutable receipt."""
+
+    payload = {
+        "kind": "ox-ramp-stage",
+        "profile_contract_id": "a" * 64,
+        "source_commit": "b" * 40,
+        "source_tree_sha256": "c" * 64,
+        "source_ox_identity_sha256": "d" * 64,
+        "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+        "cap": 10,
+        "valid_receipts": 20,
+        "attempts": 20,
+        "work_ids": [f"{index:064x}" for index in range(20)],
+        "label_count": 20,
+        "label_head_sha256": "e" * 64,
+        "captured_at": "2026-08-25T00:00:00Z",
+    }
+    distill._append_ox_event(tmp_path, "ox-ramp-receipts.jsonl", payload)
+    distill._append_ox_event(tmp_path, "ox-ramp-receipts.jsonl", payload)
+    assert (
+        store.chain_head(store.distillation_dir(tmp_path) / "ox-ramp-receipts.jsonl")[
+            "records"
+        ]
+        == 1
+    )
+
+
+@pytest.mark.parametrize(
+    "request_revision",
+    [None, "json-schema-core-label-abstain-16k-240s-v5"],
+)
+def test_ox_event_projection_rejects_revision_drift(
+    tmp_path: Path, request_revision: str | None
+) -> None:
+    source = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    contract = distill._ensure_ox_profile_contract(
+        tmp_path,
+        distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            ox_free_only=True,
+            ox_expires_at="2099-01-01T00:00:00Z",
+        ),
+        source_binding=source,
+    )
+    event = {
+        "kind": "ox-ramp-stage",
+        "profile_contract_id": contract["artifact_id"],
+        **source,
+        "cap": 1,
+        "valid_receipts": 20,
+        "attempts": 20,
+        "work_ids": [f"{index:064x}" for index in range(20)],
+        "label_count": 20,
+        "label_head_sha256": "d" * 64,
+        "expires_at": contract["expires_at"],
+        "captured_at": "2026-08-25T00:00:00Z",
+    }
+    if request_revision is not None:
+        event["request_revision"] = request_revision
+    distill._append_ox_event(tmp_path, "ox-ramp-receipts.jsonl", event)
+
+    with pytest.raises(
+        distill.DistillationError, match="request revision|contract binding"
+    ):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+def test_ox_event_projection_validates_historical_contracts_before_partition(
+    tmp_path: Path,
+) -> None:
+    source_a = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    source_b = {
+        "source_commit": "d" * 40,
+        "source_tree_sha256": "e" * 64,
+        "source_ox_identity_sha256": "f" * 64,
+    }
+    config = distill.DistillationConfig(
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        ox_enabled=True,
+        ox_free_only=True,
+        ox_expires_at="2099-01-01T00:00:00Z",
+    )
+    contract_a = distill._ensure_ox_profile_contract(
+        tmp_path, config, source_binding=source_a
+    )
+    config_b = replace(config, ox_expires_at="2099-01-02T00:00:00Z")
+    contract_b = distill._ensure_ox_profile_contract(
+        tmp_path, config_b, source_binding=source_b
+    )
+    for contract, source, cap in (
+        (contract_a, source_a, 1),
+        (contract_b, source_b, 2),
+    ):
+        distill._append_ox_event(
+            tmp_path,
+            "ox-ramp-receipts.jsonl",
+            {
+                "kind": "ox-ramp-stage",
+                "profile_contract_id": contract["artifact_id"],
+                **source,
+                "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+                "expires_at": contract["expires_at"],
+                "cap": cap,
+                "valid_receipts": 20,
+                "attempts": 20,
+                "work_ids": [f"{cap}{index:063d}" for index in range(20)],
+                "label_count": 20,
+                "label_head_sha256": "d" * 64,
+                "captured_at": "2026-08-25T00:00:00Z",
+            },
+        )
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    for contract, source in ((contract_a, source_a), (contract_b, source_b)):
+        store.append_chain(
+            label_path,
+            {
+                "kind": "teacher-label",
+                "status": "completed",
+                "profile": distill.OX_SINGLE_PROFILE,
+                "profile_contract_id": contract["artifact_id"],
+                "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+                "expires_at": contract["expires_at"],
+                **source,
+            },
+        )
+
+    projection = distill._ox_event_projection(
+        tmp_path,
+        profile_contract_id=str(contract_b["artifact_id"]),
+        source_binding=source_b,
+        workset={"leased": 0},
+        label_path=label_path,
+        authoritative_gate={"passed": True, "reasons": []},
+    )
+    assert [row["profile_contract_id"] for row in projection["ramp_receipts"]] == [
+        contract_b["artifact_id"]
+    ]
+    assert projection["quality_gates"]["ramp_complete"] is False
+
+
+@pytest.mark.parametrize(
+    "expires_at",
+    [
+        None,
+        9999999999.0,
+        True,
+        "2099-01-01",
+        "2099-01-01T09:00:00+09:00",
+        "2099-01-01T00:00:00.123Z",
+        "9999-01-01T00:00:00Z",
+    ],
+)
+def test_ox_event_projection_rejects_noncanonical_expiry(
+    tmp_path: Path, expires_at: object
+) -> None:
+    source = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    contract = distill._ensure_ox_profile_contract(
+        tmp_path,
+        distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            ox_free_only=True,
+            ox_expires_at="2099-01-01T00:00:00Z",
+        ),
+        source_binding=source,
+    )
+    event = {
+        "kind": "ox-ramp-stage",
+        "profile_contract_id": contract["artifact_id"],
+        **source,
+        "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+        "expires_at": expires_at,
+        "cap": 1,
+        "valid_receipts": 20,
+        "attempts": 20,
+        "work_ids": [f"{index:064x}" for index in range(20)],
+        "label_count": 20,
+        "label_head_sha256": "d" * 64,
+        "captured_at": "2026-08-25T00:00:00Z",
+    }
+    distill._append_ox_event(tmp_path, "ox-ramp-receipts.jsonl", event)
+    with pytest.raises(distill.DistillationError, match="expiry|contract binding"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+@pytest.mark.parametrize(
+    "expires_at",
+    [9999999999.0, True, "2099-01-01T09:00:00+09:00", "2099-01-01"],
+)
+def test_ox_label_projection_rejects_noncanonical_expiry(
+    tmp_path: Path, expires_at: object
+) -> None:
+    source = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    contract = distill._ensure_ox_profile_contract(
+        tmp_path,
+        distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            ox_free_only=True,
+            ox_expires_at="2099-01-01T00:00:00Z",
+        ),
+        source_binding=source,
+    )
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "profile": distill.OX_SINGLE_PROFILE,
+            "profile_contract_id": contract["artifact_id"],
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": expires_at,
+            **source,
+        },
+    )
+    with pytest.raises(distill.DistillationError, match="expiry|contract binding"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": True, "reasons": []},
+        )
 
 
 def _config(root: Path, **overrides: object) -> Path:
@@ -124,7 +559,9 @@ def _baseline_identity(root: Path) -> str:
     return identity
 
 
-def _fixture_candidate(root: Path) -> dict[str, object]:
+def _fixture_candidate(
+    root: Path, *, baseline_artifact_id: str = "", model_cohort_sha256: str = ""
+) -> dict[str, object]:
     """Rollout fixtures bypass publication deliberately; production cannot."""
 
     _, _, artifact = store.write_immutable(
@@ -132,7 +569,11 @@ def _fixture_candidate(root: Path) -> dict[str, object]:
         {
             "kind": "tiny-logistic-policy",
             **distill.train_tiny_policy([]),
-            "lineage": {"fixture": True},
+            "lineage": {
+                "fixture": True,
+                "baseline_artifact_id": baseline_artifact_id,
+                "model_cohort_sha256": model_cohort_sha256,
+            },
         },
         schema=distill.POLICY_SCHEMA,
     )
@@ -251,6 +692,7 @@ def test_ox_profile_contract_is_stable_and_fail_closed(tmp_path: Path) -> None:
     assert first["artifact_id"] == second["artifact_id"] == bulk["artifact_id"]
     assert first["endpoint"] == "https://opencode.ai/zen/go/v1/chat/completions"
     assert first["request_model"] == first["required_returned_model"] == "ox-alpha-free"
+    assert first["request_revision"] == distill.OX_RAMP_REQUEST_REVISION
     assert first["expires_at"] == "2099-01-01T00:00:00Z"
     assert first["live_recall_model_calls"] == 0
     assert first["kill_categories"] == [
@@ -268,6 +710,112 @@ def test_ox_profile_contract_is_stable_and_fail_closed(tmp_path: Path) -> None:
                 teacher_max_inflight=11,
             ),
         )
+
+
+def test_ox_expiry_normalizes_offsets_and_rejects_noncanonical_or_far_future() -> None:
+    assert (
+        distill._ox_expiry("2099-01-01T09:00:00+09:00")
+        == "2099-01-01T00:00:00Z"
+    )
+    for value in (
+        None,
+        True,
+        9999999999.0,
+        "2099-01-01",
+        "2099-01-01T00:00:00.123Z",
+        "2000-01-01T00:00:00Z",
+        "9999-01-01T00:00:00Z",
+    ):
+        with pytest.raises(distill.DistillationError):
+            distill._ox_expiry(value)
+
+
+@pytest.mark.parametrize(
+    "request_revision",
+    [None, "json-schema-core-label-abstain-16k-240s-v5"],
+)
+def test_ox_profile_contract_rejects_resealed_revision_drift(
+    tmp_path: Path, request_revision: str | None
+) -> None:
+    config = distill.DistillationConfig(
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        ox_enabled=True,
+        ox_free_only=True,
+        ox_expires_at="2099-01-01T00:00:00Z",
+    )
+    contract = distill._ensure_ox_profile_contract(tmp_path, config)
+    contract_path = (
+        store.distillation_dir(tmp_path)
+        / "ox-profile-contracts"
+        / f"{contract['artifact_id']}.json"
+    )
+    payload = json.loads(contract_path.read_text())
+    if request_revision is None:
+        payload.pop("request_revision")
+    else:
+        payload["request_revision"] = request_revision
+    unsigned = {
+        key: value for key, value in payload.items() if key != "seal_sha256"
+    }
+    payload["seal_sha256"] = canonical_json.canonical_json_sha256_strict(unsigned)
+    contract_path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+    assert distill._ox_contract_source_binding(tmp_path, str(contract["artifact_id"])) == {}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("route", "evil-route"),
+        ("request_model", "evil-model"),
+        ("required_returned_model", "evil-model"),
+        ("fixed_identity", {}),
+        ("free_only", False),
+        ("no_paid_fallback", False),
+        ("kill_categories", []),
+        ("live_recall_model_calls", 99),
+    ],
+)
+def test_ox_contract_reader_rejects_self_consistent_identity_forgery(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    source = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    contract = distill._ensure_ox_profile_contract(
+        tmp_path,
+        distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            ox_free_only=True,
+            ox_expires_at="2099-01-01T00:00:00Z",
+        ),
+        source_binding=source,
+    )
+    original_path = (
+        store.distillation_dir(tmp_path)
+        / "ox-profile-contracts"
+        / f"{contract['artifact_id']}.json"
+    )
+    forged = json.loads(original_path.read_text())
+    forged[field] = value
+    unsigned = {key: item for key, item in forged.items() if key not in {"artifact_id", "seal_sha256"}}
+    forged_id = canonical_json.canonical_json_sha256_strict(unsigned)
+    forged = {"artifact_id": forged_id, **unsigned}
+    forged["seal_sha256"] = canonical_json.canonical_json_sha256_strict(forged)
+    forged_path = (
+        store.distillation_dir(tmp_path) / "ox-profile-contracts" / f"{forged_id}.json"
+    )
+    forged_path.write_bytes(canonical_json.canonical_json_bytes_strict(forged) + b"\n")
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / "ox-profile-contract.json",
+        {"kind": "ox-profile-contract-pointer", "profile_contract_id": forged_id},
+    )
+
+    assert distill._read_ox_profile_contract(tmp_path, forged_id) == {}
+    assert distill._ox_contract_source_binding(tmp_path, forged_id) == {}
 
 
 @pytest.mark.parametrize(
@@ -2289,6 +2837,7 @@ def test_ox_single_teacher_materialization_binds_temporal_quality_evidence(
                 "payload_digest": payload_digest,
                 "payload_source": payload_source,
                 "expires_at": config.ox_expires_at,
+                "request_revision": distill.OX_RAMP_REQUEST_REVISION,
                 "rally_id": rally["rally_id"],
                 "candidate_id": f"candidate-{index}",
                 "route": "opencode-go/ox-alpha-free",
@@ -2298,6 +2847,9 @@ def test_ox_single_teacher_materialization_binds_temporal_quality_evidence(
                 "profile": distill.OX_SINGLE_PROFILE,
                 "cohort": distill.OX_SINGLE_COHORT,
                 "profile_contract_id": profile_contract_id,
+                "source_commit": "a" * 40,
+                "source_tree_sha256": "b" * 64,
+                "source_ox_identity_sha256": "c" * 64,
                 "route_identity": {
                     "provider": "opencode-go",
                     "model": "opencode-go/ox-alpha-free",
@@ -2335,6 +2887,28 @@ def test_ox_single_teacher_materialization_binds_temporal_quality_evidence(
     assert "blind_repeat_pairs_below_floor" in gate["reasons"]
     assert "teacher_models_not_distinct" not in gate["reasons"]
     assert gate["identity"]["profile_contract_id"] == profile_contract_id
+    tampered_labels = [dict(row) for row in store.read_chain(label_path)]
+    tampered_labels[0]["request_revision"] = (
+        "json-schema-core-label-abstain-16k-240s-v5"
+    )
+    tampered_labels[0]["record_sha256"] = canonical_json.canonical_json_sha256_strict(
+        {
+            key: value
+            for key, value in tampered_labels[0].items()
+            if key != "record_sha256"
+        }
+    )
+    tampered_rows = distill.materialize_training_rows(
+        tmp_path,
+        _rallies=rallies,
+        _snapshots=snapshots,
+        _label_rows=tampered_labels,
+    )["rows"]
+    assert all(
+        row["request_revision"] == distill.OX_RAMP_REQUEST_REVISION
+        for row in tampered_rows
+    )
+    assert len(tampered_rows) < len(rows)
     _, ox_model_cohort = distill._active_training_cohort(
         rows,
         teacher_profile=distill.OX_SINGLE_PROFILE,
@@ -2486,6 +3060,13 @@ def test_authoritative_row_binding_rejects_recomputed_cross_source(
         local = False
         role = distill.OX_TEACHER_ROLE
 
+        def receipt_binding(self) -> dict[str, str]:
+            return {
+                "source_commit": "a" * 40,
+                "source_tree_sha256": "b" * 64,
+                "source_ox_identity_sha256": "c" * 64,
+            }
+
         def evaluate(self, payload: object) -> dict[str, object]:
             assert isinstance(payload, dict)
             return {
@@ -2613,7 +3194,7 @@ def test_authoritative_row_binding_rejects_recomputed_cross_source(
         expires_at=str(forged["expires_at"]),
     )
     forged["provider_response_request_sha256"] = forged["provider_request_sha256"]
-    assert distill._materialized_row_integrity(forged) is True
+    assert distill._materialized_row_integrity(forged) is False
     assert (
         distill._materialized_row_integrity(forged, root=tmp_path, split_plan=plan)
         is False
@@ -3568,6 +4149,12 @@ def test_ox_ramp_only_counts_deep_valid_provider_responses(
         0,
         1,
     )
+    failures = store.read_chain(
+        store.distillation_dir(tmp_path) / "ox-failure-receipts.jsonl"
+    )
+    assert len(failures) == 1
+    assert failures[0]["category"] == "model_drift"
+    assert failures[0]["status"] == "hard_stop"
 
 
 def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_labels(
@@ -3576,6 +4163,13 @@ def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_label
     class RemoteTeacher:
         local = False
         role = distill.OX_TEACHER_ROLE
+
+        def receipt_binding(self) -> dict[str, str]:
+            return {
+                "source_commit": "a" * 40,
+                "source_tree_sha256": "b" * 64,
+                "source_ox_identity_sha256": "c" * 64,
+            }
 
         def evaluate(self, payload: object) -> dict[str, object]:
             assert isinstance(payload, dict)
@@ -3648,6 +4242,10 @@ def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_label
     assert all(row["cohort"] == distill.OX_SINGLE_COHORT for row in labels)
     assert all(len(row["prompt_sha256"]) == 64 for row in labels)
     assert all(row["assignment"]["probe"] is False for row in labels)
+    assert all(row["source_commit"] == "a" * 40 for row in labels)
+    assert all(row["source_tree_sha256"] == "b" * 64 for row in labels)
+    assert all(row["source_ox_identity_sha256"] == "c" * 64 for row in labels)
+    assert all(row["ramp_cap"] == 1 and row["attempt_count"] == 1 for row in labels)
 
     with sqlite3.connect(store.distillation_dir(tmp_path) / "ox-workset.sqlite3") as db:
         db.execute(
@@ -3695,6 +4293,12 @@ def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_label
         progress["ledger_heads"]["labels"]
         == store.chain_head(label_path)["head_sha256"]
     )
+    recovery = store.read_chain(
+        store.distillation_dir(tmp_path) / "ox-lease-recovery-receipts.jsonl"
+    )
+    assert len(recovery) == 1
+    assert recovery[0]["reclaimed"] == 2
+    assert recovery[0]["leased_after"] == 2
 
 
 def test_ox_metadata_drift_stops_before_the_next_wave_and_releases_all_claims(
@@ -3892,6 +4496,9 @@ def test_ox_indexed_workset_reads_only_delta_then_claimed_snapshots(
         },
     }
     catalog.advance(_raw(tmp_path), tmp_path, 4096)
+    workset.DistillationWorkset(
+        store.distillation_dir(tmp_path) / "ox-workset.sqlite3"
+    )
     plan = distill._ensure_split_plan(
         tmp_path,
         list(rallies.values()),
@@ -5065,7 +5672,8 @@ def test_automatic_rollout_holds_and_ignores_caller_supplied_metrics(
                 "kind": "tiny-logistic-policy",
                 **policy,
                 "lineage": {
-                    "locked_replay_id": hashlib.sha256(name.encode()).hexdigest()
+                    "locked_replay_id": hashlib.sha256(name.encode()).hexdigest(),
+                    "model_cohort_sha256": "e" * 64,
                 },
             },
             schema=distill.POLICY_SCHEMA,
@@ -5073,7 +5681,7 @@ def test_automatic_rollout_holds_and_ignores_caller_supplied_metrics(
         return return_value[0], return_value[2]
 
     incumbent_id, _ = write_policy("incumbent")
-    candidate_id, candidate = write_policy("candidate")
+    candidate_id, _ = write_policy("candidate")
     store.write_pointer(tmp_path, "active", incumbent_id)
     store.write_pointer(tmp_path, "lkg", incumbent_id)
     store.write_pointer(tmp_path, "candidate", candidate_id)
@@ -5084,6 +5692,7 @@ def test_automatic_rollout_holds_and_ignores_caller_supplied_metrics(
             "status": "replay",
             "rollout_percent": 0,
             "stage_started_at": "2026-08-01T00:00:00Z",
+            "stage_run_id": "d" * 64,
         },
     )
     _, _, baseline = store.write_immutable(
@@ -5096,62 +5705,18 @@ def test_automatic_rollout_holds_and_ignores_caller_supplied_metrics(
         },
         schema=distill.BASELINE_SCHEMA,
     )
-    evaluation_dir = store.distillation_dir(tmp_path) / "evaluations"
-    evaluation_dir.mkdir(parents=True)
-    (evaluation_dir / f"{'f' * 64}.json").write_text("{}\n")
     first = distill._automatic_rollout_evaluation(
         tmp_path, baseline, {"status": "candidate", "policy_id": candidate_id}
     )
-    assert first["status"] == "shadow"
-    gate = {
-        "denominator": 500,
-        "min_denominator": 500,
-        "min_days": 7,
-        "ci_lower": 1.0,
-        "min_ci_lower": 0.9,
-    }
-    metrics = {
-        name: dict(gate)
-        for name in (
-            "coverage_abstain",
-            "latency_timeout",
-            "cohort_delta",
-            "feature_parity",
-        )
-    }
-    run_id = "b" * 64
-    store.write_immutable(
-        store.distillation_dir(tmp_path) / "evaluations",
-        {
-            "kind": "runtime-measured-metrics",
-            "run_id": run_id,
-            "policy_id": candidate_id,
-            "baseline_id": baseline["artifact_id"],
-            "raw_watermark": baseline["raw_watermark"],
-            "incumbent_policy_id": incumbent_id,
-            "split_sha256": candidate["lineage"]["locked_replay_id"],
-            "feature_revision": distill.TEXT_FEATURE_REVISION,
-            "feature_parity_sha256": "c" * 64,
-            "offline_gate_sha256": distill.canonical_json.canonical_json_sha256_strict(
-                baseline["offline_training_gate"]
-            ),
-            "observation_mode": "paired",
-            "replay_metrics": metrics,
-            "shadow_metrics": metrics,
-            "canary_metrics": metrics,
-        },
-        schema="chronovisor.recall-distill-rollout-evaluation.v2",
+    assert first == {"status": "held", "reason": "rollout_baseline_mismatch"}
+    assert not list(
+        (store.distillation_dir(tmp_path) / "evaluations").glob("*.json")
     )
-    held = distill._automatic_rollout_evaluation(
-        tmp_path, baseline, {"status": "candidate", "policy_id": candidate_id}
-    )
-    assert held["status"] == "shadow"
-    state = store.read_sealed(store.distillation_dir(tmp_path) / store.STATE_FILE)
-    assert state["status"] == "shadow"
 
 
-def test_qualified_shadow_policy_records_private_operational_receipt(
+def test_automatic_replay_materializes_actual_paired_shadow_rows(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from chronovisor.recall import recall_distillation_rollout as rollout
 
@@ -5167,57 +5732,249 @@ def test_qualified_shadow_policy_records_private_operational_receipt(
         schema=distill.BASELINE_SCHEMA,
     )
     bootstrap = distill._ensure_bootstrap_policy(tmp_path, baseline)
-    locked_replay_id = "b" * 64
-    candidate = _fixture_candidate(tmp_path)
-    gate = {
-        "denominator": 500,
-        "min_denominator": 500,
-        "min_days": 7,
-        "ci_lower": 1.0,
-        "min_ci_lower": 0.9,
+    run_id = "a" * 64
+    cohort = "paired-test-cohort"
+    candidate = _fixture_candidate(
+        tmp_path,
+        baseline_artifact_id=str(baseline["artifact_id"]),
+        model_cohort_sha256=cohort,
+    )
+    candidate_id = str(candidate["artifact_id"])
+    incumbent_id = str(bootstrap["artifact_id"])
+    context = {
+        "stage": "shadow",
+        "stage_started_at": "2026-08-01T00:00:00Z",
+        "qualified_run_id": run_id,
+        "cohort": cohort,
+        "baseline_artifact_id": str(baseline["artifact_id"]),
+        "served_policy_id": incumbent_id,
+        "candidate_policy_id": candidate_id,
+        "incumbent_policy_id": incumbent_id,
+        "served_policy": bootstrap,
+        "candidate_policy": candidate,
+        "incumbent_policy": bootstrap,
     }
-    metrics = {
-        name: dict(gate)
-        for name in (
-            "coverage_abstain",
-            "latency_timeout",
-            "cohort_delta",
-            "feature_parity",
-        )
-    }
-    run_id = "c" * 64
-    evaluation_id, _, _ = store.write_immutable(
-        store.distillation_dir(tmp_path) / "evaluations",
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / store.STATE_FILE,
         {
-            "kind": "test-runtime-metrics",
-            "run_id": run_id,
-            "policy_id": candidate["artifact_id"],
-            "baseline_id": baseline["artifact_id"],
-            "raw_watermark": baseline["raw_watermark"],
-            "incumbent_policy_id": bootstrap["artifact_id"],
-            "split_sha256": locked_replay_id,
-            "feature_revision": distill.TEXT_FEATURE_REVISION,
-            "feature_parity_sha256": "d" * 64,
-            "offline_gate_sha256": distill.canonical_json.canonical_json_sha256_strict(
-                baseline["offline_training_gate"]
-            ),
-            "observation_mode": "paired",
-            "replay_metrics": metrics,
-            "shadow_metrics": metrics,
-            "canary_metrics": metrics,
+            "kind": "worker-state",
+            "status": "shadow",
+            "rollout_percent": 0,
+            "stage_started_at": context["stage_started_at"],
+            "stage_run_id": run_id,
         },
-        schema=rollout.EVALUATION_SCHEMA,
     )
-    assert (
-        rollout.evaluate_and_advance(
-            tmp_path,
-            "2026-08-14T00:00:00Z",
-            {"run_id": run_id, "evaluation_artifact_id": evaluation_id},
-        )["status"]
-        == "shadow"
+    monkeypatch.setattr(
+        distill,
+        "load_policy_observation_context",
+        lambda _session_id, _root=None: context,
     )
-    if distill.load_shadow_policy(tmp_path) == {}:
-        return
+    observations = (
+        ("00" + "0" + "a" * 61, "2026-08-01T00:00:00Z"),
+        ("b5" + "1" + "b" * 61, "2026-08-04T00:00:00Z"),
+        ("e0" + "2" + "c" * 61, "2026-08-08T00:00:00Z"),
+    )
+    for index, (query_hash, observed_at) in enumerate(observations):
+        candidate_key = f"candidate-{index}"
+        unselected_key = f"aaa-{index}"
+        features = distill.build_fast_features(
+            query_chargram_coverage=0.5,
+            candidate_chargram_precision=0.5,
+        )
+        page_sha = hashlib.sha256(f"page-{index}".encode()).hexdigest()
+        pool = [
+            {
+                "candidate_id": unselected_key,
+                "selected": False,
+                "page_id": f"page-unselected-{index}",
+                "page_content_sha256": hashlib.sha256(
+                    f"page-unselected-{index}".encode()
+                ).hexdigest(),
+                "rendered_context_sha256": hashlib.sha256(
+                    f"context-unselected-{index}".encode()
+                ).hexdigest(),
+            },
+            {
+                "candidate_id": candidate_key,
+                "selected": True,
+                "page_id": f"page-{index}",
+                "page_content_sha256": page_sha,
+                "rendered_context_sha256": hashlib.sha256(
+                    f"context-{index}".encode()
+                ).hexdigest(),
+            }
+        ]
+        evidence = distill.ShadowOperationalEvidence(
+            candidate_quality=True,
+            baseline_quality=True,
+            candidate_covered=True,
+            baseline_covered=True,
+            candidate_anchor_retained=True,
+            baseline_anchor_retained=True,
+            candidate_abstained=False,
+            baseline_abstained=False,
+            candidate_score_ms=10,
+            live_latency_ms=10,
+            resource_ok=True,
+            integrity_ok=True,
+            negative_veto=False,
+            deadline_ms=1_200,
+            stage="shadow",
+            run_id=run_id,
+            cohort=cohort,
+            host="codex",
+            feature_parity=True,
+        )
+        distill.record_shadow_observation(
+            decision_id=f"decision-{index}",
+            host="codex",
+            session_id=f"session-{index}",
+            query_semantic_sha256=query_hash,
+            policy_id=candidate_id,
+            incumbent_policy_id=incumbent_id,
+            served_policy_id=incumbent_id,
+            selected_candidate_ids=[candidate_key],
+            incumbent_selected_candidate_ids=[candidate_key],
+            paired_eligible=True,
+            candidate_feature_snapshot=[
+                {"candidate_id": candidate_key, "features": features},
+                {"candidate_id": unselected_key, "features": features},
+            ],
+            candidate_pool_refs=pool,
+            baseline_feature_snapshot=[
+                {"candidate_id": candidate_key, "features": features},
+                {"candidate_id": unselected_key, "features": features},
+            ],
+            baseline_pool_refs=pool,
+            observed_at=observed_at,
+            decision_latency_ms=10,
+            timed_out=False,
+            operational_evidence=evidence,
+            root=tmp_path,
+        )
+    result = distill._automatic_rollout_evaluation(
+        tmp_path,
+        baseline,
+        {"status": "candidate", "policy_id": candidate_id},
+    )
+    assert result["status"] == "shadow"
+    evaluation = store.read_sealed(
+        store.distillation_dir(tmp_path)
+        / "evaluations"
+        / f"{result['evaluation_artifact_id']}.json"
+    )
+    observation = store.read_sealed(
+        store.distillation_dir(tmp_path)
+        / "rollout-observations"
+        / f"{result['replay_observation_artifact_id']}.json"
+    )
+    split_id = evaluation["split_sha256"]
+    assert split_id and len(split_id) == 64
+    assert observation["pair_count"] == 3
+    assert len(observation["pairs"]) == 3
+    assert all(set(pair) == rollout._REPLAY_PAIR_KEYS for pair in observation["pairs"])
+    split = store.read_sealed(
+        store.distillation_dir(tmp_path) / "locked-replays" / f"{split_id}.json",
+        schema="chronovisor.recall-distill-locked-replay.v1",
+    )
+    assert all(set(row) == rollout._LOCKED_REPLAY_ROW_KEYS for row in split["training_rows"])
+    assert {
+        row["split"] for row in split["training_rows"]
+    } == {"train", "validation", "test"}
+    assert {
+        row["candidate_id"] for row in split["training_rows"]
+    } == {f"candidate-{index}" for index in range(3)}
+
+
+def test_shadow_replay_source_identity_uses_selected_pool_row() -> None:
+    pool = [
+        {"candidate_id": "aaa", "selected": False},
+        {"candidate_id": "zzz", "selected": True},
+    ]
+    fields = distill._shadow_replay_source_fields(
+        decision_id="decision",
+        query_semantic_sha256="a" * 64,
+        observed_at="2026-08-01T00:00:00Z",
+        pool_rows=pool,
+        selected_candidate_ids=["zzz"],
+        baseline_pool_rows=pool,
+        baseline_selected_candidate_ids=["zzz"],
+        paired_eligible=True,
+    )
+    assert fields["candidate_id"] == "zzz"
+    with pytest.raises(distill.DistillationError, match="not selected"):
+        distill._shadow_replay_source_fields(
+            decision_id="decision",
+            query_semantic_sha256="a" * 64,
+            observed_at="2026-08-01T00:00:00Z",
+            pool_rows=pool,
+            selected_candidate_ids=["aaa"],
+            baseline_pool_rows=pool,
+            baseline_selected_candidate_ids=["zzz"],
+            paired_eligible=True,
+        )
+    with pytest.raises(distill.DistillationError, match="ambiguous"):
+        distill._shadow_replay_source_fields(
+            decision_id="decision",
+            query_semantic_sha256="a" * 64,
+            observed_at="2026-08-01T00:00:00Z",
+            pool_rows=pool,
+            selected_candidate_ids=["aaa", "zzz"],
+            baseline_pool_rows=pool,
+            baseline_selected_candidate_ids=["zzz"],
+            paired_eligible=True,
+        )
+
+
+def test_qualified_shadow_policy_records_private_operational_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _config(tmp_path)
+    _, _, baseline = store.write_immutable(
+        store.distillation_dir(tmp_path) / "baselines",
+        {
+            "kind": "test-baseline",
+            "raw_watermark": "a" * 64,
+            "hard_floor": {"p5_allowed": True, "reasons": []},
+            "offline_training_gate": {"passed": True, "revision": "test-v2"},
+        },
+        schema=distill.BASELINE_SCHEMA,
+    )
+    bootstrap = distill._ensure_bootstrap_policy(tmp_path, baseline)
+    candidate = _fixture_candidate(
+        tmp_path, baseline_artifact_id=str(baseline["artifact_id"])
+    )
+    run_id = "c" * 64
+    context = {
+        "stage": "shadow",
+        "stage_started_at": "2026-08-14T00:00:00Z",
+        "qualified_run_id": run_id,
+        "cohort": "rollout-test-cohort",
+        "baseline_artifact_id": str(baseline["artifact_id"]),
+        "served_policy_id": str(bootstrap["artifact_id"]),
+        "candidate_policy_id": str(candidate["artifact_id"]),
+        "incumbent_policy_id": str(bootstrap["artifact_id"]),
+        "served_policy": bootstrap,
+        "candidate_policy": candidate,
+        "incumbent_policy": bootstrap,
+    }
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / store.STATE_FILE,
+        {
+            "kind": "worker-state",
+            "status": "shadow",
+            "rollout_percent": 0,
+            "stage_started_at": "2026-08-14T00:00:00Z",
+            "stage_run_id": run_id,
+        },
+    )
+    monkeypatch.setattr(
+        distill,
+        "load_policy_observation_context",
+        lambda _session_id, _root=None: context,
+    )
+    assert distill.load_shadow_policy(tmp_path)["artifact_id"] == candidate["artifact_id"]
 
     rendered = "private bounded snippet"
     features = distill.build_fast_features(query_chargram_coverage=1)
@@ -5264,6 +6021,27 @@ def test_qualified_shadow_policy_records_private_operational_receipt(
     assert deferred == {"status": "deferred", "reason": "receipt_ledger_busy"}
     assert not shadow_ledger.exists()
     assert not (store.distillation_dir(tmp_path) / "shadow-observations").exists()
+    evidence = distill.ShadowOperationalEvidence(
+        candidate_quality=True,
+        baseline_quality=True,
+        candidate_covered=True,
+        baseline_covered=True,
+        candidate_anchor_retained=True,
+        baseline_anchor_retained=True,
+        candidate_abstained=False,
+        baseline_abstained=False,
+        candidate_score_ms=42,
+        live_latency_ms=42,
+        resource_ok=True,
+        integrity_ok=True,
+        negative_veto=False,
+        deadline_ms=1_200,
+        stage="shadow",
+        run_id=run_id,
+        cohort="rollout-test-cohort",
+        host="codex",
+        feature_parity=True,
+    )
     receipt = distill.record_shadow_observation(
         decision_id="shadow-decision",
         host="codex",
@@ -5291,6 +6069,7 @@ def test_qualified_shadow_policy_records_private_operational_receipt(
         observed_at="2026-08-14T00:00:01Z",
         decision_latency_ms=42,
         timed_out=False,
+        operational_evidence=evidence,
         root=tmp_path,
     )
     retry = distill.record_shadow_observation(
@@ -5320,6 +6099,7 @@ def test_qualified_shadow_policy_records_private_operational_receipt(
         observed_at="2026-08-14T00:00:02Z",
         decision_latency_ms=42,
         timed_out=False,
+        operational_evidence=evidence,
         root=tmp_path,
     )
     assert retry["record_sha256"] == receipt["record_sha256"]
@@ -5347,6 +6127,18 @@ def test_qualified_shadow_policy_records_private_operational_receipt(
                 ).hexdigest(),
             }
         ],
+        baseline_pool_refs=[
+            {
+                "candidate_id": "page-v1",
+                "selected": False,
+                "page_id": "page",
+                "page_content_sha256": "f" * 64,
+                "rendered_context": rendered,
+                "rendered_context_sha256": hashlib.sha256(
+                    rendered.encode()
+                ).hexdigest(),
+            }
+        ],
         observed_at="2026-08-14T00:00:03Z",
         decision_latency_ms=41,
         timed_out=False,
@@ -5362,13 +6154,21 @@ def test_qualified_shadow_policy_records_private_operational_receipt(
     )
     assert "rendered_context" not in artifact["candidate_pool_refs"][0]
     operational = distill._operational_rollout_metrics(
-        tmp_path, candidate["artifact_id"], bootstrap["artifact_id"]
+        tmp_path,
+        candidate["artifact_id"],
+        bootstrap["artifact_id"],
+        baseline_artifact_id=str(baseline["artifact_id"]),
+        cohort="rollout-test-cohort",
     )
-    assert operational["coverage_abstain"]["denominator"] == 1
-    assert operational["latency_timeout"]["denominator"] == 1
+    assert operational["coverage_abstain"]["denominator"] == 0
+    assert operational["latency_timeout"]["denominator"] == 0
     artifact_path.write_text("{}\n", encoding="utf-8")
     tampered = distill._operational_rollout_metrics(
-        tmp_path, candidate["artifact_id"], bootstrap["artifact_id"]
+        tmp_path,
+        candidate["artifact_id"],
+        bootstrap["artifact_id"],
+        baseline_artifact_id=str(baseline["artifact_id"]),
+        cohort="rollout-test-cohort",
     )
     assert tampered["coverage_abstain"]["denominator"] == 0
 
@@ -5425,7 +6225,11 @@ def test_unpaired_exact_receipts_do_not_qualify_rollout_metrics(
             root=tmp_path,
         )
     metrics = distill._operational_rollout_metrics(
-        tmp_path, candidate_id, incumbent["artifact_id"]
+        tmp_path,
+        candidate_id,
+        incumbent["artifact_id"],
+        baseline_artifact_id=str(incumbent["artifact_id"]),
+        cohort="rollout-test-cohort",
     )
     assert metrics["coverage_abstain"]["denominator"] == 0
     assert metrics["latency_timeout"]["denominator"] == 0
@@ -5462,7 +6266,13 @@ def test_page_fallback_counts_only_coverage_and_runtime_denominators(
             root=tmp_path,
         )
         assert receipt["runtime_observation"]["error_code"] == "exact_capture_error"
-    metrics = distill._operational_rollout_metrics(tmp_path, candidate_id, incumbent_id)
+    metrics = distill._operational_rollout_metrics(
+        tmp_path,
+        candidate_id,
+        incumbent_id,
+        baseline_artifact_id=incumbent_id,
+        cohort="rollout-test-cohort",
+    )
     assert metrics["coverage_abstain"]["denominator"] == 0
     assert metrics["latency_timeout"]["denominator"] == 0
     assert metrics["feature_parity"]["denominator"] == 0
@@ -5522,7 +6332,13 @@ def test_page_operational_receipt_is_deduped_when_exact_decision_exists(
             "idempotency_sha256": "d" * 64,
         },
     )
-    metrics = distill._operational_rollout_metrics(tmp_path, policy_id, "f" * 64)
+    metrics = distill._operational_rollout_metrics(
+        tmp_path,
+        policy_id,
+        "f" * 64,
+        baseline_artifact_id="f" * 64,
+        cohort="rollout-test-cohort",
+    )
     assert metrics["latency_timeout"]["denominator"] == 0
 
 
@@ -6302,3 +7118,72 @@ def test_cold_start_does_not_begin_counterfactual_without_time_budget(
     )
     assert result["status"] == "deferred"
     assert result["counterfactuals_written"] == 0
+
+
+def test_shadow_hashes_serialize_candidate_and_baseline_arms_independently() -> None:
+    rendered = "{\"page_id\":\"page\"}"
+    source = {
+        "candidate_id": "page",
+        "selected": True,
+        "page_id": "page",
+        "page_content_sha256": "a" * 64,
+        "rendered_context": rendered,
+        "rendered_context_sha256": hashlib.sha256(rendered.encode()).hexdigest(),
+    }
+    features = distill.build_fast_features(
+        query_chargram_coverage=1.0, candidate_chargram_precision=0.5
+    )
+    equal = distill.shadow_observation_hashes(
+        [{"candidate_id": "page", "features": features}],
+        [{"candidate_id": "page", "features": features}],
+        [source],
+        [source],
+        selected_candidate_ids=["page"],
+        baseline_selected_candidate_ids=["page"],
+    )
+    assert equal["feature_parity"] is True
+    changed = distill.shadow_observation_hashes(
+        [{"candidate_id": "page", "features": features}],
+        [
+            {
+                "candidate_id": "page",
+                "features": distill.build_fast_features(
+                    query_chargram_coverage=0.0, candidate_chargram_precision=0.5
+                ),
+            }
+        ],
+        [source],
+        [source],
+        selected_candidate_ids=["page"],
+        baseline_selected_candidate_ids=["page"],
+    )
+    assert changed["feature_parity"] is False
+    assert changed["candidate_feature_bytes_sha256"] != changed[
+        "baseline_feature_bytes_sha256"
+    ]
+    assert changed["pair_id"] != equal["pair_id"]
+
+
+def test_shadow_operational_evidence_rejects_arbitrary_mapping() -> None:
+    hashes = {
+        "candidate_decision_sha256": "a" * 64,
+        "baseline_decision_sha256": "b" * 64,
+        "candidate_pool_sha256": "c" * 64,
+        "baseline_pool_sha256": "d" * 64,
+        "candidate_feature_snapshot_sha256": "e" * 64,
+        "baseline_feature_snapshot_sha256": "f" * 64,
+        "candidate_feature_bytes_sha256": "0" * 64,
+        "baseline_feature_bytes_sha256": "1" * 64,
+        "feature_snapshot_sha256": "2" * 64,
+        "feature_parity": True,
+        "pair_id": "3" * 64,
+    }
+    with pytest.raises(distill.DistillationError, match="must be typed"):
+        distill._shadow_evidence_with_hashes(
+            {"candidate_quality": True},  # type: ignore[arg-type]
+            hashes,
+            stage="shadow",
+            run_id="4" * 64,
+            cohort="5" * 64,
+            host="codex",
+        )
