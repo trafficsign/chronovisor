@@ -460,8 +460,9 @@ def _run_workset(
         "dataset": "dataset",
         "evaluation": "evaluation",
     }
-    for stage, kind in kind_by_stage.items():
-        count = samples - 1 if stage == "teacher" else samples
+    remaining, extra = divmod(samples - 1, len(kind_by_stage))
+    for index, (stage, kind) in enumerate(kind_by_stage.items()):
+        count = remaining + (1 if index < extra else 0)
         items = [_item(f"r3-{stage}-{index}", kind, priority=99) for index in range(count)]
         stage_items.extend(items)
         stage_workset.advance(items, {"source": stage}, progress=_progress(0))
@@ -564,7 +565,8 @@ def _run_workset(
         },
         "fairness": {"oldest_work_id_sha256": _digest("r3-old-teacher"), "passed": True},
         "claim": {
-            "samples": len(claim_samples),
+            "samples": claim_count,
+            "observation_calls": len(claim_samples),
             "p95_ns": claim_p95,
             "threshold_ns": CLAIM_P95_LIMIT_NS,
         },
