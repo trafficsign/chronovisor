@@ -50,6 +50,8 @@ OX_WORKSET_EXPECTED_STATES = {
 }
 OX_WORKSET_ROW_LIMIT = 100_000
 WORKSET_LOCK_BYTES_LIMIT = 64 * 1024
+WORKSET_LOCK_FILE_LIMIT = 64
+WORKSET_LOCK_AGGREGATE_BYTES_LIMIT = WORKSET_LOCK_FILE_LIMIT * WORKSET_LOCK_BYTES_LIMIT
 WORKSET_RECEIPT_ROW_LIMIT = OX_WORKSET_ROW_LIMIT * 2
 WORKSET_TEXT_ROW_BYTES_LIMIT = 64 * 1024
 WORKSET_TEXT_BYTES_LIMIT = 64 * 1024 * 1024
@@ -778,7 +780,11 @@ def _workset_lock_snapshot(runtime_dir: Path) -> dict[str, Any]:
     immutable_lock = runtime_dir / ".immutable.lock"
     if immutable_lock.exists():
         paths.append(immutable_lock)
-    for path in sorted(set(paths)):
+    paths = sorted(set(paths))
+    if len(paths) > WORKSET_LOCK_FILE_LIMIT:
+        raise R3Error("production Workset lock file count exceeds bounded inventory")
+    total_bytes = 0
+    for path in paths:
         if _has_symlink_component(path) or not path.is_file():
             raise R3Error("production Workset lock/sidecar path is unsafe")
         before = _regular_file_state(path)
@@ -794,8 +800,18 @@ def _workset_lock_snapshot(runtime_dir: Path) -> dict[str, Any]:
         digest = hashlib.sha256(content).hexdigest()
         if before != _regular_file_state(path):
             raise R3Error("production Workset lock changed during read")
+        total_bytes += int(before.get("st_size", 0))
+        if total_bytes > WORKSET_LOCK_AGGREGATE_BYTES_LIMIT:
+            raise R3Error("production Workset lock bytes exceed bounded inventory")
         locks[path.name] = {**before, "sha256": digest}
-    return {"files": locks, "bounded": True}
+    return {
+        "files": locks,
+        "file_count": len(paths),
+        "file_limit": WORKSET_LOCK_FILE_LIMIT,
+        "bytes": total_bytes,
+        "aggregate_bytes_limit": WORKSET_LOCK_AGGREGATE_BYTES_LIMIT,
+        "bounded": True,
+    }
 
 
 def _production_snapshot(
@@ -938,12 +954,18 @@ def _production_scope_identity(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         else:
             raise R3Error("production pointer identity is malformed")
     normalized_locks = {
-        str(name): {
-            "st_size": value.get("st_size"),
-            "sha256": value.get("sha256"),
-        }
-        for name, value in lock_files.items()
-        if isinstance(value, Mapping)
+        "file_count": locks.get("file_count"),
+        "file_limit": locks.get("file_limit"),
+        "bytes": locks.get("bytes"),
+        "aggregate_bytes_limit": locks.get("aggregate_bytes_limit"),
+        "files": {
+            str(name): {
+                "st_size": value.get("st_size"),
+                "sha256": value.get("sha256"),
+            }
+            for name, value in lock_files.items()
+            if isinstance(value, Mapping)
+        },
     }
     return {
         # APFS clone inode/device/mtime values are expected to differ.  Keep

@@ -33,6 +33,10 @@ def test_r3_contract_constants_are_bounded() -> None:
     assert HARNESS.WORKSET_RECEIPT_ROW_LIMIT == HARNESS.OX_WORKSET_ROW_LIMIT * 2
     assert HARNESS.WORKSET_TEXT_ROW_BYTES_LIMIT == 64 * 1024
     assert HARNESS.WORKSET_TEXT_BYTES_LIMIT == 64 * 1024 * 1024
+    assert HARNESS.WORKSET_LOCK_FILE_LIMIT == 64
+    assert HARNESS.WORKSET_LOCK_AGGREGATE_BYTES_LIMIT == (
+        HARNESS.WORKSET_LOCK_FILE_LIMIT * HARNESS.WORKSET_LOCK_BYTES_LIMIT
+    )
     assert HARNESS.OX_WORKSET_EXPECTED_STATES == {
         "ready": 19_400,
         "leased": 0,
@@ -103,6 +107,15 @@ def test_workset_lock_snapshot_rejects_oversized_lock(tmp_path: Path) -> None:
     lock = runtime / "worker.lock"
     lock.write_bytes(b"x" * (HARNESS.WORKSET_LOCK_BYTES_LIMIT + 1))
     with pytest.raises(HARNESS.R3Error, match="bounded read"):
+        HARNESS._workset_lock_snapshot(runtime)
+
+
+def test_workset_lock_snapshot_rejects_unbounded_file_count(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime" / "recall-distillation"
+    runtime.mkdir(parents=True)
+    for index in range(HARNESS.WORKSET_LOCK_FILE_LIMIT + 1):
+        (runtime / f"worker-{index:03d}.lock").write_bytes(b"")
+    with pytest.raises(HARNESS.R3Error, match="file count"):
         HARNESS._workset_lock_snapshot(runtime)
 
 
