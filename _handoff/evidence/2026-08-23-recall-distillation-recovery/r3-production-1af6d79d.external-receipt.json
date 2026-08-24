@@ -1,0 +1,171 @@
+{
+  "schema": "chronovisor.recall-r3-external-receipt.v2",
+  "namespace": "recall-distillation",
+  "captured_at": "2026-08-25T00:47:18+0900",
+  "verdict": "approved",
+  "scope": "production Workset DB, receipt/state/pointers/locks; Raw/catalog/FTS/ledgers/unrelated runtime excluded_not_evaluated",
+  "prior_attempts": [
+    {
+      "main_artifact_id": "16a20947938467018674301ddc9e4e8120ba9f79f895c11308a69a378e341d3c",
+      "completion_artifact_id": "420180c2385e96f0332b6bfd8af2ed9b5557c367530af8c5acbefbd7e9eb855b",
+      "semantic_verdict": "approved",
+      "superseded_reason": "later standard read-only audit probes touched the live SHM mtime, so the production reader was hardened to immutable mode"
+    },
+    {
+      "main_artifact_id": "0a4677085af08450cda72fe491754f66e4d53d35a76ef613e11008830deae319",
+      "completion_artifact_id": "fb2b192418fef3e9955e49a3b2f64dc5131d3f7491aa232126b802c057e9515d",
+      "semantic_verdict": "approved",
+      "superseded_reason": "the exact external SHM hash was not sampled immediately adjacent to both ends of the formal process"
+    }
+  ],
+  "execution": {
+    "source_commit": "19503b5b121b3e4936cb7c4ac284897e14e52882",
+    "source_clean_after": true,
+    "certification_attempt": 3,
+    "automatic_retry_count": 0,
+    "external_watchdog_seconds": 600,
+    "returncode": 0,
+    "timed_out": false,
+    "provider_calls": 0,
+    "production_semantic_mutation": false,
+    "formal_wall_ns": 21912763000,
+    "external_process_wall_seconds": 21.89986525
+  },
+  "artifacts": {
+    "main": {
+      "path": "1af6d79d17a5346f7676321a1a1c038a29dd820e7a18310747e912bcce33ac92.json",
+      "artifact_id": "1af6d79d17a5346f7676321a1a1c038a29dd820e7a18310747e912bcce33ac92",
+      "file_sha256": "8b34b3d5923a0ece0d6133f7de67a1b025d938b0ba2fc77885b9ebecdd76d212",
+      "schema": "chronovisor.recall-r3.v1",
+      "seal_and_readback_verified": true
+    },
+    "completion": {
+      "path": "af643d9623f78b8110ffa9eb40baf1d776da97cf68f57e7887e5faa491ef30e8.json",
+      "artifact_id": "af643d9623f78b8110ffa9eb40baf1d776da97cf68f57e7887e5faa491ef30e8",
+      "file_sha256": "68d49b4f2806d6d28f08c2d74b533e7eaa5313583b485bf68d568ef6fb3ff935",
+      "schema": "chronovisor.recall-r3-completion.v1",
+      "main_artifact_binding_verified": true,
+      "seal_and_readback_verified": true
+    },
+    "independent_process_readback": true,
+    "post_exit_file_hashes_verified": true
+  },
+  "acceptance": {
+    "samples": 100,
+    "successful_cycles": 100,
+    "claim_p95_ns": 26945667,
+    "claim_p95_limit_ns": 500000000,
+    "teacher_handoff_accepted": 100,
+    "teacher_handoff_completed": 100,
+    "teacher_handoff_ns": 2928027125,
+    "teacher_handoff_limit_ns": 10000000000,
+    "receipt_coverage_pct": 100.0,
+    "progress_coverage_pct": 100.0,
+    "duplicates": 0,
+    "sigterm_returncode": -15,
+    "sigterm_receipt_chain_verified": true,
+    "old_owner_rejected": true,
+    "lease_reclaimed": true,
+    "idempotent_commit": true,
+    "leased_after": 0,
+    "clone_cleanup_remaining": 0
+  },
+  "production_workset": {
+    "external_boundary_readback_verified": true,
+    "read_mode": "immutable-ro",
+    "nonempty_wal_or_journal_fail_closed": true,
+    "content_sha256_before": "1a4d4b2e1db2985efda940ab4de0a47a181d83de00bcad17f31e873782735bdc",
+    "content_sha256_after": "1a4d4b2e1db2985efda940ab4de0a47a181d83de00bcad17f31e873782735bdc",
+    "row_count_before": 32522,
+    "row_count_after": 32522,
+    "state_counts_before": {
+      "completed": 152,
+      "quarantined": 12970,
+      "ready": 19400
+    },
+    "state_counts_after": {
+      "completed": 152,
+      "quarantined": 12970,
+      "ready": 19400
+    },
+    "distinct_work_ids": 32522,
+    "active_lease_fields": 0,
+    "lock_file_count": 8,
+    "distillation_lock_holders": 0,
+    "clone_temp_remaining": 0
+  },
+  "sqlite_file_boundary": {
+    "external_pre_captured_at": "2026-08-25T00:46:23+0900",
+    "external_post_captured_at": "2026-08-25T00:46:46+0900",
+    "sealed_sidecar_metadata_identical": true,
+    "main": {
+      "size_before": 49459200,
+      "size_after": 49459200,
+      "mtime_ns_before": 1787519839286336952,
+      "mtime_ns_after": 1787519839286336952,
+      "sha256_before": "3ab11a6fccbea151808c47b57ac28f9aa21f9a3090686dc6b2084790fb50a9eb",
+      "sha256_after": "3ab11a6fccbea151808c47b57ac28f9aa21f9a3090686dc6b2084790fb50a9eb"
+    },
+    "wal": {
+      "size_before": 0,
+      "size_after": 0,
+      "mtime_ns_before": 1787581094761559166,
+      "mtime_ns_after": 1787581094761559166,
+      "sha256_before": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256_after": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "shm": {
+      "size_before": 32768,
+      "size_after": 32768,
+      "mtime_ns_before": 1787585976328473182,
+      "mtime_ns_after": 1787585976328473182,
+      "sha256_before": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+      "sha256_after": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+    },
+    "journal_absent": true
+  },
+  "service_boundary": {
+    "ingest": {
+      "launchd_state": "running",
+      "parent_pid": 40569,
+      "child_pid": 40585,
+      "archive": "KflEUpF1Dz4eyDNgWaS8e",
+      "direct_url_commit": "37132ea7b68bc715c249648d90953fd397f07334",
+      "lock_holder_pid": 40585
+    },
+    "sleep": "bootout",
+    "converge": "bootout",
+    "distillation_config": {
+      "enabled": true,
+      "teacher_profile": "ox-alpha-single-v1",
+      "teacher_max_inflight": 10,
+      "teacher_claim_limit": 1,
+      "ox_enabled": false,
+      "ox_free_only": true
+    },
+    "distillation_processes": 0,
+    "distillation_lock_holders": 0,
+    "workset_leased": 0
+  },
+  "fresh_dashboard": {
+    "captured_at": "2026-08-25T00:47:18+0900",
+    "health_status": "alert",
+    "runtime_commit": "37132ea7b68bc715c249648d90953fd397f07334",
+    "expected_commit": "37132ea7b68bc715c249648d90953fd397f07334",
+    "runtime_drift": false,
+    "runtime_status": "ok",
+    "runtime_state": "running",
+    "mutation_authority": "ready",
+    "mutation_ready": true,
+    "active_failure_present": false,
+    "last_failure_at": "2026-08-25T00:25:36",
+    "ingest_liveness_status": "alert",
+    "ingest_liveness_observed_at": "2026-08-24T20:57:49",
+    "ingest_liveness_stale": true,
+    "ingest_liveness_alert": true,
+    "ingest_runtime_state": "ready",
+    "ingest_mutation_ready": true,
+    "pending_raws": 2143
+  },
+  "seal_sha256": "61de977ab58769929b037960f4a1daa0bbaa7dd4360cbcdc4795b5fc8a198b3e"
+}

@@ -1,0 +1,111 @@
+{
+  "schema": "chronovisor.recall-r3-external-receipt.v1",
+  "namespace": "recall-distillation",
+  "captured_at": "2026-08-25T00:22:43+0900",
+  "verdict": "approved",
+  "scope": "production Workset DB, receipt/state/pointers/locks; Raw/catalog/FTS/ledgers/unrelated runtime excluded_not_evaluated",
+  "execution": {
+    "source_commit": "b9f90379d5b24015072af958ca085e5bc2c21d90",
+    "source_clean_after": true,
+    "external_watchdog_seconds": 600,
+    "retry_count": 0,
+    "returncode": 0,
+    "timed_out": false,
+    "provider_calls": 0,
+    "production_mutation": false,
+    "outer_elapsed_ns": 21671754000
+  },
+  "artifacts": {
+    "main": {
+      "path": "16a20947938467018674301ddc9e4e8120ba9f79f895c11308a69a378e341d3c.json",
+      "artifact_id": "16a20947938467018674301ddc9e4e8120ba9f79f895c11308a69a378e341d3c",
+      "file_sha256": "00ad85a4411a86757c00257eeed81e615fa67e4c959e24ec71e2f5677f4defca",
+      "schema": "chronovisor.recall-r3.v1",
+      "seal_and_readback_verified": true
+    },
+    "completion": {
+      "path": "420180c2385e96f0332b6bfd8af2ed9b5557c367530af8c5acbefbd7e9eb855b.json",
+      "artifact_id": "420180c2385e96f0332b6bfd8af2ed9b5557c367530af8c5acbefbd7e9eb855b",
+      "file_sha256": "54556c3b6793c28b3fbcd7c4a08ee53ab2444180661c86d268c5d1114e7d7274",
+      "schema": "chronovisor.recall-r3-completion.v1",
+      "main_artifact_binding_verified": true,
+      "seal_and_readback_verified": true
+    },
+    "independent_process_readback": true,
+    "post_exit_file_hashes_verified": true
+  },
+  "acceptance": {
+    "samples": 100,
+    "successful_cycles": 100,
+    "claim_p95_ns": 24804291,
+    "claim_p95_limit_ns": 500000000,
+    "teacher_handoff_accepted": 100,
+    "teacher_handoff_completed": 100,
+    "teacher_handoff_ns": 3054606083,
+    "teacher_handoff_limit_ns": 10000000000,
+    "receipt_coverage_pct": 100.0,
+    "progress_coverage_pct": 100.0,
+    "duplicates": 0,
+    "sigterm_returncode": -15,
+    "sigterm_receipt_chain_verified": true,
+    "old_owner_rejected": true,
+    "idempotent_commit": true,
+    "leased_after": 0,
+    "clone_cleanup_remaining": 0
+  },
+  "production_workset": {
+    "external_boundary_readback_verified": true,
+    "content_sha256_before": "1a4d4b2e1db2985efda940ab4de0a47a181d83de00bcad17f31e873782735bdc",
+    "content_sha256_after": "1a4d4b2e1db2985efda940ab4de0a47a181d83de00bcad17f31e873782735bdc",
+    "row_count_before": 32522,
+    "row_count_after": 32522,
+    "state_counts_before": {
+      "completed": 152,
+      "quarantined": 12970,
+      "ready": 19400
+    },
+    "state_counts_after": {
+      "completed": 152,
+      "quarantined": 12970,
+      "ready": 19400
+    },
+    "distinct_work_ids": 32522,
+    "active_lease_fields": 0,
+    "lock_file_count": 8,
+    "distillation_lock_holders": 0,
+    "clone_temp_remaining": 0
+  },
+  "service_boundary": {
+    "ingest": {
+      "launchd_state": "running",
+      "parent_pid": 40569,
+      "child_pid": 40585,
+      "lock_holder_pid": 40585
+    },
+    "sleep": "bootout",
+    "converge": "bootout",
+    "ox_enabled": false,
+    "distillation_processes": 0,
+    "workset_leased": 0
+  },
+  "fresh_dashboard": {
+    "status": "alert",
+    "runtime_commit": "37132ea7b68bc715c249648d90953fd397f07334",
+    "expected_commit": "37132ea7b68bc715c249648d90953fd397f07334",
+    "runtime_drift": false,
+    "runtime_state": "running",
+    "mutation_authority": "ready",
+    "mutation_ready": true,
+    "active_failure_present": true,
+    "active_failure_source": "ingest",
+    "active_failure_message_sha256": "61a782f34af573e4c29c05f8b8e77a366ebf657b966b52d42ae6c62b166cf7ca",
+    "ingest_liveness_status": "alert",
+    "ingest_liveness_observed_at": "2026-08-24T20:57:49",
+    "ingest_liveness_stale": true,
+    "ingest_liveness_alert": true,
+    "ingest_runtime_state": "ready",
+    "ingest_mutation_ready": true,
+    "pending_raws": 2143
+  },
+  "seal_sha256": "c0b0d2d287dfe0d1e1794bcd0a20b8154a6710e64a66068d9336ec4b6d950c8b"
+}
