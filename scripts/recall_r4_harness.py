@@ -2258,6 +2258,7 @@ def _collect_authoritative_production(
     }
     root_fd: int | None = None
     cwd_fd: int | None = None
+    restore_error: OSError | None = None
     try:
         expected_original = PRODUCTION_ROOT.expanduser().absolute()
         original_root = production_root.expanduser().absolute()
@@ -2457,8 +2458,8 @@ def _collect_authoritative_production(
         if cwd_fd is not None:
             try:
                 os.fchdir(cwd_fd)
-            except OSError:
-                pass
+            except OSError as exc:
+                restore_error = exc
         if root_fd is not None:
             try:
                 os.close(root_fd)
@@ -2469,6 +2470,8 @@ def _collect_authoritative_production(
                 os.close(cwd_fd)
             except OSError:
                 pass
+        if restore_error is not None:
+            raise R4Error("production cwd restore failed") from restore_error
 
 
 def _validate_production_attestations(

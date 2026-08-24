@@ -1085,6 +1085,40 @@ def test_authoritative_collector_restores_cwd_on_exception(
     assert Path.cwd() == before
 
 
+def test_authoritative_collector_fails_closed_on_cwd_restore_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path, source, commit)
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    anchor = _fixture_candidate_anchor(production)
+    monkeypatch.setattr(HARNESS, "_load_production_anchor", lambda _: anchor)
+    emergency_fd = os.open(".", os.O_RDONLY)
+    real_fchdir = HARNESS.os.fchdir
+    calls = 0
+
+    def fail_restore(fd: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("synthetic cwd restore failure")
+        real_fchdir(fd)
+
+    monkeypatch.setattr(HARNESS.os, "fchdir", fail_restore)
+    try:
+        with pytest.raises(HARNESS.R4Error, match="cwd restore"):
+            HARNESS.run(
+                source_root=source,
+                source_commit=commit,
+                output=tmp_path / "evidence",
+                production_root=production,
+            )
+    finally:
+        real_fchdir(emergency_fd)
+        os.close(emergency_fd)
+    assert list((tmp_path / "evidence").glob("*.json")) == []
+
+
 def test_authoritative_collector_can_certify_only_fixed_sealed_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
