@@ -131,9 +131,9 @@ def test_recall_distillation_kpi_reads_real_sealed_state_and_pointers(
     assert payload["lkg_policy_id"] == policy_ids[2][:12]
     assert payload["teacher_only"] == 1
     assert payload["verified_truth"] == 1
-    # A raw probe label and unbound observation receipt are not authority:
-    # only baseline locked-test probe pairs and stage-bound paired receipts count.
-    assert payload["probe_not_truth"] == 0
+    # Probe labels stay visible as non-truth telemetry; the unbound observation
+    # receipt still does not enter the stage-bound paired denominator.
+    assert payload["probe_not_truth"] == 1
     assert payload["paired_denominator"] == 0
     assert payload["hold_reason"] == "verified_truth_below_floor"
     assert payload["feature_revision"] == "recall-distill-text-v2"
