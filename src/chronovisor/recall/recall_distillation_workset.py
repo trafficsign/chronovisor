@@ -407,6 +407,60 @@ def _cursor_relation(before: Any, after: Any) -> int:
     raise DistillationWorksetError("progress cursor identity rewrite is invalid")
 
 
+def _is_legacy_ox_progress_upgrade(
+    before: Mapping[str, Any], after: Mapping[str, Any]
+) -> bool:
+    """Allow only the sealed R3 shape upgrade emitted by the OX caller."""
+
+    cursor = before["cursor"]
+    heads = before["ledger_heads"]
+    provenance = before["provenance"]
+    target_cursor = after["cursor"]
+    target_heads = after["ledger_heads"]
+    target_provenance = after["provenance"]
+    return (
+        before["progress_kind"] == "ox-label-v2"
+        and isinstance(cursor, Mapping)
+        and set(cursor) == {"labels"}
+        and isinstance(cursor["labels"], int)
+        and not isinstance(cursor["labels"], bool)
+        and cursor["labels"] >= 0
+        and heads.keys() == {"labels"}
+        and provenance.keys() == {"profile", "profile_contract_id"}
+        and provenance["profile"] == "ox-alpha-single-v1"
+        and after["progress_kind"] == "ox-workset-v2"
+        and isinstance(target_cursor, Mapping)
+        and set(target_cursor) == {"candidate_count", "label_count", "revision_epoch"}
+        and all(
+            isinstance(target_cursor[key], int)
+            and not isinstance(target_cursor[key], bool)
+            and target_cursor[key] >= 0
+            for key in target_cursor
+        )
+        and target_cursor["label_count"] == cursor["labels"]
+        and target_cursor["revision_epoch"] == 0
+        and target_heads.keys() == {"candidate", "labels"}
+        and target_heads["labels"] == heads["labels"]
+        and target_provenance.keys()
+        == {"profile", "profile_contract_id", "probe_revision", "split_plan_id"}
+        and target_provenance["profile"] == provenance["profile"]
+        and target_provenance["profile_contract_id"]
+        == provenance["profile_contract_id"]
+    )
+
+
+def _validate_progress_transition(
+    before: Mapping[str, Any], after: Mapping[str, Any]
+) -> None:
+    if _is_legacy_ox_progress_upgrade(before, after):
+        return
+    relation = _cursor_relation(before["cursor"], after["cursor"])
+    if relation < 0:
+        raise DistillationWorksetError("progress cursor regressed")
+    if relation == 0 and _json(before, "progress") != _json(after, "progress"):
+        raise DistillationWorksetError("progress cursor identity rewrite is invalid")
+
+
 def _item(value: Mapping[str, Any], watermark_json: str) -> tuple[Any, ...]:
     allowed = {
         "work_id",
@@ -632,11 +686,7 @@ class DistillationWorkset:
         normalized = _strict_progress(progress)
         before = cls._progress(connection)
         if before is not None:
-            relation = _cursor_relation(before["cursor"], normalized["cursor"])
-            if relation < 0:
-                raise DistillationWorksetError("progress cursor regressed")
-            if relation == 0 and _json(before, "progress") != _json(normalized, "progress"):
-                raise DistillationWorksetError("progress cursor identity rewrite is invalid")
+            _validate_progress_transition(before, normalized)
         connection.execute(
             "INSERT INTO workset_state (key, value_json) VALUES ('progress', ?) "
             "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
@@ -1034,13 +1084,28 @@ class DistillationWorkset:
                                 "workset receipt progress continuity failed"
                             )
                         legacy_origin = legacy_origin or prior_after is not None
-                    elif prior_after is not None and _json(
-                        before["progress"], "receipt progress"
-                    ) != _json(prior_after.get("progress"), "receipt progress"):
-                        raise DistillationWorksetError(
-                            "workset receipt progress continuity failed"
-                        )
+                    elif prior_after is not None:
+                        if "progress" not in prior_after:
+                            if not _is_legacy_ox_progress_upgrade(
+                                before["progress"], after["progress"]
+                            ):
+                                raise DistillationWorksetError(
+                                    "workset receipt progress continuity failed"
+                                )
+                            legacy_origin = True
+                        elif _json(
+                            before["progress"], "receipt progress"
+                        ) != _json(
+                            prior_after["progress"], "receipt progress"
+                        ):
+                            raise DistillationWorksetError(
+                                "workset receipt progress continuity failed"
+                            )
                     saw_v2 = True
+                    if before["progress"] is not None:
+                        _validate_progress_transition(
+                            before["progress"], after["progress"]
+                        )
                 if prior_after is None:
                     legacy_origin = (
                         before["counts"] != {state: 0 for state in _RECEIPT_STATES}

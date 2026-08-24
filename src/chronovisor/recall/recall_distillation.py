@@ -5314,7 +5314,11 @@ def _ox_workset_progress(
         "probe_revision": OX_PROBE_REVISION,
         "split_plan_id": split_plan_id,
     }
-    if prior and provenance != current_provenance:
+    if (
+        prior
+        and prior.get("progress_kind") != "ox-label-v2"
+        and provenance != current_provenance
+    ):
         epoch += 1
     return {
         "cursor": {
@@ -7852,6 +7856,30 @@ def cold_start_due(root: Path | None = None) -> bool:
     return state.get("cold_start_pending") is not False
 
 
+def _timeout_workset_statuses(root: Path) -> dict[str, dict[str, Any]]:
+    """Return only durable queue boundaries; timeout must not hide a bad queue."""
+
+    from chronovisor.recall.recall_distillation_workset import DistillationWorkset
+
+    statuses: dict[str, dict[str, Any]] = {}
+    for name, filename in (
+        ("ox_workset", "ox-workset.sqlite3"),
+        ("local_workset", "local-workset.sqlite3"),
+    ):
+        path = store.distillation_dir(root) / filename
+        try:
+            if not path.exists():
+                statuses[name] = {"observation": "missing"}
+            else:
+                statuses[name] = {
+                    "observation": "available",
+                    **DistillationWorkset(path).status(include_timing=True),
+                }
+        except Exception:
+            statuses[name] = {"observation": "unavailable"}
+    return statuses
+
+
 def run_distillation_chunk(
     *,
     root: Path | None = None,
@@ -7908,6 +7936,7 @@ def run_distillation_chunk(
                 "processed": 0,
                 "reason": "wall_clock_timeout",
                 "atomic_progress_may_be_present": True,
+                **_timeout_workset_statuses(resolved_root),
             }
     finally:
         store.release_lock(lock)

@@ -1617,6 +1617,71 @@ def test_final_state_is_last_commit_and_binds_completed_run(
     assert state["run_id"] == completed["run_id"]
 
 
+def test_timeout_reports_payload_free_durable_workset_boundaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall.recall_runtime import RecallWallClockTimeout
+
+    runtime_dir = store.distillation_dir(tmp_path)
+    for filename, progress in (
+        (
+            "ox-workset.sqlite3",
+            {
+                "cursor": {"candidate_count": 0, "label_count": 1, "revision_epoch": 0},
+                "ledger_heads": {"candidate": "", "labels": "a" * 64},
+                "provenance": {
+                    "profile": distill.OX_SINGLE_PROFILE,
+                    "profile_contract_id": "b" * 64,
+                    "probe_revision": distill.OX_PROBE_REVISION,
+                    "split_plan_id": "",
+                },
+                "progress_kind": "ox-workset-v2",
+            },
+        ),
+        (
+            "local-workset.sqlite3",
+            {
+                "cursor": {"candidate_count": 0, "label_count": 2},
+                "ledger_heads": {"candidate": "", "labels": "c" * 64},
+                "provenance": {
+                    "assignment_revision": distill.ASSIGNMENT_REVISION,
+                    "probe_revision": distill.PROBE_REVISION,
+                    "split_plan_id": "",
+                },
+                "progress_kind": "local-workset-v2",
+            },
+        ),
+    ):
+        workset.DistillationWorkset(runtime_dir / filename).advance(
+            [], {"source": filename}, progress=progress
+        )
+
+    def timeout(**_kwargs: object) -> dict[str, object]:
+        raise RecallWallClockTimeout("test timeout")
+
+    monkeypatch.setattr(distill, "_run_distillation_chunk_impl", timeout)
+    result = distill.run_distillation_chunk(root=tmp_path, max_elapsed_seconds=60)
+
+    assert result["reason"] == "wall_clock_timeout"
+    for name in ("ox_workset", "local_workset"):
+        status = result[name]
+        assert status["observation"] == "available"
+        assert status["last_durable_progress"]
+        assert status["last_durable_receipt"]["generation"] > 0
+        assert "payload_ref" not in json.dumps(status)
+
+
+def test_timeout_workset_observation_marks_missing_and_corrupt_queue(tmp_path: Path) -> None:
+    runtime_dir = store.distillation_dir(tmp_path)
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / "ox-workset.sqlite3").write_bytes(b"not sqlite")
+
+    statuses = distill._timeout_workset_statuses(tmp_path)
+
+    assert statuses["ox_workset"] == {"observation": "unavailable"}
+    assert statuses["local_workset"] == {"observation": "missing"}
+
+
 def test_chunk_commits_ox_ramp_with_the_completed_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
