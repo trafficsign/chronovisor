@@ -6061,6 +6061,7 @@ def _health_with_live_truth(cached_value: Any) -> dict[str, Any]:
     runtime_health = health_runtime_status_kpi()
     result = {
         **cached,
+        "runtime": runtime_identity(),
         "ingest_liveness": ingest_liveness,
         "runtime_status": runtime_health,
     }

@@ -4900,6 +4900,11 @@ def test_health_live_truth_overlays_cached_authority_liveness_and_age(
     chronovisor_root = tmp_path / "wiki"
     monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
     monkeypatch.setattr(dashboard.time, "time", lambda: 100.0)
+    monkeypatch.setattr(
+        dashboard,
+        "runtime_identity",
+        lambda: {"commit_id": "live-commit", "drift": False},
+    )
     cached = {
         "status": "ok",
         "stale": False,
@@ -4940,6 +4945,7 @@ def test_health_live_truth_overlays_cached_authority_liveness_and_age(
     assert health["stale"] is False
     assert health["ingest_liveness"]["observed_at"] == "live"
     assert health["runtime_status"]["state"] == "running"
+    assert health["runtime"]["commit_id"] == "live-commit"
     assert health["current_authority"]["authority_digest"] == "live"
     assert cached == original
 
