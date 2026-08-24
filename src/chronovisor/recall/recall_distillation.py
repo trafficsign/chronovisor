@@ -2968,6 +2968,8 @@ def _materialization_label_row(
         "expires_at": str(label.get("expires_at") or ""),
         "identity_revision": str(label.get("identity_revision") or ""),
         "request_revision": str(label.get("request_revision") or ""),
+        "group_id": temporal_group_id,
+        "label_split_plan_id": str(label.get("split_plan_id") or ""),
         "order_agreement": label.get("order_agreement") is True,
         "label_record_sha256": label_record_sha256,
         "payload_digest": str(label.get("payload_digest") or ""),
@@ -3003,9 +3005,7 @@ def _materialization_label_row(
                 "provider_response_request_sha256": str(
                     label.get("provider_response_request_sha256") or ""
                 ),
-                "group_id": temporal_group_id,
                 "group_identity_exact": temporal_group_id == session_cluster_id,
-                "label_split_plan_id": str(label.get("split_plan_id") or ""),
                 "as_of": temporal_as_of,
                 "future_leakage_evidence_ref": (
                     f"candidate-snapshot:{contract['snapshot_sha256']}"
@@ -3293,6 +3293,10 @@ def _authoritative_materialized_row_binding(
         row.get(key) != value for key, value in canonical.items()
     ):
         return False
+    if str(row.get("source") or "") == "counterfactual-label" and not _sealed_counterfactual_exposure_binding(
+        root, row, label, rallies.get(str(row.get("rally_id") or ""))
+    ):
+        return False
     if not _configured_local_route_binding(row):
         return False
     expected_plan = split_plan
@@ -3313,6 +3317,93 @@ def _authoritative_materialized_row_binding(
         or row.get("locked_test_read_only") is not (split == "test")
         or row.get("locked_test_evidence_ref")
         != (f"split-plan:{plan_id}" if split == "test" else "")
+    )
+
+
+def _sealed_counterfactual_exposure_binding(
+    root: Path,
+    row: Mapping[str, Any],
+    label: Mapping[str, Any],
+    rally: Mapping[str, Any] | None,
+) -> bool:
+    """Require CF rows to remain anchored to one verified prior exposure.
+
+    The hash chain proves that the label existed, but not that its blind
+    comparison used an actually captured exposure.  Reuse the verified
+    exposure-receipt projection here so direct publication cannot substitute a
+    self-consistent, nonexistent ``counterfactual_ref``.
+    """
+
+    reference = str(row.get("counterfactual_ref") or "")
+    if (
+        rally is None
+        or re.fullmatch(r"[0-9a-f]{64}", reference) is None
+        or label.get("exposure_artifact_id") != reference
+    ):
+        return False
+    authority_fields = (
+        "rally_id",
+        "profile",
+        "cohort",
+        "assignment_revision",
+        "as_of",
+        "group_id",
+        "a0_sha256",
+        "a1_sha256",
+        "blind_orders",
+        "counterfactual_producer",
+        "counterfactual_revision",
+        "generator_route_identity",
+        "generator_model_digest",
+        "judge_route_identity",
+        "judge_model_digest",
+    )
+    if any(row.get(key) != label.get(key) for key in authority_fields) or (
+        row.get("candidate_id") != str(label.get("candidate_id") or "")
+    ) or (
+        row.get("label_split_plan_id") != label.get("split_plan_id")
+    ):
+        return False
+    rally_receipts = rally.get("exposure_receipts")
+    if not isinstance(rally_receipts, list):
+        return False
+    matching_rally_receipts = [
+        receipt
+        for receipt in rally_receipts
+        if isinstance(receipt, Mapping)
+        and receipt.get("exposure_artifact_id") == reference
+    ]
+    if len(matching_rally_receipts) != 1:
+        return False
+    try:
+        exact_receipts = _exposure_map(root).get(
+            (
+                str(rally.get("host") or ""),
+                str(rally.get("session_id_sha256") or ""),
+                str(rally.get("query_sha256") or ""),
+            ),
+            [],
+        )
+        artifact = store.read_sealed(
+            store.distillation_dir(root) / "exposures" / f"{reference}.json",
+            schema="chronovisor.recall-exact-exposure.v1",
+        )
+    except (KeyError, TypeError, store.DistillationStoreError):
+        return False
+    receipt = next(
+        (
+            item
+            for item in exact_receipts
+            if item.get("exposure_artifact_id") == reference
+        ),
+        None,
+    )
+    if receipt is None or artifact.get("artifact_id") != reference:
+        return False
+    return (
+        matching_rally_receipts[0].get("candidate_ids")
+        == receipt.get("candidate_ids")
+        and artifact.get("candidate_ids") == receipt.get("candidate_ids")
     )
 
 

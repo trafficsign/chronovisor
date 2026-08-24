@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.core import canonical_json
 from chronovisor.recall import recall_distillation as distill
 from chronovisor.recall import recall_distillation_store as store
 from chronovisor.recall.recall_distillation_workset import DistillationWorkset
@@ -29,6 +31,52 @@ def _sealed_counterfactual_exposure(
         "exposure_artifact_id": artifact_id,
         "candidate_ids": candidate_ids or [],
     }
+
+
+def _record_counterfactual_exposure(
+    root: Path, *, host: str, session_id_sha256: str, query_sha256: str
+) -> dict[str, object]:
+    """Create the canonical receipt projection used by root lineage checks."""
+
+    binding = {
+        "decision_id": "decision-1",
+        "host": host,
+        "session_id_sha256": session_id_sha256,
+        "query_semantic_sha256": query_sha256,
+        "policy_id": "a" * 64,
+        "candidate_ids": [],
+        "candidate_refs_sha256": "b" * 64,
+        "candidate_pool_refs_sha256": "c" * 64,
+        "candidate_feature_snapshot_sha256": "d" * 64,
+        "runtime_observation_sha256": "e" * 64,
+        "render_sha256": "f" * 64,
+        "renderer_revision": "test-renderer-v1",
+        "context_style": "test",
+        "candidate_snapshot_sha256": "1" * 64,
+        "observed_at": "2026-01-01T00:00:00Z",
+    }
+    artifact_id, _, _ = store.write_immutable(
+        store.distillation_dir(root) / "exposures",
+        {
+            "kind": "exact-rendered-exposure",
+            **binding,
+            "candidate_refs": [],
+            "candidate_pool_refs": [],
+            "candidate_feature_snapshot": [],
+            "runtime_observation": {},
+        },
+        schema="chronovisor.recall-exact-exposure.v1",
+    )
+    receipt = {
+        "kind": "prospective-exact-exposure-v1",
+        **binding,
+        "binding_sha256": canonical_json.canonical_json_sha256_strict(binding),
+        "exposure_artifact_id": artifact_id,
+    }
+    store.append_chain(
+        store.distillation_dir(root) / "exposure-receipts.jsonl", receipt
+    )
+    return {"exposure_artifact_id": artifact_id, "candidate_ids": []}
 
 
 def test_local_workset_reconciles_appended_label_without_repeat_call(
@@ -582,12 +630,21 @@ def test_counterfactual_preserves_raw_candidate_id_in_label(
     )
     rally = {
         "rally_id": "rally-1",
+        "host": "test-host",
+        "session_id_sha256": "s" * 64,
         "session_cluster_id": "session-1",
         "as_of": "2026-01-01T00:00:00Z",
         "query_sha256": "query",
         "context_refs": [],
         "actual_answer_refs": [{"semantic_sha256": "answer"}],
-        "exposure_receipts": [_sealed_counterfactual_exposure(tmp_path)],
+        "exposure_receipts": [
+            _record_counterfactual_exposure(
+                tmp_path,
+                host="test-host",
+                session_id_sha256="s" * 64,
+                query_sha256="query",
+            )
+        ],
     }
     snapshots = {
         "rally-1": {
@@ -623,13 +680,33 @@ def test_counterfactual_preserves_raw_candidate_id_in_label(
     assert labels[0]["assignment"]["revision"] == distill.ASSIGNMENT_REVISION
     assert labels[0]["assignment_revision"] == distill.ASSIGNMENT_REVISION
     assert labels[0]["identity_revision"] == "local-blind-counterfactual-v1"
-    materialized = distill.materialize_training_rows(
-        tmp_path,
-        _rallies=[rally],
-        _snapshots=snapshots,
-        _label_rows=labels,
-    )["rows"]
+    monkeypatch.setattr(
+        distill,
+        "_materialization_rallies",
+        lambda _root, _supplied: {"rally-1": rally},
+    )
+    monkeypatch.setattr(
+        distill,
+        "_materialization_snapshots",
+        lambda _root, _supplied: snapshots,
+    )
+    materialized = distill.materialize_training_rows(tmp_path)["rows"]
     assert materialized[0]["assignment_revision"] == distill.ASSIGNMENT_REVISION
     assert materialized[0]["identity_revision"] == "local-blind-counterfactual-v1"
     assert distill._materialized_row_integrity(materialized[0]) is True
+    assert distill._sealed_counterfactual_exposure_binding(
+        tmp_path, materialized[0], labels[0], rally
+    ) is True
     assert distill._configured_local_route_binding(materialized[0]) is True
+    assert distill._materialized_row_integrity(materialized[0], root=tmp_path) is True
+    missing = {**materialized[0], "counterfactual_ref": "c" * 64}
+    assert distill._materialized_row_integrity(missing, root=tmp_path) is False
+    exposure_path = (
+        store.distillation_dir(tmp_path)
+        / "exposures"
+        / f"{materialized[0]['counterfactual_ref']}.json"
+    )
+    tampered = json.loads(exposure_path.read_text(encoding="utf-8"))
+    tampered["candidate_ids"] = ["evil"]
+    exposure_path.write_text(json.dumps(tampered), encoding="utf-8")
+    assert distill._materialized_row_integrity(materialized[0], root=tmp_path) is False
