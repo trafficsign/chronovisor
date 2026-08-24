@@ -1,0 +1,278 @@
+from __future__ import annotations
+
+import importlib.util
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location(
+    "recall_r2_harness_test_module", ROOT / "scripts" / "recall_r2_harness.py"
+)
+assert SPEC is not None and SPEC.loader is not None
+HARNESS = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = HARNESS
+SPEC.loader.exec_module(HARNESS)
+
+
+def test_p95_uses_nearest_rank_without_float_rounding() -> None:
+    assert HARNESS._p95(list(range(1, 21))) == 19
+    assert HARNESS._p95([10, 1, 5, 2, 9]) == 10
+
+
+def test_read_counters_separate_logical_and_physical_old_bytes() -> None:
+    path = Path("/tmp/r2-segment")
+    counters = HARNESS.ReadCounters(
+        old_ids=frozenset({"old"}), old_ranges={path.resolve(): ((0, 10),)}
+    )
+    counters.record_logical("new", 4)
+    counters.record_logical("old", 6)
+    counters.record_range(path, 0, 20)
+    assert counters.logical_old_bytes == 6
+    assert counters.logical_new_bytes == 4
+    assert counters.physical_old_bytes == 10
+    assert counters.range_overlaps[0]["old_overlap_bytes"] == 10
+
+
+def test_evidence_digest_does_not_depend_on_row_order() -> None:
+    rows = [("events", (2, "b")), ("events", (1, "a"))]
+    reversed_rows = list(reversed(rows))
+    assert HARNESS._canonical_digest(iter(rows)) != HARNESS._canonical_digest(
+        iter(reversed_rows)
+    )
+
+
+def test_non_darwin_is_explicitly_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(HARNESS.sys, "platform", "linux")
+    with pytest.raises(HARNESS.R2Error, match="Darwin/APFS"):
+        HARNESS._require_supported_environment(Path("/tmp"))
+
+
+def test_r2_schema_is_versioned_and_evidence_limit_is_bounded() -> None:
+    assert HARNESS.R2_SCHEMA == "chronovisor.recall-r2.v1"
+    assert HARNESS.MAX_EVIDENCE_BYTES == 2 * 1024 * 1024
+    assert HARNESS.DEFAULT_DELTA_SAMPLES >= 20
+
+
+def test_root_matrix_rejects_every_protected_overlap(tmp_path: Path) -> None:
+    production = tmp_path / "production"
+    source = tmp_path / "source"
+    production.mkdir()
+    source.mkdir()
+    output = tmp_path / "evidence.json"
+    HARNESS._assert_root_matrix(production, source, output)
+    with pytest.raises(HARNESS.R2Error, match="overlap"):
+        HARNESS._assert_root_matrix(production, production / "nested", output)
+
+
+def test_root_matrix_rejects_symlink_entry_points(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(HARNESS.R2Error, match="symlink"):
+        HARNESS._assert_root_matrix(link, target, tmp_path / "evidence.json")
+
+
+def test_repair_parity_ignores_file_state_but_checks_inventory_and_duplicates() -> None:
+    expected = {
+        "catalog": {
+            "exists": True,
+            "rows": {"raw_units": 2},
+            "duplicates": {"raw_units": 0},
+            "columns": {"raw_units": ["raw_id"]},
+            "digest": "catalog",
+            "file_state": {"st_ino": 1},
+        },
+        "fts": {"exists": True, "rows": 1, "digest": "fts", "file_state": {}},
+        "inventory": {"count": 2, "ids_sha256": "ids", "status_counts": {"indexed": 2}},
+    }
+    repaired = {
+        **expected,
+        "catalog": {**expected["catalog"], "file_state": {"st_ino": 2}},
+        "fts": {**expected["fts"], "file_state": {"st_ino": 3}},
+    }
+    HARNESS._assert_repair_parity(repaired, expected, "repair")
+    repaired["inventory"] = {**expected["inventory"], "count": 1}
+    with pytest.raises(HARNESS.R2Error, match="inventory"):
+        HARNESS._assert_repair_parity(repaired, expected, "repair")
+
+
+def test_warm_rejects_assistant_full_scan() -> None:
+    metrics = {
+        "raw": {
+            "logical_old_reads": 0,
+            "logical_old_bytes": 0,
+            "logical_new_reads": 0,
+            "logical_new_bytes": 0,
+            "physical_old_bytes": 0,
+            "full_raw_scans": 0,
+        },
+        "scans": {
+            "full_event_scans": 0,
+            "full_rally_scans": 0,
+            "full_session_scans": 0,
+            "full_fts_scans": 0,
+            "assistant_scans": 1,
+            "full_fts_rebuilds": 0,
+            "fts_scan_statements": 0,
+        },
+    }
+    with pytest.raises(HARNESS.R2Error, match="scanned"):
+        HARNESS._assert_warm(metrics)
+
+
+def test_clone_cleanup_is_verified(tmp_path: Path) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    (clone / "marker").write_text("x", encoding="utf-8")
+    HARNESS._cleanup_clone(clone)
+    assert not clone.exists()
+
+
+def test_paired_append_uses_path_neutral_receipt_identity(tmp_path: Path) -> None:
+    class FakeRawSegment:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def append_capture(self, **kwargs: object) -> object:
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                commit=SimpleNamespace(
+                    sha256="a" * 64,
+                    to_dict=lambda: {
+                        "raw_id": kwargs["raw_id"],
+                        "session_key": kwargs["session_key"],
+                        "source_file": str(kwargs["source_file"]),
+                    },
+                ),
+            )
+
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    raw_segment = FakeRawSegment()
+    events = [HARNESS._message("assistant", "same", 1)]
+    first = HARNESS._append_events(
+        raw_segment,
+        first_root,
+        session_key="paired",
+        after_line=0,
+        events=events,
+        tag="paired",
+        logical_source_file=Path("r2-paired.jsonl"),
+    )
+    second = HARNESS._append_events(
+        raw_segment,
+        second_root,
+        session_key="paired",
+        after_line=0,
+        events=events,
+        tag="paired",
+        logical_source_file=Path("r2-paired.jsonl"),
+    )
+    assert first == second
+    assert raw_segment.calls[0]["source_file"] == raw_segment.calls[1]["source_file"]
+    assert raw_segment.calls[0]["source_bytes"] == raw_segment.calls[1]["source_bytes"]
+
+
+def test_post_commit_child_receives_context_bytes() -> None:
+    assert "context_bytes = int(sys.argv[4])" in HARNESS._POST_COMMIT_CHILD
+    assert 'catalog.advance(root / "raw", root, context_bytes)' in (
+        HARNESS._POST_COMMIT_CHILD
+    )
+
+
+def test_source_digest_catches_dirty_tracked_and_untracked_bytes(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "scripts").mkdir()
+    tracked = repo / "tracked.txt"
+    untracked = repo / "tests-dirty.txt"
+    tracked.write_text("before", encoding="utf-8")
+    untracked.write_text("one", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    tracked.write_text("dirty-before", encoding="utf-8")
+    before = HARNESS._source_tree_digest(repo)
+    tracked.write_text("dirty-after", encoding="utf-8")
+    untracked.write_text("two", encoding="utf-8")
+    after = HARNESS._source_tree_digest(repo)
+    assert before["git_status_sha256"] == after["git_status_sha256"]
+    assert before["repo"]["content_sha256"] != after["repo"]["content_sha256"]
+
+
+def test_bounded_chain_never_reads_ledger_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = tmp_path / "candidate-ledger.jsonl"
+    ledger.write_bytes(b"x" * 128)
+    state = HARNESS.R0._stat(ledger)
+    assert state is not None
+
+    class BoundedStore:
+        DISTILLATION_SCHEMA = "schema"
+
+        @staticmethod
+        def _chain_checkpoint_path(path: Path) -> Path:
+            return path.with_suffix(path.suffix + ".checkpoint.json")
+
+        @staticmethod
+        def read_sealed(_path: Path, *, schema: str) -> dict[str, object]:
+            assert schema == "schema"
+            return {
+                "kind": "ledger-chain-checkpoint",
+                "ledger_name": ledger.name,
+                "records": 1,
+                "head_sha256": "a" * 64,
+                "file_state": state,
+            }
+
+        @staticmethod
+        def verify_chain(_path: Path) -> None:
+            raise AssertionError("bounded snapshot must not replay the ledger")
+
+    def fail_read_bytes(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("bounded snapshot must not read ledger bytes")
+
+    monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+    result = HARNESS._bounded_chain(
+        BoundedStore(), ledger, require_checkpoint_file_state=True
+    )
+    assert result["records"] == 1
+    assert result["bytes"] == 128
+
+
+def test_raw_state_digest_does_not_read_file_bodies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "segment.jsonl.open").write_bytes(b"payload")
+
+    def fail_open(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Raw state digest must not open bodies")
+
+    monkeypatch.setattr(Path, "open", fail_open)
+    monkeypatch.setattr(Path, "read_bytes", fail_open)
+    result = HARNESS._raw_tree_state_digest(tmp_path)
+    assert result["file_count"] == 1
+    assert result["bytes"] == 7
+
+
+def test_clone_temp_preflight_rejects_source_as_temp_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    monkeypatch.setattr(HARNESS.sys, "platform", "darwin")
+    monkeypatch.setattr(HARNESS.tempfile, "gettempdir", lambda: str(source))
+    with pytest.raises(HARNESS.R2Error, match="overlaps source"):
+        HARNESS._clone_from_root(source)
