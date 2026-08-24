@@ -1,0 +1,98 @@
+{
+  "schema": "chronovisor.recall-r2-external-receipt.v1",
+  "verdict": "approved",
+  "scope": "one production-sized frozen APFS clone formal run",
+  "started_at": "2026-08-24T22:05:45+09:00",
+  "finished_at": "2026-08-24T22:27:18+09:00",
+  "formal_source": {
+    "commit": "ccf9f604d3ed8635a86d1559aed58aff4b8b8a99",
+    "clean": true,
+    "integrated_hardening_commit": "76ade55",
+    "post_run_source_contract": "dd5a60e1718020a48ad2cfa01b034ab5ee960235"
+  },
+  "formal": {
+    "return_code": 0,
+    "wall_seconds": 1281.413,
+    "limit_seconds": 1500,
+    "watchdog_seconds": 1490,
+    "phase_intervals": 139,
+    "phase_starts": 139,
+    "phase_finishes": 139,
+    "phase_errors": 0,
+    "open_phases": 0,
+    "phase_union_seconds": 1254.926,
+    "unaccounted_seconds": 26.112
+  },
+  "thresholds": {
+    "warm_samples": 20,
+    "warm_p95_ns": 622786500,
+    "warm_limit_ns": 1000000000,
+    "delta_samples": 20,
+    "delta_p95_ns": 1857437958,
+    "delta_limit_ns": 15000000000
+  },
+  "corpus": {
+    "raw_units": 18633,
+    "events": 200763,
+    "rallies": 8050,
+    "duplicate_ids": 0
+  },
+  "artifacts": {
+    "artifact": {
+      "path": "r2-production-0f97f4ac.json",
+      "sha256": "d4269142946bdc6f701280a2fbafb04493784885f0d40faceff12c88ad46652e"
+    },
+    "completion": {
+      "path": "r2-production-0f97f4ac.completion.receipt",
+      "sha256": "3cd951d398df622dda840dbeac01f8efbb43a12cb00f7dadbe08f46c85dc251e"
+    },
+    "phases": {
+      "path": "r2-production-0f97f4ac.phases.jsonl",
+      "sha256": "1b6078c1f175a41690aed9948c7866c7651a1a7dadd04d32a92a98041858aeff"
+    },
+    "frozen_manifest": {
+      "path": "r2-production-16e27d7a.frozen-manifest.json",
+      "sha256": "b5cee40db85da3cf1b39f665a5e4dc30444123453d1c262158a57d182eefdf29"
+    }
+  },
+  "independent_readback": {
+    "artifact_content_id_and_seal": true,
+    "completion_artifact_binding": true,
+    "manifest_content_id_and_seal": true,
+    "lstat_sha256_restat_stable": true,
+    "artifact_phase_timing_is_pre_completion": true,
+    "completion_and_outer_receipt_cover_final_phases": true
+  },
+  "integrity": {
+    "production_source_before_after_equal": true,
+    "production_static_before_after_equal": true,
+    "production_raw_before_after_equal": true,
+    "production_catalog_before_after_equal": true,
+    "session_tail_parity": true,
+    "checkpoint_repair_parity": true,
+    "database_tamper_repair_parity": true,
+    "post_commit_crash_recovery_parity": true,
+    "independent_full_rebuild_parity": true
+  },
+  "cleanup": {
+    "clone_count": 30,
+    "verified": true,
+    "owned_temp_count": 0,
+    "remaining_clone_paths": 0,
+    "remaining_temp_prefixes": 0,
+    "formal_processes": 0
+  },
+  "live_boundary": {
+    "ingest_parent_pid": 40569,
+    "ingest_child_pid": 40585,
+    "ingest_lock_holder": 40585,
+    "sleep_bootout": true,
+    "converge_bootout": true,
+    "ox_enabled": false,
+    "distillation_processes": 0,
+    "distillation_lock_holders": 0,
+    "leased_work": 0,
+    "runtime_commit": "37132ea7b68bc715c249648d90953fd397f07334",
+    "runtime_drift": false
+  }
+}
