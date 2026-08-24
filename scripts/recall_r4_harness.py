@@ -4,18 +4,20 @@
 The harness validates receipts; it does not run a teacher or make a provider
 request.  A source-contract verdict is intentionally independent from the
 production verdict: synthetic receipts can exercise the contract, while
-production certification stays disabled until an independently authenticated
-runtime/resource/process/egress evidence chain is available.
+production certification requires the fixed managed root's sealed runtime,
+workset, ledger-checkpoint, and quality evidence chain.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
 import re
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -25,6 +27,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback is fail-closed.
+    tomllib = None  # type: ignore[assignment]
 
 R4_SCHEMA = "chronovisor.recall-r4.v1"
 RECEIPT_SCHEMA = "chronovisor.recall-r4-receipt.v1"
@@ -61,6 +68,44 @@ LOCAL_MIN_INITIAL_RECEIPTS = 20
 LOCAL_MIN_VALID_RATE = 0.95
 LOCAL_MAX_LOAD_SKEW = 0.10
 LOCAL_PROBE_TOLERANCE = 0.02
+
+# Production evidence is intentionally rooted at the one managed Chronovisor
+# data directory.  The name is a module constant (rather than an environment
+# variable or a CLI value) so an arbitrary fixture cannot become authoritative.
+# Tests may replace this constant with an isolated root before calling the
+# private collector; the normal CLI never accepts a root override.
+PRODUCTION_ROOT = Path.home() / ".chronovisor"
+PRODUCTION_DISTILLATION_RELATIVE = Path("runtime") / "recall-distillation"
+PRODUCTION_WORKSET_RELATIVE = PRODUCTION_DISTILLATION_RELATIVE / "ox-workset.sqlite3"
+PRODUCTION_CANDIDATE_RELATIVE = (
+    PRODUCTION_DISTILLATION_RELATIVE / "candidate-ledger.jsonl"
+)
+PRODUCTION_CANDIDATE_CHECKPOINT_RELATIVE = (
+    PRODUCTION_DISTILLATION_RELATIVE / "candidate-ledger.jsonl.head.json"
+)
+PRODUCTION_LABEL_RELATIVE = PRODUCTION_DISTILLATION_RELATIVE / "label-ledger.jsonl"
+PRODUCTION_LABEL_CHECKPOINT_RELATIVE = (
+    PRODUCTION_DISTILLATION_RELATIVE / "label-ledger.jsonl.head.json"
+)
+PRODUCTION_STATE_RELATIVE = PRODUCTION_DISTILLATION_RELATIVE / "state.json"
+PRODUCTION_CONFIG_RELATIVE = Path("config.toml")
+PRODUCTION_CONTRACT_DIR_RELATIVE = (
+    PRODUCTION_DISTILLATION_RELATIVE / "ox-profile-contracts"
+)
+PRODUCTION_MAX_SQLITE_BYTES = 256 * 1024 * 1024
+PRODUCTION_MAX_LEDGER_BYTES = 4 * 1024 * 1024 * 1024
+PRODUCTION_MAX_FULL_LEDGER_BYTES = 8 * 1024 * 1024
+PRODUCTION_MAX_LEDGER_TAIL_BYTES = 512 * 1024
+PRODUCTION_MAX_ROWS = 100_000
+PRODUCTION_WORKSET_STATES = ("ready", "leased", "completed", "quarantined")
+PRODUCTION_WORKSET_OPERATIONS = {
+    "advance",
+    "claim_reclaim",
+    "claim",
+    "release",
+    "commit",
+}
+PRODUCTION_RAMP_CAPS = (1, 2, 5, 10)
 
 
 class R4Error(ValueError):
@@ -862,16 +907,1286 @@ def _validate_ox(
     }
 
 
+def _production_stat(path: Path, *, label: str) -> dict[str, int]:
+    """Capture one production file without following symlinks."""
+
+    if _has_symlink_component(path):
+        raise R4Error(f"{label} path contains a symlink")
+    try:
+        value = path.lstat()
+    except OSError as exc:
+        raise R4Error(f"{label} path is unavailable") from exc
+    if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
+        raise R4Error(f"{label} path is not a regular file")
+    return {
+        "st_dev": int(value.st_dev),
+        "st_ino": int(value.st_ino),
+        "st_mode": int(value.st_mode & 0o7777),
+        "st_size": int(value.st_size),
+        "st_mtime_ns": int(value.st_mtime_ns),
+        "st_ctime_ns": int(value.st_ctime_ns),
+    }
+
+
+def _production_file_bytes(
+    path: Path, *, label: str, max_bytes: int
+) -> tuple[bytes, dict[str, int], str]:
+    """Read a bounded production file and re-stat it before returning."""
+
+    before = _production_stat(path, label=label)
+    if before["st_size"] > max_bytes:
+        raise R4Error(f"{label} file exceeds bounded size")
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise R4Error(f"{label} file read failed") from exc
+    after = _production_stat(path, label=label)
+    if before != after or len(data) != before["st_size"]:
+        raise R4Error(f"{label} changed during capture")
+    return data, after, hashlib.sha256(data).hexdigest()
+
+
+def _production_json(
+    path: Path,
+    *,
+    label: str,
+    schema: str | None = None,
+    max_bytes: int = _MAX_RECEIPT_BYTES,
+) -> tuple[dict[str, Any], dict[str, int], str]:
+    data, state, digest = _production_file_bytes(path, label=label, max_bytes=max_bytes)
+    try:
+        payload = json.loads(data)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise R4Error(f"{label} JSON is invalid") from exc
+    if not isinstance(payload, dict):
+        raise R4Error(f"{label} JSON is not an object")
+    if payload.get("namespace") != "recall-distillation":
+        raise R4Error(f"{label} namespace is invalid")
+    if schema is not None and payload.get("schema") != schema:
+        raise R4Error(f"{label} schema is invalid")
+    unsigned = {key: value for key, value in payload.items() if key != "seal_sha256"}
+    if payload.get("seal_sha256") != _sha256(unsigned):
+        raise R4Error(f"{label} seal mismatch")
+    canonical = _json_bytes(payload)
+    # Managed immutable JSON files are written with one record-delimiting
+    # newline.  Accept that exact suffix, but reject every other whitespace
+    # or re-serialization variant so a resealed/truncated file cannot pass.
+    if data not in {canonical, canonical + b"\n"}:
+        raise R4Error(f"{label} JSON is not canonical")
+    final = _production_stat(path, label=label)
+    if final != state:
+        raise R4Error(f"{label} changed after validation")
+    return payload, state, digest
+
+
+def _production_companion_state(path: Path, *, label: str) -> dict[str, int] | None:
+    try:
+        value = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise R4Error(f"{label} path is unavailable") from exc
+    if stat.S_ISLNK(value.st_mode):
+        raise R4Error(f"{label} path contains a symlink")
+    if not stat.S_ISREG(value.st_mode):
+        raise R4Error(f"{label} path is not a regular file")
+    return _production_stat(path, label=label)
+
+
+def _production_sqlite_state(path: Path, *, label: str) -> dict[str, Any]:
+    """Capture sidecar identities for a read-only SQLite observation."""
+
+    return {
+        "main": _production_stat(path, label=label),
+        "wal": _production_companion_state(
+            path.with_name(f"{path.name}-wal"), label=f"{label}-wal"
+        ),
+        "shm": _production_companion_state(
+            path.with_name(f"{path.name}-shm"), label=f"{label}-shm"
+        ),
+    }
+
+
+def _production_sqlite_unchanged(
+    path: Path, before: Mapping[str, Any], *, label: str
+) -> bool:
+    return _production_sqlite_state(path, label=label) == dict(before)
+
+
+def _counts(value: object, *, label: str) -> dict[str, int]:
+    if not isinstance(value, Mapping) or set(value) != set(PRODUCTION_WORKSET_STATES):
+        raise R4Error(f"{label} counts are invalid")
+    result: dict[str, int] = {}
+    for state in PRODUCTION_WORKSET_STATES:
+        count = value[state]
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise R4Error(f"{label} counts are invalid")
+        result[state] = count
+    return result
+
+
+def _production_workset_receipts(
+    connection: sqlite3.Connection,
+    current_counts: Mapping[str, int],
+    current_watermark: object,
+) -> dict[str, Any]:
+    try:
+        rows = connection.execute(
+            "SELECT generation, previous_sha256, operation, payload_json, "
+            "receipt_sha256 FROM workset_receipts ORDER BY generation ASC"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise R4Error("production workset receipt read failed") from exc
+    if not rows:
+        raise R4Error("production workset receipts are empty")
+    if len(rows) > PRODUCTION_MAX_ROWS:
+        raise R4Error("production workset receipt count is unbounded")
+    previous = ""
+    prior_after: dict[str, Any] | None = None
+    for expected_generation, row in enumerate(rows, start=1):
+        generation, previous_sha, operation, payload_json, receipt_sha = row
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation != expected_generation
+            or previous_sha != previous
+            or operation not in PRODUCTION_WORKSET_OPERATIONS
+            or not isinstance(payload_json, str)
+            or not isinstance(receipt_sha, str)
+            or _SHA.fullmatch(receipt_sha) is None
+        ):
+            raise R4Error("production workset receipt chain is corrupted")
+        try:
+            payload = json.loads(payload_json)
+        except (ValueError, UnicodeError, RecursionError) as exc:
+            raise R4Error("production workset receipt JSON is invalid") from exc
+        if (
+            not isinstance(payload, Mapping)
+            or _json_bytes(payload).decode() != payload_json
+        ):
+            raise R4Error("production workset receipt JSON is not canonical")
+        before = payload.get("before")
+        after = payload.get("after")
+        delta = payload.get("delta")
+        version = payload.get("version", 1)
+        allowed_payload = {"before", "after", "delta", "details"}
+        if version == 2:
+            allowed_payload.add("version")
+            if payload.get("bootstrap") is True:
+                allowed_payload.add("bootstrap")
+        if version not in {1, 2} or set(payload) != allowed_payload:
+            raise R4Error("production workset receipt schema is invalid")
+        if not isinstance(before, Mapping) or not isinstance(after, Mapping):
+            raise R4Error("production workset receipt snapshot is invalid")
+        expected_snapshot_keys = {"counts", "watermark"}
+        if version == 2:
+            expected_snapshot_keys.add("progress")
+        if (
+            set(before) != expected_snapshot_keys
+            or set(after) != expected_snapshot_keys
+            or (
+                version == 2
+                and payload.get("bootstrap") is True
+                and before["progress"] is not None
+            )
+        ):
+            raise R4Error("production workset receipt snapshot is invalid")
+        before_counts = _counts(before.get("counts"), label="receipt before")
+        after_counts = _counts(after.get("counts"), label="receipt after")
+        if not isinstance(delta, Mapping) or set(delta) != set(
+            PRODUCTION_WORKSET_STATES
+        ):
+            raise R4Error("production workset receipt delta is invalid")
+        for state in PRODUCTION_WORKSET_STATES:
+            value = delta[state]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise R4Error("production workset receipt delta is invalid")
+            if value != after_counts[state] - before_counts[state]:
+                raise R4Error("production workset receipt continuity failed")
+        details = payload.get("details")
+        if not isinstance(details, Mapping):
+            raise R4Error("production workset receipt details are invalid")
+        if operation == "advance":
+            expected_details = {
+                "inserted",
+                "rebound",
+                "watermark_changed",
+                "selection_sha256",
+            }
+            if version == 2:
+                expected_details.add("progress_changed")
+            if set(details) != expected_details:
+                raise R4Error("production workset advance receipt is invalid")
+            if (
+                isinstance(details["inserted"], bool)
+                or not isinstance(details["inserted"], int)
+                or details["inserted"] < 0
+                or isinstance(details["rebound"], bool)
+                or not isinstance(details["rebound"], int)
+                or details["rebound"] < 0
+                or not isinstance(details["watermark_changed"], bool)
+                or not isinstance(details.get("progress_changed", False), bool)
+                or _SHA.fullmatch(str(details["selection_sha256"])) is None
+            ):
+                raise R4Error("production workset advance receipt is invalid")
+            expected_delta = {
+                "ready": details["inserted"],
+                "leased": 0,
+                "completed": 0,
+                "quarantined": 0,
+            }
+            if dict(delta) != expected_delta:
+                raise R4Error("production workset advance delta is invalid")
+        elif operation in {"claim_reclaim", "claim", "release"}:
+            if set(details) != {"kind", "count", "selection_sha256"}:
+                raise R4Error("production workset lease receipt is invalid")
+            kind = details["kind"]
+            count = details["count"]
+            if (
+                not isinstance(kind, str)
+                or not kind
+                or isinstance(count, bool)
+                or not isinstance(count, int)
+                or count < 1
+                or _SHA.fullmatch(str(details["selection_sha256"])) is None
+            ):
+                raise R4Error("production workset lease receipt is invalid")
+            expected_delta = {
+                "ready": count if operation in {"claim_reclaim", "release"} else -count,
+                "leased": -count
+                if operation in {"claim_reclaim", "release"}
+                else count,
+                "completed": 0,
+                "quarantined": 0,
+            }
+            if dict(delta) != expected_delta:
+                raise R4Error("production workset lease delta is invalid")
+        else:
+            expected_details = {"completed", "retry", "quarantined", "selection_sha256"}
+            timed_details = expected_details | {"retry_wait", "retry_schedule_sha256"}
+            if set(details) not in (expected_details, timed_details):
+                raise R4Error("production workset commit receipt is invalid")
+            totals = {
+                key: details[key] for key in ("completed", "retry", "quarantined")
+            }
+            if (
+                any(
+                    isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    for value in totals.values()
+                )
+                or sum(totals.values()) < 1
+                or _SHA.fullmatch(str(details["selection_sha256"])) is None
+            ):
+                raise R4Error("production workset commit receipt is invalid")
+            if set(details) == timed_details and (
+                isinstance(details["retry_wait"], bool)
+                or not isinstance(details["retry_wait"], int)
+                or details["retry_wait"] < 0
+                or details["retry_wait"] > details["retry"]
+                or _SHA.fullmatch(str(details["retry_schedule_sha256"])) is None
+            ):
+                raise R4Error("production workset commit receipt is invalid")
+            expected_delta = {
+                "ready": totals["retry"],
+                "leased": -sum(totals.values()),
+                "completed": totals["completed"],
+                "quarantined": totals["quarantined"],
+            }
+            if dict(delta) != expected_delta:
+                raise R4Error("production workset commit delta is invalid")
+        if prior_after is not None and (
+            before_counts != prior_after["counts"]
+            or before.get("watermark") != prior_after["watermark"]
+        ):
+            raise R4Error("production workset receipt continuity failed")
+        envelope = {
+            "generation": generation,
+            "previous_sha256": previous,
+            "operation": operation,
+            "payload": payload,
+        }
+        if _sha256(envelope) != receipt_sha:
+            raise R4Error("production workset receipt hash mismatch")
+        previous = receipt_sha
+        prior_after = {
+            "counts": after_counts,
+            "watermark": after.get("watermark"),
+        }
+    if prior_after is None or prior_after["counts"] != dict(current_counts):
+        raise R4Error("production workset receipt final state mismatch")
+    if prior_after["watermark"] != current_watermark:
+        raise R4Error("production workset receipt final watermark mismatch")
+    return {
+        "count": len(rows),
+        "generation": len(rows),
+        "head_sha256": previous,
+        "verified": True,
+    }
+
+
+def _production_workset(path: Path) -> dict[str, Any]:
+    """Read and verify the managed SQLite workset without opening a writer."""
+
+    before_files = _production_sqlite_state(path, label="production workset")
+    if before_files["main"]["st_size"] > PRODUCTION_MAX_SQLITE_BYTES:
+        raise R4Error("production workset exceeds bounded size")
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        raise R4Error("production workset cannot be opened read-only") from exc
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        if not {"work_items", "workset_state", "workset_receipts"}.issubset(tables):
+            raise R4Error("production workset schema is incomplete")
+        columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(work_items)")
+        }
+        required_columns = {
+            "sequence",
+            "work_id",
+            "kind",
+            "payload_ref",
+            "payload_digest",
+            "temporal_split_json",
+            "provenance_json",
+            "state",
+            "attempt_count",
+            "completion_ref",
+            "completion_digest",
+        }
+        if not required_columns.issubset(columns):
+            raise R4Error("production workset columns are incomplete")
+        row_count = int(
+            connection.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
+        )
+        if row_count < 1 or row_count > PRODUCTION_MAX_ROWS:
+            raise R4Error("production workset row count is outside bounds")
+        rows = connection.execute(
+            "SELECT sequence, work_id, kind, payload_ref, payload_digest, "
+            "temporal_split_json, provenance_json, state, attempt_count, "
+            "completion_ref, completion_digest FROM work_items ORDER BY sequence"
+        ).fetchall()
+        if len(rows) != row_count:
+            raise R4Error("production workset row count changed during read")
+        work_ids: set[str] = set()
+        completed: dict[str, dict[str, Any]] = {}
+        counts = {state: 0 for state in PRODUCTION_WORKSET_STATES}
+        provenance_identity: dict[str, Any] | None = None
+        for expected_sequence, row in enumerate(rows, start=1):
+            (
+                sequence,
+                work_id,
+                kind,
+                payload_ref,
+                payload_digest,
+                temporal_json,
+                provenance_json,
+                state,
+                attempt_count,
+                completion_ref,
+                completion_digest,
+            ) = row
+            if (
+                sequence != expected_sequence
+                or not isinstance(work_id, str)
+                or _SHA.fullmatch(work_id) is None
+                or work_id in work_ids
+                or not isinstance(kind, str)
+                or kind != "ox"
+                or not isinstance(payload_ref, str)
+                or not payload_ref.startswith("candidate-")
+                or _SHA.fullmatch(str(payload_digest)) is None
+                or state not in PRODUCTION_WORKSET_STATES
+                or isinstance(attempt_count, bool)
+                or not isinstance(attempt_count, int)
+                or attempt_count < 0
+            ):
+                raise R4Error("production workset item identity is invalid")
+            try:
+                temporal = json.loads(temporal_json)
+                provenance = json.loads(provenance_json)
+            except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
+                raise R4Error("production workset metadata is invalid") from exc
+            if not isinstance(temporal, Mapping) or not isinstance(provenance, Mapping):
+                raise R4Error("production workset metadata is invalid")
+            expected_provenance = {
+                key: provenance.get(key)
+                for key in ("cohort", "profile", "profile_contract_id", "route")
+            }
+            if (
+                expected_provenance["cohort"] != OX_COHORT
+                or expected_provenance["profile"] != OX_PROFILE
+                or expected_provenance["route"] != OX_ROUTE
+                or _SHA.fullmatch(str(expected_provenance["profile_contract_id"]))
+                is None
+            ):
+                raise R4Error("production workset provenance is invalid")
+            if provenance_identity is None:
+                provenance_identity = dict(expected_provenance)
+            elif provenance_identity != expected_provenance:
+                raise R4Error("production workset provenance is mixed")
+            work_ids.add(work_id)
+            counts[state] += 1
+            if state == "completed":
+                if (
+                    not isinstance(completion_ref, str)
+                    or not completion_ref.startswith("label-ledger:")
+                    or _SHA.fullmatch(str(completion_digest)) is None
+                    or completion_ref.removeprefix("label-ledger:") != completion_digest
+                ):
+                    raise R4Error("production completed work lacks a sealed label ref")
+                completed[work_id] = {
+                    "work_id": work_id,
+                    "completion_digest": str(completion_digest),
+                    "attempt_count": attempt_count,
+                    "provenance": dict(provenance),
+                }
+        state_rows = connection.execute(
+            "SELECT key, value_json FROM workset_state"
+        ).fetchall()
+        state_values: dict[str, Any] = {}
+        for key, value_json in state_rows:
+            if not isinstance(key, str) or key in state_values:
+                raise R4Error("production workset state is invalid")
+            try:
+                value = json.loads(value_json)
+            except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
+                raise R4Error("production workset state JSON is invalid") from exc
+            if (
+                not isinstance(value_json, str)
+                or _json_bytes(value).decode() != value_json
+            ):
+                raise R4Error("production workset state JSON is not canonical")
+            state_values[key] = value
+        if "watermark" not in state_values:
+            raise R4Error("production workset watermark is missing")
+        watermark = state_values.get("watermark")
+        receipt = _production_workset_receipts(connection, counts, watermark)
+    except sqlite3.Error as exc:
+        raise R4Error("production workset read failed") from exc
+    finally:
+        connection.close()
+    if not _production_sqlite_unchanged(path, before_files, label="production workset"):
+        raise R4Error("production workset changed during validation")
+    digest = _file_sha256(path)
+    if not _production_sqlite_unchanged(path, before_files, label="production workset"):
+        raise R4Error("production workset changed during hashing")
+    return {
+        "rows": row_count,
+        "counts": counts,
+        "completed": completed,
+        "provenance": provenance_identity or {},
+        "watermark": watermark,
+        "receipts": receipt,
+        "file_state": before_files,
+        "sha256": digest,
+    }
+
+
+def _production_ledger_checkpoint(
+    path: Path, checkpoint_path: Path, *, ledger_name: str
+) -> dict[str, Any]:
+    checkpoint, checkpoint_state, checkpoint_sha = _production_json(
+        checkpoint_path,
+        label=f"production {ledger_name} checkpoint",
+        schema="chronovisor.recall-distillation.v1",
+    )
+    if (
+        checkpoint.get("kind") != "ledger-chain-checkpoint"
+        or checkpoint.get("ledger_name") != ledger_name
+        or isinstance(checkpoint.get("records"), bool)
+        or not isinstance(checkpoint.get("records"), int)
+        or checkpoint.get("records", 0) < 1
+        or _SHA.fullmatch(str(checkpoint.get("head_sha256"))) is None
+    ):
+        raise R4Error(f"production {ledger_name} checkpoint identity is invalid")
+    file_state = checkpoint.get("file_state")
+    if not isinstance(file_state, Mapping):
+        raise R4Error(f"production {ledger_name} checkpoint file state is missing")
+    current = _production_stat(path, label=f"production {ledger_name}")
+    if current["st_size"] > PRODUCTION_MAX_LEDGER_BYTES:
+        raise R4Error(f"production {ledger_name} exceeds bounded size")
+    expected = {
+        "size_bytes": current["st_size"],
+        "st_dev": current["st_dev"],
+        "st_ino": current["st_ino"],
+        "st_mtime_ns": current["st_mtime_ns"],
+        "st_ctime_ns": current["st_ctime_ns"],
+    }
+    if dict(file_state) != expected:
+        raise R4Error(f"production {ledger_name} checkpoint file state mismatch")
+    if (
+        _production_stat(checkpoint_path, label=f"production {ledger_name} checkpoint")
+        != checkpoint_state
+    ):
+        raise R4Error(f"production {ledger_name} checkpoint changed during validation")
+    return {
+        "records": int(checkpoint["records"]),
+        "head_sha256": str(checkpoint["head_sha256"]),
+        "file_state": dict(file_state),
+        "ledger_state": current,
+        "checkpoint_sha256": checkpoint_sha,
+        "checkpoint_state": checkpoint_state,
+    }
+
+
+def _production_chain(path: Path, checkpoint_path: Path) -> dict[str, Any]:
+    """Verify a bounded label-ledger view against its sealed head checkpoint.
+
+    A small ledger is checked in full.  Once it exceeds the hot-path bound,
+    only the bounded tail is parsed; the sealed checkpoint supplies the
+    historical record count, head digest, and immutable file identity.
+    """
+
+    checkpoint = _production_ledger_checkpoint(
+        path, checkpoint_path, ledger_name="label-ledger.jsonl"
+    )
+    before = _production_stat(path, label="production label ledger")
+    if before["st_size"] > PRODUCTION_MAX_LEDGER_BYTES:
+        raise R4Error("production label ledger exceeds bounded size")
+    checkpoint_file_state = checkpoint["file_state"]
+
+    rows: list[dict[str, Any]] = []
+    previous = ""
+    full_scan = before["st_size"] <= PRODUCTION_MAX_FULL_LEDGER_BYTES
+    try:
+        with path.open("rb") as handle:
+            if not full_scan:
+                offset = max(0, before["st_size"] - PRODUCTION_MAX_LEDGER_TAIL_BYTES)
+                handle.seek(offset)
+                if offset:
+                    handle.readline()
+                raw_tail = handle.read(PRODUCTION_MAX_LEDGER_TAIL_BYTES + 1)
+                if len(raw_tail) > PRODUCTION_MAX_LEDGER_TAIL_BYTES:
+                    raise R4Error("production label ledger tail exceeds bound")
+                lines = raw_tail.splitlines(keepends=True)
+                if not lines or not lines[-1].endswith(b"\n"):
+                    raise R4Error("production label ledger is truncated")
+                iterator = enumerate(lines, start=1)
+            else:
+                iterator = enumerate(handle, start=1)
+            for index, raw in iterator:
+                if index > PRODUCTION_MAX_ROWS:
+                    raise R4Error("production label ledger is unbounded")
+                if not raw.endswith(b"\n") or raw == b"\n":
+                    raise R4Error("production label ledger is truncated")
+                try:
+                    payload = json.loads(raw[:-1])
+                except (ValueError, UnicodeError, RecursionError) as exc:
+                    raise R4Error("production label ledger JSON is invalid") from exc
+                if not isinstance(payload, dict) or _json_bytes(payload) != raw[:-1]:
+                    raise R4Error("production label ledger JSON is not canonical")
+                if (
+                    payload.get("schema") != "chronovisor.recall-distillation.v1"
+                    or payload.get("namespace") != "recall-distillation"
+                    or not isinstance(payload.get("previous_sha256"), str)
+                    or _SHA.fullmatch(str(payload.get("record_sha256"))) is None
+                ):
+                    raise R4Error("production label ledger chain is corrupted")
+                if full_scan and payload.get("previous_sha256") != previous:
+                    raise R4Error("production label ledger chain is corrupted")
+                if (
+                    not full_scan
+                    and rows
+                    and payload.get("previous_sha256") != previous
+                ):
+                    raise R4Error("production label ledger tail chain is corrupted")
+                unsigned = {
+                    key: value
+                    for key, value in payload.items()
+                    if key != "record_sha256"
+                }
+                if _sha256(unsigned) != payload["record_sha256"]:
+                    raise R4Error("production label ledger hash mismatch")
+                previous = str(payload["record_sha256"])
+                rows.append(payload)
+    except OSError as exc:
+        raise R4Error("production label ledger read failed") from exc
+    after = _production_stat(path, label="production label ledger")
+    if before != after:
+        raise R4Error("production label ledger changed during validation")
+    if previous != checkpoint["head_sha256"]:
+        raise R4Error("production label checkpoint head mismatch")
+    if full_scan and len(rows) != checkpoint["records"]:
+        raise R4Error("production label checkpoint count mismatch")
+    if len(rows) > checkpoint["records"]:
+        raise R4Error("production label checkpoint tail count mismatch")
+    digest: str | None = _file_sha256(path) if full_scan else None
+    if full_scan and _production_stat(path, label="production label ledger") != after:
+        raise R4Error("production label ledger changed during hashing")
+    if (
+        _production_stat(checkpoint_path, label="production label checkpoint")
+        != checkpoint["checkpoint_state"]
+    ):
+        raise R4Error("production label checkpoint changed during validation")
+    return {
+        "rows": rows,
+        "count": int(checkpoint["records"]),
+        "head_sha256": str(checkpoint["head_sha256"]),
+        "file_state": after,
+        "sha256": digest,
+        "checkpoint_sha256": checkpoint["checkpoint_sha256"],
+        "checkpoint_file_state": dict(checkpoint_file_state),
+    }
+
+
+def _production_identity(
+    *,
+    source: Mapping[str, Any],
+    state: Mapping[str, Any],
+    config: Mapping[str, Any],
+    config_sha256: str,
+    contract: Mapping[str, Any],
+    contract_sha256: str,
+    workset: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    labels: Mapping[str, Any],
+    root: Path,
+) -> set[str]:
+    reasons: set[str] = set()
+    if state.get("schema") != "chronovisor.recall-distillation.v1":
+        reasons.add("production_state_schema_invalid")
+    if state.get("kind") != "worker-state":
+        reasons.add("production_state_kind_invalid")
+    distillation = (
+        config.get("recall", {}).get("distillation")
+        if isinstance(config.get("recall"), Mapping)
+        else None
+    )
+    if not isinstance(distillation, Mapping):
+        reasons.add("production_config_distillation_missing")
+        distillation = {}
+    required_config = {
+        "enabled": True,
+        "teacher_profile": OX_PROFILE,
+        "teacher_max_inflight": 10,
+        "teacher_claim_limit": 1,
+        "ox_enabled": True,
+        "ox_free_only": True,
+    }
+    for key, expected in required_config.items():
+        if distillation.get(key) != expected:
+            reasons.add(f"production_config_{key}_invalid")
+    relevant_config = {
+        key: distillation.get(key)
+        for key in (
+            "teacher_profile",
+            "teacher_max_inflight",
+            "ox_enabled",
+            "ox_free_only",
+            "max_input_bytes",
+            "max_candidates",
+        )
+    }
+    if not isinstance(contract.get("relevant_config_sha256"), str) or contract.get(
+        "relevant_config_sha256"
+    ) != _sha256(relevant_config):
+        reasons.add("production_contract_config_mismatch")
+    if state.get("source_commit") != source.get("commit") or state.get(
+        "source_tree_sha256"
+    ) != source.get("tree_sha256"):
+        reasons.add("production_state_source_mismatch")
+    runtime = state.get("runtime_identity")
+    if not isinstance(runtime, Mapping):
+        reasons.add("production_runtime_identity_missing")
+        runtime = {}
+    expected_runtime = {
+        "root": str(root.absolute()),
+        "source_commit": source.get("commit"),
+        "source_tree_sha256": source.get("tree_sha256"),
+        "source_ox_identity_sha256": source.get("ox_identity_sha256"),
+        "config_sha256": config_sha256,
+        "workset_sha256": workset.get("sha256"),
+        "profile_contract_sha256": contract_sha256,
+        "workset_receipt_head": workset.get("receipts", {}).get("head_sha256"),
+        "candidate_checkpoint_head": candidate.get("head_sha256"),
+        "candidate_checkpoint_records": candidate.get("records"),
+        "candidate_checkpoint_file_state": candidate.get("file_state"),
+        "label_receipt_head": labels.get("head_sha256"),
+        "label_checkpoint_records": labels.get("count"),
+        "label_checkpoint_file_state": labels.get("checkpoint_file_state"),
+    }
+    if labels.get("sha256") is not None:
+        expected_runtime["label_sha256"] = labels.get("sha256")
+    for key, expected in expected_runtime.items():
+        if runtime.get(key) != expected:
+            reasons.add(f"production_runtime_{key}_mismatch")
+    os_identity = runtime.get("os_identity")
+    if not isinstance(os_identity, Mapping):
+        reasons.add("production_os_identity_missing")
+    else:
+        # This is observational, not a caller-provided attestation: the value
+        # is compared to the current interpreter's OS view at collection time.
+        observed = {
+            "system": os.uname().sysname,
+            "release": os.uname().release,
+            "machine": os.uname().machine,
+        }
+        if dict(os_identity) != observed:
+            reasons.add("production_os_identity_mismatch")
+    profile_contract = {
+        "profile": OX_PROFILE,
+        "cohort": OX_COHORT,
+        "route": OX_ROUTE,
+        "request_model": OX_MODEL,
+        "required_returned_model": OX_MODEL,
+        "free_only": True,
+        "no_paid_fallback": True,
+    }
+    for key, expected in profile_contract.items():
+        if contract.get(key) != expected:
+            reasons.add(f"production_contract_{key}_invalid")
+    if contract.get("max_inflight") != 10:
+        reasons.add("production_contract_max_inflight_invalid")
+    expiry = _parse_expiry(contract.get("expires_at"))
+    if expiry is None or expiry <= datetime.now(UTC).timestamp():
+        reasons.add("production_contract_expired_or_missing")
+    contract_id = _text(state.get("profile_contract_id"))
+    if (
+        _SHA.fullmatch(contract_id) is None
+        or contract.get("artifact_id") != contract_id
+        or workset.get("provenance", {}).get("profile_contract_id") != contract_id
+    ):
+        reasons.add("production_profile_contract_binding_invalid")
+    return reasons
+
+
+def _production_quality(
+    *,
+    state: Mapping[str, Any],
+    workset: Mapping[str, Any],
+    labels: Mapping[str, Any],
+    source: Mapping[str, Any],
+    contract_id: str,
+) -> tuple[set[str], dict[str, Any]]:
+    reasons: set[str] = set()
+    label_rows = labels.get("rows")
+    if not isinstance(label_rows, list) or not label_rows:
+        return {"production_labels_missing"}, {"stages": {}}
+    completed = workset.get("completed")
+    if not isinstance(completed, Mapping):
+        return {"production_completed_inventory_missing"}, {"stages": {}}
+    label_by_digest: dict[str, Mapping[str, Any]] = {}
+    label_by_work: dict[str, Mapping[str, Any]] = {}
+    label_ids: set[str] = set()
+    commit_ids: set[str] = set()
+    stage_work_ids: dict[int, list[str]] = {cap: [] for cap in PRODUCTION_RAMP_CAPS}
+    for row in label_rows:
+        if not isinstance(row, Mapping):
+            reasons.add("production_label_invalid")
+            continue
+        digest = _text(row.get("record_sha256"))
+        work_id = _text(row.get("work_id"))
+        label_id = _text(row.get("label_id"))
+        commit_id = _text(row.get("commit_id"))
+        identity = row.get("route_identity")
+        if (
+            row.get("kind") != "teacher-label"
+            or row.get("status") != "completed"
+            or row.get("profile") != OX_PROFILE
+            or row.get("cohort") != OX_COHORT
+            or row.get("profile_contract_id") != contract_id
+            or row.get("source_commit") != source.get("commit")
+            or row.get("source_tree_sha256") != source.get("tree_sha256")
+            or row.get("route") != OX_ROUTE
+            or row.get("teacher_role") != "recall.distill.teacher.ox-alpha"
+            or row.get("identity_revision") != OX_IDENTITY_REVISION
+            or row.get("route_digest") != OX_ROUTE_SHA256
+            or row.get("model_digest") != OX_MODEL_SHA256
+            or row.get("prompt_sha256") != OX_PROMPT_SHA256
+            or row.get("schema_sha256") != OX_SCHEMA_SHA256
+            or row.get("source_ox_identity_sha256") != source.get("ox_identity_sha256")
+            or not isinstance(identity, Mapping)
+            or dict(identity)
+            != {"provider": "opencode-go", "model": OX_ROUTE, "location": "remote"}
+            or _SHA.fullmatch(digest) is None
+            or _SHA.fullmatch(work_id) is None
+            or _SHA.fullmatch(label_id) is None
+            or _SHA.fullmatch(commit_id) is None
+            or digest in label_by_digest
+            or work_id in label_by_work
+            or label_id in label_ids
+            or commit_id in commit_ids
+        ):
+            reasons.add("production_label_identity_invalid")
+        if (
+            _SHA.fullmatch(digest) is None
+            or _SHA.fullmatch(work_id) is None
+            or _SHA.fullmatch(label_id) is None
+            or _SHA.fullmatch(commit_id) is None
+        ):
+            continue
+        label_by_digest[digest] = row
+        label_by_work[work_id] = row
+        label_ids.add(label_id)
+        commit_ids.add(commit_id)
+        work = completed.get(work_id)
+        if (
+            not isinstance(work, Mapping)
+            or work.get("completion_digest") != digest
+            or isinstance(work.get("attempt_count"), bool)
+            or not isinstance(work.get("attempt_count"), int)
+            or work.get("attempt_count", 0) < 1
+            or row.get("attempt_count") != work.get("attempt_count")
+        ):
+            reasons.add("production_workset_label_binding_invalid")
+        cap = row.get("ramp_cap")
+        if (
+            isinstance(cap, bool)
+            or not isinstance(cap, int)
+            or cap not in PRODUCTION_RAMP_CAPS
+        ):
+            reasons.add("production_label_ramp_cap_missing")
+        else:
+            stage_work_ids[cap].append(work_id)
+    if set(label_by_work) != set(completed):
+        reasons.add("production_completed_label_set_mismatch")
+    ramp = state.get("ramp_receipts")
+    if not isinstance(ramp, list) or len(ramp) != len(PRODUCTION_RAMP_CAPS):
+        reasons.add("production_ramp_receipts_missing")
+        ramp = []
+    stages: dict[str, Any] = {}
+    seen_caps: set[int] = set()
+    ramp_caps: list[int] = []
+    for row in ramp:
+        if not isinstance(row, Mapping):
+            reasons.add("production_ramp_receipt_invalid")
+            continue
+        cap = row.get("cap")
+        if isinstance(cap, int) and not isinstance(cap, bool):
+            ramp_caps.append(cap)
+        valid = row.get("valid_receipts")
+        attempts = row.get("attempts")
+        work_ids = row.get("work_ids")
+        if (
+            isinstance(cap, bool)
+            or not isinstance(cap, int)
+            or cap not in PRODUCTION_RAMP_CAPS
+            or cap in seen_caps
+            or isinstance(valid, bool)
+            or not isinstance(valid, int)
+            or isinstance(attempts, bool)
+            or not isinstance(attempts, int)
+            or valid < 20
+            or attempts < valid
+            or valid / attempts < 0.95
+            or not isinstance(work_ids, list)
+            or len(work_ids) != valid
+            or len(set(work_ids)) != len(work_ids)
+            or set(work_ids) != set(stage_work_ids.get(cap, []))
+            or row.get("source_commit") != source.get("commit")
+            or row.get("profile_contract_id") != contract_id
+        ):
+            reasons.add("production_ramp_quality_invalid")
+            continue
+        seen_caps.add(cap)
+        stages[str(cap)] = {
+            "valid_receipts": valid,
+            "attempts": attempts,
+            "valid_rate": round(valid / attempts, 8),
+            "work_ids": list(work_ids),
+        }
+    if seen_caps != set(PRODUCTION_RAMP_CAPS):
+        reasons.add("production_ramp_stages_incomplete")
+    if ramp_caps != list(PRODUCTION_RAMP_CAPS):
+        reasons.add("production_ramp_order_invalid")
+    if workset.get("counts", {}).get("leased") != 0:
+        reasons.add("production_leased_work_present")
+    for key in (
+        "sensitive",
+        "raw",
+        "billable",
+        "unexpected_route",
+        "duplicate_label",
+        "duplicate_commit",
+    ):
+        value = state.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value != 0:
+            reasons.add(f"production_{key}_veto_invalid")
+    lease_recovery = state.get("lease_recovery")
+    recovered = (
+        lease_recovery.get("recovered") if isinstance(lease_recovery, Mapping) else None
+    )
+    if (
+        not isinstance(lease_recovery, Mapping)
+        or isinstance(lease_recovery.get("leased_after"), bool)
+        or not isinstance(lease_recovery.get("leased_after"), int)
+        or lease_recovery.get("leased_after") != 0
+        or isinstance(recovered, bool)
+        or not isinstance(recovered, int)
+        or recovered < 0
+    ):
+        reasons.add("production_lease_recovery_invalid")
+    quality_gates = state.get("quality_gates")
+    if not isinstance(quality_gates, Mapping):
+        reasons.add("production_quality_gates_missing")
+    else:
+        negative_veto = quality_gates.get("negative_veto")
+        if (
+            not isinstance(negative_veto, Mapping)
+            or negative_veto.get("authenticated") is not True
+            or negative_veto.get("exact_binding") is not True
+            or negative_veto.get("conflicts") != 0
+        ):
+            reasons.add("production_negative_veto_gate_invalid")
+        blind_repeat = quality_gates.get("blind_repeat")
+        if (
+            not isinstance(blind_repeat, Mapping)
+            or blind_repeat.get("revision") != OX_PROBE_REVISION
+            or blind_repeat.get("complete") is not True
+            or blind_repeat.get("stability_passed") is not True
+            or not isinstance(blind_repeat.get("pairs"), int)
+            or isinstance(blind_repeat.get("pairs"), bool)
+            or blind_repeat.get("pairs", 0) < OX_MIN_BLIND_REPEAT_PAIRS
+        ):
+            reasons.add("production_blind_repeat_gate_invalid")
+        order_swap = quality_gates.get("order_swap")
+        if (
+            not isinstance(order_swap, Mapping)
+            or order_swap.get("complete") is not True
+            or not isinstance(order_swap.get("pairs"), int)
+            or isinstance(order_swap.get("pairs"), bool)
+            or order_swap.get("pairs", 0) < OX_MIN_BLIND_REPEAT_PAIRS
+        ):
+            reasons.add("production_order_swap_gate_invalid")
+        rollback = quality_gates.get("rollback")
+        if (
+            not isinstance(rollback, Mapping)
+            or rollback.get("verified") is not True
+            or rollback.get("active_unchanged") is not True
+            or rollback.get("status") not in {"not_rolled_back", "rolled_back"}
+        ):
+            reasons.add("production_rollback_gate_invalid")
+    transitions = state.get("failure_receipts")
+    expected_failures = {
+        "429": False,
+        "5xx": False,
+        "timeout": False,
+        "402": False,
+        "paid": False,
+        "model_drift": False,
+    }
+    if not isinstance(transitions, list):
+        reasons.add("production_failure_receipts_missing")
+        transitions = []
+    for transition in transitions:
+        if not isinstance(transition, Mapping):
+            reasons.add("production_failure_receipt_invalid")
+            continue
+        category = _text(transition.get("category"))
+        if category == "429":
+            before_cap = transition.get("before_cap")
+            after_cap = transition.get("after_cap")
+            valid = (
+                isinstance(before_cap, int)
+                and not isinstance(before_cap, bool)
+                and before_cap in PRODUCTION_RAMP_CAPS
+                and before_cap > 1
+                and isinstance(after_cap, int)
+                and not isinstance(after_cap, bool)
+                and after_cap in PRODUCTION_RAMP_CAPS
+                and after_cap == max(1, before_cap // 2)
+                and transition.get("status") == "deferred"
+            )
+        elif category in {"5xx", "timeout"}:
+            valid = (
+                isinstance(transition.get("attempts"), int)
+                and not isinstance(transition.get("attempts"), bool)
+                and 1 <= transition["attempts"] <= 3
+                and transition.get("bounded") is True
+                and transition.get("status") == "deferred"
+            )
+        elif category in {"402", "paid", "model_drift"}:
+            valid = transition.get("status") == "hard_stop"
+        else:
+            reasons.add("production_failure_category_invalid")
+            continue
+        if not valid:
+            reasons.add("production_failure_receipt_invalid")
+        else:
+            expected_failures[category] = True
+    if not all(expected_failures.values()):
+        reasons.add("production_failure_coverage_incomplete")
+    return reasons, {"stages": stages, "labels": len(label_rows)}
+
+
+def _source_ox_identity(source_root: Path) -> dict[str, str]:
+    """Recompute the fixed OX identity from the exact source checkout."""
+
+    module_path = (
+        source_root
+        / "src"
+        / "chronovisor"
+        / "recall"
+        / "recall_distillation_remote_teacher.py"
+    )
+    if _has_symlink_component(module_path) or not module_path.is_file():
+        raise R4Error("source OX identity module is unavailable")
+    source_path = str(source_root / "src")
+    previous_path = list(sys.path)
+    if source_path in sys.path:
+        sys.path.remove(source_path)
+    sys.path.insert(0, source_path)
+    previous_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "chronovisor_r4_source_remote_teacher", module_path
+        )
+        if spec is None or spec.loader is None:
+            raise R4Error("source OX identity module cannot be loaded")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        identity = getattr(module, "OX_ALPHA_FIXED_IDENTITY", None)
+        route_identity = (
+            identity.get("route_identity") if isinstance(identity, Mapping) else None
+        )
+        values = {
+            "identity_revision": identity.get("revision")
+            if isinstance(identity, Mapping)
+            else None,
+            "provider": route_identity.get("provider")
+            if isinstance(route_identity, Mapping)
+            else None,
+            "model": route_identity.get("model")
+            if isinstance(route_identity, Mapping)
+            else None,
+            "location": route_identity.get("location")
+            if isinstance(route_identity, Mapping)
+            else None,
+            "model_sha256": identity.get("model_digest")
+            if isinstance(identity, Mapping)
+            else None,
+            "route_sha256": identity.get("route_digest")
+            if isinstance(identity, Mapping)
+            else None,
+            "prompt_sha256": identity.get("prompt_template_sha256")
+            if isinstance(identity, Mapping)
+            else None,
+            "schema_sha256": identity.get("schema_revision_sha256")
+            if isinstance(identity, Mapping)
+            else None,
+        }
+        if any(not isinstance(value, str) or not value for value in values.values()):
+            raise R4Error("source OX identity is incomplete")
+        return {key: str(value) for key, value in values.items()}
+    except (ImportError, OSError, AttributeError, TypeError, ValueError) as exc:
+        if isinstance(exc, R4Error):
+            raise
+        raise R4Error("source OX identity import failed") from exc
+    finally:
+        sys.dont_write_bytecode = previous_bytecode
+        sys.path[:] = previous_path
+        sys.modules.pop("chronovisor_r4_source_remote_teacher", None)
+
+
+def _collect_authoritative_production(
+    *,
+    source_root: Path,
+    source: Mapping[str, Any],
+    production_root: Path,
+) -> dict[str, Any]:
+    """Collect production evidence only from the fixed managed root.
+
+    This routine intentionally has no writer, provider, subprocess, or network
+    path.  It reads the sealed state, profile contract, label chain, and SQLite
+    workset directly, re-statting every input before returning.  A caller-supplied
+    receipt bundle is not involved, so a copied JSON fixture cannot certify.
+    """
+
+    unavailable = {
+        "passed": False,
+        "reasons": [],
+        "collector": "fixed-production-root-workset-v1",
+        "provider_calls": 0,
+    }
+    try:
+        expected_original = PRODUCTION_ROOT.expanduser().absolute()
+        original_root = production_root.expanduser().absolute()
+        if _has_symlink_component(expected_original) or _has_symlink_component(
+            original_root
+        ):
+            unavailable["reasons"] = ["production_root_unavailable"]
+            return unavailable
+        expected_root = expected_original.resolve(strict=False)
+        if original_root.resolve(strict=False) != expected_root:
+            unavailable["reasons"] = ["production_root_not_authoritative"]
+            return unavailable
+        if not production_root.is_dir():
+            unavailable["reasons"] = ["production_root_unavailable"]
+            return unavailable
+        if _has_symlink_component(source_root):
+            unavailable["reasons"] = ["source_root_contains_symlink"]
+            return unavailable
+        source_identity = _source_ox_identity(source_root)
+        expected_identity = {
+            "identity_revision": OX_IDENTITY_REVISION,
+            "provider": "opencode-go",
+            # The fixed source identity binds the fully-qualified route/model;
+            # the profile contract's request_model remains the short model id.
+            "model": OX_ROUTE,
+            "location": "remote",
+            "model_sha256": OX_MODEL_SHA256,
+            "route_sha256": OX_ROUTE_SHA256,
+            "prompt_sha256": OX_PROMPT_SHA256,
+            "schema_sha256": OX_SCHEMA_SHA256,
+        }
+        if source_identity != expected_identity:
+            raise R4Error("source OX identity does not match the fixed contract")
+        distill = production_root / PRODUCTION_DISTILLATION_RELATIVE
+        state_path = production_root / PRODUCTION_STATE_RELATIVE
+        workset_path = production_root / PRODUCTION_WORKSET_RELATIVE
+        candidate_path = production_root / PRODUCTION_CANDIDATE_RELATIVE
+        candidate_checkpoint_path = (
+            production_root / PRODUCTION_CANDIDATE_CHECKPOINT_RELATIVE
+        )
+        label_path = production_root / PRODUCTION_LABEL_RELATIVE
+        label_checkpoint_path = production_root / PRODUCTION_LABEL_CHECKPOINT_RELATIVE
+        config_path = production_root / PRODUCTION_CONFIG_RELATIVE
+        state, state_file_state, state_sha256 = _production_json(
+            state_path,
+            label="production state",
+            schema="chronovisor.recall-distillation.v1",
+        )
+        if _has_symlink_component(distill) or not distill.is_dir():
+            raise R4Error("production distillation directory is unavailable")
+        workset = _production_workset(workset_path)
+        candidate = _production_ledger_checkpoint(
+            candidate_path,
+            candidate_checkpoint_path,
+            ledger_name="candidate-ledger.jsonl",
+        )
+        labels = _production_chain(label_path, label_checkpoint_path)
+        config_bytes, config_state, config_sha256 = _production_file_bytes(
+            config_path, label="production config", max_bytes=_MAX_RECEIPT_BYTES
+        )
+        if tomllib is None:
+            raise R4Error("production config parser is unavailable")
+        try:
+            config = tomllib.loads(config_bytes.decode("utf-8"))
+        except (ValueError, UnicodeError) as exc:
+            raise R4Error("production config TOML is invalid") from exc
+        if not isinstance(config, Mapping):
+            raise R4Error("production config is not an object")
+        contract_id = _text(state.get("profile_contract_id"))
+        if _SHA.fullmatch(contract_id) is None:
+            raise R4Error("production profile contract id is invalid")
+        contract_path = (
+            production_root / PRODUCTION_CONTRACT_DIR_RELATIVE / f"{contract_id}.json"
+        )
+        contract, contract_state, contract_sha256 = _production_json(
+            contract_path,
+            label="production profile contract",
+            schema="chronovisor.recall-distill-ox-profile.v1",
+        )
+        contract_unsigned = {
+            key: value
+            for key, value in contract.items()
+            if key not in {"artifact_id", "seal_sha256"}
+        }
+        if contract.get("artifact_id") != contract_id or contract_id != _sha256(
+            contract_unsigned
+        ):
+            raise R4Error("production profile contract identity mismatch")
+        identity_reasons = _production_identity(
+            source=source,
+            state=state,
+            config=config,
+            config_sha256=config_sha256,
+            contract=contract,
+            contract_sha256=contract_sha256,
+            workset=workset,
+            candidate=candidate,
+            labels=labels,
+            root=production_root,
+        )
+        quality_reasons, quality = _production_quality(
+            state=state,
+            workset=workset,
+            labels=labels,
+            source=source,
+            contract_id=contract_id,
+        )
+        reasons = identity_reasons | quality_reasons
+        if _production_stat(state_path, label="production state") != state_file_state:
+            raise R4Error("production state changed during validation")
+        if _production_stat(config_path, label="production config") != config_state:
+            raise R4Error("production config changed during validation")
+        if (
+            _production_stat(contract_path, label="production profile contract")
+            != contract_state
+        ):
+            raise R4Error("production profile contract changed during validation")
+        if (
+            _production_stat(candidate_path, label="production candidate-ledger")
+            != candidate["ledger_state"]
+            or _production_stat(
+                candidate_checkpoint_path,
+                label="production candidate-ledger checkpoint",
+            )
+            != candidate["checkpoint_state"]
+        ):
+            raise R4Error("production candidate ledger changed during validation")
+        output = {
+            "passed": not reasons,
+            "reasons": sorted(reasons),
+            "collector": "fixed-production-root-workset-v1",
+            "provider_calls": 0,
+            "root": str(production_root.absolute()),
+            "state": {
+                "sha256": state_sha256,
+                "file_state": _production_stat(state_path, label="production state"),
+            },
+            "config": {"sha256": config_sha256},
+            "profile_contract": {
+                "artifact_id": contract_id,
+                "sha256": contract_sha256,
+            },
+            "workset": {
+                "rows": workset["rows"],
+                "counts": workset["counts"],
+                "sha256": workset["sha256"],
+                "receipts": workset["receipts"],
+            },
+            "candidate_checkpoint": candidate,
+            "labels": {
+                "count": labels["count"],
+                "head_sha256": labels["head_sha256"],
+                "sha256": labels["sha256"],
+            },
+            "quality": quality,
+        }
+        return output
+    except (
+        R4Error,
+        OSError,
+        sqlite3.Error,
+        ValueError,
+        UnicodeError,
+        RecursionError,
+        OverflowError,
+    ) as exc:
+        unavailable["reasons"] = [str(exc) or "production_evidence_invalid"]
+        return unavailable
+
+
 def _validate_production_attestations(
     receipts: Sequence[Mapping[str, Any]], source: Mapping[str, Any]
 ) -> dict[str, Any]:
     """Keep production certification disabled until a trusted chain exists.
 
-    JSON seals and a same-process collector are replayable claims, not durable
-    provider/runtime attestations.  The harness therefore never promotes them
-    to production certification.  Source-contract validation remains usable via
-    ``--source-contract-only`` while a future implementation can replace this
-    gate with a separately authenticated provider evidence chain.
+    JSON seals and caller-provided producer bundles are replayable claims, not
+    authoritative runtime evidence.  The external-bundle path therefore never
+    promotes them to production certification; only the fixed-root collector
+    can produce that verdict.  Source-contract validation remains usable via
+    ``--source-contract-only``.
     """
 
     del source
@@ -966,31 +2281,31 @@ def run(
         ("source", source_root),
         ("output", output),
     ]
-    if production_root is not None:
-        original_paths.append(("production", production_root))
     for name, value in (
         ("local_receipts", local_receipts),
         ("ox_receipts", ox_receipts),
-        ("production_receipts", production_receipts),
     ):
         if value is not None:
             original_paths.append((name, value))
+    if production_root is not None:
+        original_paths.append(("production", production_root))
     _reject_original_symlinks(original_paths)
     source_root = source_root.expanduser().resolve(strict=True)
     output = output.expanduser().resolve(strict=False)
-    production = (
-        production_root.expanduser().resolve(strict=True) if production_root else None
-    )
+    production = production_root.expanduser().absolute() if production_root else None
     input_roots = [
         path.expanduser().resolve(strict=True)
-        for path in (local_receipts, ox_receipts, production_receipts)
+        for path in (local_receipts, ox_receipts)
         if path is not None
     ]
     assert_root_matrix(source_root, output, production, input_roots)
     source_before = _assert_source(source_root, source_commit)
     local, local_files = load_receipts(local_receipts)
     ox, ox_files = load_receipts(ox_receipts)
-    production_rows, production_files = load_receipts(production_receipts)
+    # Arbitrary production JSON is never an input to certification.  Keep the
+    # old parameter only as a compatibility tripwire for callers that still
+    # pass it; the resulting verdict remains false and no file is read.
+    production_files: dict[str, Any] = {"files": [], "count": 0}
     local_result = (
         _validate_local(local, source_before)
         if local
@@ -1004,16 +2319,26 @@ def run(
     source_after = _assert_source(source_root, source_commit)
     if source_after != source_before:
         raise R4Error("source changed during evidence validation")
-    production_result = (
-        _validate_production_attestations(production_rows, source_before)
-        if production_rows
-        else {
+    if production is not None:
+        production_result = _collect_authoritative_production(
+            source_root=source_root,
+            source=source_before,
+            production_root=production,
+        )
+    elif production_receipts is not None:
+        production_result = {
+            "passed": False,
+            "reasons": ["external_production_receipts_rejected"],
+            "collector": "fixed-production-root-workset-v1",
+            "provider_calls": 0,
+        }
+    else:
+        production_result = {
             "passed": False,
             "reasons": ["independent_live_provider_attestation_unavailable"],
-            "kinds": [],
-            "producers": [],
+            "collector": "fixed-production-root-workset-v1",
+            "provider_calls": 0,
         }
-    )
     source_passed = bool(
         local_result["passed"]
         and ox_result["passed"]
@@ -1052,8 +2377,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--local-receipts", type=Path)
     parser.add_argument("--ox-receipts", type=Path)
-    parser.add_argument("--production-receipts", type=Path)
-    parser.add_argument("--production-root", type=Path)
+    parser.add_argument(
+        "--production",
+        action="store_true",
+        help="read the fixed ~/.chronovisor production root without mutation",
+    )
     parser.add_argument(
         "--source-contract-only",
         action="store_true",
@@ -1067,8 +2395,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             output=args.output,
             local_receipts=args.local_receipts,
             ox_receipts=args.ox_receipts,
-            production_receipts=args.production_receipts,
-            production_root=args.production_root,
+            production_root=PRODUCTION_ROOT if args.production else None,
         )
     except (R4Error, OSError, ValueError) as exc:
         print(f"r4 harness failed: {exc}", file=sys.stderr)
