@@ -6695,7 +6695,8 @@ def _compare_and_commit_counterfactual(
             ],
         )
         return _CounterfactualBlockResult(pending=True, deferred=True)
-    candidate_id = str(candidate["candidate_id"])
+    candidate_id_raw = candidate["candidate_id"]
+    candidate_id = str(candidate_id_raw)
     appended = store.append_chain(
         label_path,
         {
@@ -6703,7 +6704,7 @@ def _compare_and_commit_counterfactual(
             "work_id": claim.work_id,
             "payload_digest": claim.payload_digest,
             "rally_id": rally_id,
-            "candidate_id": candidate_id,
+            "candidate_id": candidate_id_raw,
             "route": "counterfactual",
             "mode": mode,
             "exposure_artifact_id": str(exposure.get("exposure_artifact_id") or ""),
