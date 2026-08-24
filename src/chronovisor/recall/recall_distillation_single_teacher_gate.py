@@ -101,7 +101,7 @@ def evaluate_single_teacher_gate(
     if any(
         row.get("negative_veto_conflict") is not None
         and row.get("negative_veto_conflict") is not False
-        for row in rows
+        for row in current_rows
     ):
         reasons.append("negative_veto_conflict")
 

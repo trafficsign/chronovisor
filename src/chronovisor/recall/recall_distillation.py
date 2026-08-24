@@ -41,6 +41,7 @@ from chronovisor.recall.recall_calibration import sigmoid
 from chronovisor.recall.recall_distillation_remote_teacher import (
     OX_ALPHA_FIXED_IDENTITY,
     ox_alpha_response_metadata,
+    validate_ox_alpha_labels,
 )
 from chronovisor.recall.recall_distillation_single_teacher_gate import (
     evaluate_single_teacher_gate,
@@ -5176,6 +5177,21 @@ def _ox_batch_payload(
     }
 
 
+def _ox_response_metadata_matches(
+    tasks: Mapping[str, Mapping[str, Any]],
+    claims: Sequence[Any],
+    response: Mapping[str, Any],
+    *,
+    max_input_bytes: int,
+) -> bool:
+    expected_metadata = ox_alpha_response_metadata(
+        _ox_batch_payload(tasks, claims), max_input_bytes=max_input_bytes
+    )
+    return expected_metadata is not None and not any(
+        response.get(key) != value for key, value in expected_metadata.items()
+    )
+
+
 def _ox_prepare_batches(
     *,
     claims: Sequence[Any],
@@ -5424,12 +5440,6 @@ def _ox_dispatch_and_commit(
     ],
     label_path: Path,
 ) -> _TeacherBatchResult:
-    required_label_fields = {
-        "candidate_id",
-        "verdict",
-        "confidence",
-        "rationale",
-    }
     # Dispatch one fixed-cap wave at a time.  The generic dispatcher remains a
     # transport primitive; only this OX layer can promote a cap after deep
     # identity, digest, and label validation below.
@@ -5437,6 +5447,7 @@ def _ox_dispatch_and_commit(
 
     results: list[Any] = []
     dispatched_batches = 0
+    metadata_drift = False
     for start in range(0, len(batches), ramp_cap):
         wave = batches[start : start + ramp_cap]
         wave_results = dispatch_claimed_work(
@@ -5452,6 +5463,21 @@ def _ox_dispatch_and_commit(
         results.extend(wave_results)
         dispatched_batches += len(wave)
         if any(
+            result.status == "ok"
+            and (
+                not isinstance(result.value, Mapping)
+                or not _ox_response_metadata_matches(
+                    tasks,
+                    result.work,
+                    result.value,
+                    max_input_bytes=config.max_input_bytes,
+                )
+            )
+            for result in wave_results
+        ):
+            metadata_drift = True
+            break
+        if any(
             result.rate_limited or result.status == "stopped" for result in wave_results
         ):
             break
@@ -5466,6 +5492,37 @@ def _ox_dispatch_and_commit(
     completed_claims: list[Any] = []
     outcomes: dict[str, dict[str, str]] = {}
     valid_provider_results = 0
+    if metadata_drift:
+        drift_claims = [claim for result in results for claim in result.work]
+        if drift_claims:
+            workset.commit(
+                drift_claims,
+                [
+                    {"status": "retry", "error_class": "route_model_drift"}
+                    for _claim in drift_claims
+                ],
+            )
+        ramp_cap, ramp_valid_receipts, ramp_provider_attempts = _advance_ox_ramp(
+            cap=ramp_cap,
+            valid_receipts=ramp_valid_receipts,
+            provider_attempts=ramp_provider_attempts,
+            valid_results=0,
+            actual_attempts=sum(result.attempts for result in results),
+            rate_limited=any(result.rate_limited for result in results),
+            stopped=True,
+            max_inflight=config.teacher_max_inflight,
+        )
+        return _TeacherBatchResult(
+            model_calls=sum(result.attempts for result in results),
+            deferred=True,
+            workset_status=workset.status("ox"),
+            profile_stopped=True,
+            profile_contract_id=profile_contract_id,
+            ramp_cap=ramp_cap,
+            ramp_valid_receipts=ramp_valid_receipts,
+            ramp_provider_attempts=ramp_provider_attempts,
+            last_durable_progress=workset.progress(),
+        )
     for result in results:
         batch_claims = result.work
         if result.status != "ok" or not isinstance(result.value, Mapping):
@@ -5492,63 +5549,26 @@ def _ox_dispatch_and_commit(
                 }
             continue
         response = result.value
+        response_metadata = response
         labels = response.get("labels")
-        expected_metadata = ox_alpha_response_metadata(
-            _ox_batch_payload(tasks, batch_claims),
-            max_input_bytes=config.max_input_bytes,
+        safe_labels = validate_ox_alpha_labels(
+            labels,
+            tuple(
+                str(tasks[claim.work_id]["candidate"]["candidate_id"])
+                for claim in batch_claims
+            ),
         )
-        response_metadata = {
-            key: response.get(key)
-            for key in (
-                "_identity_revision",
-                "_route_identity",
-                "_route_digest",
-                "_model_digest",
-                "_prompt_digest",
-                "_schema_digest",
-                "_request_digest",
-            )
+        valid = safe_labels is not None
+        labels_by_id = {
+            str(label["candidate_id"]): label for label in safe_labels or []
         }
-        expected_ids = {
-            str(tasks[claim.work_id]["candidate"]["candidate_id"])
-            for claim in batch_claims
-        }
-        valid = (
-            expected_metadata is not None
-            and response_metadata == expected_metadata
-            and isinstance(labels, list)
-            and len(labels) == len(batch_claims)
-            and all(
-                isinstance(label, Mapping) and set(label) == required_label_fields
-                for label in labels
-            )
-            and {
-                str(label.get("candidate_id"))
-                for label in labels
-                if isinstance(label, Mapping)
-            }
-            == expected_ids
-        )
-        labels_by_id = (
-            {
-                str(label["candidate_id"]): label
-                for label in labels
-                if isinstance(label, Mapping)
-            }
-            if isinstance(labels, list)
-            else {}
-        )
-        valid = valid and all(
-            label.get("verdict") in {"relevant", "irrelevant", "uncertain"}
-            for label in labels_by_id.values()
-        )
         if not valid:
             deferred = True
-            stopped = True
             for claim in batch_claims:
+                status = "quarantined" if claim.attempt >= 3 else "retry"
                 outcomes[claim.work_id] = {
-                    "status": "retry",
-                    "error_class": "route_model_drift",
+                    "status": status,
+                    "error_class": "invalid_teacher_output",
                 }
             continue
         valid_provider_results += 1

@@ -1690,7 +1690,9 @@ def test_timeout_reports_payload_free_durable_workset_boundaries(
     assert result["local_workset"] == {"observation": "unavailable"}
 
 
-def test_timeout_workset_observation_marks_missing_and_corrupt_queue(tmp_path: Path) -> None:
+def test_timeout_workset_observation_marks_missing_and_corrupt_queue(
+    tmp_path: Path,
+) -> None:
     runtime_dir = store.distillation_dir(tmp_path)
     runtime_dir.mkdir(parents=True)
     (runtime_dir / "ox-workset.sqlite3").write_bytes(b"not sqlite")
@@ -2244,7 +2246,7 @@ def test_ox_locked_blind_repeats_are_reversed_and_resume_without_duplicates(
                             else "irrelevant"
                         ),
                         "confidence": 0.9,
-                        "rationale": "bounded evidence",
+                        "rationale": "direct_match",
                     }
                     for candidate in candidates
                 ],
@@ -3081,7 +3083,7 @@ def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_label
                         "candidate_id": candidate["candidate_id"],
                         "verdict": "relevant",
                         "confidence": 0.9,
-                        "rationale": "bounded evidence",
+                        "rationale": "direct_match",
                     }
                     for candidate in payload["candidates"]
                 ],
@@ -3193,6 +3195,124 @@ def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_label
     )
 
 
+def test_ox_metadata_drift_stops_before_the_next_wave_and_releases_all_claims(
+    tmp_path: Path,
+) -> None:
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def evaluate(self, payload: object) -> dict[str, object]:
+            assert isinstance(payload, dict)
+            self.calls += 1
+            metadata = _ox_metadata(payload)
+            metadata["_request_digest"] = "0" * 64
+            return {
+                "labels": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "verdict": "relevant",
+                        "confidence": 0.9,
+                        "rationale": "direct_match",
+                    }
+                    for candidate in payload["candidates"]
+                ],
+                **metadata,
+            }
+
+    teacher = RemoteTeacher()
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            teacher_claim_limit=1,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: teacher},
+        snapshots={
+            "rally": {
+                "candidates": [
+                    {"candidate_id": "candidate-1", "text_sha256": "candidate-1"},
+                    {"candidate_id": "candidate-2", "text_sha256": "candidate-2"},
+                ]
+            }
+        },
+        rally_by_id={
+            "rally": {"rally_id": "rally", "query_sha256": "query", "context_refs": []}
+        },
+        texts={
+            "query": "what proves the claim",
+            "candidate-1": "first bounded fact",
+            "candidate-2": "second bounded fact",
+        },
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert teacher.calls == 1
+    assert result.labels_written == 0
+    assert result.profile_stopped is True
+    assert result.workset_status["ready"] == 2  # type: ignore[index]
+    assert (
+        store.read_chain(store.distillation_dir(tmp_path) / "label-ledger.jsonl") == []
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("confidence", float("nan")), ("rationale", "untrusted free text")],
+)
+def test_ox_invalid_label_body_retries_without_profile_stop(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def evaluate(self, payload: object) -> dict[str, object]:
+            assert isinstance(payload, dict)
+            label = {
+                "candidate_id": "candidate",
+                "verdict": "relevant",
+                "confidence": 0.9,
+                "rationale": "direct_match",
+            }
+            label[field] = value
+            return {"labels": [label], **_ox_metadata(payload)}
+
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            teacher_claim_limit=1,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: RemoteTeacher()},
+        snapshots={
+            "rally": {
+                "candidates": [
+                    {"candidate_id": "candidate", "text_sha256": "candidate"}
+                ]
+            }
+        },
+        rally_by_id={
+            "rally": {"rally_id": "rally", "query_sha256": "query", "context_refs": []}
+        },
+        texts={"query": "what proves the claim", "candidate": "bounded fact"},
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert result.labels_written == 0
+    assert result.profile_stopped is False
+    assert result.workset_status["ready"] == 1  # type: ignore[index]
+
+
 def test_ox_indexed_workset_reads_only_delta_then_claimed_snapshots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3213,7 +3333,7 @@ def test_ox_indexed_workset_reads_only_delta_then_claimed_snapshots(
                         "candidate_id": candidate["candidate_id"],
                         "verdict": "relevant" if self.valid else "invalid",
                         "confidence": 0.9,
-                        "rationale": "bounded evidence",
+                        "rationale": "direct_match",
                     }
                     for candidate in payload["candidates"]
                 ],
@@ -3621,7 +3741,7 @@ def test_ox_resolves_text_only_for_claimed_work_and_uses_long_lease(
                         "candidate_id": candidate["candidate_id"],
                         "verdict": "relevant",
                         "confidence": 0.9,
-                        "rationale": "bounded evidence",
+                        "rationale": "direct_match",
                     }
                     for candidate in payload["candidates"]
                 ],
@@ -3748,7 +3868,7 @@ def test_ox_canary_skips_payload_rejected_probe_before_one_safe_request(
                         "candidate_id": candidate["candidate_id"],
                         "verdict": "relevant",
                         "confidence": 0.9,
-                        "rationale": "bounded evidence",
+                        "rationale": "direct_match",
                     }
                     for candidate in candidates
                 ],
@@ -3829,7 +3949,7 @@ def test_ox_canary_skips_oversize_probe_before_one_request(
                         "candidate_id": candidate["candidate_id"],
                         "verdict": "relevant",
                         "confidence": 0.9,
-                        "rationale": "bounded evidence",
+                        "rationale": "direct_match",
                     }
                     for candidate in candidates
                 ],
@@ -4290,7 +4410,7 @@ def test_ox_claim_cap_keeps_append_batch_at_or_below_500(tmp_path: Path) -> None
                         "candidate_id": candidate["candidate_id"],
                         "verdict": "irrelevant",
                         "confidence": 0.8,
-                        "rationale": "bounded evidence",
+                        "rationale": "direct_match",
                     }
                     for candidate in candidates
                 ],

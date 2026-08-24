@@ -165,6 +165,43 @@ def test_gate_excludes_prior_contract_rows_from_every_quality_count() -> None:
     assert gate["labels"]["eligible"] == 4
 
 
+def test_prior_contract_veto_is_audit_only_but_current_contract_veto_blocks() -> None:
+    rows = _passing_rows()
+    prior = {
+        **rows[0],
+        "row_id": "prior-veto",
+        "profile_contract_id": "f" * 64,
+        "negative_veto_conflict": True,
+    }
+
+    audit_only = evaluate_single_teacher_gate(
+        [*rows, prior],
+        profile=PROFILE,
+        cohort=COHORT,
+        profile_contract_id="e" * 64,
+        min_labels=4,
+        min_per_class=2,
+        min_repeat_pairs=2,
+        min_repeat_stability=0.10,
+    )
+    assert audit_only["passed"] is True
+    assert audit_only["excluded_prior_contract_rows"] == 1
+
+    rows[0]["negative_veto_conflict"] = True
+    blocked = evaluate_single_teacher_gate(
+        rows,
+        profile=PROFILE,
+        cohort=COHORT,
+        profile_contract_id="e" * 64,
+        min_labels=4,
+        min_per_class=2,
+        min_repeat_pairs=2,
+        min_repeat_stability=0.10,
+    )
+    assert blocked["passed"] is False
+    assert "negative_veto_conflict" in blocked["reasons"]
+
+
 def test_negative_veto_conflict_fails_even_when_other_gates_pass() -> None:
     rows = _passing_rows()
     rows[0]["negative_veto_conflict"] = True

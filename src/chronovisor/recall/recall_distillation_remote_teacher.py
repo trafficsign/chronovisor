@@ -119,49 +119,6 @@ def _sha256(value: object) -> str:
     return hashlib.sha256(_json_bytes(value)).hexdigest()
 
 
-OX_ALPHA_FIXED_IDENTITY_REVISION = "ox-alpha-fixed-identity-v1"
-_SYSTEM_PROMPT = (
-    "You are a temporary Recall relevance teacher. Judge only the "
-    "supplied point-in-time evidence. Return schema-valid JSON; use "
-    "uncertain when evidence is insufficient. The rationale field "
-    "must contain one fixed snake_case code, never free text."
-)
-_PROMPT_TEMPLATE = {
-    "revision": OX_ALPHA_FIXED_IDENTITY_REVISION,
-    "system": _SYSTEM_PROMPT,
-    "instruction": (
-        "Label every candidate exactly once. Return only one JSON object; "
-        "do not add facts, markdown, prose, or repeat secrets. Use only "
-        "the fixed rationale codes in the schema. Output schema then input."
-    ),
-}
-_SCHEMA_REVISION = {
-    "revision": OX_ALPHA_FIXED_IDENTITY_REVISION,
-    "schema": TEACHER_BATCH_SCHEMA,
-    "verdicts": ["relevant", "irrelevant", "uncertain"],
-    "rationale_codes": list(OX_RATIONALE_CODES),
-    "label_fields": ["candidate_id", "verdict", "confidence", "rationale"],
-}
-OX_ALPHA_FIXED_IDENTITY = {
-    "revision": OX_ALPHA_FIXED_IDENTITY_REVISION,
-    "route_identity": {
-        "provider": OX_ALPHA_PROVIDER,
-        "model": OX_ALPHA_ROUTE_MODEL,
-        "location": RouteLocation.REMOTE.value,
-    },
-    "model_digest": hashlib.sha256(OX_ALPHA_ROUTE_MODEL.encode("utf-8")).hexdigest(),
-    "route_digest": _sha256(
-        {
-            "provider": OX_ALPHA_PROVIDER,
-            "model": OX_ALPHA_ROUTE_MODEL,
-            "location": RouteLocation.REMOTE.value,
-        }
-    ),
-    "prompt_template_sha256": _sha256(_PROMPT_TEMPLATE),
-    "schema_revision_sha256": _sha256(_SCHEMA_REVISION),
-}
-
-
 def resolve_ox_alpha_model(provider: str, configured_model: str) -> str:
     """Resolve the request model from the existing provider/model route.
 
@@ -226,6 +183,60 @@ def _teacher_schema(candidate_ids: tuple[str, ...]) -> dict[str, Any]:
             }
         },
     }
+
+
+OX_ALPHA_FIXED_IDENTITY_REVISION = "ox-alpha-fixed-identity-v1"
+_SYSTEM_PROMPT = (
+    "You are a temporary Recall relevance teacher. Judge only the "
+    "supplied point-in-time evidence. Return schema-valid JSON; use "
+    "uncertain when evidence is insufficient. The rationale field "
+    "must contain one fixed snake_case code, never free text."
+)
+_PROMPT_PREFIX = (
+    "Label every candidate exactly once. Return only one JSON object; "
+    "do not add facts, markdown, prose, or repeat secrets. Use only "
+    "the fixed rationale codes in the schema. Output schema:\n"
+)
+_PROMPT_INPUT_SEPARATOR = "\nInput:\n"
+_SCHEMA_CANDIDATE_PLACEHOLDER = "{candidate_id}"
+
+
+def _prompt_template_digest(
+    system: str = _SYSTEM_PROMPT,
+    prefix: str = _PROMPT_PREFIX,
+    separator: str = _PROMPT_INPUT_SEPARATOR,
+) -> str:
+    return _sha256({"system": system, "prefix": prefix, "separator": separator})
+
+
+def _schema_revision_digest(
+    schema: Mapping[str, Any] | None = None,
+) -> str:
+    return _sha256(
+        schema
+        if schema is not None
+        else _teacher_schema((_SCHEMA_CANDIDATE_PLACEHOLDER,))
+    )
+
+
+OX_ALPHA_FIXED_IDENTITY = {
+    "revision": OX_ALPHA_FIXED_IDENTITY_REVISION,
+    "route_identity": {
+        "provider": OX_ALPHA_PROVIDER,
+        "model": OX_ALPHA_ROUTE_MODEL,
+        "location": RouteLocation.REMOTE.value,
+    },
+    "model_digest": hashlib.sha256(OX_ALPHA_ROUTE_MODEL.encode("utf-8")).hexdigest(),
+    "route_digest": _sha256(
+        {
+            "provider": OX_ALPHA_PROVIDER,
+            "model": OX_ALPHA_ROUTE_MODEL,
+            "location": RouteLocation.REMOTE.value,
+        }
+    ),
+    "prompt_template_sha256": _prompt_template_digest(),
+    "schema_revision_sha256": _schema_revision_digest(),
+}
 
 
 def _contains_forbidden_text(value: str) -> bool:
@@ -325,14 +336,7 @@ def _prepare_request(
         prompt_json = _json_bytes(normalized).decode("utf-8")
         schema_json = _json_bytes(schema).decode("utf-8")
         system = _SYSTEM_PROMPT
-        prompt = (
-            "Label every candidate exactly once. Return only one JSON object; "
-            "do not add facts, markdown, prose, or repeat secrets. Use only "
-            "the fixed rationale codes in the schema. Output schema:\n"
-            + schema_json
-            + "\nInput:\n"
-            + prompt_json
-        )
+        prompt = _PROMPT_PREFIX + schema_json + _PROMPT_INPUT_SEPARATOR + prompt_json
         if (
             len(system.encode("utf-8")) + len(prompt.encode("utf-8"))
             > MAX_REQUEST_BYTES
@@ -399,6 +403,21 @@ def _safe_label(label: object, candidate_ids: frozenset[str]) -> dict[str, Any] 
         "confidence": confidence,
         "rationale": safe_rationale,
     }
+
+
+def validate_ox_alpha_labels(
+    labels: object, candidate_ids: tuple[str, ...]
+) -> list[dict[str, Any]] | None:
+    """Validate the exact OX label contract at every trust boundary."""
+
+    if not isinstance(labels, list) or len(labels) != len(candidate_ids):
+        return None
+    safe_labels = [_safe_label(label, frozenset(candidate_ids)) for label in labels]
+    if any(label is None for label in safe_labels) or {
+        label["candidate_id"] for label in safe_labels if label is not None
+    } != set(candidate_ids):
+        return None
+    return [label for label in safe_labels if label is not None]
 
 
 class OpenCodeOxAlphaTeacher:
@@ -599,10 +618,8 @@ class OpenCodeOxAlphaTeacher:
                 stage="teacher_label_count",
                 request_id=request_id,
             )
-        safe_labels = [_safe_label(label, frozenset(candidate_ids)) for label in labels]
-        if any(label is None for label in safe_labels) or {
-            label["candidate_id"] for label in safe_labels if label is not None
-        } != set(candidate_ids):
+        safe_labels = validate_ox_alpha_labels(labels, candidate_ids)
+        if safe_labels is None:
             return self._failure(
                 ProviderFailureCategory.INVALID_RESPONSE.value,
                 request_digest=request_digest,
@@ -610,7 +627,7 @@ class OpenCodeOxAlphaTeacher:
                 request_id=request_id,
             )
         return {
-            "labels": [label for label in safe_labels if label is not None],
+            "labels": safe_labels,
             **response_metadata,
         }
 

@@ -12,11 +12,18 @@ from chronovisor.core.llm_security import CredentialRef, CredentialResolver
 from chronovisor.core.openai_compatible_adapter import compose_openai_compatible_adapter
 from chronovisor.core.provider_profiles import generic_openai_profile
 from chronovisor.recall.recall_distillation_remote_teacher import (
+    _PROMPT_INPUT_SEPARATOR,
+    _PROMPT_PREFIX,
+    _SYSTEM_PROMPT,
     OX_ALPHA_ENDPOINT,
     OX_ALPHA_FIXED_IDENTITY,
     OX_ALPHA_ROUTE_MODEL,
     OX_RATIONALE_CODES,
     OpenCodeOxAlphaTeacher,
+    _prepare_request,
+    _prompt_template_digest,
+    _schema_revision_digest,
+    _teacher_schema,
     ox_alpha_response_metadata,
 )
 
@@ -237,6 +244,34 @@ def test_fixed_identity_is_payload_independent_but_request_digest_is_normalized(
         "_schema_digest",
     ):
         assert first[key] == changed[key]
+
+
+def test_fixed_identity_digests_the_exact_request_builders() -> None:
+    prepared = _prepare_request(_payload(), max_input_bytes=12_000)
+    assert prepared is not None
+    _candidate_ids, schema, system, prompt = prepared
+    assert system == _SYSTEM_PROMPT
+    assert prompt.startswith(_PROMPT_PREFIX)
+    assert _PROMPT_INPUT_SEPARATOR in prompt
+    assert (
+        OX_ALPHA_FIXED_IDENTITY["prompt_template_sha256"] == _prompt_template_digest()
+    )
+    assert OX_ALPHA_FIXED_IDENTITY["prompt_template_sha256"] != _prompt_template_digest(
+        prefix=_PROMPT_PREFIX + "changed"
+    )
+    assert (
+        OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"] == _schema_revision_digest()
+    )
+    changed_schema = _teacher_schema(("{candidate_id}",))
+    changed_schema["properties"]["labels"]["items"]["properties"]["confidence"][
+        "maximum"
+    ] = 2
+    assert OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"] != _schema_revision_digest(
+        changed_schema
+    )
+    assert schema["properties"]["labels"]["items"]["properties"]["rationale"][
+        "enum"
+    ] == list(OX_RATIONALE_CODES)
 
 
 def test_exact_single_json_fence_is_decoded(tmp_path: Path) -> None:
