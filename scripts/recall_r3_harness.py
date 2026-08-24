@@ -49,6 +49,7 @@ OX_WORKSET_EXPECTED_STATES = {
     "quarantined": 12_970,
 }
 OX_WORKSET_ROW_LIMIT = 100_000
+WORKSET_LOCK_BYTES_LIMIT = 64 * 1024
 CLONE_TREE_FILE_LIMIT = 100_000
 CLONE_TREE_FILE_BYTES_LIMIT = 512 * 1024 * 1024
 # A formal run may inventory production-sized files, but it must never read an
@@ -756,6 +757,8 @@ def _workset_lock_snapshot(runtime_dir: Path) -> dict[str, Any]:
         if _has_symlink_component(path) or not path.is_file():
             raise R3Error("production Workset lock/sidecar path is unsafe")
         before = _regular_file_state(path)
+        if before.get("st_size", 0) > WORKSET_LOCK_BYTES_LIMIT:
+            raise R3Error("production Workset lock exceeds bounded read")
         try:
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError as exc:

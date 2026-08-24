@@ -94,6 +94,15 @@ def test_production_snapshot_scopes_unrelated_siblings_and_protected_symlinks(
         HARNESS._production_snapshot(production)
 
 
+def test_workset_lock_snapshot_rejects_oversized_lock(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime" / "recall-distillation"
+    runtime.mkdir(parents=True)
+    lock = runtime / "worker.lock"
+    lock.write_bytes(b"x" * (HARNESS.WORKSET_LOCK_BYTES_LIMIT + 1))
+    with pytest.raises(HARNESS.R3Error, match="bounded read"):
+        HARNESS._workset_lock_snapshot(runtime)
+
+
 def test_external_clone_filesystem_uses_actual_r0_probe(
     tmp_path: Path, monkeypatch
 ) -> None:
