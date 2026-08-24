@@ -12,6 +12,7 @@ import importlib
 import importlib.util
 import json
 import os
+import plistlib
 import shutil
 import socket
 import sqlite3
@@ -76,6 +77,36 @@ STATE_KEYS = (
 
 class R0Error(ValueError):
     """A R0 contract failed closed."""
+
+
+def _filesystem_type(path: Path) -> str:
+    """Resolve a path's backing device and return its filesystem type."""
+
+    try:
+        usage = subprocess.run(
+            ["/bin/df", "-P", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        lines = [line for line in usage.stdout.splitlines() if line.strip()]
+        if len(lines) < 2 or not lines[-1].split():
+            raise R0Error("filesystem device probe returned invalid output")
+        device = lines[-1].split()[0]
+        result = subprocess.run(
+            ["/usr/sbin/diskutil", "info", "-plist", device],
+            check=True,
+            capture_output=True,
+        )
+        info = plistlib.loads(result.stdout)
+    except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+        raise R0Error("filesystem type probe failed") from exc
+    if not isinstance(info, Mapping):
+        raise R0Error("filesystem type probe returned invalid output")
+    filesystem = info.get("FilesystemType")
+    if not isinstance(filesystem, str) or not filesystem.strip():
+        raise R0Error("filesystem type probe returned invalid output")
+    return filesystem.strip().lower()
 
 
 def _stat(path: Path) -> dict[str, int] | None:

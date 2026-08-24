@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import itertools
 import os
+import plistlib
 import socket
 import sqlite3
 import sys
@@ -18,6 +19,7 @@ from chronovisor.recall import recall_distillation_store as store
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+import recall_r0_harness as r0_harness  # noqa: E402
 import recall_r1_harness as harness  # noqa: E402
 
 
@@ -361,6 +363,33 @@ def test_apfs_preflight_rejects_non_apfs_before_clone(
         with harness._clone_context(production):
             pass
     assert clone_calls == []
+
+
+def test_filesystem_type_resolves_the_volume_before_asking_diskutil(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        if command[:2] == ["/bin/df", "-P"]:
+            return SimpleNamespace(
+                stdout=(
+                    "Filesystem 512-blocks Used Available Capacity Mounted on\n"
+                    "/dev/disk3s5 1 1 1 1% /System/Volumes/Data\n"
+                )
+            )
+        if command[:3] == ["/usr/sbin/diskutil", "info", "-plist"]:
+            return SimpleNamespace(stdout=plistlib.dumps({"FilesystemType": "apfs"}))
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(r0_harness.subprocess, "run", run)
+
+    assert harness._filesystem_type(Path("/Users/example/runtime")) == "apfs"
+    assert calls == [
+        ["/bin/df", "-P", "/Users/example/runtime"],
+        ["/usr/sbin/diskutil", "info", "-plist", "/dev/disk3s5"],
+    ]
 
 
 def test_bytecode_suppression_is_process_and_runtime_env_contract() -> None:

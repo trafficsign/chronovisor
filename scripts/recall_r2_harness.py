@@ -17,7 +17,6 @@ import importlib.util
 import json
 import math
 import os
-import plistlib
 import shutil
 import sqlite3
 import stat
@@ -69,23 +68,10 @@ def _require_supported_environment(path: Path) -> None:
     if sys.platform != "darwin":
         raise R2Error("unsupported environment: Darwin/APFS is required")
     try:
-        result = subprocess.run(
-            ["/usr/sbin/diskutil", "info", "-plist", str(path)],
-            check=True,
-            capture_output=True,
-        )
-        info = plistlib.loads(result.stdout)
-    except (
-        OSError,
-        subprocess.CalledProcessError,
-        plistlib.InvalidFileException,
-    ) as exc:
+        filesystem = R0._filesystem_type(path)
+    except (OSError, ValueError) as exc:
         raise R2Error("unsupported environment: APFS volume is unavailable") from exc
-    personality = " ".join(
-        str(info.get(key, ""))
-        for key in ("FilesystemPersonality", "FilesystemName", "Type")
-    ).lower()
-    if "apfs" not in personality:
+    if filesystem != "apfs":
         raise R2Error("unsupported environment: production volume is not APFS")
 
 

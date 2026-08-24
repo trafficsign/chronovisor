@@ -12,7 +12,6 @@ import os
 import random
 import shutil
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import threading
@@ -32,6 +31,7 @@ from recall_r0_harness import (  # noqa: E402
     R0Error,
     _chain,
     _env,
+    _filesystem_type,
     _fts,
     _load,
     _loopback_json,
@@ -814,22 +814,6 @@ def _candidate_snapshot(catalog: Any, rally_id: str) -> dict[str, Any]:
     }
     snapshot["snapshot_sha256"] = catalog.canonical_json_sha256_strict(snapshot)
     return snapshot
-
-
-def _filesystem_type(path: Path) -> str:
-    try:
-        result = subprocess.run(
-            ["/usr/bin/stat", "-f", "%T", str(path)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise R1Error("filesystem type probe failed") from exc
-    filesystem = result.stdout.strip().lower()
-    if not filesystem:
-        raise R1Error("filesystem type probe returned empty output")
-    return filesystem
 
 
 COPYFILE_ALL = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3)
