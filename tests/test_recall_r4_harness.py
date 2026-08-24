@@ -261,6 +261,7 @@ def _ox_rows(source: Path, commit: str) -> list[dict[str, object]]:
         rows.append(
             {
                 "profile": HARNESS.OX_PROFILE,
+                "captured_at": f"2026-08-24T00:00:{cap:02d}Z",
                 "source_commit": commit,
                 "source_tree_sha256": tree,
                 "contract": contract,
@@ -1062,6 +1063,28 @@ def test_authoritative_collector_rejects_persistent_root_directory_swap(
     assert "production root changed during validation" in result["reasons"]
 
 
+def test_authoritative_collector_restores_cwd_on_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path, source, commit)
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    before = Path.cwd()
+
+    def fail_workset(_path: Path) -> dict[str, object]:
+        raise HARNESS.R4Error("synthetic workset failure")
+
+    monkeypatch.setattr(HARNESS, "_production_workset", fail_workset)
+    result = HARNESS._collect_authoritative_production(
+        source_root=source,
+        source=HARNESS._assert_source(source, commit),
+        production_root=production,
+    )
+    assert result["passed"] is False
+    assert "synthetic workset failure" in result["reasons"]
+    assert Path.cwd() == before
+
+
 def test_authoritative_collector_can_certify_only_fixed_sealed_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1335,6 +1358,16 @@ def test_ox_negative_aliases_and_invalid_backoff_are_vetoes(tmp_path: Path) -> N
     result = HARNESS._validate_ox(rows, source_snapshot)
     assert result["passed"] is False
     assert "429_halving_invalid" in result["reasons"]
+
+
+def test_ox_ramp_order_and_capture_time_are_fixed_gates(tmp_path: Path) -> None:
+    source, commit = _git_source(tmp_path)
+    source_snapshot = HARNESS._source_tree_digest(source)
+    rows = list(reversed(_ox_rows(source, commit)))
+    result = HARNESS._validate_ox(rows, source_snapshot)
+    assert result["passed"] is False
+    assert "ox_ramp_order_invalid" in result["reasons"]
+    assert "ox_captured_at_not_monotonic" in result["reasons"]
 
 
 def test_production_boolean_is_not_an_attestation(tmp_path: Path) -> None:

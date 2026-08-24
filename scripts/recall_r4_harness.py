@@ -653,7 +653,16 @@ def _validate_ox(
     all_work_ids: list[str] = []
     recovery_seen = False
     failure_flags: set[str] = set()
+    stage_order: list[int] = []
+    previous_captured_at: float | None = None
     for row in rows:
+        captured_at = _parse_expiry(row.get("captured_at"))
+        if captured_at is None:
+            reasons.add("ox_captured_at_invalid")
+        elif previous_captured_at is not None and captured_at < previous_captured_at:
+            reasons.add("ox_captured_at_not_monotonic")
+        if captured_at is not None:
+            previous_captured_at = captured_at
         contract = row.get("contract")
         if not isinstance(contract, Mapping):
             reasons.add("contract_missing")
@@ -782,6 +791,29 @@ def _validate_ox(
             if isinstance(cap, int) and not isinstance(cap, bool) and cap in OX_STAGES:
                 if cap in stages:
                     reasons.add("ox_duplicate_stage")
+                else:
+                    expected_cap = (
+                        OX_STAGES[len(stage_order)]
+                        if len(stage_order) < len(OX_STAGES)
+                        else None
+                    )
+                    if cap != expected_cap:
+                        reasons.add("ox_ramp_order_invalid")
+                    if stage_order:
+                        prior = stages[stage_order[-1]]
+                        prior_count = prior.get("valid_receipts")
+                        prior_attempts = prior.get("attempts")
+                        if (
+                            isinstance(prior_count, bool)
+                            or not isinstance(prior_count, int)
+                            or isinstance(prior_attempts, bool)
+                            or not isinstance(prior_attempts, int)
+                            or prior_attempts < 1
+                            or prior_count < 20
+                            or prior_count / prior_attempts < 0.95
+                        ):
+                            reasons.add("ox_prior_stage_ineligible")
+                    stage_order.append(cap)
                 stages[cap] = dict(stage)
                 count = _int(stage.get("valid_receipts"))
                 attempts = _int(stage.get("attempts"), minimum=1)
@@ -917,6 +949,8 @@ def _validate_ox(
         reasons.add("lease_recovery_missing")
     if tuple(sorted(stages)) != OX_STAGES:
         reasons.add("ox_ramp_stages_incomplete")
+    if stage_order != list(OX_STAGES):
+        reasons.add("ox_ramp_order_invalid")
     if "429_halved" not in failure_flags:
         reasons.add("429_halving_missing")
     if not {"5xx_bounded_retry", "timeout_bounded_retry"}.issubset(failure_flags):
@@ -972,6 +1006,16 @@ def _production_directory_identity(path: Path, *, label: str) -> dict[str, int]:
         "st_dev": int(value.st_dev),
         "st_ino": int(value.st_ino),
     }
+
+
+def _production_directory_fd_identity(fd: int, *, label: str) -> dict[str, int]:
+    try:
+        value = os.fstat(fd)
+    except OSError as exc:
+        raise R4Error(f"{label} descriptor is unavailable") from exc
+    if not stat.S_ISDIR(value.st_mode):
+        raise R4Error(f"{label} descriptor is not a directory")
+    return {"st_dev": int(value.st_dev), "st_ino": int(value.st_ino)}
 
 
 def _production_file_bytes(
@@ -2212,6 +2256,8 @@ def _collect_authoritative_production(
         "provider_calls": 0,
         "root": str(PRODUCTION_ROOT.absolute()),
     }
+    root_fd: int | None = None
+    cwd_fd: int | None = None
     try:
         expected_original = PRODUCTION_ROOT.expanduser().absolute()
         original_root = production_root.expanduser().absolute()
@@ -2228,8 +2274,19 @@ def _collect_authoritative_production(
             unavailable["reasons"] = ["production_root_unavailable"]
             return unavailable
         root_identity = _production_directory_identity(
-            production_root, label="production root"
+            original_root, label="production root"
         )
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(
+            os, "O_NOFOLLOW", 0
+        )
+        cwd_fd = os.open(".", directory_flags)
+        root_fd = os.open(str(original_root), directory_flags)
+        # ponytail: this one-shot CLI uses process-global cwd; concurrent
+        # embedding must move the same reads to openat(dir_fd=...) instead.
+        os.fchdir(root_fd)
+        collection_root = Path(".")
+        if _production_directory_fd_identity(root_fd, label="production root") != root_identity:
+            raise R4Error("production root changed while opening")
         if _has_symlink_component(source_root):
             unavailable["reasons"] = ["source_root_contains_symlink"]
             return unavailable
@@ -2248,16 +2305,16 @@ def _collect_authoritative_production(
         }
         if source_identity != expected_identity:
             raise R4Error("source OX identity does not match the fixed contract")
-        distill = production_root / PRODUCTION_DISTILLATION_RELATIVE
-        state_path = production_root / PRODUCTION_STATE_RELATIVE
-        workset_path = production_root / PRODUCTION_WORKSET_RELATIVE
-        candidate_path = production_root / PRODUCTION_CANDIDATE_RELATIVE
+        distill = collection_root / PRODUCTION_DISTILLATION_RELATIVE
+        state_path = collection_root / PRODUCTION_STATE_RELATIVE
+        workset_path = collection_root / PRODUCTION_WORKSET_RELATIVE
+        candidate_path = collection_root / PRODUCTION_CANDIDATE_RELATIVE
         candidate_checkpoint_path = (
-            production_root / PRODUCTION_CANDIDATE_CHECKPOINT_RELATIVE
+            collection_root / PRODUCTION_CANDIDATE_CHECKPOINT_RELATIVE
         )
-        label_path = production_root / PRODUCTION_LABEL_RELATIVE
-        label_checkpoint_path = production_root / PRODUCTION_LABEL_CHECKPOINT_RELATIVE
-        config_path = production_root / PRODUCTION_CONFIG_RELATIVE
+        label_path = collection_root / PRODUCTION_LABEL_RELATIVE
+        label_checkpoint_path = collection_root / PRODUCTION_LABEL_CHECKPOINT_RELATIVE
+        config_path = collection_root / PRODUCTION_CONFIG_RELATIVE
         state, state_file_state, state_sha256 = _production_json(
             state_path,
             label="production state",
@@ -2292,7 +2349,7 @@ def _collect_authoritative_production(
         if _SHA.fullmatch(contract_id) is None:
             raise R4Error("production profile contract id is invalid")
         contract_path = (
-            production_root / PRODUCTION_CONTRACT_DIR_RELATIVE / f"{contract_id}.json"
+            collection_root / PRODUCTION_CONTRACT_DIR_RELATIVE / f"{contract_id}.json"
         )
         contract, contract_state, contract_sha256 = _production_json(
             contract_path,
@@ -2318,7 +2375,7 @@ def _collect_authoritative_production(
             workset=workset,
             candidate=candidate,
             labels=labels,
-            root=production_root,
+            root=original_root,
         )
         quality_reasons, quality = _production_quality(
             state=state,
@@ -2348,7 +2405,9 @@ def _collect_authoritative_production(
         ):
             raise R4Error("production candidate ledger changed during validation")
         if (
-            _production_directory_identity(production_root, label="production root")
+            _production_directory_fd_identity(root_fd, label="production root")
+            != root_identity
+            or _production_directory_identity(original_root, label="production root")
             != root_identity
         ):
             raise R4Error("production root changed during validation")
@@ -2357,7 +2416,7 @@ def _collect_authoritative_production(
             "reasons": sorted(reasons),
             "collector": "fixed-production-root-workset-v1",
             "provider_calls": 0,
-            "root": str(production_root.absolute()),
+            "root": str(original_root),
             "state": {
                 "sha256": state_sha256,
                 "file_state": _production_stat(state_path, label="production state"),
@@ -2394,6 +2453,22 @@ def _collect_authoritative_production(
     ) as exc:
         unavailable["reasons"] = [str(exc) or "production_evidence_invalid"]
         return unavailable
+    finally:
+        if cwd_fd is not None:
+            try:
+                os.fchdir(cwd_fd)
+            except OSError:
+                pass
+        if root_fd is not None:
+            try:
+                os.close(root_fd)
+            except OSError:
+                pass
+        if cwd_fd is not None:
+            try:
+                os.close(cwd_fd)
+            except OSError:
+                pass
 
 
 def _validate_production_attestations(
@@ -2471,7 +2546,12 @@ def _write_immutable(
 
 
 def read_artifact(path: Path) -> dict[str, Any]:
-    """Read one R4 artifact and verify its immutable identity and seal."""
+    """Verify one R4 artifact's serialization, identity, and integrity seal.
+
+    This is an integrity/readback check, not an independent production
+    authority.  Production certification still requires an external
+    completion/watchdog evidence chain.
+    """
 
     _reject_original_symlinks((("R4 artifact", path),))
     before = _stat(path)
