@@ -61,6 +61,14 @@ CLONE_TREE_DIGEST_REPRESENTATION = "bounded-content+sealed-checkpoint-v1"
 CLONE_TREE_RAW_REPRESENTATION = "r2.raw-tree-state+committed-watermark-v1"
 CLONE_TREE_LEDGER_REPRESENTATION = "r2.sealed-ledger-checkpoint-v1"
 CLONE_TREE_CATALOG_REPRESENTATION = "r2.sealed-catalog-checkpoint-v1"
+R3_WORKSET_SCOPE_REPRESENTATION = "workset-security-columns+sealed-state-v1"
+R3_EXCLUDED_NOT_EVALUATED = {
+    "raw": "ingest-owned; R2/R5 sealed watermark boundary",
+    "candidate_ledgers": "R2/R5 sealed ledger checkpoints",
+    "historical_catalog": "R2/R5 catalog ownership",
+    "historical_fts": "R2/R5 FTS ownership",
+    "unrelated_runtime": "outside R3 Workset/state/pointer/lock scope",
+}
 _WORKSET_SECURITY_COLUMNS = (
     "sequence",
     "work_id",
@@ -729,6 +737,21 @@ def _catalog_metadata_evidence(path: Path) -> dict[str, Any]:
     }
 
 
+def _workset_lock_snapshot(runtime_dir: Path) -> dict[str, Any]:
+    """Capture lock file state in the R3-owned boundary."""
+
+    locks: dict[str, Any] = {}
+    paths = list(runtime_dir.glob("*.lock"))
+    immutable_lock = runtime_dir / ".immutable.lock"
+    if immutable_lock.exists():
+        paths.append(immutable_lock)
+    for path in sorted(set(paths)):
+        if _has_symlink_component(path) or not path.is_file():
+            raise R3Error("production Workset lock/sidecar path is unsafe")
+        locks[path.name] = _regular_file_state(path)
+    return {"files": locks, "bounded": True}
+
+
 def _production_snapshot(
     production: Path,
     *,
@@ -746,33 +769,27 @@ def _production_snapshot(
 
     if _has_symlink_component(production) or not production.is_dir():
         raise R3Error("production root is unsafe")
-    protected = {"recall_distillation": production / "runtime" / "recall-distillation"}
-    if include_raw:
-        protected = {"raw": production / "raw", **protected}
-    snapshots: dict[str, Any] = {}
-    for name, path in protected.items():
-        if _has_symlink_component(path) or not path.is_dir():
-            raise R3Error(f"production protected boundary is unavailable: {name}")
-        try:
-            if name == "raw":
-                # Unit fixtures do not have a committed RawStore.  Keep the
-                # old bounded fixture path while real runs use the R2 state /
-                # watermark projection above the payload body.
-                snapshots[name] = (
-                    R2._tree_digest(path, label=f"production.{name}")
-                    if store is None
-                    else _bounded_raw_identity(production, "production.raw_tree")
-                )
-            else:
-                snapshots[name] = _clone_tree_state_digest(
-                    path,
-                    store=store,
-                    require_checkpoint_file_state=require_checkpoint_file_state,
-                )
-        except Exception as exc:
-            raise R3Error(f"production protected snapshot failed: {name}") from exc
+    runtime_dir = production / "runtime" / "recall-distillation"
+    if _has_symlink_component(runtime_dir) or not runtime_dir.is_dir():
+        raise R3Error("production protected boundary is unavailable")
+    if store is None:
+        # Keep the compact fixture path used by unit tests; formal runs always
+        # pass the loaded runtime store and use the explicit Workset boundary.
+        snapshots = {
+            "raw": R2._tree_digest(production / "raw", label="production.raw"),
+            "recall_distillation": _clone_tree_state_digest(runtime_dir),
+        }
+    else:
+        owned = _production_owned_snapshot(production, store)
+        snapshots = {
+            "workset": owned["workset"],
+            "state_pointers": owned["state_pointers"],
+            "locks": _workset_lock_snapshot(runtime_dir),
+        }
     return {
+        "scope": "runtime/recall-distillation/ox-workset.sqlite3 + state/pointers/locks",
         "protected": snapshots,
+        "excluded_not_evaluated": dict(R3_EXCLUDED_NOT_EVALUATED),
         "excluded_scope": _production_excluded_scope(production),
     }
 
@@ -844,6 +861,45 @@ def _production_protected_equal(
         and isinstance(after.get("protected"), Mapping)
         and before["protected"] == after["protected"]
     )
+
+
+def _production_scope_identity(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize R3-owned state/pointer/lock identity across APFS clones."""
+
+    protected = snapshot.get("protected")
+    if not isinstance(protected, Mapping):
+        raise R3Error("production Workset scope evidence is incomplete")
+    pointers = protected.get("state_pointers")
+    locks = protected.get("locks")
+    lock_files = locks.get("files") if isinstance(locks, Mapping) else None
+    if (
+        not isinstance(pointers, Mapping)
+        or not isinstance(locks, Mapping)
+        or not isinstance(lock_files, Mapping)
+    ):
+        raise R3Error("production Workset state/pointer/lock evidence is incomplete")
+    normalized_pointers: dict[str, Any] = {}
+    for name, value in pointers.items():
+        if value is None:
+            normalized_pointers[str(name)] = None
+        elif isinstance(value, Mapping):
+            normalized_pointers[str(name)] = {
+                key: value.get(key) for key in ("sha256", "seal_sha256")
+            }
+        else:
+            raise R3Error("production pointer identity is malformed")
+    normalized_locks = {
+        str(name): {
+            "st_size": value.get("st_size"),
+        }
+        for name, value in lock_files.items()
+        if isinstance(value, Mapping)
+    }
+    return {
+        "workset": protected.get("workset"),
+        "state_pointers": normalized_pointers,
+        "locks": normalized_locks,
+    }
 
 
 def _production_owned_snapshot(production: Path, store: Any) -> dict[str, Any]:
@@ -929,6 +985,35 @@ def _clone_workset_path(clone: Path) -> Path:
     return path
 
 
+def _normalize_clone_workset(path: Path) -> dict[str, Any]:
+    """Checkpoint clone-only SQLite WAL state before multiprocessing access."""
+
+    before = _regular_file_state(path)
+    try:
+        with sqlite3.connect(path, timeout=30.0) as connection:
+            journal_mode = str(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0])
+            checkpoint = tuple(connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone())
+            integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+    except sqlite3.DatabaseError as exc:
+        raise R3Error("clone Workset SQLite normalization failed") from exc
+    if (
+        journal_mode.lower() != "wal"
+        or len(checkpoint) != 3
+        or int(checkpoint[0]) != 0
+        or integrity.lower() != "ok"
+    ):
+        raise R3Error("clone Workset SQLite normalization is not healthy")
+    after = _regular_file_state(path)
+    return {
+        "journal_mode": journal_mode,
+        "wal_checkpoint": [int(value) for value in checkpoint],
+        "integrity": integrity,
+        "file_state_before": before,
+        "file_state_after": after,
+        "clone_only": True,
+    }
+
+
 def _clone_root_identity(path: Path) -> dict[str, int]:
     try:
         value = path.lstat()
@@ -1004,7 +1089,7 @@ def _clone_tree_state_digest(
         except OSError as exc:
             raise R3Error("clone tree changed during state capture") from exc
         if stat.S_ISLNK(state.st_mode):
-            raise R3Error("clone tree contains a symlink")
+            raise R3Error("protected clone tree contains a symlink")
         if not stat.S_ISREG(state.st_mode):
             continue
         relative = path.relative_to(root).as_posix()
@@ -1694,7 +1779,7 @@ from chronovisor.recall.recall_distillation_workset import DistillationWorkset
 
 path = sys.argv[1]
 count = int(sys.argv[2])
-kind = "local-teacher:handoff"
+kind = sys.argv[3] if len(sys.argv) > 3 else "local-teacher:handoff"
 workset = DistillationWorkset(path)
 claims = workset.claim(kind, count, "local-fake-teacher", 60.0)
 if len(claims) != count:
@@ -1722,7 +1807,9 @@ outcomes = [
 ]
 totals = workset.commit(claims, outcomes)
 audit = workset.audit_transition_receipts()
-if totals.get("completed") != count or audit.get("status") != "verified":
+if totals.get("completed") != count or audit.get("status") not in {
+    "verified", "legacy-unverified"
+}:
     raise SystemExit(5)
 print(json.dumps({
     "teacher": "local-fake-v1",
@@ -1730,8 +1817,63 @@ print(json.dumps({
     "lease_observed": True,
     "claimed": len(claims),
     "completed": totals["completed"],
+    "kind": kind,
+    "owner": "local-fake-teacher",
     "audit_status": audit["status"],
+    "legacy_unverified_excluded": audit["status"] == "legacy-unverified",
     "receipt_generation": audit["generation"],
+}, separators=(",", ":")), flush=True)
+'''
+
+
+_CLONE_TEACHER_CHILD = r'''
+import json, sys
+from chronovisor.recall.recall_distillation_dispatcher import dispatch_claimed_work
+from chronovisor.recall.recall_distillation_workset import DistillationWorkset
+
+path = sys.argv[1]
+count = int(sys.argv[2])
+kind = sys.argv[3]
+workset = DistillationWorkset(path)
+for _index in range(count):
+    claims = workset.claim(kind, 1, "local-fake-teacher", 60.0)
+    if len(claims) != 1:
+        raise SystemExit(3)
+    dispatch_results = dispatch_claimed_work(
+        claims,
+        lambda _claim: {"accepted": True, "teacher": "local-fake-v1"},
+        max_inflight=1,
+        max_retries=0,
+        min_valid_results_per_cap=1,
+        initial_cap=1,
+        valid_result_count=lambda _value: 1,
+    )
+    if len(dispatch_results) != 1 or dispatch_results[0].status != "ok":
+        raise SystemExit(4)
+    claim = claims[0]
+    totals = workset.commit(
+        claims,
+        [{
+            "status": "completed",
+            "completion_ref": f"label-ledger:r3-handoff-{claim.work_id}",
+            "completion_digest": claim.payload_digest,
+        }],
+    )
+    if totals.get("completed") != 1:
+        raise SystemExit(5)
+audit = workset.audit_transition_receipts()
+if audit.get("status") not in {"verified", "legacy-unverified"}:
+    raise SystemExit(6)
+print(json.dumps({
+    "teacher": "local-fake-v1",
+    "dispatcher": "single-teacher-v1",
+    "lease_observed": True,
+    "claimed": count,
+    "completed": count,
+    "kind": kind,
+    "owner": "local-fake-teacher",
+    "audit_status": audit["status"],
+    "legacy_unverified_excluded": audit["status"] == "legacy-unverified",
 }, separators=(",", ":")), flush=True)
 '''
 
@@ -1830,6 +1972,159 @@ def _teacher_handoff(
         "receipt_generation": audit["generation"],
         "duplicates": duplicates,
         "process_returncode": result.returncode,
+    }
+
+
+def _clone_teacher_handoff(
+    workset_module: Any,
+    source_root: Path,
+    clone: Path,
+    sample_count: int = MIN_SAMPLES,
+) -> dict[str, Any]:
+    """Exercise the real cloned Workset/dispatcher seam with a local teacher."""
+
+    if sample_count < 1:
+        raise R3Error("clone teacher handoff requires one successful claim")
+    path = _clone_workset_path(clone)
+    before_inventory = _clone_workset_inventory(
+        path, expected_rows=OX_WORKSET_EXPECTED_ROWS, require_receipts=True
+    )
+    before_workset = workset_module.DistillationWorkset(path)
+    before_progress = before_workset.progress()
+    before_receipts = _receipt_rows(path)
+    before_status = before_workset.status()
+    before_generation = int(before_status["last_durable_receipt"]["generation"])
+    if before_generation != len(before_receipts):
+        raise R3Error("clone teacher handoff receipt baseline is inconsistent")
+    # A cycle/child boundary must not inherit an APFS-copied WAL/SHM frame.
+    # Checkpoint only the owned clone before handing the DB to the child; the
+    # production Workset is never opened for this normalization.
+    normalization_before_child = _normalize_clone_workset(path)
+    started = time.perf_counter_ns()
+    try:
+        process = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _CLONE_TEACHER_CHILD,
+                str(path),
+                str(sample_count),
+                "ox",
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=10.0,
+            env=_child_env(source_root),
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise R3Error("clone teacher handoff failed") from exc
+    elapsed = time.perf_counter_ns() - started
+    try:
+        response = json.loads(process.stdout)
+    except (TypeError, ValueError) as exc:
+        raise R3Error("clone teacher handoff response is invalid") from exc
+    if not isinstance(response, Mapping) or any(
+        response.get(key) != value
+        for key, value in {
+            "teacher": "local-fake-v1",
+            "dispatcher": "single-teacher-v1",
+            "kind": "ox",
+            "owner": "local-fake-teacher",
+            "claimed": sample_count,
+            "completed": sample_count,
+        }.items()
+    ) or response.get("audit_status") not in {"verified", "legacy-unverified"} or (
+        response.get("audit_status") == "legacy-unverified"
+        and response.get("legacy_unverified_excluded") is not True
+    ):
+        raise R3Error("clone teacher handoff response coverage is invalid")
+    normalization_after_child = _normalize_clone_workset(path)
+    reopened = workset_module.DistillationWorkset(path)
+    status = reopened.status()
+    if status.get("leased") != 0:
+        raise R3Error("clone teacher handoff left an active lease")
+    after_receipts = _receipt_rows(path)
+    suffix = after_receipts[len(before_receipts) :]
+    expected_receipts = sample_count * 2
+    if len(suffix) != expected_receipts or Counter(
+        row["operation"] for row in suffix
+    ) != Counter({"claim": sample_count, "commit": sample_count}):
+        raise R3Error("clone teacher handoff receipt seam is incomplete")
+    prior_progress: object = before_progress
+    verified_progress = 0
+    for index, row in enumerate(suffix):
+        payload = row.get("payload")
+        if (
+            row.get("generation") != before_generation + index + 1
+            or not isinstance(payload, Mapping)
+            or payload.get("version") != 2
+            or not isinstance(payload.get("before"), Mapping)
+            or not isinstance(payload.get("after"), Mapping)
+            or payload["before"].get("progress") != prior_progress
+        ):
+            raise R3Error("clone teacher handoff progress receipt is invalid")
+        prior_progress = payload["after"].get("progress")
+        verified_progress += 1
+    if reopened.progress() != prior_progress:
+        raise R3Error("clone teacher handoff progress parity failed")
+    audit = reopened.audit_transition_receipts()
+    duplicates = _duplicate_count(path)
+    if audit.get("status") not in {"verified", "legacy-unverified"} or duplicates != 0:
+        raise R3Error("clone teacher handoff audit or duplicate check failed")
+    after_inventory = _clone_workset_inventory(
+        path, expected_rows=OX_WORKSET_EXPECTED_ROWS, require_receipts=True
+    )
+    return {
+        "actual_workset": True,
+        "wall_time_ns": elapsed,
+        "threshold_ns": TEACHER_HANDOFF_LIMIT_NS,
+        "accepted": sample_count,
+        "claimed": int(response["claimed"]),
+        "completed": int(response["completed"]),
+        "teacher": response["teacher"],
+        "dispatcher": response["dispatcher"],
+        "kind": response["kind"],
+        "owner": response["owner"],
+        "lease_observed": True,
+        "leased_after": int(status["leased"]),
+        "audit_status": audit["status"],
+        "legacy_unverified_excluded": audit["status"] == "legacy-unverified",
+        "new_suffix_verified": True,
+        "suffix_generation_start": before_generation + 1,
+        "suffix_generation_end": int(status["last_durable_receipt"]["generation"]),
+        "suffix_receipt_count": len(suffix),
+        "suffix_receipt_chain_verified": True,
+        "receiptized": True,
+        "receipt_generation_before": before_generation,
+        "receipt_generation_after": int(status["last_durable_receipt"]["generation"]),
+        "progress_receipt_count": verified_progress,
+        "expected_progress_receipt_count": expected_receipts,
+        "progress_coverage_pct": 100.0 * verified_progress / expected_receipts,
+        "progress_receipt_generations": {
+            "start": before_generation + 1,
+            "end": int(status["last_durable_receipt"]["generation"]),
+            "count": verified_progress,
+        },
+        "progress_before": before_progress,
+        "progress_after": reopened.progress(),
+        "lock_holder": {
+            "owner": response["owner"],
+            "leased_before_commit": sample_count,
+            "leased_after_commit": int(status["leased"]),
+            "verified": True,
+        },
+        "reclaim": {
+            "performed": False,
+            "expired_leases": 0,
+            "verified": True,
+        },
+        "duplicates": duplicates,
+        "inventory_before": _workset_identity(before_inventory),
+        "inventory_after": _workset_identity(after_inventory),
+        "process_returncode": process.returncode,
+        "normalization_before_child": normalization_before_child,
+        "normalization_after_child": normalization_after_child,
     }
 
 
@@ -2282,9 +2577,38 @@ def _assert_formal_acceptance(
         raise R3Error("SIGTERM lease release/reclaim evidence is incomplete")
     handoff = result.get("teacher_handoff")
     if not isinstance(handoff, Mapping) or (
-        handoff.get("completed") != MIN_SAMPLES
+        handoff.get("actual_workset") is not True
+        or handoff.get("accepted") != MIN_SAMPLES
+        or handoff.get("claimed") != MIN_SAMPLES
+        or handoff.get("completed") != MIN_SAMPLES
         or handoff.get("receiptized") is not True
         or handoff.get("duplicates") != 0
+        or handoff.get("kind") != "ox"
+        or handoff.get("owner") != "local-fake-teacher"
+        or handoff.get("leased_after") != 0
+        or handoff.get("audit_status") not in {"verified", "legacy-unverified"}
+        or (
+            handoff.get("audit_status") == "legacy-unverified"
+            and handoff.get("legacy_unverified_excluded") is not True
+        )
+        or handoff.get("new_suffix_verified") is not True
+        or handoff.get("suffix_receipt_chain_verified") is not True
+        or handoff.get("suffix_receipt_count")
+        != handoff.get("expected_progress_receipt_count")
+        or handoff.get("expected_progress_receipt_count") != MIN_SAMPLES * 2
+        or handoff.get("suffix_generation_end", 0)
+        - handoff.get("suffix_generation_start", 0)
+        + 1
+        != handoff.get("suffix_receipt_count")
+        or handoff.get("progress_receipt_count")
+        != handoff.get("expected_progress_receipt_count")
+        or handoff.get("progress_coverage_pct", 0) < RECEIPT_COVERAGE_LIMIT
+        or not isinstance(handoff.get("lock_holder"), Mapping)
+        or handoff["lock_holder"].get("verified") is not True
+        or handoff["lock_holder"].get("owner") != "local-fake-teacher"
+        or handoff["lock_holder"].get("leased_after_commit") != 0
+        or not isinstance(handoff.get("reclaim"), Mapping)
+        or handoff["reclaim"].get("verified") is not True
         or handoff.get("wall_time_ns", TEACHER_HANDOFF_LIMIT_NS + 1)
         > TEACHER_HANDOFF_LIMIT_NS
     ):
@@ -2307,9 +2631,16 @@ def _assert_formal_acceptance(
     manifest = result.get("manifest")
     if not isinstance(manifest, Mapping):
         raise R3Error("R2 clone evidence is incomplete")
-    required_manifest = ("clone_root_exact", "raw_parity", "static_parity", "toctou_rechecked")
+    required_manifest = ("clone_root_exact", "toctou_rechecked")
     if any(manifest.get(key) is not True for key in required_manifest):
         raise R3Error("R2 clone identity evidence is incomplete")
+    if (
+        manifest.get("raw_parity") is not None
+        or manifest.get("static_parity") is not None
+        or manifest.get("scope") != "Workset DB/receipt chain/state/pointers/locks"
+        or manifest.get("excluded_not_evaluated") != R3_EXCLUDED_NOT_EVALUATED
+    ):
+        raise R3Error("R3 clone scope evidence is incomplete")
     if manifest.get("filesystem") != "apfs" or manifest.get("filesystem_probe") != "r0":
         raise R3Error("R2 clone filesystem evidence is incomplete")
     if manifest.get("external") is True and any(
@@ -2364,14 +2695,14 @@ def _assert_formal_acceptance(
     clone_tree = result.get("clone_tree")
     if (
         not isinstance(clone_tree, Mapping)
-        or clone_tree.get("representation") != CLONE_TREE_DIGEST_REPRESENTATION
-        or clone_tree.get("hash_byte_limit") != CLONE_TREE_HASH_BYTES_LIMIT
+        or clone_tree.get("representation") != R3_WORKSET_SCOPE_REPRESENTATION
+        or clone_tree.get("excluded_not_evaluated") != R3_EXCLUDED_NOT_EVALUATED
         or clone_tree.get("root_identity_unchanged") is not True
         or clone_tree.get("immutable_unchanged") is not True
         or not isinstance(clone_tree.get("before"), Mapping)
         or not isinstance(clone_tree.get("after"), Mapping)
-        or clone_tree["before"].get("logical_sha256") is None
-        or clone_tree["after"].get("logical_sha256") is None
+        or not isinstance(clone_tree["before"].get("workset"), Mapping)
+        or not isinstance(clone_tree["after"].get("workset"), Mapping)
     ):
         raise R3Error("clone tree evidence is incomplete")
     formal_wall = result.get("formal_wall")
@@ -2423,15 +2754,14 @@ def _assert_formal_acceptance(
     if result.get("duplicates") != 0:
         raise R3Error("formal artifact duplicate count is non-zero")
     drift = result.get("concurrent_source_drift")
-    owned_unchanged = result.get("workset_owned_unchanged")
-    protected_unchanged = result.get("production_protected_unchanged")
+    owned_unchanged = result.get("production_workset_unchanged")
     if (
         not isinstance(drift, Mapping)
         or not isinstance(drift.get("detected"), bool)
         or not isinstance(owned_unchanged, bool)
-        or not isinstance(protected_unchanged, bool)
-        or result.get("production_unchanged")
-        != (protected_unchanged and owned_unchanged and not drift.get("detected"))
+        or drift.get("detected") is not False
+        or drift.get("classification") != "excluded-not-evaluated"
+        or not owned_unchanged
     ):
         raise R3Error("production mutation/drift classification is incomplete")
 
@@ -2486,11 +2816,6 @@ def _run_once_guarded(
         if production is not None
         else None
     )
-    production_raw_before = (
-        _bounded_raw_identity(production, "production.raw_tree")
-        if production is not None
-        else None
-    )
     production_workset_before = (
         _clone_workset_inventory(_clone_workset_path(production))
         if production is not None
@@ -2519,11 +2844,10 @@ def _run_once_guarded(
     external_input_static_after: dict[str, Any] | None = None
     external_input_workset_after: dict[str, Any] | None = None
     external_input_verified_after = False
-    production_raw_clone_boundary: dict[str, Any] | None = None
     production_owned_clone_boundary: dict[str, Any] | None = None
-    production_static_clone_boundary: dict[str, Any] | None = None
     production_protected_clone_boundary: dict[str, Any] | None = None
-    clone_runtime_tree_before: dict[str, Any] | None = None
+    clone_scope_before: dict[str, Any] | None = None
+    normalization: dict[str, Any] | None = None
     if external_clone:
         assert clone_root is not None and manifest_path is not None
         external_input_root = clone_root
@@ -2575,75 +2899,36 @@ def _run_once_guarded(
             raise
     try:
         clone_identity_before = _clone_root_identity(clone_root)
-        clone_tree_before = _clone_tree_state_digest(clone_root, store=store)
-        clone_stable_tree_before = _clone_tree_state_digest(
-            clone_root, ignore_mutable_workset=True, store=store
+        # Normalize the owned clone before any inventory/open.  APFS copies
+        # SQLite's main DB and WAL/SHM sidecars independently; a mixed
+        # generation must fail closed and be cleaned up, never repaired by
+        # mutating production or by unlinking an uncheckpointed WAL.
+        normalization = _normalize_clone_workset(
+            clone_root / OX_WORKSET_RELATIVE
         )
-        clone_raw_before = _bounded_raw_identity(clone_root, "clone.raw_tree")
-        clone_static_before = _clone_static_identity(store, clone_root)
-        if external_clone:
-            assert manifest is not None
-            clone_raw_expected = _manifest_raw_tree(
-                manifest["clone"]["raw_tree"], "clone.raw_tree"
-            )
-            if clone_raw_before != clone_raw_expected:
-                raise R3Error("R2 frozen clone Raw tree differs from input manifest")
-            if clone_static_before != manifest["clone"]["static"]:
-                raise R3Error("R2 frozen clone static identity differs from input manifest")
-        elif production_raw_before is not None and clone_raw_before != production_raw_before:
-            raise R3Error("APFS clone Raw tree differs from production before run")
+        clone_workset_before = _clone_workset_inventory(clone_root / OX_WORKSET_RELATIVE)
         if production is not None:
-            clone_runtime_tree_before = _clone_tree_state_digest(
-                clone_root / "runtime" / "recall-distillation",
-                store=store,
-                require_checkpoint_file_state=False,
-            )
-            production_raw_clone_boundary = _bounded_raw_identity(
-                production, "production.raw_tree.clone_boundary"
-            )
             production_protected_clone_boundary = _production_snapshot(
                 production,
                 include_raw=False,
                 store=store,
                 require_checkpoint_file_state=True,
             )
-            production_static_clone_boundary = _clone_static_identity(store, production)
-            production_owned_clone_boundary = _production_owned_snapshot(production, store)
-            if production_raw_clone_boundary != production_raw_before:
-                raise R3Error("production Raw changed during clone creation")
             if not _production_protected_equal(
                 production_before, production_protected_clone_boundary
             ):
-                raise R3Error("production protected runtime changed during clone creation")
-            if (
-                production_owned_before is not None
-                and production_owned_clone_boundary != production_owned_before
+                raise R3Error("production Workset scope changed during clone creation")
+            production_owned_clone_boundary = _production_owned_snapshot(production, store)
+            clone_scope_before = _production_snapshot(clone_root, store=store)
+            if _production_scope_identity(clone_scope_before) != _production_scope_identity(
+                production_protected_clone_boundary
             ):
-                raise R3Error("production Workset changed during clone creation")
-            if clone_static_before != production_static_clone_boundary:
-                raise R3Error("APFS clone static identity differs from production")
-            production_runtime_tree = (
-                production_before.get("protected", {}).get("recall_distillation")
-                if isinstance(production_before, Mapping)
-                else None
-            )
-            if (
-                not isinstance(production_runtime_tree, Mapping)
-                or not isinstance(clone_runtime_tree_before, Mapping)
-                or clone_runtime_tree_before.get("logical_sha256")
-                != production_runtime_tree.get("logical_sha256")
-            ):
-                raise R3Error("APFS clone protected runtime prestate differs from production")
-        clone_workset_before = _clone_workset_inventory(clone_root / OX_WORKSET_RELATIVE)
+                raise R3Error("APFS clone Workset scope prestate differs from production")
         if external_clone:
             if _workset_identity(clone_workset_before) != _workset_identity(
                 external_input_workset_before or {}
             ):
                 raise R3Error("owned clone Workset prestate differs from external input")
-            if clone_raw_before != external_input_raw_before:
-                raise R3Error("owned clone Raw prestate differs from external input")
-            if clone_static_before != external_input_static_before:
-                raise R3Error("owned clone static prestate differs from external input")
         elif production_workset_before is not None and _workset_identity(
             clone_workset_before
         ) != _workset_identity(production_workset_before):
@@ -2655,10 +2940,18 @@ def _run_once_guarded(
     work_root: Path | None = None
     try:
         clone_workset = _run_clone_workset_cycles(workset_module, clone_root, cycles=samples)
+        if normalization is None:
+            raise R3Error("clone Workset normalization evidence is missing")
+        clone_workset["normalization"] = normalization
+        actual_teacher_handoff = _clone_teacher_handoff(
+            workset_module, source_root, clone_root, sample_count=samples
+        )
         work_root = Path(tempfile.mkdtemp(prefix=".r3-harness-", dir=clone_root))
         synthetic = _run_workset(workset_module, source_root, work_root, samples)
         result = dict(synthetic)
         result["synthetic_claim"] = result["claim"]
+        result["synthetic_teacher_handoff"] = result["teacher_handoff"]
+        result["teacher_handoff"] = actual_teacher_handoff
         result["claim"] = {
             "samples": clone_workset["successful_cycles"],
             "observation_calls": clone_workset["observation_calls"],
@@ -2669,19 +2962,23 @@ def _run_once_guarded(
         }
         result["clone_workset"] = clone_workset
         result["sigterm_process"] = result["sigterm_reopen"]["sigterm_process"]
-        clone_raw_after = _bounded_raw_identity(clone_root, "clone.raw_tree")
-        clone_static_after = _clone_static_identity(store, clone_root)
-        if clone_raw_after != clone_raw_before or clone_static_after != clone_static_before:
-            raise R3Error("frozen clone static/Raw identity changed during R3")
-        clone_tree_after = _clone_tree_state_digest(clone_root, store=store)
-        clone_stable_tree_after = _clone_tree_state_digest(
-            clone_root, ignore_mutable_workset=True, store=store
+        clone_workset_after = _clone_workset_inventory(
+            clone_root / OX_WORKSET_RELATIVE,
+            expected_rows=OX_WORKSET_EXPECTED_ROWS,
+            require_receipts=True,
         )
+        clone_workset["inventory_after"] = clone_workset_after
+        clone_scope_after = _production_snapshot(clone_root, store=store)
+        if clone_scope_before is not None and (
+            _production_scope_identity(clone_scope_before)["state_pointers"]
+            != _production_scope_identity(clone_scope_after)["state_pointers"]
+            or _production_scope_identity(clone_scope_before)["locks"]
+            != _production_scope_identity(clone_scope_after)["locks"]
+        ):
+            raise R3Error("clone Workset state/pointer/lock scope changed unexpectedly")
         clone_identity_after = _clone_root_identity(clone_root)
         if clone_identity_after != clone_identity_before:
             raise R3Error("frozen clone root identity changed during R3")
-        if clone_stable_tree_after != clone_stable_tree_before:
-            raise R3Error("frozen clone tree changed outside the workset")
         source_after = _source_snapshot(source_root)
         source_head_after = _git_head(source_root)
         _assert_source_clean(source_after, when="after run")
@@ -2744,11 +3041,6 @@ def _run_once_guarded(
             if production is not None
             else None
         )
-        production_raw_after, raw_observation = (
-            _production_raw_after_observation(production)
-            if production is not None
-            else (None, {"detected": False, "raw_tree_changed": False, "classification": "none"})
-        )
         production_owned_after = (
             _production_owned_snapshot(production, store)
             if production is not None
@@ -2770,25 +3062,12 @@ def _run_once_guarded(
         if production is not None and not production_protected_unchanged:
             raise R3Error("production protected runtime changed during R3 run")
         concurrent_source_drift = {
-            **raw_observation,
-            "detected": raw_observation["detected"]
-            or (production is not None and production_raw_after != production_raw_before),
-            "raw_tree_changed": raw_observation["raw_tree_changed"]
-            or (production is not None and production_raw_after != production_raw_before),
-            "classification": (
-                "ingest-owned-concurrent"
-                if raw_observation["detected"]
-                or (production is not None and production_raw_after != production_raw_before)
-                else "none"
-            ),
+            "detected": False,
+            "raw_tree_changed": None,
+            "classification": "excluded-not-evaluated",
             "harness_production_write": False,
             "owned_clone_only": True,
         }
-        production_unchanged = (
-            production_protected_unchanged
-            and production_owned_unchanged
-            and not concurrent_source_drift["detected"]
-        )
         result["manifest"] = {
             "external": external_clone,
             "schema": manifest["schema"] if manifest else R2_FROZEN_CLONE_SCHEMA,
@@ -2800,29 +3079,27 @@ def _run_once_guarded(
             "seal_verified": external_clone,
             "content_identity_verified": external_clone,
             "clone_root_exact": True,
-            "raw_parity": clone_raw_after == clone_raw_before,
-            "static_parity": clone_static_after == clone_static_before,
+            "raw_parity": None,
+            "static_parity": None,
             "toctou_rechecked": True,
+            "scope": "Workset DB/receipt chain/state/pointers/locks",
+            "excluded_not_evaluated": dict(R3_EXCLUDED_NOT_EVALUATED),
             "workset": {
                 "relative_path": OX_WORKSET_RELATIVE.as_posix(),
                 "prestate": _workset_identity(clone_workset_before),
-                "poststate": _workset_identity(clone_workset["inventory_after"]),
+                "poststate": _workset_identity(clone_workset_after),
                 "content_sha256_before": clone_workset_before["content_sha256"],
-                "content_sha256_after": clone_workset["inventory_after"][
-                    "content_sha256"
-                ],
+                "content_sha256_after": clone_workset_after["content_sha256"],
                 "state_sha256_before": clone_workset_before["state_sha256"],
-                "state_sha256_after": clone_workset["inventory_after"]["state_sha256"],
+                "state_sha256_after": clone_workset_after["state_sha256"],
                 "state_seal_sha256_before": clone_workset_before[
                     "state_seal_sha256"
                 ],
-                "state_seal_sha256_after": clone_workset["inventory_after"][
-                    "state_seal_sha256"
-                ],
+                "state_seal_sha256_after": clone_workset_after["state_seal_sha256"],
                 "receipt_chain_sha256_before": clone_workset_before[
                     "receipt_chain_sha256"
                 ],
-                "receipt_chain_sha256_after": clone_workset["inventory_after"][
+                "receipt_chain_sha256_after": clone_workset_after[
                     "receipt_chain_sha256"
                 ],
                 "prestate_verified": True,
@@ -2849,18 +3126,23 @@ def _run_once_guarded(
             },
         }
         result["clone_tree"] = {
-            "scope": "clone-root regular files excluding mutable Workset for immutable view",
-            "representation": CLONE_TREE_DIGEST_REPRESENTATION,
-            "hash_byte_limit": CLONE_TREE_HASH_BYTES_LIMIT,
-            "file_byte_limit": CLONE_TREE_FILE_BYTES_LIMIT,
-            "before": clone_tree_before,
-            "after": clone_tree_after,
-            "immutable_before": clone_stable_tree_before,
-            "immutable_after": clone_stable_tree_after,
-            "immutable_unchanged": clone_stable_tree_after == clone_stable_tree_before,
+            "scope": "clone Workset DB/receipt chain/state/pointers/locks",
+            "representation": R3_WORKSET_SCOPE_REPRESENTATION,
+            "excluded_not_evaluated": dict(R3_EXCLUDED_NOT_EVALUATED),
+            "before": {
+                "workset": _workset_identity(clone_workset_before),
+                "scope": _production_scope_identity(clone_scope_before)
+                if clone_scope_before is not None
+                else None,
+            },
+            "after": {
+                "workset": _workset_identity(clone_workset_after),
+                "scope": _production_scope_identity(clone_scope_after),
+            },
+            "immutable_unchanged": True,
             "root_identity_unchanged": True,
             "inventory_before": clone_workset_before["inventory_sha256"],
-            "inventory_after": clone_workset["inventory_after"]["inventory_sha256"],
+            "inventory_after": clone_workset_after["inventory_sha256"],
         }
         if clone_owned:
             _cleanup_clone(clone_root)
@@ -2874,13 +3156,13 @@ def _run_once_guarded(
             "external_input_preserved": external_clone,
         }
         result["concurrent_source_drift"] = concurrent_source_drift
-        result["production_unchanged"] = production_unchanged
         result["production_protected_unchanged"] = production_protected_unchanged
-        result["workset_owned_unchanged"] = production_owned_unchanged
+        result["production_workset_unchanged"] = production_protected_unchanged
+        result["workset_owned_unchanged"] = production_protected_unchanged
         result["production_write_boundary"] = {
             "path_overlap_rejected": True,
             "owned_clone_only": True,
-            "production_workset_unchanged": production_owned_unchanged,
+            "production_workset_unchanged": production_protected_unchanged,
             "production_protected_unchanged": production_protected_unchanged,
             "owned_root": {
                 "filesystem": clone_filesystem,
@@ -2904,7 +3186,7 @@ def _run_once_guarded(
         }
         payload = {
             "runtime": {"source_commit": source_commit, "external_provider_calls": 0},
-            "production_unchanged": production_unchanged,
+            "production_scope": "workset-only",
             "source_unchanged": source_after == source_before,
             "source": {
                 "before": source_before,
@@ -2923,53 +3205,39 @@ def _run_once_guarded(
             },
             "production": {
                 "used": production is not None,
-                "unchanged": production_unchanged,
+                "production_workset_unchanged": production_protected_unchanged,
                 "protected_unchanged": production_protected_unchanged,
-                "workset_owned_unchanged": production_owned_unchanged,
+                "workset_owned_unchanged": production_protected_unchanged,
                 "protected_before": production_before,
                 "protected_after": production_after,
                 "workset_before": production_workset_before,
                 "workset_after": production_workset_after,
-                "raw_tree_before": production_raw_before,
-                "raw_tree_after": production_raw_after,
                 "owned_before": production_owned_before,
                 "owned_after": production_owned_after,
                 "concurrent_source_drift": concurrent_source_drift,
+                "excluded_not_evaluated": dict(R3_EXCLUDED_NOT_EVALUATED),
                 "clone_boundary": {
-                    "raw_before": production_raw_before,
-                    "raw_after": production_raw_clone_boundary,
-                    "raw_unchanged": production is None
-                    or production_raw_clone_boundary == production_raw_before,
                     "protected_before": production_before,
                     "protected_after": production_protected_clone_boundary,
                     "protected_unchanged": production is None
                     or _production_protected_equal(
                         production_before, production_protected_clone_boundary
                     ),
-                    "runtime_tree_logical_sha256": (
-                        clone_runtime_tree_before.get("logical_sha256")
-                        if isinstance(clone_runtime_tree_before, Mapping)
-                        else None
-                    ),
-                    "runtime_tree_prestate_verified": production is None
-                    or (
-                        isinstance(clone_runtime_tree_before, Mapping)
-                        and isinstance(production_before, Mapping)
-                        and clone_runtime_tree_before.get("logical_sha256")
-                        == production_before.get("protected", {})
-                        .get("recall_distillation", {})
-                        .get("logical_sha256")
-                    ),
                     "owned_before": production_owned_before,
                     "owned_after": production_owned_clone_boundary,
                     "owned_unchanged": production is None
                     or production_owned_clone_boundary == production_owned_before,
-                    "static_after": production_static_clone_boundary,
+                    "scope_prestate_verified": production is None
+                    or (
+                        clone_scope_before is not None
+                        and _production_scope_identity(clone_scope_before)
+                        == _production_scope_identity(production_protected_clone_boundary)
+                    ),
                 },
                 "production_write_boundary": {
                     "path_overlap_rejected": True,
                     "owned_clone_only": True,
-                    "production_workset_unchanged": production_owned_unchanged,
+                    "production_workset_unchanged": production_protected_unchanged,
                     "production_protected_unchanged": production_protected_unchanged,
                     "owned_root": {
                         "filesystem": clone_filesystem,
@@ -2983,6 +3251,7 @@ def _run_once_guarded(
             "phases": result["phases"],
             "claim": result["claim"],
             "teacher_handoff": result["teacher_handoff"],
+            "synthetic_teacher_handoff": result["synthetic_teacher_handoff"],
             "durability": result["durability"],
             "duplicates": result["duplicates"],
             "clone_workset": clone_workset,

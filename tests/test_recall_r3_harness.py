@@ -298,6 +298,24 @@ def test_clone_inventory_is_bounded_and_payload_free(tmp_path: Path) -> None:
     HARNESS._assert_payload_free(inventory)
 
 
+def test_clone_workset_normalization_and_cleanup_are_clone_only(tmp_path: Path) -> None:
+    clone = tmp_path / "owned-clone"
+    workset_path = clone / HARNESS.OX_WORKSET_RELATIVE
+    workset_path.parent.mkdir(parents=True)
+    with sqlite3.connect(workset_path) as connection:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        connection.execute("PRAGMA wal_autocheckpoint=0")
+        connection.execute("CREATE TABLE probe(value TEXT NOT NULL)")
+        connection.executemany("INSERT INTO probe VALUES (?)", [(str(i),) for i in range(3)])
+    normalized = HARNESS._normalize_clone_workset(workset_path)
+    assert normalized["clone_only"] is True
+    assert normalized["integrity"] == "ok"
+    assert normalized["journal_mode"] == "wal"
+    assert normalized["wal_checkpoint"] == [0, 0, 0]
+    HARNESS._cleanup_clone(clone)
+    assert not clone.exists()
+
+
 def test_clone_cycles_migrate_legacy_ox_schema_and_preserve_counts(
     tmp_path: Path,
 ) -> None:
