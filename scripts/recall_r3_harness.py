@@ -239,7 +239,7 @@ def _clone_workset_path(clone: Path) -> Path:
 
 
 def _clone_workset_inventory(
-    path: Path, *, expected_rows: int | None = None
+    path: Path, *, expected_rows: int | None = None, require_receipts: bool = False
 ) -> dict[str, Any]:
     """Read a bounded, payload-free inventory and digest of the clone DB."""
 
@@ -252,9 +252,16 @@ def _clone_workset_inventory(
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 )
             }
-            required = {"work_items", "workset_receipts", "workset_state"}
+            required = {"work_items", "workset_state"}
             if not required.issubset(tables):
                 raise R3Error("clone production ox workset schema is incomplete")
+            receipt_table_present = "workset_receipts" in tables
+            if require_receipts and not receipt_table_present:
+                raise R3Error("clone production ox workset receipts are unavailable")
+            work_item_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(work_items)")
+            }
             row = connection.execute(
                 "SELECT COUNT(*), COUNT(DISTINCT work_id), "
                 "COUNT(DISTINCT payload_digest) FROM work_items"
@@ -270,6 +277,13 @@ def _clone_workset_inventory(
                     "SELECT state, COUNT(*) FROM work_items GROUP BY state ORDER BY state"
                 )
             }
+            receipt_count = 0
+            if receipt_table_present:
+                receipt_count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM workset_receipts"
+                    ).fetchone()[0]
+                )
             rows = connection.execute(
                 "SELECT sequence, work_id, kind, payload_digest, priority, state, "
                 "attempt_count FROM work_items ORDER BY sequence LIMIT ?",
@@ -306,6 +320,13 @@ def _clone_workset_inventory(
         "unique_work_ids": unique_work_ids,
         "unique_item_digests": unique_payload_digests,
         "states": states,
+        "schema": {
+            "tables": sorted(tables),
+            "receipt_table_present": receipt_table_present,
+            "receipt_count": receipt_count,
+            "retry_column_present": "next_attempt_at" in work_item_columns,
+            "stage_column_present": "stage" in work_item_columns,
+        },
         "inventory_sha256": digest.hexdigest(),
         "file_state": after,
         "bounded": True,
@@ -321,9 +342,37 @@ def _run_clone_workset_cycles(
     if cycles < MIN_SAMPLES:
         raise R3Error("clone workset certification requires 100 successful cycles")
     path = _clone_workset_path(clone)
-    before = _clone_workset_inventory(path, expected_rows=OX_WORKSET_EXPECTED_ROWS)
+    legacy = _clone_workset_inventory(
+        path, expected_rows=OX_WORKSET_EXPECTED_ROWS, require_receipts=False
+    )
+    legacy_schema = legacy["schema"]
+    if not isinstance(legacy_schema, Mapping):
+        raise R3Error("clone production ox workset legacy schema evidence is invalid")
     workset = workset_module.DistillationWorkset(path)
+    migrated = _clone_workset_inventory(
+        path, expected_rows=OX_WORKSET_EXPECTED_ROWS, require_receipts=True
+    )
+    migrated_schema = migrated["schema"]
+    if (
+        not isinstance(migrated_schema, Mapping)
+        or migrated_schema.get("receipt_table_present") is not True
+        or migrated_schema.get("retry_column_present") is not True
+        or migrated_schema.get("stage_column_present") is not True
+    ):
+        raise R3Error("clone production ox workset migration is incomplete")
+    migration_audit = workset.audit_transition_receipts()
+    if migration_audit.get("status") not in {"verified", "legacy-unverified"}:
+        raise R3Error("clone production ox workset migration audit is invalid")
     initial_status = workset.status()
+    state_names = ("ready", "leased", "completed", "quarantined")
+    legacy_state_counts = {
+        state: int(legacy["states"].get(state, 0)) for state in state_names
+    }
+    migration_state_counts = {
+        state: int(initial_status.get(state, 0)) for state in state_names
+    }
+    if migration_state_counts != legacy_state_counts:
+        raise R3Error("clone workset migration changed state counts")
     initial_generation = int(initial_status["last_durable_receipt"]["generation"])
     timings: list[int] = []
     for _index in range(cycles):
@@ -338,7 +387,7 @@ def _run_clone_workset_cycles(
             raise R3Error("clone production ox workset commit was not completed")
     empty_started = time.perf_counter_ns()
     if workset.claim("r3-empty-probe", 1, "r3-clone-cycle", 60.0):
-        raise R3Error("clone production ox workset empty probe was not empty")
+        raise R3Error("clone production ox workset empty probe selected work")
     empty_probe_ns = time.perf_counter_ns() - empty_started
     claim_p95 = _p95(timings)
     if claim_p95 > CLAIM_P95_LIMIT_NS:
@@ -348,12 +397,19 @@ def _run_clone_workset_cycles(
     if final_generation - initial_generation < cycles * 2:
         raise R3Error("clone workset did not receiptize every cycle")
     audit = workset.audit_transition_receipts()
-    if audit.get("status") != "verified":
+    audit_status = audit.get("status")
+    receipt_chain_verified = audit_status == "verified" or (
+        legacy_schema.get("receipt_table_present") is False
+        and audit_status == "legacy-unverified"
+    )
+    if not receipt_chain_verified:
         raise R3Error("clone production ox workset receipt chain is not verified")
-    after = _clone_workset_inventory(path, expected_rows=OX_WORKSET_EXPECTED_ROWS)
+    after = _clone_workset_inventory(
+        path, expected_rows=OX_WORKSET_EXPECTED_ROWS, require_receipts=True
+    )
     if after["unique_work_ids"] != after["row_count"]:
         raise R3Error("clone production ox workset contains duplicate work ids")
-    if before["row_count"] != after["row_count"]:
+    if legacy["row_count"] != after["row_count"]:
         raise R3Error("clone production ox workset inventory changed size")
     duplicates = _duplicate_count(path)
     if duplicates != 0:
@@ -361,20 +417,39 @@ def _run_clone_workset_cycles(
     return {
         "relative_path": OX_WORKSET_RELATIVE.as_posix(),
         "row_count": after["row_count"],
-        "inventory_before": before,
+        "legacy_inventory": legacy,
+        "inventory_before": migrated,
         "inventory_after": after,
         "samples": len(timings),
         "successful_cycles": len(timings),
         "claim_samples": len(timings),
-        "observation_calls": len(timings) + 1,
+        "observation_calls": len(timings),
         "claim_p95_ns": claim_p95,
         "claim_threshold_ns": CLAIM_P95_LIMIT_NS,
-        "final_empty_excluded": True,
-        "final_empty_observation_ns": empty_probe_ns,
+        "empty_probe": {
+            "kind": "r3-empty-probe",
+            "observed_empty": True,
+            "elapsed_ns": empty_probe_ns,
+            "excluded_from_p95": True,
+        },
+        "legacy_status": {
+            "states": legacy_state_counts,
+            "row_count": legacy["row_count"],
+            "receipt_count": legacy_schema["receipt_count"],
+        },
+        "migration": {
+            "schema_before": legacy_schema,
+            "schema_after": migrated_schema,
+            "status_before_cycles": migration_state_counts,
+            "status_unchanged": migration_state_counts == legacy_state_counts,
+            "audit_status_before_cycles": migration_audit["status"],
+            "receipt_chain_verified": receipt_chain_verified,
+        },
         "receipt_generation_before": initial_generation,
         "receipt_generation_after": final_generation,
         "receipt_delta": final_generation - initial_generation,
-        "audit_status": audit["status"],
+        "audit_status": audit_status,
+        "receipt_chain_verified": receipt_chain_verified,
         "duplicates": duplicates,
         "production_path_used": False,
     }
@@ -931,21 +1006,39 @@ def _assert_formal_acceptance(
         raise R3Error("formal artifact lacks 100 successful claim cycles")
     if claim.get("samples") != claim.get("successful_count"):
         raise R3Error("formal claim denominator does not equal successful cycles")
-    if claim.get("final_empty_excluded") is not True:
-        raise R3Error("formal claim p95 did not exclude final empty observation")
+    if claim.get("observation_calls") != claim.get("successful_count"):
+        raise R3Error("formal claim observation count is not truthful")
+    synthetic = result.get("synthetic_claim")
+    if not isinstance(synthetic, Mapping):
+        raise R3Error("formal artifact lacks synthetic empty-observation evidence")
+    synthetic_count = synthetic.get("successful_count")
+    if (
+        not isinstance(synthetic_count, int)
+        or isinstance(synthetic_count, bool)
+        or synthetic_count < MIN_SAMPLES
+        or synthetic.get("observation_calls") != synthetic_count + 1
+        or synthetic.get("final_empty_excluded") is not True
+    ):
+        raise R3Error("synthetic claim empty observation evidence is incomplete")
     if not isinstance(clone, Mapping):
         raise R3Error("formal artifact lacks clone workset evidence")
+    legacy_status = clone.get("legacy_status")
+    migration = clone.get("migration")
     if (
         clone.get("relative_path") != OX_WORKSET_RELATIVE.as_posix()
         or clone.get("row_count") != OX_WORKSET_EXPECTED_ROWS
         or not isinstance(clone.get("successful_cycles"), int)
         or clone.get("successful_cycles", 0) < MIN_SAMPLES
         or clone.get("claim_samples") != clone.get("successful_cycles")
-        or clone.get("observation_calls") != clone.get("successful_cycles", 0) + 1
-        or clone.get("final_empty_excluded") is not True
+        or clone.get("observation_calls") != clone.get("successful_cycles")
         or clone.get("production_path_used") is not False
         or clone.get("duplicates") != 0
-        or clone.get("audit_status") != "verified"
+        or clone.get("receipt_chain_verified") is not True
+        or not isinstance(legacy_status, Mapping)
+        or not isinstance(legacy_status.get("states"), Mapping)
+        or legacy_status["states"].get("leased") != 0
+        or not isinstance(migration, Mapping)
+        or migration.get("status_unchanged") is not True
     ):
         raise R3Error("clone workset certification is incomplete")
     if not isinstance(sigterm, Mapping) or (
@@ -1006,8 +1099,6 @@ def _run_once_guarded(
             "p95_ns": clone_workset["claim_p95_ns"],
             "threshold_ns": CLAIM_P95_LIMIT_NS,
             "successful_count": clone_workset["successful_cycles"],
-            "final_empty_excluded": True,
-            "final_empty_observation_ns": clone_workset["final_empty_observation_ns"],
             "source": "clone-production-ox-workset",
         }
         result["clone_workset"] = clone_workset

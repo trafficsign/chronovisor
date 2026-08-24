@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import signal
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -108,6 +109,115 @@ def test_clone_inventory_is_bounded_and_payload_free(tmp_path: Path) -> None:
     assert inventory["bounded"] is True
     assert inventory["production_path_used"] is False
     HARNESS._assert_payload_free(inventory)
+
+
+def test_clone_cycles_migrate_legacy_ox_schema_and_preserve_counts(
+    tmp_path: Path,
+) -> None:
+    from chronovisor.recall import recall_distillation_workset as workset
+
+    path = tmp_path / HARNESS.OX_WORKSET_RELATIVE
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE work_items (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                work_id TEXT NOT NULL UNIQUE,
+                kind TEXT NOT NULL,
+                payload_ref TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                temporal_split_json TEXT NOT NULL,
+                provenance_json TEXT NOT NULL,
+                priority INTEGER NOT NULL,
+                watermark_json TEXT NOT NULL,
+                state TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error_class TEXT NOT NULL DEFAULT '',
+                lease_id TEXT,
+                lease_owner TEXT,
+                lease_expires_at REAL,
+                completion_ref TEXT NOT NULL DEFAULT '',
+                completion_digest TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE workset_state (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL
+            );
+            """
+        )
+        rows = []
+        for index in range(HARNESS.OX_WORKSET_EXPECTED_ROWS):
+            state = (
+                "ready"
+                if index < 19_400
+                else "quarantined"
+                if index < 19_400 + 12_970
+                else "completed"
+            )
+            completed = state == "completed"
+            rows.append(
+                (
+                    f"legacy-{index}",
+                    "ox",
+                    f"candidate-ledger:legacy-{index}",
+                    "a" * 64,
+                    "{}",
+                    "{}",
+                    0,
+                    "{}",
+                    state,
+                    0,
+                    "",
+                    None,
+                    None,
+                    None,
+                    f"label-ledger:legacy-{index}" if completed else "",
+                    "b" * 64 if completed else "",
+                    1,
+                    1,
+                )
+            )
+        connection.executemany(
+            "INSERT INTO work_items ("
+            "work_id, kind, payload_ref, payload_digest, temporal_split_json, "
+            "provenance_json, priority, watermark_json, state, attempt_count, "
+            "last_error_class, lease_id, lease_owner, lease_expires_at, "
+            "completion_ref, completion_digest, created_at, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        connection.execute("INSERT INTO workset_state VALUES ('watermark', '{}')")
+
+    legacy = HARNESS._clone_workset_inventory(
+        path, expected_rows=HARNESS.OX_WORKSET_EXPECTED_ROWS
+    )
+    assert legacy["states"] == {
+        "completed": 152,
+        "quarantined": 12_970,
+        "ready": 19_400,
+    }
+    assert legacy["schema"]["receipt_table_present"] is False
+    result = HARNESS._run_clone_workset_cycles(workset, tmp_path, cycles=100)
+    assert result["legacy_status"]["states"] == {
+        "ready": 19_400,
+        "leased": 0,
+        "completed": 152,
+        "quarantined": 12_970,
+    }
+    assert result["migration"]["schema_before"]["receipt_table_present"] is False
+    assert result["migration"]["schema_after"]["receipt_table_present"] is True
+    assert result["migration"]["status_unchanged"] is True
+    assert result["migration"]["status_before_cycles"]["leased"] == 0
+    assert result["receipt_chain_verified"] is True
+    assert result["audit_status"] == "legacy-unverified"
+    assert result["successful_cycles"] == 100
+    assert result["observation_calls"] == 100
+    assert result["empty_probe"]["kind"] == "r3-empty-probe"
+    assert result["empty_probe"]["excluded_from_p95"] is True
+    HARNESS._assert_payload_free(result)
 
 
 def test_source_clean_guard_fails_closed() -> None:
