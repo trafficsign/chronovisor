@@ -3346,6 +3346,14 @@ def _authoritative_materialized_row_binding(
     plan_id = str(expected_plan.get("artifact_id") or "")
     rally_id = str(row.get("rally_id") or "")
     split = expected_plan.get("assignments", {}).get(rally_id)
+    rally = rallies.get(rally_id)
+    if str(row.get("source") or "") == "counterfactual-label" and (
+        rally is None
+        or row.get("label_split_plan_id") != plan_id
+        or row.get("group_id") != rally.get("session_cluster_id")
+        or row.get("as_of") != rally.get("as_of")
+    ):
+        return False
     return not (
         row.get("split_plan_id") != plan_id
         or split not in {"train", "validation", "test"}

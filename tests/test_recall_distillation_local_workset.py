@@ -718,6 +718,21 @@ def test_counterfactual_preserves_raw_candidate_id_in_label(
     assert distill._materialized_row_integrity(materialized[0], root=tmp_path) is True
     missing = {**materialized[0], "counterfactual_ref": "c" * 64}
     assert distill._materialized_row_integrity(missing, root=tmp_path) is False
+    forged_label = store.append_chain(
+        label_path,
+        {
+            key: value
+            for key, value in labels[0].items()
+            if key not in {"schema", "namespace", "previous_sha256", "record_sha256"}
+        }
+        | {"group_id": "evil-group", "split_plan_id": "f" * 64},
+    )
+    forged_row = next(
+        row
+        for row in distill.materialize_training_rows(tmp_path)["rows"]
+        if row["label_record_sha256"] == forged_label["record_sha256"]
+    )
+    assert distill._materialized_row_integrity(forged_row, root=tmp_path) is False
     wrong_candidate_row = {**materialized[0], "candidate_id": "missing"}
     wrong_candidate_label = {**labels[0], "candidate_id": "missing"}
     assert distill._sealed_counterfactual_exposure_binding(
