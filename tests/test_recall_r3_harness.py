@@ -67,6 +67,8 @@ def test_run_workset_covers_durability_and_recovery(tmp_path: Path) -> None:
     assert set(result["stages"]) == set(HARNESS.SIX_STAGES)
     assert result["stages"]["teacher"]["retry_wait"] == 1
     assert result["stages"]["retry_wait"]["retry_wait"] == 1
+    assert result["retry_wait"]["count"] == 1
+    assert result["retry_wait"]["next_retry_in_seconds"] == 30
     assert result["sigterm_reopen"]["old_owner_rejected"] is True
     assert result["sigterm_reopen"]["idempotent_commit"] is True
     assert result["durability"]["receipt_coverage_pct"] >= 99

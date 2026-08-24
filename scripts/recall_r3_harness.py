@@ -559,6 +559,11 @@ def _run_workset(
         "samples": samples,
         "admitted_cycles": samples,
         "stages": dict(retry_status["stages"]),
+        "retry_wait": {
+            "count": retry_status["retry_wait"],
+            "next_retry_in_seconds": retry_status["next_retry_in_seconds"],
+            "oldest_retry_wait_age_seconds": retry_status["oldest_retry_wait_age_seconds"],
+        },
         "final_status": {
             key: value
             for key, value in final_status.items()
