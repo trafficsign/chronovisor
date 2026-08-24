@@ -466,29 +466,56 @@ def test_counterfactual_preserves_raw_candidate_id_in_label(
 
     monkeypatch.setattr(distill, "committed_raw_watermark", lambda _path: "raw-1")
     label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    features = distill.build_fast_features(
+        query_chargram_coverage=1, candidate_chargram_precision=1
+    )
+    rally = {
+        "rally_id": "rally-1",
+        "session_cluster_id": "session-1",
+        "as_of": "2026-01-01T00:00:00Z",
+        "query_sha256": "query",
+        "context_refs": [],
+        "actual_answer_refs": [{"semantic_sha256": "answer"}],
+    }
+    snapshots = {
+        "rally-1": {
+            "as_of": rally["as_of"],
+            "snapshot_sha256": "e" * 64,
+            "feature_revision": distill.TEXT_FEATURE_REVISION,
+            "candidates": [
+                {"candidate_id": 7, "text_sha256": "text", "features": features}
+            ],
+        }
+    }
+    distill._ensure_split_plan(
+        tmp_path,
+        [rally],
+        raw_watermark="a" * 64,
+        model_cohort_sha256="b" * 64,
+    )
     result = distill._run_counterfactual_block(
         execute=True,
         root=tmp_path,
         config=distill.DistillationConfig(enabled=True, max_input_bytes=4_096),
         counterfactual=Counterfactual(),
-        snapshots={
-            "rally-1": {
-                "snapshot_sha256": "snapshot",
-                "candidates": [{"candidate_id": 7, "text_sha256": "text"}],
-            }
-        },
-        rally_by_id={
-            "rally-1": {
-                "rally_id": "rally-1",
-                "query_sha256": "query",
-                "context_refs": [],
-                "actual_answer_refs": [{"semantic_sha256": "answer"}],
-            }
-        },
+        snapshots=snapshots,
+        rally_by_id={"rally-1": rally},
         texts={"query": "question", "answer": "answer", "text": "candidate"},
         label_path=label_path,
         label_rows=[],
     )
 
     assert result.written == 1
-    assert store.read_chain(label_path)[0]["candidate_id"] == 7
+    labels = store.read_chain(label_path)
+    assert labels[0]["candidate_id"] == 7
+    assert labels[0]["assignment"]["revision"] == distill.ASSIGNMENT_REVISION
+    assert labels[0]["assignment_revision"] == distill.ASSIGNMENT_REVISION
+    assert labels[0]["identity_revision"] == "local-blind-counterfactual-v1"
+    materialized = distill.materialize_training_rows(
+        tmp_path,
+        _rallies=[rally],
+        _snapshots=snapshots,
+        _label_rows=labels,
+    )["rows"]
+    assert materialized[0]["assignment_revision"] == distill.ASSIGNMENT_REVISION
+    assert materialized[0]["identity_revision"] == "local-blind-counterfactual-v1"

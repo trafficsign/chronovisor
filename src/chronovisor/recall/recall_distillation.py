@@ -6609,6 +6609,9 @@ def _ox_dispatch_and_commit(
                         payload_digest=claim.payload_digest,
                     ),
                     "assignment": task["assignment"],
+                    "assignment_revision": str(
+                        task["assignment"].get("revision") or ""
+                    ),
                     **task["temporal"],
                     **_teacher_label(
                         label_response,
@@ -8029,6 +8032,13 @@ def _compare_and_commit_counterfactual(
             "rally_id": rally_id,
             "candidate_id": candidate_id_raw,
             "route": "counterfactual",
+            "assignment": {
+                "revision": ASSIGNMENT_REVISION,
+                "kind": "counterfactual",
+            },
+            "split_plan_id": str(claim.temporal_split.get("split_plan_id") or ""),
+            "as_of": str(claim.temporal_split.get("as_of") or ""),
+            "group_id": str(claim.temporal_split.get("group_id") or ""),
             "counterfactual_producer": "chronovisor-local-blind-v1",
             "counterfactual_revision": "two-order-locked-v1",
             # This producer is intentionally local; only its stable route
