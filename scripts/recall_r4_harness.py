@@ -24,7 +24,7 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -2409,7 +2409,10 @@ def _validate_production_attestations(
 
 
 def _write_immutable(
-    output: Path, payload: Mapping[str, Any]
+    output: Path,
+    payload: Mapping[str, Any],
+    *,
+    before_publish: Callable[[], None] | None = None,
 ) -> tuple[str, Path, dict[str, Any]]:
     output.mkdir(parents=True, exist_ok=True)
     unsigned = {"schema": R4_SCHEMA, "namespace": "recall-distillation", **payload}
@@ -2429,6 +2432,13 @@ def _write_immutable(
                 handle.write(encoded)
                 handle.flush()
                 os.fsync(handle.fileno())
+            try:
+                if Path(temporary).read_bytes() != encoded:
+                    raise R4Error("immutable artifact readback mismatch")
+            except OSError as exc:
+                raise R4Error("immutable artifact readback failed") from exc
+            if before_publish is not None:
+                before_publish()
             os.replace(temporary, path)
         finally:
             Path(temporary).unlink(missing_ok=True)
@@ -2569,7 +2579,46 @@ def run(
         "provider_calls": 0,
         "production_root_used": production is not None,
     }
-    artifact_id, artifact_path, artifact = _write_immutable(output, payload)
+    expected_unsigned = {
+        "schema": R4_SCHEMA,
+        "namespace": "recall-distillation",
+        **payload,
+    }
+    expected_artifact_path = output / f"{_sha256(expected_unsigned)}.json"
+    artifact_preexisted = (
+        expected_artifact_path.exists() or expected_artifact_path.is_symlink()
+    )
+
+    def _verify_publication_source() -> None:
+        nonlocal source_final
+        checked = _assert_source(source_root, source_commit)
+        if checked != source_before or checked != source_after:
+            raise R4Error("source changed during artifact publication")
+        source_final = checked
+
+    artifact_id, artifact_path, artifact = _write_immutable(
+        output, payload, before_publish=_verify_publication_source
+    )
+    try:
+        checked_after_publish = _assert_source(source_root, source_commit)
+    except R4Error as exc:
+        # Never remove a pre-existing immutable artifact.  If this invocation
+        # just published a matching regular file, clean up only that file.
+        if not artifact_preexisted and not artifact_path.is_symlink():
+            try:
+                if artifact_path.read_bytes() == _json_bytes(artifact) + b"\n":
+                    artifact_path.unlink()
+            except OSError:
+                pass
+        raise R4Error("source changed after artifact publication") from exc
+    if checked_after_publish != source_before or checked_after_publish != source_final:
+        if not artifact_preexisted and not artifact_path.is_symlink():
+            try:
+                if artifact_path.read_bytes() == _json_bytes(artifact) + b"\n":
+                    artifact_path.unlink()
+            except OSError:
+                pass
+        raise R4Error("source changed after artifact publication")
     return artifact, artifact_path
 
 

@@ -802,6 +802,45 @@ def test_run_rejects_source_mutation_during_production_collection(
         )
 
 
+def test_run_does_not_publish_when_source_changes_during_atomic_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    local_dir = tmp_path / "local"
+    ox_dir = tmp_path / "ox"
+    _write_receipts(
+        local_dir,
+        [_receipt(row, index) for index, row in enumerate(_local_rows(source, commit))],
+    )
+    _write_receipts(
+        ox_dir,
+        [
+            _receipt(row, index + 100)
+            for index, row in enumerate(_ox_rows(source, commit))
+        ],
+    )
+    real_replace = HARNESS.os.replace
+    mutated = False
+
+    def mutating_replace(source_path: str | bytes, destination: str | bytes) -> None:
+        nonlocal mutated
+        if not mutated:
+            mutated = True
+            (source / "README.md").write_text("mutated during publication\n")
+        real_replace(source_path, destination)
+
+    monkeypatch.setattr(HARNESS.os, "replace", mutating_replace)
+    with pytest.raises(HARNESS.R4Error, match="dirty|after artifact publication"):
+        HARNESS.run(
+            source_root=source,
+            source_commit=commit,
+            output=tmp_path / "evidence",
+            local_receipts=local_dir,
+            ox_receipts=ox_dir,
+        )
+    assert list((tmp_path / "evidence").glob("*.json")) == []
+
+
 def test_public_cli_ignores_home_override_for_production_root(
     tmp_path: Path,
 ) -> None:
