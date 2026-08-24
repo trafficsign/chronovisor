@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "1f0bc3a04d60255ed98802ac178bf90b28fbe50172dc495e13cc6329309b6574",
+  "baseline_sha256": "645fb56cafae160c9ba25af968852c6fad0c8389c4a80d695e9eebae0d7d88c8",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 44,
@@ -6546,20 +6546,6 @@
           "line": 11
         },
         {
-          "semantic_id": "arch:a8c1c699854730f1e58d46b369637fad59c887bba4592226d4bb4c81152198fb",
-          "source_module": "chronovisor.recall.recall_distillation_remote_teacher",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core.openai_compatible_adapter",
-          "symbols": [
-            "OpenAICompatibleAdapter"
-          ],
-          "content_sha256": "452666840d165b9c754875a2dfa4af2796593f758ba9d4f41164e109cafc3114",
-          "occurrence": 1,
-          "line": 35
-        },
-        {
           "semantic_id": "arch:a9cde5eea6d5803e58877155f0a1dc5ceed40ce2a62fd6a22e75df4cbcb9aa33",
           "source_module": "chronovisor.recall.content_correction",
           "scope_kind": "module",
@@ -6690,7 +6676,7 @@
           ],
           "content_sha256": "e654c4f8ef3b69a370397827c50bf2e22b305f3a0be39444276377fc8670ce01",
           "occurrence": 1,
-          "line": 26
+          "line": 27
         },
         {
           "semantic_id": "arch:afa049df400f58805a154efcf8a17a0cde45f921b14499e833e1f90904ea013e",
@@ -7466,6 +7452,20 @@
           "content_sha256": "636f007b97ceb7fa96ef16652a46e4a69762e8bdb8bded781f6f80dda1346a68",
           "occurrence": 1,
           "line": 18
+        },
+        {
+          "semantic_id": "arch:da61690eaea740495ed2a77260e0215ed94a95d864036876578e3c017d076155",
+          "source_module": "chronovisor.recall.recall_distillation_remote_teacher",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.llm_config",
+          "symbols": [
+            "is_openai_compatible_adapter"
+          ],
+          "content_sha256": "8ecfbbb870e5c59ebfa690d6a2ded33ef6a22a1ddd3400bc1ef4b7670ddc86c8",
+          "occurrence": 1,
+          "line": 26
         },
         {
           "semantic_id": "arch:da8778e466c1b79e1dc86706794283da2aea1ee1f853ea20cf187adb655104b1",

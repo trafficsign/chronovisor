@@ -23,6 +23,7 @@ from typing import Any
 
 from chronovisor.core import runtime_config
 from chronovisor.core.egress_policy import guard_egress_query
+from chronovisor.core.llm_config import is_openai_compatible_adapter
 from chronovisor.core.llm_runtime import (
     GenerationBackend,
     GenerationRequest,
@@ -32,7 +33,6 @@ from chronovisor.core.llm_runtime import (
     SourceSensitivity,
     safe_metadata_identifier,
 )
-from chronovisor.core.openai_compatible_adapter import OpenAICompatibleAdapter
 from chronovisor.core.provider_profiles import (
     ProviderAdapterError,
     ProviderFailureCategory,
@@ -668,7 +668,7 @@ class OpenCodeOxAlphaTeacher:
             or endpoint != OX_ALPHA_ENDPOINT
         ):
             raise ValueError("invalid OX Alpha route")
-        if type(backend) is not OpenAICompatibleAdapter and test_only is not True:
+        if test_only is not True and not is_openai_compatible_adapter(backend):
             raise ValueError("untrusted OX Alpha backend")
         if test_only is not True and (
             simulation_attestation is not None or owned_root is not None

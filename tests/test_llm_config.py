@@ -990,6 +990,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "hard_floor_teacher_per_class": 100,
         "hard_floor_probe_pairs": 100,
         "hard_floor_counterfactual_pairs": 100,
+        "ox_expires_at": "",
         "rollout_stages": [5, 25, 100],
         "canary_min_days": 7,
     }

@@ -46,7 +46,10 @@ from chronovisor.core.nemotron_adapter import NemotronEmbeddingBackend
 from chronovisor.core.ollama_adapter import OllamaAdapter
 from chronovisor.core.ollama_transport import OLLAMA_URL
 from chronovisor.core.omlx_adapter import OMLX_BASE_URL, OMLXAdapter
-from chronovisor.core.openai_compatible_adapter import compose_openai_compatible_adapter
+from chronovisor.core.openai_compatible_adapter import (
+    OpenAICompatibleAdapter,
+    compose_openai_compatible_adapter,
+)
 from chronovisor.core.provider_profiles import (
     CURATED_PROFILE_IDS,
     ProviderAdapterError,
@@ -530,6 +533,12 @@ def compose_remote_generation_backend(
         if profile.protocol is ProviderProtocol.ANTHROPIC_MESSAGES
         else compose_openai_compatible_adapter(profile, resolver, sender=sender),
     )
+
+
+def is_openai_compatible_adapter(backend: object) -> bool:
+    """Return whether ``backend`` is the canonical OpenAI-compatible adapter."""
+
+    return type(backend) is OpenAICompatibleAdapter
 
 
 def build_llm_runtime(

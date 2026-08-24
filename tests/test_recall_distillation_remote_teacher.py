@@ -12,7 +12,10 @@ import httpx
 import pytest
 
 from chronovisor.core.llm_security import CredentialRef, CredentialResolver
-from chronovisor.core.openai_compatible_adapter import compose_openai_compatible_adapter
+from chronovisor.core.openai_compatible_adapter import (
+    OpenAICompatibleAdapter,
+    compose_openai_compatible_adapter,
+)
 from chronovisor.core.provider_profiles import generic_openai_profile
 from chronovisor.recall import recall_distillation_remote_teacher as remote
 from chronovisor.recall.recall_distillation_remote_teacher import (
@@ -282,6 +285,24 @@ def test_fabricated_backend_requires_explicit_test_only_seam() -> None:
     with pytest.raises(ValueError, match="untrusted OX Alpha backend"):
         OpenCodeOxAlphaTeacher(FabricatedBackend())
     assert OpenCodeOxAlphaTeacher(FabricatedBackend(), test_only=True).test_only is True
+
+
+def test_production_rejects_openai_compatible_adapter_subclass(tmp_path: Path) -> None:
+    class AdapterSubclass(OpenAICompatibleAdapter):
+        pass
+
+    profile = generic_openai_profile(
+        "opencode-go", ENDPOINT, CREDENTIAL_REF, structured_output_models={"ox-alpha-free"},
+    )
+    base = compose_openai_compatible_adapter(
+        profile,
+        _resolver(tmp_path),
+        sender=FakeSender(_response("{}")),
+    )
+    assert OpenCodeOxAlphaTeacher(base).test_only is False
+    backend = AdapterSubclass(profile, base._transport)
+    with pytest.raises(ValueError, match="untrusted OX Alpha backend"):
+        OpenCodeOxAlphaTeacher(backend)
 
 
 @pytest.mark.parametrize(
