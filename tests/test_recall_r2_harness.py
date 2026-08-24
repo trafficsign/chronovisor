@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import shutil
 import subprocess
 import sys
@@ -827,29 +826,84 @@ def test_completion_receipt_is_sealed_and_bound_to_artifact(tmp_path: Path) -> N
     persisted = store.read_sealed(path, schema=store.DISTILLATION_SCHEMA)
     assert persisted["r2_artifact_id"] == artifact_id
     assert persisted["r2_artifact_seal_sha256"] == artifact["seal_sha256"]
+    assert persisted["phase_timing"]["formal_wall_ns"] >= 7
+    assert persisted["phase_timing"]["artifact_seal_readback_included"] is True
+    assert persisted["phase_timing"]["formal_unaccounted_ns"] == max(
+        0,
+        persisted["phase_timing"]["formal_wall_ns"]
+        - persisted["phase_timing"]["formal_phase_union_ns"],
+    )
 
-    original_write = store.write_sealed_state
 
-    def write_tampered(path: Path, payload: object) -> object:
-        result = original_write(path, payload)  # type: ignore[arg-type]
-        tampered = json.loads(path.read_text(encoding="utf-8"))
-        tampered["r2_artifact_id"] = "0" * 64
-        path.write_text(json.dumps(tampered), encoding="utf-8")
+def test_completion_receipt_has_one_final_atomic_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_distillation_store as store
+
+    _artifact_id, artifact_path, artifact = store.write_immutable(
+        tmp_path, {"value": "safe"}, schema=HARNESS.R2_SCHEMA
+    )
+    replacements: list[tuple[Path, Path]] = []
+    reads: list[Path] = []
+    original_replace = HARNESS.os.replace
+    original_read = store.read_sealed
+
+    def record_replace(source: str | bytes | Path, destination: str | bytes | Path) -> None:
+        replacements.append((Path(source), Path(destination)))
+        original_replace(source, destination)
+
+    def record_read(path: Path, *, schema: str | None = None) -> dict[str, object]:
+        reads.append(path)
+        return original_read(path, schema=schema)
+
+    monkeypatch.setattr(HARNESS.os, "replace", record_replace)
+    monkeypatch.setattr(store, "read_sealed", record_read)
+    monkeypatch.setattr(
+        store,
+        "write_sealed_state",
+        lambda *_args, **_kwargs: pytest.fail("completion must publish atomically"),
+    )
+    result = HARNESS._write_completion_receipt(
+        store,
+        tmp_path,
+        artifact,
+        artifact_path,
+        {"elapsed_ns": 7},
+    )
+    final_path = Path(result["path"])
+    assert len(replacements) == 1
+    assert replacements[0][1] == final_path
+    assert reads == [final_path]
+    assert final_path.is_file()
+
+
+def test_completion_receipt_readback_rejects_inode_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_distillation_store as store
+
+    _artifact_id, artifact_path, artifact = store.write_immutable(
+        tmp_path, {"value": "safe"}, schema=HARNESS.R2_SCHEMA
+    )
+    original_read = store.read_sealed
+
+    def replace_after_read(path: Path, *, schema: str | None = None) -> dict[str, object]:
+        result = original_read(path, schema=schema)
+        if path.name.endswith(HARNESS.R2_COMPLETION_SUFFIX):
+            replacement = path.with_name(f".{path.name}.replacement")
+            replacement.write_bytes(path.read_bytes())
+            HARNESS.os.replace(replacement, path)
         return result
 
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(store, "write_sealed_state", write_tampered)
-    try:
-        with pytest.raises(HARNESS.R2Error, match="completion receipt"):
-            HARNESS._write_completion_receipt(
-                store,
-                tmp_path,
-                artifact,
-                artifact_path,
-                {"elapsed_ns": 7},
-            )
-    finally:
-        monkeypatch.undo()
+    monkeypatch.setattr(store, "read_sealed", replace_after_read)
+    with pytest.raises(HARNESS.R2Error, match="changed during sealed readback"):
+        HARNESS._write_completion_receipt(
+            store,
+            tmp_path,
+            artifact,
+            artifact_path,
+            {"elapsed_ns": 7},
+        )
 
 
 def test_owned_prefix_cleanup_catches_unregistered_clone(tmp_path: Path) -> None:
@@ -858,6 +912,18 @@ def test_owned_prefix_cleanup_catches_unregistered_clone(tmp_path: Path) -> None
     leaked.mkdir()
     (leaked / "marker").write_text("x", encoding="utf-8")
     assert HARNESS._cleanup_owned_temp_clones(tmp_path, prefix) == 1
+    assert not leaked.exists()
+
+
+def test_signal_during_clone_registration_cleans_owned_prefix(tmp_path: Path) -> None:
+    prefix = "chronovisor-r2-signal-"
+    leaked = tmp_path / f"{prefix}unregistered"
+    leaked.mkdir()
+    receipt = HARNESS._PhaseReceipt(None)
+    with pytest.raises(HARNESS._CooperativeSignal):
+        with HARNESS._SignalGuard(receipt, grace_seconds=1.0):
+            __import__("os").kill(__import__("os").getpid(), __import__("signal").SIGTERM)
+    assert HARNESS._cleanup_clone_set([], tmp_path, prefix) == 1
     assert not leaked.exists()
 
 

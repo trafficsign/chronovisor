@@ -525,21 +525,77 @@ def _canonical_json_sha256(value: Any) -> str:
     ).hexdigest()
 
 
+def _stable_file_digest(path: Path, *, label: str) -> tuple[os.stat_result, str]:
+    """Hash a regular file while rejecting lstat/size/content TOCTOU changes."""
+
+    if _has_symlink_component(path):
+        raise R2Error(f"{label} path contains a symlink")
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise R2Error(f"{label} path stat failed") from exc
+    if not stat.S_ISREG(before.st_mode):
+        raise R2Error(f"{label} path is not a regular file")
+    try:
+        with path.open("rb") as handle:
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        after = path.lstat()
+    except OSError as exc:
+        raise R2Error(f"{label} path read failed") from exc
+    if _has_symlink_component(path) or not stat.S_ISREG(after.st_mode):
+        raise R2Error(f"{label} path changed to a non-regular file")
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ):
+        raise R2Error(f"{label} path changed during readback")
+    return after, digest
+
+
+def _read_stable_sealed(
+    store: Any, path: Path, *, schema: str, label: str
+) -> tuple[dict[str, Any], str]:
+    before_state, before_digest = _stable_file_digest(path, label=label)
+    try:
+        artifact = store.read_sealed(path, schema=schema)
+    except Exception as exc:
+        raise R2Error(f"{label} sealed read failed") from exc
+    after_state, after_digest = _stable_file_digest(path, label=label)
+    if (
+        before_digest != after_digest
+        or before_state.st_dev != after_state.st_dev
+        or before_state.st_ino != after_state.st_ino
+        or before_state.st_size != after_state.st_size
+    ):
+        raise R2Error(f"{label} changed during sealed readback")
+    return dict(artifact), after_digest
+
+
 def _read_content_addressed_artifact(
     store: Any, path: Path, *, schema: str, label: str
 ) -> dict[str, Any]:
     """Read back an immutable artifact and independently bind ID, path, seal, schema."""
 
-    if _has_symlink_component(path) or not path.is_file():
-        raise R2Error(f"{label} artifact path is unsafe")
     if path.suffix != ".json" or path.stem != path.name[:-5]:
         raise R2Error(f"{label} artifact filename is malformed")
     expected_id = _assert_artifact_id(path.stem, label=label)
-    try:
-        artifact = store.read_sealed(path, schema=schema)
-        persisted = store.read_sealed(path, schema=schema)
-    except Exception as exc:
-        raise R2Error(f"{label} artifact readback failed") from exc
+    artifact, first_digest = _read_stable_sealed(
+        store, path, schema=schema, label=label
+    )
+    persisted, second_digest = _read_stable_sealed(
+        store, path, schema=schema, label=label
+    )
+    if first_digest != second_digest:
+        raise R2Error(f"{label} artifact changed during readback")
     if persisted != artifact:
         raise R2Error(f"{label} artifact changed during readback")
     actual_id = _assert_artifact_id(artifact.get("artifact_id"), label=label)
@@ -560,6 +616,69 @@ def _read_content_addressed_artifact(
     return dict(artifact)
 
 
+def _completion_bytes(store: Any, payload: Mapping[str, Any]) -> tuple[bytes, dict[str, Any]]:
+    unsigned = {
+        "schema": store.DISTILLATION_SCHEMA,
+        "namespace": "recall-distillation",
+        **payload,
+    }
+    artifact = {**unsigned, "seal_sha256": _canonical_json_sha256(unsigned)}
+    encoded = (
+        json.dumps(
+            artifact,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    return encoded, artifact
+
+
+def _write_temp_receipt(path: Path, encoded: bytes) -> tuple[Path, int]:
+    started_ns = time.monotonic_ns()
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return temporary, time.monotonic_ns() - started_ns
+    except BaseException:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        raise
+
+
+def _publish_completion_receipt(
+    store: Any, path: Path, encoded: bytes, *, schema: str
+) -> tuple[dict[str, Any], int]:
+    """Publish one final receipt via temp+fsync+replace, then stable-read it."""
+
+    started_ns = time.monotonic_ns()
+    if path.exists() or path.is_symlink():
+        raise R2Error("R2 completion receipt already exists")
+    temporary, _write_elapsed_ns = _write_temp_receipt(path, encoded)
+    try:
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        receipt, _digest = _read_stable_sealed(
+            store, path, schema=schema, label="R2 completion receipt"
+        )
+        return receipt, time.monotonic_ns() - started_ns
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _write_completion_receipt(
     store: Any,
     output: Path,
@@ -575,31 +694,53 @@ def _write_completion_receipt(
     )
     path = output / f"{artifact_id}{R2_COMPLETION_SUFFIX}"
     _assert_symlink_free_tree(output, label="R2 output")
-    if _has_symlink_component(path) or (path.exists() and not path.is_file()):
+    if _has_symlink_component(path) or path.exists():
         raise R2Error("R2 completion receipt path is unsafe")
     started_ns = time.monotonic_ns()
+    pre_completion_timing = dict(phase_timing)
+    pre_completion_timing["scope"] = "formal-run-pre-completion"
+    pre_completion_timing["artifact_seal_readback_included"] = True
+    # Calibrate the final publication/readback envelope without leaving a
+    # second valid completion receipt in the output directory.  The actual
+    # receipt is published exactly once below via ``os.replace``.
+    probe_encoded = b"chronovisor-r2-completion-publication-probe\n"
+    probe_path: Path | None = None
+    try:
+        probe_path, _probe_write_ns = _write_temp_receipt(path, probe_encoded)
+        _stable_file_digest(probe_path, label="R2 completion publication probe")
+        probe_finished_ns = time.monotonic_ns()
+        probe_elapsed_ns = probe_finished_ns - started_ns
+    finally:
+        if probe_path is not None:
+            probe_path.unlink(missing_ok=True)
+    formal_wall_ns = int(pre_completion_timing.get("elapsed_ns", 0)) + probe_elapsed_ns
+    formal_phase_union_ns = int(pre_completion_timing.get("phase_union_ns", 0))
+    final_timing = {
+        **pre_completion_timing,
+        "completion_publication_readback_ns": probe_elapsed_ns,
+        "formal_wall_ns": formal_wall_ns,
+        "formal_phase_union_ns": formal_phase_union_ns,
+        "formal_unaccounted_ns": max(0, formal_wall_ns - formal_phase_union_ns),
+        "formal_wall_scope": "run-start-through-completion-publication-readback",
+    }
     payload = {
         "kind": R2_COMPLETION_KIND,
         "r2_schema": R2_SCHEMA,
         "r2_artifact_id": artifact_id,
         "r2_artifact_path": str(artifact_path),
         "r2_artifact_seal_sha256": artifact_seal,
-        "phase_timing": dict(phase_timing),
+        "phase_timing": final_timing,
         "completion_started_ns": started_ns,
+        "completion_publication_readback_ns": probe_elapsed_ns,
     }
-    try:
-        store.write_sealed_state(path, payload)
-        store.read_sealed(path, schema=store.DISTILLATION_SCHEMA)
-        finished_ns = time.monotonic_ns()
-        final_payload = {
-            **payload,
-            "completion_finished_ns": finished_ns,
-            "completion_elapsed_ns": finished_ns - started_ns,
-        }
-        store.write_sealed_state(path, final_payload)
-        persisted = store.read_sealed(path, schema=store.DISTILLATION_SCHEMA)
-    except Exception as exc:
-        raise R2Error("R2 completion receipt seal/readback failed") from exc
+    encoded, _artifact = _completion_bytes(store, payload)
+    persisted, publication_elapsed_ns = _publish_completion_receipt(
+        store,
+        path,
+        encoded,
+        schema=store.DISTILLATION_SCHEMA,
+    )
+    finished_ns = time.monotonic_ns()
     if (
         persisted.get("kind") != R2_COMPLETION_KIND
         or persisted.get("r2_schema") != R2_SCHEMA
@@ -607,8 +748,8 @@ def _write_completion_receipt(
         or persisted.get("r2_artifact_path") != str(artifact_path)
         or persisted.get("r2_artifact_seal_sha256") != artifact_seal
         or persisted.get("completion_started_ns") != started_ns
-        or persisted.get("completion_finished_ns") != finished_ns
-        or persisted.get("completion_elapsed_ns") != finished_ns - started_ns
+        or persisted.get("completion_publication_readback_ns") != probe_elapsed_ns
+        or persisted.get("phase_timing", {}).get("formal_wall_ns") != formal_wall_ns
     ):
         raise R2Error("R2 completion receipt binding mismatch")
     return {
@@ -616,7 +757,8 @@ def _write_completion_receipt(
         "path": str(path),
         "artifact_id": artifact_id,
         "artifact_seal_sha256": artifact_seal,
-        "completion_elapsed_ns": finished_ns - started_ns,
+        "completion_elapsed_ns": publication_elapsed_ns,
+        "completion_finished_ns": finished_ns,
         "phase_timing": dict(persisted["phase_timing"]),
     }
 
@@ -3508,7 +3650,11 @@ def _run_once(
                 "verified": True,
                 "owned_temp_count": owned_cleanup_count,
             }
-            payload["phase_timing"] = phases.summary()
+            payload["phase_timing"] = {
+                **phases.summary(),
+                "scope": "formal-run-pre-completion",
+                "artifact_seal_readback_included": False,
+            }
             payload["cli_paths"] = dict(cli_paths or {})
             payload["completion_receipt"] = {
                 "kind": R2_COMPLETION_KIND,
