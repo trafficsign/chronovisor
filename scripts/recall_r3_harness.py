@@ -557,6 +557,7 @@ def _run_workset(
         raise R3Error("workset duplicate count is non-zero")
     return {
         "samples": samples,
+        "admitted_cycles": samples,
         "stages": dict(retry_status["stages"]),
         "final_status": {
             key: value
