@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -376,6 +377,51 @@ def test_repeated_resolve_builds_one_immutable_store_index(
     assert store.resolve("second.md") is not None
     assert store.resolve("missing.md") is None
     assert scans == 1
+
+
+def test_committed_watermark_cache_is_thread_safe_and_signature_bound(
+    tmp_path: Path, monkeypatch
+) -> None:
+    raw_dir = tmp_path / "raw"
+    source = tmp_path / "session.jsonl"
+    first_payload = b'{"source":"first"}\n'
+    source.write_bytes(first_payload)
+    _append(raw_dir, source, first_payload)
+    first = raw_store_module.committed_raw_watermark(raw_dir)
+
+    def unexpected_hash(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("warm watermark rehashed the Raw inventory")
+
+    monkeypatch.setattr(
+        raw_store_module, "_committed_segment_watermark", unexpected_hash
+    )
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        assert set(executor.map(lambda _: raw_store_module.committed_raw_watermark(raw_dir), range(8))) == {
+            first
+        }
+    monkeypatch.undo()
+
+    second_payload = b'{"source":"second"}\n'
+    source.write_bytes(second_payload)
+    _append(
+        raw_dir,
+        source,
+        second_payload,
+        raw_id="save-second.md",
+        idempotency_key="second",
+        after_line=1,
+    )
+    calls = 0
+    original = raw_store_module._committed_segment_watermark
+
+    def counted(units):
+        nonlocal calls
+        calls += 1
+        return original(units)
+
+    monkeypatch.setattr(raw_store_module, "_committed_segment_watermark", counted)
+    assert raw_store_module.committed_raw_watermark(raw_dir) != first
+    assert calls == 1
 
 
 def test_materialized_reference_projects_native_transcript_without_copying_it(

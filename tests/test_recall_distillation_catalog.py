@@ -202,6 +202,29 @@ def test_steady_state_same_watermark_reads_no_raw_and_new_session_is_delta(
     assert reads == ["save-codex-two.md"]
 
 
+def test_warm_catalog_and_fts_skip_raw_inventory_identity_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [_message("assistant", "answer", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    digest = catalog.sync_historical_index(raw_dir, tmp_path)
+
+    def unexpected_inventory(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("warm path iterated the Raw inventory")
+
+    monkeypatch.setattr(RawStore, "iter_segment_units", unexpected_inventory)
+    monkeypatch.setattr(catalog, "_unit_identity", unexpected_inventory)
+
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "noop"
+    assert catalog.sync_historical_index(raw_dir, tmp_path) == digest
+
+
 def test_post_commit_crash_repairs_catalog_on_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

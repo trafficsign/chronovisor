@@ -146,7 +146,12 @@ class RawStore:
     # Reuse that parsed snapshot across short-lived stores, but only while the
     # authoritative index files retain the same lstat identities.
     _segment_snapshots: OrderedDict[
-        Path, tuple[tuple[tuple[str, int, int, int, int], ...], tuple[RawUnit, ...]]
+        Path,
+        tuple[
+            tuple[tuple[str, int, int, int, int], ...],
+            tuple[RawUnit, ...],
+            str | None,
+        ],
     ] = OrderedDict()
     _segment_snapshots_lock = threading.Lock()
 
@@ -156,6 +161,10 @@ class RawStore:
         self._units_cache: tuple[RawUnit, ...] | None = None
         self._units_by_id: dict[str, RawUnit] | None = None
         self._segment_units_cache: tuple[RawUnit, ...] | None = None
+        self._segment_signature_cache: (
+            tuple[tuple[str, int, int, int, int], ...] | None
+        ) = None
+        self._segment_watermark_cache: str | None = None
         self._legacy_archive_units_by_id: dict[str, RawUnit] | None = None
         self._verified_legacy_manifests: dict[Path, tuple[int, ...]] = {}
 
@@ -339,9 +348,12 @@ class RawStore:
             self._units_cache = tuple(selected[raw_id] for raw_id in sorted(selected))
         yield from self._units_cache
 
-    def iter_segment_units(self) -> Iterator[RawUnit]:
-        """List v2 logical units without touching the legacy flat directory."""
-
+    def _segment_snapshot(
+        self,
+    ) -> tuple[tuple[tuple[str, int, int, int, int], ...], tuple[RawUnit, ...]]:
+        if self._segment_units_cache is not None:
+            assert self._segment_signature_cache is not None
+            return self._segment_signature_cache, self._segment_units_cache
         if self._segment_units_cache is None:
             signature = self._segment_snapshot_signature()
             cached_units: tuple[RawUnit, ...] | None = None
@@ -349,6 +361,7 @@ class RawStore:
                 cached = self._segment_snapshots.get(self.raw_dir)
                 if cached is not None and cached[0] == signature:
                     cached_units = cached[1]
+                    self._segment_watermark_cache = cached[2]
                     self._segment_snapshots.move_to_end(self.raw_dir)
             if cached_units is not None:
                 self._segment_units_cache = cached_units
@@ -358,12 +371,45 @@ class RawStore:
                 # while it was parsed; a following store will parse afresh.
                 if self._segment_snapshot_signature() == signature:
                     with self._segment_snapshots_lock:
-                        self._segment_snapshots[self.raw_dir] = (signature, units)
+                        self._segment_snapshots[self.raw_dir] = (
+                            signature,
+                            units,
+                            None,
+                        )
                         self._segment_snapshots.move_to_end(self.raw_dir)
                         while len(self._segment_snapshots) > _SEGMENT_SNAPSHOT_CACHE_SIZE:
                             self._segment_snapshots.popitem(last=False)
                 self._segment_units_cache = units
-        yield from self._segment_units_cache
+        self._segment_signature_cache = signature
+        return signature, self._segment_units_cache
+
+    def committed_segment_watermark(self) -> str:
+        """Return the signature-bound committed inventory identity."""
+
+        signature, units = self._segment_snapshot()
+        if self._segment_watermark_cache is not None:
+            return self._segment_watermark_cache
+        watermark = _committed_segment_watermark(units)
+        # The watermark is only reusable when it is still bound to the same
+        # authoritative journal/manifest signature it was derived from.
+        if self._segment_snapshot_signature() == signature:
+            with self._segment_snapshots_lock:
+                cached = self._segment_snapshots.get(self.raw_dir)
+                if cached is not None and cached[0] == signature:
+                    self._segment_snapshots[self.raw_dir] = (
+                        signature,
+                        cached[1],
+                        watermark,
+                    )
+                    self._segment_snapshots.move_to_end(self.raw_dir)
+        self._segment_watermark_cache = watermark
+        return watermark
+
+    def iter_segment_units(self) -> Iterator[RawUnit]:
+        """List v2 logical units without touching the legacy flat directory."""
+
+        _signature, units = self._segment_snapshot()
+        yield from units
 
     def iter_segment_bytes(
         self, raw_ids: Iterable[str] | None = None
@@ -852,8 +898,12 @@ class RawStore:
 def committed_raw_watermark(raw_dir: Path) -> str:
     """Return the committed-receipt inventory identity without Raw content."""
 
+    return RawStore(raw_dir, mode="v2").committed_segment_watermark()
+
+
+def _committed_segment_watermark(units: Iterable[RawUnit]) -> str:
     rows: list[dict[str, object]] = []
-    for unit in RawStore(raw_dir, mode="v2").iter_segment_units():
+    for unit in units:
         commit = unit.commit
         if commit is None or unit.sha256 is None or unit.captured_at is None:
             raise RawSegmentCorrupt("Raw unit has no committed receipt")
