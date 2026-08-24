@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import sqlite3
+import stat
 import tempfile
 import unicodedata
 from collections.abc import Iterable, Iterator, Mapping
@@ -22,6 +23,7 @@ from chronovisor.core.store import CHRONOVISOR_ROOT
 DISTILLATION_SCHEMA = "chronovisor.recall-distillation.v1"
 DISTILLATION_DIR = CHRONOVISOR_ROOT / "runtime" / "recall-distillation"
 STATE_FILE = "state.json"
+LABEL_LEDGER_FILE = "label-ledger.jsonl"
 POINTER_FILES = {
     "active": "active-policy.json",
     "candidate": "candidate-policy.json",
@@ -220,6 +222,73 @@ def _chain_checkpoint_path(path: Path) -> Path:
     return path.with_suffix(path.suffix + ".head.json")
 
 
+def _label_health_projection_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".health.json")
+
+
+def _label_health_counts(rows: Iterable[Mapping[str, Any]]) -> dict[str, int]:
+    counts = {"teacher_only": 0, "verified_truth": 0, "probe_not_truth": 0}
+    for row in rows:
+        if row.get("authority") == "teacher-only":
+            counts["teacher_only"] += 1
+        elif row.get("authority") == "verified":
+            counts["verified_truth"] += 1
+        assignment = row.get("assignment")
+        if isinstance(assignment, Mapping) and assignment.get("probe") is True:
+            counts["probe_not_truth"] += 1
+    return counts
+
+
+def _read_label_health_projection(
+    path: Path, head: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    try:
+        projection = read_sealed(
+            _label_health_projection_path(path), schema=DISTILLATION_SCHEMA
+        )
+    except DistillationStoreError:
+        return None
+    counts = projection.get("counts")
+    records = head.get("records")
+    if (
+        projection.get("kind") != "label-health-projection"
+        or projection.get("ledger_name") != path.name
+        or projection.get("label_chain_head") != head.get("head_sha256")
+        or projection.get("label_records") != records
+        or not isinstance(counts, Mapping)
+        or set(counts) != {"teacher_only", "verified_truth", "probe_not_truth"}
+        or not isinstance(records, int)
+        or isinstance(records, bool)
+        or any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in counts.values()
+        )
+        or counts["teacher_only"] + counts["verified_truth"] > records
+        or counts["probe_not_truth"] > records
+    ):
+        return None
+    return {
+        "label_chain_head": head["head_sha256"],
+        "label_records": records,
+        "counts": {key: int(value) for key, value in counts.items()},
+    }
+
+
+def _write_label_health_projection(
+    path: Path, head: Mapping[str, Any], counts: Mapping[str, int]
+) -> dict[str, Any]:
+    return write_sealed_state(
+        _label_health_projection_path(path),
+        {
+            "kind": "label-health-projection",
+            "ledger_name": path.name,
+            "label_chain_head": head["head_sha256"],
+            "label_records": head["records"],
+            "counts": dict(counts),
+        },
+    )
+
+
 def _ledger_file_state(path: Path) -> dict[str, int] | None:
     try:
         stat = path.stat()
@@ -304,7 +373,10 @@ def _recover_chain_tail(path: Path) -> dict[str, Any]:
                 try:
                     row = json.loads(line)
                 except (UnicodeError, json.JSONDecodeError) as exc:
-                    if not line.endswith(b"\n"):
+                    if not line.endswith(b"\n") or (
+                        line == b"\n"
+                        and end_offset == os.fstat(handle.fileno()).st_size
+                    ):
                         with path.open("r+b") as writable:
                             writable.truncate(last_good_offset)
                             writable.flush()
@@ -403,6 +475,14 @@ def append_chain_batch(
     with _locked(lock_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         head = _read_chain_checkpoint(path) or _recover_chain_tail(path)
+        label_counts: dict[str, int] | None = None
+        if path.name == LABEL_LEDGER_FILE:
+            projection = _read_label_health_projection(path, head)
+            label_counts = (
+                dict(projection["counts"])
+                if projection is not None
+                else _label_health_counts(_read_chain_locked(path, head))
+            )
         # The checkpoint is a write-ahead recovery point for an interrupted append.
         _write_chain_checkpoint(path, head)
         previous = str(head["head_sha256"])
@@ -423,10 +503,26 @@ def append_chain_batch(
             previous = row["record_sha256"]
             encoded.extend(canonical_json_bytes_strict(row) + b"\n")
         _append_fsynced(path, _chain_separator(path) + encoded)
-        _write_chain_checkpoint(
-            path,
-            {"records": head["records"] + len(rows), "head_sha256": previous},
-        )
+        updated_head = {
+            "records": head["records"] + len(rows),
+            "head_sha256": previous,
+        }
+        _write_chain_checkpoint(path, updated_head)
+        if label_counts is not None:
+            additions = _label_health_counts(rows)
+            try:
+                _write_label_health_projection(
+                    path,
+                    updated_head,
+                    {
+                        key: label_counts[key] + additions[key]
+                        for key in label_counts
+                    },
+                )
+            except (OSError, DistillationStoreError):
+                # The ledger is already durable; a stale projection fails closed
+                # to the exact ledger scan on the next health read.
+                pass
         return rows
 
 
@@ -465,6 +561,301 @@ def append_chain_unique(
         )
 
 
+def _unique_index_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".unique.sqlite3")
+
+
+def _unique_index_checkpoint_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".checkpoint.json")
+
+
+def _write_unique_index_checkpoint(path: Path) -> None:
+    write_sealed_state(
+        _unique_index_checkpoint_path(path),
+        {
+            "kind": "unique-ledger-index-checkpoint",
+            "index_name": path.name,
+            "file_state": _ledger_file_state(path),
+        },
+    )
+
+
+def _unique_index_checkpoint_matches(path: Path) -> bool:
+    try:
+        checkpoint = read_sealed(
+            _unique_index_checkpoint_path(path), schema=DISTILLATION_SCHEMA
+        )
+    except DistillationStoreError:
+        return False
+    return (
+        checkpoint.get("kind") == "unique-ledger-index-checkpoint"
+        and checkpoint.get("index_name") == path.name
+        and checkpoint.get("file_state") == _ledger_file_state(path)
+    )
+
+
+def _unique_index_metadata(
+    path: Path,
+    head: Mapping[str, Any],
+    *,
+    unique_field: str,
+    binding_field: str,
+) -> dict[str, str]:
+    return {
+        "schema": "chronovisor.unique-ledger-index.v1",
+        "ledger_name": path.name,
+        "unique_field": unique_field,
+        "binding_field": binding_field,
+        "records": str(head["records"]),
+        "head_sha256": str(head["head_sha256"]),
+        "file_state": canonical_json_bytes_strict(_ledger_file_state(path)).decode(),
+    }
+
+
+def _open_unique_index(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(descriptor)
+    if stat.S_IMODE(path.stat().st_mode) != 0o600:
+        os.chmod(path, 0o600)
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA journal_mode = DELETE")
+    connection.execute("PRAGMA synchronous = FULL")
+    return connection
+
+
+def _rebuild_unique_index(
+    path: Path,
+    *,
+    unique_field: str,
+    binding_field: str,
+) -> tuple[dict[str, Any], sqlite3.Connection]:
+    """Recover the ledger once, then atomically replace its derived index."""
+
+    head = _recover_chain_tail(path)
+    separator = _chain_separator(path)
+    if separator:
+        _append_fsynced(path, separator)
+    _write_chain_checkpoint(path, head)
+    index_path = _unique_index_path(path)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{index_path.name}.", suffix=".tmp", dir=index_path.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        connection = _open_unique_index(temporary)
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE rows (
+                    offset INTEGER PRIMARY KEY,
+                    length INTEGER NOT NULL,
+                    record_sha256 TEXT NOT NULL
+                );
+                CREATE TABLE entries (
+                    unique_field TEXT NOT NULL,
+                    binding_field TEXT NOT NULL,
+                    identity BLOB NOT NULL,
+                    binding BLOB NOT NULL,
+                    offset INTEGER NOT NULL REFERENCES rows(offset),
+                    PRIMARY KEY (unique_field, binding_field, identity, offset)
+                );
+                """
+            )
+            with path.open("rb") if path.exists() else contextlib.nullcontext() as handle:
+                if handle is not None:
+                    while line := handle.readline():
+                        offset = handle.tell() - len(line)
+                        row = json.loads(line)
+                        if not isinstance(row, dict):
+                            raise DistillationStoreError("ledger row is not an object")
+                        connection.execute(
+                            "INSERT INTO rows VALUES (?, ?, ?)",
+                            (offset, len(line), str(row.get("record_sha256") or "")),
+                        )
+                        connection.execute(
+                            "INSERT INTO entries VALUES (?, ?, ?, ?, ?)",
+                            (
+                                unique_field,
+                                binding_field,
+                                sqlite3.Binary(
+                                    canonical_json_bytes_strict(row.get(unique_field))
+                                ),
+                                sqlite3.Binary(
+                                    canonical_json_bytes_strict(row.get(binding_field))
+                                ),
+                                offset,
+                            ),
+                        )
+            connection.executemany(
+                "INSERT INTO metadata VALUES (?, ?)",
+                _unique_index_metadata(
+                    path,
+                    head,
+                    unique_field=unique_field,
+                    binding_field=binding_field,
+                ).items(),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, index_path)
+        _fsync_directory(index_path)
+        _write_unique_index_checkpoint(index_path)
+        return head, _open_unique_index(index_path)
+    except (OSError, sqlite3.Error, ValueError, UnicodeError) as exc:
+        temporary.unlink(missing_ok=True)
+        raise DistillationStoreError("unique ledger index rebuild failed") from exc
+
+
+def _unique_index_matches(
+    connection: sqlite3.Connection,
+    path: Path,
+    head: Mapping[str, Any],
+    *,
+    unique_field: str,
+    binding_field: str,
+) -> bool:
+    try:
+        metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+        return metadata == _unique_index_metadata(
+            path,
+            head,
+            unique_field=unique_field,
+            binding_field=binding_field,
+        )
+    except (sqlite3.Error, TypeError, ValueError):
+        return False
+
+
+def _indexed_unique_rows(
+    connection: sqlite3.Connection,
+    path: Path,
+    identity: str,
+    *,
+    unique_field: str,
+    binding_field: str,
+) -> list[dict[str, Any]] | None:
+    try:
+        state = _ledger_file_state(path)
+        file_size = int(state["size_bytes"]) if state is not None else 0
+        entries = connection.execute(
+            """
+            SELECT rows.offset, rows.length, rows.record_sha256
+            FROM entries JOIN rows USING (offset)
+            WHERE entries.unique_field = ? AND entries.binding_field = ?
+              AND entries.identity = ? ORDER BY rows.offset
+            """,
+            (
+                unique_field,
+                binding_field,
+                sqlite3.Binary(canonical_json_bytes_strict(identity)),
+            ),
+        ).fetchall()
+        if not entries:
+            return []
+        with path.open("rb") as handle:
+            rows: list[dict[str, Any]] = []
+            for offset, length, digest in entries:
+                if (
+                    not isinstance(offset, int)
+                    or not isinstance(length, int)
+                    or offset < 0
+                    or length < 1
+                    or offset > file_size
+                    or length > file_size - offset
+                ):
+                    return None
+                handle.seek(offset)
+                line = handle.read(length)
+                if len(line) != length or not line.endswith(b"\n"):
+                    return None
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    return None
+                _require_chain_metadata(row, 0)
+                unsigned = {
+                    key: value for key, value in row.items() if key != "record_sha256"
+                }
+                if (
+                    row.get("record_sha256") != digest
+                    or row.get("record_sha256")
+                    != canonical_json_sha256_strict(unsigned)
+                    or row.get(unique_field) != identity
+                ):
+                    return None
+                # The entry binding is deliberately re-derived from the exact JSONL row.
+                if connection.execute(
+                    """
+                    SELECT binding FROM entries
+                    WHERE unique_field = ? AND binding_field = ?
+                      AND identity = ? AND offset = ?
+                    """,
+                    (
+                        unique_field,
+                        binding_field,
+                        sqlite3.Binary(canonical_json_bytes_strict(identity)),
+                        offset,
+                    ),
+                ).fetchone() != (
+                    canonical_json_bytes_strict(row.get(binding_field)),
+                ):
+                    return None
+                rows.append(row)
+            return rows
+    except (OSError, OverflowError, sqlite3.Error, ValueError, UnicodeError):
+        return None
+
+
+def _update_unique_index(
+    connection: sqlite3.Connection,
+    path: Path,
+    head: Mapping[str, Any],
+    row: Mapping[str, Any],
+    *,
+    offset: int,
+    length: int,
+    unique_field: str,
+    binding_field: str,
+) -> None:
+    try:
+        connection.execute(
+            "INSERT INTO rows VALUES (?, ?, ?)",
+            (offset, length, str(row["record_sha256"])),
+        )
+        connection.execute(
+            "INSERT INTO entries VALUES (?, ?, ?, ?, ?)",
+            (
+                unique_field,
+                binding_field,
+                sqlite3.Binary(canonical_json_bytes_strict(row.get(unique_field))),
+                sqlite3.Binary(canonical_json_bytes_strict(row.get(binding_field))),
+                offset,
+            ),
+        )
+        connection.execute("DELETE FROM metadata")
+        connection.executemany(
+            "INSERT INTO metadata VALUES (?, ?)",
+            _unique_index_metadata(
+                path,
+                head,
+                unique_field=unique_field,
+                binding_field=binding_field,
+            ).items(),
+        )
+        connection.commit()
+        _write_unique_index_checkpoint(_unique_index_path(path))
+    except sqlite3.Error as exc:
+        connection.rollback()
+        raise DistillationStoreError("unique ledger index update failed") from exc
+
+
 def append_chain_unique_locked(
     path: Path,
     payload: Mapping[str, Any],
@@ -489,61 +880,156 @@ def append_chain_unique_locked(
     if not isinstance(identity, str) or not identity or not isinstance(binding, str):
         raise DistillationStoreError("unique ledger identity is invalid")
     path.parent.mkdir(parents=True, exist_ok=True)
-    head = verify_chain(path)
-    existing = path.read_bytes() if path.exists() else b""
-    for line in existing.splitlines():
-        row = json.loads(line)
+    head = _read_chain_checkpoint(path)
+    connection: sqlite3.Connection | None = None
+    try:
+        if head is not None:
+            try:
+                index_path = _unique_index_path(path)
+                if _unique_index_checkpoint_matches(index_path):
+                    connection = _open_unique_index(index_path)
+            except (OSError, sqlite3.Error):
+                connection = None
+        if connection is None or head is None or not _unique_index_matches(
+            connection,
+            path,
+            head,
+            unique_field=unique_field,
+            binding_field=binding_field,
+        ):
+            if connection is not None:
+                connection.close()
+                connection = None
+            head, connection = _rebuild_unique_index(
+                path, unique_field=unique_field, binding_field=binding_field
+            )
+        existing_rows = _indexed_unique_rows(
+            connection,
+            path,
+            identity,
+            unique_field=unique_field,
+            binding_field=binding_field,
+        )
+        if existing_rows is None:
+            connection.close()
+            connection = None
+            head, connection = _rebuild_unique_index(
+                path, unique_field=unique_field, binding_field=binding_field
+            )
+            existing_rows = _indexed_unique_rows(
+                connection,
+                path,
+                identity,
+                unique_field=unique_field,
+                binding_field=binding_field,
+            )
+            if existing_rows is None:
+                raise DistillationStoreError("unique ledger index does not match ledger")
+        for existing in existing_rows:
+            if existing.get(binding_field) == binding:
+                return existing
+            raise DistillationStoreError("unique ledger identity conflict")
+        unsigned = {
+            "schema": DISTILLATION_SCHEMA,
+            "namespace": "recall-distillation",
+            "previous_sha256": head["head_sha256"],
+            **payload,
+        }
+        row = {**unsigned, "record_sha256": canonical_json_sha256_strict(unsigned)}
+        encoded = canonical_json_bytes_strict(row) + b"\n"
+        separator = _chain_separator(path)
+        offset = (_ledger_file_state(path) or {"size_bytes": 0})["size_bytes"] + len(
+            separator
+        )
+        _append_fsynced(path, separator + encoded)
+        updated_head = {
+            "records": head["records"] + 1,
+            "head_sha256": row["record_sha256"],
+        }
+        _write_chain_checkpoint(path, updated_head)
+        _update_unique_index(
+            connection,
+            path,
+            updated_head,
+            row,
+            offset=offset,
+            length=len(encoded),
+            unique_field=unique_field,
+            binding_field=binding_field,
+        )
+        return row
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _read_chain_locked(
+    path: Path, head: Mapping[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    if head is None:
+        head = _read_chain_checkpoint(path)
+        if head is None:
+            head = _recover_chain_tail(path)
+            _write_chain_checkpoint(path, head)
+    try:
+        lines = path.read_bytes().splitlines()
+    except FileNotFoundError:
+        lines = []
+    except OSError as exc:
+        raise DistillationStoreError("ledger is unreadable") from exc
+    rows: list[dict[str, Any]] = []
+    for index, line in enumerate(lines):
+        try:
+            row = json.loads(line)
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise DistillationStoreError(f"ledger row {index} is invalid") from exc
         if not isinstance(row, dict):
-            raise DistillationStoreError("ledger row is not an object")
-        if row.get(unique_field) != identity:
-            continue
-        if row.get(binding_field) == binding:
-            return row
-        raise DistillationStoreError("unique ledger identity conflict")
-    unsigned = {
-        "schema": DISTILLATION_SCHEMA,
-        "namespace": "recall-distillation",
-        "previous_sha256": head["head_sha256"],
-        **payload,
-    }
-    row = {**unsigned, "record_sha256": canonical_json_sha256_strict(unsigned)}
-    _atomic_write(path, existing + canonical_json_bytes_strict(row) + b"\n")
-    return row
+            raise DistillationStoreError(f"ledger row {index} is not an object")
+        _require_chain_metadata(row, index)
+        rows.append(row)
+    if (
+        len(rows) != head["records"]
+        or (rows[-1].get("record_sha256") if rows else "")
+        != head["head_sha256"]
+    ):
+        raise DistillationStoreError("ledger checkpoint does not match decoded rows")
+    return rows
 
 
 def read_chain(path: Path) -> list[dict[str, Any]]:
     """Decode a stable ledger snapshot after checkpoint-backed verification."""
 
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    with _locked(lock_path):
+    with _locked(path.with_suffix(path.suffix + ".lock")):
+        return _read_chain_locked(path)
+
+
+def label_health_projection(
+    path: Path, *, repair: bool = False
+) -> dict[str, Any]:
+    """Read exact label health counts under the ledger lock."""
+
+    with _locked(path.with_suffix(path.suffix + ".lock")):
         head = _read_chain_checkpoint(path)
         if head is None:
             head = _recover_chain_tail(path)
             _write_chain_checkpoint(path, head)
-        try:
-            lines = path.read_bytes().splitlines()
-        except FileNotFoundError:
-            lines = []
-        except OSError as exc:
-            raise DistillationStoreError("ledger is unreadable") from exc
-        rows: list[dict[str, Any]] = []
-        for index, line in enumerate(lines):
+        projection = _read_label_health_projection(path, head)
+        if projection is not None:
+            return projection
+        counts = _label_health_counts(_read_chain_locked(path, head))
+        projection = {
+            "label_chain_head": head["head_sha256"],
+            "label_records": head["records"],
+            "counts": counts,
+        }
+        if repair:
             try:
-                row = json.loads(line)
-            except (UnicodeError, json.JSONDecodeError) as exc:
-                raise DistillationStoreError(f"ledger row {index} is invalid") from exc
-            if not isinstance(row, dict):
-                raise DistillationStoreError(f"ledger row {index} is not an object")
-            _require_chain_metadata(row, index)
-            rows.append(row)
-        if (
-            len(rows) != head["records"]
-            or (rows[-1].get("record_sha256") if rows else "") != head["head_sha256"]
-        ):
-            raise DistillationStoreError(
-                "ledger checkpoint does not match decoded rows"
-            )
-        return rows
+                _write_label_health_projection(path, head, counts)
+            except (OSError, DistillationStoreError):
+                # ponytail: the projection is an optimization; retry repair on
+                # the next read instead of failing exact health reporting.
+                pass
+        return projection
 
 
 def write_pointer(
@@ -802,21 +1288,12 @@ def snapshot(chronovisor_root: Path) -> dict[str, Any]:
             for character in error_code
         ):
             error_code = "invalid_error_code"
-        labels = read_chain(root / "label-ledger.jsonl")
-        teacher_only = sum(row.get("authority") == "teacher-only" for row in labels)
-        verified_truth = sum(row.get("authority") == "verified" for row in labels)
-        probe_not_truth = 0
-        baseline_id = state.get("baseline_artifact_id")
-        if isinstance(baseline_id, str) and len(baseline_id) == 64:
-            baseline = read_sealed(
-                root / "baselines" / f"{baseline_id}.json",
-                schema="chronovisor.recall-distill-baseline.v1",
-            )
-            counts = baseline.get("counts")
-            if isinstance(counts, Mapping):
-                teacher_only = int(counts.get("teacher_only_labels") or 0)
-                verified_truth = int(counts.get("verified_truth_labels") or 0)
-                probe_not_truth = int(counts.get("locked_test_probe_pairs") or 0)
+        label_counts = label_health_projection(
+            root / LABEL_LEDGER_FILE, repair=True
+        )["counts"]
+        teacher_only = label_counts["teacher_only"]
+        verified_truth = label_counts["verified_truth"]
+        probe_not_truth = label_counts["probe_not_truth"]
         paired_denominator = sum(
             row.get("kind") == "shadow-policy-observation"
             and row.get("paired_eligible") is True

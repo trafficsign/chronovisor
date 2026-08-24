@@ -301,3 +301,296 @@ def test_historical_index_serializes_concurrent_builders(tmp_path: Path) -> None
 
     assert len(set(digests)) == 1
     assert S_IMODE(path.stat().st_mode) == 0o600
+
+
+def _unique_payload(identity: str, binding: str) -> dict[str, str]:
+    return {"decision_id": identity, "idempotency_sha256": binding}
+
+
+def test_unique_append_uses_index_without_full_ledger_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "receipts.jsonl"
+    first = store.append_chain_unique(
+        path,
+        _unique_payload("decision-1", "binding-1"),
+        unique_field="decision_id",
+        binding_field="idempotency_sha256",
+    )
+    read_bytes = Path.read_bytes
+
+    def reject_ledger_read(self: Path) -> bytes:
+        if self == path:
+            raise AssertionError("steady-state unique append must not read the ledger")
+        return read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_ledger_read)
+    monkeypatch.setattr(
+        store,
+        "_recover_chain_tail",
+        lambda _path: (_ for _ in ()).throw(AssertionError("must not rebuild")),
+    )
+
+    assert (
+        store.append_chain_unique(
+            path,
+            _unique_payload("decision-1", "binding-1"),
+            unique_field="decision_id",
+            binding_field="idempotency_sha256",
+        )
+        == first
+    )
+    store.append_chain_unique(
+        path,
+        _unique_payload("decision-2", "binding-2"),
+        unique_field="decision_id",
+        binding_field="idempotency_sha256",
+    )
+
+
+def test_unique_index_preserves_duplicate_and_conflict_behavior(tmp_path: Path) -> None:
+    path = tmp_path / "receipts.jsonl"
+    first = store.append_chain_unique(
+        path,
+        _unique_payload("decision-1", "binding-1"),
+        unique_field="decision_id",
+        binding_field="idempotency_sha256",
+    )
+
+    assert (
+        store.append_chain_unique(
+            path,
+            _unique_payload("decision-1", "binding-1"),
+            unique_field="decision_id",
+            binding_field="idempotency_sha256",
+        )
+        == first
+    )
+    with pytest.raises(store.DistillationStoreError, match="identity conflict"):
+        store.append_chain_unique(
+            path,
+            _unique_payload("decision-1", "binding-2"),
+            unique_field="decision_id",
+            binding_field="idempotency_sha256",
+        )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "legacy",
+        "missing",
+        "corrupt",
+        "torn",
+        "separator_only",
+        "valid_no_newline",
+        "batch_stale",
+    ],
+)
+def test_unique_index_recovers_and_rebuilds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    path = tmp_path / "receipts.jsonl"
+    if failure == "legacy":
+        store.append_chain(path, {"legacy": True})
+    else:
+        store.append_chain_unique(
+            path,
+            _unique_payload("decision-1", "binding-1"),
+            unique_field="decision_id",
+            binding_field="idempotency_sha256",
+        )
+    if failure == "missing":
+        store._unique_index_path(path).unlink()
+    elif failure == "corrupt":
+        store._unique_index_path(path).write_bytes(b"not sqlite")
+    elif failure == "torn":
+        with path.open("ab") as handle:
+            handle.write(b'{"broken":')
+            handle.flush()
+    elif failure == "separator_only":
+        with path.open("ab") as handle:
+            handle.write(b"\n")
+            handle.flush()
+    elif failure == "valid_no_newline":
+        path.write_bytes(path.read_bytes().removesuffix(b"\n"))
+    elif failure == "batch_stale":
+        store.append_chain_batch(path, [{"index": 2}])
+    recover = store._recover_chain_tail
+    calls = 0
+
+    def tracked_recovery(recovery_path: Path) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return recover(recovery_path)
+
+    monkeypatch.setattr(store, "_recover_chain_tail", tracked_recovery)
+    store.append_chain_unique(
+        path,
+        _unique_payload("decision-2", "binding-2"),
+        unique_field="decision_id",
+        binding_field="idempotency_sha256",
+    )
+
+    assert calls == 1
+    assert store.verify_chain(path)["records"] == (3 if failure == "batch_stale" else 2)
+
+
+def test_unique_index_rebuilds_out_of_bounds_offset(tmp_path: Path) -> None:
+    path = tmp_path / "receipts.jsonl"
+    first = store.append_chain_unique(
+        path,
+        _unique_payload("decision-1", "binding-1"),
+        unique_field="decision_id",
+        binding_field="idempotency_sha256",
+    )
+    with sqlite3.connect(store._unique_index_path(path)) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("UPDATE entries SET offset = ?", (2**63 - 1,))
+        connection.execute("UPDATE rows SET offset = ?", (2**63 - 1,))
+
+    assert (
+        store.append_chain_unique(
+            path,
+            _unique_payload("decision-1", "binding-1"),
+            unique_field="decision_id",
+            binding_field="idempotency_sha256",
+        )
+        == first
+    )
+
+
+def test_unique_index_rebuilds_after_logical_row_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "receipts.jsonl"
+    first = store.append_chain_unique(
+        path,
+        _unique_payload("decision-1", "binding-1"),
+        unique_field="decision_id",
+        binding_field="idempotency_sha256",
+    )
+    with sqlite3.connect(store._unique_index_path(path)) as connection:
+        connection.execute("DELETE FROM entries")
+    recover = store._recover_chain_tail
+    calls = 0
+
+    def tracked_recovery(recovery_path: Path) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return recover(recovery_path)
+
+    monkeypatch.setattr(store, "_recover_chain_tail", tracked_recovery)
+
+    assert (
+        store.append_chain_unique(
+            path,
+            _unique_payload("decision-1", "binding-1"),
+            unique_field="decision_id",
+            binding_field="idempotency_sha256",
+        )
+        == first
+    )
+    assert calls == 1
+    assert store.verify_chain(path)["records"] == 1
+
+
+def test_snapshot_uses_label_projection_without_reading_ledger_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = store.distillation_dir(tmp_path)
+    label_path = root / store.LABEL_LEDGER_FILE
+    store.append_chain_batch(
+        label_path,
+        [
+            {"authority": "teacher-only", "assignment": {"probe": True}},
+            {"authority": "verified"},
+        ],
+    )
+    store.write_sealed_state(
+        root / store.STATE_FILE,
+        {"status": "ready"},
+    )
+    read_bytes = Path.read_bytes
+
+    def reject_label_body(self: Path) -> bytes:
+        if self == label_path:
+            raise AssertionError("projected snapshot must not decode labels")
+        return read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_label_body)
+    result = store.snapshot(tmp_path)
+
+    assert (result["teacher_only"], result["verified_truth"], result["probe_not_truth"]) == (
+        1,
+        1,
+        1,
+    )
+
+
+def test_snapshot_ignores_forged_baseline_counts(tmp_path: Path) -> None:
+    root = store.distillation_dir(tmp_path)
+    label_path = root / store.LABEL_LEDGER_FILE
+    store.append_chain(label_path, {"authority": "teacher-only"})
+    label_head = store.chain_head(label_path)
+    baseline_id, _, _ = store.write_immutable(
+        root / "baselines",
+        {
+            "kind": "baseline",
+            "label_chain_head": label_head["head_sha256"],
+            "label_records": label_head["records"],
+            "counts": {
+                "teacher_only_labels": 7,
+                "verified_truth_labels": 3,
+                "locked_test_probe_pairs": 2,
+            },
+        },
+        schema="chronovisor.recall-distill-baseline.v1",
+    )
+    store.write_sealed_state(
+        root / store.STATE_FILE,
+        {"status": "ready", "baseline_artifact_id": baseline_id},
+    )
+
+    result = store.snapshot(tmp_path)
+
+    assert (result["teacher_only"], result["verified_truth"], result["probe_not_truth"]) == (
+        1,
+        0,
+        0,
+    )
+
+
+def test_label_projection_recovers_missing_and_interrupted_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = store.distillation_dir(tmp_path) / store.LABEL_LEDGER_FILE
+    store.append_chain(path, {"authority": "teacher-only"})
+    store._label_health_projection_path(path).unlink()
+
+    projection = store.label_health_projection(path, repair=True)
+
+    assert projection["counts"] == {
+        "teacher_only": 1,
+        "verified_truth": 0,
+        "probe_not_truth": 0,
+    }
+    assert store._label_health_projection_path(path).exists()
+
+    def interrupted(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise store.DistillationStoreError("interrupted projection")
+
+    monkeypatch.setattr(store, "_write_label_health_projection", interrupted)
+    store.append_chain(path, {"authority": "verified"})
+
+    assert store.label_health_projection(path)["counts"] == {
+        "teacher_only": 1,
+        "verified_truth": 1,
+        "probe_not_truth": 0,
+    }
+    monkeypatch.undo()
+    assert store.label_health_projection(path, repair=True)["counts"] == {
+        "teacher_only": 1,
+        "verified_truth": 1,
+        "probe_not_truth": 0,
+    }

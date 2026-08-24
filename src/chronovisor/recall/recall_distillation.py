@@ -4258,9 +4258,16 @@ def preflight(
             "max_input_bytes": config.max_input_bytes,
             "max_candidates": config.max_candidates,
         }
+    label_projection = store.label_health_projection(
+        store.distillation_dir(root) / store.LABEL_LEDGER_FILE,
+        repair=True,
+    )
+    label_counts = label_projection["counts"]
     payload = {
         "kind": "privacy-safe-baseline",
         "raw_watermark": committed_raw_watermark(raw_dir),
+        "label_chain_head": label_projection["label_chain_head"],
+        "label_records": label_projection["label_records"],
         "config_sha256": config_sha256,
         "runtime_commit": resolved_runtime_commit,
         "counts": {
@@ -4289,10 +4296,11 @@ def preflight(
             else 0.0,
             "span_days": span_days,
             "windows": windows,
-            "teacher_only_labels": offline_gate["teacher_counts"]["total"],
-            "verified_truth_labels": 0,
+            "teacher_only_labels": label_counts["teacher_only"],
+            "verified_truth_labels": label_counts["verified_truth"],
             "probe_pairs": offline_gate["probe"]["pairs"],
             "counterfactual_pairs": offline_gate["counterfactual_pairs"],
+            "probe_label_rows": label_counts["probe_not_truth"],
             "locked_test_probe_pairs": offline_gate["probe"]["pairs"],
             "locked_test_counterfactual_pairs": offline_gate["counterfactual_pairs"],
         },
