@@ -857,6 +857,7 @@ class ReadCounters:
     fts_delta_cursor_calls: int = 0
     fts_scan_statements: int = 0
     full_fts_rebuilds: int = 0
+    logical_old_id_sha256: list[str] = field(default_factory=list)
     range_overlaps: list[dict[str, Any]] = field(default_factory=list)
     old_ranges: dict[Path, tuple[tuple[int, int], ...]] = field(default_factory=dict)
 
@@ -866,6 +867,12 @@ class ReadCounters:
         if raw_id in self.old_ids:
             self.logical_old_reads += 1
             self.logical_old_bytes += length
+            digest = hashlib.sha256(raw_id.encode()).hexdigest()
+            if (
+                len(self.logical_old_id_sha256) < 8
+                and digest not in self.logical_old_id_sha256
+            ):
+                self.logical_old_id_sha256.append(digest)
         else:
             self.logical_new_reads += 1
             self.logical_new_bytes += length
@@ -877,7 +884,7 @@ class ReadCounters:
         for start, end in self.old_ranges.get(path.resolve(strict=False), ()):
             overlaps += max(0, min(offset + length, end) - max(offset, start))
         self.physical_old_bytes += overlaps
-        if overlaps:
+        if overlaps and len(self.range_overlaps) < 8:
             self.range_overlaps.append(
                 {
                     "path": path.name,
@@ -1070,6 +1077,8 @@ class StageClock:
                 "physical_bytes": self.counters.physical_bytes,
                 "physical_old_bytes": self.counters.physical_old_bytes,
                 "full_raw_scans": self.counters.full_raw_scans,
+                "logical_old_id_sha256": self.counters.logical_old_id_sha256[:8],
+                "range_overlaps": self.counters.range_overlaps[:8],
             },
             "scans": {
                 "full_event_scans": self.counters.full_event_scans,
@@ -1930,7 +1939,20 @@ def _assert_delta(metrics: Mapping[str, Any], new_raw_id: str) -> None:
         or int(raw["physical_old_bytes"])
         or int(raw["full_raw_scans"])
     ):
-        raise R2Error("delta path read existing Raw")
+        overlap = next(iter(raw.get("range_overlaps", ())), {})
+        old_hash = next(iter(raw.get("logical_old_id_sha256", ())), "none")
+        raise R2Error(
+            "delta path read existing Raw "
+            f"logical_old_reads={raw['logical_old_reads']} "
+            f"logical_old_bytes={raw['logical_old_bytes']} "
+            f"physical_old_bytes={raw['physical_old_bytes']} "
+            f"full_raw_scans={raw['full_raw_scans']} "
+            f"old_id_sha256={old_hash} "
+            f"overlap_path={overlap.get('path', 'none')} "
+            f"overlap_offset={overlap.get('offset', 'none')} "
+            f"overlap_length={overlap.get('length', 'none')} "
+            f"overlap_old_bytes={overlap.get('old_overlap_bytes', 'none')}"
+        )
     if int(raw["logical_new_reads"]) == 0 or int(raw["logical_new_bytes"]) == 0:
         raise R2Error(f"delta path did not read new Raw: {new_raw_id}")
     scans = metrics["scans"]

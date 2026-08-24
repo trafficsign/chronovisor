@@ -126,6 +126,34 @@ def test_warm_rejects_assistant_full_scan() -> None:
         HARNESS._assert_warm(metrics)
 
 
+def test_delta_read_failure_reports_bounded_safe_counters() -> None:
+    metrics = {
+        "raw": {
+            "logical_old_reads": 1,
+            "logical_old_bytes": 6,
+            "logical_new_reads": 1,
+            "logical_new_bytes": 4,
+            "physical_old_bytes": 6,
+            "full_raw_scans": 0,
+            "logical_old_id_sha256": ["a" * 64],
+            "range_overlaps": [
+                {
+                    "path": "segment.open",
+                    "offset": 2,
+                    "length": 8,
+                    "old_overlap_bytes": 6,
+                }
+            ],
+        }
+    }
+    with pytest.raises(HARNESS.R2Error) as failure:
+        HARNESS._assert_delta(metrics, "new")
+    message = str(failure.value)
+    assert "logical_old_reads=1" in message
+    assert f"old_id_sha256={'a' * 64}" in message
+    assert "overlap_path=segment.open" in message
+
+
 def test_clone_cleanup_is_verified(tmp_path: Path) -> None:
     clone = tmp_path / "clone"
     clone.mkdir()
