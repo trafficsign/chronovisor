@@ -164,8 +164,18 @@ def test_counterfactual_payload_change_creates_new_work(
                 "blind_orders": ["a0_first", "a1_first"],
                 "a0_sha256": "c" * 64,
                 "a1_sha256": "d" * 64,
-                "generator_route_identity": {"role": "generator"},
-                "judge_route_identity": {"role": "judge"},
+                "generator_route_identity": {
+                    "role": "generator",
+                    "provider": "test",
+                    "model": "generator",
+                    "location": "local",
+                },
+                "judge_route_identity": {
+                    "role": "judge",
+                    "provider": "test",
+                    "model": "judge",
+                    "location": "local",
+                },
                 "generator_model_digest": "a" * 64,
                 "judge_model_digest": "b" * 64,
             }
@@ -321,7 +331,12 @@ def test_counterfactual_retries_missing_answer_digest_or_route_identity(
                 "a0_sha256": "",
                 "a1_sha256": "b" * 64,
                 "generator_route_identity": {},
-                "judge_route_identity": {"role": "judge"},
+                "judge_route_identity": {
+                    "role": "judge",
+                    "provider": "test",
+                    "model": "judge",
+                    "location": "local",
+                },
                 "generator_model_digest": "a" * 64,
                 "judge_model_digest": "b" * 64,
             }
@@ -433,8 +448,18 @@ def test_counterfactual_preserves_raw_candidate_id_in_label(
                 "blind_orders": ["a0_first", "a1_first"],
                 "a0_sha256": "c" * 64,
                 "a1_sha256": "d" * 64,
-                "generator_route_identity": {"role": "generator"},
-                "judge_route_identity": {"role": "judge"},
+                "generator_route_identity": {
+                    "role": "generator",
+                    "provider": "test",
+                    "model": "generator",
+                    "location": "local",
+                },
+                "judge_route_identity": {
+                    "role": "judge",
+                    "provider": "test",
+                    "model": "judge",
+                    "location": "local",
+                },
                 "generator_model_digest": "a" * 64,
                 "judge_model_digest": "b" * 64,
             }

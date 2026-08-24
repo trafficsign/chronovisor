@@ -185,11 +185,12 @@ def test_legacy_incumbent_allows_candidate_only_gate_only_at_100_percent(
         schema=distill.BASELINE_SCHEMA,
     )
     legacy = distill._ensure_bootstrap_policy(tmp_path, baseline_artifact)
-    candidate = distill.publish_policy(
-        distill.train_tiny_policy([]),
-        lineage={"baseline_artifact_id": baseline, "locked_replay_id": "c" * 64},
-        root=tmp_path,
-    )["artifact_id"]
+    candidate = _policy(tmp_path, "legacy-candidate")
+    store.write_pointer(tmp_path, "candidate", candidate)
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / store.STATE_FILE,
+        {"kind": "worker-state", "status": "replay", "rollout_percent": 0},
+    )
     for now, name, expected in (
         ("2026-08-01T00:00:00Z", "legacy-replay", 0),
         ("2026-08-08T00:00:00Z", "legacy-shadow", 5),

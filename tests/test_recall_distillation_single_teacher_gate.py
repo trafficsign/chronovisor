@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from typing import cast
 
+from chronovisor.core import canonical_json
+from chronovisor.recall.recall_distillation_remote_teacher import (
+    OX_ALPHA_FIXED_IDENTITY,
+)
 from chronovisor.recall.recall_distillation_single_teacher_gate import (
     evaluate_single_teacher_gate,
+    expected_ox_provider_request_sha256,
+    expected_ox_request_sha256,
 )
 
 PROFILE = "ox-alpha-single-v1"
@@ -22,6 +28,8 @@ def _row(
     as_of = {"train": "2026-08-01", "validation": "2026-08-02", "test": "2026-08-03"}[
         split
     ]
+    payload_source = {"row_id": row_id}
+    payload_digest = canonical_json.canonical_json_sha256_strict(payload_source)
     return {
         "row_id": row_id,
         "rally_id": row_id,
@@ -32,10 +40,32 @@ def _row(
         "profile": PROFILE,
         "cohort": COHORT,
         "route": "opencode-go/ox-alpha-free",
-        "model_digest": "a" * 64,
-        "prompt_sha256": "b" * 64,
-        "schema_sha256": "c" * 64,
+        "model_digest": OX_ALPHA_FIXED_IDENTITY["model_digest"],
+        "prompt_sha256": OX_ALPHA_FIXED_IDENTITY["prompt_template_sha256"],
+        "schema_sha256": OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"],
         "profile_contract_id": "e" * 64,
+        "identity_revision": "ox-alpha-fixed-identity-v1",
+        "request_revision": "json-schema-core-label-abstain-16k-240s-v6",
+        "route_digest": OX_ALPHA_FIXED_IDENTITY["route_digest"],
+        "payload_digest": payload_digest,
+        "payload_source": payload_source,
+        "request_sha256": expected_ox_request_sha256(
+            profile_contract_id="e" * 64, payload_digest=payload_digest
+        ),
+        "work_id": row_id,
+        "expires_at": "2099-01-01T00:00:00Z",
+        "provider_request_sha256": expected_ox_provider_request_sha256(
+            profile_contract_id="e" * 64,
+            payload_digest=payload_digest,
+            work_id=row_id,
+            expires_at="2099-01-01T00:00:00Z",
+        ),
+        "provider_response_request_sha256": expected_ox_provider_request_sha256(
+            profile_contract_id="e" * 64,
+            payload_digest=payload_digest,
+            work_id=row_id,
+            expires_at="2099-01-01T00:00:00Z",
+        ),
         "route_identity_exact": True,
         "split": split,
         "split_plan_id": "d" * 64,
@@ -116,6 +146,23 @@ def test_single_teacher_gate_accepts_fixed_chronological_cohort() -> None:
         "evidence_refs": [f"split-plan:{'d' * 64}"],
     }
     assert gate["blind_repeat"]["complete_pairs"] == 2
+
+
+def test_single_teacher_gate_applies_authority_validator_to_every_row() -> None:
+    rows = _passing_rows()
+    gate = evaluate_single_teacher_gate(
+        rows,
+        profile=PROFILE,
+        cohort=COHORT,
+        min_labels=4,
+        min_per_class=2,
+        min_repeat_pairs=2,
+        min_repeat_stability=0.10,
+        row_validator=lambda row: row is not rows[0],
+    )
+
+    assert gate["passed"] is False
+    assert "row_authority_mismatch" in gate["reasons"]
 
 
 def test_invalid_uncertain_and_retry_rows_are_excluded_from_label_counts() -> None:
@@ -242,6 +289,15 @@ def test_gate_fails_closed_for_repeat_identity_and_parity_contracts() -> None:
         "route_identity_mismatch",
         "schema_sha256_identity_not_exactly_one",
     } <= set(gate["reasons"])
+
+
+def test_gate_recomputes_request_envelopes() -> None:
+    rows = _passing_rows()
+    rows[0]["provider_request_sha256"] = "a" * 64
+
+    gate = _gate(rows)
+
+    assert "provider_request_sha256_contract_mismatch" in gate["reasons"]
 
 
 def test_gate_rejects_noncanonical_identity_values_and_invalid_rows() -> None:

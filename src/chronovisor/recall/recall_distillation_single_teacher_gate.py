@@ -2,11 +2,67 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
+
+from chronovisor.core import canonical_json
+from chronovisor.recall.recall_distillation_remote_teacher import (
+    OX_ALPHA_FIXED_IDENTITY,
+)
+
+
+def expected_ox_request_sha256(*, profile_contract_id: str, payload_digest: str) -> str:
+    """Bind a label to its sealed contract and non-sensitive request payload."""
+
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "identity_revision": OX_ALPHA_FIXED_IDENTITY["revision"],
+                "payload_digest": payload_digest,
+                "profile_contract_id": profile_contract_id,
+                "request_revision": "json-schema-core-label-abstain-16k-240s-v6",
+                "route_digest": OX_ALPHA_FIXED_IDENTITY["route_digest"],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def expected_ox_provider_request_sha256(
+    *,
+    profile_contract_id: str,
+    payload_digest: str,
+    work_id: str,
+    expires_at: str,
+) -> str:
+    """Hash the non-sensitive envelope that uniquely binds one OX request."""
+
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "contract": profile_contract_id,
+                "expires_at": expires_at,
+                "identity_revision": OX_ALPHA_FIXED_IDENTITY["revision"],
+                "model_digest": OX_ALPHA_FIXED_IDENTITY["model_digest"],
+                "payload_digest": payload_digest,
+                "prompt_sha256": OX_ALPHA_FIXED_IDENTITY["prompt_template_sha256"],
+                "route_digest": OX_ALPHA_FIXED_IDENTITY["route_digest"],
+                "schema_sha256": OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"],
+                "work_id": work_id,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _wilson_lower(successes: int, total: int) -> float:
@@ -52,6 +108,7 @@ def evaluate_single_teacher_gate(
     min_per_class: int = 100,
     min_repeat_pairs: int = 100,
     min_repeat_stability: float = 0.60,
+    row_validator: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> dict[str, Any]:
     """Evaluate sealed-like rows without granting them verified-truth authority.
 
@@ -85,12 +142,21 @@ def evaluate_single_teacher_gate(
         or row.get("profile_contract_id") == profile_contract_id
     ]
     excluded_prior_contract_rows = len(rows) - len(current_rows)
-    completed = [row for row in current_rows if _complete_row(row)]
+    # Counterfactuals are produced locally and are evaluated by the separate
+    # directional gate.  They must not impersonate the remote OX teacher's
+    # fixed identity here.
+    completed = [
+        row
+        for row in current_rows
+        if _complete_row(row) and row.get("source") != "counterfactual-label"
+    ]
     required_splits = {"train", "validation", "test"}
     eligible = [row for row in completed if row.get("split") in required_splits]
     excluded = len(rows) - len(eligible)
     labels = [row for row in eligible if row.get("probe") is not True]
     probes = [row for row in eligible if row.get("probe") is True]
+    if row_validator is not None and any(not row_validator(row) for row in eligible):
+        reasons.append("row_authority_mismatch")
     relevant = sum(row.get("verdict") == "relevant" for row in labels)
     irrelevant = sum(row.get("verdict") == "irrelevant" for row in labels)
 
@@ -116,6 +182,9 @@ def evaluate_single_teacher_gate(
             "schema_sha256",
             "split_plan_id",
             "profile_contract_id",
+            "identity_revision",
+            "request_revision",
+            "route_digest",
         )
     }
     if identities["profile"] and identities["profile"] != profile:
@@ -126,15 +195,84 @@ def evaluate_single_teacher_gate(
         reasons.append("profile_contract_mismatch")
     if identities["route"] and identities["route"] != "opencode-go/ox-alpha-free":
         reasons.append("route_mismatch")
+    for name, expected in (
+        ("model_digest", OX_ALPHA_FIXED_IDENTITY["model_digest"]),
+        ("prompt_sha256", OX_ALPHA_FIXED_IDENTITY["prompt_template_sha256"]),
+        ("schema_sha256", OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"]),
+        ("route_digest", OX_ALPHA_FIXED_IDENTITY["route_digest"]),
+    ):
+        if identities[name] != expected:
+            reasons.append(f"{name}_contract_mismatch")
+    if any(
+        expected_ox_request_sha256(
+            profile_contract_id=_text(row.get("profile_contract_id")),
+            payload_digest=_text(row.get("payload_digest")),
+        )
+        != _text(row.get("request_sha256"))
+        for row in completed
+    ):
+        reasons.append("request_sha256_contract_mismatch")
+    if any(
+        expected_ox_provider_request_sha256(
+            profile_contract_id=_text(row.get("profile_contract_id")),
+            payload_digest=_text(row.get("payload_digest")),
+            work_id=_text(row.get("work_id")),
+            expires_at=_text(row.get("expires_at")),
+        )
+        != _text(row.get("provider_request_sha256"))
+        for row in completed
+    ):
+        reasons.append("provider_request_sha256_contract_mismatch")
+    if any(
+        re.fullmatch(
+            r"[0-9a-f]{64}", _text(row.get("provider_response_request_sha256"))
+        )
+        is None
+        for row in completed
+    ):
+        reasons.append("provider_response_request_sha256_invalid")
+    if any(
+        re.fullmatch(r"[0-9a-f]{64}", _text(row.get("payload_digest"))) is None
+        or not isinstance(row.get("payload_source"), Mapping)
+        or canonical_json.canonical_json_sha256_strict(row["payload_source"])
+        != _text(row.get("payload_digest"))
+        for row in completed
+    ):
+        reasons.append("payload_source_digest_mismatch")
+    if any(
+        _text(row.get("provider_response_request_sha256"))
+        != _text(row.get("provider_request_sha256"))
+        for row in completed
+    ):
+        reasons.append("provider_response_request_sha256_contract_mismatch")
+
+    def future_utc(value: object) -> bool:
+        text = _text(value)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", text) is None:
+            return False
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")) > datetime.now(
+                UTC
+            )
+        except ValueError:
+            return False
+
+    if any(not future_utc(row.get("expires_at")) for row in completed):
+        reasons.append("expiry_missing")
     for name in (
         "model_digest",
         "prompt_sha256",
         "schema_sha256",
         "split_plan_id",
         "profile_contract_id",
+        "route_digest",
     ):
         if identities[name] and re.fullmatch(r"[0-9a-f]{64}", identities[name]) is None:
             reasons.append(f"{name}_identity_invalid")
+    if identities["identity_revision"] != "ox-alpha-fixed-identity-v1":
+        reasons.append("identity_revision_mismatch")
+    if identities["request_revision"] != "json-schema-core-label-abstain-16k-240s-v6":
+        reasons.append("request_revision_mismatch")
     if any(row.get("route_identity_exact") is not True for row in completed):
         reasons.append("route_identity_mismatch")
     if any(row.get("fixed_split_plan") is not True for row in completed):

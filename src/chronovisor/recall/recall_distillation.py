@@ -17,7 +17,7 @@ import unicodedata
 from collections import defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -45,6 +45,8 @@ from chronovisor.recall.recall_distillation_remote_teacher import (
 )
 from chronovisor.recall.recall_distillation_single_teacher_gate import (
     evaluate_single_teacher_gate,
+    expected_ox_provider_request_sha256,
+    expected_ox_request_sha256,
 )
 
 RALLY_SCHEMA = "chronovisor.recall-rally.rally-v1"
@@ -470,7 +472,44 @@ def _default_workers(
             )
         except Exception:
             return {}, None
-        return {teacher.role: teacher}, None
+        # Counterfactuals remain local even while OX supplies the temporary
+        # relevance teacher.  They never receive the remote backend.
+        try:
+            from chronovisor.core import ollama
+
+            roles = (
+                "recall.distill.answer_generator",
+                "recall.distill.utility_judge",
+            )
+            routes = ollama.runtime_generation_routes(roles)
+            digests = ollama.runtime_generation_route_fingerprints(routes)
+            identities = {
+                route.role: {
+                    "role": route.role,
+                    "provider": route.provider,
+                    "model": route.model,
+                    "location": route.location,
+                }
+                for route in routes
+            }
+            counterfactual = (
+                _WorkerCounterfactual(
+                    config.max_input_bytes,
+                    identities,
+                    digests,
+                    counterfactual_deadline_ms,
+                )
+                if tuple(route.role for route in routes) == roles
+                and all(
+                    route.location == "local" and route.structured_output
+                    for route in routes
+                )
+                and digests[roles[0]] != digests[roles[1]]
+                else None
+            )
+        except Exception:
+            counterfactual = None
+        return {teacher.role: teacher}, counterfactual
 
     from chronovisor.core import ollama
 
@@ -542,6 +581,54 @@ class DistillationConfig:
     teacher_claim_limit: int = 500
     ox_enabled: bool = False
     ox_free_only: bool = True
+    ox_expires_at: str = "2099-01-01T00:00:00Z"
+
+
+def _ox_expiry(value: object) -> str:
+    """Return a strict future UTC RFC3339 expiry, or fail before egress."""
+
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value) is None
+    ):
+        raise DistillationError("OX expiry must be strict UTC RFC3339")
+    try:
+        expires_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise DistillationError("OX expiry must be strict UTC RFC3339") from exc
+    if expires_at <= datetime.now(UTC):
+        raise DistillationError("OX expiry is not in the future")
+    return value
+
+
+def _same_future_ox_expiry(value: object, expected: object) -> bool:
+    try:
+        return _ox_expiry(value) == _ox_expiry(expected)
+    except DistillationError:
+        return False
+
+
+def _canonical_hard_floors() -> dict[str, int]:
+    defaults = DistillationConfig()
+    return {
+        name: getattr(defaults, name)
+        for name in (
+            "hard_floor_rallies",
+            "hard_floor_days",
+            "hard_floor_windows",
+            "hard_floor_teacher_labels",
+            "hard_floor_teacher_per_class",
+            "hard_floor_probe_pairs",
+            "hard_floor_counterfactual_pairs",
+        )
+    }
+
+
+def _has_canonical_hard_floors(config: DistillationConfig) -> bool:
+    return all(
+        getattr(config, name) >= value
+        for name, value in _canonical_hard_floors().items()
+    )
 
 
 def _ensure_ox_profile_contract(
@@ -551,15 +638,18 @@ def _ensure_ox_profile_contract(
 
     if (
         config.teacher_profile != OX_SINGLE_PROFILE
+        or config.ox_enabled is not True
         or config.ox_free_only is not True
         or not 1 <= config.teacher_max_inflight <= 10
     ):
         raise DistillationError("OX profile contract is unsafe")
+    expires_at = _ox_expiry(config.ox_expires_at)
     relevant_config = {
         "teacher_profile": config.teacher_profile,
         "teacher_max_inflight": config.teacher_max_inflight,
         "ox_enabled": config.ox_enabled,
         "ox_free_only": config.ox_free_only,
+        "ox_expires_at": expires_at,
         "max_input_bytes": config.max_input_bytes,
         "max_candidates": config.max_candidates,
     }
@@ -577,7 +667,7 @@ def _ensure_ox_profile_contract(
             "free_only": True,
             "no_paid_fallback": True,
             "official_status": "limited_time",
-            "expires_at": None,
+            "expires_at": expires_at,
             "docs_url": "https://opencode.ai/docs/go/",
             "kill_categories": [
                 "402",
@@ -632,6 +722,7 @@ _OPTIONAL_PROFILE_CONFIG = frozenset(
         "teacher_claim_limit",
         "ox_enabled",
         "ox_free_only",
+        "ox_expires_at",
     }
 )
 
@@ -682,6 +773,9 @@ def load_distillation_config(config_path: Path | None = None) -> DistillationCon
     ox_free_only = table.get("ox_free_only", True)
     if not isinstance(ox_enabled, bool) or ox_free_only is not True:
         raise DistillationError("OX Alpha must be explicitly enabled and free-only")
+    ox_expires_at = table.get("ox_expires_at", "")
+    if teacher_profile == OX_SINGLE_PROFILE and ox_enabled is True:
+        _ox_expiry(ox_expires_at)
     teacher_max_inflight = positive("teacher_max_inflight", 10)
     if teacher_max_inflight > 10:
         raise DistillationError("teacher_max_inflight must be at most 10")
@@ -709,6 +803,7 @@ def load_distillation_config(config_path: Path | None = None) -> DistillationCon
         teacher_claim_limit=teacher_claim_limit,
         ox_enabled=ox_enabled,
         ox_free_only=True,
+        ox_expires_at=str(ox_expires_at),
     )
 
 
@@ -2621,6 +2716,15 @@ def train_tiny_policy(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _policy_payload_digest(policy: Mapping[str, Any]) -> str:
+    """Hash only executable policy fields, never the sealed artifact envelope."""
+
+    fields = train_tiny_policy(())
+    return canonical_json.canonical_json_sha256_strict(
+        {key: policy.get(key) for key in fields}
+    )
+
+
 def _materialization_rallies(
     root: Path, supplied: Sequence[Mapping[str, Any]] | None
 ) -> dict[str, Mapping[str, Any]]:
@@ -2718,6 +2822,7 @@ def _materialization_feature_pairs(
 
 def _materialization_label_row(
     label: Mapping[str, Any],
+    root: Path,
     rallies: Mapping[str, Mapping[str, Any]],
     features_by_pair: Mapping[tuple[str, str], Mapping[str, float]],
     snapshot_contracts: Mapping[str, Mapping[str, str]],
@@ -2735,6 +2840,17 @@ def _materialization_label_row(
         not rally_as_of
         or not session_cluster_id
         or re.fullmatch(r"[0-9a-f]{64}", label_record_sha256) is None
+        or label.get("schema") != store.DISTILLATION_SCHEMA
+        or label.get("namespace") != "recall-distillation"
+        or (
+            str(label.get("previous_sha256") or "")
+            and re.fullmatch(r"[0-9a-f]{64}", str(label.get("previous_sha256") or ""))
+            is None
+        )
+        or canonical_json.canonical_json_sha256_strict(
+            {key: value for key, value in label.items() if key != "record_sha256"}
+        )
+        != label_record_sha256
     ):
         return None
     raw_features = label.get("features") or features_by_pair.get(
@@ -2762,6 +2878,49 @@ def _materialization_label_row(
     is_ox = label.get("profile") == OX_SINGLE_PROFILE
     if is_ox and label.get("profile_contract_id") != current_ox_contract_id:
         return None
+    if is_ox:
+        try:
+            contract = store.read_sealed(
+                store.distillation_dir(root)
+                / "ox-profile-contracts"
+                / f"{current_ox_contract_id}.json",
+                schema=OX_PROFILE_SCHEMA,
+            )
+            expiry = _ox_expiry(label.get("expires_at"))
+        except (DistillationError, store.DistillationStoreError):
+            return None
+        if expiry != contract.get("expires_at"):
+            return None
+        payload_source = label.get("payload_source")
+        payload_digest = str(label.get("payload_digest") or "")
+        expected_work_id = canonical_json.canonical_json_sha256_strict(
+            {
+                "kind": "ox-teacher-label-v1",
+                "profile": OX_SINGLE_PROFILE,
+                "cohort": OX_SINGLE_COHORT,
+                "route": "opencode-go/ox-alpha-free",
+                "profile_contract_id": current_ox_contract_id,
+                "payload_digest": payload_digest,
+            }
+        )
+        if (
+            not isinstance(payload_source, Mapping)
+            or canonical_json.canonical_json_sha256_strict(payload_source)
+            != payload_digest
+            or label.get("work_id") != expected_work_id
+            or payload_source.get("rally_id") != rally_id
+            or payload_source.get("candidate_id") != candidate_id
+            or payload_source.get("query_sha256") != rally_row.get("query_sha256", "")
+            or payload_source.get("context_sha256")
+            != [
+                ref.get("semantic_sha256", "")
+                for ref in rally_row.get("context_refs", [])
+                if isinstance(ref, Mapping)
+            ]
+            or payload_source.get("snapshot_sha256")
+            != snapshot_contracts.get(rally_id, {}).get("snapshot_sha256", "")
+        ):
+            return None
     contract = snapshot_contracts.get(rally_id, {})
     temporal_as_of = str(label.get("as_of") or rally_as_of)
     temporal_group_id = str(label.get("group_id") or session_cluster_id)
@@ -2783,23 +2942,43 @@ def _materialization_label_row(
         "authority": label["authority"],
         "features": features,
         "route": str(label.get("route") or ""),
+        "route_identity": dict(label.get("route_identity") or {}),
+        "teacher_role": str(label.get("teacher_role") or ""),
         "model_digest": str(label.get("model_digest") or ""),
         "generator_model_digest": str(label.get("generator_model_digest") or ""),
         "judge_model_digest": str(label.get("judge_model_digest") or ""),
+        "generator_route_identity": dict(label.get("generator_route_identity") or {}),
+        "judge_route_identity": dict(label.get("judge_route_identity") or {}),
+        "counterfactual_ref": str(label.get("exposure_artifact_id") or ""),
+        "a0_sha256": str(label.get("a0_sha256") or ""),
+        "a1_sha256": str(label.get("a1_sha256") or ""),
+        "blind_orders": list(label.get("blind_orders") or []),
+        "counterfactual_producer": str(label.get("counterfactual_producer") or ""),
+        "counterfactual_revision": str(label.get("counterfactual_revision") or ""),
         "probe": probe,
         "source": str(label.get("kind") or ""),
+        "profile": str(label.get("profile") or label.get("teacher_profile") or ""),
+        "cohort": str(label.get("cohort") or label.get("teacher_profile") or ""),
         "order_agreement": label.get("order_agreement") is True,
         "label_record_sha256": label_record_sha256,
+        "payload_digest": str(label.get("payload_digest") or ""),
+        "payload_source": dict(label.get("payload_source") or {}),
+        "work_id": str(label.get("work_id") or ""),
+        "negative_veto_conflict": label.get("negative_veto_conflict") is not None
+        and label.get("negative_veto_conflict") is not False,
+        "feature_parity": feature_parity,
+        "future_leakage": not future_safe,
         **(
             {
                 "status": str(label.get("status") or ""),
                 "error_class": label.get("error_class"),
-                "negative_veto_conflict": label.get("negative_veto_conflict")
-                is not None
-                and label.get("negative_veto_conflict") is not False,
                 "profile": str(label.get("profile") or ""),
                 "cohort": str(label.get("cohort") or ""),
                 "profile_contract_id": str(label.get("profile_contract_id") or ""),
+                "expires_at": str(label.get("expires_at") or ""),
+                "identity_revision": str(label.get("identity_revision") or ""),
+                "request_revision": str(label.get("request_revision") or ""),
+                "route_digest": str(label.get("route_digest") or ""),
                 "route_identity_exact": label.get("route_identity")
                 == {
                     "provider": "opencode-go",
@@ -2808,12 +2987,17 @@ def _materialization_label_row(
                 },
                 "prompt_sha256": str(label.get("prompt_sha256") or ""),
                 "schema_sha256": str(label.get("schema_sha256") or ""),
+                "request_sha256": str(label.get("request_sha256") or ""),
+                "provider_request_sha256": str(
+                    label.get("provider_request_sha256") or ""
+                ),
+                "provider_response_request_sha256": str(
+                    label.get("provider_response_request_sha256") or ""
+                ),
                 "group_id": temporal_group_id,
                 "group_identity_exact": temporal_group_id == session_cluster_id,
                 "label_split_plan_id": str(label.get("split_plan_id") or ""),
                 "as_of": temporal_as_of,
-                "feature_parity": feature_parity,
-                "future_leakage": not future_safe,
                 "future_leakage_evidence_ref": (
                     f"candidate-snapshot:{contract['snapshot_sha256']}"
                     if future_safe
@@ -2844,26 +3028,63 @@ def _materialization_label_row(
 
 def _materialization_rows(
     labels: Sequence[Mapping[str, Any]],
+    root: Path,
     rallies: Mapping[str, Mapping[str, Any]],
     features_by_pair: Mapping[tuple[str, str], Mapping[str, float]],
     snapshot_contracts: Mapping[str, Mapping[str, str]],
     current_ox_contract_id: str,
 ) -> list[dict[str, Any]]:
-    return [
-        row
-        for label in labels
-        if isinstance(label, Mapping)
-        if (
-            row := _materialization_label_row(
-                label,
-                rallies,
-                features_by_pair,
-                snapshot_contracts,
-                current_ox_contract_id,
-            )
+    rows: list[dict[str, Any]] = []
+    previous = ""
+    for label in labels:
+        if not isinstance(label, Mapping):
+            continue
+        # A direct list is not trusted merely because it carries a digest: its
+        # canonical predecessor must form the same ledger chain.
+        if label.get("previous_sha256") != previous:
+            return []
+        record = str(label.get("record_sha256") or "")
+        if re.fullmatch(r"[0-9a-f]{64}", record) is None:
+            return []
+        previous = record
+        row = _materialization_label_row(
+            label,
+            root,
+            rallies,
+            features_by_pair,
+            snapshot_contracts,
+            current_ox_contract_id,
         )
-        is not None
-    ]
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
+def _allocate_materialized_rows(
+    rows: Sequence[Mapping[str, Any]], limit: int
+) -> list[dict[str, Any]]:
+    """Keep deterministic old, recent, and locked-test coverage when bounded."""
+
+    ordered = sorted(
+        (dict(row) for row in rows),
+        key=lambda row: (_source_epoch(row), str(row.get("rally_id") or "")),
+    )
+    if len(ordered) <= limit:
+        return ordered
+    locked = [row for row in ordered if row.get("locked_test_read_only") is True]
+    unlocked = [row for row in ordered if row.get("locked_test_read_only") is not True]
+    recent_count = max(1, len(unlocked) // 3)
+    old, recent = unlocked[:-recent_count], unlocked[-recent_count:]
+    bands = (old, recent, locked)
+    selected: list[dict[str, Any]] = []
+    while len(selected) < limit and any(bands):
+        for band in bands:
+            if band and len(selected) < limit:
+                selected.append(band.pop(0))
+    return sorted(
+        selected,
+        key=lambda row: (_source_epoch(row), str(row.get("rally_id") or "")),
+    )
 
 
 def _finalize_materialized_training_rows(
@@ -2873,7 +3094,6 @@ def _finalize_materialized_training_rows(
     *,
     excluded_prior_contract_rows: int = 0,
 ) -> dict[str, Any]:
-    materialized = materialized[-limit:]
     split_plan_id = ""
     split: dict[str, str] = {}
     compatible_split_plan_ids: set[str] = set()
@@ -2923,6 +3143,12 @@ def _finalize_materialized_training_rows(
                 **row,
                 "split": row_split,
                 "split_plan_id": split_plan_id,
+                "locked_test_read_only": bool(split_plan_id) and row_split == "test",
+                "locked_test_evidence_ref": (
+                    f"split-plan:{split_plan_id}"
+                    if split_plan_id and row_split == "test"
+                    else ""
+                ),
                 **(
                     {
                         "fixed_split_plan": fixed_split_plan,
@@ -2936,6 +3162,7 @@ def _finalize_materialized_training_rows(
                 ),
             }
         )
+    rows = _allocate_materialized_rows(rows, limit)
     _, _, artifact = store.write_immutable(
         store.distillation_dir(root) / "training-snapshots",
         {
@@ -2984,6 +3211,7 @@ def materialize_training_rows(
     )
     materialized = _materialization_rows(
         labels,
+        root,
         rallies,
         features_by_pair,
         snapshot_contracts,
@@ -3014,6 +3242,223 @@ def _wilson_upper(successes: int, total: int) -> float:
     if total <= 0 or successes < 0 or successes > total:
         return 1.0
     return min(1.0, 1.0 - _wilson_lower(total - successes, total))
+
+
+def _authoritative_materialized_row_binding(
+    root: Path, row: Mapping[str, Any], split_plan: Mapping[str, Any] | None
+) -> bool:
+    """Bind a sealed training row back to its canonical ledger source.
+
+    Digest self-consistency is not provenance: a caller can recompute an
+    envelope for an unrelated rally/candidate pair.  The label record, live
+    rally manifest and candidate snapshot are the authority that make the
+    envelope meaningful.
+    """
+
+    record_sha256 = str(row.get("label_record_sha256") or "")
+    if re.fullmatch(r"[0-9a-f]{64}", record_sha256) is None:
+        return False
+    labels = _read_chain(store.distillation_dir(root) / "label-ledger.jsonl")
+    labels_by_record = {
+        str(label.get("record_sha256") or ""): label
+        for label in labels
+        if isinstance(label, Mapping)
+    }
+    label = labels_by_record.get(record_sha256)
+    if label is None:
+        return False
+    rallies = _materialization_rallies(root, None)
+    snapshots = _materialization_snapshots(root, None)
+    features_by_pair, snapshot_contracts = _materialization_feature_pairs(
+        root, rallies, snapshots
+    )
+    canonical = _materialization_label_row(
+        label,
+        root,
+        rallies,
+        features_by_pair,
+        snapshot_contracts,
+        _current_ox_profile_contract_id(root),
+    )
+    if canonical is None or any(
+        row.get(key) != value for key, value in canonical.items()
+    ):
+        return False
+    if not _configured_local_route_binding(row):
+        return False
+    expected_plan = split_plan
+    if expected_plan is None:
+        try:
+            expected_plan = _read_split_plan_artifact(
+                root, str(row.get("split_plan_id") or "")
+            )
+        except (DistillationError, store.DistillationStoreError):
+            return False
+    plan_id = str(expected_plan.get("artifact_id") or "")
+    rally_id = str(row.get("rally_id") or "")
+    split = expected_plan.get("assignments", {}).get(rally_id)
+    return not (
+        row.get("split_plan_id") != plan_id
+        or split not in {"train", "validation", "test"}
+        or row.get("split") != split
+        or row.get("locked_test_read_only") is not (split == "test")
+        or row.get("locked_test_evidence_ref")
+        != (f"split-plan:{plan_id}" if split == "test" else "")
+    )
+
+
+def _configured_local_route_binding(row: Mapping[str, Any]) -> bool:
+    """Bind local teacher/CF identities to the currently configured routes."""
+
+    source = str(row.get("source") or "")
+    if source not in {"teacher-label", "counterfactual-label"}:
+        return True
+    if source == "teacher-label" and row.get("profile") == OX_SINGLE_PROFILE:
+        return True
+    try:
+        from chronovisor.core import ollama
+
+        roles = (
+            *TEACHER_ROLES,
+            "recall.distill.answer_generator",
+            "recall.distill.utility_judge",
+        )
+        routes = ollama.runtime_generation_routes(roles)
+        digests = ollama.runtime_generation_route_fingerprints(routes)
+    except Exception:
+        return False
+    expected = {
+        route.role: {
+            "role": route.role,
+            "provider": route.provider,
+            "model": route.model,
+            "location": route.location,
+        }
+        for route in routes
+    }
+    if tuple(expected) != roles or any(
+        identity["location"] != "local" for identity in expected.values()
+    ):
+        return False
+    if source == "teacher-label":
+        route = str(row.get("route") or "")
+        return (
+            row.get("profile") == LOCAL_TRIAD_PROFILE
+            and row.get("cohort") == LOCAL_TRIAD_PROFILE
+            and route in TEACHER_ROLES
+            and row.get("route_identity") == expected[route]
+            and row.get("model_digest") == digests[route]
+        )
+    generator = "recall.distill.answer_generator"
+    judge = "recall.distill.utility_judge"
+    return (
+        row.get("counterfactual_producer") == "chronovisor-local-blind-v1"
+        and row.get("counterfactual_revision") == "two-order-locked-v1"
+        and set(row.get("blind_orders") or []) == {"a0_first", "a1_first"}
+        and row.get("generator_route_identity") == expected[generator]
+        and row.get("judge_route_identity") == expected[judge]
+        and row.get("generator_model_digest") == digests[generator]
+        and row.get("judge_model_digest") == digests[judge]
+        and row.get("generator_model_digest") != row.get("judge_model_digest")
+    )
+
+
+def _materialized_row_integrity(
+    row: Mapping[str, Any],
+    *,
+    root: Path | None = None,
+    split_plan: Mapping[str, Any] | None = None,
+) -> bool:
+    """One gate for local and OX rows that came through materialization."""
+
+    if re.fullmatch(r"[0-9a-f]{64}", str(row.get("label_record_sha256") or "")) is None:
+        return False
+    if (
+        row.get("future_leakage") is not False
+        or row.get("feature_parity") is not True
+        or row.get("negative_veto_conflict") is True
+        or not str(row.get("route") or "")
+        or re.fullmatch(r"[0-9a-f]{64}", str(row.get("model_digest") or "")) is None
+    ):
+        return False
+    if row.get("source") != "counterfactual-label":
+        if row.get("profile") == OX_SINGLE_PROFILE:
+            payload = str(row.get("payload_digest") or "")
+            source = row.get("payload_source")
+            semantic = (
+                isinstance(source, Mapping)
+                and re.fullmatch(r"[0-9a-f]{64}", payload) is not None
+                and canonical_json.canonical_json_sha256_strict(source) == payload
+                and row.get("route") == "opencode-go/ox-alpha-free"
+                and row.get("teacher_role") == OX_TEACHER_ROLE
+                and row.get("cohort") == OX_SINGLE_COHORT
+                and row.get("route_identity")
+                == OX_ALPHA_FIXED_IDENTITY["route_identity"]
+                and row.get("route_identity_exact") is True
+                and row.get("model_digest") == OX_ALPHA_FIXED_IDENTITY["model_digest"]
+                and row.get("prompt_sha256")
+                == OX_ALPHA_FIXED_IDENTITY["prompt_template_sha256"]
+                and row.get("schema_sha256")
+                == OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"]
+                and row.get("route_digest") == OX_ALPHA_FIXED_IDENTITY["route_digest"]
+                and row.get("identity_revision") == OX_ALPHA_FIXED_IDENTITY["revision"]
+                and row.get("request_revision") == OX_RAMP_REQUEST_REVISION
+                and expected_ox_request_sha256(
+                    profile_contract_id=str(row.get("profile_contract_id") or ""),
+                    payload_digest=payload,
+                )
+                == row.get("request_sha256")
+                and expected_ox_provider_request_sha256(
+                    profile_contract_id=str(row.get("profile_contract_id") or ""),
+                    payload_digest=payload,
+                    work_id=str(row.get("work_id") or ""),
+                    expires_at=str(row.get("expires_at") or ""),
+                )
+                == row.get("provider_request_sha256")
+                and row.get("provider_response_request_sha256")
+                == row.get("provider_request_sha256")
+            )
+        else:
+            semantic = True
+    else:
+        semantic = (
+            row.get("order_agreement") is True
+            and re.fullmatch(r"[0-9a-f]{64}", str(row.get("counterfactual_ref") or ""))
+            is not None
+            and re.fullmatch(r"[0-9a-f]{64}", str(row.get("a0_sha256") or ""))
+            is not None
+            and re.fullmatch(r"[0-9a-f]{64}", str(row.get("a1_sha256") or ""))
+            is not None
+            and str(row.get("generator_model_digest") or "")
+            != str(row.get("judge_model_digest") or "")
+            and all(
+                re.fullmatch(r"[0-9a-f]{64}", str(row.get(name) or "")) is not None
+                for name in ("generator_model_digest", "judge_model_digest")
+            )
+            and bool(row.get("generator_route_identity"))
+            and bool(row.get("judge_route_identity"))
+            and row["generator_route_identity"].get("location") == "local"
+            and row["judge_route_identity"].get("location") == "local"
+            and bool(row["generator_route_identity"].get("provider"))
+            and bool(row["judge_route_identity"].get("provider"))
+            and bool(row["generator_route_identity"].get("model"))
+            and bool(row["judge_route_identity"].get("model"))
+            and row["generator_route_identity"] != row["judge_route_identity"]
+            and row.get("counterfactual_producer") == "chronovisor-local-blind-v1"
+            and row.get("counterfactual_revision") == "two-order-locked-v1"
+            and set(row.get("blind_orders") or []) == {"a0_first", "a1_first"}
+            and (
+                row.get("split") != "test"
+                or (
+                    row.get("locked_test_read_only") is True
+                    and str(row.get("locked_test_evidence_ref") or "")
+                    == f"split-plan:{str(row.get('split_plan_id') or '')}"
+                )
+            )
+        )
+    return semantic and (
+        root is None or _authoritative_materialized_row_binding(root, row, split_plan)
+    )
 
 
 def _active_training_cohort(
@@ -3109,10 +3554,16 @@ def _offline_training_gate(
 ) -> dict[str, Any]:
     """Qualify untrusted local-model data without calling it verified truth."""
 
+    integrity_failed = any(
+        isinstance(row, Mapping) and not _materialized_row_integrity(row)
+        for row in rows
+    )
     if config.teacher_profile == OX_SINGLE_PROFILE:
         invalid_input_rows = any(not isinstance(row, Mapping) for row in rows)
         current_contract_id = ""
         reasons: list[str] = []
+        if integrity_failed:
+            reasons.append("row_integrity_failed")
         if root is None:
             reasons.append("profile_contract_unavailable")
         else:
@@ -3135,12 +3586,41 @@ def _offline_training_gate(
             min_labels=config.hard_floor_teacher_labels,
             min_per_class=config.hard_floor_teacher_per_class,
             min_repeat_pairs=config.hard_floor_probe_pairs,
+            row_validator=(
+                (lambda row: _materialized_row_integrity(row, root=root))
+                if root is not None
+                else None
+            ),
         )
         reasons.extend(gate["reasons"])
         if invalid_input_rows:
             reasons.append("input_row_invalid")
         if config.ox_enabled is not True:
             reasons.append("ox_profile_disabled")
+        counterfactual_pairs = [
+            row
+            for row in single_rows
+            if row.get("source") == "counterfactual-label"
+            and row.get("split") == "test"
+            and row.get("verdict") in {"helpful", "harmful"}
+            and re.fullmatch(r"[0-9a-f]{64}", str(row.get("counterfactual_ref") or ""))
+            and re.fullmatch(r"[0-9a-f]{64}", str(row.get("a0_sha256") or ""))
+            and re.fullmatch(r"[0-9a-f]{64}", str(row.get("a1_sha256") or ""))
+            and isinstance(row.get("generator_route_identity"), Mapping)
+            and isinstance(row.get("judge_route_identity"), Mapping)
+            and row.get("generator_route_identity")
+            and row.get("judge_route_identity")
+            and row.get("counterfactual_producer") == "chronovisor-local-blind-v1"
+            and row.get("counterfactual_revision") == "two-order-locked-v1"
+            and set(row.get("blind_orders") or []) == {"a0_first", "a1_first"}
+            and row.get("profile") == OX_SINGLE_PROFILE
+            and row.get("cohort") == OX_SINGLE_COHORT
+            and row.get("profile_contract_id") == current_contract_id
+            and row.get("identity_revision") == "local-blind-counterfactual-v1"
+            and _same_future_ox_expiry(row.get("expires_at"), config.ox_expires_at)
+        ]
+        if len(counterfactual_pairs) < max(100, config.hard_floor_counterfactual_pairs):
+            reasons.append("counterfactual_pairs_below_floor")
         if current_contract_id:
             if gate["identity"]["profile_contract_id"] != current_contract_id:
                 reasons.append("profile_contract_mismatch")
@@ -3173,7 +3653,7 @@ def _offline_training_gate(
                     for verdict in ("relevant", "irrelevant")
                 },
             },
-            "counterfactual_pairs": 0,
+            "counterfactual_pairs": len(counterfactual_pairs),
             "probe": {
                 "pairs": gate["blind_repeat"]["complete_pairs"],
                 "locked_test_only": gate["locked_test"]["read_only"],
@@ -3185,6 +3665,24 @@ def _offline_training_gate(
             "counterfactual_direction": {"denominator": 0, "wilson_lower": 0.0},
         }
 
+    if any(not isinstance(row, Mapping) for row in rows):
+        return {
+            "schema": "chronovisor.recall-offline-training-gate.v2",
+            "truth_authority": "teacher_only_not_verified",
+            "passed": False,
+            "reasons": ["input_row_invalid"],
+            "teacher_counts": {"total": 0, "relevant": 0, "irrelevant": 0},
+            "counterfactual_pairs": 0,
+            "probe": {
+                "pairs": 0,
+                "locked_test_only": False,
+                "stable": 0,
+                "route_stability_wilson_lower": 0.0,
+                "is_truth": False,
+            },
+            "route_folds": {},
+            "counterfactual_direction": {"denominator": 0, "wilson_lower": 0.0},
+        }
     rows, model_cohort = _active_training_cohort(rows)
 
     owner = [
@@ -3236,6 +3734,8 @@ def _offline_training_gate(
         next(iter(values)) for values in digests.values() if len(values) == 1
     }
     reasons: list[str] = []
+    if integrity_failed:
+        reasons.append("row_integrity_failed")
     fixed_ids = {str(row.get("split_plan_id") or "") for row in rows}
     try:
         split_plan = _read_split_plan(root) if root is not None else {}
@@ -3418,26 +3918,209 @@ def _ensure_bootstrap_policy(root: Path, baseline: Mapping[str, Any]) -> dict[st
         return artifact
 
 
+def _verify_candidate_lineage(
+    root: Path,
+    candidate: Mapping[str, Any],
+    candidate_policy: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+) -> str | None:
+    """Validate every durable candidate path before it can be reused."""
+
+    lineage = candidate_policy.get("lineage")
+    if not isinstance(lineage, Mapping):
+        return "candidate_lineage_incomplete"
+    if lineage.get("baseline_artifact_id") != baseline.get("artifact_id"):
+        return "candidate_baseline_mismatch"
+    if candidate.get("policy_id") != candidate_policy.get("artifact_id"):
+        return "candidate_lineage_incomplete"
+    required = (
+        "training_snapshot_id",
+        "locked_replay_id",
+        "model_cohort_sha256",
+        "raw_watermark",
+        "label_chain_head",
+        "split_plan_id",
+        "offline_gate_sha256",
+        "training_rows_sha256",
+        "candidate_head",
+    )
+    if any(
+        re.fullmatch(r"[0-9a-f]{64}", str(lineage.get(key) or "")) is None
+        for key in required
+    ):
+        return "candidate_lineage_incomplete"
+    if lineage.get("feature_revision") != TEXT_FEATURE_REVISION:
+        return "candidate_lineage_incomplete"
+    try:
+        snapshot = store.read_sealed(
+            store.distillation_dir(root)
+            / "training-snapshots"
+            / f"{lineage['training_snapshot_id']}.json",
+            schema="chronovisor.recall-distill-training.v1",
+        )
+        replay = store.read_sealed(
+            store.distillation_dir(root)
+            / "locked-replays"
+            / f"{lineage['locked_replay_id']}.json",
+            schema="chronovisor.recall-distill-locked-replay.v1",
+        )
+        sealed_baseline = store.read_sealed(
+            store.distillation_dir(root)
+            / "baselines"
+            / f"{lineage['baseline_artifact_id']}.json",
+            schema=BASELINE_SCHEMA,
+        )
+        split_plan = _read_split_plan_artifact(root, str(lineage["split_plan_id"]))
+    except (DistillationError, store.DistillationStoreError, KeyError):
+        return "candidate_lineage_incomplete"
+    rows = snapshot.get("rows")
+    replay_rows = replay.get("training_rows")
+    expected_rows: list[dict[str, Any]] = []
+    if isinstance(rows, list) and all(isinstance(row, Mapping) for row in rows):
+        profile = (
+            OX_SINGLE_PROFILE
+            if any(row.get("profile") == OX_SINGLE_PROFILE for row in rows)
+            else LOCAL_TRIAD_PROFILE
+        )
+        contract_id = str(lineage.get("profile_contract_id") or "")
+        if profile == OX_SINGLE_PROFILE and not contract_id:
+            contract_id = _current_ox_profile_contract_id(root)
+        expected_rows, _ = _active_training_cohort(
+            rows, teacher_profile=profile, profile_contract_id=contract_id
+        )
+    snapshot_hashes = [
+        canonical_json.canonical_json_sha256_strict(row)
+        for row in rows or []
+        if isinstance(row, Mapping)
+    ]
+    replay_hashes = [
+        canonical_json.canonical_json_sha256_strict(row)
+        for row in replay_rows or []
+        if isinstance(row, Mapping)
+    ]
+    expected_hashes = [
+        canonical_json.canonical_json_sha256_strict(row) for row in expected_rows
+    ]
+    ox_rows = [
+        row
+        for row in rows or []
+        if isinstance(row, Mapping) and row.get("profile") == OX_SINGLE_PROFILE
+    ]
+    if ox_rows:
+        current_contract_id = _current_ox_profile_contract_id(root)
+        try:
+            current_contract = store.read_sealed(
+                store.distillation_dir(root)
+                / "ox-profile-contracts"
+                / f"{current_contract_id}.json",
+                schema=OX_PROFILE_SCHEMA,
+            )
+            expiry_valid = _ox_expiry(current_contract.get("expires_at"))
+        except (DistillationError, store.DistillationStoreError):
+            return "candidate_lineage_incomplete"
+        if (
+            not current_contract_id
+            or lineage.get("profile_contract_id") != current_contract_id
+            or any(
+                row.get("profile_contract_id") != current_contract_id
+                or _same_future_ox_expiry(row.get("expires_at"), expiry_valid)
+                is not True
+                for row in [*ox_rows, *(replay_rows or [])]
+                if isinstance(row, Mapping) and row.get("profile") == OX_SINGLE_PROFILE
+            )
+        ):
+            return "candidate_lineage_incomplete"
+    if (
+        snapshot.get("artifact_id") != lineage["training_snapshot_id"]
+        or snapshot.get("label_chain_head") != lineage["label_chain_head"]
+        or store.chain_head(store.distillation_dir(root) / "label-ledger.jsonl")[
+            "head_sha256"
+        ]
+        != lineage["label_chain_head"]
+        or store.chain_head(store.distillation_dir(root) / "candidate-ledger.jsonl")[
+            "head_sha256"
+        ]
+        != lineage["candidate_head"]
+        or snapshot.get("feature_revision") != TEXT_FEATURE_REVISION
+        or not isinstance(rows, list)
+        or not rows
+        or not isinstance(replay_rows, list)
+        or not replay_rows
+        or len(replay_hashes) != len(replay_rows)
+        or len(set(replay_hashes)) != len(replay_hashes)
+        or set(replay_hashes) - set(snapshot_hashes)
+        or set(replay_hashes) != set(expected_hashes)
+        or any(
+            not isinstance(row, Mapping)
+            or not _materialized_row_integrity(row, root=root, split_plan=split_plan)
+            for row in rows
+        )
+        or {str(row.get("split") or "") for row in rows if isinstance(row, Mapping)}
+        < {"train", "validation", "test"}
+        or not all(
+            any(
+                row.get("split") == split
+                for row in replay_rows
+                if isinstance(row, Mapping)
+            )
+            for split in ("train", "validation")
+        )
+        or not any(
+            row.get("split") == "test" and row.get("locked_test_read_only") is True
+            for row in replay_rows
+            if isinstance(row, Mapping)
+        )
+        or replay.get("training_snapshot_id") != lineage["training_snapshot_id"]
+        or replay.get("baseline_artifact_id") != lineage["baseline_artifact_id"]
+        or replay.get("model_cohort_sha256") != lineage["model_cohort_sha256"]
+        or replay.get("split_revision") != "grouped-rolling-v1"
+        or split_plan.get("feature_revision") != TEXT_FEATURE_REVISION
+        or split_plan.get("model_cohort_sha256") != lineage["model_cohort_sha256"]
+        or sealed_baseline.get("raw_watermark") != lineage["raw_watermark"]
+        or sealed_baseline.get("raw_watermark") != baseline.get("raw_watermark")
+        or sealed_baseline.get("hard_floor", {}).get("p5_allowed") is not True
+        or sealed_baseline.get("offline_training_gate", {}).get("passed") is not True
+        or sealed_baseline.get("frozen_contract", {}).get("hard_floors")
+        != _canonical_hard_floors()
+        or canonical_json.canonical_json_sha256_strict(
+            sealed_baseline.get("offline_training_gate")
+        )
+        != lineage["offline_gate_sha256"]
+        or replay.get("offline_gate_sha256") != lineage["offline_gate_sha256"]
+        or replay.get("training_rows_sha256") != lineage["training_rows_sha256"]
+        or canonical_json.canonical_json_sha256_strict(replay_rows)
+        != lineage["training_rows_sha256"]
+        or replay.get("policy_sha256") != _policy_payload_digest(candidate_policy)
+        or train_tiny_policy(replay_rows)
+        != {key: candidate_policy.get(key) for key in train_tiny_policy(replay_rows)}
+    ):
+        return "candidate_lineage_incomplete"
+    return None
+
+
 def _maybe_publish_candidate(
     root: Path,
     config: DistillationConfig,
     baseline: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if not _has_canonical_hard_floors(config):
+        return {"status": "held", "reason": "canonical_floor_lowered"}
     if baseline.get("hard_floor", {}).get("p5_allowed") is not True:
         return {"status": "held", "reason": "p5_hard_floor"}
     try:
         candidate = store.read_pointer(root, "candidate")
         candidate_policy = _load_policy(str(candidate["policy_id"]), root)
-        lineage = candidate_policy.get("lineage")
-        if not isinstance(lineage, Mapping) or lineage.get(
-            "baseline_artifact_id"
-        ) != baseline.get("artifact_id"):
-            return {"status": "held", "reason": "candidate_baseline_mismatch"}
+        reason = _verify_candidate_lineage(root, candidate, candidate_policy, baseline)
+        if reason:
+            return {"status": "held", "reason": reason}
         return {"status": "candidate", "policy_id": candidate["policy_id"]}
     except (store.DistillationStoreError, DistillationError, KeyError):
         pass
     training = materialize_training_rows(root)
     rows = training["rows"]
+    required_splits = {"train", "validation", "test"}
+    if not rows or required_splits - {str(row.get("split") or "") for row in rows}:
+        return {"status": "held", "reason": "training_lineage_incomplete"}
     offline_gate = _offline_training_gate(rows, config, root=root)
     active_rows, model_cohort = _active_training_cohort(
         rows,
@@ -3458,13 +4141,22 @@ def _maybe_publish_candidate(
     except store.DistillationStoreError:
         return {"status": "held", "reason": "sealed_incumbent_missing"}
     policy = train_tiny_policy(active_rows)
+    training_rows_sha256 = canonical_json.canonical_json_sha256_strict(active_rows)
     replay_id, _, _ = store.write_immutable(
         store.distillation_dir(root) / "locked-replays",
         {
             "kind": "locked-replay-input",
             "training_snapshot_id": training["artifact_id"],
+            "training_rows": active_rows,
             "baseline_artifact_id": baseline["artifact_id"],
-            "policy_sha256": canonical_json.canonical_json_sha256_strict(policy),
+            "policy_sha256": _policy_payload_digest(policy),
+            "training_rows_sha256": training_rows_sha256,
+            "candidate_head": store.chain_head(
+                store.distillation_dir(root) / "candidate-ledger.jsonl"
+            )["head_sha256"],
+            "profile_contract_id": _current_ox_profile_contract_id(root)
+            if config.teacher_profile == OX_SINGLE_PROFILE
+            else "",
             "offline_gate_sha256": canonical_json.canonical_json_sha256_strict(
                 offline_gate
             ),
@@ -3480,9 +4172,35 @@ def _maybe_publish_candidate(
             "locked_replay_id": replay_id,
             "baseline_artifact_id": baseline["artifact_id"],
             "model_cohort_sha256": model_cohort["cohort_sha256"],
+            "raw_watermark": baseline["raw_watermark"],
+            "label_chain_head": training["label_chain_head"],
+            "feature_revision": training["feature_revision"],
+            "split_plan_id": str(
+                next(
+                    iter({str(row.get("split_plan_id") or "") for row in active_rows}),
+                    "",
+                )
+            ),
+            "offline_gate_sha256": canonical_json.canonical_json_sha256_strict(
+                offline_gate
+            ),
+            "training_rows_sha256": training_rows_sha256,
+            "candidate_head": store.chain_head(
+                store.distillation_dir(root) / "candidate-ledger.jsonl"
+            )["head_sha256"],
+            "profile_contract_id": _current_ox_profile_contract_id(root)
+            if config.teacher_profile == OX_SINGLE_PROFILE
+            else "",
         },
         root=root,
     )
+    try:
+        candidate = store.read_pointer(root, "candidate")
+        reason = _verify_candidate_lineage(root, candidate, artifact, baseline)
+    except (store.DistillationStoreError, DistillationError, KeyError):
+        reason = "candidate_lineage_incomplete"
+    if reason:
+        return {"status": "held", "reason": reason}
     return {"status": "candidate", "policy_id": artifact["artifact_id"]}
 
 
@@ -3801,12 +4519,127 @@ def publish_policy(
     root: Path | None = None,
 ) -> dict[str, Any]:
     root = root or CHRONOVISOR_ROOT
+    training_snapshot_id = str(lineage.get("training_snapshot_id") or "")
+    if not training_snapshot_id:
+        raise DistillationError("candidate lineage is incomplete")
+    required = (
+        "locked_replay_id",
+        "baseline_artifact_id",
+        "model_cohort_sha256",
+        "raw_watermark",
+        "label_chain_head",
+        "split_plan_id",
+        "offline_gate_sha256",
+        "training_rows_sha256",
+        "candidate_head",
+    )
+    if (
+        any(
+            re.fullmatch(r"[0-9a-f]{64}", str(lineage.get(name) or "")) is None
+            for name in ("training_snapshot_id", *required)
+        )
+        or lineage.get("feature_revision") != TEXT_FEATURE_REVISION
+    ):
+        raise DistillationError("candidate lineage is incomplete")
+    try:
+        snapshot = store.read_sealed(
+            store.distillation_dir(root)
+            / "training-snapshots"
+            / f"{training_snapshot_id}.json",
+            schema="chronovisor.recall-distill-training.v1",
+        )
+        baseline = store.read_sealed(
+            store.distillation_dir(root)
+            / "baselines"
+            / f"{lineage['baseline_artifact_id']}.json",
+            schema=BASELINE_SCHEMA,
+        )
+        replay = store.read_sealed(
+            store.distillation_dir(root)
+            / "locked-replays"
+            / f"{lineage['locked_replay_id']}.json",
+            schema="chronovisor.recall-distill-locked-replay.v1",
+        )
+        split_plan = _read_split_plan_artifact(root, str(lineage["split_plan_id"]))
+    except (DistillationError, store.DistillationStoreError) as exc:
+        raise DistillationError("candidate sealed lineage is unavailable") from exc
+    rows = snapshot.get("rows")
+    if (
+        snapshot.get("artifact_id") != training_snapshot_id
+        or snapshot.get("label_chain_head") != lineage["label_chain_head"]
+        or store.chain_head(store.distillation_dir(root) / "label-ledger.jsonl")[
+            "head_sha256"
+        ]
+        != lineage["label_chain_head"]
+        or store.chain_head(store.distillation_dir(root) / "candidate-ledger.jsonl")[
+            "head_sha256"
+        ]
+        != lineage["candidate_head"]
+        or snapshot.get("feature_revision") != TEXT_FEATURE_REVISION
+        or not isinstance(rows, list)
+        or not rows
+        or any(
+            not isinstance(row, Mapping)
+            or not _materialized_row_integrity(row, root=root, split_plan=split_plan)
+            for row in rows
+        )
+        or {str(row.get("split") or "") for row in rows if isinstance(row, Mapping)}
+        < {"train", "validation", "test"}
+        or baseline.get("raw_watermark") != lineage["raw_watermark"]
+        or baseline.get("hard_floor", {}).get("p5_allowed") is not True
+        or baseline.get("offline_training_gate", {}).get("passed") is not True
+        or canonical_json.canonical_json_sha256_strict(
+            baseline.get("offline_training_gate")
+        )
+        != lineage["offline_gate_sha256"]
+        or replay.get("training_snapshot_id") != training_snapshot_id
+        or replay.get("baseline_artifact_id") != lineage["baseline_artifact_id"]
+        or replay.get("model_cohort_sha256") != lineage["model_cohort_sha256"]
+        or replay.get("split_revision") != "grouped-rolling-v1"
+        or replay.get("offline_gate_sha256") != lineage["offline_gate_sha256"]
+        or split_plan.get("feature_revision") != TEXT_FEATURE_REVISION
+        or split_plan.get("model_cohort_sha256") != lineage["model_cohort_sha256"]
+        or replay.get("training_rows_sha256") != lineage["training_rows_sha256"]
+        or replay.get("candidate_head") != lineage["candidate_head"]
+        or replay.get("profile_contract_id") != lineage.get("profile_contract_id", "")
+        or canonical_json.canonical_json_sha256_strict(replay.get("training_rows"))
+        != lineage["training_rows_sha256"]
+        or replay.get("policy_sha256") != _policy_payload_digest(policy)
+        or not isinstance(replay.get("training_rows"), list)
+        or not replay["training_rows"]
+        or any(
+            canonical_json.canonical_json_sha256_strict(row)
+            not in {
+                canonical_json.canonical_json_sha256_strict(snapshot_row)
+                for snapshot_row in rows
+                if isinstance(snapshot_row, Mapping)
+            }
+            for row in replay["training_rows"]
+            if isinstance(row, Mapping)
+        )
+        or any(not isinstance(row, Mapping) for row in replay["training_rows"])
+        or not any(row.get("split") == "train" for row in replay["training_rows"])
+        or not any(row.get("split") == "validation" for row in replay["training_rows"])
+        or not any(
+            row.get("split") == "test" and row.get("locked_test_read_only") is True
+            for row in replay["training_rows"]
+        )
+        or train_tiny_policy(replay["training_rows"]) != dict(policy)
+        or baseline.get("frozen_contract", {}).get("hard_floors")
+        != _canonical_hard_floors()
+    ):
+        raise DistillationError("candidate training lineage is incomplete")
     with store._locked(store.distillation_dir(root) / "rollout.lock"):
         policy_id, _, artifact = store.write_immutable(
             store.distillation_dir(root) / "policies",
             {"kind": "tiny-logistic-policy", **policy, "lineage": dict(lineage)},
             schema=POLICY_SCHEMA,
         )
+        reason = _verify_candidate_lineage(
+            root, {"policy_id": policy_id}, artifact, baseline
+        )
+        if reason:
+            raise DistillationError("candidate training lineage is incomplete")
         try:
             active = store.read_pointer(root, "active")
             store.write_pointer(root, "lkg", str(active["policy_id"]))
@@ -3870,7 +4703,7 @@ def grouped_rolling_split(
     ordered = sorted(
         components.values(),
         key=lambda indexes: (
-            max(str(rows[index].get("as_of", "")) for index in indexes),
+            max(_source_epoch(rows[index]) for index in indexes),
             min(str(rows[index].get("rally_id", "")) for index in indexes),
         ),
     )
@@ -3926,6 +4759,34 @@ def _read_split_plan(root: Path) -> dict[str, Any]:
     return _read_split_plan_artifact(root, plan_id)
 
 
+def _scheduling_split_plan_id(plan: Mapping[str, Any]) -> str:
+    """Return the frozen work-plan receipt, never a growth-only pointer."""
+
+    current = str(plan.get("artifact_id") or "")
+    frozen = str(plan.get("scheduling_split_plan_id") or current)
+    if re.fullmatch(r"[0-9a-f]{64}", frozen) is None:
+        raise DistillationError("split plan scheduling receipt is invalid")
+    return frozen
+
+
+def _scheduling_age_bands(root: Path, plan: Mapping[str, Any]) -> Mapping[str, str]:
+    """Read the age receipt bound to the immutable work-plan identity."""
+
+    frozen = _read_split_plan_artifact(root, _scheduling_split_plan_id(plan))
+    bands = frozen.get("age_bands")
+    # Legacy sealed plans predate age receipts.  Their callers use the
+    # deterministic UTC fallback; newly created plans must carry this field.
+    if bands is None:
+        return {}
+    if not isinstance(bands, Mapping) or any(
+        not isinstance(rally_id, str)
+        or band not in {"old-history", "recent", "locked-test"}
+        for rally_id, band in bands.items()
+    ):
+        raise DistillationError("split plan age receipt is invalid")
+    return {str(rally_id): str(band) for rally_id, band in bands.items()}
+
+
 def _ensure_split_plan(
     root: Path,
     rallies: Sequence[Mapping[str, Any]],
@@ -3951,12 +4812,21 @@ def _ensure_split_plan(
         }
         if not set(prior_assignments).issubset(rally_ids):
             raise DistillationError("split plan rally set regressed")
+        # A growth receipt preserves every existing assignment and embargoes
+        # the new source.  Its ``scheduling_split_plan_id`` remains the prior
+        # immutable plan, so Workset payloads for already-known work do not
+        # acquire mutable provenance merely because the source watermark grew.
         assignments = {
             **prior_assignments,
             **{
                 rally_id: "embargo" for rally_id in rally_ids - prior_assignments.keys()
             },
         }
+        scheduling_split_plan_id = str(
+            prior.get("scheduling_split_plan_id") or prior.get("artifact_id") or ""
+        )
+    else:
+        scheduling_split_plan_id = ""
     plan_id, _, artifact = store.write_immutable(
         store.distillation_dir(root) / "split-plans",
         {
@@ -3966,6 +4836,13 @@ def _ensure_split_plan(
             "model_cohort_sha256": model_cohort_sha256,
             "split_revision": "grouped-rolling-v1",
             "assignments": assignments,
+            "age_boundary_utc": _source_age_boundary(rallies),
+            "age_bands": _source_age_bands(rallies, assignments=assignments),
+            **(
+                {"scheduling_split_plan_id": scheduling_split_plan_id}
+                if scheduling_split_plan_id
+                else {}
+            ),
         },
         schema=SPLIT_PLAN_SCHEMA,
     )
@@ -4342,7 +5219,7 @@ def preflight(
         "max_load_skew": 0.10,
         "order_bias_max": 0.05,
     }
-    if config.teacher_profile == OX_SINGLE_PROFILE:
+    if config.teacher_profile == OX_SINGLE_PROFILE and config.ox_enabled:
         profile_contract = _ensure_ox_profile_contract(root, config)
         teacher_contract = {
             "profile": OX_SINGLE_PROFILE,
@@ -4353,6 +5230,15 @@ def preflight(
             "free_only": True,
             "max_input_bytes": config.max_input_bytes,
             "max_candidates": config.max_candidates,
+        }
+    elif config.teacher_profile == OX_SINGLE_PROFILE:
+        teacher_contract = {
+            "profile": OX_SINGLE_PROFILE,
+            "cohort": OX_SINGLE_COHORT,
+            "routes": [OX_TEACHER_ROLE],
+            "local_only": False,
+            "free_only": True,
+            "enabled": False,
         }
     label_projection = store.label_health_projection(
         store.distillation_dir(root) / store.LABEL_LEDGER_FILE,
@@ -4407,6 +5293,7 @@ def preflight(
         },
         "metrics": metrics,
         "frozen_contract": {
+            "hard_floors": _canonical_hard_floors(),
             "rally_revision": "rally-v1",
             "assignment_revision": ASSIGNMENT_REVISION,
             "probe_revision": PROBE_REVISION,
@@ -4688,9 +5575,14 @@ def _ox_prepare_tasks(
     profile_contract_id: str,
     candidate_indexed: bool,
     candidate_state: Mapping[str, Any],
+    age_bands: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     tasks: dict[str, dict[str, Any]] = {}
     work_items: list[dict[str, Any]] = []
+    age_bands = dict(
+        age_bands
+        or _source_age_bands(list(rally_by_id.values()), assignments=assignments)
+    )
 
     def add_task(
         rally_id: str,
@@ -4706,6 +5598,7 @@ def _ox_prepare_tasks(
         candidate_id = str(candidate.get("candidate_id") or "")
         if not candidate_id:
             return None
+        age_band = age_bands.get(rally_id, "old-history")
         source = {
             "rally_id": rally_id,
             "candidate_id": candidate_id,
@@ -4746,6 +5639,7 @@ def _ox_prepare_tasks(
             "probe_batch_id": str(assignment.get("probe_batch_id") or ""),
             "work_id": work_id,
             "payload_digest": payload_digest,
+            "payload_source": source,
         }
         tasks[work_id] = task
         if not register_item:
@@ -4756,7 +5650,7 @@ def _ox_prepare_tasks(
                 "kind": "ox",
                 "payload_ref": f"candidate-snapshot:{rally_id}:{candidate_id}",
                 "payload_digest": payload_digest,
-                "priority": priority,
+                "priority": max(priority, _age_band_priority(age_band)),
                 "temporal_split": temporal,
                 "provenance": {
                     "profile": OX_SINGLE_PROFILE,
@@ -4801,9 +5695,12 @@ def _ox_prepare_tasks(
             eligible_probe_rallies.append((rally_id, snapshot, rally, candidates))
     probe_rallies = sorted(
         eligible_probe_rallies,
-        key=lambda item: (str(item[2].get("as_of") or ""), item[0]),
+        key=lambda item: (_source_epoch(item[2]), item[0]),
     )[: config.hard_floor_probe_pairs]
-    for rally_id, snapshot in sorted(snapshots.items()):
+    for rally_id, snapshot in sorted(
+        snapshots.items(),
+        key=lambda item: (_source_epoch(rally_by_id.get(item[0], {})), item[0]),
+    ):
         rally = rally_by_id.get(rally_id)
         if rally is None or (
             split_plan_id
@@ -5423,6 +6320,7 @@ def _ox_workset_progress(
 
 def _ox_dispatch_and_commit(
     *,
+    root: Path,
     claims: Sequence[Any],
     batches: Sequence[Sequence[Any]],
     ramp_cap: int,
@@ -5445,11 +6343,34 @@ def _ox_dispatch_and_commit(
     # identity, digest, and label validation below.
     from chronovisor.recall.recall_distillation_dispatcher import dispatch_claimed_work
 
+    try:
+        _ensure_ox_profile_contract(root, config)
+    except DistillationError:
+        workset.release_unattempted(claims)
+        return _TeacherBatchResult(
+            deferred=True,
+            workset_status=workset.status("ox"),
+            profile_contract_id=profile_contract_id,
+            last_durable_progress=workset.progress(),
+        )
+
     results: list[Any] = []
     dispatched_batches = 0
     metadata_drift = False
     for start in range(0, len(batches), ramp_cap):
         wave = batches[start : start + ramp_cap]
+        # A claim may have waited in the workset while an earlier wave ran.
+        # Recheck at the actual egress boundary, not just when the run began.
+        try:
+            _ox_expiry(config.ox_expires_at)
+        except DistillationError:
+            workset.release_unattempted(claims)
+            return _TeacherBatchResult(
+                deferred=True,
+                workset_status=workset.status("ox"),
+                profile_contract_id=profile_contract_id,
+                last_durable_progress=workset.progress(),
+            )
         wave_results = dispatch_claimed_work(
             wave,
             lambda current: teacher.evaluate(_ox_batch_payload(tasks, current)),
@@ -5583,6 +6504,8 @@ def _ox_dispatch_and_commit(
                     "kind": "teacher-label",
                     "status": "completed",
                     "work_id": claim.work_id,
+                    "payload_digest": claim.payload_digest,
+                    "payload_source": task["payload_source"],
                     "rally_id": rally["rally_id"],
                     "candidate_id": candidate["candidate_id"],
                     "route": "opencode-go/ox-alpha-free",
@@ -5590,13 +6513,30 @@ def _ox_dispatch_and_commit(
                     "profile": OX_SINGLE_PROFILE,
                     "cohort": OX_SINGLE_COHORT,
                     "profile_contract_id": profile_contract_id,
+                    "expires_at": config.ox_expires_at,
                     "identity_revision": OX_ALPHA_FIXED_IDENTITY["revision"],
+                    "request_revision": OX_RAMP_REQUEST_REVISION,
                     "route_identity": dict(expected_identity),
                     "route_digest": response_metadata["_route_digest"],
                     "model_digest": response_metadata["_model_digest"],
                     "prompt_sha256": response_metadata["_prompt_digest"],
                     "schema_sha256": response_metadata["_schema_digest"],
-                    "request_sha256": response_metadata["_request_digest"],
+                    "provider_response_request_sha256": expected_ox_provider_request_sha256(
+                        profile_contract_id=profile_contract_id,
+                        payload_digest=claim.payload_digest,
+                        work_id=claim.work_id,
+                        expires_at=config.ox_expires_at,
+                    ),
+                    "provider_request_sha256": expected_ox_provider_request_sha256(
+                        profile_contract_id=profile_contract_id,
+                        payload_digest=claim.payload_digest,
+                        work_id=claim.work_id,
+                        expires_at=config.ox_expires_at,
+                    ),
+                    "request_sha256": expected_ox_request_sha256(
+                        profile_contract_id=profile_contract_id,
+                        payload_digest=claim.payload_digest,
+                    ),
                     "assignment": task["assignment"],
                     **task["temporal"],
                     **_teacher_label(
@@ -5608,6 +6548,21 @@ def _ox_dispatch_and_commit(
                 }
             )
             completed_claims.append(claim)
+    try:
+        # Recheck after HTTP and immediately before appending the ledger.  No
+        # transcript or raw provider body has been persisted at this point.
+        _ox_expiry(config.ox_expires_at)
+        _ensure_ox_profile_contract(root, config)
+    except DistillationError:
+        # Every result is still uncommitted here, including failed HTTP
+        # outcomes.  Returning only successes leaves retry leases stranded.
+        workset.release_unattempted(claims)
+        return _TeacherBatchResult(
+            deferred=True,
+            workset_status=workset.status("ox"),
+            profile_contract_id=profile_contract_id,
+            last_durable_progress=workset.progress(),
+        )
     appended = store.append_chain_batch(label_path, records)
     appended_by_work = {str(row["work_id"]): row for row in appended}
     for claim in completed_claims:
@@ -5619,6 +6574,21 @@ def _ox_dispatch_and_commit(
         }
     active_claims = [claim for claim in claims if claim.work_id in outcomes]
     if active_claims:
+        try:
+            _ox_expiry(config.ox_expires_at)
+        except DistillationError:
+            # The label append was sealed only after the preceding check; do
+            # not turn an expired lease into completed work.  Reconciliation
+            # will safely finish it on a future valid run.
+            workset.release_unattempted(claims)
+            return _TeacherBatchResult(
+                labels_written=len(appended),
+                model_calls=sum(result.attempts for result in results),
+                deferred=True,
+                workset_status=workset.status("ox"),
+                profile_contract_id=profile_contract_id,
+                last_durable_progress=workset.progress(),
+            )
         progress: Mapping[str, Any] | None = None
         if appended:
             label_state = store.chain_head(label_path)
@@ -5712,10 +6682,12 @@ def _run_ox_teacher_batch(
     try:
         split_plan = _read_split_plan(root)
         assignments = split_plan["assignments"]
-        split_plan_id = str(split_plan["artifact_id"])
+        split_plan_id = _scheduling_split_plan_id(split_plan)
+        age_bands = _scheduling_age_bands(root, split_plan)
     except (DistillationError, store.DistillationStoreError, KeyError):
         assignments = {}
         split_plan_id = ""
+        age_bands = {}
 
     candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
     candidate_state: Mapping[str, Any] = {}
@@ -5767,6 +6739,7 @@ def _run_ox_teacher_batch(
         profile_contract_id=profile_contract_id,
         candidate_indexed=candidate_indexed,
         candidate_state=candidate_state,
+        age_bands=age_bands if isinstance(age_bands, Mapping) else None,
     )
     tasks = prepared["tasks"]
     work_items = prepared["work_items"]
@@ -5941,6 +6914,7 @@ def _run_ox_teacher_batch(
         )
 
     return _ox_dispatch_and_commit(
+        root=root,
         claims=claims,
         batches=batches,
         ramp_cap=ramp_cap,
@@ -6027,7 +7001,7 @@ def _local_workset_watermark(
     label_state = store.chain_head(label_path)
     try:
         split_plan = _read_split_plan(root)
-        split_plan_id = str(split_plan.get("artifact_id") or "")
+        split_plan_id = _scheduling_split_plan_id(split_plan)
     except (DistillationError, store.DistillationStoreError):
         split_plan_id = ""
     return {
@@ -6094,12 +7068,23 @@ def _prepare_local_teacher_work(
     rally_by_id: Mapping[str, Mapping[str, Any]],
     split_assignments: Mapping[str, Any],
     split_plan_id: str,
+    age_bands: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     tasks: dict[str, dict[str, Any]] = {}
     work_items: list[dict[str, Any]] = []
-    for rally_id, snapshot in sorted(snapshots.items()):
+    age_bands = dict(
+        age_bands
+        or _source_age_bands(list(rally_by_id.values()), assignments=split_assignments)
+    )
+    for rally_id, snapshot in sorted(
+        snapshots.items(),
+        key=lambda item: (_source_epoch(rally_by_id.get(item[0], {})), item[0]),
+    ):
         rally = rally_by_id.get(rally_id)
-        if rally is None:
+        if rally is None or (
+            split_plan_id
+            and split_assignments.get(rally_id) not in {"train", "validation", "test"}
+        ):
             continue
         candidates = list(snapshot.get("candidates", []))
         selected = candidates[:3]
@@ -6146,7 +7131,14 @@ def _prepare_local_teacher_work(
                         "kind": f"local-teacher:{route}",
                         "payload_ref": f"candidate-snapshot:{rally_id}:{candidate_id}",
                         "payload_digest": payload_digest,
-                        "priority": int(assignment["probe"]),
+                        "priority": (
+                            100
+                            + _age_band_priority(age_bands.get(rally_id, "old-history"))
+                            if assignment["probe"]
+                            else _age_band_priority(
+                                age_bands.get(rally_id, "old-history")
+                            )
+                        ),
                         "temporal_split": {
                             "as_of": str(rally.get("as_of") or ""),
                             "group_id": str(rally.get("session_cluster_id") or ""),
@@ -6487,16 +7479,19 @@ def _run_local_teacher_batch(
     raw_dir = raw_dir or root / "raw"  # compatibility for direct test callers
     try:
         split_plan = _read_split_plan(root)
-        split_plan_id = str(split_plan.get("artifact_id") or "")
+        split_plan_id = _scheduling_split_plan_id(split_plan)
         split_assignments = split_plan.get("assignments", {})
+        age_bands = _scheduling_age_bands(root, split_plan)
     except (DistillationError, store.DistillationStoreError, KeyError):
         split_plan_id = ""
         split_assignments = {}
+        age_bands = {}
     tasks, work_items = _prepare_local_teacher_work(
         snapshots=snapshots,
         rally_by_id=rally_by_id,
         split_assignments=split_assignments,
         split_plan_id=split_plan_id,
+        age_bands=age_bands if isinstance(age_bands, Mapping) else None,
     )
     _advance_local_workset(
         workset,
@@ -6536,16 +7531,36 @@ def _prepare_counterfactual_work(
 ) -> tuple[list[dict[str, Any]], dict[tuple[str, str], str]]:
     try:
         split_plan = _read_split_plan(root)
-        split_plan_id = str(split_plan.get("artifact_id") or "")
+        split_plan_id = _scheduling_split_plan_id(split_plan)
         split_assignments = split_plan.get("assignments", {})
+        age_bands = _scheduling_age_bands(root, split_plan)
     except (DistillationError, store.DistillationStoreError, KeyError):
         split_plan_id = ""
         split_assignments = {}
+        age_bands = {}
+    age_bands = (
+        dict(age_bands)
+        if isinstance(age_bands, Mapping)
+        else _source_age_bands(
+            list(rally_by_id.values()), assignments=split_assignments
+        )
+    )
     items: list[dict[str, Any]] = []
     keys: dict[tuple[str, str], str] = {}
-    for rally_id, snapshot in sorted(snapshots.items()):
+    for rally_id, snapshot in sorted(
+        snapshots.items(),
+        key=lambda item: (_source_epoch(rally_by_id.get(item[0], {})), item[0]),
+    ):
         rally = rally_by_id.get(rally_id)
-        if rally is None or not rally.get("actual_answer_refs"):
+        if (
+            rally is None
+            or not rally.get("actual_answer_refs")
+            or (
+                split_plan_id
+                and split_assignments.get(rally_id)
+                not in {"train", "validation", "test"}
+            )
+        ):
             continue
         candidates = [
             candidate
@@ -6616,7 +7631,10 @@ def _prepare_counterfactual_work(
                     "kind": "local-counterfactual",
                     "payload_ref": f"candidate-snapshot:{rally_id}:{candidate_id}",
                     "payload_digest": payload_digest,
-                    "priority": int("page_content_sha256" in candidate),
+                    "priority": (
+                        100 * int("page_content_sha256" in candidate)
+                        + _age_band_priority(age_bands.get(rally_id, "old-history"))
+                    ),
                     "temporal_split": {
                         "as_of": str(rally.get("as_of") or ""),
                         "group_id": str(rally.get("session_cluster_id") or ""),
@@ -6816,6 +7834,7 @@ def _compare_and_commit_counterfactual(
     rally_id: str,
     candidate: Mapping[str, Any],
     mode: str,
+    config: DistillationConfig,
 ) -> _CounterfactualBlockResult:
     response: Mapping[str, Any] = {}
     try:
@@ -6826,6 +7845,17 @@ def _compare_and_commit_counterfactual(
         blind_orders = response.get("blind_orders")
         generator_route_identity = response.get("generator_route_identity")
         judge_route_identity = response.get("judge_route_identity")
+        local_routes = (
+            isinstance(generator_route_identity, Mapping)
+            and isinstance(judge_route_identity, Mapping)
+            and generator_route_identity.get("location") == "local"
+            and judge_route_identity.get("location") == "local"
+            and bool(generator_route_identity.get("provider"))
+            and bool(judge_route_identity.get("provider"))
+            and bool(generator_route_identity.get("model"))
+            and bool(judge_route_identity.get("model"))
+            and dict(generator_route_identity) != dict(judge_route_identity)
+        )
         if (
             response.get("order_agreement") is not True
             or re.fullmatch(r"[0-9a-f]{64}", str(response.get("a0_sha256") or ""))
@@ -6839,10 +7869,7 @@ def _compare_and_commit_counterfactual(
             or not isinstance(blind_orders, list)
             or set(blind_orders) != {"a0_first", "a1_first"}
             or len(blind_orders) != 2
-            or not isinstance(generator_route_identity, Mapping)
-            or not generator_route_identity
-            or not isinstance(judge_route_identity, Mapping)
-            or not judge_route_identity
+            or not local_routes
             or isinstance(counterfactual, _WorkerCounterfactual)
             and (
                 dict(generator_route_identity)
@@ -6909,6 +7936,14 @@ def _compare_and_commit_counterfactual(
         return _CounterfactualBlockResult(pending=True, deferred=True)
     candidate_id_raw = candidate["candidate_id"]
     candidate_id = str(candidate_id_raw)
+    ox_contract_id = (
+        _current_ox_profile_contract_id(root)
+        if config.teacher_profile == OX_SINGLE_PROFILE
+        else ""
+    )
+    if config.teacher_profile == OX_SINGLE_PROFILE and not ox_contract_id:
+        workset.release_unattempted([claim])
+        return _CounterfactualBlockResult(pending=True, deferred=True)
     appended = store.append_chain(
         label_path,
         {
@@ -6918,6 +7953,19 @@ def _compare_and_commit_counterfactual(
             "rally_id": rally_id,
             "candidate_id": candidate_id_raw,
             "route": "counterfactual",
+            "counterfactual_producer": "chronovisor-local-blind-v1",
+            "counterfactual_revision": "two-order-locked-v1",
+            # This producer is intentionally local; only its stable route
+            # fingerprints are retained, never generated text or provider body.
+            "profile": config.teacher_profile,
+            "cohort": OX_SINGLE_COHORT
+            if config.teacher_profile == OX_SINGLE_PROFILE
+            else LOCAL_TRIAD_PROFILE,
+            "profile_contract_id": ox_contract_id,
+            "identity_revision": "local-blind-counterfactual-v1",
+            "expires_at": config.ox_expires_at
+            if config.teacher_profile == OX_SINGLE_PROFILE
+            else "",
             "mode": mode,
             "exposure_artifact_id": str(exposure.get("exposure_artifact_id") or ""),
             "a0_sha256": response.get("a0_sha256", ""),
@@ -6928,6 +7976,7 @@ def _compare_and_commit_counterfactual(
             "generator_model_digest": response.get("generator_model_digest", ""),
             "judge_route_identity": response.get("judge_route_identity", {}),
             "judge_model_digest": response.get("judge_model_digest", ""),
+            "model_digest": response.get("generator_model_digest", ""),
             **(
                 {"features": exact_features[candidate_id]}
                 if candidate_id in exact_features
@@ -6974,7 +8023,10 @@ def _run_counterfactual_claim(
     texts: Mapping[str, str],
     label_path: Path,
 ) -> _CounterfactualBlockResult:
-    for rally_id, snapshot in sorted(snapshots.items()):
+    for rally_id, snapshot in sorted(
+        snapshots.items(),
+        key=lambda item: (_source_epoch(rally_by_id.get(item[0], {})), item[0]),
+    ):
         rally = rally_by_id.get(rally_id)
         if rally is None or not rally.get("actual_answer_refs"):
             continue
@@ -7076,6 +8128,7 @@ def _run_counterfactual_claim(
                 rally_id=rally_id,
                 candidate=candidate,
                 mode=mode,
+                config=config,
             )
     workset.commit(
         [claim],
@@ -7162,6 +8215,112 @@ def _run_counterfactual_block(
     )
 
 
+def _source_age_bands(
+    rallies: Sequence[Mapping[str, Any]],
+    *,
+    assignments: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """Classify source rows against a stable source-watermark UTC boundary."""
+
+    parsed: dict[str, datetime] = {}
+    for rally in rallies:
+        rally_id = str(rally.get("rally_id") or "")
+        value = str(rally.get("as_of") or "")
+        try:
+            parsed[rally_id] = datetime.fromisoformat(
+                value.replace("Z", "+00:00")
+            ).astimezone(UTC)
+        except ValueError:
+            continue
+    newest = max(parsed.values(), default=None)
+    cutoff = newest - timedelta(days=7) if newest is not None else None
+    result: dict[str, str] = {}
+    for rally in rallies:
+        rally_id = str(rally.get("rally_id") or "")
+        if rally.get("locked_test_read_only") is True or (
+            assignments is not None and assignments.get(rally_id) == "test"
+        ):
+            result[rally_id] = "locked-test"
+        elif (
+            cutoff is not None
+            and parsed.get(rally_id, datetime.min.replace(tzinfo=UTC)) >= cutoff
+        ):
+            result[rally_id] = "recent"
+        else:
+            result[rally_id] = "old-history"
+    return result
+
+
+def _source_age_boundary(rallies: Sequence[Mapping[str, Any]]) -> str:
+    values: list[datetime] = []
+    for rally in rallies:
+        try:
+            values.append(
+                datetime.fromisoformat(
+                    str(rally.get("as_of") or "").replace("Z", "+00:00")
+                ).astimezone(UTC)
+            )
+        except ValueError:
+            continue
+    return max(values).isoformat().replace("+00:00", "Z") if values else ""
+
+
+def _source_epoch(rally: Mapping[str, Any]) -> float:
+    value = str(rally.get("as_of") or "")
+    try:
+        return (
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+            .astimezone(UTC)
+            .timestamp()
+        )
+    except ValueError:
+        # Historical unit fixtures use a monotonic raw microsecond surrogate.
+        # Production source rows are RFC3339, so this is only a deterministic
+        # compatibility representation and never a wall-clock fallback.
+        try:
+            return float(value) if value and value.isdecimal() else float("-inf")
+        except ValueError:
+            return float("-inf")
+
+
+def _age_aware_backfill(
+    *, rallies: Sequence[Mapping[str, Any]], profile: str
+) -> list[dict[str, Any]]:
+    """Round-robin fixed UTC bands; source time, not wall-clock, defines age."""
+
+    ordered = sorted(
+        (dict(rally) for rally in rallies),
+        key=lambda rally: (_source_epoch(rally), str(rally.get("rally_id") or "")),
+    )
+    age_bands = _source_age_bands(ordered)
+    bands: dict[str, list[dict[str, Any]]] = {
+        "old-history": [],
+        "recent": [],
+        "locked-test": [],
+    }
+    boundary = _source_age_boundary(ordered)
+    for rally in ordered:
+        band = age_bands[str(rally.get("rally_id") or "")]
+        bands[band].append(
+            {**rally, "_backfill_band": band, "_age_boundary_utc": boundary}
+        )
+    schedule = (
+        ("old-history", "recent", "locked-test")
+        if profile == OX_SINGLE_PROFILE
+        else ("recent", "locked-test", "old-history")
+    )
+    result: list[dict[str, Any]] = []
+    while any(bands.values()):
+        for band in schedule:
+            if bands[band]:
+                result.append(bands[band].pop(0))
+    return result
+
+
+def _age_band_priority(band: str) -> int:
+    return {"locked-test": 30, "recent": 20, "old-history": 10}.get(band, 0)
+
+
 def _capture_candidate_snapshots(
     *,
     root: Path,
@@ -7204,6 +8363,7 @@ def _capture_candidate_snapshots(
         known_rally_ids = set(snapshots)
     candidate_limit = 100 if cold_start else config.chunk_size
     planned = [rally for rally in rallies if rally["rally_id"] not in known_rally_ids]
+    planned = _age_aware_backfill(rallies=planned, profile=config.teacher_profile)
     split_plan: Mapping[str, Any] = {}
     if cold_start:
         training = materialize_training_rows(
@@ -7231,6 +8391,7 @@ def _capture_candidate_snapshots(
         planned.sort(
             key=lambda rally: (
                 0 if assignments.get(rally["rally_id"]) == "test" else 1,
+                _source_epoch(rally),
                 str(rally["rally_id"]),
             )
         )
@@ -7253,6 +8414,10 @@ def _capture_candidate_snapshots(
             {
                 "kind": "candidate-snapshot",
                 "rally_id": rally["rally_id"],
+                "backfill_revision": "age-bands-v1",
+                "backfill_profile": config.teacher_profile,
+                "backfill_band": str(rally.get("_backfill_band") or "old-history"),
+                "age_boundary_utc": str(rally.get("_age_boundary_utc") or ""),
                 "snapshot": snapshot,
             }
         )
@@ -7336,7 +8501,7 @@ def _prepare_distillation_chunk(
         return {"early": {"status": "disabled", "processed": 0}}
     ox_profile_contract_id = (
         str(_ensure_ox_profile_contract(root, config)["artifact_id"])
-        if config.teacher_profile == OX_SINGLE_PROFILE
+        if config.teacher_profile == OX_SINGLE_PROFILE and config.ox_enabled
         else ""
     )
     try:
@@ -7566,7 +8731,9 @@ def _prepare_distillation_training(
         _training_snapshot=training_snapshot,
     )
     gate_baseline = _matching_p5_baseline(root, baseline) or baseline
-    p5_allowed = bool(gate_baseline["hard_floor"]["p5_allowed"])
+    p5_allowed = bool(
+        gate_baseline["hard_floor"]["p5_allowed"]
+    ) and _has_canonical_hard_floors(config)
     manifest_backlog = max(0, len(rallies) - len(existing) - len(pending))
     candidate_backlog = max(
         0,

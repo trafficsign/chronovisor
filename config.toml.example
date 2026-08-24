@@ -61,6 +61,9 @@ hard_floor_teacher_labels = 500
 hard_floor_teacher_per_class = 100
 hard_floor_probe_pairs = 100
 hard_floor_counterfactual_pairs = 100
+# OX remains off by default. When enabling its temporary remote profile, set a
+# strict future UTC expiry, e.g. 2026-12-31T23:59:59Z.
+ox_expires_at = ""
 rollout_stages = [5, 25, 100]
 canary_min_days = 7
 
