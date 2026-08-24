@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Run the offline Recall R3 workset durability/performance gate.
 
-The gate exercises only the local SQLite workset. It never calls a teacher or
-another provider and it runs all writes in throwaway clone-local directories.
-The evidence is sealed with the normal Recall immutable-artifact writer and
-contains counts, digests, and timings, never work payloads.
+The default path takes a production root, creates the existing forced APFS
+clone, and mutates only that clone.  A trusted R2 frozen clone plus manifest
+may be supplied instead.  No teacher/provider is called; evidence is sealed
+with the normal immutable-artifact writer and contains bounded digests/counts,
+never work payloads.
 """
 
 from __future__ import annotations
@@ -30,6 +31,8 @@ from pathlib import Path
 from typing import Any
 
 R3_SCHEMA = "chronovisor.recall-r3.v1"
+R3_COMPLETION_SCHEMA = "chronovisor.recall-r3-completion.v1"
+R2_FROZEN_CLONE_SCHEMA = "chronovisor.recall-r2-frozen-clone.v1"
 DEFAULT_SAMPLES = 100
 MIN_SAMPLES = 100
 UNIT_MIN_SAMPLES = 20
@@ -45,6 +48,31 @@ OX_WORKSET_EXPECTED_STATES = {
     "quarantined": 12_970,
 }
 OX_WORKSET_ROW_LIMIT = 100_000
+CLONE_TREE_FILE_LIMIT = 100_000
+CLONE_TREE_FILE_BYTES_LIMIT = 512 * 1024 * 1024
+_WORKSET_SECURITY_COLUMNS = (
+    "sequence",
+    "work_id",
+    "kind",
+    "payload_ref",
+    "payload_digest",
+    "temporal_split_json",
+    "provenance_json",
+    "priority",
+    "watermark_json",
+    "stage",
+    "state",
+    "attempt_count",
+    "last_error_class",
+    "lease_id",
+    "lease_owner",
+    "lease_expires_at",
+    "next_attempt_at",
+    "completion_ref",
+    "completion_digest",
+    "created_at",
+    "updated_at",
+)
 SIX_STAGES = (
     "snapshot",
     "teacher",
@@ -54,6 +82,22 @@ SIX_STAGES = (
     "evaluation",
 )
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
+_DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
+_TREE_RE = re.compile(r"[0-9a-f]{40}\Z")
+_FROZEN_MANIFEST_KEYS = {
+    "artifact_id",
+    "captured_at",
+    "clone",
+    "clone_root",
+    "namespace",
+    "production",
+    "runtime_identity",
+    "schema",
+    "seal_sha256",
+    "source_commit",
+    "source_tree",
+    "threshold",
+}
 
 
 class R3Error(ValueError):
@@ -106,6 +150,256 @@ def _load_runtime(source_root: Path) -> tuple[Any, Any]:
         if not module_path.is_relative_to(source_root / "src"):
             raise R3Error("R3 runtime module escaped source root")
     return workset, store
+
+
+def _hex_digest(value: object, field: str) -> str:
+    if not isinstance(value, str) or _DIGEST_RE.fullmatch(value) is None:
+        raise R3Error(f"{field} must be a lowercase SHA-256")
+    return value
+
+
+def _tree_sha(value: object, field: str) -> str:
+    if not isinstance(value, str) or _TREE_RE.fullmatch(value) is None:
+        raise R3Error(f"{field} must be a full Git tree SHA")
+    return value
+
+
+def _bounded_integer(value: object, field: str, *, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise R3Error(f"{field} must be a bounded integer")
+    return value
+
+
+def _manifest_raw_tree(value: object, field: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise R3Error(f"{field} is missing")
+    required = {"bytes", "content_sha256", "file_count"}
+    if not required.issubset(value):
+        raise R3Error(f"{field} is incomplete")
+    return {
+        "bytes": _bounded_integer(value.get("bytes"), f"{field}.bytes"),
+        "content_sha256": _hex_digest(
+            value.get("content_sha256"), f"{field}.content_sha256"
+        ),
+        "file_count": _bounded_integer(value.get("file_count"), f"{field}.file_count"),
+    }
+
+
+def _manifest_static(value: object, field: str) -> dict[str, Any]:
+    """Validate the path-neutral R2 clone identity projection.
+
+    R0's ``_clone_identity`` intentionally contains only ledger heads/counts/
+    bytes, FTS digest/count/checkpoint seal, pointer seals, state seal, and the
+    committed Raw watermark.  Keep this validator shape-aware but compare the
+    complete projection later so a trusted manifest cannot omit one binding.
+    """
+
+    if not isinstance(value, Mapping):
+        raise R3Error(f"{field} is missing")
+    ledgers = value.get("ledgers")
+    if not isinstance(ledgers, Mapping) or not ledgers:
+        raise R3Error(f"{field}.ledgers is incomplete")
+    normalized_ledgers: dict[str, Any] = {}
+    for name, row in ledgers.items():
+        if not isinstance(name, str) or not isinstance(row, Mapping):
+            raise R3Error(f"{field}.ledgers is malformed")
+        records = _bounded_integer(
+            row.get("records"), f"{field}.ledgers.{name}.records"
+        )
+        head = row.get("head_sha256")
+        if head != "":
+            head = _hex_digest(head, f"{field}.ledgers.{name}.head_sha256")
+        elif records != 0:
+            raise R3Error(f"{field}.ledgers.{name}.head_sha256 is empty")
+        normalized_ledgers[name] = {
+            "records": records,
+            "head_sha256": head,
+            "bytes": _bounded_integer(
+                row.get("bytes"), f"{field}.ledgers.{name}.bytes"
+            ),
+        }
+    raw_watermark = _hex_digest(
+        value.get("raw_watermark"), f"{field}.raw_watermark"
+    )
+    fts = value.get("fts")
+    if not isinstance(fts, Mapping):
+        raise R3Error(f"{field}.fts is incomplete")
+    normalized_fts = {
+        "content_sha256": _hex_digest(
+            fts.get("content_sha256"), f"{field}.fts.content_sha256"
+        ),
+        "atom_count": _bounded_integer(
+            fts.get("atom_count"), f"{field}.fts.atom_count"
+        ),
+        "fts_count": _bounded_integer(
+            fts.get("fts_count"), f"{field}.fts.fts_count"
+        ),
+        "checkpoint_seal_sha256": _hex_digest(
+            fts.get("checkpoint_seal_sha256"),
+            f"{field}.fts.checkpoint_seal_sha256",
+        ),
+    }
+    state = value.get("state")
+    if not isinstance(state, Mapping):
+        raise R3Error(f"{field}.state is incomplete")
+    state_seal = _hex_digest(state.get("seal_sha256"), f"{field}.state.seal_sha256")
+    state_fields = state.get("fields")
+    if not isinstance(state_fields, Mapping):
+        raise R3Error(f"{field}.state.fields is incomplete")
+    pointers = value.get("pointers")
+    if not isinstance(pointers, Mapping):
+        raise R3Error(f"{field}.pointers is incomplete")
+    normalized_pointers: dict[str, Any] = {}
+    for kind, pointer in pointers.items():
+        if not isinstance(kind, str):
+            raise R3Error(f"{field}.pointers is malformed")
+        if pointer is None:
+            normalized_pointers[kind] = None
+            continue
+        if not isinstance(pointer, Mapping):
+            raise R3Error(f"{field}.pointers.{kind} is malformed")
+        normalized_pointers[kind] = {
+            "policy_id": _hex_digest(
+                pointer.get("policy_id"), f"{field}.pointers.{kind}.policy_id"
+            ),
+            "pointer_seal_sha256": _hex_digest(
+                pointer.get("pointer_seal_sha256"),
+                f"{field}.pointers.{kind}.pointer_seal_sha256",
+            ),
+            "policy_seal_sha256": _hex_digest(
+                pointer.get("policy_seal_sha256"),
+                f"{field}.pointers.{kind}.policy_seal_sha256",
+            ),
+        }
+    return {
+        "ledgers": normalized_ledgers,
+        "raw_watermark": raw_watermark,
+        "fts": normalized_fts,
+        "state": {"seal_sha256": state_seal, "fields": dict(state_fields)},
+        "pointers": normalized_pointers,
+    }
+
+
+def _read_frozen_manifest(
+    path: Path,
+    store: Any,
+    *,
+    clone_root: Path,
+    source_commit: str,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """Read and verify the immutable R2 APFS clone manifest once.
+
+    The manifest is an input contract, never an output that this harness can
+    replace.  Both the canonical seal and content ``artifact_id`` are checked;
+    the caller re-stats and re-hashes the file at run completion for TOCTOU.
+    """
+
+    if _has_symlink_component(path) or not path.is_file():
+        raise R3Error("R2 frozen manifest is not a regular file")
+    before = _regular_file_state(path)
+    try:
+        encoded = path.read_bytes()
+        raw = json.loads(encoded)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise R3Error("R2 frozen manifest is invalid JSON") from exc
+    after = _regular_file_state(path)
+    if before != after:
+        raise R3Error("R2 frozen manifest changed during read")
+    if not isinstance(raw, Mapping):
+        raise R3Error("R2 frozen manifest is not an object")
+    try:
+        verified = store.verify_seal(dict(raw), schema=R2_FROZEN_CLONE_SCHEMA)
+    except Exception as exc:
+        raise R3Error("R2 frozen manifest seal/schema verification failed") from exc
+    if set(verified) != _FROZEN_MANIFEST_KEYS:
+        raise R3Error("R2 frozen manifest top-level schema is not exact")
+    unsigned = {
+        key: value for key, value in verified.items() if key not in {"artifact_id", "seal_sha256"}
+    }
+    try:
+        content_id = store.canonical_json_sha256_strict(unsigned)
+    except Exception as exc:
+        raise R3Error("R2 frozen manifest content identity failed") from exc
+    if verified.get("artifact_id") != content_id:
+        raise R3Error("R2 frozen manifest artifact identity mismatch")
+    if path.name != f"{content_id}.json":
+        raise R3Error("R2 frozen manifest filename is not content-addressed")
+    if not isinstance(verified.get("captured_at"), str) or not verified["captured_at"]:
+        raise R3Error("R2 frozen manifest captured_at is invalid")
+    if verified.get("source_commit") != source_commit:
+        raise R3Error("R2 frozen manifest source commit mismatch")
+    if verified.get("namespace") != "recall-distillation":
+        raise R3Error("R2 frozen manifest namespace mismatch")
+    clone_value = verified.get("clone")
+    if not isinstance(clone_value, Mapping) or set(clone_value) != {
+        "clone_backend",
+        "filesystem",
+        "raw_tree",
+        "static",
+    }:
+        raise R3Error("R2 frozen manifest clone contract is incomplete")
+    clone_backend = clone_value.get("clone_backend")
+    filesystem = clone_value.get("filesystem")
+    if (
+        not isinstance(clone_backend, str)
+        or "apfs" not in clone_backend.lower()
+        or not isinstance(filesystem, str)
+        or filesystem.lower() != "apfs"
+    ):
+        raise R3Error("R2 frozen manifest is not an APFS clone")
+    clone_root_value = verified.get("clone_root")
+    if not isinstance(clone_root_value, str) or clone_root_value != str(clone_root):
+        raise R3Error("R2 frozen manifest clone root does not match input")
+    production = verified.get("production")
+    if not isinstance(production, Mapping) or set(production) != {"raw_tree", "static"}:
+        raise R3Error("R2 frozen manifest production identity is incomplete")
+    clone_raw = _manifest_raw_tree(clone_value.get("raw_tree"), "clone.raw_tree")
+    production_raw = _manifest_raw_tree(
+        production.get("raw_tree"), "production.raw_tree"
+    )
+    if clone_raw != production_raw:
+        raise R3Error("R2 frozen manifest Raw parity is not exact")
+    clone_static = _manifest_static(clone_value.get("static"), "clone.static")
+    production_static = _manifest_static(production.get("static"), "production.static")
+    if clone_static != production_static:
+        raise R3Error("R2 frozen manifest static clone parity is not exact")
+    runtime_identity = verified.get("runtime_identity")
+    if not isinstance(runtime_identity, Mapping) or set(runtime_identity) != {
+        "runtime_module_sha256",
+        "source_commit",
+        "source_tree",
+    }:
+        raise R3Error("R2 frozen manifest runtime identity is incomplete")
+    _hex_digest(
+        runtime_identity.get("runtime_module_sha256"),
+        "runtime_identity.runtime_module_sha256",
+    )
+    if runtime_identity.get("source_commit") != source_commit:
+        raise R3Error("R2 frozen manifest runtime source commit mismatch")
+    _tree_sha(runtime_identity.get("source_tree"), "runtime_identity.source_tree")
+    source_tree = verified.get("source_tree")
+    if not isinstance(source_tree, Mapping) or set(source_tree) != {
+        "git_status_count",
+        "git_status_sha256",
+        "repo",
+        "trees",
+    }:
+        raise R3Error("R2 frozen manifest source tree is incomplete")
+    _bounded_integer(source_tree.get("git_status_count"), "source_tree.git_status_count")
+    _hex_digest(source_tree.get("git_status_sha256"), "source_tree.git_status_sha256")
+    if not isinstance(source_tree.get("repo"), Mapping) or not isinstance(
+        source_tree.get("trees"), Mapping
+    ):
+        raise R3Error("R2 frozen manifest source tree inventory is incomplete")
+    threshold = verified.get("threshold")
+    if not isinstance(threshold, Mapping) or set(threshold) != {
+        "production_unchanged_during_freeze",
+        "raw_parity",
+    } or threshold.get("production_unchanged_during_freeze") is not True or threshold.get(
+        "raw_parity"
+    ) is not True:
+        raise R3Error("R2 frozen manifest threshold contract is not certified")
+    return dict(verified), before, hashlib.sha256(encoded).hexdigest()
 
 
 def _has_symlink_component(path: Path) -> bool:
@@ -162,6 +456,44 @@ def _assert_output_safe(output: Path) -> None:
         raise R3Error("output tree contains a symlink")
 
 
+def _assert_input_matrix(
+    clone_root: Path, source_root: Path, manifest: Path, output: Path
+) -> None:
+    paths = {
+        "clone_root": clone_root,
+        "source_root": source_root,
+        "manifest": manifest,
+        "output": output,
+    }
+    for name, path in paths.items():
+        if _has_symlink_component(path):
+            raise R3Error(f"{name} path contains a symlink")
+    entries = tuple(paths.items())
+    for index, (left_name, left) in enumerate(entries):
+        for right_name, right in entries[index + 1 :]:
+            if _path_overlap(left, right):
+                raise R3Error(f"{left_name}/{right_name} paths overlap")
+    if not clone_root.is_dir():
+        raise R3Error("clone root is not a directory")
+    if not source_root.is_dir():
+        raise R3Error("source root is not a directory")
+    if not manifest.is_file():
+        raise R3Error("manifest is not a regular file")
+
+
+def _configured_production_root() -> Path:
+    configured = os.environ.get("CHRONOVISOR_ROOT", "").strip()
+    return Path(configured).expanduser() if configured else Path.home() / ".chronovisor"
+
+
+def _assert_external_clone_not_production(clone_root: Path) -> None:
+    """Reject an external input that resolves to the live production root."""
+
+    production = _configured_production_root()
+    if _path_overlap(clone_root, production):
+        raise R3Error("external clone overlaps configured production root")
+
+
 def _git_head(source_root: Path) -> str:
     try:
         result = subprocess.run(
@@ -186,16 +518,178 @@ def _source_snapshot(source_root: Path) -> dict[str, Any]:
         raise R3Error("source snapshot failed") from exc
 
 
+def _source_runtime_identity(source_root: Path, source_commit: str) -> dict[str, str]:
+    module = source_root / "src" / "chronovisor" / "recall" / "recall_runtime.py"
+    if _has_symlink_component(module) or not module.is_file():
+        raise R3Error("source runtime module is unavailable")
+    before = _regular_file_state(module)
+    try:
+        module_sha = hashlib.sha256(module.read_bytes()).hexdigest()
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD^{tree}"],
+            cwd=source_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise R3Error("source tree identity lookup failed") from exc
+    if before != _regular_file_state(module):
+        raise R3Error("source runtime module changed during identity capture")
+    return {
+        "runtime_module_sha256": module_sha,
+        "source_commit": source_commit,
+        "source_tree": _tree_sha(result.stdout.strip(), "source runtime tree"),
+    }
+
+
+def _assert_manifest_source_binding(
+    manifest: Mapping[str, Any],
+    source_snapshot: Mapping[str, Any],
+    runtime_identity: Mapping[str, str],
+) -> None:
+    if manifest.get("source_tree") != dict(source_snapshot):
+        raise R3Error("R2 frozen manifest source tree differs from source checkout")
+    if manifest.get("runtime_identity") != dict(runtime_identity):
+        raise R3Error("R2 frozen manifest runtime identity differs from source")
+
+
 def _assert_source_clean(snapshot: Mapping[str, Any], *, when: str) -> None:
     if snapshot.get("git_status_count") != 0:
         raise R3Error(f"source checkout is dirty {when}")
 
 
-def _production_snapshot(production: Path) -> dict[str, Any]:
+def _production_snapshot(
+    production: Path, *, include_raw: bool = True
+) -> dict[str, Any]:
+    """Digest only R3's protected production boundary.
+
+    The live root intentionally contains unrelated application trees (some may
+    be symlinked model/cache paths).  R3 never reads those siblings.  The Raw
+    tree and Recall distillation directory are the protected inputs used by
+    the Workset/static checks; symlinks inside either boundary remain fatal.
+    """
+
+    if _has_symlink_component(production) or not production.is_dir():
+        raise R3Error("production root is unsafe")
+    protected = {"recall_distillation": production / "runtime" / "recall-distillation"}
+    if include_raw:
+        protected = {"raw": production / "raw", **protected}
+    snapshots: dict[str, Any] = {}
+    for name, path in protected.items():
+        if _has_symlink_component(path) or not path.is_dir():
+            raise R3Error(f"production protected boundary is unavailable: {name}")
+        try:
+            snapshots[name] = R2._tree_digest(path, label=f"production.{name}")
+        except Exception as exc:
+            raise R3Error(f"production protected snapshot failed: {name}") from exc
+    return {
+        "protected": snapshots,
+        "excluded_scope": _production_excluded_scope(production),
+    }
+
+
+def _production_excluded_scope(production: Path) -> dict[str, Any]:
+    if _has_symlink_component(production) or not production.is_dir():
+        raise R3Error("production root is unsafe")
+    excluded_names = sorted(
+        path.name
+        for path in production.iterdir()
+        if path.name not in {"raw", "runtime"}
+    )
+    return {
+        "root_siblings": len(excluded_names),
+        "root_siblings_sha256": hashlib.sha256(
+            json.dumps(excluded_names, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "root_symlink_count": sum(
+            1 for path in production.iterdir() if path.is_symlink()
+        ),
+        "read": False,
+    }
+
+
+def _production_raw_after_observation(
+    production: Path,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Observe Raw after the run, classifying only an in-flight source append."""
+
+    raw_root = production / "raw"
+    if _has_symlink_component(raw_root) or not raw_root.is_dir():
+        raise R3Error("production Raw root is unsafe")
     try:
-        return R2._tree_digest(production, label="production")
+        value = _manifest_raw_tree(
+            R2._raw_tree_digest(production), "production.raw_tree.after"
+        )
     except Exception as exc:
-        raise R3Error("production snapshot failed") from exc
+        message = str(exc).lower()
+        if not any(
+            marker in message
+            for marker in ("changed during", "disappeared", "capture")
+        ):
+            raise R3Error("production Raw observation failed") from exc
+        return None, {
+            "detected": True,
+            "raw_tree_changed": True,
+            "classification": "ingest-owned-concurrent",
+            "observation_error": type(exc).__name__,
+        }
+    return value, {
+        "detected": False,
+        "raw_tree_changed": False,
+        "classification": "none",
+    }
+
+
+def _production_protected_equal(
+    before: Mapping[str, Any] | None, after: Mapping[str, Any] | None
+) -> bool:
+    """Compare only the boundary R3 reads; root sibling inventory is excluded."""
+
+    return (
+        isinstance(before, Mapping)
+        and isinstance(after, Mapping)
+        and isinstance(before.get("protected"), Mapping)
+        and isinstance(after.get("protected"), Mapping)
+        and before["protected"] == after["protected"]
+    )
+
+
+def _production_owned_snapshot(production: Path, store: Any) -> dict[str, Any]:
+    """Capture only the Workset and sealed state R3 is allowed to mutate."""
+
+    workset = _clone_workset_inventory(_clone_workset_path(production))
+    runtime_dir = production / "runtime" / "recall-distillation"
+    if _has_symlink_component(runtime_dir) or not runtime_dir.is_dir():
+        raise R3Error("production distillation directory is unsafe")
+    state_pointers: dict[str, Any] = {}
+    filenames = (store.STATE_FILE, *store.POINTER_FILES.values())
+    for filename in filenames:
+        path = runtime_dir / filename
+        if not path.exists():
+            state_pointers[filename] = None
+            continue
+        if _has_symlink_component(path) or not path.is_file():
+            raise R3Error(f"production sealed state path is unsafe: {filename}")
+        file_snapshot = _artifact_file_snapshot(path)
+        try:
+            sealed = store.read_sealed(path, schema=store.DISTILLATION_SCHEMA)
+        except Exception as exc:
+            raise R3Error(f"production sealed state is invalid: {filename}") from exc
+        if _artifact_file_snapshot(path) != file_snapshot:
+            raise R3Error(f"production sealed state changed during read: {filename}")
+        seal = sealed.get("seal_sha256")
+        _hex_digest(seal, f"production.{filename}.seal_sha256")
+        state_pointers[filename] = {
+            "file_state": file_snapshot["file_state"],
+            "sha256": file_snapshot["sha256"],
+            "seal_sha256": seal,
+        }
+    return {
+        "workset": workset,
+        "workset_identity": _workset_identity(workset),
+        "state_pointers": state_pointers,
+    }
 
 
 def _clone_from_root(source: Path) -> Path:
@@ -244,6 +738,182 @@ def _clone_workset_path(clone: Path) -> Path:
     return path
 
 
+def _clone_root_identity(path: Path) -> dict[str, int]:
+    try:
+        value = path.lstat()
+    except OSError as exc:
+        raise R3Error("clone root disappeared") from exc
+    if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
+        raise R3Error("clone root is not a regular directory")
+    return {"st_dev": int(value.st_dev), "st_ino": int(value.st_ino)}
+
+
+def _probe_apfs_clone(path: Path) -> str:
+    """Measure the clone's actual filesystem instead of trusting a manifest."""
+
+    if _has_symlink_component(path) or not path.is_dir():
+        raise R3Error("clone root is unsafe")
+    try:
+        filesystem = R2.R0._filesystem_type(path.resolve(strict=True))
+    except Exception as exc:
+        raise R3Error("clone filesystem probe failed") from exc
+    if filesystem != "apfs":
+        raise R3Error("trusted clone is not on APFS")
+    return filesystem
+
+
+def _artifact_file_snapshot(path: Path) -> dict[str, Any]:
+    """Hash an artifact while proving its path and file state stayed stable."""
+
+    if _has_symlink_component(path) or not path.is_file():
+        raise R3Error("immutable artifact path is unsafe")
+    before = _regular_file_state(path)
+    try:
+        encoded = path.read_bytes()
+    except (OSError, UnicodeError) as exc:
+        raise R3Error("immutable artifact read failed") from exc
+    after = _regular_file_state(path)
+    if before != after:
+        raise R3Error("immutable artifact changed during hash")
+    return {
+        "path": str(path),
+        "file_state": after,
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _clone_tree_state_digest(
+    root: Path, *, ignore_mutable_workset: bool = False
+) -> dict[str, Any]:
+    """Capture a bounded path/state digest without retaining clone payloads."""
+
+    if _has_symlink_component(root) or not root.is_dir():
+        raise R3Error("clone tree root is unsafe")
+    digest = hashlib.sha256()
+    file_count = 0
+    total_bytes = 0
+    for path in sorted(root.rglob("*")):
+        try:
+            state = path.lstat()
+        except OSError as exc:
+            raise R3Error("clone tree changed during state capture") from exc
+        if stat.S_ISLNK(state.st_mode):
+            raise R3Error("clone tree contains a symlink")
+        if not stat.S_ISREG(state.st_mode):
+            continue
+        relative = path.relative_to(root).as_posix()
+        if ignore_mutable_workset and (
+            relative == OX_WORKSET_RELATIVE.as_posix()
+            or relative.startswith(f"{OX_WORKSET_RELATIVE.as_posix()}-")
+            or any(
+                component.startswith(".r3-harness-")
+                for component in Path(relative).parts
+            )
+        ):
+            continue
+        if file_count >= CLONE_TREE_FILE_LIMIT:
+            raise R3Error("clone tree exceeds bounded file inventory")
+        if int(state.st_size) > CLONE_TREE_FILE_BYTES_LIMIT:
+            raise R3Error("clone tree file exceeds bounded hash limit")
+        content = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    content.update(chunk)
+            after = path.lstat()
+        except OSError as exc:
+            raise R3Error("clone tree file changed during hashing") from exc
+        if (
+            state.st_dev != after.st_dev
+            or state.st_ino != after.st_ino
+            or state.st_size != after.st_size
+            or state.st_mtime_ns != after.st_mtime_ns
+        ):
+            raise R3Error("clone tree file changed during hashing")
+        row = {
+            "mode": int(state.st_mode & 0o7777),
+            "path": relative,
+            "size_bytes": int(state.st_size),
+            "sha256": content.hexdigest(),
+        }
+        digest.update(json.dumps(row, sort_keys=True, separators=(",", ":")).encode())
+        digest.update(b"\n")
+        file_count += 1
+        total_bytes += int(state.st_size)
+    return {
+        "file_count": file_count,
+        "bytes": total_bytes,
+        "state_sha256": digest.hexdigest(),
+    }
+
+
+def _clone_static_identity(store: Any, clone: Path) -> dict[str, Any]:
+    """Read the R2 path-neutral static identity from the supplied clone."""
+
+    try:
+        catalog = __import__(
+            "chronovisor.recall.recall_distillation_catalog",
+            fromlist=["HistoricalCatalog"],
+        )
+        raw_store = __import__("chronovisor.core.raw_store", fromlist=["RawStore"])
+        runtime_dir = store.distillation_dir(clone)
+        ledgers = {
+            name: R2._bounded_chain(
+                store,
+                runtime_dir / name,
+                require_checkpoint_file_state=False,
+            )
+            for name in R2.R0.LEDGERS
+        }
+        watermark = raw_store.committed_raw_watermark(clone / "raw")
+        fts = R2.R0._fts(
+            store,
+            catalog,
+            clone,
+            watermark,
+            require_checkpoint_file_state=False,
+        )
+        state = store.read_sealed(
+            runtime_dir / store.STATE_FILE, schema=store.DISTILLATION_SCHEMA
+        )
+        compact_state = {
+            key: state.get(key)
+            for key in R2.R0.STATE_KEYS
+            if isinstance(state.get(key), (str, int, bool)) or state.get(key) is None
+        }
+        pointers: dict[str, Any] = {}
+        for kind, filename in store.POINTER_FILES.items():
+            pointer_path = runtime_dir / filename
+            if not pointer_path.exists():
+                pointers[kind] = None
+                continue
+            pointer = store.read_sealed(pointer_path, schema=store.DISTILLATION_SCHEMA)
+            policy_id = pointer.get("policy_id")
+            policy = store.read_sealed(
+                runtime_dir / "policies" / f"{policy_id}.json",
+                schema=R2.R0.POLICY_SCHEMA,
+            )
+            if policy.get("artifact_id") != policy_id:
+                raise R3Error("clone policy pointer identity mismatch")
+            pointers[kind] = {
+                "policy_id": policy_id,
+                "pointer_seal_sha256": pointer.get("seal_sha256", ""),
+                "policy_seal_sha256": policy.get("seal_sha256", ""),
+            }
+        identity = R2.R0._clone_identity(
+            {
+                "ledgers": ledgers,
+                "raw_watermark": watermark,
+                "fts": fts,
+                "state": {"seal_sha256": state.get("seal_sha256", ""), "fields": compact_state},
+                "pointers": pointers,
+            }
+        )
+    except (ImportError, OSError, KeyError, TypeError, ValueError, sqlite3.Error) as exc:
+        raise R3Error("clone static identity read failed") from exc
+    return _manifest_static(identity, "clone.static")
+
+
 def _clone_workset_inventory(
     path: Path, *, expected_rows: int | None = None, require_receipts: bool = False
 ) -> dict[str, Any]:
@@ -268,6 +938,11 @@ def _clone_workset_inventory(
                 str(row[1])
                 for row in connection.execute("PRAGMA table_info(work_items)")
             }
+            required_columns = set(_WORKSET_SECURITY_COLUMNS).difference(
+                {"stage", "next_attempt_at"}
+            )
+            if not required_columns.issubset(work_item_columns):
+                raise R3Error("clone production ox workset identity schema is incomplete")
             row = connection.execute(
                 "SELECT COUNT(*), COUNT(DISTINCT work_id), "
                 "COUNT(DISTINCT payload_digest) FROM work_items"
@@ -283,16 +958,50 @@ def _clone_workset_inventory(
                     "SELECT state, COUNT(*) FROM work_items GROUP BY state ORDER BY state"
                 )
             }
+            state_rows = connection.execute(
+                "SELECT key, value_json FROM workset_state ORDER BY key"
+            ).fetchall()
+            state_digest = hashlib.sha256(
+                json.dumps(
+                    [(str(key), str(value_json)) for key, value_json in state_rows],
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            state_seal_digest = hashlib.sha256(
+                b"chronovisor.r3.workset-state-seal.v1\n"
+                + state_digest.encode()
+            ).hexdigest()
             receipt_count = 0
+            receipt_digest = hashlib.sha256()
             if receipt_table_present:
-                receipt_count = int(
-                    connection.execute(
-                        "SELECT COUNT(*) FROM workset_receipts"
-                    ).fetchone()[0]
-                )
+                receipt_rows = connection.execute(
+                    "SELECT generation, previous_sha256, operation, receipt_sha256 "
+                    "FROM workset_receipts ORDER BY generation"
+                ).fetchall()
+                receipt_count = len(receipt_rows)
+                for generation, previous, operation, receipt in receipt_rows:
+                    receipt_digest.update(
+                        json.dumps(
+                            {
+                                "generation": int(generation),
+                                "previous_sha256": str(previous),
+                                "operation": str(operation),
+                                "receipt_sha256": str(receipt),
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode()
+                    )
+                    receipt_digest.update(b"\n")
+                if receipt_count > OX_WORKSET_ROW_LIMIT * 2:
+                    raise R3Error("clone production ox workset receipts are unbounded")
             rows = connection.execute(
-                "SELECT sequence, work_id, kind, payload_digest, priority, state, "
-                "attempt_count FROM work_items ORDER BY sequence LIMIT ?",
+                "SELECT "
+                + ", ".join(
+                    f'"{column}"' if column in work_item_columns else f'NULL AS "{column}"'
+                    for column in _WORKSET_SECURITY_COLUMNS
+                )
+                + " FROM work_items ORDER BY sequence LIMIT ?",
                 (OX_WORKSET_ROW_LIMIT + 1,),
             ).fetchall()
             if len(rows) > OX_WORKSET_ROW_LIMIT:
@@ -300,18 +1009,14 @@ def _clone_workset_inventory(
     except sqlite3.Error as exc:
         raise R3Error("clone production ox workset read failed") from exc
     digest = hashlib.sha256()
-    for sequence, work_id, kind, payload_digest, priority, state, attempt_count in rows:
+    for row in rows:
+        identity = {
+            column: value
+            for column, value in zip(_WORKSET_SECURITY_COLUMNS, row, strict=True)
+        }
         digest.update(
             json.dumps(
-                {
-                    "sequence": int(sequence),
-                    "work_id": str(work_id),
-                    "kind": str(kind),
-                    "payload_digest": str(payload_digest),
-                    "priority": int(priority),
-                    "state": str(state),
-                    "attempt_count": int(attempt_count),
-                },
+                identity,
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode()
@@ -334,10 +1039,37 @@ def _clone_workset_inventory(
             "stage_column_present": "stage" in work_item_columns,
         },
         "inventory_sha256": digest.hexdigest(),
+        "content_sha256": digest.hexdigest(),
+        "state_sha256": state_digest,
+        "state_seal_sha256": state_seal_digest,
+        "receipt_chain_sha256": receipt_digest.hexdigest(),
         "file_state": after,
         "bounded": True,
         "production_path_used": False,
     }
+
+
+def _workset_identity(inventory: Mapping[str, Any]) -> dict[str, Any]:
+    """Return clone/workset content identity without inode or mtime metadata."""
+
+    keys = (
+        "relative_path",
+        "row_count",
+        "unique_work_ids",
+        "unique_item_digests",
+        "states",
+        "schema",
+        "inventory_sha256",
+        "content_sha256",
+        "state_sha256",
+        "state_seal_sha256",
+        "receipt_chain_sha256",
+        "bounded",
+        "production_path_used",
+    )
+    if any(key not in inventory for key in keys):
+        raise R3Error("workset identity evidence is incomplete")
+    return {key: inventory[key] for key in keys}
 
 
 def _run_clone_workset_cycles(
@@ -381,7 +1113,35 @@ def _run_clone_workset_cycles(
         raise R3Error("clone production ox workset state counts are not certified")
     if migration_state_counts != legacy_state_counts:
         raise R3Error("clone workset migration changed state counts")
+    # Legacy production clones have durable state but no receipt progress.  Seed
+    # one current-schema progress boundary after migration; the legacy prefix is
+    # retained as evidence and is never admitted to the successful-cycle
+    # denominator below.
+    progress_before_cycles = workset.progress()
+    progress_bootstrap = progress_before_cycles is None
+    if progress_bootstrap:
+        watermark = workset.watermark()
+        if watermark is None:
+            watermark = {"source": "r3-clone-cycle"}
+        workset.advance([], watermark, progress=_progress(0))
+        progress_before_cycles = workset.progress()
+    if not isinstance(progress_before_cycles, Mapping):
+        raise R3Error("clone workset durable progress is unavailable")
+    progress_cursor = progress_before_cycles.get("cursor")
+    if (
+        not isinstance(progress_cursor, Mapping)
+        or set(progress_cursor) != {"completed"}
+        or isinstance(progress_cursor.get("completed"), bool)
+        or not isinstance(progress_cursor.get("completed"), int)
+        or progress_cursor["completed"] < 0
+    ):
+        raise R3Error("clone workset durable progress cursor is not current-schema")
+    progress_base_cursor = int(progress_cursor["completed"])
+    receipts_before_cycles = _receipt_rows(path)
+    initial_status = workset.status()
     initial_generation = int(initial_status["last_durable_receipt"]["generation"])
+    if initial_generation != len(receipts_before_cycles):
+        raise R3Error("clone workset receipt generation baseline is inconsistent")
     timings: list[int] = []
     for _index in range(cycles):
         started = time.perf_counter_ns()
@@ -390,7 +1150,11 @@ def _run_clone_workset_cycles(
         if len(claims) != 1:
             raise R3Error("clone production ox workset did not admit a successful cycle")
         timings.append(elapsed)
-        totals = workset.commit(claims, [_completed(claims[0])])
+        totals = workset.commit(
+            claims,
+            [_completed(claims[0])],
+            progress=_progress(progress_base_cursor + _index + 1),
+        )
         if totals.get("completed") != 1:
             raise R3Error("clone production ox workset commit was not completed")
     empty_started = time.perf_counter_ns()
@@ -401,17 +1165,97 @@ def _run_clone_workset_cycles(
     if claim_p95 > CLAIM_P95_LIMIT_NS:
         raise R3Error("clone claim p95 exceeded 500ms")
     final_status = workset.status()
+    expected_final_states = dict(OX_WORKSET_EXPECTED_STATES)
+    expected_final_states["ready"] -= cycles
+    expected_final_states["completed"] += cycles
+    final_state_counts = {
+        state: int(final_status.get(state, 0)) for state in expected_final_states
+    }
+    if final_state_counts != expected_final_states or final_state_counts["leased"] != 0:
+        raise R3Error("clone production ox workset final state counts are invalid")
     final_generation = int(final_status["last_durable_receipt"]["generation"])
     if final_generation - initial_generation < cycles * 2:
         raise R3Error("clone workset did not receiptize every cycle")
+    receipt_rows = _receipt_rows(path)
+    cycle_receipts = receipt_rows[len(receipts_before_cycles) :]
+    expected_progress_receipts = cycles * 2
+    if len(cycle_receipts) != expected_progress_receipts:
+        raise R3Error("clone workset cycle receipt denominator is incomplete")
+
+    def progress_equal(left: object, right: object) -> bool:
+        return json.dumps(left, sort_keys=True, separators=(",", ":")) == json.dumps(
+            right, sort_keys=True, separators=(",", ":")
+        )
+
+    def valid_progress(value: object) -> bool:
+        return isinstance(value, Mapping) and set(value) == {
+            "cursor",
+            "ledger_heads",
+            "provenance",
+            "progress_kind",
+        }
+
+    prior_progress: object = progress_before_cycles
+    verified_progress_receipts = 0
+    for index, row in enumerate(cycle_receipts):
+        payload = row.get("payload")
+        if (
+            row.get("generation") != initial_generation + index + 1
+            or row.get("operation") not in {"claim", "commit"}
+            or not isinstance(payload, Mapping)
+            or payload.get("version") != 2
+            or not isinstance(payload.get("before"), Mapping)
+            or not isinstance(payload.get("after"), Mapping)
+        ):
+            raise R3Error("clone cycle receipt is not current-schema progress")
+        before = payload["before"].get("progress")
+        after = payload["after"].get("progress")
+        if (
+            not valid_progress(before)
+            or not valid_progress(after)
+            or not progress_equal(before, prior_progress)
+        ):
+            raise R3Error("clone cycle progress before/after continuity failed")
+        if row["operation"] == "claim" and not progress_equal(before, after):
+            raise R3Error("clone claim receipt changed durable progress")
+        if row["operation"] == "commit":
+            expected_cursor = progress_base_cursor + (index // 2) + 1
+            cursor = after.get("cursor")
+            if (
+                not isinstance(cursor, Mapping)
+                or cursor.get("completed") != expected_cursor
+            ):
+                raise R3Error("clone commit receipt progress cursor is invalid")
+            prior_progress = after
+        else:
+            prior_progress = after
+        verified_progress_receipts += 1
+    final_progress = workset.progress()
+    if not valid_progress(final_progress) or not progress_equal(
+        final_progress, prior_progress
+    ):
+        raise R3Error("clone workset final durable progress parity failed")
+    progress_coverage = 100.0 * verified_progress_receipts / expected_progress_receipts
+    # The denominator starts after migration/bootstrap, so any legacy or
+    # pre-existing receipts are explicitly outside successful-cycle coverage.
+    legacy_unverified_excluded = True
     audit = workset.audit_transition_receipts()
     audit_status = audit.get("status")
-    receipt_chain_verified = audit_status == "verified" or (
-        legacy_schema.get("receipt_table_present") is False
-        and audit_status == "legacy-unverified"
+    durable_final = final_status.get("last_durable_receipt")
+    if (
+        not isinstance(durable_final, Mapping)
+        or audit.get("generation") != final_generation
+        or audit.get("head_sha256") != durable_final.get("head_sha256")
+        or audit.get("progress") != final_progress
+        or final_status.get("last_durable_progress") != final_progress
+    ):
+        raise R3Error("clone workset last durable receipt/progress parity failed")
+    cycle_receipt_chain_verified = (
+        verified_progress_receipts == expected_progress_receipts
+        and progress_coverage >= RECEIPT_COVERAGE_LIMIT
     )
-    if not receipt_chain_verified:
-        raise R3Error("clone production ox workset receipt chain is not verified")
+    if not cycle_receipt_chain_verified:
+        raise R3Error("clone production ox workset progress receipts are not verified")
     after = _clone_workset_inventory(
         path, expected_rows=OX_WORKSET_EXPECTED_ROWS, require_receipts=True
     )
@@ -451,13 +1295,36 @@ def _run_clone_workset_cycles(
             "status_before_cycles": migration_state_counts,
             "status_unchanged": migration_state_counts == legacy_state_counts,
             "audit_status_before_cycles": migration_audit["status"],
-            "receipt_chain_verified": receipt_chain_verified,
+            "receipt_chain_verified": migration_audit["status"] == "verified",
         },
+        "final_status": final_state_counts,
         "receipt_generation_before": initial_generation,
         "receipt_generation_after": final_generation,
         "receipt_delta": final_generation - initial_generation,
         "audit_status": audit_status,
-        "receipt_chain_verified": receipt_chain_verified,
+        "receipt_chain_verified": cycle_receipt_chain_verified,
+        "cycle_audit_status": "verified" if cycle_receipt_chain_verified else "failed",
+        "legacy_audit_status": audit_status,
+        "legacy_unverified_excluded": legacy_unverified_excluded,
+        "progress_receipt_count": verified_progress_receipts,
+        "expected_progress_receipt_count": expected_progress_receipts,
+        "progress_coverage_pct": progress_coverage,
+        "progress_coverage": {
+            "denominator": expected_progress_receipts,
+            "receipts": verified_progress_receipts,
+            "percent": progress_coverage,
+            "schema_version": 2,
+            "legacy_unverified_excluded": legacy_unverified_excluded,
+        },
+        "progress_before": dict(progress_before_cycles),
+        "progress_after": dict(final_progress),
+        "progress_receipt_generations": {
+            "before": initial_generation,
+            "after": final_generation,
+            "delta": final_generation - initial_generation,
+        },
+        "preexisting_receipt_count": len(receipts_before_cycles),
+        "progress_bootstrap": progress_bootstrap,
         "duplicates": duplicates,
         "production_path_used": False,
     }
@@ -777,6 +1644,23 @@ def _sigterm_reopen(workset_module: Any, source_root: Path, path: Path) -> dict[
     status = reopened.status("r3-sigterm")
     if status.get("completed") != 1 or status.get("leased") != 0:
         raise R3Error("reopened workset status is invalid")
+    lock_holder = {
+        "before_sigterm": old_claim.owner,
+        "after_reclaim": reclaimed.owner,
+        "lease_id_changed": reclaimed.lease_id != old_claim.lease_id,
+    }
+    release = {
+        "attempted": True,
+        "old_owner_rejected": old_owner_rejected,
+        "lease_expired_before_reclaim": True,
+    }
+    reclaim = {
+        "performed": True,
+        "owner": reclaimed.owner,
+        "attempt_before": old_claim.attempt,
+        "attempt_after": reclaimed.attempt,
+        "attempt_incremented": reclaimed.attempt == old_claim.attempt + 1,
+    }
     return {
         "wall_time_ns": time.perf_counter_ns() - started,
         "child_returncode": process.returncode,
@@ -785,10 +1669,16 @@ def _sigterm_reopen(workset_module: Any, source_root: Path, path: Path) -> dict[
             "returncode": process.returncode,
             "expected_returncode": -signal.SIGTERM,
             "asserted": True,
+            "lock_holder": lock_holder,
+            "release": release,
+            "reclaim": reclaim,
         },
         "old_owner_rejected": old_owner_rejected,
         "reclaimed_attempt": reclaimed.attempt,
         "idempotent_commit": True,
+        "lock_holder": lock_holder,
+        "release": release,
+        "reclaim": reclaim,
         "duplicates": _duplicate_count(path),
     }
 
@@ -807,13 +1697,16 @@ def _run_workset(
     stage_workset = workset_module.DistillationWorkset(
         stage_path, clock=lambda: clock_value[0]
     )
+    phase_records: dict[str, dict[str, Any]] = {}
     # Make one teacher item old enough to prove cross-kind fairness over a
     # newer, higher-priority kind.
+    teacher_phase_started = time.time_ns()
     stage_workset.advance(
         [_item("r3-old-teacher", "local-teacher:old", priority=0)],
         {"source": 0},
         progress=_progress(0),
     )
+    teacher_phase_finished = time.time_ns()
     clock_value[0] = 61.0
     stage_items: list[dict[str, Any]] = []
     kind_by_stage = {
@@ -825,12 +1718,29 @@ def _run_workset(
     }
     remaining, extra = divmod(samples - 1, len(kind_by_stage))
     for index, (stage, kind) in enumerate(kind_by_stage.items()):
+        phase_started = time.time_ns()
         count = remaining + (1 if index < extra else 0)
         items = [_item(f"r3-{stage}-{index}", kind, priority=99) for index in range(count)]
         stage_items.extend(items)
         stage_workset.advance(items, {"source": stage}, progress=_progress(0))
+        phase_finished = time.time_ns()
+        phase_records[stage] = {
+            "started_at_ns": phase_started,
+            "finished_at_ns": phase_finished,
+            "elapsed_ns": phase_finished - phase_started,
+            "count": count,
+        }
+    phase_records["teacher"] = {
+        "started_at_ns": teacher_phase_started,
+        "finished_at_ns": teacher_phase_finished,
+        "elapsed_ns": teacher_phase_finished - teacher_phase_started,
+        "count": phase_records["teacher"]["count"] + 1
+        if "teacher" in phase_records
+        else 1,
+    }
 
     claim_samples: list[int] = []
+    retry_phase_started = time.time_ns()
     first_started = time.perf_counter_ns()
     first_claims = stage_workset.claim(None, 1, "fairness-worker", 60.0)
     if len(first_claims) != 1 or first_claims[0].work_id != "r3-old-teacher":
@@ -848,6 +1758,13 @@ def _run_workset(
         raise R3Error("six-stage status projection is incomplete")
     if retry_status.get("retry_wait") != 1 or stages["teacher"].get("retry_wait") != 1:
         raise R3Error("retry_wait observability is missing")
+    retry_phase_finished = time.time_ns()
+    phase_records["retry_wait"] = {
+        "started_at_ns": retry_phase_started,
+        "finished_at_ns": retry_phase_finished,
+        "elapsed_ns": retry_phase_finished - retry_phase_started,
+        "count": 1,
+    }
 
     empty_probe_ns: int | None = None
     while True:
@@ -926,6 +1843,7 @@ def _run_workset(
         "samples": samples,
         "admitted_cycles": samples,
         "stages": dict(retry_status["stages"]),
+        "phases": phase_records,
         "retry_wait": {
             "count": retry_status["retry_wait"],
             "next_retry_in_seconds": retry_status["next_retry_in_seconds"],
@@ -1010,15 +1928,15 @@ def _assert_formal_acceptance(
         or isinstance(successful_count, bool)
         or not isinstance(successful_count, int)
         or successful_count < MIN_SAMPLES
+        or claim.get("samples") != successful_count
+        or claim.get("observation_calls") != successful_count
+        or not isinstance(claim.get("p95_ns"), int)
+        or claim["p95_ns"] > CLAIM_P95_LIMIT_NS
     ):
         raise R3Error("formal artifact lacks 100 successful claim cycles")
-    if claim.get("samples") != claim.get("successful_count"):
-        raise R3Error("formal claim denominator does not equal successful cycles")
-    if claim.get("observation_calls") != claim.get("successful_count"):
-        raise R3Error("formal claim observation count is not truthful")
     synthetic = result.get("synthetic_claim")
     if not isinstance(synthetic, Mapping):
-        raise R3Error("formal artifact lacks synthetic empty-observation evidence")
+        raise R3Error("formal artifact lacks synthetic claim evidence")
     synthetic_count = synthetic.get("successful_count")
     if (
         not isinstance(synthetic_count, int)
@@ -1027,7 +1945,7 @@ def _assert_formal_acceptance(
         or synthetic.get("observation_calls") != synthetic_count + 1
         or synthetic.get("final_empty_excluded") is not True
     ):
-        raise R3Error("synthetic claim empty observation evidence is incomplete")
+        raise R3Error("synthetic claim empty-observation evidence is incomplete")
     if not isinstance(clone, Mapping):
         raise R3Error("formal artifact lacks clone workset evidence")
     legacy_status = clone.get("legacy_status")
@@ -1035,26 +1953,187 @@ def _assert_formal_acceptance(
     if (
         clone.get("relative_path") != OX_WORKSET_RELATIVE.as_posix()
         or clone.get("row_count") != OX_WORKSET_EXPECTED_ROWS
-        or not isinstance(clone.get("successful_cycles"), int)
-        or clone.get("successful_cycles", 0) < MIN_SAMPLES
-        or clone.get("claim_samples") != clone.get("successful_cycles")
-        or clone.get("observation_calls") != clone.get("successful_cycles")
+        or clone.get("successful_cycles") != successful_count
+        or clone.get("claim_samples") != successful_count
+        or clone.get("observation_calls") != successful_count
         or clone.get("production_path_used") is not False
         or clone.get("duplicates") != 0
         or clone.get("receipt_chain_verified") is not True
+        or clone.get("cycle_audit_status") != "verified"
+        or clone.get("legacy_unverified_excluded") is not True
+        or clone.get("progress_receipt_count")
+        != clone.get("expected_progress_receipt_count")
+        or not isinstance(clone.get("progress_coverage_pct"), (int, float))
+        or clone.get("progress_coverage_pct") < RECEIPT_COVERAGE_LIMIT
+        or not isinstance(clone.get("progress_before"), Mapping)
+        or not isinstance(clone.get("progress_after"), Mapping)
+        or not isinstance(clone.get("progress_receipt_generations"), Mapping)
+        or clone["progress_receipt_generations"].get("delta", 0)
+        < clone.get("expected_progress_receipt_count", 0)
+        or not isinstance(clone.get("progress_coverage"), Mapping)
+        or clone["progress_coverage"].get("denominator")
+        != clone.get("expected_progress_receipt_count")
+        or clone["progress_coverage"].get("receipts")
+        != clone.get("progress_receipt_count")
+        or clone["progress_coverage"].get("legacy_unverified_excluded") is not True
         or not isinstance(legacy_status, Mapping)
-        or not isinstance(legacy_status.get("states"), Mapping)
-        or legacy_status["states"] != OX_WORKSET_EXPECTED_STATES
+        or legacy_status.get("states") != OX_WORKSET_EXPECTED_STATES
         or not isinstance(migration, Mapping)
         or migration.get("status_unchanged") is not True
+        or clone.get("final_status", {}).get("leased") != 0
     ):
         raise R3Error("clone workset certification is incomplete")
     if not isinstance(sigterm, Mapping) or (
         sigterm.get("returncode") != -signal.SIGTERM
         or sigterm.get("expected_returncode") != -signal.SIGTERM
         or sigterm.get("asserted") is not True
+        or result.get("sigterm_reopen", {}).get("old_owner_rejected") is not True
+        or result.get("sigterm_reopen", {}).get("idempotent_commit") is not True
     ):
         raise R3Error("SIGTERM child process evidence is incomplete")
+    sigterm_reopen = result.get("sigterm_reopen")
+    lock_holder = sigterm_reopen.get("lock_holder") if isinstance(sigterm_reopen, Mapping) else None
+    release = sigterm_reopen.get("release") if isinstance(sigterm_reopen, Mapping) else None
+    reclaim = sigterm_reopen.get("reclaim") if isinstance(sigterm_reopen, Mapping) else None
+    if (
+        not isinstance(lock_holder, Mapping)
+        or lock_holder.get("before_sigterm") != "sigterm-child"
+        or lock_holder.get("after_reclaim") != "reopened-owner"
+        or lock_holder.get("lease_id_changed") is not True
+        or not isinstance(release, Mapping)
+        or release.get("attempted") is not True
+        or release.get("old_owner_rejected") is not True
+        or release.get("lease_expired_before_reclaim") is not True
+        or not isinstance(reclaim, Mapping)
+        or reclaim.get("performed") is not True
+        or reclaim.get("owner") != "reopened-owner"
+        or reclaim.get("attempt_incremented") is not True
+    ):
+        raise R3Error("SIGTERM lease release/reclaim evidence is incomplete")
+    handoff = result.get("teacher_handoff")
+    if not isinstance(handoff, Mapping) or (
+        handoff.get("completed") != MIN_SAMPLES
+        or handoff.get("receiptized") is not True
+        or handoff.get("duplicates") != 0
+        or handoff.get("wall_time_ns", TEACHER_HANDOFF_LIMIT_NS + 1)
+        > TEACHER_HANDOFF_LIMIT_NS
+    ):
+        raise R3Error("teacher handoff evidence is incomplete")
+    phases = result.get("phases")
+    if not isinstance(phases, Mapping) or set(phases) != set(SIX_STAGES):
+        raise R3Error("six formal phases are incomplete")
+    for name, phase in phases.items():
+        if (
+            not isinstance(phase, Mapping)
+            or not isinstance(phase.get("started_at_ns"), int)
+            or not isinstance(phase.get("finished_at_ns"), int)
+            or phase["finished_at_ns"] < phase["started_at_ns"]
+            or phase.get("elapsed_ns")
+            != phase["finished_at_ns"] - phase["started_at_ns"]
+            or not isinstance(phase.get("count"), int)
+            or phase["count"] < (1 if name == "retry_wait" else 0)
+        ):
+            raise R3Error("phase timing/count evidence is incomplete")
+    manifest = result.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise R3Error("R2 clone evidence is incomplete")
+    required_manifest = ("clone_root_exact", "raw_parity", "static_parity", "toctou_rechecked")
+    if any(manifest.get(key) is not True for key in required_manifest):
+        raise R3Error("R2 clone identity evidence is incomplete")
+    if manifest.get("filesystem") != "apfs" or manifest.get("filesystem_probe") != "r0":
+        raise R3Error("R2 clone filesystem evidence is incomplete")
+    if manifest.get("external") is True and any(
+        manifest.get(key) is not True
+        for key in ("seal_verified", "content_identity_verified")
+    ):
+        raise R3Error("R2 frozen manifest evidence is incomplete")
+    workset_manifest = manifest.get("workset")
+    if (
+        not isinstance(workset_manifest, Mapping)
+        or workset_manifest.get("relative_path") != OX_WORKSET_RELATIVE.as_posix()
+        or not isinstance(workset_manifest.get("prestate"), Mapping)
+        or not isinstance(workset_manifest.get("poststate"), Mapping)
+        or workset_manifest.get("prestate_verified") is not True
+        or workset_manifest.get("content_sha256_before")
+        != workset_manifest["prestate"].get("content_sha256")
+        or workset_manifest.get("state_sha256_before")
+        != workset_manifest["prestate"].get("state_sha256")
+        or workset_manifest.get("receipt_chain_sha256_before")
+        != workset_manifest["prestate"].get("receipt_chain_sha256")
+        or workset_manifest.get("content_sha256_after")
+        != workset_manifest["poststate"].get("content_sha256")
+        or workset_manifest.get("state_sha256_after")
+        != workset_manifest["poststate"].get("state_sha256")
+        or workset_manifest.get("state_seal_sha256_before")
+        != workset_manifest["prestate"].get("state_seal_sha256")
+        or workset_manifest.get("state_seal_sha256_after")
+        != workset_manifest["poststate"].get("state_seal_sha256")
+        or workset_manifest.get("receipt_chain_sha256_after")
+        != workset_manifest["poststate"].get("receipt_chain_sha256")
+    ):
+        raise R3Error("R3 frozen manifest Workset prestate is incomplete")
+    for field in (
+        "content_sha256_before",
+        "content_sha256_after",
+        "state_sha256_before",
+        "state_sha256_after",
+        "state_seal_sha256_before",
+        "state_seal_sha256_after",
+        "receipt_chain_sha256_before",
+        "receipt_chain_sha256_after",
+    ):
+        _hex_digest(workset_manifest.get(field), f"manifest.workset.{field}")
+    input_clone = manifest.get("input_clone")
+    if (
+        not isinstance(input_clone, Mapping)
+        or input_clone.get("external") != (manifest.get("external") is True)
+        or input_clone.get("immutable_unchanged") is not True
+        or input_clone.get("root_identity_unchanged") is not True
+    ):
+        raise R3Error("external clone immutability evidence is incomplete")
+    clone_tree = result.get("clone_tree")
+    if (
+        not isinstance(clone_tree, Mapping)
+        or clone_tree.get("root_identity_unchanged") is not True
+        or clone_tree.get("immutable_unchanged") is not True
+    ):
+        raise R3Error("clone tree evidence is incomplete")
+    formal_wall = result.get("formal_wall")
+    if (
+        not isinstance(formal_wall, Mapping)
+        or not isinstance(formal_wall.get("started_at_ns"), int)
+        or not isinstance(formal_wall.get("finished_at_ns"), int)
+        or formal_wall["finished_at_ns"] < formal_wall["started_at_ns"]
+        or formal_wall.get("elapsed_ns")
+        != formal_wall["finished_at_ns"] - formal_wall["started_at_ns"]
+    ):
+        raise R3Error("formal wall timing evidence is incomplete")
+    cleanup = result.get("cleanup")
+    if (
+        not isinstance(cleanup, Mapping)
+        or cleanup.get("remaining") != 0
+        or cleanup.get("clone_owned") is not True
+        or cleanup.get("external_input_preserved")
+        != (manifest.get("external") is True)
+    ):
+        raise R3Error("temporary cleanup evidence is incomplete")
+    write_boundary = result.get("production_write_boundary")
+    owned_root = (
+        write_boundary.get("owned_root")
+        if isinstance(write_boundary, Mapping)
+        else None
+    )
+    if (
+        not isinstance(write_boundary, Mapping)
+        or write_boundary.get("path_overlap_rejected") is not True
+        or write_boundary.get("owned_clone_only") is not True
+        or write_boundary.get("production_workset_unchanged") is not True
+        or not isinstance(owned_root, Mapping)
+        or owned_root.get("filesystem") != "apfs"
+        or owned_root.get("root_identity_unchanged") is not True
+        or owned_root.get("cleanup_remaining") != 0
+    ):
+        raise R3Error("production write boundary evidence is incomplete")
     if (
         source.get("head_before") != source.get("head_after")
         or source.get("status_count_before") != 0
@@ -1067,39 +2146,208 @@ def _assert_formal_acceptance(
         raise R3Error("source immutability evidence is incomplete")
     if result.get("duplicates") != 0:
         raise R3Error("formal artifact duplicate count is non-zero")
+    drift = result.get("concurrent_source_drift")
+    owned_unchanged = result.get("workset_owned_unchanged")
+    protected_unchanged = result.get("production_protected_unchanged")
+    if (
+        not isinstance(drift, Mapping)
+        or not isinstance(drift.get("detected"), bool)
+        or not isinstance(owned_unchanged, bool)
+        or not isinstance(protected_unchanged, bool)
+        or result.get("production_unchanged")
+        != (protected_unchanged and owned_unchanged and not drift.get("detected"))
+    ):
+        raise R3Error("production mutation/drift classification is incomplete")
 
 
 def _run_once_guarded(
     *,
-    production: Path,
+    production: Path | None = None,
+    clone_root: Path | None = None,
+    manifest_path: Path | None = None,
     source_root: Path,
     source_commit: str,
     output: Path,
     samples: int,
 ) -> dict[str, Any]:
+    formal_started_ns = time.time_ns()
     if samples < MIN_SAMPLES:
         raise R3Error(f"formal R3 sample count must be at least {MIN_SAMPLES}")
-    if not _COMMIT_RE.fullmatch(source_commit):
+    if _COMMIT_RE.fullmatch(source_commit) is None:
         raise R3Error("source commit must be a full lowercase SHA-1")
-    _assert_root_matrix(production, source_root, output)
+    external_clone = clone_root is not None or manifest_path is not None
+    if (clone_root is None) != (manifest_path is None):
+        raise R3Error("--clone-root and --manifest must be supplied together")
+    if external_clone:
+        raise R3Error(
+            "external frozen clone input is non-certifying; use --production-root"
+        )
+    if external_clone and production is not None:
+        raise R3Error("production root cannot be combined with a trusted clone input")
+    if not external_clone and production is None:
+        raise R3Error("production root or trusted clone input is required")
+    if external_clone:
+        assert clone_root is not None and manifest_path is not None
+        _assert_external_clone_not_production(clone_root)
+        _assert_input_matrix(clone_root, source_root, manifest_path, output)
+    else:
+        assert production is not None
+        _assert_root_matrix(production, source_root, output)
     _assert_output_safe(output)
     source_head_before = _git_head(source_root)
     if source_head_before != source_commit:
         raise R3Error("source commit does not match source HEAD")
     source_before = _source_snapshot(source_root)
     _assert_source_clean(source_before, when="before run")
-    production_before = _production_snapshot(production)
     workset_module, store = _load_runtime(source_root)
-    clone: Path | None = None
+    production_before = (
+        _production_snapshot(production, include_raw=False)
+        if production is not None
+        else None
+    )
+    production_raw_before = (
+        _manifest_raw_tree(R2._raw_tree_digest(production), "production.raw_tree")
+        if production is not None
+        else None
+    )
+    production_workset_before = (
+        _clone_workset_inventory(_clone_workset_path(production))
+        if production is not None
+        else None
+    )
+    production_owned_before = (
+        _production_owned_snapshot(production, store)
+        if production is not None
+        else None
+    )
+    manifest: dict[str, Any] | None = None
+    manifest_state_before: dict[str, int] | None = None
+    manifest_bytes_sha: str | None = None
+    clone_filesystem: str | None = None
+    external_input_filesystem: str | None = None
+    clone_owned = False
+    external_input_root: Path | None = None
+    external_input_identity_before: dict[str, int] | None = None
+    external_input_stable_tree_before: dict[str, Any] | None = None
+    external_input_raw_before: dict[str, Any] | None = None
+    external_input_static_before: dict[str, Any] | None = None
+    external_input_workset_before: dict[str, Any] | None = None
+    external_input_identity_after: dict[str, int] | None = None
+    external_input_stable_tree_after: dict[str, Any] | None = None
+    external_input_raw_after: dict[str, Any] | None = None
+    external_input_static_after: dict[str, Any] | None = None
+    external_input_workset_after: dict[str, Any] | None = None
+    external_input_verified_after = False
+    production_raw_clone_boundary: dict[str, Any] | None = None
+    production_owned_clone_boundary: dict[str, Any] | None = None
+    production_static_clone_boundary: dict[str, Any] | None = None
+    if external_clone:
+        assert clone_root is not None and manifest_path is not None
+        external_input_root = clone_root
+        external_input_filesystem = _probe_apfs_clone(clone_root)
+        manifest, manifest_state_before, manifest_bytes_sha = _read_frozen_manifest(
+            manifest_path,
+            store,
+            clone_root=clone_root,
+            source_commit=source_commit,
+        )
+        _assert_manifest_source_binding(
+            manifest,
+            source_before,
+            _source_runtime_identity(source_root, source_commit),
+        )
+        external_input_identity_before = _clone_root_identity(clone_root)
+        external_input_stable_tree_before = _clone_tree_state_digest(
+            clone_root, ignore_mutable_workset=True
+        )
+        external_input_raw_before = _manifest_raw_tree(
+            R2._raw_tree_digest(clone_root), "external clone.raw_tree"
+        )
+        external_input_static_before = _clone_static_identity(store, clone_root)
+        external_input_workset_before = _clone_workset_inventory(
+            _clone_workset_path(clone_root)
+        )
+        clone_root = _clone_from_root(clone_root)
+        clone_owned = True
+        try:
+            _assert_input_matrix(clone_root, source_root, manifest_path, output)
+            if external_input_root is not None and _path_overlap(
+                clone_root, external_input_root
+            ):
+                raise R3Error("owned clone overlaps external input")
+            clone_filesystem = _probe_apfs_clone(clone_root)
+        except BaseException:
+            _cleanup_clone(clone_root)
+            raise
+    else:
+        clone_owned = True
+        clone_root = _clone_from_root(production)
+        try:
+            _assert_root_matrix(production, source_root, output, (clone_root,))
+            clone_filesystem = _probe_apfs_clone(clone_root)
+        except BaseException:
+            _cleanup_clone(clone_root)
+            raise
+    try:
+        clone_identity_before = _clone_root_identity(clone_root)
+        clone_tree_before = _clone_tree_state_digest(clone_root)
+        clone_stable_tree_before = _clone_tree_state_digest(
+            clone_root, ignore_mutable_workset=True
+        )
+        clone_raw_before = _manifest_raw_tree(
+            R2._raw_tree_digest(clone_root), "clone.raw_tree"
+        )
+        clone_static_before = _clone_static_identity(store, clone_root)
+        if external_clone:
+            assert manifest is not None
+            clone_raw_expected = _manifest_raw_tree(
+                manifest["clone"]["raw_tree"], "clone.raw_tree"
+            )
+            if clone_raw_before != clone_raw_expected:
+                raise R3Error("R2 frozen clone Raw tree differs from input manifest")
+            if clone_static_before != manifest["clone"]["static"]:
+                raise R3Error("R2 frozen clone static identity differs from input manifest")
+        elif production_raw_before is not None and clone_raw_before != production_raw_before:
+            raise R3Error("APFS clone Raw tree differs from production before run")
+        if production is not None:
+            production_raw_clone_boundary = _manifest_raw_tree(
+                R2._raw_tree_digest(production), "production.raw_tree.clone_boundary"
+            )
+            production_static_clone_boundary = _clone_static_identity(store, production)
+            production_owned_clone_boundary = _production_owned_snapshot(production, store)
+            if production_raw_clone_boundary != production_raw_before:
+                raise R3Error("production Raw changed during clone creation")
+            if (
+                production_owned_before is not None
+                and production_owned_clone_boundary != production_owned_before
+            ):
+                raise R3Error("production Workset changed during clone creation")
+            if clone_static_before != production_static_clone_boundary:
+                raise R3Error("APFS clone static identity differs from production")
+        clone_workset_before = _clone_workset_inventory(clone_root / OX_WORKSET_RELATIVE)
+        if external_clone:
+            if _workset_identity(clone_workset_before) != _workset_identity(
+                external_input_workset_before or {}
+            ):
+                raise R3Error("owned clone Workset prestate differs from external input")
+            if clone_raw_before != external_input_raw_before:
+                raise R3Error("owned clone Raw prestate differs from external input")
+            if clone_static_before != external_input_static_before:
+                raise R3Error("owned clone static prestate differs from external input")
+        elif production_workset_before is not None and _workset_identity(
+            clone_workset_before
+        ) != _workset_identity(production_workset_before):
+            raise R3Error("APFS clone Workset prestate differs from production")
+    except BaseException:
+        if clone_owned and clone_root.exists():
+            _cleanup_clone(clone_root)
+        raise
     work_root: Path | None = None
     try:
-        clone = _clone_from_root(production)
-        _assert_root_matrix(production, source_root, output, (clone,))
-        clone_workset = _run_clone_workset_cycles(
-            workset_module, clone, cycles=samples
-        )
-        work_root = Path(tempfile.mkdtemp(prefix="r3-harness-", dir=clone / "runtime"))
-        result = _run_workset(workset_module, source_root, work_root, samples)
+        clone_workset = _run_clone_workset_cycles(workset_module, clone_root, cycles=samples)
+        work_root = Path(tempfile.mkdtemp(prefix=".r3-harness-", dir=clone_root))
+        synthetic = _run_workset(workset_module, source_root, work_root, samples)
+        result = dict(synthetic)
         result["synthetic_claim"] = result["claim"]
         result["claim"] = {
             "samples": clone_workset["successful_cycles"],
@@ -1107,35 +2355,239 @@ def _run_once_guarded(
             "p95_ns": clone_workset["claim_p95_ns"],
             "threshold_ns": CLAIM_P95_LIMIT_NS,
             "successful_count": clone_workset["successful_cycles"],
-            "source": "clone-production-ox-workset",
+            "source": "r2-frozen-clone-production-ox-workset",
         }
         result["clone_workset"] = clone_workset
         result["sigterm_process"] = result["sigterm_reopen"]["sigterm_process"]
-        production_after = _production_snapshot(production)
-        if production_after != production_before:
-            raise R3Error("production changed during R3 run")
+        clone_raw_after = _manifest_raw_tree(
+            R2._raw_tree_digest(clone_root), "clone.raw_tree"
+        )
+        clone_static_after = _clone_static_identity(store, clone_root)
+        if clone_raw_after != clone_raw_before or clone_static_after != clone_static_before:
+            raise R3Error("frozen clone static/Raw identity changed during R3")
+        clone_tree_after = _clone_tree_state_digest(clone_root)
+        clone_stable_tree_after = _clone_tree_state_digest(
+            clone_root, ignore_mutable_workset=True
+        )
+        clone_identity_after = _clone_root_identity(clone_root)
+        if clone_identity_after != clone_identity_before:
+            raise R3Error("frozen clone root identity changed during R3")
+        if clone_stable_tree_after != clone_stable_tree_before:
+            raise R3Error("frozen clone tree changed outside the workset")
         source_after = _source_snapshot(source_root)
         source_head_after = _git_head(source_root)
         _assert_source_clean(source_after, when="after run")
-        if source_head_after != source_head_before:
-            raise R3Error("source HEAD changed during R3 run")
-        if source_after != source_before:
+        if source_head_after != source_head_before or source_after != source_before:
             raise R3Error("source changed during R3 run")
         shutil.rmtree(work_root, ignore_errors=True)
         if work_root.exists():
             raise R3Error("R3 workset temp cleanup failed")
         work_root = None
-        _cleanup_clone(clone)
-        clone = None
+        if external_clone:
+            assert manifest_path is not None and manifest_state_before is not None
+            verified_after, manifest_state_after, manifest_bytes_after = (
+                _read_frozen_manifest(
+                    manifest_path,
+                    store,
+                    clone_root=external_input_root or clone_root,
+                    source_commit=source_commit,
+                )
+            )
+            if (
+                manifest_state_after != manifest_state_before
+                or manifest_bytes_after != manifest_bytes_sha
+                or verified_after != manifest
+            ):
+                raise R3Error("R2 frozen manifest changed during R3")
+            assert external_input_root is not None
+            external_input_identity_after = _clone_root_identity(external_input_root)
+            external_input_stable_tree_after = _clone_tree_state_digest(
+                external_input_root, ignore_mutable_workset=True
+            )
+            external_input_raw_after = _manifest_raw_tree(
+                R2._raw_tree_digest(external_input_root),
+                "external clone.raw_tree.after",
+            )
+            external_input_static_after = _clone_static_identity(
+                store, external_input_root
+            )
+            external_input_workset_after = _clone_workset_inventory(
+                _clone_workset_path(external_input_root)
+            )
+            if (
+                external_input_identity_after != external_input_identity_before
+                or external_input_stable_tree_after
+                != external_input_stable_tree_before
+                or external_input_raw_after != external_input_raw_before
+                or external_input_static_after != external_input_static_before
+                or _workset_identity(external_input_workset_after)
+                != _workset_identity(external_input_workset_before or {})
+            ):
+                raise R3Error("external frozen clone changed during R3")
+            external_input_verified_after = True
+        production_after = (
+            _production_snapshot(production, include_raw=False)
+            if production is not None
+            else None
+        )
+        production_raw_after, raw_observation = (
+            _production_raw_after_observation(production)
+            if production is not None
+            else (None, {"detected": False, "raw_tree_changed": False, "classification": "none"})
+        )
+        production_owned_after = (
+            _production_owned_snapshot(production, store)
+            if production is not None
+            else None
+        )
+        production_workset_after = (
+            production_owned_after["workset"]
+            if production_owned_after is not None
+            else None
+        )
+        production_owned_unchanged = production is None or (
+            production_owned_after == production_owned_before
+        )
+        if production is not None and not production_owned_unchanged:
+            raise R3Error("production changed during R3 run")
+        production_protected_unchanged = production is None or _production_protected_equal(
+            production_before, production_after
+        )
+        if production is not None and not production_protected_unchanged:
+            raise R3Error("production protected runtime changed during R3 run")
+        concurrent_source_drift = {
+            **raw_observation,
+            "detected": raw_observation["detected"]
+            or (production is not None and production_raw_after != production_raw_before),
+            "raw_tree_changed": raw_observation["raw_tree_changed"]
+            or (production is not None and production_raw_after != production_raw_before),
+            "classification": (
+                "ingest-owned-concurrent"
+                if raw_observation["detected"]
+                or (production is not None and production_raw_after != production_raw_before)
+                else "none"
+            ),
+            "harness_production_write": False,
+            "owned_clone_only": True,
+        }
+        production_unchanged = (
+            production_protected_unchanged
+            and production_owned_unchanged
+            and not concurrent_source_drift["detected"]
+        )
+        result["manifest"] = {
+            "external": external_clone,
+            "schema": manifest["schema"] if manifest else R2_FROZEN_CLONE_SCHEMA,
+            "artifact_id": manifest["artifact_id"] if manifest else None,
+            "seal_sha256": manifest["seal_sha256"] if manifest else None,
+            "content_sha256": manifest_bytes_sha,
+            "filesystem": clone_filesystem,
+            "filesystem_probe": "r0",
+            "seal_verified": external_clone,
+            "content_identity_verified": external_clone,
+            "clone_root_exact": True,
+            "raw_parity": clone_raw_after == clone_raw_before,
+            "static_parity": clone_static_after == clone_static_before,
+            "toctou_rechecked": True,
+            "workset": {
+                "relative_path": OX_WORKSET_RELATIVE.as_posix(),
+                "prestate": _workset_identity(clone_workset_before),
+                "poststate": _workset_identity(clone_workset["inventory_after"]),
+                "content_sha256_before": clone_workset_before["content_sha256"],
+                "content_sha256_after": clone_workset["inventory_after"][
+                    "content_sha256"
+                ],
+                "state_sha256_before": clone_workset_before["state_sha256"],
+                "state_sha256_after": clone_workset["inventory_after"]["state_sha256"],
+                "state_seal_sha256_before": clone_workset_before[
+                    "state_seal_sha256"
+                ],
+                "state_seal_sha256_after": clone_workset["inventory_after"][
+                    "state_seal_sha256"
+                ],
+                "receipt_chain_sha256_before": clone_workset_before[
+                    "receipt_chain_sha256"
+                ],
+                "receipt_chain_sha256_after": clone_workset["inventory_after"][
+                    "receipt_chain_sha256"
+                ],
+                "prestate_verified": True,
+            },
+            "input_clone": {
+                "external": external_clone,
+                "filesystem": external_input_filesystem,
+                "immutable_tree_before": external_input_stable_tree_before,
+                "immutable_tree_after": external_input_stable_tree_after,
+                "immutable_unchanged": external_clone is False
+                or external_input_stable_tree_after == external_input_stable_tree_before,
+                "root_identity_unchanged": external_clone is False
+                or external_input_identity_after == external_input_identity_before,
+                "workset_before": (
+                    _workset_identity(external_input_workset_before)
+                    if external_input_workset_before is not None
+                    else None
+                ),
+                "workset_after": (
+                    _workset_identity(external_input_workset_after)
+                    if external_input_workset_after is not None
+                    else None
+                ),
+            },
+        }
+        result["clone_tree"] = {
+            "before": clone_tree_before,
+            "after": clone_tree_after,
+            "immutable_before": clone_stable_tree_before,
+            "immutable_after": clone_stable_tree_after,
+            "immutable_unchanged": clone_stable_tree_after == clone_stable_tree_before,
+            "root_identity_unchanged": True,
+            "inventory_before": clone_workset_before["inventory_sha256"],
+            "inventory_after": clone_workset["inventory_after"]["inventory_sha256"],
+        }
+        if clone_owned:
+            _cleanup_clone(clone_root)
+            clone_remaining = int(clone_root.exists())
+        else:
+            clone_remaining = 0
+        result["cleanup"] = {
+            "temporary_roots": 1,
+            "clone_owned": clone_owned,
+            "remaining": clone_remaining,
+            "external_input_preserved": external_clone,
+        }
+        result["concurrent_source_drift"] = concurrent_source_drift
+        result["production_unchanged"] = production_unchanged
+        result["production_protected_unchanged"] = production_protected_unchanged
+        result["workset_owned_unchanged"] = production_owned_unchanged
+        result["production_write_boundary"] = {
+            "path_overlap_rejected": True,
+            "owned_clone_only": True,
+            "production_workset_unchanged": production_owned_unchanged,
+            "production_protected_unchanged": production_protected_unchanged,
+            "owned_root": {
+                "filesystem": clone_filesystem,
+                "root_identity_unchanged": True,
+                "cleanup_remaining": clone_remaining,
+            },
+        }
+        result["duplicates"] = int(result.get("duplicates", 0)) + int(
+            clone_workset.get("duplicates", 0)
+        )
+        if _git_head(source_root) != source_head_before:
+            raise R3Error("source HEAD changed at R3 exit")
+        _assert_output_safe(output)
+        run_formal_finished_ns = time.time_ns()
+        result["formal_wall"] = {
+            "started_at_ns": formal_started_ns,
+            "finished_at_ns": run_formal_finished_ns,
+            "elapsed_ns": run_formal_finished_ns - formal_started_ns,
+            "artifact_persistence_included": False,
+            "artifact_readback_included": False,
+        }
         payload = {
             "runtime": {"source_commit": source_commit, "external_provider_calls": 0},
-            "production_unchanged": True,
-            "production": {
-                "before": production_before,
-                "after": production_after,
-                "unchanged": production_before == production_after,
-            },
-            "source_unchanged": True,
+            "production_unchanged": production_unchanged,
+            "source_unchanged": source_after == source_before,
             "source": {
                 "before": source_before,
                 "after": source_after,
@@ -1146,25 +2598,63 @@ def _run_once_guarded(
                 "status_count_after": source_after["git_status_count"],
                 "status_sha256_before": source_before["git_status_sha256"],
                 "status_sha256_after": source_after["git_status_sha256"],
-                "status_before": {
-                    "count": source_before["git_status_count"],
-                    "sha256": source_before["git_status_sha256"],
-                },
-                "status_after": {
-                    "count": source_after["git_status_count"],
-                    "sha256": source_after["git_status_sha256"],
-                },
                 "tree_unchanged": source_before == source_after,
                 "clean_before": source_before["git_status_count"] == 0,
                 "clean_after": source_after["git_status_count"] == 0,
                 "bytecode_disabled_during_run": True,
             },
+            "production": {
+                "used": production is not None,
+                "unchanged": production_unchanged,
+                "protected_unchanged": production_protected_unchanged,
+                "workset_owned_unchanged": production_owned_unchanged,
+                "protected_before": production_before,
+                "protected_after": production_after,
+                "workset_before": production_workset_before,
+                "workset_after": production_workset_after,
+                "raw_tree_before": production_raw_before,
+                "raw_tree_after": production_raw_after,
+                "owned_before": production_owned_before,
+                "owned_after": production_owned_after,
+                "concurrent_source_drift": concurrent_source_drift,
+                "clone_boundary": {
+                    "raw_before": production_raw_before,
+                    "raw_after": production_raw_clone_boundary,
+                    "raw_unchanged": production is None
+                    or production_raw_clone_boundary == production_raw_before,
+                    "owned_before": production_owned_before,
+                    "owned_after": production_owned_clone_boundary,
+                    "owned_unchanged": production is None
+                    or production_owned_clone_boundary == production_owned_before,
+                    "static_after": production_static_clone_boundary,
+                },
+                "production_write_boundary": {
+                    "path_overlap_rejected": True,
+                    "owned_clone_only": True,
+                    "production_workset_unchanged": production_owned_unchanged,
+                    "production_protected_unchanged": production_protected_unchanged,
+                    "owned_root": {
+                        "filesystem": clone_filesystem,
+                        "root_identity_unchanged": True,
+                        "cleanup_remaining": clone_remaining,
+                    },
+                },
+            },
+            "manifest": result["manifest"],
+            "formal_wall": result["formal_wall"],
+            "phases": result["phases"],
+            "claim": result["claim"],
+            "teacher_handoff": result["teacher_handoff"],
+            "durability": result["durability"],
+            "duplicates": result["duplicates"],
             "clone_workset": clone_workset,
             "sigterm_process": result["sigterm_process"],
             "samples": result["samples"],
             "admitted_cycles": result["admitted_cycles"],
             "successful_cycles": result["claim"]["successful_count"],
-            "clone_temp_cleanup_verified": True,
+            "clone_tree": result["clone_tree"],
+            "cleanup": result["cleanup"],
+            "clone_temp_cleanup_verified": result["cleanup"]["remaining"] == 0,
             "result": result,
             "thresholds": {
                 "claim_p95_ns": CLAIM_P95_LIMIT_NS,
@@ -1180,6 +2670,78 @@ def _run_once_guarded(
         artifact_id, artifact_path, artifact = store.write_immutable(
             output, payload, schema=R3_SCHEMA
         )
+        artifact_before = _artifact_file_snapshot(artifact_path)
+        readback = store.read_sealed(artifact_path, schema=R3_SCHEMA)
+        artifact_after = _artifact_file_snapshot(artifact_path)
+        if artifact_before != artifact_after:
+            raise R3Error("R3 immutable artifact changed during readback")
+        if readback != artifact or readback.get("artifact_id") != artifact_id:
+            raise R3Error("R3 immutable artifact readback mismatch")
+        _assert_output_safe(output)
+        completion_started_ns = time.time_ns()
+        completion_probe = {
+            "started_at_ns": completion_started_ns,
+            "main_artifact_id": artifact_id,
+            "main_artifact_sha256": artifact_after["sha256"],
+        }
+        completion_payload = {
+            "sealed_artifact_id": artifact_id,
+            "sealed_artifact_sha256": artifact_after["sha256"],
+            "sealed_artifact_file_state": artifact_after["file_state"],
+            "completion_probe": completion_probe,
+            "readback_verified": True,
+            "source_commit": source_commit,
+        }
+        completion_id, completion_path, completion_artifact = store.write_immutable(
+            output, completion_payload, schema=R3_COMPLETION_SCHEMA
+        )
+        completion_before = _artifact_file_snapshot(completion_path)
+        completion_readback = store.read_sealed(
+            completion_path, schema=R3_COMPLETION_SCHEMA
+        )
+        completion_after = _artifact_file_snapshot(completion_path)
+        if completion_before != completion_after:
+            raise R3Error("R3 completion receipt changed during readback")
+        if completion_readback != completion_artifact:
+            raise R3Error("R3 completion receipt readback mismatch")
+        final_artifact_probe = _artifact_file_snapshot(artifact_path)
+        if final_artifact_probe != artifact_after:
+            raise R3Error("R3 main artifact changed after completion publication")
+        _assert_output_safe(output)
+        completion_finished_ns = time.time_ns()
+        completion_wall = {
+            "started_at_ns": completion_started_ns,
+            "finished_at_ns": completion_finished_ns,
+            "elapsed_ns": completion_finished_ns - completion_started_ns,
+            "main_artifact_persisted_and_readback": True,
+            "completion_receipt_persisted_and_readback": True,
+            "main_artifact_rechecked": True,
+        }
+        outer_formal_wall = {
+            "started_at_ns": formal_started_ns,
+            "finished_at_ns": completion_finished_ns,
+            "elapsed_ns": completion_finished_ns - formal_started_ns,
+            "artifact_persistence_included": True,
+            "artifact_readback_included": True,
+            "completion_receipt_persistence_included": True,
+            "completion_receipt_readback_included": True,
+            "main_artifact_rechecked": True,
+            "completion_wall": completion_wall,
+        }
+        result["formal_wall"] = outer_formal_wall
+        result["completion_receipt"] = {
+            "schema": completion_artifact["schema"],
+            "artifact_id": completion_id,
+            "path": str(completion_path),
+            "artifact_file_state": completion_after["file_state"],
+            "artifact_sha256": completion_after["sha256"],
+            "readback_verified": True,
+            "probe": completion_probe,
+            "completion_wall": completion_wall,
+            "formal_wall": outer_formal_wall,
+        }
+        _assert_formal_acceptance(result, payload["source"])
+        _assert_payload_free(result["completion_receipt"])
         return {
             "schema": artifact["schema"],
             "artifact_id": artifact_id,
@@ -1190,32 +2752,87 @@ def _run_once_guarded(
             "receipt_coverage_pct": result["durability"]["receipt_coverage_pct"],
             "progress_coverage_pct": result["durability"]["progress_coverage_pct"],
             "duplicates": result["duplicates"],
+            "artifact_seal_verified": True,
+            "artifact_readback_verified": True,
+            "artifact_file_state": artifact_after["file_state"],
+            "artifact_sha256": artifact_after["sha256"],
+            "artifact_path_rechecked": artifact_before["path"] == artifact_after["path"],
+            "formal_wall": result["formal_wall"],
+            "completion_receipt": result["completion_receipt"],
             "clone_cleanup_verified": True,
         }
     finally:
+        if (
+            external_input_root is not None
+            and external_input_identity_before is not None
+            and not external_input_verified_after
+        ):
+            try:
+                if manifest_path is None or manifest is None or store is None:
+                    raise R3Error("external frozen clone verification context is missing")
+                verified_failure, state_failure, bytes_failure = _read_frozen_manifest(
+                    manifest_path,
+                    store,
+                    clone_root=external_input_root,
+                    source_commit=source_commit,
+                )
+                if (
+                    manifest_state_before is None
+                    or manifest_bytes_sha is None
+                    or state_failure != manifest_state_before
+                    or bytes_failure != manifest_bytes_sha
+                    or verified_failure != manifest
+                ):
+                    raise R3Error("external frozen manifest changed during failed R3")
+                if (
+                    _clone_root_identity(external_input_root)
+                    != external_input_identity_before
+                    or _clone_tree_state_digest(
+                        external_input_root, ignore_mutable_workset=True
+                    )
+                    != external_input_stable_tree_before
+                    or _manifest_raw_tree(
+                        R2._raw_tree_digest(external_input_root),
+                        "external clone.raw_tree.failure",
+                    )
+                    != external_input_raw_before
+                    or _clone_static_identity(store, external_input_root)
+                    != external_input_static_before
+                    or _workset_identity(
+                        _clone_workset_inventory(_clone_workset_path(external_input_root))
+                    )
+                    != _workset_identity(external_input_workset_before or {})
+                ):
+                    raise R3Error("external frozen clone changed during failed R3")
+            except BaseException as exc:
+                raise R3Error("external frozen clone preservation check failed") from exc
         if work_root is not None:
             shutil.rmtree(work_root, ignore_errors=True)
             if work_root.exists():
                 raise R3Error("R3 workset temp cleanup failed")
-        if clone is not None:
-            _cleanup_clone(clone)
+        if clone_owned and clone_root is not None and clone_root.exists():
+            _cleanup_clone(clone_root)
 
 
 def _run_once(
     *,
-    production: Path,
+    production: Path | None = None,
+    clone_root: Path | None = None,
+    manifest_path: Path | None = None,
     source_root: Path,
     source_commit: str,
     output: Path,
     samples: int,
 ) -> dict[str, Any]:
-    """Run the gate with bytecode generation disabled for the full window."""
+    """Run one formal R3 gate with bytecode generation disabled throughout."""
 
     previous = sys.dont_write_bytecode
     sys.dont_write_bytecode = True
     try:
         return _run_once_guarded(
             production=production,
+            clone_root=clone_root,
+            manifest_path=manifest_path,
             source_root=source_root,
             source_commit=source_commit,
             output=output,
@@ -1227,25 +2844,50 @@ def _run_once(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--production-root", type=Path, required=True)
+    parser.add_argument("--production-root", type=Path)
+    parser.add_argument("--clone-root", type=Path)
+    parser.add_argument("--manifest", type=Path)
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--samples", type=int, default=DEFAULT_SAMPLES)
-    parser.add_argument("--dashboard-url")
-    parser.add_argument("--isolated-root", type=Path)
+    parser.add_argument("--isolated-root", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     try:
         if args.isolated_root is not None:
-            raise R3Error("--isolated-root is unsupported; use forced APFS clones")
-        paths = (args.production_root, args.source_root, args.output)
+            raise R3Error("--isolated-root is unsupported; use the trusted R2 clone")
+        if args.production_root is None and args.clone_root is None:
+            raise R3Error("--production-root or --clone-root is required")
+        if (args.clone_root is None) != (args.manifest is None):
+            raise R3Error("--clone-root and --manifest must be supplied together")
+        paths = tuple(
+            path
+            for path in (args.production_root, args.clone_root, args.manifest, args.source_root, args.output)
+            if path is not None
+        )
         if any(_has_symlink_component(path.expanduser()) for path in paths):
-            raise R3Error("root/output path contains a symlink")
-        production = args.production_root.expanduser().resolve(strict=True)
+            raise R3Error("input/output path contains a symlink")
+        production = (
+            args.production_root.expanduser().resolve(strict=True)
+            if args.production_root is not None
+            else None
+        )
+        clone_root = (
+            args.clone_root.expanduser().resolve(strict=True)
+            if args.clone_root is not None
+            else None
+        )
+        manifest_path = (
+            args.manifest.expanduser().resolve(strict=True)
+            if args.manifest is not None
+            else None
+        )
         source_root = args.source_root.expanduser().resolve(strict=True)
         output = args.output.expanduser().resolve(strict=False)
         result = _run_once(
             production=production,
+            clone_root=clone_root,
+            manifest_path=manifest_path,
             source_root=source_root,
             source_commit=args.source_commit,
             output=output,
