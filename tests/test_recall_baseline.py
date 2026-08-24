@@ -13,11 +13,14 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from chronovisor.recall.recall_runtime import ContextItem
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_FILE = REPO_ROOT / "_handoff" / "2026-08-13_1446_recall-baseline.json"
 PARITY_SCRIPT = REPO_ROOT / "scripts" / "recall_parity.py"
+R0_SCRIPT = REPO_ROOT / "scripts" / "recall_r0_harness.py"
 
 
 def _load_baseline() -> dict:
@@ -26,6 +29,14 @@ def _load_baseline() -> dict:
 
 def _load_parity():
     spec = importlib.util.spec_from_file_location("recall_parity", PARITY_SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_r0():
+    spec = importlib.util.spec_from_file_location("recall_r0_harness", R0_SCRIPT)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -479,3 +490,58 @@ def test_parity_restores_read_only_environment(monkeypatch) -> None:
 
     assert parity.run_production({}) == {"status": "ok"}
     assert parity.os.environ["CHRONOVISOR_READ_ONLY"] == "before"
+
+
+def test_r0_harness_metrics_and_fail_closed(monkeypatch) -> None:
+    harness = _load_r0()
+    samples = iter(
+        (
+            {
+                "rusage_uuid": "a",
+                "resident_bytes": 10,
+                "footprint_bytes": 20,
+                "disk_read_bytes": 30,
+                "disk_write_bytes": 40,
+            },
+            {
+                "rusage_uuid": "a",
+                "resident_bytes": 11,
+                "footprint_bytes": 25,
+                "disk_read_bytes": 33,
+                "disk_write_bytes": 44,
+            },
+        )
+    )
+    monkeypatch.setattr(harness, "_proc_pid_rusage_v2", lambda: next(samples))
+    metrics = {}
+    assert harness._measure_stage(
+        harness.STAGES[0], lambda: "ok", metrics
+    ) == "ok"
+    metric = metrics[harness.STAGES[0]][0]
+    assert metric["footprint_before_bytes"] == 20
+    assert metric["footprint_after_bytes"] == 25
+    assert metric["disk_read_bytes"] == 3
+    assert metric["disk_write_bytes"] == 4
+    assert "rss" not in metric
+    assert "peak_rss" not in metric
+
+    incomplete = {name: [] for name in harness.STAGES}
+    incomplete.pop(harness.STAGES[-1])
+    with pytest.raises(ValueError, match="missing stages"):
+        harness._require_complete_stages(incomplete)
+
+    class RemoteTeacher:
+        role = "recall.distill.teacher.a"
+        local = False
+
+    with pytest.raises(ValueError, match="provider/OX attempt"):
+        harness._assert_local_workers(
+            {role: RemoteTeacher() for role in (
+                "recall.distill.teacher.a",
+                "recall.distill.teacher.b",
+                "recall.distill.teacher.c",
+            )},
+            type("LocalCounterfactual", (), {"local": True})(),
+        )
+    with pytest.raises(ValueError, match="runtime identity drift"):
+        harness._assert_identity_stable({"source_commit": "a"}, {"source_commit": "b"})
