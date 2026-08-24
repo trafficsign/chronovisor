@@ -16,6 +16,7 @@ import importlib.util
 import json
 import math
 import os
+import pwd
 import re
 import sqlite3
 import stat
@@ -69,12 +70,28 @@ LOCAL_MIN_VALID_RATE = 0.95
 LOCAL_MAX_LOAD_SKEW = 0.10
 LOCAL_PROBE_TOLERANCE = 0.02
 
+
+def _account_identity() -> tuple[int, Path]:
+    """Resolve the OS account identity without consulting HOME."""
+
+    try:
+        uid = os.getuid()
+        home = Path(pwd.getpwuid(uid).pw_dir).resolve(strict=False)
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+        return -1, Path("/nonexistent/chronovisor-account")
+    if uid < 0 or not home.is_absolute():
+        return -1, Path("/nonexistent/chronovisor-account")
+    return uid, home
+
+
+ACCOUNT_UID, ACCOUNT_HOME = _account_identity()
+
 # Production evidence is intentionally rooted at the one managed Chronovisor
 # data directory.  The name is a module constant (rather than an environment
 # variable or a CLI value) so an arbitrary fixture cannot become authoritative.
 # Tests may replace this constant with an isolated root before calling the
 # private collector; the normal CLI never accepts a root override.
-PRODUCTION_ROOT = Path.home() / ".chronovisor"
+PRODUCTION_ROOT = ACCOUNT_HOME / ".chronovisor"
 PRODUCTION_DISTILLATION_RELATIVE = Path("runtime") / "recall-distillation"
 PRODUCTION_WORKSET_RELATIVE = PRODUCTION_DISTILLATION_RELATIVE / "ox-workset.sqlite3"
 PRODUCTION_CANDIDATE_RELATIVE = (
@@ -106,6 +123,16 @@ PRODUCTION_WORKSET_OPERATIONS = {
     "commit",
 }
 PRODUCTION_RAMP_CAPS = (1, 2, 5, 10)
+
+# The candidate ledger is too large to re-hash on every hot-path collection.
+# Its sealed R0 artifact is tracked by the clean source tree and therefore is
+# the immutable baseline; changes require a fresh offline snapshot.
+R0_SCHEMA = "chronovisor.recall-r0.v1"
+R0_EVIDENCE_ID = "4de2cfe3f33e5c9c5153b264ebee8fae24d814856e0ac339e53c3077dc7efb33"
+R0_EVIDENCE_RELATIVE = Path(
+    "_handoff/evidence/2026-08-23-recall-distillation-recovery/"
+    "r0-measured-baseline-4de2cfe3.json"
+)
 
 
 class R4Error(ValueError):
@@ -301,6 +328,8 @@ def _source_tree_digest(root: Path) -> dict[str, Any]:
         "file_count": files,
         "symlink_count": symlinks,
         "ox_identity_sha256": ox_identity_sha256,
+        "account_uid": ACCOUNT_UID,
+        "account_home": str(ACCOUNT_HOME),
     }
 
 
@@ -1436,6 +1465,151 @@ def _production_ledger_checkpoint(
     }
 
 
+def _load_production_anchor(source_root: Path) -> dict[str, Any]:
+    """Read the tracked R0 candidate baseline as an immutable ledger anchor."""
+
+    path = source_root / R0_EVIDENCE_RELATIVE
+    _reject_original_symlinks((("R0 evidence", path),))
+    data, state, file_sha256 = _production_file_bytes(
+        path, label="R0 production evidence", max_bytes=_MAX_RECEIPT_BYTES
+    )
+    try:
+        payload = json.loads(data)
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise R4Error("R0 production evidence JSON is invalid") from exc
+    if not isinstance(payload, dict):
+        raise R4Error("R0 production evidence is not an object")
+    if payload.get("schema") != R0_SCHEMA:
+        raise R4Error("R0 production evidence schema is invalid")
+    try:
+        verified = _verify_seal(payload, schema=R0_SCHEMA)
+    except R4Error as exc:
+        raise R4Error("R0 production evidence seal is invalid") from exc
+    if verified.get("artifact_id") != R0_EVIDENCE_ID:
+        raise R4Error("R0 production evidence artifact id mismatch")
+    unsigned = {
+        key: value
+        for key, value in verified.items()
+        if key not in {"artifact_id", "seal_sha256"}
+    }
+    if _sha256(unsigned) != R0_EVIDENCE_ID:
+        raise R4Error("R0 production evidence content digest mismatch")
+    canonical = _json_bytes(verified)
+    if data not in {canonical, canonical + b"\n"}:
+        raise R4Error("R0 production evidence is not canonical")
+    if _production_stat(path, label="R0 production evidence") != state:
+        raise R4Error("R0 production evidence changed during validation")
+    production = verified.get("production")
+    ledgers = production.get("ledgers") if isinstance(production, Mapping) else None
+    candidate = (
+        ledgers.get("candidate-ledger.jsonl")
+        if isinstance(ledgers, Mapping)
+        else None
+    )
+    if not isinstance(candidate, Mapping):
+        raise R4Error("R0 candidate ledger anchor is missing")
+    head = candidate.get("head_sha256")
+    records = candidate.get("records")
+    bytes_value = candidate.get("bytes")
+    file_state = candidate.get("file_state")
+    if (
+        not isinstance(head, str)
+        or _SHA.fullmatch(head) is None
+        or isinstance(records, bool)
+        or not isinstance(records, int)
+        or records < 1
+        or isinstance(bytes_value, bool)
+        or not isinstance(bytes_value, int)
+        or bytes_value < 1
+        or not isinstance(file_state, Mapping)
+        or file_state.get("size_bytes") != bytes_value
+    ):
+        raise R4Error("R0 candidate ledger anchor is invalid")
+    return {
+        "artifact_id": R0_EVIDENCE_ID,
+        "file_sha256": file_sha256,
+        "seal_sha256": str(verified["seal_sha256"]),
+        "candidate": {
+            "head_sha256": head,
+            "records": records,
+            "bytes": bytes_value,
+            "file_state": dict(file_state),
+        },
+    }
+
+
+def _production_candidate_tail(
+    path: Path, checkpoint: Mapping[str, Any], anchor: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Require the current candidate checkpoint to equal the sealed R0 base.
+
+    Candidate ledgers are production-sized.  A future append must first create
+    a new offline R0 snapshot; accepting a self-resealed checkpoint plus a
+    bounded tail would make the checkpoint itself the authority again.
+    """
+
+    expected = anchor.get("candidate")
+    if not isinstance(expected, Mapping):
+        raise R4Error("R0 candidate ledger anchor is invalid")
+    anchor_head = expected.get("head_sha256")
+    anchor_records = expected.get("records")
+    anchor_bytes = expected.get("bytes")
+    if (
+        not isinstance(anchor_head, str)
+        or _SHA.fullmatch(anchor_head) is None
+        or isinstance(anchor_records, bool)
+        or not isinstance(anchor_records, int)
+        or anchor_records < 1
+        or isinstance(anchor_bytes, bool)
+        or not isinstance(anchor_bytes, int)
+        or anchor_bytes < 1
+    ):
+        raise R4Error("R0 candidate ledger anchor is invalid")
+    records = checkpoint.get("records")
+    head = checkpoint.get("head_sha256")
+    ledger_state = checkpoint.get("ledger_state")
+    if (
+        isinstance(records, bool)
+        or not isinstance(records, int)
+        or records < anchor_records
+        or not isinstance(head, str)
+        or _SHA.fullmatch(head) is None
+        or not isinstance(ledger_state, Mapping)
+    ):
+        raise R4Error("production candidate checkpoint precedes R0 anchor")
+    current_bytes = ledger_state.get("st_size")
+    if (
+        isinstance(current_bytes, bool)
+        or not isinstance(current_bytes, int)
+        or current_bytes < anchor_bytes
+    ):
+        raise R4Error("production candidate checkpoint precedes R0 bytes")
+    anchor_file_state = expected.get("file_state")
+    checkpoint_file_state = checkpoint.get("file_state")
+    if (
+        not isinstance(anchor_file_state, Mapping)
+        or not isinstance(checkpoint_file_state, Mapping)
+        or dict(checkpoint_file_state) != dict(anchor_file_state)
+        or records != anchor_records
+        or current_bytes != anchor_bytes
+        or head != anchor_head
+    ):
+        # A new append requires a fresh offline R0 snapshot.  We deliberately
+        # do not trust a current checkpoint to authenticate an unanchored tail.
+        raise R4Error("production candidate ledger differs from sealed R0 anchor")
+    if _production_stat(path, label="production candidate ledger") != dict(ledger_state):
+        raise R4Error("production candidate ledger changed during anchor validation")
+    return {
+        "anchor_artifact_id": anchor.get("artifact_id"),
+        "anchor_head_sha256": anchor_head,
+        "anchor_records": anchor_records,
+        "anchor_bytes": anchor_bytes,
+        "tail_records": 0,
+        "tail_bytes": 0,
+        "tail_verified": True,
+    }
+
+
 def _production_chain(path: Path, checkpoint_path: Path) -> dict[str, Any]:
     """Verify a bounded label-ledger view against its sealed head checkpoint.
 
@@ -1592,12 +1766,19 @@ def _production_identity(
         "source_tree_sha256"
     ) != source.get("tree_sha256"):
         reasons.add("production_state_source_mismatch")
+    if (
+        source.get("account_uid") != ACCOUNT_UID
+        or source.get("account_home") != str(ACCOUNT_HOME)
+    ):
+        reasons.add("production_account_identity_invalid")
     runtime = state.get("runtime_identity")
     if not isinstance(runtime, Mapping):
         reasons.add("production_runtime_identity_missing")
         runtime = {}
     expected_runtime = {
         "root": str(root.absolute()),
+        "account_uid": source.get("account_uid"),
+        "account_home": source.get("account_home"),
         "source_commit": source.get("commit"),
         "source_tree_sha256": source.get("tree_sha256"),
         "source_ox_identity_sha256": source.get("ox_identity_sha256"),
@@ -1608,6 +1789,12 @@ def _production_identity(
         "candidate_checkpoint_head": candidate.get("head_sha256"),
         "candidate_checkpoint_records": candidate.get("records"),
         "candidate_checkpoint_file_state": candidate.get("file_state"),
+        "candidate_anchor_artifact_id": candidate.get("anchor_artifact_id"),
+        "candidate_anchor_head_sha256": candidate.get("anchor_head_sha256"),
+        "candidate_anchor_records": candidate.get("anchor_records"),
+        "candidate_anchor_bytes": candidate.get("anchor_bytes"),
+        "candidate_tail_records": candidate.get("tail_records"),
+        "candidate_tail_bytes": candidate.get("tail_bytes"),
         "label_receipt_head": labels.get("head_sha256"),
         "label_checkpoint_records": labels.get("count"),
         "label_checkpoint_file_state": labels.get("checkpoint_file_state"),
@@ -2006,6 +2193,7 @@ def _collect_authoritative_production(
         "reasons": [],
         "collector": "fixed-production-root-workset-v1",
         "provider_calls": 0,
+        "root": str(PRODUCTION_ROOT.absolute()),
     }
     try:
         expected_original = PRODUCTION_ROOT.expanduser().absolute()
@@ -2063,6 +2251,11 @@ def _collect_authoritative_production(
             candidate_checkpoint_path,
             ledger_name="candidate-ledger.jsonl",
         )
+        candidate_anchor = _load_production_anchor(source_root)
+        candidate_tail = _production_candidate_tail(
+            candidate_path, candidate, candidate_anchor
+        )
+        candidate = {**candidate, **candidate_tail}
         labels = _production_chain(label_path, label_checkpoint_path)
         config_bytes, config_state, config_sha256 = _production_file_bytes(
             config_path, label="production config", max_bytes=_MAX_RECEIPT_BYTES
@@ -2156,6 +2349,7 @@ def _collect_authoritative_production(
                 "receipts": workset["receipts"],
             },
             "candidate_checkpoint": candidate,
+            "candidate_anchor": candidate_anchor,
             "labels": {
                 "count": labels["count"],
                 "head_sha256": labels["head_sha256"],
@@ -2339,15 +2533,24 @@ def run(
             "collector": "fixed-production-root-workset-v1",
             "provider_calls": 0,
         }
+    # The collector reads a large amount of runtime state.  Re-snapshot the
+    # source immediately before publishing the artifact so a source mutation
+    # during collection cannot be hidden by the earlier before/after pair.
+    source_final = _assert_source(source_root, source_commit)
+    if source_final != source_before or source_final != source_after:
+        raise R4Error("source changed during final evidence validation")
     source_passed = bool(
         local_result["passed"]
         and ox_result["passed"]
         and source_before["clean"]
         and source_after == source_before
+        and source_final == source_before
     )
     payload = {
         "captured_at": datetime.now(UTC).isoformat(),
         "source": source_before,
+        "source_after": source_after,
+        "source_final": source_final,
         "source_contract": {
             "schema": SOURCE_SCHEMA,
             "passed": source_passed,
@@ -2380,7 +2583,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--production",
         action="store_true",
-        help="read the fixed ~/.chronovisor production root without mutation",
+        help="read the fixed OS-account Chronovisor root without mutation",
     )
     parser.add_argument(
         "--source-contract-only",

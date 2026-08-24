@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -632,6 +633,8 @@ max_candidates = 200
         "source_tree_sha256": tree,
         "runtime_identity": {
             "root": str(root.absolute()),
+            "account_uid": HARNESS.ACCOUNT_UID,
+            "account_home": str(HARNESS.ACCOUNT_HOME),
             "source_commit": commit,
             "source_tree_sha256": tree,
             "source_ox_identity_sha256": HARNESS._source_tree_digest(source)[
@@ -645,6 +648,12 @@ max_candidates = 200
             "candidate_checkpoint_head": candidate_checkpoint["head_sha256"],
             "candidate_checkpoint_records": 1,
             "candidate_checkpoint_file_state": candidate_checkpoint["file_state"],
+            "candidate_anchor_artifact_id": "a" * 64,
+            "candidate_anchor_head_sha256": candidate_checkpoint["head_sha256"],
+            "candidate_anchor_records": 1,
+            "candidate_anchor_bytes": candidate_file_state["st_size"],
+            "candidate_tail_records": 0,
+            "candidate_tail_bytes": 0,
             "profile_contract_sha256": contract_sha,
             "workset_receipt_head": HARNESS._sha256(envelope),
             "label_receipt_head": previous,
@@ -714,6 +723,20 @@ max_candidates = 200
     return root
 
 
+def _fixture_candidate_anchor(production: Path) -> dict[str, object]:
+    checkpoint_path = production / HARNESS.PRODUCTION_CANDIDATE_CHECKPOINT_RELATIVE
+    checkpoint = json.loads(checkpoint_path.read_text())
+    return {
+        "artifact_id": "a" * 64,
+        "candidate": {
+            "head_sha256": checkpoint["head_sha256"],
+            "records": checkpoint["records"],
+            "bytes": checkpoint["file_state"]["size_bytes"],
+            "file_state": dict(checkpoint["file_state"]),
+        },
+    }
+
+
 def test_source_contract_passes_but_production_stays_false_without_attestation(
     tmp_path: Path,
 ) -> None:
@@ -751,6 +774,172 @@ def test_source_contract_passes_but_production_stays_false_without_attestation(
     )
 
 
+def test_run_rejects_source_mutation_during_production_collection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    production = tmp_path / "production"
+    production.mkdir()
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+
+    def mutating_collector(**kwargs: object) -> dict[str, object]:
+        source_root = cast(Path, kwargs["source_root"])
+        (source_root / "README.md").write_text("mutated during collection\n")
+        return {
+            "passed": False,
+            "reasons": ["synthetic_collector"],
+            "collector": "test",
+            "provider_calls": 0,
+        }
+
+    monkeypatch.setattr(HARNESS, "_collect_authoritative_production", mutating_collector)
+    with pytest.raises(HARNESS.R4Error, match="dirty|final evidence"):
+        HARNESS.run(
+            source_root=source,
+            source_commit=commit,
+            output=tmp_path / "evidence",
+            production_root=production,
+        )
+
+
+def test_public_cli_ignores_home_override_for_production_root(
+    tmp_path: Path,
+) -> None:
+    source, commit = _git_source(tmp_path)
+    output = tmp_path / "evidence"
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    environment = dict(os.environ)
+    environment["HOME"] = str(fake_home)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "recall_r4_harness.py"),
+            "--source-root",
+            str(source),
+            "--source-commit",
+            commit,
+            "--output",
+            str(output),
+            "--production",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 3
+    artifact_path = next(output.glob("*.json"))
+    artifact = HARNESS.read_artifact(artifact_path)
+    assert artifact["production_certification"]["root"] == str(
+        HARNESS.ACCOUNT_HOME / ".chronovisor"
+    )
+
+
+def test_r0_candidate_anchor_is_sealed_and_tamper_evident(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    anchor_path = source / HARNESS.R0_EVIDENCE_RELATIVE
+    anchor_path.parent.mkdir(parents=True)
+    tracked = ROOT / HARNESS.R0_EVIDENCE_RELATIVE
+    anchor_path.write_bytes(tracked.read_bytes())
+    anchor = HARNESS._load_production_anchor(source)
+    assert anchor["artifact_id"] == HARNESS.R0_EVIDENCE_ID
+    assert anchor["candidate"]["records"] == 8050
+    original = anchor_path.read_bytes()
+    anchor_path.write_bytes(original.replace(b'"records":8050', b'"records":8051', 1))
+    with pytest.raises(HARNESS.R4Error, match="seal|digest"):
+        HARNESS._load_production_anchor(source)
+
+
+def test_candidate_checkpoint_reseal_and_same_size_substitution_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path, source, commit)
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    anchor = _fixture_candidate_anchor(production)
+    monkeypatch.setattr(
+        HARNESS, "_load_production_anchor", lambda _: anchor
+    )
+    candidate_path = production / HARNESS.PRODUCTION_CANDIDATE_RELATIVE
+    checkpoint_path = production / HARNESS.PRODUCTION_CANDIDATE_CHECKPOINT_RELATIVE
+    original = candidate_path.read_bytes()
+    forged = original.replace(b"candidate-fixture", b"candidate-forge!!", 1)
+    assert len(forged) == len(original)
+    candidate_path.write_bytes(forged)
+    checkpoint = json.loads(checkpoint_path.read_text())
+    current = HARNESS._production_stat(candidate_path, label="forged candidates")
+    checkpoint["file_state"] = {
+        "size_bytes": current["st_size"],
+        "st_dev": current["st_dev"],
+        "st_ino": current["st_ino"],
+        "st_mtime_ns": current["st_mtime_ns"],
+        "st_ctime_ns": current["st_ctime_ns"],
+    }
+    checkpoint["seal_sha256"] = HARNESS._sha256(
+        {key: value for key, value in checkpoint.items() if key != "seal_sha256"}
+    )
+    checkpoint_path.write_text(json.dumps(checkpoint, sort_keys=True, separators=(",", ":")))
+    result = HARNESS._collect_authoritative_production(
+        source_root=source,
+        source=HARNESS._assert_source(source, commit),
+        production_root=production,
+    )
+    assert result["passed"] is False
+    assert any("candidate" in reason for reason in result["reasons"])
+
+
+def test_candidate_append_requires_a_fresh_offline_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path, source, commit)
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    anchor = _fixture_candidate_anchor(production)
+    monkeypatch.setattr(
+        HARNESS, "_load_production_anchor", lambda _: anchor
+    )
+    candidate_path = production / HARNESS.PRODUCTION_CANDIDATE_RELATIVE
+    checkpoint_path = production / HARNESS.PRODUCTION_CANDIDATE_CHECKPOINT_RELATIVE
+    first = json.loads(candidate_path.read_text())
+    second_unsigned = {
+        "candidate_id": "candidate-next",
+        "namespace": "recall-distillation",
+        "previous_sha256": first["record_sha256"],
+        "schema": "chronovisor.recall-distillation.v1",
+    }
+    second = {**second_unsigned, "record_sha256": HARNESS._sha256(second_unsigned)}
+    candidate_path.write_bytes(
+        candidate_path.read_bytes()
+        + json.dumps(second, sort_keys=True, separators=(",", ":")).encode()
+        + b"\n"
+    )
+    current = HARNESS._production_stat(candidate_path, label="appended candidates")
+    checkpoint = json.loads(checkpoint_path.read_text())
+    checkpoint.update(
+        records=2,
+        head_sha256=second["record_sha256"],
+        file_state={
+            "size_bytes": current["st_size"],
+            "st_dev": current["st_dev"],
+            "st_ino": current["st_ino"],
+            "st_mtime_ns": current["st_mtime_ns"],
+            "st_ctime_ns": current["st_ctime_ns"],
+        },
+    )
+    checkpoint["seal_sha256"] = HARNESS._sha256(
+        {key: value for key, value in checkpoint.items() if key != "seal_sha256"}
+    )
+    checkpoint_path.write_text(json.dumps(checkpoint, sort_keys=True, separators=(",", ":")))
+    result = HARNESS._collect_authoritative_production(
+        source_root=source,
+        source=HARNESS._assert_source(source, commit),
+        production_root=production,
+    )
+    assert result["passed"] is False
+    assert "production candidate ledger differs from sealed R0 anchor" in result["reasons"]
+
+
 def test_authoritative_collector_can_certify_only_fixed_sealed_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -759,6 +948,9 @@ def test_authoritative_collector_can_certify_only_fixed_sealed_root(
     source, commit = _git_source(tmp_path)
     production = _authoritative_production_root(tmp_path, source, commit)
     monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    monkeypatch.setattr(
+        HARNESS, "_load_production_anchor", lambda _: _fixture_candidate_anchor(production)
+    )
     source_snapshot = HARNESS._assert_source(source, commit)
     result = HARNESS._collect_authoritative_production(
         source_root=source,
@@ -823,6 +1015,9 @@ def test_authoritative_collector_rejects_symlink_and_resealed_state(
     assert symlinked["passed"] is False
     assert "production_root_unavailable" in symlinked["reasons"]
     monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    monkeypatch.setattr(
+        HARNESS, "_load_production_anchor", lambda _: _fixture_candidate_anchor(production)
+    )
     state_path = production / HARNESS.PRODUCTION_STATE_RELATIVE
     state = json.loads(state_path.read_text())
     state["seal_sha256"] = "0" * 64
@@ -844,6 +1039,9 @@ def test_authoritative_collector_rejects_truncation_route_spoof_and_veto(
 
     truncated = _authoritative_production_root(tmp_path / "truncated", source, commit)
     monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", truncated)
+    monkeypatch.setattr(
+        HARNESS, "_load_production_anchor", lambda _: _fixture_candidate_anchor(truncated)
+    )
     label_path = truncated / HARNESS.PRODUCTION_LABEL_RELATIVE
     label_path.write_bytes(label_path.read_bytes()[:-1])
     result = HARNESS._collect_authoritative_production(
@@ -858,6 +1056,9 @@ def test_authoritative_collector_rejects_truncation_route_spoof_and_veto(
 
     spoofed = _authoritative_production_root(tmp_path / "spoofed", source, commit)
     monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", spoofed)
+    monkeypatch.setattr(
+        HARNESS, "_load_production_anchor", lambda _: _fixture_candidate_anchor(spoofed)
+    )
     spoof_label_path = spoofed / HARNESS.PRODUCTION_LABEL_RELATIVE
     first, *rest = spoof_label_path.read_bytes().splitlines(keepends=True)
     first_row = json.loads(first)
@@ -876,6 +1077,9 @@ def test_authoritative_collector_rejects_truncation_route_spoof_and_veto(
 
     vetoed = _authoritative_production_root(tmp_path / "vetoed", source, commit)
     monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", vetoed)
+    monkeypatch.setattr(
+        HARNESS, "_load_production_anchor", lambda _: _fixture_candidate_anchor(vetoed)
+    )
     state_path = vetoed / HARNESS.PRODUCTION_STATE_RELATIVE
     state = json.loads(state_path.read_text())
     state["sensitive"] = 1
