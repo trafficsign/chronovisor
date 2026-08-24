@@ -68,7 +68,11 @@ from chronovisor.ops.dashboard_http import (
 )
 from chronovisor.ops.dashboard_static import STATIC_DIR, _resolve_static_path
 from chronovisor.ops.decision_trace_projection import project_decision_trace
-from chronovisor.ops.health import health_snapshot
+from chronovisor.ops.health import (
+    health_snapshot,
+    ingest_liveness_kpi,
+)
+from chronovisor.ops.health import runtime_status_kpi as health_runtime_status_kpi
 from chronovisor.ops.model_lab import snapshot as model_lab_snapshot
 from chronovisor.recall import recall_runtime
 from chronovisor.recall.recall_auditor import load_audit_policy
@@ -6049,6 +6053,69 @@ _COLD_STATUS_DERIVED_KEYS = (
 )
 
 
+def _health_with_live_truth(cached_value: Any) -> dict[str, Any]:
+    """Overlay cheap authority and liveness truth on cached health aggregates."""
+
+    cached = cached_value if isinstance(cached_value, dict) else {}
+    ingest_liveness = ingest_liveness_kpi()
+    runtime_health = health_runtime_status_kpi()
+    result = {
+        **cached,
+        "ingest_liveness": ingest_liveness,
+        "runtime_status": runtime_health,
+    }
+    try:
+        built_at = float(cached.get("materialized_at_epoch") or 0.0)
+    except (TypeError, ValueError):
+        built_at = 0.0
+    age = max(0.0, time.time() - built_at) if built_at else None
+    if age is not None:
+        result["age"] = age
+    cache_key = (str(CHRONOVISOR_ROOT), "health")
+    with _MATERIALIZED_COMPONENT_LOCK:
+        refreshing = cache_key in _MATERIALIZED_COMPONENT_REFRESHING
+    liveness_stale = bool(
+        ingest_liveness.get("stale")
+        or isinstance(ingest_liveness.get("liveness"), dict)
+        and ingest_liveness["liveness"].get("stale")
+    )
+    result["refreshing"] = refreshing
+    result["stale"] = bool(
+        cached.get("stale")
+        or refreshing
+        or age is not None
+        and age >= DASHBOARD_HEALTH_AUDIT_SECONDS
+        or liveness_stale
+    )
+    semantic_index = cached.get("semantic_index")
+    if cached.get("status") in {None, "ok", "alert"}:
+        result["status"] = (
+            "alert"
+            if ingest_liveness.get("alert")
+            or runtime_health.get("alert")
+            or isinstance(semantic_index, dict)
+            and semantic_index.get("status") == "alert"
+            else "ok"
+        )
+    authority = None
+    for section in (runtime_health, ingest_liveness):
+        for key in ("current_authority", "mutation_authority", "authority_preflight"):
+            authority = section.get(key)
+            if authority is not None:
+                break
+        if authority is not None:
+            break
+    if authority is None:
+        librarian = cached.get("librarian")
+        if isinstance(librarian, dict):
+            authority = librarian.get("authority")
+    if authority is not None:
+        result["current_authority"] = authority
+    else:
+        result.pop("current_authority", None)
+    return result
+
+
 def _snapshot_with_live_status(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Overlay cheap runtime truth without mutating cached cold aggregates."""
 
@@ -6069,6 +6136,11 @@ def _snapshot_with_live_status(snapshot: dict[str, Any]) -> dict[str, Any]:
             live_status,
             orchestrator._load_state(),
             pending=max(0, pending),
+        )
+        health = (
+            _health_with_live_truth(snapshot.get("health"))
+            if "health" in snapshot
+            else None
         )
     except Exception as exc:
         return {
@@ -6095,6 +6167,7 @@ def _snapshot_with_live_status(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {
         **snapshot,
         "status": status,
+        **({"health": health} if health is not None else {}),
         **failures,
         "_dashboard": {**dashboard_state, "live_overlay": True},
     }
@@ -6857,7 +6930,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif path == "/api/health":
                 _json_response(
                     self,
-                    {"health": _cached_snapshot(allow_stale=True)["health"]},
+                    {
+                        "health": _snapshot_with_live_status(
+                            _cached_snapshot(allow_stale=True)
+                        )["health"]
+                    },
                 )
             elif path == "/api/cortex/graph":
                 self._cortex_graph_response()

@@ -4894,6 +4894,63 @@ def test_snapshot_live_status_overlay_is_non_mutating_and_preserves_cold_fields(
     assert cached == original
 
 
+def test_health_live_truth_overlays_cached_authority_liveness_and_age(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(dashboard.time, "time", lambda: 100.0)
+    cached = {
+        "status": "ok",
+        "stale": False,
+        "refreshing": True,
+        "materialized_at_epoch": 90.0,
+        "current_authority": {"authority_digest": "old"},
+        "ingest_liveness": {"observed_at": "old"},
+        "runtime_status": {"state": "idle"},
+        "semantic_index": {"status": "ok"},
+    }
+    original = json.loads(json.dumps(cached))
+    live_liveness = {
+        "observed_at": "live",
+        "alert": False,
+        "stale": False,
+        "liveness": {"stale": False},
+    }
+    monkeypatch.setattr(
+        dashboard,
+        "ingest_liveness_kpi",
+        lambda: dict(live_liveness),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "health_runtime_status_kpi",
+        lambda: {
+            "state": "running",
+            "alert": False,
+            "mutation_authority": {"authority_digest": "live"},
+        },
+    )
+
+    health = dashboard._health_with_live_truth(cached)
+
+    assert health["status"] == "ok"
+    assert health["age"] == 10.0
+    assert health["refreshing"] is False
+    assert health["stale"] is False
+    assert health["ingest_liveness"]["observed_at"] == "live"
+    assert health["runtime_status"]["state"] == "running"
+    assert health["current_authority"]["authority_digest"] == "live"
+    assert cached == original
+
+    live_liveness.update({"alert": True, "stale": True})
+    assert dashboard._health_with_live_truth(cached)["status"] == "alert"
+    assert dashboard._health_with_live_truth(cached)["stale"] is True
+
+    failed = {**cached, "status": "error", "error": "health build failed"}
+    assert dashboard._health_with_live_truth(failed)["status"] == "error"
+
+
 def test_snapshot_live_status_overlay_reflects_idle_to_active_next_response(
     monkeypatch,
 ) -> None:
@@ -4975,11 +5032,15 @@ def test_snapshot_routes_apply_live_overlay() -> None:
     status_route = source.split('elif path == "/api/status":', 1)[1].split(
         'elif path == "/api/local-consensus":', 1
     )[0]
+    health_route = source.split('elif path == "/api/health":', 1)[1].split(
+        'elif path == "/api/cortex/graph":', 1
+    )[0]
 
     assert "_snapshot_with_live_status(" in snapshot_route
     assert "_cached_snapshot(allow_stale=True)" in snapshot_route
     assert "_snapshot_with_live_status(" in status_route
     assert '"_dashboard": snapshot.get("_dashboard") or {}' in status_route
+    assert "_snapshot_with_live_status(" in health_route
 
 
 def test_local_consensus_route_stays_on_direct_live_path() -> None:
