@@ -755,7 +755,14 @@ def _workset_lock_snapshot(runtime_dir: Path) -> dict[str, Any]:
     for path in sorted(set(paths)):
         if _has_symlink_component(path) or not path.is_file():
             raise R3Error("production Workset lock/sidecar path is unsafe")
-        locks[path.name] = _regular_file_state(path)
+        before = _regular_file_state(path)
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise R3Error("production Workset lock state read failed") from exc
+        if before != _regular_file_state(path):
+            raise R3Error("production Workset lock changed during read")
+        locks[path.name] = {**before, "sha256": digest}
     return {"files": locks, "bounded": True}
 
 
@@ -901,6 +908,7 @@ def _production_scope_identity(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     normalized_locks = {
         str(name): {
             "st_size": value.get("st_size"),
+            "sha256": value.get("sha256"),
         }
         for name, value in lock_files.items()
         if isinstance(value, Mapping)
@@ -2229,6 +2237,7 @@ def _sigterm_reopen(
     source_root: Path,
     path: Path,
     kind: str | None = None,
+    expected_rows: int | None = None,
 ) -> dict[str, Any]:
     if kind is None:
         try:
@@ -2243,6 +2252,10 @@ def _sigterm_reopen(
     workset = workset_module.DistillationWorkset(path)
     before_status = workset.status(kind)
     before_completed = int(before_status.get("completed", 0))
+    before_receipts = _receipt_rows(path)
+    before_inventory = _clone_workset_inventory(
+        path, expected_rows=expected_rows, require_receipts=True
+    )
     started = time.perf_counter_ns()
     process = subprocess.Popen(
         [sys.executable, "-c", _SIGTERM_CHILD, str(path), kind],
@@ -2308,6 +2321,17 @@ def _sigterm_reopen(
         or status.get("leased") != 0
     ):
         raise R3Error("reopened workset status is invalid")
+    after_receipts = _receipt_rows(path)
+    receipt_suffix = after_receipts[len(before_receipts) :]
+    initial_generation = int(before_status["last_durable_receipt"]["generation"])
+    if not receipt_suffix or any(
+        row.get("generation") != initial_generation + index + 1
+        for index, row in enumerate(receipt_suffix)
+    ):
+        raise R3Error("SIGTERM recovery receipt suffix is incomplete")
+    after_inventory = _clone_workset_inventory(
+        path, expected_rows=expected_rows, require_receipts=True
+    )
     lock_holder = {
         "before_sigterm": old_claim.owner,
         "after_reclaim": reclaimed.owner,
@@ -2342,6 +2366,17 @@ def _sigterm_reopen(
         "reclaimed_attempt": reclaimed.attempt,
         "completed_before": before_completed,
         "completed_after": int(status["completed"]),
+        "actual_workset": True,
+        "kind": kind,
+        "leased_after": int(status["leased"]),
+        "inventory_before": _workset_identity(before_inventory),
+        "inventory_after": _workset_identity(after_inventory),
+        "receipt_suffix": {
+            "generation_start": receipt_suffix[0]["generation"],
+            "generation_end": receipt_suffix[-1]["generation"],
+            "count": len(receipt_suffix),
+            "operations": dict(Counter(row["operation"] for row in receipt_suffix)),
+        },
         "idempotent_commit": True,
         "lock_holder": lock_holder,
         "release": release,
@@ -2679,6 +2714,28 @@ def _assert_formal_acceptance(
         or result.get("sigterm_reopen", {}).get("idempotent_commit") is not True
     ):
         raise R3Error("SIGTERM child process evidence is incomplete")
+    actual_sigterm = result.get("actual_clone_sigterm")
+    if (
+        not isinstance(actual_sigterm, Mapping)
+        or actual_sigterm.get("actual_workset") is not True
+        or actual_sigterm.get("kind") != "ox"
+        or actual_sigterm.get("leased_after") != 0
+        or actual_sigterm.get("duplicates") != 0
+        or not isinstance(actual_sigterm.get("inventory_before"), Mapping)
+        or not isinstance(actual_sigterm.get("inventory_after"), Mapping)
+        or actual_sigterm["inventory_before"].get("row_count")
+        != OX_WORKSET_EXPECTED_ROWS
+        or actual_sigterm["inventory_after"].get("row_count")
+        != OX_WORKSET_EXPECTED_ROWS
+        or actual_sigterm.get("inventory_after_normalized")
+        != actual_sigterm.get("inventory_after")
+        or not isinstance(actual_sigterm.get("receipt_suffix"), Mapping)
+        or actual_sigterm["receipt_suffix"].get("count", 0) < 1
+        or not isinstance(actual_sigterm.get("normalization"), Mapping)
+        or actual_sigterm["normalization"].get("clone_only") is not True
+        or actual_sigterm["normalization"].get("integrity") != "ok"
+    ):
+        raise R3Error("actual clone SIGTERM recovery evidence is incomplete")
     sigterm_reopen = result.get("sigterm_reopen")
     lock_holder = sigterm_reopen.get("lock_holder") if isinstance(sigterm_reopen, Mapping) else None
     release = sigterm_reopen.get("release") if isinstance(sigterm_reopen, Mapping) else None
@@ -2812,17 +2869,18 @@ def _assert_formal_acceptance(
     if (
         not isinstance(input_clone, Mapping)
         or input_clone.get("external") != (manifest.get("external") is True)
-        or input_clone.get("immutable_unchanged") is not True
+        or input_clone.get("owned_scope_unchanged") is not True
+        or input_clone.get("excluded_not_evaluated") != R3_EXCLUDED_NOT_EVALUATED
         or input_clone.get("root_identity_unchanged") is not True
     ):
-        raise R3Error("external clone immutability evidence is incomplete")
+        raise R3Error("external clone owned-scope evidence is incomplete")
     clone_tree = result.get("clone_tree")
     if (
         not isinstance(clone_tree, Mapping)
         or clone_tree.get("representation") != R3_WORKSET_SCOPE_REPRESENTATION
         or clone_tree.get("excluded_not_evaluated") != R3_EXCLUDED_NOT_EVALUATED
         or clone_tree.get("root_identity_unchanged") is not True
-        or clone_tree.get("immutable_unchanged") is not True
+        or clone_tree.get("owned_scope_unchanged") is not True
         or not isinstance(clone_tree.get("before"), Mapping)
         or not isinstance(clone_tree.get("after"), Mapping)
         or not isinstance(clone_tree["before"].get("workset"), Mapping)
@@ -2854,6 +2912,37 @@ def _assert_formal_acceptance(
         if isinstance(completion, Mapping)
         else None
     )
+    completion_boundary = (
+        completion.get("completion_boundary")
+        if isinstance(completion, Mapping)
+        else None
+    )
+    boundary_source = (
+        completion_boundary.get("source")
+        if isinstance(completion_boundary, Mapping)
+        else None
+    )
+    boundary_production = (
+        completion_boundary.get("production")
+        if isinstance(completion_boundary, Mapping)
+        else None
+    )
+    post_completion_readback = result.get("post_completion_readback")
+    final_scope_recheck = (
+        post_completion_readback.get("scope")
+        if isinstance(post_completion_readback, Mapping)
+        else None
+    )
+    final_source = (
+        final_scope_recheck.get("source")
+        if isinstance(final_scope_recheck, Mapping)
+        else None
+    )
+    final_production = (
+        final_scope_recheck.get("production")
+        if isinstance(final_scope_recheck, Mapping)
+        else None
+    )
     if require_completion and (
         not isinstance(completion, Mapping)
         or completion.get("readback_verified") is not True
@@ -2865,6 +2954,21 @@ def _assert_formal_acceptance(
         or not isinstance(through_main, Mapping)
         or through_main.get("main_artifact_persistence_included") is not True
         or through_main.get("main_artifact_readback_included") is not True
+        or not isinstance(completion_boundary, Mapping)
+        or not isinstance(boundary_source, Mapping)
+        or boundary_source.get("after") != source.get("after")
+        or boundary_source.get("head_after") != source.get("head_after")
+        or not isinstance(boundary_production, Mapping)
+        or boundary_production.get("production_workset_unchanged") is not True
+        or boundary_production.get("excluded_not_evaluated")
+        != R3_EXCLUDED_NOT_EVALUATED
+        or not isinstance(post_completion_readback, Mapping)
+        or not isinstance(final_scope_recheck, Mapping)
+        or not isinstance(final_source, Mapping)
+        or final_source.get("matches_sealed_boundary") is not True
+        or not isinstance(final_production, Mapping)
+        or final_production.get("production_workset_unchanged") is not True
+        or final_production.get("matches_sealed_boundary") is not True
     ):
         raise R3Error("completion receipt evidence is incomplete")
     cleanup = result.get("cleanup")
@@ -2905,17 +3009,16 @@ def _assert_formal_acceptance(
         raise R3Error("source immutability evidence is incomplete")
     if result.get("duplicates") != 0:
         raise R3Error("formal artifact duplicate count is non-zero")
-    drift = result.get("concurrent_source_drift")
+    excluded_observation = result.get("excluded_scope_observation")
     owned_unchanged = result.get("production_workset_unchanged")
     if (
-        not isinstance(drift, Mapping)
-        or not isinstance(drift.get("detected"), bool)
+        not isinstance(excluded_observation, Mapping)
+        or excluded_observation.get("detected") is not None
         or not isinstance(owned_unchanged, bool)
-        or drift.get("detected") is not False
-        or drift.get("classification") != "excluded-not-evaluated"
+        or excluded_observation.get("classification") != "excluded-not-evaluated"
         or not owned_unchanged
     ):
-        raise R3Error("production mutation/drift classification is incomplete")
+        raise R3Error("excluded production scope observation is incomplete")
 
 
 def _run_once_guarded(
@@ -3107,11 +3210,38 @@ def _run_once_guarded(
         actual_teacher_handoff = _clone_teacher_handoff(
             workset_module, source_root, clone_root, sample_count=samples
         )
+        actual_clone_sigterm = _sigterm_reopen(
+            workset_module,
+            source_root,
+            clone_root / OX_WORKSET_RELATIVE,
+            expected_rows=OX_WORKSET_EXPECTED_ROWS,
+        )
+        sigterm_normalization = _normalize_clone_workset(
+            clone_root / OX_WORKSET_RELATIVE,
+            expected_identity=actual_clone_sigterm["inventory_after"],
+            allow_wal=True,
+        )
+        sigterm_normalized_inventory = _clone_workset_inventory(
+            clone_root / OX_WORKSET_RELATIVE,
+            expected_rows=OX_WORKSET_EXPECTED_ROWS,
+            require_receipts=True,
+        )
+        if _workset_identity(sigterm_normalized_inventory) != _workset_identity(
+            actual_clone_sigterm["inventory_after"]
+        ):
+            raise R3Error("clone SIGTERM inventory changed during normalization")
+        actual_clone_sigterm["normalization"] = sigterm_normalization
+        actual_clone_sigterm["inventory_after_normalized"] = _workset_identity(
+            sigterm_normalized_inventory
+        )
         work_root = Path(tempfile.mkdtemp(prefix=".r3-harness-", dir=clone_root))
         synthetic = _run_workset(workset_module, source_root, work_root, samples)
         result = dict(synthetic)
         result["synthetic_claim"] = result["claim"]
         result["synthetic_teacher_handoff"] = result["teacher_handoff"]
+        result["synthetic_sigterm_reopen"] = result["sigterm_reopen"]
+        result["actual_clone_sigterm"] = actual_clone_sigterm
+        result["sigterm_reopen"] = actual_clone_sigterm
         result["teacher_handoff"] = actual_teacher_handoff
         result["claim"] = {
             "samples": clone_workset["successful_cycles"],
@@ -3122,7 +3252,7 @@ def _run_once_guarded(
             "source": "r2-frozen-clone-production-ox-workset",
         }
         result["clone_workset"] = clone_workset
-        result["sigterm_process"] = result["sigterm_reopen"]["sigterm_process"]
+        result["sigterm_process"] = actual_clone_sigterm["sigterm_process"]
         clone_workset_after = _clone_workset_inventory(
             clone_root / OX_WORKSET_RELATIVE,
             expected_rows=OX_WORKSET_EXPECTED_ROWS,
@@ -3217,17 +3347,16 @@ def _run_once_guarded(
         )
         if production is not None and not production_owned_unchanged:
             raise R3Error("production changed during R3 run")
-        production_protected_unchanged = production is None or _production_protected_equal(
+        production_workset_unchanged = production is None or _production_protected_equal(
             production_before, production_after
         )
-        if production is not None and not production_protected_unchanged:
+        if production is not None and not production_workset_unchanged:
             raise R3Error("production protected runtime changed during R3 run")
-        concurrent_source_drift = {
-            "detected": False,
+        excluded_scope_observation = {
+            "detected": None,
             "raw_tree_changed": None,
             "classification": "excluded-not-evaluated",
-            "harness_production_write": False,
-            "owned_clone_only": True,
+            "scope": dict(R3_EXCLUDED_NOT_EVALUATED),
         }
         result["manifest"] = {
             "external": external_clone,
@@ -3268,10 +3397,11 @@ def _run_once_guarded(
             "input_clone": {
                 "external": external_clone,
                 "filesystem": external_input_filesystem,
-                "immutable_tree_before": external_input_stable_tree_before,
-                "immutable_tree_after": external_input_stable_tree_after,
-                "immutable_unchanged": external_clone is False
+                "owned_scope_before": external_input_stable_tree_before,
+                "owned_scope_after": external_input_stable_tree_after,
+                "owned_scope_unchanged": external_clone is False
                 or external_input_stable_tree_after == external_input_stable_tree_before,
+                "excluded_not_evaluated": dict(R3_EXCLUDED_NOT_EVALUATED),
                 "root_identity_unchanged": external_clone is False
                 or external_input_identity_after == external_input_identity_before,
                 "workset_before": (
@@ -3300,7 +3430,7 @@ def _run_once_guarded(
                 "workset": _workset_identity(clone_workset_after),
                 "scope": _production_scope_identity(clone_scope_after),
             },
-            "immutable_unchanged": True,
+            "owned_scope_unchanged": True,
             "root_identity_unchanged": True,
             "inventory_before": clone_workset_before["inventory_sha256"],
             "inventory_after": clone_workset_after["inventory_sha256"],
@@ -3316,15 +3446,12 @@ def _run_once_guarded(
             "remaining": clone_remaining,
             "external_input_preserved": external_clone,
         }
-        result["concurrent_source_drift"] = concurrent_source_drift
-        result["production_protected_unchanged"] = production_protected_unchanged
-        result["production_workset_unchanged"] = production_protected_unchanged
-        result["workset_owned_unchanged"] = production_protected_unchanged
+        result["excluded_scope_observation"] = excluded_scope_observation
+        result["production_workset_unchanged"] = production_workset_unchanged
         result["production_write_boundary"] = {
             "path_overlap_rejected": True,
             "owned_clone_only": True,
-            "production_workset_unchanged": production_protected_unchanged,
-            "production_protected_unchanged": production_protected_unchanged,
+            "production_workset_unchanged": production_workset_unchanged,
             "owned_root": {
                 "filesystem": clone_filesystem,
                 "root_identity_unchanged": True,
@@ -3368,21 +3495,19 @@ def _run_once_guarded(
             },
             "production": {
                 "used": production is not None,
-                "production_workset_unchanged": production_protected_unchanged,
-                "protected_unchanged": production_protected_unchanged,
-                "workset_owned_unchanged": production_protected_unchanged,
+                "production_workset_unchanged": production_workset_unchanged,
                 "protected_before": production_before,
                 "protected_after": production_after,
                 "workset_before": production_workset_before,
                 "workset_after": production_workset_after,
                 "owned_before": production_owned_before,
                 "owned_after": production_owned_after,
-                "concurrent_source_drift": concurrent_source_drift,
+                "excluded_scope_observation": excluded_scope_observation,
                 "excluded_not_evaluated": dict(R3_EXCLUDED_NOT_EVALUATED),
                 "clone_boundary": {
                     "protected_before": production_before,
                     "protected_after": production_protected_clone_boundary,
-                    "protected_unchanged": production is None
+                    "workset_unchanged": production is None
                     or _production_protected_equal(
                         production_before, production_protected_clone_boundary
                     ),
@@ -3400,8 +3525,7 @@ def _run_once_guarded(
                 "production_write_boundary": {
                     "path_overlap_rejected": True,
                     "owned_clone_only": True,
-                    "production_workset_unchanged": production_protected_unchanged,
-                    "production_protected_unchanged": production_protected_unchanged,
+                    "production_workset_unchanged": production_workset_unchanged,
                     "owned_root": {
                         "filesystem": clone_filesystem,
                         "root_identity_unchanged": True,
@@ -3419,6 +3543,8 @@ def _run_once_guarded(
             "duplicates": result["duplicates"],
             "clone_workset": clone_workset,
             "sigterm_process": result["sigterm_process"],
+            "actual_clone_sigterm": result["actual_clone_sigterm"],
+            "synthetic_sigterm_reopen": result["synthetic_sigterm_reopen"],
             "samples": result["samples"],
             "admitted_cycles": result["admitted_cycles"],
             "successful_cycles": result["claim"]["successful_count"],
@@ -3459,6 +3585,54 @@ def _run_once_guarded(
         _assert_output_safe(output)
         if production is not None:
             _assert_root_matrix(production, source_root, output)
+        # The completion receipt is published only after an independent
+        # source/Workset boundary recheck.  The same semantic values are
+        # re-read once more after completion readback below; that post-readback
+        # probe is compared with this sealed boundary and the initial pre-run
+        # identity, so a late mutation cannot be hidden by artifact timing.
+        completion_source = _source_snapshot(source_root)
+        completion_source_head = _git_head(source_root)
+        _assert_source_clean(completion_source, when="before completion receipt")
+        if completion_source != source_before or completion_source_head != source_head_before:
+            raise R3Error("source changed before completion receipt")
+        completion_production = (
+            _production_snapshot(
+                production,
+                include_raw=False,
+                store=store,
+                require_checkpoint_file_state=True,
+            )
+            if production is not None
+            else None
+        )
+        completion_production_owned = (
+            _production_owned_snapshot(production, store)
+            if production is not None
+            else None
+        )
+        completion_workset_unchanged = production is None or (
+            _production_protected_equal(production_before, completion_production)
+            and completion_production_owned == production_owned_before
+        )
+        if not completion_workset_unchanged:
+            raise R3Error("production Workset changed before completion receipt")
+        completion_boundary = {
+            "source": {
+                "before": source_before,
+                "after": completion_source,
+                "head_before": source_head_before,
+                "head_after": completion_source_head,
+            },
+            "production": {
+                "scope": "workset-only",
+                "protected_before": production_before,
+                "protected_after": completion_production,
+                "owned_before": production_owned_before,
+                "owned_after": completion_production_owned,
+                "production_workset_unchanged": completion_workset_unchanged,
+                "excluded_not_evaluated": dict(R3_EXCLUDED_NOT_EVALUATED),
+            },
+        }
         completion_started_ns = time.time_ns()
         completion_probe = {
             "started_at_ns": completion_started_ns,
@@ -3472,6 +3646,7 @@ def _run_once_guarded(
             "completion_probe": completion_probe,
             "readback_verified": True,
             "source_commit": source_commit,
+            "completion_boundary": completion_boundary,
         }
         through_main_readback_wall = {
             "started_at_ns": formal_started_ns,
@@ -3506,8 +3681,57 @@ def _run_once_guarded(
             != artifact_after["sha256"]
             or completion_readback.get("through_main_readback_wall")
             != through_main_readback_wall
+            or completion_readback.get("completion_boundary") != completion_boundary
         ):
             raise R3Error("R3 completion receipt readback mismatch")
+        final_source = _source_snapshot(source_root)
+        final_source_head = _git_head(source_root)
+        _assert_source_clean(final_source, when="after completion receipt readback")
+        final_production = (
+            _production_snapshot(
+                production,
+                include_raw=False,
+                store=store,
+                require_checkpoint_file_state=True,
+            )
+            if production is not None
+            else None
+        )
+        final_production_owned = (
+            _production_owned_snapshot(production, store)
+            if production is not None
+            else None
+        )
+        final_workset_unchanged = production is None or (
+            _production_protected_equal(production_before, final_production)
+            and final_production_owned == production_owned_before
+        )
+        if (
+            final_source != completion_source
+            or final_source_head != completion_source_head
+            or not final_workset_unchanged
+            or not _production_protected_equal(completion_production, final_production)
+            or final_production_owned != completion_production_owned
+        ):
+            raise R3Error("source or production Workset changed after completion readback")
+        final_scope_recheck = {
+            "source": {
+                "after_completion_readback": final_source,
+                "head_after_completion_readback": final_source_head,
+                "matches_sealed_boundary": final_source == completion_source
+                and final_source_head == completion_source_head,
+            },
+            "production": {
+                "protected_after_completion_readback": final_production,
+                "owned_after_completion_readback": final_production_owned,
+                "production_workset_unchanged": final_workset_unchanged,
+                "matches_sealed_boundary": _production_protected_equal(
+                    completion_production, final_production
+                )
+                and final_production_owned == completion_production_owned,
+                "excluded_not_evaluated": dict(R3_EXCLUDED_NOT_EVALUATED),
+            },
+        }
         final_artifact_probe = _artifact_file_snapshot(artifact_path)
         if final_artifact_probe != artifact_after:
             raise R3Error("R3 main artifact changed after completion publication")
@@ -3530,6 +3754,12 @@ def _run_once_guarded(
             "completion_receipt_readback_observed": True,
         }
         result["formal_wall"] = outer_end_to_end_wall
+        result["post_completion_readback"] = {
+            "scope": final_scope_recheck,
+            "completion_wall": completion_wall,
+            "outer_end_to_end_wall": outer_end_to_end_wall,
+            "authority": "external-watchdog-attestation",
+        }
         result["completion_receipt"] = {
             "schema": completion_artifact["schema"],
             "artifact_id": completion_id,
@@ -3544,12 +3774,12 @@ def _run_once_guarded(
             "main_artifact_persistence_included": True,
             "main_artifact_readback_included": True,
             "probe": completion_probe,
-            "completion_wall": completion_wall,
             "through_main_readback_wall": through_main_readback_wall,
-            "outer_end_to_end_wall": outer_end_to_end_wall,
+            "completion_boundary": completion_boundary,
         }
         _assert_formal_acceptance(result, payload["source"])
         _assert_payload_free(result["completion_receipt"])
+        _assert_payload_free(result["post_completion_readback"])
         return {
             "schema": artifact["schema"],
             "artifact_id": artifact_id,
@@ -3567,6 +3797,7 @@ def _run_once_guarded(
             "artifact_path_rechecked": artifact_before["path"] == artifact_after["path"],
             "formal_wall": result["formal_wall"],
             "completion_receipt": result["completion_receipt"],
+            "post_completion_readback": result["post_completion_readback"],
             "clone_cleanup_verified": True,
         }
     finally:
