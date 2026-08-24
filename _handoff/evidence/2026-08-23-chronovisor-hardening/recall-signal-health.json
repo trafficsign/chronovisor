@@ -2,8 +2,8 @@
   "schema_version": 1,
   "schema": "chronovisor.hardening.recall-signal-health.v1",
   "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
-  "captured_at": "2026-08-24T10:21:45+09:00",
-  "status": "pending_deployment_boundary",
+  "captured_at": "2026-08-24T11:05:32+09:00",
+  "status": "deployed_cohort_pending",
   "privacy": {
     "prompt_content_persisted": false,
     "query_content_persisted": false,
@@ -23,30 +23,47 @@
     "production_replayable_rate": 1.0
   },
   "deployment": {
-    "commit": null,
-    "started_at": null,
-    "active_hosts": [],
-    "status": "pending"
+    "commit": "5b096b94d8409f8452ed4aa9daa13ad084242a8e",
+    "implementation_commit": "a8046429a80239d79c3157ee7da92b7277f30ef7",
+    "started_at": "2026-08-24T11:02:10+09:00",
+    "active_hosts": [
+      "codex"
+    ],
+    "status": "deployed_cohort_pending"
   },
   "gate": {
     "minimum_hours": 24,
     "minimum_exact_receipts_per_active_host": 100,
-    "observed_hours": 0,
-    "active_hosts": [],
-    "by_host": {},
-    "status": "pending_deployment"
+    "observed_hours": 0.056166,
+    "active_hosts": [
+      "codex"
+    ],
+    "by_host": {
+      "codex": {
+        "exact_exposure_receipts": 1,
+        "receipts_remaining": 99
+      }
+    },
+    "status": "pending_minimum_duration_and_sample"
   },
   "cohort": {
-    "eligible_episodes": 0,
-    "exact_exposure_receipts": 0,
-    "identity_missing": 0,
-    "used_page_ids_missing": 0,
-    "orphan_receipts": 0,
-    "duplicate_receipts": 0,
-    "production_replayable": 0,
+    "eligible_episodes": 1,
+    "exact_exposure_receipts": 1,
+    "identity_missing": null,
+    "used_page_ids_missing": null,
+    "orphan_receipts": null,
+    "duplicate_receipts": null,
+    "production_replayable": null,
     "production_replayable_rate": null,
-    "used_decisions": 0,
+    "used_decisions": null,
     "used_rate": null,
-    "note": "Zero rows before the deployment boundary is not a passing cohort. Used rate remains descriptive and is not an authority gate."
+    "receipt_observation": {
+      "host": "codex",
+      "kind": "prospective-page-exposure",
+      "decision": "read",
+      "selected_count": 3,
+      "timed_out": false
+    },
+    "note": "The first exact receipt proves the deployed append path. Identity, used-page, orphan, duplicate, and production-replayable gates remain unevaluated until the minimum 24-hour and 100-receipt cohort exists; used rate remains descriptive only."
   }
 }

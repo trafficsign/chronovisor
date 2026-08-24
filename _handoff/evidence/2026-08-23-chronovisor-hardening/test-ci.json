@@ -306,5 +306,31 @@
       }
     }
   },
+  "deployment_receipt": {
+    "head": "5b096b94d8409f8452ed4aa9daa13ad084242a8e",
+    "origin_main": "5b096b94d8409f8452ed4aa9daa13ad084242a8e",
+    "github_required_jobs": {
+      "status": "passed",
+      "quality": {
+        "run_id": 32679896603,
+        "conclusion": "success"
+      },
+      "python_3_14": {
+        "run_id": 32679896577,
+        "conclusion": "success"
+      },
+      "security": {
+        "run_id": 32679896607,
+        "conclusion": "success"
+      }
+    },
+    "runtime_alignment": {
+      "required_services": 5,
+      "running_services": 5,
+      "archive_direct_url_commit_match": true,
+      "runtime_commit_drift": false
+    },
+    "note": "This receipt commit contains documentation and acceptance artifacts only; executable behavior is the unchanged a804642 implementation already covered by the two isolated 5378-pass suites above."
+  },
   "phase_exit": "passed_remote_required_jobs"
 }

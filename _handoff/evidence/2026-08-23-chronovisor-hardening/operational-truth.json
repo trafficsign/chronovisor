@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
-  "captured_at": "2026-08-23T21:32:05+09:00",
+  "captured_at": "2026-08-24T11:07:13+09:00",
   "focused_verification": {
     "command": "uv run pytest -q tests/test_runtime_status.py tests/test_health.py tests/test_dashboard.py tests/test_reranker_service.py tests/test_cli.py",
     "passed": 217,
@@ -39,7 +39,93 @@
   },
   "live_snapshot": {
     "status": "alert",
-    "reason": "Current ingest liveness is stale and Librarian reports BLOCKED; the implementation preserves rather than masks this runtime truth.",
-    "deployment_performed": false
+    "reason": "All five managed services are aligned and the live runtime remains running with ready mutation authority, while the five-minute ingest liveness receipt became stale during the active long-running batch. API and DOM expose the alert instead of masking it.",
+    "deployment_performed": true,
+    "implementation_commit": "a8046429a80239d79c3157ee7da92b7277f30ef7",
+    "deployment_commit": "5b096b94d8409f8452ed4aa9daa13ad084242a8e",
+    "expected_runtime_commit": "5b096b94d8409f8452ed4aa9daa13ad084242a8e",
+    "runtime_commit_drift": false,
+    "service_alignment": {
+      "observed_at": "2026-08-24T11:00:50+09:00",
+      "semantic": {
+        "state": "running",
+        "parent_pid": 48768,
+        "child_pid": 48781,
+        "archive": "BWqngm0Q4TB4fBOiIRvvp"
+      },
+      "reranker": {
+        "state": "running",
+        "parent_pid": 45975,
+        "child_pid": 45995,
+        "archive": "ssPbZMSvEVwSpm3CDPO0t"
+      },
+      "dashboard": {
+        "state": "running",
+        "parent_pid": 47159,
+        "child_pid": 47179,
+        "archive": "kvlPCCoakhSXT7JeKBUnc"
+      },
+      "lan_dashboard": {
+        "state": "running",
+        "parent_pid": 48130,
+        "child_pid": 48147,
+        "archive": "kvlPCCoakhSXT7JeKBUnc"
+      },
+      "ingest_drain": {
+        "state": "running",
+        "parent_pid": 64179,
+        "child_pid": 64196,
+        "archive": "kvlPCCoakhSXT7JeKBUnc"
+      },
+      "archive_direct_url_commit_match": true
+    },
+    "api": {
+      "initial_post_restart": {
+        "observed_at": "2026-08-24T11:00:50+09:00",
+        "health_status": "ok",
+        "materialized_snapshot_stale": true,
+        "materialized_snapshot_refreshing": false,
+        "ingest_liveness_stale": false,
+        "ingest_liveness_alert": false,
+        "runtime_state": "running",
+        "runtime_stage": "local-consensus-review",
+        "active_failure": null,
+        "mutation_ready": true,
+        "pending_raws": 2249
+      },
+      "followup": {
+        "observed_at": "2026-08-24T11:06:25+09:00",
+        "health_status": "alert",
+        "materialized_snapshot_stale": true,
+        "ingest_liveness_stale": true,
+        "ingest_liveness_ttl_seconds": 300,
+        "runtime_state": "running",
+        "runtime_stage": "local-consensus-review",
+        "active_failure": null,
+        "mutation_ready": true,
+        "pending_raws": 2249
+      },
+      "lan_unauthenticated_http_status": 401
+    },
+    "dom": {
+      "observed_at": "2026-08-24T11:06:25+09:00",
+      "header_state": "running",
+      "memory_health_status": "alert",
+      "authority": "ready",
+      "stale": true,
+      "refreshing": false,
+      "console_errors_or_warnings": 0
+    },
+    "distillation_boundary": {
+      "sleep_service": "bootout",
+      "converge_service": "bootout",
+      "ox_enabled": false,
+      "ox_free_only": true,
+      "distillation_processes": 0,
+      "lock_holders": 0,
+      "workset_total": 32522,
+      "workset_distinct": 32522,
+      "workset_leased": 0
+    }
   }
 }

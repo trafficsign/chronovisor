@@ -2,9 +2,10 @@
   "schema_version": 1,
   "schema": "chronovisor.hardening.final-acceptance.v1",
   "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
-  "captured_at": "2026-08-24T10:21:45+09:00",
-  "status": "deployment_alignment_pending",
+  "captured_at": "2026-08-24T11:07:13+09:00",
+  "status": "deployment_complete_cohort_pending",
   "candidate_commit": "a8046429a80239d79c3157ee7da92b7277f30ef7",
+  "deployment_commit": "5b096b94d8409f8452ed4aa9daa13ad084242a8e",
   "dry_run_contract": {
     "mutating_rollback_executed": false,
     "method": "Evaluate every trigger with read-only commands and existing immutable receipts; execute rollback only when the trigger is present.",
@@ -91,9 +92,12 @@
         "host_wrapper_timeout_observability": "not represented in pre-deploy structured records"
       },
       "after": {
-        "status": "pending_postdeploy_cohort",
-        "observed_hours": 0,
-        "active_hosts": []
+        "status": "pending_minimum_duration_and_sample",
+        "observed_hours": 0.056166,
+        "active_hosts": [
+          "codex"
+        ],
+        "eligible": 1
       },
       "result": "evaluated_pending_cohort_baseline_known_miss",
       "rollback_action": "Keep the Plan running and do not loosen thresholds. If the qualified post-deploy cohort fails, run the existing Recall policy rollback, verify status and health, and revert only the implicated availability commit."
@@ -112,12 +116,17 @@
       "after": {
         "health_status": "alert",
         "ingest_liveness_stale": true,
+        "materialized_snapshot_stale": true,
         "runtime_state": "running",
-        "runtime_stage": "triage",
+        "runtime_stage": "local-consensus-review",
         "active_failure": null,
-        "mutation_ready": true
+        "mutation_ready": true,
+        "dashboard_status": "alert",
+        "dashboard_authority": "ready",
+        "dashboard_console_errors_or_warnings": 0,
+        "note": "The liveness TTL alert is visible in both API and DOM while the independently refreshed runtime status remains running."
       },
-      "result": "not_triggered",
+      "result": "not_triggered_current_alert_visible",
       "rollback_action": "Revert only the Dashboard health overlay or runtime-identity consumer commit, push before refreshing Dashboard and LAN, and preserve the backend failure state."
     },
     {
@@ -159,7 +168,12 @@
         "failed": 0,
         "skipped_per_run": 1,
         "security_run_id": 32678810991,
-        "required_jobs": "passed"
+        "required_jobs": "passed",
+        "deployment_receipt_head": "5b096b94d8409f8452ed4aa9daa13ad084242a8e",
+        "deployment_receipt_quality_run_id": 32679896603,
+        "deployment_receipt_python_3_14_run_id": 32679896577,
+        "deployment_receipt_security_run_id": 32679896607,
+        "deployment_receipt_required_jobs": "passed"
       },
       "result": "not_triggered",
       "rollback_action": "Revert the failing candidate commit, push before restart, refresh only affected services, then rerun isolated full, static, and required CI gates."
@@ -176,9 +190,21 @@
         "semantic_and_reranker_commit": "80669dc2f918c9f2bacb0156eb1fb3981df5443c"
       },
       "after": {
-        "status": "pending_safe_ingest_boundary_and_final_restart"
+        "status": "aligned",
+        "pushed_commit": "5b096b94d8409f8452ed4aa9daa13ad084242a8e",
+        "expected_runtime_commit": "5b096b94d8409f8452ed4aa9daa13ad084242a8e",
+        "runtime_commit_drift": false,
+        "archives": {
+          "semantic": "BWqngm0Q4TB4fBOiIRvvp",
+          "reranker": "ssPbZMSvEVwSpm3CDPO0t",
+          "dashboard": "kvlPCCoakhSXT7JeKBUnc",
+          "lan_dashboard": "kvlPCCoakhSXT7JeKBUnc",
+          "ingest_drain": "kvlPCCoakhSXT7JeKBUnc"
+        },
+        "all_required_services_running": true,
+        "old_github_backed_workers_present": false
       },
-      "result": "trigger_present_restart_pending",
+      "result": "not_triggered",
       "rollback_action": "Refresh all affected managed services from the last known-good pushed commit, then rerun runtime identity, health, status, socket readiness, archive equality, and DOM checks."
     }
   ]

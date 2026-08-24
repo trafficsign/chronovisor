@@ -211,10 +211,15 @@
     }
   },
   "deferred": {
-    "push_authorized": false,
-    "origin_main": "87872fdf4199229bda7f73c55bd066b7e9d90c6b",
-    "phase_5b_remote_required_jobs": "pending",
-    "phase_6_live_cohort": "pending",
-    "plan_state": "running"
+    "push_authorized": true,
+    "origin_main": "5b096b94d8409f8452ed4aa9daa13ad084242a8e",
+    "phase_5b_remote_required_jobs": "passed",
+    "phase_6_live_cohort": "pending_minimum_duration_and_sample",
+    "plan_state": "running",
+    "historical_before_push": {
+      "push_authorized": false,
+      "origin_main": "87872fdf4199229bda7f73c55bd066b7e9d90c6b",
+      "phase_5b_remote_required_jobs": "pending"
+    }
   }
 }
