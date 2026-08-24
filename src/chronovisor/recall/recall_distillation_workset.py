@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS work_items (
     lease_id TEXT,
     lease_owner TEXT,
     lease_expires_at REAL,
+    next_attempt_at REAL,
     completion_ref TEXT NOT NULL DEFAULT '',
     completion_digest TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
@@ -350,7 +351,9 @@ def _item(value: Mapping[str, Any], watermark_json: str) -> tuple[Any, ...]:
 def _selection_sha256(values: Iterable[Mapping[str, Any]]) -> str:
     try:
         return canonical_json_sha256_strict(
-            sorted((dict(value) for value in values), key=lambda value: value["work_id"])
+            sorted(
+                (dict(value) for value in values), key=lambda value: value["work_id"]
+            )
         )
     except (KeyError, OverflowError, RecursionError, TypeError, ValueError) as exc:
         raise DistillationWorksetError("receipt selection is invalid") from exc
@@ -435,6 +438,18 @@ class DistillationWorkset:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:
             connection.executescript(_SCHEMA)
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(work_items)")
+            }
+            if "next_attempt_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE work_items ADD COLUMN next_attempt_at REAL"
+                )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS work_items_retry_due "
+                "ON work_items(kind, state, next_attempt_at, priority DESC, sequence ASC)"
+            )
             self._secure_sqlite_files()
 
     def _now(self) -> float:
@@ -485,7 +500,9 @@ class DistillationWorkset:
             try:
                 watermark = json.loads(value_json)
             except (RecursionError, json.JSONDecodeError) as exc:
-                raise DistillationWorksetError("watermark state is invalid JSON") from exc
+                raise DistillationWorksetError(
+                    "watermark state is invalid JSON"
+                ) from exc
             watermark = _metadata_value(watermark, "watermark")
             _json(watermark, "watermark")
         return {"counts": counts, "watermark": watermark}
@@ -602,7 +619,9 @@ class DistillationWorkset:
             for state in _RECEIPT_STATES:
                 count = raw_counts[state]
                 if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-                    raise DistillationWorksetError("workset receipt counts are corrupted")
+                    raise DistillationWorksetError(
+                        "workset receipt counts are corrupted"
+                    )
                 counts[state] = count
             watermark = _metadata_value(value["watermark"], "receipt watermark")
             return {"counts": counts, "watermark": watermark}
@@ -675,30 +694,55 @@ class DistillationWorkset:
                 raise DistillationWorksetError("workset lease receipt is corrupted")
             _digest(details["selection_sha256"], "receipt selection_sha256")
             if operation == "claim_reclaim":
-                expected = {"ready": count, "leased": -count, "completed": 0, "quarantined": 0}
+                expected = {
+                    "ready": count,
+                    "leased": -count,
+                    "completed": 0,
+                    "quarantined": 0,
+                }
             elif operation == "claim":
-                expected = {"ready": -count, "leased": count, "completed": 0, "quarantined": 0}
+                expected = {
+                    "ready": -count,
+                    "leased": count,
+                    "completed": 0,
+                    "quarantined": 0,
+                }
             else:
-                expected = {"ready": count, "leased": -count, "completed": 0, "quarantined": 0}
+                expected = {
+                    "ready": count,
+                    "leased": -count,
+                    "completed": 0,
+                    "quarantined": 0,
+                }
             if delta != expected:
                 raise DistillationWorksetError("workset lease delta is invalid")
         else:
-            if set(details) != {
-                "completed",
-                "retry",
-                "quarantined",
-                "selection_sha256",
-            }:
+            legacy_keys = {"completed", "retry", "quarantined", "selection_sha256"}
+            timed_keys = {*legacy_keys, "retry_wait", "retry_schedule_sha256"}
+            if set(details) not in (legacy_keys, timed_keys):
                 raise DistillationWorksetError("workset commit receipt is corrupted")
+            if set(details) == timed_keys and (
+                isinstance(details.get("retry_wait"), bool)
+                or not isinstance(details.get("retry_wait"), int)
+                or details["retry_wait"] < 0
+                or details["retry_wait"] > details["retry"]
+            ):
+                raise DistillationWorksetError("workset commit receipt is corrupted")
+            if set(details) == timed_keys:
+                _digest(
+                    details["retry_schedule_sha256"], "receipt retry_schedule_sha256"
+                )
             totals = {
-                state: details[state]
-                for state in ("completed", "retry", "quarantined")
+                state: details[state] for state in ("completed", "retry", "quarantined")
             }
             _digest(details["selection_sha256"], "receipt selection_sha256")
-            if any(
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-                for value in totals.values()
-            ) or sum(totals.values()) < 1:
+            if (
+                any(
+                    isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    for value in totals.values()
+                )
+                or sum(totals.values()) < 1
+            ):
                 raise DistillationWorksetError("workset commit receipt is corrupted")
             expected = {
                 "ready": totals["retry"],
@@ -758,14 +802,19 @@ class DistillationWorkset:
                     or not isinstance(payload_json, str)
                     or not isinstance(receipt_sha256, str)
                     or len(receipt_sha256) != 64
-                    or any(character not in "0123456789abcdef" for character in receipt_sha256)
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in receipt_sha256
+                    )
                     or row["previous_sha256"] != previous_sha256
                 ):
                     raise DistillationWorksetError("workset receipt chain is corrupted")
                 try:
                     payload = json.loads(payload_json)
                 except (RecursionError, json.JSONDecodeError) as exc:
-                    raise DistillationWorksetError("workset receipt JSON is invalid") from exc
+                    raise DistillationWorksetError(
+                        "workset receipt JSON is invalid"
+                    ) from exc
                 if (
                     _json(
                         payload,
@@ -774,12 +823,13 @@ class DistillationWorkset:
                     )
                     != payload_json
                 ):
-                    raise DistillationWorksetError("workset receipt JSON is not canonical")
+                    raise DistillationWorksetError(
+                        "workset receipt JSON is not canonical"
+                    )
                 before, after, _, _ = self._validate_receipt_payload(operation, payload)
                 if prior_after is None:
                     legacy_origin = (
-                        before["counts"]
-                        != {state: 0 for state in _RECEIPT_STATES}
+                        before["counts"] != {state: 0 for state in _RECEIPT_STATES}
                         or before["watermark"] is not None
                     )
                 elif _json(
@@ -910,9 +960,9 @@ class DistillationWorkset:
                     (watermark_json,),
                 )
                 after = self._snapshot(connection)
-                watermark_changed = _json(
-                    before["watermark"], "watermark"
-                ) != _json(after["watermark"], "watermark")
+                watermark_changed = _json(before["watermark"], "watermark") != _json(
+                    after["watermark"], "watermark"
+                )
                 if inserted or rebound or watermark_changed:
                     self._append_receipt(
                         connection,
@@ -1017,7 +1067,9 @@ class DistillationWorkset:
                 )
                 reclaimed = reclaim_result.rowcount
                 if reclaimed != len(expired_rows):
-                    raise DistillationWorksetError("expired lease reclaim is inconsistent")
+                    raise DistillationWorksetError(
+                        "expired lease reclaim is inconsistent"
+                    )
                 if reclaimed:
                     after_reclaim = self._snapshot(connection)
                     self._append_receipt(
@@ -1037,10 +1089,11 @@ class DistillationWorkset:
                            temporal_split_json, provenance_json, priority, attempt_count
                     FROM work_items
                     WHERE kind = ? AND state = 'ready'
+                      AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                     ORDER BY priority DESC, sequence ASC
                     LIMIT ?
                     """,
-                    (kind, limit),
+                    (kind, now, limit),
                 ).fetchall()
                 for row in rows:
                     lease_id = uuid.uuid4().hex
@@ -1049,6 +1102,7 @@ class DistillationWorkset:
                         UPDATE work_items
                         SET state = 'leased', lease_id = ?, lease_owner = ?,
                             lease_expires_at = ?, attempt_count = attempt_count + 1,
+                            next_attempt_at = NULL,
                             updated_at = ?
                         WHERE work_id = ? AND state = 'ready'
                         """,
@@ -1158,7 +1212,7 @@ class DistillationWorkset:
                         UPDATE work_items
                         SET state = 'ready', attempt_count = attempt_count - 1,
                             lease_id = NULL, lease_owner = NULL,
-                            lease_expires_at = NULL, updated_at = ?
+                            lease_expires_at = NULL, next_attempt_at = NULL, updated_at = ?
                         WHERE work_id = ?
                         """,
                         (now, claim.work_id),
@@ -1214,6 +1268,7 @@ class DistillationWorkset:
         totals = {"completed": 0, "retry": 0, "quarantined": 0}
         changed_totals = {"completed": 0, "retry": 0, "quarantined": 0}
         changed_claims: list[WorkClaim] = []
+        changed_outcomes: list[dict[str, Any]] = []
         now = self._now()
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1264,7 +1319,7 @@ class DistillationWorkset:
                             SET state = 'completed', completion_ref = ?,
                                 completion_digest = ?, last_error_class = '',
                                 lease_id = NULL, lease_owner = NULL,
-                                lease_expires_at = NULL, updated_at = ?
+                                lease_expires_at = NULL, next_attempt_at = NULL, updated_at = ?
                             WHERE work_id = ?
                             """,
                             (
@@ -1283,14 +1338,23 @@ class DistillationWorkset:
                             UPDATE work_items
                             SET state = ?, last_error_class = ?, lease_id = NULL,
                                 lease_owner = NULL, lease_expires_at = NULL,
-                                updated_at = ?
+                                next_attempt_at = ?, updated_at = ?
                             WHERE work_id = ?
                             """,
-                            (state, outcome["error_class"], now, claim.work_id),
+                            (
+                                state,
+                                outcome["error_class"],
+                                now + outcome["retry_after_seconds"]
+                                if outcome["status"] == "retry"
+                                else None,
+                                now,
+                                claim.work_id,
+                            ),
                         )
                     totals[outcome["status"]] += 1
                     changed_totals[outcome["status"]] += 1
                     changed_claims.append(claim)
+                    changed_outcomes.append(outcome)
                 if sum(changed_totals.values()) > 0:
                     after = self._snapshot(connection)
                     self._append_receipt(
@@ -1300,9 +1364,27 @@ class DistillationWorkset:
                         after,
                         {
                             **changed_totals,
-                            "selection_sha256": _claim_selection_sha256(
-                                changed_claims
+                            "retry_wait": sum(
+                                1
+                                for outcome in normalized
+                                if outcome["status"] == "retry"
+                                and outcome["retry_after_seconds"] > 0
                             ),
+                            "retry_schedule_sha256": canonical_json_sha256_strict(
+                                [
+                                    {
+                                        "work_id": claim.work_id,
+                                        "retry_after_seconds": outcome[
+                                            "retry_after_seconds"
+                                        ],
+                                    }
+                                    for claim, outcome in zip(
+                                        changed_claims, changed_outcomes, strict=True
+                                    )
+                                    if outcome["status"] == "retry"
+                                ]
+                            ),
+                            "selection_sha256": _claim_selection_sha256(changed_claims),
                         },
                     )
                 self._secure_sqlite_files()
@@ -1314,7 +1396,9 @@ class DistillationWorkset:
                 raise
         return totals
 
-    def status(self, kind: str | None = None) -> dict[str, int]:
+    def status(
+        self, kind: str | None = None, *, include_timing: bool = False
+    ) -> dict[str, int]:
         """Return state counters without exposing work payloads."""
 
         if kind is not None:
@@ -1327,22 +1411,62 @@ class DistillationWorkset:
             "completed": 0,
             "quarantined": 0,
         }
+        timing_rows: Sequence[sqlite3.Row] = ()
         with closing(self._connect()) as connection:
             rows = connection.execute(
                 f"SELECT state, COUNT(*) AS count FROM work_items{where} GROUP BY state",
                 parameters,
             ).fetchall()
+            if include_timing:
+                timing_where = " WHERE state = 'ready'" + (
+                    " AND kind = ?" if kind is not None else ""
+                )
+                timing_rows = connection.execute(
+                    "SELECT next_attempt_at, created_at FROM work_items" + timing_where,
+                    parameters,
+                ).fetchall()
         for row in rows:
             counts[str(row["state"])] = int(row["count"])
         counts["backlog"] = counts["ready"] + counts["leased"]
         counts["total"] = sum(
             counts[state] for state in ("ready", "leased", "completed", "quarantined")
         )
+        if include_timing:
+            now = self._now()
+            due = [
+                row
+                for row in timing_rows
+                if row["next_attempt_at"] is None or row["next_attempt_at"] <= now
+            ]
+            waiting = [
+                row
+                for row in timing_rows
+                if row["next_attempt_at"] is not None and row["next_attempt_at"] > now
+            ]
+            counts["retry_wait"] = len(waiting)
+            counts["oldest_backlog_age_seconds"] = int(
+                max((now - row["created_at"] for row in timing_rows), default=0)
+            )
+            counts["oldest_ready_age_seconds"] = int(
+                max((now - row["created_at"] for row in due), default=0)
+            )
+            counts["oldest_retry_wait_age_seconds"] = int(
+                max((now - row["created_at"] for row in waiting), default=0)
+            )
+            counts["next_retry_in_seconds"] = int(
+                min((row["next_attempt_at"] - now for row in waiting), default=0)
+            )
         return counts
 
     @staticmethod
-    def _outcome(claim: WorkClaim, value: Mapping[str, Any]) -> dict[str, str]:
-        allowed = {"status", "error_class", "completion_ref", "completion_digest"}
+    def _outcome(claim: WorkClaim, value: Mapping[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "status",
+            "error_class",
+            "completion_ref",
+            "completion_digest",
+            "retry_after_seconds",
+        }
         unexpected = set(value).difference(allowed)
         if unexpected:
             raise DistillationWorksetError(
@@ -1356,6 +1480,8 @@ class DistillationWorkset:
         if status == "completed" and error_class:
             raise DistillationWorksetError("completed work cannot have an error_class")
         if status == "completed":
+            if "retry_after_seconds" in value:
+                raise DistillationWorksetError("completed work cannot delay retry")
             return {
                 "status": status,
                 "error_class": "",
@@ -1365,14 +1491,23 @@ class DistillationWorkset:
                 "completion_digest": _digest(
                     value.get("completion_digest"), "completion_digest"
                 ),
+                "retry_after_seconds": 0.0,
             }
         if not error_class:
             raise DistillationWorksetError("non-completed work requires error_class")
         if "completion_ref" in value or "completion_digest" in value:
             raise DistillationWorksetError("failed work cannot include a completion")
+        retry_after = _finite(
+            value.get("retry_after_seconds", 0), "retry_after_seconds"
+        )
+        if retry_after < 0 or retry_after > 86_400:
+            raise DistillationWorksetError("retry_after_seconds is out of range")
+        if status != "retry" and retry_after:
+            raise DistillationWorksetError("quarantined work cannot delay retry")
         return {
             "status": status,
             "error_class": error_class,
             "completion_ref": "",
             "completion_digest": "",
+            "retry_after_seconds": retry_after,
         }

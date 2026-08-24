@@ -37,6 +37,99 @@ def _completed() -> dict[str, str]:
     }
 
 
+def test_retry_wait_is_due_before_reclaim_and_sealed_in_receipt(tmp_path: Path) -> None:
+    now = [100.0]
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3", clock=lambda: now[0])
+    workset.advance([_item("retry")], {"source": 1})
+    claim = workset.claim("label", 1, "worker", 60)[0]
+
+    workset.commit(
+        [claim],
+        [
+            {
+                "status": "retry",
+                "error_class": "transport_error",
+                "retry_after_seconds": 30,
+            }
+        ],
+    )
+    assert workset.claim("label", 1, "worker", 60) == ()
+    status = workset.status("label", include_timing=True)
+    assert status["retry_wait"] == 1
+    assert status["oldest_backlog_age_seconds"] == 0
+    assert status["oldest_retry_wait_age_seconds"] == 0
+    assert status["next_retry_in_seconds"] == 30
+    assert workset.audit_transition_receipts()["status"] == "verified"
+
+    now[0] += 30
+    assert workset.claim("label", 1, "worker", 60)[0].work_id == "retry"
+
+
+def test_terminal_retry_attempt_quarantines_without_retry_delay(tmp_path: Path) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance([_item("invalid")], {"source": 1})
+    for attempt in range(1, 4):
+        claim = workset.claim("label", 1, "worker", 60)[0]
+        workset.commit(
+            [claim],
+            [
+                {
+                    "status": "quarantined" if attempt >= 3 else "retry",
+                    "error_class": "invalid_teacher_output",
+                    "retry_after_seconds": 0,
+                }
+            ],
+        )
+    assert workset.status("label")["quarantined"] == 1
+
+
+def test_legacy_database_migrates_retry_column_without_losing_rows_or_receipts(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "workset.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE work_items (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT, work_id TEXT NOT NULL UNIQUE,
+                kind TEXT NOT NULL, payload_ref TEXT NOT NULL, payload_digest TEXT NOT NULL,
+                temporal_split_json TEXT NOT NULL, provenance_json TEXT NOT NULL,
+                priority INTEGER NOT NULL, watermark_json TEXT NOT NULL, state TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0, last_error_class TEXT NOT NULL DEFAULT '',
+                lease_id TEXT, lease_owner TEXT, lease_expires_at REAL,
+                completion_ref TEXT NOT NULL DEFAULT '', completion_digest TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL, updated_at REAL NOT NULL
+            );
+            CREATE TABLE workset_state (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+            CREATE TABLE workset_receipts (
+                generation INTEGER PRIMARY KEY, previous_sha256 TEXT NOT NULL,
+                operation TEXT NOT NULL, payload_json TEXT NOT NULL,
+                receipt_sha256 TEXT NOT NULL UNIQUE
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO work_items (work_id, kind, payload_ref, payload_digest, "
+            "temporal_split_json, provenance_json, priority, watermark_json, state, created_at, updated_at) "
+            "VALUES ('legacy', 'label', 'candidate-ledger:legacy', ?, '{}', '{}', 0, '{}', 'ready', 1, 1)",
+            ("a" * 64,),
+        )
+        connection.execute(
+            "INSERT INTO workset_state VALUES ('watermark', '{\"source\":1}')"
+        )
+
+    workset = DistillationWorkset(path)
+    assert workset.watermark() == {"source": 1}
+    assert workset.status()["ready"] == 1
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT next_attempt_at FROM work_items"
+        ).fetchone() == (None,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM workset_receipts"
+        ).fetchone() == (0,)
+
+
 def _split_item(
     work_id: str, plan_id: str, *, split: str = "train"
 ) -> dict[str, object]:
@@ -576,6 +669,7 @@ def test_commit_wraps_invalid_claim_metadata_and_rolls_back(tmp_path: Path) -> N
         workset.commit([invalid], [_completed()])
 
     assert workset.status("label")["leased"] == 1
+
 
 @pytest.mark.parametrize(
     "payload_ref",
