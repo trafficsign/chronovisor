@@ -1266,6 +1266,11 @@ def _rebind_clone_checkpoints(catalog: Any, source: Path, destination: Path) -> 
 
     source_index_path = catalog.historical_index_path(source)
     source_index = catalog._read_index_checkpoint(source_index_path)
+    if source_index is None:
+        source_index = catalog._read_index_checkpoint(
+            source_index_path,
+            content_digest_schema=catalog.LEGACY_HISTORICAL_INDEX_DIGEST_SCHEMA,
+        )
     clone_index_path = catalog.historical_index_path(destination)
     if source_index is not None:
         clone_index_state = catalog._index_file_state(clone_index_path)
@@ -1297,8 +1302,15 @@ def _rebind_clone_checkpoints(catalog: Any, source: Path, destination: Path) -> 
         rebound_catalog,
         str(source_index["content_sha256"]),
         int(source_index["atom_count"]),
+        content_digest_schema=str(source_index["content_digest_schema"]),
     )
-    if catalog._read_index_checkpoint(clone_index_path) is None:
+    if (
+        catalog._read_index_checkpoint(
+            clone_index_path,
+            content_digest_schema=str(source_index["content_digest_schema"]),
+        )
+        is None
+    ):
         raise R2Error("cloned FTS checkpoint rebind failed")
 
 

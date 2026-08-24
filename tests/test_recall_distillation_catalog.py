@@ -773,11 +773,13 @@ def test_historical_index_conflicting_atom_fails_closed(tmp_path: Path) -> None:
         catalog.sync_historical_index(raw_dir, tmp_path)
 
 
-def test_historical_index_rebuild_has_the_same_digest(tmp_path: Path) -> None:
+def test_catalog_and_historical_index_rebuild_have_the_same_digest(
+    tmp_path: Path,
+) -> None:
     init_chronovisor(RuntimeContext(tmp_path))
     raw_dir = _capture(
         tmp_path,
-        "save-codex-one.md",
+        "save-codex-z.md",
         "a" * 24,
         [_message("assistant", "first", "2026-08-01T00:00:00Z")],
     )
@@ -785,7 +787,7 @@ def test_historical_index_rebuild_has_the_same_digest(tmp_path: Path) -> None:
     first = catalog.sync_historical_index(raw_dir, tmp_path)
     _capture(
         tmp_path,
-        "save-codex-two.md",
+        "save-codex-a.md",
         "b" * 24,
         [_message("assistant", "second", "2026-08-02T00:00:00Z")],
     )
@@ -794,9 +796,109 @@ def test_historical_index_rebuild_has_the_same_digest(tmp_path: Path) -> None:
     index_path = catalog.historical_index_path(tmp_path)
     index_path.unlink()
     catalog._index_checkpoint_path(index_path).unlink()
+    catalog.catalog_path(tmp_path).unlink()
+    catalog._catalog_checkpoint_path(tmp_path).unlink()
+    catalog.advance(raw_dir, tmp_path, 4096)
 
     assert first != advanced
     assert catalog.sync_historical_index(raw_dir, tmp_path) == advanced
+
+
+def test_historical_index_digest_is_order_independent_and_incremental() -> None:
+    first = {"atom_id": "a" * 64, "catalog_rowid": 2}
+    second = {"atom_id": "b" * 64, "catalog_rowid": 1}
+
+    expected = catalog._index_digest({"first": first, "second": second})
+
+    assert catalog._index_digest({"second": second, "first": first}) == expected
+    assert (
+        catalog._advance_index_digest(catalog._index_digest({"first": first}), [second])
+        == expected
+    )
+
+
+def test_historical_index_migrates_v1_after_catalog_rowids_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-z.md",
+        "a" * 24,
+        [
+            _message("user", "first", "2026-08-01T00:00:00Z"),
+            _message("assistant", "first answer", "2026-08-01T00:00:01Z"),
+        ],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    catalog.sync_historical_index(raw_dir, tmp_path)
+    _capture(
+        tmp_path,
+        "save-codex-m.md",
+        "b" * 24,
+        [
+            _message("user", "second", "2026-08-02T00:00:00Z"),
+            _message("assistant", "second answer", "2026-08-02T00:00:01Z"),
+        ],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    catalog.sync_historical_index(raw_dir, tmp_path)
+    index_path = catalog.historical_index_path(tmp_path)
+    old_atoms = catalog._catalog_assistant_atoms(tmp_path)
+    legacy_digest = catalog._legacy_index_digest(old_atoms)
+    with sqlite3.connect(index_path) as connection:
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='content_sha256'",
+            (legacy_digest,),
+        )
+    catalog_checkpoint = catalog._read_catalog_checkpoint(tmp_path)
+    assert catalog_checkpoint is not None
+    catalog._write_index_checkpoint(
+        index_path,
+        catalog_checkpoint,
+        legacy_digest,
+        len(old_atoms),
+        content_digest_schema=catalog.LEGACY_HISTORICAL_INDEX_DIGEST_SCHEMA,
+    )
+
+    _capture(
+        tmp_path,
+        "save-codex-a.md",
+        "a" * 24,
+        [_message("assistant", "tail answer", "2026-08-01T00:00:02Z")],
+        after_line=2,
+    )
+    catalog.catalog_path(tmp_path).unlink()
+    catalog._catalog_checkpoint_path(tmp_path).unlink()
+    catalog.advance(raw_dir, tmp_path, 4096)
+    rebuilt_atoms = catalog._catalog_assistant_atoms(tmp_path)
+    assert legacy_digest != catalog._legacy_index_digest(
+        {atom_id: rebuilt_atoms[atom_id] for atom_id in old_atoms}
+    )
+
+    original_read = RawStore.iter_segment_bytes
+    reads: list[str] = []
+
+    def record_read(
+        self: RawStore, raw_ids: Iterable[str] | None = None
+    ) -> Iterator[tuple[object, bytes]]:
+        for unit, raw in original_read(self, raw_ids):
+            reads.append(unit.raw_id)
+            yield unit, raw
+
+    monkeypatch.setattr(RawStore, "iter_segment_bytes", record_read)
+    digest = catalog.sync_historical_index(raw_dir, tmp_path)
+
+    assert reads == ["save-codex-a.md"]
+    with sqlite3.connect(index_path) as connection:
+        assert (
+            dict(connection.execute("SELECT key,value FROM metadata"))["content_sha256"]
+            == digest
+        )
+    checkpoint = catalog._read_index_checkpoint(index_path)
+    assert checkpoint is not None
+    assert checkpoint["content_digest_schema"] == catalog.HISTORICAL_INDEX_DIGEST_SCHEMA
+    assert checkpoint["atom_count"] == len(rebuilt_atoms)
 
 
 def test_index_checkpoint_loss_inserts_pending_atoms(tmp_path: Path) -> None:
@@ -832,6 +934,44 @@ def test_index_checkpoint_loss_inserts_pending_atoms(tmp_path: Path) -> None:
     assert found
 
 
+def test_legacy_index_checkpoint_rejects_non_hex_digest(tmp_path: Path) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [_message("assistant", "answer", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    catalog.sync_historical_index(raw_dir, tmp_path)
+    index_path = catalog.historical_index_path(tmp_path)
+    invalid_digest = "g" * 64
+    with sqlite3.connect(index_path) as connection:
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='content_sha256'",
+            (invalid_digest,),
+        )
+    catalog_checkpoint = catalog._read_catalog_checkpoint(tmp_path)
+    assert catalog_checkpoint is not None
+    catalog._write_index_checkpoint(
+        index_path,
+        catalog_checkpoint,
+        invalid_digest,
+        1,
+        content_digest_schema=catalog.LEGACY_HISTORICAL_INDEX_DIGEST_SCHEMA,
+    )
+
+    assert (
+        catalog._read_index_checkpoint(
+            index_path,
+            content_digest_schema=catalog.LEGACY_HISTORICAL_INDEX_DIGEST_SCHEMA,
+        )
+        is None
+    )
+    with pytest.raises(catalog.CatalogError, match="content digest conflicts"):
+        catalog.sync_historical_index(raw_dir, tmp_path)
+
+
 def test_historical_index_checkpoint_mismatch_revalidates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -848,20 +988,35 @@ def test_historical_index_checkpoint_mismatch_revalidates(
     catalog.advance(raw_dir, tmp_path, 4096)
     digest = catalog.sync_historical_index(raw_dir, tmp_path)
     index_path = catalog.historical_index_path(tmp_path)
+    expected = catalog._catalog_assistant_atoms(tmp_path)
+    with sqlite3.connect(index_path) as connection:
+        indexed, _verified = catalog._index_atoms(connection, expected)
+        bootstrap_digest = canonical_json_sha256_strict(
+            sorted(indexed.values(), key=lambda atom: str(atom["atom_id"]))
+        )
+        connection.execute(
+            "UPDATE metadata SET value=? WHERE key='content_sha256'",
+            (bootstrap_digest,),
+        )
     catalog._index_checkpoint_path(index_path).write_text("{}", encoding="utf-8")
     inspect = catalog._index_atoms
     calls = 0
 
     def tracked_inspect(
-        connection: sqlite3.Connection, expected: object
+        connection: sqlite3.Connection, expected: object, **kwargs: object
     ) -> tuple[dict[str, dict[str, object]], str]:
         nonlocal calls
         calls += 1
-        return inspect(connection, expected)
+        return inspect(connection, expected, **kwargs)
 
     monkeypatch.setattr(catalog, "_index_atoms", tracked_inspect)
     assert catalog.sync_historical_index(raw_dir, tmp_path) == digest
     assert calls == 1
+    with sqlite3.connect(index_path) as connection:
+        assert (
+            dict(connection.execute("SELECT key,value FROM metadata"))["content_sha256"]
+            == digest
+        )
 
     state = index_path.stat()
     os.utime(index_path, ns=(state.st_atime_ns, state.st_mtime_ns + 1_000_000))

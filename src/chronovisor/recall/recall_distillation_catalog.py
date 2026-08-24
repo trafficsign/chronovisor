@@ -29,7 +29,8 @@ from chronovisor.recall import recall_distillation_store as store
 CATALOG_SCHEMA = "chronovisor.recall-distillation-catalog.v1"
 HISTORICAL_INDEX_SCHEMA = "chronovisor.recall-historical-fts.v1"
 HISTORICAL_INDEX_CHECKPOINT_KIND = "historical-index-checkpoint"
-HISTORICAL_INDEX_DIGEST_SCHEMA = "historical-fts-chain-v1"
+LEGACY_HISTORICAL_INDEX_DIGEST_SCHEMA = "historical-fts-chain-v1"
+HISTORICAL_INDEX_DIGEST_SCHEMA = "historical-fts-multiset-v2"
 CANDIDATE_SNAPSHOT_SCHEMA = "chronovisor.recall-candidate-snapshot.v1"
 CANDIDATE_INDEX_SCHEMA = "chronovisor.recall-candidate-offset-index.v1"
 
@@ -171,6 +172,8 @@ def _write_index_checkpoint(
     catalog_checkpoint: Mapping[str, Any],
     digest: str,
     count: int,
+    *,
+    content_digest_schema: str = HISTORICAL_INDEX_DIGEST_SCHEMA,
 ) -> None:
     store.write_sealed_state(
         _index_checkpoint_path(path),
@@ -178,7 +181,7 @@ def _write_index_checkpoint(
             "kind": HISTORICAL_INDEX_CHECKPOINT_KIND,
             "index_name": path.name,
             "historical_index_schema": HISTORICAL_INDEX_SCHEMA,
-            "content_digest_schema": HISTORICAL_INDEX_DIGEST_SCHEMA,
+            "content_digest_schema": content_digest_schema,
             "catalog_watermark": catalog_checkpoint["catalog_watermark"],
             "catalog_event_rowid": catalog_checkpoint["event_rowid"],
             "catalog_file_state": catalog_checkpoint["file_state"],
@@ -189,7 +192,11 @@ def _write_index_checkpoint(
     )
 
 
-def _read_index_checkpoint(path: Path) -> dict[str, Any] | None:
+def _read_index_checkpoint(
+    path: Path,
+    *,
+    content_digest_schema: str = HISTORICAL_INDEX_DIGEST_SCHEMA,
+) -> dict[str, Any] | None:
     try:
         checkpoint = store.read_sealed(
             _index_checkpoint_path(path), schema=store.DISTILLATION_SCHEMA
@@ -200,13 +207,17 @@ def _read_index_checkpoint(path: Path) -> dict[str, Any] | None:
         checkpoint.get("kind") != HISTORICAL_INDEX_CHECKPOINT_KIND
         or checkpoint.get("index_name") != path.name
         or checkpoint.get("historical_index_schema") != HISTORICAL_INDEX_SCHEMA
-        or checkpoint.get("content_digest_schema") != HISTORICAL_INDEX_DIGEST_SCHEMA
+        or checkpoint.get("content_digest_schema") != content_digest_schema
         or not isinstance(checkpoint.get("catalog_watermark"), str)
         or not isinstance(checkpoint.get("catalog_event_rowid"), int)
         or isinstance(checkpoint.get("catalog_event_rowid"), bool)
         or checkpoint["catalog_event_rowid"] < 0
         or not isinstance(checkpoint.get("content_sha256"), str)
         or len(checkpoint["content_sha256"]) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in checkpoint["content_sha256"]
+        )
         or not isinstance(checkpoint.get("atom_count"), int)
         or isinstance(checkpoint.get("atom_count"), bool)
         or checkpoint["atom_count"] < 0
@@ -2155,7 +2166,10 @@ def _catalog_assistant_atoms(
 
 
 def _index_atoms(
-    connection: sqlite3.Connection, expected: Mapping[str, Mapping[str, Any]]
+    connection: sqlite3.Connection,
+    expected: Mapping[str, Mapping[str, Any]],
+    *,
+    legacy_checkpoint: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], str]:
     try:
         metadata = dict(connection.execute("SELECT key,value FROM metadata"))
@@ -2229,10 +2243,20 @@ def _index_atoms(
             "text": text,
         }
     digest = _index_digest({atom_id: expected[atom_id] for atom_id in atoms})
-    legacy_digest = canonical_json_sha256_strict(
+    legacy_chain_digest = _legacy_index_digest(
+        {atom_id: expected[atom_id] for atom_id in atoms}
+    )
+    legacy_canonical_digest = canonical_json_sha256_strict(
         sorted(atoms.values(), key=lambda atom: str(atom["atom_id"]))
     )
-    if metadata.get("content_sha256") not in {digest, legacy_digest}:
+    accepted_digests = {digest, legacy_chain_digest, legacy_canonical_digest}
+    if (
+        legacy_checkpoint is not None
+        and legacy_checkpoint.get("content_sha256") == metadata.get("content_sha256")
+        and legacy_checkpoint.get("atom_count") == len(records)
+    ):
+        accepted_digests.add(str(metadata["content_sha256"]))
+    if metadata.get("content_sha256") not in accepted_digests:
         raise CatalogError("historical index content digest conflicts")
     return atoms, digest
 
@@ -2255,10 +2279,11 @@ def _resolved_atoms(
 
 
 def _index_digest(atoms: Mapping[str, Mapping[str, Any]]) -> str:
-    """Hash the catalog-row ordered atom chain without scanning old FTS rows."""
+    """Build an order-independent checksum for the unique assistant atom set."""
 
     return _advance_index_digest(
-        hashlib.sha256(HISTORICAL_INDEX_DIGEST_SCHEMA.encode()).hexdigest(), atoms.values()
+        hashlib.sha256(f"{HISTORICAL_INDEX_DIGEST_SCHEMA}\0seed".encode()).hexdigest(),
+        atoms.values(),
     )
 
 
@@ -2266,13 +2291,23 @@ def _advance_index_digest(previous: str, added: Iterable[Mapping[str, Any]]) -> 
     if len(previous) != 64:
         raise CatalogError("historical index digest is invalid")
     try:
-        state = bytes.fromhex(previous)
+        state = int(previous, 16)
     except ValueError as exc:
         raise CatalogError("historical index digest is invalid") from exc
-    for atom in sorted(added, key=lambda value: int(value["catalog_rowid"])):
-        state = hashlib.sha256(
-            state + str(atom["atom_id"]).encode() + b"\0"
+    for atom in added:
+        term = hashlib.sha256(
+            f"{HISTORICAL_INDEX_DIGEST_SCHEMA}\0atom\0{atom['atom_id']}".encode()
         ).digest()
+        state = (state + int.from_bytes(term, "big")) % (1 << 256)
+    return f"{state:064x}"
+
+
+def _legacy_index_digest(atoms: Mapping[str, Mapping[str, Any]]) -> str:
+    state = bytes.fromhex(
+        hashlib.sha256(LEGACY_HISTORICAL_INDEX_DIGEST_SCHEMA.encode()).hexdigest()
+    )
+    for atom in sorted(atoms.values(), key=lambda value: int(value["catalog_rowid"])):
+        state = hashlib.sha256(state + str(atom["atom_id"]).encode() + b"\0").digest()
     return state.hex()
 
 
@@ -2288,6 +2323,14 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
         raise CatalogError("catalog checkpoint requires repair")
     path = historical_index_path(root)
     checkpoint = _read_index_checkpoint(path)
+    legacy_checkpoint = (
+        _read_index_checkpoint(
+            path,
+            content_digest_schema=LEGACY_HISTORICAL_INDEX_DIGEST_SCHEMA,
+        )
+        if checkpoint is None and path.exists()
+        else None
+    )
     if (
         checkpoint is not None
         and checkpoint["catalog_watermark"] == watermark
@@ -2340,7 +2383,9 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
             connection.execute("PRAGMA synchronous=FULL")
             connection.execute("BEGIN IMMEDIATE")
             added = _resolved_atoms(raw_dir, pending)
-            digest = _advance_index_digest(str(checkpoint["content_sha256"]), added.values())
+            digest = _advance_index_digest(
+                str(checkpoint["content_sha256"]), added.values()
+            )
             for atom in added.values():
                 cursor = connection.execute(
                     """INSERT INTO atoms(
@@ -2391,7 +2436,9 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
         connection.execute("PRAGMA journal_mode=DELETE")
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("BEGIN IMMEDIATE")
-        indexed, digest = _index_atoms(connection, expected)
+        indexed, digest = _index_atoms(
+            connection, expected, legacy_checkpoint=legacy_checkpoint
+        )
         pending = {
             atom_id: atom
             for atom_id, atom in expected.items()
