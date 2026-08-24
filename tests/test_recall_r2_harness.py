@@ -217,11 +217,45 @@ def test_clone_checkpoint_rebind_keeps_delta_incremental(tmp_path: Path) -> None
     catalog.sync_historical_index(base / "raw", base)
     shutil.copytree(base, clone, copy_function=shutil.copy2)
 
-    assert catalog._read_catalog_checkpoint(base) is not None
+    source_catalog = catalog._read_catalog_checkpoint(base)
+    assert source_catalog is not None
     assert catalog._read_catalog_checkpoint(clone) is None
     HARNESS._rebind_clone_checkpoints(catalog, base, clone)
-    assert catalog._read_catalog_checkpoint(clone) is not None
-    assert catalog._read_index_checkpoint(catalog.historical_index_path(clone))
+    clone_catalog = catalog._read_catalog_checkpoint(clone)
+    clone_index = catalog._read_index_checkpoint(catalog.historical_index_path(clone))
+    assert clone_catalog is not None and clone_index is not None
+    assert clone_catalog["catalog_lineage"] != source_catalog["catalog_lineage"]
+    assert clone_index["catalog_lineage"] == clone_catalog["catalog_lineage"]
+
+    source_index_path = catalog._index_checkpoint_path(
+        catalog.historical_index_path(base)
+    )
+    source_index_checkpoint = store.read_sealed(
+        source_index_path, schema=store.DISTILLATION_SCHEMA
+    )
+    mismatched = dict(source_index_checkpoint)
+    source_lineage = str(source_index_checkpoint["catalog_lineage"])
+    mismatched["catalog_lineage"] = (
+        ("0" if source_lineage[0] != "0" else "1") + source_lineage[1:]
+    )
+    store.write_sealed_state(
+        source_index_path,
+        {
+            key: value
+            for key, value in mismatched.items()
+            if key not in {"schema", "namespace", "seal_sha256"}
+        },
+    )
+    with pytest.raises(HARNESS.R2Error, match="lineages differ"):
+        HARNESS._rebind_clone_checkpoints(catalog, base, clone)
+    store.write_sealed_state(
+        source_index_path,
+        {
+            key: value
+            for key, value in source_index_checkpoint.items()
+            if key not in {"schema", "namespace", "seal_sha256"}
+        },
+    )
 
     raw_store_module = sys.modules[RawStore.__module__]
     old_units = HARNESS._raw_units(raw_store_module, clone / "raw")
@@ -251,6 +285,68 @@ def test_clone_checkpoint_rebind_keeps_delta_incremental(tmp_path: Path) -> None
 
     HARNESS._assert_delta(metrics, new_id)
     assert result[0].status == "advanced"
+
+    source_checkpoint = store.read_sealed(
+        catalog._catalog_checkpoint_path(base), schema=store.DISTILLATION_SCHEMA
+    )
+    source_checkpoint.pop("catalog_lineage")
+    store.write_sealed_state(
+        catalog._catalog_checkpoint_path(base),
+        {
+            key: value
+            for key, value in source_checkpoint.items()
+            if key not in {"schema", "namespace", "seal_sha256"}
+        },
+    )
+    legacy_clone = (tmp_path / "legacy-clone").resolve()
+    shutil.copytree(base, legacy_clone, copy_function=shutil.copy2)
+    HARNESS._rebind_clone_checkpoints(catalog, base, legacy_clone)
+    legacy_catalog = catalog._read_catalog_checkpoint(legacy_clone)
+    legacy_index = catalog._read_index_checkpoint(catalog.historical_index_path(legacy_clone))
+    assert legacy_catalog is not None and legacy_index is not None
+    assert legacy_catalog["catalog_lineage"] == legacy_index["catalog_lineage"]
+
+
+def test_post_commit_crash_recovers_adversarial_catalog_lineage(tmp_path: Path) -> None:
+    from chronovisor.core import raw_segment
+    from chronovisor.core.raw_store import RawStore
+    from chronovisor.core.store import RuntimeContext, init_chronovisor
+    from chronovisor.recall import recall_distillation as distill
+    from chronovisor.recall import recall_distillation_catalog as catalog
+    from chronovisor.recall import recall_distillation_store as store
+
+    base = (tmp_path / "base").resolve()
+    init_chronovisor(RuntimeContext(base))
+    for session_key in ("c" * 24, "d" * 24, "e" * 24, "f" * 24):
+        HARNESS._append_events(
+            raw_segment,
+            base,
+            session_key=session_key,
+            after_line=0,
+            events=[HARNESS._message("assistant", session_key, 0)],
+            tag=f"baseline-{session_key[0]}",
+        )
+    catalog.advance(base / "raw", base, 4096)
+    catalog.sync_historical_index(base / "raw", base)
+    raw_store_module = sys.modules[RawStore.__module__]
+    root, receipt, clean_root = HARNESS._run_post_commit_crash(
+        base=base,
+        source_root=ROOT,
+        raw_segment=raw_segment,
+        catalog=catalog,
+        distill=distill,
+        store=store,
+        raw_store_module=raw_store_module,
+        context_bytes=4096,
+        old_units=HARNESS._raw_units(raw_store_module, base / "raw"),
+    )
+    try:
+        assert receipt["catalog_child_returncode"] == 137
+        assert receipt["fts_child_returncode"] == 137
+        assert receipt["parity"] is True
+    finally:
+        HARNESS._cleanup_clone(root)
+        HARNESS._cleanup_clone(clean_root)
 
 
 def test_clone_cleanup_is_verified(tmp_path: Path) -> None:

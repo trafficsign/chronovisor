@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import sqlite3
 import stat
 from collections import defaultdict
@@ -101,7 +102,30 @@ def _index_file_state(path: Path) -> dict[str, int] | None:
     }
 
 
-def _write_catalog_checkpoint(root: Path, watermark: str, event_rowid: int) -> None:
+def _new_catalog_lineage() -> str:
+    return secrets.token_hex(32)
+
+
+def _catalog_lineage(checkpoint: Mapping[str, Any]) -> str | None:
+    """Return a valid lineage, keeping sealed pre-lineage checkpoints readable."""
+
+    lineage = checkpoint.get("catalog_lineage")
+    if lineage is None:
+        return None
+    if (
+        not isinstance(lineage, str)
+        or len(lineage) != 64
+        or any(character not in "0123456789abcdef" for character in lineage)
+    ):
+        return None
+    return lineage
+
+
+def _write_catalog_checkpoint(
+    root: Path, watermark: str, event_rowid: int, *, catalog_lineage: str
+) -> None:
+    if _catalog_lineage({"catalog_lineage": catalog_lineage}) is None:
+        raise CatalogError("catalog lineage is invalid")
     store.write_sealed_state(
         _catalog_checkpoint_path(root),
         {
@@ -110,6 +134,7 @@ def _write_catalog_checkpoint(root: Path, watermark: str, event_rowid: int) -> N
             "catalog_schema": CATALOG_SCHEMA,
             "catalog_watermark": watermark,
             "event_rowid": event_rowid,
+            "catalog_lineage": catalog_lineage,
             "file_state": _index_file_state(catalog_path(root)),
         },
     )
@@ -131,6 +156,9 @@ def _read_catalog_checkpoint(root: Path) -> dict[str, Any] | None:
         or isinstance(checkpoint.get("event_rowid"), bool)
         or checkpoint["event_rowid"] < 0
         or checkpoint.get("file_state") != _index_file_state(catalog_path(root))
+        or (
+            "catalog_lineage" in checkpoint and _catalog_lineage(checkpoint) is None
+        )
     ):
         return None
     return checkpoint
@@ -184,6 +212,7 @@ def _write_index_checkpoint(
             "content_digest_schema": content_digest_schema,
             "catalog_watermark": catalog_checkpoint["catalog_watermark"],
             "catalog_event_rowid": catalog_checkpoint["event_rowid"],
+            "catalog_lineage": catalog_checkpoint["catalog_lineage"],
             "catalog_file_state": catalog_checkpoint["file_state"],
             "content_sha256": digest,
             "atom_count": count,
@@ -222,6 +251,9 @@ def _read_index_checkpoint(
         or isinstance(checkpoint.get("atom_count"), bool)
         or checkpoint["atom_count"] < 0
         or not isinstance(checkpoint.get("catalog_file_state"), dict)
+        or (
+            "catalog_lineage" in checkpoint and _catalog_lineage(checkpoint) is None
+        )
         or checkpoint.get("file_state") != _index_file_state(path)
     ):
         return None
@@ -1019,6 +1051,7 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
                 and (
                     prior_checkpoint is None
                     or prior_checkpoint["catalog_watermark"] != metadata.get("watermark")
+                    or _catalog_lineage(prior_checkpoint) is None
                 )
             )
             or bool({"source_after_line", "source_until_line"} - columns)
@@ -1141,6 +1174,11 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
         event_rowid = int(
             connection.execute("SELECT COALESCE(MAX(rowid),0) FROM events").fetchone()[0]
         )
+        catalog_lineage = (
+            _new_catalog_lineage()
+            if schema is None or repairing
+            else cast(str, _catalog_lineage(prior_checkpoint))
+        )
         connection.commit()
     except Exception:
         connection.rollback()
@@ -1148,7 +1186,9 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
     finally:
         connection.close()
     _ensure_private_file(catalog_path(root))
-    _write_catalog_checkpoint(root, watermark, event_rowid)
+    _write_catalog_checkpoint(
+        root, watermark, event_rowid, catalog_lineage=catalog_lineage
+    )
     return CatalogAdvance(
         status,
         watermark,
@@ -1641,12 +1681,18 @@ def sync_candidate_index(
                 )
                 connection.commit()
                 _ensure_private_file(catalog_path(root))
-                if catalog_checkpoint is not None:
+                lineage = (
+                    _catalog_lineage(catalog_checkpoint)
+                    if catalog_checkpoint is not None
+                    else None
+                )
+                if catalog_checkpoint is not None and lineage is not None:
                     _write_candidate_catalog_state(root, catalog_checkpoint)
                     _write_catalog_checkpoint(
                         root,
                         str(catalog_checkpoint["catalog_watermark"]),
                         int(catalog_checkpoint["event_rowid"]),
+                        catalog_lineage=lineage,
                     )
                 return {
                     "status": "noop",
@@ -1717,12 +1763,18 @@ def sync_candidate_index(
     finally:
         connection.close()
     _ensure_private_file(catalog_path(root))
-    if catalog_checkpoint is not None:
+    lineage = (
+        _catalog_lineage(catalog_checkpoint)
+        if catalog_checkpoint is not None
+        else None
+    )
+    if catalog_checkpoint is not None and lineage is not None:
         _write_candidate_catalog_state(root, catalog_checkpoint)
         _write_catalog_checkpoint(
             root,
             str(catalog_checkpoint["catalog_watermark"]),
             int(catalog_checkpoint["event_rowid"]),
+            catalog_lineage=lineage,
         )
     return {
         "status": status,
@@ -2319,6 +2371,7 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
     if (
         catalog_checkpoint is None
         or catalog_checkpoint["catalog_watermark"] != watermark
+        or _catalog_lineage(catalog_checkpoint) is None
     ):
         raise CatalogError("catalog checkpoint requires repair")
     path = historical_index_path(root)
@@ -2331,11 +2384,13 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
         if checkpoint is None and path.exists()
         else None
     )
+    checkpoint_for_validation = checkpoint or legacy_checkpoint
     if (
         checkpoint is not None
         and checkpoint["catalog_watermark"] == watermark
         and checkpoint["catalog_file_state"] == catalog_checkpoint["file_state"]
         and checkpoint["catalog_event_rowid"] == catalog_checkpoint["event_rowid"]
+        and _catalog_lineage(checkpoint) == _catalog_lineage(catalog_checkpoint)
     ):
         return str(checkpoint["content_sha256"])
     if not path.exists():
@@ -2364,6 +2419,7 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
     if (
         checkpoint is not None
         and checkpoint["catalog_event_rowid"] <= catalog_checkpoint["event_rowid"]
+        and _catalog_lineage(checkpoint) == _catalog_lineage(catalog_checkpoint)
     ):
         pending = _catalog_assistant_atoms(
             root, after_rowid=int(checkpoint["catalog_event_rowid"])
@@ -2437,7 +2493,7 @@ def sync_historical_index(raw_dir: Path, root: Path) -> str:
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("BEGIN IMMEDIATE")
         indexed, digest = _index_atoms(
-            connection, expected, legacy_checkpoint=legacy_checkpoint
+            connection, expected, legacy_checkpoint=checkpoint_for_validation
         )
         pending = {
             atom_id: atom

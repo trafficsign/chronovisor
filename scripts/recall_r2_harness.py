@@ -1286,11 +1286,21 @@ def _rebind_clone_checkpoints(catalog: Any, source: Path, destination: Path) -> 
             or source_index.get("catalog_file_state") != source_catalog_state
         ):
             raise R2Error("source catalog and FTS checkpoints differ")
+        source_catalog_lineage = catalog._catalog_lineage(source_catalog)
+        source_index_lineage = catalog._catalog_lineage(source_index)
+        if (
+            source_catalog_lineage is not None
+            and source_index_lineage is not None
+            and source_catalog_lineage != source_index_lineage
+        ):
+            raise R2Error("source catalog and FTS checkpoint lineages differ")
 
+    clone_lineage = catalog._new_catalog_lineage()
     catalog._write_catalog_checkpoint(
         destination,
         str(source_catalog["catalog_watermark"]),
         int(source_catalog["event_rowid"]),
+        catalog_lineage=clone_lineage,
     )
     rebound_catalog = catalog._read_catalog_checkpoint(destination)
     if rebound_catalog is None:
@@ -1658,7 +1668,7 @@ def _run_post_commit_crash(
             _raw_tree_state_digest(clean_root), base_raw_state, "post-commit clean"
         )
         crash_old_units = _raw_units(raw_store_module, root / "raw")
-        new_session = hashlib.sha256(b"r2-post-commit").hexdigest()[:24]
+        new_session = "fac9" * 6
         crash_events = [
             _message("user", "r2 crash query", 0),
             _message("assistant", "r2 crash answer", 1),
@@ -1701,8 +1711,10 @@ def _run_post_commit_crash(
         )
         if process.returncode != 137:
             raise R2Error(
-                "catalog post-commit child did not terminate at fault boundary"
+                "catalog post-commit child did not terminate at fault boundary "
+                f"(returncode={process.returncode})"
             )
+        catalog_child_returncode = process.returncode
         _, catalog_metrics = _measure(
             "catalog-post-commit-recovery",
             lambda: catalog.advance(root / "raw", root, context_bytes),
@@ -1726,7 +1738,11 @@ def _run_post_commit_crash(
             capture_output=True,
         )
         if process.returncode != 137:
-            raise R2Error("FTS post-commit child did not terminate at fault boundary")
+            raise R2Error(
+                "FTS post-commit child did not terminate at fault boundary "
+                f"(returncode={process.returncode})"
+            )
+        fts_child_returncode = process.returncode
         _, fts_metrics = _measure(
             "fts-post-commit-recovery",
             lambda: catalog.sync_historical_index(root / "raw", root),
@@ -1752,6 +1768,8 @@ def _run_post_commit_crash(
                 "fts": fts_metrics,
                 "raw_id": crash_raw_id,
                 "receipt_sha256": crash_receipt_sha,
+                "catalog_child_returncode": catalog_child_returncode,
+                "fts_child_returncode": fts_child_returncode,
                 "snapshot": snapshot,
                 "clean_reference": clean_snapshot,
                 "parity": True,

@@ -67,6 +67,17 @@ def _capture(
     return raw_dir
 
 
+def _rewrite_checkpoint(path: Path, checkpoint: dict[str, object]) -> None:
+    store.write_sealed_state(
+        path,
+        {
+            key: value
+            for key, value in checkpoint.items()
+            if key not in {"schema", "namespace", "seal_sha256"}
+        },
+    )
+
+
 def test_bootstrap_catalog_keeps_text_out_of_sqlite_and_resolves_refs(
     tmp_path: Path,
 ) -> None:
@@ -814,6 +825,185 @@ def test_historical_index_digest_is_order_independent_and_incremental() -> None:
     assert (
         catalog._advance_index_digest(catalog._index_digest({"first": first}), [second])
         == expected
+    )
+
+
+def test_catalog_lineage_stays_stable_for_normal_delta_and_candidate_sync(
+    tmp_path: Path,
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-c.md",
+        "c" * 24,
+        [_message("assistant", "c", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    catalog.sync_historical_index(raw_dir, tmp_path)
+    before = catalog._read_catalog_checkpoint(tmp_path)
+    assert before is not None
+    lineage = before["catalog_lineage"]
+    _capture(
+        tmp_path,
+        "save-codex-d.md",
+        "d" * 24,
+        [_message("assistant", "d", "2026-08-02T00:00:00Z")],
+    )
+
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "advanced"
+    catalog.sync_historical_index(raw_dir, tmp_path)
+    current = catalog._read_catalog_checkpoint(tmp_path)
+    index = catalog._read_index_checkpoint(catalog.historical_index_path(tmp_path))
+    assert current is not None and index is not None
+    assert current["catalog_lineage"] == lineage == index["catalog_lineage"]
+
+    ledger = store.distillation_dir(tmp_path) / "candidate-ledger.jsonl"
+    store.append_chain(
+        ledger,
+        {
+            "kind": "candidate-snapshot",
+            "rally_id": "rally-1",
+            "snapshot": _candidate_snapshot("rally-1", ["c1"]),
+        },
+    )
+    catalog.sync_candidate_index(tmp_path, ledger)
+    assert catalog._read_catalog_checkpoint(tmp_path)["catalog_lineage"] == lineage
+
+
+def test_catalog_checkpoint_loss_rebuilds_lineage_before_fts_delta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A post-commit checkpoint loss must not reuse the old FTS rowid cursor."""
+
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = tmp_path / "raw"
+    for raw_id in (
+        "save-codex-c.md",
+        "save-codex-d.md",
+        "save-codex-e.md",
+        "save-codex-f.md",
+    ):
+        _capture(
+            tmp_path,
+            raw_id,
+            raw_id.removeprefix("save-codex-").removesuffix(".md") * 24,
+            [_message("assistant", raw_id, "2026-08-01T00:00:00Z")],
+        )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    catalog.sync_historical_index(raw_dir, tmp_path)
+    old_checkpoint = catalog._read_catalog_checkpoint(tmp_path)
+    assert old_checkpoint is not None
+
+    _capture(
+        tmp_path,
+        "save-codex-a.md",
+        "a" * 24,
+        [_message("assistant", "post-commit tail", "2026-08-02T00:00:00Z")],
+    )
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "advanced"
+    catalog._catalog_checkpoint_path(tmp_path).unlink()
+
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "repaired"
+    repaired = catalog._read_catalog_checkpoint(tmp_path)
+    assert repaired is not None
+    assert repaired["catalog_lineage"] != old_checkpoint["catalog_lineage"]
+    calls = 0
+    inspect = catalog._index_atoms
+
+    def counted(
+        *args: object, **kwargs: object
+    ) -> tuple[dict[str, dict[str, object]], str]:
+        nonlocal calls
+        calls += 1
+        return inspect(*args, **kwargs)
+
+    monkeypatch.setattr(catalog, "_index_atoms", counted)
+    catalog.sync_historical_index(raw_dir, tmp_path)
+    assert calls == 1
+    with sqlite3.connect(catalog.historical_index_path(tmp_path)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM atoms").fetchone()[0] == 5
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM (SELECT atom_id FROM atoms GROUP BY atom_id HAVING COUNT(*) > 1)"
+            ).fetchone()[0]
+            == 0
+        )
+    index = catalog._read_index_checkpoint(catalog.historical_index_path(tmp_path))
+    assert index is not None and index["catalog_lineage"] == repaired["catalog_lineage"]
+
+
+@pytest.mark.parametrize("lineage", ["missing", None, "A" * 64])
+def test_catalog_lineage_legacy_migrates_and_malformed_fails_closed(
+    tmp_path: Path, lineage: str | None
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [_message("assistant", "answer", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    catalog.sync_historical_index(raw_dir, tmp_path)
+    checkpoint_path = catalog._catalog_checkpoint_path(tmp_path)
+    checkpoint = store.read_sealed(checkpoint_path, schema=store.DISTILLATION_SCHEMA)
+    if lineage == "missing":
+        checkpoint.pop("catalog_lineage")
+    else:
+        checkpoint["catalog_lineage"] = lineage
+    _rewrite_checkpoint(checkpoint_path, checkpoint)
+
+    if lineage != "missing":
+        assert catalog._read_catalog_checkpoint(tmp_path) is None
+        with pytest.raises(catalog.CatalogError, match="requires repair"):
+            catalog.sync_historical_index(raw_dir, tmp_path)
+    else:
+        legacy = catalog._read_catalog_checkpoint(tmp_path)
+        assert legacy is not None and "catalog_lineage" not in legacy
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "repaired"
+    migrated = catalog._read_catalog_checkpoint(tmp_path)
+    assert migrated is not None and migrated["catalog_lineage"] != lineage
+
+
+@pytest.mark.parametrize("lineage", ["missing", None])
+def test_missing_or_null_fts_lineage_forces_full_validation_then_migrates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lineage: str | None
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [_message("assistant", "answer", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    catalog.sync_historical_index(raw_dir, tmp_path)
+    path = catalog.historical_index_path(tmp_path)
+    checkpoint_path = catalog._index_checkpoint_path(path)
+    checkpoint = store.read_sealed(checkpoint_path, schema=store.DISTILLATION_SCHEMA)
+    if lineage == "missing":
+        checkpoint.pop("catalog_lineage")
+    else:
+        checkpoint["catalog_lineage"] = lineage
+    _rewrite_checkpoint(checkpoint_path, checkpoint)
+    if lineage is None:
+        assert catalog._read_index_checkpoint(path) is None
+    calls = 0
+    inspect = catalog._index_atoms
+
+    def counted(
+        *args: object, **kwargs: object
+    ) -> tuple[dict[str, dict[str, object]], str]:
+        nonlocal calls
+        calls += 1
+        return inspect(*args, **kwargs)
+
+    monkeypatch.setattr(catalog, "_index_atoms", counted)
+    catalog.sync_historical_index(raw_dir, tmp_path)
+    assert calls == 1
+    assert (
+        catalog._read_index_checkpoint(path)["catalog_lineage"]
+        == catalog._read_catalog_checkpoint(tmp_path)["catalog_lineage"]
     )
 
 
