@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from chronovisor.core import raw_store as raw_store_module
 from chronovisor.core.canonical_json import canonical_json_sha256_strict
 from chronovisor.core.raw_segment import append_capture
 from chronovisor.core.raw_store import RawStore
@@ -202,7 +203,7 @@ def test_steady_state_same_watermark_reads_no_raw_and_new_session_is_delta(
     assert reads == ["save-codex-two.md"]
 
 
-def test_warm_catalog_and_fts_skip_raw_inventory_identity_loop(
+def test_warm_catalog_and_fts_reuse_raw_snapshot_watermark(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     init_chronovisor(RuntimeContext(tmp_path))
@@ -215,14 +216,39 @@ def test_warm_catalog_and_fts_skip_raw_inventory_identity_loop(
     catalog.advance(raw_dir, tmp_path, 4096)
     digest = catalog.sync_historical_index(raw_dir, tmp_path)
 
-    def unexpected_inventory(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("warm path iterated the Raw inventory")
+    def unexpected_hash(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("warm path rehashed the Raw inventory")
 
-    monkeypatch.setattr(RawStore, "iter_segment_units", unexpected_inventory)
-    monkeypatch.setattr(catalog, "_unit_identity", unexpected_inventory)
+    monkeypatch.setattr(
+        raw_store_module, "_committed_segment_watermark", unexpected_hash
+    )
 
     assert catalog.advance(raw_dir, tmp_path, 4096).status == "noop"
     assert catalog.sync_historical_index(raw_dir, tmp_path) == digest
+
+
+def test_advance_checks_raw_identity_after_checkpoint_reseal(tmp_path: Path) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [_message("assistant", "answer", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    checkpoint = catalog._read_catalog_checkpoint(tmp_path)
+    assert checkpoint is not None
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        connection.execute("UPDATE raw_units SET raw_sha256=?", ("0" * 64,))
+    catalog._write_catalog_checkpoint(
+        tmp_path,
+        str(checkpoint["catalog_watermark"]),
+        int(checkpoint["event_rowid"]),
+        catalog_lineage=str(checkpoint["catalog_lineage"]),
+    )
+
+    with pytest.raises(catalog.CatalogError, match="digest conflicts"):
+        catalog.advance(raw_dir, tmp_path, 4096)
 
 
 def test_post_commit_crash_repairs_catalog_on_retry(

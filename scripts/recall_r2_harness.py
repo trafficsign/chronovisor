@@ -1134,6 +1134,15 @@ def _p95(values: list[int]) -> int:
     return ordered[max(0, math.ceil(len(ordered) * 0.95) - 1)]
 
 
+def _latency_summary(values: list[int]) -> str:
+    """Return bounded path-neutral timing diagnostics for a failed gate."""
+
+    return (
+        f"p95_ns={_p95(values)} min_ns={min(values)} max_ns={max(values)} "
+        f"values_ns={','.join(str(value) for value in values[:20])}"
+    )
+
+
 def _append_events(
     raw_segment: Any,
     root: Path,
@@ -2191,9 +2200,13 @@ def _run_once(
                 if R0._stat(catalog.historical_index_path(clone)) != prior_index_state:
                     raise R2Error("warm no-op rewrote FTS DB")
                 noop_metrics.append(metrics)
-            noop_p95 = _p95([int(row["wall_time_ns"]) for row in noop_metrics])
+            noop_values = [int(row["wall_time_ns"]) for row in noop_metrics]
+            noop_p95 = _p95(noop_values)
             if noop_p95 > 1_000_000_000:
-                raise R2Error("no-new-data p95 exceeded 1 second")
+                raise R2Error(
+                    "no-new-data latency gate failed "
+                    f"threshold_ns=1000000000 {_latency_summary(noop_values)}"
+                )
 
             session_key, tail_after = _catalog_session_tail(catalog, clone)
             delta_metrics: list[dict[str, Any]] = []
@@ -2285,9 +2298,13 @@ def _run_once(
                 ),
             }
             delta_outcomes[-1]["inventory"] = delta_inventory_validation["snapshot"]
-            delta_p95 = _p95([int(row["wall_time_ns"]) for row in delta_metrics])
+            delta_values = [int(row["wall_time_ns"]) for row in delta_metrics]
+            delta_p95 = _p95(delta_values)
             if delta_p95 > 15_000_000_000:
-                raise R2Error("1,000-event delta p95 exceeded 15 seconds")
+                raise R2Error(
+                    "delta latency gate failed "
+                    f"threshold_ns=15000000000 {_latency_summary(delta_values)}"
+                )
 
             tail_root = _clone_from_root(clone, catalog=catalog)
             clones.append(tail_root)

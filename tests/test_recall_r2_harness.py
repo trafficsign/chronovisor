@@ -25,6 +25,50 @@ def test_p95_uses_nearest_rank_without_float_rounding() -> None:
     assert HARNESS._p95([10, 1, 5, 2, 9]) == 10
 
 
+def test_latency_summary_is_bounded_and_path_neutral() -> None:
+    summary = HARNESS._latency_summary(list(range(1, 31)))
+    assert "p95_ns=29" in summary
+    assert "min_ns=1 max_ns=30" in summary
+    assert "values_ns=1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20" in summary
+    assert "21" not in summary
+    assert ":" not in summary
+
+
+def test_main_keeps_latency_diagnostics_when_the_gate_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    production = tmp_path / "production"
+    source = tmp_path / "source"
+    production.mkdir()
+    source.mkdir()
+
+    def failed(**_kwargs: object) -> object:
+        raise HARNESS.R2Error(
+            "no-new-data latency gate failed threshold_ns=1000000000 "
+            "p95_ns=2 min_ns=1 max_ns=2 values_ns=1,2"
+        )
+
+    monkeypatch.setattr(HARNESS, "_run_once", failed)
+    assert (
+        HARNESS.main(
+            [
+                "--production-root",
+                str(production),
+                "--source-root",
+                str(source),
+                "--source-commit",
+                "deadbeef",
+                "--dashboard-url",
+                "http://127.0.0.1:1",
+                "--output",
+                str(tmp_path / "evidence.json"),
+            ]
+        )
+        == 2
+    )
+    assert "p95_ns=2 min_ns=1 max_ns=2 values_ns=1,2" in capsys.readouterr().err
+
+
 def test_read_counters_separate_logical_and_physical_old_bytes() -> None:
     path = Path("/tmp/r2-segment")
     counters = HARNESS.ReadCounters(

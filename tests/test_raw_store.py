@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -395,8 +397,9 @@ def test_committed_watermark_cache_is_thread_safe_and_signature_bound(
     monkeypatch.setattr(
         raw_store_module, "_committed_segment_watermark", unexpected_hash
     )
+    warm_store = RawStore(raw_dir, mode="v2")
     with ThreadPoolExecutor(max_workers=4) as executor:
-        assert set(executor.map(lambda _: raw_store_module.committed_raw_watermark(raw_dir), range(8))) == {
+        assert set(executor.map(lambda _: warm_store.committed_segment_watermark(), range(8))) == {
             first
         }
     monkeypatch.undo()
@@ -422,6 +425,177 @@ def test_committed_watermark_cache_is_thread_safe_and_signature_bound(
     monkeypatch.setattr(raw_store_module, "_committed_segment_watermark", counted)
     assert raw_store_module.committed_raw_watermark(raw_dir) != first
     assert calls == 1
+
+
+def test_committed_snapshot_retries_append_after_load(
+    tmp_path: Path, monkeypatch
+) -> None:
+    raw_dir = tmp_path / "raw"
+    source = tmp_path / "session.jsonl"
+    source.write_bytes(b'{"source":"first"}\n')
+    _append(raw_dir, source, source.read_bytes())
+    with RawStore._segment_snapshots_lock:
+        RawStore._segment_snapshots.pop(raw_dir.resolve(), None)
+
+    original = RawStore._load_segment_units
+    loaded = threading.Event()
+    resume = threading.Event()
+    calls = 0
+
+    def paused_load(self: RawStore):
+        nonlocal calls
+        calls += 1
+        units = original(self)
+        if calls == 1:
+            loaded.set()
+            assert resume.wait(timeout=2)
+        return units
+
+    monkeypatch.setattr(RawStore, "_load_segment_units", paused_load)
+    result: list[tuple[tuple[object, ...], str]] = []
+
+    def snapshot() -> None:
+        result.append(RawStore(raw_dir, mode="v2").committed_segment_snapshot())
+
+    worker = threading.Thread(target=snapshot)
+    worker.start()
+    assert loaded.wait(timeout=2)
+    source.write_bytes(b'{"source":"second"}\n')
+    _append(
+        raw_dir,
+        source,
+        source.read_bytes(),
+        raw_id="save-second.md",
+        idempotency_key="second",
+        after_line=1,
+    )
+    resume.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert {unit.raw_id for unit in result[0][0]} == {
+        "save-shared.md",
+        "save-second.md",
+    }
+
+
+def test_committed_snapshot_retries_cached_watermark_after_append(
+    tmp_path: Path, monkeypatch
+) -> None:
+    raw_dir = tmp_path / "raw"
+    source = tmp_path / "session.jsonl"
+    source.write_bytes(b'{"source":"first"}\n')
+    _append(raw_dir, source, source.read_bytes())
+    RawStore(raw_dir, mode="v2").committed_segment_snapshot()
+
+    original = RawStore._segment_snapshot_signature
+    barrier = threading.Barrier(2)
+    appended = threading.Event()
+    calls = 0
+
+    def paused_signature(self: RawStore):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            barrier.wait(timeout=2)
+            assert appended.wait(timeout=2)
+        return original(self)
+
+    def append() -> None:
+        barrier.wait(timeout=2)
+        source.write_bytes(b'{"source":"second"}\n')
+        _append(
+            raw_dir,
+            source,
+            source.read_bytes(),
+            raw_id="save-second.md",
+            idempotency_key="second",
+            after_line=1,
+        )
+        appended.set()
+
+    appender = threading.Thread(target=append)
+    appender.start()
+    monkeypatch.setattr(RawStore, "_segment_snapshot_signature", paused_signature)
+    units, _watermark = RawStore(raw_dir, mode="v2").committed_segment_snapshot()
+    appender.join(timeout=2)
+    assert not appender.is_alive()
+    assert {unit.raw_id for unit in units} == {"save-shared.md", "save-second.md"}
+
+
+def test_committed_snapshot_fails_closed_when_indexes_keep_changing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    raw_dir = tmp_path / "raw"
+    source = tmp_path / "session.jsonl"
+    source.write_bytes(b'{"source":"first"}\n')
+    _append(raw_dir, source, source.read_bytes())
+    original = RawStore._segment_snapshot_signature
+    calls = 0
+
+    def changing_signature(self: RawStore):
+        nonlocal calls
+        calls += 1
+        return (*original(self), (str(calls), 0, 0, 0, 0, 0))
+
+    monkeypatch.setattr(RawStore, "_segment_snapshot_signature", changing_signature)
+    with pytest.raises(RawSegmentCorrupt, match="changed during snapshot"):
+        RawStore(raw_dir, mode="v2").committed_segment_snapshot()
+
+
+def test_committed_snapshot_cache_includes_index_ctime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    raw_dir = tmp_path / "raw"
+    source = tmp_path / "session.jsonl"
+    source.write_bytes(b'{"source":"first"}\n')
+    _append(raw_dir, source, source.read_bytes())
+    first = RawStore(raw_dir, mode="v2").committed_segment_watermark()
+    journal = next(raw_dir.glob("**/*.commits.jsonl"))
+    before = journal.stat()
+    original_text = journal.read_text(encoding="utf-8")
+    journal.write_text(
+        original_text.replace("shared", "mutate"), encoding="utf-8"
+    )
+    os.utime(journal, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = journal.stat()
+    assert after.st_size == before.st_size and after.st_mtime_ns == before.st_mtime_ns
+
+    calls = 0
+    original = raw_store_module._committed_segment_watermark
+
+    def counted(units):
+        nonlocal calls
+        calls += 1
+        return original(units)
+
+    monkeypatch.setattr(raw_store_module, "_committed_segment_watermark", counted)
+    assert RawStore(raw_dir, mode="v2").committed_segment_watermark() != first
+    assert calls == 1
+
+
+@pytest.mark.parametrize("sealed", [False, True])
+@pytest.mark.parametrize("rebind_parent", [False, True])
+def test_committed_snapshot_rejects_rebound_segment_index_symlink(
+    tmp_path: Path, sealed: bool, rebind_parent: bool
+) -> None:
+    raw_dir = tmp_path / "raw"
+    source = tmp_path / "session.jsonl"
+    source.write_bytes(b'{"source":"first"}\n')
+    receipt = _append(raw_dir, source, source.read_bytes())
+    if sealed:
+        seal_segment(receipt.data_path, remove_open=True)
+        index_path = next(raw_dir.glob("**/*.manifest.json"))
+    else:
+        index_path = next(raw_dir.glob("**/*.commits.jsonl"))
+    RawStore(raw_dir, mode="v2").committed_segment_snapshot()
+    target = index_path.parent if rebind_parent else index_path
+    external = tmp_path / "external" / target.name
+    external.parent.mkdir()
+    target.rename(external)
+    target.symlink_to(external, target_is_directory=rebind_parent)
+
+    with pytest.raises(RawSegmentCorrupt, match="index path is a symlink"):
+        RawStore(raw_dir, mode="v2").committed_segment_snapshot()
 
 
 def test_materialized_reference_projects_native_transcript_without_copying_it(

@@ -1023,21 +1023,13 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
         raise CatalogError("max_context_bytes must be positive")
     try:
         raw_store = RawStore(raw_dir, mode="v2")
-        watermark = raw_store.committed_segment_watermark()
+        units, watermark = raw_store.committed_segment_snapshot()
     except RawSegmentCorrupt as exc:
         raise CatalogError("committed Raw inventory is invalid") from exc
+    current = {unit.raw_id: unit for unit in units}
     prior_checkpoint = (
         _read_catalog_checkpoint(root) if catalog_path(root).exists() else None
     )
-    if (
-        prior_checkpoint is not None
-        and prior_checkpoint["catalog_watermark"] == watermark
-        and _catalog_lineage(prior_checkpoint) is not None
-        and _catalog_metadata_matches(root, watermark)
-    ):
-        return CatalogAdvance("noop", watermark, (), (), (), ())
-    units = list(raw_store.iter_segment_units())
-    current = {unit.raw_id: unit for unit in units}
     connection = _connect(root)
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -2142,29 +2134,21 @@ def _catalog_watermark(raw_dir: Path, root: Path) -> str:
         watermark = committed_raw_watermark(raw_dir)
     except RawSegmentCorrupt as exc:
         raise CatalogError("committed Raw inventory is invalid") from exc
-    if not catalog_path(root).exists():
-        raise CatalogError("historical catalog is absent")
-    if not _catalog_metadata_matches(root, watermark):
-        raise CatalogError("historical catalog is not current")
-    return watermark
-
-
-def _catalog_metadata_matches(root: Path, watermark: str) -> bool:
-    """Check the small catalog metadata binding before trusting a warm no-op."""
-
     path = catalog_path(root)
-    if path.is_symlink() or not path.is_file():
-        return False
+    if not path.exists():
+        raise CatalogError("historical catalog is absent")
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
             connection.row_factory = sqlite3.Row
             metadata = dict(connection.execute("SELECT key,value FROM metadata"))
+            if (
+                metadata.get("schema") != CATALOG_SCHEMA
+                or metadata.get("watermark") != watermark
+            ):
+                raise CatalogError("historical catalog is not current")
     except sqlite3.DatabaseError as exc:
         raise CatalogError("historical catalog is unreadable") from exc
-    return (
-        metadata.get("schema") == CATALOG_SCHEMA
-        and metadata.get("watermark") == watermark
-    )
+    return watermark
 
 
 def _catalog_assistant_atoms_from_rows(
