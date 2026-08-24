@@ -1048,7 +1048,7 @@ def test_authoritative_collector_rejects_persistent_root_directory_swap(
             swapped = True
             production.rename(old_production)
             replacement.rename(production)
-        return real_directory_identity(path, label=label)
+        return cast(dict[str, int], real_directory_identity(path, label=label))
 
     monkeypatch.setattr(
         HARNESS, "_production_directory_identity", swap_before_final_identity
