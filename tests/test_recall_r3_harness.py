@@ -43,6 +43,14 @@ def test_root_matrix_rejects_overlap_and_symlink(tmp_path: Path) -> None:
         HARNESS._assert_root_matrix(link, production, output)
 
 
+def test_output_tree_rejects_symlinks(tmp_path: Path) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "link").symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(HARNESS.R3Error, match="symlink"):
+        HARNESS._assert_output_safe(output)
+
+
 def test_payload_free_guard_rejects_payload_fields() -> None:
     HARNESS._assert_payload_free({"payload_free": True, "count": 1})
     with pytest.raises(HARNESS.R3Error, match="payload"):

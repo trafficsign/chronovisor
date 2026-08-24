@@ -144,6 +144,13 @@ def _assert_root_matrix(
             raise R3Error(f"{name} root is not a directory")
 
 
+def _assert_output_safe(output: Path) -> None:
+    if output.exists() and not output.is_dir():
+        raise R3Error("output root is not a directory")
+    if output.is_dir() and any(path.is_symlink() for path in output.rglob("*")):
+        raise R3Error("output tree contains a symlink")
+
+
 def _git_head(source_root: Path) -> str:
     try:
         result = subprocess.run(
@@ -619,8 +626,7 @@ def _run_once(
     if not _COMMIT_RE.fullmatch(source_commit):
         raise R3Error("source commit must be a full lowercase SHA-1")
     _assert_root_matrix(production, source_root, output)
-    if output.exists() and not output.is_dir():
-        raise R3Error("output root is not a directory")
+    _assert_output_safe(output)
     if _git_head(source_root) != source_commit:
         raise R3Error("source commit does not match source HEAD")
     source_before = _source_snapshot(source_root)
@@ -666,8 +672,11 @@ def _run_once(
             "schema": artifact["schema"],
             "artifact_id": artifact_id,
             "path": str(artifact_path),
+            "samples": result["samples"],
             "claim_p95_ns": result["claim"]["p95_ns"],
             "teacher_handoff_ns": result["teacher_handoff"]["wall_time_ns"],
+            "receipt_coverage_pct": result["durability"]["receipt_coverage_pct"],
+            "progress_coverage_pct": result["durability"]["progress_coverage_pct"],
             "duplicates": result["duplicates"],
             "clone_cleanup_verified": True,
         }
