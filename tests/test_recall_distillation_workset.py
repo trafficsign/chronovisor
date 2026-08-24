@@ -566,6 +566,17 @@ def test_commit_rejects_duplicate_work_and_lease_ids_before_transaction(
     assert workset.status("label")["leased"] == 2
 
 
+def test_commit_wraps_invalid_claim_metadata_and_rolls_back(tmp_path: Path) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance([_item("one")], 1)
+    claim = workset.claim("label", 1, "ox-1", 60)[0]
+    invalid = replace(claim, provenance={"invalid": object()})
+
+    with pytest.raises(DistillationWorksetError, match="receipt selection is invalid"):
+        workset.commit([invalid], [_completed()])
+
+    assert workset.status("label")["leased"] == 1
+
 @pytest.mark.parametrize(
     "payload_ref",
     [
@@ -655,3 +666,149 @@ def test_error_class_and_completion_reference_cannot_persist_payloads(
             "SELECT last_error_class, completion_ref FROM work_items WHERE work_id = 'one'"
         ).fetchone()
     assert row == ("", "")
+
+
+def test_transition_receipts_cover_progress_and_skip_noops(tmp_path: Path) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+
+    assert workset.audit_transition_receipts() == {
+        "status": "verified-empty",
+        "receipts": 0,
+        "generation": 0,
+        "head_sha256": "",
+        "counts": {"ready": 0, "leased": 0, "completed": 0, "quarantined": 0},
+        "watermark": None,
+    }
+    workset.advance([_item("one")], 1)
+    workset.advance([_item("one")], 1)
+    claim = workset.claim("label", 1, "ox-1", 60)[0]
+    workset.commit([claim], [_completed()])
+
+    audit = workset.audit_transition_receipts()
+    assert audit["status"] == "verified"
+    assert audit["receipts"] == audit["generation"] == 3
+    assert audit["counts"] == {
+        state: workset.status()[state]
+        for state in ("ready", "leased", "completed", "quarantined")
+    }
+    assert audit["watermark"] == 1
+    with sqlite3.connect(tmp_path / "workset.sqlite3") as connection:
+        rows = connection.execute(
+            "SELECT operation, payload_json FROM workset_receipts ORDER BY generation"
+        ).fetchall()
+    assert [operation for operation, _ in rows] == ["advance", "claim", "commit"]
+    assert all(
+        len(json.loads(payload)["details"]["selection_sha256"]) == 64
+        for _, payload in rows
+    )
+
+
+def test_transition_receipt_accepts_maximum_legal_watermark(tmp_path: Path) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    watermark = {f"k{index}": "x" * 110 for index in range(32)}
+
+    workset.advance([_item("one")], watermark)
+
+    assert workset.audit_transition_receipts()["watermark"] == watermark
+
+
+def test_transition_receipts_reclaim_and_claim_are_separate(tmp_path: Path) -> None:
+    now = [100.0]
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path, clock=lambda: now[0])
+    workset.advance([_item("one")], 1)
+    workset.claim("label", 1, "ox-1", 10)
+    now[0] = 110.0
+    DistillationWorkset(path, clock=lambda: now[0]).claim("label", 1, "ox-2", 10)
+
+    with sqlite3.connect(path) as connection:
+        operations = connection.execute(
+            "SELECT operation FROM workset_receipts ORDER BY generation"
+        ).fetchall()
+    assert [operation for (operation,) in operations] == [
+        "advance",
+        "claim",
+        "claim_reclaim",
+        "claim",
+    ]
+    assert workset.audit_transition_receipts()["receipts"] == 4
+
+
+def test_transition_receipts_fail_closed_on_tamper_and_rollback(tmp_path: Path) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance([_item("one"), _item("two")], 1)
+    changed = _item("two")
+    changed["payload_ref"] = "candidate-ledger:changed"
+    with pytest.raises(DistillationWorksetError, match="identity conflict"):
+        workset.advance([_item("one"), changed], 2)
+    assert workset.audit_transition_receipts()["receipts"] == 1
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE workset_receipts SET receipt_sha256 = ? WHERE generation = 1",
+            ("0" * 64,),
+        )
+    with pytest.raises(DistillationWorksetError, match="hash mismatch"):
+        workset.audit_transition_receipts()
+
+
+def test_transition_receipts_report_legacy_without_synthesizing_history(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance([_item("one")], 1)
+    with sqlite3.connect(path) as connection:
+        connection.execute("DELETE FROM workset_receipts")
+
+    assert workset.audit_transition_receipts() == {
+        "status": "legacy-unverified",
+        "receipts": 0,
+        "generation": 0,
+        "head_sha256": "",
+        "counts": {"ready": 1, "leased": 0, "completed": 0, "quarantined": 0},
+        "watermark": 1,
+    }
+
+
+def test_transition_receipts_continue_from_legacy_anchor(tmp_path: Path) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance([_item("one")], 1)
+    with sqlite3.connect(path) as connection:
+        connection.execute("DELETE FROM workset_receipts")
+
+    workset.claim("label", 1, "worker-1", 60)
+    audit = workset.audit_transition_receipts()
+
+    assert audit["status"] == "legacy-unverified"
+    assert audit["receipts"] == 1
+    assert audit["counts"] == {
+        "ready": 0,
+        "leased": 1,
+        "completed": 0,
+        "quarantined": 0,
+    }
+
+
+def test_transition_receipts_do_not_call_legacy_watermark_empty(tmp_path: Path) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance([], 1)
+    with sqlite3.connect(path) as connection:
+        connection.execute("DELETE FROM workset_receipts")
+
+    assert workset.audit_transition_receipts()["status"] == "legacy-unverified"
+
+
+def test_transition_receipts_preserve_exact_watermark_json(tmp_path: Path) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+
+    workset.advance([], 1)
+    workset.advance([], 1.0)
+
+    audit = workset.audit_transition_receipts()
+    assert audit["status"] == "verified"
+    assert audit["receipts"] == 2
+    assert type(audit["watermark"]) is float
