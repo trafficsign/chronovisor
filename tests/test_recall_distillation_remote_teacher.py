@@ -13,9 +13,11 @@ from chronovisor.core.openai_compatible_adapter import compose_openai_compatible
 from chronovisor.core.provider_profiles import generic_openai_profile
 from chronovisor.recall.recall_distillation_remote_teacher import (
     OX_ALPHA_ENDPOINT,
+    OX_ALPHA_FIXED_IDENTITY,
     OX_ALPHA_ROUTE_MODEL,
     OX_RATIONALE_CODES,
     OpenCodeOxAlphaTeacher,
+    ox_alpha_response_metadata,
 )
 
 CANARY = "sk-CANARY-REMOTE-TEACHER"
@@ -145,8 +147,15 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
         "model": OX_ALPHA_ROUTE_MODEL,
         "location": "remote",
     }
-    for key in ("_model_digest", "_route_digest", "_prompt_digest", "_schema_digest"):
+    for key in (
+        "_model_digest",
+        "_route_digest",
+        "_prompt_digest",
+        "_schema_digest",
+        "_request_digest",
+    ):
         assert len(cast(str, result[key])) == 64
+    assert result["_identity_revision"] == OX_ALPHA_FIXED_IDENTITY["revision"]
     body = json.loads(cast(bytes, sender.calls[0].data))
     assert body["model"] == "ox-alpha-free"
     assert body["max_tokens"] == 16_000
@@ -207,6 +216,27 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
     assert '"candidate_id":{"enum":["candidate-1"]' in prompt
     assert '"additionalProperties":false' in prompt
     assert CANARY not in cast(bytes, sender.calls[0].data).decode("utf-8")
+
+
+def test_fixed_identity_is_payload_independent_but_request_digest_is_normalized() -> (
+    None
+):
+    first = ox_alpha_response_metadata(_payload(query="Cafe\u0301"))
+    equivalent = ox_alpha_response_metadata(_payload(query="Café"))
+    changed = ox_alpha_response_metadata(_payload(query="different evidence"))
+
+    assert first is not None and equivalent is not None and changed is not None
+    assert first["_request_digest"] == equivalent["_request_digest"]
+    assert first["_request_digest"] != changed["_request_digest"]
+    for key in (
+        "_identity_revision",
+        "_route_identity",
+        "_model_digest",
+        "_route_digest",
+        "_prompt_digest",
+        "_schema_digest",
+    ):
+        assert first[key] == changed[key]
 
 
 def test_exact_single_json_fence_is_decoded(tmp_path: Path) -> None:

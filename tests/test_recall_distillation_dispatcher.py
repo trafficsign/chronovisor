@@ -285,7 +285,13 @@ def test_rate_limit_persists_halved_resume_state() -> None:
 
 @pytest.mark.parametrize(
     "category",
-    ["http_402", "paid-fallback", "model-unavailable", "kill-switch"],
+    [
+        "http_402",
+        "paid-fallback",
+        "model-unavailable",
+        "route-model-drift",
+        "kill-switch",
+    ],
 )
 def test_stop_defers_unstarted_work_in_order(category: str) -> None:
     calls: list[int] = []

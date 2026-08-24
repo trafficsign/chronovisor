@@ -26,6 +26,16 @@ from chronovisor.recall import recall_distillation as distill
 from chronovisor.recall import recall_distillation_catalog as catalog
 from chronovisor.recall import recall_distillation_store as store
 from chronovisor.recall import recall_distillation_workset as workset
+from chronovisor.recall.recall_distillation_remote_teacher import (
+    ox_alpha_response_metadata,
+)
+
+
+def _ox_metadata(payload: object) -> dict[str, object]:
+    assert isinstance(payload, dict)
+    metadata = ox_alpha_response_metadata(payload)
+    assert metadata is not None
+    return metadata
 
 
 def _config(root: Path, **overrides: object) -> Path:
@@ -2066,7 +2076,9 @@ def test_ox_single_teacher_materialization_binds_temporal_quality_evidence(
     assert "teacher_models_not_distinct" not in gate["reasons"]
     assert gate["identity"]["profile_contract_id"] == profile_contract_id
     _, ox_model_cohort = distill._active_training_cohort(
-        rows, teacher_profile=distill.OX_SINGLE_PROFILE
+        rows,
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        profile_contract_id=profile_contract_id,
     )
 
     extended_plan_id, _, _ = store.write_immutable(
@@ -2236,15 +2248,7 @@ def test_ox_locked_blind_repeats_are_reversed_and_resume_without_duplicates(
                     }
                     for candidate in candidates
                 ],
-                "_route_identity": {
-                    "provider": "opencode-go",
-                    "model": "opencode-go/ox-alpha-free",
-                    "location": "remote",
-                },
-                "_route_digest": "a" * 64,
-                "_model_digest": "b" * 64,
-                "_prompt_digest": "c" * 64,
-                "_schema_digest": "d" * 64,
+                **_ox_metadata(payload),
             }
 
     features = distill.build_fast_features(
@@ -2887,6 +2891,100 @@ def test_ox_ramp_429_halves_and_resets_but_final_acceptance_is_stable() -> None:
     )
 
 
+def test_ox_contract_rotation_changes_work_split_and_cohort_without_reusing_old_rows(
+    tmp_path: Path,
+) -> None:
+    config = distill.DistillationConfig(
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        ox_enabled=True,
+    )
+    first_contract = distill._ensure_ox_profile_contract(tmp_path, config)[
+        "artifact_id"
+    ]
+    rotated_config = replace(config, max_input_bytes=config.max_input_bytes - 1)
+    second_contract = distill._ensure_ox_profile_contract(tmp_path, rotated_config)[
+        "artifact_id"
+    ]
+    assert first_contract != second_contract
+    rows = [
+        {
+            "profile": distill.OX_SINGLE_PROFILE,
+            "cohort": distill.OX_SINGLE_COHORT,
+            "profile_contract_id": contract_id,
+            "model_digest": "a" * 64,
+        }
+        for contract_id in (first_contract, second_contract)
+    ]
+    _, first_cohort = distill._active_training_cohort(
+        rows,
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        profile_contract_id=first_contract,
+    )
+    _, second_cohort = distill._active_training_cohort(
+        rows,
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        profile_contract_id=second_contract,
+    )
+    assert first_cohort["cohort_sha256"] != second_cohort["cohort_sha256"]
+    rally = {
+        "rally_id": "rally",
+        "query_sha256": "query",
+        "session_cluster_id": "session",
+        "as_of": "2026-01-01T00:00:00Z",
+        "context_refs": [],
+    }
+    first_plan = distill._ensure_split_plan(
+        tmp_path,
+        [rally],
+        raw_watermark="b" * 64,
+        model_cohort_sha256=first_cohort["cohort_sha256"],
+    )
+    second_plan = distill._ensure_split_plan(
+        tmp_path,
+        [rally],
+        raw_watermark="b" * 64,
+        model_cohort_sha256=second_cohort["cohort_sha256"],
+    )
+    assert first_plan["artifact_id"] != second_plan["artifact_id"]
+    payload = {
+        "rally": {
+            "snapshot_sha256": "snapshot",
+            "candidates": [{"candidate_id": "candidate", "text_sha256": "text"}],
+        }
+    }
+    first = distill._ox_prepare_tasks(
+        config=config,
+        snapshots=payload,
+        rally_by_id={"rally": rally},
+        assignments=first_plan["assignments"],
+        split_plan_id=first_plan["artifact_id"],
+        profile_contract_id=first_contract,
+        candidate_indexed=False,
+        candidate_state={},
+    )
+    second = distill._ox_prepare_tasks(
+        config=rotated_config,
+        snapshots=payload,
+        rally_by_id={"rally": rally},
+        assignments=second_plan["assignments"],
+        split_plan_id=second_plan["artifact_id"],
+        profile_contract_id=second_contract,
+        candidate_indexed=False,
+        candidate_state={},
+    )
+    assert set(first["tasks"]).isdisjoint(second["tasks"])
+    audit = distill.materialize_training_rows(
+        tmp_path,
+        _label_rows=[
+            {
+                "profile": distill.OX_SINGLE_PROFILE,
+                "profile_contract_id": first_contract,
+            }
+        ],
+    )
+    assert audit["excluded_prior_contract_rows"] == 1
+
+
 def test_ox_ramp_only_counts_deep_valid_provider_responses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2953,6 +3051,10 @@ def test_ox_ramp_only_counts_deep_valid_provider_responses(
     )
 
     assert result.labels_written == 0
+    assert result.profile_stopped is True
+    assert (
+        store.read_chain(store.distillation_dir(tmp_path) / "label-ledger.jsonl") == []
+    )
     assert (
         result.ramp_cap,
         result.ramp_valid_receipts,
@@ -2983,15 +3085,7 @@ def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_label
                     }
                     for candidate in payload["candidates"]
                 ],
-                "_route_identity": {
-                    "provider": "opencode-go",
-                    "model": "opencode-go/ox-alpha-free",
-                    "location": "remote",
-                },
-                "_route_digest": "a" * 64,
-                "_model_digest": "b" * 64,
-                "_prompt_digest": "c" * 64,
-                "_schema_digest": "d" * 64,
+                **_ox_metadata(payload),
             }
 
     rally = {
@@ -3093,7 +3187,10 @@ def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_label
     assert len(store.read_chain(label_path)) == 2
     progress = recovered.workset_status["last_durable_progress"]  # type: ignore[index]
     assert progress["cursor"]["label_count"] == 2
-    assert progress["ledger_heads"]["labels"] == store.chain_head(label_path)["head_sha256"]
+    assert (
+        progress["ledger_heads"]["labels"]
+        == store.chain_head(label_path)["head_sha256"]
+    )
 
 
 def test_ox_indexed_workset_reads_only_delta_then_claimed_snapshots(
@@ -3120,15 +3217,7 @@ def test_ox_indexed_workset_reads_only_delta_then_claimed_snapshots(
                     }
                     for candidate in payload["candidates"]
                 ],
-                "_route_identity": {
-                    "provider": "opencode-go",
-                    "model": "opencode-go/ox-alpha-free",
-                    "location": "remote",
-                },
-                "_route_digest": "a" * 64,
-                "_model_digest": "b" * 64,
-                "_prompt_digest": "c" * 64,
-                "_schema_digest": "d" * 64,
+                **_ox_metadata(payload),
             }
 
     def snapshot(rally_id: str, candidate_id: str, text_hash: str) -> dict[str, object]:
@@ -3443,15 +3532,7 @@ def test_ox_single_teacher_uncertain_output_completes_as_non_training_abstention
                     }
                     for candidate in payload["candidates"]
                 ],
-                "_route_identity": {
-                    "provider": "opencode-go",
-                    "model": "opencode-go/ox-alpha-free",
-                    "location": "remote",
-                },
-                "_route_digest": "a" * 64,
-                "_model_digest": "b" * 64,
-                "_prompt_digest": "c" * 64,
-                "_schema_digest": "d" * 64,
+                **_ox_metadata(payload),
             }
 
     features = distill.build_fast_features(
@@ -3544,15 +3625,7 @@ def test_ox_resolves_text_only_for_claimed_work_and_uses_long_lease(
                     }
                     for candidate in payload["candidates"]
                 ],
-                "_route_identity": {
-                    "provider": "opencode-go",
-                    "model": "opencode-go/ox-alpha-free",
-                    "location": "remote",
-                },
-                "_route_digest": "a" * 64,
-                "_model_digest": "b" * 64,
-                "_prompt_digest": "c" * 64,
-                "_schema_digest": "d" * 64,
+                **_ox_metadata(payload),
             }
 
     class GuardedTexts(dict[str, str]):
@@ -3679,15 +3752,7 @@ def test_ox_canary_skips_payload_rejected_probe_before_one_safe_request(
                     }
                     for candidate in candidates
                 ],
-                "_route_identity": {
-                    "provider": "opencode-go",
-                    "model": "opencode-go/ox-alpha-free",
-                    "location": "remote",
-                },
-                "_route_digest": "a" * 64,
-                "_model_digest": "b" * 64,
-                "_prompt_digest": "c" * 64,
-                "_schema_digest": "d" * 64,
+                **_ox_metadata(payload),
             }
 
     rally = {
@@ -3768,15 +3833,7 @@ def test_ox_canary_skips_oversize_probe_before_one_request(
                     }
                     for candidate in candidates
                 ],
-                "_route_identity": {
-                    "provider": "opencode-go",
-                    "model": "opencode-go/ox-alpha-free",
-                    "location": "remote",
-                },
-                "_route_digest": "a" * 64,
-                "_model_digest": "b" * 64,
-                "_prompt_digest": "c" * 64,
-                "_schema_digest": "d" * 64,
+                **_ox_metadata(payload),
             }
 
     rally = {
@@ -4237,15 +4294,7 @@ def test_ox_claim_cap_keeps_append_batch_at_or_below_500(tmp_path: Path) -> None
                     }
                     for candidate in candidates
                 ],
-                "_route_identity": {
-                    "provider": "opencode-go",
-                    "model": "opencode-go/ox-alpha-free",
-                    "location": "remote",
-                },
-                "_route_digest": "a" * 64,
-                "_model_digest": "b" * 64,
-                "_prompt_digest": "c" * 64,
-                "_schema_digest": "d" * 64,
+                **_ox_metadata(payload),
             }
 
     snapshots: dict[str, dict[str, object]] = {}

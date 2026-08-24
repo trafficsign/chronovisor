@@ -145,6 +145,26 @@ def test_invalid_uncertain_and_retry_rows_are_excluded_from_label_counts() -> No
     }
 
 
+def test_gate_excludes_prior_contract_rows_from_every_quality_count() -> None:
+    rows = _passing_rows()
+    prior = {**rows[0], "row_id": "prior", "profile_contract_id": "f" * 64}
+
+    gate = evaluate_single_teacher_gate(
+        [*rows, prior],
+        profile=PROFILE,
+        cohort=COHORT,
+        profile_contract_id="e" * 64,
+        min_labels=4,
+        min_per_class=2,
+        min_repeat_pairs=2,
+        min_repeat_stability=0.10,
+    )
+
+    assert gate["passed"] is True
+    assert gate["excluded_prior_contract_rows"] == 1
+    assert gate["labels"]["eligible"] == 4
+
+
 def test_negative_veto_conflict_fails_even_when_other_gates_pass() -> None:
     rows = _passing_rows()
     rows[0]["negative_veto_conflict"] = True

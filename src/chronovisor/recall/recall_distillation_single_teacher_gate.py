@@ -47,6 +47,7 @@ def evaluate_single_teacher_gate(
     *,
     profile: str,
     cohort: str,
+    profile_contract_id: str = "",
     min_labels: int = 500,
     min_per_class: int = 100,
     min_repeat_pairs: int = 100,
@@ -77,7 +78,14 @@ def evaluate_single_teacher_gate(
     if not 0.0 <= min_repeat_stability <= 1.0:
         reasons.append("repeat_stability_argument_invalid")
 
-    completed = [row for row in rows if _complete_row(row)]
+    current_rows = [
+        row
+        for row in rows
+        if not profile_contract_id
+        or row.get("profile_contract_id") == profile_contract_id
+    ]
+    excluded_prior_contract_rows = len(rows) - len(current_rows)
+    completed = [row for row in current_rows if _complete_row(row)]
     required_splits = {"train", "validation", "test"}
     eligible = [row for row in completed if row.get("split") in required_splits]
     excluded = len(rows) - len(eligible)
@@ -114,6 +122,8 @@ def evaluate_single_teacher_gate(
         reasons.append("profile_identity_mismatch")
     if identities["cohort"] and identities["cohort"] != cohort:
         reasons.append("cohort_identity_mismatch")
+    if profile_contract_id and identities["profile_contract_id"] != profile_contract_id:
+        reasons.append("profile_contract_mismatch")
     if identities["route"] and identities["route"] != "opencode-go/ox-alpha-free":
         reasons.append("route_mismatch")
     for name in (
@@ -244,6 +254,7 @@ def evaluate_single_teacher_gate(
             "irrelevant": irrelevant,
             "excluded": excluded,
         },
+        "excluded_prior_contract_rows": excluded_prior_contract_rows,
         "identity": identities,
         "chronological_grouped": {
             "splits": sorted({str(row.get("split")) for row in split_rows}),

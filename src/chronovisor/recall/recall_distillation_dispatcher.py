@@ -28,6 +28,7 @@ _STOPPED = {
     "payment_required",
     "paid_fallback",
     "model_unavailable",
+    "route_model_drift",
     "kill_switch",
 }
 _FAILURE_STAGES = frozenset(

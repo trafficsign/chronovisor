@@ -119,6 +119,49 @@ def _sha256(value: object) -> str:
     return hashlib.sha256(_json_bytes(value)).hexdigest()
 
 
+OX_ALPHA_FIXED_IDENTITY_REVISION = "ox-alpha-fixed-identity-v1"
+_SYSTEM_PROMPT = (
+    "You are a temporary Recall relevance teacher. Judge only the "
+    "supplied point-in-time evidence. Return schema-valid JSON; use "
+    "uncertain when evidence is insufficient. The rationale field "
+    "must contain one fixed snake_case code, never free text."
+)
+_PROMPT_TEMPLATE = {
+    "revision": OX_ALPHA_FIXED_IDENTITY_REVISION,
+    "system": _SYSTEM_PROMPT,
+    "instruction": (
+        "Label every candidate exactly once. Return only one JSON object; "
+        "do not add facts, markdown, prose, or repeat secrets. Use only "
+        "the fixed rationale codes in the schema. Output schema then input."
+    ),
+}
+_SCHEMA_REVISION = {
+    "revision": OX_ALPHA_FIXED_IDENTITY_REVISION,
+    "schema": TEACHER_BATCH_SCHEMA,
+    "verdicts": ["relevant", "irrelevant", "uncertain"],
+    "rationale_codes": list(OX_RATIONALE_CODES),
+    "label_fields": ["candidate_id", "verdict", "confidence", "rationale"],
+}
+OX_ALPHA_FIXED_IDENTITY = {
+    "revision": OX_ALPHA_FIXED_IDENTITY_REVISION,
+    "route_identity": {
+        "provider": OX_ALPHA_PROVIDER,
+        "model": OX_ALPHA_ROUTE_MODEL,
+        "location": RouteLocation.REMOTE.value,
+    },
+    "model_digest": hashlib.sha256(OX_ALPHA_ROUTE_MODEL.encode("utf-8")).hexdigest(),
+    "route_digest": _sha256(
+        {
+            "provider": OX_ALPHA_PROVIDER,
+            "model": OX_ALPHA_ROUTE_MODEL,
+            "location": RouteLocation.REMOTE.value,
+        }
+    ),
+    "prompt_template_sha256": _sha256(_PROMPT_TEMPLATE),
+    "schema_revision_sha256": _sha256(_SCHEMA_REVISION),
+}
+
+
 def resolve_ox_alpha_model(provider: str, configured_model: str) -> str:
     """Resolve the request model from the existing provider/model route.
 
@@ -281,12 +324,7 @@ def _prepare_request(
     try:
         prompt_json = _json_bytes(normalized).decode("utf-8")
         schema_json = _json_bytes(schema).decode("utf-8")
-        system = (
-            "You are a temporary Recall relevance teacher. Judge only the "
-            "supplied point-in-time evidence. Return schema-valid JSON; use "
-            "uncertain when evidence is insufficient. The rationale field "
-            "must contain one fixed snake_case code, never free text."
-        )
+        system = _SYSTEM_PROMPT
         prompt = (
             "Label every candidate exactly once. Return only one JSON object; "
             "do not add facts, markdown, prose, or repeat secrets. Use only "
@@ -303,6 +341,28 @@ def _prepare_request(
     except (TypeError, ValueError, OverflowError):
         return None
     return candidate_ids, schema, system, prompt
+
+
+def ox_alpha_response_metadata(
+    payload: Mapping[str, Any], *, max_input_bytes: int = MAX_PAYLOAD_BYTES
+) -> dict[str, Any] | None:
+    """Return fixed identity plus the digest of one normalized egress request."""
+
+    prepared = _prepare_request(payload, max_input_bytes=max_input_bytes)
+    if prepared is None:
+        return None
+    _candidate_ids, schema, system, prompt = prepared
+    return {
+        "_identity_revision": OX_ALPHA_FIXED_IDENTITY["revision"],
+        "_route_identity": dict(OX_ALPHA_FIXED_IDENTITY["route_identity"]),
+        "_model_digest": OX_ALPHA_FIXED_IDENTITY["model_digest"],
+        "_route_digest": OX_ALPHA_FIXED_IDENTITY["route_digest"],
+        "_prompt_digest": OX_ALPHA_FIXED_IDENTITY["prompt_template_sha256"],
+        "_schema_digest": OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"],
+        "_request_digest": _sha256(
+            {"system": system, "prompt": prompt, "format": schema}
+        ),
+    }
 
 
 def _safe_label(label: object, candidate_ids: frozenset[str]) -> dict[str, Any] | None:
@@ -395,36 +455,29 @@ class OpenCodeOxAlphaTeacher:
         self.enabled = bool(enabled)
         self.max_input_bytes = max_input_bytes
         self.timeout_ms = timeout_ms
-        self._route_identity = {
-            "provider": self.provider,
-            "model": self.model,
-            "location": RouteLocation.REMOTE.value,
-        }
-        self._model_digest = hashlib.sha256(self.model.encode("utf-8")).hexdigest()
-        self._route_digest = _sha256(self._route_identity)
+        self._route_identity = dict(OX_ALPHA_FIXED_IDENTITY["route_identity"])
 
     def disable(self) -> None:
         """Trip the temporary route kill switch without touching provider state."""
 
         self.enabled = False
 
-    def _metadata(
-        self, *, prompt_digest: str = "", schema_digest: str = ""
-    ) -> dict[str, Any]:
+    def _metadata(self, *, request_digest: str = "") -> dict[str, Any]:
         return {
+            "_identity_revision": OX_ALPHA_FIXED_IDENTITY["revision"],
             "_route_identity": dict(self._route_identity),
-            "_model_digest": self._model_digest,
-            "_route_digest": self._route_digest,
-            "_prompt_digest": prompt_digest,
-            "_schema_digest": schema_digest,
+            "_model_digest": OX_ALPHA_FIXED_IDENTITY["model_digest"],
+            "_route_digest": OX_ALPHA_FIXED_IDENTITY["route_digest"],
+            "_prompt_digest": OX_ALPHA_FIXED_IDENTITY["prompt_template_sha256"],
+            "_schema_digest": OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"],
+            "_request_digest": request_digest,
         }
 
     def _failure(
         self,
         category: str,
         *,
-        prompt_digest: str = "",
-        schema_digest: str = "",
+        request_digest: str = "",
         stage: str | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
@@ -440,10 +493,7 @@ class OpenCodeOxAlphaTeacher:
             failure["request_id"] = safe_request_id
         return {
             "_failure": failure,
-            **self._metadata(
-                prompt_digest=prompt_digest,
-                schema_digest=schema_digest,
-            ),
+            **self._metadata(request_digest=request_digest),
         }
 
     def accepts_egress_payload(self, payload: Mapping[str, Any]) -> bool:
@@ -464,11 +514,13 @@ class OpenCodeOxAlphaTeacher:
         if prepared is None:
             return self._failure("remote_payload_rejected")
         candidate_ids, schema, system, prompt = prepared
-        prompt_digest = ""
-        schema_digest = ""
+        response_metadata = ox_alpha_response_metadata(
+            payload, max_input_bytes=self.max_input_bytes
+        )
+        if response_metadata is None:
+            return self._failure("remote_payload_rejected")
+        request_digest = str(response_metadata["_request_digest"])
         try:
-            prompt_digest = _sha256({"system": system, "prompt": prompt})
-            schema_digest = _sha256(schema)
             result = self._backend.generate(
                 GenerationRequest(
                     prompt=prompt,
@@ -487,16 +539,14 @@ class OpenCodeOxAlphaTeacher:
         except ProviderAdapterError as exc:
             return self._failure(
                 exc.category.value,
-                prompt_digest=prompt_digest,
-                schema_digest=schema_digest,
+                request_digest=request_digest,
                 stage=exc.stage,
                 request_id=exc.request_id,
             )
         except Exception:
             return self._failure(
                 "backend_error",
-                prompt_digest=prompt_digest,
-                schema_digest=schema_digest,
+                request_digest=request_digest,
             )
         returned_model = None
         metadata = getattr(result, "metadata", None)
@@ -510,15 +560,13 @@ class OpenCodeOxAlphaTeacher:
         if returned_model != OX_ALPHA_REQUEST_MODEL:
             return self._failure(
                 "model_unavailable",
-                prompt_digest=prompt_digest,
-                schema_digest=schema_digest,
+                request_digest=request_digest,
                 request_id=request_id,
             )
         if result.finish_reason != "stop":
             return self._failure(
                 ProviderFailureCategory.INVALID_RESPONSE.value,
-                prompt_digest=prompt_digest,
-                schema_digest=schema_digest,
+                request_digest=request_digest,
                 stage="teacher_finish_reason",
                 request_id=request_id,
             )
@@ -532,16 +580,14 @@ class OpenCodeOxAlphaTeacher:
         except (TypeError, ValueError, json.JSONDecodeError):
             return self._failure(
                 ProviderFailureCategory.INVALID_RESPONSE.value,
-                prompt_digest=prompt_digest,
-                schema_digest=schema_digest,
+                request_digest=request_digest,
                 stage="teacher_json_parse",
                 request_id=request_id,
             )
         if not isinstance(decoded, Mapping) or set(decoded) != {"labels"}:
             return self._failure(
                 ProviderFailureCategory.INVALID_RESPONSE.value,
-                prompt_digest=prompt_digest,
-                schema_digest=schema_digest,
+                request_digest=request_digest,
                 stage="teacher_response_shape",
                 request_id=request_id,
             )
@@ -549,8 +595,7 @@ class OpenCodeOxAlphaTeacher:
         if not isinstance(labels, list) or len(labels) != len(candidate_ids):
             return self._failure(
                 ProviderFailureCategory.INVALID_RESPONSE.value,
-                prompt_digest=prompt_digest,
-                schema_digest=schema_digest,
+                request_digest=request_digest,
                 stage="teacher_label_count",
                 request_id=request_id,
             )
@@ -560,17 +605,13 @@ class OpenCodeOxAlphaTeacher:
         } != set(candidate_ids):
             return self._failure(
                 ProviderFailureCategory.INVALID_RESPONSE.value,
-                prompt_digest=prompt_digest,
-                schema_digest=schema_digest,
+                request_digest=request_digest,
                 stage="teacher_label_schema",
                 request_id=request_id,
             )
         return {
             "labels": [label for label in safe_labels if label is not None],
-            **self._metadata(
-                prompt_digest=prompt_digest,
-                schema_digest=schema_digest,
-            ),
+            **response_metadata,
         }
 
 

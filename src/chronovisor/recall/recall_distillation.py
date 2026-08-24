@@ -38,6 +38,10 @@ from chronovisor.core.raw_store import (
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.recall import recall_distillation_store as store
 from chronovisor.recall.recall_calibration import sigmoid
+from chronovisor.recall.recall_distillation_remote_teacher import (
+    OX_ALPHA_FIXED_IDENTITY,
+    ox_alpha_response_metadata,
+)
 from chronovisor.recall.recall_distillation_single_teacher_gate import (
     evaluate_single_teacher_gate,
 )
@@ -568,6 +572,7 @@ def _ensure_ox_profile_contract(
             "endpoint": f"{OX_ALPHA_ENDPOINT}/chat/completions",
             "request_model": "ox-alpha-free",
             "required_returned_model": "ox-alpha-free",
+            "fixed_identity": OX_ALPHA_FIXED_IDENTITY,
             "free_only": True,
             "no_paid_fallback": True,
             "official_status": "limited_time",
@@ -588,7 +593,28 @@ def _ensure_ox_profile_contract(
         },
         schema=OX_PROFILE_SCHEMA,
     )
+    store.write_sealed_state(
+        store.distillation_dir(root) / "ox-profile-contract.json",
+        {
+            "kind": "ox-profile-contract-pointer",
+            "profile_contract_id": artifact["artifact_id"],
+        },
+    )
     return artifact
+
+
+def _current_ox_profile_contract_id(root: Path) -> str:
+    """Read the sole OX contract allowed to contribute to training."""
+
+    try:
+        pointer = store.read_sealed(
+            store.distillation_dir(root) / "ox-profile-contract.json",
+            schema=store.DISTILLATION_SCHEMA,
+        )
+    except store.DistillationStoreError:
+        return ""
+    contract_id = str(pointer.get("profile_contract_id") or "")
+    return contract_id if re.fullmatch(r"[0-9a-f]{64}", contract_id) else ""
 
 
 def _default_distillation_config() -> dict[str, Any]:
@@ -2694,6 +2720,7 @@ def _materialization_label_row(
     rallies: Mapping[str, Mapping[str, Any]],
     features_by_pair: Mapping[tuple[str, str], Mapping[str, float]],
     snapshot_contracts: Mapping[str, Mapping[str, str]],
+    current_ox_contract_id: str,
 ) -> dict[str, Any] | None:
     rally_id = str(label.get("rally_id") or "")
     candidate_id = str(label.get("candidate_id") or "")
@@ -2732,6 +2759,8 @@ def _materialization_label_row(
     assignment = label.get("assignment")
     probe = isinstance(assignment, Mapping) and assignment.get("probe") is True
     is_ox = label.get("profile") == OX_SINGLE_PROFILE
+    if is_ox and label.get("profile_contract_id") != current_ox_contract_id:
+        return None
     contract = snapshot_contracts.get(rally_id, {})
     temporal_as_of = str(label.get("as_of") or rally_as_of)
     temporal_group_id = str(label.get("group_id") or session_cluster_id)
@@ -2817,6 +2846,7 @@ def _materialization_rows(
     rallies: Mapping[str, Mapping[str, Any]],
     features_by_pair: Mapping[tuple[str, str], Mapping[str, float]],
     snapshot_contracts: Mapping[str, Mapping[str, str]],
+    current_ox_contract_id: str,
 ) -> list[dict[str, Any]]:
     return [
         row
@@ -2824,7 +2854,11 @@ def _materialization_rows(
         if isinstance(label, Mapping)
         if (
             row := _materialization_label_row(
-                label, rallies, features_by_pair, snapshot_contracts
+                label,
+                rallies,
+                features_by_pair,
+                snapshot_contracts,
+                current_ox_contract_id,
             )
         )
         is not None
@@ -2832,7 +2866,11 @@ def _materialization_rows(
 
 
 def _finalize_materialized_training_rows(
-    root: Path, materialized: list[dict[str, Any]], limit: int
+    root: Path,
+    materialized: list[dict[str, Any]],
+    limit: int,
+    *,
+    excluded_prior_contract_rows: int = 0,
 ) -> dict[str, Any]:
     materialized = materialized[-limit:]
     split_plan_id = ""
@@ -2903,6 +2941,7 @@ def _finalize_materialized_training_rows(
             "kind": "text-parity-training-snapshot",
             "feature_revision": TEXT_FEATURE_REVISION,
             "rows": rows,
+            "excluded_prior_contract_rows": excluded_prior_contract_rows,
             "label_chain_head": store.chain_head(
                 store.distillation_dir(root) / "label-ledger.jsonl"
             )["head_sha256"],
@@ -2935,10 +2974,26 @@ def materialize_training_rows(
         if _label_rows is not None
         else _read_chain(store.distillation_dir(root) / "label-ledger.jsonl")
     )
-    materialized = _materialization_rows(
-        labels, rallies, features_by_pair, snapshot_contracts
+    current_ox_contract_id = _current_ox_profile_contract_id(root)
+    excluded_prior_contract_rows = sum(
+        isinstance(label, Mapping)
+        and label.get("profile") == OX_SINGLE_PROFILE
+        and label.get("profile_contract_id") != current_ox_contract_id
+        for label in labels
     )
-    return _finalize_materialized_training_rows(root, materialized, limit)
+    materialized = _materialization_rows(
+        labels,
+        rallies,
+        features_by_pair,
+        snapshot_contracts,
+        current_ox_contract_id,
+    )
+    return _finalize_materialized_training_rows(
+        root,
+        materialized,
+        limit,
+        excluded_prior_contract_rows=excluded_prior_contract_rows,
+    )
 
 
 def _wilson_lower(successes: int, total: int) -> float:
@@ -2964,6 +3019,7 @@ def _active_training_cohort(
     rows: Sequence[Mapping[str, Any]],
     *,
     teacher_profile: str = LOCAL_TRIAD_PROFILE,
+    profile_contract_id: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Select the latest coherent local-model cohort and resplit only it."""
 
@@ -2973,11 +3029,13 @@ def _active_training_cohort(
             for row in rows
             if row.get("profile") == OX_SINGLE_PROFILE
             and row.get("cohort") == OX_SINGLE_COHORT
+            and row.get("profile_contract_id") == profile_contract_id
         ]
         single_cohort = {
             "revision": "single-teacher-cohort-v1",
             "profile": OX_SINGLE_PROFILE,
             "cohort": OX_SINGLE_COHORT,
+            "profile_contract_id": profile_contract_id,
             "model_digests": sorted(
                 {str(row.get("model_digest") or "") for row in single_rows}
             ),
@@ -3052,24 +3110,8 @@ def _offline_training_gate(
 
     if config.teacher_profile == OX_SINGLE_PROFILE:
         invalid_input_rows = any(not isinstance(row, Mapping) for row in rows)
-        single_rows = [
-            row
-            for row in rows
-            if isinstance(row, Mapping) and row.get("profile") == OX_SINGLE_PROFILE
-        ]
-        gate = evaluate_single_teacher_gate(
-            single_rows,
-            profile=OX_SINGLE_PROFILE,
-            cohort=OX_SINGLE_COHORT,
-            min_labels=config.hard_floor_teacher_labels,
-            min_per_class=config.hard_floor_teacher_per_class,
-            min_repeat_pairs=config.hard_floor_probe_pairs,
-        )
-        reasons = list(gate["reasons"])
-        if invalid_input_rows:
-            reasons.append("input_row_invalid")
-        if config.ox_enabled is not True:
-            reasons.append("ox_profile_disabled")
+        current_contract_id = ""
+        reasons: list[str] = []
         if root is None:
             reasons.append("profile_contract_unavailable")
         else:
@@ -3079,16 +3121,37 @@ def _offline_training_gate(
                 )
             except (DistillationError, store.DistillationStoreError, KeyError):
                 reasons.append("profile_contract_unavailable")
-            else:
-                if gate["identity"]["profile_contract_id"] != current_contract_id:
-                    reasons.append("profile_contract_mismatch")
+        single_rows = [
+            row
+            for row in rows
+            if isinstance(row, Mapping) and row.get("profile") == OX_SINGLE_PROFILE
+        ]
+        gate = evaluate_single_teacher_gate(
+            single_rows,
+            profile=OX_SINGLE_PROFILE,
+            cohort=OX_SINGLE_COHORT,
+            profile_contract_id=current_contract_id,
+            min_labels=config.hard_floor_teacher_labels,
+            min_per_class=config.hard_floor_teacher_per_class,
+            min_repeat_pairs=config.hard_floor_probe_pairs,
+        )
+        reasons.extend(gate["reasons"])
+        if invalid_input_rows:
+            reasons.append("input_row_invalid")
+        if config.ox_enabled is not True:
+            reasons.append("ox_profile_disabled")
+        if current_contract_id:
+            if gate["identity"]["profile_contract_id"] != current_contract_id:
+                reasons.append("profile_contract_mismatch")
             try:
                 split_plan = _read_split_plan(root)
             except (DistillationError, store.DistillationStoreError, KeyError):
                 reasons.append("split_plan_unavailable")
             else:
                 _, model_cohort = _active_training_cohort(
-                    single_rows, teacher_profile=OX_SINGLE_PROFILE
+                    single_rows,
+                    teacher_profile=OX_SINGLE_PROFILE,
+                    profile_contract_id=current_contract_id,
                 )
                 if (
                     split_plan.get("model_cohort_sha256")
@@ -3376,7 +3439,13 @@ def _maybe_publish_candidate(
     rows = training["rows"]
     offline_gate = _offline_training_gate(rows, config, root=root)
     active_rows, model_cohort = _active_training_cohort(
-        rows, teacher_profile=config.teacher_profile
+        rows,
+        teacher_profile=config.teacher_profile,
+        profile_contract_id=(
+            _current_ox_profile_contract_id(root)
+            if config.teacher_profile == OX_SINGLE_PROFILE
+            else ""
+        ),
     )
     if offline_gate != baseline.get("offline_training_gate"):
         return {"status": "held", "reason": "offline_gate_baseline_mismatch"}
@@ -4656,6 +4725,7 @@ def _ox_prepare_tasks(
                 "profile": OX_SINGLE_PROFILE,
                 "cohort": OX_SINGLE_COHORT,
                 "route": "opencode-go/ox-alpha-free",
+                "profile_contract_id": profile_contract_id,
                 "payload_digest": payload_digest,
             }
         )
@@ -5389,11 +5459,7 @@ def _ox_dispatch_and_commit(
         workset.release_unattempted(
             [claim for batch in batches[dispatched_batches:] for claim in batch]
         )
-    expected_identity = {
-        "provider": "opencode-go",
-        "model": "opencode-go/ox-alpha-free",
-        "location": "remote",
-    }
+    expected_identity = OX_ALPHA_FIXED_IDENTITY["route_identity"]
     stopped = False
     deferred = False
     records: list[dict[str, Any]] = []
@@ -5427,22 +5493,29 @@ def _ox_dispatch_and_commit(
             continue
         response = result.value
         labels = response.get("labels")
-        digests = {
-            "route_digest": response.get("_route_digest"),
-            "model_digest": response.get("_model_digest"),
-            "prompt_sha256": response.get("_prompt_digest"),
-            "schema_sha256": response.get("_schema_digest"),
+        expected_metadata = ox_alpha_response_metadata(
+            _ox_batch_payload(tasks, batch_claims),
+            max_input_bytes=config.max_input_bytes,
+        )
+        response_metadata = {
+            key: response.get(key)
+            for key in (
+                "_identity_revision",
+                "_route_identity",
+                "_route_digest",
+                "_model_digest",
+                "_prompt_digest",
+                "_schema_digest",
+                "_request_digest",
+            )
         }
         expected_ids = {
             str(tasks[claim.work_id]["candidate"]["candidate_id"])
             for claim in batch_claims
         }
         valid = (
-            response.get("_route_identity") == expected_identity
-            and all(
-                re.fullmatch(r"[0-9a-f]{64}", str(value or ""))
-                for value in digests.values()
-            )
+            expected_metadata is not None
+            and response_metadata == expected_metadata
             and isinstance(labels, list)
             and len(labels) == len(batch_claims)
             and all(
@@ -5471,11 +5544,11 @@ def _ox_dispatch_and_commit(
         )
         if not valid:
             deferred = True
+            stopped = True
             for claim in batch_claims:
-                status = "quarantined" if claim.attempt >= 3 else "retry"
                 outcomes[claim.work_id] = {
-                    "status": status,
-                    "error_class": "invalid_teacher_output",
+                    "status": "retry",
+                    "error_class": "route_model_drift",
                 }
             continue
         valid_provider_results += 1
@@ -5497,8 +5570,13 @@ def _ox_dispatch_and_commit(
                     "profile": OX_SINGLE_PROFILE,
                     "cohort": OX_SINGLE_COHORT,
                     "profile_contract_id": profile_contract_id,
-                    "route_identity": expected_identity,
-                    **digests,
+                    "identity_revision": OX_ALPHA_FIXED_IDENTITY["revision"],
+                    "route_identity": dict(expected_identity),
+                    "route_digest": response_metadata["_route_digest"],
+                    "model_digest": response_metadata["_model_digest"],
+                    "prompt_sha256": response_metadata["_prompt_digest"],
+                    "schema_sha256": response_metadata["_schema_digest"],
+                    "request_sha256": response_metadata["_request_digest"],
                     "assignment": task["assignment"],
                     **task["temporal"],
                     **_teacher_label(
@@ -5727,6 +5805,9 @@ def _run_ox_teacher_batch(
         and row.get("status") == "completed"
         and row.get("route") == "opencode-go/ox-alpha-free"
         and row.get("teacher_role") == OX_TEACHER_ROLE
+        and row.get("profile") == OX_SINGLE_PROFILE
+        and row.get("cohort") == OX_SINGLE_COHORT
+        and row.get("profile_contract_id") == profile_contract_id
     }
     reconciled = [claim for claim in claims if claim.work_id in existing]
     if reconciled:
@@ -7112,7 +7193,13 @@ def _capture_candidate_snapshots(
             _label_rows=label_rows,
         )
         _, cohort = _active_training_cohort(
-            training["rows"], teacher_profile=config.teacher_profile
+            training["rows"],
+            teacher_profile=config.teacher_profile,
+            profile_contract_id=(
+                _current_ox_profile_contract_id(root)
+                if config.teacher_profile == OX_SINGLE_PROFILE
+                else ""
+            ),
         )
         split_plan = _ensure_split_plan(
             root,
@@ -7431,7 +7518,13 @@ def _prepare_distillation_training(
     )
     if cold_start:
         _, current_cohort = _active_training_cohort(
-            training_snapshot["rows"], teacher_profile=config.teacher_profile
+            training_snapshot["rows"],
+            teacher_profile=config.teacher_profile,
+            profile_contract_id=(
+                _current_ox_profile_contract_id(root)
+                if config.teacher_profile == OX_SINGLE_PROFILE
+                else ""
+            ),
         )
         split_plan = _ensure_split_plan(
             root,
