@@ -1246,9 +1246,7 @@ def _clone_from_root(source: Path) -> Path:
                 if child.is_symlink() or not child.is_file():
                     raise R2Error("clone source contains an unsafe file")
                 files.append(child)
-    destination = Path(
-        tempfile.mkdtemp(prefix="chronovisor-r2-", dir=tempfile.gettempdir())
-    )
+    destination = Path(tempfile.mkdtemp(prefix="chronovisor-r2-", dir=temp_parent))
     try:
         for directory in sorted(directories):
             (destination / directory.relative_to(source)).mkdir(
