@@ -303,6 +303,7 @@ def test_clone_uses_the_resolved_temp_parent(
     try:
         assert not HARNESS._has_symlink_component(clone)
         assert clone.parent == real_temp.resolve()
+        assert (clone / "pages").stat().st_mode & 0o777 == 0o700
     finally:
         HARNESS._cleanup_clone(clone)
 
@@ -346,3 +347,23 @@ def test_clone_preserves_okf_startup_proof_for_raw_append(
         assert raw_id.startswith("save-codex-")
     finally:
         HARNESS._cleanup_clone(clone)
+
+
+def test_clone_rejects_symlinked_okf_layout_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.core.store import RuntimeContext, init_chronovisor
+
+    source = tmp_path / "source"
+    init_chronovisor(RuntimeContext(source))
+    (source / "runtime" / "recall-distillation").mkdir()
+    real_pages = tmp_path / "real-pages"
+    (source / "pages").rename(real_pages)
+    (source / "pages").symlink_to(real_pages, target_is_directory=True)
+    temp_parent = tmp_path / "temp"
+    temp_parent.mkdir()
+    monkeypatch.setattr(HARNESS.sys, "platform", "darwin")
+    monkeypatch.setattr(HARNESS.tempfile, "gettempdir", lambda: str(temp_parent))
+
+    with pytest.raises(HARNESS.R2Error, match="unsafe"):
+        HARNESS._clone_from_root(source)

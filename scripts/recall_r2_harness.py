@@ -1249,7 +1249,7 @@ def _clone_from_root(source: Path) -> Path:
     files: list[Path] = []
     directories: set[Path] = set()
     for subtree in required:
-        if subtree.is_symlink() or not subtree.is_dir():
+        if _has_symlink_component(subtree) or not subtree.is_dir():
             raise R2Error("clone source subtree is unsafe")
         for base, dir_names, file_names in os.walk(subtree, followlinks=False):
             base_path = Path(base)
@@ -1264,19 +1264,20 @@ def _clone_from_root(source: Path) -> Path:
                     raise R2Error("clone source contains an unsafe file")
                 files.append(child)
     for child in required_files:
-        if child.is_symlink() or not child.is_file():
+        if _has_symlink_component(child) or not child.is_file():
             raise R2Error("clone source OKF layout is unsafe")
         files.append(child)
     destination = Path(tempfile.mkdtemp(prefix="chronovisor-r2-", dir=temp_parent))
     try:
         for directory in sorted(directories):
-            (destination / directory.relative_to(source)).mkdir(
-                parents=True, exist_ok=True
-            )
+            target = destination / directory.relative_to(source)
+            target.mkdir(parents=True, exist_ok=True, mode=0o700)
+            target.chmod(0o700)
         flags = COPYFILE_ALL | COPYFILE_NOFOLLOW | COPYFILE_CLONE_FORCE
         for path in files:
             target = destination / path.relative_to(source)
-            target.parent.mkdir(parents=True, exist_ok=True)
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            target.parent.chmod(0o700)
             _copyfile_clone(path, target, flags)
         if any(path.is_symlink() for path in destination.rglob("*")):
             raise R2Error("APFS clone contains a symlink")
