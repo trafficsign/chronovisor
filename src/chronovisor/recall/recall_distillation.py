@@ -4512,6 +4512,7 @@ class _TeacherBatchResult:
     ramp_cap: int | None = None
     ramp_valid_receipts: int | None = None
     ramp_provider_attempts: int | None = None
+    last_durable_progress: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -5477,8 +5478,24 @@ def _ox_dispatch_and_commit(
         }
     active_claims = [claim for claim in claims if claim.work_id in outcomes]
     if active_claims:
+        progress: Mapping[str, Any] | None = None
+        if appended:
+            label_state = store.chain_head(label_path)
+            progress = {
+                "cursor": {"labels": int(label_state.get("records") or 0)},
+                "ledger_heads": {
+                    "labels": str(label_state.get("head_sha256") or ""),
+                },
+                "provenance": {
+                    "profile": OX_SINGLE_PROFILE,
+                    "profile_contract_id": profile_contract_id,
+                },
+                "progress_kind": "ox-label-v2",
+            }
         workset.commit(
-            active_claims, [outcomes[claim.work_id] for claim in active_claims]
+            active_claims,
+            [outcomes[claim.work_id] for claim in active_claims],
+            progress=progress,
         )
     ramp_cap, ramp_valid_receipts, ramp_provider_attempts = _advance_ox_ramp(
         cap=ramp_cap,
@@ -5500,6 +5517,7 @@ def _ox_dispatch_and_commit(
         ramp_cap=ramp_cap,
         ramp_valid_receipts=ramp_valid_receipts,
         ramp_provider_attempts=ramp_provider_attempts,
+        last_durable_progress=workset.progress(),
     )
 
 
@@ -5526,7 +5544,11 @@ def _run_ox_teacher_batch(
     teacher = teachers.get(OX_TEACHER_ROLE)
     workset = DistillationWorkset(store.distillation_dir(root) / "ox-workset.sqlite3")
     if teacher is None or teacher.local:
-        return _TeacherBatchResult(deferred=True, workset_status=workset.status("ox"))
+        return _TeacherBatchResult(
+            deferred=True,
+            workset_status=workset.status("ox"),
+            last_durable_progress=workset.progress(),
+        )
     profile_contract_id = str(_ensure_ox_profile_contract(root, config)["artifact_id"])
     try:
         worker_state = _read_worker_state(root)
@@ -5534,6 +5556,7 @@ def _run_ox_teacher_batch(
             return _TeacherBatchResult(
                 deferred=True,
                 workset_status=workset.status("ox"),
+                last_durable_progress=workset.progress(),
                 profile_stopped=True,
                 profile_contract_id=profile_contract_id,
             )
@@ -5718,7 +5741,10 @@ def _run_ox_teacher_batch(
                 _payload_scan_remaining=remaining,
                 structural_verifier=structural_verifier,
             )
-        return _TeacherBatchResult(workset_status=workset.status("ox"))
+        return _TeacherBatchResult(
+            workset_status=workset.status("ox"),
+            last_durable_progress=workset.progress(),
+        )
 
     batches, rescan_count = _ox_prepare_batches(
         claims=claims,
@@ -5749,7 +5775,11 @@ def _run_ox_teacher_batch(
                 _payload_scan_remaining=remaining,
                 structural_verifier=structural_verifier,
             )
-        return _TeacherBatchResult(deferred=True, workset_status=workset.status("ox"))
+        return _TeacherBatchResult(
+            deferred=True,
+            workset_status=workset.status("ox"),
+            last_durable_progress=workset.progress(),
+        )
 
     return _ox_dispatch_and_commit(
         claims=claims,

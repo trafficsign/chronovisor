@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS work_items (
     provenance_json TEXT NOT NULL,
     priority INTEGER NOT NULL,
     watermark_json TEXT NOT NULL,
+    stage TEXT NOT NULL DEFAULT 'snapshot',
     state TEXT NOT NULL CHECK (state IN ('ready', 'leased', 'completed', 'quarantined')),
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_error_class TEXT NOT NULL DEFAULT '',
@@ -122,6 +123,16 @@ _RECEIPT_OPERATIONS = {
     "release",
     "commit",
 }
+_STAGES = (
+    "snapshot",
+    "teacher",
+    "counterfactual",
+    "retry_wait",
+    "dataset",
+    "evaluation",
+)
+_PROGRESS_KEYS = {"cursor", "ledger_heads", "provenance", "progress_kind"}
+_FAIRNESS_AGE_SECONDS = 60
 
 
 def _json(
@@ -313,6 +324,71 @@ def _digest(value: object, field: str) -> str:
     return digest
 
 
+def _stage_for_kind(kind: str) -> str:
+    if "counterfactual" in kind:
+        return "counterfactual"
+    if "dataset" in kind:
+        return "dataset"
+    if "evaluation" in kind or "eval" in kind:
+        return "evaluation"
+    if "teacher" in kind or kind == "ox":
+        return "teacher"
+    return "snapshot"
+
+
+def _strict_progress(value: object, field: str = "progress") -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != _PROGRESS_KEYS:
+        raise DistillationWorksetError(f"{field} must be a strict progress object")
+    cursor = _metadata_value(value["cursor"], f"{field}.cursor")
+    heads = _mapping(value["ledger_heads"], f"{field}.ledger_heads")
+    normalized_heads = {
+        _metadata_key(key, f"{field}.ledger_heads"): _digest(
+            head, f"{field}.ledger_heads"
+        )
+        for key, head in heads.items()
+    }
+    provenance = _metadata_value(value["provenance"], f"{field}.provenance")
+    kind = _identifier(value["progress_kind"], f"{field}.progress_kind")
+    result = {
+        "cursor": cursor,
+        "ledger_heads": normalized_heads,
+        "provenance": provenance,
+        "progress_kind": kind,
+    }
+    _json(result, field)
+    return result
+
+
+def _cursor_relation(before: Any, after: Any) -> int:
+    """Return -1/0/1 for a safe cursor transition; reject incomparable rewrites."""
+
+    if _json(before, "progress cursor") == _json(after, "progress cursor"):
+        return 0
+    if (
+        isinstance(before, (int, float))
+        and not isinstance(before, bool)
+        and isinstance(after, (int, float))
+        and not isinstance(after, bool)
+    ):
+        return 1 if after > before else -1
+    if isinstance(before, Mapping) and isinstance(after, Mapping):
+        shared = set(before).intersection(after)
+        numeric = [
+            key
+            for key in shared
+            if isinstance(before[key], int)
+            and not isinstance(before[key], bool)
+            and isinstance(after[key], int)
+            and not isinstance(after[key], bool)
+        ]
+        if numeric:
+            if any(after[key] < before[key] for key in numeric):
+                return -1
+            if any(after[key] > before[key] for key in numeric):
+                return 1
+    raise DistillationWorksetError("progress cursor identity rewrite is invalid")
+
+
 def _item(value: Mapping[str, Any], watermark_json: str) -> tuple[Any, ...]:
     allowed = {
         "work_id",
@@ -446,6 +522,18 @@ class DistillationWorkset:
                 connection.execute(
                     "ALTER TABLE work_items ADD COLUMN next_attempt_at REAL"
                 )
+            if "stage" not in columns:
+                connection.execute(
+                    "ALTER TABLE work_items ADD COLUMN stage TEXT NOT NULL DEFAULT 'snapshot'"
+                )
+                connection.execute(
+                    "UPDATE work_items SET stage = CASE "
+                    "WHEN kind LIKE '%counterfactual%' THEN 'counterfactual' "
+                    "WHEN kind LIKE '%dataset%' THEN 'dataset' "
+                    "WHEN kind LIKE '%evaluation%' OR kind LIKE '%eval%' THEN 'evaluation' "
+                    "WHEN kind LIKE '%teacher%' OR kind = 'ox' THEN 'teacher' "
+                    "ELSE 'snapshot' END"
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS work_items_retry_due "
                 "ON work_items(kind, state, next_attempt_at, priority DESC, sequence ASC)"
@@ -508,6 +596,37 @@ class DistillationWorkset:
         return {"counts": counts, "watermark": watermark}
 
     @staticmethod
+    def _progress(connection: sqlite3.Connection) -> dict[str, Any] | None:
+        row = connection.execute(
+            "SELECT value_json FROM workset_state WHERE key = 'progress'"
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return _strict_progress(json.loads(row["value_json"]))
+        except (KeyError, TypeError, RecursionError, json.JSONDecodeError) as exc:
+            raise DistillationWorksetError("progress state is invalid JSON") from exc
+
+    @classmethod
+    def _store_progress(
+        cls, connection: sqlite3.Connection, progress: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        normalized = _strict_progress(progress)
+        before = cls._progress(connection)
+        if before is not None:
+            relation = _cursor_relation(before["cursor"], normalized["cursor"])
+            if relation < 0:
+                raise DistillationWorksetError("progress cursor regressed")
+            if relation == 0 and _json(before, "progress") != _json(normalized, "progress"):
+                raise DistillationWorksetError("progress cursor identity rewrite is invalid")
+        connection.execute(
+            "INSERT INTO workset_state (key, value_json) VALUES ('progress', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+            (_json(normalized, "progress"),),
+        )
+        return normalized
+
+    @staticmethod
     def _count_delta(
         before: Mapping[str, Any], after: Mapping[str, Any]
     ) -> dict[str, int]:
@@ -553,11 +672,14 @@ class DistillationWorkset:
         before: Mapping[str, Any],
         after: Mapping[str, Any],
         details: Mapping[str, Any],
+        *,
+        before_progress: Mapping[str, Any] | None = None,
+        after_progress: Mapping[str, Any] | None = None,
     ) -> None:
         if operation not in _RECEIPT_OPERATIONS:
             raise DistillationWorksetError("receipt operation is invalid")
         delta = cls._count_delta(before, after)
-        payload = {
+        payload: dict[str, Any] = {
             "before": {
                 "counts": dict(before["counts"]),
                 "watermark": before["watermark"],
@@ -569,6 +691,12 @@ class DistillationWorkset:
             "delta": delta,
             "details": dict(details),
         }
+        if before_progress is not None or after_progress is not None:
+            if before_progress is None or after_progress is None:
+                raise DistillationWorksetError("receipt progress is incomplete")
+            payload["version"] = 2
+            payload["before"]["progress"] = _strict_progress(before_progress)
+            payload["after"]["progress"] = _strict_progress(after_progress)
         payload_json = _json(
             payload,
             "workset receipt",
@@ -604,11 +732,16 @@ class DistillationWorkset:
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, int], dict[str, Any]]:
         if operation not in _RECEIPT_OPERATIONS or not isinstance(payload, Mapping):
             raise DistillationWorksetError("workset receipt payload is corrupted")
-        if set(payload) != {"before", "after", "delta", "details"}:
+        allowed = {"before", "after", "delta", "details"}
+        version = payload.get("version", 1)
+        if set(payload) != (allowed if version == 1 else {*allowed, "version"}):
+            raise DistillationWorksetError("workset receipt payload is corrupted")
+        if version not in (1, 2):
             raise DistillationWorksetError("workset receipt payload is corrupted")
 
         def snapshot(value: object) -> dict[str, Any]:
-            if not isinstance(value, Mapping) or set(value) != {"counts", "watermark"}:
+            expected = {"counts", "watermark"} if version == 1 else {"counts", "watermark", "progress"}
+            if not isinstance(value, Mapping) or set(value) != expected:
                 raise DistillationWorksetError("workset receipt snapshot is corrupted")
             raw_counts = value["counts"]
             if not isinstance(raw_counts, Mapping) or set(raw_counts) != set(
@@ -624,7 +757,10 @@ class DistillationWorkset:
                     )
                 counts[state] = count
             watermark = _metadata_value(value["watermark"], "receipt watermark")
-            return {"counts": counts, "watermark": watermark}
+            result: dict[str, Any] = {"counts": counts, "watermark": watermark}
+            if version == 2:
+                result["progress"] = _strict_progress(value["progress"], "receipt progress")
+            return result
 
         before = snapshot(payload["before"])
         after = snapshot(payload["after"])
@@ -763,6 +899,7 @@ class DistillationWorkset:
                 "receipt_sha256 FROM workset_receipts ORDER BY generation ASC"
             ).fetchall()
             current = self._snapshot(connection)
+            current_progress = self._progress(connection)
             if not rows:
                 if (
                     sum(current["counts"].values()) == 0
@@ -833,11 +970,11 @@ class DistillationWorkset:
                         or before["watermark"] is not None
                     )
                 elif _json(
-                    before,
+                    {key: before[key] for key in ("counts", "watermark")},
                     "receipt snapshot",
                     max_bytes=_MAX_RECEIPT_JSON_BYTES,
                 ) != _json(
-                    prior_after,
+                    {key: prior_after[key] for key in ("counts", "watermark")},
                     "receipt snapshot",
                     max_bytes=_MAX_RECEIPT_JSON_BYTES,
                 ):
@@ -854,7 +991,7 @@ class DistillationWorkset:
                 prior_after = after
 
             if _json(
-                prior_after,
+                {key: prior_after[key] for key in ("counts", "watermark")},
                 "receipt snapshot",
                 max_bytes=_MAX_RECEIPT_JSON_BYTES,
             ) != _json(
@@ -863,7 +1000,11 @@ class DistillationWorkset:
                 max_bytes=_MAX_RECEIPT_JSON_BYTES,
             ):
                 raise DistillationWorksetError("workset receipt final state mismatch")
-            return {
+            if "progress" in prior_after and _json(
+                prior_after["progress"], "receipt progress"
+            ) != _json(current_progress, "receipt progress"):
+                raise DistillationWorksetError("workset receipt final progress mismatch")
+            result = {
                 "status": "legacy-unverified" if legacy_origin else "verified",
                 "receipts": len(rows),
                 "generation": len(rows),
@@ -871,9 +1012,20 @@ class DistillationWorkset:
                 "counts": current["counts"],
                 "watermark": current["watermark"],
             }
+            if current_progress is not None:
+                result["progress"] = current_progress
+                result["last_durable_receipt"] = {
+                    "generation": len(rows),
+                    "head_sha256": previous_sha256,
+                }
+            return result
 
     def advance(
-        self, items: Iterable[Mapping[str, Any]], watermark: Any
+        self,
+        items: Iterable[Mapping[str, Any]],
+        watermark: Any,
+        *,
+        progress: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Idempotently record immutable work and its source progress watermark."""
 
@@ -894,11 +1046,13 @@ class DistillationWorkset:
         now = self._now()
         inserted = 0
         existing = 0
+        last_receipt: tuple[int, str] | None = None
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             committed = False
             try:
                 before = self._snapshot(connection)
+                before_progress = self._progress(connection)
                 rebound = 0
                 for record in records:
                     prior = connection.execute(
@@ -916,10 +1070,10 @@ class DistillationWorkset:
                             INSERT INTO work_items (
                                 work_id, kind, payload_ref, payload_digest,
                                 temporal_split_json, provenance_json, priority,
-                                watermark_json, state, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)
+                                watermark_json, stage, state, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)
                             """,
-                            (*record, now, now),
+                            (*record, _stage_for_kind(record[1]), now, now),
                         )
                         inserted += 1
                     elif tuple(prior[:6]) != immutable:
@@ -959,11 +1113,19 @@ class DistillationWorkset:
                     """,
                     (watermark_json,),
                 )
+                after_progress = (
+                    self._store_progress(connection, progress)
+                    if progress is not None
+                    else before_progress
+                )
                 after = self._snapshot(connection)
                 watermark_changed = _json(before["watermark"], "watermark") != _json(
                     after["watermark"], "watermark"
                 )
-                if inserted or rebound or watermark_changed:
+                progress_changed = _json(before_progress, "progress") != _json(
+                    after_progress, "progress"
+                )
+                if inserted or rebound or watermark_changed or progress_changed:
                     self._append_receipt(
                         connection,
                         "advance",
@@ -975,7 +1137,11 @@ class DistillationWorkset:
                             "watermark_changed": watermark_changed,
                             "selection_sha256": selection_sha256,
                         },
+                        before_progress=before_progress or after_progress,
+                        after_progress=after_progress,
                     )
+                if progress is not None:
+                    last_receipt = self._receipt_head(connection)
                 self._secure_sqlite_files()
                 connection.execute("COMMIT")
                 committed = True
@@ -983,7 +1149,14 @@ class DistillationWorkset:
                 if not committed:
                     connection.execute("ROLLBACK")
                 raise
-        return {"inserted": inserted, "existing": existing, "watermark": watermark}
+        result = {"inserted": inserted, "existing": existing, "watermark": watermark}
+        if progress is not None:
+            result["progress"] = _strict_progress(progress)
+            result["last_durable_receipt"] = {
+                "generation": last_receipt[0] if last_receipt is not None else 0,
+                "head_sha256": last_receipt[1] if last_receipt is not None else "",
+            }
+        return result
 
     def watermark(self) -> Any | None:
         """Read and validate the durable source progress watermark."""
@@ -1011,12 +1184,19 @@ class DistillationWorkset:
         _json(normalized, "watermark")
         return normalized
 
+    def progress(self) -> dict[str, Any] | None:
+        """Read the last payload-free, durable progress boundary."""
+
+        with closing(self._connect()) as connection:
+            return self._progress(connection)
+
     def claim(
-        self, kind: str, limit: int, owner: str, lease_seconds: float
+        self, kind: str | None, limit: int, owner: str, lease_seconds: float
     ) -> tuple[WorkClaim, ...]:
         """Claim FIFO work of one kind, reclaiming expired leases atomically."""
 
-        kind = _identifier(kind, "kind")
+        if kind is not None:
+            kind = _identifier(kind, "kind")
         owner = _identifier(owner, "owner")
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise DistillationWorksetError("limit must be a positive integer")
@@ -1038,10 +1218,11 @@ class DistillationWorkset:
                     SELECT work_id, kind, payload_digest, temporal_split_json,
                            provenance_json, attempt_count, lease_owner, lease_id
                     FROM work_items
-                    WHERE kind = ? AND state = 'leased' AND lease_expires_at <= ?
+                    WHERE state = 'leased' AND lease_expires_at <= ?
+                      AND (? IS NULL OR kind = ?)
                     ORDER BY sequence ASC
                     """,
-                    (kind, now),
+                    (now, kind, kind),
                 ).fetchall()
                 expired_selection_sha256 = _selection_sha256(
                     {
@@ -1061,9 +1242,10 @@ class DistillationWorkset:
                     UPDATE work_items
                     SET state = 'ready', lease_id = NULL, lease_owner = NULL,
                         lease_expires_at = NULL, updated_at = ?
-                    WHERE kind = ? AND state = 'leased' AND lease_expires_at <= ?
+                    WHERE state = 'leased' AND lease_expires_at <= ?
+                      AND (? IS NULL OR kind = ?)
                     """,
-                    (now, kind, now),
+                    (now, now, kind, kind),
                 )
                 reclaimed = reclaim_result.rowcount
                 if reclaimed != len(expired_rows):
@@ -1078,22 +1260,32 @@ class DistillationWorkset:
                         before,
                         after_reclaim,
                         {
-                            "kind": kind,
+                            "kind": kind or "mixed",
                             "count": reclaimed,
                             "selection_sha256": expired_selection_sha256,
                         },
                     )
+                chosen_kind = kind
+                if kind is None:
+                    oldest = connection.execute(
+                        "SELECT kind, MIN(created_at) AS oldest FROM work_items "
+                        "WHERE state = 'ready' AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
+                        "GROUP BY kind ORDER BY oldest ASC LIMIT 1",
+                        (now,),
+                    ).fetchone()
+                    if oldest is not None and now - float(oldest["oldest"]) >= _FAIRNESS_AGE_SECONDS:
+                        chosen_kind = str(oldest["kind"])
                 rows = connection.execute(
                     """
                     SELECT work_id, kind, payload_ref, payload_digest,
                            temporal_split_json, provenance_json, priority, attempt_count
                     FROM work_items
-                    WHERE kind = ? AND state = 'ready'
+                    WHERE (? IS NULL OR kind = ?) AND state = 'ready'
                       AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                     ORDER BY priority DESC, sequence ASC
                     LIMIT ?
                     """,
-                    (kind, now, limit),
+                    (chosen_kind, chosen_kind, now, limit),
                 ).fetchall()
                 for row in rows:
                     lease_id = uuid.uuid4().hex
@@ -1133,7 +1325,7 @@ class DistillationWorkset:
                         after_reclaim if reclaimed else before,
                         after_claim,
                         {
-                            "kind": kind,
+                            "kind": kind or "mixed",
                             "count": len(claims),
                             "selection_sha256": _claim_selection_sha256(claims),
                         },
@@ -1243,6 +1435,8 @@ class DistillationWorkset:
         self,
         claims: Sequence[WorkClaim],
         outcomes: Sequence[Mapping[str, Any]],
+        *,
+        progress: Mapping[str, Any] | None = None,
     ) -> dict[str, int]:
         """Commit matching leased claims with one single-writer transaction.
 
@@ -1275,6 +1469,7 @@ class DistillationWorkset:
             committed = False
             try:
                 before = self._snapshot(connection)
+                before_progress = self._progress(connection)
                 for claim, outcome in zip(claims, normalized, strict=True):
                     row = connection.execute(
                         """
@@ -1355,8 +1550,15 @@ class DistillationWorkset:
                     changed_totals[outcome["status"]] += 1
                     changed_claims.append(claim)
                     changed_outcomes.append(outcome)
-                if sum(changed_totals.values()) > 0:
+                after_progress = before_progress
+                if progress is not None:
+                    after_progress = self._store_progress(connection, progress)
+                if sum(changed_totals.values()) > 0 or progress is not None:
                     after = self._snapshot(connection)
+                    if not changed_claims:
+                        raise DistillationWorksetError(
+                            "durable progress requires an active completion"
+                        )
                     self._append_receipt(
                         connection,
                         "commit",
@@ -1386,6 +1588,8 @@ class DistillationWorkset:
                             ),
                             "selection_sha256": _claim_selection_sha256(changed_claims),
                         },
+                        before_progress=before_progress or after_progress,
+                        after_progress=after_progress,
                     )
                 self._secure_sqlite_files()
                 connection.execute("COMMIT")
@@ -1398,7 +1602,7 @@ class DistillationWorkset:
 
     def status(
         self, kind: str | None = None, *, include_timing: bool = False
-    ) -> dict[str, int]:
+    ) -> dict[str, Any]:
         """Return state counters without exposing work payloads."""
 
         if kind is not None:
@@ -1412,6 +1616,7 @@ class DistillationWorkset:
             "quarantined": 0,
         }
         timing_rows: Sequence[sqlite3.Row] = ()
+        stage_rows: Sequence[sqlite3.Row] = ()
         with closing(self._connect()) as connection:
             rows = connection.execute(
                 f"SELECT state, COUNT(*) AS count FROM work_items{where} GROUP BY state",
@@ -1425,6 +1630,13 @@ class DistillationWorkset:
                     "SELECT next_attempt_at, created_at FROM work_items" + timing_where,
                     parameters,
                 ).fetchall()
+                stage_rows = connection.execute(
+                    "SELECT stage, state, next_attempt_at, created_at, COUNT(*) AS count "
+                    "FROM work_items" + where + " GROUP BY stage, state, next_attempt_at, created_at",
+                    parameters,
+                ).fetchall()
+                progress = self._progress(connection)
+                generation, head = self._receipt_head(connection)
         for row in rows:
             counts[str(row["state"])] = int(row["count"])
         counts["backlog"] = counts["ready"] + counts["leased"]
@@ -1456,6 +1668,33 @@ class DistillationWorkset:
             counts["next_retry_in_seconds"] = int(
                 min((row["next_attempt_at"] - now for row in waiting), default=0)
             )
+            stages: dict[str, dict[str, int]] = {
+                stage: {
+                    state: 0
+                    for state in (*_RECEIPT_STATES, "retry_wait", "backlog")
+                }
+                for stage in _STAGES
+            }
+            for row in stage_rows:
+                stage = str(row["stage"])
+                if stage not in stages:
+                    raise DistillationWorksetError("workset stage is corrupted")
+                state = str(row["state"])
+                count = int(row["count"])
+                stages[stage][state] += count
+                if state == "ready" and row["next_attempt_at"] is not None and row["next_attempt_at"] > now:
+                    stages[stage]["retry_wait"] += count
+            for stage in _STAGES:
+                stages[stage]["backlog"] = (
+                    stages[stage]["ready"] + stages[stage]["leased"]
+                )
+            stages["retry_wait"]["retry_wait"] = counts["retry_wait"]
+            counts["stages"] = stages
+            counts["last_durable_receipt"] = {
+                "generation": generation,
+                "head_sha256": head,
+            }
+            counts["last_durable_progress"] = progress
         return counts
 
     @staticmethod

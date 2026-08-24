@@ -125,6 +125,9 @@ def test_legacy_database_migrates_retry_column_without_losing_rows_or_receipts(
         assert connection.execute(
             "SELECT next_attempt_at FROM work_items"
         ).fetchone() == (None,)
+        assert connection.execute("SELECT stage FROM work_items").fetchone() == (
+            "snapshot",
+        )
         assert connection.execute(
             "SELECT COUNT(*) FROM workset_receipts"
         ).fetchone() == (0,)
@@ -906,3 +909,66 @@ def test_transition_receipts_preserve_exact_watermark_json(tmp_path: Path) -> No
     assert audit["status"] == "verified"
     assert audit["receipts"] == 2
     assert type(audit["watermark"]) is float
+
+
+def _progress(cursor: int) -> dict[str, object]:
+    return {
+        "cursor": cursor,
+        "ledger_heads": {"labels": "c" * 64},
+        "provenance": {"profile": "ox-alpha-single-v1"},
+        "progress_kind": "ox-label-v2",
+    }
+
+
+def test_v2_progress_is_durable_monotonic_and_payload_free(tmp_path: Path) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance([_item("one")], {"source": 1})
+    claim = workset.claim("label", 1, "worker", 60)[0]
+    workset.commit([claim], [_completed()], progress=_progress(1))
+
+    assert workset.progress() == _progress(1)
+    assert workset.status("label", include_timing=True)["last_durable_progress"] == _progress(1)
+    assert workset.audit_transition_receipts()["progress"] == _progress(1)
+    with sqlite3.connect(path) as connection:
+        payload = json.loads(
+            connection.execute(
+                "SELECT payload_json FROM workset_receipts ORDER BY generation DESC LIMIT 1"
+            ).fetchone()[0]
+        )
+    assert payload["version"] == 2
+    assert set(payload["after"]["progress"]) == {
+        "cursor", "ledger_heads", "provenance", "progress_kind"
+    }
+    assert "payload_ref" not in json.dumps(payload)
+
+
+def test_progress_rejects_cursor_regression_and_same_cursor_rewrite(tmp_path: Path) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance([], {"source": 1}, progress=_progress(2))
+    with pytest.raises(DistillationWorksetError, match="regressed"):
+        workset.advance([], {"source": 2}, progress=_progress(1))
+    rewritten = _progress(2)
+    rewritten["provenance"] = {"profile": "other"}
+    with pytest.raises(DistillationWorksetError, match="identity rewrite"):
+        workset.advance([], {"source": 2}, progress=rewritten)
+    assert workset.advance([], {"source": 1}, progress=_progress(2))["progress"] == _progress(2)
+
+
+def test_cross_kind_claim_fairness_and_stage_retry_visibility(tmp_path: Path) -> None:
+    now = [0.0]
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3", clock=lambda: now[0])
+    workset.advance([_item("old", kind="local-teacher:a")], {"source": 1})
+    now[0] = 100.0
+    workset.advance([_item("new", kind="counterfactual", priority=99)], {"source": 2})
+
+    claim = workset.claim(None, 1, "worker", 60)[0]
+    assert claim.work_id == "old"
+    workset.commit(
+        [claim],
+        [{"status": "retry", "error_class": "transport_error", "retry_after_seconds": 10}],
+    )
+    stages = workset.status(include_timing=True)["stages"]
+    assert stages["teacher"]["retry_wait"] == 1
+    assert stages["retry_wait"]["retry_wait"] == 1
+    assert stages["counterfactual"]["ready"] == 1
