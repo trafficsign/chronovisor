@@ -5294,6 +5294,43 @@ def _ox_prepare_batches(
     return batches, 0
 
 
+def _ox_workset_progress(
+    workset: Any,
+    *,
+    candidate_state: Mapping[str, Any],
+    label_state: Mapping[str, Any],
+    profile_contract_id: str,
+    split_plan_id: str,
+) -> dict[str, Any]:
+    prior = workset.progress() or {}
+    cursor = prior.get("cursor", {})
+    provenance = prior.get("provenance", {})
+    epoch = cursor.get("revision_epoch", 0) if isinstance(cursor, Mapping) else 0
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+        raise DistillationError("OX workset progress is invalid")
+    current_provenance = {
+        "profile": OX_SINGLE_PROFILE,
+        "profile_contract_id": profile_contract_id,
+        "probe_revision": OX_PROBE_REVISION,
+        "split_plan_id": split_plan_id,
+    }
+    if prior and provenance != current_provenance:
+        epoch += 1
+    return {
+        "cursor": {
+            "candidate_count": int(candidate_state.get("record_count") or 0),
+            "label_count": int(label_state.get("records") or 0),
+            "revision_epoch": epoch,
+        },
+        "ledger_heads": {
+            "candidate": str(candidate_state.get("head_sha256") or ""),
+            "labels": str(label_state.get("head_sha256") or ""),
+        },
+        "provenance": current_provenance,
+        "progress_kind": "ox-workset-v2",
+    }
+
+
 def _ox_dispatch_and_commit(
     *,
     claims: Sequence[Any],
@@ -5306,6 +5343,8 @@ def _ox_dispatch_and_commit(
     config: DistillationConfig,
     workset: Any,
     profile_contract_id: str,
+    split_plan_id: str,
+    candidate_state: Mapping[str, Any],
     structural_verifier: Callable[
         [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
     ],
@@ -5481,17 +5520,13 @@ def _ox_dispatch_and_commit(
         progress: Mapping[str, Any] | None = None
         if appended:
             label_state = store.chain_head(label_path)
-            progress = {
-                "cursor": {"labels": int(label_state.get("records") or 0)},
-                "ledger_heads": {
-                    "labels": str(label_state.get("head_sha256") or ""),
-                },
-                "provenance": {
-                    "profile": OX_SINGLE_PROFILE,
-                    "profile_contract_id": profile_contract_id,
-                },
-                "progress_kind": "ox-label-v2",
-            }
+            progress = _ox_workset_progress(
+                workset,
+                candidate_state=candidate_state,
+                label_state=label_state,
+                profile_contract_id=profile_contract_id,
+                split_plan_id=split_plan_id,
+            )
         workset.commit(
             active_claims,
             [outcomes[claim.work_id] for claim in active_claims],
@@ -5635,7 +5670,18 @@ def _run_ox_teacher_batch(
     work_items = prepared["work_items"]
     watermark = prepared["watermark"]
     add_task = prepared["add_task"]
-    workset.advance(work_items, watermark)
+    label_state = store.chain_head(label_path)
+    workset.advance(
+        work_items,
+        watermark,
+        progress=_ox_workset_progress(
+            workset,
+            candidate_state=candidate_state,
+            label_state=label_state,
+            profile_contract_id=profile_contract_id,
+            split_plan_id=split_plan_id,
+        ),
+    )
     # Prepared tasks already contain candidate and probe work.
     claim_limit = config.teacher_claim_limit
     if (
@@ -5680,6 +5726,7 @@ def _run_ox_teacher_batch(
     }
     reconciled = [claim for claim in claims if claim.work_id in existing]
     if reconciled:
+        label_state = store.chain_head(label_path)
         workset.commit(
             reconciled,
             [
@@ -5690,6 +5737,13 @@ def _run_ox_teacher_batch(
                 }
                 for claim in reconciled
             ],
+            progress=_ox_workset_progress(
+                workset,
+                candidate_state=candidate_state,
+                label_state=label_state,
+                profile_contract_id=profile_contract_id,
+                split_plan_id=split_plan_id,
+            ),
         )
     claims = [claim for claim in claims if claim not in reconciled]
     claims = _ox_restore_claims(
@@ -5792,6 +5846,8 @@ def _run_ox_teacher_batch(
         config=config,
         workset=workset,
         profile_contract_id=profile_contract_id,
+        split_plan_id=split_plan_id,
+        candidate_state=candidate_state,
         structural_verifier=structural_verifier,
         label_path=label_path,
     )
@@ -5882,6 +5938,27 @@ def _local_workset_watermark(
     }
 
 
+def _local_workset_progress(watermark: Mapping[str, Any]) -> dict[str, Any]:
+    """Payload-free lineage shared by local teacher and counterfactual work."""
+
+    return {
+        "cursor": {
+            "candidate_count": int(watermark["candidate_count"]),
+            "label_count": int(watermark["label_count"]),
+        },
+        "ledger_heads": {
+            "candidate": str(watermark["candidate_head"]),
+            "labels": str(watermark["label_head"]),
+        },
+        "provenance": {
+            "assignment_revision": str(watermark["assignment_revision"]),
+            "probe_revision": str(watermark["probe_revision"]),
+            "split_plan_id": str(watermark["split_plan_id"]),
+        },
+        "progress_kind": "local-workset-v2",
+    }
+
+
 def _advance_local_workset(
     workset: Any, items: Sequence[Mapping[str, Any]], watermark: Mapping[str, Any]
 ) -> None:
@@ -5903,7 +5980,7 @@ def _advance_local_workset(
                 or (after_count > before_count and not after_head)
             ):
                 raise DistillationError("local workset watermark regressed")
-    workset.advance(items, watermark)
+    workset.advance(items, watermark, progress=_local_workset_progress(watermark))
 
 
 def _prepare_local_teacher_work(

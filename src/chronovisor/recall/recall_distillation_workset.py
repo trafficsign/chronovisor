@@ -340,10 +340,11 @@ def _strict_progress(value: object, field: str = "progress") -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != _PROGRESS_KEYS:
         raise DistillationWorksetError(f"{field} must be a strict progress object")
     cursor = _metadata_value(value["cursor"], f"{field}.cursor")
+    _validate_progress_cursor(cursor)
     heads = _mapping(value["ledger_heads"], f"{field}.ledger_heads")
     normalized_heads = {
-        _metadata_key(key, f"{field}.ledger_heads"): _digest(
-            head, f"{field}.ledger_heads"
+        _metadata_key(key, f"{field}.ledger_heads"): (
+            "" if head == "" else _digest(head, f"{field}.ledger_heads")
         )
         for key, head in heads.items()
     }
@@ -359,6 +360,19 @@ def _strict_progress(value: object, field: str = "progress") -> dict[str, Any]:
     return result
 
 
+def _validate_progress_cursor(value: object) -> None:
+    if isinstance(value, bool):
+        raise DistillationWorksetError("progress cursor is invalid")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise DistillationWorksetError("progress cursor is invalid")
+    if isinstance(value, Mapping):
+        for child in value.values():
+            _validate_progress_cursor(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            _validate_progress_cursor(child)
+
+
 def _cursor_relation(before: Any, after: Any) -> int:
     """Return -1/0/1 for a safe cursor transition; reject incomparable rewrites."""
 
@@ -372,15 +386,19 @@ def _cursor_relation(before: Any, after: Any) -> int:
     ):
         return 1 if after > before else -1
     if isinstance(before, Mapping) and isinstance(after, Mapping):
-        shared = set(before).intersection(after)
-        numeric = [
-            key
-            for key in shared
-            if isinstance(before[key], int)
-            and not isinstance(before[key], bool)
-            and isinstance(after[key], int)
-            and not isinstance(after[key], bool)
-        ]
+        if set(before) != set(after):
+            raise DistillationWorksetError("progress cursor identity rewrite is invalid")
+        numeric: list[str] = []
+        for key in before:
+            left, right = before[key], after[key]
+            if isinstance(left, bool) or isinstance(right, bool):
+                raise DistillationWorksetError("progress cursor is invalid")
+            if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+                if not math.isfinite(left) or not math.isfinite(right):
+                    raise DistillationWorksetError("progress cursor is invalid")
+                numeric.append(key)
+            elif _json(left, "progress cursor") != _json(right, "progress cursor"):
+                raise DistillationWorksetError("progress cursor identity rewrite is invalid")
         if numeric:
             if any(after[key] < before[key] for key in numeric):
                 return -1
@@ -664,6 +682,15 @@ class DistillationWorkset:
             raise DistillationWorksetError("workset receipt head is corrupted")
         return generation, digest
 
+    @staticmethod
+    def _validate_stages(connection: sqlite3.Connection) -> None:
+        if connection.execute(
+            "SELECT 1 FROM work_items WHERE stage NOT IN "
+            "('snapshot', 'teacher', 'counterfactual', 'retry_wait', 'dataset', 'evaluation') "
+            "LIMIT 1"
+        ).fetchone() is not None:
+            raise DistillationWorksetError("workset stage is corrupted")
+
     @classmethod
     def _append_receipt(
         cls,
@@ -691,11 +718,18 @@ class DistillationWorkset:
             "delta": delta,
             "details": dict(details),
         }
+        if before_progress is None and after_progress is None:
+            before_progress = after_progress = cls._progress(connection)
         if before_progress is not None or after_progress is not None:
-            if before_progress is None or after_progress is None:
+            bootstrap = before_progress is None
+            if after_progress is None:
                 raise DistillationWorksetError("receipt progress is incomplete")
             payload["version"] = 2
-            payload["before"]["progress"] = _strict_progress(before_progress)
+            if bootstrap:
+                payload["bootstrap"] = True
+            payload["before"]["progress"] = (
+                None if bootstrap else _strict_progress(before_progress)
+            )
             payload["after"]["progress"] = _strict_progress(after_progress)
         payload_json = _json(
             payload,
@@ -734,12 +768,17 @@ class DistillationWorkset:
             raise DistillationWorksetError("workset receipt payload is corrupted")
         allowed = {"before", "after", "delta", "details"}
         version = payload.get("version", 1)
-        if set(payload) != (allowed if version == 1 else {*allowed, "version"}):
+        v2_allowed = {*allowed, "version"}
+        if payload.get("bootstrap") is True:
+            v2_allowed.add("bootstrap")
+        if set(payload) != (allowed if version == 1 else v2_allowed):
             raise DistillationWorksetError("workset receipt payload is corrupted")
         if version not in (1, 2):
             raise DistillationWorksetError("workset receipt payload is corrupted")
 
-        def snapshot(value: object) -> dict[str, Any]:
+        bootstrap = payload.get("bootstrap") is True
+
+        def snapshot(value: object, *, before: bool) -> dict[str, Any]:
             expected = {"counts", "watermark"} if version == 1 else {"counts", "watermark", "progress"}
             if not isinstance(value, Mapping) or set(value) != expected:
                 raise DistillationWorksetError("workset receipt snapshot is corrupted")
@@ -759,11 +798,18 @@ class DistillationWorkset:
             watermark = _metadata_value(value["watermark"], "receipt watermark")
             result: dict[str, Any] = {"counts": counts, "watermark": watermark}
             if version == 2:
-                result["progress"] = _strict_progress(value["progress"], "receipt progress")
+                if before and bootstrap:
+                    if value["progress"] is not None:
+                        raise DistillationWorksetError("workset receipt bootstrap is corrupted")
+                    result["progress"] = None
+                else:
+                    result["progress"] = _strict_progress(
+                        value["progress"], "receipt progress"
+                    )
             return result
 
-        before = snapshot(payload["before"])
-        after = snapshot(payload["after"])
+        before = snapshot(payload["before"], before=True)
+        after = snapshot(payload["after"], before=False)
         raw_delta = payload["delta"]
         if not isinstance(raw_delta, Mapping) or set(raw_delta) != set(_RECEIPT_STATES):
             raise DistillationWorksetError("workset receipt delta is corrupted")
@@ -780,12 +826,14 @@ class DistillationWorkset:
         if not isinstance(details, Mapping):
             raise DistillationWorksetError("workset receipt details are corrupted")
         if operation == "advance":
-            if set(details) != {
+            base_keys = {
                 "inserted",
                 "rebound",
                 "watermark_changed",
                 "selection_sha256",
-            }:
+            }
+            expected_keys = base_keys | ({"progress_changed"} if version == 2 else set())
+            if set(details) != expected_keys:
                 raise DistillationWorksetError("workset advance receipt is corrupted")
             inserted = details["inserted"]
             rebound = details["rebound"]
@@ -803,7 +851,18 @@ class DistillationWorkset:
                     _json(before["watermark"], "receipt watermark")
                     != _json(after["watermark"], "receipt watermark")
                 )
-                or (inserted == 0 and rebound == 0 and not changed)
+                or (
+                    inserted == 0
+                    and rebound == 0
+                    and not changed
+                    and not details.get("progress_changed", False)
+                )
+            ):
+                raise DistillationWorksetError("workset advance receipt is corrupted")
+            if version == 2 and (
+                not isinstance(details["progress_changed"], bool)
+                or details["progress_changed"]
+                != (_json(before["progress"], "receipt progress") != _json(after["progress"], "receipt progress"))
             ):
                 raise DistillationWorksetError("workset advance receipt is corrupted")
             _digest(details["selection_sha256"], "receipt selection_sha256")
@@ -925,6 +984,7 @@ class DistillationWorkset:
             previous_sha256 = ""
             prior_after: dict[str, Any] | None = None
             legacy_origin = False
+            saw_v2 = False
             for expected_generation, row in enumerate(rows, start=1):
                 generation = row["generation"]
                 operation = row["operation"]
@@ -964,6 +1024,23 @@ class DistillationWorkset:
                         "workset receipt JSON is not canonical"
                     )
                 before, after, _, _ = self._validate_receipt_payload(operation, payload)
+                version = payload.get("version", 1)
+                if saw_v2 and version == 1:
+                    raise DistillationWorksetError("workset receipt progress downgraded")
+                if version == 2:
+                    if payload.get("bootstrap") is True:
+                        if prior_after is not None and "progress" in prior_after:
+                            raise DistillationWorksetError(
+                                "workset receipt progress continuity failed"
+                            )
+                        legacy_origin = legacy_origin or prior_after is not None
+                    elif prior_after is not None and _json(
+                        before["progress"], "receipt progress"
+                    ) != _json(prior_after.get("progress"), "receipt progress"):
+                        raise DistillationWorksetError(
+                            "workset receipt progress continuity failed"
+                        )
+                    saw_v2 = True
                 if prior_after is None:
                     legacy_origin = (
                         before["counts"] != {state: 0 for state in _RECEIPT_STATES}
@@ -1052,6 +1129,7 @@ class DistillationWorkset:
             committed = False
             try:
                 before = self._snapshot(connection)
+                self._validate_stages(connection)
                 before_progress = self._progress(connection)
                 rebound = 0
                 for record in records:
@@ -1126,18 +1204,21 @@ class DistillationWorkset:
                     after_progress, "progress"
                 )
                 if inserted or rebound or watermark_changed or progress_changed:
+                    details = {
+                        "inserted": inserted,
+                        "rebound": rebound,
+                        "watermark_changed": watermark_changed,
+                        "selection_sha256": selection_sha256,
+                    }
+                    if after_progress is not None:
+                        details["progress_changed"] = progress_changed
                     self._append_receipt(
                         connection,
                         "advance",
                         before,
                         after,
-                        {
-                            "inserted": inserted,
-                            "rebound": rebound,
-                            "watermark_changed": watermark_changed,
-                            "selection_sha256": selection_sha256,
-                        },
-                        before_progress=before_progress or after_progress,
+                        details,
+                        before_progress=before_progress,
                         after_progress=after_progress,
                     )
                 if progress is not None:
@@ -1213,6 +1294,7 @@ class DistillationWorkset:
             committed = False
             try:
                 before = self._snapshot(connection)
+                self._validate_stages(connection)
                 expired_rows = connection.execute(
                     """
                     SELECT work_id, kind, payload_digest, temporal_split_json,
@@ -1356,6 +1438,7 @@ class DistillationWorkset:
             committed = False
             try:
                 before = self._snapshot(connection)
+                self._validate_stages(connection)
                 for claim in claims:
                     row = connection.execute(
                         """
@@ -1469,6 +1552,7 @@ class DistillationWorkset:
             committed = False
             try:
                 before = self._snapshot(connection)
+                self._validate_stages(connection)
                 before_progress = self._progress(connection)
                 for claim, outcome in zip(claims, normalized, strict=True):
                     row = connection.execute(
@@ -1553,12 +1637,15 @@ class DistillationWorkset:
                 after_progress = before_progress
                 if progress is not None:
                     after_progress = self._store_progress(connection, progress)
-                if sum(changed_totals.values()) > 0 or progress is not None:
+                progress_changed = _json(before_progress, "progress") != _json(
+                    after_progress, "progress"
+                )
+                if not changed_claims and progress_changed:
+                    raise DistillationWorksetError(
+                        "durable progress requires an active completion"
+                    )
+                if sum(changed_totals.values()) > 0:
                     after = self._snapshot(connection)
-                    if not changed_claims:
-                        raise DistillationWorksetError(
-                            "durable progress requires an active completion"
-                        )
                     self._append_receipt(
                         connection,
                         "commit",
@@ -1588,7 +1675,7 @@ class DistillationWorkset:
                             ),
                             "selection_sha256": _claim_selection_sha256(changed_claims),
                         },
-                        before_progress=before_progress or after_progress,
+                        before_progress=before_progress,
                         after_progress=after_progress,
                     )
                 self._secure_sqlite_files()
@@ -1622,6 +1709,9 @@ class DistillationWorkset:
                 f"SELECT state, COUNT(*) AS count FROM work_items{where} GROUP BY state",
                 parameters,
             ).fetchall()
+            self._validate_stages(connection)
+            progress = self._progress(connection)
+            generation, head = self._receipt_head(connection)
             if include_timing:
                 timing_where = " WHERE state = 'ready'" + (
                     " AND kind = ?" if kind is not None else ""
@@ -1635,14 +1725,17 @@ class DistillationWorkset:
                     "FROM work_items" + where + " GROUP BY stage, state, next_attempt_at, created_at",
                     parameters,
                 ).fetchall()
-                progress = self._progress(connection)
-                generation, head = self._receipt_head(connection)
         for row in rows:
             counts[str(row["state"])] = int(row["count"])
         counts["backlog"] = counts["ready"] + counts["leased"]
         counts["total"] = sum(
             counts[state] for state in ("ready", "leased", "completed", "quarantined")
         )
+        counts["last_durable_receipt"] = {
+            "generation": generation,
+            "head_sha256": head,
+        }
+        counts["last_durable_progress"] = progress
         if include_timing:
             now = self._now()
             due = [
@@ -1657,13 +1750,13 @@ class DistillationWorkset:
             ]
             counts["retry_wait"] = len(waiting)
             counts["oldest_backlog_age_seconds"] = int(
-                max((now - row["created_at"] for row in timing_rows), default=0)
+                max((max(0.0, now - row["created_at"]) for row in timing_rows), default=0)
             )
             counts["oldest_ready_age_seconds"] = int(
-                max((now - row["created_at"] for row in due), default=0)
+                max((max(0.0, now - row["created_at"]) for row in due), default=0)
             )
             counts["oldest_retry_wait_age_seconds"] = int(
-                max((now - row["created_at"] for row in waiting), default=0)
+                max((max(0.0, now - row["created_at"]) for row in waiting), default=0)
             )
             counts["next_retry_in_seconds"] = int(
                 min((row["next_attempt_at"] - now for row in waiting), default=0)
@@ -1690,11 +1783,6 @@ class DistillationWorkset:
                 )
             stages["retry_wait"]["retry_wait"] = counts["retry_wait"]
             counts["stages"] = stages
-            counts["last_durable_receipt"] = {
-                "generation": generation,
-                "head_sha256": head,
-            }
-            counts["last_durable_progress"] = progress
         return counts
 
     @staticmethod

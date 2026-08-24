@@ -2955,7 +2955,11 @@ def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_label
 
     assert result.labels_written == 2
     assert result.model_calls == 1
-    assert result.workset_status == {
+    assert {
+        key: value
+        for key, value in result.workset_status.items()  # type: ignore[union-attr]
+        if not key.startswith("last_durable_")
+    } == {
         "ready": 0,
         "leased": 0,
         "completed": 2,
@@ -2963,6 +2967,7 @@ def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_label
         "backlog": 0,
         "total": 2,
     }
+    assert result.workset_status["last_durable_progress"]["cursor"]["label_count"] == 2  # type: ignore[index]
     assert [row["candidate_id"] for row in labels] == ["candidate-1", "candidate-2"]
     assert all(row["route"] == "opencode-go/ox-alpha-free" for row in labels)
     assert all(row["teacher_role"] == distill.OX_TEACHER_ROLE for row in labels)
@@ -3012,6 +3017,9 @@ def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_label
     assert recovered.labels_written == 0
     assert recovered.workset_status["completed"] == 2  # type: ignore[index]
     assert len(store.read_chain(label_path)) == 2
+    progress = recovered.workset_status["last_durable_progress"]  # type: ignore[index]
+    assert progress["cursor"]["label_count"] == 2
+    assert progress["ledger_heads"]["labels"] == store.chain_head(label_path)["head_sha256"]
 
 
 def test_ox_indexed_workset_reads_only_delta_then_claimed_snapshots(

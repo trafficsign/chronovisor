@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.core.canonical_json import canonical_json_sha256_strict
 from chronovisor.recall.recall_distillation_workset import (
     DistillationWorkset,
     DistillationWorksetError,
@@ -476,7 +477,11 @@ def test_status_reports_backlog_by_kind_and_state(tmp_path: Path) -> None:
     )
     claims = workset.claim("label", 2, "ox-1", 60)
 
-    assert workset.status("label") == {
+    assert {
+        key: value
+        for key, value in workset.status("label").items()
+        if not key.startswith("last_durable_")
+    } == {
         "ready": 0,
         "leased": 2,
         "completed": 0,
@@ -491,7 +496,11 @@ def test_status_reports_backlog_by_kind_and_state(tmp_path: Path) -> None:
             {"status": "quarantined", "error_class": "policy_veto"},
         ],
     )
-    assert workset.status() == {
+    assert {
+        key: value
+        for key, value in workset.status().items()
+        if not key.startswith("last_durable_")
+    } == {
         "ready": 1,
         "leased": 0,
         "completed": 1,
@@ -953,6 +962,90 @@ def test_progress_rejects_cursor_regression_and_same_cursor_rewrite(tmp_path: Pa
     with pytest.raises(DistillationWorksetError, match="identity rewrite"):
         workset.advance([], {"source": 2}, progress=rewritten)
     assert workset.advance([], {"source": 1}, progress=_progress(2))["progress"] == _progress(2)
+
+
+def test_v2_progress_receipts_cover_claim_release_commit_and_replay(tmp_path: Path) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance([_item("one")], {"source": 1}, progress=_progress(1))
+    claim = workset.claim("label", 1, "worker", 60)[0]
+    workset.release_unattempted([claim])
+    claim = workset.claim("label", 1, "worker", 60)[0]
+    workset.commit([claim], [_completed()], progress=_progress(1))
+    receipt = workset.status()["last_durable_receipt"]
+
+    assert workset.commit([claim], [_completed()], progress=_progress(1))["completed"] == 1
+    assert workset.status()["last_durable_receipt"] == receipt
+    changed = _progress(2)
+    with pytest.raises(DistillationWorksetError, match="active completion"):
+        workset.commit([claim], [_completed()], progress=changed)
+    assert workset.status()["last_durable_receipt"] == receipt
+    assert workset.audit_transition_receipts()["status"] == "verified"
+    with sqlite3.connect(path) as connection:
+        payloads = [
+            json.loads(row[0])
+            for row in connection.execute(
+                "SELECT payload_json FROM workset_receipts ORDER BY generation"
+            )
+        ]
+    assert all(payload["version"] == 2 for payload in payloads)
+    assert payloads[0]["before"]["progress"] is None
+    assert payloads[0]["bootstrap"] is True
+
+
+@pytest.mark.parametrize("cursor", [True, math.nan, math.inf, -math.inf])
+def test_progress_rejects_boolean_and_nonfinite_cursors(tmp_path: Path, cursor: object) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    progress = _progress(1)
+    progress["cursor"] = cursor
+
+    with pytest.raises(DistillationWorksetError, match="cursor"):
+        workset.advance([], {"source": 1}, progress=progress)
+
+
+def test_status_rejects_stage_corruption_without_timing(tmp_path: Path) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance([_item("one")], {"source": 1})
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE work_items SET stage = 'corrupted'")
+
+    with pytest.raises(DistillationWorksetError, match="stage"):
+        workset.status()
+    with pytest.raises(DistillationWorksetError, match="stage"):
+        workset.claim("label", 1, "worker", 60)
+
+
+def test_audit_rejects_v2_to_v1_receipt_downgrade(tmp_path: Path) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance([_item("one")], {"source": 1}, progress=_progress(1))
+    workset.claim("label", 1, "worker", 60)
+    with sqlite3.connect(path) as connection:
+        generation, previous, operation, raw_payload = connection.execute(
+            "SELECT generation, previous_sha256, operation, payload_json "
+            "FROM workset_receipts ORDER BY generation DESC LIMIT 1"
+        ).fetchone()
+        payload = json.loads(raw_payload)
+        payload.pop("version")
+        payload["before"].pop("progress")
+        payload["after"].pop("progress")
+        digest = canonical_json_sha256_strict(
+            {
+                "generation": generation,
+                "previous_sha256": previous,
+                "operation": operation,
+                "payload": payload,
+            }
+        )
+        connection.execute(
+            "UPDATE workset_receipts SET payload_json = ?, receipt_sha256 = ? "
+            "WHERE generation = ?",
+            (json.dumps(payload, sort_keys=True, separators=(",", ":")), digest, generation),
+        )
+
+    with pytest.raises(DistillationWorksetError, match="downgraded"):
+        workset.audit_transition_receipts()
 
 
 def test_cross_kind_claim_fairness_and_stage_retry_visibility(tmp_path: Path) -> None:
