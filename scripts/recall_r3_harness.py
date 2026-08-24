@@ -50,6 +50,9 @@ OX_WORKSET_EXPECTED_STATES = {
 }
 OX_WORKSET_ROW_LIMIT = 100_000
 WORKSET_LOCK_BYTES_LIMIT = 64 * 1024
+WORKSET_RECEIPT_ROW_LIMIT = OX_WORKSET_ROW_LIMIT * 2
+WORKSET_TEXT_ROW_BYTES_LIMIT = 64 * 1024
+WORKSET_TEXT_BYTES_LIMIT = 64 * 1024 * 1024
 CLONE_TREE_FILE_LIMIT = 100_000
 CLONE_TREE_FILE_BYTES_LIMIT = 512 * 1024 * 1024
 # A formal run may inventory production-sized files, but it must never read an
@@ -93,6 +96,28 @@ _WORKSET_SECURITY_COLUMNS = (
     "completion_digest",
     "created_at",
     "updated_at",
+)
+_WORKSET_TEXT_COLUMNS = (
+    "work_id",
+    "kind",
+    "payload_ref",
+    "payload_digest",
+    "temporal_split_json",
+    "provenance_json",
+    "watermark_json",
+    "stage",
+    "state",
+    "last_error_class",
+    "lease_id",
+    "lease_owner",
+    "completion_ref",
+    "completion_digest",
+)
+_WORKSET_RECEIPT_TEXT_COLUMNS = (
+    "previous_sha256",
+    "operation",
+    "payload_json",
+    "receipt_sha256",
 )
 SIX_STAGES = (
     "snapshot",
@@ -760,9 +785,13 @@ def _workset_lock_snapshot(runtime_dir: Path) -> dict[str, Any]:
         if before.get("st_size", 0) > WORKSET_LOCK_BYTES_LIMIT:
             raise R3Error("production Workset lock exceeds bounded read")
         try:
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            with path.open("rb") as handle:
+                content = handle.read(WORKSET_LOCK_BYTES_LIMIT + 1)
         except OSError as exc:
             raise R3Error("production Workset lock state read failed") from exc
+        if len(content) > WORKSET_LOCK_BYTES_LIMIT:
+            raise R3Error("production Workset lock exceeds bounded read")
+        digest = hashlib.sha256(content).hexdigest()
         if before != _regular_file_state(path):
             raise R3Error("production Workset lock changed during read")
         locks[path.name] = {**before, "sha256": digest}
@@ -1353,6 +1382,10 @@ def _clone_workset_inventory(
     """Read a bounded, payload-free inventory and digest of the clone DB."""
 
     before = _regular_file_state(path)
+    work_item_max_bytes = 0
+    work_item_total_bytes = 0
+    receipt_max_bytes = 0
+    receipt_total_bytes = 0
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
             tables = {
@@ -1404,14 +1437,53 @@ def _clone_workset_inventory(
                 b"chronovisor.r3.workset-state-seal.v1\n"
                 + state_digest.encode()
             ).hexdigest()
+            work_item_text_expr = " + ".join(
+                f'COALESCE(LENGTH(CAST("{column}" AS BLOB)), 0)'
+                for column in _WORKSET_TEXT_COLUMNS
+            )
+            work_item_text_stats = connection.execute(
+                f"SELECT MAX({work_item_text_expr}), "
+                f"COALESCE(SUM({work_item_text_expr}), 0) FROM work_items"
+            ).fetchone()
+            work_item_max_bytes = int(work_item_text_stats[0] or 0)
+            work_item_total_bytes = int(work_item_text_stats[1] or 0)
+            if (
+                work_item_max_bytes > WORKSET_TEXT_ROW_BYTES_LIMIT
+                or work_item_total_bytes > WORKSET_TEXT_BYTES_LIMIT
+            ):
+                raise R3Error("clone production ox workset text exceeds bounded inventory")
             receipt_count = 0
             receipt_digest = hashlib.sha256()
             if receipt_table_present:
+                receipt_count_row = connection.execute(
+                    "SELECT COUNT(*) FROM workset_receipts"
+                ).fetchone()
+                receipt_count = int(receipt_count_row[0]) if receipt_count_row else 0
+                if receipt_count > WORKSET_RECEIPT_ROW_LIMIT:
+                    raise R3Error("clone production ox workset receipts are unbounded")
+                receipt_text_expr = " + ".join(
+                    f'COALESCE(LENGTH(CAST("{column}" AS BLOB)), 0)'
+                    for column in _WORKSET_RECEIPT_TEXT_COLUMNS
+                )
+                receipt_text_stats = connection.execute(
+                    f"SELECT MAX({receipt_text_expr}), "
+                    f"COALESCE(SUM({receipt_text_expr}), 0) "
+                    "FROM workset_receipts"
+                ).fetchone()
+                receipt_max_bytes = int(receipt_text_stats[0] or 0)
+                receipt_total_bytes = int(receipt_text_stats[1] or 0)
+                if (
+                    receipt_max_bytes > WORKSET_TEXT_ROW_BYTES_LIMIT
+                    or receipt_total_bytes > WORKSET_TEXT_BYTES_LIMIT
+                ):
+                    raise R3Error("clone Workset receipt payload exceeds bounded inventory")
                 receipt_rows = connection.execute(
                     "SELECT generation, previous_sha256, operation, receipt_sha256 "
-                    "FROM workset_receipts ORDER BY generation"
+                    "FROM workset_receipts ORDER BY generation LIMIT ?",
+                    (WORKSET_RECEIPT_ROW_LIMIT + 1,),
                 ).fetchall()
-                receipt_count = len(receipt_rows)
+                if len(receipt_rows) > WORKSET_RECEIPT_ROW_LIMIT:
+                    raise R3Error("clone production ox workset receipts are unbounded")
                 for generation, previous, operation, receipt in receipt_rows:
                     receipt_digest.update(
                         json.dumps(
@@ -1426,8 +1498,6 @@ def _clone_workset_inventory(
                         ).encode()
                     )
                     receipt_digest.update(b"\n")
-                if receipt_count > OX_WORKSET_ROW_LIMIT * 2:
-                    raise R3Error("clone production ox workset receipts are unbounded")
             rows = connection.execute(
                 "SELECT "
                 + ", ".join(
@@ -1470,6 +1540,14 @@ def _clone_workset_inventory(
             "receipt_count": receipt_count,
             "retry_column_present": "next_attempt_at" in work_item_columns,
             "stage_column_present": "stage" in work_item_columns,
+        },
+        "text_budget": {
+            "row_limit_bytes": WORKSET_TEXT_ROW_BYTES_LIMIT,
+            "aggregate_limit_bytes": WORKSET_TEXT_BYTES_LIMIT,
+            "work_item_max_bytes": work_item_max_bytes,
+            "work_item_total_bytes": work_item_total_bytes,
+            "receipt_max_bytes": receipt_max_bytes,
+            "receipt_total_bytes": receipt_total_bytes,
         },
         "inventory_sha256": digest.hexdigest(),
         "content_sha256": digest.hexdigest(),
@@ -1810,10 +1888,34 @@ def _completed(claim: Any) -> dict[str, str]:
 def _receipt_rows(path: Path) -> list[dict[str, Any]]:
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            count_row = connection.execute(
+                "SELECT COUNT(*) FROM workset_receipts"
+            ).fetchone()
+            receipt_count = int(count_row[0]) if count_row else 0
+            if receipt_count > WORKSET_RECEIPT_ROW_LIMIT:
+                raise R3Error("workset receipts exceed bounded inventory")
+            receipt_text_expr = " + ".join(
+                f'COALESCE(LENGTH(CAST("{column}" AS BLOB)), 0)'
+                for column in _WORKSET_RECEIPT_TEXT_COLUMNS
+            )
+            receipt_text_stats = connection.execute(
+                f"SELECT MAX({receipt_text_expr}), "
+                f"COALESCE(SUM({receipt_text_expr}), 0) FROM workset_receipts"
+            ).fetchone()
+            receipt_max_bytes = int(receipt_text_stats[0] or 0)
+            receipt_total_bytes = int(receipt_text_stats[1] or 0)
+            if (
+                receipt_max_bytes > WORKSET_TEXT_ROW_BYTES_LIMIT
+                or receipt_total_bytes > WORKSET_TEXT_BYTES_LIMIT
+            ):
+                raise R3Error("workset receipt payload exceeds bounded inventory")
             rows = connection.execute(
                 "SELECT generation, previous_sha256, operation, payload_json, "
-                "receipt_sha256 FROM workset_receipts ORDER BY generation"
+                "receipt_sha256 FROM workset_receipts ORDER BY generation LIMIT ?",
+                (WORKSET_RECEIPT_ROW_LIMIT + 1,),
             ).fetchall()
+            if len(rows) > WORKSET_RECEIPT_ROW_LIMIT:
+                raise R3Error("workset receipts exceed bounded inventory")
     except sqlite3.Error as exc:
         raise R3Error("workset receipt read failed") from exc
     result: list[dict[str, Any]] = []
@@ -1848,6 +1950,64 @@ def _duplicate_count(path: Path) -> int:
     except sqlite3.Error as exc:
         raise R3Error("duplicate audit failed") from exc
     return int(rows[0] or 0) + int(receipt_rows[0] or 0)
+
+
+def _receipt_suffix_evidence(
+    workset_module: Any,
+    path: Path,
+    before_receipts: list[dict[str, Any]],
+    after_receipts: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Audit the full Workset chain and bind the newly admitted suffix."""
+
+    try:
+        audit = workset_module.DistillationWorkset(path).audit_transition_receipts()
+    except Exception as exc:
+        raise R3Error("Workset receipt chain audit failed") from exc
+    if audit.get("status") not in {"verified", "legacy-unverified"}:
+        raise R3Error("Workset receipt chain is not auditable")
+    suffix = after_receipts[len(before_receipts) :]
+    if not suffix:
+        raise R3Error("Workset receipt suffix is empty")
+    previous = (
+        str(before_receipts[-1]["receipt_sha256"]) if before_receipts else ""
+    )
+    canonicalizer = getattr(workset_module, "canonical_json_sha256_strict", None)
+    if not callable(canonicalizer):
+        raise R3Error("Workset receipt canonicalizer is unavailable")
+    for row in suffix:
+        payload = row.get("payload")
+        envelope = {
+            "generation": row.get("generation"),
+            "previous_sha256": row.get("previous_sha256"),
+            "operation": row.get("operation"),
+            "payload": payload,
+        }
+        if row.get("previous_sha256") != previous or not isinstance(payload, Mapping):
+            raise R3Error("Workset receipt suffix previous hash is invalid")
+        try:
+            expected_hash = str(canonicalizer(envelope))
+        except Exception as exc:
+            raise R3Error("Workset receipt suffix hash calculation failed") from exc
+        if expected_hash != row.get("receipt_sha256"):
+            raise R3Error("Workset receipt suffix hash is invalid")
+        previous = str(row["receipt_sha256"])
+    if (
+        audit.get("generation") != len(after_receipts)
+        or audit.get("head_sha256") != previous
+    ):
+        raise R3Error("Workset receipt audit head does not match suffix")
+    return suffix, {
+        "verified": True,
+        "audit_status": audit["status"],
+        "legacy_unverified_excluded": audit["status"] == "legacy-unverified",
+        "generation": audit["generation"],
+        "head_sha256": audit["head_sha256"],
+        "suffix_generation_start": suffix[0]["generation"],
+        "suffix_generation_end": suffix[-1]["generation"],
+        "suffix_count": len(suffix),
+        "suffix_head_sha256": previous,
+    }
 
 
 _TEACHER_CHILD = r'''
@@ -2325,9 +2485,11 @@ def _sigterm_reopen(
     ):
         raise R3Error("reopened workset status is invalid")
     after_receipts = _receipt_rows(path)
-    receipt_suffix = after_receipts[len(before_receipts) :]
+    receipt_suffix, receipt_chain = _receipt_suffix_evidence(
+        workset_module, path, before_receipts, after_receipts
+    )
     initial_generation = int(before_status["last_durable_receipt"]["generation"])
-    if not receipt_suffix or any(
+    if any(
         row.get("generation") != initial_generation + index + 1
         for index, row in enumerate(receipt_suffix)
     ):
@@ -2380,6 +2542,8 @@ def _sigterm_reopen(
             "count": len(receipt_suffix),
             "operations": dict(Counter(row["operation"] for row in receipt_suffix)),
         },
+        "receipt_chain": receipt_chain,
+        "receipt_chain_verified": receipt_chain["verified"],
         "idempotent_commit": True,
         "lock_holder": lock_holder,
         "release": release,
@@ -2724,6 +2888,7 @@ def _assert_formal_acceptance(
         or actual_sigterm.get("kind") != "ox"
         or actual_sigterm.get("leased_after") != 0
         or actual_sigterm.get("duplicates") != 0
+        or actual_sigterm.get("receipt_chain_verified") is not True
         or not isinstance(actual_sigterm.get("inventory_before"), Mapping)
         or not isinstance(actual_sigterm.get("inventory_after"), Mapping)
         or actual_sigterm["inventory_before"].get("row_count")
@@ -2734,6 +2899,22 @@ def _assert_formal_acceptance(
         != actual_sigterm.get("inventory_after")
         or not isinstance(actual_sigterm.get("receipt_suffix"), Mapping)
         or actual_sigterm["receipt_suffix"].get("count", 0) < 1
+        or not isinstance(actual_sigterm.get("receipt_chain"), Mapping)
+        or actual_sigterm["receipt_chain"].get("verified") is not True
+        or actual_sigterm["receipt_chain"].get("audit_status")
+        not in {"verified", "legacy-unverified"}
+        or (
+            actual_sigterm["receipt_chain"].get("audit_status")
+            == "legacy-unverified"
+            and actual_sigterm["receipt_chain"].get("legacy_unverified_excluded")
+            is not True
+        )
+        or actual_sigterm["receipt_chain"].get("suffix_count")
+        != actual_sigterm["receipt_suffix"].get("count")
+        or actual_sigterm["receipt_chain"].get("suffix_generation_start")
+        != actual_sigterm["receipt_suffix"].get("generation_start")
+        or actual_sigterm["receipt_chain"].get("suffix_generation_end")
+        != actual_sigterm["receipt_suffix"].get("generation_end")
         or not isinstance(actual_sigterm.get("normalization"), Mapping)
         or actual_sigterm["normalization"].get("clone_only") is not True
         or actual_sigterm["normalization"].get("integrity") != "ok"
@@ -2966,6 +3147,9 @@ def _assert_formal_acceptance(
         or boundary_production.get("excluded_not_evaluated")
         != R3_EXCLUDED_NOT_EVALUATED
         or not isinstance(post_completion_readback, Mapping)
+        or post_completion_readback.get("authority")
+        != "harness-post-completion-readback"
+        or post_completion_readback.get("completion_artifact_rechecked") is not True
         or not isinstance(final_scope_recheck, Mapping)
         or not isinstance(final_source, Mapping)
         or final_source.get("matches_sealed_boundary") is not True
@@ -3738,6 +3922,9 @@ def _run_once_guarded(
         final_artifact_probe = _artifact_file_snapshot(artifact_path)
         if final_artifact_probe != artifact_after:
             raise R3Error("R3 main artifact changed after completion publication")
+        final_completion_probe = _artifact_file_snapshot(completion_path)
+        if final_completion_probe != completion_after:
+            raise R3Error("R3 completion artifact changed after final scope recheck")
         _assert_output_safe(output)
         completion_finished_ns = time.time_ns()
         completion_wall = {
@@ -3747,12 +3934,13 @@ def _run_once_guarded(
             "main_artifact_persisted_and_readback": True,
             "completion_receipt_persisted_and_readback": True,
             "main_artifact_rechecked": True,
+            "completion_artifact_rechecked": True,
         }
         outer_end_to_end_wall = {
             "started_at_ns": formal_started_ns,
             "finished_at_ns": completion_finished_ns,
             "elapsed_ns": completion_finished_ns - formal_started_ns,
-            "sealed_scope": "external_completion_readback",
+            "scope": "harness-post-completion-readback",
             "through_main_readback_wall": through_main_readback_wall,
             "completion_receipt_readback_observed": True,
         }
@@ -3761,7 +3949,8 @@ def _run_once_guarded(
             "scope": final_scope_recheck,
             "completion_wall": completion_wall,
             "outer_end_to_end_wall": outer_end_to_end_wall,
-            "authority": "external-watchdog-attestation",
+            "completion_artifact_rechecked": True,
+            "authority": "harness-post-completion-readback",
         }
         result["completion_receipt"] = {
             "schema": completion_artifact["schema"],

@@ -30,6 +30,9 @@ def test_r3_contract_constants_are_bounded() -> None:
         "runtime/recall-distillation/ox-workset.sqlite3"
     )
     assert HARNESS.OX_WORKSET_EXPECTED_ROWS == 32_522
+    assert HARNESS.WORKSET_RECEIPT_ROW_LIMIT == HARNESS.OX_WORKSET_ROW_LIMIT * 2
+    assert HARNESS.WORKSET_TEXT_ROW_BYTES_LIMIT == 64 * 1024
+    assert HARNESS.WORKSET_TEXT_BYTES_LIMIT == 64 * 1024 * 1024
     assert HARNESS.OX_WORKSET_EXPECTED_STATES == {
         "ready": 19_400,
         "leased": 0,
@@ -101,6 +104,53 @@ def test_workset_lock_snapshot_rejects_oversized_lock(tmp_path: Path) -> None:
     lock.write_bytes(b"x" * (HARNESS.WORKSET_LOCK_BYTES_LIMIT + 1))
     with pytest.raises(HARNESS.R3Error, match="bounded read"):
         HARNESS._workset_lock_snapshot(runtime)
+
+
+def test_workset_receipt_reads_reject_unbounded_count(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from chronovisor.recall import recall_distillation_workset as workset
+
+    path = tmp_path / "receipts.sqlite3"
+    queue = workset.DistillationWorkset(path)
+    queue.advance([HARNESS._item("receipt-limit-1", "ox")], {"source": "test"})
+    queue.advance([HARNESS._item("receipt-limit-2", "ox")], {"source": "test"})
+    monkeypatch.setattr(HARNESS, "WORKSET_RECEIPT_ROW_LIMIT", 1)
+    with pytest.raises(HARNESS.R3Error, match="bounded inventory"):
+        HARNESS._receipt_rows(path)
+    with pytest.raises(HARNESS.R3Error, match="unbounded"):
+        HARNESS._clone_workset_inventory(path, require_receipts=True)
+
+
+def test_workset_text_budget_rejects_oversized_item_or_receipt(
+    tmp_path: Path,
+) -> None:
+    from chronovisor.recall import recall_distillation_workset as workset
+
+    path = tmp_path / "text-budget.sqlite3"
+    queue = workset.DistillationWorkset(path)
+    queue.advance([HARNESS._item("text-budget-1", "ox")], {"source": "test"})
+    oversized = "x" * (HARNESS.WORKSET_TEXT_ROW_BYTES_LIMIT + 1)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE work_items SET payload_ref = ? WHERE work_id = ?",
+            (oversized, "text-budget-1"),
+        )
+    with pytest.raises(HARNESS.R3Error, match="text exceeds bounded"):
+        HARNESS._clone_workset_inventory(path, require_receipts=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE work_items SET payload_ref = ? WHERE work_id = ?",
+            ("candidate-ledger:text-budget-1", "text-budget-1"),
+        )
+        connection.execute(
+            "UPDATE workset_receipts SET payload_json = ? WHERE generation = 1",
+            (oversized, ),
+        )
+    with pytest.raises(HARNESS.R3Error, match="receipt payload"):
+        HARNESS._receipt_rows(path)
+    with pytest.raises(HARNESS.R3Error, match="receipt payload"):
+        HARNESS._clone_workset_inventory(path, require_receipts=True)
 
 
 def test_external_clone_filesystem_uses_actual_r0_probe(
@@ -200,6 +250,25 @@ def test_artifact_probe_rejects_completion_toctou(tmp_path: Path, monkeypatch) -
         HARNESS._artifact_file_snapshot(artifact)
 
 
+def test_completion_artifact_restat_detects_inode_and_hash_replacement(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "completion.json"
+    artifact.write_bytes(b"sealed")
+    before = HARNESS._artifact_file_snapshot(artifact)
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(b"sealed")
+    replacement.replace(artifact)
+    same_content_replacement = HARNESS._artifact_file_snapshot(artifact)
+    assert same_content_replacement["path"] == before["path"]
+    assert same_content_replacement["file_state"]["st_ino"] != before["file_state"]["st_ino"]
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(b"tampered")
+    replacement.replace(artifact)
+    hash_replacement = HARNESS._artifact_file_snapshot(artifact)
+    assert hash_replacement["sha256"] != before["sha256"]
+
+
 def test_production_raw_drift_is_classified_without_failing_closed(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -294,6 +363,8 @@ def test_clone_inventory_is_bounded_and_payload_free(tmp_path: Path) -> None:
     assert len(inventory["state_sha256"]) == 64
     assert inventory["state_seal_sha256"] != inventory["state_sha256"]
     assert len(inventory["receipt_chain_sha256"]) == 64
+    assert inventory["text_budget"]["work_item_total_bytes"] <= HARNESS.WORKSET_TEXT_BYTES_LIMIT
+    assert inventory["text_budget"]["receipt_total_bytes"] <= HARNESS.WORKSET_TEXT_BYTES_LIMIT
     assert HARNESS._workset_identity(inventory)["content_sha256"] == inventory[
         "content_sha256"
     ]
@@ -402,6 +473,35 @@ def test_clone_nonempty_wal_fails_before_normalization_and_preserves_state(
     assert HARNESS._regular_file_state(workset_path) == db_state
     HARNESS._cleanup_clone(clone)
     assert not clone.exists()
+
+
+def test_sigterm_receipt_suffix_rejects_tampered_previous_or_hash(
+    tmp_path: Path,
+) -> None:
+    from chronovisor.recall import recall_distillation_workset as workset
+
+    path = tmp_path / "sigterm-receipts.sqlite3"
+    queue = workset.DistillationWorkset(path)
+    queue.advance([HARNESS._item("receipt-chain-1", "ox")], {"source": "test"})
+    valid = HARNESS._receipt_rows(path)
+    suffix, evidence = HARNESS._receipt_suffix_evidence(workset, path, [], valid)
+    assert len(suffix) == 1
+    assert evidence["verified"] is True
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE workset_receipts SET previous_sha256 = ? WHERE generation = 1",
+            ("f" * 64,),
+        )
+    with pytest.raises(HARNESS.R3Error, match="receipt"):
+        HARNESS._receipt_suffix_evidence(workset, path, [], HARNESS._receipt_rows(path))
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE workset_receipts SET previous_sha256 = ?, receipt_sha256 = ? "
+            "WHERE generation = 1",
+            ("", "0" * 64),
+        )
+    with pytest.raises(HARNESS.R3Error, match="receipt"):
+        HARNESS._receipt_suffix_evidence(workset, path, [], HARNESS._receipt_rows(path))
 
 
 def test_clone_cycles_migrate_legacy_ox_schema_and_preserve_counts(
