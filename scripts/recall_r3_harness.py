@@ -38,6 +38,12 @@ TEACHER_HANDOFF_LIMIT_NS = 10_000_000_000
 RECEIPT_COVERAGE_LIMIT = 99.0
 OX_WORKSET_RELATIVE = Path("runtime") / "recall-distillation" / "ox-workset.sqlite3"
 OX_WORKSET_EXPECTED_ROWS = 32_522
+OX_WORKSET_EXPECTED_STATES = {
+    "ready": 19_400,
+    "leased": 0,
+    "completed": 152,
+    "quarantined": 12_970,
+}
 OX_WORKSET_ROW_LIMIT = 100_000
 SIX_STAGES = (
     "snapshot",
@@ -371,6 +377,8 @@ def _run_clone_workset_cycles(
     migration_state_counts = {
         state: int(initial_status.get(state, 0)) for state in state_names
     }
+    if legacy_state_counts != OX_WORKSET_EXPECTED_STATES:
+        raise R3Error("clone production ox workset state counts are not certified")
     if migration_state_counts != legacy_state_counts:
         raise R3Error("clone workset migration changed state counts")
     initial_generation = int(initial_status["last_durable_receipt"]["generation"])
@@ -1036,7 +1044,7 @@ def _assert_formal_acceptance(
         or clone.get("receipt_chain_verified") is not True
         or not isinstance(legacy_status, Mapping)
         or not isinstance(legacy_status.get("states"), Mapping)
-        or legacy_status["states"].get("leased") != 0
+        or legacy_status["states"] != OX_WORKSET_EXPECTED_STATES
         or not isinstance(migration, Mapping)
         or migration.get("status_unchanged") is not True
     ):

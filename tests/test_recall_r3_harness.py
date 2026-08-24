@@ -27,6 +27,12 @@ def test_r3_contract_constants_are_bounded() -> None:
         "runtime/recall-distillation/ox-workset.sqlite3"
     )
     assert HARNESS.OX_WORKSET_EXPECTED_ROWS == 32_522
+    assert HARNESS.OX_WORKSET_EXPECTED_STATES == {
+        "ready": 19_400,
+        "leased": 0,
+        "completed": 152,
+        "quarantined": 12_970,
+    }
 
 
 def test_p95_uses_nearest_rank() -> None:
