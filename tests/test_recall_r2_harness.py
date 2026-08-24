@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -367,3 +368,109 @@ def test_clone_rejects_symlinked_okf_layout_parent(
 
     with pytest.raises(HARNESS.R2Error, match="unsafe"):
         HARNESS._clone_from_root(source)
+
+
+@pytest.mark.parametrize(
+    "invalid_entry", ("migrations-file", "root-marker", "pages-symlink")
+)
+def test_clone_rejects_source_state_that_okf_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_entry: str
+) -> None:
+    from chronovisor.core.okf_cutover import discover_okf_startup
+    from chronovisor.core.store import RuntimeContext, init_chronovisor
+
+    source = tmp_path / "source"
+    init_chronovisor(RuntimeContext(source))
+    (source / "runtime" / "recall-distillation").mkdir()
+    if invalid_entry == "migrations-file":
+        (source / "runtime" / "migrations").write_text("invalid", encoding="utf-8")
+    elif invalid_entry == "root-marker":
+        (source / "index.md").write_text("invalid", encoding="utf-8")
+    else:
+        (source / "pages" / "extra").symlink_to(source / "pages" / "index.md")
+    assert not discover_okf_startup(source, source / "runtime").allowed
+    temp_parent = tmp_path / "temp"
+    temp_parent.mkdir()
+    monkeypatch.setattr(HARNESS.sys, "platform", "darwin")
+    monkeypatch.setattr(HARNESS.tempfile, "gettempdir", lambda: str(temp_parent))
+
+    def copyfile(source_path: Path, destination: Path, _flags: int) -> None:
+        destination.write_bytes(source_path.read_bytes())
+
+    monkeypatch.setattr(HARNESS, "_copyfile_clone", copyfile)
+    try:
+        clone = HARNESS._clone_from_root(source)
+    except HARNESS.R2Error:
+        return
+    HARNESS._cleanup_clone(clone)
+    pytest.fail("OKF-blocked source was normalized into a clone")
+
+
+def test_clone_holds_okf_layout_lease_while_copying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.core import durable_state
+    from chronovisor.core.store import RuntimeContext, init_chronovisor
+
+    source = tmp_path / "source"
+    init_chronovisor(RuntimeContext(source))
+    (source / "runtime" / "recall-distillation").mkdir()
+    temp_parent = tmp_path / "temp"
+    temp_parent.mkdir()
+    monkeypatch.setattr(HARNESS.sys, "platform", "darwin")
+    monkeypatch.setattr(HARNESS.tempfile, "gettempdir", lambda: str(temp_parent))
+    lease_held = False
+
+    @contextmanager
+    def writer_lock(root: Path, **kwargs: object) -> object:
+        nonlocal lease_held
+        assert root == source
+        assert kwargs == {"allow_create": False}
+        lease_held = True
+        try:
+            yield
+        finally:
+            lease_held = False
+
+    def copyfile(source_path: Path, destination: Path, _flags: int) -> None:
+        assert lease_held
+        destination.write_bytes(source_path.read_bytes())
+
+    monkeypatch.setattr(durable_state, "okf_writer_lock", writer_lock)
+    monkeypatch.setattr(HARNESS, "_copyfile_clone", copyfile)
+    clone = HARNESS._clone_from_root(source)
+    try:
+        assert not lease_held
+    finally:
+        HARNESS._cleanup_clone(clone)
+
+
+def test_clone_walk_errors_fail_closed_and_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.core.store import RuntimeContext, init_chronovisor
+
+    source = tmp_path / "source"
+    init_chronovisor(RuntimeContext(source))
+    (source / "runtime" / "recall-distillation").mkdir()
+    temp_parent = tmp_path / "temp"
+    temp_parent.mkdir()
+    monkeypatch.setattr(HARNESS.sys, "platform", "darwin")
+    monkeypatch.setattr(HARNESS.tempfile, "gettempdir", lambda: str(temp_parent))
+
+    def failing_walk(
+        _root: Path, *, followlinks: bool, onerror: object = None
+    ) -> object:
+        assert not followlinks
+        if callable(onerror):
+            onerror(PermissionError("denied"))
+        return iter(())
+
+    monkeypatch.setattr(HARNESS.os, "walk", failing_walk)
+    try:
+        clone = HARNESS._clone_from_root(source)
+    except HARNESS.R2Error:
+        assert not tuple(temp_parent.iterdir())
+        return
+    HARNESS._cleanup_clone(clone)
+    pytest.fail("clone source walk error was ignored")

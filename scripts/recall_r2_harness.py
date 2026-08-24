@@ -1216,7 +1216,7 @@ def _copyfile_clone(source: Path, destination: Path, flags: int) -> None:
         raise R2Error(f"forced APFS clone failed: errno={ctypes.get_errno()}")
 
 
-def _clone_from_root(source: Path) -> Path:
+def _new_clone_destination(source: Path) -> Path:
     if sys.platform != "darwin":
         raise R2Error("unsupported environment: Darwin/APFS is required")
     if _has_symlink_component(source) or not source.is_dir():
@@ -1228,67 +1228,105 @@ def _clone_from_root(source: Path) -> Path:
         raise R2Error("clone temp parent is unavailable") from exc
     if temp_parent == source_resolved or temp_parent.is_relative_to(source_resolved):
         raise R2Error("clone temp destination overlaps source")
-    required = [source / "raw", source / "runtime" / "recall-distillation"]
-    required_files = [
-        source / "pages" / "index.md",
-        source / "pages" / "log.md",
-        source / "system" / "schema.md",
-        source / "runtime" / "activity.jsonl",
-        source / "runtime" / "okf-writer.lock",
-    ]
-    migrations = source / "runtime" / "migrations"
-    bootstrap_proof = source / "runtime" / "bootstrap-layout.json"
-    if migrations.is_symlink():
-        raise R2Error("clone source OKF proof is unsafe")
-    if migrations.is_dir():
-        required.append(migrations)
-    elif bootstrap_proof.is_symlink() or not bootstrap_proof.is_file():
-        raise R2Error("clone source has no OKF startup proof")
-    else:
-        required_files.append(bootstrap_proof)
-    files: list[Path] = []
-    directories: set[Path] = set()
-    for subtree in required:
-        if _has_symlink_component(subtree) or not subtree.is_dir():
-            raise R2Error("clone source subtree is unsafe")
-        for base, dir_names, file_names in os.walk(subtree, followlinks=False):
-            base_path = Path(base)
-            directories.add(base_path)
-            for name in sorted(dir_names):
-                child = base_path / name
-                if child.is_symlink():
-                    raise R2Error("clone source contains a symlink")
-            for name in sorted(file_names):
-                child = base_path / name
-                if child.is_symlink() or not child.is_file():
-                    raise R2Error("clone source contains an unsafe file")
-                files.append(child)
-    for child in required_files:
-        if _has_symlink_component(child) or not child.is_file():
-            raise R2Error("clone source OKF layout is unsafe")
-        files.append(child)
     destination = Path(tempfile.mkdtemp(prefix="chronovisor-r2-", dir=temp_parent))
+    if _path_overlap(source, destination):
+        _cleanup_clone(destination)
+        raise R2Error("APFS clone overlaps source")
+    return destination
+
+
+def _populate_clone(source: Path, destination: Path) -> Path:
     try:
-        for directory in sorted(directories):
-            target = destination / directory.relative_to(source)
-            target.mkdir(parents=True, exist_ok=True, mode=0o700)
-            target.chmod(0o700)
-        flags = COPYFILE_ALL | COPYFILE_NOFOLLOW | COPYFILE_CLONE_FORCE
-        for path in files:
-            target = destination / path.relative_to(source)
-            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            target.parent.chmod(0o700)
-            _copyfile_clone(path, target, flags)
-        if any(path.is_symlink() for path in destination.rglob("*")):
-            raise R2Error("APFS clone contains a symlink")
-        if _path_overlap(source, destination):
-            raise R2Error("APFS clone overlaps source")
+        from chronovisor.core.durable_state import okf_writer_lock
+        from chronovisor.core.okf_cutover import discover_okf_startup
+
+        if (
+            _has_symlink_component(destination)
+            or not destination.is_dir()
+            or any(destination.iterdir())
+        ):
+            raise R2Error("clone destination is unsafe")
+
+        def reject_walk_error(error: OSError) -> None:
+            raise R2Error("clone source walk failed") from error
+
+        with okf_writer_lock(source, allow_create=False):
+            source_startup = discover_okf_startup(source, source / "runtime")
+            if not source_startup.allowed:
+                raise R2Error("clone source OKF startup is unsafe")
+
+            required = [source / "raw", source / "runtime" / "recall-distillation"]
+            required_files = [
+                source / "pages" / "index.md",
+                source / "pages" / "log.md",
+                source / "system" / "schema.md",
+                source / "runtime" / "activity.jsonl",
+                source / "runtime" / "okf-writer.lock",
+            ]
+            migrations = source / "runtime" / "migrations"
+            bootstrap_proof = source / "runtime" / "bootstrap-layout.json"
+            try:
+                migration_mode = migrations.lstat().st_mode
+            except FileNotFoundError:
+                migration_mode = None
+            if migration_mode is not None:
+                if not stat.S_ISDIR(migration_mode):
+                    raise R2Error("clone source OKF proof is unsafe")
+                required.append(migrations)
+            elif bootstrap_proof.is_symlink() or not bootstrap_proof.is_file():
+                raise R2Error("clone source has no OKF startup proof")
+            else:
+                required_files.append(bootstrap_proof)
+
+            files: list[Path] = []
+            directories: set[Path] = set()
+            for subtree in required:
+                if _has_symlink_component(subtree) or not subtree.is_dir():
+                    raise R2Error("clone source subtree is unsafe")
+                for base, dir_names, file_names in os.walk(
+                    subtree, followlinks=False, onerror=reject_walk_error
+                ):
+                    base_path = Path(base)
+                    directories.add(base_path)
+                    for name in sorted(dir_names):
+                        child = base_path / name
+                        if child.is_symlink():
+                            raise R2Error("clone source contains a symlink")
+                    for name in sorted(file_names):
+                        child = base_path / name
+                        if child.is_symlink() or not child.is_file():
+                            raise R2Error("clone source contains an unsafe file")
+                        files.append(child)
+            for child in required_files:
+                if _has_symlink_component(child) or not child.is_file():
+                    raise R2Error("clone source OKF layout is unsafe")
+                files.append(child)
+
+            for directory in sorted(directories):
+                target = destination / directory.relative_to(source)
+                target.mkdir(parents=True, exist_ok=True, mode=0o700)
+                target.chmod(0o700)
+            flags = COPYFILE_ALL | COPYFILE_NOFOLLOW | COPYFILE_CLONE_FORCE
+            for path in files:
+                target = destination / path.relative_to(source)
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                target.parent.chmod(0o700)
+                _copyfile_clone(path, target, flags)
+            if any(path.is_symlink() for path in destination.rglob("*")):
+                raise R2Error("APFS clone contains a symlink")
+            clone_startup = discover_okf_startup(destination, destination / "runtime")
+            if not clone_startup.allowed:
+                raise R2Error("APFS clone OKF startup proof is invalid")
         return destination
     except Exception as exc:
         _cleanup_clone(destination)
         if isinstance(exc, R2Error):
             raise
         raise R2Error("APFS clone failed") from exc
+
+
+def _clone_from_root(source: Path) -> Path:
+    return _populate_clone(source, _new_clone_destination(source))
 
 
 def _cleanup_clone(path: Path) -> None:
@@ -1927,7 +1965,7 @@ def _run_once(
     if noop_samples < 20 or delta_samples < 20:
         raise R2Error("R2 sample counts are below the required minimum")
     source_before = _source_tree_digest(source_root)
-    clone = _clone_from_root(production)
+    clone = _new_clone_destination(production)
     clones: list[Path] = [clone]
     previous_dont_write_bytecode = sys.dont_write_bytecode
     sys.dont_write_bytecode = True
@@ -1942,6 +1980,7 @@ def _run_once(
             }
         ):
             parity, distill, store, catalog, raw_store = R0._load(source_root)
+            _populate_clone(production, clone)
             raw_segment = __import__(
                 "chronovisor.core.raw_segment", fromlist=["append_capture"]
             )
