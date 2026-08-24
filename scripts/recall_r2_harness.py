@@ -2496,7 +2496,6 @@ def _run_once(
                 raise R2Error("production derived state changed")
 
             payload = {
-                "schema": R2_SCHEMA,
                 "captured_at": datetime.now().astimezone().isoformat(),
                 "runtime_identity": identity_before,
                 "runtime_comparison": R0._runtime_comparison(
