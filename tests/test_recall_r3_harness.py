@@ -62,6 +62,7 @@ def test_run_workset_covers_durability_and_recovery(tmp_path: Path) -> None:
 
     result = HARNESS._run_workset(workset, ROOT, tmp_path, HARNESS.UNIT_MIN_SAMPLES)
     assert result["fairness"]["passed"] is True
+    assert result["cross_kind_fairness"] is True
     assert result["claim"]["p95_ns"] <= HARNESS.CLAIM_P95_LIMIT_NS
     assert result["teacher_handoff"]["wall_time_ns"] <= HARNESS.TEACHER_HANDOFF_LIMIT_NS
     assert set(result["stages"]) == set(HARNESS.SIX_STAGES)

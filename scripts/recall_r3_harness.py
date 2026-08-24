@@ -569,7 +569,14 @@ def _run_workset(
             for key, value in final_status.items()
             if key in {"ready", "leased", "completed", "quarantined", "retry_wait", "total"}
         },
-        "fairness": {"oldest_work_id_sha256": _digest("r3-old-teacher"), "passed": True},
+        "fairness": {
+            "older_kind": "local-teacher:old",
+            "newer_high_priority_kind": "counterfactual",
+            "selected_older_kind": True,
+            "oldest_work_id_sha256": _digest("r3-old-teacher"),
+            "passed": True,
+        },
+        "cross_kind_fairness": True,
         "claim": {
             "samples": claim_count,
             "observation_calls": len(claim_samples),
