@@ -7860,6 +7860,7 @@ def _timeout_workset_statuses(root: Path) -> dict[str, dict[str, Any]]:
     """Return only durable queue boundaries; timeout must not hide a bad queue."""
 
     from chronovisor.recall.recall_distillation_workset import DistillationWorkset
+    from chronovisor.recall.recall_runtime import RecallWallClockTimeout
 
     statuses: dict[str, dict[str, Any]] = {}
     for name, filename in (
@@ -7875,6 +7876,8 @@ def _timeout_workset_statuses(root: Path) -> dict[str, dict[str, Any]]:
                     "observation": "available",
                     **DistillationWorkset(path).status(include_timing=True),
                 }
+        except RecallWallClockTimeout:
+            statuses[name] = {"observation": "unavailable"}
         except Exception:
             statuses[name] = {"observation": "unavailable"}
     return statuses

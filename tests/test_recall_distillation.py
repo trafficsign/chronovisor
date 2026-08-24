@@ -1670,6 +1670,15 @@ def test_timeout_reports_payload_free_durable_workset_boundaries(
         assert status["last_durable_receipt"]["generation"] > 0
         assert "payload_ref" not in json.dumps(status)
 
+    def timeout_status(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise RecallWallClockTimeout("second timeout")
+
+    monkeypatch.setattr(workset.DistillationWorkset, "status", timeout_status)
+    result = distill.run_distillation_chunk(root=tmp_path, max_elapsed_seconds=60)
+    assert result["reason"] == "wall_clock_timeout"
+    assert result["ox_workset"] == {"observation": "unavailable"}
+    assert result["local_workset"] == {"observation": "unavailable"}
+
 
 def test_timeout_workset_observation_marks_missing_and_corrupt_queue(tmp_path: Path) -> None:
     runtime_dir = store.distillation_dir(tmp_path)

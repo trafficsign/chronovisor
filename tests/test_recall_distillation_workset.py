@@ -1033,6 +1033,26 @@ def test_legacy_ox_progress_seals_once_into_current_shape(tmp_path: Path) -> Non
             _current_ox_progress(),
         ),
         (_legacy_ox_progress(3), _current_ox_progress(2)),
+        (
+            _legacy_ox_progress(),
+            {
+                **_current_ox_progress(),
+                "provenance": {
+                    **_current_ox_progress()["provenance"],
+                    "probe_revision": "other-probe",
+                },
+            },
+        ),
+        (
+            _legacy_ox_progress(),
+            {
+                **_current_ox_progress(),
+                "provenance": {
+                    **_current_ox_progress()["provenance"],
+                    "split_plan_id": "not-a-digest",
+                },
+            },
+        ),
     ],
 )
 def test_legacy_ox_progress_upgrade_rejects_unknown_or_regressed_contracts(
@@ -1049,6 +1069,54 @@ def test_legacy_ox_progress_upgrade_rejects_unknown_or_regressed_contracts(
     with pytest.raises(DistillationWorksetError, match="identity rewrite"):
         workset.advance([], {"source": 1}, progress=current)
     assert workset.progress() == legacy
+
+
+def test_legacy_ox_progress_upgrade_allows_only_a_sealed_split_digest(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    legacy = _legacy_ox_progress()
+    current = _current_ox_progress()
+    current["provenance"] = {
+        **current["provenance"],
+        "split_plan_id": "e" * 64,
+    }
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO workset_state (key, value_json) VALUES ('progress', ?)",
+            (json.dumps(legacy, sort_keys=True, separators=(",", ":")),),
+        )
+
+    workset.advance([], {"source": 1}, progress=current)
+
+    assert workset.progress() == current
+
+
+@pytest.mark.parametrize("contract_id", [123, True, None, {}, [], ""])
+def test_legacy_ox_progress_upgrade_rejects_non_digest_contract_ids(
+    tmp_path: Path, contract_id: object
+) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    legacy = _legacy_ox_progress()
+    current = _current_ox_progress()
+    legacy["provenance"] = {
+        "profile": "ox-alpha-single-v1",
+        "profile_contract_id": contract_id,
+    }
+    current["provenance"] = {
+        **current["provenance"],
+        "profile_contract_id": contract_id,
+    }
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO workset_state (key, value_json) VALUES ('progress', ?)",
+            (json.dumps(legacy, sort_keys=True, separators=(",", ":")),),
+        )
+
+    with pytest.raises(DistillationWorksetError, match="identity rewrite"):
+        workset.advance([], {"source": 1}, progress=current)
 
 
 def test_v2_progress_receipts_cover_claim_release_commit_and_replay(tmp_path: Path) -> None:

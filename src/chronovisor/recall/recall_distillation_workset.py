@@ -410,7 +410,7 @@ def _cursor_relation(before: Any, after: Any) -> int:
 def _is_legacy_ox_progress_upgrade(
     before: Mapping[str, Any], after: Mapping[str, Any]
 ) -> bool:
-    """Allow only the sealed R3 shape upgrade emitted by the OX caller."""
+    """Allow the exact OX upgrade; legacy has no split, so a digest is admissible."""
 
     cursor = before["cursor"]
     heads = before["ledger_heads"]
@@ -446,6 +446,18 @@ def _is_legacy_ox_progress_upgrade(
         and target_provenance["profile"] == provenance["profile"]
         and target_provenance["profile_contract_id"]
         == provenance["profile_contract_id"]
+        and isinstance(provenance["profile_contract_id"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", provenance["profile_contract_id"])
+        is not None
+        and target_provenance["probe_revision"] == "single-teacher-repeat-v2"
+        and (
+            target_provenance["split_plan_id"] == ""
+            or (
+                isinstance(target_provenance["split_plan_id"], str)
+                and re.fullmatch(r"[0-9a-f]{64}", target_provenance["split_plan_id"])
+                is not None
+            )
+        )
     )
 
 
