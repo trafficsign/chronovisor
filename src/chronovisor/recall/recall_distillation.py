@@ -7793,19 +7793,41 @@ def _counterfactual_snapshot_inputs(
     dict[str, str],
     list[dict[str, Any]],
 ]:
-    exposure = rally["exposure_receipts"][0] if rally.get("exposure_receipts") else {}
+    receipts = rally.get("exposure_receipts")
+    exposure = (
+        receipts[0]
+        if isinstance(receipts, list) and receipts and isinstance(receipts[0], Mapping)
+        else {}
+    )
+    exposure_id = str(exposure.get("exposure_artifact_id") or "")
+    # Counterfactual labels are evidence about a concrete prior exposure.  A
+    # missing, malformed, or unverifiable receipt is not a degraded input: it
+    # is a resumable precondition failure.  In particular, never let a
+    # snapshot-only fallback manufacture a blind-comparison training row.
+    if re.fullmatch(r"[0-9a-f]{64}", exposure_id) is None:
+        raise DistillationDeferred(
+            "sealed counterfactual exposure receipt is unavailable",
+            failure_class="counterfactual_exposure_unavailable",
+            attempted=False,
+        )
     exposure_artifact: Mapping[str, Any] = {}
-    if exposure:
-        try:
-            exposure_artifact = store.read_sealed(
-                store.distillation_dir(root)
-                / "exposures"
-                / f"{exposure['exposure_artifact_id']}.json",
-                schema="chronovisor.recall-exact-exposure.v1",
-            )
-        except (KeyError, store.DistillationStoreError):
-            exposure = {}
-            exposure_artifact = {}
+    try:
+        exposure_artifact = store.read_sealed(
+            store.distillation_dir(root) / "exposures" / f"{exposure_id}.json",
+            schema="chronovisor.recall-exact-exposure.v1",
+        )
+    except (KeyError, store.DistillationStoreError):
+        raise DistillationDeferred(
+            "sealed counterfactual exposure receipt is unavailable",
+            failure_class="counterfactual_exposure_unavailable",
+            attempted=False,
+        ) from None
+    if str(exposure_artifact.get("artifact_id") or "") != exposure_id:
+        raise DistillationDeferred(
+            "sealed counterfactual exposure receipt is invalid",
+            failure_class="counterfactual_exposure_unavailable",
+            attempted=False,
+        )
     exact_candidates = exposure_artifact.get("candidate_refs", [])
     raw_feature_rows = [
         *(
@@ -8118,15 +8140,24 @@ def _run_counterfactual_claim(
         rally = rally_by_id.get(rally_id)
         if rally is None or not rally.get("actual_answer_refs"):
             continue
-        (
-            exposure,
-            exposure_artifact,
-            exact_features,
-            original_evidence,
-            removal_candidates,
-        ) = _counterfactual_snapshot_inputs(
-            root=root, rally=rally, snapshot=snapshot, texts=texts
-        )
+        try:
+            (
+                exposure,
+                exposure_artifact,
+                exact_features,
+                original_evidence,
+                removal_candidates,
+            ) = _counterfactual_snapshot_inputs(
+                root=root, rally=rally, snapshot=snapshot, texts=texts
+            )
+        except DistillationDeferred:
+            if target[0] == rally_id:
+                # Receipt acquisition is outside this claim.  Preserve the
+                # claim and its attempt budget so a later sealed exposure can
+                # resume it without creating any label or training row.
+                workset.release_unattempted([claim])
+                return _CounterfactualBlockResult(pending=True, deferred=True)
+            continue
         if exposure and set(original_evidence) != set(exposure["candidate_ids"]):
             if target[0] == rally_id:
                 workset.commit(

@@ -1,12 +1,34 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from chronovisor.recall import recall_distillation as distill
 from chronovisor.recall import recall_distillation_store as store
 from chronovisor.recall.recall_distillation_workset import DistillationWorkset
+
+
+def _sealed_counterfactual_exposure(
+    root: Path, *, candidate_ids: list[object] | None = None
+) -> dict[str, object]:
+    """Create the immutable receipt required by the real CF producer."""
+
+    artifact_id, _, _ = store.write_immutable(
+        store.distillation_dir(root) / "exposures",
+        {
+            "kind": "exact-rendered-exposure",
+            "candidate_refs": [],
+            "candidate_pool_refs": [],
+            "candidate_feature_snapshot": [],
+        },
+        schema="chronovisor.recall-exact-exposure.v1",
+    )
+    return {
+        "exposure_artifact_id": artifact_id,
+        "candidate_ids": candidate_ids or [],
+    }
 
 
 def test_local_workset_reconciles_appended_label_without_repeat_call(
@@ -188,6 +210,7 @@ def test_counterfactual_payload_change_creates_new_work(
         "query_sha256": "query",
         "context_refs": [],
         "actual_answer_refs": [{"semantic_sha256": "answer"}],
+        "exposure_receipts": [_sealed_counterfactual_exposure(tmp_path)],
     }
     label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
     config = distill.DistillationConfig(enabled=True, max_input_bytes=4_096)
@@ -232,6 +255,62 @@ def test_counterfactual_payload_change_creates_new_work(
     )
     assert second.written == 1
     assert counterfactual.calls == 2
+
+
+def test_counterfactual_without_sealed_exposure_defers_without_label_or_attempt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class Counterfactual:
+        local = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def compare(self, _payload: object) -> dict[str, object]:
+            self.calls += 1
+            raise AssertionError("no exposure receipt must not reach the producer")
+
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda _path: "raw-1")
+    counterfactual = Counterfactual()
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    result = distill._run_counterfactual_block(
+        execute=True,
+        root=tmp_path,
+        raw_dir=tmp_path / "raw-alt",
+        config=distill.DistillationConfig(enabled=True, max_input_bytes=4_096),
+        counterfactual=counterfactual,
+        snapshots={
+            "rally-1": {
+                "snapshot_sha256": "snapshot",
+                "candidates": [
+                    {"candidate_id": "candidate-1", "text_sha256": "text"}
+                ],
+            }
+        },
+        rally_by_id={
+            "rally-1": {
+                "rally_id": "rally-1",
+                "query_sha256": "query",
+                "context_refs": [],
+                "actual_answer_refs": [{"semantic_sha256": "answer"}],
+            }
+        },
+        texts={"query": "question", "answer": "answer", "text": "candidate"},
+        label_path=label_path,
+        label_rows=[],
+    )
+
+    status = DistillationWorkset(
+        store.distillation_dir(tmp_path) / "local-workset.sqlite3"
+    ).status("local-counterfactual")
+    assert result.written == 0
+    assert result.deferred is True
+    assert counterfactual.calls == 0
+    assert not label_path.exists()
+    assert status["leased"] == 0
+    assert status["ready"] == 1
+    assert status["last_durable_receipt"]["generation"] >= 3
+    assert status["last_durable_progress"]["progress_kind"] == "local-workset-v2"
 
 
 def test_local_teacher_defers_cross_rally_duplicate_candidate_id(
@@ -360,6 +439,7 @@ def test_counterfactual_retries_missing_answer_digest_or_route_identity(
                 "query_sha256": "query",
                 "context_refs": [],
                 "actual_answer_refs": [{"semantic_sha256": "answer"}],
+                "exposure_receipts": [_sealed_counterfactual_exposure(tmp_path)],
             }
         },
         texts={"query": "question", "answer": "answer", "text": "candidate"},
@@ -385,6 +465,7 @@ def test_counterfactual_exposure_mismatch_precedes_malformed_pool(
         store,
         "read_sealed",
         lambda *_args, **_kwargs: {
+            "artifact_id": "e" * 64,
             "candidate_refs": [
                 {
                     "candidate_id": "candidate-1",
@@ -414,7 +495,7 @@ def test_counterfactual_exposure_mismatch_precedes_malformed_pool(
                 "actual_answer_refs": [{"semantic_sha256": "answer"}],
                 "exposure_receipts": [
                     {
-                        "exposure_artifact_id": "exposure-1",
+                        "exposure_artifact_id": "e" * 64,
                         "candidate_ids": ["other-candidate"],
                     }
                 ],
@@ -449,13 +530,13 @@ def test_counterfactual_preserves_raw_candidate_id_in_label(
                 "a0_sha256": "c" * 64,
                 "a1_sha256": "d" * 64,
                 "generator_route_identity": {
-                    "role": "generator",
+                    "role": "recall.distill.answer_generator",
                     "provider": "test",
                     "model": "generator",
                     "location": "local",
                 },
                 "judge_route_identity": {
-                    "role": "judge",
+                    "role": "recall.distill.utility_judge",
                     "provider": "test",
                     "model": "judge",
                     "location": "local",
@@ -465,6 +546,36 @@ def test_counterfactual_preserves_raw_candidate_id_in_label(
             }
 
     monkeypatch.setattr(distill, "committed_raw_watermark", lambda _path: "raw-1")
+    from chronovisor.core import ollama
+
+    roles = (
+        *distill.TEACHER_ROLES,
+        "recall.distill.answer_generator",
+        "recall.distill.utility_judge",
+    )
+    routes = tuple(
+        SimpleNamespace(
+            role=role,
+            provider="test",
+            model=("generator" if role.endswith("answer_generator") else "judge"),
+            location="local",
+        )
+        for role in roles
+    )
+    digests = {
+        role: (
+            "a" * 64
+            if role == "recall.distill.answer_generator"
+            else "b" * 64
+            if role == "recall.distill.utility_judge"
+            else f"{index + 1:064x}"
+        )
+        for index, role in enumerate(roles)
+    }
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
+    monkeypatch.setattr(
+        ollama, "runtime_generation_route_fingerprints", lambda _routes: digests
+    )
     label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
     features = distill.build_fast_features(
         query_chargram_coverage=1, candidate_chargram_precision=1
@@ -476,6 +587,7 @@ def test_counterfactual_preserves_raw_candidate_id_in_label(
         "query_sha256": "query",
         "context_refs": [],
         "actual_answer_refs": [{"semantic_sha256": "answer"}],
+        "exposure_receipts": [_sealed_counterfactual_exposure(tmp_path)],
     }
     snapshots = {
         "rally-1": {
@@ -519,3 +631,5 @@ def test_counterfactual_preserves_raw_candidate_id_in_label(
     )["rows"]
     assert materialized[0]["assignment_revision"] == distill.ASSIGNMENT_REVISION
     assert materialized[0]["identity_revision"] == "local-blind-counterfactual-v1"
+    assert distill._materialized_row_integrity(materialized[0]) is True
+    assert distill._configured_local_route_binding(materialized[0]) is True
