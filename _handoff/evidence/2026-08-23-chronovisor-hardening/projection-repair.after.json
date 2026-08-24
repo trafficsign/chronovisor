@@ -164,6 +164,35 @@
     "independent_review": "approve; blocker/high/medium 0",
     "index_coverage": "no_recorded_issue; metadata_match"
   },
+  "postdeploy_recheck": {
+    "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
+    "observed_at": "2026-08-24T10:21:45+09:00",
+    "candidate_commit": "a8046429a80239d79c3157ee7da92b7277f30ef7",
+    "raw_archive_verify": {
+      "status": "ok",
+      "full": true,
+      "open_segments": 116,
+      "sealed_segments": 2483,
+      "legacy_archives": 71,
+      "logical_units": 21116,
+      "errors": []
+    },
+    "projection_inventory": {
+      "status": "ok",
+      "full": true,
+      "total": 13919,
+      "valid": 13919,
+      "missing": 0,
+      "invalid": 0
+    },
+    "immutable_repair_receipt": {
+      "raw_digest_changes": 0,
+      "observed_digest_mismatches": 0,
+      "duplicate_artifacts": 0,
+      "idempotent_content_changes": 0,
+      "source": "acceptance"
+    }
+  },
   "service_restore": {
     "label": "com.trafficsign.chronovisor-ingest-drain.managed",
     "state": "running",

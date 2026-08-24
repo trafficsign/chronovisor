@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
-  "captured_at": "2026-08-24T07:41:00+09:00",
+  "captured_at": "2026-08-24T10:21:45+09:00",
   "code_freeze": {
-    "head": "c3a6432c2130f0cb30e38a24e0ecac5613e41083",
+    "head": "a8046429a80239d79c3157ee7da92b7277f30ef7",
     "working_tree": "clean",
-    "note": "Final code SHA after the Linux HNSW complete-scan fix; subsequent pre-deploy changes are limited to Plan and evidence files."
+    "note": "Final implementation candidate after the Linux HNSW fix, ingest projection recovery, and Dashboard live-health/runtime-identity repairs. Historical c3a6432 gates remain below as immutable receipts."
   },
   "qos_order_isolation": {
     "forward_runs": 3,
@@ -206,6 +206,104 @@
         "CodeQL (Python)",
         "Secret scan (tree, history, release artifacts)"
       ]
+    }
+  },
+  "final_candidate": {
+    "head": "a8046429a80239d79c3157ee7da92b7277f30ef7",
+    "working_tree": "clean",
+    "local": {
+      "dashboard_tests": {
+        "passed": 155,
+        "failed": 0
+      },
+      "phase_4_runtime_truth_tests": {
+        "passed": 198,
+        "failed": 0
+      },
+      "architecture_and_large_function_policy_tests": {
+        "passed": 80,
+        "failed": 0
+      },
+      "security_privacy_dry_run": {
+        "passed": 36,
+        "failed": 0,
+        "warnings": 1
+      },
+      "static": {
+        "compileall": "passed",
+        "ruff": "passed",
+        "mypy_source_files": 90,
+        "import_linter": "364 files / 1980 dependencies / 1 kept / 0 broken",
+        "diff_check": "passed"
+      },
+      "unisolated_full_suite_attempt": {
+        "status": "interrupted_not_authoritative",
+        "reason": "The developer workstation root contained mutable live data and produced slow live-state-dependent failures at approximately 95 percent. The first cached failure reproduced under standard-GIL Python 3.14 and was unrelated to the candidate diff. No pass result is inferred from this run.",
+        "authoritative_replacement": "Two clean isolated GitHub full suites below."
+      }
+    },
+    "github_required_jobs": {
+      "status": "passed",
+      "quality": {
+        "run_id": 32678810997,
+        "conclusion": "success",
+        "frozen_quality_gates": {
+          "job_id": 97291720498,
+          "pytest": {
+            "passed": 5378,
+            "failed": 0,
+            "skipped": 1,
+            "warnings": 1,
+            "elapsed_seconds": 653.67
+          },
+          "ruff": "passed",
+          "mypy_source_files": 90,
+          "import_linter": "364 files / 1980 dependencies / 1 kept / 0 broken",
+          "architecture_baseline_edges": 44
+        },
+        "semantic_hnsw": {
+          "job_id": 97291720606,
+          "passed": 1,
+          "skipped": 0,
+          "elapsed_seconds": 0.49
+        },
+        "semantic_smoke_python_3_11": {
+          "job_id": 97291720651,
+          "passed": 53,
+          "failed": 0,
+          "skipped": 0
+        },
+        "semantic_smoke_python_3_12": {
+          "job_id": 97291720597,
+          "passed": 53,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      "python_3_14": {
+        "run_id": 32678810998,
+        "job_id": 97291720564,
+        "conclusion": "success",
+        "standard_gil_assertion": "passed",
+        "architecture_and_runtime_contracts_passed": 29,
+        "architecture_baseline_edges": 44,
+        "pytest": {
+          "passed": 5378,
+          "failed": 0,
+          "skipped": 1,
+          "warnings": 2,
+          "elapsed_seconds": 662.79
+        }
+      },
+      "security": {
+        "run_id": 32678810991,
+        "conclusion": "success",
+        "job_ids": {
+          "secret_scan": 97291720437,
+          "codeql_python": 97291720522,
+          "dependency_audit": 97291720545
+        }
+      }
     }
   },
   "phase_exit": "passed_remote_required_jobs"

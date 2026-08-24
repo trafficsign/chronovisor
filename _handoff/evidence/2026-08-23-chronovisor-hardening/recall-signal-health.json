@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "schema": "chronovisor.hardening.recall-signal-health.v1",
+  "plan_task_id": "plan_596dfe01bc574196a8085d0b34acd25f",
+  "captured_at": "2026-08-24T10:21:45+09:00",
+  "status": "pending_deployment_boundary",
+  "privacy": {
+    "prompt_content_persisted": false,
+    "query_content_persisted": false,
+    "page_ids_persisted": false,
+    "session_ids_persisted": false,
+    "aggregation_only": true
+  },
+  "focused_fixture_reference": {
+    "artifact": "recall-signal.focused.json",
+    "decisions": 100,
+    "used_decisions": 50,
+    "unused_decisions": 50,
+    "identity_missing": 0,
+    "used_page_ids_missing": 0,
+    "orphan_receipts": 0,
+    "duplicate_receipts": 0,
+    "production_replayable_rate": 1.0
+  },
+  "deployment": {
+    "commit": null,
+    "started_at": null,
+    "active_hosts": [],
+    "status": "pending"
+  },
+  "gate": {
+    "minimum_hours": 24,
+    "minimum_exact_receipts_per_active_host": 100,
+    "observed_hours": 0,
+    "active_hosts": [],
+    "by_host": {},
+    "status": "pending_deployment"
+  },
+  "cohort": {
+    "eligible_episodes": 0,
+    "exact_exposure_receipts": 0,
+    "identity_missing": 0,
+    "used_page_ids_missing": 0,
+    "orphan_receipts": 0,
+    "duplicate_receipts": 0,
+    "production_replayable": 0,
+    "production_replayable_rate": null,
+    "used_decisions": 0,
+    "used_rate": null,
+    "note": "Zero rows before the deployment boundary is not a passing cohort. Used rate remains descriptive and is not an authority gate."
+  }
+}
