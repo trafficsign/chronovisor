@@ -774,6 +774,38 @@ def test_source_contract_passes_but_production_stays_false_without_attestation(
     )
 
 
+def test_read_artifact_requires_canonical_closed_payload(tmp_path: Path) -> None:
+    source, commit = _git_source(tmp_path)
+    artifact, artifact_path = HARNESS.run(
+        source_root=source,
+        source_commit=commit,
+        output=tmp_path / "evidence",
+    )
+    original = artifact_path.read_bytes()
+    artifact_path.write_bytes(original + b" ")
+    with pytest.raises(HARNESS.R4Error, match="canonical"):
+        HARNESS.read_artifact(artifact_path)
+    artifact_path.write_bytes(original)
+
+    unsigned = {
+        key: value
+        for key, value in artifact.items()
+        if key not in {"artifact_id", "seal_sha256", "source_contract"}
+    }
+    forged_id = HARNESS._sha256(unsigned)
+    forged = {"artifact_id": forged_id, **unsigned}
+    forged["seal_sha256"] = HARNESS._sha256(forged)
+    forged_path = artifact_path.with_name(f"{forged_id}.json")
+    forged_path.write_bytes(HARNESS._json_bytes(forged) + b"\n")
+    with pytest.raises(HARNESS.R4Error, match="payload shape|source contract"):
+        HARNESS.read_artifact(forged_path)
+
+    wrong_name = artifact_path.with_name("0" * 64 + ".json")
+    wrong_name.write_bytes(original)
+    with pytest.raises(HARNESS.R4Error, match="filename"):
+        HARNESS.read_artifact(wrong_name)
+
+
 def test_run_rejects_source_mutation_during_production_collection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -977,6 +1009,57 @@ def test_candidate_append_requires_a_fresh_offline_anchor(
     )
     assert result["passed"] is False
     assert "production candidate ledger differs from sealed R0 anchor" in result["reasons"]
+
+
+def test_authoritative_collector_rejects_persistent_root_directory_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path / "first", source, commit)
+    replacement = _authoritative_production_root(tmp_path / "second", source, commit)
+    replacement_state_path = replacement / HARNESS.PRODUCTION_STATE_RELATIVE
+    replacement_state = json.loads(replacement_state_path.read_text())
+    replacement_state["runtime_identity"]["root"] = str(production.absolute())
+    replacement_state["seal_sha256"] = HARNESS._sha256(
+        {
+            key: value
+            for key, value in replacement_state.items()
+            if key != "seal_sha256"
+        }
+    )
+    replacement_state_path.write_text(
+        json.dumps(replacement_state, sort_keys=True, separators=(",", ":"))
+    )
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    monkeypatch.setattr(
+        HARNESS,
+        "_load_production_anchor",
+        lambda _: _fixture_candidate_anchor(production),
+    )
+    real_directory_identity = HARNESS._production_directory_identity
+    identity_calls = 0
+    swapped = False
+    old_production = tmp_path / "production-old"
+
+    def swap_before_final_identity(path: Path, *, label: str) -> dict[str, int]:
+        nonlocal identity_calls, swapped
+        identity_calls += 1
+        if identity_calls == 2 and not swapped:
+            swapped = True
+            production.rename(old_production)
+            replacement.rename(production)
+        return real_directory_identity(path, label=label)
+
+    monkeypatch.setattr(
+        HARNESS, "_production_directory_identity", swap_before_final_identity
+    )
+    result = HARNESS._collect_authoritative_production(
+        source_root=source,
+        source=HARNESS._assert_source(source, commit),
+        production_root=production,
+    )
+    assert result["passed"] is False
+    assert "production root changed during validation" in result["reasons"]
 
 
 def test_authoritative_collector_can_certify_only_fixed_sealed_root(

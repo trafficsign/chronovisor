@@ -957,6 +957,23 @@ def _production_stat(path: Path, *, label: str) -> dict[str, int]:
     }
 
 
+def _production_directory_identity(path: Path, *, label: str) -> dict[str, int]:
+    """Capture a production directory's device/inode without following links."""
+
+    if _has_symlink_component(path):
+        raise R4Error(f"{label} path contains a symlink")
+    try:
+        value = path.lstat()
+    except OSError as exc:
+        raise R4Error(f"{label} path is unavailable") from exc
+    if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
+        raise R4Error(f"{label} path is not a directory")
+    return {
+        "st_dev": int(value.st_dev),
+        "st_ino": int(value.st_ino),
+    }
+
+
 def _production_file_bytes(
     path: Path, *, label: str, max_bytes: int
 ) -> tuple[bytes, dict[str, int], str]:
@@ -2210,6 +2227,9 @@ def _collect_authoritative_production(
         if not production_root.is_dir():
             unavailable["reasons"] = ["production_root_unavailable"]
             return unavailable
+        root_identity = _production_directory_identity(
+            production_root, label="production root"
+        )
         if _has_symlink_component(source_root):
             unavailable["reasons"] = ["source_root_contains_symlink"]
             return unavailable
@@ -2327,6 +2347,11 @@ def _collect_authoritative_production(
             != candidate["checkpoint_state"]
         ):
             raise R4Error("production candidate ledger changed during validation")
+        if (
+            _production_directory_identity(production_root, label="production root")
+            != root_identity
+        ):
+            raise R4Error("production root changed during validation")
         output = {
             "passed": not reasons,
             "reasons": sorted(reasons),
@@ -2448,22 +2473,113 @@ def _write_immutable(
 def read_artifact(path: Path) -> dict[str, Any]:
     """Read one R4 artifact and verify its immutable identity and seal."""
 
+    _reject_original_symlinks((("R4 artifact", path),))
     before = _stat(path)
     try:
-        artifact = json.loads(path.read_bytes())
+        data = path.read_bytes()
+        artifact = json.loads(data)
     except (OSError, ValueError, UnicodeError) as exc:
         raise R4Error("R4 artifact is not valid JSON") from exc
     if not isinstance(artifact, dict) or artifact.get("schema") != R4_SCHEMA:
         raise R4Error("R4 artifact schema mismatch")
+    expected_keys = {
+        "artifact_id",
+        "schema",
+        "namespace",
+        "seal_sha256",
+        "captured_at",
+        "source",
+        "source_after",
+        "source_final",
+        "source_contract",
+        "production_certification",
+        "receipt_files",
+        "provider_calls",
+        "production_root_used",
+    }
+    if set(artifact) != expected_keys:
+        raise R4Error("R4 artifact payload shape mismatch")
     _verify_seal(artifact, schema=R4_SCHEMA)
-    if artifact.get("artifact_id") != _sha256(
-        {
-            key: value
-            for key, value in artifact.items()
-            if key not in {"artifact_id", "seal_sha256"}
-        }
+    artifact_id = artifact.get("artifact_id")
+    if not isinstance(artifact_id, str) or path.stem != artifact_id:
+        raise R4Error("R4 artifact filename identity mismatch")
+    if artifact_id != _sha256(
+        {key: value for key, value in artifact.items() if key not in {"artifact_id", "seal_sha256"}}
     ):
         raise R4Error("R4 artifact identity mismatch")
+    canonical = _json_bytes(artifact)
+    if data not in {canonical, canonical + b"\n"}:
+        raise R4Error("R4 artifact is not canonical")
+    if not isinstance(artifact.get("captured_at"), str) or not artifact["captured_at"]:
+        raise R4Error("R4 artifact timestamp is invalid")
+    source_keys = {
+        "commit",
+        "clean",
+        "status_sha256",
+        "status_count",
+        "tree_sha256",
+        "file_count",
+        "symlink_count",
+        "ox_identity_sha256",
+        "account_uid",
+        "account_home",
+    }
+    snapshots = [artifact.get(name) for name in ("source", "source_after", "source_final")]
+    if any(not isinstance(snapshot, Mapping) or not source_keys.issubset(snapshot) for snapshot in snapshots):
+        raise R4Error("R4 artifact source snapshot shape mismatch")
+    first_snapshot = snapshots[0]
+    if not isinstance(first_snapshot, Mapping):
+        raise R4Error("R4 artifact source snapshot shape mismatch")
+    if not (
+        snapshots[0] == snapshots[1] == snapshots[2]
+        and isinstance(first_snapshot.get("clean"), bool)
+    ):
+        raise R4Error("R4 artifact source snapshots disagree")
+    source_contract = artifact.get("source_contract")
+    if not isinstance(source_contract, Mapping) or not {
+        "schema", "passed", "local", "ox"
+    }.issubset(source_contract):
+        raise R4Error("R4 artifact source contract is missing")
+    if (
+        not isinstance(source_contract.get("passed"), bool)
+        or not isinstance(source_contract.get("local"), Mapping)
+        or not isinstance(source_contract.get("ox"), Mapping)
+    ):
+        raise R4Error("R4 artifact source contract is invalid")
+    production = artifact.get("production_certification")
+    if not isinstance(production, Mapping) or not {
+        "passed", "reasons", "collector", "provider_calls"
+    }.issubset(production):
+        raise R4Error("R4 artifact production verdict is missing")
+    if (
+        not isinstance(production.get("passed"), bool)
+        or not isinstance(production.get("reasons"), list)
+        or not isinstance(production.get("collector"), str)
+        or isinstance(production.get("provider_calls"), bool)
+        or not isinstance(production.get("provider_calls"), int)
+        or production.get("provider_calls") != 0
+    ):
+        raise R4Error("R4 artifact production verdict is invalid")
+    receipt_files = artifact.get("receipt_files")
+    if not isinstance(receipt_files, Mapping) or set(receipt_files) != {
+        "local", "ox", "production"
+    }:
+        raise R4Error("R4 artifact receipt file shape mismatch")
+    for receipt in receipt_files.values():
+        if (
+            not isinstance(receipt, Mapping)
+            or not isinstance(receipt.get("files"), list)
+            or isinstance(receipt.get("count"), bool)
+            or not isinstance(receipt.get("count"), int)
+        ):
+            raise R4Error("R4 artifact receipt file entry is invalid")
+    if (
+        isinstance(artifact.get("provider_calls"), bool)
+        or not isinstance(artifact.get("provider_calls"), int)
+        or artifact.get("provider_calls") != 0
+        or not isinstance(artifact.get("production_root_used"), bool)
+    ):
+        raise R4Error("R4 artifact provider/root contract is invalid")
     if _stat(path) != before:
         raise R4Error("R4 artifact changed during read")
     return artifact
