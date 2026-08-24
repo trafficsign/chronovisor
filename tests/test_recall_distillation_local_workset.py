@@ -354,3 +354,67 @@ def test_counterfactual_retries_missing_answer_digest_or_route_identity(
 
     assert result.written == 0
     assert result.deferred is True
+
+
+def test_counterfactual_exposure_mismatch_precedes_malformed_pool(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class Counterfactual:
+        local = True
+
+        def compare(self, _payload: object) -> dict[str, object]:
+            raise AssertionError("mismatched exposure must not reach the teacher")
+
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda _path: "raw-1")
+    monkeypatch.setattr(
+        store,
+        "read_sealed",
+        lambda *_args, **_kwargs: {
+            "candidate_refs": [
+                {
+                    "candidate_id": "candidate-1",
+                    "content_sha256": "text",
+                    "rendered_context": "candidate",
+                }
+            ],
+            "candidate_pool_refs": [{"selected": False}],
+        },
+    )
+    result = distill._run_counterfactual_block(
+        execute=True,
+        root=tmp_path,
+        config=distill.DistillationConfig(enabled=True, max_input_bytes=4_096),
+        counterfactual=Counterfactual(),
+        snapshots={
+            "rally-1": {
+                "snapshot_sha256": "snapshot",
+                "candidates": [{"candidate_id": "candidate-1", "text_sha256": "text"}],
+            }
+        },
+        rally_by_id={
+            "rally-1": {
+                "rally_id": "rally-1",
+                "query_sha256": "query",
+                "context_refs": [],
+                "actual_answer_refs": [{"semantic_sha256": "answer"}],
+                "exposure_receipts": [
+                    {
+                        "exposure_artifact_id": "exposure-1",
+                        "candidate_ids": ["other-candidate"],
+                    }
+                ],
+            }
+        },
+        texts={"query": "question", "answer": "answer", "text": "candidate"},
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+    )
+
+    assert result.deferred is True
+    assert result.written == 0
+    assert (
+        DistillationWorkset(
+            store.distillation_dir(tmp_path) / "local-workset.sqlite3"
+        ).status()["leased"]
+        == 0
+    )

@@ -6478,7 +6478,11 @@ def _counterfactual_snapshot_inputs(
     snapshot: Mapping[str, Any],
     texts: Mapping[str, str],
 ) -> tuple[
-    Mapping[str, Any], dict[str, dict[str, Any]], dict[str, str], list[dict[str, Any]]
+    Mapping[str, Any],
+    Mapping[str, Any],
+    dict[str, dict[str, Any]],
+    dict[str, str],
+    list[dict[str, Any]],
 ]:
     exposure = rally["exposure_receipts"][0] if rally.get("exposure_receipts") else {}
     exposure_artifact: Mapping[str, Any] = {}
@@ -6550,6 +6554,22 @@ def _counterfactual_snapshot_inputs(
                 "rendered_context": rendered,
             }
         )
+    return (
+        exposure,
+        exposure_artifact,
+        exact_features,
+        original_evidence,
+        removal_candidates,
+    )
+
+
+def _counterfactual_additions(
+    *,
+    snapshot: Mapping[str, Any],
+    exposure_artifact: Mapping[str, Any],
+    original_evidence: Mapping[str, str],
+    removal_candidates: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
     live_additions = [
         {
             "candidate_id": item["candidate_id"],
@@ -6566,12 +6586,7 @@ def _counterfactual_snapshot_inputs(
         and candidate["candidate_id"]
         not in {item["candidate_id"] for item in live_additions}
     ]
-    return (
-        exposure,
-        exact_features,
-        original_evidence,
-        [*removal_candidates, *live_additions, *historical_additions],
-    )
+    return [*removal_candidates, *live_additions, *historical_additions]
 
 
 def _compare_and_commit_counterfactual(
@@ -6750,10 +6765,14 @@ def _run_counterfactual_claim(
         rally = rally_by_id.get(rally_id)
         if rally is None or not rally.get("actual_answer_refs"):
             continue
-        exposure, exact_features, original_evidence, candidates = (
-            _counterfactual_snapshot_inputs(
-                root=root, rally=rally, snapshot=snapshot, texts=texts
-            )
+        (
+            exposure,
+            exposure_artifact,
+            exact_features,
+            original_evidence,
+            removal_candidates,
+        ) = _counterfactual_snapshot_inputs(
+            root=root, rally=rally, snapshot=snapshot, texts=texts
         )
         if exposure and set(original_evidence) != set(exposure["candidate_ids"]):
             if target[0] == rally_id:
@@ -6769,6 +6788,12 @@ def _run_counterfactual_claim(
                 )
                 return _CounterfactualBlockResult(pending=True, deferred=True)
             continue
+        candidates = _counterfactual_additions(
+            snapshot=snapshot,
+            exposure_artifact=exposure_artifact,
+            original_evidence=original_evidence,
+            removal_candidates=removal_candidates,
+        )
         for candidate in candidates:
             candidate_id = str(candidate["candidate_id"])
             if (rally_id, candidate_id) != target:
