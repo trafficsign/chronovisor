@@ -373,6 +373,8 @@ def test_clone_inventory_is_bounded_and_payload_free(tmp_path: Path) -> None:
     assert inventory["unique_work_ids"] == 1
     assert inventory["bounded"] is True
     assert inventory["production_path_used"] is False
+    assert inventory["read_mode"] == "clone-ro"
+    assert inventory["immutable_read"] is False
     assert len(inventory["state_sha256"]) == 64
     assert inventory["state_seal_sha256"] != inventory["state_sha256"]
     assert len(inventory["receipt_chain_sha256"]) == 64
@@ -390,6 +392,29 @@ def test_clone_inventory_is_bounded_and_payload_free(tmp_path: Path) -> None:
     assert tampered["row_count"] == inventory["row_count"]
     assert tampered["content_sha256"] != inventory["content_sha256"]
     HARNESS._assert_payload_free(inventory)
+
+
+def test_production_immutable_inventory_preserves_shm_and_clone_ro_stays_mutable(
+    tmp_path: Path,
+) -> None:
+    from chronovisor.recall import recall_distillation_workset as workset
+
+    path = tmp_path / "runtime" / "recall-distillation" / "ox-workset.sqlite3"
+    path.parent.mkdir(parents=True)
+    queue = workset.DistillationWorkset(path)
+    queue.advance([HARNESS._item("immutable-1", "ox")], {"source": "test"})
+    wal = path.with_name(path.name + "-wal")
+    shm = path.with_name(path.name + "-shm")
+    wal.write_bytes(b"")
+    shm.write_bytes(b"\0" * 32_768)
+    shm_before = HARNESS._regular_file_state(shm)
+    inventory = HARNESS._clone_workset_inventory(path, immutable=True)
+    assert inventory["read_mode"] == "immutable-ro"
+    assert inventory["immutable_read"] is True
+    assert HARNESS._regular_file_state(shm) == shm_before
+    mutable = HARNESS._clone_workset_inventory(path)
+    assert mutable["read_mode"] == "clone-ro"
+    assert mutable["immutable_read"] is False
 
 
 def test_production_scope_identity_is_path_neutral_for_apfs_clone(tmp_path: Path) -> None:
@@ -478,6 +503,8 @@ def test_clone_nonempty_wal_fails_before_normalization_and_preserves_state(
     wal.write_bytes(b"stale-generation")
     with pytest.raises(HARNESS.R3Error, match="not checkpointed"):
         HARNESS._assert_checkpointed_clone_sidecars(workset_path)
+    with pytest.raises(HARNESS.R3Error, match="not checkpointed"):
+        HARNESS._clone_workset_inventory(workset_path, immutable=True)
     with pytest.raises(HARNESS.R3Error, match="not checkpointed"):
         HARNESS._normalize_clone_workset(
             workset_path, expected_identity=HARNESS._workset_identity(inventory)

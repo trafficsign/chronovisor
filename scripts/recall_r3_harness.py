@@ -820,6 +820,7 @@ def _production_snapshot(
     include_raw: bool = True,
     store: Any | None = None,
     require_checkpoint_file_state: bool = False,
+    immutable_workset: bool = False,
 ) -> dict[str, Any]:
     """Digest only R3's protected production boundary.
 
@@ -842,7 +843,9 @@ def _production_snapshot(
             "recall_distillation": _clone_tree_state_digest(runtime_dir),
         }
     else:
-        owned = _production_owned_snapshot(production, store)
+        owned = _production_owned_snapshot(
+            production, store, immutable=immutable_workset
+        )
         snapshots = {
             "workset": owned["workset"],
             "state_pointers": owned["state_pointers"],
@@ -977,10 +980,14 @@ def _production_scope_identity(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _production_owned_snapshot(production: Path, store: Any) -> dict[str, Any]:
+def _production_owned_snapshot(
+    production: Path, store: Any, *, immutable: bool = False
+) -> dict[str, Any]:
     """Capture only the Workset and sealed state R3 is allowed to mutate."""
 
-    workset = _clone_workset_inventory(_clone_workset_path(production))
+    workset = _clone_workset_inventory(
+        _clone_workset_path(production), immutable=immutable
+    )
     runtime_dir = production / "runtime" / "recall-distillation"
     if _has_symlink_component(runtime_dir) or not runtime_dir.is_dir():
         raise R3Error("production distillation directory is unsafe")
@@ -1399,17 +1406,31 @@ def _clone_static_identity(store: Any, clone: Path) -> dict[str, Any]:
 
 
 def _clone_workset_inventory(
-    path: Path, *, expected_rows: int | None = None, require_receipts: bool = False
+    path: Path,
+    *,
+    expected_rows: int | None = None,
+    require_receipts: bool = False,
+    immutable: bool = False,
 ) -> dict[str, Any]:
     """Read a bounded, payload-free inventory and digest of the clone DB."""
 
     before = _regular_file_state(path)
+    sidecars_preflight: dict[str, Any] | None = None
+    if immutable:
+        sidecars_preflight = _sqlite_sidecar_snapshot(path)
+        for suffix in ("-wal", "-journal"):
+            state = sidecars_preflight[suffix]
+            if isinstance(state, Mapping) and state.get("st_size") != 0:
+                raise R3Error("production Workset SQLite sidecar is not checkpointed")
     work_item_max_bytes = 0
     work_item_total_bytes = 0
     receipt_max_bytes = 0
     receipt_total_bytes = 0
     try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        uri = f"file:{path}?mode=ro"
+        if immutable:
+            uri += "&immutable=1"
+        with sqlite3.connect(uri, uri=True) as connection:
             tables = {
                 str(row[0])
                 for row in connection.execute(
@@ -1579,6 +1600,9 @@ def _clone_workset_inventory(
         "file_state": after,
         "bounded": True,
         "production_path_used": False,
+        "read_mode": "immutable-ro" if immutable else "clone-ro",
+        "immutable_read": immutable,
+        "sidecars_preflight": sidecars_preflight,
     }
 
 
@@ -3276,17 +3300,18 @@ def _run_once_guarded(
             include_raw=False,
             store=store,
             require_checkpoint_file_state=True,
+            immutable_workset=True,
         )
         if production is not None
         else None
     )
     production_workset_before = (
-        _clone_workset_inventory(_clone_workset_path(production))
+        _clone_workset_inventory(_clone_workset_path(production), immutable=True)
         if production is not None
         else None
     )
     production_owned_before = (
-        _production_owned_snapshot(production, store)
+        _production_owned_snapshot(production, store, immutable=True)
         if production is not None
         else None
     )
@@ -3375,12 +3400,15 @@ def _run_once_guarded(
                 include_raw=False,
                 store=store,
                 require_checkpoint_file_state=True,
+                immutable_workset=True,
             )
             if not _production_protected_equal(
                 production_before, production_protected_clone_boundary
             ):
                 raise R3Error("production Workset scope changed during clone creation")
-            production_owned_clone_boundary = _production_owned_snapshot(production, store)
+            production_owned_clone_boundary = _production_owned_snapshot(
+                production, store, immutable=True
+            )
             clone_scope_before = _production_snapshot(clone_root, store=store)
             if _production_scope_identity(clone_scope_before) != _production_scope_identity(
                 production_protected_clone_boundary
@@ -3537,12 +3565,13 @@ def _run_once_guarded(
                 include_raw=False,
                 store=store,
                 require_checkpoint_file_state=True,
+                immutable_workset=True,
             )
             if production is not None
             else None
         )
         production_owned_after = (
-            _production_owned_snapshot(production, store)
+            _production_owned_snapshot(production, store, immutable=True)
             if production is not None
             else None
         )
@@ -3810,12 +3839,13 @@ def _run_once_guarded(
                 include_raw=False,
                 store=store,
                 require_checkpoint_file_state=True,
+                immutable_workset=True,
             )
             if production is not None
             else None
         )
         completion_production_owned = (
-            _production_owned_snapshot(production, store)
+            _production_owned_snapshot(production, store, immutable=True)
             if production is not None
             else None
         )
@@ -3902,12 +3932,13 @@ def _run_once_guarded(
                 include_raw=False,
                 store=store,
                 require_checkpoint_file_state=True,
+                immutable_workset=True,
             )
             if production is not None
             else None
         )
         final_production_owned = (
-            _production_owned_snapshot(production, store)
+            _production_owned_snapshot(production, store, immutable=True)
             if production is not None
             else None
         )
