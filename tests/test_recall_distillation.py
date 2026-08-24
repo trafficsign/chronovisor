@@ -2657,6 +2657,11 @@ def test_configured_local_route_binding_rejects_evil_canonical_identities(
         "source": "teacher-label",
         "profile": distill.LOCAL_TRIAD_PROFILE,
         "cohort": distill.LOCAL_TRIAD_PROFILE,
+        "profile_contract_id": "",
+        "expires_at": "",
+        "identity_revision": "local-teacher-v1",
+        "request_revision": "local-teacher-v1",
+        "assignment_revision": distill.ASSIGNMENT_REVISION,
         "route": distill.TEACHER_ROLES[0],
         "route_identity": identities[distill.TEACHER_ROLES[0]],
         "model_digest": digests[distill.TEACHER_ROLES[0]],
@@ -2686,6 +2691,12 @@ def test_configured_local_route_binding_rejects_evil_canonical_identities(
                 **teacher,
                 "route_identity": {**teacher["route_identity"], "model": "evil"},
             }
+        )
+        is False
+    )
+    assert (
+        distill._configured_local_route_binding(
+            {**teacher, "identity_revision": "evil-revision"}
         )
         is False
     )

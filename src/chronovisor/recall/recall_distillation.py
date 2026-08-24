@@ -3351,10 +3351,18 @@ def _configured_local_route_binding(row: Mapping[str, Any]) -> bool:
         return False
     if source == "teacher-label":
         route = str(row.get("route") or "")
+        authority = {
+            "profile": LOCAL_TRIAD_PROFILE,
+            "cohort": LOCAL_TRIAD_PROFILE,
+            "profile_contract_id": "",
+            "expires_at": "",
+            "identity_revision": "local-teacher-v1",
+            "request_revision": "local-teacher-v1",
+            "assignment_revision": ASSIGNMENT_REVISION,
+        }
         return (
-            row.get("profile") == LOCAL_TRIAD_PROFILE
-            and row.get("cohort") == LOCAL_TRIAD_PROFILE
-            and route in TEACHER_ROLES
+            route in TEACHER_ROLES
+            and all(row.get(key) == value for key, value in authority.items())
             and row.get("route_identity") == expected[route]
             and row.get("model_digest") == digests[route]
         )
@@ -3426,6 +3434,7 @@ def _materialized_row_integrity(
                 and row.get("route") == "opencode-go/ox-alpha-free"
                 and row.get("teacher_role") == OX_TEACHER_ROLE
                 and row.get("cohort") == OX_SINGLE_COHORT
+                and row.get("assignment_revision") == "single-teacher-v1"
                 and row.get("route_identity")
                 == OX_ALPHA_FIXED_IDENTITY["route_identity"]
                 and row.get("route_identity_exact") is True
@@ -7477,6 +7486,11 @@ def _run_local_teacher_route(
                 "candidate_id": candidate["candidate_id"],
                 "route": route,
                 "teacher_profile": config.teacher_profile,
+                "profile_contract_id": "",
+                "expires_at": "",
+                "identity_revision": "local-teacher-v1",
+                "request_revision": "local-teacher-v1",
+                "assignment_revision": ASSIGNMENT_REVISION,
                 "route_identity": response.get("_route_identity", {}),
                 "model_digest": response.get("_model_digest", ""),
                 "assignment": task["assignment"],
