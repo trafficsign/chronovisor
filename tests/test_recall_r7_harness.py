@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import hashlib
 import importlib.util
-import json
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -19,212 +18,388 @@ HARNESS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(HARNESS)
 
 
-def _id(value: int) -> str:
-    return f"{value:064x}"
+def _id(number: int) -> str:
+    return f"{number:064x}"
 
 
-def _digest(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+def _sealed(value: dict[str, Any]) -> dict[str, Any]:
+    value["seal_sha256"] = HARNESS._digest(
+        {key: item for key, item in value.items() if key != "seal_sha256"}
+    )
+    return value
 
 
-def _fixture(*, synthetic: bool = True) -> dict[str, object]:
-    baseline, candidate, lkg = _id(1), _id(2), _id(3)
-    commit = "a" * 40
+def _stage_seal(stage: dict[str, Any]) -> None:
+    rows_sha = HARNESS._digest(stage["rows"])
+    polls = stage["poll_history"]
+    for poll in polls:
+        poll["rows_sha256"] = rows_sha
+        _sealed(poll)
+    stage["stage_started_at"] = polls[0]["polled_at"]
+    _sealed(stage)
+
+
+def _fixture() -> dict[str, Any]:
+    baseline, candidate, lkg, feature = _id(1), _id(2), _id(3), _id(4)
+    source_commit = "a" * 40
+    now = datetime(2026, 8, 24, tzinfo=UTC)
+    artifacts: dict[str, dict[str, Any]] = {}
+    for name, policy_id in (
+        ("baseline", baseline),
+        ("candidate", candidate),
+        ("lkg", lkg),
+    ):
+        artifacts[name] = _sealed(
+            {
+                "schema": (
+                    HARNESS.BASELINE_SCHEMA
+                    if name == "baseline"
+                    else HARNESS.POLICY_SCHEMA
+                ),
+                "namespace": "recall-distillation",
+                "artifact_id": policy_id,
+                "feature_bytes_sha256": feature,
+            }
+        )
+    for name, policy_id in (
+        ("active", candidate),
+        ("candidate", candidate),
+        ("lkg", lkg),
+    ):
+        artifacts[f"{name}_pointer"] = _sealed(
+            {
+                "schema": HARNESS.STORE_SCHEMA,
+                "namespace": "recall-distillation",
+                "kind": f"{name}-policy-pointer",
+                "policy_id": policy_id,
+            }
+        )
     identity = {
         "active_id": candidate,
         "baseline_id": baseline,
         "candidate_id": candidate,
         "lkg_id": lkg,
         "policy_id": candidate,
-        "source_commit": commit,
+        "source_commit": source_commit,
+    }
+    actual = {
+        "runtime": {"runtime_commit": source_commit},
+        "archive": {
+            "archive_commit": source_commit,
+            "direct_url": "https://example.invalid/archive",
+        },
+        "process": {
+            "process_commit": source_commit,
+            "pid": 42,
+            "started_at": now.isoformat(),
+        },
+        "health": {"health_commit": source_commit, "status": "ok"},
+        "api": {"api_commit": source_commit, "status": 200},
+        "dom": {"dom_commit": source_commit, "status": "ready"},
+        "policy": {
+            "active_pointer": candidate,
+            "candidate_pointer": candidate,
+            "lkg_pointer": lkg,
+        },
     }
     receipts = {
-        name: {"kind": f"recall-r7-{name}-receipt", "identity": identity}
-        for name in ("runtime", "archive", "process", "health", "api", "dom", "policy")
-    }
-    receipt_digests = {name: _digest(value) for name, value in receipts.items()}
-    now = datetime(2026, 8, 24, tzinfo=UTC)
-    metrics = {
-        "quality": {
-            "baseline_successes": 450,
-            "candidate_successes": 500,
-            "total": 500,
-        },
-        "coverage": {"successes": 500, "total": 500},
-        "abstain": {"baseline": 0, "candidate": 0, "total": 500},
-        "latency": {
-            "p95_ms": 100,
-            "deadline_ms": 100,
-            "deadline_breaches": 0,
-            "timeout_count": 0,
-            "total": 500,
-        },
-        "resource": {
-            "worker_count": 1,
-            "declared_max_workers": 1,
-            "resource_violations": 0,
-        },
-        "integrity": {
-            "anchor_retained": True,
-            "blind_repeat": True,
-            "feature_bytes_sha256": candidate,
-            "negative_vetoes": 0,
-            "order_swap": True,
-        },
-    }
-    stages = []
-    previous = None
-    for index, (stage, percent) in enumerate(HARNESS.STAGES, 10):
-        run_id = _id(index)
-        pairs = [
+        name: _sealed(
             {
-                "receipt_id": _id(1000 + pair),
-                "host": "h1",
-                "cohort": "c1",
-                "run_id": run_id,
-                "stage": stage,
-            }
-            for pair in range(500)
-        ]
-        started = now - timedelta(days=32 - 8 * (index - 10))
-        stages.append(
-            {
-                "stage": stage,
-                "rollout_percent": percent,
-                "run_id": run_id,
-                "stage_started_at": started.isoformat(),
-                "observed_at": (started + timedelta(days=7)).isoformat(),
-                "same_decision_paired_eligible": 500,
-                "pairs": pairs,
-                "declared_minimums": {"hosts": 1, "cohorts": 1},
-                "hosts": ["h1"],
-                "cohorts": ["c1"],
-                "observation_mode": "paired",
-                "identity_receipts": receipt_digests,
-                "previous_stage_run_id": previous,
-                "stage_reset": index != 10,
-                "metrics": metrics,
+                "schema": f"chronovisor.recall-r7-{name}-receipt.v1",
+                "namespace": "recall-distillation",
+                "kind": f"recall-r7-{name}-receipt",
+                "identity": identity,
+                "actual": payload,
             }
         )
-        previous = run_id
-    locked = {
-        "schema": HARNESS.LOCKED_REPLAY_SCHEMA,
-        "namespace": "recall-distillation",
-        "placeholder": False,
-        "replay_status": "complete",
-        "synthetic_fixture": synthetic,
-        "splits": {"train": 70, "validation": 15, "test": 15, "embargo": True},
-        "boundaries": {
-            "train_end": (now - timedelta(days=10)).isoformat(),
-            "validation_start": (now - timedelta(days=9)).isoformat(),
-            "validation_end": (now - timedelta(days=8)).isoformat(),
-            "embargo_start": (now - timedelta(days=7)).isoformat(),
-            "embargo_end": (now - timedelta(days=6)).isoformat(),
-            "test_start": (now - timedelta(days=5)).isoformat(),
-            "test_end": (now - timedelta(days=4)).isoformat(),
-        },
-        "probes": {"blind_repeat": True, "order_swap": True, "negative_veto": True},
-        "feature_bytes_sha256": candidate,
-        "identity_receipts": receipt_digests,
+        for name, payload in actual.items()
     }
-    locked["seal_sha256"] = _digest(locked)
-    failure = {
-        "kind": "recall-r7-forced-failure-receipt",
-        "deterministic_failure": True,
-        "rolled_back": True,
-        "learning_halted": True,
-        "rollout_percent": 0,
-        "active_id": lkg,
-        "candidate_cleared": True,
-        "candidate_id": candidate,
-        "lkg_id": lkg,
-        "quarantine_id": _id(99),
-        "identity_receipts": receipt_digests,
+    refs = {name: HARNESS._digest(value) for name, value in receipts.items()} | {
+        name: HARNESS._digest(value) for name, value in artifacts.items()
     }
+    locked_rows = []
+    for index in range(100):
+        split = "train" if index < 70 else "validation" if index < 85 else "test"
+        locked_rows.append(
+            {
+                "row_id": _id(1_000 + index),
+                "split": split,
+                "decision_sha256": _id(2_000 + index),
+                "session_sha256": _id(3_000 + index),
+                "query_sha256": _id(4_000 + index),
+                "candidate_pool_sha256": _id(5_000 + index),
+                "feature_bytes_sha256": feature,
+                "timestamp": (now - timedelta(days=80)).isoformat(),
+                "read_only": True,
+                "route_probe": True,
+                "ox_blind": True,
+                "order_swap": True,
+                "counterfactual": True,
+                "negative_veto": False,
+            }
+        )
+    locked = _sealed(
+        {
+            "schema": HARNESS.LOCKED_REPLAY_SCHEMA,
+            "namespace": "recall-distillation",
+            "kind": "locked-replay",
+            "synthetic_fixture": False,
+            "provenance": "production-immutable-locked-replay",
+            "splits": {"train": 70, "validation": 15, "test": 15, "embargo": True},
+            "rows": locked_rows,
+            "identity_refs": refs,
+        }
+    )
+    stages = []
+    previous_run: str | None = None
+    for stage_index, (stage_name, percent) in enumerate(HARNESS.STAGES):
+        run_id = _id(10_000 + stage_index)
+        start = now - timedelta(days=40 - stage_index * 8)
+        end = start + timedelta(days=7)
+        rows = [
+            {
+                "receipt_id": _id(20_000 + stage_index * 1_000 + row),
+                "decision_sha256": _id(30_000 + stage_index * 1_000 + row),
+                "session_sha256": _id(40_000 + stage_index * 1_000 + row),
+                "query_sha256": _id(50_000 + stage_index * 1_000 + row),
+                "candidate_pool_sha256": _id(60_000 + stage_index * 1_000 + row),
+                "feature_bytes_sha256": feature,
+                "observed_at": (start + timedelta(days=1 + row % 2)).isoformat(),
+                "host": "host-a",
+                "cohort": "cohort-a",
+                "baseline_quality": row < 450,
+                "candidate_quality": True,
+                "baseline_covered": True,
+                "candidate_covered": True,
+                "baseline_abstained": False,
+                "candidate_abstained": False,
+                "candidate_score_ms": 180,
+                "live_latency_ms": 300,
+                "timed_out": False,
+                "deadline_ms": 1_200,
+                "worker_id": "worker-a",
+                "resource_ok": True,
+                "integrity_ok": True,
+                "negative_veto": False,
+            }
+            for row in range(500)
+        ]
+        polls = [
+            {
+                "schema": "chronovisor.recall-r7-poll.v1",
+                "namespace": "recall-distillation",
+                "kind": "immutable-stage-poll",
+                "artifact_id": _id(70_000 + stage_index * 2 + poll),
+                "stage": stage_name,
+                "run_id": run_id,
+                "polled_at": (start if poll == 0 else end).isoformat(),
+                "rows_sha256": "",
+            }
+            for poll in range(2)
+        ]
+        stage = {
+            "schema": "chronovisor.recall-r7-stage-receipt.v1",
+            "namespace": "recall-distillation",
+            "kind": "stage-receipt",
+            "stage": stage_name,
+            "rollout_percent": percent,
+            "run_id": run_id,
+            "stage_started_at": start.isoformat(),
+            "poll_history": polls,
+            "rows": rows,
+            "stratum_minimums": {"host": 500, "cohort": 500},
+            "observation_mode": "paired",
+            "identity_refs": refs,
+            "locked_replay_sha256": HARNESS._digest(
+                {key: item for key, item in locked.items() if key != "seal_sha256"}
+            ),
+            "feature_bytes_sha256": feature,
+            "previous_run_id": previous_run,
+            "legacy_incumbent_proof": None,
+        }
+        _stage_seal(stage)
+        stages.append(stage)
+        previous_run = run_id
+    final = stages[-1]
+    rollback = _sealed(
+        {
+            "schema": "chronovisor.recall-r7-forced-failure-receipt.v1",
+            "namespace": "recall-distillation",
+            "kind": "forced-failure-receipt",
+            "run_id": final["run_id"],
+            "stage": "100",
+            "failure_at": (now - timedelta(days=8)).isoformat(),
+            "stage_seal_sha256": final["seal_sha256"],
+            "last_poll_seal_sha256": final["poll_history"][-1]["seal_sha256"],
+            "identity_refs": refs,
+            "deterministic_failure": True,
+            "rolled_back": True,
+            "learning_halted": True,
+            "rollout_percent": 0,
+            "rollback_state": {
+                "active_policy_id": lkg,
+                "candidate_policy_id": None,
+                "lkg_policy_id": lkg,
+            },
+            "quarantine_id": _id(90_000),
+        }
+    )
     return {
         "locked_replay": locked,
         "stages": stages,
-        "forced_failure": failure,
+        "forced_failure": rollback,
         "receipts": receipts,
+        "artifacts": artifacts,
         "baseline_id": baseline,
         "candidate_id": candidate,
         "lkg_id": lkg,
-        "source_commit": commit,
+        "source_commit": source_commit,
         "now": now,
     }
 
 
-def _validate(fixture: dict[str, object]) -> dict[str, object]:
-    return HARNESS.validate_bundle(**fixture)  # type: ignore[arg-type]
+def _validate(fixture: dict[str, Any]) -> dict[str, Any]:
+    return HARNESS.validate_bundle(**fixture)
 
 
-def test_happy_synthetic_validator_fixture_is_never_certification() -> None:
+def test_happy_real_receipt_fixture_recomputes_all_fixed_gates() -> None:
     result = _validate(_fixture())
-    assert result["synthetic_fixture"] is True
     assert result["certification"] is False
-    assert len(result["stages"]) == 4
+    assert (
+        result["certification_reason"]
+        == "independent_live_input_attestation_unavailable"
+    )
+    assert result["stages"][-1]["metrics"]["candidate_score_p95_ms"] == 180
+    assert result["stages"][-1]["metrics"]["live_p95_ms"] == 300
 
 
 @pytest.mark.parametrize(
-    "path, message",
+    ("path", "value", "message"),
     [
-        (("stages", 0, "metrics", "quality", "total"), "denominator"),
-        (("stages", 0, "stage_started_at"), "seven-day"),
+        (("locked_replay", "synthetic_fixture"), True, "synthetic/source-only"),
+        (("locked_replay", "provenance"), "synthetic-fixture", "synthetic/source-only"),
+        (("stages", 0, "rows", 0, "candidate_score_ms"), 181, "fixed gate"),
+        (("stages", 0, "rows", 0, "live_latency_ms"), 900, "fixed gate"),
+        (("stages", 0, "rows", 0, "deadline_ms"), 1201, "hard deadline"),
     ],
 )
-def test_insufficient_denominator_and_days_fail_closed(
-    path: tuple[object, ...], message: str
+def test_known_false_passes_are_rejected(
+    path: tuple[object, ...], value: object, message: str
 ) -> None:
     fixture = _fixture()
-    target: object = fixture
+    target: Any = fixture
     for key in path[:-1]:
-        target = target[key]  # type: ignore[index]
-    target[path[-1]] = 1 if path[-1] == "total" else fixture["now"].isoformat()  # type: ignore[index,union-attr]
+        target = target[key]
+    target[path[-1]] = value
+    if path[0] == "locked_replay":
+        _sealed(fixture["locked_replay"])
+    else:
+        if path[-1] in {"candidate_score_ms", "live_latency_ms"}:
+            for row in fixture["stages"][0]["rows"]:
+                row[path[-1]] = value
+        _stage_seal(fixture["stages"][0])
     with pytest.raises(HARNESS.R7Error, match=message):
         _validate(fixture)
 
 
-def test_placeholder_replay_and_duplicate_and_mixed_host_fail_closed() -> None:
+def test_rejects_cross_stage_reuse_poll_shortcut_tamper_and_early_legacy() -> None:
     fixture = _fixture()
-    fixture["locked_replay"]["placeholder"] = True  # type: ignore[index]
-    unsigned = {
-        key: value
-        for key, value in fixture["locked_replay"].items()
-        if key != "seal_sha256"
-    }  # type: ignore[index]
-    fixture["locked_replay"]["seal_sha256"] = _digest(unsigned)  # type: ignore[index]
-    with pytest.raises(HARNESS.R7Error, match="placeholder"):
-        _validate(fixture)
-    fixture = _fixture()
-    fixture["stages"][0]["pairs"][1]["receipt_id"] = fixture["stages"][0]["pairs"][0][
+    fixture["stages"][1]["rows"][0]["receipt_id"] = fixture["stages"][0]["rows"][0][
         "receipt_id"
-    ]  # type: ignore[index]
-    with pytest.raises(HARNESS.R7Error, match="duplicate"):
+    ]
+    _stage_seal(fixture["stages"][1])
+    with pytest.raises(HARNESS.R7Error, match="reuse"):
         _validate(fixture)
     fixture = _fixture()
-    fixture["stages"][0]["pairs"][0]["host"] = "foreign"  # type: ignore[index]
-    with pytest.raises(HARNESS.R7Error, match="mixed"):
+    for key in (
+        "decision_sha256",
+        "session_sha256",
+        "query_sha256",
+        "candidate_pool_sha256",
+    ):
+        fixture["stages"][0]["rows"][1][key] = fixture["stages"][0]["rows"][0][key]
+    _stage_seal(fixture["stages"][0])
+    with pytest.raises(HARNESS.R7Error, match="duplicate paired observation"):
         _validate(fixture)
-
-
-def test_candidate_only_is_rejected_before_100_and_rollback_must_be_complete() -> None:
     fixture = _fixture()
-    fixture["stages"][1]["observation_mode"] = "candidate_only_legacy_incumbent"  # type: ignore[index]
+    timestamp = fixture["stages"][0]["rows"][0]["observed_at"]
+    for row in fixture["stages"][0]["rows"]:
+        row["observed_at"] = timestamp
+    _stage_seal(fixture["stages"][0])
+    with pytest.raises(HARNESS.R7Error, match="one synthetic timestamp"):
+        _validate(fixture)
+    fixture = _fixture()
+    fixture["stages"][0]["poll_history"][1]["polled_at"] = fixture["stages"][0][
+        "poll_history"
+    ][0]["polled_at"]
+    _stage_seal(fixture["stages"][0])
+    with pytest.raises(HARNESS.R7Error, match="seven-day"):
+        _validate(fixture)
+    fixture = _fixture()
+    fixture["receipts"]["api"]["actual"]["status"] = 500
+    with pytest.raises(HARNESS.R7Error, match="seal mismatch"):
+        _validate(fixture)
+    fixture = _fixture()
+    stage = fixture["stages"][1]
+    stage["observation_mode"] = "candidate_only_legacy_incumbent"
+    stage["legacy_incumbent_proof"] = _sealed(
+        {
+            "schema": "chronovisor.recall-r7-legacy-incumbent-proof.v1",
+            "namespace": "recall-distillation",
+            "kind": "legacy-incumbent-proof",
+            "incumbent_unavailable": True,
+            "run_id": stage["run_id"],
+            "stage": "5",
+        }
+    )
+    _stage_seal(stage)
     with pytest.raises(HARNESS.R7Error, match="only at 100"):
         _validate(fixture)
+
+
+def test_identity_pointer_and_rollback_binding_fail_closed() -> None:
     fixture = _fixture()
-    fixture["forced_failure"]["learning_halted"] = False  # type: ignore[index]
-    with pytest.raises(HARNESS.R7Error, match="rollback is incomplete"):
+    fixture["artifacts"]["candidate_pointer"]["policy_id"] = _id(99)
+    _sealed(fixture["artifacts"]["candidate_pointer"])
+    with pytest.raises(HARNESS.R7Error, match="identity drift"):
+        _validate(fixture)
+    fixture = _fixture()
+    fixture["forced_failure"]["run_id"] = _id(99)
+    _sealed(fixture["forced_failure"])
+    with pytest.raises(HARNESS.R7Error, match="binding/state"):
         _validate(fixture)
 
 
-def test_identity_drift_and_path_safety_fail_closed(tmp_path: Path) -> None:
+def test_100_percent_legacy_incumbent_requires_and_honors_sealed_proof() -> None:
     fixture = _fixture()
-    fixture["receipts"]["api"]["identity"]["source_commit"] = "b" * 40  # type: ignore[index]
-    with pytest.raises(HARNESS.R7Error, match="drift"):
-        _validate(fixture)
+    stage = fixture["stages"][-1]
+    stage["observation_mode"] = "candidate_only_legacy_incumbent"
+    for row in stage["rows"]:
+        row["baseline_quality"] = None
+        row["baseline_covered"] = None
+        row["baseline_abstained"] = None
+    stage["legacy_incumbent_proof"] = _sealed(
+        {
+            "schema": "chronovisor.recall-r7-legacy-incumbent-proof.v1",
+            "namespace": "recall-distillation",
+            "kind": "legacy-incumbent-proof",
+            "incumbent_unavailable": True,
+            "run_id": stage["run_id"],
+            "stage": "100",
+        }
+    )
+    _stage_seal(stage)
+    fixture["forced_failure"]["stage_seal_sha256"] = stage["seal_sha256"]
+    fixture["forced_failure"]["last_poll_seal_sha256"] = stage["poll_history"][-1][
+        "seal_sha256"
+    ]
+    _sealed(fixture["forced_failure"])
+    assert _validate(fixture)["certification"] is False
+
+
+def test_paths_dirty_source_and_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     production, source = tmp_path / "production", tmp_path / "source"
     production.mkdir()
     source.mkdir()
@@ -232,18 +407,18 @@ def test_identity_drift_and_path_safety_fail_closed(tmp_path: Path) -> None:
     link.symlink_to(production, target_is_directory=True)
     with pytest.raises(HARNESS.R7Error, match="symlink"):
         HARNESS._assert_paths(link, source, tmp_path / "output", [])
-    with pytest.raises(HARNESS.R7Error, match="overlap"):
-        HARNESS._assert_paths(production, source, production / "output", [])
-
-
-def test_dirty_source_is_rejected(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    source.mkdir()
+    with pytest.raises(HARNESS.R7Error, match="evidence input"):
+        HARNESS._assert_paths(
+            production,
+            source,
+            tmp_path / "output",
+            [tmp_path / "output" / "locked.json"],
+        )
     subprocess.run(["git", "init", "-q"], cwd=source, check=True)
-    (source / "tracked.txt").write_text("one")
-    subprocess.run(["git", "add", "tracked.txt"], cwd=source, check=True)
+    (source / "x").write_text("x")
+    subprocess.run(["git", "add", "x"], cwd=source, check=True)
     subprocess.run(
-        ["git", "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "base"],
+        ["git", "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "x"],
         cwd=source,
         check=True,
     )
@@ -254,50 +429,29 @@ def test_dirty_source_is_rejected(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
     ).stdout.strip()
-    assert HARNESS._source_identity(source, commit) == {"source_commit": commit}
-    (source / "tracked.txt").write_text("dirty")
+    (source / "x").write_text("dirty")
     with pytest.raises(HARNESS.R7Error, match="dirty"):
         HARNESS._source_identity(source, commit)
-
-
-def test_main_removes_temporary_clone_after_writing_verdict(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    production, source, clone = (
-        tmp_path / "production",
-        tmp_path / "source",
-        tmp_path / "clone",
-    )
-    production.mkdir()
-    source.mkdir()
+    clone = tmp_path / "clone"
     clone.mkdir()
-    receipt_paths = {
-        name: tmp_path / f"{name}.json"
-        for name in ("runtime", "archive", "process", "health", "api", "dom", "policy")
-    }
-    stages = [tmp_path / f"stage-{index}.json" for index in range(4)]
     monkeypatch.setattr(HARNESS.R0, "_clone", lambda *_args: (clone, True))
+    monkeypatch.setattr(HARNESS, "_clone_state", lambda _path: {"ok": True})
     monkeypatch.setattr(
         HARNESS, "_source_identity", lambda *_args: {"source_commit": "a" * 40}
     )
-    monkeypatch.setattr(
-        HARNESS, "_tree_state", lambda _path: {"files": 0, "state_sha256": "x"}
-    )
-    monkeypatch.setattr(HARNESS, "_read_json", lambda *_args: ({}, "x"))
-    monkeypatch.setattr(
-        HARNESS, "validate_bundle", lambda **_kwargs: {"synthetic_fixture": False}
-    )
+    monkeypatch.setattr(HARNESS, "_read_json", lambda *_args: {})
+    monkeypatch.setattr(HARNESS, "validate_bundle", lambda **_kwargs: {"ok": True})
     store = SimpleNamespace(
         write_immutable=lambda output, payload, schema: (
-            _id(88),
-            output / "artifact.json",
+            _id(1),
+            output / "a.json",
             {"schema": schema},
         )
     )
     monkeypatch.setattr(
         HARNESS.R0, "_load", lambda _source: (None, None, store, None, None)
     )
-    argv = [
+    arguments = [
         "--production-root",
         str(production),
         "--source-root",
@@ -315,11 +469,15 @@ def test_main_removes_temporary_clone_after_writing_verdict(
         "--locked-replay",
         str(tmp_path / "locked.json"),
         "--forced-failure-receipt",
-        str(tmp_path / "failure.json"),
+        str(tmp_path / "forced.json"),
     ]
-    for path in stages:
-        argv.extend(("--stage-receipt", str(path)))
-    for name, path in receipt_paths.items():
-        argv.extend((f"--{name}-receipt", str(path)))
-    assert HARNESS.main(argv) == 0
+    for index in range(4):
+        arguments.extend(("--stage-receipt", str(tmp_path / f"stage-{index}.json")))
+    for name in ("runtime", "archive", "process", "health", "api", "dom", "policy"):
+        arguments.extend((f"--{name}-receipt", str(tmp_path / f"{name}.json")))
+    for name in ("baseline", "candidate", "lkg"):
+        arguments.extend((f"--{name}-artifact", str(tmp_path / f"{name}.json")))
+    for name in ("active", "candidate", "lkg"):
+        arguments.extend((f"--{name}-pointer", str(tmp_path / f"{name}-pointer.json")))
+    assert HARNESS.main(arguments) == 0
     assert not clone.exists()
