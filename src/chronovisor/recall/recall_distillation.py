@@ -2820,6 +2820,41 @@ def _materialization_feature_pairs(
     return features_by_pair, snapshot_contracts
 
 
+def _training_assignment_authority(assignment: object) -> dict[str, Any]:
+    """Keep the deterministic, training-relevant assignment projection."""
+
+    source = assignment if isinstance(assignment, Mapping) else {}
+    return {
+        "revision": str(source.get("revision") or ""),
+        "kind": str(source.get("kind") or ""),
+        "profile": str(source.get("profile") or ""),
+        "split": str(source.get("split") or ""),
+        "probe": source.get("probe") is True,
+        "owner": str(source.get("owner") or ""),
+        "routes": [str(route) for route in source.get("routes", [])]
+        if isinstance(source.get("routes"), list)
+        else [],
+        "probe_revision": str(source.get("probe_revision") or ""),
+        "repeat_pair_id": str(source.get("repeat_pair_id") or ""),
+        "fixed_repeat": source.get("fixed_repeat") is True,
+        "order_swap": source.get("order_swap") is True,
+        "blind_order": str(source.get("blind_order") or ""),
+        "probe_batch_id": str(source.get("probe_batch_id") or ""),
+        "order_variant": (
+            int(source["order_variant"])
+            if isinstance(source.get("order_variant"), int)
+            and not isinstance(source.get("order_variant"), bool)
+            else 0
+        ),
+        "candidate_position": (
+            int(source["candidate_position"])
+            if isinstance(source.get("candidate_position"), int)
+            and not isinstance(source.get("candidate_position"), bool)
+            else -1
+        ),
+    }
+
+
 def _materialization_label_row(
     label: Mapping[str, Any],
     root: Path,
@@ -2964,6 +2999,7 @@ def _materialization_label_row(
             or (assignment.get("revision") if isinstance(assignment, Mapping) else "")
             or ""
         ),
+        "assignment_authority": _training_assignment_authority(assignment),
         "profile_contract_id": str(label.get("profile_contract_id") or ""),
         "expires_at": str(label.get("expires_at") or ""),
         "identity_revision": str(label.get("identity_revision") or ""),
@@ -3400,10 +3436,60 @@ def _sealed_counterfactual_exposure_binding(
     )
     if receipt is None or artifact.get("artifact_id") != reference:
         return False
+    candidate_ids = receipt.get("candidate_ids")
+    candidate_id = str(row.get("candidate_id") or "")
+    if (
+        not isinstance(candidate_ids, list)
+        or not candidate_ids
+        or candidate_id not in {str(value) for value in candidate_ids}
+        or artifact.get("candidate_ids") != candidate_ids
+        or row.get("assignment_authority")
+        != _training_assignment_authority(label.get("assignment"))
+        or row.get("assignment_authority")
+        != _training_assignment_authority(
+            {"revision": ASSIGNMENT_REVISION, "kind": "counterfactual"}
+        )
+    ):
+        return False
+    refs = artifact.get("candidate_refs")
+    if isinstance(refs, list):
+        matching_refs = [
+            item
+            for item in refs
+            if isinstance(item, Mapping)
+            and str(item.get("candidate_id") or "") == candidate_id
+        ]
+        if not matching_refs:
+            return False
+        declared_hashes = {
+            str(value)
+            for item in matching_refs
+            for value in (
+                item.get("content_sha256"),
+                item.get("page_content_sha256"),
+                item.get("text_sha256"),
+            )
+            if isinstance(value, str) and value
+        }
+        if declared_hashes:
+            try:
+                snapshot = _materialization_snapshots(root, None).get(
+                    str(row.get("rally_id") or ""), {}
+                )
+                candidates = snapshot.get("candidates", [])
+            except (AttributeError, KeyError, TypeError, store.DistillationStoreError):
+                return False
+            candidate_hashes = {
+                str(candidate.get("text_sha256") or "")
+                for candidate in candidates
+                if isinstance(candidate, Mapping)
+                and str(candidate.get("candidate_id") or "") == candidate_id
+            }
+            if not candidate_hashes.intersection(declared_hashes):
+                return False
     return (
         matching_rally_receipts[0].get("candidate_ids")
         == receipt.get("candidate_ids")
-        and artifact.get("candidate_ids") == receipt.get("candidate_ids")
     )
 
 
@@ -3564,6 +3650,10 @@ def _materialized_row_integrity(
                 else LOCAL_TRIAD_PROFILE
             )
             and row.get("assignment_revision") == ASSIGNMENT_REVISION
+            and row.get("assignment_authority")
+            == _training_assignment_authority(
+                {"revision": ASSIGNMENT_REVISION, "kind": "counterfactual"}
+            )
             and row.get("identity_revision") == "local-blind-counterfactual-v1"
             and row.get("request_revision") == "local-blind-counterfactual-v1"
             and (
@@ -7951,7 +8041,8 @@ def _counterfactual_snapshot_inputs(
     for item in exact_candidates:
         if not isinstance(item, Mapping):
             continue
-        candidate_id = str(item.get("candidate_id") or "")
+        candidate_id_raw = item.get("candidate_id")
+        candidate_id = str(candidate_id_raw or "")
         rendered = item.get("rendered_context")
         evidence_refs = item.get("evidence_refs")
         if not isinstance(rendered, str) or not rendered:
@@ -7968,7 +8059,7 @@ def _counterfactual_snapshot_inputs(
         original_evidence[candidate_id] = rendered
         removal_candidates.append(
             {
-                "candidate_id": candidate_id,
+                "candidate_id": candidate_id_raw,
                 "text_sha256": item.get("content_sha256"),
                 "ref": evidence_refs[0]
                 if isinstance(evidence_refs, list) and evidence_refs
@@ -8004,9 +8095,9 @@ def _counterfactual_additions(
     historical_additions = [
         candidate
         for candidate in snapshot.get("candidates", [])[:3]
-        if candidate["candidate_id"] not in original_evidence
-        and candidate["candidate_id"]
-        not in {item["candidate_id"] for item in live_additions}
+        if str(candidate["candidate_id"]) not in original_evidence
+        and str(candidate["candidate_id"])
+        not in {str(item["candidate_id"]) for item in live_additions}
     ]
     return [*removal_candidates, *live_additions, *historical_additions]
 
@@ -8249,7 +8340,9 @@ def _run_counterfactual_claim(
                 workset.release_unattempted([claim])
                 return _CounterfactualBlockResult(pending=True, deferred=True)
             continue
-        if exposure and set(original_evidence) != set(exposure["candidate_ids"]):
+        if exposure and set(original_evidence) != {
+            str(candidate_id) for candidate_id in exposure["candidate_ids"]
+        }:
             if target[0] == rally_id:
                 workset.commit(
                     [claim],

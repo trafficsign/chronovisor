@@ -5941,6 +5941,12 @@ def test_offline_gate_uses_route_stability_and_agreed_counterfactuals(
                     "identity_revision": "local-blind-counterfactual-v1",
                     "request_revision": "local-blind-counterfactual-v1",
                     "assignment_revision": distill.ASSIGNMENT_REVISION,
+                    "assignment_authority": distill._training_assignment_authority(
+                        {
+                            "revision": distill.ASSIGNMENT_REVISION,
+                            "kind": "counterfactual",
+                        }
+                    ),
                     "generator_route_identity": {
                         "role": "generator",
                         "provider": "test",

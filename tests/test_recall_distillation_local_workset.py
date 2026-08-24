@@ -34,17 +34,34 @@ def _sealed_counterfactual_exposure(
 
 
 def _record_counterfactual_exposure(
-    root: Path, *, host: str, session_id_sha256: str, query_sha256: str
+    root: Path,
+    *,
+    host: str,
+    session_id_sha256: str,
+    query_sha256: str,
+    candidate_ids: list[object] | None = None,
 ) -> dict[str, object]:
     """Create the canonical receipt projection used by root lineage checks."""
 
+    candidate_ids = [7] if candidate_ids is None else candidate_ids
+    candidate_refs = (
+        [
+            {
+                "candidate_id": 7,
+                "content_sha256": "text",
+                "rendered_context": "candidate",
+            }
+        ]
+        if candidate_ids == [7]
+        else []
+    )
     binding = {
         "decision_id": "decision-1",
         "host": host,
         "session_id_sha256": session_id_sha256,
         "query_semantic_sha256": query_sha256,
         "policy_id": "a" * 64,
-        "candidate_ids": [],
+        "candidate_ids": candidate_ids,
         "candidate_refs_sha256": "b" * 64,
         "candidate_pool_refs_sha256": "c" * 64,
         "candidate_feature_snapshot_sha256": "d" * 64,
@@ -60,7 +77,7 @@ def _record_counterfactual_exposure(
         {
             "kind": "exact-rendered-exposure",
             **binding,
-            "candidate_refs": [],
+            "candidate_refs": candidate_refs,
             "candidate_pool_refs": [],
             "candidate_feature_snapshot": [],
             "runtime_observation": {},
@@ -76,7 +93,7 @@ def _record_counterfactual_exposure(
     store.append_chain(
         store.distillation_dir(root) / "exposure-receipts.jsonl", receipt
     )
-    return {"exposure_artifact_id": artifact_id, "candidate_ids": []}
+    return {"exposure_artifact_id": artifact_id, "candidate_ids": candidate_ids}
 
 
 def test_local_workset_reconciles_appended_label_without_repeat_call(
@@ -701,6 +718,38 @@ def test_counterfactual_preserves_raw_candidate_id_in_label(
     assert distill._materialized_row_integrity(materialized[0], root=tmp_path) is True
     missing = {**materialized[0], "counterfactual_ref": "c" * 64}
     assert distill._materialized_row_integrity(missing, root=tmp_path) is False
+    wrong_candidate_row = {**materialized[0], "candidate_id": "missing"}
+    wrong_candidate_label = {**labels[0], "candidate_id": "missing"}
+    assert distill._sealed_counterfactual_exposure_binding(
+        tmp_path, wrong_candidate_row, wrong_candidate_label, rally
+    ) is False
+    empty_receipt = _record_counterfactual_exposure(
+        tmp_path,
+        host="test-host",
+        session_id_sha256="s" * 64,
+        query_sha256="query",
+        candidate_ids=[],
+    )
+    empty_row = {
+        **materialized[0],
+        "counterfactual_ref": empty_receipt["exposure_artifact_id"],
+    }
+    empty_label = {
+        **labels[0],
+        "exposure_artifact_id": empty_row["counterfactual_ref"],
+    }
+    empty_rally = {**rally, "exposure_receipts": [empty_receipt]}
+    assert distill._sealed_counterfactual_exposure_binding(
+        tmp_path, empty_row, empty_label, empty_rally
+    ) is False
+    bad_assignment = {
+        **materialized[0],
+        "assignment_authority": {
+            **materialized[0]["assignment_authority"],
+            "kind": "forged",
+        },
+    }
+    assert distill._materialized_row_integrity(bad_assignment) is False
     exposure_path = (
         store.distillation_dir(tmp_path)
         / "exposures"
