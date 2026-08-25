@@ -733,10 +733,7 @@ class DistillationConfig:
 def _ox_expiry(value: object) -> str:
     """Return a strict future UTC RFC3339 expiry, or fail before egress."""
 
-    if (
-        not isinstance(value, str)
-        or _OX_EXPIRY_RE.fullmatch(value) is None
-    ):
+    if not isinstance(value, str) or _OX_EXPIRY_RE.fullmatch(value) is None:
         raise DistillationError("OX expiry must be strict UTC RFC3339")
     try:
         expires_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -754,10 +751,7 @@ def _same_future_ox_expiry(value: object, expected: object) -> bool:
     try:
         value_normalized = _ox_expiry(value)
         expected_normalized = _ox_expiry(expected)
-        return (
-            value_normalized == value
-            and value_normalized == expected_normalized
-        )
+        return value_normalized == value and value_normalized == expected_normalized
     except DistillationError:
         return False
 
@@ -995,19 +989,20 @@ def _validate_ox_profile_contract(
     try:
         if _ox_expiry(contract.get("expires_at")) != contract.get("expires_at"):
             return {}
-        _validate_ox_source_binding(
-            {key: contract[key] for key in source_keys}
-        )
+        _validate_ox_source_binding({key: contract[key] for key in source_keys})
     except DistillationError:
         return {}
-    if any(
-        re.fullmatch(r"[0-9a-f]{64}", contract.get(key, "")) is None
-        for key in (
-            "source_tree_sha256",
-            "source_ox_identity_sha256",
-            "relevant_config_sha256",
+    if (
+        any(
+            re.fullmatch(r"[0-9a-f]{64}", contract.get(key, "")) is None
+            for key in (
+                "source_tree_sha256",
+                "source_ox_identity_sha256",
+                "relevant_config_sha256",
+            )
         )
-    ) or re.fullmatch(r"[0-9a-f]{40}", contract.get("source_commit", "")) is None:
+        or re.fullmatch(r"[0-9a-f]{40}", contract.get("source_commit", "")) is None
+    ):
         return {}
     return dict(contract)
 
@@ -1112,10 +1107,7 @@ def _ox_eligibility_guard(
             or config.ox_free_only is not True
             or not 1 <= config.teacher_max_inflight <= 10
             or not 1 <= config.teacher_claim_limit <= 500
-            or (
-                type(teacher) is OpenCodeOxAlphaTeacher
-                and teacher.enabled is not True
-            )
+            or (type(teacher) is OpenCodeOxAlphaTeacher and teacher.enabled is not True)
             or _current_ox_profile_contract_id(root) != profile_contract_id
         ):
             raise DistillationError("OX egress eligibility changed")
@@ -1150,7 +1142,9 @@ def _ox_provider_receipt_from_result(result: Any) -> str:
         receipt = value.get("_provider_receipt_sha256")
         if isinstance(receipt, str) and re.fullmatch(r"[0-9a-f]{64}", receipt):
             return receipt
-    return ox_provider_receipt_sha256(getattr(getattr(result, "error", None), "request_id", None))
+    return ox_provider_receipt_sha256(
+        getattr(getattr(result, "error", None), "request_id", None)
+    )
 
 
 def _ox_event_head(root: Path, name: str) -> dict[str, Any]:
@@ -1711,7 +1705,9 @@ def _r4_runtime_identity_projection(
     if not isinstance(direct_url, Mapping):
         return {}
     try:
-        direct_url_copy = json.loads(canonical_json.canonical_json_bytes_strict(direct_url))
+        direct_url_copy = json.loads(
+            canonical_json.canonical_json_bytes_strict(direct_url)
+        )
     except (TypeError, ValueError):
         return {}
     return {
@@ -1750,300 +1746,168 @@ def _r4_runtime_identity_projection(
     }
 
 
-def _ox_event_projection(
+def _validate_ox_failure_event(
+    *,
+    kind: str,
+    payload: Mapping[str, Any],
+    required: set[str],
+    allowed_caps: set[int],
+    profile_contract_id: str,
+    current_workset_payload_digests: Callable[[], dict[str, str]],
+    referenced_expiry: object,
+) -> None:
+    if kind == "ox-provider-failure" and (
+        type(payload.get("cap")) is not int
+        or payload.get("cap") not in allowed_caps
+        or payload.get("status") not in {"deferred", "hard_stop"}
+        or not isinstance(payload.get("work_ids"), list)
+        or not isinstance(payload.get("attempts_by_work"), Mapping)
+        or not isinstance(payload.get("provider_receipts"), Mapping)
+        or not isinstance(payload.get("provider_requests"), Mapping)
+    ):
+        raise DistillationError("OX failure event fields are invalid")
+    if kind == "ox-provider-failure":
+        work_ids = payload.get("work_ids")
+        attempts_by_work = payload.get("attempts_by_work")
+        provider_receipts = payload.get("provider_receipts")
+        provider_requests = payload.get("provider_requests")
+        if (
+            not isinstance(work_ids, list)
+            or not work_ids
+            or any(
+                not isinstance(work_id, str)
+                or re.fullmatch(r"[0-9a-f]{64}", work_id) is None
+                for work_id in work_ids
+            )
+            or len(set(work_ids)) != len(work_ids)
+            or type(payload.get("attempts")) is not int
+            or payload["attempts"] != 1
+            or not isinstance(attempts_by_work, Mapping)
+            or set(attempts_by_work) != set(work_ids)
+            or any(
+                type(value) is not int or value < 1
+                for value in attempts_by_work.values()
+            )
+            or not isinstance(provider_receipts, Mapping)
+            or set(provider_receipts) != set(work_ids)
+            or len(set(provider_receipts.values())) != 1
+            or not isinstance(provider_requests, Mapping)
+            or set(provider_requests) != set(work_ids)
+        ):
+            raise DistillationError("OX failure event fields are invalid")
+        payload_inventory = current_workset_payload_digests()
+        if any(work_id not in payload_inventory for work_id in work_ids) or any(
+            not isinstance(receipt, str)
+            or re.fullmatch(r"[0-9a-f]{64}", receipt) is None
+            for receipt in provider_receipts.values()
+        ):
+            raise DistillationError("OX failure provider receipt is unbound")
+        if dict(provider_requests) != {
+            work_id: expected_ox_provider_request_sha256(
+                profile_contract_id=profile_contract_id,
+                payload_digest=payload_inventory[work_id],
+                work_id=work_id,
+                expires_at=str(referenced_expiry),
+            )
+            for work_id in work_ids
+        }:
+            raise DistillationError("OX failure provider request is unbound")
+        if any(
+            provider_receipts[work_id] == provider_requests[work_id]
+            for work_id in work_ids
+        ):
+            raise DistillationError("OX failure provider receipt is synthetic")
+        category = payload.get("category")
+        expected_fields = set(required)
+        if category == "429":
+            if (
+                payload.get("status") != "deferred"
+                or type(payload.get("before_cap")) is not int
+                or payload.get("before_cap") not in allowed_caps
+                or type(payload.get("after_cap")) is not int
+                or payload.get("after_cap") not in allowed_caps
+            ):
+                raise DistillationError("OX failure event fields are invalid")
+            expected_fields.update({"before_cap", "after_cap"})
+        elif category in {"5xx", "timeout"}:
+            if payload.get("bounded") is not True:
+                raise DistillationError("OX failure event fields are invalid")
+            expected_fields.add("bounded")
+        elif category in {"402", "paid", "model_drift"}:
+            if payload.get("status") != "hard_stop":
+                raise DistillationError("OX failure event fields are invalid")
+        else:
+            raise DistillationError("OX failure event fields are invalid")
+        if set(payload) != expected_fields:
+            raise DistillationError("OX event schema is invalid")
+
+
+def _ox_event_rows(
     root: Path,
+    name: str,
     *,
     profile_contract_id: str,
     source_binding: Mapping[str, str],
-    workset: Mapping[str, Any],
-    label_path: Path,
-    authoritative_gate: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Project the immutable OX ledgers; never manufacture missing evidence."""
-
-    contract = _read_ox_profile_contract(root, profile_contract_id)
-    contract_revision = contract.get("request_revision")
-    contract_max_inflight = contract.get("max_inflight", 1)
+    contract_expiry: str | None,
+    contract_max_inflight: int,
+    allowed_caps: set[int],
+    referenced_contract: Callable[[Mapping[str, Any]], dict[str, Any]],
+    current_workset_payload_digests: Callable[[], dict[str, str]],
+) -> list[dict[str, Any]]:
+    path = store.distillation_dir(root) / name
+    try:
+        if path.stat().st_size > 4 * 1024 * 1024:
+            raise DistillationError("OX event ledger exceeds bounded size")
+    except FileNotFoundError:
+        pass
+    verified = store.verify_chain(path)
+    records = store.read_chain(path)
+    head = store.chain_head(path)
     if (
-        isinstance(contract_max_inflight, bool)
-        or not isinstance(contract_max_inflight, int)
-        or not 1 <= contract_max_inflight <= 10
+        verified != head
+        or len(records) != head["records"]
+        or (records[-1].get("record_sha256") if records else "") != head["head_sha256"]
     ):
-        raise DistillationError("OX profile contract max inflight is invalid")
-    allowed_caps = {
-        min(cap, contract_max_inflight) for cap in (1, 2, 5, 10)
-    }
-    contract_expiry: str | None = None
-    if profile_contract_id:
-        try:
-            contract_expiry = _ox_expiry(contract.get("expires_at"))
-        except DistillationError as exc:
-            raise DistillationError("OX profile contract expiry is invalid") from exc
-        if (
-            not contract
-            or contract_revision != OX_RAMP_REQUEST_REVISION
-            or contract_expiry != contract.get("expires_at")
-        ):
-            raise DistillationError("OX profile contract request revision is invalid")
-    else:
-        contract_revision = OX_RAMP_REQUEST_REVISION
-
-    contract_cache: dict[str, dict[str, Any]] = {}
-    if profile_contract_id:
-        contract_cache[profile_contract_id] = contract
-
-    workset_payload_digests: dict[str, str] | None = None
-
-    def current_workset_provenance_matches(provenance: Mapping[str, Any]) -> bool:
-        required = {
-            "profile",
-            "cohort",
-            "route",
-            "teacher_role",
-            "profile_contract_id",
-            "probe",
+        raise DistillationError("OX event ledger head does not reconcile")
+    selected: list[dict[str, Any]] = []
+    for record in records:
+        referenced = referenced_contract(record)
+        referenced_revision = referenced.get("request_revision")
+        referenced_expiry = referenced.get("expires_at")
+        if record.get("request_revision") != referenced_revision:
+            raise DistillationError("OX event request revision conflicts")
+        if record.get("expires_at") != referenced_expiry:
+            raise DistillationError("OX event expiry conflicts")
+        if record.get("profile_contract_id") != profile_contract_id:
+            continue
+        if any(record.get(key) != value for key, value in source_binding.items()):
+            raise DistillationError("OX event source binding conflicts")
+        chain_fields = {
+            "schema",
+            "namespace",
+            "previous_sha256",
+            "record_sha256",
+            "event_key",
+            "event_binding_sha256",
         }
-        probe_fields = {
-            "probe_revision",
-            "repeat_pair_id",
-            "fixed_repeat",
-            "order_swap",
-            "blind_order",
-            "probe_batch_id",
-            "order_variant",
-            "candidate_position",
+        payload = {
+            key: value for key, value in record.items() if key not in chain_fields
         }
-        if set(provenance) - (required | probe_fields) or any(
-            provenance.get(key) != value
-            for key, value in {
-                "profile": OX_SINGLE_PROFILE,
-                "cohort": OX_SINGLE_COHORT,
-                "route": "opencode-go/ox-alpha-free",
-                "teacher_role": OX_TEACHER_ROLE,
-                "profile_contract_id": profile_contract_id,
-            }.items()
-        ):
-            return False
-        if provenance.get("probe") is False:
-            return set(provenance) == required
-        if provenance.get("probe") is not True or set(provenance) != required | probe_fields:
-            return False
-        return (
-            provenance.get("probe_revision") == OX_PROBE_REVISION
-            and provenance.get("fixed_repeat") is True
-            and provenance.get("order_swap") is True
-            and provenance.get("blind_order") in {"a_first", "b_first"}
-            and type(provenance.get("order_variant")) is int
-            and provenance.get("order_variant") in {1, 2}
-            and type(provenance.get("candidate_position")) is int
-            and provenance.get("candidate_position") in {0, 1}
-            and all(
-                re.fullmatch(r"[0-9a-f]{64}", str(provenance.get(key) or ""))
-                is not None
-                for key in ("repeat_pair_id", "probe_batch_id")
-            )
-        )
-
-    def current_workset_payload_digests() -> dict[str, str]:
-        """Read the exact OX payload inventory without opening it writable."""
-
-        nonlocal workset_payload_digests
-        if workset_payload_digests is not None:
-            return workset_payload_digests
-        path = store.distillation_dir(root) / "ox-workset.sqlite3"
-        try:
-            uri = path.absolute().as_uri() + "?mode=ro"
-            with sqlite3.connect(uri, uri=True) as connection:
-                rows = connection.execute(
-                    "SELECT work_id, payload_digest, provenance_json "
-                    "FROM work_items WHERE kind = ?",
-                    ("ox",),
-                ).fetchall()
-        except (OSError, sqlite3.Error) as exc:
-            raise DistillationError("OX workset payload inventory is unavailable") from exc
-        inventory: dict[str, str] = {}
-        for work_id, payload_digest, provenance_json in rows:
-            if (
-                not isinstance(work_id, str)
-                or re.fullmatch(r"[0-9a-f]{64}", work_id) is None
-                or not isinstance(payload_digest, str)
-                or re.fullmatch(r"[0-9a-f]{64}", payload_digest) is None
-                or work_id in inventory
-            ):
-                raise DistillationError("OX workset payload inventory is invalid")
-            try:
-                provenance = json.loads(provenance_json)
-            except (TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
-                raise DistillationError("OX workset payload inventory is invalid") from exc
-            if not isinstance(provenance, Mapping):
-                raise DistillationError("OX workset payload inventory is invalid")
-            if provenance.get("profile_contract_id") != profile_contract_id:
-                continue
-            if not current_workset_provenance_matches(provenance):
-                raise DistillationError("OX workset payload inventory is invalid")
-            expected_work_id = canonical_json.canonical_json_sha256_strict(
-                {
-                    "kind": "ox-teacher-label-v1",
-                    "profile": OX_SINGLE_PROFILE,
-                    "cohort": OX_SINGLE_COHORT,
-                    "route": "opencode-go/ox-alpha-free",
-                    "profile_contract_id": profile_contract_id,
-                    "payload_digest": payload_digest,
-                }
-            )
-            if work_id != expected_work_id:
-                raise DistillationError("OX workset payload inventory is unbound")
-            inventory[work_id] = payload_digest
-        workset_payload_digests = inventory
-        return inventory
-
-    def referenced_contract(record: Mapping[str, Any]) -> dict[str, Any]:
-        record_contract_id = record.get("profile_contract_id")
-        if not isinstance(record_contract_id, str) or re.fullmatch(
-            r"[0-9a-f]{64}", record_contract_id
-        ) is None:
-            raise DistillationError("OX record profile contract reference is invalid")
-        if record_contract_id not in contract_cache:
-            referenced = _read_ox_profile_contract(root, record_contract_id)
-            if not referenced:
-                raise DistillationError("OX record profile contract is missing")
-            contract_cache[record_contract_id] = referenced
-        referenced = contract_cache[record_contract_id]
-        source_keys = (
-            "source_commit",
-            "source_tree_sha256",
-            "source_ox_identity_sha256",
-        )
-        if any(
-            record.get(key) != referenced.get(key)
-            for key in (*source_keys, "request_revision", "expires_at")
-        ):
-            raise DistillationError("OX record contract binding conflicts")
-        return referenced
-
-    def rows(name: str) -> list[dict[str, Any]]:
-        path = store.distillation_dir(root) / name
-        try:
-            if path.stat().st_size > 4 * 1024 * 1024:
-                raise DistillationError("OX event ledger exceeds bounded size")
-        except FileNotFoundError:
-            pass
-        verified = store.verify_chain(path)
-        records = store.read_chain(path)
-        head = store.chain_head(path)
-        if (
-            verified != head
-            or len(records) != head["records"]
-            or (records[-1].get("record_sha256") if records else "")
-            != head["head_sha256"]
-        ):
-            raise DistillationError("OX event ledger head does not reconcile")
-        selected: list[dict[str, Any]] = []
-        for record in records:
-            referenced = referenced_contract(record)
-            referenced_revision = referenced.get("request_revision")
-            referenced_expiry = referenced.get("expires_at")
-            if record.get("request_revision") != referenced_revision:
-                raise DistillationError("OX event request revision conflicts")
-            if record.get("expires_at") != referenced_expiry:
-                raise DistillationError("OX event expiry conflicts")
-            if record.get("profile_contract_id") != profile_contract_id:
-                continue
-            if any(record.get(key) != value for key, value in source_binding.items()):
-                raise DistillationError("OX event source binding conflicts")
-            chain_fields = {
-                "schema",
-                "namespace",
-                "previous_sha256",
-                "record_sha256",
-                "event_key",
-                "event_binding_sha256",
-            }
-            payload = {
-                key: value for key, value in record.items() if key not in chain_fields
-            }
-            event_version = payload.get("event_version")
-            # v1 records remain readable as historical, non-certifying data.
-            # Only the closed v2 union may satisfy the current OX projection.
-            if event_version is None or (
-                type(event_version) is int and event_version == 1
-            ):
-                if (
-                    record.get("event_key")
-                    != canonical_json.canonical_json_sha256_strict(
-                        _legacy_ox_event_identity(payload)
-                    )
-                    or record.get("event_binding_sha256")
-                    != canonical_json.canonical_json_sha256_strict(payload)
-                ):
-                    raise DistillationError("OX legacy event identity is invalid")
-                continue
-            if type(event_version) is not int or event_version != 2:
-                raise DistillationError("OX event version is invalid")
-            allowed = {
-                "ox-ramp-stage": {
-                    "event_version",
-                    "kind",
-                    "profile_contract_id",
-                    "source_commit",
-                    "source_tree_sha256",
-                    "source_ox_identity_sha256",
-                    "request_revision",
-                    "expires_at",
-                    "cap",
-                    "next_cap",
-                    "valid_receipts",
-                    "attempts",
-                    "work_ids",
-                    "label_count",
-                    "label_head_sha256",
-                    "failure_record_count",
-                    "failure_head_sha256",
-                    "captured_at",
-                },
-                "ox-provider-failure": {
-                    "event_version",
-                    "kind",
-                    "profile_contract_id",
-                    "source_commit",
-                    "source_tree_sha256",
-                    "source_ox_identity_sha256",
-                    "request_revision",
-                    "expires_at",
-                    "cap",
-                    "category",
-                    "status",
-                    "attempts",
-                    "bounded",
-                    "before_cap",
-                    "after_cap",
-                    "work_ids",
-                    "attempts_by_work",
-                    "provider_receipts",
-                    "provider_requests",
-                    "captured_at",
-                },
-                "ox-lease-reclaim": {
-                    "event_version",
-                    "kind",
-                    "profile_contract_id",
-                    "source_commit",
-                    "source_tree_sha256",
-                    "source_ox_identity_sha256",
-                    "request_revision",
-                    "expires_at",
-                    "workset_receipt_generation",
-                    "workset_receipt_sha256",
-                    "work_ids_sha256",
-                    "reclaimed",
-                    "leased_after",
-                    "captured_at",
-                },
-            }
-            kind = str(payload.get("kind") or "")
-            if kind not in allowed or set(payload) - allowed[kind]:
-                raise DistillationError("OX event schema is invalid")
-            common_required = {
+        event_version = payload.get("event_version")
+        # v1 records remain readable as historical, non-certifying data.
+        # Only the closed v2 union may satisfy the current OX projection.
+        if event_version is None or (type(event_version) is int and event_version == 1):
+            if record.get("event_key") != canonical_json.canonical_json_sha256_strict(
+                _legacy_ox_event_identity(payload)
+            ) or record.get(
+                "event_binding_sha256"
+            ) != canonical_json.canonical_json_sha256_strict(payload):
+                raise DistillationError("OX legacy event identity is invalid")
+            continue
+        if type(event_version) is not int or event_version != 2:
+            raise DistillationError("OX event version is invalid")
+        allowed = {
+            "ox-ramp-stage": {
                 "event_version",
                 "kind",
                 "profile_contract_id",
@@ -2052,227 +1916,214 @@ def _ox_event_projection(
                 "source_ox_identity_sha256",
                 "request_revision",
                 "expires_at",
+                "cap",
+                "next_cap",
+                "valid_receipts",
+                "attempts",
+                "work_ids",
+                "label_count",
+                "label_head_sha256",
+                "failure_record_count",
+                "failure_head_sha256",
                 "captured_at",
-            }
-            required = {
-                "ox-ramp-stage": common_required
-                | {
-                    "cap",
-                    "next_cap",
-                    "valid_receipts",
-                    "attempts",
-                    "work_ids",
-                    "label_count",
-                    "label_head_sha256",
-                    "failure_record_count",
-                    "failure_head_sha256",
-                },
-                "ox-provider-failure": common_required
-                | {
-                    "cap",
-                    "category",
-                    "status",
-                    "attempts",
-                    "work_ids",
-                    "attempts_by_work",
-                    "provider_receipts",
-                    "provider_requests",
-                },
-                "ox-lease-reclaim": common_required
-                | {
-                    "workset_receipt_generation",
-                    "workset_receipt_sha256",
-                    "work_ids_sha256",
-                    "reclaimed",
-                    "leased_after",
-                },
-            }[kind]
-            if not required.issubset(payload) or not isinstance(
-                payload.get("captured_at"), str
-            ):
-                raise DistillationError("OX event required fields are missing")
-            if payload.get("expires_at") != contract_expiry:
-                raise DistillationError("OX event expiry conflicts")
-            try:
-                if _ox_expiry(payload.get("expires_at")) != payload.get("expires_at"):
-                    raise DistillationError("OX event expiry is not canonical")
-            except DistillationError as exc:
-                raise DistillationError("OX event expiry is invalid") from exc
-            if kind == "ox-ramp-stage" and (
-                type(payload.get("cap")) is not int
-                or payload.get("cap") not in allowed_caps
-                or type(payload.get("next_cap")) is not int
-                or payload.get("next_cap") not in allowed_caps
-                or payload["next_cap"]
-                != _next_ox_ramp_cap(payload["cap"], contract_max_inflight)
-                or type(payload.get("valid_receipts")) is not int
-                or payload["valid_receipts"] < 0
-                or type(payload.get("attempts")) is not int
-                or payload["attempts"] < payload["valid_receipts"]
-                or not isinstance(payload.get("work_ids"), list)
-                or type(payload.get("label_count")) is not int
-                or payload["label_count"] < 1
-                or re.fullmatch(
-                    r"[0-9a-f]{64}", str(payload.get("label_head_sha256") or "")
-                )
-                is None
-                or type(payload.get("failure_record_count")) is not int
-                or payload["failure_record_count"] < 0
-                or (
-                    payload["failure_record_count"] == 0
-                    and payload.get("failure_head_sha256") != ""
-                )
-                or (
-                    payload["failure_record_count"] > 0
-                    and re.fullmatch(
-                        r"[0-9a-f]{64}",
-                        str(payload.get("failure_head_sha256") or ""),
-                    )
-                    is None
-                )
-            ):
-                raise DistillationError("OX ramp event fields are invalid")
-            if kind in {"ox-ramp-stage", "ox-lease-reclaim"} and set(payload) != required:
-                raise DistillationError("OX event schema is invalid")
-            if kind == "ox-provider-failure" and (
-                type(payload.get("cap")) is not int
-                or payload.get("cap") not in allowed_caps
-                or payload.get("status") not in {"deferred", "hard_stop"}
-                or not isinstance(payload.get("work_ids"), list)
-                or not isinstance(payload.get("attempts_by_work"), Mapping)
-                or not isinstance(payload.get("provider_receipts"), Mapping)
-                or not isinstance(payload.get("provider_requests"), Mapping)
-            ):
-                raise DistillationError("OX failure event fields are invalid")
-            if kind == "ox-provider-failure":
-                work_ids = payload.get("work_ids")
-                attempts_by_work = payload.get("attempts_by_work")
-                provider_receipts = payload.get("provider_receipts")
-                provider_requests = payload.get("provider_requests")
-                if (
-                    not isinstance(work_ids, list)
-                    or not work_ids
-                    or any(
-                        not isinstance(work_id, str)
-                        or re.fullmatch(r"[0-9a-f]{64}", work_id) is None
-                        for work_id in work_ids
-                    )
-                    or len(set(work_ids)) != len(work_ids)
-                    or type(payload.get("attempts")) is not int
-                    or payload["attempts"] != 1
-                    or not isinstance(attempts_by_work, Mapping)
-                    or set(attempts_by_work) != set(work_ids)
-                    or any(
-                        type(value) is not int
-                        or value < 1
-                        for value in attempts_by_work.values()
-                    )
-                    or not isinstance(provider_receipts, Mapping)
-                    or set(provider_receipts) != set(work_ids)
-                    or len(set(provider_receipts.values())) != 1
-                    or not isinstance(provider_requests, Mapping)
-                    or set(provider_requests) != set(work_ids)
-                ):
-                    raise DistillationError("OX failure event fields are invalid")
-                payload_inventory = current_workset_payload_digests()
-                if (
-                    any(work_id not in payload_inventory for work_id in work_ids)
-                    or any(
-                        not isinstance(receipt, str)
-                        or re.fullmatch(r"[0-9a-f]{64}", receipt) is None
-                        for receipt in provider_receipts.values()
-                    )
-                ):
-                    raise DistillationError("OX failure provider receipt is unbound")
-                if dict(provider_requests) != {
-                    work_id: expected_ox_provider_request_sha256(
-                        profile_contract_id=profile_contract_id,
-                        payload_digest=payload_inventory[work_id],
-                        work_id=work_id,
-                        expires_at=str(referenced_expiry),
-                    )
-                    for work_id in work_ids
-                }:
-                    raise DistillationError("OX failure provider request is unbound")
-                if any(
-                    provider_receipts[work_id] == provider_requests[work_id]
-                    for work_id in work_ids
-                ):
-                    raise DistillationError("OX failure provider receipt is synthetic")
-                category = payload.get("category")
-                expected_fields = set(required)
-                if category == "429":
-                    if (
-                        payload.get("status") != "deferred"
-                        or type(payload.get("before_cap")) is not int
-                        or payload.get("before_cap") not in allowed_caps
-                        or type(payload.get("after_cap")) is not int
-                        or payload.get("after_cap") not in allowed_caps
-                    ):
-                        raise DistillationError("OX failure event fields are invalid")
-                    expected_fields.update({"before_cap", "after_cap"})
-                elif category in {"5xx", "timeout"}:
-                    if payload.get("bounded") is not True:
-                        raise DistillationError("OX failure event fields are invalid")
-                    expected_fields.add("bounded")
-                elif category in {"402", "paid", "model_drift"}:
-                    if payload.get("status") != "hard_stop":
-                        raise DistillationError("OX failure event fields are invalid")
-                else:
-                    raise DistillationError("OX failure event fields are invalid")
-                if set(payload) != expected_fields:
-                    raise DistillationError("OX event schema is invalid")
-            if kind == "ox-lease-reclaim" and (
-                type(payload.get("workset_receipt_generation")) is not int
-                or payload["workset_receipt_generation"] < 1
-                or re.fullmatch(
-                    r"[0-9a-f]{64}", str(payload.get("workset_receipt_sha256") or "")
-                )
-                is None
-                or re.fullmatch(
-                    r"[0-9a-f]{64}", str(payload.get("work_ids_sha256") or "")
-                )
-                is None
-                or type(payload.get("reclaimed")) is not int
-                or payload["reclaimed"] < 1
-                or type(payload.get("leased_after")) is not int
-                or payload["leased_after"] < 0
-            ):
-                raise DistillationError("OX lease reclaim fields are invalid")
-            if record.get("event_key") != canonical_json.canonical_json_sha256_strict(
-                _ox_event_identity(payload)
-            ) or record.get(
-                "event_binding_sha256"
-            ) != canonical_json.canonical_json_sha256_strict(payload):
-                raise DistillationError("OX event identity is invalid")
-            anchor_id = canonical_json.canonical_json_sha256_strict(
-                {
-                    "schema": "chronovisor.recall-distill-ox-event-anchor.v1",
-                    "namespace": "recall-distillation",
-                    "kind": "ox-event-anchor",
-                    "ledger_name": name,
-                    "event_key": record["event_key"],
-                    "event_binding_sha256": record["event_binding_sha256"],
-                    "record_sha256": record["record_sha256"],
-                }
+            },
+            "ox-provider-failure": {
+                "event_version",
+                "kind",
+                "profile_contract_id",
+                "source_commit",
+                "source_tree_sha256",
+                "source_ox_identity_sha256",
+                "request_revision",
+                "expires_at",
+                "cap",
+                "category",
+                "status",
+                "attempts",
+                "bounded",
+                "before_cap",
+                "after_cap",
+                "work_ids",
+                "attempts_by_work",
+                "provider_receipts",
+                "provider_requests",
+                "captured_at",
+            },
+            "ox-lease-reclaim": {
+                "event_version",
+                "kind",
+                "profile_contract_id",
+                "source_commit",
+                "source_tree_sha256",
+                "source_ox_identity_sha256",
+                "request_revision",
+                "expires_at",
+                "workset_receipt_generation",
+                "workset_receipt_sha256",
+                "work_ids_sha256",
+                "reclaimed",
+                "leased_after",
+                "captured_at",
+            },
+        }
+        kind = str(payload.get("kind") or "")
+        if kind not in allowed or set(payload) - allowed[kind]:
+            raise DistillationError("OX event schema is invalid")
+        common_required = {
+            "event_version",
+            "kind",
+            "profile_contract_id",
+            "source_commit",
+            "source_tree_sha256",
+            "source_ox_identity_sha256",
+            "request_revision",
+            "expires_at",
+            "captured_at",
+        }
+        required = {
+            "ox-ramp-stage": common_required
+            | {
+                "cap",
+                "next_cap",
+                "valid_receipts",
+                "attempts",
+                "work_ids",
+                "label_count",
+                "label_head_sha256",
+                "failure_record_count",
+                "failure_head_sha256",
+            },
+            "ox-provider-failure": common_required
+            | {
+                "cap",
+                "category",
+                "status",
+                "attempts",
+                "work_ids",
+                "attempts_by_work",
+                "provider_receipts",
+                "provider_requests",
+            },
+            "ox-lease-reclaim": common_required
+            | {
+                "workset_receipt_generation",
+                "workset_receipt_sha256",
+                "work_ids_sha256",
+                "reclaimed",
+                "leased_after",
+            },
+        }[kind]
+        if not required.issubset(payload) or not isinstance(
+            payload.get("captured_at"), str
+        ):
+            raise DistillationError("OX event required fields are missing")
+        if payload.get("expires_at") != contract_expiry:
+            raise DistillationError("OX event expiry conflicts")
+        try:
+            if _ox_expiry(payload.get("expires_at")) != payload.get("expires_at"):
+                raise DistillationError("OX event expiry is not canonical")
+        except DistillationError as exc:
+            raise DistillationError("OX event expiry is invalid") from exc
+        if kind == "ox-ramp-stage" and (
+            type(payload.get("cap")) is not int
+            or payload.get("cap") not in allowed_caps
+            or type(payload.get("next_cap")) is not int
+            or payload.get("next_cap") not in allowed_caps
+            or payload["next_cap"]
+            != _next_ox_ramp_cap(payload["cap"], contract_max_inflight)
+            or type(payload.get("valid_receipts")) is not int
+            or payload["valid_receipts"] < 0
+            or type(payload.get("attempts")) is not int
+            or payload["attempts"] < payload["valid_receipts"]
+            or not isinstance(payload.get("work_ids"), list)
+            or type(payload.get("label_count")) is not int
+            or payload["label_count"] < 1
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(payload.get("label_head_sha256") or "")
             )
-            try:
-                anchor = store.read_sealed(
-                    store.distillation_dir(root)
-                    / "ox-event-anchors"
-                    / f"{anchor_id}.json",
-                    schema="chronovisor.recall-distill-ox-event-anchor.v1",
+            is None
+            or type(payload.get("failure_record_count")) is not int
+            or payload["failure_record_count"] < 0
+            or (
+                payload["failure_record_count"] == 0
+                and payload.get("failure_head_sha256") != ""
+            )
+            or (
+                payload["failure_record_count"] > 0
+                and re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(payload.get("failure_head_sha256") or ""),
                 )
-            except store.DistillationStoreError as exc:
-                raise DistillationError("OX event immutable anchor is missing") from exc
-            if anchor.get("artifact_id") != anchor_id:
-                raise DistillationError("OX event immutable anchor conflicts")
-            selected.append(dict(record))
-        return selected
+                is None
+            )
+        ):
+            raise DistillationError("OX ramp event fields are invalid")
+        if kind in {"ox-ramp-stage", "ox-lease-reclaim"} and set(payload) != required:
+            raise DistillationError("OX event schema is invalid")
+        _validate_ox_failure_event(
+            kind=kind,
+            payload=payload,
+            required=required,
+            allowed_caps=allowed_caps,
+            profile_contract_id=profile_contract_id,
+            current_workset_payload_digests=current_workset_payload_digests,
+            referenced_expiry=referenced_expiry,
+        )
+        if kind == "ox-lease-reclaim" and (
+            type(payload.get("workset_receipt_generation")) is not int
+            or payload["workset_receipt_generation"] < 1
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(payload.get("workset_receipt_sha256") or "")
+            )
+            is None
+            or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("work_ids_sha256") or ""))
+            is None
+            or type(payload.get("reclaimed")) is not int
+            or payload["reclaimed"] < 1
+            or type(payload.get("leased_after")) is not int
+            or payload["leased_after"] < 0
+        ):
+            raise DistillationError("OX lease reclaim fields are invalid")
+        if record.get("event_key") != canonical_json.canonical_json_sha256_strict(
+            _ox_event_identity(payload)
+        ) or record.get(
+            "event_binding_sha256"
+        ) != canonical_json.canonical_json_sha256_strict(payload):
+            raise DistillationError("OX event identity is invalid")
+        anchor_id = canonical_json.canonical_json_sha256_strict(
+            {
+                "schema": "chronovisor.recall-distill-ox-event-anchor.v1",
+                "namespace": "recall-distillation",
+                "kind": "ox-event-anchor",
+                "ledger_name": name,
+                "event_key": record["event_key"],
+                "event_binding_sha256": record["event_binding_sha256"],
+                "record_sha256": record["record_sha256"],
+            }
+        )
+        try:
+            anchor = store.read_sealed(
+                store.distillation_dir(root) / "ox-event-anchors" / f"{anchor_id}.json",
+                schema="chronovisor.recall-distill-ox-event-anchor.v1",
+            )
+        except store.DistillationStoreError as exc:
+            raise DistillationError("OX event immutable anchor is missing") from exc
+        if anchor.get("artifact_id") != anchor_id:
+            raise DistillationError("OX event immutable anchor conflicts")
+        selected.append(dict(record))
+    return selected
 
-    ramp = rows("ox-ramp-receipts.jsonl")
-    failures = rows("ox-failure-receipts.jsonl")
-    recoveries = rows("ox-lease-recovery-receipts.jsonl")
+
+def _ox_certifying_labels(
+    *,
+    root: Path,
+    profile_contract_id: str,
+    source_binding: Mapping[str, str],
+    allowed_caps: set[int],
+    label_path: Path,
+    referenced_contract: Callable[[Mapping[str, Any]], dict[str, Any]],
+    current_workset_payload_digests: Callable[[], dict[str, str]],
+) -> list[dict[str, Any]]:
     labels: list[dict[str, Any]] = []
     for row in store.read_chain(label_path):
         if row.get("profile") != OX_SINGLE_PROFILE:
@@ -2296,9 +2147,7 @@ def _ox_event_projection(
         except DistillationError as exc:
             raise DistillationError("OX label expiry is invalid") from exc
         if (
-            re.fullmatch(
-                r"[0-9a-f]{64}", str(row.get("provider_receipt_sha256") or "")
-            )
+            re.fullmatch(r"[0-9a-f]{64}", str(row.get("provider_receipt_sha256") or ""))
             is None
         ):
             raise DistillationError("OX label provider receipt is invalid")
@@ -2364,7 +2213,315 @@ def _ox_event_projection(
         if type(row.get("ramp_cap")) is not int or row["ramp_cap"] not in allowed_caps:
             raise DistillationError("OX label ramp cap is invalid")
         labels.append(row)
+    return labels
 
+
+def _ox_workset_receipts_certifying(
+    *,
+    root: Path,
+    labels: Sequence[Mapping[str, Any]],
+    recoveries: Sequence[Mapping[str, Any]],
+) -> bool:
+    workset_receipts_certifying = False
+    workset_path = store.distillation_dir(root) / "ox-workset.sqlite3"
+    if workset_path.exists():
+        from chronovisor.recall.recall_distillation_workset import DistillationWorkset
+
+        try:
+            queue = DistillationWorkset(workset_path, migrate=False)
+            workset_receipts_certifying = (
+                queue.audit_transition_receipts().get("status") == "verified"
+            )
+            if labels:
+                if not workset_receipts_certifying:
+                    raise DistillationError(
+                        "OX label workset receipts are non-certifying"
+                    )
+                completed = queue.completion_identities(
+                    [str(label["work_id"]) for label in labels]
+                )
+                if set(completed) != {str(label["work_id"]) for label in labels}:
+                    raise DistillationError(
+                        "OX label completion identity is unavailable"
+                    )
+                for label in labels:
+                    work_id = str(label["work_id"])
+                    record_sha256 = str(label.get("record_sha256") or "")
+                    identity = completed[work_id]
+                    if (
+                        identity.get("attempt") != label.get("attempt_count")
+                        or identity.get("completion_ref")
+                        != f"label-ledger:{record_sha256}"
+                        or identity.get("completion_digest") != record_sha256
+                    ):
+                        raise DistillationError(
+                            "OX label completion identity is unbound"
+                        )
+            if workset_receipts_certifying:
+                for recovery in recoveries:
+                    binding = queue.transition_receipt_binding(
+                        int(recovery["workset_receipt_generation"])
+                    )
+                    if (
+                        binding is None
+                        or binding.get("operation") != "claim_reclaim"
+                        or binding.get("receipt_sha256")
+                        != recovery.get("workset_receipt_sha256")
+                        or binding.get("count") != recovery.get("reclaimed")
+                        or binding.get("work_ids_sha256")
+                        != recovery.get("work_ids_sha256")
+                    ):
+                        raise DistillationError("OX lease reclaim receipt is unbound")
+        except DistillationError:
+            raise
+        except (ValueError, TypeError, sqlite3.Error) as exc:
+            raise DistillationError("OX lease reclaim receipt is unbound") from exc
+    elif labels:
+        raise DistillationError("OX label workset is unavailable")
+    return workset_receipts_certifying
+
+
+def _ox_complete_pair(rows_for_pair: Sequence[Mapping[str, Any]], key: str) -> bool:
+    assignments = [row.get("assignment") for row in rows_for_pair]
+    if not all(isinstance(value, Mapping) for value in assignments):
+        return False
+    members = {
+        str(row.get("work_id") or "")
+        for row in rows_for_pair
+        if str(row.get("work_id") or "")
+    }
+    orders = {
+        str(cast(Mapping[str, Any], value).get("blind_order") or "")
+        for value in assignments
+    }
+    return (
+        len(members) >= 2
+        and all(
+            cast(Mapping[str, Any], value).get(key) is True for value in assignments
+        )
+        and orders == {"a_first", "b_first"}
+    )
+
+
+def _ox_event_projection(
+    root: Path,
+    *,
+    profile_contract_id: str,
+    source_binding: Mapping[str, str],
+    workset: Mapping[str, Any],
+    label_path: Path,
+    authoritative_gate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project the immutable OX ledgers; never manufacture missing evidence."""
+
+    contract = _read_ox_profile_contract(root, profile_contract_id)
+    contract_revision = contract.get("request_revision")
+    contract_max_inflight = contract.get("max_inflight", 1)
+    if (
+        isinstance(contract_max_inflight, bool)
+        or not isinstance(contract_max_inflight, int)
+        or not 1 <= contract_max_inflight <= 10
+    ):
+        raise DistillationError("OX profile contract max inflight is invalid")
+    allowed_caps = {min(cap, contract_max_inflight) for cap in (1, 2, 5, 10)}
+    contract_expiry: str | None = None
+    if profile_contract_id:
+        try:
+            contract_expiry = _ox_expiry(contract.get("expires_at"))
+        except DistillationError as exc:
+            raise DistillationError("OX profile contract expiry is invalid") from exc
+        if (
+            not contract
+            or contract_revision != OX_RAMP_REQUEST_REVISION
+            or contract_expiry != contract.get("expires_at")
+        ):
+            raise DistillationError("OX profile contract request revision is invalid")
+    else:
+        contract_revision = OX_RAMP_REQUEST_REVISION
+
+    contract_cache: dict[str, dict[str, Any]] = {}
+    if profile_contract_id:
+        contract_cache[profile_contract_id] = contract
+
+    workset_payload_digests: dict[str, str] | None = None
+
+    def current_workset_provenance_matches(provenance: Mapping[str, Any]) -> bool:
+        required = {
+            "profile",
+            "cohort",
+            "route",
+            "teacher_role",
+            "profile_contract_id",
+            "probe",
+        }
+        probe_fields = {
+            "probe_revision",
+            "repeat_pair_id",
+            "fixed_repeat",
+            "order_swap",
+            "blind_order",
+            "probe_batch_id",
+            "order_variant",
+            "candidate_position",
+        }
+        if set(provenance) - (required | probe_fields) or any(
+            provenance.get(key) != value
+            for key, value in {
+                "profile": OX_SINGLE_PROFILE,
+                "cohort": OX_SINGLE_COHORT,
+                "route": "opencode-go/ox-alpha-free",
+                "teacher_role": OX_TEACHER_ROLE,
+                "profile_contract_id": profile_contract_id,
+            }.items()
+        ):
+            return False
+        if provenance.get("probe") is False:
+            return set(provenance) == required
+        if (
+            provenance.get("probe") is not True
+            or set(provenance) != required | probe_fields
+        ):
+            return False
+        return (
+            provenance.get("probe_revision") == OX_PROBE_REVISION
+            and provenance.get("fixed_repeat") is True
+            and provenance.get("order_swap") is True
+            and provenance.get("blind_order") in {"a_first", "b_first"}
+            and type(provenance.get("order_variant")) is int
+            and provenance.get("order_variant") in {1, 2}
+            and type(provenance.get("candidate_position")) is int
+            and provenance.get("candidate_position") in {0, 1}
+            and all(
+                re.fullmatch(r"[0-9a-f]{64}", str(provenance.get(key) or ""))
+                is not None
+                for key in ("repeat_pair_id", "probe_batch_id")
+            )
+        )
+
+    def current_workset_payload_digests() -> dict[str, str]:
+        """Read the exact OX payload inventory without opening it writable."""
+
+        nonlocal workset_payload_digests
+        if workset_payload_digests is not None:
+            return workset_payload_digests
+        path = store.distillation_dir(root) / "ox-workset.sqlite3"
+        try:
+            uri = path.absolute().as_uri() + "?mode=ro"
+            with sqlite3.connect(uri, uri=True) as connection:
+                rows = connection.execute(
+                    "SELECT work_id, payload_digest, provenance_json "
+                    "FROM work_items WHERE kind = ?",
+                    ("ox",),
+                ).fetchall()
+        except (OSError, sqlite3.Error) as exc:
+            raise DistillationError(
+                "OX workset payload inventory is unavailable"
+            ) from exc
+        inventory: dict[str, str] = {}
+        for work_id, payload_digest, provenance_json in rows:
+            if (
+                not isinstance(work_id, str)
+                or re.fullmatch(r"[0-9a-f]{64}", work_id) is None
+                or not isinstance(payload_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", payload_digest) is None
+                or work_id in inventory
+            ):
+                raise DistillationError("OX workset payload inventory is invalid")
+            try:
+                provenance = json.loads(provenance_json)
+            except (TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+                raise DistillationError(
+                    "OX workset payload inventory is invalid"
+                ) from exc
+            if not isinstance(provenance, Mapping):
+                raise DistillationError("OX workset payload inventory is invalid")
+            if provenance.get("profile_contract_id") != profile_contract_id:
+                continue
+            if not current_workset_provenance_matches(provenance):
+                raise DistillationError("OX workset payload inventory is invalid")
+            expected_work_id = canonical_json.canonical_json_sha256_strict(
+                {
+                    "kind": "ox-teacher-label-v1",
+                    "profile": OX_SINGLE_PROFILE,
+                    "cohort": OX_SINGLE_COHORT,
+                    "route": "opencode-go/ox-alpha-free",
+                    "profile_contract_id": profile_contract_id,
+                    "payload_digest": payload_digest,
+                }
+            )
+            if work_id != expected_work_id:
+                raise DistillationError("OX workset payload inventory is unbound")
+            inventory[work_id] = payload_digest
+        workset_payload_digests = inventory
+        return inventory
+
+    def referenced_contract(record: Mapping[str, Any]) -> dict[str, Any]:
+        record_contract_id = record.get("profile_contract_id")
+        if (
+            not isinstance(record_contract_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", record_contract_id) is None
+        ):
+            raise DistillationError("OX record profile contract reference is invalid")
+        if record_contract_id not in contract_cache:
+            referenced = _read_ox_profile_contract(root, record_contract_id)
+            if not referenced:
+                raise DistillationError("OX record profile contract is missing")
+            contract_cache[record_contract_id] = referenced
+        referenced = contract_cache[record_contract_id]
+        source_keys = (
+            "source_commit",
+            "source_tree_sha256",
+            "source_ox_identity_sha256",
+        )
+        if any(
+            record.get(key) != referenced.get(key)
+            for key in (*source_keys, "request_revision", "expires_at")
+        ):
+            raise DistillationError("OX record contract binding conflicts")
+        return referenced
+
+    ramp = _ox_event_rows(
+        root,
+        "ox-ramp-receipts.jsonl",
+        profile_contract_id=profile_contract_id,
+        source_binding=source_binding,
+        contract_expiry=contract_expiry,
+        contract_max_inflight=contract_max_inflight,
+        allowed_caps=allowed_caps,
+        referenced_contract=referenced_contract,
+        current_workset_payload_digests=current_workset_payload_digests,
+    )
+    failures = _ox_event_rows(
+        root,
+        "ox-failure-receipts.jsonl",
+        profile_contract_id=profile_contract_id,
+        source_binding=source_binding,
+        contract_expiry=contract_expiry,
+        contract_max_inflight=contract_max_inflight,
+        allowed_caps=allowed_caps,
+        referenced_contract=referenced_contract,
+        current_workset_payload_digests=current_workset_payload_digests,
+    )
+    recoveries = _ox_event_rows(
+        root,
+        "ox-lease-recovery-receipts.jsonl",
+        profile_contract_id=profile_contract_id,
+        source_binding=source_binding,
+        contract_expiry=contract_expiry,
+        contract_max_inflight=contract_max_inflight,
+        allowed_caps=allowed_caps,
+        referenced_contract=referenced_contract,
+        current_workset_payload_digests=current_workset_payload_digests,
+    )
+    labels = _ox_certifying_labels(
+        root=root,
+        profile_contract_id=profile_contract_id,
+        source_binding=source_binding,
+        allowed_caps=allowed_caps,
+        label_path=label_path,
+        referenced_contract=referenced_contract,
+        current_workset_payload_digests=current_workset_payload_digests,
+    )
     if len({str(row["work_id"]) for row in labels}) != len(labels):
         raise DistillationError("OX label work_id is not globally unique")
     success_receipts: set[str] = set()
@@ -2396,56 +2553,9 @@ def _ox_event_projection(
     if success_receipts & failure_provider_receipts:
         raise DistillationError("OX provider receipt crosses success and failure")
 
-    workset_receipts_certifying = False
-    workset_path = store.distillation_dir(root) / "ox-workset.sqlite3"
-    if workset_path.exists():
-        from chronovisor.recall.recall_distillation_workset import DistillationWorkset
-
-        try:
-            queue = DistillationWorkset(workset_path, migrate=False)
-            workset_receipts_certifying = (
-                queue.audit_transition_receipts().get("status") == "verified"
-            )
-            if labels:
-                if not workset_receipts_certifying:
-                    raise DistillationError("OX label workset receipts are non-certifying")
-                completed = queue.completion_identities(
-                    [str(label["work_id"]) for label in labels]
-                )
-                if set(completed) != {str(label["work_id"]) for label in labels}:
-                    raise DistillationError("OX label completion identity is unavailable")
-                for label in labels:
-                    work_id = str(label["work_id"])
-                    record_sha256 = str(label.get("record_sha256") or "")
-                    identity = completed[work_id]
-                    if (
-                        identity.get("attempt") != label.get("attempt_count")
-                        or identity.get("completion_ref")
-                        != f"label-ledger:{record_sha256}"
-                        or identity.get("completion_digest") != record_sha256
-                    ):
-                        raise DistillationError("OX label completion identity is unbound")
-            if workset_receipts_certifying:
-                for recovery in recoveries:
-                    binding = queue.transition_receipt_binding(
-                        int(recovery["workset_receipt_generation"])
-                    )
-                    if (
-                        binding is None
-                        or binding.get("operation") != "claim_reclaim"
-                        or binding.get("receipt_sha256")
-                        != recovery.get("workset_receipt_sha256")
-                        or binding.get("count") != recovery.get("reclaimed")
-                        or binding.get("work_ids_sha256")
-                        != recovery.get("work_ids_sha256")
-                    ):
-                        raise DistillationError("OX lease reclaim receipt is unbound")
-        except DistillationError:
-            raise
-        except (ValueError, TypeError, sqlite3.Error) as exc:
-            raise DistillationError("OX lease reclaim receipt is unbound") from exc
-    elif labels:
-        raise DistillationError("OX label workset is unavailable")
+    workset_receipts_certifying = _ox_workset_receipts_certifying(
+        root=root, labels=labels, recoveries=recoveries
+    )
     pair_rows: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in labels:
         assignment = row.get("assignment")
@@ -2457,36 +2567,15 @@ def _ox_event_projection(
         if pair_id:
             pair_rows[pair_id].append(row)
 
-    def complete_pair(rows_for_pair: Sequence[Mapping[str, Any]], key: str) -> bool:
-        assignments = [row.get("assignment") for row in rows_for_pair]
-        if not all(isinstance(value, Mapping) for value in assignments):
-            return False
-        members = {
-            str(row.get("work_id") or "")
-            for row in rows_for_pair
-            if str(row.get("work_id") or "")
-        }
-        orders = {
-            str(cast(Mapping[str, Any], value).get("blind_order") or "")
-            for value in assignments
-        }
-        return (
-            len(members) >= 2
-            and all(
-                cast(Mapping[str, Any], value).get(key) is True for value in assignments
-            )
-            and orders == {"a_first", "b_first"}
-        )
-
     repeat_pairs = {
         pair_id
         for pair_id, rows_for_pair in pair_rows.items()
-        if complete_pair(rows_for_pair, "fixed_repeat")
+        if _ox_complete_pair(rows_for_pair, "fixed_repeat")
     }
     order_pairs = {
         pair_id
         for pair_id, rows_for_pair in pair_rows.items()
-        if complete_pair(rows_for_pair, "order_swap")
+        if _ox_complete_pair(rows_for_pair, "order_swap")
     }
     conflicts = sum(row.get("negative_veto_conflict") is True for row in labels)
     # Policy artifacts are authority, not an optimistic local alias.  Require
@@ -2538,9 +2627,7 @@ def _ox_event_projection(
         head = chain[count - 1].get("record_sha256")
         return head if isinstance(head, str) else None
 
-    certifying_labels = {
-        str(row.get("record_sha256") or "") for row in labels
-    }
+    certifying_labels = {str(row.get("record_sha256") or "") for row in labels}
     prior_label_count = 0
     prior_failure_count = 0
     ramp_segments: list[bool] = []
@@ -2589,19 +2676,20 @@ def _ox_event_projection(
             if ramp_receipts & receipt_groups:
                 raise DistillationError("OX provider receipt crosses ramp stages")
             ramp_receipts.update(receipt_groups)
-        prior_label_count = label_count if type(label_count) is int else prior_label_count
+        prior_label_count = (
+            label_count if type(label_count) is int else prior_label_count
+        )
         prior_failure_count = (
             failure_count if type(failure_count) is int else prior_failure_count
         )
 
-    required_caps = tuple(
-        sorted(allowed_caps)
-    )
+    required_caps = tuple(sorted(allowed_caps))
     caps = [row.get("cap") for row in ramp]
     terminal_requalification = any(
         row.get("category") == "429"
         and row.get("before_cap") == required_caps[-1]
-        and row.get("after_cap") == _previous_ox_ramp_cap(
+        and row.get("after_cap")
+        == _previous_ox_ramp_cap(
             required_caps[-1], int(contract.get("max_inflight") or 1)
         )
         for row in failures
@@ -2610,11 +2698,7 @@ def _ox_event_projection(
     for index in range(1, len(caps)):
         if caps[index - 1] == required_caps[-1] and caps[index] != required_caps[-1]:
             latest_start = index
-    if (
-        len(required_caps) == 1
-        and terminal_requalification
-        and len(caps) > 1
-    ):
+    if len(required_caps) == 1 and terminal_requalification and len(caps) > 1:
         latest_start = len(caps) - 1
     latest_caps = caps[latest_start:]
     if (
@@ -2639,15 +2723,15 @@ def _ox_event_projection(
         and latest_caps == expected_suffix
         and (latest_start == 0 or terminal_requalification)
         and all(
-        type(row.get("valid_receipts")) is int
-        and type(row.get("attempts")) is int
-        and row["valid_receipts"] >= OX_RAMP_RECEIPTS_PER_CAP
-        and row["attempts"] >= row["valid_receipts"]
-        and row["valid_receipts"] * 100 >= row["attempts"] * 95
-        and isinstance(row.get("work_ids"), list)
-        and len(row["work_ids"]) == row["valid_receipts"]
-        and len(set(row["work_ids"])) == len(row["work_ids"])
-        for row in ramp
+            type(row.get("valid_receipts")) is int
+            and type(row.get("attempts")) is int
+            and row["valid_receipts"] >= OX_RAMP_RECEIPTS_PER_CAP
+            and row["attempts"] >= row["valid_receipts"]
+            and row["valid_receipts"] * 100 >= row["attempts"] * 95
+            and isinstance(row.get("work_ids"), list)
+            and len(row["work_ids"]) == row["valid_receipts"]
+            and len(set(row["work_ids"])) == len(row["work_ids"])
+            for row in ramp
         )
     )
     failure_complete = {str(row.get("category") or "") for row in failures} >= {
@@ -3761,8 +3845,12 @@ def shadow_observation_hashes(
     baseline_features = _shadow_feature_rows(baseline_feature_snapshot, "baseline")
     candidate_pool = _shadow_pool_rows(candidate_pool_refs, "candidate")
     baseline_pool = _shadow_pool_rows(baseline_pool_refs, "baseline")
-    candidate_feature_bytes = canonical_json.canonical_json_bytes_strict(candidate_features)
-    baseline_feature_bytes = canonical_json.canonical_json_bytes_strict(baseline_features)
+    candidate_feature_bytes = canonical_json.canonical_json_bytes_strict(
+        candidate_features
+    )
+    baseline_feature_bytes = canonical_json.canonical_json_bytes_strict(
+        baseline_features
+    )
     candidate_feature_sha = hashlib.sha256(candidate_feature_bytes).hexdigest()
     baseline_feature_sha = hashlib.sha256(baseline_feature_bytes).hexdigest()
     candidate_feature_snapshot_sha = canonical_json.canonical_json_sha256_strict(
@@ -3877,7 +3965,13 @@ def _shadow_replay_source_fields(
         }
     )
     split_bucket = int(query_semantic_sha256[:2], 16) if query_semantic_sha256 else 0
-    split = "train" if split_bucket < 179 else "validation" if split_bucket < 217 else "test"
+    split = (
+        "train"
+        if split_bucket < 179
+        else "validation"
+        if split_bucket < 217
+        else "test"
+    )
     return {
         "row_id": row_id,
         "rally_id": query_semantic_sha256,
@@ -4283,7 +4377,10 @@ def record_shadow_observation(
     selected = list(selected_candidate_ids)
     incumbent_selected = list(incumbent_selected_candidate_ids)
     if any(
-        any(not isinstance(candidate_id, str) or not candidate_id for candidate_id in values)
+        any(
+            not isinstance(candidate_id, str) or not candidate_id
+            for candidate_id in values
+        )
         or len(values) != len(set(values))
         for values in (selected, incumbent_selected)
     ):
@@ -5149,8 +5246,7 @@ def _materialization_feature_pairs(
                     if isinstance(snapshot.get("candidates"), list)
                     else []
                 )
-                if isinstance(candidate, Mapping)
-                and candidate.get("candidate_id")
+                if isinstance(candidate, Mapping) and candidate.get("candidate_id")
             },
         }
         for rally_id, snapshot in snapshots.items()
@@ -6618,7 +6714,9 @@ def _ensure_bootstrap_policy(root: Path, baseline: Mapping[str, Any]) -> dict[st
         except (KeyError, store.DistillationStoreError, DistillationError):
             pass
         try:
-            lkg = _load_policy(str(_stable_pointer_read(root, "lkg")["policy_id"]), root)
+            lkg = _load_policy(
+                str(_stable_pointer_read(root, "lkg")["policy_id"]), root
+            )
         except (KeyError, store.DistillationStoreError, DistillationError):
             pass
         if active and lkg:
@@ -7033,11 +7131,16 @@ def _materialize_replay_observation(
             shadow_observation_artifact_ids=source_ids,
         )
     else:
-        raise DistillationError("replay observation unavailable without paired observations")
+        raise DistillationError(
+            "replay observation unavailable without paired observations"
+        )
     if not isinstance(observation, Mapping):
         raise DistillationError("replay observation writer returned invalid artifact")
     artifact_id = observation.get("artifact_id")
-    if not isinstance(artifact_id, str) or re.fullmatch(r"[0-9a-f]{64}", artifact_id) is None:
+    if (
+        not isinstance(artifact_id, str)
+        or re.fullmatch(r"[0-9a-f]{64}", artifact_id) is None
+    ):
         raise DistillationError("replay observation identity is invalid")
     return dict(observation), split_artifact_id
 
@@ -7243,6 +7346,7 @@ def _operational_rollout_metrics(
     }
     try:
         from chronovisor.recall import recall_distillation_rollout as rollout
+
         validated_sources = _operational_rollout_sources(
             root,
             candidate_id=candidate_id,
@@ -7352,18 +7456,15 @@ def _operational_rollout_metrics(
             )
         except (TypeError, ValueError):
             return metrics
-        if (
-            any(item.tzinfo is None for item in observed)
-            or observed[-1] - observed[0] < timedelta(days=7)
-        ):
+        if any(item.tzinfo is None for item in observed) or observed[-1] - observed[
+            0
+        ] < timedelta(days=7):
             return metrics
         candidate_coverage = sum(row["candidate_covered"] for row in pairs) / len(pairs)
         incumbent_coverage = sum(row["incumbent_covered"] for row in pairs) / len(pairs)
         evidence = [row["evidence"] for row in pairs]
         operational_ok = all(
-            row["resource_ok"]
-            and row["integrity_ok"]
-            and not row["negative_veto"]
+            row["resource_ok"] and row["integrity_ok"] and not row["negative_veto"]
             for row in evidence
         )
         quality_ok = sum(row["candidate_quality"] for row in evidence) >= sum(
@@ -7398,7 +7499,9 @@ def _operational_rollout_metrics(
         )
         metrics["latency_timeout"] = gate(len(pairs), latency_ok, 1.0)
         metrics["feature_parity"] = gate(
-            len(pairs), float(operational_ok and all(not row["negative_veto"] for row in evidence)), 1.0
+            len(pairs),
+            float(operational_ok and all(not row["negative_veto"] for row in evidence)),
+            1.0,
         )
     return metrics
 
@@ -7533,7 +7636,11 @@ def _automatic_rollout_evaluation(
     except (DistillationError, rollout.RolloutError, store.DistillationStoreError):
         return {"status": "held", "reason": "replay_observation_unavailable"}
     pair_count = replay_observation.get("pair_count")
-    if isinstance(pair_count, bool) or not isinstance(pair_count, int) or pair_count < 0:
+    if (
+        isinstance(pair_count, bool)
+        or not isinstance(pair_count, int)
+        or pair_count < 0
+    ):
         return {"status": "held", "reason": "replay_observation_invalid"}
     replay_gate = {
         "denominator": pair_count,
@@ -7589,9 +7696,12 @@ def _automatic_rollout_evaluation(
             replay_observation.get("artifact_id") or ""
         ),
     }
-    if re.fullmatch(
-        r"[0-9a-f]{64}", evaluation_payload["replay_observation_artifact_id"]
-    ) is None:
+    if (
+        re.fullmatch(
+            r"[0-9a-f]{64}", evaluation_payload["replay_observation_artifact_id"]
+        )
+        is None
+    ):
         return {"status": "held", "reason": "replay_observation_invalid"}
     evaluation_id, _, _ = store.write_immutable(
         store.distillation_dir(root) / "evaluations",
@@ -9376,9 +9486,7 @@ def _ox_prepare_batches(
         if rejected_count and remaining > 0:
             return [], rejected_count
     if claim_limit == 1 and len(batches) > 1:
-        workset.release_unattempted(
-            [claim for batch in batches[1:] for claim in batch]
-        )
+        workset.release_unattempted([claim for batch in batches[1:] for claim in batch])
         batches = batches[:1]
     return batches, 0
 
@@ -9424,62 +9532,17 @@ def _ox_workset_progress(
     }
 
 
-def _ox_dispatch_and_commit(
+def _ox_dispatch_waves(
     *,
-    root: Path,
-    claims: Sequence[Any],
     batches: Sequence[Sequence[Any]],
     ramp_cap: int,
-    ramp_valid_receipts: int,
-    ramp_provider_attempts: int,
-    teacher: Teacher,
     tasks: Mapping[str, Mapping[str, Any]],
+    teacher: Teacher,
     config: DistillationConfig,
-    workset: Any,
-    profile_contract_id: str,
-    source_binding: Mapping[str, str],
-    split_plan_id: str,
-    candidate_state: Mapping[str, Any],
-    structural_verifier: Callable[
-        [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
-    ],
-    label_path: Path,
-) -> _TeacherBatchResult:
-    # Dispatch one fixed-cap wave at a time.  The generic dispatcher remains a
-    # transport primitive; only this OX layer can promote a cap after deep
-    # identity, digest, and label validation below.
+    guard: Callable[[], None],
+    evaluate: Callable[[Sequence[Any]], Mapping[str, Any]],
+) -> tuple[list[Any], bool]:
     from chronovisor.recall.recall_distillation_dispatcher import dispatch_claimed_work
-
-    try:
-        contract = _ensure_ox_profile_contract(
-            root, config, source_binding=source_binding
-        )
-        if contract["artifact_id"] != profile_contract_id:
-            raise DistillationError("OX profile contract changed before dispatch")
-        contract_expiry = _ox_expiry(contract.get("expires_at"))
-    except DistillationError:
-        workset.release_unattempted(claims)
-        return _TeacherBatchResult(
-            deferred=True,
-            workset_status=workset.status("ox"),
-            profile_contract_id=profile_contract_id,
-            last_durable_progress=workset.progress(),
-        )
-
-    def guard() -> None:
-        _ox_eligibility_guard(
-            root=root,
-            config=config,
-            teacher=teacher,
-            profile_contract_id=profile_contract_id,
-            source_binding=source_binding,
-        )
-
-    def evaluate(current: Sequence[Any]) -> Mapping[str, Any]:
-        payload = _ox_batch_payload(tasks, current)
-        if type(teacher) is OpenCodeOxAlphaTeacher:
-            return teacher.evaluate_guarded(payload, before_egress=guard)
-        return teacher.evaluate(payload)
 
     results: list[Any] = []
     metadata_drift = False
@@ -9519,6 +9582,258 @@ def _ox_dispatch_and_commit(
             result.rate_limited or result.status == "stopped" for result in wave_results
         ):
             break
+    return results, metadata_drift
+
+
+def _append_ox_stage_event(
+    *,
+    root: Path,
+    previous_cap: int,
+    ramp_cap: int,
+    profile_contract_id: str,
+    source_binding: Mapping[str, str],
+    contract_expiry: str,
+    label_path: Path,
+    prior_stage: Mapping[str, Any] | None,
+    previous_receipts: int,
+    valid_provider_results: int,
+    ramp_valid_receipts: int,
+    ramp_provider_attempts: int,
+    previous_attempts: int,
+    attempts: int,
+    captured_at: str,
+    final_cap: int,
+) -> None:
+    stage_cap = previous_cap if ramp_cap > previous_cap else final_cap
+    label_head = store.chain_head(label_path)
+    failure_head = store.chain_head(
+        store.distillation_dir(root) / "ox-failure-receipts.jsonl"
+    )
+    lower_labels = 0
+    lower_failures = 0
+    if prior_stage is not None:
+        lower_labels = prior_stage.get("label_count", -1)
+        lower_failures = prior_stage.get("failure_record_count", -1)
+    if (
+        type(lower_labels) is not int
+        or type(lower_failures) is not int
+        or not 0 <= lower_labels <= label_head["records"]
+        or not 0 <= lower_failures <= failure_head["records"]
+    ):
+        raise DistillationError("OX ramp checkpoint segment is invalid")
+    stage_labels: list[str] = []
+    seen_receipts: set[str] = set()
+    for row in store.read_chain(label_path)[lower_labels:]:
+        if (
+            row.get("profile_contract_id") != profile_contract_id
+            or row.get("ramp_cap") != stage_cap
+            or row.get("status") != "completed"
+        ):
+            continue
+        receipt = str(row.get("provider_receipt_sha256") or "")
+        work_id = str(row.get("work_id") or "")
+        if (
+            re.fullmatch(r"[0-9a-f]{64}", receipt) is not None
+            and re.fullmatch(r"[0-9a-f]{64}", work_id) is not None
+            and receipt not in seen_receipts
+        ):
+            seen_receipts.add(receipt)
+            stage_labels.append(work_id)
+    stage_receipts = (
+        previous_receipts + valid_provider_results
+        if ramp_cap > previous_cap
+        else ramp_valid_receipts
+    )
+    if len(stage_labels) != stage_receipts:
+        raise DistillationError("OX ramp receipt segment is incomplete")
+    _append_ox_event(
+        root,
+        "ox-ramp-receipts.jsonl",
+        {
+            "event_version": 2,
+            "kind": "ox-ramp-stage",
+            "profile_contract_id": profile_contract_id,
+            **source_binding,
+            "request_revision": OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract_expiry,
+            "cap": stage_cap,
+            "next_cap": ramp_cap if stage_cap != 10 else 10,
+            "valid_receipts": stage_receipts,
+            "attempts": (
+                previous_attempts + attempts
+                if ramp_cap > previous_cap
+                else ramp_provider_attempts
+            ),
+            "work_ids": stage_labels,
+            "label_count": int(label_head["records"]),
+            "label_head_sha256": label_head["head_sha256"],
+            "failure_record_count": int(failure_head["records"]),
+            "failure_head_sha256": failure_head["head_sha256"],
+            "captured_at": captured_at,
+        },
+    )
+
+
+def _append_ox_failure_events(
+    *,
+    root: Path,
+    results: Sequence[Any],
+    profile_contract_id: str,
+    source_binding: Mapping[str, str],
+    contract_expiry: str,
+    captured_at: str,
+    previous_cap: int,
+    ramp_cap: int,
+) -> None:
+    for result in results:
+        category = str(result.category or "")
+        if result.rate_limited:
+            event = {
+                "category": "429",
+                "before_cap": previous_cap,
+                "after_cap": ramp_cap,
+                "status": "deferred",
+            }
+        elif category in {
+            "http_5xx",
+            "timeout",
+            "http_402",
+            "paid_fallback",
+            "payment_required",
+            "model_unavailable",
+            "route_model_drift",
+        }:
+            event: dict[str, Any] = {
+                "category": {
+                    "http_5xx": "5xx",
+                    "timeout": "timeout",
+                    "http_402": "402",
+                    "paid_fallback": "paid",
+                    "payment_required": "paid",
+                    "model_unavailable": "model_drift",
+                    "route_model_drift": "model_drift",
+                }[category],
+                "attempts": 1,
+                "status": (
+                    "hard_stop"
+                    if category
+                    in {
+                        "http_402",
+                        "paid_fallback",
+                        "payment_required",
+                        "model_unavailable",
+                        "route_model_drift",
+                    }
+                    else "deferred"
+                ),
+            }
+            if category in {"http_5xx", "timeout"}:
+                event["bounded"] = True
+        else:
+            continue
+        provider_receipt = _ox_provider_receipt_from_result(result)
+        if not provider_receipt:
+            continue
+        _append_ox_event(
+            root,
+            "ox-failure-receipts.jsonl",
+            {
+                "event_version": 2,
+                "kind": "ox-provider-failure",
+                "profile_contract_id": profile_contract_id,
+                **source_binding,
+                "request_revision": OX_RAMP_REQUEST_REVISION,
+                "expires_at": contract_expiry,
+                "captured_at": captured_at,
+                "cap": previous_cap,
+                "work_ids": [str(claim.work_id) for claim in result.work],
+                "attempts": 1,
+                "attempts_by_work": {
+                    str(claim.work_id): int(claim.attempt) for claim in result.work
+                },
+                "provider_receipts": {
+                    str(claim.work_id): provider_receipt for claim in result.work
+                },
+                "provider_requests": {
+                    str(claim.work_id): expected_ox_provider_request_sha256(
+                        profile_contract_id=profile_contract_id,
+                        payload_digest=claim.payload_digest,
+                        work_id=claim.work_id,
+                        expires_at=contract_expiry,
+                    )
+                    for claim in result.work
+                },
+                **event,
+            },
+        )
+
+
+def _ox_dispatch_and_commit(
+    *,
+    root: Path,
+    claims: Sequence[Any],
+    batches: Sequence[Sequence[Any]],
+    ramp_cap: int,
+    ramp_valid_receipts: int,
+    ramp_provider_attempts: int,
+    teacher: Teacher,
+    tasks: Mapping[str, Mapping[str, Any]],
+    config: DistillationConfig,
+    workset: Any,
+    profile_contract_id: str,
+    source_binding: Mapping[str, str],
+    split_plan_id: str,
+    candidate_state: Mapping[str, Any],
+    structural_verifier: Callable[
+        [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
+    ],
+    label_path: Path,
+) -> _TeacherBatchResult:
+    # Dispatch one fixed-cap wave at a time.  The generic dispatcher remains a
+    # transport primitive; only this OX layer can promote a cap after deep
+    # identity, digest, and label validation below.
+    try:
+        contract = _ensure_ox_profile_contract(
+            root, config, source_binding=source_binding
+        )
+        if contract["artifact_id"] != profile_contract_id:
+            raise DistillationError("OX profile contract changed before dispatch")
+        contract_expiry = _ox_expiry(contract.get("expires_at"))
+    except DistillationError:
+        workset.release_unattempted(claims)
+        return _TeacherBatchResult(
+            deferred=True,
+            workset_status=workset.status("ox"),
+            profile_contract_id=profile_contract_id,
+            last_durable_progress=workset.progress(),
+        )
+
+    def guard() -> None:
+        _ox_eligibility_guard(
+            root=root,
+            config=config,
+            teacher=teacher,
+            profile_contract_id=profile_contract_id,
+            source_binding=source_binding,
+        )
+
+    def evaluate(current: Sequence[Any]) -> Mapping[str, Any]:
+        payload = _ox_batch_payload(tasks, current)
+        if type(teacher) is OpenCodeOxAlphaTeacher:
+            return teacher.evaluate_guarded(payload, before_egress=guard)
+        return teacher.evaluate(payload)
+
+    results: list[Any] = []
+    metadata_drift = False
+    results, metadata_drift = _ox_dispatch_waves(
+        batches=batches,
+        ramp_cap=ramp_cap,
+        tasks=tasks,
+        teacher=teacher,
+        config=config,
+        guard=guard,
+        evaluate=evaluate,
+    )
     expected_identity = OX_ALPHA_FIXED_IDENTITY["route_identity"]
     stopped = False
     deferred = False
@@ -9529,10 +9844,7 @@ def _ox_dispatch_and_commit(
     seen_provider_receipts: set[str] = set()
     if any(result.category == "ox_guard_denied" for result in results):
         attempted = [
-            claim
-            for result in results
-            if result.attempts > 0
-            for claim in result.work
+            claim for result in results if result.attempts > 0 for claim in result.work
         ]
         attempted_ids = {claim.work_id for claim in attempted}
         if attempted:
@@ -9561,10 +9873,7 @@ def _ox_dispatch_and_commit(
         )
     if metadata_drift:
         drift_claims = [
-            claim
-            for result in results
-            if result.attempts > 0
-            for claim in result.work
+            claim for result in results if result.attempts > 0 for claim in result.work
         ]
         drift_ids = {claim.work_id for claim in drift_claims}
         failure_cap = ramp_cap
@@ -9615,8 +9924,7 @@ def _ox_dispatch_and_commit(
                         for claim in result_claims
                     },
                     "provider_receipts": {
-                        str(claim.work_id): provider_receipt
-                        for claim in result_claims
+                        str(claim.work_id): provider_receipt for claim in result_claims
                     },
                     "provider_requests": {
                         str(claim.work_id): expected_ox_provider_request_sha256(
@@ -9646,10 +9954,7 @@ def _ox_dispatch_and_commit(
         """Consume provider-attempted leases without publishing their result."""
 
         attempted = [
-            claim
-            for result in results
-            if result.attempts > 0
-            for claim in result.work
+            claim for result in results if result.attempts > 0 for claim in result.work
         ]
         attempted_ids = {claim.work_id for claim in attempted}
         if attempted:
@@ -9811,9 +10116,10 @@ def _ox_dispatch_and_commit(
         contract = _ensure_ox_profile_contract(
             root, config, source_binding=source_binding
         )
-        if (
-            contract["artifact_id"] != profile_contract_id
-            or not _ox_source_binding_matches(teacher, source_binding)
+        if contract[
+            "artifact_id"
+        ] != profile_contract_id or not _ox_source_binding_matches(
+            teacher, source_binding
         ):
             raise DistillationError("OX profile contract changed before commit")
     except DistillationError:
@@ -9911,164 +10217,42 @@ def _ox_dispatch_and_commit(
         and prior_stage.get("label_count") == current_label_head["records"]
         and prior_stage.get("label_head_sha256") == current_label_head["head_sha256"]
         and prior_stage.get("failure_record_count") == current_failure_head["records"]
-        and prior_stage.get("failure_head_sha256") == current_failure_head["head_sha256"]
+        and prior_stage.get("failure_head_sha256")
+        == current_failure_head["head_sha256"]
     )
     stage_event_needed = ramp_cap > previous_cap or (
         final_stage_completed and not final_receipt_emitted
     )
-    def append_stage() -> None:
-        stage_cap = previous_cap if ramp_cap > previous_cap else final_cap
-        label_head = store.chain_head(label_path)
-        failure_head = store.chain_head(
-            store.distillation_dir(root) / "ox-failure-receipts.jsonl"
-        )
-        lower_labels = 0
-        lower_failures = 0
-        if prior_stage is not None:
-            lower_labels = prior_stage.get("label_count", -1)
-            lower_failures = prior_stage.get("failure_record_count", -1)
-        if (
-            type(lower_labels) is not int
-            or type(lower_failures) is not int
-            or not 0 <= lower_labels <= label_head["records"]
-            or not 0 <= lower_failures <= failure_head["records"]
-        ):
-            raise DistillationError("OX ramp checkpoint segment is invalid")
-        stage_labels: list[str] = []
-        seen_receipts: set[str] = set()
-        for row in store.read_chain(label_path)[lower_labels:]:
-            if (
-                row.get("profile_contract_id") != profile_contract_id
-                or row.get("ramp_cap") != stage_cap
-                or row.get("status") != "completed"
-            ):
-                continue
-            receipt = str(row.get("provider_receipt_sha256") or "")
-            work_id = str(row.get("work_id") or "")
-            if (
-                re.fullmatch(r"[0-9a-f]{64}", receipt) is not None
-                and re.fullmatch(r"[0-9a-f]{64}", work_id) is not None
-                and receipt not in seen_receipts
-            ):
-                seen_receipts.add(receipt)
-                stage_labels.append(work_id)
-        stage_receipts = (
-            previous_receipts + valid_provider_results
-            if ramp_cap > previous_cap
-            else ramp_valid_receipts
-        )
-        if len(stage_labels) != stage_receipts:
-            raise DistillationError("OX ramp receipt segment is incomplete")
-        _append_ox_event(
-            root,
-            "ox-ramp-receipts.jsonl",
-            {
-                "event_version": 2,
-                "kind": "ox-ramp-stage",
-                "profile_contract_id": profile_contract_id,
-                **source_binding,
-                "request_revision": OX_RAMP_REQUEST_REVISION,
-                "expires_at": contract_expiry,
-                "cap": stage_cap,
-                "next_cap": ramp_cap if stage_cap != 10 else 10,
-                "valid_receipts": stage_receipts,
-                "attempts": (
-                    previous_attempts + attempts
-                    if ramp_cap > previous_cap
-                    else ramp_provider_attempts
-                ),
-                "work_ids": stage_labels,
-                "label_count": int(label_head["records"]),
-                "label_head_sha256": label_head["head_sha256"],
-                "failure_record_count": int(failure_head["records"]),
-                "failure_head_sha256": failure_head["head_sha256"],
-                "captured_at": captured_at,
-            },
-        )
-    for result in results:
-        category = str(result.category or "")
-        if result.rate_limited:
-            event = {
-                "category": "429",
-                "before_cap": previous_cap,
-                "after_cap": ramp_cap,
-                "status": "deferred",
-            }
-        elif category in {
-            "http_5xx",
-            "timeout",
-            "http_402",
-            "paid_fallback",
-            "payment_required",
-            "model_unavailable",
-            "route_model_drift",
-        }:
-            event: dict[str, Any] = {
-                "category": {
-                    "http_5xx": "5xx",
-                    "timeout": "timeout",
-                    "http_402": "402",
-                    "paid_fallback": "paid",
-                    "payment_required": "paid",
-                    "model_unavailable": "model_drift",
-                    "route_model_drift": "model_drift",
-                }[category],
-                "attempts": 1,
-                "status": (
-                    "hard_stop"
-                    if category
-                    in {
-                        "http_402",
-                        "paid_fallback",
-                        "payment_required",
-                        "model_unavailable",
-                        "route_model_drift",
-                    }
-                    else "deferred"
-                ),
-            }
-            if category in {"http_5xx", "timeout"}:
-                event["bounded"] = True
-        else:
-            continue
-        provider_receipt = _ox_provider_receipt_from_result(result)
-        if not provider_receipt:
-            continue
-        _append_ox_event(
-            root,
-            "ox-failure-receipts.jsonl",
-            {
-                "event_version": 2,
-                "kind": "ox-provider-failure",
-                "profile_contract_id": profile_contract_id,
-                **source_binding,
-                "request_revision": OX_RAMP_REQUEST_REVISION,
-                "expires_at": contract_expiry,
-                "captured_at": captured_at,
-                "cap": previous_cap,
-                "work_ids": [str(claim.work_id) for claim in result.work],
-                "attempts": 1,
-                "attempts_by_work": {
-                    str(claim.work_id): int(claim.attempt) for claim in result.work
-                },
-                "provider_receipts": {
-                    str(claim.work_id): provider_receipt
-                    for claim in result.work
-                },
-                "provider_requests": {
-                    str(claim.work_id): expected_ox_provider_request_sha256(
-                        profile_contract_id=profile_contract_id,
-                        payload_digest=claim.payload_digest,
-                        work_id=claim.work_id,
-                        expires_at=contract_expiry,
-                    )
-                    for claim in result.work
-                },
-                **event,
-            },
-        )
+
+    _append_ox_failure_events(
+        root=root,
+        results=results,
+        profile_contract_id=profile_contract_id,
+        source_binding=source_binding,
+        contract_expiry=contract_expiry,
+        captured_at=captured_at,
+        previous_cap=previous_cap,
+        ramp_cap=ramp_cap,
+    )
     if stage_event_needed:
-        append_stage()
+        _append_ox_stage_event(
+            root=root,
+            previous_cap=previous_cap,
+            ramp_cap=ramp_cap,
+            profile_contract_id=profile_contract_id,
+            source_binding=source_binding,
+            contract_expiry=contract_expiry,
+            label_path=label_path,
+            prior_stage=prior_stage,
+            previous_receipts=previous_receipts,
+            valid_provider_results=valid_provider_results,
+            ramp_valid_receipts=ramp_valid_receipts,
+            ramp_provider_attempts=ramp_provider_attempts,
+            previous_attempts=previous_attempts,
+            attempts=attempts,
+            captured_at=captured_at,
+            final_cap=final_cap,
+        )
     return _TeacherBatchResult(
         labels_written=len(appended),
         model_calls=sum(result.attempts for result in results),
@@ -10082,6 +10266,57 @@ def _ox_dispatch_and_commit(
         last_durable_progress=workset.progress(),
         source_binding=source_binding,
     )
+
+
+def _ox_candidate_indexed_snapshots(
+    *,
+    root: Path,
+    workset: Any,
+    split_plan_id: str,
+    candidate_indexed: bool,
+    snapshots: Mapping[str, Mapping[str, Any]],
+) -> tuple[Path, Mapping[str, Any], Mapping[str, Mapping[str, Any]]]:
+    candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
+    candidate_state: Mapping[str, Any] = {}
+    if candidate_indexed:
+        from chronovisor.recall import recall_distillation_catalog as catalog
+
+        try:
+            catalog.sync_candidate_index(root, candidate_path)
+            candidate_state = catalog.candidate_index_state(root)
+            previous_watermark = workset.watermark()
+            prior_records = 0
+            if previous_watermark is not None:
+                if not isinstance(previous_watermark, Mapping):
+                    raise DistillationError("OX workset watermark is invalid")
+                prior_records = previous_watermark.get("candidate_records", 0)
+                prior_head = str(previous_watermark.get("candidate_head") or "")
+                if isinstance(prior_records, bool) or not isinstance(
+                    prior_records, int
+                ):
+                    raise DistillationError("OX workset candidate watermark is invalid")
+                if prior_records < 0 or prior_records > int(
+                    candidate_state["record_count"]
+                ):
+                    raise DistillationError("OX workset candidate watermark regressed")
+                if prior_records == int(candidate_state["record_count"]):
+                    current_head = str(candidate_state.get("head_sha256") or "")
+                    if prior_head and prior_head != current_head:
+                        raise DistillationError("OX candidate index head conflicts")
+                if (
+                    str(previous_watermark.get("split_plan_id") or "") != split_plan_id
+                    or str(previous_watermark.get("probe_revision") or "")
+                    != OX_PROBE_REVISION
+                ):
+                    prior_records = 0
+            snapshots = catalog.read_candidate_snapshots(
+                root,
+                candidate_path,
+                catalog.candidate_rally_ids(root, after_seq=prior_records),
+            )
+        except catalog.CatalogError as exc:
+            raise DistillationError("OX candidate index is unavailable") from exc
+    return candidate_path, candidate_state, snapshots
 
 
 def _run_ox_teacher_batch(
@@ -10102,6 +10337,7 @@ def _run_ox_teacher_batch(
 ) -> _TeacherBatchResult:
     """Advance, claim, dispatch, append, and commit OX work in that order."""
 
+    from chronovisor.recall import recall_distillation_catalog as catalog
     from chronovisor.recall.recall_distillation_workset import DistillationWorkset
 
     teacher = teachers.get(OX_TEACHER_ROLE)
@@ -10159,46 +10395,13 @@ def _run_ox_teacher_batch(
         split_plan_id = ""
         age_bands = {}
 
-    candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
-    candidate_state: Mapping[str, Any] = {}
-    if candidate_indexed:
-        from chronovisor.recall import recall_distillation_catalog as catalog
-
-        try:
-            catalog.sync_candidate_index(root, candidate_path)
-            candidate_state = catalog.candidate_index_state(root)
-            previous_watermark = workset.watermark()
-            prior_records = 0
-            if previous_watermark is not None:
-                if not isinstance(previous_watermark, Mapping):
-                    raise DistillationError("OX workset watermark is invalid")
-                prior_records = previous_watermark.get("candidate_records", 0)
-                prior_head = str(previous_watermark.get("candidate_head") or "")
-                if isinstance(prior_records, bool) or not isinstance(
-                    prior_records, int
-                ):
-                    raise DistillationError("OX workset candidate watermark is invalid")
-                if prior_records < 0 or prior_records > int(
-                    candidate_state["record_count"]
-                ):
-                    raise DistillationError("OX workset candidate watermark regressed")
-                if prior_records == int(candidate_state["record_count"]):
-                    current_head = str(candidate_state.get("head_sha256") or "")
-                    if prior_head and prior_head != current_head:
-                        raise DistillationError("OX candidate index head conflicts")
-                if (
-                    str(previous_watermark.get("split_plan_id") or "") != split_plan_id
-                    or str(previous_watermark.get("probe_revision") or "")
-                    != OX_PROBE_REVISION
-                ):
-                    prior_records = 0
-            snapshots = catalog.read_candidate_snapshots(
-                root,
-                candidate_path,
-                catalog.candidate_rally_ids(root, after_seq=prior_records),
-            )
-        except catalog.CatalogError as exc:
-            raise DistillationError("OX candidate index is unavailable") from exc
+    candidate_path, candidate_state, snapshots = _ox_candidate_indexed_snapshots(
+        root=root,
+        workset=workset,
+        split_plan_id=split_plan_id,
+        candidate_indexed=candidate_indexed,
+        snapshots=snapshots,
+    )
 
     prepared = _ox_prepare_tasks(
         config=config,
@@ -10268,9 +10471,10 @@ def _run_ox_teacher_batch(
         work_ids_sha256 = details.get("work_ids_sha256")
         # Legacy receipts remain readable so an old queue can recover, but
         # they cannot mint a certifying v2 lease event without exact work IDs.
-        if not isinstance(work_ids_sha256, str) or re.fullmatch(
-            r"[0-9a-f]{64}", work_ids_sha256
-        ) is None:
+        if (
+            not isinstance(work_ids_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", work_ids_sha256) is None
+        ):
             continue
         _append_ox_event(
             root,
@@ -10691,11 +10895,8 @@ def _local_r4_receipt_entry(
         or label.get("route") != task.get("route")
         or label.get("assignment") != assignment
         or label.get("route_identity") != route_identity
-        or re.fullmatch(r"[0-9a-f]{40}", str(label.get("source_commit") or ""))
-        is None
-        or re.fullmatch(
-            r"[0-9a-f]{64}", str(label.get("source_tree_sha256") or "")
-        )
+        or re.fullmatch(r"[0-9a-f]{40}", str(label.get("source_commit") or "")) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(label.get("source_tree_sha256") or ""))
         is None
         or re.fullmatch(
             r"[0-9a-f]{64}", str(label.get("source_ox_identity_sha256") or "")
@@ -10752,8 +10953,17 @@ def _r4_regular_file_state(path: Path) -> dict[str, int | str] | None:
     except (OSError, ValueError) as exc:
         raise DistillationError("legacy R4 root authority migration is unsafe") from exc
     if (
-        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-        != (state.st_dev, state.st_ino, state.st_size, state.st_mtime_ns, state.st_ctime_ns)
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ) != (
+        state.st_dev,
+        state.st_ino,
+        state.st_size,
+        state.st_mtime_ns,
+        state.st_ctime_ns,
     ):
         raise DistillationError("legacy R4 root authority migration content drift")
     return {
@@ -10777,10 +10987,16 @@ def _r4_legacy_evidence_state(
         or production.get("before") != production.get("after")
         or not isinstance(production.get("after"), Mapping)
     ):
-        raise DistillationError("legacy R4 root authority migration evidence is invalid")
+        raise DistillationError(
+            "legacy R4 root authority migration evidence is invalid"
+        )
     runtime = root / "runtime"
     distillation = store.distillation_dir(root)
-    if _r4_path_has_symlink(root) or _r4_path_has_symlink(runtime) or _r4_path_has_symlink(distillation):
+    if (
+        _r4_path_has_symlink(root)
+        or _r4_path_has_symlink(runtime)
+        or _r4_path_has_symlink(distillation)
+    ):
         raise DistillationError("legacy R4 root authority migration is unsafe")
     try:
         store.pinned_directory_identity(root, create=False)
@@ -10800,20 +11016,35 @@ def _r4_legacy_evidence_state(
     }
     expected = production["after"]
     if set(expected) != set(paths):
-        raise DistillationError("legacy R4 root authority migration evidence is invalid")
+        raise DistillationError(
+            "legacy R4 root authority migration evidence is invalid"
+        )
     observed = {name: _r4_regular_file_state(path) for name, path in paths.items()}
     for name, state in observed.items():
         evidence_state = expected[name]
         if evidence_state is None:
             if state is not None:
-                raise DistillationError("legacy R4 root authority migration content drift")
+                raise DistillationError(
+                    "legacy R4 root authority migration content drift"
+                )
             continue
         if not isinstance(evidence_state, Mapping) or state is None:
             raise DistillationError("legacy R4 root authority migration content drift")
-        required = {"sha256", "size_bytes", "st_dev", "st_ino", "st_mtime_ns", "st_ctime_ns"}
+        required = {
+            "sha256",
+            "size_bytes",
+            "st_dev",
+            "st_ino",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        }
         if set(evidence_state) != required:
-            raise DistillationError("legacy R4 root authority migration evidence is invalid")
-        compared = required - ({"st_mtime_ns", "st_ctime_ns"} if name == "workset_shm" else set())
+            raise DistillationError(
+                "legacy R4 root authority migration evidence is invalid"
+            )
+        compared = required - (
+            {"st_mtime_ns", "st_ctime_ns"} if name == "workset_shm" else set()
+        )
         if any(state[key] != evidence_state[key] for key in compared):
             raise DistillationError("legacy R4 root authority migration content drift")
     if (
@@ -10823,7 +11054,10 @@ def _r4_legacy_evidence_state(
         or observed["workset_wal"]["size_bytes"] != 0
     ):
         raise DistillationError("legacy R4 root authority migration content drift")
-    if observed["workset_journal"] is not None or observed["candidate_anchor"] is not None:
+    if (
+        observed["workset_journal"] is not None
+        or observed["candidate_anchor"] is not None
+    ):
         raise DistillationError("legacy R4 root authority migration content drift")
     return observed, paths["workset"]
 
@@ -10841,7 +11075,9 @@ def _r4_legacy_workset_is_idle(path: Path) -> bool:
         finally:
             connection.close()
     except (OSError, sqlite3.Error) as exc:
-        raise DistillationError("legacy R4 root authority migration workset is invalid") from exc
+        raise DistillationError(
+            "legacy R4 root authority migration workset is invalid"
+        ) from exc
     return row is not None and row[0] == 0
 
 
@@ -10857,28 +11093,46 @@ def _r4_legacy_offline_bootstrap(
         with open_regular_nofollow(evidence_path) as handle:
             before = os.fstat(handle.fileno())
             if before.st_size > R4_OFFLINE_BOOTSTRAP_MAX_BYTES:
-                raise DistillationError("legacy R4 root authority migration evidence is invalid")
+                raise DistillationError(
+                    "legacy R4 root authority migration evidence is invalid"
+                )
             raw = handle.read(R4_OFFLINE_BOOTSTRAP_MAX_BYTES + 1)
             after = os.fstat(handle.fileno())
             if (
                 len(raw) > R4_OFFLINE_BOOTSTRAP_MAX_BYTES
                 or len(raw) != before.st_size
                 or before.st_size != after.st_size
-                or (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns)
+                or (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                )
                 != (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns)
             ):
-                raise DistillationError("legacy R4 root authority migration evidence is invalid")
+                raise DistillationError(
+                    "legacy R4 root authority migration evidence is invalid"
+                )
         evidence = json.loads(raw)
         store.verify_seal(evidence, schema=R4_OFFLINE_BOOTSTRAP_SCHEMA)
     except DistillationError:
         raise
-    except (OSError, ValueError, json.JSONDecodeError, store.DistillationStoreError) as exc:
-        raise DistillationError("legacy R4 root authority migration evidence is invalid") from exc
+    except (
+        OSError,
+        ValueError,
+        json.JSONDecodeError,
+        store.DistillationStoreError,
+    ) as exc:
+        raise DistillationError(
+            "legacy R4 root authority migration evidence is invalid"
+        ) from exc
     try:
         expected_source = _validate_ox_source_binding(expected_source_binding)
         current_source = _validate_ox_source_binding(ox_alpha_source_binding())
     except (TypeError, ValueError) as exc:
-        raise DistillationError("legacy R4 root authority migration source is invalid") from exc
+        raise DistillationError(
+            "legacy R4 root authority migration source is invalid"
+        ) from exc
     source = evidence.get("source")
     scope = evidence.get("scope")
     if (
@@ -10908,7 +11162,9 @@ def _r4_legacy_offline_bootstrap(
             "r4_checkbox_complete": False,
         }
     ):
-        raise DistillationError("legacy R4 root authority migration evidence is invalid")
+        raise DistillationError(
+            "legacy R4 root authority migration evidence is invalid"
+        )
     _r4_legacy_evidence_state(root=root, evidence=evidence)
     return {
         "artifact_id": evidence["artifact_id"],
@@ -10937,7 +11193,9 @@ def migrate_r4_legacy_distillation_root_authority(
     try:
         with okf_writer_lock(root, exclusive=True, allow_create=False):
             parent_identity = store.pinned_directory_identity(root, create=False)
-            observed = store.pinned_directory_identity(store.distillation_dir(root), create=False)
+            observed = store.pinned_directory_identity(
+                store.distillation_dir(root), create=False
+            )
             try:
                 store.read_immutable_pinned(
                     root,
@@ -10959,14 +11217,14 @@ def migrate_r4_legacy_distillation_root_authority(
                 raise DistillationError("legacy R4 root authority migration is busy")
             try:
                 worker_held = os.fstat(worker_lock.fileno())
-                if (
-                    worker_before is None
-                    or (worker_before["st_dev"], worker_before["st_ino"])
-                    != (worker_held.st_dev, worker_held.st_ino)
-                ):
+                if worker_before is None or (
+                    worker_before["st_dev"],
+                    worker_before["st_ino"],
+                ) != (worker_held.st_dev, worker_held.st_ino):
                     raise DistillationError(
                         "legacy R4 root authority migration is unsafe"
                     )
+
                 def preflight() -> dict[str, Any]:
                     metadata = _r4_legacy_offline_bootstrap(
                         offline_bootstrap_evidence,
@@ -10987,7 +11245,9 @@ def migrate_r4_legacy_distillation_root_authority(
                     if not _r4_legacy_workset_is_idle(
                         store.distillation_dir(root) / "ox-workset.sqlite3"
                     ):
-                        raise DistillationError("legacy R4 root authority migration workset is leased")
+                        raise DistillationError(
+                            "legacy R4 root authority migration workset is leased"
+                        )
                     try:
                         config_path = root / "config.toml"
                         with open_regular_nofollow(config_path) as handle:
@@ -10996,7 +11256,12 @@ def migrate_r4_legacy_distillation_root_authority(
                             raise DistillationError(
                                 "legacy R4 root authority migration OX is enabled"
                             )
-                    except (OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError) as exc:
+                    except (
+                        OSError,
+                        UnicodeError,
+                        ValueError,
+                        tomllib.TOMLDecodeError,
+                    ) as exc:
                         raise DistillationError(
                             "legacy R4 root authority migration config is invalid"
                         ) from exc
@@ -11004,7 +11269,9 @@ def migrate_r4_legacy_distillation_root_authority(
 
                 locked_metadata = preflight()
                 if locked_metadata != evidence_metadata:
-                    raise DistillationError("legacy R4 root authority migration evidence changed")
+                    raise DistillationError(
+                        "legacy R4 root authority migration evidence changed"
+                    )
 
                 def before_persist() -> None:
                     if preflight() != locked_metadata:
@@ -11051,7 +11318,9 @@ def migrate_r4_legacy_distillation_root_authority(
                         expected_directory_identity=parent_identity,
                     )
                 except store.DistillationStoreError as exc:
-                    raise DistillationError("legacy R4 root authority migration is invalid") from exc
+                    raise DistillationError(
+                        "legacy R4 root authority migration is invalid"
+                    ) from exc
             finally:
                 store.release_lock(worker_lock)
     except DistillationError:
@@ -11105,7 +11374,9 @@ def _bootstrap_r4_distillation_root_authority(root: Path) -> tuple[int, int]:
     authority_id = canonical_json.canonical_json_sha256_strict(authority_identity)
     legacy_id = _r4_legacy_root_authority_id()
     try:
-        parent_identity = store.pinned_directory_identity(authority_parent, create=False)
+        parent_identity = store.pinned_directory_identity(
+            authority_parent, create=False
+        )
         try:
             store.read_immutable_pinned(
                 authority_parent,
@@ -11129,7 +11400,9 @@ def _bootstrap_r4_distillation_root_authority(root: Path) -> tuple[int, int]:
                 store.distillation_dir(root), create=True, require_missing=True
             )
         except store.DistillationStoreError as exc:
-            raise DistillationError("local R4 root authority bootstrap is untrusted") from exc
+            raise DistillationError(
+                "local R4 root authority bootstrap is untrusted"
+            ) from exc
         _, _, authority = store.write_immutable_pinned(
             authority_parent,
             {
@@ -11171,9 +11444,7 @@ def _bootstrap_r4_distillation_root_authority(root: Path) -> tuple[int, int]:
     return observed
 
 
-def _r4_distillation_root_authority(
-    root: Path, *, register: bool
-) -> tuple[int, int]:
+def _r4_distillation_root_authority(root: Path, *, register: bool) -> tuple[int, int]:
     """Verify the previously bootstrapped distillation root authority."""
 
     if register:
@@ -11183,7 +11454,9 @@ def _r4_distillation_root_authority(
     authority_id = canonical_json.canonical_json_sha256_strict(authority_identity)
     legacy_id = _r4_legacy_root_authority_id()
     try:
-        parent_identity = store.pinned_directory_identity(authority_parent, create=False)
+        parent_identity = store.pinned_directory_identity(
+            authority_parent, create=False
+        )
         try:
             normal_authority = store.read_immutable_pinned(
                 authority_parent,
@@ -11387,9 +11660,7 @@ def _r4_regular_or_missing(path: Path) -> bool:
 
 
 _LOCAL_R4_DEFERRED_FAILURES = frozenset({"capacity", "timeout", "preemption"})
-_LOCAL_R4_INVALID_FAILURES = frozenset(
-    {"schema", "coverage", "route_model_mismatch"}
-)
+_LOCAL_R4_INVALID_FAILURES = frozenset({"schema", "coverage", "route_model_mismatch"})
 
 
 def _local_r4_owned_failure_injection(
@@ -11437,9 +11708,7 @@ def _local_r4_failure_entry(
         or not route_identity["provider"]
         or not isinstance(route_identity.get("model"), str)
         or not route_identity["model"]
-        or _validate_ox_source_binding(
-            cast(Mapping[str, str] | None, source)
-        ) != source
+        or _validate_ox_source_binding(cast(Mapping[str, str] | None, source)) != source
         or not outcome_class
     ):
         return None
@@ -11561,9 +11830,7 @@ def _write_r4_local_failure_receipts(
         or not 1 <= receipt_cap <= 10
     ):
         return False
-    created: list[
-        tuple[Path, str, Mapping[str, Any], tuple[int, int]]
-    ] = []
+    created: list[tuple[Path, str, Mapping[str, Any], tuple[int, int]]] = []
     try:
         first = entries[0]
         source = first.get("source")
@@ -11571,7 +11838,9 @@ def _write_r4_local_failure_receipts(
             return False
         source = _validate_ox_source_binding(cast(Mapping[str, str], source))
         settle_generation = settle_transition.get("generation")
-        if isinstance(settle_generation, bool) or not isinstance(settle_generation, int):
+        if isinstance(settle_generation, bool) or not isinstance(
+            settle_generation, int
+        ):
             return False
         exact_transition = workset.transition_receipt_binding(settle_generation)
         label_path = store.distillation_dir(root) / "label-ledger.jsonl"
@@ -11717,7 +11986,9 @@ def _write_r4_local_failure_receipts(
                     return False
                 workset_receipt = current_workset_receipt
             else:
-                captured_at = captured_at or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                captured_at = captured_at or datetime.now(UTC).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
                 workset_receipt = current_workset_receipt
             task_assignment = task["assignment"]
             payload: dict[str, Any] = {
@@ -11767,8 +12038,7 @@ def _write_r4_local_failure_receipts(
             expected = {**unsigned, "receipt_sha256": payload["receipt_sha256"]}
             if existing is not None:
                 if set(existing) != {*expected, "seal_sha256"} or any(
-                    existing.get(key) != value
-                    for key, value in expected.items()
+                    existing.get(key) != value for key, value in expected.items()
                 ):
                     return False
             else:
@@ -11790,11 +12060,14 @@ def _write_r4_local_failure_receipts(
                     != artifact
                 ):
                     return False
-        if any(workset.completion_identities([str(entry["work_id"])]) for entry in entries):
+        if any(
+            workset.completion_identities([str(entry["work_id"])]) for entry in entries
+        ):
             raise DistillationError("local R4 failure completion changed")
         if (
             (require_current_source and ox_alpha_source_binding() != source)
-            or workset.transition_receipt_binding(settle_generation) != settle_transition
+            or workset.transition_receipt_binding(settle_generation)
+            != settle_transition
             or store.chain_head(label_path) != label_head
         ):
             raise DistillationError("local R4 failure receipt identity conflicts")
@@ -11833,9 +12106,7 @@ def _write_r4_local_receipts(
     if not entries:
         return True
 
-    created: list[
-        tuple[Path, str, Mapping[str, Any], tuple[int, int]]
-    ] = []
+    created: list[tuple[Path, str, Mapping[str, Any], tuple[int, int]]] = []
     try:
         first_label = entries[0].get("label")
         if not isinstance(first_label, Mapping):
@@ -11843,20 +12114,16 @@ def _write_r4_local_receipts(
         source = {
             "source_commit": first_label.get("source_commit"),
             "source_tree_sha256": first_label.get("source_tree_sha256"),
-            "source_ox_identity_sha256": first_label.get(
-                "source_ox_identity_sha256"
-            ),
+            "source_ox_identity_sha256": first_label.get("source_ox_identity_sha256"),
         }
         recent = workset.recent_transition_receipts(limit=1)
         label_path = store.distillation_dir(root) / "label-ledger.jsonl"
         label_head = store.chain_head(label_path)
         if (
             not isinstance(source["source_commit"], str)
-            or re.fullmatch(r"[0-9a-f]{40}", source["source_commit"])
-            is None
+            or re.fullmatch(r"[0-9a-f]{40}", source["source_commit"]) is None
             or not isinstance(source["source_tree_sha256"], str)
-            or re.fullmatch(r"[0-9a-f]{64}", source["source_tree_sha256"])
-            is None
+            or re.fullmatch(r"[0-9a-f]{64}", source["source_tree_sha256"]) is None
             or not isinstance(source["source_ox_identity_sha256"], str)
             or re.fullmatch(r"[0-9a-f]{64}", source["source_ox_identity_sha256"])
             is None
@@ -11864,13 +12131,9 @@ def _write_r4_local_receipts(
             or isinstance(recent[0].get("generation"), bool)
             or not isinstance(recent[0].get("generation"), int)
             or recent[0]["generation"] < 1
-            or re.fullmatch(
-                r"[0-9a-f]{64}", str(recent[0].get("receipt_sha256") or "")
-            )
+            or re.fullmatch(r"[0-9a-f]{64}", str(recent[0].get("receipt_sha256") or ""))
             is None
-            or re.fullmatch(
-                r"[0-9a-f]{64}", str(label_head.get("head_sha256") or "")
-            )
+            or re.fullmatch(r"[0-9a-f]{64}", str(label_head.get("head_sha256") or ""))
             is None
         ):
             return False
@@ -11923,9 +12186,7 @@ def _write_r4_local_receipts(
                 or {
                     "source_commit": label.get("source_commit"),
                     "source_tree_sha256": label.get("source_tree_sha256"),
-                    "source_ox_identity_sha256": label.get(
-                        "source_ox_identity_sha256"
-                    ),
+                    "source_ox_identity_sha256": label.get("source_ox_identity_sha256"),
                 }
                 != source
             ):
@@ -11938,8 +12199,7 @@ def _write_r4_local_receipts(
             completion = completions.get(work_id)
             if (
                 re.fullmatch(r"[0-9a-f]{64}", record) is None
-                or canonical_json.canonical_json_sha256_strict(label_unsigned)
-                != record
+                or canonical_json.canonical_json_sha256_strict(label_unsigned) != record
                 or not isinstance(captured_at, str)
                 or _OX_EXPIRY_RE.fullmatch(captured_at) is None
                 or completion
@@ -11958,9 +12218,7 @@ def _write_r4_local_receipts(
                 "attempt": attempt,
                 "label_record_sha256": record,
             }
-            receipt_id = canonical_json.canonical_json_sha256_strict(
-                receipt_identity
-            )
+            receipt_id = canonical_json.canonical_json_sha256_strict(receipt_identity)
             workset_receipt: Mapping[str, Any]
             existing: Mapping[str, Any] | None = None
             if _r4_directory_or_missing(directory):
@@ -11981,11 +12239,9 @@ def _write_r4_local_receipts(
                 if isinstance(generation, bool) or not isinstance(generation, int):
                     return False
                 transition = workset.transition_receipt_identity(generation)
-                if (
-                    transition is None
-                    or transition.get("receipt_sha256")
-                    != workset_receipt_value.get("head_sha256")
-                ):
+                if transition is None or transition.get(
+                    "receipt_sha256"
+                ) != workset_receipt_value.get("head_sha256"):
                     return False
                 workset_receipt = dict(workset_receipt_value)
             else:
@@ -12033,10 +12289,13 @@ def _write_r4_local_receipts(
                 "namespace": "recall-distillation",
                 **payload,
             }
-            payload["receipt_sha256"] = (
-                canonical_json.canonical_json_sha256_strict(expected_unsigned)
+            payload["receipt_sha256"] = canonical_json.canonical_json_sha256_strict(
+                expected_unsigned
             )
-            expected = {**expected_unsigned, "receipt_sha256": payload["receipt_sha256"]}
+            expected = {
+                **expected_unsigned,
+                "receipt_sha256": payload["receipt_sha256"],
+            }
             if existing is not None:
                 if set(existing) != {*expected, "seal_sha256"} or any(
                     existing.get(key) != value for key, value in expected.items()
@@ -12133,9 +12392,7 @@ def _repair_r4_local_receipts(
     if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         return
     ledger_head = store.chain_head(label_path)
-    expected_head = (
-        str(label_rows[-1].get("record_sha256") or "") if label_rows else ""
-    )
+    expected_head = str(label_rows[-1].get("record_sha256") or "") if label_rows else ""
     if ledger_head != {
         "records": len(label_rows),
         "head_sha256": expected_head,
@@ -12187,9 +12444,7 @@ def _repair_r4_local_receipts(
         == {
             "work_id": entry["work_id"],
             "attempt": entry["attempt"],
-            "completion_ref": (
-                f"label-ledger:{entry['label']['record_sha256']}"
-            ),
+            "completion_ref": (f"label-ledger:{entry['label']['record_sha256']}"),
             "completion_digest": entry["label"]["record_sha256"],
         }
     ]
@@ -12313,11 +12568,16 @@ def _write_local_r4_pending_failure_marker(
         except FileNotFoundError:
             pass
     if existing is not None:
-        stable_payload = {key: value for key, value in payload.items() if key != "claim_transition"}
-        if (
-            set(existing) != {"schema", "namespace", "artifact_id", "seal_sha256", *payload}
-            or any(existing.get(key) != value for key, value in stable_payload.items())
-        ):
+        stable_payload = {
+            key: value for key, value in payload.items() if key != "claim_transition"
+        }
+        if set(existing) != {
+            "schema",
+            "namespace",
+            "artifact_id",
+            "seal_sha256",
+            *payload,
+        } or any(existing.get(key) != value for key, value in stable_payload.items()):
             raise DistillationError("local R4 pending failure marker conflicts")
         return dict(existing)
     _, path, artifact = _write_r4_immutable(
@@ -12364,7 +12624,8 @@ def _local_r4_task_matches_work_item(
     payload_bound = (
         payload_ref == f"candidate-snapshot:{rally_id}:{candidate_id}"
         if isinstance(payload_ref, str) and payload_ref.count(":") >= 2
-        else isinstance(payload_ref, str) and payload_ref.startswith("candidate-snapshot:")
+        else isinstance(payload_ref, str)
+        and payload_ref.startswith("candidate-snapshot:")
     )
     return (
         isinstance(rally_id, str)
@@ -12402,7 +12663,9 @@ def _remove_local_r4_pending_failure_marker(
             expected_directory_identity=directory_identity,
         )
     except store.DistillationStoreError as exc:
-        raise DistillationError("local R4 pending failure marker cleanup failed") from exc
+        raise DistillationError(
+            "local R4 pending failure marker cleanup failed"
+        ) from exc
 
 
 def _local_r4_pending_receipt_is_sealed(
@@ -12486,10 +12749,7 @@ def _local_r4_pending_receipt_is_sealed(
         }
     receipt_id = canonical_json.canonical_json_sha256_strict(receipt_identity)
     directory = (
-        store.distillation_dir(root)
-        / "r4-receipts"
-        / "local"
-        / source["source_commit"]
+        store.distillation_dir(root) / "r4-receipts" / "local" / source["source_commit"]
     )
     try:
         attempts_identity = _r4_directory_authority(
@@ -12552,8 +12812,12 @@ def _local_r4_pending_receipt_is_sealed(
         "captured_at": receipt_captured_at,
         "work_id": work_id,
         "attempt": attempt,
-        "rally_id": task.get("rally", {}).get("rally_id") if isinstance(task.get("rally"), Mapping) else None,
-        "candidate_id": task.get("candidate", {}).get("candidate_id") if isinstance(task.get("candidate"), Mapping) else None,
+        "rally_id": task.get("rally", {}).get("rally_id")
+        if isinstance(task.get("rally"), Mapping)
+        else None,
+        "candidate_id": task.get("candidate", {}).get("candidate_id")
+        if isinstance(task.get("candidate"), Mapping)
+        else None,
         "primary_owner": assignment.get("owner"),
         "probe": assignment.get("probe"),
         "assignment_revision": assignment.get("revision"),
@@ -12563,7 +12827,10 @@ def _local_r4_pending_receipt_is_sealed(
         "live_recall": {"model_calls": 0, "remote_egress": 0},
         "configured_max_inflight": configured_max_inflight,
         "failure_injection": True,
-        "outcome": {"class": normalized["outcome_class"], "reason": normalized["category"]},
+        "outcome": {
+            "class": normalized["outcome_class"],
+            "reason": normalized["category"],
+        },
         "attempt_record_sha256": attempt_record_sha256,
         "diagnostic": {"provider_calls": 0, "network_egress": 0},
         "workset_receipt": workset_receipt,
@@ -12597,19 +12864,26 @@ def _repair_local_r4_pending_failure_markers(
         return
     directories = sorted(base_directory.iterdir())
     if len(directories) > 128:
-        raise DistillationError("local R4 pending failure source inventory exceeds limit")
+        raise DistillationError(
+            "local R4 pending failure source inventory exceeds limit"
+        )
     paths: list[tuple[Path, Path]] = []
     for directory in directories:
         if not _r4_directory_or_missing(directory):
             continue
         paths.extend((directory, path) for path in sorted(directory.glob("*.json")))
     if len(paths) > 128:
-        raise DistillationError("local R4 pending failure marker inventory exceeds limit")
+        raise DistillationError(
+            "local R4 pending failure marker inventory exceeds limit"
+        )
     for directory, path in paths:
         if not stat.S_ISREG(path.lstat().st_mode):
             raise DistillationError("local R4 pending failure marker is unsafe")
         marker_id = path.stem
-        if path.name != f"{marker_id}.json" or re.fullmatch(r"[0-9a-f]{64}", marker_id) is None:
+        if (
+            path.name != f"{marker_id}.json"
+            or re.fullmatch(r"[0-9a-f]{64}", marker_id) is None
+        ):
             raise DistillationError("local R4 pending failure marker is unsafe")
         directory_identity = _r4_directory_authority(
             root=root,
@@ -12676,7 +12950,9 @@ def _repair_local_r4_pending_failure_markers(
         if {key: identity.get(key) for key in source} != source:
             raise DistillationError("local R4 pending failure marker is invalid")
         if directory.name != source["source_commit"]:
-            raise DistillationError("local R4 pending failure marker source directory drifted")
+            raise DistillationError(
+                "local R4 pending failure marker source directory drifted"
+            )
         stored_cap = marker.get("configured_max_inflight")
         captured_at = marker.get("captured_at")
         if (
@@ -12689,7 +12965,11 @@ def _repair_local_r4_pending_failure_markers(
             raise DistillationError("local R4 pending failure marker is invalid")
         work_id = identity.get("work_id")
         attempt = identity.get("attempt")
-        if not isinstance(work_id, str) or isinstance(attempt, bool) or not isinstance(attempt, int):
+        if (
+            not isinstance(work_id, str)
+            or isinstance(attempt, bool)
+            or not isinstance(attempt, int)
+        ):
             raise DistillationError("local R4 pending failure marker is invalid")
         claim_generation = claim_transition.get("generation")
         if isinstance(claim_generation, bool) or not isinstance(claim_generation, int):
@@ -12728,9 +13008,8 @@ def _repair_local_r4_pending_failure_markers(
             work_item=work_item_reader(work_id) or {},
         ):
             raise DistillationError("local R4 pending failure task drifted")
-        if (
-            store.chain_head(label_path) != label_head
-            or workset.completion_identities([work_id])
+        if store.chain_head(label_path) != label_head or workset.completion_identities(
+            [work_id]
         ):
             raise DistillationError("local R4 pending failure evidence drifted")
         settle = workset.transition_receipt_binding(claim_generation + 1)
@@ -12739,8 +13018,7 @@ def _repair_local_r4_pending_failure_markers(
             and settle.get("operation") == expected_operation
             and settle.get("selection_sha256")
             == claim_transition.get("selection_sha256")
-            and settle.get("work_ids_sha256")
-            == claim_transition.get("work_ids_sha256")
+            and settle.get("work_ids_sha256") == claim_transition.get("work_ids_sha256")
             and settle.get("context_sha256") == marker.get("seal_sha256")
         )
         if not settled:
@@ -12779,8 +13057,7 @@ def _repair_local_r4_pending_failure_markers(
                 source_commit=source["source_commit"],
             )
             continue
-        if (
-            not _write_r4_local_failure_receipts(
+        if not _write_r4_local_failure_receipts(
             root=root,
             config=config,
             workset=workset,
@@ -12791,7 +13068,6 @@ def _repair_local_r4_pending_failure_markers(
             require_current_source=False,
             captured_at=captured_at,
             claim_transition=claim_transition,
-        )
         ):
             raise DistillationError("local R4 pending failure repair failed")
         if not _local_r4_pending_receipt_is_sealed(
@@ -12844,7 +13120,11 @@ def _settle_local_r4_failure(
             label_head=label_head,
             claim_transition=claim_transition,
         )
-    if category in {"capacity", "preemption"} and not attempted and not owned_diagnostic:
+    if (
+        category in {"capacity", "preemption"}
+        and not attempted
+        and not owned_diagnostic
+    ):
         workset.release_unattempted(claims)
     else:
         workset.commit(
@@ -12860,11 +13140,15 @@ def _settle_local_r4_failure(
             context_sha256=marker["seal_sha256"] if marker else None,
         )
     if owned_diagnostic:
-        assert source is not None and claim_transition is not None and marker is not None
+        assert (
+            source is not None and claim_transition is not None and marker is not None
+        )
         marker_claim = marker.get("claim_transition")
         if not isinstance(marker_claim, Mapping):
             raise DistillationError("local R4 owned failure marker is invalid")
-        if marker_claim.get("work_ids_sha256") != canonical_json.canonical_json_sha256_strict(
+        if marker_claim.get(
+            "work_ids_sha256"
+        ) != canonical_json.canonical_json_sha256_strict(
             [claim.work_id for claim in claims]
         ):
             raise DistillationError("local R4 owned failure marker is invalid")
@@ -12906,7 +13190,9 @@ def _settle_local_r4_failure(
             entries=entries,
             label_head=label_head,
             settle_transition=settle_transition,
-            captured_at=marker.get("captured_at") if isinstance(marker.get("captured_at"), str) else None,
+            captured_at=marker.get("captured_at")
+            if isinstance(marker.get("captured_at"), str)
+            else None,
             claim_transition=marker_claim,
         ):
             raise DistillationError("local R4 failure receipt publication failed")
@@ -12940,66 +13226,16 @@ def _local_r4_deferred_category(exc: DistillationDeferred) -> str:
     return "timeout"
 
 
-def _run_local_teacher_route(
+def _reconcile_local_teacher_claims(
     *,
     workset: Any,
-    route: str,
-    config: DistillationConfig,
-    teachers: Mapping[str, Teacher],
-    tasks: Mapping[str, Mapping[str, Any]],
-    texts: Mapping[str, str],
-    root: Path,
-    raw_dir: Path,
-    label_path: Path,
-    snapshots: Mapping[str, Mapping[str, Any]],
+    claims: Sequence[Any],
     label_rows: Sequence[Mapping[str, Any]],
-    structural_verifier: Callable[
-        [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
-    ],
-) -> _TeacherBatchResult | None:
-    teacher = teachers[route]
-    claims = list(workset.claim(f"local-teacher:{route}", 1, str(route), 300))
-    if not claims:
-        return None
-    if isinstance(teacher, _WorkerTeacher):
-        _repair_local_r4_pending_failure_markers(
-            root=root,
-            config=config,
-            workset=workset,
-            label_path=label_path,
-            reclaimed_claim=claims[0],
-        )
-    owned_injection = (
-        _local_r4_owned_failure_injection(
-            route=route, work_id=claims[0].work_id, attempt=claims[0].attempt
-        )
-        if isinstance(teacher, _WorkerTeacher)
-        else None
-    )
-    if owned_injection is not None and owned_injection not in (
-        _LOCAL_R4_DEFERRED_FAILURES | _LOCAL_R4_INVALID_FAILURES
-    ):
-        raise DistillationError("local R4 owned failure category is invalid")
-    claim_transition: Mapping[str, Any] | None = None
-    if isinstance(teacher, _WorkerTeacher) and owned_injection is not None:
-        latest = workset.recent_transition_receipts(limit=1)
-        if len(latest) != 1 or latest[0].get("operation") != "claim":
-            raise DistillationError("local R4 owned claim transition is unavailable")
-        generation = latest[0].get("generation")
-        if isinstance(generation, bool) or not isinstance(generation, int):
-            raise DistillationError("local R4 owned claim transition is invalid")
-        claim_transition = workset.transition_receipt_binding(generation)
-        if claim_transition is None:
-            raise DistillationError("local R4 owned claim transition is invalid")
-    elif config.teacher_claim_limit > 1:
-        claims.extend(
-            workset.claim(
-                f"local-teacher:{route}",
-                min(15, config.teacher_claim_limit - 1),
-                str(route),
-                300,
-            )
-        )
+    tasks: Mapping[str, Mapping[str, Any]],
+    route: str,
+    root: Path,
+    config: DistillationConfig,
+) -> list[Any]:
     completed_by_work = {
         str(row["work_id"]): row
         for row in label_rows
@@ -13080,30 +13316,114 @@ def _run_local_teacher_route(
             entries=receipt_entries,
         )
     claims = [claim for claim in claims if claim not in reconciled]
-    active = [claim for claim in claims if claim.work_id in tasks]
-    missing = [claim for claim in claims if claim.work_id not in tasks]
-    if missing:
-        workset.commit(
-            missing,
-            [
-                {"status": "quarantined", "error_class": "payload_missing"}
-                for _ in missing
-            ],
-        )
-    if not active:
-        return None
-    unique_active: list[Any] = []
-    duplicate_claims: list[Any] = []
-    batch_candidate_ids: set[str] = set()
-    for claim in active:
-        candidate_id = str(tasks[claim.work_id]["candidate"]["candidate_id"])
-        if candidate_id in batch_candidate_ids:
-            duplicate_claims.append(claim)
-            continue
-        batch_candidate_ids.add(candidate_id)
-        unique_active.append(claim)
-    if duplicate_claims:
-        workset.release_unattempted(duplicate_claims)
+    return claims
+
+
+def _commit_local_teacher_labels(
+    *,
+    workset: Any,
+    route: str,
+    config: DistillationConfig,
+    root: Path,
+    raw_dir: Path,
+    label_path: Path,
+    snapshots: Mapping[str, Mapping[str, Any]],
+    batch: Sequence[Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    labels_by_id: Mapping[str, Mapping[str, Any]],
+    response: Mapping[str, Any],
+    structural_verifier: Callable[
+        [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
+    ],
+    source_binding: Mapping[str, str] | None,
+    worker_teacher: bool,
+) -> _TeacherBatchResult:
+    if source_binding is not None:
+        try:
+            source_stable = (
+                _validate_ox_source_binding(ox_alpha_source_binding()) == source_binding
+            )
+        except (DistillationError, ValueError):
+            source_stable = False
+        if not source_stable:
+            workset.commit(
+                [item["claim"] for item in batch],
+                [
+                    {
+                        "status": (
+                            "quarantined" if item["claim"].attempt >= 3 else "retry"
+                        ),
+                        "error_class": "source_drift",
+                        "retry_after_seconds": (
+                            0 if item["claim"].attempt >= 3 else 60
+                        ),
+                    }
+                    for item in batch
+                ],
+            )
+            return _TeacherBatchResult(
+                deferred=True,
+                model_calls=1,
+                workset_status=workset.status(include_timing=True),
+            )
+    appended = store.append_chain_batch(label_path, records)
+    _advance_local_workset(
+        workset,
+        [],
+        _local_workset_watermark(
+            root=root, raw_dir=raw_dir, label_path=label_path, snapshots=snapshots
+        ),
+    )
+    appended_by_work = {str(row["work_id"]): row for row in appended}
+    workset.commit(
+        [item["claim"] for item in batch],
+        [
+            {
+                "status": "completed",
+                "completion_ref": f"label-ledger:{appended_by_work[item['claim'].work_id]['record_sha256']}",
+                "completion_digest": str(
+                    appended_by_work[item["claim"].work_id]["record_sha256"]
+                ),
+            }
+            for item in batch
+        ],
+    )
+    route_identity = response.get("_route_identity")
+    receipt_entries = []
+    if isinstance(route_identity, Mapping):
+        for item in batch:
+            entry = _local_r4_receipt_entry(
+                work_id=item["claim"].work_id,
+                attempt=item["claim"].attempt,
+                task=item["task"],
+                label=appended_by_work[item["claim"].work_id],
+                route_identity=route_identity,
+            )
+            if entry is not None:
+                receipt_entries.append(entry)
+    if worker_teacher and len(receipt_entries) != len(batch):
+        raise DistillationError("local R4 receipt cardinality mismatch")
+    _ensure_r4_local_receipts(
+        root=root,
+        config=config,
+        workset=workset,
+        entries=receipt_entries,
+    )
+    return _TeacherBatchResult(
+        labels_written=len(appended),
+        model_calls=1,
+        workset_status=workset.status(include_timing=True),
+    )
+
+
+def _prepare_local_teacher_payload_batch(
+    *,
+    unique_active: Sequence[Any],
+    tasks: Mapping[str, Mapping[str, Any]],
+    texts: Mapping[str, str],
+    config: DistillationConfig,
+    workset: Any,
+) -> list[dict[str, Any]]:
     batch: list[dict[str, Any]] = []
     for claim in unique_active:
         task = tasks[claim.work_id]
@@ -13131,6 +13451,110 @@ def _run_local_teacher_route(
                 },
             }
         )
+    return batch
+
+
+def _run_local_teacher_route(
+    *,
+    workset: Any,
+    route: str,
+    config: DistillationConfig,
+    teachers: Mapping[str, Teacher],
+    tasks: Mapping[str, Mapping[str, Any]],
+    texts: Mapping[str, str],
+    root: Path,
+    raw_dir: Path,
+    label_path: Path,
+    snapshots: Mapping[str, Mapping[str, Any]],
+    label_rows: Sequence[Mapping[str, Any]],
+    structural_verifier: Callable[
+        [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
+    ],
+) -> _TeacherBatchResult | None:
+    teacher = teachers[route]
+    claims = list(workset.claim(f"local-teacher:{route}", 1, str(route), 300))
+    if not claims:
+        return None
+    if isinstance(teacher, _WorkerTeacher):
+        _repair_local_r4_pending_failure_markers(
+            root=root,
+            config=config,
+            workset=workset,
+            label_path=label_path,
+            reclaimed_claim=claims[0],
+        )
+    owned_injection = (
+        _local_r4_owned_failure_injection(
+            route=route, work_id=claims[0].work_id, attempt=claims[0].attempt
+        )
+        if isinstance(teacher, _WorkerTeacher)
+        else None
+    )
+    if owned_injection is not None and owned_injection not in (
+        _LOCAL_R4_DEFERRED_FAILURES | _LOCAL_R4_INVALID_FAILURES
+    ):
+        raise DistillationError("local R4 owned failure category is invalid")
+    claim_transition: Mapping[str, Any] | None = None
+    if isinstance(teacher, _WorkerTeacher) and owned_injection is not None:
+        latest = workset.recent_transition_receipts(limit=1)
+        if len(latest) != 1 or latest[0].get("operation") != "claim":
+            raise DistillationError("local R4 owned claim transition is unavailable")
+        generation = latest[0].get("generation")
+        if isinstance(generation, bool) or not isinstance(generation, int):
+            raise DistillationError("local R4 owned claim transition is invalid")
+        claim_transition = workset.transition_receipt_binding(generation)
+        if claim_transition is None:
+            raise DistillationError("local R4 owned claim transition is invalid")
+    elif config.teacher_claim_limit > 1:
+        claims.extend(
+            workset.claim(
+                f"local-teacher:{route}",
+                min(15, config.teacher_claim_limit - 1),
+                str(route),
+                300,
+            )
+        )
+    claims = _reconcile_local_teacher_claims(
+        workset=workset,
+        claims=claims,
+        label_rows=label_rows,
+        tasks=tasks,
+        route=route,
+        root=root,
+        config=config,
+    )
+
+    active = [claim for claim in claims if claim.work_id in tasks]
+    missing = [claim for claim in claims if claim.work_id not in tasks]
+    if missing:
+        workset.commit(
+            missing,
+            [
+                {"status": "quarantined", "error_class": "payload_missing"}
+                for _ in missing
+            ],
+        )
+    if not active:
+        return None
+    unique_active: list[Any] = []
+    duplicate_claims: list[Any] = []
+    batch_candidate_ids: set[str] = set()
+    for claim in active:
+        candidate_id = str(tasks[claim.work_id]["candidate"]["candidate_id"])
+        if candidate_id in batch_candidate_ids:
+            duplicate_claims.append(claim)
+            continue
+        batch_candidate_ids.add(candidate_id)
+        unique_active.append(claim)
+    if duplicate_claims:
+        workset.release_unattempted(duplicate_claims)
+    batch = _prepare_local_teacher_payload_batch(
+        unique_active=unique_active,
+        tasks=tasks,
+        texts=texts,
+        config=config,
+        workset=workset,
+    )
     if not batch:
         return _TeacherBatchResult(workset_status=workset.status(include_timing=True))
     worker_input = {
@@ -13314,84 +13738,22 @@ def _run_local_teacher_route(
                 ),
             }
         )
-    if source_binding is not None:
-        try:
-            source_stable = (
-                _validate_ox_source_binding(ox_alpha_source_binding())
-                == source_binding
-            )
-        except (DistillationError, ValueError):
-            source_stable = False
-        if not source_stable:
-            workset.commit(
-                [item["claim"] for item in batch],
-                [
-                    {
-                        "status": (
-                            "quarantined" if item["claim"].attempt >= 3 else "retry"
-                        ),
-                        "error_class": "source_drift",
-                        "retry_after_seconds": (
-                            0 if item["claim"].attempt >= 3 else 60
-                        ),
-                    }
-                    for item in batch
-                ],
-            )
-            return _TeacherBatchResult(
-                deferred=True,
-                model_calls=1,
-                workset_status=workset.status(include_timing=True),
-            )
-    appended = store.append_chain_batch(label_path, records)
-    _advance_local_workset(
-        workset,
-        [],
-        _local_workset_watermark(
-            root=root, raw_dir=raw_dir, label_path=label_path, snapshots=snapshots
-        ),
-    )
-    appended_by_work = {str(row["work_id"]): row for row in appended}
-    workset.commit(
-        [item["claim"] for item in batch],
-        [
-            {
-                "status": "completed",
-                "completion_ref": f"label-ledger:{appended_by_work[item['claim'].work_id]['record_sha256']}",
-                "completion_digest": str(
-                    appended_by_work[item["claim"].work_id]["record_sha256"]
-                ),
-            }
-            for item in batch
-        ],
-    )
-    route_identity = response.get("_route_identity")
-    receipt_entries = []
-    if isinstance(route_identity, Mapping):
-        for item in batch:
-            entry = _local_r4_receipt_entry(
-                work_id=item["claim"].work_id,
-                attempt=item["claim"].attempt,
-                task=item["task"],
-                label=appended_by_work[item["claim"].work_id],
-                route_identity=route_identity,
-            )
-            if entry is not None:
-                receipt_entries.append(entry)
-    if isinstance(teachers[route], _WorkerTeacher) and len(receipt_entries) != len(
-        batch
-    ):
-        raise DistillationError("local R4 receipt cardinality mismatch")
-    _ensure_r4_local_receipts(
-        root=root,
-        config=config,
+
+    return _commit_local_teacher_labels(
         workset=workset,
-        entries=receipt_entries,
-    )
-    return _TeacherBatchResult(
-        labels_written=len(appended),
-        model_calls=1,
-        workset_status=workset.status(include_timing=True),
+        route=route,
+        config=config,
+        root=root,
+        raw_dir=raw_dir,
+        label_path=label_path,
+        snapshots=snapshots,
+        batch=batch,
+        records=records,
+        labels_by_id=labels_by_id,
+        response=response,
+        structural_verifier=structural_verifier,
+        source_binding=source_binding,
+        worker_teacher=isinstance(teachers[route], _WorkerTeacher),
     )
 
 
