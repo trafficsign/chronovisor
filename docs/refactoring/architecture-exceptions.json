@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "645fb56cafae160c9ba25af968852c6fad0c8389c4a80d695e9eebae0d7d88c8",
+  "baseline_sha256": "906f30b79c64fea75679f522d3ab957e7fd3fa8467c776c79d3ce105ef6df79e",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 44,
@@ -4513,6 +4513,27 @@
           "line": 53
         },
         {
+          "semantic_id": "arch:16f5b8000fb3afddc22cad9dfe4c3d18f22aabf91216f0f6a4f3c60641101e30",
+          "source_module": "chronovisor.recall.recall_distillation",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.durable_state",
+          "symbols": [
+            "DurableStateError",
+            "atomic_write_bytes",
+            "atomic_write_bytes_at",
+            "file_lock",
+            "okf_writer_lock",
+            "open_directory_nofollow",
+            "open_regular_nofollow",
+            "sidecar_exclusive_lock"
+          ],
+          "content_sha256": "42ff3fb1fe36d96005985981b14b3c9af7fdea882300181575497ebded9c4b89",
+          "occurrence": 1,
+          "line": 36
+        },
+        {
           "semantic_id": "arch:19d98cf56f5afa28ed4901349231bb32ff20e2478523778dca9a86ccb20a958a",
           "source_module": "chronovisor.recall.recall_improvement",
           "scope_kind": "module",
@@ -4995,21 +5016,6 @@
           "content_sha256": "e95ae9bee1d3a1a29398860ddd41b2b3614348ddd2ffd54c63b66dc046feb1c3",
           "occurrence": 1,
           "line": 16
-        },
-        {
-          "semantic_id": "arch:3e6007be611d3b5ae634fb9b1b88b27032f7d6e4ccab389ac4fbee9f34256554",
-          "source_module": "chronovisor.recall.recall_distillation",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core.durable_state",
-          "symbols": [
-            "atomic_write_bytes",
-            "sidecar_exclusive_lock"
-          ],
-          "content_sha256": "8cd7183e9996997c63d06718c9d337e411fc8ac421896d76c9c694b5e75d94f4",
-          "occurrence": 1,
-          "line": 34
         },
         {
           "semantic_id": "arch:40364d2d73c8e42c6f625cdef9cee00bb658a130432d3a384131cf3fb32d6d21",
