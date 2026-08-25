@@ -1541,6 +1541,56 @@ def _ox_event_projection(
 
     workset_payload_digests: dict[str, str] | None = None
 
+    def current_workset_provenance_matches(provenance: Mapping[str, Any]) -> bool:
+        required = {
+            "profile",
+            "cohort",
+            "route",
+            "teacher_role",
+            "profile_contract_id",
+            "probe",
+        }
+        probe_fields = {
+            "probe_revision",
+            "repeat_pair_id",
+            "fixed_repeat",
+            "order_swap",
+            "blind_order",
+            "probe_batch_id",
+            "order_variant",
+            "candidate_position",
+        }
+        if set(provenance) - (required | probe_fields) or any(
+            provenance.get(key) != value
+            for key, value in {
+                "profile": OX_SINGLE_PROFILE,
+                "cohort": OX_SINGLE_COHORT,
+                "route": "opencode-go/ox-alpha-free",
+                "teacher_role": OX_TEACHER_ROLE,
+                "profile_contract_id": profile_contract_id,
+            }.items()
+        ):
+            return False
+        if provenance.get("probe") is False:
+            return set(provenance) == required
+        if provenance.get("probe") is not True or set(provenance) != required | probe_fields:
+            return False
+        return (
+            provenance.get("probe_revision") == OX_PROBE_REVISION
+            and provenance.get("fixed_repeat") is True
+            and provenance.get("order_swap") is True
+            and provenance.get("blind_order") in {"a_first", "b_first"}
+            and type(provenance.get("order_variant")) is int
+            and provenance.get("order_variant") in {1, 2}
+            and type(provenance.get("candidate_position")) is int
+            and provenance.get("candidate_position") in {0, 1}
+            and all(
+                re.fullmatch(r"[0-9a-f]{64}", str(provenance.get(key) or ""))
+                is not None
+                for key in ("repeat_pair_id", "probe_batch_id")
+            )
+        )
+
     def current_workset_payload_digests() -> dict[str, str]:
         """Read the exact OX payload inventory without opening it writable."""
 
@@ -1576,11 +1626,7 @@ def _ox_event_projection(
                 raise DistillationError("OX workset payload inventory is invalid")
             if provenance.get("profile_contract_id") != profile_contract_id:
                 continue
-            if (
-                provenance.get("profile") != OX_SINGLE_PROFILE
-                or provenance.get("cohort") != OX_SINGLE_COHORT
-                or provenance.get("route") != "opencode-go/ox-alpha-free"
-            ):
+            if not current_workset_provenance_matches(provenance):
                 raise DistillationError("OX workset payload inventory is invalid")
             expected_work_id = canonical_json.canonical_json_sha256_strict(
                 {
@@ -1804,6 +1850,8 @@ def _ox_event_projection(
                 or payload.get("cap") not in allowed_caps
                 or type(payload.get("next_cap")) is not int
                 or payload.get("next_cap") not in allowed_caps
+                or payload["next_cap"]
+                != _next_ox_ramp_cap(payload["cap"], contract_max_inflight)
                 or type(payload.get("valid_receipts")) is not int
                 or payload["valid_receipts"] < 0
                 or type(payload.get("attempts")) is not int
@@ -1893,6 +1941,11 @@ def _ox_event_projection(
                     for work_id in work_ids
                 }:
                     raise DistillationError("OX failure provider request is unbound")
+                if any(
+                    provider_receipts[work_id] == provider_requests[work_id]
+                    for work_id in work_ids
+                ):
+                    raise DistillationError("OX failure provider receipt is synthetic")
                 category = payload.get("category")
                 expected_fields = set(required)
                 if category == "429":
@@ -1909,7 +1962,10 @@ def _ox_event_projection(
                     if payload.get("bounded") is not True:
                         raise DistillationError("OX failure event fields are invalid")
                     expected_fields.add("bounded")
-                elif category not in {"402", "paid", "model_drift"}:
+                elif category in {"402", "paid", "model_drift"}:
+                    if payload.get("status") != "hard_stop":
+                        raise DistillationError("OX failure event fields are invalid")
+                else:
                     raise DistillationError("OX failure event fields are invalid")
                 if set(payload) != expected_fields:
                     raise DistillationError("OX event schema is invalid")
@@ -1971,6 +2027,8 @@ def _ox_event_projection(
         referenced = referenced_contract(row)
         if row.get("profile_contract_id") != profile_contract_id:
             continue
+        if row.get("kind") != "teacher-label" or row.get("status") != "completed":
+            raise DistillationError("OX label kind or status is invalid")
         if "provider_response_request_sha256" in row:
             raise DistillationError("OX label contains retired provider receipt key")
         if any(row.get(key) != value for key, value in source_binding.items()):
@@ -1990,7 +2048,7 @@ def _ox_event_projection(
             )
             is None
         ):
-            continue
+            raise DistillationError("OX label provider receipt is invalid")
         payload_digest = row.get("payload_digest")
         work_id = row.get("work_id")
         if (
@@ -2011,7 +2069,79 @@ def _ox_event_projection(
             )
         ):
             raise DistillationError("OX label provider request intent is unbound")
+        if row.get("provider_receipt_sha256") == row.get("provider_request_sha256"):
+            raise DistillationError("OX label provider receipt is synthetic")
+        if any(
+            (
+                row.get("cohort") != OX_SINGLE_COHORT,
+                row.get("route") != "opencode-go/ox-alpha-free",
+                row.get("teacher_role") != OX_TEACHER_ROLE,
+                row.get("identity_revision") != OX_ALPHA_FIXED_IDENTITY["revision"],
+                row.get("route_identity") != OX_ALPHA_FIXED_IDENTITY["route_identity"],
+                row.get("route_digest") != OX_ALPHA_FIXED_IDENTITY["route_digest"],
+                row.get("model_digest") != OX_ALPHA_FIXED_IDENTITY["model_digest"],
+                row.get("prompt_sha256")
+                != OX_ALPHA_FIXED_IDENTITY["prompt_template_sha256"],
+                row.get("schema_sha256")
+                != OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"],
+                row.get("test_only") is not False,
+            )
+        ):
+            raise DistillationError("OX label producer identity is invalid")
+        payload_source = row.get("payload_source")
+        expected_work_id = canonical_json.canonical_json_sha256_strict(
+            {
+                "kind": "ox-teacher-label-v1",
+                "profile": OX_SINGLE_PROFILE,
+                "cohort": OX_SINGLE_COHORT,
+                "route": "opencode-go/ox-alpha-free",
+                "profile_contract_id": profile_contract_id,
+                "payload_digest": payload_digest,
+            }
+        )
+        if (
+            not isinstance(payload_source, Mapping)
+            or canonical_json.canonical_json_sha256_strict(payload_source)
+            != payload_digest
+            or work_id != expected_work_id
+        ):
+            raise DistillationError("OX label payload binding is invalid")
+        if type(row.get("attempt_count")) is not int or row["attempt_count"] < 1:
+            raise DistillationError("OX label attempt is invalid")
+        if type(row.get("ramp_cap")) is not int or row["ramp_cap"] not in allowed_caps:
+            raise DistillationError("OX label ramp cap is invalid")
         labels.append(row)
+
+    if len({str(row["work_id"]) for row in labels}) != len(labels):
+        raise DistillationError("OX label work_id is not globally unique")
+    success_receipts: set[str] = set()
+    success_attempts: set[tuple[str, int]] = set()
+    for row in labels:
+        receipt = str(row["provider_receipt_sha256"])
+        success_receipts.add(receipt)
+        success_attempts.add((str(row["work_id"]), int(row["attempt_count"])))
+    failure_provider_receipts: set[str] = set()
+    seen_attempts = set(success_attempts)
+    for failure in failures:
+        receipts = {
+            str(receipt)
+            for receipt in cast(
+                Mapping[str, Any], failure.get("provider_receipts", {})
+            ).values()
+        }
+        if failure_provider_receipts & receipts:
+            raise DistillationError("OX provider receipt crosses failure events")
+        failure_provider_receipts.update(receipts)
+        attempts_by_work = cast(Mapping[str, Any], failure["attempts_by_work"])
+        attempts = {
+            (str(work_id), int(attempt))
+            for work_id, attempt in attempts_by_work.items()
+        }
+        if seen_attempts & attempts:
+            raise DistillationError("OX provider attempt is not globally unique")
+        seen_attempts.update(attempts)
+    if success_receipts & failure_provider_receipts:
+        raise DistillationError("OX provider receipt crosses success and failure")
 
     workset_receipts_certifying = False
     workset_path = store.distillation_dir(root) / "ox-workset.sqlite3"
@@ -2023,6 +2153,25 @@ def _ox_event_projection(
             workset_receipts_certifying = (
                 queue.audit_transition_receipts().get("status") == "verified"
             )
+            if labels:
+                if not workset_receipts_certifying:
+                    raise DistillationError("OX label workset receipts are non-certifying")
+                completed = queue.completion_identities(
+                    [str(label["work_id"]) for label in labels]
+                )
+                if set(completed) != {str(label["work_id"]) for label in labels}:
+                    raise DistillationError("OX label completion identity is unavailable")
+                for label in labels:
+                    work_id = str(label["work_id"])
+                    record_sha256 = str(label.get("record_sha256") or "")
+                    identity = completed[work_id]
+                    if (
+                        identity.get("attempt") != label.get("attempt_count")
+                        or identity.get("completion_ref")
+                        != f"label-ledger:{record_sha256}"
+                        or identity.get("completion_digest") != record_sha256
+                    ):
+                        raise DistillationError("OX label completion identity is unbound")
             if workset_receipts_certifying:
                 for recovery in recoveries:
                     binding = queue.transition_receipt_binding(
@@ -2038,8 +2187,12 @@ def _ox_event_projection(
                         != recovery.get("work_ids_sha256")
                     ):
                         raise DistillationError("OX lease reclaim receipt is unbound")
-        except (DistillationError, ValueError, TypeError, sqlite3.Error) as exc:
+        except DistillationError:
+            raise
+        except (ValueError, TypeError, sqlite3.Error) as exc:
             raise DistillationError("OX lease reclaim receipt is unbound") from exc
+    elif labels:
+        raise DistillationError("OX label workset is unavailable")
     pair_rows: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in labels:
         assignment = row.get("assignment")
@@ -2138,6 +2291,7 @@ def _ox_event_projection(
     prior_label_count = 0
     prior_failure_count = 0
     ramp_segments: list[bool] = []
+    ramp_receipts: set[str] = set()
     for stage in ramp:
         label_count = stage.get("label_count")
         failure_count = stage.get("failure_record_count")
@@ -2172,6 +2326,16 @@ def _ox_event_projection(
                 and stage.get("valid_receipts") == len(segment)
                 and len(segment) == len(set(segment))
             )
+            receipt_groups = {
+                str(row.get("provider_receipt_sha256") or "")
+                for row in label_chain[prior_label_count:label_count]
+                if str(row.get("record_sha256") or "") in certifying_labels
+                and row.get("ramp_cap") == stage.get("cap")
+                and row.get("status") == "completed"
+            }
+            if ramp_receipts & receipt_groups:
+                raise DistillationError("OX provider receipt crosses ramp stages")
+            ramp_receipts.update(receipt_groups)
         prior_label_count = label_count if type(label_count) is int else prior_label_count
         prior_failure_count = (
             failure_count if type(failure_count) is int else prior_failure_count
@@ -2200,13 +2364,24 @@ def _ox_event_projection(
     ):
         latest_start = len(caps) - 1
     latest_caps = caps[latest_start:]
+    if (
+        ramp
+        and ramp[-1].get("cap") == required_caps[-1]
+        and (
+            ramp[-1].get("label_count") != len(label_chain)
+            or ramp[-1].get("failure_record_count") != len(failure_chain)
+        )
+    ):
+        raise DistillationError("OX terminal ramp checkpoint is stale")
     expected_suffix = (
         list(required_caps[required_caps.index(latest_caps[0]) :])
         if latest_caps and latest_caps[0] in required_caps
         else []
     )
     ramp_complete = (
-        bool(ramp)
+        contract.get("teacher_claim_limit") == 1
+        and contract_max_inflight == 10
+        and bool(ramp)
         and all(ramp_segments)
         and latest_caps == expected_suffix
         and (latest_start == 0 or terminal_requalification)

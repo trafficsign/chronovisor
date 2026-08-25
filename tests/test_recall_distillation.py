@@ -74,6 +74,132 @@ def _ox_metadata(payload: object) -> dict[str, object]:
     return {**metadata, "_provider_receipt_sha256": "e" * 64}
 
 
+def _ox_projection_payload_source(candidate_id: str = "candidate") -> dict[str, str]:
+    return {"candidate_id": candidate_id, "rally_id": "rally"}
+
+
+def _ox_projection_label_identity() -> dict[str, Any]:
+    return {
+        "cohort": distill.OX_SINGLE_COHORT,
+        "route": "opencode-go/ox-alpha-free",
+        "teacher_role": distill.OX_TEACHER_ROLE,
+        "identity_revision": distill.OX_ALPHA_FIXED_IDENTITY["revision"],
+        "route_identity": dict(distill.OX_ALPHA_FIXED_IDENTITY["route_identity"]),
+        "route_digest": distill.OX_ALPHA_FIXED_IDENTITY["route_digest"],
+        "model_digest": distill.OX_ALPHA_FIXED_IDENTITY["model_digest"],
+        "prompt_sha256": distill.OX_ALPHA_FIXED_IDENTITY["prompt_template_sha256"],
+        "schema_sha256": distill.OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"],
+        "test_only": False,
+    }
+
+
+def _ox_projection_work(
+    tmp_path: Path, *, max_inflight: int = 10
+) -> tuple[dict[str, str], dict[str, Any], str, str]:
+    source = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    contract = distill._ensure_ox_profile_contract(
+        tmp_path,
+        distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            ox_free_only=True,
+            teacher_claim_limit=1,
+            teacher_max_inflight=max_inflight,
+        ),
+        source_binding=source,
+    )
+    payload_digest = canonical_json.canonical_json_sha256_strict(
+        _ox_projection_payload_source()
+    )
+    work_id = canonical_json.canonical_json_sha256_strict(
+        {
+            "kind": "ox-teacher-label-v1",
+            "profile": distill.OX_SINGLE_PROFILE,
+            "cohort": distill.OX_SINGLE_COHORT,
+            "route": "opencode-go/ox-alpha-free",
+            "profile_contract_id": contract["artifact_id"],
+            "payload_digest": payload_digest,
+        }
+    )
+    workset.DistillationWorkset(
+        store.distillation_dir(tmp_path) / "ox-workset.sqlite3"
+    ).advance(
+        [
+            {
+                "work_id": work_id,
+                "kind": "ox",
+                "payload_ref": "candidate-snapshot:rally:candidate",
+                "payload_digest": payload_digest,
+                "temporal_split": {"split": "embargo"},
+                "provenance": {
+                    "profile": distill.OX_SINGLE_PROFILE,
+                    "cohort": distill.OX_SINGLE_COHORT,
+                    "route": "opencode-go/ox-alpha-free",
+                    "teacher_role": distill.OX_TEACHER_ROLE,
+                    "profile_contract_id": contract["artifact_id"],
+                    "probe": False,
+                },
+            }
+        ],
+        {"candidate_records": 1},
+    )
+    return source, contract, work_id, payload_digest
+
+
+def _complete_projection_label(tmp_path: Path, work_id: str, label: Mapping[str, Any]) -> None:
+    queue = workset.DistillationWorkset(
+        store.distillation_dir(tmp_path) / "ox-workset.sqlite3"
+    )
+    claim = queue.claim("ox", 1, "test", 60)[0]
+    assert claim.work_id == work_id
+    record_sha256 = str(label["record_sha256"])
+    queue.commit(
+        [claim],
+        [
+            {
+                "status": "completed",
+                "completion_ref": f"label-ledger:{record_sha256}",
+                "completion_digest": record_sha256,
+            }
+        ],
+    )
+
+
+def _ox_projection_label_record(
+    source: Mapping[str, str], contract: Mapping[str, Any], work_id: str, payload_digest: str
+) -> dict[str, Any]:
+    return {
+        "kind": "teacher-label",
+        "status": "completed",
+        "work_id": work_id,
+        "payload_digest": payload_digest,
+        "payload_source": _ox_projection_payload_source(),
+        "attempt_count": 1,
+        "ramp_cap": 1,
+        "profile": distill.OX_SINGLE_PROFILE,
+        "profile_contract_id": contract["artifact_id"],
+        **_ox_projection_label_identity(),
+        **source,
+        "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+        "expires_at": contract["expires_at"],
+        "provider_request_sha256": distill.expected_ox_provider_request_sha256(
+            profile_contract_id=str(contract["artifact_id"]),
+            payload_digest=payload_digest,
+            work_id=work_id,
+            expires_at=str(contract["expires_at"]),
+        ),
+        "provider_receipt_sha256": "f" * 64,
+        "request_sha256": distill.expected_ox_request_sha256(
+            profile_contract_id=str(contract["artifact_id"]),
+            payload_digest=payload_digest,
+        ),
+    }
+
+
 def test_ox_receipt_projection_cannot_promote_shallow_forgery(tmp_path: Path) -> None:
     """One forged label/pointer must not replace the authoritative gate."""
 
@@ -172,7 +298,9 @@ def test_ox_event_projection_keeps_legacy_provider_receipts_noncertifying(
                     "profile": distill.OX_SINGLE_PROFILE,
                     "cohort": distill.OX_SINGLE_COHORT,
                     "route": "opencode-go/ox-alpha-free",
+                    "teacher_role": distill.OX_TEACHER_ROLE,
                     "profile_contract_id": contract["artifact_id"],
+                    "probe": False,
                 },
             }
         ],
@@ -294,6 +422,1029 @@ def test_ox_label_projection_rejects_retired_provider_receipt_key(
             label_path=label_path,
             authoritative_gate={"passed": True, "reasons": []},
         )
+
+
+@pytest.mark.parametrize("synthetic", [True, False])
+def test_ox_failure_projection_requires_distinct_actual_receipt(
+    tmp_path: Path, synthetic: bool
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    provider_request = distill.expected_ox_provider_request_sha256(
+        profile_contract_id=str(contract["artifact_id"]),
+        payload_digest=payload_digest,
+        work_id=work_id,
+        expires_at=str(contract["expires_at"]),
+    )
+    distill._append_ox_event(
+        tmp_path,
+        "ox-failure-receipts.jsonl",
+        {
+                "event_version": 2,
+                "kind": "ox-provider-failure",
+                "profile_contract_id": contract["artifact_id"],
+                **source,
+                "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+                "expires_at": contract["expires_at"],
+                "cap": 1,
+                "category": "5xx",
+                "status": "deferred",
+                "attempts": 1,
+                "bounded": True,
+                "work_ids": [work_id],
+                "attempts_by_work": {work_id: 1},
+                "provider_requests": {work_id: provider_request},
+                "provider_receipts": {
+                    work_id: provider_request if synthetic else "f" * 64
+                },
+                "captured_at": "2026-08-25T00:00:00Z",
+        },
+    )
+    kwargs = {
+        "profile_contract_id": str(contract["artifact_id"]),
+        "source_binding": source,
+        "workset": {"leased": 0},
+        "label_path": store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        "authoritative_gate": {"passed": True, "reasons": []},
+    }
+    if synthetic:
+        with pytest.raises(distill.DistillationError, match="receipt is synthetic"):
+            distill._ox_event_projection(tmp_path, **kwargs)
+    else:
+        assert len(distill._ox_event_projection(tmp_path, **kwargs)["failure_receipts"]) == 1
+
+
+@pytest.mark.parametrize("category", ["402", "paid", "model_drift"])
+@pytest.mark.parametrize("status", ["deferred", "hard_stop"])
+def test_ox_failure_projection_requires_hard_stop_for_terminal_categories(
+    tmp_path: Path, category: str, status: str
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    provider_request = distill.expected_ox_provider_request_sha256(
+        profile_contract_id=str(contract["artifact_id"]),
+        payload_digest=payload_digest,
+        work_id=work_id,
+        expires_at=str(contract["expires_at"]),
+    )
+    distill._append_ox_event(
+        tmp_path,
+        "ox-failure-receipts.jsonl",
+        {
+            "event_version": 2,
+            "kind": "ox-provider-failure",
+            "profile_contract_id": contract["artifact_id"],
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+            "cap": 1,
+            "category": category,
+            "status": status,
+            "attempts": 1,
+            "work_ids": [work_id],
+            "attempts_by_work": {work_id: 1},
+            "provider_requests": {work_id: provider_request},
+            "provider_receipts": {work_id: "f" * 64},
+            "captured_at": "2026-08-25T00:00:00Z",
+        },
+    )
+    kwargs = {
+        "profile_contract_id": str(contract["artifact_id"]),
+        "source_binding": source,
+        "workset": {"leased": 0},
+        "label_path": store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        "authoritative_gate": {"passed": True, "reasons": []},
+    }
+    if status == "deferred":
+        with pytest.raises(distill.DistillationError, match="failure event fields"):
+            distill._ox_event_projection(tmp_path, **kwargs)
+    else:
+        assert distill._ox_event_projection(tmp_path, **kwargs)["failure_receipts"][0][
+            "status"
+        ] == "hard_stop"
+
+
+@pytest.mark.parametrize("cap, wrong_next_cap", [(1, 1), (2, 1), (5, 2), (10, 5)])
+def test_ox_ramp_projection_rejects_wrong_next_cap(
+    tmp_path: Path, cap: int, wrong_next_cap: int
+) -> None:
+    source, contract, _work_id, _payload_digest = _ox_projection_work(tmp_path)
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    label = store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "profile": distill.LOCAL_TRIAD_PROFILE,
+        },
+    )
+    distill._append_ox_event(
+        tmp_path,
+        "ox-ramp-receipts.jsonl",
+        {
+            "event_version": 2,
+            "kind": "ox-ramp-stage",
+            "profile_contract_id": contract["artifact_id"],
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+            "cap": cap,
+            "next_cap": wrong_next_cap,
+            "valid_receipts": 0,
+            "attempts": 0,
+            "work_ids": [],
+            "label_count": 1,
+            "label_head_sha256": label["record_sha256"],
+            "failure_record_count": 0,
+            "failure_head_sha256": "",
+            "captured_at": f"2026-08-25T00:00:0{cap}Z",
+        },
+    )
+
+    with pytest.raises(distill.DistillationError, match="ramp event fields"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+@pytest.mark.parametrize("synthetic", [True, False])
+def test_ox_label_projection_requires_distinct_actual_receipt(
+    tmp_path: Path, synthetic: bool
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    provider_request = distill.expected_ox_provider_request_sha256(
+        profile_contract_id=str(contract["artifact_id"]),
+        payload_digest=payload_digest,
+        work_id=work_id,
+        expires_at=str(contract["expires_at"]),
+    )
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    label = store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "work_id": work_id,
+            "payload_digest": payload_digest,
+            "attempt_count": 1,
+            "ramp_cap": 1,
+            "profile": distill.OX_SINGLE_PROFILE,
+            "profile_contract_id": contract["artifact_id"],
+            "payload_source": _ox_projection_payload_source(),
+            **_ox_projection_label_identity(),
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+            "provider_request_sha256": provider_request,
+            "provider_receipt_sha256": provider_request if synthetic else "f" * 64,
+            "request_sha256": distill.expected_ox_request_sha256(
+                profile_contract_id=str(contract["artifact_id"]),
+                payload_digest=payload_digest,
+            ),
+        },
+    )
+    if not synthetic:
+        _complete_projection_label(tmp_path, work_id, label)
+    kwargs = {
+        "profile_contract_id": str(contract["artifact_id"]),
+        "source_binding": source,
+        "workset": {"leased": 0},
+        "label_path": label_path,
+        "authoritative_gate": {"passed": True, "reasons": []},
+    }
+    if synthetic:
+        with pytest.raises(distill.DistillationError, match="receipt is synthetic"):
+            distill._ox_event_projection(tmp_path, **kwargs)
+    else:
+        assert distill._ox_event_projection(tmp_path, **kwargs)["quality_gates"][
+            "negative_veto"
+        ]["authenticated"] is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("cohort", "other", "producer identity"),
+        ("route", "other", "producer identity"),
+        ("teacher_role", "other", "producer identity"),
+        ("identity_revision", "other", "producer identity"),
+        ("route_identity", {}, "producer identity"),
+        ("route_digest", "0" * 64, "producer identity"),
+        ("model_digest", "0" * 64, "producer identity"),
+        ("prompt_sha256", "0" * 64, "producer identity"),
+        ("schema_sha256", "0" * 64, "producer identity"),
+        ("test_only", True, "producer identity"),
+        ("test_only_missing", None, "producer identity"),
+        ("payload_source", {"candidate_id": "other", "rally_id": "rally"}, "payload binding"),
+        ("work_id", "0" * 64, "provider request intent"),
+    ],
+)
+def test_ox_label_projection_rejects_producer_identity_or_payload_binding_mutation(
+    tmp_path: Path, field: str, value: object, error: str
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    label = _ox_projection_label_record(source, contract, work_id, payload_digest)
+    if field == "test_only_missing":
+        label.pop("test_only")
+    else:
+        label[field] = value
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    store.append_chain(label_path, label)
+
+    with pytest.raises(distill.DistillationError, match=error):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+@pytest.mark.parametrize("mutation", ["extra", "missing", "wrong", "nonprobe_optional"])
+def test_ox_label_projection_requires_exact_workset_provenance(
+    tmp_path: Path, mutation: str
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    workset_path = store.distillation_dir(tmp_path) / "ox-workset.sqlite3"
+    with sqlite3.connect(workset_path) as connection:
+        provenance = json.loads(
+            connection.execute(
+                "SELECT provenance_json FROM work_items WHERE work_id = ?", (work_id,)
+            ).fetchone()[0]
+        )
+        if mutation == "extra":
+            provenance["extra"] = "forged"
+        elif mutation == "missing":
+            provenance.pop("route")
+        elif mutation == "nonprobe_optional":
+            provenance["repeat_pair_id"] = "d" * 64
+        else:
+            provenance["route"] = "forged"
+        connection.execute(
+            "UPDATE work_items SET provenance_json = ? WHERE work_id = ?",
+            (json.dumps(provenance), work_id),
+        )
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    store.append_chain(
+        label_path,
+        _ox_projection_label_record(source, contract, work_id, payload_digest),
+    )
+
+    with pytest.raises(distill.DistillationError, match="payload inventory|request intent"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+def test_ox_label_projection_accepts_exact_probe_workset_provenance(
+    tmp_path: Path,
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    workset_path = store.distillation_dir(tmp_path) / "ox-workset.sqlite3"
+    with sqlite3.connect(workset_path) as connection:
+        connection.execute(
+            "UPDATE work_items SET provenance_json = ? WHERE work_id = ?",
+            (
+                json.dumps(
+                    {
+                        "profile": distill.OX_SINGLE_PROFILE,
+                        "cohort": distill.OX_SINGLE_COHORT,
+                        "route": "opencode-go/ox-alpha-free",
+                        "teacher_role": distill.OX_TEACHER_ROLE,
+                        "profile_contract_id": contract["artifact_id"],
+                        "probe": True,
+                        "probe_revision": distill.OX_PROBE_REVISION,
+                        "repeat_pair_id": "d" * 64,
+                        "fixed_repeat": True,
+                        "order_swap": True,
+                        "blind_order": "a_first",
+                        "probe_batch_id": "e" * 64,
+                        "order_variant": 1,
+                        "candidate_position": 0,
+                    }
+                ),
+                work_id,
+            ),
+        )
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    store.append_chain(
+        label_path,
+        _ox_projection_label_record(source, contract, work_id, payload_digest),
+    )
+
+    with pytest.raises(distill.DistillationError, match="completion identity is unavailable"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+def test_ox_label_projection_rejects_missing_current_receipt(tmp_path: Path) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "work_id": work_id,
+            "payload_digest": payload_digest,
+            "profile": distill.OX_SINGLE_PROFILE,
+            "profile_contract_id": contract["artifact_id"],
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+        },
+    )
+
+    with pytest.raises(distill.DistillationError, match="provider receipt is invalid"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+def test_ox_label_projection_rejects_ready_workset_item(tmp_path: Path) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    provider_request = distill.expected_ox_provider_request_sha256(
+        profile_contract_id=str(contract["artifact_id"]),
+        payload_digest=payload_digest,
+        work_id=work_id,
+        expires_at=str(contract["expires_at"]),
+    )
+    store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "work_id": work_id,
+            "payload_digest": payload_digest,
+            "attempt_count": 1,
+            "ramp_cap": 1,
+            "profile": distill.OX_SINGLE_PROFILE,
+            "profile_contract_id": contract["artifact_id"],
+            "payload_source": _ox_projection_payload_source(),
+            **_ox_projection_label_identity(),
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+            "provider_request_sha256": provider_request,
+            "provider_receipt_sha256": "f" * 64,
+            "request_sha256": distill.expected_ox_request_sha256(
+                profile_contract_id=str(contract["artifact_id"]),
+                payload_digest=payload_digest,
+            ),
+        },
+    )
+
+    with pytest.raises(distill.DistillationError, match="completion identity is unavailable"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+@pytest.mark.parametrize("ramp_cap", [None, 3, "1"])
+def test_ox_label_projection_rejects_missing_or_invalid_ramp_cap(
+    tmp_path: Path, ramp_cap: object
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    provider_request = distill.expected_ox_provider_request_sha256(
+        profile_contract_id=str(contract["artifact_id"]),
+        payload_digest=payload_digest,
+        work_id=work_id,
+        expires_at=str(contract["expires_at"]),
+    )
+    store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "work_id": work_id,
+            "payload_digest": payload_digest,
+            "attempt_count": 1,
+            "ramp_cap": ramp_cap,
+            "profile": distill.OX_SINGLE_PROFILE,
+            "profile_contract_id": contract["artifact_id"],
+            "payload_source": _ox_projection_payload_source(),
+            **_ox_projection_label_identity(),
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+            "provider_request_sha256": provider_request,
+            "provider_receipt_sha256": "f" * 64,
+            "request_sha256": distill.expected_ox_request_sha256(
+                profile_contract_id=str(contract["artifact_id"]),
+                payload_digest=payload_digest,
+            ),
+        },
+    )
+
+    with pytest.raises(distill.DistillationError, match="ramp cap is invalid"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+@pytest.mark.parametrize(("kind", "status"), [("other", "completed"), ("teacher-label", "retry")])
+def test_ox_label_projection_rejects_wrong_current_kind_or_status(
+    tmp_path: Path, kind: str, status: str
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    store.append_chain(
+        label_path,
+        {
+            "kind": kind,
+            "status": status,
+            "work_id": work_id,
+            "payload_digest": payload_digest,
+            "profile": distill.OX_SINGLE_PROFILE,
+            "profile_contract_id": contract["artifact_id"],
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+        },
+    )
+
+    with pytest.raises(distill.DistillationError, match="kind or status is invalid"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+@pytest.mark.parametrize(
+    ("max_inflight", "ramp_caps"), [(10, (1, 2)), (1, (1, 1))]
+)
+def test_ox_projection_rejects_actual_receipt_reused_across_stages(
+    tmp_path: Path, max_inflight: int, ramp_caps: tuple[int, int]
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(
+        tmp_path, max_inflight=max_inflight
+    )
+    second_payload_source = _ox_projection_payload_source("candidate-2")
+    second_payload_digest = canonical_json.canonical_json_sha256_strict(
+        second_payload_source
+    )
+    second_work_id = canonical_json.canonical_json_sha256_strict(
+        {
+            "kind": "ox-teacher-label-v1",
+            "profile": distill.OX_SINGLE_PROFILE,
+            "cohort": distill.OX_SINGLE_COHORT,
+            "route": "opencode-go/ox-alpha-free",
+            "profile_contract_id": contract["artifact_id"],
+            "payload_digest": second_payload_digest,
+        }
+    )
+    workset.DistillationWorkset(
+        store.distillation_dir(tmp_path) / "ox-workset.sqlite3"
+    ).advance(
+        [
+            {
+                "work_id": second_work_id,
+                "kind": "ox",
+                "payload_ref": "candidate-snapshot:rally:candidate-2",
+                "payload_digest": second_payload_digest,
+                "temporal_split": {"split": "embargo"},
+                "provenance": {
+                    "profile": distill.OX_SINGLE_PROFILE,
+                    "cohort": distill.OX_SINGLE_COHORT,
+                    "route": "opencode-go/ox-alpha-free",
+                    "teacher_role": distill.OX_TEACHER_ROLE,
+                    "profile_contract_id": contract["artifact_id"],
+                    "probe": False,
+                },
+            }
+        ],
+        {"candidate_records": 2},
+    )
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    work_items = (
+        (work_id, payload_digest, _ox_projection_payload_source()),
+        (second_work_id, second_payload_digest, second_payload_source),
+    )
+    labels = []
+    for (item_work_id, item_payload_digest, item_payload_source), ramp_cap in zip(
+        work_items, ramp_caps, strict=True
+    ):
+        provider_request = distill.expected_ox_provider_request_sha256(
+            profile_contract_id=str(contract["artifact_id"]),
+            payload_digest=item_payload_digest,
+            work_id=item_work_id,
+            expires_at=str(contract["expires_at"]),
+        )
+        label = store.append_chain(
+            label_path,
+            {
+                "kind": "teacher-label",
+                "status": "completed",
+                "work_id": item_work_id,
+                "payload_digest": item_payload_digest,
+                "attempt_count": 1,
+                "profile": distill.OX_SINGLE_PROFILE,
+                "profile_contract_id": contract["artifact_id"],
+                "payload_source": item_payload_source,
+                **_ox_projection_label_identity(),
+                **source,
+                "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+                "expires_at": contract["expires_at"],
+                "ramp_cap": ramp_cap,
+                "provider_request_sha256": provider_request,
+                "provider_receipt_sha256": "f" * 64,
+                "request_sha256": distill.expected_ox_request_sha256(
+                    profile_contract_id=str(contract["artifact_id"]),
+                    payload_digest=item_payload_digest,
+                ),
+            },
+        )
+        labels.append(label)
+        _complete_projection_label(tmp_path, item_work_id, label)
+
+    for index, (ramp_cap, item_work_id, label) in enumerate(
+        zip(ramp_caps, (work_id, second_work_id), labels, strict=True), start=1
+    ):
+        distill._append_ox_event(
+            tmp_path,
+            "ox-ramp-receipts.jsonl",
+            {
+                "event_version": 2,
+                "kind": "ox-ramp-stage",
+                "profile_contract_id": contract["artifact_id"],
+                **source,
+                "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+                "expires_at": contract["expires_at"],
+                "cap": ramp_cap,
+                "next_cap": distill._next_ox_ramp_cap(ramp_cap, max_inflight),
+                "valid_receipts": 1,
+                "attempts": 1,
+                "work_ids": [item_work_id],
+                "label_count": index,
+                "label_head_sha256": label["record_sha256"],
+                "failure_record_count": 0,
+                "failure_head_sha256": "",
+                "captured_at": f"2026-08-25T00:00:0{index}Z",
+            },
+        )
+
+    kwargs = {
+        "profile_contract_id": str(contract["artifact_id"]),
+        "source_binding": source,
+        "workset": {"leased": 0},
+        "label_path": label_path,
+        "authoritative_gate": {"passed": True, "reasons": []},
+    }
+    with pytest.raises(distill.DistillationError, match="crosses ramp stages"):
+        distill._ox_event_projection(tmp_path, **kwargs)
+
+
+def test_ox_projection_rejects_current_label_work_id_reuse(tmp_path: Path) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    provider_request = distill.expected_ox_provider_request_sha256(
+        profile_contract_id=str(contract["artifact_id"]),
+        payload_digest=payload_digest,
+        work_id=work_id,
+        expires_at=str(contract["expires_at"]),
+    )
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    for attempt, receipt in ((1, "f" * 64), (2, "e" * 64)):
+        store.append_chain(
+            label_path,
+            {
+                "kind": "teacher-label",
+                "status": "completed",
+                "work_id": work_id,
+                "payload_digest": payload_digest,
+                "attempt_count": attempt,
+                "ramp_cap": 1,
+                "profile": distill.OX_SINGLE_PROFILE,
+                "profile_contract_id": contract["artifact_id"],
+                "payload_source": _ox_projection_payload_source(),
+                **_ox_projection_label_identity(),
+                **source,
+                "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+                "expires_at": contract["expires_at"],
+                "provider_request_sha256": provider_request,
+                "provider_receipt_sha256": receipt,
+                "request_sha256": distill.expected_ox_request_sha256(
+                    profile_contract_id=str(contract["artifact_id"]),
+                    payload_digest=payload_digest,
+                ),
+            },
+        )
+
+    with pytest.raises(distill.DistillationError, match="work_id is not globally unique"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+def test_ox_projection_rejects_actual_receipt_reused_by_failure(
+    tmp_path: Path,
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    provider_request = distill.expected_ox_provider_request_sha256(
+        profile_contract_id=str(contract["artifact_id"]),
+        payload_digest=payload_digest,
+        work_id=work_id,
+        expires_at=str(contract["expires_at"]),
+    )
+    receipt = "f" * 64
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "work_id": work_id,
+            "payload_digest": payload_digest,
+            "attempt_count": 1,
+            "ramp_cap": 1,
+            "profile": distill.OX_SINGLE_PROFILE,
+            "profile_contract_id": contract["artifact_id"],
+            "payload_source": _ox_projection_payload_source(),
+            **_ox_projection_label_identity(),
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+            "provider_request_sha256": provider_request,
+            "provider_receipt_sha256": receipt,
+            "request_sha256": distill.expected_ox_request_sha256(
+                profile_contract_id=str(contract["artifact_id"]),
+                payload_digest=payload_digest,
+            ),
+        },
+    )
+    distill._append_ox_event(
+        tmp_path,
+        "ox-failure-receipts.jsonl",
+        {
+            "event_version": 2,
+            "kind": "ox-provider-failure",
+            "profile_contract_id": contract["artifact_id"],
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+            "cap": 1,
+            "category": "5xx",
+            "status": "deferred",
+            "attempts": 1,
+            "bounded": True,
+            "work_ids": [work_id],
+            "attempts_by_work": {work_id: 2},
+            "provider_requests": {work_id: provider_request},
+            "provider_receipts": {work_id: receipt},
+            "captured_at": "2026-08-25T00:00:00Z",
+        },
+    )
+
+    with pytest.raises(distill.DistillationError, match="crosses success and failure"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+def test_ox_projection_rejects_success_and_failure_same_attempt(
+    tmp_path: Path,
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    provider_request = distill.expected_ox_provider_request_sha256(
+        profile_contract_id=str(contract["artifact_id"]),
+        payload_digest=payload_digest,
+        work_id=work_id,
+        expires_at=str(contract["expires_at"]),
+    )
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "work_id": work_id,
+            "payload_digest": payload_digest,
+            "attempt_count": 1,
+            "ramp_cap": 1,
+            "profile": distill.OX_SINGLE_PROFILE,
+            "profile_contract_id": contract["artifact_id"],
+            "payload_source": _ox_projection_payload_source(),
+            **_ox_projection_label_identity(),
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+            "provider_request_sha256": provider_request,
+            "provider_receipt_sha256": "f" * 64,
+            "request_sha256": distill.expected_ox_request_sha256(
+                profile_contract_id=str(contract["artifact_id"]),
+                payload_digest=payload_digest,
+            ),
+        },
+    )
+    distill._append_ox_event(
+        tmp_path,
+        "ox-failure-receipts.jsonl",
+        {
+            "event_version": 2,
+            "kind": "ox-provider-failure",
+            "profile_contract_id": contract["artifact_id"],
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+            "cap": 1,
+            "category": "5xx",
+            "status": "deferred",
+            "attempts": 1,
+            "bounded": True,
+            "work_ids": [work_id],
+            "attempts_by_work": {work_id: 1},
+            "provider_requests": {work_id: provider_request},
+            "provider_receipts": {work_id: "e" * 64},
+            "captured_at": "2026-08-25T00:00:00Z",
+        },
+    )
+
+    with pytest.raises(distill.DistillationError, match="attempt is not globally unique"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+def test_ox_projection_rejects_actual_receipt_reused_by_failure_events(
+    tmp_path: Path,
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    provider_request = distill.expected_ox_provider_request_sha256(
+        profile_contract_id=str(contract["artifact_id"]),
+        payload_digest=payload_digest,
+        work_id=work_id,
+        expires_at=str(contract["expires_at"]),
+    )
+    for cap in (1, 2):
+        distill._append_ox_event(
+            tmp_path,
+            "ox-failure-receipts.jsonl",
+            {
+                "event_version": 2,
+                "kind": "ox-provider-failure",
+                "profile_contract_id": contract["artifact_id"],
+                **source,
+                "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+                "expires_at": contract["expires_at"],
+                "cap": cap,
+                "category": "5xx",
+                "status": "deferred",
+                "attempts": 1,
+                "bounded": True,
+                "work_ids": [work_id],
+                "attempts_by_work": {work_id: 1},
+                "provider_requests": {work_id: provider_request},
+                "provider_receipts": {work_id: "f" * 64},
+                "captured_at": f"2026-08-25T00:00:0{cap}Z",
+            },
+        )
+
+    with pytest.raises(distill.DistillationError, match="crosses failure events"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+def test_ox_projection_rejects_failure_attempt_reused_with_distinct_receipts(
+    tmp_path: Path,
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    provider_request = distill.expected_ox_provider_request_sha256(
+        profile_contract_id=str(contract["artifact_id"]),
+        payload_digest=payload_digest,
+        work_id=work_id,
+        expires_at=str(contract["expires_at"]),
+    )
+    for cap, receipt in ((1, "f" * 64), (2, "e" * 64)):
+        distill._append_ox_event(
+            tmp_path,
+            "ox-failure-receipts.jsonl",
+            {
+                "event_version": 2,
+                "kind": "ox-provider-failure",
+                "profile_contract_id": contract["artifact_id"],
+                **source,
+                "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+                "expires_at": contract["expires_at"],
+                "cap": cap,
+                "category": "5xx",
+                "status": "deferred",
+                "attempts": 1,
+                "bounded": True,
+                "work_ids": [work_id],
+                "attempts_by_work": {work_id: 1},
+                "provider_requests": {work_id: provider_request},
+                "provider_receipts": {work_id: receipt},
+                "captured_at": f"2026-08-25T00:00:0{cap}Z",
+            },
+        )
+
+    with pytest.raises(distill.DistillationError, match="attempt is not globally unique"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+def test_ox_projection_rejects_stale_terminal_ramp_checkpoint(tmp_path: Path) -> None:
+    source, contract, work_id, _payload_digest = _ox_projection_work(tmp_path)
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    first_label = store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "profile": distill.LOCAL_TRIAD_PROFILE,
+        },
+    )
+    distill._append_ox_event(
+        tmp_path,
+        "ox-ramp-receipts.jsonl",
+        {
+            "event_version": 2,
+            "kind": "ox-ramp-stage",
+            "profile_contract_id": contract["artifact_id"],
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+            "cap": 10,
+            "next_cap": 10,
+            "valid_receipts": 1,
+            "attempts": 1,
+            "work_ids": [work_id],
+            "label_count": 1,
+            "label_head_sha256": first_label["record_sha256"],
+            "failure_record_count": 0,
+            "failure_head_sha256": "",
+            "captured_at": "2026-08-25T00:00:00Z",
+        },
+    )
+    store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "profile": distill.LOCAL_TRIAD_PROFILE,
+        },
+    )
+
+    with pytest.raises(distill.DistillationError, match="terminal ramp checkpoint is stale"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
+def test_ox_projection_accepts_historical_terminal_before_429_requalification(
+    tmp_path: Path,
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    label = store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "profile": distill.LOCAL_TRIAD_PROFILE,
+        },
+    )
+    failure_path = store.distillation_dir(tmp_path) / "ox-failure-receipts.jsonl"
+
+    def append_stage(cap: int, failure_count: int) -> None:
+        failures = store.read_chain(failure_path)
+        distill._append_ox_event(
+            tmp_path,
+            "ox-ramp-receipts.jsonl",
+            {
+                "event_version": 2,
+                "kind": "ox-ramp-stage",
+                "profile_contract_id": contract["artifact_id"],
+                **source,
+                "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+                "expires_at": contract["expires_at"],
+                "cap": cap,
+                "next_cap": distill._next_ox_ramp_cap(cap, 10),
+                "valid_receipts": 0,
+                "attempts": 0,
+                "work_ids": [],
+                "label_count": 1,
+                "label_head_sha256": label["record_sha256"],
+                "failure_record_count": failure_count,
+                "failure_head_sha256": (
+                    failures[-1]["record_sha256"] if failure_count else ""
+                ),
+                "captured_at": f"2026-08-25T00:00:0{cap}Z",
+            },
+        )
+
+    for cap in (1, 2, 5, 10):
+        append_stage(cap, 0)
+    provider_request = distill.expected_ox_provider_request_sha256(
+        profile_contract_id=str(contract["artifact_id"]),
+        payload_digest=payload_digest,
+        work_id=work_id,
+        expires_at=str(contract["expires_at"]),
+    )
+    distill._append_ox_event(
+        tmp_path,
+        "ox-failure-receipts.jsonl",
+        {
+            "event_version": 2,
+            "kind": "ox-provider-failure",
+            "profile_contract_id": contract["artifact_id"],
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+            "cap": 10,
+            "category": "429",
+            "status": "deferred",
+            "attempts": 1,
+            "before_cap": 10,
+            "after_cap": 5,
+            "work_ids": [work_id],
+            "attempts_by_work": {work_id: 1},
+            "provider_requests": {work_id: provider_request},
+            "provider_receipts": {work_id: "f" * 64},
+            "captured_at": "2026-08-25T00:00:10Z",
+        },
+    )
+    for cap in (5, 10):
+        append_stage(cap, 1)
+
+    projection = distill._ox_event_projection(
+        tmp_path,
+        profile_contract_id=str(contract["artifact_id"]),
+        source_binding=source,
+        workset={"leased": 0},
+        label_path=label_path,
+        authoritative_gate={"passed": True, "reasons": []},
+    )
+    assert "ramp_receipts_incomplete" in projection["quality_gates"]["reasons"]
+
 
 
 def test_ox_terminal_ramp_receipt_is_idempotent(tmp_path: Path) -> None:
@@ -418,7 +1569,10 @@ def test_ox_event_projection_rejects_revision_drift(
         )
 
 
-def test_ox_event_projection_accepts_configured_terminal_cap(tmp_path: Path) -> None:
+@pytest.mark.parametrize("max_inflight", [3, 5])
+def test_ox_event_projection_accepts_configured_terminal_cap(
+    tmp_path: Path, max_inflight: int
+) -> None:
     source = {
         "source_commit": "a" * 40,
         "source_tree_sha256": "b" * 64,
@@ -431,9 +1585,18 @@ def test_ox_event_projection_accepts_configured_terminal_cap(tmp_path: Path) -> 
             ox_enabled=True,
             ox_free_only=True,
             ox_expires_at="2099-01-01T00:00:00Z",
-            teacher_max_inflight=3,
+            teacher_max_inflight=max_inflight,
         ),
         source_binding=source,
+    )
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    label = store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "profile": distill.LOCAL_TRIAD_PROFILE,
+        },
     )
     distill._append_ox_event(
         tmp_path,
@@ -445,13 +1608,13 @@ def test_ox_event_projection_accepts_configured_terminal_cap(tmp_path: Path) -> 
             **source,
             "request_revision": distill.OX_RAMP_REQUEST_REVISION,
             "expires_at": contract["expires_at"],
-            "cap": 3,
-            "next_cap": 3,
-            "valid_receipts": 20,
-            "attempts": 20,
-            "work_ids": [f"{index:064x}" for index in range(20)],
+            "cap": max_inflight,
+            "next_cap": max_inflight,
+            "valid_receipts": 0,
+            "attempts": 0,
+            "work_ids": [],
             "label_count": 1,
-            "label_head_sha256": "d" * 64,
+            "label_head_sha256": label["record_sha256"],
             "failure_record_count": 0,
             "failure_head_sha256": "",
             "captured_at": "2026-08-25T00:00:00Z",
@@ -463,11 +1626,216 @@ def test_ox_event_projection_accepts_configured_terminal_cap(tmp_path: Path) -> 
         profile_contract_id=str(contract["artifact_id"]),
         source_binding=source,
         workset={"leased": 0},
-        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_path=label_path,
         authoritative_gate={"passed": False, "reasons": ["test"]},
     )
 
-    assert projection["ramp_receipts"][0]["cap"] == 3
+    assert projection["ramp_receipts"][0]["cap"] == max_inflight
+
+
+@pytest.mark.parametrize(
+    ("max_inflight", "teacher_claim_limit", "certifying"),
+    [(3, 1, False), (5, 1, False), (10, 2, False), (10, 1, True)],
+)
+def test_ox_event_projection_binds_certifying_terminal_tail_to_formal_contract(
+    tmp_path: Path,
+    max_inflight: int,
+    teacher_claim_limit: int,
+    certifying: bool,
+) -> None:
+    source = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    contract = distill._ensure_ox_profile_contract(
+        tmp_path,
+        distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            ox_free_only=True,
+            ox_expires_at="2099-01-01T00:00:00Z",
+            teacher_max_inflight=max_inflight,
+            teacher_claim_limit=teacher_claim_limit,
+        ),
+        source_binding=source,
+    )
+    caps = tuple(sorted({min(cap, max_inflight) for cap in (1, 2, 5, 10)}))
+    work_items: list[dict[str, Any]] = []
+    labels_by_cap: dict[int, list[dict[str, Any]]] = {cap: [] for cap in caps}
+    for cap in caps:
+        for index in range(20):
+            payload_source = {
+                "candidate_id": f"candidate-{cap}-{index}",
+                "rally_id": "rally",
+            }
+            payload_digest = canonical_json.canonical_json_sha256_strict(payload_source)
+            work_id = canonical_json.canonical_json_sha256_strict(
+                {
+                    "kind": "ox-teacher-label-v1",
+                    "profile": distill.OX_SINGLE_PROFILE,
+                    "cohort": distill.OX_SINGLE_COHORT,
+                    "route": "opencode-go/ox-alpha-free",
+                    "profile_contract_id": contract["artifact_id"],
+                    "payload_digest": payload_digest,
+                }
+            )
+            work_items.append(
+                {
+                    "work_id": work_id,
+                    "kind": "ox",
+                    "payload_ref": f"candidate-snapshot:rally:{index}",
+                    "payload_digest": payload_digest,
+                    "temporal_split": {"split": "embargo"},
+                    "provenance": {
+                        "profile": distill.OX_SINGLE_PROFILE,
+                        "cohort": distill.OX_SINGLE_COHORT,
+                        "route": "opencode-go/ox-alpha-free",
+                        "teacher_role": distill.OX_TEACHER_ROLE,
+                        "profile_contract_id": contract["artifact_id"],
+                        "probe": False,
+                    },
+                }
+            )
+            label = _ox_projection_label_record(
+                source, contract, work_id, payload_digest
+            )
+            label["payload_source"] = payload_source
+            label["ramp_cap"] = cap
+            label["provider_receipt_sha256"] = f"{len(work_items):064x}"
+            labels_by_cap[cap].append(label)
+
+    queue = workset.DistillationWorkset(
+        store.distillation_dir(tmp_path) / "ox-workset.sqlite3"
+    )
+    queue.advance(work_items, {"candidate_records": len(work_items)})
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    labels = [
+        store.append_chain(label_path, label)
+        for cap in caps
+        for label in labels_by_cap[cap]
+    ]
+    labels_by_work = {str(label["work_id"]): label for label in labels}
+    claims = queue.claim("ox", len(work_items), "test", 60)
+    queue.commit(
+        claims,
+        [
+            {
+                "status": "completed",
+                "completion_ref": f"label-ledger:{labels_by_work[claim.work_id]['record_sha256']}",
+                "completion_digest": labels_by_work[claim.work_id]["record_sha256"],
+            }
+            for claim in claims
+        ],
+    )
+    for stage_index, cap in enumerate(caps, start=1):
+        label_count = stage_index * 20
+        stage_labels = labels[(stage_index - 1) * 20 : label_count]
+        distill._append_ox_event(
+            tmp_path,
+            "ox-ramp-receipts.jsonl",
+            {
+                "event_version": 2,
+                "kind": "ox-ramp-stage",
+                "profile_contract_id": contract["artifact_id"],
+                **source,
+                "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+                "expires_at": contract["expires_at"],
+                "cap": cap,
+                "next_cap": distill._next_ox_ramp_cap(cap, max_inflight),
+                "valid_receipts": 20,
+                "attempts": 20,
+                "work_ids": [str(label["work_id"]) for label in stage_labels],
+                "label_count": label_count,
+                "label_head_sha256": labels[label_count - 1]["record_sha256"],
+                "failure_record_count": 0,
+                "failure_head_sha256": "",
+                "captured_at": f"2026-08-25T00:00:0{stage_index}Z",
+            },
+        )
+
+    projection = distill._ox_event_projection(
+        tmp_path,
+        profile_contract_id=str(contract["artifact_id"]),
+        source_binding=source,
+        workset={"leased": 0},
+        label_path=label_path,
+        authoritative_gate={"passed": False, "reasons": ["test"]},
+    )
+    quality = projection["quality_gates"]
+    assert quality["ramp_complete"] is certifying
+    assert ("ramp_receipts_incomplete" not in quality["reasons"]) is certifying
+
+
+@pytest.mark.parametrize("max_inflight", [3, 5])
+def test_ox_event_projection_rejects_stale_configured_terminal_cap(
+    tmp_path: Path, max_inflight: int
+) -> None:
+    source = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    contract = distill._ensure_ox_profile_contract(
+        tmp_path,
+        distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            ox_free_only=True,
+            ox_expires_at="2099-01-01T00:00:00Z",
+            teacher_max_inflight=max_inflight,
+        ),
+        source_binding=source,
+    )
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    label = store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "profile": distill.LOCAL_TRIAD_PROFILE,
+        },
+    )
+    distill._append_ox_event(
+        tmp_path,
+        "ox-ramp-receipts.jsonl",
+        {
+            "event_version": 2,
+            "kind": "ox-ramp-stage",
+            "profile_contract_id": contract["artifact_id"],
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+            "cap": max_inflight,
+            "next_cap": max_inflight,
+            "valid_receipts": 0,
+            "attempts": 0,
+            "work_ids": [],
+            "label_count": 1,
+            "label_head_sha256": label["record_sha256"],
+            "failure_record_count": 0,
+            "failure_head_sha256": "",
+            "captured_at": "2026-08-25T00:00:00Z",
+        },
+    )
+    store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "profile": distill.LOCAL_TRIAD_PROFILE,
+        },
+    )
+
+    with pytest.raises(distill.DistillationError, match="terminal ramp checkpoint is stale"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": False, "reasons": ["test"]},
+        )
 
 
 def test_ox_event_projection_validates_historical_contracts_before_partition(
@@ -511,7 +1879,7 @@ def test_ox_event_projection_validates_historical_contracts_before_partition(
                 "request_revision": distill.OX_RAMP_REQUEST_REVISION,
                 "expires_at": contract["expires_at"],
                     "cap": cap,
-                    "next_cap": cap,
+                    "next_cap": distill._next_ox_ramp_cap(cap, 10),
                 "valid_receipts": 20,
                 "attempts": 20,
                 "work_ids": [f"{cap}{index:063d}" for index in range(20)],
@@ -530,7 +1898,7 @@ def test_ox_event_projection_validates_historical_contracts_before_partition(
                 "kind": "teacher-label",
                 "status": "completed",
                 "teacher_profile": distill.LOCAL_TRIAD_PROFILE,
-                "profile": distill.OX_SINGLE_PROFILE,
+                "profile": distill.LOCAL_TRIAD_PROFILE,
                 "profile_contract_id": contract["artifact_id"],
                 "request_revision": distill.OX_RAMP_REQUEST_REVISION,
                 "expires_at": contract["expires_at"],
