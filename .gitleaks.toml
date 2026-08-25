@@ -14,5 +14,13 @@ description = "Fake session key fixture"
 targetRules = ["generic-api-key"]
 condition = "AND"
 regexTarget = "line"
-paths = ['''(^|/)tests/test_cortex\.py$''']
+paths = ['''(^|/)tests/(test_cortex|test_recall_r2_harness)\.py$''']
 regexes = ['''session_key\s*=\s*"0123456789abcdef01234567"''']
+
+[[allowlists]]
+description = "Synthetic R8 auxiliary completion keys"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)scripts/recall_r8_harness\.py$''']
+regexes = ['''key\s*==\s*"r[23]_completion"''']
