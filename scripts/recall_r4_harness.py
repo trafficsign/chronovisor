@@ -1043,6 +1043,7 @@ def _validate_ox(
     all_label_ids: list[str] = []
     all_commit_ids: list[str] = []
     all_work_ids: list[str] = []
+    all_provider_receipts: set[str] = set()
     recovery_seen = False
     failure_flags: set[str] = set()
     stage_order: list[int] = []
@@ -1266,6 +1267,11 @@ def _validate_ox(
                         for item in labels
                         if isinstance(item, Mapping)
                     ]
+                    provider_receipts = [
+                        _text(item.get("provider_receipt_sha256"))
+                        for item in labels
+                        if isinstance(item, Mapping)
+                    ]
                     if (
                         len(stage_label_ids) != len(labels)
                         or len(stage_commit_ids) != len(labels)
@@ -1276,6 +1282,7 @@ def _validate_ox(
                         or len(set(stage_label_ids)) != len(stage_label_ids)
                         or len(set(stage_commit_ids)) != len(stage_commit_ids)
                         or len(set(work_ids)) != len(work_ids)
+                        or len(provider_receipts) != len(labels)
                     ):
                         reasons.add("ox_label_identity_invalid")
                     if any(
@@ -1336,17 +1343,27 @@ def _validate_ox(
                             work_id=_text(item.get("work_id")),
                             expires_at=_text(contract_mapping.get("expires_at")),
                         )
-                        or item.get("provider_response_request_sha256")
-                        != item.get("provider_request_sha256")
+                        or _SHA.fullmatch(
+                            _text(item.get("provider_receipt_sha256"))
+                        )
+                        is None
+                        or item.get("provider_receipt_sha256")
+                        == item.get("provider_request_sha256")
+                        or "provider_response_request_sha256" in item
                         for item in labels
                     ):
                         reasons.add("ox_label_binding_invalid")
-                    if len(stage_label_ids) != count:
+                    stage_provider_groups = set(provider_receipts)
+                    if (
+                        len(stage_provider_groups) != count
+                        or bool(stage_provider_groups & all_provider_receipts)
+                    ):
                         reasons.add("ox_label_count_mismatch")
                     else:
                         all_label_ids.extend(stage_label_ids)
                         all_commit_ids.extend(stage_commit_ids)
                         all_work_ids.extend(work_ids)
+                        all_provider_receipts.update(stage_provider_groups)
             else:
                 reasons.add("ox_stage_invalid")
         transitions = row.get("transition_receipts")
@@ -1862,6 +1879,53 @@ def _production_workset_receipts(
     }
 
 
+def _valid_ox_workset_provenance(
+    provenance: Mapping[str, Any], contract_id: str
+) -> bool:
+    base = {
+        "profile",
+        "cohort",
+        "route",
+        "teacher_role",
+        "profile_contract_id",
+        "probe",
+    }
+    probe = {
+        "probe_revision",
+        "repeat_pair_id",
+        "fixed_repeat",
+        "order_swap",
+        "blind_order",
+        "probe_batch_id",
+        "order_variant",
+        "candidate_position",
+    }
+    if (
+        provenance.get("profile") != OX_PROFILE
+        or provenance.get("cohort") != OX_COHORT
+        or provenance.get("route") != OX_ROUTE
+        or provenance.get("teacher_role") != "recall.distill.teacher.ox-alpha"
+        or provenance.get("profile_contract_id") != contract_id
+        or type(provenance.get("probe")) is not bool
+    ):
+        return False
+    if provenance["probe"] is False:
+        return set(provenance) == base
+    return (
+        set(provenance) == base | probe
+        and provenance.get("probe_revision") == OX_PROBE_REVISION
+        and _SHA.fullmatch(str(provenance.get("repeat_pair_id"))) is not None
+        and provenance.get("fixed_repeat") is True
+        and provenance.get("order_swap") is True
+        and provenance.get("blind_order") in {"a_first", "b_first"}
+        and _SHA.fullmatch(str(provenance.get("probe_batch_id"))) is not None
+        and type(provenance.get("order_variant")) is int
+        and provenance["order_variant"] in {1, 2}
+        and type(provenance.get("candidate_position")) is int
+        and provenance["candidate_position"] in {0, 1}
+    )
+
+
 def _production_workset(path: Path) -> dict[str, Any]:
     """Read and verify the managed SQLite workset without opening a writer."""
 
@@ -2011,9 +2075,9 @@ def _production_workset(path: Path) -> dict[str, Any]:
                 for key in ("cohort", "profile", "profile_contract_id", "route")
             }
             if (
-                expected_provenance["cohort"] != OX_COHORT
-                or expected_provenance["profile"] != OX_PROFILE
-                or expected_provenance["route"] != OX_ROUTE
+                not _valid_ox_workset_provenance(
+                    provenance, str(expected_provenance["profile_contract_id"])
+                )
                 or _SHA.fullmatch(str(expected_provenance["profile_contract_id"]))
                 is None
             ):
@@ -2717,6 +2781,7 @@ def _production_ox_events(
                         "attempts",
                         "work_ids",
                         "attempts_by_work",
+                        "provider_requests",
                         "provider_receipts",
                     },
                     "ox-lease-reclaim": v2_common
@@ -2744,6 +2809,7 @@ def _production_ox_events(
                 attempts = payload.get("attempts")
                 work_ids = payload.get("work_ids")
                 attempts_by_work = payload.get("attempts_by_work")
+                provider_requests = payload.get("provider_requests")
                 provider_receipts = payload.get("provider_receipts")
                 if (
                     isinstance(attempts, bool)
@@ -2766,6 +2832,13 @@ def _production_ox_events(
                     )
                     or not isinstance(provider_receipts, Mapping)
                     or set(provider_receipts) != set(work_ids)
+                    or (
+                        not legacy
+                        and (
+                            not isinstance(provider_requests, Mapping)
+                            or set(provider_requests) != set(work_ids)
+                        )
+                    )
                     or not all(isinstance(value, str) and _SHA.fullmatch(value) for value in provider_receipts.values())
                     or len(set(provider_receipts.values())) != 1
                     or attempts != len(set(provider_receipts.values()))
@@ -2803,6 +2876,20 @@ def _production_ox_events(
                     payload_digest = item.get("payload_digest")
                     if not isinstance(payload_digest, str) or _SHA.fullmatch(payload_digest) is None:
                         raise R4Error("production OX workset payload digest is invalid")
+                    if (
+                        not legacy
+                        and (
+                            not isinstance(provider_requests, Mapping)
+                            or provider_requests.get(work_id)
+                        != _expected_ox_provider_request_sha256(
+                            profile_contract_id=contract_id,
+                            payload_digest=payload_digest,
+                            work_id=work_id,
+                            expires_at=contract_expiry,
+                        )
+                        )
+                    ):
+                        raise R4Error("production OX provider request is unbound")
                     if legacy and provider_receipts.get(work_id) != _expected_ox_provider_request_sha256(
                         profile_contract_id=contract_id,
                         payload_digest=payload_digest,
@@ -3730,6 +3817,8 @@ def _production_identity(
         "free_only": True,
         "no_paid_fallback": True,
         "kill_categories": list(OX_KILL_CATEGORIES),
+        "max_inflight": 10,
+        "teacher_claim_limit": 1,
         "live_recall_model_calls": 0,
         "source_commit": source.get("commit"),
         "source_tree_sha256": source.get("tree_sha256"),
@@ -3869,6 +3958,8 @@ def _production_quality(
         "free_only": True,
         "no_paid_fallback": True,
         "kill_categories": list(OX_KILL_CATEGORIES),
+        "max_inflight": 10,
+        "teacher_claim_limit": 1,
         "live_recall_model_calls": 0,
         "source_commit": source.get("commit"),
         "source_tree_sha256": source.get("tree_sha256"),
@@ -4103,6 +4194,7 @@ def _production_quality(
     if not isinstance(transitions, Sequence):
         reasons.add("production_failure_receipts_missing")
         transitions = []
+    failure_receipt_records: dict[str, int] = {}
     for transition in transitions:
         if not isinstance(transition, Mapping):
             reasons.add("production_failure_receipt_invalid")
@@ -4138,6 +4230,14 @@ def _production_quality(
             or transition_attempts != len(set(provider_receipts.values()))
         ):
             reasons.add("production_failure_receipt_invalid")
+            continue
+        failure_receipt = next(iter(provider_receipts.values()))
+        record_index = transition["record_index"]
+        previous_record = failure_receipt_records.setdefault(
+            failure_receipt, record_index
+        )
+        if previous_record != record_index:
+            reasons.add("production_provider_receipt_reused")
             continue
         for work_id in work_ids:
             attempt = attempts_by_work.get(work_id)
