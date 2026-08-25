@@ -935,6 +935,30 @@ def test_transition_receipt_identity_is_verified_and_payload_free(
         workset.transition_receipt_identity(1)
 
 
+def test_transition_receipt_binding_exposes_verified_selection_only(
+    tmp_path: Path,
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance([_item("one")], 1)
+    claim = workset.claim("label", 1, "owner", 60)[0]
+
+    binding = workset.transition_receipt_binding(2)
+
+    assert binding is not None
+    assert set(binding) == {
+        "generation",
+        "receipt_sha256",
+        "operation",
+        "selection_sha256",
+        "work_ids_sha256",
+    }
+    assert binding["operation"] == "claim"
+    assert len(binding["selection_sha256"]) == 64
+    assert binding["work_ids_sha256"] == canonical_json_sha256_strict(["one"])
+    workset.release_unattempted([claim])
+    assert workset.transition_receipt_binding(99) is None
+
+
 @pytest.mark.parametrize("generation", [False, 0, -1, 1.0, "1"])
 def test_transition_receipt_identity_rejects_invalid_generation(
     tmp_path: Path, generation: object

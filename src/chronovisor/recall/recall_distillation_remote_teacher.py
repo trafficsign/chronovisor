@@ -726,14 +726,34 @@ class OpenCodeOxAlphaTeacher:
                 or root.is_symlink()
             ):
                 raise ValueError("simulation attestation is unavailable")
-            before = path.stat()
+            before = path.lstat()
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError("simulation attestation is unavailable")
             root_stat = root.resolve(strict=True).stat()
             try:
                 payload = json.loads(path.read_bytes())
             except (OSError, ValueError, UnicodeError) as exc:
                 raise ValueError("simulation attestation is invalid") from exc
-            after = path.stat()
-            if before != after or not isinstance(payload, Mapping):
+            after = path.lstat()
+            if (
+                (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_mode,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                )
+                != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_mode,
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                )
+                or not isinstance(payload, Mapping)
+            ):
                 raise ValueError("simulation attestation changed during read")
             unsigned = {
                 key: value for key, value in payload.items() if key != "seal_sha256"

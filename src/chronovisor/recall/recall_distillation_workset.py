@@ -543,6 +543,10 @@ def _claim_selection_sha256(claims: Sequence[WorkClaim]) -> str:
     )
 
 
+def _work_ids_sha256(work_ids: Iterable[str]) -> str:
+    return canonical_json_sha256_strict(sorted(work_ids))
+
+
 def _same_temporal_split_except_plan(
     prior_json: str, current_json: str, *, allow_split_change: bool = False
 ) -> bool:
@@ -1022,7 +1026,10 @@ class DistillationWorkset:
                 raise DistillationWorksetError("workset advance delta is invalid")
         elif operation in {"claim_reclaim", "claim", "release"}:
             expected_keys = {"kind", "count", "selection_sha256"}
-            if set(details) != expected_keys:
+            optional = {"work_ids_sha256"}
+            if not expected_keys.issubset(details) or set(details).difference(
+                expected_keys | optional
+            ):
                 raise DistillationWorksetError("workset lease receipt is corrupted")
             kind = details["kind"]
             count = details["count"]
@@ -1035,6 +1042,8 @@ class DistillationWorkset:
             ):
                 raise DistillationWorksetError("workset lease receipt is corrupted")
             _digest(details["selection_sha256"], "receipt selection_sha256")
+            if "work_ids_sha256" in details:
+                _digest(details["work_ids_sha256"], "receipt work_ids_sha256")
             if operation == "claim_reclaim":
                 expected = {
                     "ready": count,
@@ -1061,19 +1070,31 @@ class DistillationWorkset:
         else:
             legacy_keys = {"completed", "retry", "quarantined", "selection_sha256"}
             timed_keys = {*legacy_keys, "retry_wait", "retry_schedule_sha256"}
-            if set(details) not in (legacy_keys, timed_keys):
+            work_bound_keys = {*legacy_keys, "work_ids_sha256"}
+            timed_work_bound_keys = {*timed_keys, "work_ids_sha256"}
+            detail_keys = set(details).difference({"context_sha256"})
+            if detail_keys not in (
+                legacy_keys,
+                timed_keys,
+                work_bound_keys,
+                timed_work_bound_keys,
+            ):
                 raise DistillationWorksetError("workset commit receipt is corrupted")
-            if set(details) == timed_keys and (
+            if detail_keys in (timed_keys, timed_work_bound_keys) and (
                 isinstance(details.get("retry_wait"), bool)
                 or not isinstance(details.get("retry_wait"), int)
                 or details["retry_wait"] < 0
                 or details["retry_wait"] > details["retry"]
             ):
                 raise DistillationWorksetError("workset commit receipt is corrupted")
-            if set(details) == timed_keys:
+            if detail_keys in (timed_keys, timed_work_bound_keys):
                 _digest(
                     details["retry_schedule_sha256"], "receipt retry_schedule_sha256"
                 )
+            if "work_ids_sha256" in details:
+                _digest(details["work_ids_sha256"], "receipt work_ids_sha256")
+            if "context_sha256" in details:
+                _digest(details["context_sha256"], "receipt context_sha256")
             totals = {
                 state: details[state] for state in ("completed", "retry", "quarantined")
             }
@@ -1377,6 +1398,75 @@ class DistillationWorkset:
             "generation": generation,
             "receipt_sha256": receipt_sha256,
             "operation": operation,
+        }
+
+    def transition_receipt_binding(self, generation: int) -> dict[str, Any] | None:
+        """Return one verified transition plus its claim-selection binding."""
+
+        identity = self.transition_receipt_identity(generation)
+        if identity is None:
+            return None
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM workset_receipts WHERE generation = ?",
+                (generation,),
+            ).fetchone()
+        if row is None or not isinstance(row["payload_json"], str):
+            raise DistillationWorksetError("workset receipt binding is corrupted")
+        try:
+            payload = json.loads(row["payload_json"])
+        except (RecursionError, json.JSONDecodeError) as exc:
+            raise DistillationWorksetError("workset receipt binding is invalid") from exc
+        if (
+            _json(payload, "workset receipt", max_bytes=_MAX_RECEIPT_JSON_BYTES)
+            != row["payload_json"]
+            or not isinstance(payload, Mapping)
+            or not isinstance(payload.get("details"), Mapping)
+        ):
+            raise DistillationWorksetError("workset receipt binding is invalid")
+        selection = _digest(
+            payload["details"].get("selection_sha256"), "receipt selection_sha256"
+        )
+        result = {**identity, "selection_sha256": selection}
+        if "work_ids_sha256" in payload["details"]:
+            result["work_ids_sha256"] = _digest(
+                payload["details"].get("work_ids_sha256"),
+                "receipt work_ids_sha256",
+            )
+        if "context_sha256" in payload["details"]:
+            result["context_sha256"] = _digest(
+                payload["details"].get("context_sha256"), "receipt context_sha256"
+            )
+        return result
+
+    def work_item_identity(self, work_id: str) -> dict[str, Any] | None:
+        """Read the immutable task identity needed to verify an R4 marker."""
+
+        work_id = _identifier(work_id, "work_id")
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT work_id, kind, payload_ref, payload_digest, temporal_split_json, "
+                "provenance_json FROM work_items WHERE work_id = ?",
+                (work_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            temporal_split = _metadata_value(
+                json.loads(row["temporal_split_json"]), "temporal_split"
+            )
+            provenance = _metadata_value(
+                json.loads(row["provenance_json"]), "provenance"
+            )
+        except (TypeError, ValueError, RecursionError, json.JSONDecodeError) as exc:
+            raise DistillationWorksetError("work item identity is corrupted") from exc
+        return {
+            "work_id": _identifier(row["work_id"], "work_id"),
+            "kind": _identifier(row["kind"], "kind"),
+            "payload_ref": _reference(row["payload_ref"], "payload_ref"),
+            "payload_digest": _digest(row["payload_digest"], "payload_digest"),
+            "temporal_split": temporal_split,
+            "provenance": provenance,
         }
 
     def advance(
@@ -1698,6 +1788,9 @@ class DistillationWorkset:
                             "kind": kind or "mixed",
                             "count": reclaimed,
                             "selection_sha256": expired_selection_sha256,
+                            "work_ids_sha256": _work_ids_sha256(
+                                str(row["work_id"]) for row in expired_rows
+                            ),
                         },
                     )
                 chosen_kind = kind
@@ -1766,6 +1859,9 @@ class DistillationWorkset:
                             "kind": kind or "mixed",
                             "count": len(claims),
                             "selection_sha256": _claim_selection_sha256(claims),
+                            "work_ids_sha256": _work_ids_sha256(
+                                claim.work_id for claim in claims
+                            ),
                         },
                     )
                 self._secure_sqlite_files()
@@ -1859,6 +1955,9 @@ class DistillationWorkset:
                         "kind": next(iter(kinds)) if len(kinds) == 1 else "mixed",
                         "count": len(claims),
                         "selection_sha256": _claim_selection_sha256(claims),
+                        "work_ids_sha256": _work_ids_sha256(
+                            claim.work_id for claim in claims
+                        ),
                     },
                 )
                 self._secure_sqlite_files()
@@ -1876,6 +1975,7 @@ class DistillationWorkset:
         outcomes: Sequence[Mapping[str, Any]],
         *,
         progress: Mapping[str, Any] | None = None,
+        context_sha256: str | None = None,
     ) -> dict[str, int]:
         """Commit matching leased claims with one single-writer transaction.
 
@@ -1894,6 +1994,8 @@ class DistillationWorkset:
             raise DistillationWorksetError("commit contains duplicate work_id")
         if len(set(lease_ids)) != len(lease_ids):
             raise DistillationWorksetError("commit contains duplicate lease_id")
+        if context_sha256 is not None:
+            context_sha256 = _digest(context_sha256, "receipt context_sha256")
         normalized = [
             self._outcome(claim, outcome)
             for claim, outcome in zip(claims, outcomes, strict=True)
@@ -2030,6 +2132,10 @@ class DistillationWorkset:
                                 ]
                             ),
                             "selection_sha256": _claim_selection_sha256(changed_claims),
+                            "work_ids_sha256": _work_ids_sha256(
+                                claim.work_id for claim in changed_claims
+                            ),
+                            **({"context_sha256": context_sha256} if context_sha256 else {}),
                         },
                         before_progress=before_progress,
                         after_progress=after_progress,

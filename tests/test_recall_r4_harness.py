@@ -86,12 +86,17 @@ def _git_source(tmp_path: Path) -> tuple[Path, str]:
 
 def _receipt(payload: dict[str, object], index: int) -> dict[str, object]:
     workset_receipt = payload.get("workset_receipt")
+    binding_key = (
+        "attempt_record_sha256"
+        if payload.get("failure_injection") is True
+        else "label_record_sha256"
+    )
     receipt_identity = (
         {
             "profile": HARNESS.LOCAL_PROFILE,
             "work_id": payload.get("work_id"),
             "attempt": payload.get("attempt"),
-            "label_record_sha256": payload.get("label_record_sha256"),
+            binding_key: payload.get(binding_key),
         }
         if payload.get("profile") == HARNESS.LOCAL_PROFILE
         and isinstance(workset_receipt, Mapping)
@@ -442,22 +447,15 @@ def _local_rows(source: Path, commit: str) -> list[dict[str, object]]:
         "timeout",
         "preemption",
         "route_model_mismatch",
-        "ok",
     ]
     for index, reason in enumerate(reasons):
         rally = f"rally-{index}"
         candidate = f"candidate-{index}"
         owner = HARNESS._expected_owner(rally, candidate)
         outcome_class = (
-            "valid"
-            if reason == "ok"
-            else "deferred"
-            if reason in HARNESS._DEFERRED_REASONS
-            else "invalid"
+            "deferred" if reason in HARNESS._DEFERRED_REASONS else "invalid"
         )
         outcome: dict[str, object] = {"class": outcome_class, "reason": reason}
-        if outcome_class == "valid":
-            outcome.update(schema_valid=True, coverage_valid=True)
         rows.append(
             {
                 "profile": HARNESS.LOCAL_PROFILE,
@@ -469,7 +467,13 @@ def _local_rows(source: Path, commit: str) -> list[dict[str, object]]:
                 "probe": HARNESS._expected_probe(rally, candidate),
                 "assignment_revision": HARNESS.LOCAL_ASSIGNMENT_REVISION,
                 "probe_assignment_revision": HARNESS.LOCAL_PROBE_REVISION,
-                **_local_evidence_fields(index, rally, candidate, owner),
+                **_local_evidence_fields(
+                    index,
+                    rally,
+                    candidate,
+                    owner,
+                    failure=True,
+                ),
                 "route_identity": {
                     "role": owner,
                     "provider": "ollama",
@@ -510,7 +514,7 @@ def _local_rows(source: Path, commit: str) -> list[dict[str, object]]:
                 "assignment_revision": HARNESS.LOCAL_ASSIGNMENT_REVISION,
                 "probe_assignment_revision": HARNESS.LOCAL_PROBE_REVISION,
                 **_local_evidence_fields(
-                    next_index, rally, candidate, owner
+                    next_index, rally, candidate, owner, failure=True
                 ),
                 "route_identity": {
                     "role": owner,
@@ -528,10 +532,8 @@ def _local_rows(source: Path, commit: str) -> list[dict[str, object]]:
                 "configured_max_inflight": 10,
                 "failure_injection": True,
                 "outcome": {
-                    "class": "valid",
-                    "reason": "ok",
-                    "schema_valid": True,
-                    "coverage_valid": True,
+                    "class": "deferred",
+                    "reason": "capacity",
                 },
             }
         )
@@ -1170,7 +1172,12 @@ def _fixture_candidate_anchor(production: Path) -> dict[str, object]:
 
 
 def _local_evidence_fields(
-    index: int, rally_id: str, candidate_id: str, owner: str
+    index: int,
+    rally_id: str,
+    candidate_id: str,
+    owner: str,
+    *,
+    failure: bool = False,
 ) -> dict[str, object]:
     work_id = "local-teacher-" + HARNESS._sha256(
         {
@@ -1180,13 +1187,10 @@ def _local_evidence_fields(
             "owner": owner,
         }
     )
-    return {
+    evidence: dict[str, object] = {
         "captured_at": "2026-08-24T00:00:00Z",
         "work_id": work_id,
         "attempt": 1,
-        "label_record_sha256": HARNESS._sha256(
-            {"work_id": work_id, "label_index": index}
-        ),
         "workset_receipt": {
             "generation": index + 1,
             "head_sha256": HARNESS._sha256(
@@ -1194,6 +1198,13 @@ def _local_evidence_fields(
             ),
         },
     }
+    binding_key = "attempt_record_sha256" if failure else "label_record_sha256"
+    evidence[binding_key] = HARNESS._sha256(
+        {"work_id": work_id, "record_index": index, "failure": failure}
+    )
+    if failure:
+        evidence["diagnostic"] = {"provider_calls": 0, "network_egress": 0}
+    return evidence
 
 
 def test_source_contract_passes_but_production_stays_false_without_attestation(
@@ -1547,6 +1558,40 @@ def test_authority_reader_rejects_nested_symlink_and_directory_swap(
         HARNESS._read_authority_regular(receipt, label="test")
 
 
+def test_authority_reader_allows_unrelated_sibling_directory_metadata_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "authority"
+    directory.mkdir()
+    receipt = directory / "receipt.json"
+    receipt.write_text("{}\n")
+    original_states = HARNESS._authority_path_states
+    mutated = False
+
+    def mutate_sibling_after_snapshot(
+        path: Path, *, label: str
+    ) -> list[dict[str, int]]:
+        nonlocal mutated
+        states = original_states(path, label=label)
+        if not mutated:
+            mutated = True
+            (directory / "sibling.json").write_text("{}\n")
+        return states
+
+    monkeypatch.setattr(
+        HARNESS, "_authority_path_states", mutate_sibling_after_snapshot
+    )
+
+    raw, state, parent = HARNESS._read_authority_regular(receipt, label="test")
+
+    assert raw == b"{}\n"
+    assert state["st_size"] == 3
+    assert (parent["st_dev"], parent["st_ino"]) == (
+        directory.stat().st_dev,
+        directory.stat().st_ino,
+    )
+
+
 def test_source_bound_authority_receipt_uses_official_producer_and_validator(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1715,7 +1760,7 @@ def test_authority_validator_rejects_resealed_embedded_duplicate_receipt(
                 ),
             )
         )
-    assert len(local_values) == 3009
+    assert len(local_values) == local_files["count"]
     source_snapshot = HARNESS._assert_source(source, commit)
 
     authority_unsigned = {
@@ -3150,6 +3195,77 @@ def test_local_contract_requires_truthful_sleep_lane_and_separate_config_cap(
     assert result["passed"] is False
     assert "local_durable_binding_invalid" in result["reasons"]
 
+    boolean_counts = json.loads(json.dumps(rows))
+    boolean_counts[0]["lane"]["inflight"] = True
+    boolean_counts[-1]["live_recall"]["model_calls"] = False
+    result = HARNESS._validate_local(boolean_counts, source_snapshot)
+    assert "scheduler_lane_invalid" in result["reasons"]
+    assert "live_recall_egress" in result["reasons"]
+
+    wrong_valid_reason = json.loads(json.dumps(rows))
+    wrong_valid_reason[-1]["outcome"]["reason"] = "capacity"
+    result = HARNESS._validate_local(wrong_valid_reason, source_snapshot)
+    assert "valid_outcome_unverified" in result["reasons"]
+
+
+def test_local_failure_receipts_are_closed_and_excluded_from_quality(
+    tmp_path: Path,
+) -> None:
+    source, commit = _git_source(tmp_path)
+    source_snapshot = HARNESS._source_tree_digest(source)
+    payloads = _local_rows(source, commit)
+    rows = [_receipt(row, index) for index, row in enumerate(payloads)]
+
+    result = HARNESS._validate_local(rows, source_snapshot)
+    assert result["passed"] is True
+    assert result["initial_receipts"] == 3000
+    assert result["valid_rate"] == 1.0
+    assert set(result["outcomes"]["categories"]) == (
+        HARNESS._DEFERRED_REASONS | HARNESS._INVALID_REASONS
+    )
+
+    missing_capacity = [
+        row
+        for row in rows
+        if row.get("outcome", {}).get("reason") != "capacity"
+    ]
+    result = HARNESS._validate_local(missing_capacity, source_snapshot)
+    assert "failure_class_coverage_incomplete" in result["reasons"]
+
+    false_flag = dict(payloads[0])
+    attempt_digest = false_flag.pop("attempt_record_sha256")
+    false_flag.pop("diagnostic")
+    false_flag["label_record_sha256"] = attempt_digest
+    false_flag["failure_injection"] = False
+    result = HARNESS._validate_local(
+        [_receipt(false_flag, 50_000), *rows[1:]], source_snapshot
+    )
+    assert "failure_injection_outcome_mismatch" in result["reasons"]
+
+    valid_as_failure = dict(next(row for row in payloads if not row["failure_injection"]))
+    label_digest = valid_as_failure.pop("label_record_sha256")
+    valid_as_failure["attempt_record_sha256"] = label_digest
+    valid_as_failure["diagnostic"] = {"provider_calls": 0, "network_egress": 0}
+    valid_as_failure["failure_injection"] = True
+    result = HARNESS._validate_local(
+        [*rows, _receipt(valid_as_failure, 50_001)], source_snapshot
+    )
+    assert "failure_injection_outcome_mismatch" in result["reasons"]
+
+    egress = dict(payloads[1])
+    egress["diagnostic"] = {"provider_calls": 1, "network_egress": 0}
+    result = HARNESS._validate_local(
+        [_receipt(egress, 50_002), *rows[1:]], source_snapshot
+    )
+    assert "failure_diagnostic_egress" in result["reasons"]
+
+    boolean_zero = dict(payloads[1])
+    boolean_zero["diagnostic"] = {"provider_calls": False, "network_egress": 0}
+    result = HARNESS._validate_local(
+        [_receipt(boolean_zero, 50_003), *rows[1:]], source_snapshot
+    )
+    assert "failure_diagnostic_egress" in result["reasons"]
+
 
 def test_ox_negative_aliases_and_invalid_backoff_are_vetoes(tmp_path: Path) -> None:
     source, commit = _git_source(tmp_path)
@@ -3265,6 +3381,7 @@ def test_owned_fault_producer_reaches_validator_safe_outcomes(
         if scenario in {"http_402_paid", "model_drift", "disable_rollback"}:
             assert outcome["profile_stopped"] is True
     assert by_scenario["invalid_output_quarantine"]["outcome"]["quarantined"] >= 1
+    assert by_scenario["invalid_output_quarantine"]["outcome"]["adapter_calls"] >= 1
     assert by_scenario["lease_expiry_reclaim"]["event_heads"]["lease"]
     assert by_scenario["resource_pressure_preemption"]["outcome"]["adapter_calls"] >= 1
     assert by_scenario["disable_rollback"]["outcome"]["profile_stopped"] is True

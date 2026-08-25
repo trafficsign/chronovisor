@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -352,6 +353,7 @@ def test_test_only_attestation_rejects_noncanonical_source_identity(
         json.dumps({**unsigned, "seal_sha256": remote._sha256(unsigned)}),
         encoding="utf-8",
     )
+    os.utime(attestation, ns=(1, attestation.stat().st_mtime_ns))
     teacher = OpenCodeOxAlphaTeacher(
         Backend(),
         test_only=True,

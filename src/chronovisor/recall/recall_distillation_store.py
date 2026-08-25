@@ -10,7 +10,8 @@ import sqlite3
 import stat
 import tempfile
 import unicodedata
-from collections.abc import Iterable, Iterator, Mapping
+import uuid
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -177,6 +178,274 @@ def write_immutable(
         with _locked(directory / ".immutable.lock"):
             persist()
     return identity, path, verify_seal(artifact, schema=schema)
+
+
+def _snapshot_directory_path(
+    path: Path, *, expected_identity: tuple[int, int] | None = None
+) -> tuple[Path, tuple[tuple[int, int] | None, ...]]:
+    """Capture every existing directory inode before the pinned traversal."""
+
+    absolute = path.expanduser().absolute()
+    current = Path(absolute.anchor)
+    identities: list[tuple[int, int] | None] = []
+    missing = False
+    for component in (None, *absolute.parts[1:]):
+        if component is not None:
+            current /= component
+        if missing:
+            identities.append(None)
+            continue
+        try:
+            state = current.lstat()
+        except FileNotFoundError:
+            missing = True
+            identities.append(None)
+            continue
+        except OSError as exc:
+            raise DistillationStoreError(
+                "immutable artifact directory is unsafe"
+            ) from exc
+        if not stat.S_ISDIR(state.st_mode):
+            raise DistillationStoreError("immutable artifact directory is unsafe")
+        identities.append((state.st_dev, state.st_ino))
+    if expected_identity is not None and identities[-1] != expected_identity:
+        raise DistillationStoreError("immutable artifact directory changed")
+    return absolute, tuple(identities)
+
+
+def _open_directory_nofollow(
+    path: Path,
+    *,
+    create: bool,
+    snapshot: tuple[Path, tuple[tuple[int, int] | None, ...]],
+) -> int:
+    """Open a directory through no-follow components and retain its inode fd."""
+
+    absolute = path.expanduser().absolute()
+    snapshot_path, expected_identities = snapshot
+    if snapshot_path != absolute or len(expected_identities) != len(absolute.parts):
+        raise DistillationStoreError("immutable artifact directory is unsafe")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = os.open("/", flags)
+    try:
+        root_state = os.fstat(descriptor)
+        if expected_identities[0] != (root_state.st_dev, root_state.st_ino):
+            raise DistillationStoreError("immutable artifact directory changed")
+        for index, component in enumerate(absolute.parts[1:], start=1):
+            expected = expected_identities[index]
+            if expected is None:
+                if not create:
+                    raise DistillationStoreError(
+                        "immutable artifact directory is missing"
+                    )
+                try:
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
+                except FileExistsError as exc:
+                    raise DistillationStoreError(
+                        "immutable artifact directory changed"
+                    ) from exc
+                created_state = os.stat(
+                    component, dir_fd=descriptor, follow_symlinks=False
+                )
+                expected = (created_state.st_dev, created_state.st_ino)
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError as exc:
+                message = (
+                    "immutable artifact directory is missing"
+                    if expected is None
+                    else "immutable artifact directory changed"
+                )
+                raise DistillationStoreError(message) from exc
+            child_state = os.fstat(child)
+            if expected is not None and expected != (
+                child_state.st_dev,
+                child_state.st_ino,
+            ):
+                os.close(child)
+                raise DistillationStoreError("immutable artifact directory changed")
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except DistillationStoreError:
+        os.close(descriptor)
+        raise
+    except (OSError, ValueError) as exc:
+        os.close(descriptor)
+        raise DistillationStoreError("immutable artifact directory is unsafe") from exc
+
+
+def _read_pinned_regular(directory_fd: int, name: str) -> bytes:
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise DistillationStoreError("immutable artifact is unreadable") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise DistillationStoreError("immutable artifact is unsafe")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 65_536):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def pinned_directory_identity(
+    directory: Path, *, create: bool, require_missing: bool = False
+) -> tuple[int, int]:
+    """Return the inode identity of one safely traversed directory."""
+
+    snapshot = _snapshot_directory_path(directory)
+    if require_missing and snapshot[1][-1] is not None:
+        raise DistillationStoreError("immutable artifact directory changed")
+    descriptor = _open_directory_nofollow(
+        directory, create=create, snapshot=snapshot
+    )
+    try:
+        state = os.fstat(descriptor)
+        return state.st_dev, state.st_ino
+    finally:
+        os.close(descriptor)
+
+
+def write_immutable_pinned(
+    directory: Path,
+    payload: Mapping[str, Any],
+    *,
+    schema: str,
+    artifact_id: str | None = None,
+    before_persist: Callable[[], None] | None = None,
+    expected_directory_identity: tuple[int, int] | None = None,
+) -> tuple[str, Path, dict[str, Any]]:
+    """Immutable artifact write relative to a no-follow, inode-pinned directory."""
+
+    _reject_reserved(payload, {"schema", "namespace", "artifact_id", "seal_sha256"})
+    unsigned = {"schema": schema, "namespace": "recall-distillation", **payload}
+    identity = _validate_artifact_id(artifact_id or canonical_json_sha256_strict(unsigned))
+    artifact = _sealed({"artifact_id": identity, **unsigned})
+    encoded = canonical_json_bytes_strict(artifact) + b"\n"
+    name = f"{identity}.json"
+    snapshot = _snapshot_directory_path(
+        directory, expected_identity=expected_directory_identity
+    )
+    directory_fd = _open_directory_nofollow(
+        directory, create=True, snapshot=snapshot
+    )
+    try:
+        lock_fd = os.open(
+            ".immutable.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd
+        )
+        try:
+            if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+                raise DistillationStoreError("immutable artifact lock is unsafe")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            if before_persist is not None:
+                before_persist()
+            try:
+                current = _read_pinned_regular(directory_fd, name)
+            except FileNotFoundError:
+                current = None
+            if current is not None:
+                if current != encoded:
+                    raise DistillationStoreError("immutable artifact conflict")
+            else:
+                temporary = f".{name}.{uuid.uuid4().hex}.tmp"
+                temporary_fd = os.open(
+                    temporary,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    offset = 0
+                    while offset < len(encoded):
+                        written = os.write(temporary_fd, encoded[offset:])
+                        if written <= 0:
+                            raise OSError("immutable artifact short write")
+                        offset += written
+                    os.fsync(temporary_fd)
+                    os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(temporary_fd)
+                    try:
+                        os.unlink(temporary, dir_fd=directory_fd)
+                    except FileNotFoundError:
+                        pass
+            if _read_pinned_regular(directory_fd, name) != encoded:
+                raise DistillationStoreError("immutable artifact read-back failed")
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+    finally:
+        os.close(directory_fd)
+    return identity, directory / name, verify_seal(artifact, schema=schema)
+
+
+def read_immutable_pinned(
+    directory: Path,
+    artifact_id: str,
+    *,
+    schema: str | None = None,
+    expected_directory_identity: tuple[int, int] | None = None,
+) -> dict[str, Any]:
+    """Read one named immutable artifact relative to a no-follow directory fd."""
+
+    identity = _validate_artifact_id(artifact_id)
+    snapshot = _snapshot_directory_path(
+        directory, expected_identity=expected_directory_identity
+    )
+    descriptor = _open_directory_nofollow(
+        directory, create=False, snapshot=snapshot
+    )
+    try:
+        try:
+            payload = json.loads(_read_pinned_regular(descriptor, f"{identity}.json"))
+        except (ValueError, UnicodeError) as exc:
+            raise DistillationStoreError("immutable artifact is invalid") from exc
+    finally:
+        os.close(descriptor)
+    return verify_seal(payload, schema=schema)
+
+
+def unlink_immutable_pinned(
+    directory: Path,
+    artifact_id: str,
+    *,
+    expected: Mapping[str, Any],
+    schema: str,
+    before_unlink: Callable[[], None] | None = None,
+    expected_directory_identity: tuple[int, int] | None = None,
+) -> None:
+    """Unlink only a sealed expected artifact through its pinned directory fd."""
+
+    identity = _validate_artifact_id(artifact_id)
+    snapshot = _snapshot_directory_path(
+        directory, expected_identity=expected_directory_identity
+    )
+    descriptor = _open_directory_nofollow(
+        directory, create=False, snapshot=snapshot
+    )
+    try:
+        try:
+            payload = json.loads(
+                _read_pinned_regular(descriptor, f"{identity}.json")
+            )
+        except (ValueError, UnicodeError) as exc:
+            raise DistillationStoreError("immutable artifact is invalid") from exc
+        if verify_seal(payload, schema=schema) != expected:
+            raise DistillationStoreError("immutable artifact changed")
+        if before_unlink is not None:
+            before_unlink()
+        os.unlink(f"{identity}.json", dir_fd=descriptor)
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise DistillationStoreError("immutable artifact cleanup failed") from exc
+    finally:
+        os.close(descriptor)
 
 
 @contextlib.contextmanager

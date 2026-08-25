@@ -82,6 +82,7 @@ OX_PROFILE_SCHEMA = "chronovisor.recall-distill-ox-profile.v1"
 R4_CANDIDATE_ANCHOR_SCHEMA = "chronovisor.recall-r4-candidate-anchor.v1"
 R4_CANDIDATE_ANCHOR_FILE = "r4-candidate-anchor.json"
 R4_RECEIPT_SCHEMA = "chronovisor.recall-r4-receipt.v1"
+R4_DIRECTORY_AUTHORITY_SCHEMA = "chronovisor.recall-r4-directory-authority.v1"
 R4_R0_EVIDENCE_ID = "4de2cfe3f33e5c9c5153b264ebee8fae24d814856e0ac339e53c3077dc7efb33"
 OX_RAMP_RECEIPTS_PER_CAP = 20
 _OX_EXPIRY_RE = re.compile(
@@ -296,6 +297,14 @@ class DistillationDeferred(RuntimeError):
         super().__init__(message)
         self.failure_class = failure_class
         self.attempted = attempted
+
+
+class _LocalR4ClassifiedFailure(DistillationError):
+    """A closed local-teacher response failure category."""
+
+    def __init__(self, category: str) -> None:
+        super().__init__(f"local R4 {category} failure")
+        self.category = category
 
 
 class Teacher(Protocol):
@@ -537,13 +546,16 @@ def _worker_call(
                 },
             )
         raise DistillationError("distillation worker output is invalid")
+    if not isinstance(response.get("result"), dict):
+        raise DistillationError("distillation worker response is invalid")
     if (
-        not isinstance(response.get("result"), dict)
-        or not isinstance(route_identity, dict)
+        not isinstance(route_identity, dict)
         or route_identity != dict(expected_route)
         or not isinstance(model_digest, str)
         or model_digest != expected_digest
     ):
+        if operation == "teacher":
+            raise _LocalR4ClassifiedFailure("route_model_mismatch")
         raise DistillationError("distillation worker response is invalid")
     return {
         **response["result"],
@@ -9765,6 +9777,684 @@ def _r4_path_has_symlink(path: Path) -> bool:
         current = parent
 
 
+def bootstrap_r4_distillation_root_authority(root: Path) -> tuple[int, int]:
+    """Create the one-time R4 root authority before any distillation state exists.
+
+    This is deliberately separate from verification.  Once a distillation
+    directory exists without its authority artifact, its identity was never
+    pinned and must not be adopted later.
+    """
+
+    authority_parent = root
+    authority_identity = {"kind": "local-r4-distillation-root-authority"}
+    authority_id = canonical_json.canonical_json_sha256_strict(authority_identity)
+    try:
+        parent_identity = store.pinned_directory_identity(authority_parent, create=False)
+        authority = store.read_immutable_pinned(
+            authority_parent,
+            authority_id,
+            schema=R4_DIRECTORY_AUTHORITY_SCHEMA,
+            expected_directory_identity=parent_identity,
+        )
+    except FileNotFoundError:
+        try:
+            observed = store.pinned_directory_identity(
+                store.distillation_dir(root), create=True, require_missing=True
+            )
+        except store.DistillationStoreError as exc:
+            raise DistillationError("local R4 root authority bootstrap is untrusted") from exc
+        _, _, authority = store.write_immutable_pinned(
+            authority_parent,
+            {
+                **authority_identity,
+                "directory_identity": {
+                    "device": observed[0],
+                    "inode": observed[1],
+                },
+            },
+            schema=R4_DIRECTORY_AUTHORITY_SCHEMA,
+            artifact_id=authority_id,
+            expected_directory_identity=parent_identity,
+        )
+    except store.DistillationStoreError as exc:
+        raise DistillationError("local R4 root authority is invalid") from exc
+    else:
+        try:
+            observed = store.pinned_directory_identity(
+                store.distillation_dir(root), create=False
+            )
+        except store.DistillationStoreError as exc:
+            raise DistillationError("local R4 root authority is unsafe") from exc
+    expected_directory = {"device": observed[0], "inode": observed[1]}
+    if (
+        set(authority)
+        != {
+            "schema",
+            "namespace",
+            "artifact_id",
+            "seal_sha256",
+            "kind",
+            "directory_identity",
+        }
+        or authority.get("artifact_id") != authority_id
+        or authority.get("kind") != authority_identity["kind"]
+        or authority.get("directory_identity") != expected_directory
+    ):
+        raise DistillationError("local R4 root authority changed")
+    return observed
+
+
+def _r4_distillation_root_authority(
+    root: Path, *, register: bool
+) -> tuple[int, int]:
+    """Verify the previously bootstrapped distillation root authority."""
+
+    if register:
+        raise DistillationError("local R4 root authority requires explicit bootstrap")
+    authority_parent = root
+    authority_identity = {"kind": "local-r4-distillation-root-authority"}
+    authority_id = canonical_json.canonical_json_sha256_strict(authority_identity)
+    try:
+        parent_identity = store.pinned_directory_identity(authority_parent, create=False)
+        authority = store.read_immutable_pinned(
+            authority_parent,
+            authority_id,
+            schema=R4_DIRECTORY_AUTHORITY_SCHEMA,
+            expected_directory_identity=parent_identity,
+        )
+        observed = store.pinned_directory_identity(
+            store.distillation_dir(root), create=False
+        )
+    except FileNotFoundError:
+        raise DistillationError("local R4 root authority is missing") from None
+    except store.DistillationStoreError as exc:
+        raise DistillationError("local R4 root authority is unsafe") from exc
+    expected_directory = {"device": observed[0], "inode": observed[1]}
+    if (
+        set(authority)
+        != {
+            "schema",
+            "namespace",
+            "artifact_id",
+            "seal_sha256",
+            "kind",
+            "directory_identity",
+        }
+        or authority.get("artifact_id") != authority_id
+        or authority.get("kind") != authority_identity["kind"]
+        or authority.get("directory_identity") != expected_directory
+    ):
+        raise DistillationError("local R4 root authority changed")
+    return observed
+
+
+def _r4_directory_authority(
+    *,
+    root: Path,
+    directory: Path,
+    role: str,
+    source_commit: str,
+    register: bool,
+) -> tuple[int, int]:
+    """Pin an R4 source directory across calls under the stable distillation root."""
+
+    if (
+        role not in {"receipts", "failure-attempts", "failure-pending"}
+        or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None
+    ):
+        raise DistillationError("local R4 directory authority is invalid")
+    authority_identity = {
+        "kind": "local-r4-directory-authority",
+        "role": role,
+        "source_commit": source_commit,
+    }
+    authority_id = canonical_json.canonical_json_sha256_strict(authority_identity)
+    authority_root = store.distillation_dir(root)
+    try:
+        authority_root_identity = _r4_distillation_root_authority(root, register=False)
+        authority = store.read_immutable_pinned(
+            authority_root,
+            authority_id,
+            schema=R4_DIRECTORY_AUTHORITY_SCHEMA,
+            expected_directory_identity=authority_root_identity,
+        )
+    except FileNotFoundError:
+        if not register:
+            raise DistillationError("local R4 directory authority is missing") from None
+        try:
+            observed = store.pinned_directory_identity(
+                directory, create=True, require_missing=True
+            )
+        except store.DistillationStoreError as exc:
+            raise DistillationError(
+                "local R4 directory authority bootstrap is untrusted"
+            ) from exc
+        _, _, authority = store.write_immutable_pinned(
+            authority_root,
+            {
+                **authority_identity,
+                "directory_identity": {
+                    "device": observed[0],
+                    "inode": observed[1],
+                },
+            },
+            schema=R4_DIRECTORY_AUTHORITY_SCHEMA,
+            artifact_id=authority_id,
+            expected_directory_identity=authority_root_identity,
+        )
+    except store.DistillationStoreError as exc:
+        raise DistillationError("local R4 directory authority is invalid") from exc
+    else:
+        try:
+            observed = store.pinned_directory_identity(directory, create=False)
+        except store.DistillationStoreError as exc:
+            raise DistillationError("local R4 directory authority is unsafe") from exc
+    expected_keys = {
+        "schema",
+        "namespace",
+        "artifact_id",
+        "seal_sha256",
+        *authority_identity,
+        "directory_identity",
+    }
+    expected_directory = {"device": observed[0], "inode": observed[1]}
+    if (
+        set(authority) != expected_keys
+        or authority.get("artifact_id") != authority_id
+        or any(authority.get(key) != value for key, value in authority_identity.items())
+        or authority.get("directory_identity") != expected_directory
+    ):
+        raise DistillationError("local R4 directory authority changed")
+    return observed
+
+
+def _write_r4_immutable(
+    directory: Path,
+    payload: Mapping[str, Any],
+    *,
+    schema: str,
+    artifact_id: str,
+    directory_identity: tuple[int, int],
+) -> tuple[str, Path, Mapping[str, Any]]:
+    """Write and read an R4 artifact through one no-follow directory fd."""
+
+    written = store.write_immutable_pinned(
+        directory,
+        payload,
+        schema=schema,
+        artifact_id=artifact_id,
+        expected_directory_identity=directory_identity,
+    )
+    if (
+        store.read_immutable_pinned(
+            directory,
+            artifact_id,
+            schema=schema,
+            expected_directory_identity=directory_identity,
+        )
+        != written[2]
+    ):
+        raise DistillationError("local R4 immutable read-back failed")
+    return written
+
+
+def _r4_directory_or_missing(path: Path) -> bool:
+    """Return whether a directory exists; reject dangling links and non-directories."""
+
+    try:
+        state = path.lstat()
+    except FileNotFoundError:
+        return False
+    if stat.S_ISLNK(state.st_mode) or not stat.S_ISDIR(state.st_mode):
+        raise DistillationError("local R4 directory path is unsafe")
+    return True
+
+
+def _r4_regular_or_missing(path: Path) -> bool:
+    try:
+        state = path.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(state.st_mode):
+        raise DistillationError("local R4 artifact path is unsafe")
+    return True
+
+
+_LOCAL_R4_DEFERRED_FAILURES = frozenset({"capacity", "timeout", "preemption"})
+_LOCAL_R4_INVALID_FAILURES = frozenset(
+    {"schema", "coverage", "route_model_mismatch"}
+)
+
+
+def _local_r4_owned_failure_injection(
+    *, route: str, work_id: str, attempt: int
+) -> str | None:
+    """Return an owned, provider-free R4 fault category when a harness injects one.
+
+    Production deliberately has no configuration switch for this: the formal clone
+    harness reaches the seam by replacing this function in its isolated process.
+    """
+
+    del route, work_id, attempt
+    return None
+
+
+def _local_r4_failure_entry(
+    *,
+    work_id: object,
+    attempt: object,
+    task: Mapping[str, Any],
+    route_identity: Mapping[str, Any],
+    source: Mapping[str, Any],
+    category: object,
+    owned_diagnostic: bool,
+) -> dict[str, Any] | None:
+    assignment = task.get("assignment")
+    outcome_class = (
+        "deferred"
+        if category in _LOCAL_R4_DEFERRED_FAILURES
+        else "invalid"
+        if category in _LOCAL_R4_INVALID_FAILURES
+        else ""
+    )
+    if (
+        not isinstance(work_id, str)
+        or re.fullmatch(r"local-teacher-[0-9a-f]{64}", work_id) is None
+        or isinstance(attempt, bool)
+        or not isinstance(attempt, int)
+        or attempt < 1
+        or not isinstance(assignment, Mapping)
+        or set(route_identity) != {"role", "provider", "model", "location"}
+        or route_identity.get("role") != task.get("route")
+        or route_identity.get("location") != "local"
+        or not isinstance(route_identity.get("provider"), str)
+        or not route_identity["provider"]
+        or not isinstance(route_identity.get("model"), str)
+        or not route_identity["model"]
+        or _validate_ox_source_binding(
+            cast(Mapping[str, str] | None, source)
+        ) != source
+        or not outcome_class
+    ):
+        return None
+    return {
+        "work_id": work_id,
+        "attempt": attempt,
+        "task": task,
+        "route_identity": dict(route_identity),
+        "source": dict(source),
+        "category": str(category),
+        "outcome_class": outcome_class,
+        "owned_diagnostic": owned_diagnostic,
+    }
+
+
+def _local_r4_failure_workset_receipt(
+    transition: Mapping[str, Any], work_ids: Sequence[str]
+) -> dict[str, Any]:
+    expected_keys = {
+        "generation",
+        "receipt_sha256",
+        "operation",
+        "selection_sha256",
+        "work_ids_sha256",
+    }
+    if "context_sha256" in transition:
+        expected_keys.add("context_sha256")
+    if (
+        not work_ids
+        or len(set(work_ids)) != len(work_ids)
+        or set(transition) != expected_keys
+        or isinstance(transition.get("generation"), bool)
+        or not isinstance(transition.get("generation"), int)
+        or transition["generation"] < 1
+        or transition.get("operation") not in {"release", "commit"}
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(transition.get(key) or "")) is None
+            for key in ("receipt_sha256", "selection_sha256", "work_ids_sha256")
+        )
+        or transition.get("work_ids_sha256")
+        != canonical_json.canonical_json_sha256_strict(sorted(work_ids))
+    ):
+        raise DistillationError("local R4 failure workset binding is invalid")
+    return {
+        "generation": transition["generation"],
+        "head_sha256": transition["receipt_sha256"],
+        "operation": transition["operation"],
+        "selection_sha256": transition["selection_sha256"],
+        "work_ids_sha256": transition["work_ids_sha256"],
+        **(
+            {"context_sha256": transition["context_sha256"]}
+            if "context_sha256" in transition
+            else {}
+        ),
+    }
+
+
+def _write_r4_local_failure_receipts(
+    *,
+    root: Path,
+    config: DistillationConfig,
+    workset: Any,
+    entries: Sequence[Mapping[str, Any]],
+    label_head: Mapping[str, Any],
+    settle_transition: Mapping[str, Any],
+    configured_max_inflight: int | None = None,
+    require_current_source: bool = True,
+    captured_at: str | None = None,
+    claim_transition: Mapping[str, Any] | None = None,
+) -> bool:
+    """Seal owned, payload-free failure diagnostics after their queue transition."""
+
+    if not entries:
+        return True
+    entry_work_ids = [entry.get("work_id") for entry in entries]
+    if not all(isinstance(work_id, str) for work_id in entry_work_ids):
+        return False
+    work_ids = cast(list[str], entry_work_ids)
+    try:
+        current_workset_receipt = _local_r4_failure_workset_receipt(
+            settle_transition, work_ids
+        )
+    except DistillationError:
+        return False
+    claim_receipt: dict[str, Any] | None = None
+    if captured_at is None or claim_transition is None:
+        return False
+    if _OX_EXPIRY_RE.fullmatch(captured_at) is None:
+        return False
+    if not isinstance(claim_transition, Mapping):
+        return False
+    generation = claim_transition.get("generation")
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or claim_transition.get("operation") != "claim"
+        or generation + 1 != settle_transition.get("generation")
+        or claim_transition.get("selection_sha256")
+        != settle_transition.get("selection_sha256")
+        or claim_transition.get("work_ids_sha256")
+        != settle_transition.get("work_ids_sha256")
+        or workset.transition_receipt_binding(generation) != claim_transition
+    ):
+        return False
+    claim_receipt = {
+        "generation": generation,
+        "head_sha256": claim_transition["receipt_sha256"],
+        "selection_sha256": claim_transition["selection_sha256"],
+        "work_ids_sha256": claim_transition["work_ids_sha256"],
+    }
+    receipt_cap = (
+        config.teacher_max_inflight
+        if configured_max_inflight is None
+        else configured_max_inflight
+    )
+    if (
+        isinstance(receipt_cap, bool)
+        or not isinstance(receipt_cap, int)
+        or not 1 <= receipt_cap <= 10
+    ):
+        return False
+    created: list[
+        tuple[Path, str, Mapping[str, Any], tuple[int, int]]
+    ] = []
+    try:
+        first = entries[0]
+        source = first.get("source")
+        if not isinstance(source, Mapping):
+            return False
+        source = _validate_ox_source_binding(cast(Mapping[str, str], source))
+        settle_generation = settle_transition.get("generation")
+        if isinstance(settle_generation, bool) or not isinstance(settle_generation, int):
+            return False
+        exact_transition = workset.transition_receipt_binding(settle_generation)
+        label_path = store.distillation_dir(root) / "label-ledger.jsonl"
+        if (
+            exact_transition != settle_transition
+            or settle_transition.get("operation") not in {"release", "commit"}
+            or store.chain_head(label_path) != label_head
+            or (require_current_source and ox_alpha_source_binding() != source)
+        ):
+            return False
+        directory = (
+            store.distillation_dir(root)
+            / "r4-receipts"
+            / "local"
+            / source["source_commit"]
+        )
+        attempts_directory = (
+            store.distillation_dir(root)
+            / "r4-failure-attempts"
+            / "local"
+            / source["source_commit"]
+        )
+        if _r4_path_has_symlink(directory) or _r4_path_has_symlink(attempts_directory):
+            return False
+        directory_identity = _r4_directory_authority(
+            root=root,
+            directory=directory,
+            role="receipts",
+            source_commit=source["source_commit"],
+            register=True,
+        )
+        attempts_identity = _r4_directory_authority(
+            root=root,
+            directory=attempts_directory,
+            role="failure-attempts",
+            source_commit=source["source_commit"],
+            register=True,
+        )
+        seen: set[tuple[str, int]] = set()
+        for entry in entries:
+            task = entry.get("task")
+            route_identity = entry.get("route_identity")
+            if (
+                not isinstance(task, Mapping)
+                or not isinstance(route_identity, Mapping)
+                or entry.get("source") != source
+                or not entry.get("owned_diagnostic")
+            ):
+                return False
+            normalized = _local_r4_failure_entry(
+                work_id=entry.get("work_id"),
+                attempt=entry.get("attempt"),
+                task=task,
+                route_identity=route_identity,
+                source=source,
+                category=entry.get("category"),
+                owned_diagnostic=True,
+            )
+            if normalized is None:
+                return False
+            work_id = str(normalized["work_id"])
+            attempt = int(normalized["attempt"])
+            if (work_id, attempt) in seen or workset.completion_identities([work_id]):
+                return False
+            seen.add((work_id, attempt))
+            attempt_payload = {
+                "kind": "local-r4-failure-attempt",
+                "profile": LOCAL_TRIAD_PROFILE,
+                "source_commit": source["source_commit"],
+                "source_tree_sha256": source["source_tree_sha256"],
+                "source_ox_identity_sha256": source["source_ox_identity_sha256"],
+                "work_id": work_id,
+                "attempt": attempt,
+                "route_identity": dict(route_identity),
+                "outcome": {
+                    "class": normalized["outcome_class"],
+                    "reason": normalized["category"],
+                },
+            }
+            attempt_record_sha256 = canonical_json.canonical_json_sha256_strict(
+                attempt_payload
+            )
+            attempt_path = attempts_directory / f"{attempt_record_sha256}.json"
+            try:
+                attempt_exists = True
+                if not stat.S_ISREG(attempt_path.lstat().st_mode):
+                    return False
+            except FileNotFoundError:
+                attempt_exists = False
+            _, attempt_path, attempt_artifact = _write_r4_immutable(
+                attempts_directory,
+                attempt_payload,
+                schema=R4_RECEIPT_SCHEMA,
+                artifact_id=attempt_record_sha256,
+                directory_identity=attempts_identity,
+            )
+            if not attempt_exists:
+                created.append(
+                    (
+                        attempts_directory,
+                        attempt_record_sha256,
+                        attempt_artifact,
+                        attempts_identity,
+                    )
+                )
+            if (
+                store.read_immutable_pinned(
+                    attempts_directory,
+                    attempt_record_sha256,
+                    schema=R4_RECEIPT_SCHEMA,
+                    expected_directory_identity=attempts_identity,
+                )
+                != attempt_artifact
+            ):
+                return False
+            receipt_identity = {
+                "profile": LOCAL_TRIAD_PROFILE,
+                "work_id": work_id,
+                "attempt": attempt,
+                "attempt_record_sha256": attempt_record_sha256,
+            }
+            if claim_receipt is not None:
+                receipt_identity = {
+                    **receipt_identity,
+                    "captured_at": captured_at,
+                    "claim_receipt_sha256": claim_receipt["head_sha256"],
+                }
+            receipt_id = canonical_json.canonical_json_sha256_strict(receipt_identity)
+            path = directory / f"{receipt_id}.json"
+            existing: Mapping[str, Any] | None = None
+            if _r4_regular_or_missing(path):
+                existing = store.read_immutable_pinned(
+                    directory,
+                    receipt_id,
+                    schema=R4_RECEIPT_SCHEMA,
+                    expected_directory_identity=directory_identity,
+                )
+                if (
+                    existing.get("captured_at") != captured_at
+                    or existing.get("claim_receipt") != claim_receipt
+                    or existing.get("workset_receipt") != current_workset_receipt
+                ):
+                    return False
+                workset_receipt = current_workset_receipt
+            else:
+                captured_at = captured_at or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                workset_receipt = current_workset_receipt
+            task_assignment = task["assignment"]
+            payload: dict[str, Any] = {
+                "receipt_id": receipt_id,
+                "receipt_identity": receipt_identity,
+                "profile": LOCAL_TRIAD_PROFILE,
+                "source_commit": source["source_commit"],
+                "source_tree_sha256": source["source_tree_sha256"],
+                "captured_at": captured_at,
+                "work_id": work_id,
+                "attempt": attempt,
+                "rally_id": task["rally"]["rally_id"],
+                "candidate_id": task["candidate"]["candidate_id"],
+                "primary_owner": task_assignment.get("owner"),
+                "probe": task_assignment.get("probe"),
+                "assignment_revision": task_assignment.get("revision"),
+                "probe_assignment_revision": task_assignment.get("probe_revision"),
+                "route_identity": dict(route_identity),
+                "lane": {
+                    "mode": "sleep",
+                    "purpose": "sleep",
+                    "admitted": True,
+                    "inflight": 1,
+                },
+                "live_recall": {"model_calls": 0, "remote_egress": 0},
+                "configured_max_inflight": receipt_cap,
+                "failure_injection": True,
+                "outcome": {
+                    "class": normalized["outcome_class"],
+                    "reason": normalized["category"],
+                },
+                "attempt_record_sha256": attempt_record_sha256,
+                "diagnostic": {"provider_calls": 0, "network_egress": 0},
+                "workset_receipt": workset_receipt,
+            }
+            if claim_receipt is not None:
+                payload["claim_receipt"] = claim_receipt
+            unsigned = {
+                "artifact_id": receipt_id,
+                "schema": R4_RECEIPT_SCHEMA,
+                "namespace": "recall-distillation",
+                **payload,
+            }
+            payload["receipt_sha256"] = canonical_json.canonical_json_sha256_strict(
+                unsigned
+            )
+            expected = {**unsigned, "receipt_sha256": payload["receipt_sha256"]}
+            if existing is not None:
+                if set(existing) != {*expected, "seal_sha256"} or any(
+                    existing.get(key) != value
+                    for key, value in expected.items()
+                ):
+                    return False
+            else:
+                _, path, artifact = _write_r4_immutable(
+                    directory,
+                    payload,
+                    schema=R4_RECEIPT_SCHEMA,
+                    artifact_id=receipt_id,
+                    directory_identity=directory_identity,
+                )
+                created.append((directory, receipt_id, artifact, directory_identity))
+                if (
+                    store.read_immutable_pinned(
+                        directory,
+                        receipt_id,
+                        schema=R4_RECEIPT_SCHEMA,
+                        expected_directory_identity=directory_identity,
+                    )
+                    != artifact
+                ):
+                    return False
+        if any(workset.completion_identities([str(entry["work_id"])]) for entry in entries):
+            raise DistillationError("local R4 failure completion changed")
+        if (
+            (require_current_source and ox_alpha_source_binding() != source)
+            or workset.transition_receipt_binding(settle_generation) != settle_transition
+            or store.chain_head(label_path) != label_head
+        ):
+            raise DistillationError("local R4 failure receipt identity conflicts")
+        return True
+    except (
+        DistillationError,
+        OSError,
+        ValueError,
+        store.DistillationStoreError,
+        KeyError,
+        TypeError,
+    ):
+        for directory, artifact_id, artifact, directory_identity in created:
+            try:
+                store.unlink_immutable_pinned(
+                    directory,
+                    artifact_id,
+                    expected=artifact,
+                    schema=R4_RECEIPT_SCHEMA,
+                    expected_directory_identity=directory_identity,
+                )
+            except (OSError, store.DistillationStoreError):
+                continue
+        return False
+
+
 def _write_r4_local_receipts(
     *,
     root: Path,
@@ -9777,7 +10467,9 @@ def _write_r4_local_receipts(
     if not entries:
         return True
 
-    created: list[tuple[Path, Mapping[str, Any]]] = []
+    created: list[
+        tuple[Path, str, Mapping[str, Any], tuple[int, int]]
+    ] = []
     try:
         first_label = entries[0].get("label")
         if not isinstance(first_label, Mapping):
@@ -9838,7 +10530,14 @@ def _write_r4_local_receipts(
         )
         if _r4_path_has_symlink(directory):
             return False
-        readbacks: list[tuple[Path, Mapping[str, Any]]] = []
+        directory_identity = _r4_directory_authority(
+            root=root,
+            directory=directory,
+            role="receipts",
+            source_commit=source["source_commit"],
+            register=True,
+        )
+        readbacks: list[tuple[str, Mapping[str, Any]]] = []
         for (work_id, attempt), entry in by_key.items():
             task = entry.get("task")
             label = entry.get("label")
@@ -9896,12 +10595,19 @@ def _write_r4_local_receipts(
             receipt_id = canonical_json.canonical_json_sha256_strict(
                 receipt_identity
             )
-            path = directory / f"{receipt_id}.json"
             workset_receipt: Mapping[str, Any]
-            if path.exists():
-                if not stat.S_ISREG(path.lstat().st_mode):
-                    return False
-                existing = store.read_sealed(path, schema=R4_RECEIPT_SCHEMA)
+            existing: Mapping[str, Any] | None = None
+            if _r4_directory_or_missing(directory):
+                try:
+                    existing = store.read_immutable_pinned(
+                        directory,
+                        receipt_id,
+                        schema=R4_RECEIPT_SCHEMA,
+                        expected_directory_identity=directory_identity,
+                    )
+                except FileNotFoundError:
+                    pass
+            if existing is not None:
                 workset_receipt_value = existing.get("workset_receipt")
                 if not isinstance(workset_receipt_value, Mapping):
                     return False
@@ -9965,30 +10671,37 @@ def _write_r4_local_receipts(
                 canonical_json.canonical_json_sha256_strict(expected_unsigned)
             )
             expected = {**expected_unsigned, "receipt_sha256": payload["receipt_sha256"]}
-            if path.exists():
+            if existing is not None:
                 if set(existing) != {*expected, "seal_sha256"} or any(
                     existing.get(key) != value for key, value in expected.items()
                 ):
                     return False
-                readbacks.append((path, existing))
+                readbacks.append((receipt_id, existing))
                 continue
-            artifact_id, path, artifact = store.write_immutable(
+            artifact_id, _path, artifact = _write_r4_immutable(
                 directory,
                 payload,
                 schema=R4_RECEIPT_SCHEMA,
                 artifact_id=receipt_id,
+                directory_identity=directory_identity,
             )
             if artifact_id != receipt_id:
                 raise DistillationError("local R4 receipt identity conflicts")
-            created.append((path, artifact))
-            readbacks.append((path, artifact))
+            created.append((directory, receipt_id, artifact, directory_identity))
+            readbacks.append((receipt_id, artifact))
         if (
             ox_alpha_source_binding() != source
             or workset.recent_transition_receipts(limit=1) != recent
             or store.chain_head(label_path) != label_head
             or any(
-                store.read_sealed(path, schema=R4_RECEIPT_SCHEMA) != artifact
-                for path, artifact in readbacks
+                store.read_immutable_pinned(
+                    directory,
+                    artifact_id,
+                    schema=R4_RECEIPT_SCHEMA,
+                    expected_directory_identity=directory_identity,
+                )
+                != artifact
+                for artifact_id, artifact in readbacks
             )
         ):
             raise DistillationError("local R4 receipt identity conflicts")
@@ -10001,10 +10714,15 @@ def _write_r4_local_receipts(
         KeyError,
         TypeError,
     ):
-        for path, expected_artifact in created:
+        for directory, artifact_id, expected_artifact, directory_identity in created:
             try:
-                if store.read_sealed(path, schema=R4_RECEIPT_SCHEMA) == expected_artifact:
-                    path.unlink()
+                store.unlink_immutable_pinned(
+                    directory,
+                    artifact_id,
+                    expected=expected_artifact,
+                    schema=R4_RECEIPT_SCHEMA,
+                    expected_directory_identity=directory_identity,
+                )
             except (OSError, store.DistillationStoreError):
                 continue
         return False
@@ -10037,7 +10755,13 @@ def _repair_r4_local_receipts(
     label_path: Path,
     label_rows: Sequence[Mapping[str, Any]],
 ) -> None:
-    """Advance a sealed label-ledger cursor only after missing receipts settle."""
+    """Repair every supplied label row through idempotent immutable receipts.
+
+    ``label_rows`` is the caller's sealed, complete ledger snapshot.  A
+    persistent cursor supplied no additional correctness and left a mutable
+    path below the distillation root; rechecking the complete snapshot is the
+    smaller fail-closed contract.
+    """
 
     commit = runtime_config.runtime_identity().get("commit_id")
     if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
@@ -10051,37 +10775,8 @@ def _repair_r4_local_receipts(
         "head_sha256": expected_head,
     }:
         raise DistillationError("local R4 repair ledger identity changed")
-    state_path = (
-        store.distillation_dir(root) / "r4-local-repair" / f"{commit}.json"
-    )
-    if _r4_path_has_symlink(state_path):
-        raise DistillationError("local R4 repair state path is unsafe")
-    start = 0
-    if state_path.exists():
-        state = store.read_sealed(state_path, schema=store.DISTILLATION_SCHEMA)
-        if set(state) != {
-            "schema",
-            "namespace",
-            "seal_sha256",
-            "kind",
-            "source_commit",
-            "label_records",
-            "label_head_sha256",
-        }:
-            raise DistillationError("local R4 repair state shape is invalid")
-        start = state.get("label_records")
-        if (
-            state.get("kind") != "local-r4-repair-state"
-            or state.get("source_commit") != commit
-            or isinstance(start, bool)
-            or not isinstance(start, int)
-            or not 0 <= start <= len(label_rows)
-            or state.get("label_head_sha256")
-            != (str(label_rows[start - 1].get("record_sha256") or "") if start else "")
-        ):
-            raise DistillationError("local R4 repair state is invalid")
     entries: list[dict[str, Any]] = []
-    for label in label_rows[start:]:
+    for label in label_rows:
         if (
             label.get("kind") != "teacher-label"
             or label.get("source_commit") != commit
@@ -10142,20 +10837,741 @@ def _repair_r4_local_receipts(
         return
     if store.chain_head(label_path) != ledger_head:
         raise DistillationError("local R4 repair ledger changed")
-    if _r4_path_has_symlink(state_path):
-        raise DistillationError("local R4 repair state path is unsafe")
-    payload = {
-        "kind": "local-r4-repair-state",
-        "source_commit": commit,
-        "label_records": len(label_rows),
-        "label_head_sha256": expected_head,
-    }
-    written = store.write_sealed_state(state_path, payload)
+
+
+def _local_r4_owned_failure_crash_after_settle(_marker: Mapping[str, Any]) -> bool:
+    """Test seam for the one crash boundary between queue settle and receipt."""
+
+    return False
+
+
+def _local_r4_owned_failure_crash_after_receipt(_marker: Mapping[str, Any]) -> bool:
+    """Test seam for the receipt-readback to marker-unlink crash boundary."""
+
+    return False
+
+
+def _write_local_r4_pending_failure_marker(
+    *,
+    root: Path,
+    config: DistillationConfig,
+    item: Mapping[str, Any],
+    category: str,
+    source: Mapping[str, str],
+    route_identity: Mapping[str, Any],
+    label_head: Mapping[str, Any],
+    claim_transition: Mapping[str, Any],
+) -> dict[str, Any]:
+    claim = item["claim"]
+    task = item["task"]
     if (
-        store.read_sealed(state_path, schema=store.DISTILLATION_SCHEMA) != written
-        or any(written.get(key) != value for key, value in payload.items())
+        not isinstance(task, Mapping)
+        or not isinstance(route_identity, Mapping)
+        or _local_r4_failure_entry(
+            work_id=claim.work_id,
+            attempt=claim.attempt,
+            task=task,
+            route_identity=route_identity,
+            source=source,
+            category=category,
+            owned_diagnostic=True,
+        )
+        is None
+        or set(label_head) != {"records", "head_sha256"}
+        or not isinstance(label_head.get("records"), int)
+        or isinstance(label_head.get("records"), bool)
+        or not isinstance(label_head.get("head_sha256"), str)
+        or claim_transition.get("operation") != "claim"
+        or claim_transition.get("work_ids_sha256")
+        != canonical_json.canonical_json_sha256_strict([claim.work_id])
     ):
-        raise DistillationError("local R4 repair state read-back failed")
+        raise DistillationError("local R4 pending failure marker is invalid")
+    if not _local_r4_task_matches_work_item(
+        task=task,
+        work_id=claim.work_id,
+        work_item={
+            "kind": claim.kind,
+            "payload_ref": claim.payload_ref,
+            "provenance": claim.provenance,
+        },
+    ):
+        raise DistillationError("local R4 pending failure task binding is invalid")
+    marker_identity = {
+        "profile": LOCAL_TRIAD_PROFILE,
+        **source,
+        "work_id": claim.work_id,
+        "attempt": claim.attempt,
+    }
+    marker_id = canonical_json.canonical_json_sha256_strict(marker_identity)
+    payload = {
+        "kind": "local-r4-owned-failure-pending",
+        "marker_identity": marker_identity,
+        "claim_transition": dict(claim_transition),
+        "label_head": dict(label_head),
+        "task": {
+            "rally_id": task["rally"]["rally_id"],
+            "candidate_id": task["candidate"]["candidate_id"],
+            "assignment": task["assignment"],
+            "route": task["route"],
+        },
+        "route_identity": dict(route_identity),
+        "category": category,
+        "configured_max_inflight": config.teacher_max_inflight,
+        "captured_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    directory = (
+        store.distillation_dir(root)
+        / "r4-failure-pending"
+        / "local"
+        / source["source_commit"]
+    )
+    if _r4_path_has_symlink(directory):
+        raise DistillationError("local R4 pending failure marker path is unsafe")
+    directory_identity = _r4_directory_authority(
+        root=root,
+        directory=directory,
+        role="failure-pending",
+        source_commit=source["source_commit"],
+        register=True,
+    )
+    path = directory / f"{marker_id}.json"
+    existing: Mapping[str, Any] | None = None
+    if _r4_directory_or_missing(directory):
+        try:
+            existing = store.read_immutable_pinned(
+                directory,
+                marker_id,
+                schema=R4_RECEIPT_SCHEMA,
+                expected_directory_identity=directory_identity,
+            )
+        except FileNotFoundError:
+            pass
+    if existing is not None:
+        stable_payload = {key: value for key, value in payload.items() if key != "claim_transition"}
+        if (
+            set(existing) != {"schema", "namespace", "artifact_id", "seal_sha256", *payload}
+            or any(existing.get(key) != value for key, value in stable_payload.items())
+        ):
+            raise DistillationError("local R4 pending failure marker conflicts")
+        return dict(existing)
+    _, path, artifact = _write_r4_immutable(
+        directory,
+        payload,
+        schema=R4_RECEIPT_SCHEMA,
+        artifact_id=marker_id,
+        directory_identity=directory_identity,
+    )
+    if (
+        not stat.S_ISREG(path.lstat().st_mode)
+        or store.read_immutable_pinned(
+            directory,
+            marker_id,
+            schema=R4_RECEIPT_SCHEMA,
+            expected_directory_identity=directory_identity,
+        )
+        != artifact
+    ):
+        raise DistillationError("local R4 pending failure marker read-back failed")
+    return dict(artifact)
+
+
+def _local_r4_task_matches_work_item(
+    *, task: Mapping[str, Any], work_id: str, work_item: Mapping[str, Any]
+) -> bool:
+    """Bind the marker's display task to the immutable claimed work item."""
+
+    rally = task.get("rally")
+    candidate = task.get("candidate")
+    assignment = task.get("assignment")
+    route = task.get("route")
+    if (
+        not isinstance(rally, Mapping)
+        or not isinstance(candidate, Mapping)
+        or not isinstance(assignment, Mapping)
+        or not isinstance(route, str)
+        or not isinstance(work_id, str)
+    ):
+        return False
+    rally_id, candidate_id = rally.get("rally_id"), candidate.get("candidate_id")
+    provenance = work_item.get("provenance")
+    payload_ref = work_item.get("payload_ref")
+    payload_bound = (
+        payload_ref == f"candidate-snapshot:{rally_id}:{candidate_id}"
+        if isinstance(payload_ref, str) and payload_ref.count(":") >= 2
+        else isinstance(payload_ref, str) and payload_ref.startswith("candidate-snapshot:")
+    )
+    return (
+        isinstance(rally_id, str)
+        and isinstance(candidate_id, str)
+        and work_item.get("kind") == f"local-teacher:{route}"
+        and payload_bound
+        and isinstance(provenance, Mapping)
+        and provenance.get("route") == route
+        and assignment.get("owner") == route
+        and work_id.startswith("local-teacher-")
+    )
+
+
+def _remove_local_r4_pending_failure_marker(
+    *, root: Path, path: Path, marker: Mapping[str, Any], source_commit: str
+) -> None:
+    """Remove a pending marker only after its sealed evidence has been read back."""
+
+    artifact_id = marker.get("artifact_id")
+    if not isinstance(artifact_id, str):
+        raise DistillationError("local R4 pending failure marker is invalid")
+    directory_identity = _r4_directory_authority(
+        root=root,
+        directory=path.parent,
+        role="failure-pending",
+        source_commit=source_commit,
+        register=False,
+    )
+    try:
+        store.unlink_immutable_pinned(
+            path.parent,
+            artifact_id,
+            expected=marker,
+            schema=R4_RECEIPT_SCHEMA,
+            expected_directory_identity=directory_identity,
+        )
+    except store.DistillationStoreError as exc:
+        raise DistillationError("local R4 pending failure marker cleanup failed") from exc
+
+
+def _local_r4_pending_receipt_is_sealed(
+    *,
+    root: Path,
+    entry: Mapping[str, Any],
+    source: Mapping[str, str],
+    configured_max_inflight: int,
+    settle_transition: Mapping[str, Any],
+    captured_at: str | None = None,
+    claim_transition: Mapping[str, Any] | None = None,
+) -> bool:
+    """Recognize the exact receipt written before a marker-cleanup crash."""
+
+    task = entry.get("task")
+    route_identity = entry.get("route_identity")
+    if not isinstance(task, Mapping) or not isinstance(route_identity, Mapping):
+        return False
+    normalized = _local_r4_failure_entry(
+        work_id=entry.get("work_id"),
+        attempt=entry.get("attempt"),
+        task=task,
+        route_identity=route_identity,
+        source=source,
+        category=entry.get("category"),
+        owned_diagnostic=True,
+    )
+    if (
+        normalized is None
+        or isinstance(configured_max_inflight, bool)
+        or not isinstance(configured_max_inflight, int)
+        or not 1 <= configured_max_inflight <= 10
+    ):
+        return False
+    work_id, attempt = str(normalized["work_id"]), int(normalized["attempt"])
+    attempt_payload = {
+        "kind": "local-r4-failure-attempt",
+        "profile": LOCAL_TRIAD_PROFILE,
+        **source,
+        "work_id": work_id,
+        "attempt": attempt,
+        "route_identity": dict(route_identity),
+        "outcome": {
+            "class": normalized["outcome_class"],
+            "reason": normalized["category"],
+        },
+    }
+    attempt_record_sha256 = canonical_json.canonical_json_sha256_strict(attempt_payload)
+    attempts_directory = (
+        store.distillation_dir(root)
+        / "r4-failure-attempts"
+        / "local"
+        / source["source_commit"]
+    )
+    attempt_expected = store._sealed(
+        {
+            "artifact_id": attempt_record_sha256,
+            "schema": R4_RECEIPT_SCHEMA,
+            "namespace": "recall-distillation",
+            **attempt_payload,
+        }
+    )
+    receipt_identity = {
+        "profile": LOCAL_TRIAD_PROFILE,
+        "work_id": work_id,
+        "attempt": attempt,
+        "attempt_record_sha256": attempt_record_sha256,
+    }
+    claim_receipt: dict[str, Any] | None = None
+    if captured_at is not None and isinstance(claim_transition, Mapping):
+        claim_receipt = {
+            "generation": claim_transition.get("generation"),
+            "head_sha256": claim_transition.get("receipt_sha256"),
+            "selection_sha256": claim_transition.get("selection_sha256"),
+            "work_ids_sha256": claim_transition.get("work_ids_sha256"),
+        }
+        receipt_identity = {
+            **receipt_identity,
+            "captured_at": captured_at,
+            "claim_receipt_sha256": claim_receipt["head_sha256"],
+        }
+    receipt_id = canonical_json.canonical_json_sha256_strict(receipt_identity)
+    directory = (
+        store.distillation_dir(root)
+        / "r4-receipts"
+        / "local"
+        / source["source_commit"]
+    )
+    try:
+        attempts_identity = _r4_directory_authority(
+            root=root,
+            directory=attempts_directory,
+            role="failure-attempts",
+            source_commit=source["source_commit"],
+            register=False,
+        )
+        directory_identity = _r4_directory_authority(
+            root=root,
+            directory=directory,
+            role="receipts",
+            source_commit=source["source_commit"],
+            register=False,
+        )
+    except DistillationError:
+        return False
+    try:
+        if (
+            store.read_immutable_pinned(
+                attempts_directory,
+                attempt_record_sha256,
+                schema=R4_RECEIPT_SCHEMA,
+                expected_directory_identity=attempts_identity,
+            )
+            != attempt_expected
+        ):
+            return False
+        receipt = store.read_immutable_pinned(
+            directory,
+            receipt_id,
+            schema=R4_RECEIPT_SCHEMA,
+            expected_directory_identity=directory_identity,
+        )
+    except (OSError, store.DistillationStoreError):
+        return False
+    receipt_captured_at = receipt.get("captured_at")
+    if (
+        not isinstance(receipt_captured_at, str)
+        or _OX_EXPIRY_RE.fullmatch(receipt_captured_at) is None
+        or (captured_at is not None and receipt_captured_at != captured_at)
+    ):
+        return False
+    assignment = task.get("assignment")
+    if not isinstance(assignment, Mapping):
+        return False
+    try:
+        workset_receipt = _local_r4_failure_workset_receipt(
+            settle_transition, [work_id]
+        )
+    except DistillationError:
+        return False
+    payload: dict[str, Any] = {
+        "receipt_id": receipt_id,
+        "receipt_identity": receipt_identity,
+        "profile": LOCAL_TRIAD_PROFILE,
+        "source_commit": source["source_commit"],
+        "source_tree_sha256": source["source_tree_sha256"],
+        "captured_at": receipt_captured_at,
+        "work_id": work_id,
+        "attempt": attempt,
+        "rally_id": task.get("rally", {}).get("rally_id") if isinstance(task.get("rally"), Mapping) else None,
+        "candidate_id": task.get("candidate", {}).get("candidate_id") if isinstance(task.get("candidate"), Mapping) else None,
+        "primary_owner": assignment.get("owner"),
+        "probe": assignment.get("probe"),
+        "assignment_revision": assignment.get("revision"),
+        "probe_assignment_revision": assignment.get("probe_revision"),
+        "route_identity": dict(route_identity),
+        "lane": {"mode": "sleep", "purpose": "sleep", "admitted": True, "inflight": 1},
+        "live_recall": {"model_calls": 0, "remote_egress": 0},
+        "configured_max_inflight": configured_max_inflight,
+        "failure_injection": True,
+        "outcome": {"class": normalized["outcome_class"], "reason": normalized["category"]},
+        "attempt_record_sha256": attempt_record_sha256,
+        "diagnostic": {"provider_calls": 0, "network_egress": 0},
+        "workset_receipt": workset_receipt,
+    }
+    if claim_receipt is not None:
+        payload["claim_receipt"] = claim_receipt
+    unsigned = {
+        "artifact_id": receipt_id,
+        "schema": R4_RECEIPT_SCHEMA,
+        "namespace": "recall-distillation",
+        **payload,
+    }
+    payload["receipt_sha256"] = canonical_json.canonical_json_sha256_strict(unsigned)
+    return receipt == store._sealed(
+        {**unsigned, "receipt_sha256": payload["receipt_sha256"]}
+    )
+
+
+def _repair_local_r4_pending_failure_markers(
+    *,
+    root: Path,
+    config: DistillationConfig,
+    workset: Any,
+    label_path: Path,
+    reclaimed_claim: Any | None = None,
+) -> None:
+    """Finish only the exact post-settle owned-failure crash boundary."""
+
+    base_directory = store.distillation_dir(root) / "r4-failure-pending" / "local"
+    if not _r4_directory_or_missing(base_directory):
+        return
+    directories = sorted(base_directory.iterdir())
+    if len(directories) > 128:
+        raise DistillationError("local R4 pending failure source inventory exceeds limit")
+    paths: list[tuple[Path, Path]] = []
+    for directory in directories:
+        if not _r4_directory_or_missing(directory):
+            continue
+        paths.extend((directory, path) for path in sorted(directory.glob("*.json")))
+    if len(paths) > 128:
+        raise DistillationError("local R4 pending failure marker inventory exceeds limit")
+    for directory, path in paths:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise DistillationError("local R4 pending failure marker is unsafe")
+        marker_id = path.stem
+        if path.name != f"{marker_id}.json" or re.fullmatch(r"[0-9a-f]{64}", marker_id) is None:
+            raise DistillationError("local R4 pending failure marker is unsafe")
+        directory_identity = _r4_directory_authority(
+            root=root,
+            directory=directory,
+            role="failure-pending",
+            source_commit=directory.name,
+            register=False,
+        )
+        marker = store.read_immutable_pinned(
+            directory,
+            marker_id,
+            schema=R4_RECEIPT_SCHEMA,
+            expected_directory_identity=directory_identity,
+        )
+        expected_keys = {
+            "schema",
+            "namespace",
+            "artifact_id",
+            "seal_sha256",
+            "kind",
+            "marker_identity",
+            "claim_transition",
+            "label_head",
+            "task",
+            "route_identity",
+            "category",
+            "configured_max_inflight",
+            "captured_at",
+        }
+        identity = marker.get("marker_identity")
+        claim_transition = marker.get("claim_transition")
+        task_payload = marker.get("task")
+        route_identity = marker.get("route_identity")
+        label_head = marker.get("label_head")
+        if (
+            set(marker) != expected_keys
+            or marker.get("kind") != "local-r4-owned-failure-pending"
+            or not isinstance(identity, Mapping)
+            or dict(identity).get("profile") != LOCAL_TRIAD_PROFILE
+            or marker.get("artifact_id")
+            != canonical_json.canonical_json_sha256_strict(identity)
+            or not isinstance(claim_transition, Mapping)
+            or not isinstance(task_payload, Mapping)
+            or not isinstance(route_identity, Mapping)
+            or not isinstance(label_head, Mapping)
+        ):
+            raise DistillationError("local R4 pending failure marker is invalid")
+        source_commit = identity.get("source_commit")
+        source_tree = identity.get("source_tree_sha256")
+        source_ox_identity = identity.get("source_ox_identity_sha256")
+        if (
+            not isinstance(source_commit, str)
+            or not isinstance(source_tree, str)
+            or not isinstance(source_ox_identity, str)
+        ):
+            raise DistillationError("local R4 pending failure marker is invalid")
+        source = _validate_ox_source_binding(
+            {
+                "source_commit": source_commit,
+                "source_tree_sha256": source_tree,
+                "source_ox_identity_sha256": source_ox_identity,
+            }
+        )
+        if {key: identity.get(key) for key in source} != source:
+            raise DistillationError("local R4 pending failure marker is invalid")
+        if directory.name != source["source_commit"]:
+            raise DistillationError("local R4 pending failure marker source directory drifted")
+        stored_cap = marker.get("configured_max_inflight")
+        captured_at = marker.get("captured_at")
+        if (
+            isinstance(stored_cap, bool)
+            or not isinstance(stored_cap, int)
+            or not 1 <= stored_cap <= 10
+            or not isinstance(captured_at, str)
+            or _OX_EXPIRY_RE.fullmatch(captured_at) is None
+        ):
+            raise DistillationError("local R4 pending failure marker is invalid")
+        work_id = identity.get("work_id")
+        attempt = identity.get("attempt")
+        if not isinstance(work_id, str) or isinstance(attempt, bool) or not isinstance(attempt, int):
+            raise DistillationError("local R4 pending failure marker is invalid")
+        claim_generation = claim_transition.get("generation")
+        if isinstance(claim_generation, bool) or not isinstance(claim_generation, int):
+            raise DistillationError("local R4 pending failure claim is invalid")
+        exact_claim = workset.transition_receipt_binding(claim_generation)
+        category = marker.get("category")
+        expected_operation = "commit"
+        if (
+            exact_claim != claim_transition
+            or claim_transition.get("operation") != "claim"
+            or claim_transition.get("work_ids_sha256")
+            != canonical_json.canonical_json_sha256_strict([work_id])
+        ):
+            raise DistillationError("local R4 pending failure claim drifted")
+        task = {
+            "rally": {"rally_id": task_payload.get("rally_id")},
+            "candidate": {"candidate_id": task_payload.get("candidate_id")},
+            "assignment": task_payload.get("assignment"),
+            "route": task_payload.get("route"),
+        }
+        entry = _local_r4_failure_entry(
+            work_id=work_id,
+            attempt=attempt,
+            task=task,
+            route_identity=route_identity,
+            source=source,
+            category=category,
+            owned_diagnostic=True,
+        )
+        if entry is None:
+            raise DistillationError("local R4 pending failure repair failed")
+        work_item_reader = getattr(workset, "work_item_identity", None)
+        if not callable(work_item_reader) or not _local_r4_task_matches_work_item(
+            task=task,
+            work_id=work_id,
+            work_item=work_item_reader(work_id) or {},
+        ):
+            raise DistillationError("local R4 pending failure task drifted")
+        if (
+            store.chain_head(label_path) != label_head
+            or workset.completion_identities([work_id])
+        ):
+            raise DistillationError("local R4 pending failure evidence drifted")
+        settle = workset.transition_receipt_binding(claim_generation + 1)
+        settled = (
+            settle is not None
+            and settle.get("operation") == expected_operation
+            and settle.get("selection_sha256")
+            == claim_transition.get("selection_sha256")
+            and settle.get("work_ids_sha256")
+            == claim_transition.get("work_ids_sha256")
+            and settle.get("context_sha256") == marker.get("seal_sha256")
+        )
+        if not settled:
+            if (
+                reclaimed_claim is not None
+                and reclaimed_claim.work_id == work_id
+                and reclaimed_claim.attempt == attempt + 1
+            ):
+                _remove_local_r4_pending_failure_marker(
+                    root=root,
+                    path=path,
+                    marker=marker,
+                    source_commit=source["source_commit"],
+                )
+                continue
+            if settle is None or settle.get("operation") in {
+                "claim",
+                "claim_reclaim",
+            }:
+                continue
+            raise DistillationError("local R4 pending failure transition drifted")
+        assert settle is not None
+        if _local_r4_pending_receipt_is_sealed(
+            root=root,
+            entry=entry,
+            source=source,
+            configured_max_inflight=stored_cap,
+            settle_transition=settle,
+            captured_at=captured_at,
+            claim_transition=claim_transition,
+        ):
+            _remove_local_r4_pending_failure_marker(
+                root=root,
+                path=path,
+                marker=marker,
+                source_commit=source["source_commit"],
+            )
+            continue
+        if (
+            not _write_r4_local_failure_receipts(
+            root=root,
+            config=config,
+            workset=workset,
+            entries=[entry],
+            label_head=label_head,
+            settle_transition=settle,
+            configured_max_inflight=stored_cap,
+            require_current_source=False,
+            captured_at=captured_at,
+            claim_transition=claim_transition,
+        )
+        ):
+            raise DistillationError("local R4 pending failure repair failed")
+        if not _local_r4_pending_receipt_is_sealed(
+            root=root,
+            entry=entry,
+            source=source,
+            configured_max_inflight=stored_cap,
+            settle_transition=settle,
+            captured_at=captured_at,
+            claim_transition=claim_transition,
+        ):
+            raise DistillationError("local R4 pending failure receipt read-back failed")
+        _remove_local_r4_pending_failure_marker(
+            root=root,
+            path=path,
+            marker=marker,
+            source_commit=source["source_commit"],
+        )
+
+
+def _settle_local_r4_failure(
+    *,
+    root: Path,
+    config: DistillationConfig,
+    workset: Any,
+    batch: Sequence[Mapping[str, Any]],
+    category: str,
+    source: Mapping[str, str] | None,
+    route_identity: Mapping[str, Any],
+    label_head: Mapping[str, Any],
+    owned_diagnostic: bool,
+    model_calls: int,
+    attempted: bool = True,
+    claim_transition: Mapping[str, Any] | None = None,
+) -> _TeacherBatchResult:
+    """Durably settle one classified local failure before publishing diagnostics."""
+
+    claims = [item["claim"] for item in batch]
+    marker: Mapping[str, Any] | None = None
+    if owned_diagnostic:
+        if source is None or claim_transition is None or len(batch) != 1:
+            raise DistillationError("local R4 owned failure boundary is invalid")
+        marker = _write_local_r4_pending_failure_marker(
+            root=root,
+            config=config,
+            item=batch[0],
+            category=category,
+            source=source,
+            route_identity=route_identity,
+            label_head=label_head,
+            claim_transition=claim_transition,
+        )
+    if category in {"capacity", "preemption"} and not attempted and not owned_diagnostic:
+        workset.release_unattempted(claims)
+    else:
+        workset.commit(
+            claims,
+            [
+                {
+                    "status": "quarantined" if claim.attempt >= 3 else "retry",
+                    "error_class": f"local_r4_{category}",
+                    "retry_after_seconds": 0 if claim.attempt >= 3 else 60,
+                }
+                for claim in claims
+            ],
+            context_sha256=marker["seal_sha256"] if marker else None,
+        )
+    if owned_diagnostic:
+        assert source is not None and claim_transition is not None and marker is not None
+        marker_claim = marker.get("claim_transition")
+        if not isinstance(marker_claim, Mapping):
+            raise DistillationError("local R4 owned failure marker is invalid")
+        if marker_claim.get("work_ids_sha256") != canonical_json.canonical_json_sha256_strict(
+            [claim.work_id for claim in claims]
+        ):
+            raise DistillationError("local R4 owned failure marker is invalid")
+        claim_generation = marker_claim.get("generation")
+        if isinstance(claim_generation, bool) or not isinstance(claim_generation, int):
+            raise DistillationError("local R4 owned failure claim is invalid")
+        settle_transition = workset.transition_receipt_binding(claim_generation + 1)
+        expected_operation = "commit"
+        if (
+            settle_transition is None
+            or settle_transition.get("operation") != expected_operation
+            or settle_transition.get("selection_sha256")
+            != marker_claim.get("selection_sha256")
+            or settle_transition.get("work_ids_sha256")
+            != marker_claim.get("work_ids_sha256")
+            or settle_transition.get("context_sha256") != marker.get("seal_sha256")
+        ):
+            raise DistillationError("local R4 owned failure transition is invalid")
+        if _local_r4_owned_failure_crash_after_settle(marker):
+            raise DistillationError("local R4 owned failure injected crash")
+        entries: list[dict[str, Any]] = []
+        for item in batch:
+            entry = _local_r4_failure_entry(
+                work_id=item["claim"].work_id,
+                attempt=item["claim"].attempt,
+                task=item["task"],
+                route_identity=route_identity,
+                source=source,
+                category=category,
+                owned_diagnostic=True,
+            )
+            if entry is None:
+                raise DistillationError("local R4 owned failure provenance is invalid")
+            entries.append(entry)
+        if not _write_r4_local_failure_receipts(
+            root=root,
+            config=config,
+            workset=workset,
+            entries=entries,
+            label_head=label_head,
+            settle_transition=settle_transition,
+            captured_at=marker.get("captured_at") if isinstance(marker.get("captured_at"), str) else None,
+            claim_transition=marker_claim,
+        ):
+            raise DistillationError("local R4 failure receipt publication failed")
+        if _local_r4_owned_failure_crash_after_receipt(marker):
+            raise DistillationError("local R4 owned failure injected receipt crash")
+        marker_path = (
+            store.distillation_dir(root)
+            / "r4-failure-pending"
+            / "local"
+            / source["source_commit"]
+            / f"{marker['artifact_id']}.json"
+        )
+        _remove_local_r4_pending_failure_marker(
+            root=root,
+            path=marker_path,
+            marker=marker,
+            source_commit=source["source_commit"],
+        )
+    return _TeacherBatchResult(
+        deferred=True,
+        model_calls=model_calls,
+        workset_status=workset.status(include_timing=True),
+    )
+
+
+def _local_r4_deferred_category(exc: DistillationDeferred) -> str:
+    if exc.failure_class in {"capacity_unavailable", "resource_busy", "deferred"}:
+        return "capacity"
+    if exc.failure_class in {"foreground_preempted", "cancelled"}:
+        return "preemption"
+    return "timeout"
 
 
 def _run_local_teacher_route(
@@ -10175,16 +11591,49 @@ def _run_local_teacher_route(
         [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
     ],
 ) -> _TeacherBatchResult | None:
-    claims = list(
-        workset.claim(
-            f"local-teacher:{route}",
-            min(16, config.teacher_claim_limit),
-            str(route),
-            300,
-        )
-    )
+    teacher = teachers[route]
+    claims = list(workset.claim(f"local-teacher:{route}", 1, str(route), 300))
     if not claims:
         return None
+    if isinstance(teacher, _WorkerTeacher):
+        _repair_local_r4_pending_failure_markers(
+            root=root,
+            config=config,
+            workset=workset,
+            label_path=label_path,
+            reclaimed_claim=claims[0],
+        )
+    owned_injection = (
+        _local_r4_owned_failure_injection(
+            route=route, work_id=claims[0].work_id, attempt=claims[0].attempt
+        )
+        if isinstance(teacher, _WorkerTeacher)
+        else None
+    )
+    if owned_injection is not None and owned_injection not in (
+        _LOCAL_R4_DEFERRED_FAILURES | _LOCAL_R4_INVALID_FAILURES
+    ):
+        raise DistillationError("local R4 owned failure category is invalid")
+    claim_transition: Mapping[str, Any] | None = None
+    if isinstance(teacher, _WorkerTeacher) and owned_injection is not None:
+        latest = workset.recent_transition_receipts(limit=1)
+        if len(latest) != 1 or latest[0].get("operation") != "claim":
+            raise DistillationError("local R4 owned claim transition is unavailable")
+        generation = latest[0].get("generation")
+        if isinstance(generation, bool) or not isinstance(generation, int):
+            raise DistillationError("local R4 owned claim transition is invalid")
+        claim_transition = workset.transition_receipt_binding(generation)
+        if claim_transition is None:
+            raise DistillationError("local R4 owned claim transition is invalid")
+    elif config.teacher_claim_limit > 1:
+        claims.extend(
+            workset.claim(
+                f"local-teacher:{route}",
+                min(15, config.teacher_claim_limit - 1),
+                str(route),
+                300,
+            )
+        )
     completed_by_work = {
         str(row["work_id"]): row
         for row in label_rows
@@ -10332,8 +11781,11 @@ def _run_local_teacher_route(
         return _TeacherBatchResult(
             deferred=True, workset_status=workset.status(include_timing=True)
         )
+    worker_route_identity: Mapping[str, Any] = (
+        teacher.expected_route if isinstance(teacher, _WorkerTeacher) else {}
+    )
     source_binding: dict[str, str] | None = None
-    if isinstance(teachers[route], _WorkerTeacher):
+    if isinstance(teacher, _WorkerTeacher):
         try:
             source_binding = _validate_ox_source_binding(ox_alpha_source_binding())
         except (DistillationError, ValueError):
@@ -10341,81 +11793,104 @@ def _run_local_teacher_route(
             return _TeacherBatchResult(
                 deferred=True, workset_status=workset.status(include_timing=True)
             )
+        if owned_injection is not None:
+            return _settle_local_r4_failure(
+                root=root,
+                config=config,
+                workset=workset,
+                batch=batch,
+                category=owned_injection,
+                source=source_binding,
+                route_identity=worker_route_identity,
+                label_head=store.chain_head(label_path),
+                owned_diagnostic=True,
+                model_calls=0,
+                attempted=False,
+                claim_transition=claim_transition,
+            )
     try:
-        response = teachers[route].evaluate(worker_input)
+        response = teacher.evaluate(worker_input)
+        if not isinstance(response, Mapping):
+            raise _LocalR4ClassifiedFailure("schema")
         labels = response.get("labels")
-        if (
-            not isinstance(labels, list)
-            or len(labels) != len(batch)
-            or not all(isinstance(label, Mapping) for label in labels)
-            or {
-                str(label.get("candidate_id"))
-                for label in labels
-                if isinstance(label, Mapping)
-            }
-            != {str(item["task"]["candidate"]["candidate_id"]) for item in batch}
-            or isinstance(teachers[route], _WorkerTeacher)
-            and (
-                response.get("_route_identity") != teachers[route].expected_route
-                or response.get("_model_digest") != teachers[route].expected_digest
-            )
+        if not isinstance(labels, list) or not all(
+            isinstance(label, Mapping) for label in labels
         ):
-            raise DistillationError("teacher batch response coverage is invalid")
+            raise _LocalR4ClassifiedFailure("schema")
+        if len(labels) != len(batch) or {
+            str(label.get("candidate_id")) for label in labels
+        } != {str(item["task"]["candidate"]["candidate_id"]) for item in batch}:
+            raise _LocalR4ClassifiedFailure("coverage")
+        if isinstance(teacher, _WorkerTeacher) and (
+            response.get("_route_identity") != teacher.expected_route
+            or response.get("_model_digest") != teacher.expected_digest
+        ):
+            raise _LocalR4ClassifiedFailure("route_model_mismatch")
     except DistillationDeferred as exc:
-        if not exc.attempted and exc.failure_class in {
-            "capacity_unavailable",
-            "resource_busy",
-            "foreground_preempted",
-            "cancelled",
-            "deferred",
-        }:
-            workset.release_unattempted([item["claim"] for item in batch])
-            return _TeacherBatchResult(
-                deferred=True, workset_status=workset.status(include_timing=True)
-            )
-        outcomes = [
-            {
-                "status": "quarantined" if item["claim"].attempt >= 3 else "retry",
-                "error_class": "teacher_timeout",
-                "retry_after_seconds": 0 if item["claim"].attempt >= 3 else 60,
-            }
-            for item in batch
-        ]
-        workset.commit([item["claim"] for item in batch], outcomes)
-        return _TeacherBatchResult(
-            deferred=True,
-            model_calls=1,
-            workset_status=workset.status(include_timing=True),
+        return _settle_local_r4_failure(
+            root=root,
+            config=config,
+            workset=workset,
+            batch=batch,
+            category=_local_r4_deferred_category(exc),
+            source=source_binding,
+            route_identity=worker_route_identity,
+            label_head=store.chain_head(label_path),
+            owned_diagnostic=False,
+            model_calls=1 if exc.attempted else 0,
+            attempted=exc.attempted,
         )
     except OSError:
-        outcomes = [
-            {
-                "status": "quarantined" if item["claim"].attempt >= 3 else "retry",
-                "error_class": "teacher_transport",
-                "retry_after_seconds": 0,
-            }
-            for item in batch
-        ]
-        workset.commit([item["claim"] for item in batch], outcomes)
-        return _TeacherBatchResult(
-            deferred=True,
+        return _settle_local_r4_failure(
+            root=root,
+            config=config,
+            workset=workset,
+            batch=batch,
+            category="timeout",
+            source=source_binding,
+            route_identity=worker_route_identity,
+            label_head=store.chain_head(label_path),
+            owned_diagnostic=False,
             model_calls=1,
-            workset_status=workset.status(include_timing=True),
         )
-    except (TimeoutError, DistillationError):
-        outcomes = [
-            {
-                "status": "quarantined" if item["claim"].attempt >= 3 else "retry",
-                "error_class": "invalid_teacher_output",
-                "retry_after_seconds": 0 if item["claim"].attempt >= 3 else 60,
-            }
-            for item in batch
-        ]
-        workset.commit([item["claim"] for item in batch], outcomes)
-        return _TeacherBatchResult(
-            deferred=True,
+    except TimeoutError:
+        return _settle_local_r4_failure(
+            root=root,
+            config=config,
+            workset=workset,
+            batch=batch,
+            category="timeout",
+            source=source_binding,
+            route_identity=worker_route_identity,
+            label_head=store.chain_head(label_path),
+            owned_diagnostic=False,
             model_calls=1,
-            workset_status=workset.status(include_timing=True),
+        )
+    except _LocalR4ClassifiedFailure as exc:
+        return _settle_local_r4_failure(
+            root=root,
+            config=config,
+            workset=workset,
+            batch=batch,
+            category=exc.category,
+            source=source_binding,
+            route_identity=worker_route_identity,
+            label_head=store.chain_head(label_path),
+            owned_diagnostic=False,
+            model_calls=1,
+        )
+    except DistillationError:
+        return _settle_local_r4_failure(
+            root=root,
+            config=config,
+            workset=workset,
+            batch=batch,
+            category="schema",
+            source=source_binding,
+            route_identity=worker_route_identity,
+            label_head=store.chain_head(label_path),
+            owned_diagnostic=False,
+            model_calls=1,
         )
     labels_by_id = {
         str(label["candidate_id"]): label
@@ -10426,21 +11901,17 @@ def _run_local_teacher_route(
         label.get("verdict") not in RELEVANCE_LABELS | UTILITY_LABELS
         for label in labels_by_id.values()
     ):
-        workset.commit(
-            [item["claim"] for item in batch],
-            [
-                {
-                    "status": "quarantined" if item["claim"].attempt >= 3 else "retry",
-                    "error_class": "invalid_teacher_output",
-                    "retry_after_seconds": 0 if item["claim"].attempt >= 3 else 60,
-                }
-                for item in batch
-            ],
-        )
-        return _TeacherBatchResult(
-            deferred=True,
+        return _settle_local_r4_failure(
+            root=root,
+            config=config,
+            workset=workset,
+            batch=batch,
+            category="schema",
+            source=source_binding,
+            route_identity=worker_route_identity,
+            label_head=store.chain_head(label_path),
+            owned_diagnostic=False,
             model_calls=1,
-            workset_status=workset.status(include_timing=True),
         )
     records: list[dict[str, Any]] = []
     for item in batch:
@@ -10610,6 +12081,12 @@ def _run_local_teacher_batch(
         tasks=tasks,
         label_path=label_path,
         label_rows=label_rows,
+    )
+    _repair_local_r4_pending_failure_markers(
+        root=root,
+        config=config,
+        workset=workset,
+        label_path=label_path,
     )
     for route in _ordered_teacher_routes(
         {task["route"]: [task] for task in tasks.values() if task["route"] in teachers},

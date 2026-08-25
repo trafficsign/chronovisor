@@ -103,7 +103,7 @@ _RECEIPT_ENVELOPE_KEYS = {
     "receipt_sha256",
     "seal_sha256",
 }
-_LOCAL_RECEIPT_KEYS = _RECEIPT_ENVELOPE_KEYS | {
+_LOCAL_RECEIPT_COMMON_KEYS = _RECEIPT_ENVELOPE_KEYS | {
     "profile",
     "captured_at",
     "source_commit",
@@ -122,8 +122,14 @@ _LOCAL_RECEIPT_KEYS = _RECEIPT_ENVELOPE_KEYS | {
     "configured_max_inflight",
     "failure_injection",
     "outcome",
-    "label_record_sha256",
     "workset_receipt",
+}
+_LOCAL_VALID_RECEIPT_KEYS = _LOCAL_RECEIPT_COMMON_KEYS | {
+    "label_record_sha256",
+}
+_LOCAL_FAILURE_RECEIPT_KEYS = _LOCAL_RECEIPT_COMMON_KEYS | {
+    "attempt_record_sha256",
+    "diagnostic",
 }
 
 
@@ -755,18 +761,29 @@ def _validate_local(
     probe_revision = ""
     work_attempts: set[tuple[str, int]] = set()
     for row in rows:
-        if set(row) != _LOCAL_RECEIPT_KEYS:
+        failure_injection = row.get("failure_injection")
+        expected_keys = (
+            _LOCAL_FAILURE_RECEIPT_KEYS
+            if failure_injection is True
+            else _LOCAL_VALID_RECEIPT_KEYS
+        )
+        if set(row) != expected_keys:
             reasons.add("local_receipt_shape_invalid")
             continue
         work_id = _text(row.get("work_id"))
         attempt = row.get("attempt")
-        label_record_sha256 = _text(row.get("label_record_sha256"))
+        binding_key = (
+            "attempt_record_sha256"
+            if failure_injection is True
+            else "label_record_sha256"
+        )
+        binding_sha256 = _text(row.get(binding_key))
         workset_receipt = row.get("workset_receipt")
         expected_identity = {
             "profile": LOCAL_PROFILE,
             "work_id": work_id,
             "attempt": attempt,
-            "label_record_sha256": label_record_sha256,
+            binding_key: binding_sha256,
         }
         if (
             _parse_expiry(row.get("captured_at")) is None
@@ -774,7 +791,7 @@ def _validate_local(
             or isinstance(attempt, bool)
             or not isinstance(attempt, int)
             or attempt < 1
-            or _SHA.fullmatch(label_record_sha256) is None
+            or _SHA.fullmatch(binding_sha256) is None
             or not isinstance(workset_receipt, Mapping)
             or set(workset_receipt) != {"generation", "head_sha256"}
             or isinstance(workset_receipt.get("generation"), bool)
@@ -843,6 +860,7 @@ def _validate_local(
             or lane.get("mode") != "sleep"
             or lane.get("purpose") != "sleep"
             or lane.get("admitted") is not True
+            or isinstance(lane.get("inflight"), bool)
             or lane.get("inflight") != 1
         ):
             reasons.add("scheduler_lane_invalid")
@@ -850,10 +868,23 @@ def _validate_local(
         if (
             not isinstance(live, Mapping)
             or set(live) != {"model_calls", "remote_egress"}
+            or isinstance(live.get("model_calls"), bool)
+            or isinstance(live.get("remote_egress"), bool)
             or live.get("model_calls") != 0
             or live.get("remote_egress") != 0
         ):
             reasons.add("live_recall_egress")
+        if failure_injection is True:
+            diagnostic = row.get("diagnostic")
+            if (
+                not isinstance(diagnostic, Mapping)
+                or set(diagnostic) != {"provider_calls", "network_egress"}
+                or isinstance(diagnostic.get("provider_calls"), bool)
+                or isinstance(diagnostic.get("network_egress"), bool)
+                or diagnostic.get("provider_calls") != 0
+                or diagnostic.get("network_egress") != 0
+            ):
+                reasons.add("failure_diagnostic_egress")
         outcome = row.get("outcome")
         if not isinstance(outcome, Mapping):
             reasons.add("outcome_missing")
@@ -872,7 +903,8 @@ def _validate_local(
         elif outcome_class == "valid":
             valid += 1
             if (
-                outcome.get("schema_valid") is not True
+                reason != "ok"
+                or outcome.get("schema_valid") is not True
                 or outcome.get("coverage_valid") is not True
             ):
                 reasons.add("valid_outcome_unverified")
@@ -884,7 +916,9 @@ def _validate_local(
             invalid += 1
             if reason not in _INVALID_REASONS:
                 reasons.add("invalid_reason_invalid")
-        if reason:
+        if (outcome_class == "valid") != (failure_injection is False):
+            reasons.add("failure_injection_outcome_mismatch")
+        if reason and failure_injection is True:
             categories.add(reason)
         configured_max_inflight = row.get("configured_max_inflight")
         if (
@@ -893,9 +927,9 @@ def _validate_local(
             or not 1 <= configured_max_inflight <= 10
         ):
             reasons.add("local_configured_inflight_invalid")
-        if not isinstance(row.get("failure_injection"), bool):
+        if not isinstance(failure_injection, bool):
             reasons.add("failure_injection_invalid")
-        elif row.get("failure_injection") is not True:
+        elif failure_injection is False and outcome_class == "valid":
             quality_rows.append(row)
     if set(identities) != set(LOCAL_ROLES):
         reasons.add("local_identity_count_not_three")
@@ -1703,7 +1737,11 @@ def _production_workset_receipts(
             if dict(delta) != expected_delta:
                 raise R4Error("production workset advance delta is invalid")
         elif operation in {"claim_reclaim", "claim", "release"}:
-            if set(details) != {"kind", "count", "selection_sha256"}:
+            expected_details = {"kind", "count", "selection_sha256"}
+            if set(details) not in (
+                expected_details,
+                {*expected_details, "work_ids_sha256"},
+            ):
                 raise R4Error("production workset lease receipt is invalid")
             kind = details["kind"]
             count = details["count"]
@@ -1714,6 +1752,10 @@ def _production_workset_receipts(
                 or not isinstance(count, int)
                 or count < 1
                 or _SHA.fullmatch(str(details["selection_sha256"])) is None
+                or (
+                    "work_ids_sha256" in details
+                    and _SHA.fullmatch(str(details["work_ids_sha256"])) is None
+                )
             ):
                 raise R4Error("production workset lease receipt is invalid")
             expected_delta = {
@@ -1729,7 +1771,14 @@ def _production_workset_receipts(
         else:
             expected_details = {"completed", "retry", "quarantined", "selection_sha256"}
             timed_details = expected_details | {"retry_wait", "retry_schedule_sha256"}
-            if set(details) not in (expected_details, timed_details):
+            work_bound_details = expected_details | {"work_ids_sha256"}
+            timed_work_bound_details = timed_details | {"work_ids_sha256"}
+            if set(details) not in (
+                expected_details,
+                timed_details,
+                work_bound_details,
+                timed_work_bound_details,
+            ):
                 raise R4Error("production workset commit receipt is invalid")
             totals = {
                 key: details[key] for key in ("completed", "retry", "quarantined")
@@ -1741,9 +1790,13 @@ def _production_workset_receipts(
                 )
                 or sum(totals.values()) < 1
                 or _SHA.fullmatch(str(details["selection_sha256"])) is None
+                or (
+                    "work_ids_sha256" in details
+                    and _SHA.fullmatch(str(details["work_ids_sha256"])) is None
+                )
             ):
                 raise R4Error("production workset commit receipt is invalid")
-            if set(details) == timed_details and (
+            if set(details) in (timed_details, timed_work_bound_details) and (
                 isinstance(details["retry_wait"], bool)
                 or not isinstance(details["retry_wait"], int)
                 or details["retry_wait"] < 0
@@ -2884,7 +2937,9 @@ def _validate_owned_fault_scenarios(
         ]:
             reasons.add("owned_fault_safe_outcome_invalid")
             continue
-        if scenario == "invalid_output_quarantine" and outcome["quarantined"] < 1:
+        if scenario == "invalid_output_quarantine" and (
+            outcome["quarantined"] < 1 or outcome["adapter_calls"] < 1
+        ):
             reasons.add("owned_fault_safe_outcome_invalid")
             continue
         if scenario == "lease_expiry_reclaim" and not heads["lease"]:
@@ -3032,7 +3087,7 @@ def run_owned_fault_scenarios(
                         ],
                     },
                 }
-                for index in range(240)
+                for index in range(48)
             ]
             data = b"".join(_json_bytes(row) + b"\n" for row in rows)
             source_file.write_bytes(data)
@@ -3061,6 +3116,7 @@ def run_owned_fault_scenarios(
                 encoding="utf-8",
             )
             workset_path = root / PRODUCTION_WORKSET_RELATIVE
+            distillation.bootstrap_r4_distillation_root_authority(root)
             DistillationWorkset(
                 workset_path
             )  # Explicit bootstrap; worker cannot migrate.
@@ -4834,6 +4890,14 @@ def _authority_fd_state(value: os.stat_result) -> dict[str, int]:
     }
 
 
+def _authority_directory_state(value: os.stat_result) -> dict[str, int]:
+    return {
+        "st_dev": int(value.st_dev),
+        "st_ino": int(value.st_ino),
+        "st_mode": int(value.st_mode & 0o7777),
+    }
+
+
 def _authority_inventory_file_state(value: Mapping[str, int]) -> dict[str, int]:
     """Keep the public receipt inventory compatible with the R4 file schema."""
 
@@ -4892,7 +4956,11 @@ def _authority_path_states(path: Path, *, label: str) -> list[dict[str, int]]:
             ):
                 os.close(opened)
                 raise R4Error(f"{label} path has an unsafe component")
-            states.append(_authority_fd_state(value))
+            states.append(
+                _authority_fd_state(value)
+                if final
+                else _authority_directory_state(value)
+            )
             os.close(current)
             current = opened
         return states

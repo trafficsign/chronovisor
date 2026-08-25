@@ -868,6 +868,7 @@ def test_local_worker_metadata_and_transient_failure_classification(
 
     monkeypatch.setattr(research_scheduler, "research_lane", lane)
     failure = {"value": ""}
+    reported_identity: dict[str, object] = dict(identity)
 
     def command(
         _argv: object, encoded: str, _lease: object, **_kwargs: object
@@ -880,7 +881,7 @@ def test_local_worker_metadata_and_transient_failure_classification(
                 "operation": request["operation"],
                 "role": request["role"],
                 "request_id": request["request_id"],
-                "route_identity": identity,
+                "route_identity": reported_identity,
                 "model_digest": "d" * 64,
                 "result": {},
                 "failure_class": failure["value"],
@@ -892,7 +893,7 @@ def test_local_worker_metadata_and_transient_failure_classification(
                 "operation": request["operation"],
                 "role": request["role"],
                 "request_id": request["request_id"],
-                "route_identity": identity,
+                "route_identity": reported_identity,
                 "model_digest": "d" * 64,
                 "result": {"labels": []},
                 "failure_class": "",
@@ -925,6 +926,26 @@ def test_local_worker_metadata_and_transient_failure_classification(
     with pytest.raises(distill.DistillationError, match="output"):
         distill._worker_call(
             "teacher",
+            route.role,
+            {"candidates": []},
+            max_input_bytes=12_000,
+            expected_route=identity,
+            expected_digest="d" * 64,
+        )
+    failure["value"] = ""
+    reported_identity["model"] = "wrong-model"
+    with pytest.raises(distill._LocalR4ClassifiedFailure, match="route_model_mismatch"):
+        distill._worker_call(
+            "teacher",
+            route.role,
+            {"candidates": []},
+            max_input_bytes=12_000,
+            expected_route=identity,
+            expected_digest="d" * 64,
+        )
+    with pytest.raises(distill.DistillationError, match="response"):
+        distill._worker_call(
+            "utility",
             route.role,
             {"candidates": []},
             max_input_bytes=12_000,
@@ -7126,6 +7147,7 @@ def test_chain_batch_replace_failure_preserves_old_head_and_retries(
 def _committed_local_r4_entries(
     root: Path, count: int = 2
 ) -> tuple[workset.DistillationWorkset, list[dict[str, Any]]]:
+    distill.bootstrap_r4_distillation_root_authority(root)
     queue = workset.DistillationWorkset(
         store.distillation_dir(root) / "local-workset.sqlite3"
     )
@@ -7429,6 +7451,858 @@ def test_authentic_local_teacher_rechecks_source_before_label_append(
     assert status["retry_wait"] == 1
 
 
+@pytest.mark.parametrize(
+    ("category", "operation"),
+    (
+        ("capacity", "commit"),
+        ("timeout", "commit"),
+        ("preemption", "commit"),
+        ("schema", "commit"),
+        ("coverage", "commit"),
+        ("route_model_mismatch", "commit"),
+    ),
+)
+def test_authentic_local_r4_owned_failure_receipts_are_provider_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    category: str,
+    operation: str,
+) -> None:
+    rally = {"rally_id": "r4-owned-failure", "query_sha256": "query", "context_refs": []}
+    candidate = {"candidate_id": "r4-owned-candidate", "text_sha256": "text"}
+    assignment = distill.teacher_assignment(
+        str(rally["rally_id"]), str(candidate["candidate_id"])
+    )
+    route = str(assignment["owner"])
+    payload_digest = canonical_json.canonical_json_sha256_strict(
+        {"rally_id": rally["rally_id"], "candidate_id": candidate["candidate_id"]}
+    )
+    work_id = distill._local_work_id(payload_digest, route)
+    clock = [100.0]
+    distill.bootstrap_r4_distillation_root_authority(tmp_path)
+    queue = workset.DistillationWorkset(
+        store.distillation_dir(tmp_path) / "local-workset.sqlite3",
+        clock=lambda: clock[0],
+    )
+    queue.advance(
+        [
+            {
+                "work_id": work_id,
+                "kind": f"local-teacher:{route}",
+                "payload_ref": "candidate-snapshot:r4-owned-failure",
+                "payload_digest": payload_digest,
+                "priority": 0,
+                "temporal_split": {"split": "train"},
+                "provenance": {"route": route},
+            }
+        ],
+        {"source": 1},
+    )
+    route_identity = {
+        "role": route,
+        "provider": "ollama",
+        "model": "local-r4-owned-model",
+        "location": "local",
+    }
+    teacher = distill._WorkerTeacher(route, 4_096, route_identity, "d" * 64)
+    provider_calls = 0
+
+    def evaluate(_payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("owned diagnostic must not call a provider")
+
+    monkeypatch.setattr(teacher, "evaluate", evaluate)
+    monkeypatch.setattr(
+        distill,
+        "_local_r4_owned_failure_injection",
+        lambda **_kwargs: category,
+    )
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+
+    result = distill._run_local_teacher_route(
+        workset=queue,
+        route=route,
+        config=distill.DistillationConfig(teacher_claim_limit=1),
+        teachers={route: teacher},
+        tasks={
+            work_id: {
+                "rally": rally,
+                "candidate": candidate,
+                "assignment": assignment,
+                "route": route,
+            }
+        },
+        texts={"query": "question", "text": "evidence"},
+        root=tmp_path,
+        raw_dir=tmp_path / "raw",
+        label_path=label_path,
+        snapshots={},
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert result is not None and result.deferred is True and result.model_calls == 0
+    assert provider_calls == 0
+    assert not label_path.exists()
+    assert queue.completion_identities([work_id]) == {}
+    transition = queue.recent_transition_receipts(limit=1)[0]
+    assert transition["operation"] == operation
+    directory = (
+        store.distillation_dir(tmp_path)
+        / "r4-receipts"
+        / "local"
+        / ("a" * 40)
+    )
+    receipts = list(directory.glob("*.json"))
+    assert len(receipts) == 1
+    receipt = store.read_sealed(receipts[0], schema=distill.R4_RECEIPT_SCHEMA)
+    assert receipt["failure_injection"] is True
+    assert receipt["outcome"] == {
+        "class": "deferred" if category in {"capacity", "timeout", "preemption"} else "invalid",
+        "reason": category,
+    }
+    assert receipt["diagnostic"] == {"provider_calls": 0, "network_egress": 0}
+    assert receipt["workset_receipt"] == {
+        "generation": transition["generation"],
+        "head_sha256": transition["receipt_sha256"],
+        "operation": transition["operation"],
+        "selection_sha256": transition["details"]["selection_sha256"],
+        "work_ids_sha256": transition["details"]["work_ids_sha256"],
+        "context_sha256": transition["details"]["context_sha256"],
+    }
+    assert "label_record_sha256" not in receipt
+    assert isinstance(receipt["attempt_record_sha256"], str)
+    if category == "capacity":
+        before = receipts[0].read_bytes()
+        claim_transition = queue.transition_receipt_binding(
+            int(transition["generation"]) - 1
+        )
+        settle_transition = queue.transition_receipt_binding(
+            int(transition["generation"])
+        )
+        assert claim_transition is not None and settle_transition is not None
+        entry = distill._local_r4_failure_entry(
+            work_id=work_id,
+            attempt=1,
+            task={
+                "rally": rally,
+                "candidate": candidate,
+                "assignment": assignment,
+                "route": route,
+            },
+            route_identity=route_identity,
+            source={
+                "source_commit": "a" * 40,
+                "source_tree_sha256": "b" * 64,
+                "source_ox_identity_sha256": "c" * 64,
+            },
+            category=category,
+            owned_diagnostic=True,
+        )
+        assert entry is not None
+        forged_timestamp = dict(receipt)
+        forged_timestamp["captured_at"] = "2099-01-01T00:00:00Z"
+        forged_timestamp["receipt_sha256"] = (
+            canonical_json.canonical_json_sha256_strict(
+                {
+                    key: value
+                    for key, value in forged_timestamp.items()
+                    if key not in {"receipt_sha256", "seal_sha256"}
+                }
+            )
+        )
+        forged_timestamp["seal_sha256"] = (
+            canonical_json.canonical_json_sha256_strict(
+                {
+                    key: value
+                    for key, value in forged_timestamp.items()
+                    if key != "seal_sha256"
+                }
+            )
+        )
+        receipts[0].write_bytes(
+            canonical_json.canonical_json_bytes_strict(forged_timestamp) + b"\n"
+        )
+        assert not distill._write_r4_local_failure_receipts(
+            root=tmp_path,
+            config=distill.DistillationConfig(teacher_claim_limit=1),
+            workset=queue,
+            entries=[entry],
+            label_head=store.chain_head(label_path),
+            settle_transition=settle_transition,
+            captured_at=receipt["captured_at"],
+            claim_transition=claim_transition,
+        )
+        receipts[0].write_bytes(before)
+
+        def forge_workset_binding(binding: Mapping[str, Any]) -> None:
+            forged = dict(receipt)
+            forged["workset_receipt"] = {
+                "generation": binding["generation"],
+                "head_sha256": binding["receipt_sha256"],
+                "operation": binding["operation"],
+                "selection_sha256": binding["selection_sha256"],
+                "work_ids_sha256": binding["work_ids_sha256"],
+            }
+            forged["receipt_sha256"] = canonical_json.canonical_json_sha256_strict(
+                {
+                    key: value
+                    for key, value in forged.items()
+                    if key not in {"receipt_sha256", "seal_sha256"}
+                }
+            )
+            forged["seal_sha256"] = canonical_json.canonical_json_sha256_strict(
+                {key: value for key, value in forged.items() if key != "seal_sha256"}
+            )
+            receipts[0].write_bytes(
+                canonical_json.canonical_json_bytes_strict(forged) + b"\n"
+            )
+
+        forge_workset_binding(claim_transition)
+        assert not distill._write_r4_local_failure_receipts(
+            root=tmp_path,
+            config=distill.DistillationConfig(teacher_claim_limit=1),
+            workset=queue,
+            entries=[entry],
+            label_head=store.chain_head(label_path),
+            settle_transition=settle_transition,
+            captured_at=receipt["captured_at"],
+            claim_transition=claim_transition,
+        )
+        receipts[0].write_bytes(before)
+        replacement = tmp_path / "r4-receipts-replacement"
+        displaced = tmp_path / "r4-receipts-displaced"
+        replacement.mkdir()
+        (replacement / "sentinel").write_text("must-survive")
+        directory.rename(displaced)
+        replacement.rename(directory)
+        assert not distill._write_r4_local_failure_receipts(
+            root=tmp_path,
+            config=distill.DistillationConfig(teacher_claim_limit=1),
+            workset=queue,
+            entries=[entry],
+            label_head=store.chain_head(label_path),
+            settle_transition=settle_transition,
+            captured_at=receipt["captured_at"],
+            claim_transition=claim_transition,
+        )
+        assert {path.name for path in directory.iterdir()} == {"sentinel"}
+        directory.rename(replacement)
+        displaced.rename(directory)
+        clock[0] += 61
+        later_claim = queue.claim(
+            f"local-teacher:{route}", 1, "later-worker", 60
+        )[0]
+        assert later_claim.work_id == work_id and later_claim.attempt == 2
+        queue.release_unattempted([later_claim])
+        later_release = queue.transition_receipt_binding(
+            int(queue.recent_transition_receipts(limit=1)[0]["generation"])
+        )
+        assert later_release is not None
+        forge_workset_binding(later_release)
+        assert not distill._write_r4_local_failure_receipts(
+            root=tmp_path,
+            config=distill.DistillationConfig(teacher_claim_limit=1),
+            workset=queue,
+            entries=[entry],
+            label_head=store.chain_head(label_path),
+            settle_transition=settle_transition,
+            captured_at=receipt["captured_at"],
+            claim_transition=claim_transition,
+        )
+        receipts[0].write_bytes(before)
+        unrelated_digest = canonical_json.canonical_json_sha256_strict(
+            {"rally_id": "r4-owned-unrelated", "candidate_id": "unrelated"}
+        )
+        unrelated_work_id = distill._local_work_id(unrelated_digest, route)
+        queue.advance(
+            [
+                {
+                    "work_id": unrelated_work_id,
+                    "kind": f"local-teacher:{route}",
+                    "payload_ref": "candidate-snapshot:r4-owned-unrelated",
+                    "payload_digest": unrelated_digest,
+                    "priority": 1,
+                    "temporal_split": {"split": "train"},
+                    "provenance": {"route": route},
+                }
+            ],
+            {"source": 2},
+        )
+        unrelated_claim = queue.claim(
+            f"local-teacher:{route}", 1, "unrelated-worker", 60
+        )[0]
+        assert unrelated_claim.work_id == unrelated_work_id
+        queue.release_unattempted([unrelated_claim])
+        unrelated_release = queue.transition_receipt_binding(
+            int(queue.recent_transition_receipts(limit=1)[0]["generation"])
+        )
+        assert unrelated_release is not None
+        forge_workset_binding(unrelated_release)
+        assert not distill._write_r4_local_failure_receipts(
+            root=tmp_path,
+            config=distill.DistillationConfig(teacher_claim_limit=1),
+            workset=queue,
+            entries=[entry],
+            label_head=store.chain_head(label_path),
+            settle_transition=settle_transition,
+            captured_at=receipt["captured_at"],
+            claim_transition=claim_transition,
+        )
+        receipts[0].write_bytes(before)
+        cleanup_claim = queue.claim(
+            f"local-teacher:{route}", 1, "unrelated-worker", 60
+        )[0]
+        assert cleanup_claim.work_id == unrelated_work_id
+        queue.commit(
+            [cleanup_claim],
+            [{"status": "quarantined", "error_class": "test_cleanup"}],
+        )
+        repeated = distill._run_local_teacher_route(
+            workset=queue,
+            route=route,
+            config=distill.DistillationConfig(teacher_claim_limit=1),
+            teachers={route: teacher},
+            tasks={
+                work_id: {
+                    "rally": rally,
+                    "candidate": candidate,
+                    "assignment": assignment,
+                    "route": route,
+                }
+            },
+            texts={"query": "question", "text": "evidence"},
+            root=tmp_path,
+            raw_dir=tmp_path / "raw",
+            label_path=label_path,
+            snapshots={},
+            label_rows=[],
+            structural_verifier=lambda *_args: None,
+        )
+        assert repeated is not None and repeated.model_calls == 0
+        # A later lease has a distinct sealed claim binding, so it must not
+        # overwrite or be mistaken for the original provider-free failure.
+        assert receipts[0].read_bytes() == before
+        assert len(list(directory.glob("*.json"))) == 2
+
+
+def test_local_r4_directory_authority_refuses_tofu_for_an_existing_directory(
+    tmp_path: Path,
+) -> None:
+    source_commit = "a" * 40
+    directory = (
+        store.distillation_dir(tmp_path)
+        / "r4-receipts"
+        / "local"
+        / source_commit
+    )
+    distill.bootstrap_r4_distillation_root_authority(tmp_path)
+    directory.mkdir(parents=True)
+    (directory / "sentinel").write_text("untrusted")
+
+    with pytest.raises(distill.DistillationError, match="bootstrap is untrusted"):
+        distill._r4_directory_authority(
+            root=tmp_path,
+            directory=directory,
+            role="receipts",
+            source_commit=source_commit,
+            register=True,
+        )
+
+    assert {path.name for path in directory.iterdir()} == {"sentinel"}
+
+
+def test_local_r4_directory_authority_rejects_a_distillation_root_replacement(
+    tmp_path: Path,
+) -> None:
+    source_commit = "a" * 40
+    distillation_root = store.distillation_dir(tmp_path)
+    directory = distillation_root / "r4-receipts" / "local" / source_commit
+    distill.bootstrap_r4_distillation_root_authority(tmp_path)
+    distill._r4_directory_authority(
+        root=tmp_path,
+        directory=directory,
+        role="receipts",
+        source_commit=source_commit,
+        register=True,
+    )
+    displaced = tmp_path / "displaced-distillation-root"
+    replacement = tmp_path / "replacement-distillation-root"
+    replacement.mkdir()
+    (replacement / "sentinel").write_text("must-survive")
+    distillation_root.rename(displaced)
+    replacement.rename(distillation_root)
+
+    with pytest.raises(distill.DistillationError, match="root authority changed"):
+        distill._r4_directory_authority(
+            root=tmp_path,
+            directory=directory,
+            role="receipts",
+            source_commit=source_commit,
+            register=True,
+        )
+
+    assert {path.name for path in distillation_root.iterdir()} == {"sentinel"}
+
+
+def test_local_r4_root_authority_never_tofus_a_replaced_root_after_deletion(
+    tmp_path: Path,
+) -> None:
+    original = distill.bootstrap_r4_distillation_root_authority(tmp_path)
+    assert distill._r4_distillation_root_authority(tmp_path, register=False) == original
+    authority_id = canonical_json.canonical_json_sha256_strict(
+        {"kind": "local-r4-distillation-root-authority"}
+    )
+    (tmp_path / f"{authority_id}.json").unlink()
+    distillation_root = store.distillation_dir(tmp_path)
+    displaced = tmp_path / "displaced-distillation-root"
+    replacement = tmp_path / "replacement-distillation-root"
+    replacement.mkdir()
+    (replacement / "sentinel").write_text("must-survive")
+    distillation_root.rename(displaced)
+    replacement.rename(distillation_root)
+
+    with pytest.raises(distill.DistillationError, match="bootstrap is untrusted"):
+        distill.bootstrap_r4_distillation_root_authority(tmp_path)
+    with pytest.raises(distill.DistillationError, match="root authority is missing"):
+        distill._r4_distillation_root_authority(tmp_path, register=False)
+
+    assert {path.name for path in distillation_root.iterdir()} == {"sentinel"}
+
+
+def test_authentic_local_r4_owned_failure_source_drift_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    source_calls = 0
+
+    def source_binding() -> dict[str, str]:
+        nonlocal source_calls
+        source_calls += 1
+        return dict(source) if source_calls < 3 else {**source, "source_tree_sha256": "d" * 64}
+
+    monkeypatch.setattr(distill, "ox_alpha_source_binding", source_binding)
+    monkeypatch.setattr(
+        distill, "_local_r4_owned_failure_injection", lambda **_kwargs: "capacity"
+    )
+    rally = {"rally_id": "r4-drift", "query_sha256": "query", "context_refs": []}
+    candidate = {"candidate_id": "r4-drift-candidate", "text_sha256": "text"}
+    assignment = distill.teacher_assignment("r4-drift", "r4-drift-candidate")
+    route = str(assignment["owner"])
+    digest = canonical_json.canonical_json_sha256_strict({"rally": "r4-drift"})
+    work_id = distill._local_work_id(digest, route)
+    distill.bootstrap_r4_distillation_root_authority(tmp_path)
+    queue = workset.DistillationWorkset(store.distillation_dir(tmp_path) / "local-workset.sqlite3")
+    queue.advance(
+        [{"work_id": work_id, "kind": f"local-teacher:{route}", "payload_ref": "candidate-snapshot:r4-drift", "payload_digest": digest, "priority": 0, "temporal_split": {"split": "train"}, "provenance": {"route": route}}],
+        {"source": 1},
+    )
+    identity = {"role": route, "provider": "ollama", "model": "local-r4-drift", "location": "local"}
+    teacher = distill._WorkerTeacher(route, 4_096, identity, "d" * 64)
+    monkeypatch.setattr(teacher, "evaluate", lambda _payload: pytest.fail("provider called"))
+
+    with pytest.raises(distill.DistillationError, match="failure receipt"):
+        distill._run_local_teacher_route(
+            workset=queue, route=route, config=distill.DistillationConfig(teacher_claim_limit=1),
+            teachers={route: teacher}, tasks={work_id: {"rally": rally, "candidate": candidate, "assignment": assignment, "route": route}},
+            texts={"query": "question", "text": "evidence"}, root=tmp_path, raw_dir=tmp_path / "raw",
+            label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl", snapshots={}, label_rows=[], structural_verifier=lambda *_args: None,
+        )
+    assert queue.status(include_timing=True)["ready"] == 1
+    assert not list((store.distillation_dir(tmp_path) / "r4-receipts").rglob("*.json"))
+
+
+@pytest.mark.parametrize("category", ("capacity", "preemption"))
+def test_local_r4_attempted_capacity_and_preemption_commit(
+    tmp_path: Path, category: str
+) -> None:
+    queue = workset.DistillationWorkset(store.distillation_dir(tmp_path) / "workset.sqlite3")
+    queue.advance(
+        [{"work_id": "local-teacher-" + "a" * 64, "kind": "local-teacher:test", "payload_ref": "candidate-snapshot:attempted", "payload_digest": "b" * 64, "priority": 0, "temporal_split": {"split": "train"}, "provenance": {"route": "test"}}],
+        {"source": 1},
+    )
+    claim = queue.claim("local-teacher:test", 1, "test", 60)[0]
+    result = distill._settle_local_r4_failure(
+        root=tmp_path,
+        config=distill.DistillationConfig(),
+        workset=queue,
+        batch=[{"claim": claim}],
+        category=category,
+        source=None,
+        route_identity={},
+        label_head={"records": 0, "head_sha256": ""},
+        owned_diagnostic=False,
+        model_calls=1,
+        attempted=True,
+    )
+    assert result.model_calls == 1
+    assert queue.status(include_timing=True)["retry_wait"] == 1
+
+
+def test_local_r4_owned_failure_crash_repairs_before_next_route_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rally = {"rally_id": "r4-crash", "query_sha256": "query", "context_refs": []}
+    candidate = {"candidate_id": "r4-crash-candidate", "text_sha256": "text"}
+    assignment = distill.teacher_assignment("r4-crash", "r4-crash-candidate")
+    route = str(assignment["owner"])
+    digest = canonical_json.canonical_json_sha256_strict({"rally": "r4-crash"})
+    work_id = distill._local_work_id(digest, route)
+    distill.bootstrap_r4_distillation_root_authority(tmp_path)
+    queue = workset.DistillationWorkset(
+        store.distillation_dir(tmp_path) / "local-workset.sqlite3"
+    )
+    queue.advance(
+        [{"work_id": work_id, "kind": f"local-teacher:{route}", "payload_ref": "candidate-snapshot:r4-crash", "payload_digest": digest, "priority": 0, "temporal_split": {"split": "train"}, "provenance": {"route": route}}],
+        {"source": 1},
+    )
+    identity = {"role": route, "provider": "ollama", "model": "local-r4-crash", "location": "local"}
+    teacher = distill._WorkerTeacher(route, 4_096, identity, "d" * 64)
+    monkeypatch.setattr(teacher, "evaluate", lambda _payload: pytest.fail("provider called"))
+    monkeypatch.setattr(distill, "_local_r4_owned_failure_injection", lambda **_kwargs: "timeout")
+    monkeypatch.setattr(distill, "_local_r4_owned_failure_crash_after_settle", lambda _marker: True)
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+
+    with pytest.raises(distill.DistillationError, match="injected crash"):
+        distill._run_local_teacher_route(
+            workset=queue, route=route, config=distill.DistillationConfig(teacher_claim_limit=1),
+            teachers={route: teacher}, tasks={work_id: {"rally": rally, "candidate": candidate, "assignment": assignment, "route": route}},
+            texts={"query": "question", "text": "evidence"}, root=tmp_path, raw_dir=tmp_path / "raw",
+            label_path=label_path, snapshots={}, label_rows=[], structural_verifier=lambda *_args: None,
+        )
+    assert queue.status(include_timing=True)["retry_wait"] == 1
+    assert not list((store.distillation_dir(tmp_path) / "r4-receipts").rglob("*.json"))
+    assert list((store.distillation_dir(tmp_path) / "r4-failure-pending").rglob("*.json"))
+
+    monkeypatch.setattr(distill, "_local_r4_owned_failure_injection", lambda **_kwargs: None)
+    monkeypatch.setattr(distill, "_local_r4_owned_failure_crash_after_settle", lambda _marker: False)
+    monkeypatch.setattr(distill, "_prepare_local_teacher_work", lambda **_kwargs: ({}, []))
+    monkeypatch.setattr(distill, "_advance_local_workset", lambda *_args, **_kwargs: None)
+    result = distill._run_local_teacher_batch(
+        root=tmp_path, config=distill.DistillationConfig(teacher_claim_limit=1), teachers={},
+        snapshots={}, rally_by_id={}, texts={}, label_path=label_path, label_rows=[], structural_verifier=lambda *_args: None,
+    )
+    assert result.labels_written == result.model_calls == 0
+    receipts = list((store.distillation_dir(tmp_path) / "r4-receipts").rglob("*.json"))
+    assert len(receipts) == 1
+    receipt = store.read_sealed(receipts[0], schema=distill.R4_RECEIPT_SCHEMA)
+    assert receipt["outcome"] == {"class": "deferred", "reason": "timeout"}
+    assert receipt["diagnostic"] == {"provider_calls": 0, "network_egress": 0}
+    assert queue.completion_identities([work_id]) == {}
+    assert not label_path.exists()
+
+
+def test_local_r4_repair_handles_aggregate_reclaim_without_cross_deleting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [1_000.0]
+    route = distill.TEACHER_ROLES[0]
+    distill.bootstrap_r4_distillation_root_authority(tmp_path)
+    queue = workset.DistillationWorkset(
+        store.distillation_dir(tmp_path) / "local-workset.sqlite3",
+        clock=lambda: now[0],
+    )
+    source = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    route_identity = {
+        "role": route,
+        "provider": "ollama",
+        "model": "local-r4-reclaim",
+        "location": "local",
+    }
+    tasks: dict[str, dict[str, Any]] = {}
+    items: list[dict[str, Any]] = []
+    for index in range(100):
+        rally_id = f"r4-reclaim-rally-{index}"
+        candidate_id = f"r4-reclaim-candidate-{index}"
+        assignment = distill.teacher_assignment(rally_id, candidate_id)
+        if assignment["owner"] != route:
+            continue
+        digest = canonical_json.canonical_json_sha256_strict({"index": index})
+        work_id = distill._local_work_id(digest, route)
+        tasks[work_id] = {
+            "rally": {"rally_id": rally_id},
+            "candidate": {"candidate_id": candidate_id},
+            "assignment": assignment,
+            "route": route,
+        }
+        items.append(
+            {
+                "work_id": work_id,
+                "kind": f"local-teacher:{route}",
+                "payload_ref": f"candidate-snapshot:r4-reclaim-{index}",
+                "payload_digest": digest,
+                "priority": 0,
+                "temporal_split": {"split": "train"},
+                "provenance": {"route": route},
+            }
+        )
+        if len(items) == 2:
+            break
+    assert len(items) == 2
+    queue.advance(items, {"source": 1})
+    label_head = {"records": 0, "head_sha256": ""}
+    markers: list[Mapping[str, Any]] = []
+    claims: list[Any] = []
+    for _index in range(2):
+        claim = queue.claim(f"local-teacher:{route}", 1, route, 1)[0]
+        claims.append(claim)
+        transition = queue.transition_receipt_binding(
+            queue.recent_transition_receipts(limit=1)[0]["generation"]
+        )
+        assert transition is not None
+        markers.append(
+            distill._write_local_r4_pending_failure_marker(
+                root=tmp_path,
+                config=distill.DistillationConfig(teacher_max_inflight=1),
+                item={"claim": claim, "task": tasks[claim.work_id]},
+                category="timeout",
+                source=source,
+                route_identity=route_identity,
+                label_head=label_head,
+                claim_transition=transition,
+            )
+        )
+
+    now[0] += 2
+    reclaimed = queue.claim(f"local-teacher:{route}", 1, route, 60)[0]
+    assert reclaimed.work_id == claims[0].work_id
+    assert reclaimed.attempt == claims[0].attempt + 1
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    real_chain_head = store.chain_head
+    monkeypatch.setattr(
+        store,
+        "chain_head",
+        lambda path: (
+            {"records": 1, "head_sha256": "f" * 64}
+            if path == label_path
+            else real_chain_head(path)
+        ),
+    )
+    with pytest.raises(distill.DistillationError, match="evidence drifted"):
+        distill._repair_local_r4_pending_failure_markers(
+            root=tmp_path,
+            config=distill.DistillationConfig(teacher_max_inflight=1),
+            workset=queue,
+            label_path=label_path,
+            reclaimed_claim=reclaimed,
+        )
+    assert len(
+        list(
+            (store.distillation_dir(tmp_path) / "r4-failure-pending").rglob(
+                "*.json"
+            )
+        )
+    ) == 2
+    monkeypatch.setattr(store, "chain_head", real_chain_head)
+    real_completions = queue.completion_identities
+    monkeypatch.setattr(
+        queue,
+        "completion_identities",
+        lambda work_ids: {
+            work_id: {
+                "work_id": work_id,
+                "attempt": 1,
+                "completion_ref": "label-ledger:" + "e" * 64,
+                "completion_digest": "e" * 64,
+            }
+            for work_id in work_ids
+        },
+    )
+    with pytest.raises(distill.DistillationError, match="evidence drifted"):
+        distill._repair_local_r4_pending_failure_markers(
+            root=tmp_path,
+            config=distill.DistillationConfig(teacher_max_inflight=1),
+            workset=queue,
+            label_path=label_path,
+            reclaimed_claim=reclaimed,
+        )
+    assert len(
+        list(
+            (store.distillation_dir(tmp_path) / "r4-failure-pending").rglob(
+                "*.json"
+            )
+        )
+    ) == 2
+    monkeypatch.setattr(queue, "completion_identities", real_completions)
+    distill._repair_local_r4_pending_failure_markers(
+        root=tmp_path,
+        config=distill.DistillationConfig(teacher_max_inflight=1),
+        workset=queue,
+        label_path=label_path,
+        reclaimed_claim=reclaimed,
+    )
+    pending = list(
+        (store.distillation_dir(tmp_path) / "r4-failure-pending").rglob("*.json")
+    )
+    assert [path.stem for path in pending] == [markers[1]["artifact_id"]]
+    queue.commit(
+        [reclaimed],
+        [{"status": "quarantined", "error_class": "test_reclaim_cleanup"}],
+    )
+    second = queue.claim(f"local-teacher:{route}", 1, route, 60)[0]
+    assert second.work_id == claims[1].work_id
+    assert second.attempt == claims[1].attempt + 1
+    distill._repair_local_r4_pending_failure_markers(
+        root=tmp_path,
+        config=distill.DistillationConfig(teacher_max_inflight=1),
+        workset=queue,
+        label_path=label_path,
+        reclaimed_claim=second,
+    )
+    assert not list(
+        (store.distillation_dir(tmp_path) / "r4-failure-pending").rglob("*.json")
+    )
+    assert queue.release_unattempted([second]) == 1
+
+
+def test_local_r4_receipt_crash_repairs_under_stored_cap_and_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_a = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    route = distill.TEACHER_ROLES[0]
+    rally = {"rally_id": "r4-receipt-crash"}
+    candidate = {"candidate_id": "r4-receipt-crash-candidate"}
+    assignment = distill.teacher_assignment(
+        str(rally["rally_id"]), str(candidate["candidate_id"])
+    )
+    route = str(assignment["owner"])
+    digest = canonical_json.canonical_json_sha256_strict(
+        {"rally": rally["rally_id"], "candidate": candidate["candidate_id"]}
+    )
+    work_id = distill._local_work_id(digest, route)
+    distill.bootstrap_r4_distillation_root_authority(tmp_path)
+    queue = workset.DistillationWorkset(
+        store.distillation_dir(tmp_path) / "local-workset.sqlite3"
+    )
+    queue.advance(
+        [
+            {
+                "work_id": work_id,
+                "kind": f"local-teacher:{route}",
+                "payload_ref": "candidate-snapshot:r4-receipt-crash",
+                "payload_digest": digest,
+                "priority": 0,
+                "temporal_split": {"split": "train"},
+                "provenance": {"route": route},
+            }
+        ],
+        {"source": 1},
+    )
+    claim = queue.claim(f"local-teacher:{route}", 1, route, 60)[0]
+    claim_transition = queue.transition_receipt_binding(
+        queue.recent_transition_receipts(limit=1)[0]["generation"]
+    )
+    assert claim_transition is not None
+    task = {
+        "rally": rally,
+        "candidate": candidate,
+        "assignment": assignment,
+        "route": route,
+    }
+    route_identity = {
+        "role": route,
+        "provider": "ollama",
+        "model": "local-r4-receipt-crash",
+        "location": "local",
+    }
+    monkeypatch.setattr(
+        distill, "_local_r4_owned_failure_crash_after_receipt", lambda _marker: True
+    )
+    with pytest.raises(distill.DistillationError, match="receipt crash"):
+        distill._settle_local_r4_failure(
+            root=tmp_path,
+            config=distill.DistillationConfig(teacher_max_inflight=7),
+            workset=queue,
+            batch=[{"claim": claim, "task": task}],
+            category="capacity",
+            source=source_a,
+            route_identity=route_identity,
+            label_head={"records": 0, "head_sha256": ""},
+            owned_diagnostic=True,
+            model_calls=0,
+            attempted=False,
+            claim_transition=claim_transition,
+        )
+    pending_root = store.distillation_dir(tmp_path) / "r4-failure-pending"
+    receipt_root = store.distillation_dir(tmp_path) / "r4-receipts" / "local"
+    assert len(list(pending_root.rglob("*.json"))) == 1
+    receipts = list(receipt_root.rglob("*.json"))
+    assert len(receipts) == 1
+    monkeypatch.setattr(
+        distill,
+        "ox_alpha_source_binding",
+        lambda: {
+            "source_commit": "d" * 40,
+            "source_tree_sha256": "e" * 64,
+            "source_ox_identity_sha256": "f" * 64,
+        },
+    )
+    distill._repair_local_r4_pending_failure_markers(
+        root=tmp_path,
+        config=distill.DistillationConfig(teacher_max_inflight=3),
+        workset=queue,
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+    )
+    assert not list(pending_root.rglob("*.json"))
+    assert list(receipt_root.rglob("*.json")) == receipts
+    receipt = store.read_sealed(receipts[0], schema=distill.R4_RECEIPT_SCHEMA)
+    assert receipt["configured_max_inflight"] == 7
+    assert receipt["source_commit"] == source_a["source_commit"]
+    assert not (receipt_root / ("d" * 40)).exists()
+
+
+def test_local_r4_owned_failure_injection_forces_one_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    route = distill.TEACHER_ROLES[0]
+    distill.bootstrap_r4_distillation_root_authority(tmp_path)
+    queue = workset.DistillationWorkset(store.distillation_dir(tmp_path) / "local-workset.sqlite3")
+    tasks: dict[str, dict[str, object]] = {}
+    items: list[dict[str, object]] = []
+    for index in range(100):
+        rally_id = f"r4-one-claim-rally-{index}"
+        candidate_id = f"r4-one-claim-candidate-{index}"
+        assignment = distill.teacher_assignment(rally_id, candidate_id)
+        if assignment["owner"] != route:
+            continue
+        digest = canonical_json.canonical_json_sha256_strict({"index": index})
+        work_id = distill._local_work_id(digest, route)
+        tasks[work_id] = {"rally": {"rally_id": rally_id, "query_sha256": f"query-{index}", "context_refs": []}, "candidate": {"candidate_id": candidate_id, "text_sha256": f"text-{index}"}, "assignment": assignment, "route": route}
+        items.append({"work_id": work_id, "kind": f"local-teacher:{route}", "payload_ref": f"candidate-snapshot:r4-one-claim-{index}", "payload_digest": digest, "priority": 0, "temporal_split": {"split": "train"}, "provenance": {"route": route}})
+        if len(items) == 2:
+            break
+    assert len(items) == 2
+    queue.advance(items, {"source": 1})
+    identity = {"role": route, "provider": "ollama", "model": "local-r4-one-claim", "location": "local"}
+    teacher = distill._WorkerTeacher(route, 4_096, identity, "d" * 64)
+    monkeypatch.setattr(teacher, "evaluate", lambda _payload: pytest.fail("provider called"))
+    monkeypatch.setattr(distill, "_local_r4_owned_failure_injection", lambda **_kwargs: "capacity")
+
+    result = distill._run_local_teacher_route(
+        workset=queue, route=route, config=distill.DistillationConfig(teacher_claim_limit=2),
+        teachers={route: teacher}, tasks=tasks,
+        texts={**{f"query-{index}": "question" for index in range(100)}, **{f"text-{index}": "evidence" for index in range(100)}}, root=tmp_path, raw_dir=tmp_path / "raw",
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl", snapshots={}, label_rows=[], structural_verifier=lambda *_args: None,
+    )
+    assert result is not None and result.model_calls == 0
+    assert queue.status(include_timing=True)["ready"] == 2
+    assert len(list((store.distillation_dir(tmp_path) / "r4-receipts").rglob("*.json"))) == 1
+
+
 def test_local_r4_existing_receipt_symlink_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -7537,28 +8411,25 @@ def test_local_r4_repair_cursor_covers_backlog_beyond_500(
 
     distill._repair_r4_local_receipts(**arguments, label_rows=rows)
     assert len(batches[-1]) == 505
-    state_path = store.distillation_dir(tmp_path) / "r4-local-repair" / f"{commit}.json"
-    assert store.read_sealed(state_path)["label_records"] == 505
 
     added = store.append_chain_batch(
         label_path, [payload(index) for index in range(505, 508)]
     )
     rows.extend(added)
     distill._repair_r4_local_receipts(**arguments, label_rows=rows)
-    assert len(batches[-1]) == 3
-    assert store.read_sealed(state_path)["label_records"] == 508
+    assert len(batches[-1]) == 508
 
     incomplete = store.append_chain_batch(label_path, [payload(508)])
     distill._repair_r4_local_receipts(
         **arguments, label_rows=[*rows, *incomplete]
     )
-    assert store.read_sealed(state_path)["label_records"] == 508
+    assert len(batches[-1]) == 508
     rows.extend(incomplete)
     distill._repair_r4_local_receipts(**arguments, label_rows=rows)
-    assert store.read_sealed(state_path)["label_records"] == 509
+    assert len(batches[-1]) == 509
 
 
-def test_local_r4_repair_rejects_symlinked_state_directory(
+def test_local_r4_repair_never_touches_a_symlinked_legacy_state_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     commit = "a" * 40
@@ -7571,15 +8442,14 @@ def test_local_r4_repair_rejects_symlinked_state_directory(
         distill.runtime_config, "runtime_identity", lambda: {"commit_id": commit}
     )
 
-    with pytest.raises(distill.DistillationError, match="state path is unsafe"):
-        distill._repair_r4_local_receipts(
-            root=tmp_path,
-            config=distill.DistillationConfig(),
-            workset=object(),
-            tasks={},
-            label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
-            label_rows=[],
-        )
+    distill._repair_r4_local_receipts(
+        root=tmp_path,
+        config=distill.DistillationConfig(),
+        workset=object(),
+        tasks={},
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+    )
 
     assert not list(external.iterdir())
 
@@ -7612,10 +8482,6 @@ def test_local_r4_repair_skips_other_teacher_profiles(
         label_rows=rows,
     )
 
-    state = store.read_sealed(
-        store.distillation_dir(tmp_path) / "r4-local-repair" / f"{commit}.json"
-    )
-    assert state["label_records"] == 1
 
 
 def test_local_teacher_batch_republishes_the_post_commit_crash_gap(
