@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,7 @@ DEFAULT_MAX_BATCHES = 24
 DEFAULT_MAX_UNITS = orchestrator.MAX_INGEST_BATCH_UNITS
 DEFAULT_SLEEP_SECONDS = 1.0
 DEFAULT_IDLE_SLEEP_SECONDS = 60.0
+INGEST_LIVENESS_HEARTBEAT_SECONDS = 60.0
 
 
 def _liveness_file() -> Path:
@@ -88,6 +90,31 @@ def _record_liveness(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
     )
     return payload
+
+
+def _liveness_heartbeat(
+    stop_event: threading.Event,
+    *,
+    pending: int,
+    authority_preflight: dict[str, Any] | None,
+) -> None:
+    """Keep long-running ingest batches visible until their result is known."""
+
+    while not stop_event.wait(INGEST_LIVENESS_HEARTBEAT_SECONDS):
+        try:
+            _record_liveness(
+                "ready",
+                pending=pending,
+                authority_preflight=authority_preflight,
+            )
+        except Exception as exc:
+            runtime_status.safe_append_event(
+                "warn",
+                "ingest drain | liveness heartbeat failed",
+                source="ingest-drain",
+                error=f"{type(exc).__name__}: {exc}",
+                pending=pending,
+            )
 
 
 def _publish_authority_ready_status(
@@ -375,40 +402,58 @@ def _drain(
             stop_reason = "no pending raws"
             break
 
-        result = orchestrator.run_pending_ingest(
-            force=True,
-            max_units=max_units,
+        heartbeat_stop = threading.Event()
+        heartbeat_thread = threading.Thread(
+            target=_liveness_heartbeat,
+            args=(heartbeat_stop,),
+            kwargs={
+                "pending": pending_before,
+                "authority_preflight": authority_preflight,
+            },
+            name="chronovisor-ingest-liveness",
+            daemon=True,
         )
-        processed = len(result.get("files_processed", []))
-        total_processed += processed
+        heartbeat_thread.start()
         try:
-            from chronovisor.ingest.self_heal import (
-                run_pending as run_pending_self_heal,
+            result = orchestrator.run_pending_ingest(
+                force=True,
+                max_units=max_units,
             )
+            processed = len(result.get("files_processed", []))
+            total_processed += processed
+            try:
+                from chronovisor.ingest.self_heal import (
+                    run_pending as run_pending_self_heal,
+                )
 
-            self_heal_result = run_pending_self_heal(
-                max_packets=1,
-                enable_frontier=False,
-            )
-        except Exception as exc:
-            self_heal_result = {"status": "error", "error": str(exc)}
-        pending_after = len(orchestrator.get_pending_raw_files())
-        record = {
-            "timestamp": datetime.now().isoformat(),
-            "batch": batch_index,
-            "pending_before": pending_before,
-            "pending_after": pending_after,
-            "files_processed": processed,
-            "result": result,
-            "self_heal": self_heal_result,
-        }
-        try:
-            managed_holds = sync_ingest_semantic_holds(chronovisor_root=CHRONOVISOR_ROOT)
-        except Exception as exc:
-            managed_holds = {"status": "error", "error": str(exc)}
-        record["managed_holds"] = managed_holds
-        batches.append(record)
-        _append_jsonl(log_path, record)
+                self_heal_result = run_pending_self_heal(
+                    max_packets=1,
+                    enable_frontier=False,
+                )
+            except Exception as exc:
+                self_heal_result = {"status": "error", "error": str(exc)}
+            pending_after = len(orchestrator.get_pending_raw_files())
+            record = {
+                "timestamp": datetime.now().isoformat(),
+                "batch": batch_index,
+                "pending_before": pending_before,
+                "pending_after": pending_after,
+                "files_processed": processed,
+                "result": result,
+                "self_heal": self_heal_result,
+            }
+            try:
+                managed_holds = sync_ingest_semantic_holds(
+                    chronovisor_root=CHRONOVISOR_ROOT
+                )
+            except Exception as exc:
+                managed_holds = {"status": "error", "error": str(exc)}
+            record["managed_holds"] = managed_holds
+            batches.append(record)
+            _append_jsonl(log_path, record)
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join()
 
         if result.get("blocked_by") == "decision_authority":
             batch_authority_block = (
@@ -434,6 +479,11 @@ def _drain(
         if processed == 0 and pending_after >= pending_before:
             stop_reason = "no batch progress"
             break
+        _record_liveness(
+            "idle" if pending_after == 0 else "ready",
+            pending=pending_after,
+            authority_preflight=authority_preflight,
+        )
         if pending_after == 0:
             stop_reason = "drained"
             break

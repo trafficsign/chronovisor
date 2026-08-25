@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -289,6 +290,152 @@ def test_drain_runs_batches_until_empty(tmp_path: Path, monkeypatch) -> None:
 
     records = [json.loads(line) for line in log_file.read_text().splitlines()]
     assert [record["files_processed"] for record in records] == [10, 10, 5]
+
+
+def test_drain_refreshes_ready_liveness_after_each_completed_batch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state = {"pending": 40}
+    events: list[tuple[str, str | int, int | None]] = []
+
+    monkeypatch.setattr(ingest_drain, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(ingest_drain.orchestrator, "reset_stale_lock", lambda: None)
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "get_pending_raw_files",
+        lambda: [object()] * state["pending"],
+    )
+
+    def fake_run_pending_ingest(*, force: bool, max_units: int) -> dict:
+        events.append(("batch", state["pending"], None))
+        assert force is True
+        assert max_units == 10
+        processed = min(max_units, state["pending"])
+        state["pending"] -= processed
+        return {
+            "triggered": True,
+            "files_processed": [f"raw-{i}.md" for i in range(processed)],
+        }
+
+    def fake_record_liveness(
+        status: str,
+        *,
+        pending: int,
+        **_kwargs,
+    ) -> dict:
+        events.append(("liveness", status, pending))
+        return {
+            "status": status,
+            "pending_raws": pending,
+            "transitioned": True,
+            "error": "",
+        }
+
+    monkeypatch.setattr(
+        ingest_drain.orchestrator, "run_pending_ingest", fake_run_pending_ingest
+    )
+    monkeypatch.setattr(ingest_drain, "_record_liveness", fake_record_liveness)
+
+    result = ingest_drain.drain(
+        max_batches=3,
+        sleep_seconds=0,
+        log_file=tmp_path / "liveness-refresh.jsonl",
+    )
+
+    assert result["status"] == "partial"
+    batch_positions = [
+        index for index, event in enumerate(events) if event[0] == "batch"
+    ]
+    assert len(batch_positions) == 3
+    assert [events[index + 1] for index in batch_positions] == [
+        ("liveness", "ready", 30),
+        ("liveness", "ready", 20),
+        ("liveness", "ready", 10),
+    ]
+
+
+def test_drain_refreshes_liveness_while_batch_and_postprocessing_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state = {"pending": 2}
+    phase = {"name": "idle"}
+    phase_events = {
+        name: threading.Event() for name in ("ingest", "self_heal", "holds")
+    }
+    writes: list[tuple[str, int]] = []
+    hold_calls = 0
+
+    monkeypatch.setattr(
+        ingest_drain,
+        "INGEST_LIVENESS_HEARTBEAT_SECONDS",
+        0.001,
+        raising=False,
+    )
+    monkeypatch.setattr(ingest_drain, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(ingest_drain.orchestrator, "reset_stale_lock", lambda: None)
+    monkeypatch.setattr(
+        ingest_drain.orchestrator,
+        "get_pending_raw_files",
+        lambda: [object()] * state["pending"],
+    )
+
+    def fake_record_liveness(
+        status: str,
+        *,
+        pending: int,
+        **_kwargs,
+    ) -> dict:
+        writes.append((status, pending))
+        event = phase_events.get(phase["name"])
+        if event is not None:
+            event.set()
+        return {
+            "status": status,
+            "pending_raws": pending,
+            "transitioned": True,
+            "error": "",
+        }
+
+    def wait_for_heartbeat(name: str) -> None:
+        phase["name"] = name
+        assert phase_events[name].wait(timeout=1), f"no heartbeat during {name}"
+        phase["name"] = "done"
+
+    def fake_run_pending_ingest(*, force: bool, max_units: int) -> dict:
+        assert force is True
+        assert max_units == 10
+        wait_for_heartbeat("ingest")
+        state["pending"] -= 1
+        return {"triggered": True, "files_processed": ["raw-0.md"]}
+
+    def fake_self_heal(**_kwargs) -> dict:
+        wait_for_heartbeat("self_heal")
+        return {"status": "ok"}
+
+    def fake_hold_sync(**_kwargs) -> dict:
+        nonlocal hold_calls
+        hold_calls += 1
+        if hold_calls == 1:
+            return {"status": "ok"}
+        wait_for_heartbeat("holds")
+        return {"status": "ok"}
+
+    monkeypatch.setattr(ingest_drain, "_record_liveness", fake_record_liveness)
+    monkeypatch.setattr(
+        ingest_drain.orchestrator, "run_pending_ingest", fake_run_pending_ingest
+    )
+    monkeypatch.setattr(self_heal, "run_pending", fake_self_heal)
+    monkeypatch.setattr(managed_hold_sync, "sync_ingest_semantic_holds", fake_hold_sync)
+
+    result = ingest_drain.drain(
+        max_batches=1,
+        sleep_seconds=0,
+        log_file=tmp_path / "in-flight-liveness.jsonl",
+    )
+
+    assert result["status"] == "partial"
+    assert all(event.is_set() for event in phase_events.values())
+    assert writes and all(status == "ready" for status, _pending in writes)
 
 
 def test_drain_stops_when_batch_makes_no_progress(tmp_path: Path, monkeypatch) -> None:
