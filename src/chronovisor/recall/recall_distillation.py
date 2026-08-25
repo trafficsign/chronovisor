@@ -1302,6 +1302,65 @@ def _r4_require_canonical_artifact_id(
         raise DistillationError("R4 artifact identity is invalid")
 
 
+def _r4_bootstrap_inputs_unchanged(
+    *,
+    anchor_path: Path,
+    anchor_directory_state: os.stat_result,
+    checkpoint_handle: Any,
+    checkpoint_path: Path,
+    candidate_handle: Any,
+    candidate_path: Path,
+    checkpoint_identity: tuple[int, int, int, int, int],
+    candidate_identity: tuple[int, int, int, int, int],
+) -> bool:
+    try:
+        anchor_directory_path_state = anchor_path.parent.lstat()
+        checkpoint_state = os.fstat(checkpoint_handle.fileno())
+        checkpoint_path_state = checkpoint_path.lstat()
+        candidate_state = os.fstat(candidate_handle.fileno())
+        candidate_path_state = candidate_path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(anchor_directory_path_state.st_mode)
+        and (anchor_directory_state.st_dev, anchor_directory_state.st_ino)
+        == (
+            anchor_directory_path_state.st_dev,
+            anchor_directory_path_state.st_ino,
+        )
+        and checkpoint_identity
+        == (
+            checkpoint_state.st_dev,
+            checkpoint_state.st_ino,
+            checkpoint_state.st_size,
+            checkpoint_state.st_mtime_ns,
+            checkpoint_state.st_ctime_ns,
+        )
+        == (
+            checkpoint_path_state.st_dev,
+            checkpoint_path_state.st_ino,
+            checkpoint_path_state.st_size,
+            checkpoint_path_state.st_mtime_ns,
+            checkpoint_path_state.st_ctime_ns,
+        )
+        and candidate_identity
+        == (
+            candidate_state.st_dev,
+            candidate_state.st_ino,
+            candidate_state.st_size,
+            candidate_state.st_mtime_ns,
+            candidate_state.st_ctime_ns,
+        )
+        == (
+            candidate_path_state.st_dev,
+            candidate_path_state.st_ino,
+            candidate_path_state.st_size,
+            candidate_path_state.st_mtime_ns,
+            candidate_path_state.st_ctime_ns,
+        )
+    )
+
+
 def bootstrap_r4_candidate_anchor(
     *, root: Path, tracked_r0_evidence: Path, source_binding: Mapping[str, str]
 ) -> dict[str, Any]:
@@ -1485,55 +1544,16 @@ def bootstrap_r4_candidate_anchor(
                 "R4 candidate anchor runtime binding is unavailable"
             )
 
-        def inputs_unchanged() -> bool:
-            try:
-                anchor_directory_path_state = anchor_path.parent.lstat()
-                checkpoint_state = os.fstat(checkpoint_handle.fileno())
-                checkpoint_path_state = checkpoint_path.lstat()
-                candidate_state = os.fstat(candidate_handle.fileno())
-                candidate_path_state = candidate_path.lstat()
-            except OSError:
-                return False
-            return (
-                stat.S_ISDIR(anchor_directory_path_state.st_mode)
-                and (anchor_directory_state.st_dev, anchor_directory_state.st_ino)
-                == (
-                    anchor_directory_path_state.st_dev,
-                    anchor_directory_path_state.st_ino,
-                )
-                and checkpoint_identity
-                == (
-                    checkpoint_state.st_dev,
-                    checkpoint_state.st_ino,
-                    checkpoint_state.st_size,
-                    checkpoint_state.st_mtime_ns,
-                    checkpoint_state.st_ctime_ns,
-                )
-                == (
-                    checkpoint_path_state.st_dev,
-                    checkpoint_path_state.st_ino,
-                    checkpoint_path_state.st_size,
-                    checkpoint_path_state.st_mtime_ns,
-                    checkpoint_path_state.st_ctime_ns,
-                )
-                and candidate_identity
-                == (
-                    candidate_state.st_dev,
-                    candidate_state.st_ino,
-                    candidate_state.st_size,
-                    candidate_state.st_mtime_ns,
-                    candidate_state.st_ctime_ns,
-                )
-                == (
-                    candidate_path_state.st_dev,
-                    candidate_path_state.st_ino,
-                    candidate_path_state.st_size,
-                    candidate_path_state.st_mtime_ns,
-                    candidate_path_state.st_ctime_ns,
-                )
-            )
-
-        if not inputs_unchanged():
+        if not _r4_bootstrap_inputs_unchanged(
+            anchor_path=anchor_path,
+            anchor_directory_state=anchor_directory_state,
+            checkpoint_handle=checkpoint_handle,
+            checkpoint_path=checkpoint_path,
+            candidate_handle=candidate_handle,
+            candidate_path=candidate_path,
+            checkpoint_identity=checkpoint_identity,
+            candidate_identity=candidate_identity,
+        ):
             raise DistillationError("R4 candidate anchor bootstrap preflight failed")
         candidate = {
             "head_sha256": checkpoint["head_sha256"],
@@ -1579,7 +1599,16 @@ def bootstrap_r4_candidate_anchor(
                 raise DistillationError(
                     "R4 candidate anchor bootstrap read-back failed"
                 )
-            if not inputs_unchanged():
+            if not _r4_bootstrap_inputs_unchanged(
+                anchor_path=anchor_path,
+                anchor_directory_state=anchor_directory_state,
+                checkpoint_handle=checkpoint_handle,
+                checkpoint_path=checkpoint_path,
+                candidate_handle=candidate_handle,
+                candidate_path=candidate_path,
+                checkpoint_identity=checkpoint_identity,
+                candidate_identity=candidate_identity,
+            ):
                 raise DistillationError(
                     "R4 candidate anchor bootstrap read-back failed"
                 )
@@ -11766,6 +11795,66 @@ def _local_r4_failure_workset_receipt(
     }
 
 
+def _prepare_r4_local_failure_receipts(
+    *,
+    config: DistillationConfig,
+    workset: Any,
+    entries: Sequence[Mapping[str, Any]],
+    settle_transition: Mapping[str, Any],
+    configured_max_inflight: int | None,
+    captured_at: str | None,
+    claim_transition: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], int] | None:
+    entry_work_ids = [entry.get("work_id") for entry in entries]
+    if not all(isinstance(work_id, str) for work_id in entry_work_ids):
+        return None
+    work_ids = cast(list[str], entry_work_ids)
+    try:
+        current_workset_receipt = _local_r4_failure_workset_receipt(
+            settle_transition, work_ids
+        )
+    except DistillationError:
+        return None
+    claim_receipt: dict[str, Any] | None = None
+    if captured_at is None or claim_transition is None:
+        return None
+    if _OX_EXPIRY_RE.fullmatch(captured_at) is None:
+        return None
+    if not isinstance(claim_transition, Mapping):
+        return None
+    generation = claim_transition.get("generation")
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or claim_transition.get("operation") != "claim"
+        or generation + 1 != settle_transition.get("generation")
+        or claim_transition.get("selection_sha256")
+        != settle_transition.get("selection_sha256")
+        or claim_transition.get("work_ids_sha256")
+        != settle_transition.get("work_ids_sha256")
+        or workset.transition_receipt_binding(generation) != claim_transition
+    ):
+        return None
+    claim_receipt = {
+        "generation": generation,
+        "head_sha256": claim_transition["receipt_sha256"],
+        "selection_sha256": claim_transition["selection_sha256"],
+        "work_ids_sha256": claim_transition["work_ids_sha256"],
+    }
+    receipt_cap = (
+        config.teacher_max_inflight
+        if configured_max_inflight is None
+        else configured_max_inflight
+    )
+    if (
+        isinstance(receipt_cap, bool)
+        or not isinstance(receipt_cap, int)
+        or not 1 <= receipt_cap <= 10
+    ):
+        return None
+    return current_workset_receipt, claim_receipt, receipt_cap
+
+
 def _write_r4_local_failure_receipts(
     *,
     root: Path,
@@ -11783,53 +11872,19 @@ def _write_r4_local_failure_receipts(
 
     if not entries:
         return True
-    entry_work_ids = [entry.get("work_id") for entry in entries]
-    if not all(isinstance(work_id, str) for work_id in entry_work_ids):
-        return False
-    work_ids = cast(list[str], entry_work_ids)
-    try:
-        current_workset_receipt = _local_r4_failure_workset_receipt(
-            settle_transition, work_ids
-        )
-    except DistillationError:
-        return False
-    claim_receipt: dict[str, Any] | None = None
-    if captured_at is None or claim_transition is None:
-        return False
-    if _OX_EXPIRY_RE.fullmatch(captured_at) is None:
-        return False
-    if not isinstance(claim_transition, Mapping):
-        return False
-    generation = claim_transition.get("generation")
-    if (
-        isinstance(generation, bool)
-        or not isinstance(generation, int)
-        or claim_transition.get("operation") != "claim"
-        or generation + 1 != settle_transition.get("generation")
-        or claim_transition.get("selection_sha256")
-        != settle_transition.get("selection_sha256")
-        or claim_transition.get("work_ids_sha256")
-        != settle_transition.get("work_ids_sha256")
-        or workset.transition_receipt_binding(generation) != claim_transition
-    ):
-        return False
-    claim_receipt = {
-        "generation": generation,
-        "head_sha256": claim_transition["receipt_sha256"],
-        "selection_sha256": claim_transition["selection_sha256"],
-        "work_ids_sha256": claim_transition["work_ids_sha256"],
-    }
-    receipt_cap = (
-        config.teacher_max_inflight
-        if configured_max_inflight is None
-        else configured_max_inflight
+    prepared = _prepare_r4_local_failure_receipts(
+        config=config,
+        workset=workset,
+        entries=entries,
+        settle_transition=settle_transition,
+        configured_max_inflight=configured_max_inflight,
+        captured_at=captured_at,
+        claim_transition=claim_transition,
     )
-    if (
-        isinstance(receipt_cap, bool)
-        or not isinstance(receipt_cap, int)
-        or not 1 <= receipt_cap <= 10
-    ):
+    if prepared is None:
         return False
+    current_workset_receipt, claim_receipt, receipt_cap = prepared
+
     created: list[tuple[Path, str, Mapping[str, Any], tuple[int, int]]] = []
     try:
         first = entries[0]
