@@ -1,0 +1,157 @@
+{
+  "artifact_id": "582f0b47e0636f37ffc3404177bfa29cef0e2a68de98e904c5c10a62e23627b5",
+  "schema": "chronovisor.recall-r4-cutover-request.v1",
+  "namespace": "recall-distillation",
+  "captured_at": "2026-08-25T10:55:25Z",
+  "kind": "r4-cutover-request",
+  "scope": {
+    "production_certification": false,
+    "r4_checkbox_complete": false,
+    "requires_explicit_user_approval": true,
+    "push_performed": false,
+    "runtime_mutation_performed": false,
+    "provider_calls": 0
+  },
+  "source": {
+    "origin_main": "37132ea7b68bc715c249648d90953fd397f07334",
+    "source_code_head": "aeb8802af370992642b02d8d3d23cb48696c4dee",
+    "pre_request_commit_count": 77,
+    "pre_request_rev_list_sha256": "411bc72d845c6711fc33402f4415e95d67f209da9cd41808bd51852dcebdbff7",
+    "final_source_fixes": [
+      "ce6c8112944e4eada195d65561048c9e1b7a2305",
+      "426b78e8b7718be68a6ba087e666fb0e68d6cfd8",
+      "aeb8802af370992642b02d8d3d23cb48696c4dee"
+    ],
+    "push_target": "the linear origin_main..commit-containing-this-request range",
+    "protected_uncommitted_paths": [
+      "scripts/recall_r5_harness.py",
+      "scripts/recall_r6_harness.py",
+      "tests/test_recall_r5_harness.py",
+      "tests/test_recall_r6_harness.py"
+    ]
+  },
+  "offline_evidence": {
+    "workset_migration_and_r0_anchor": {
+      "artifact_id": "fafcf1df74c1e373b8ecec6277709d80320b60d058924adb177bcd91a344243d",
+      "file_sha256": "2baf03c6b140e9ce2dfb1287d4d8c345332578385b7b87d6be04b5c10ae4d130",
+      "verdict": "passed",
+      "production_unchanged": true,
+      "cleanup_remaining": 0,
+      "provider_calls": 0,
+      "ox_enabled": false,
+      "production_certification": false
+    },
+    "local_formal_preflight": {
+      "artifact_id": "22d9629765c176a34efc255a8a6c89baf7d2902cf26d12588e0540baf028671b",
+      "file_sha256": "fa57bc2fc5382ecdd52667de3d30c098c865fd3e681d41d63d594cb2d19a4f69",
+      "verdict": "preflight-passed",
+      "remote_provider_calls": 0,
+      "remote_network_egress": 0,
+      "local_model_calls": 0,
+      "workset_ready": 21,
+      "workset_leased": 0,
+      "cleanup_removed": true,
+      "production_certification": false
+    },
+    "ox_cap1_provider_zero_diagnostic": {
+      "artifact_count": 9,
+      "manifest_sha256": "1c4dcc2f7671805a890479b189edd1e25e89e3e9eed6bdbc24c9e53c152265fb",
+      "provider_calls": 0,
+      "ox_enabled": false,
+      "authoritative": false,
+      "production_certification": false
+    }
+  },
+  "current_live_boundary": {
+    "runtime_commit": "37132ea7b68bc715c249648d90953fd397f07334",
+    "managed_services": {
+      "com.trafficsign.chronovisor-semantic.managed": {"parent_pid": 754, "child_pid": 1078, "archive": "q5yysLjXKglqIixUhessK"},
+      "com.trafficsign.chronovisor-reranker.managed": {"parent_pid": 1426, "child_pid": 1439, "archive": "3RMV5YZ8Crn6apOgIaMKp"},
+      "com.trafficsign.chronovisor-dashboard.managed": {"parent_pid": 787, "child_pid": 1171, "archive": "dLc00qWXiHKLkg0dkR1AO"},
+      "com.trafficsign.chronovisor-lan-dashboard.managed": {"parent_pid": 791, "child_pid": 1170, "archive": "dLc00qWXiHKLkg0dkR1AO"},
+      "com.trafficsign.chronovisor-ingest-drain.managed": {"parent_pid": 784, "child_pid": 1172, "archive": "dLc00qWXiHKLkg0dkR1AO"}
+    },
+    "ingest_lock_holder": 1172,
+    "resource_lock_holder": 1172,
+    "distillation_processes": 0,
+    "distillation_lock_holders": 0,
+    "workset": {"total": 32522, "ready": 19400, "completed": 152, "quarantined": 12970, "leased": 0, "schema": "legacy"},
+    "config": {"enabled": true, "teacher_profile": "ox-alpha-single-v1", "teacher_max_inflight": 10, "teacher_claim_limit": 1, "ox_enabled": false, "ox_free_only": true},
+    "preserve_without_restart": {
+      "com.trafficsign.chronovisor-sleep.managed": "submitted-not-running-spawn-failed",
+      "com.trafficsign.chronovisor-converge.managed": "submitted-not-running-spawn-failed"
+    },
+    "local_teacher_servers": {
+      "teacher.a": {"port": 8000, "listener": true, "shared_with_ingest": true},
+      "teacher.b": {"port": 8002, "listener": false, "service_label": "com.trafficsign.omlx-muse"},
+      "teacher.c": {"port": 8001, "listener": true, "shared_machine_resource": true}
+    },
+    "dashboard": {"runtime_state": "running", "runtime_drift": false, "authority_ready": true, "mutation_ready": true, "active_failure": null, "ingest_liveness": "stale-alert"}
+  },
+  "authorization_requested": {
+    "push_and_ci": true,
+    "managed_refresh_labels": [
+      "com.trafficsign.chronovisor-semantic.managed",
+      "com.trafficsign.chronovisor-reranker.managed",
+      "com.trafficsign.chronovisor-dashboard.managed",
+      "com.trafficsign.chronovisor-lan-dashboard.managed",
+      "com.trafficsign.chronovisor-ingest-drain.managed"
+    ],
+    "external_local_teacher_label": "com.trafficsign.omlx-muse",
+    "one_shot_ingest_maintenance": true,
+    "production_additive_workset_migration": true,
+    "production_root_authority_and_r0_anchor": true,
+    "temporary_local_triad_formal": true,
+    "temporary_free_only_ox_cap1_formal": true,
+    "sleep_and_converge_mutation": false
+  },
+  "ordered_cutover": [
+    "Commit only the request and owned evidence; preserve the four R5/R6 dirty paths unstaged.",
+    "Push the complete linear range and require Quality, Python 3.14 standard-GIL, and Security workflows to pass before runtime mutation.",
+    "Refresh Semantic, Reranker, Dashboard, and LAN Dashboard one at a time; verify one parent/child, direct_url commit, health, authority, and runtime drift after each.",
+    "Seal Ingest, config, candidate ledger/checkpoint, Workset main/WAL/SHM, process, lock, lease, and service pre-state.",
+    "Gracefully stop only com.trafficsign.chronovisor-ingest-drain.managed; verify parent/child exit and ingest/resource lock holders zero.",
+    "Start only com.trafficsign.omlx-muse; require one listener on 127.0.0.1:8002 and the exact configured local route/model identity.",
+    "Using the pushed exact Git-installed runtime, perform additive Workset migration, root authority bootstrap, and R0 candidate anchor; require legacy row/work/provenance/state digests unchanged and leased zero.",
+    "Run the real local-triad production receipt window with max_inflight 1 and claim_limit 7 under a 25-minute watchdog; require 21 quality receipts split 7/7/7, valid rate at least 95 percent, route skew at most 10 percent, 3 probes, all six failure categories, scheduler and resource receipts, no remote/OX egress, and leased zero.",
+    "On every exit restore ox-alpha-single-v1, max_inflight 10, claim_limit 1, ox_enabled false, and free_only true; stop Muse back to no listener; remove owned temp roots and verify no distillation process or lock holder.",
+    "Restore managed Ingest from the pushed runtime and verify one parent/child, new child as the only ingest/resource lock holder, direct_url commit, fresh liveness, Dashboard authority/mutation readiness, and no duplicate processes.",
+    "Only after the local gate and Ingest restoration, run a separately bounded free-only OX cap1 cohort with claim_limit 1, hard provider-call ceiling 20, zero cost, exact route/model identity, existing backoff/hard-stop, and ox_enabled false plus leased zero on exit.",
+    "Run the read-only R4 production collector and check R4 only if local, OX, production projection, source, lock, lease, resource, queue, and cost gates all pass."
+  ],
+  "downtime_budget": {
+    "ingest_stop_to_new_child_lock_max_seconds": 2400,
+    "local_formal_watchdog_seconds": 1500,
+    "stop_and_prestate_seconds": 180,
+    "migration_and_anchor_seconds": 300,
+    "cleanup_restore_and_acceptance_seconds": 420,
+    "abort_rule": "If fewer than 420 seconds remain or any gate fails, abort the formal run, restore config and Ingest immediately, and leave R4 unchecked."
+  },
+  "rollback": {
+    "pre_provider_failure": "Do not enable OX; restore config, stop Muse, clean owned roots, and restore Ingest.",
+    "migration_failure": "While all distillation locks and leases are zero, restore the sealed pre-migration Workset clone only if additive integrity or semantic identity changed; otherwise retain the noncertifying additive schema and restore services.",
+    "managed_service_failure": "Stop the failed new service, restore its sealed pre-cutover plist/archive command for commit 37132ea, verify health, and do not advance to the next service.",
+    "local_formal_failure": "Discard noncertifying partial local receipts from the owned attempt, restore config and Muse state, restart Ingest, and keep R4 unchecked.",
+    "ox_failure": "Hard-stop remote egress, set ox_enabled false, release or reclaim every lease to zero, preserve failure receipts, and keep R4 unchecked.",
+    "sleep_converge": "Never bootstrap, kickstart, bootout, or normalize Sleep/Converge during this cutover."
+  },
+  "pre_acceptance": [
+    "The pushed commit is the tested exact source and the required CI workflows are green.",
+    "Only the four named R5/R6 files are dirty and they are unstaged and absent from the push.",
+    "ox_enabled is false, free_only is true, claim_limit is 1, Workset leased is zero, and no distillation process or lock holder exists.",
+    "Ingest is a single managed parent/child and is the sole ingest/resource lock holder.",
+    "Sleep and Converge remain submitted, not running, spawn failed, with no matching process."
+  ],
+  "post_acceptance": [
+    "Every refreshed managed archive direct_url equals the pushed commit and has one parent/child with no duplicates.",
+    "Production Workset migration is additive, integrity is ok, legacy digests are unchanged, active lease fields are zero, and a fresh v2 generation is used for certification.",
+    "The R0 anchor is sealed against the current candidate ledger/checkpoint and exact source modules; drift fails closed.",
+    "Local formal has 21 quality receipts, 7/7/7 routes, 3 probes, six failure categories, valid rate at least 95 percent, scheduler/resource evidence, and leased zero.",
+    "OX cap1 has at least 20 attempted receipts, valid rate at least 95 percent, exact free route/model identity, zero cost, provider calls no more than 20, no duplicates, and leased zero.",
+    "Final config is ox-alpha-single-v1, max_inflight 10, claim_limit 1, ox_enabled false, and free_only true.",
+    "Muse has no listener unless separately approved to remain running; Sleep and Converge preserve their pre-state.",
+    "Ingest is restored within 40 minutes with one new child holding the ingest/resource locks, fresh liveness, Dashboard authority/mutation ready, runtime drift false, and no active failure.",
+    "R4 remains unchecked unless the final read-only collector passes every production gate."
+  ],
+  "seal_sha256": "978a4e5b1554dc885869f7e95cd21cdb45bb6754a18123b6665981e49abd4c5a"
+}
