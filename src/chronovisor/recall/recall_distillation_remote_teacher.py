@@ -388,7 +388,9 @@ def ox_alpha_source_binding() -> dict[str, str]:
     installed_digest = hashlib.sha256(installed_bytes).hexdigest()
     digest = hashlib.sha256()
     remote_sha256 = ""
-    for _mode, blob, raw_path in index_entries:
+    # Keep the attestation stream in the same canonical path order as the R4
+    # harness; the tuple order is retained for index/HEAD equality checks.
+    for _mode, blob, raw_path in sorted(index_entries, key=lambda entry: entry[2]):
         relative = os.fsdecode(raw_path)
         if Path(relative).is_absolute() or ".." in Path(relative).parts:
             raise ValueError("installed OX source index is unsafe")

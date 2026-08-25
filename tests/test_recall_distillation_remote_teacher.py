@@ -157,6 +157,10 @@ def test_source_binding_requires_a_clean_installed_checkout(
     module = source / "src/chronovisor/recall/recall_distillation_remote_teacher.py"
     module.parent.mkdir(parents=True)
     module.write_bytes(Path(remote.__file__).read_bytes())
+    # Deliberately make blob order differ from path order so a mode/blob/path
+    # iteration cannot accidentally pass this tree-digest regression.
+    (source / "a.txt").write_bytes(b"z\n")
+    (source / "z.txt").write_bytes(b"a\n")
     for command in (
         ["git", "init"],
         ["git", "config", "user.email", "test@example.invalid"],
@@ -193,6 +197,30 @@ def test_source_binding_requires_a_clean_installed_checkout(
         binding["source_ox_identity_sha256"]
         == __import__("hashlib").sha256(module.read_bytes()).hexdigest()
     )
+    expected_tree = __import__("hashlib").sha256()
+    for path in sorted(
+        (module, source / "a.txt", source / "z.txt"),
+        key=lambda item: item.relative_to(source).as_posix(),
+    ):
+        content = path.read_bytes()
+        expected_tree.update(
+            json.dumps(
+                {
+                    "kind": "file",
+                    "path": path.relative_to(source).as_posix(),
+                    "size": len(content),
+                    "sha256": __import__("hashlib")
+                    .sha256(content)
+                    .hexdigest(),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        )
+        expected_tree.update(b"\n")
+    assert binding["source_tree_sha256"] == expected_tree.hexdigest()
     subprocess.run(
         ["git", "commit", "--allow-empty", "-m", "advanced origin"],
         cwd=source,
