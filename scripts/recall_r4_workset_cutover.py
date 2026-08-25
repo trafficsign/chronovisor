@@ -1078,6 +1078,7 @@ def cutover(
             else _sqlite_identity(old),
             "provider_calls": 0,
             "ox_enabled": False,
+            "production_certification": False,
         }
         if output is not None:
             result["output"] = _atomic_output(output, result)
@@ -1356,6 +1357,9 @@ def rollback(
             "operation_id": operation_id,
             "current_sha256": _sha256(old),
             "legacy": legacy,
+            "provider_calls": 0,
+            "ox_enabled": False,
+            "production_certification": False,
         }
         if output is not None:
             result["output"] = _atomic_output(output, result)

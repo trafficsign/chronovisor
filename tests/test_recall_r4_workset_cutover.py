@@ -222,6 +222,9 @@ def test_default_preflight_does_not_adopt_the_legacy_root(tmp_path: Path) -> Non
 
 
 def _assert_preflight_output(result: dict[str, object], output: Path) -> None:
+    assert result["provider_calls"] == 0
+    assert result["ox_enabled"] is False
+    assert result["production_certification"] is False
     receipt = CUTOVER._read_sealed_regular(output, schema=CUTOVER.CUTOVER_SCHEMA)
     assert result["output"] == receipt
     assert {
