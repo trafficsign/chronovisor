@@ -140,6 +140,57 @@ def test_production_workset_rejects_watermark_tampering(tmp_path: Path) -> None:
         HARNESS._production_workset(workset_path)
 
 
+def test_production_workset_read_does_not_touch_checkpointed_shm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path, source, commit)
+    workset_path = production / HARNESS.PRODUCTION_WORKSET_RELATIVE
+    wal_path = workset_path.with_name(f"{workset_path.name}-wal")
+    shm_path = workset_path.with_name(f"{workset_path.name}-shm")
+    with sqlite3.connect(workset_path) as writer:
+        writer.execute("PRAGMA journal_mode = WAL")
+        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        assert wal_path.stat().st_size == 0
+        assert shm_path.is_file()
+        wal_bytes = wal_path.read_bytes()
+        shm_bytes = shm_path.read_bytes()
+    wal_path.write_bytes(wal_bytes)
+    shm_path.write_bytes(shm_bytes)
+    before = HARNESS._production_sqlite_state(
+        workset_path, label="production workset"
+    )
+    opened: list[str] = []
+    real_connect = sqlite3.connect
+
+    def tracked_connect(database: object, *args: object, **kwargs: object) -> object:
+        opened.append(str(database))
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(HARNESS.sqlite3, "connect", tracked_connect)
+
+    result = HARNESS._production_workset(workset_path)
+
+    assert result["rows"] > 0
+    assert opened[0] == f"file:{workset_path}?immutable=1"
+    assert (
+        HARNESS._production_sqlite_state(
+            workset_path, label="production workset"
+        )
+        == before
+    )
+    with real_connect(workset_path) as writer:
+        writer.execute("CREATE TABLE uncheckpointed_probe(value INTEGER)")
+        writer.commit()
+        assert wal_path.stat().st_size > 0
+        opened.clear()
+        with pytest.raises(
+            HARNESS.R4Error, match="production workset has uncheckpointed WAL"
+        ):
+            HARNESS._production_workset(workset_path)
+        assert opened == []
+
+
 def test_collector_rejects_payload_ref_absent_from_candidate_ledger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -161,6 +212,8 @@ def test_collector_rejects_payload_ref_absent_from_candidate_ledger(
             "UPDATE work_items SET payload_ref = ? WHERE sequence = 1",
             (f"candidate-snapshot:{rally_id}:{'f' * 64}",),
         )
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     result = HARNESS._collect_authoritative_production(
         source_root=source,
         source=HARNESS._assert_source(source, commit),
@@ -170,6 +223,37 @@ def test_collector_rejects_payload_ref_absent_from_candidate_ledger(
     assert result["reasons"] == [
         "production workset payload does not resolve in candidate ledger"
     ]
+
+
+def test_collector_rejects_workset_mutation_after_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path, source, commit)
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    monkeypatch.setattr(
+        HARNESS,
+        "_load_production_anchor",
+        lambda _path, **_kwargs: _fixture_candidate_anchor(production),
+    )
+    original = HARNESS._production_fault_scenarios
+
+    def mutate_after_snapshot(*args: object, **kwargs: object) -> object:
+        result = original(*args, **kwargs)
+        workset_path = production / HARNESS.PRODUCTION_WORKSET_RELATIVE
+        with sqlite3.connect(workset_path) as connection:
+            connection.execute("PRAGMA user_version = 1")
+        return result
+
+    monkeypatch.setattr(HARNESS, "_production_fault_scenarios", mutate_after_snapshot)
+    result = HARNESS._collect_authoritative_production(
+        source_root=source,
+        source=HARNESS._assert_source(source, commit),
+        production_root=production,
+    )
+
+    assert result["passed"] is False
+    assert result["reasons"] == ["production workset changed during validation"]
 
 
 def test_collector_rejects_supplied_source_identity_not_matching_clean_git(

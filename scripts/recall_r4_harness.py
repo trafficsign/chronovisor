@@ -1707,17 +1707,13 @@ def _production_workset(path: Path) -> dict[str, Any]:
     if before_files["main"]["st_size"] > PRODUCTION_MAX_SQLITE_BYTES:
         raise R4Error("production workset exceeds bounded size")
     try:
-        # A read-only URI can create a new WAL shared-memory sidecar on
-        # platforms where the writer left a checkpointed WAL database.  Use
-        # SQLite's immutable mode for that stable case; when a live WAL/SHM
-        # pair already exists, retain normal read-only WAL semantics and bind
-        # both sidecars in the before/after identity checks above.
-        query = (
-            "mode=ro"
-            if before_files["wal"] is not None or before_files["shm"] is not None
-            else "immutable=1"
-        )
-        source_connection = sqlite3.connect(f"file:{path}?{query}", uri=True)
+        # SQLite's mode=ro still updates WAL shared-memory read marks.  A
+        # checkpointed database is safe to open immutable; a non-empty WAL is
+        # not a frozen production snapshot and must fail closed.
+        wal = before_files["wal"]
+        if wal is not None and wal["st_size"] > 0:
+            raise R4Error("production workset has uncheckpointed WAL")
+        source_connection = sqlite3.connect(f"file:{path}?immutable=1", uri=True)
         try:
             connection = sqlite3.connect(":memory:")
             source_connection.backup(connection)
@@ -4061,6 +4057,10 @@ def _collect_authoritative_production(
             != candidate_anchor["file_state"]
         ):
             raise R4Error("production R4 candidate anchor changed during validation")
+        if not _production_sqlite_unchanged(
+            workset_path, workset["file_state"], label="production workset"
+        ):
+            raise R4Error("production workset changed during validation")
         if (
             _production_directory_fd_identity(root_fd, label="production root")
             != root_identity
