@@ -90,6 +90,27 @@ def _complete_row(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _provider_receipt_is_certifying(row: Mapping[str, Any]) -> bool:
+    """Return whether a completed row carries an adapter-observed receipt.
+
+    ``provider_request_sha256`` is the deterministic request-intent binding and
+    is checked against :func:`expected_ox_provider_request_sha256` below.  It
+    must not be reused as a response/receipt surrogate: the producer's actual
+    adapter receipt is carried in ``provider_receipt_sha256`` and is only
+    certifying when it is a canonical lower-case SHA-256 string distinct from
+    that request binding.  Rows carrying the removed
+    ``provider_response_request_sha256`` field remain legacy/non-certifying,
+    even when they also carry the new receipt field.
+    """
+
+    if "provider_response_request_sha256" in row:
+        return False
+    receipt = _text(row.get("provider_receipt_sha256"))
+    if re.fullmatch(r"[0-9a-f]{64}", receipt) is None:
+        return False
+    return receipt != _text(row.get("provider_request_sha256"))
+
+
 def _one(values: Sequence[str], name: str, reasons: list[str]) -> str:
     distinct = set(values)
     if not values or "" in distinct or len(distinct) != 1:
@@ -112,8 +133,9 @@ def evaluate_single_teacher_gate(
 ) -> dict[str, Any]:
     """Evaluate sealed-like rows without granting them verified-truth authority.
 
-    A usable row has ``status='completed'``, no error, and a relevance verdict.
-    It must carry immutable ``profile``, ``cohort``, ``route``, ``model_digest``,
+    A usable row has ``status='completed'``, no error, a relevance verdict, and
+    a canonical adapter-observed ``provider_receipt_sha256``.  It must carry
+    immutable ``profile``, ``cohort``, ``route``, ``model_digest``,
     ``prompt_sha256``, ``schema_sha256``, and ``profile_contract_id`` identities.
     The captured provider/model/location route must match exactly.  Completed
     test rows additionally need ``locked_test_read_only=True`` and a non-empty
@@ -150,8 +172,17 @@ def evaluate_single_teacher_gate(
         for row in current_rows
         if _complete_row(row) and row.get("source") != "counterfactual-label"
     ]
+    certifying_completed = [
+        row for row in completed if _provider_receipt_is_certifying(row)
+    ]
+    if len(certifying_completed) != len(completed):
+        reasons.append("provider_receipt_sha256_invalid")
     required_splits = {"train", "validation", "test"}
-    eligible = [row for row in completed if row.get("split") in required_splits]
+    # Rows without an adapter-observed receipt remain auditable below, but are
+    # explicitly non-certifying and cannot contribute to any quality floor.
+    eligible = [
+        row for row in certifying_completed if row.get("split") in required_splits
+    ]
     excluded = len(rows) - len(eligible)
     labels = [row for row in eligible if row.get("probe") is not True]
     probes = [row for row in eligible if row.get("probe") is True]
@@ -224,14 +255,6 @@ def evaluate_single_teacher_gate(
     ):
         reasons.append("provider_request_sha256_contract_mismatch")
     if any(
-        re.fullmatch(
-            r"[0-9a-f]{64}", _text(row.get("provider_response_request_sha256"))
-        )
-        is None
-        for row in completed
-    ):
-        reasons.append("provider_response_request_sha256_invalid")
-    if any(
         re.fullmatch(r"[0-9a-f]{64}", _text(row.get("payload_digest"))) is None
         or not isinstance(row.get("payload_source"), Mapping)
         or canonical_json.canonical_json_sha256_strict(row["payload_source"])
@@ -239,12 +262,6 @@ def evaluate_single_teacher_gate(
         for row in completed
     ):
         reasons.append("payload_source_digest_mismatch")
-    if any(
-        _text(row.get("provider_response_request_sha256"))
-        != _text(row.get("provider_request_sha256"))
-        for row in completed
-    ):
-        reasons.append("provider_response_request_sha256_contract_mismatch")
 
     def future_utc(value: object) -> bool:
         text = _text(value)
@@ -278,9 +295,11 @@ def evaluate_single_teacher_gate(
     if any(row.get("fixed_split_plan") is not True for row in completed):
         reasons.append("fixed_split_plan_missing")
 
-    if len(eligible) != len(completed):
+    if len(eligible) != len(certifying_completed):
         reasons.append("split_assignment_invalid")
-    split_rows = [row for row in completed if row.get("split") in required_splits]
+    split_rows = [
+        row for row in certifying_completed if row.get("split") in required_splits
+    ]
     if {str(row.get("split")) for row in split_rows} != required_splits:
         reasons.append("chronological_split_incomplete")
     missing_group = any(not _text(row.get("group_id")) for row in completed)
@@ -322,7 +341,9 @@ def evaluate_single_teacher_gate(
     if any(row.get("feature_parity") is not True for row in completed_flags):
         reasons.append("feature_parity_failed")
 
-    test_rows = [row for row in completed if row.get("split") == "test"]
+    test_rows = [
+        row for row in certifying_completed if row.get("split") == "test"
+    ]
     evidence_refs = sorted(
         {
             _text(row.get("locked_test_evidence_ref"))

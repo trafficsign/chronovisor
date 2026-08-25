@@ -127,6 +127,21 @@ def _sha256(value: object) -> str:
     return hashlib.sha256(_json_bytes(value)).hexdigest()
 
 
+def ox_provider_receipt_sha256(request_id: object) -> str:
+    """Return non-reversible evidence for one adapter-observed request id."""
+
+    safe_request_id = safe_metadata_identifier(request_id)
+    if safe_request_id is None:
+        return ""
+    return _sha256(
+        {
+            "kind": "ox-provider-receipt-v1",
+            "provider": OX_ALPHA_PROVIDER,
+            "request_id": safe_request_id,
+        }
+    )
+
+
 def resolve_ox_alpha_model(provider: str, configured_model: str) -> str:
     """Resolve the request model from the existing provider/model route.
 
@@ -830,6 +845,9 @@ class OpenCodeOxAlphaTeacher:
         safe_request_id = safe_metadata_identifier(request_id)
         if safe_request_id is not None:
             failure["request_id"] = safe_request_id
+            failure["provider_receipt_sha256"] = ox_provider_receipt_sha256(
+                safe_request_id
+            )
         return {
             "_failure": failure,
             **self._metadata(request_digest=request_digest),
@@ -961,6 +979,7 @@ class OpenCodeOxAlphaTeacher:
         return {
             "labels": safe_labels,
             **response_metadata,
+            "_provider_receipt_sha256": ox_provider_receipt_sha256(request_id),
             "_test_only": self.test_only,
         }
 

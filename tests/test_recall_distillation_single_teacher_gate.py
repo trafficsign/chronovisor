@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import cast
 
 from chronovisor.core import canonical_json
@@ -60,12 +61,11 @@ def _row(
             work_id=row_id,
             expires_at="2099-01-01T00:00:00Z",
         ),
-        "provider_response_request_sha256": expected_ox_provider_request_sha256(
-            profile_contract_id="e" * 64,
-            payload_digest=payload_digest,
-            work_id=row_id,
-            expires_at="2099-01-01T00:00:00Z",
-        ),
+        # The adapter-observed receipt is intentionally distinct from the
+        # deterministic request-intent hash above.
+        "provider_receipt_sha256": hashlib.sha256(
+            f"adapter:{row_id}".encode()
+        ).hexdigest(),
         "route_identity_exact": True,
         "split": split,
         "split_plan_id": "d" * 64,
@@ -297,6 +297,94 @@ def test_gate_recomputes_request_envelopes() -> None:
 
     gate = _gate(rows)
 
+    assert "provider_request_sha256_contract_mismatch" in gate["reasons"]
+
+
+def test_gate_separates_request_intent_from_adapter_receipt() -> None:
+    rows = _passing_rows()
+    rows[0]["provider_receipt_sha256"] = "0" * 64
+
+    gate = _gate(rows)
+
+    assert gate["passed"] is True
+    assert gate["labels"]["eligible"] == 4
+
+
+def test_legacy_provider_response_only_rows_are_noncertifying() -> None:
+    rows = _passing_rows()
+    for row in rows:
+        row["provider_response_request_sha256"] = row["provider_request_sha256"]
+        row.pop("provider_receipt_sha256")
+
+    gate = _gate(rows)
+
+    assert gate["passed"] is False
+    assert "provider_receipt_sha256_invalid" in gate["reasons"]
+    assert gate["labels"] == {
+        "eligible": 0,
+        "relevant": 0,
+        "irrelevant": 0,
+        "excluded": len(rows),
+    }
+
+
+def test_legacy_provider_response_key_is_noncertifying_with_actual_receipt() -> None:
+    rows = _passing_rows()
+    for row in rows:
+        row["provider_response_request_sha256"] = "0" * 64
+
+    gate = _gate(rows)
+
+    assert gate["passed"] is False
+    assert "provider_receipt_sha256_invalid" in gate["reasons"]
+    assert gate["labels"] == {
+        "eligible": 0,
+        "relevant": 0,
+        "irrelevant": 0,
+        "excluded": len(rows),
+    }
+
+
+def test_receipt_reusing_request_intent_is_noncertifying() -> None:
+    rows = _passing_rows()
+    for row in rows:
+        row["provider_receipt_sha256"] = row["provider_request_sha256"]
+
+    gate = _gate(rows)
+
+    assert gate["passed"] is False
+    assert "provider_receipt_sha256_invalid" in gate["reasons"]
+    assert gate["labels"] == {
+        "eligible": 0,
+        "relevant": 0,
+        "irrelevant": 0,
+        "excluded": len(rows),
+    }
+
+
+def test_missing_adapter_receipt_cannot_enter_quality_floors() -> None:
+    rows = _passing_rows()
+    rows[0].pop("provider_receipt_sha256")
+
+    gate = _gate(rows)
+
+    assert gate["passed"] is False
+    assert "provider_receipt_sha256_invalid" in gate["reasons"]
+    assert gate["labels"] == {
+        "eligible": 3,
+        "relevant": 1,
+        "irrelevant": 2,
+        "excluded": 1,
+    }
+
+
+def test_forged_provider_request_intent_still_fails_closed() -> None:
+    rows = _passing_rows()
+    rows[0]["provider_request_sha256"] = rows[0]["provider_receipt_sha256"]
+
+    gate = _gate(rows)
+
+    assert gate["passed"] is False
     assert "provider_request_sha256_contract_mismatch" in gate["reasons"]
 
 

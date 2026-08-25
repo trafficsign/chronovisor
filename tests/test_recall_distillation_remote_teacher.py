@@ -444,8 +444,12 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
         "_prompt_digest",
         "_schema_digest",
         "_request_digest",
+        "_provider_receipt_sha256",
     ):
         assert len(cast(str, result[key])) == 64
+    assert result["_provider_receipt_sha256"] == remote.ox_provider_receipt_sha256(
+        "ox_req_1"
+    )
     assert result["_identity_revision"] == OX_ALPHA_FIXED_IDENTITY["revision"]
     body = json.loads(cast(bytes, sender.calls[0].data))
     assert body["model"] == "ox-alpha-free"
@@ -765,6 +769,9 @@ def test_invalid_provider_content_is_not_reflected(tmp_path: Path) -> None:
     assert result["_failure"]["class"] == "invalid_response"
     assert result["_failure"]["stage"] == "teacher_json_parse"
     assert result["_failure"]["request_id"] == "ox_req_1"
+    assert result["_failure"]["provider_receipt_sha256"] == remote.ox_provider_receipt_sha256(
+        "ox_req_1"
+    )
     assert result["_failure"]["labelable"] is False
     assert CANARY not in repr(result)
 
@@ -784,6 +791,9 @@ def test_invalid_provider_envelope_stage_is_propagated_safely(tmp_path: Path) ->
     assert result["_failure"]["class"] == "invalid_response"
     assert result["_failure"]["stage"] == "choices_shape"
     assert result["_failure"]["request_id"] == "ox_req_1"
+    assert result["_failure"]["provider_receipt_sha256"] == remote.ox_provider_receipt_sha256(
+        "ox_req_1"
+    )
     assert result["_failure"]["labelable"] is False
     assert CANARY not in repr(result)
 

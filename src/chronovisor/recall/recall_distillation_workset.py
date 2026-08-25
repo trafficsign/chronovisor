@@ -1026,9 +1026,13 @@ class DistillationWorkset:
                 raise DistillationWorksetError("workset advance delta is invalid")
         elif operation in {"claim_reclaim", "claim", "release"}:
             expected_keys = {"kind", "count", "selection_sha256"}
-            optional = {"work_ids_sha256"}
-            if not expected_keys.issubset(details) or set(details).difference(
-                expected_keys | optional
+            required_keys = (
+                expected_keys | {"work_ids_sha256"}
+                if version == 2
+                else expected_keys
+            )
+            if not required_keys.issubset(details) or set(details).difference(
+                expected_keys | {"work_ids_sha256"}
             ):
                 raise DistillationWorksetError("workset lease receipt is corrupted")
             kind = details["kind"]
@@ -1073,6 +1077,8 @@ class DistillationWorkset:
             work_bound_keys = {*legacy_keys, "work_ids_sha256"}
             timed_work_bound_keys = {*timed_keys, "work_ids_sha256"}
             detail_keys = set(details).difference({"context_sha256"})
+            if version == 2 and "work_ids_sha256" not in details:
+                raise DistillationWorksetError("workset commit receipt is corrupted")
             if detail_keys not in (
                 legacy_keys,
                 timed_keys,
@@ -1428,6 +1434,12 @@ class DistillationWorkset:
             payload["details"].get("selection_sha256"), "receipt selection_sha256"
         )
         result = {**identity, "selection_sha256": selection}
+        details = payload["details"]
+        if "count" in details:
+            count = details["count"]
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise DistillationWorksetError("workset receipt binding is invalid")
+            result["count"] = count
         if "work_ids_sha256" in payload["details"]:
             result["work_ids_sha256"] = _digest(
                 payload["details"].get("work_ids_sha256"),

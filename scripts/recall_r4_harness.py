@@ -1626,6 +1626,8 @@ def _production_workset_receipts(
     previous = ""
     prior_after: dict[str, Any] | None = None
     saw_v2 = False
+    legacy_unverified = False
+    receipt_by_generation: dict[str, dict[str, Any]] = {}
     for expected_generation, row in enumerate(rows, start=1):
         generation, previous_sha, operation, payload_json, receipt_sha = row
         if (
@@ -1659,6 +1661,10 @@ def _production_workset_receipts(
                 allowed_payload.add("bootstrap")
         if version not in {1, 2} or set(payload) != allowed_payload:
             raise R4Error("production workset receipt schema is invalid")
+        if version == 1:
+            # v1 remains readable for historical inspection, but it has no
+            # durable progress/work-id boundary and cannot certify R4.
+            legacy_unverified = True
         if not isinstance(before, Mapping) or not isinstance(after, Mapping):
             raise R4Error("production workset receipt snapshot is invalid")
         expected_snapshot_keys = {"counts", "watermark"}
@@ -1738,10 +1744,13 @@ def _production_workset_receipts(
                 raise R4Error("production workset advance delta is invalid")
         elif operation in {"claim_reclaim", "claim", "release"}:
             expected_details = {"kind", "count", "selection_sha256"}
-            if set(details) not in (
-                expected_details,
-                {*expected_details, "work_ids_sha256"},
-            ):
+            work_bound_details = {*expected_details, "work_ids_sha256"}
+            allowed_details = (
+                (work_bound_details,)
+                if version == 2
+                else (expected_details, work_bound_details)
+            )
+            if set(details) not in allowed_details:
                 raise R4Error("production workset lease receipt is invalid")
             kind = details["kind"]
             count = details["count"]
@@ -1825,17 +1834,17 @@ def _production_workset_receipts(
         }
         if _sha256(envelope) != receipt_sha:
             raise R4Error("production workset receipt hash mismatch")
+        receipt_by_generation[str(generation)] = {
+            "receipt_sha256": receipt_sha,
+            "operation": operation,
+            "details": dict(details),
+        }
         previous = receipt_sha
         prior_after = {
             "counts": after_counts,
             "watermark": after.get("watermark"),
             "progress": after.get("progress") if version == 2 else None,
         }
-    # Version 1 omitted durable progress, so even a hash-continuous v1 chain
-    # cannot prove the formal training boundary.  A v2 receipt must establish
-    # progress continuity before this collector can use the workset at all.
-    if not saw_v2:
-        raise R4Error("production workset lacks v2 progress continuity")
     if prior_after is None or prior_after["counts"] != dict(current_counts):
         raise R4Error("production workset receipt final state mismatch")
     if prior_after["watermark"] != current_watermark:
@@ -1846,7 +1855,10 @@ def _production_workset_receipts(
         "count": len(rows),
         "generation": len(rows),
         "head_sha256": previous,
+        "by_generation": receipt_by_generation,
         "verified": True,
+        "status": "legacy-unverified" if legacy_unverified else "verified",
+        "legacy_unverified_excluded": legacy_unverified,
     }
 
 
@@ -2048,6 +2060,7 @@ def _production_workset(path: Path) -> dict[str, Any]:
                     raise R4Error("production completed work lacks a sealed label ref")
                 completed[work_id] = {
                     "work_id": work_id,
+                    "completion_ref": completion_ref,
                     "completion_digest": str(completion_digest),
                     "attempt_count": attempt_count,
                     "provenance": dict(provenance),
@@ -2558,21 +2571,26 @@ def _production_ox_events(
         "failure": "ox-provider-failure",
         "lease": "ox-lease-reclaim",
     }
-    result: dict[str, list[dict[str, Any]]] = {key: [] for key in names}
+    result: dict[str, list[dict[str, Any]]] = {
+        **{key: [] for key in names},
+        # Read legacy chains only to make their non-certifying status explicit.
+        # They must never supply formal ramp/failure/lease evidence.
+        "legacy": [],
+    }
     common = {
         "profile_contract_id": contract_id,
         "source_commit": source.get("commit"),
         "source_tree_sha256": source.get("tree_sha256"),
         "source_ox_identity_sha256": source.get("ox_identity_sha256"),
     }
-    allowed = {
+    legacy_allowed = {
         "ox-ramp-stage": common.keys()
         | {
             "kind",
             "request_revision",
             "expires_at",
-            "cap",
-            "valid_receipts",
+                "cap",
+                "valid_receipts",
             "attempts",
             "work_ids",
             "label_count",
@@ -2608,6 +2626,7 @@ def _production_ox_events(
         },
     }
     for group, name in names.items():
+        seen_event_keys: set[str] = set()
         path = root / PRODUCTION_DISTILLATION_RELATIVE / name
         if not path.exists():
             continue
@@ -2615,7 +2634,7 @@ def _production_ox_events(
         view = _production_chain(path, checkpoint, ledger_name=name)
         if view["sha256"] is None:
             raise R4Error("production OX event ledger must fit the exact collector")
-        for record in view["rows"]:
+        for record_index, record in enumerate(view["rows"], start=1):
             payload = {
                 key: value
                 for key, value in record.items()
@@ -2630,11 +2649,11 @@ def _production_ox_events(
                 }
             }
             kind = payload.get("kind")
+            event_version = payload.get("event_version")
+            if not isinstance(kind, str) or kind not in legacy_allowed:
+                raise R4Error("production OX event schema is invalid")
             if (
-                not isinstance(kind, str)
-                or kind not in allowed
-                or kind != group_kinds[group]
-                or set(payload) != allowed[kind]
+                kind != group_kinds[group]
                 or any(payload.get(key) != value for key, value in common.items())
                 or payload.get("request_revision") != contract_revision
                 or payload.get("expires_at") != contract_expiry
@@ -2646,6 +2665,81 @@ def _production_ox_events(
                 or record["event_binding_sha256"] != _sha256(payload)
             ):
                 raise R4Error("production OX event schema is invalid")
+
+            if event_version is not None and (
+                isinstance(event_version, bool) or not isinstance(event_version, int)
+            ):
+                raise R4Error("production OX event version is invalid")
+            legacy = event_version is None or event_version == 1
+            if legacy:
+                legacy_keys = set(legacy_allowed[kind]) | (
+                    {"event_version"} if event_version == 1 else set()
+                )
+                legacy_required = set(legacy_allowed[kind])
+                if kind == "ox-provider-failure":
+                    legacy_required -= {"bounded", "before_cap", "after_cap"}
+                if not legacy_required.issubset(payload) or not set(payload).issubset(
+                    legacy_keys
+                ):
+                    raise R4Error("production OX legacy event schema is invalid")
+            elif event_version != 2:
+                raise R4Error("production OX event version is invalid")
+            else:
+                v2_common = {
+                    "event_version",
+                    "kind",
+                    "profile_contract_id",
+                    "source_commit",
+                    "source_tree_sha256",
+                    "source_ox_identity_sha256",
+                    "request_revision",
+                    "expires_at",
+                    "captured_at",
+                }
+                expected_keys = {
+                    "ox-ramp-stage": v2_common
+                        | {
+                            "cap",
+                            "next_cap",
+                            "valid_receipts",
+                        "attempts",
+                        "work_ids",
+                        "label_count",
+                        "label_head_sha256",
+                        "failure_record_count",
+                        "failure_head_sha256",
+                    },
+                    "ox-provider-failure": v2_common
+                    | {
+                        "category",
+                        "status",
+                        "cap",
+                        "attempts",
+                        "work_ids",
+                        "attempts_by_work",
+                        "provider_receipts",
+                    },
+                    "ox-lease-reclaim": v2_common
+                    | {
+                        "workset_receipt_generation",
+                        "workset_receipt_sha256",
+                        "work_ids_sha256",
+                        "reclaimed",
+                        "leased_after",
+                    },
+                }[kind]
+                category = payload.get("category")
+                if kind == "ox-provider-failure":
+                    if category == "429":
+                        expected_keys |= {"before_cap", "after_cap"}
+                    elif category in {"5xx", "timeout", "402", "paid", "model_drift"}:
+                        if category in {"5xx", "timeout"}:
+                            expected_keys |= {"bounded"}
+                    else:
+                        raise R4Error("production OX failure category is invalid")
+                if set(payload) != expected_keys:
+                    raise R4Error("production OX event schema is invalid")
+
             if kind == "ox-provider-failure":
                 attempts = payload.get("attempts")
                 work_ids = payload.get("work_ids")
@@ -2657,21 +2751,51 @@ def _production_ox_events(
                     or attempts < 1
                     or not isinstance(work_ids, list)
                     or not work_ids
-                    or not all(isinstance(work_id, str) and work_id for work_id in work_ids)
+                    or not all(
+                        isinstance(work_id, str) and _SHA.fullmatch(work_id)
+                        for work_id in work_ids
+                    )
                     or len(set(work_ids)) != len(work_ids)
                     or not isinstance(attempts_by_work, Mapping)
                     or set(attempts_by_work) != set(work_ids)
-                    or not all(isinstance(value, int) and value > 0 for value in attempts_by_work.values())
+                    or not all(
+                        isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and value > 0
+                        for value in attempts_by_work.values()
+                    )
                     or not isinstance(provider_receipts, Mapping)
                     or set(provider_receipts) != set(work_ids)
                     or not all(isinstance(value, str) and _SHA.fullmatch(value) for value in provider_receipts.values())
+                    or len(set(provider_receipts.values())) != 1
+                    or attempts != len(set(provider_receipts.values()))
                     or not str(payload.get("captured_at"))
                 ):
                     raise R4Error("production OX failure event is incomplete")
+                category = payload.get("category")
+                if not legacy and (
+                    (isinstance(payload.get("cap"), bool)
+                        or payload.get("cap") not in PRODUCTION_RAMP_CAPS)
+                    or (category == "429" and (
+                        payload.get("status") != "deferred"
+                        or isinstance(payload.get("before_cap"), bool)
+                        or not isinstance(payload.get("before_cap"), int)
+                        or payload.get("before_cap") not in PRODUCTION_RAMP_CAPS
+                        or isinstance(payload.get("after_cap"), bool)
+                        or not isinstance(payload.get("after_cap"), int)
+                        or payload.get("after_cap") not in PRODUCTION_RAMP_CAPS
+                    ))
+                    or (category in {"5xx", "timeout"} and (
+                        payload.get("status") != "deferred"
+                        or payload.get("bounded") is not True
+                    ))
+                    or (category in {"402", "paid", "model_drift"}
+                        and payload.get("status") != "hard_stop")
+                ):
+                    raise R4Error("production OX failure category is invalid")
                 work_items = workset.get("items")
                 if not isinstance(work_items, Mapping):
                     raise R4Error("production OX workset payload inventory is missing")
-                expected_receipts: dict[str, str] = {}
                 for work_id in work_ids:
                     item = work_items.get(work_id)
                     if not isinstance(item, Mapping):
@@ -2679,43 +2803,131 @@ def _production_ox_events(
                     payload_digest = item.get("payload_digest")
                     if not isinstance(payload_digest, str) or _SHA.fullmatch(payload_digest) is None:
                         raise R4Error("production OX workset payload digest is invalid")
-                    expected_receipts[work_id] = _expected_ox_provider_request_sha256(
+                    if legacy and provider_receipts.get(work_id) != _expected_ox_provider_request_sha256(
                         profile_contract_id=contract_id,
                         payload_digest=payload_digest,
                         work_id=work_id,
                         expires_at=contract_expiry,
-                    )
-                if dict(provider_receipts) != expected_receipts:
-                    raise R4Error("production OX failure provider receipt is unbound")
-            identity = {
-                key: payload.get(key)
-                for key in (
-                    "profile_contract_id",
-                    "source_commit",
-                    "source_tree_sha256",
-                    "source_ox_identity_sha256",
-                    "request_revision",
+                    ):
+                        raise R4Error("production OX legacy provider receipt is unbound")
+                    if (
+                        not legacy
+                        and provider_receipts.get(work_id)
+                        == _expected_ox_provider_request_sha256(
+                            profile_contract_id=contract_id,
+                            payload_digest=payload_digest,
+                            work_id=work_id,
+                            expires_at=contract_expiry,
+                        )
+                    ):
+                        raise R4Error("production OX actual provider receipt is synthetic")
+            elif kind == "ox-ramp-stage":
+                ramp_cap = payload.get("cap")
+                expected_next_cap = (
+                    {1: 2, 2: 5, 5: 10, 10: 10}.get(ramp_cap)
+                    if isinstance(ramp_cap, int)
+                    else None
                 )
-            }
-            if kind == "ox-ramp-stage":
-                identity = {"kind": kind, **identity, "cap": payload.get("cap")}
-            elif kind == "ox-provider-failure":
+                if (
+                        isinstance(ramp_cap, bool)
+                        or ramp_cap not in PRODUCTION_RAMP_CAPS
+                        or (
+                            not legacy
+                            and (
+                                isinstance(payload.get("next_cap"), bool)
+                                or payload.get("next_cap") not in PRODUCTION_RAMP_CAPS
+                                or payload.get("next_cap")
+                                != expected_next_cap
+                            )
+                        )
+                    or isinstance(payload.get("valid_receipts"), bool)
+                    or not isinstance(payload.get("valid_receipts"), int)
+                    or payload.get("valid_receipts", -1) < 0
+                    or isinstance(payload.get("attempts"), bool)
+                    or not isinstance(payload.get("attempts"), int)
+                    or payload.get("attempts", -1) < 0
+                    or not isinstance(payload.get("work_ids"), list)
+                    or not all(
+                        isinstance(work_id, str) and _SHA.fullmatch(work_id)
+                        for work_id in payload["work_ids"]
+                    )
+                    or len(set(payload["work_ids"])) != len(payload["work_ids"])
+                    or isinstance(payload.get("label_count"), bool)
+                    or not isinstance(payload.get("label_count"), int)
+                    or payload.get("label_count", 0) < 1
+                    or _SHA.fullmatch(str(payload.get("label_head_sha256"))) is None
+                        or (
+                            not legacy
+                            and (
+                                isinstance(payload.get("failure_record_count"), bool)
+                                or not isinstance(payload.get("failure_record_count"), int)
+                                or payload.get("failure_record_count", -1) < 0
+                                or (
+                                    payload.get("failure_record_count") == 0
+                                    and payload.get("failure_head_sha256") != ""
+                                )
+                                or (
+                                    payload.get("failure_record_count", 0) > 0
+                                    and _SHA.fullmatch(str(payload.get("failure_head_sha256")))
+                                    is None
+                                )
+                            )
+                        )
+                ):
+                    raise R4Error("production OX ramp event is incomplete")
+            else:
+                if (
+                    isinstance(payload.get("workset_receipt_generation"), bool)
+                    or not isinstance(payload.get("workset_receipt_generation"), int)
+                    or payload.get("workset_receipt_generation", 0) < 1
+                    or _SHA.fullmatch(str(payload.get("workset_receipt_sha256")))
+                    is None
+                    or _SHA.fullmatch(str(payload.get("work_ids_sha256"))) is None
+                    or isinstance(payload.get("reclaimed"), bool)
+                    or not isinstance(payload.get("reclaimed"), int)
+                    or payload.get("reclaimed", -1) < 0
+                    or isinstance(payload.get("leased_after"), bool)
+                    or not isinstance(payload.get("leased_after"), int)
+                    or payload.get("leased_after", -1) < 0
+                ):
+                    raise R4Error("production OX lease event is incomplete")
+            if legacy:
                 identity = {
-                    "kind": kind,
-                    **identity,
-                    "category": payload.get("category"),
-                    "work_ids": payload.get("work_ids"),
-                    "attempts_by_work": payload.get("attempts_by_work"),
-                    "provider_receipts": payload.get("provider_receipts"),
+                    key: payload.get(key)
+                    for key in (
+                        "profile_contract_id",
+                        "source_commit",
+                        "source_tree_sha256",
+                        "source_ox_identity_sha256",
+                        "request_revision",
+                    )
                 }
+                if kind == "ox-ramp-stage":
+                    identity = {"kind": kind, **identity, "cap": payload.get("cap")}
+                elif kind == "ox-provider-failure":
+                    identity = {
+                        "kind": kind,
+                        **identity,
+                        "category": payload.get("category"),
+                        "work_ids": payload.get("work_ids"),
+                        "attempts_by_work": payload.get("attempts_by_work"),
+                        "provider_receipts": payload.get("provider_receipts"),
+                    }
+                else:
+                    identity = {
+                        "kind": kind,
+                        **identity,
+                        "receipt": payload.get("workset_receipt_sha256"),
+                    }
             else:
                 identity = {
-                    "kind": kind,
-                    **identity,
-                    "receipt": payload.get("workset_receipt_sha256"),
+                    key: value for key, value in payload.items() if key != "captured_at"
                 }
             if record["event_key"] != _sha256(identity):
                 raise R4Error("production OX event identity is invalid")
+            if record["event_key"] in seen_event_keys:
+                raise R4Error("production OX event identity is duplicated")
+            seen_event_keys.add(str(record["event_key"]))
             anchor_id = _sha256(
                 {
                     "schema": "chronovisor.recall-distill-ox-event-anchor.v1",
@@ -2749,7 +2961,15 @@ def _production_ox_events(
                 != _sha256(expected_anchor)
             ):
                 raise R4Error("production OX event anchor is invalid")
-            result[group].append({**payload, "record_sha256": record["record_sha256"]})
+            event = {
+                **payload,
+                "record_sha256": record["record_sha256"],
+                "record_index": record_index,
+            }
+            if legacy:
+                result["legacy"].append({"group": group, **event})
+            else:
+                result[group].append(event)
     return result
 
 
@@ -3019,7 +3239,7 @@ def run_owned_fault_scenarios(
         "http_402_paid": ProviderFailureCategory.PAYMENT_REQUIRED,
         "model_drift": None,
         "invalid_output_quarantine": None,
-        "lease_expiry_reclaim": ProviderFailureCategory.SERVER_ERROR,
+            "lease_expiry_reclaim": ProviderFailureCategory.SERVER_ERROR,
         "resource_pressure_preemption": ProviderFailureCategory.RATE_LIMITED,
         "disable_rollback": None,
     }
@@ -3041,15 +3261,21 @@ def run_owned_fault_scenarios(
             self.adapter_calls += 1
             category = categories[self.scenario]
             if category is not None:
-                raise ProviderAdapterError(category)
-            if self.scenario == "model_drift":
-                return GenerationResult(
-                    content='{"labels":[]}',
-                    provider="opencode-go",
-                    model=model,
-                    finish_reason="stop",
-                    metadata={"returned_model": "unexpected-model"},
+                raise ProviderAdapterError(
+                    category,
+                    request_id=f"owned-{self.scenario}-{self.adapter_calls}",
                 )
+            if self.scenario == "model_drift":
+                    return GenerationResult(
+                        content='{"labels":[]}',
+                        provider="opencode-go",
+                        model=model,
+                        finish_reason="stop",
+                        metadata={
+                            "returned_model": "unexpected-model",
+                            "request_id": f"owned-{self.scenario}-{self.adapter_calls}",
+                        },
+                    )
             return GenerationResult(
                 content="not-json",
                 provider="opencode-go",
@@ -3172,7 +3398,10 @@ def run_owned_fault_scenarios(
                 # Exercise the durable ownership boundary independently of the
                 # provider fault: a reclaimed old lease must reject its former
                 # owner before the new owner is released.
-                fault_clock = [time.time()]
+                # The preceding provider fault leaves the one-item fixture on
+                # its bounded 60s retry schedule.  Advance only this owned
+                # Workset clock before exercising lease expiry itself.
+                fault_clock = [time.time() + 61]
                 fault_workset = DistillationWorkset(
                     workset_path, clock=lambda clock=fault_clock: clock[0], migrate=False
                 )
@@ -3387,6 +3616,7 @@ def _production_identity(
         for key in (
             "teacher_profile",
             "teacher_max_inflight",
+            "teacher_claim_limit",
             "ox_enabled",
             "ox_free_only",
             "ox_expires_at",
@@ -3525,6 +3755,7 @@ def _production_identity(
         "docs_url",
         "kill_categories",
         "max_inflight",
+        "teacher_claim_limit",
         "live_recall_model_calls",
         "source_commit",
         "source_tree_sha256",
@@ -3689,8 +3920,11 @@ def _production_quality(
     label_by_work: dict[str, Mapping[str, Any]] = {}
     label_ids: set[str] = set()
     commit_ids: set[str] = set()
-    stage_work_ids: dict[int, list[str]] = {cap: [] for cap in PRODUCTION_RAMP_CAPS}
-    for row in label_rows:
+    label_index_by_digest: dict[str, int] = {}
+    stage_work_units: dict[int, list[dict[str, Any]]] = {
+        cap: [] for cap in PRODUCTION_RAMP_CAPS
+    }
+    for label_index, row in enumerate(label_rows):
         if not isinstance(row, Mapping):
             reasons.add("production_label_invalid")
             continue
@@ -3771,8 +4005,15 @@ def _production_quality(
                 work_id=work_id,
                 expires_at=_text(contract.get("expires_at")),
             )
-            or row.get("provider_response_request_sha256")
-            != row.get("provider_request_sha256")
+            or _SHA.fullmatch(_text(row.get("provider_receipt_sha256"))) is None
+            or row.get("provider_receipt_sha256")
+            == _expected_ox_provider_request_sha256(
+                profile_contract_id=contract_id,
+                payload_digest=_text(row.get("payload_digest")),
+                work_id=work_id,
+                expires_at=_text(contract.get("expires_at")),
+            )
+            or "provider_response_request_sha256" in row
             or digest in label_by_digest
             or work_id in label_by_work
             or label_id in label_ids
@@ -3790,10 +4031,12 @@ def _production_quality(
         label_by_work[work_id] = row
         label_ids.add(label_id)
         commit_ids.add(commit_id)
+        label_index_by_digest[digest] = label_index
         work = completed.get(work_id)
         work_item = work_items.get(work_id)
         if (
             not isinstance(work, Mapping)
+            or work.get("completion_ref") != f"label-ledger:{digest}"
             or work.get("completion_digest") != digest
             or isinstance(work.get("attempt_count"), bool)
             or not isinstance(work.get("attempt_count"), int)
@@ -3818,49 +4061,287 @@ def _production_quality(
         ):
             reasons.add("production_label_ramp_cap_missing")
         else:
-            stage_work_ids[cap].append(work_id)
+            if (
+                isinstance(work, Mapping)
+                and work.get("completion_ref") == f"label-ledger:{digest}"
+                and work.get("completion_digest") == digest
+                and isinstance(work.get("attempt_count"), int)
+                and not isinstance(work.get("attempt_count"), bool)
+                and work["attempt_count"] >= 1
+            ):
+                stage_work_units[cap].append(
+                    {
+                        "work_id": work_id,
+                        "attempt_count": work["attempt_count"],
+                        "label_record_sha256": digest,
+                        "label_index": label_index,
+                        "provider_receipt_sha256": _text(
+                            row.get("provider_receipt_sha256")
+                        ),
+                    }
+                )
     if set(label_by_work) != set(completed):
         reasons.add("production_completed_label_set_mismatch")
+    success_attempts: dict[tuple[str, int], str] = {}
+    provider_receipts_by_work: set[tuple[str, str]] = set()
+    for units in stage_work_units.values():
+        for unit in units:
+            attempt_key = (str(unit["work_id"]), int(unit["attempt_count"]))
+            receipt = str(unit["provider_receipt_sha256"])
+            if (
+                attempt_key in success_attempts
+                or (attempt_key[0], receipt) in provider_receipts_by_work
+            ):
+                reasons.add("production_provider_attempt_duplicate")
+                continue
+            success_attempts[attempt_key] = receipt
+            provider_receipts_by_work.add((attempt_key[0], receipt))
+    failure_units_by_cap: dict[int, list[dict[str, Any]]] = {
+        cap: [] for cap in PRODUCTION_RAMP_CAPS
+    }
+    transitions = events.get("failure")
+    if not isinstance(transitions, Sequence):
+        reasons.add("production_failure_receipts_missing")
+        transitions = []
+    for transition in transitions:
+        if not isinstance(transition, Mapping):
+            reasons.add("production_failure_receipt_invalid")
+            continue
+        cap = transition.get("cap")
+        work_ids = transition.get("work_ids")
+        attempts_by_work = transition.get("attempts_by_work")
+        provider_receipts = transition.get("provider_receipts")
+        transition_attempts = transition.get("attempts")
+        if (
+            isinstance(cap, bool)
+            or cap not in PRODUCTION_RAMP_CAPS
+            or not isinstance(work_ids, list)
+            or isinstance(transition.get("record_index"), bool)
+            or not isinstance(transition.get("record_index"), int)
+            or transition.get("record_index", 0) < 1
+            or _SHA.fullmatch(_text(transition.get("record_sha256"))) is None
+            or not isinstance(provider_receipts, Mapping)
+            or isinstance(transition_attempts, bool)
+            or not isinstance(transition_attempts, int)
+            or not isinstance(attempts_by_work, Mapping)
+            or set(attempts_by_work) != set(work_ids)
+            or set(provider_receipts) != set(work_ids)
+            or not all(
+                isinstance(value, int) and not isinstance(value, bool) and value > 0
+                for value in attempts_by_work.values()
+            )
+            or not all(
+                isinstance(value, str) and _SHA.fullmatch(value)
+                for value in provider_receipts.values()
+            )
+            or len(set(provider_receipts.values())) != 1
+            or transition_attempts != len(set(provider_receipts.values()))
+        ):
+            reasons.add("production_failure_receipt_invalid")
+            continue
+        for work_id in work_ids:
+            attempt = attempts_by_work.get(work_id)
+            failure_receipt = provider_receipts.get(work_id)
+            if (
+                not isinstance(work_id, str)
+                or _SHA.fullmatch(work_id) is None
+                or isinstance(attempt, bool)
+                or not isinstance(attempt, int)
+                or attempt < 1
+                or not isinstance(failure_receipt, str)
+                or _SHA.fullmatch(failure_receipt) is None
+            ):
+                reasons.add("production_failure_receipt_invalid")
+                continue
+            attempt_key = (work_id, attempt)
+            if (
+                attempt_key in success_attempts
+                or (work_id, failure_receipt) in provider_receipts_by_work
+            ):
+                reasons.add("production_provider_attempt_duplicate")
+                continue
+            completed_label = label_by_work.get(work_id)
+            if (
+                completed_label is not None
+                and completed_label.get("attempt_count") == attempt
+                and completed_label.get("provider_receipt_sha256") != failure_receipt
+            ):
+                reasons.add("production_provider_receipt_binding_invalid")
+                continue
+            success_attempts[attempt_key] = failure_receipt
+            provider_receipts_by_work.add((work_id, failure_receipt))
+            failure_units_by_cap[int(cap)].append(
+                {
+                    "work_id": work_id,
+                    "attempt_count": attempt,
+                    "provider_receipt_sha256": failure_receipt,
+                    "record_index": transition.get("record_index"),
+                }
+            )
+    legacy_events = events.get("legacy")
+    if isinstance(legacy_events, Sequence) and legacy_events:
+        reasons.add("production_legacy_ox_events_noncertifying")
     ramp = events.get("ramp")
-    if not isinstance(ramp, Sequence) or len(ramp) != len(PRODUCTION_RAMP_CAPS):
+    if not isinstance(ramp, Sequence) or len(ramp) < len(PRODUCTION_RAMP_CAPS):
         reasons.add("production_ramp_receipts_missing")
         ramp = []
+    accepted_ramp: list[tuple[int, Mapping[str, Any]]] = []
+    if ramp:
+        expected_path = ((1, 2), (2, 5), (5, 10), (10, 10))
+        cursor = len(ramp)
+        selected_reverse: list[tuple[int, Mapping[str, Any]]] = []
+        for expected_cap, expected_next in reversed(expected_path):
+            found: tuple[int, Mapping[str, Any]] | None = None
+            for index in range(cursor - 1, -1, -1):
+                candidate = ramp[index]
+                if (
+                    isinstance(candidate, Mapping)
+                    and candidate.get("cap") == expected_cap
+                    and candidate.get("next_cap") == expected_next
+                ):
+                    found = (index, candidate)
+                    break
+            if found is None:
+                break
+            selected_reverse.append(found)
+            cursor = found[0]
+        if len(selected_reverse) != len(expected_path):
+            reasons.add("production_ramp_requalification_path_invalid")
+        else:
+            accepted_ramp = list(reversed(selected_reverse))
     stages: dict[str, Any] = {}
     seen_caps: set[int] = set()
     ramp_caps: list[int] = []
-    for row in ramp:
+    response_cap_by_receipt: dict[str, int] = {}
+    assigned_failure_record_indices: set[int] = set()
+    accepted_failure_record_indices: set[int] = set()
+    for ramp_index, row in accepted_ramp:
+        previous_label_count = 0
+        previous_failure_count = 0
+        if ramp_index:
+            prior = ramp[ramp_index - 1]
+            if not isinstance(prior, Mapping):
+                reasons.add("production_ramp_requalification_path_invalid")
+                continue
+            prior_label_count = prior.get("label_count")
+            prior_failure_count = prior.get("failure_record_count")
+            if (
+                isinstance(prior_label_count, bool)
+                or not isinstance(prior_label_count, int)
+                or prior_label_count < 1
+                or isinstance(prior_failure_count, bool)
+                or not isinstance(prior_failure_count, int)
+                or prior_failure_count < 0
+            ):
+                reasons.add("production_ramp_requalification_path_invalid")
+                continue
+            previous_label_count = prior_label_count
+            previous_failure_count = prior_failure_count
         if not isinstance(row, Mapping):
             reasons.add("production_ramp_receipt_invalid")
             continue
         cap = row.get("cap")
         if isinstance(cap, int) and not isinstance(cap, bool):
             ramp_caps.append(cap)
-        valid = row.get("valid_receipts")
-        attempts = row.get("attempts")
-        work_ids = row.get("work_ids")
         if (
             isinstance(cap, bool)
             or not isinstance(cap, int)
             or cap not in PRODUCTION_RAMP_CAPS
             or cap in seen_caps
-            or isinstance(valid, bool)
-            or not isinstance(valid, int)
-            or isinstance(attempts, bool)
-            or not isinstance(attempts, int)
-            or valid < 20
-            or attempts < valid
-            or valid / attempts < 0.95
-            or not isinstance(work_ids, list)
-            or len(work_ids) != valid
-            or len(set(work_ids)) != len(work_ids)
-            # Terminal cap-10 receipt seals the first qualifying cohort.  Later
-            # valid cap-10 backfill labels must not retroactively invalidate it.
-            or not set(work_ids).issubset(set(stage_work_ids.get(cap, [])))
             or row.get("source_commit") != source.get("commit")
             or row.get("profile_contract_id") != contract_id
         ):
             reasons.add("production_ramp_quality_invalid")
             continue
+        label_head = _text(row.get("label_head_sha256"))
+        head_index = label_index_by_digest.get(label_head)
+        label_count = row.get("label_count")
+        if (
+            head_index is None
+            or isinstance(label_count, bool)
+            or not isinstance(label_count, int)
+            or label_count != head_index + 1
+            or label_count <= previous_label_count
+        ):
+            reasons.add("production_ramp_label_checkpoint_invalid")
+            continue
+        head_row = label_by_digest[label_head]
+        if head_row.get("profile_contract_id") != contract_id or head_row.get("ramp_cap") != cap:
+            reasons.add("production_ramp_quality_invalid")
+            continue
+        failure_count = row.get("failure_record_count")
+        failure_head = row.get("failure_head_sha256")
+        if (
+            isinstance(failure_count, bool)
+            or not isinstance(failure_count, int)
+            or failure_count < 0
+            or failure_count < previous_failure_count
+            or (failure_count == 0 and failure_head != "")
+            or (failure_count > 0 and (
+                not isinstance(failure_head, str)
+                or _SHA.fullmatch(failure_head) is None
+                or failure_count > len(transitions)
+                or not isinstance(transitions[failure_count - 1], Mapping)
+                or transitions[failure_count - 1].get("record_sha256") != failure_head
+                or transitions[failure_count - 1].get("record_index") != failure_count
+            ))
+        ):
+            reasons.add("production_ramp_failure_checkpoint_invalid")
+            continue
+        if cap == 10 and (
+            label_count != len(label_rows) or failure_count != len(transitions)
+        ):
+            reasons.add("production_ramp_terminal_checkpoint_incomplete")
+            continue
+        units = [
+            unit
+            for unit in stage_work_units[cap]
+            if previous_label_count <= unit["label_index"] <= head_index
+        ]
+        success_by_receipt: dict[str, dict[str, Any]] = {}
+        for unit in units:
+            receipt = str(unit["provider_receipt_sha256"])
+            prior_cap = response_cap_by_receipt.get(receipt)
+            if prior_cap is not None and prior_cap != cap:
+                reasons.add("production_provider_receipt_cross_cap")
+                continue
+            response_cap_by_receipt[receipt] = cap
+            success_by_receipt.setdefault(receipt, unit)
+        failure_by_receipt: dict[str, dict[str, Any]] = {}
+        for unit in failure_units_by_cap[cap]:
+            if not previous_failure_count < unit["record_index"] <= failure_count:
+                continue
+            accepted_failure_record_indices.add(int(unit["record_index"]))
+            assigned_failure_record_indices.add(int(unit["record_index"]))
+            receipt = str(unit["provider_receipt_sha256"])
+            prior_cap = response_cap_by_receipt.get(receipt)
+            if prior_cap is not None and prior_cap != cap:
+                reasons.add("production_provider_receipt_cross_cap")
+                continue
+            response_cap_by_receipt[receipt] = cap
+            if receipt in success_by_receipt:
+                reasons.add("production_provider_receipt_binding_invalid")
+                continue
+            failure_by_receipt.setdefault(receipt, unit)
+        valid = len(success_by_receipt)
+        attempts = valid + len(failure_by_receipt)
+        work_ids = [str(unit["work_id"]) for unit in success_by_receipt.values()]
+        if (
+            valid < 20
+            or attempts < valid
+            or valid / attempts < 0.95
+            or len(set(work_ids)) != len(work_ids)
+        ):
+            reasons.add("production_ramp_quality_invalid")
+            continue
+        # Event counters are attested audit values only.  Certification is
+        # derived from sealed labels and their completed Workset units above.
+        if (
+            row.get("valid_receipts") != valid
+            or row.get("attempts") != attempts
+            or row.get("work_ids") != work_ids
+        ):
+            reasons.add("production_ramp_event_audit_mismatch")
         seen_caps.add(cap)
         stages[str(cap)] = {
             "valid_receipts": valid,
@@ -3872,8 +4353,16 @@ def _production_quality(
         reasons.add("production_ramp_stages_incomplete")
     if ramp_caps != list(PRODUCTION_RAMP_CAPS):
         reasons.add("production_ramp_order_invalid")
+    if assigned_failure_record_indices != accepted_failure_record_indices:
+        reasons.add("production_failure_stage_assignment_invalid")
     if workset.get("counts", {}).get("leased") != 0:
         reasons.add("production_leased_work_present")
+    receipt_state = workset.get("receipts")
+    if isinstance(receipt_state, Mapping) and (
+        receipt_state.get("status") != "verified"
+        or receipt_state.get("legacy_unverified_excluded") is True
+    ):
+        reasons.add("production_workset_receipts_noncertifying")
     for key in (
         "sensitive",
         "raw",
@@ -3892,15 +4381,46 @@ def _production_quality(
         if isinstance(value, bool) or not isinstance(value, int) or value != 0:
             reasons.add(f"production_{key}_veto_invalid")
     lease_events = events.get("lease")
-    if not isinstance(lease_events, Sequence) or not lease_events or any(
-        not isinstance(row, Mapping)
-        or isinstance(row.get("reclaimed"), bool)
-        or not isinstance(row.get("reclaimed"), int)
-        or row.get("reclaimed", -1) < 0
-        or row.get("leased_after") != 0
-        or _SHA.fullmatch(str(row.get("workset_receipt_sha256"))) is None
-        for row in lease_events
-    ):
+    receipt_index = workset.get("receipts", {}).get("by_generation")
+    seen_lease_receipts: set[str] = set()
+    lease_invalid = (
+        not isinstance(lease_events, Sequence)
+        or not lease_events
+        or not isinstance(receipt_index, Mapping)
+    )
+    if not lease_invalid and isinstance(lease_events, Sequence):
+        for row in lease_events:
+            if not isinstance(row, Mapping):
+                lease_invalid = True
+                break
+            generation = row.get("workset_receipt_generation")
+            receipt_sha = row.get("workset_receipt_sha256")
+            work_ids_sha = row.get("work_ids_sha256")
+            receipt = receipt_index.get(str(generation))
+            details = receipt.get("details") if isinstance(receipt, Mapping) else None
+            if (
+                isinstance(row.get("reclaimed"), bool)
+                or not isinstance(row.get("reclaimed"), int)
+                or row.get("reclaimed", -1) < 1
+                or row.get("leased_after") != 0
+                or isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or not isinstance(receipt_sha, str)
+                or _SHA.fullmatch(receipt_sha) is None
+                or receipt_sha in seen_lease_receipts
+                or not isinstance(receipt, Mapping)
+                or receipt.get("receipt_sha256") != receipt_sha
+                or receipt.get("operation") != "claim_reclaim"
+                or not isinstance(details, Mapping)
+                or details.get("count") != row.get("reclaimed")
+                or not isinstance(work_ids_sha, str)
+                or _SHA.fullmatch(work_ids_sha) is None
+                or details.get("work_ids_sha256") != work_ids_sha
+            ):
+                lease_invalid = True
+                break
+            seen_lease_receipts.add(receipt_sha)
+    if lease_invalid:
         reasons.add("production_lease_recovery_invalid")
     quality_gates = state.get("quality_gates")
     if not isinstance(quality_gates, Mapping):
@@ -3992,7 +4512,14 @@ def _production_quality(
             expected_failures[category] = True
     if not all(expected_failures.values()):
         reasons.add("production_failure_coverage_incomplete")
-    return reasons, {"stages": stages, "labels": len(label_rows)}
+    return reasons, {
+        "stages": stages,
+        "labels": len(label_rows),
+        # OX exposes no provider-signed receipt.  These hashes are durable
+        # adapter observations, bound by the event chain, immutable anchor,
+        # exact runtime source, and single-writer Workset/label evidence.
+        "receipt_authority": "adapter_observed_not_provider_signed",
+    }
 
 
 def _source_ox_identity(source_root: Path) -> dict[str, str]:

@@ -47,6 +47,7 @@ from chronovisor.recall.recall_distillation_remote_teacher import (
     OpenCodeOxAlphaTeacher,
     ox_alpha_response_metadata,
     ox_alpha_source_binding,
+    ox_provider_receipt_sha256,
     validate_ox_alpha_labels,
 )
 from chronovisor.recall.recall_distillation_single_teacher_gate import (
@@ -799,12 +800,14 @@ def _ensure_ox_profile_contract(
         or config.ox_enabled is not True
         or config.ox_free_only is not True
         or not 1 <= config.teacher_max_inflight <= 10
+        or not 1 <= config.teacher_claim_limit <= 500
     ):
         raise DistillationError("OX profile contract is unsafe")
     expires_at = _ox_expiry(config.ox_expires_at)
     relevant_config = {
         "teacher_profile": config.teacher_profile,
         "teacher_max_inflight": config.teacher_max_inflight,
+        "teacher_claim_limit": config.teacher_claim_limit,
         "ox_enabled": config.ox_enabled,
         "ox_free_only": config.ox_free_only,
         "ox_expires_at": expires_at,
@@ -844,6 +847,7 @@ def _ensure_ox_profile_contract(
                 "privacy_gate",
             ],
             "max_inflight": config.teacher_max_inflight,
+            "teacher_claim_limit": config.teacher_claim_limit,
             "live_recall_model_calls": 0,
             **source,
             "relevant_config_sha256": canonical_json.canonical_json_sha256_strict(
@@ -899,6 +903,7 @@ def _validate_ox_profile_contract(
         "docs_url",
         "kill_categories",
         "max_inflight",
+        "teacher_claim_limit",
         "live_recall_model_calls",
         "source_commit",
         "source_tree_sha256",
@@ -949,6 +954,13 @@ def _validate_ox_profile_contract(
         isinstance(max_inflight, bool)
         or not isinstance(max_inflight, int)
         or not 1 <= max_inflight <= 10
+    ):
+        return {}
+    teacher_claim_limit = contract.get("teacher_claim_limit")
+    if (
+        isinstance(teacher_claim_limit, bool)
+        or not isinstance(teacher_claim_limit, int)
+        or not 1 <= teacher_claim_limit <= 500
     ):
         return {}
     live_recall_model_calls = contract.get("live_recall_model_calls")
@@ -1056,6 +1068,78 @@ def _ox_source_binding_matches(teacher: Teacher, expected: Mapping[str, str]) ->
     )
 
 
+def _ox_eligibility_guard(
+    *,
+    root: Path,
+    config: DistillationConfig,
+    teacher: Teacher,
+    profile_contract_id: str,
+    source_binding: Mapping[str, str],
+) -> None:
+    """Read-only egress eligibility check for one already-claimed OX attempt."""
+
+    from chronovisor.recall.recall_distillation_dispatcher import DispatchGuardDenied
+
+    try:
+        source = _validate_ox_source_binding(source_binding)
+        expiry = _ox_expiry(config.ox_expires_at)
+        relevant_config = {
+            "teacher_profile": config.teacher_profile,
+            "teacher_max_inflight": config.teacher_max_inflight,
+            "teacher_claim_limit": config.teacher_claim_limit,
+            "ox_enabled": config.ox_enabled,
+            "ox_free_only": config.ox_free_only,
+            "ox_expires_at": expiry,
+            "max_input_bytes": config.max_input_bytes,
+            "max_candidates": config.max_candidates,
+        }
+        if (
+            config.teacher_profile != OX_SINGLE_PROFILE
+            or config.ox_enabled is not True
+            or config.ox_free_only is not True
+            or not 1 <= config.teacher_max_inflight <= 10
+            or not 1 <= config.teacher_claim_limit <= 500
+            or (
+                type(teacher) is OpenCodeOxAlphaTeacher
+                and teacher.enabled is not True
+            )
+            or _current_ox_profile_contract_id(root) != profile_contract_id
+        ):
+            raise DistillationError("OX egress eligibility changed")
+        contract = _read_ox_profile_contract(root, profile_contract_id)
+        if (
+            not contract
+            or contract.get("artifact_id") != profile_contract_id
+            or contract.get("request_revision") != OX_RAMP_REQUEST_REVISION
+            or contract.get("expires_at") != expiry
+            or contract.get("relevant_config_sha256")
+            != canonical_json.canonical_json_sha256_strict(relevant_config)
+            or contract.get("kill_categories")
+            != [
+                "402",
+                "payment_required",
+                "model_unavailable",
+                "route_model_drift",
+                "privacy_gate",
+            ]
+            or any(contract.get(key) != value for key, value in source.items())
+        ):
+            raise DistillationError("OX egress eligibility changed")
+    except (DistillationError, ValueError, TypeError):
+        raise DispatchGuardDenied("OX egress eligibility changed") from None
+
+
+def _ox_provider_receipt_from_result(result: Any) -> str:
+    """Extract only adapter-observed, non-reversible provider evidence."""
+
+    value = getattr(result, "value", None)
+    if isinstance(value, Mapping):
+        receipt = value.get("_provider_receipt_sha256")
+        if isinstance(receipt, str) and re.fullmatch(r"[0-9a-f]{64}", receipt):
+            return receipt
+    return ox_provider_receipt_sha256(getattr(getattr(result, "error", None), "request_id", None))
+
+
 def _ox_event_head(root: Path, name: str) -> dict[str, Any]:
     path = store.distillation_dir(root) / name
     if not path.exists():
@@ -1065,6 +1149,18 @@ def _ox_event_head(root: Path, name: str) -> dict[str, Any]:
 
 def _ox_event_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
     """The closed, stable deduplication identity for one OX event."""
+
+    if payload.get("kind") not in {
+        "ox-ramp-stage",
+        "ox-provider-failure",
+        "ox-lease-reclaim",
+    }:
+        raise DistillationError("OX event kind is invalid")
+    return {key: value for key, value in payload.items() if key != "captured_at"}
+
+
+def _legacy_ox_event_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the former event identity without certifying its evidence."""
 
     kind = str(payload.get("kind") or "")
     common = {
@@ -1105,7 +1201,14 @@ def _append_ox_event(
     unique_key: str = "",
 ) -> dict[str, Any]:
     path = store.distillation_dir(root) / name
-    event_key = canonical_json.canonical_json_sha256_strict(_ox_event_identity(payload))
+    event_version = payload.get("event_version")
+    if type(event_version) is int and event_version == 2:
+        identity = _ox_event_identity(payload)
+    elif event_version is None or (type(event_version) is int and event_version == 1):
+        identity = _legacy_ox_event_identity(payload)
+    else:
+        raise DistillationError("OX event version is invalid")
+    event_key = canonical_json.canonical_json_sha256_strict(identity)
     binding = canonical_json.canonical_json_sha256_strict(payload)
     # Store's unique index makes the check+append one critical section.  The
     # content digest turns a same identity / different payload into a hard stop.
@@ -1407,6 +1510,16 @@ def _ox_event_projection(
 
     contract = _read_ox_profile_contract(root, profile_contract_id)
     contract_revision = contract.get("request_revision")
+    contract_max_inflight = contract.get("max_inflight", 1)
+    if (
+        isinstance(contract_max_inflight, bool)
+        or not isinstance(contract_max_inflight, int)
+        or not 1 <= contract_max_inflight <= 10
+    ):
+        raise DistillationError("OX profile contract max inflight is invalid")
+    allowed_caps = {
+        min(cap, contract_max_inflight) for cap in (1, 2, 5, 10)
+    }
     contract_expiry: str | None = None
     if profile_contract_id:
         try:
@@ -1550,8 +1663,27 @@ def _ox_event_projection(
             payload = {
                 key: value for key, value in record.items() if key not in chain_fields
             }
+            event_version = payload.get("event_version")
+            # v1 records remain readable as historical, non-certifying data.
+            # Only the closed v2 union may satisfy the current OX projection.
+            if event_version is None or (
+                type(event_version) is int and event_version == 1
+            ):
+                if (
+                    record.get("event_key")
+                    != canonical_json.canonical_json_sha256_strict(
+                        _legacy_ox_event_identity(payload)
+                    )
+                    or record.get("event_binding_sha256")
+                    != canonical_json.canonical_json_sha256_strict(payload)
+                ):
+                    raise DistillationError("OX legacy event identity is invalid")
+                continue
+            if type(event_version) is not int or event_version != 2:
+                raise DistillationError("OX event version is invalid")
             allowed = {
                 "ox-ramp-stage": {
+                    "event_version",
                     "kind",
                     "profile_contract_id",
                     "source_commit",
@@ -1560,14 +1692,18 @@ def _ox_event_projection(
                     "request_revision",
                     "expires_at",
                     "cap",
+                    "next_cap",
                     "valid_receipts",
                     "attempts",
                     "work_ids",
                     "label_count",
                     "label_head_sha256",
+                    "failure_record_count",
+                    "failure_head_sha256",
                     "captured_at",
                 },
                 "ox-provider-failure": {
+                    "event_version",
                     "kind",
                     "profile_contract_id",
                     "source_commit",
@@ -1575,6 +1711,7 @@ def _ox_event_projection(
                     "source_ox_identity_sha256",
                     "request_revision",
                     "expires_at",
+                    "cap",
                     "category",
                     "status",
                     "attempts",
@@ -1584,9 +1721,11 @@ def _ox_event_projection(
                     "work_ids",
                     "attempts_by_work",
                     "provider_receipts",
+                    "provider_requests",
                     "captured_at",
                 },
                 "ox-lease-reclaim": {
+                    "event_version",
                     "kind",
                     "profile_contract_id",
                     "source_commit",
@@ -1596,6 +1735,7 @@ def _ox_event_projection(
                     "expires_at",
                     "workset_receipt_generation",
                     "workset_receipt_sha256",
+                    "work_ids_sha256",
                     "reclaimed",
                     "leased_after",
                     "captured_at",
@@ -1605,6 +1745,8 @@ def _ox_event_projection(
             if kind not in allowed or set(payload) - allowed[kind]:
                 raise DistillationError("OX event schema is invalid")
             common_required = {
+                "event_version",
+                "kind",
                 "profile_contract_id",
                 "source_commit",
                 "source_tree_sha256",
@@ -1617,23 +1759,31 @@ def _ox_event_projection(
                 "ox-ramp-stage": common_required
                 | {
                     "cap",
+                    "next_cap",
                     "valid_receipts",
                     "attempts",
                     "work_ids",
+                    "label_count",
                     "label_head_sha256",
+                    "failure_record_count",
+                    "failure_head_sha256",
                 },
                 "ox-provider-failure": common_required
                 | {
+                    "cap",
                     "category",
                     "status",
+                    "attempts",
                     "work_ids",
                     "attempts_by_work",
                     "provider_receipts",
+                    "provider_requests",
                 },
                 "ox-lease-reclaim": common_required
                 | {
                     "workset_receipt_generation",
                     "workset_receipt_sha256",
+                    "work_ids_sha256",
                     "reclaimed",
                     "leased_after",
                 },
@@ -1650,23 +1800,54 @@ def _ox_event_projection(
             except DistillationError as exc:
                 raise DistillationError("OX event expiry is invalid") from exc
             if kind == "ox-ramp-stage" and (
-                payload.get("cap") not in {1, 2, 5, 10}
-                or not isinstance(payload.get("valid_receipts"), int)
-                or not isinstance(payload.get("attempts"), int)
+                type(payload.get("cap")) is not int
+                or payload.get("cap") not in allowed_caps
+                or type(payload.get("next_cap")) is not int
+                or payload.get("next_cap") not in allowed_caps
+                or type(payload.get("valid_receipts")) is not int
+                or payload["valid_receipts"] < 0
+                or type(payload.get("attempts")) is not int
+                or payload["attempts"] < payload["valid_receipts"]
                 or not isinstance(payload.get("work_ids"), list)
+                or type(payload.get("label_count")) is not int
+                or payload["label_count"] < 1
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", str(payload.get("label_head_sha256") or "")
+                )
+                is None
+                or type(payload.get("failure_record_count")) is not int
+                or payload["failure_record_count"] < 0
+                or (
+                    payload["failure_record_count"] == 0
+                    and payload.get("failure_head_sha256") != ""
+                )
+                or (
+                    payload["failure_record_count"] > 0
+                    and re.fullmatch(
+                        r"[0-9a-f]{64}",
+                        str(payload.get("failure_head_sha256") or ""),
+                    )
+                    is None
+                )
             ):
                 raise DistillationError("OX ramp event fields are invalid")
+            if kind in {"ox-ramp-stage", "ox-lease-reclaim"} and set(payload) != required:
+                raise DistillationError("OX event schema is invalid")
             if kind == "ox-provider-failure" and (
-                payload.get("status") not in {"deferred", "hard_stop"}
+                type(payload.get("cap")) is not int
+                or payload.get("cap") not in allowed_caps
+                or payload.get("status") not in {"deferred", "hard_stop"}
                 or not isinstance(payload.get("work_ids"), list)
                 or not isinstance(payload.get("attempts_by_work"), Mapping)
                 or not isinstance(payload.get("provider_receipts"), Mapping)
+                or not isinstance(payload.get("provider_requests"), Mapping)
             ):
                 raise DistillationError("OX failure event fields are invalid")
             if kind == "ox-provider-failure":
                 work_ids = payload.get("work_ids")
                 attempts_by_work = payload.get("attempts_by_work")
                 provider_receipts = payload.get("provider_receipts")
+                provider_requests = payload.get("provider_requests")
                 if (
                     not isinstance(work_ids, list)
                     or not work_ids
@@ -1676,20 +1857,33 @@ def _ox_event_projection(
                         for work_id in work_ids
                     )
                     or len(set(work_ids)) != len(work_ids)
+                    or type(payload.get("attempts")) is not int
+                    or payload["attempts"] != 1
                     or not isinstance(attempts_by_work, Mapping)
                     or set(attempts_by_work) != set(work_ids)
                     or any(
-                        isinstance(value, bool)
-                        or not isinstance(value, int)
+                        type(value) is not int
                         or value < 1
                         for value in attempts_by_work.values()
                     )
                     or not isinstance(provider_receipts, Mapping)
                     or set(provider_receipts) != set(work_ids)
+                    or len(set(provider_receipts.values())) != 1
+                    or not isinstance(provider_requests, Mapping)
+                    or set(provider_requests) != set(work_ids)
                 ):
                     raise DistillationError("OX failure event fields are invalid")
                 payload_inventory = current_workset_payload_digests()
-                expected_receipts = {
+                if (
+                    any(work_id not in payload_inventory for work_id in work_ids)
+                    or any(
+                        not isinstance(receipt, str)
+                        or re.fullmatch(r"[0-9a-f]{64}", receipt) is None
+                        for receipt in provider_receipts.values()
+                    )
+                ):
+                    raise DistillationError("OX failure provider receipt is unbound")
+                if dict(provider_requests) != {
                     work_id: expected_ox_provider_request_sha256(
                         profile_contract_id=profile_contract_id,
                         payload_digest=payload_inventory[work_id],
@@ -1697,10 +1891,45 @@ def _ox_event_projection(
                         expires_at=str(referenced_expiry),
                     )
                     for work_id in work_ids
-                    if work_id in payload_inventory
-                }
-                if len(expected_receipts) != len(work_ids) or dict(provider_receipts) != expected_receipts:
-                    raise DistillationError("OX failure provider receipt is unbound")
+                }:
+                    raise DistillationError("OX failure provider request is unbound")
+                category = payload.get("category")
+                expected_fields = set(required)
+                if category == "429":
+                    if (
+                        payload.get("status") != "deferred"
+                        or type(payload.get("before_cap")) is not int
+                        or payload.get("before_cap") not in allowed_caps
+                        or type(payload.get("after_cap")) is not int
+                        or payload.get("after_cap") not in allowed_caps
+                    ):
+                        raise DistillationError("OX failure event fields are invalid")
+                    expected_fields.update({"before_cap", "after_cap"})
+                elif category in {"5xx", "timeout"}:
+                    if payload.get("bounded") is not True:
+                        raise DistillationError("OX failure event fields are invalid")
+                    expected_fields.add("bounded")
+                elif category not in {"402", "paid", "model_drift"}:
+                    raise DistillationError("OX failure event fields are invalid")
+                if set(payload) != expected_fields:
+                    raise DistillationError("OX event schema is invalid")
+            if kind == "ox-lease-reclaim" and (
+                type(payload.get("workset_receipt_generation")) is not int
+                or payload["workset_receipt_generation"] < 1
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", str(payload.get("workset_receipt_sha256") or "")
+                )
+                is None
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", str(payload.get("work_ids_sha256") or "")
+                )
+                is None
+                or type(payload.get("reclaimed")) is not int
+                or payload["reclaimed"] < 1
+                or type(payload.get("leased_after")) is not int
+                or payload["leased_after"] < 0
+            ):
+                raise DistillationError("OX lease reclaim fields are invalid")
             if record.get("event_key") != canonical_json.canonical_json_sha256_strict(
                 _ox_event_identity(payload)
             ) or record.get(
@@ -1742,6 +1971,8 @@ def _ox_event_projection(
         referenced = referenced_contract(row)
         if row.get("profile_contract_id") != profile_contract_id:
             continue
+        if "provider_response_request_sha256" in row:
+            raise DistillationError("OX label contains retired provider receipt key")
         if any(row.get(key) != value for key, value in source_binding.items()):
             raise DistillationError("OX label source binding conflicts")
         if row.get("request_revision") != referenced.get("request_revision"):
@@ -1753,7 +1984,62 @@ def _ox_event_projection(
                 raise DistillationError("OX label expiry is not canonical")
         except DistillationError as exc:
             raise DistillationError("OX label expiry is invalid") from exc
+        if (
+            re.fullmatch(
+                r"[0-9a-f]{64}", str(row.get("provider_receipt_sha256") or "")
+            )
+            is None
+        ):
+            continue
+        payload_digest = row.get("payload_digest")
+        work_id = row.get("work_id")
+        if (
+            not isinstance(payload_digest, str)
+            or not isinstance(work_id, str)
+            or current_workset_payload_digests().get(work_id) != payload_digest
+            or row.get("provider_request_sha256")
+            != expected_ox_provider_request_sha256(
+                profile_contract_id=profile_contract_id,
+                payload_digest=payload_digest,
+                work_id=work_id,
+                expires_at=str(referenced.get("expires_at") or ""),
+            )
+            or row.get("request_sha256")
+            != expected_ox_request_sha256(
+                profile_contract_id=profile_contract_id,
+                payload_digest=payload_digest,
+            )
+        ):
+            raise DistillationError("OX label provider request intent is unbound")
         labels.append(row)
+
+    workset_receipts_certifying = False
+    workset_path = store.distillation_dir(root) / "ox-workset.sqlite3"
+    if workset_path.exists():
+        from chronovisor.recall.recall_distillation_workset import DistillationWorkset
+
+        try:
+            queue = DistillationWorkset(workset_path, migrate=False)
+            workset_receipts_certifying = (
+                queue.audit_transition_receipts().get("status") == "verified"
+            )
+            if workset_receipts_certifying:
+                for recovery in recoveries:
+                    binding = queue.transition_receipt_binding(
+                        int(recovery["workset_receipt_generation"])
+                    )
+                    if (
+                        binding is None
+                        or binding.get("operation") != "claim_reclaim"
+                        or binding.get("receipt_sha256")
+                        != recovery.get("workset_receipt_sha256")
+                        or binding.get("count") != recovery.get("reclaimed")
+                        or binding.get("work_ids_sha256")
+                        != recovery.get("work_ids_sha256")
+                    ):
+                        raise DistillationError("OX lease reclaim receipt is unbound")
+        except (DistillationError, ValueError, TypeError, sqlite3.Error) as exc:
+            raise DistillationError("OX lease reclaim receipt is unbound") from exc
     pair_rows: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in labels:
         assignment = row.get("assignment")
@@ -1833,10 +2119,100 @@ def _ox_event_projection(
             "status": "not_rolled_back" if rollback_verified else "unverified",
         },
     }
-    required_caps = (1, 2, 5, 10)
-    ramp_complete = [row.get("cap") for row in ramp] == list(required_caps) and all(
-        isinstance(row.get("valid_receipts"), int)
-        and isinstance(row.get("attempts"), int)
+    label_chain = store.read_chain(label_path)
+    failure_chain = store.read_chain(
+        store.distillation_dir(root) / "ox-failure-receipts.jsonl"
+    )
+
+    def prefix_head(chain: Sequence[Mapping[str, Any]], count: object) -> str | None:
+        if type(count) is not int or count < 0 or count > len(chain):
+            return None
+        if count == 0:
+            return ""
+        head = chain[count - 1].get("record_sha256")
+        return head if isinstance(head, str) else None
+
+    certifying_labels = {
+        str(row.get("record_sha256") or "") for row in labels
+    }
+    prior_label_count = 0
+    prior_failure_count = 0
+    ramp_segments: list[bool] = []
+    for stage in ramp:
+        label_count = stage.get("label_count")
+        failure_count = stage.get("failure_record_count")
+        label_head = prefix_head(label_chain, label_count)
+        failure_head = prefix_head(failure_chain, failure_count)
+        segment: list[str] = []
+        seen_receipts: set[str] = set()
+        if (
+            label_head != stage.get("label_head_sha256")
+            or failure_head != stage.get("failure_head_sha256")
+            or type(label_count) is not int
+            or type(failure_count) is not int
+            or label_count < prior_label_count
+            or failure_count < prior_failure_count
+        ):
+            ramp_segments.append(False)
+        else:
+            for row in label_chain[prior_label_count:label_count]:
+                if (
+                    str(row.get("record_sha256") or "") not in certifying_labels
+                    or row.get("ramp_cap") != stage.get("cap")
+                    or row.get("status") != "completed"
+                ):
+                    continue
+                receipt = str(row.get("provider_receipt_sha256") or "")
+                work_id = str(row.get("work_id") or "")
+                if receipt not in seen_receipts:
+                    seen_receipts.add(receipt)
+                    segment.append(work_id)
+            ramp_segments.append(
+                stage.get("work_ids") == segment
+                and stage.get("valid_receipts") == len(segment)
+                and len(segment) == len(set(segment))
+            )
+        prior_label_count = label_count if type(label_count) is int else prior_label_count
+        prior_failure_count = (
+            failure_count if type(failure_count) is int else prior_failure_count
+        )
+
+    required_caps = tuple(
+        sorted(allowed_caps)
+    )
+    caps = [row.get("cap") for row in ramp]
+    terminal_requalification = any(
+        row.get("category") == "429"
+        and row.get("before_cap") == required_caps[-1]
+        and row.get("after_cap") == _previous_ox_ramp_cap(
+            required_caps[-1], int(contract.get("max_inflight") or 1)
+        )
+        for row in failures
+    )
+    latest_start = 0
+    for index in range(1, len(caps)):
+        if caps[index - 1] == required_caps[-1] and caps[index] != required_caps[-1]:
+            latest_start = index
+    if (
+        len(required_caps) == 1
+        and terminal_requalification
+        and len(caps) > 1
+    ):
+        latest_start = len(caps) - 1
+    latest_caps = caps[latest_start:]
+    expected_suffix = (
+        list(required_caps[required_caps.index(latest_caps[0]) :])
+        if latest_caps and latest_caps[0] in required_caps
+        else []
+    )
+    ramp_complete = (
+        bool(ramp)
+        and all(ramp_segments)
+        and latest_caps == expected_suffix
+        and (latest_start == 0 or terminal_requalification)
+        and all(
+        type(row.get("valid_receipts")) is int
+        and type(row.get("attempts")) is int
         and row["valid_receipts"] >= OX_RAMP_RECEIPTS_PER_CAP
         and row["attempts"] >= row["valid_receipts"]
         and row["valid_receipts"] * 100 >= row["attempts"] * 95
@@ -1844,6 +2220,7 @@ def _ox_event_projection(
         and len(row["work_ids"]) == row["valid_receipts"]
         and len(set(row["work_ids"])) == len(row["work_ids"])
         for row in ramp
+        )
     )
     failure_complete = {str(row.get("category") or "") for row in failures} >= {
         "429",
@@ -1885,6 +2262,8 @@ def _ox_event_projection(
         quality_reasons.append("failure_receipts_incomplete")
     if int(workset.get("leased") or 0) != 0:
         quality_reasons.append("leased_work_present")
+    if not workset_receipts_certifying:
+        quality_reasons.append("workset_receipts_noncertifying")
     if not gate_passed:
         quality_reasons.extend(f"offline:{reason}" for reason in authoritative_reasons)
     quality_reasons = sorted(set(quality_reasons))
@@ -4674,8 +5053,8 @@ def _materialization_label_row(
                 "provider_request_sha256": str(
                     label.get("provider_request_sha256") or ""
                 ),
-                "provider_response_request_sha256": str(
-                    label.get("provider_response_request_sha256") or ""
+                "provider_receipt_sha256": str(
+                    label.get("provider_receipt_sha256") or ""
                 ),
                 "source_commit": str(label.get("source_commit") or ""),
                 "source_tree_sha256": str(label.get("source_tree_sha256") or ""),
@@ -5308,8 +5687,11 @@ def _materialized_row_integrity(
                     expires_at=str(row.get("expires_at") or ""),
                 )
                 == row.get("provider_request_sha256")
-                and row.get("provider_response_request_sha256")
-                == row.get("provider_request_sha256")
+                and re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(row.get("provider_receipt_sha256") or ""),
+                )
+                is not None
                 and bool(contract_binding)
                 and all(
                     row.get(key) == value for key, value in contract_binding.items()
@@ -7847,16 +8229,19 @@ def _advance_ox_ramp(
 ) -> tuple[int, int, int]:
     """Apply the OX-only quality gate after deep response validation."""
     final_cap = max(min(value, max_inflight) for value in (1, 2, 5, 10))
+    # A 429 is an authoritative negative transition even after the terminal
+    # success gate has closed.  Check it first so cap 10 cannot mask a later
+    # provider limit.
+    if rate_limited:
+        return _previous_ox_ramp_cap(cap, max_inflight), 0, 0
+    if stopped:
+        return cap, valid_receipts, provider_attempts + actual_attempts
     if (
         cap == final_cap
         and valid_receipts >= OX_RAMP_RECEIPTS_PER_CAP
         and valid_receipts * 100 >= provider_attempts * 95
     ):
         return cap, valid_receipts, provider_attempts
-    if rate_limited:
-        return _previous_ox_ramp_cap(cap, max_inflight), 0, 0
-    if stopped:
-        return cap, valid_receipts, provider_attempts + actual_attempts
     receipts = valid_receipts + valid_results
     attempts = provider_attempts + actual_attempts
     if receipts < OX_RAMP_RECEIPTS_PER_CAP or receipts * 100 < attempts * 95:
@@ -8488,6 +8873,7 @@ def _ox_prepare_batches(
         request = _ox_batch_payload(tasks, proposed)
         if (
             candidate_id in candidate_ids
+            or (claim_limit == 1 and batch)
             or len(proposed) > 16
             or len(canonical_json.canonical_json_bytes_strict(request)) > 12_000
         ):
@@ -8519,16 +8905,6 @@ def _ox_prepare_batches(
             [claim for claim, _outcome in oversize],
             [outcome for _claim, outcome in oversize],
         )
-    if claim_limit == 1:
-        single_request_batches: list[list[Any]] = []
-        for current in batches:
-            if all(
-                tasks[claim.work_id]["assignment"].get("probe") for claim in current
-            ):
-                single_request_batches.append(current)
-            else:
-                single_request_batches.extend([claim] for claim in current)
-        batches = single_request_batches
     preflight_rejected: list[list[Any]] = []
     if callable(preflight):
         accepted: list[list[Any]] = []
@@ -8562,11 +8938,6 @@ def _ox_prepare_batches(
                 for _claim in rejected_claims
             ],
         )
-    if claim_limit == 1 and len(batches) > 1:
-        workset.release_unattempted(
-            [claim for current in batches[1:] for claim in current]
-        )
-        batches = batches[:1]
     if not batches:
         rejected_count = len(oversize) + sum(map(len, preflight_rejected))
         remaining = (
@@ -8576,6 +8947,11 @@ def _ox_prepare_batches(
         ) - rejected_count
         if rejected_count and remaining > 0:
             return [], rejected_count
+    if claim_limit == 1 and len(batches) > 1:
+        workset.release_unattempted(
+            [claim for batch in batches[1:] for claim in batch]
+        )
+        batches = batches[:1]
     return batches, 0
 
 
@@ -8662,35 +9038,40 @@ def _ox_dispatch_and_commit(
             last_durable_progress=workset.progress(),
         )
 
+    def guard() -> None:
+        _ox_eligibility_guard(
+            root=root,
+            config=config,
+            teacher=teacher,
+            profile_contract_id=profile_contract_id,
+            source_binding=source_binding,
+        )
+
+    def evaluate(current: Sequence[Any]) -> Mapping[str, Any]:
+        payload = _ox_batch_payload(tasks, current)
+        if type(teacher) is OpenCodeOxAlphaTeacher:
+            return teacher.evaluate_guarded(payload, before_egress=guard)
+        return teacher.evaluate(payload)
+
     results: list[Any] = []
-    dispatched_batches = 0
     metadata_drift = False
     for start in range(0, len(batches), ramp_cap):
         wave = batches[start : start + ramp_cap]
-        # A claim may have waited in the workset while an earlier wave ran.
-        # Recheck at the actual egress boundary, not just when the run began.
-        try:
-            _ox_expiry(config.ox_expires_at)
-        except DistillationError:
-            workset.release_unattempted(claims)
-            return _TeacherBatchResult(
-                deferred=True,
-                workset_status=workset.status("ox"),
-                profile_contract_id=profile_contract_id,
-                last_durable_progress=workset.progress(),
-            )
         wave_results = dispatch_claimed_work(
             wave,
-            lambda current: teacher.evaluate(_ox_batch_payload(tasks, current)),
+            evaluate,
             max_inflight=ramp_cap,
-            max_retries=0 if config.teacher_claim_limit == 1 else 2,
+            # A workset retry is a new leased attempt.  Retrying inside the
+            # dispatcher would hide an additional provider request behind one
+            # durable outcome/receipt group.
+            max_retries=0,
             min_valid_results_per_cap=OX_RAMP_RECEIPTS_PER_CAP,
             initial_cap=ramp_cap,
             initial_valid_results=0,
             valid_result_count=lambda _response: 0,
+            before_attempt=guard,
         )
         results.extend(wave_results)
-        dispatched_batches += len(wave)
         if any(
             result.status == "ok"
             and (
@@ -8710,10 +9091,6 @@ def _ox_dispatch_and_commit(
             result.rate_limited or result.status == "stopped" for result in wave_results
         ):
             break
-    if dispatched_batches < len(batches):
-        workset.release_unattempted(
-            [claim for batch in batches[dispatched_batches:] for claim in batch]
-        )
     expected_identity = OX_ALPHA_FIXED_IDENTITY["route_identity"]
     stopped = False
     deferred = False
@@ -8721,8 +9098,48 @@ def _ox_dispatch_and_commit(
     completed_claims: list[Any] = []
     outcomes: dict[str, dict[str, str]] = {}
     valid_provider_results = 0
+    seen_provider_receipts: set[str] = set()
+    if any(result.category == "ox_guard_denied" for result in results):
+        attempted = [
+            claim
+            for result in results
+            if result.attempts > 0
+            for claim in result.work
+        ]
+        attempted_ids = {claim.work_id for claim in attempted}
+        if attempted:
+            workset.commit(
+                attempted,
+                [
+                    {
+                        "status": "retry",
+                        "error_class": "ox_guard_denied",
+                        "retry_after_seconds": 60,
+                    }
+                    for _claim in attempted
+                ],
+            )
+        workset.release_unattempted(
+            [claim for claim in claims if claim.work_id not in attempted_ids]
+        )
+        return _TeacherBatchResult(
+            model_calls=sum(result.attempts for result in results),
+            deferred=True,
+            workset_status=workset.status("ox"),
+            profile_stopped=True,
+            profile_contract_id=profile_contract_id,
+            last_durable_progress=workset.progress(),
+            source_binding=source_binding,
+        )
     if metadata_drift:
-        drift_claims = [claim for result in results for claim in result.work]
+        drift_claims = [
+            claim
+            for result in results
+            if result.attempts > 0
+            for claim in result.work
+        ]
+        drift_ids = {claim.work_id for claim in drift_claims}
+        failure_cap = ramp_cap
         if drift_claims:
             workset.commit(
                 drift_claims,
@@ -8731,6 +9148,9 @@ def _ox_dispatch_and_commit(
                     for _claim in drift_claims
                 ],
             )
+        workset.release_unattempted(
+            [claim for claim in claims if claim.work_id not in drift_ids]
+        )
         ramp_cap, ramp_valid_receipts, ramp_provider_attempts = _advance_ox_ramp(
             cap=ramp_cap,
             valid_receipts=ramp_valid_receipts,
@@ -8741,34 +9161,46 @@ def _ox_dispatch_and_commit(
             stopped=True,
             max_inflight=config.teacher_max_inflight,
         )
-        _append_ox_event(
-            root,
-            "ox-failure-receipts.jsonl",
-            {
-                "kind": "ox-provider-failure",
+        for result in results:
+            provider_receipt = _ox_provider_receipt_from_result(result)
+            result_claims = list(result.work)
+            if not result_claims or not provider_receipt:
+                continue
+            _append_ox_event(
+                root,
+                "ox-failure-receipts.jsonl",
+                {
+                    "event_version": 2,
+                    "kind": "ox-provider-failure",
                     "profile_contract_id": profile_contract_id,
                     **source_binding,
                     "request_revision": OX_RAMP_REQUEST_REVISION,
                     "expires_at": contract_expiry,
                     "captured_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                "category": "model_drift",
-                "status": "hard_stop",
-                "attempts": sum(result.attempts for result in results),
-                "work_ids": [str(claim.work_id) for claim in drift_claims],
-                "attempts_by_work": {
-                    str(claim.work_id): int(claim.attempt) for claim in drift_claims
+                    "cap": failure_cap,
+                    "category": "model_drift",
+                    "status": "hard_stop",
+                    "attempts": 1,
+                    "work_ids": [str(claim.work_id) for claim in result_claims],
+                    "attempts_by_work": {
+                        str(claim.work_id): int(claim.attempt)
+                        for claim in result_claims
+                    },
+                    "provider_receipts": {
+                        str(claim.work_id): provider_receipt
+                        for claim in result_claims
+                    },
+                    "provider_requests": {
+                        str(claim.work_id): expected_ox_provider_request_sha256(
+                            profile_contract_id=profile_contract_id,
+                            payload_digest=claim.payload_digest,
+                            work_id=claim.work_id,
+                            expires_at=contract_expiry,
+                        )
+                        for claim in result_claims
+                    },
                 },
-                "provider_receipts": {
-                    str(claim.work_id): expected_ox_provider_request_sha256(
-                        profile_contract_id=profile_contract_id,
-                        payload_digest=str(claim.payload_digest),
-                        work_id=str(claim.work_id),
-                        expires_at=contract_expiry,
-                    )
-                    for claim in drift_claims
-                },
-            },
-        )
+            )
         return _TeacherBatchResult(
             model_calls=sum(result.attempts for result in results),
             deferred=True,
@@ -8781,35 +9213,31 @@ def _ox_dispatch_and_commit(
             last_durable_progress=workset.progress(),
             source_binding=source_binding,
         )
-    if not _ox_source_binding_matches(teacher, source_binding):
-        workset.release_unattempted(claims)
-        _append_ox_event(
-            root,
-            "ox-failure-receipts.jsonl",
-            {
-                "kind": "ox-provider-failure",
-                    "profile_contract_id": profile_contract_id,
-                    **source_binding,
-                    "request_revision": OX_RAMP_REQUEST_REVISION,
-                    "expires_at": contract_expiry,
-                    "captured_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-                "category": "source_drift",
-                "status": "hard_stop",
-                "attempts": sum(result.attempts for result in results),
-                "work_ids": [str(claim.work_id) for claim in claims],
-                "attempts_by_work": {
-                    str(claim.work_id): int(claim.attempt) for claim in claims
-                },
-                "provider_receipts": {
-                    str(claim.work_id): expected_ox_provider_request_sha256(
-                        profile_contract_id=profile_contract_id,
-                        payload_digest=str(claim.payload_digest),
-                        work_id=str(claim.work_id),
-                        expires_at=contract_expiry,
-                    )
-                    for claim in claims
-                },
-            },
+
+    def settle_post_http_drift(error_class: str) -> _TeacherBatchResult:
+        """Consume provider-attempted leases without publishing their result."""
+
+        attempted = [
+            claim
+            for result in results
+            if result.attempts > 0
+            for claim in result.work
+        ]
+        attempted_ids = {claim.work_id for claim in attempted}
+        if attempted:
+            workset.commit(
+                attempted,
+                [
+                    {
+                        "status": "retry",
+                        "error_class": error_class,
+                        "retry_after_seconds": 60,
+                    }
+                    for _claim in attempted
+                ],
+            )
+        workset.release_unattempted(
+            [claim for claim in claims if claim.work_id not in attempted_ids]
         )
         return _TeacherBatchResult(
             model_calls=sum(result.attempts for result in results),
@@ -8820,6 +9248,9 @@ def _ox_dispatch_and_commit(
             last_durable_progress=workset.progress(),
             source_binding=source_binding,
         )
+
+    if not _ox_source_binding_matches(teacher, source_binding):
+        return settle_post_http_drift("source_binding_drift")
     for result in results:
         batch_claims = result.work
         if result.status != "ok" or not isinstance(result.value, Mapping):
@@ -8834,6 +9265,8 @@ def _ox_dispatch_and_commit(
             )
             stopped = stopped or result.status == "stopped"
             deferred = True
+            if result.attempts == 0:
+                continue
             for claim in batch_claims:
                 outcomes[claim.work_id] = {
                     "status": (
@@ -8843,10 +9276,25 @@ def _ox_dispatch_and_commit(
                         else "retry"
                     ),
                     "error_class": error_class,
+                    **(
+                        {"retry_after_seconds": 60}
+                        if category in {"http_429", "http_5xx", "timeout"}
+                        else {}
+                    ),
                 }
             continue
         response = result.value
         response_metadata = response
+        provider_receipt_sha256 = _ox_provider_receipt_from_result(result)
+        if not provider_receipt_sha256:
+            deferred = True
+            for claim in batch_claims:
+                outcomes[claim.work_id] = {
+                    "status": "retry",
+                    "error_class": "provider_receipt_missing",
+                    "retry_after_seconds": 60,
+                }
+            continue
         labels = response.get("labels")
         safe_labels = validate_ox_alpha_labels(
             labels,
@@ -8868,7 +9316,9 @@ def _ox_dispatch_and_commit(
                     "error_class": "invalid_teacher_output",
                 }
             continue
-        valid_provider_results += 1
+        if provider_receipt_sha256 not in seen_provider_receipts:
+            seen_provider_receipts.add(provider_receipt_sha256)
+            valid_provider_results += 1
         for claim in batch_claims:
             task = tasks[claim.work_id]
             candidate = task["candidate"]
@@ -8901,12 +9351,7 @@ def _ox_dispatch_and_commit(
                     "prompt_sha256": response_metadata["_prompt_digest"],
                     "schema_sha256": response_metadata["_schema_digest"],
                     "test_only": response_metadata.get("_test_only") is True,
-                    "provider_response_request_sha256": expected_ox_provider_request_sha256(
-                        profile_contract_id=profile_contract_id,
-                        payload_digest=claim.payload_digest,
-                        work_id=claim.work_id,
-                        expires_at=contract_expiry,
-                    ),
+                    "provider_receipt_sha256": provider_receipt_sha256,
                     "provider_request_sha256": expected_ox_provider_request_sha256(
                         profile_contract_id=profile_contract_id,
                         payload_digest=claim.payload_digest,
@@ -8938,18 +9383,13 @@ def _ox_dispatch_and_commit(
         contract = _ensure_ox_profile_contract(
             root, config, source_binding=source_binding
         )
-        if contract["artifact_id"] != profile_contract_id:
+        if (
+            contract["artifact_id"] != profile_contract_id
+            or not _ox_source_binding_matches(teacher, source_binding)
+        ):
             raise DistillationError("OX profile contract changed before commit")
     except DistillationError:
-        # Every result is still uncommitted here, including failed HTTP
-        # outcomes.  Returning only successes leaves retry leases stranded.
-        workset.release_unattempted(claims)
-        return _TeacherBatchResult(
-            deferred=True,
-            workset_status=workset.status("ox"),
-            profile_contract_id=profile_contract_id,
-            last_durable_progress=workset.progress(),
-        )
+        return settle_post_http_drift("profile_contract_drift")
     appended = store.append_chain_batch(label_path, records)
     appended_by_work = {str(row["work_id"]): row for row in appended}
     for claim in completed_claims:
@@ -8960,6 +9400,10 @@ def _ox_dispatch_and_commit(
             "completion_digest": str(row["record_sha256"]),
         }
     active_claims = [claim for claim in claims if claim.work_id in outcomes]
+    active_ids = {claim.work_id for claim in active_claims}
+    workset.release_unattempted(
+        [claim for claim in claims if claim.work_id not in active_ids]
+    )
     if active_claims:
         try:
             _ox_expiry(config.ox_expires_at)
@@ -8967,7 +9411,7 @@ def _ox_dispatch_and_commit(
             # The label append was sealed only after the preceding check; do
             # not turn an expired lease into completed work.  Reconciliation
             # will safely finish it on a future valid run.
-            workset.release_unattempted(claims)
+            workset.release_unattempted(active_claims)
             return _TeacherBatchResult(
                 labels_written=len(appended),
                 model_calls=sum(result.attempts for result in results),
@@ -9016,46 +9460,100 @@ def _ox_dispatch_and_commit(
         and ramp_valid_receipts >= OX_RAMP_RECEIPTS_PER_CAP
         and ramp_valid_receipts * 100 >= ramp_provider_attempts * 95
     )
-    final_receipt_emitted = any(
-        row.get("profile_contract_id") == profile_contract_id
-        and row.get("cap") == final_cap
-        and all(row.get(key) == value for key, value in source_binding.items())
-        for row in store.read_chain(
-            store.distillation_dir(root) / "ox-ramp-receipts.jsonl"
-        )
+    ramp_path = store.distillation_dir(root) / "ox-ramp-receipts.jsonl"
+    ramp_events = store.read_chain(ramp_path)
+    prior_stage: Mapping[str, Any] | None = None
+    for row in reversed(ramp_events):
+        if (
+            row.get("event_version") == 2
+            and row.get("kind") == "ox-ramp-stage"
+            and row.get("profile_contract_id") == profile_contract_id
+            and all(row.get(key) == value for key, value in source_binding.items())
+        ):
+            prior_stage = row
+            break
+    current_label_head = store.chain_head(label_path)
+    current_failure_head = store.chain_head(
+        store.distillation_dir(root) / "ox-failure-receipts.jsonl"
     )
-    if ramp_cap > previous_cap or (final_stage_completed and not final_receipt_emitted):
+    final_receipt_emitted = (
+        prior_stage is not None
+        and prior_stage.get("cap") == final_cap
+        and prior_stage.get("next_cap") == final_cap
+        and prior_stage.get("label_count") == current_label_head["records"]
+        and prior_stage.get("label_head_sha256") == current_label_head["head_sha256"]
+        and prior_stage.get("failure_record_count") == current_failure_head["records"]
+        and prior_stage.get("failure_head_sha256") == current_failure_head["head_sha256"]
+    )
+    stage_event_needed = ramp_cap > previous_cap or (
+        final_stage_completed and not final_receipt_emitted
+    )
+    def append_stage() -> None:
         stage_cap = previous_cap if ramp_cap > previous_cap else final_cap
-        stage_labels = [
-            str(row.get("work_id") or "")
-            for row in store.read_chain(label_path)
-            if row.get("profile_contract_id") == profile_contract_id
-            and row.get("ramp_cap") == stage_cap
-            and row.get("status") == "completed"
-        ]
+        label_head = store.chain_head(label_path)
+        failure_head = store.chain_head(
+            store.distillation_dir(root) / "ox-failure-receipts.jsonl"
+        )
+        lower_labels = 0
+        lower_failures = 0
+        if prior_stage is not None:
+            lower_labels = prior_stage.get("label_count", -1)
+            lower_failures = prior_stage.get("failure_record_count", -1)
+        if (
+            type(lower_labels) is not int
+            or type(lower_failures) is not int
+            or not 0 <= lower_labels <= label_head["records"]
+            or not 0 <= lower_failures <= failure_head["records"]
+        ):
+            raise DistillationError("OX ramp checkpoint segment is invalid")
+        stage_labels: list[str] = []
+        seen_receipts: set[str] = set()
+        for row in store.read_chain(label_path)[lower_labels:]:
+            if (
+                row.get("profile_contract_id") != profile_contract_id
+                or row.get("ramp_cap") != stage_cap
+                or row.get("status") != "completed"
+            ):
+                continue
+            receipt = str(row.get("provider_receipt_sha256") or "")
+            work_id = str(row.get("work_id") or "")
+            if (
+                re.fullmatch(r"[0-9a-f]{64}", receipt) is not None
+                and re.fullmatch(r"[0-9a-f]{64}", work_id) is not None
+                and receipt not in seen_receipts
+            ):
+                seen_receipts.add(receipt)
+                stage_labels.append(work_id)
+        stage_receipts = (
+            previous_receipts + valid_provider_results
+            if ramp_cap > previous_cap
+            else ramp_valid_receipts
+        )
+        if len(stage_labels) != stage_receipts:
+            raise DistillationError("OX ramp receipt segment is incomplete")
         _append_ox_event(
             root,
             "ox-ramp-receipts.jsonl",
             {
+                "event_version": 2,
                 "kind": "ox-ramp-stage",
                 "profile_contract_id": profile_contract_id,
                 **source_binding,
                 "request_revision": OX_RAMP_REQUEST_REVISION,
                 "expires_at": contract_expiry,
                 "cap": stage_cap,
-                "valid_receipts": (
-                    previous_receipts + valid_provider_results
-                    if ramp_cap > previous_cap
-                    else ramp_valid_receipts
-                ),
+                "next_cap": ramp_cap if stage_cap != 10 else 10,
+                "valid_receipts": stage_receipts,
                 "attempts": (
                     previous_attempts + attempts
                     if ramp_cap > previous_cap
                     else ramp_provider_attempts
                 ),
                 "work_ids": stage_labels,
-                "label_count": len(appended),
-                "label_head_sha256": store.chain_head(label_path)["head_sha256"],
+                "label_count": int(label_head["records"]),
+                "label_head_sha256": label_head["head_sha256"],
+                "failure_record_count": int(failure_head["records"]),
+                "failure_head_sha256": failure_head["head_sha256"],
                 "captured_at": captured_at,
             },
         )
@@ -9077,7 +9575,7 @@ def _ox_dispatch_and_commit(
             "model_unavailable",
             "route_model_drift",
         }:
-            event = {
+            event: dict[str, Any] = {
                 "category": {
                     "http_5xx": "5xx",
                     "timeout": "timeout",
@@ -9087,8 +9585,7 @@ def _ox_dispatch_and_commit(
                     "model_unavailable": "model_drift",
                     "route_model_drift": "model_drift",
                 }[category],
-                "attempts": result.attempts,
-                "bounded": category in {"http_5xx", "timeout"},
+                "attempts": 1,
                 "status": (
                     "hard_stop"
                     if category
@@ -9102,28 +9599,39 @@ def _ox_dispatch_and_commit(
                     else "deferred"
                 ),
             }
+            if category in {"http_5xx", "timeout"}:
+                event["bounded"] = True
         else:
+            continue
+        provider_receipt = _ox_provider_receipt_from_result(result)
+        if not provider_receipt:
             continue
         _append_ox_event(
             root,
             "ox-failure-receipts.jsonl",
             {
+                "event_version": 2,
                 "kind": "ox-provider-failure",
                 "profile_contract_id": profile_contract_id,
                 **source_binding,
                 "request_revision": OX_RAMP_REQUEST_REVISION,
                 "expires_at": contract_expiry,
                 "captured_at": captured_at,
+                "cap": previous_cap,
                 "work_ids": [str(claim.work_id) for claim in result.work],
-                "attempts": result.attempts,
+                "attempts": 1,
                 "attempts_by_work": {
                     str(claim.work_id): int(claim.attempt) for claim in result.work
                 },
                 "provider_receipts": {
+                    str(claim.work_id): provider_receipt
+                    for claim in result.work
+                },
+                "provider_requests": {
                     str(claim.work_id): expected_ox_provider_request_sha256(
                         profile_contract_id=profile_contract_id,
-                        payload_digest=str(claim.payload_digest),
-                        work_id=str(claim.work_id),
+                        payload_digest=claim.payload_digest,
+                        work_id=claim.work_id,
                         expires_at=contract_expiry,
                     )
                     for claim in result.work
@@ -9131,6 +9639,8 @@ def _ox_dispatch_and_commit(
                 **event,
             },
         )
+    if stage_event_needed:
+        append_stage()
     return _TeacherBatchResult(
         labels_written=len(appended),
         model_calls=sum(result.attempts for result in results),
@@ -9327,10 +9837,18 @@ def _run_ox_teacher_batch(
         if receipt["operation"] != "claim_reclaim":
             continue
         details = receipt["details"]
+        work_ids_sha256 = details.get("work_ids_sha256")
+        # Legacy receipts remain readable so an old queue can recover, but
+        # they cannot mint a certifying v2 lease event without exact work IDs.
+        if not isinstance(work_ids_sha256, str) or re.fullmatch(
+            r"[0-9a-f]{64}", work_ids_sha256
+        ) is None:
+            continue
         _append_ox_event(
             root,
             "ox-lease-recovery-receipts.jsonl",
             {
+                "event_version": 2,
                 "kind": "ox-lease-reclaim",
                 "profile_contract_id": profile_contract_id,
                 **source_binding,
@@ -9338,6 +9856,7 @@ def _run_ox_teacher_batch(
                 "expires_at": profile_contract_expiry,
                 "workset_receipt_generation": receipt["generation"],
                 "workset_receipt_sha256": receipt["receipt_sha256"],
+                "work_ids_sha256": work_ids_sha256,
                 "reclaimed": details["count"],
                 "leased_after": workset.status("ox")["leased"],
                 "captured_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -9468,7 +9987,9 @@ def _run_ox_teacher_batch(
 
     return _ox_dispatch_and_commit(
         root=root,
-        claims=claims,
+        # _ox_prepare_batches already settles every rejected claim.  Only the
+        # still-leased batch members belong to the dispatcher commit boundary.
+        claims=[claim for batch in batches for claim in batch],
         batches=batches,
         ramp_cap=ramp_cap,
         ramp_valid_receipts=ramp_valid_receipts,

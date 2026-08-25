@@ -8,6 +8,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -131,6 +132,60 @@ def _write_receipts(path: Path, receipts: list[dict[str, object]]) -> None:
         )
 
 
+def _workset_receipt_connection(
+    *, version: int, operation: str, details: Mapping[str, object]
+) -> sqlite3.Connection:
+    """Build one canonical lease receipt for direct collector validation."""
+
+    before_counts = {
+        "ready": 1 if operation == "claim" else 0,
+        "leased": 0 if operation == "claim" else 1,
+        "completed": 0,
+        "quarantined": 0,
+    }
+    after_counts = {
+        "ready": 0 if operation == "claim" else 1,
+        "leased": 1 if operation == "claim" else 0,
+        "completed": 0,
+        "quarantined": 0,
+    }
+    progress = {"cursor": 1}
+    before: dict[str, object] = {"counts": before_counts, "watermark": "watermark"}
+    after: dict[str, object] = {"counts": after_counts, "watermark": "watermark"}
+    payload: dict[str, object] = {
+        "before": before,
+        "after": after,
+        "delta": {
+            state: after_counts[state] - before_counts[state]
+            for state in HARNESS.PRODUCTION_WORKSET_STATES
+        },
+        "details": dict(details),
+    }
+    if version == 2:
+        before["progress"] = progress
+        after["progress"] = progress
+        payload["version"] = 2
+    payload_json = HARNESS._json_bytes(payload).decode()
+    envelope = {
+        "generation": 1,
+        "previous_sha256": "",
+        "operation": operation,
+        "payload": payload,
+    }
+    connection = sqlite3.connect(":memory:")
+    connection.execute(
+        "CREATE TABLE workset_receipts ("
+        "generation INTEGER, previous_sha256 TEXT, operation TEXT, "
+        "payload_json TEXT, receipt_sha256 TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO workset_receipts VALUES (?, ?, ?, ?, ?)",
+        (1, "", operation, payload_json, HARNESS._sha256(envelope)),
+    )
+    connection.commit()
+    return connection
+
+
 def _owned_fault_artifact(
     source: Path,
     commit: str,
@@ -237,6 +292,45 @@ def test_production_workset_rejects_watermark_tampering(tmp_path: Path) -> None:
         HARNESS._production_workset(workset_path)
 
 
+@pytest.mark.parametrize("operation", ["claim_reclaim", "claim", "release"])
+def test_v2_workset_lease_receipts_require_work_id_digest(operation: str) -> None:
+    connection = _workset_receipt_connection(
+        version=2,
+        operation=operation,
+        details={"kind": "ox", "count": 1, "selection_sha256": "a" * 64},
+    )
+    try:
+        with pytest.raises(HARNESS.R4Error, match="lease receipt"):
+            HARNESS._production_workset_receipts(
+                connection,
+                {"ready": 0, "leased": 0, "completed": 0, "quarantined": 0},
+                "watermark",
+                {"cursor": 1},
+            )
+    finally:
+        connection.close()
+
+
+def test_v1_workset_lease_receipt_is_readable_but_noncertifying() -> None:
+    connection = _workset_receipt_connection(
+        version=1,
+        operation="claim_reclaim",
+        details={"kind": "ox", "count": 1, "selection_sha256": "a" * 64},
+    )
+    try:
+        result = HARNESS._production_workset_receipts(
+            connection,
+            {"ready": 1, "leased": 0, "completed": 0, "quarantined": 0},
+            "watermark",
+            None,
+        )
+    finally:
+        connection.close()
+    assert result["verified"] is True
+    assert result["status"] == "legacy-unverified"
+    assert result["legacy_unverified_excluded"] is True
+
+
 def test_production_workset_read_does_not_touch_checkpointed_shm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -245,13 +339,8 @@ def test_production_workset_read_does_not_touch_checkpointed_shm(
     workset_path = production / HARNESS.PRODUCTION_WORKSET_RELATIVE
     wal_path = workset_path.with_name(f"{workset_path.name}-wal")
     shm_path = workset_path.with_name(f"{workset_path.name}-shm")
-    with sqlite3.connect(workset_path) as writer:
-        writer.execute("PRAGMA journal_mode = WAL")
-        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        assert wal_path.stat().st_size == 0
-        assert shm_path.is_file()
-        wal_bytes = wal_path.read_bytes()
-        shm_bytes = shm_path.read_bytes()
+    wal_bytes = b""
+    shm_bytes = b"checkpointed-shm-fixture"
     wal_path.write_bytes(wal_bytes)
     shm_path.write_bytes(shm_bytes)
     before = HARNESS._production_sqlite_state(
@@ -435,6 +524,89 @@ def test_cap10_anchor_rejects_later_cohort_substitution(tmp_path: Path) -> None:
             source=HARNESS._assert_source(source, commit),
             contract_id=str(state["profile_contract_id"]),
         )
+
+
+def test_production_ox_events_partitions_legacy_and_rejects_noninteger_v2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "production"
+    events_root = root / HARNESS.PRODUCTION_DISTILLATION_RELATIVE
+    events_root.mkdir(parents=True)
+    (events_root / "ox-ramp-receipts.jsonl").touch()
+    source = {"commit": "a" * 40, "tree_sha256": "b" * 64, "ox_identity_sha256": "c" * 64}
+    contract_id = "d" * 64
+    expiry = "2099-01-01T00:00:00Z"
+    common = {
+        "profile_contract_id": contract_id, "source_commit": source["commit"],
+        "source_tree_sha256": source["tree_sha256"], "source_ox_identity_sha256": source["ox_identity_sha256"],
+        "request_revision": HARNESS.OX_REQUEST_REVISION, "expires_at": expiry,
+    }
+    v2 = {
+        "event_version": 2, "kind": "ox-ramp-stage", **common, "cap": 1,
+        "next_cap": 2,
+        "valid_receipts": 20, "attempts": 20, "work_ids": ["e" * 64],
+        "label_count": 1, "label_head_sha256": "f" * 64,
+        "failure_record_count": 0, "failure_head_sha256": "",
+        "captured_at": "2026-08-25T00:00:00Z",
+    }
+    legacy = {
+        "kind": "ox-ramp-stage", **common, "cap": 1, "valid_receipts": 20,
+        "attempts": 20, "work_ids": ["e" * 64], "label_count": 1,
+        "label_head_sha256": "f" * 64, "captured_at": "2026-08-24T00:00:00Z",
+    }
+    anchors: dict[str, dict[str, object]] = {}
+
+    def record(payload: dict[str, object], index: int) -> dict[str, object]:
+        if payload.get("event_version") == 2:
+            identity = {key: value for key, value in payload.items() if key != "captured_at"}
+        else:
+            identity = {
+                "kind": "ox-ramp-stage", "profile_contract_id": contract_id,
+                "source_commit": source["commit"], "source_tree_sha256": source["tree_sha256"],
+                "source_ox_identity_sha256": source["ox_identity_sha256"],
+                "request_revision": HARNESS.OX_REQUEST_REVISION, "cap": 1,
+            }
+        event_key = HARNESS._sha256(identity)
+        binding = HARNESS._sha256(payload)
+        record_sha = hashlib.sha256(f"event:{index}".encode()).hexdigest()
+        anchor_id = HARNESS._sha256({
+            "schema": "chronovisor.recall-distill-ox-event-anchor.v1", "namespace": "recall-distillation",
+            "kind": "ox-event-anchor", "ledger_name": "ox-ramp-receipts.jsonl",
+            "event_key": event_key, "event_binding_sha256": binding, "record_sha256": record_sha,
+        })
+        anchor_unsigned = {
+            "schema": "chronovisor.recall-distill-ox-event-anchor.v1", "namespace": "recall-distillation",
+            "kind": "ox-event-anchor", "artifact_id": anchor_id, "ledger_name": "ox-ramp-receipts.jsonl",
+            "event_key": event_key, "event_binding_sha256": binding, "record_sha256": record_sha,
+        }
+        anchors[anchor_id] = {**anchor_unsigned, "seal_sha256": HARNESS._sha256(anchor_unsigned)}
+        return {
+            "schema": "chronovisor.recall-distillation.v1", "namespace": "recall-distillation",
+            "previous_sha256": "", "record_sha256": record_sha, **payload,
+            "event_key": event_key, "event_binding_sha256": binding,
+        }
+
+    rows = [record(v2, 1), record(legacy, 2)]
+    monkeypatch.setattr(
+        HARNESS, "_production_chain", lambda *_args, **_kwargs: {"rows": rows, "sha256": "0" * 64}
+    )
+    monkeypatch.setattr(
+        HARNESS, "_production_json",
+        lambda path, **_kwargs: (
+            {"artifact_id": contract_id, "request_revision": HARNESS.OX_REQUEST_REVISION, "expires_at": expiry}
+            if path.name == f"{contract_id}.json" else anchors[path.stem], {}, "",
+        ),
+    )
+
+    events = HARNESS._production_ox_events(root, source=source, contract_id=contract_id, workset={"items": {}})
+    assert [row["event_version"] for row in events["ramp"]] == [2]
+    assert len(events["legacy"]) == 1
+
+    invalid = dict(v2)
+    invalid["event_version"] = 2.0
+    rows[:] = [record(invalid, 3)]
+    with pytest.raises(HARNESS.R4Error, match="event version"):
+        HARNESS._production_ox_events(root, source=source, contract_id=contract_id, workset={"items": {}})
 
 
 def _local_rows(source: Path, commit: str) -> list[dict[str, object]]:
@@ -910,7 +1082,7 @@ def _authoritative_production_root(tmp_path: Path, source: Path, commit: str) ->
                 finish_reason="stop",
                 metadata={
                     "returned_model": "ox-alpha-free",
-                    "request_id": "r4-fixture",
+                    "request_id": f"r4-fixture-{uuid.uuid4().hex}",
                 },
             )
 
@@ -1062,7 +1234,7 @@ def _authoritative_production_root(tmp_path: Path, source: Path, commit: str) ->
 
     def fixture_config_loader(path: Path | None = None) -> object:
         loaded = original_loader(path)
-        return replace(loaded, teacher_claim_limit=500, chunk_size=200)
+        return replace(loaded, chunk_size=200)
 
     def fixture_runtime_identity(
         _root: Path,
@@ -1083,6 +1255,10 @@ def _authoritative_production_root(tmp_path: Path, source: Path, commit: str) ->
         )
         workset_path = distill_dir / "ox-workset.sqlite3"
         receipt_head = DistillationWorkset(workset_path).audit_transition_receipts()
+        # The formal collector intentionally refuses a live WAL.  Freeze the
+        # test producer's completed transaction before sealing its file hash.
+        with sqlite3.connect(workset_path) as connection:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         anchor = {
             "candidate_anchor_artifact_id": "a" * 64,
             "candidate_anchor_head_sha256": candidate_checkpoint["head_sha256"],
@@ -1154,6 +1330,12 @@ def _authoritative_production_root(tmp_path: Path, source: Path, commit: str) ->
         distill._ox_prepare_tasks = original_prepare
         distill._ox_prepare_batches = original_batches
         distill._r4_runtime_identity_projection = original_identity
+    workset_path = distill_dir / "ox-workset.sqlite3"
+    wal_path = workset_path.with_name(f"{workset_path.name}-wal")
+    if wal_path.exists() and wal_path.stat().st_size:
+        raise AssertionError("fixture workset WAL was not checkpointed")
+    wal_path.unlink(missing_ok=True)
+    workset_path.with_name(f"{workset_path.name}-shm").unlink(missing_ok=True)
     return root
 
 
@@ -2778,6 +2960,197 @@ def test_production_quality_rederives_label_request_binding(
         contract_id=contract_id,
     )
     assert "production_label_identity_invalid" in reasons
+
+
+def test_production_quality_derives_ramp_units_without_event_self_reports() -> None:
+    source = {
+        "commit": "a" * 40,
+        "tree_sha256": "b" * 64,
+        "ox_identity_sha256": "c" * 64,
+    }
+    contract_unsigned = {
+        "profile": HARNESS.OX_PROFILE,
+        "cohort": HARNESS.OX_COHORT,
+        "route": HARNESS.OX_ROUTE,
+        "endpoint": HARNESS.OX_ENDPOINT,
+        "request_model": HARNESS.OX_MODEL,
+        "required_returned_model": HARNESS.OX_MODEL,
+        "request_revision": HARNESS.OX_REQUEST_REVISION,
+        "fixed_identity": HARNESS.OX_FIXED_IDENTITY,
+        "free_only": True,
+        "no_paid_fallback": True,
+        "kill_categories": list(HARNESS.OX_KILL_CATEGORIES),
+        "live_recall_model_calls": 0,
+        "source_commit": source["commit"],
+        "source_tree_sha256": source["tree_sha256"],
+        "source_ox_identity_sha256": source["ox_identity_sha256"],
+        "expires_at": "2099-01-01T00:00:00Z",
+    }
+    contract_id = HARNESS._sha256(contract_unsigned)
+    contract = {**contract_unsigned, "artifact_id": contract_id, "seal_sha256": "d" * 64}
+    labels: list[dict[str, object]] = []
+    items: dict[str, dict[str, object]] = {}
+    completed: dict[str, dict[str, object]] = {}
+    stage_heads: dict[int, str] = {}
+    stage_work_ids: dict[int, list[str]] = {}
+    for cap in HARNESS.OX_STAGES:
+        stage_work_ids[cap] = []
+        for index in range(20):
+            payload_source = {"rally_id": f"r{cap}-{index}", "candidate_id": f"c{cap}-{index}"}
+            payload_digest = HARNESS._sha256(payload_source)
+            work_id = HARNESS._sha256(
+                {
+                    "kind": "ox-teacher-label-v1",
+                    "profile": HARNESS.OX_PROFILE,
+                    "cohort": HARNESS.OX_COHORT,
+                    "route": HARNESS.OX_ROUTE,
+                    "profile_contract_id": contract_id,
+                    "payload_digest": payload_digest,
+                }
+            )
+            digest = hashlib.sha256(f"label:{cap}:{index}".encode()).hexdigest()
+            provider_request = HARNESS._expected_ox_provider_request_sha256(
+                profile_contract_id=contract_id,
+                payload_digest=payload_digest,
+                work_id=work_id,
+                expires_at=str(contract["expires_at"]),
+            )
+            labels.append(
+                {
+                    "kind": "teacher-label", "status": "completed",
+                    "profile": HARNESS.OX_PROFILE, "cohort": HARNESS.OX_COHORT,
+                    "profile_contract_id": contract_id, "source_commit": source["commit"],
+                    "source_tree_sha256": source["tree_sha256"],
+                    "source_ox_identity_sha256": source["ox_identity_sha256"],
+                    "route": HARNESS.OX_ROUTE, "teacher_role": "recall.distill.teacher.ox-alpha",
+                    "identity_revision": HARNESS.OX_IDENTITY_REVISION,
+                    "request_revision": HARNESS.OX_REQUEST_REVISION,
+                    "expires_at": contract["expires_at"], "route_digest": HARNESS.OX_ROUTE_SHA256,
+                    "model_digest": HARNESS.OX_MODEL_SHA256, "prompt_sha256": HARNESS.OX_PROMPT_SHA256,
+                    "schema_sha256": HARNESS.OX_SCHEMA_SHA256, "test_only": False,
+                    "route_identity": {"provider": "opencode-go", "model": HARNESS.OX_ROUTE, "location": "remote"},
+                    "record_sha256": digest, "work_id": work_id,
+                    "payload_source": payload_source, "payload_digest": payload_digest,
+                    "provider_request_sha256": provider_request,
+                    "provider_receipt_sha256": hashlib.sha256(f"provider:{cap}:{index}".encode()).hexdigest(),
+                    "attempt_count": 1, "ramp_cap": cap,
+                }
+            )
+            items[work_id] = {
+                "payload_digest": payload_digest,
+                "provenance": {"cohort": HARNESS.OX_COHORT, "profile": HARNESS.OX_PROFILE, "profile_contract_id": contract_id, "route": HARNESS.OX_ROUTE},
+            }
+            completed[work_id] = {"completion_ref": f"label-ledger:{digest}", "completion_digest": digest, "attempt_count": 1}
+            stage_work_ids[cap].append(work_id)
+        stage_heads[cap] = str(labels[-1]["record_sha256"])
+    events = {
+        "ramp": [
+            {
+                "event_version": 2, "kind": "ox-ramp-stage", "cap": cap,
+                "next_cap": {1: 2, 2: 5, 5: 10, 10: 10}[cap],
+                "valid_receipts": 999, "attempts": 999,
+                "work_ids": ["0" * 64], "label_count": {1: 20, 2: 40, 5: 60, 10: 80}[cap],
+                "label_head_sha256": stage_heads[cap], "source_commit": source["commit"],
+                "failure_record_count": 0, "failure_head_sha256": "",
+                "profile_contract_id": contract_id,
+            }
+            for cap in HARNESS.OX_STAGES
+        ],
+        "failure": [],
+        "lease": [
+            {
+                "workset_receipt_generation": 1,
+                "workset_receipt_sha256": "e" * 64,
+                "work_ids_sha256": "f" * 64,
+                "reclaimed": 1,
+                "leased_after": 0,
+            }
+        ],
+        "legacy": [],
+    }
+    state = {
+        "profile_contract_id": contract_id,
+        "quality_gates": {
+            "negative_veto": {"authenticated": True, "exact_binding": True, "conflicts": 0},
+            "blind_repeat": {"revision": HARNESS.OX_PROBE_REVISION, "complete": True, "stability_passed": True, "pairs": 20},
+            "order_swap": {"complete": True, "pairs": 20},
+            "rollback": {"verified": True, "active_unchanged": True, "status": "not_rolled_back"},
+        },
+    }
+    quality_workset = {
+        "items": items,
+        "completed": completed,
+        "counts": {"leased": 0},
+        "receipts": {
+            "status": "verified",
+            "by_generation": {
+                "1": {
+                    "receipt_sha256": "e" * 64,
+                    "operation": "claim_reclaim",
+                    "details": {"count": 1, "work_ids_sha256": "a" * 64},
+                }
+            },
+        },
+    }
+    reasons, quality = HARNESS._production_quality(
+        state=state,
+        workset=quality_workset,
+        labels={"rows": labels}, events=events, source=source, contract=contract,
+        contract_id=contract_id,
+    )
+
+    assert "production_ramp_event_audit_mismatch" in reasons
+    assert quality["receipt_authority"] == "adapter_observed_not_provider_signed"
+    assert "production_lease_recovery_invalid" in reasons
+    assert {stage: (value["valid_receipts"], value["attempts"]) for stage, value in quality["stages"].items()} == {
+        str(cap): (20, 20) for cap in HARNESS.OX_STAGES
+    }
+
+    for field, value in (
+        ("workset_receipt_generation", 2),
+        ("workset_receipt_sha256", "0" * 64),
+        ("reclaimed", 2),
+        ("work_ids_sha256", "0" * 64),
+    ):
+        forged = json.loads(json.dumps(events))
+        forged["lease"][0][field] = value
+        forged_reasons, _ = HARNESS._production_quality(
+            state=state,
+            workset=quality_workset,
+            labels={"rows": labels},
+            events=forged,
+            source=source,
+            contract=contract,
+            contract_id=contract_id,
+        )
+        assert "production_lease_recovery_invalid" in forged_reasons
+
+    missing_digest = json.loads(json.dumps(events))
+    missing_digest["lease"][0].pop("work_ids_sha256")
+    missing_reasons, _ = HARNESS._production_quality(
+        state=state,
+        workset=quality_workset,
+        labels={"rows": labels},
+        events=missing_digest,
+        source=source,
+        contract=contract,
+        contract_id=contract_id,
+    )
+    assert "production_lease_recovery_invalid" in missing_reasons
+
+    wrong_cap_head = json.loads(json.dumps(events))
+    wrong_cap_head["ramp"][0]["label_head_sha256"] = stage_heads[10]
+    wrong_cap_head["ramp"][0]["label_count"] = 80
+    wrong_reasons, _ = HARNESS._production_quality(
+        state=state,
+        workset={"items": items, "completed": completed, "counts": {"leased": 0}},
+        labels={"rows": labels},
+        events=wrong_cap_head,
+        source=source,
+        contract=contract,
+        contract_id=contract_id,
+    )
+    assert "production_ramp_quality_invalid" in wrong_reasons
 
 
 def test_production_quality_rejects_self_resealed_payload_source(

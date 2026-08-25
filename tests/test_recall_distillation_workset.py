@@ -951,10 +951,12 @@ def test_transition_receipt_binding_exposes_verified_selection_only(
         "operation",
         "selection_sha256",
         "work_ids_sha256",
+        "count",
     }
     assert binding["operation"] == "claim"
     assert len(binding["selection_sha256"]) == 64
     assert binding["work_ids_sha256"] == canonical_json_sha256_strict(["one"])
+    assert binding["count"] == 1
     workset.release_unattempted([claim])
     assert workset.transition_receipt_binding(99) is None
 
@@ -1346,6 +1348,9 @@ def test_v2_progress_receipts_cover_claim_release_commit_and_replay(
     assert all(payload["version"] == 2 for payload in payloads)
     assert payloads[0]["before"]["progress"] is None
     assert payloads[0]["bootstrap"] is True
+    payloads[1]["details"].pop("work_ids_sha256")
+    with pytest.raises(DistillationWorksetError, match="lease receipt"):
+        workset._validate_receipt_payload("claim", payloads[1])
 
 
 @pytest.mark.parametrize("cursor", [True, math.nan, math.inf, -math.inf])
