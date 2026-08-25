@@ -10190,7 +10190,9 @@ def test_r4_candidate_anchor_rejects_self_sealed_fixed_id_tampering(
     unsigned = {
         "schema": "chronovisor.recall-r0.v1",
         "namespace": "recall-distillation",
-        "production": {"ledgers": {"candidate-ledger.jsonl": {"records": 0, "head_sha256": "x"}}},
+        "production": {
+            "ledgers": {"candidate-ledger.jsonl": {"records": 0, "head_sha256": "x"}}
+        },
     }
     forged = {"artifact_id": distill.R4_R0_EVIDENCE_ID, **unsigned}
     forged["seal_sha256"] = canonical_json.canonical_json_sha256_strict(forged)
@@ -10220,6 +10222,174 @@ def test_r4_candidate_anchor_rejects_r0_evidence_symlink(tmp_path: Path) -> None
             tracked_r0_evidence=evidence,
             source_binding={"source_commit": "a" * 40},
         )
+    assert not (directory / distill.R4_CANDIDATE_ANCHOR_FILE).exists()
+
+
+def test_r4_candidate_anchor_rejects_symlinked_distillation_directory(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = tmp_path / "distillation-target"
+    target.mkdir()
+    directory = store.distillation_dir(root)
+    directory.parent.mkdir()
+    directory.symlink_to(target)
+    evidence = tmp_path / "r0.json"
+    evidence.write_text("{}")
+
+    with pytest.raises(distill.DistillationError, match="preflight failed"):
+        distill.bootstrap_r4_candidate_anchor(
+            root=root,
+            tracked_r0_evidence=evidence,
+            source_binding={"source_commit": "a" * 40},
+        )
+    assert not list(target.iterdir())
+
+
+def test_r4_candidate_anchor_normalizes_recursive_json(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    directory = store.distillation_dir(root)
+    directory.mkdir(parents=True)
+    evidence = tmp_path / "r0.json"
+    evidence.write_bytes(b"[" * 100_000 + b"0" + b"]" * 100_000)
+
+    with pytest.raises(distill.DistillationError, match="preflight failed"):
+        distill.bootstrap_r4_candidate_anchor(
+            root=root,
+            tracked_r0_evidence=evidence,
+            source_binding={"source_commit": "a" * 40},
+        )
+    assert not (directory / distill.R4_CANDIDATE_ANCHOR_FILE).exists()
+
+
+@pytest.mark.parametrize(
+    "name", ["candidate-ledger.jsonl", "candidate-ledger.jsonl.head.json"]
+)
+def test_r4_candidate_anchor_rejects_symlinked_candidate_inputs(
+    tmp_path: Path, name: str
+) -> None:
+    evidence = (
+        Path(__file__).resolve().parents[1]
+        / "_handoff/evidence/2026-08-23-recall-distillation-recovery/r0-measured-baseline-4de2cfe3.json"
+    )
+    r0 = json.loads(evidence.read_bytes())
+    ledger = r0["production"]["ledgers"]["candidate-ledger.jsonl"]
+    root = tmp_path / "root"
+    directory = store.distillation_dir(root)
+    directory.mkdir(parents=True)
+    candidate = directory / "candidate-ledger.jsonl"
+    with candidate.open("wb") as handle:
+        handle.truncate(ledger["bytes"])
+    store.write_sealed_state(
+        directory / "candidate-ledger.jsonl.head.json",
+        {
+            "head_sha256": ledger["head_sha256"],
+            "records": ledger["records"],
+            "file_state": ledger["file_state"],
+        },
+    )
+    target = directory / f"{name}.target"
+    (directory / name).replace(target)
+    (directory / name).symlink_to(target)
+
+    with pytest.raises(distill.DistillationError, match="preflight failed"):
+        distill.bootstrap_r4_candidate_anchor(
+            root=root,
+            tracked_r0_evidence=evidence,
+            source_binding={"source_commit": "a" * 40},
+        )
+    assert not (directory / distill.R4_CANDIDATE_ANCHOR_FILE).exists()
+
+
+@pytest.mark.parametrize("input_name", ["candidate", "checkpoint"])
+def test_r4_candidate_anchor_rejects_input_drift_before_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, input_name: str
+) -> None:
+    evidence = (
+        Path(__file__).resolve().parents[1]
+        / "_handoff/evidence/2026-08-23-recall-distillation-recovery/r0-measured-baseline-4de2cfe3.json"
+    )
+    r0 = json.loads(evidence.read_bytes())
+    ledger = r0["production"]["ledgers"]["candidate-ledger.jsonl"]
+    root = tmp_path / "root"
+    directory = store.distillation_dir(root)
+    directory.mkdir(parents=True)
+    candidate = directory / "candidate-ledger.jsonl"
+    with candidate.open("wb") as handle:
+        handle.truncate(ledger["bytes"])
+    checkpoint = directory / "candidate-ledger.jsonl.head.json"
+    store.write_sealed_state(
+        checkpoint,
+        {
+            "head_sha256": ledger["head_sha256"],
+            "records": ledger["records"],
+            "file_state": ledger["file_state"],
+        },
+    )
+
+    def drift() -> dict[str, str]:
+        if input_name == "candidate":
+            with candidate.open("r+b") as handle:
+                handle.write(b"x")
+        else:
+            store.write_sealed_state(
+                checkpoint,
+                {
+                    "head_sha256": ledger["head_sha256"],
+                    "records": ledger["records"] + 1,
+                    "file_state": ledger["file_state"],
+                },
+            )
+        return {"x": "y"}
+
+    monkeypatch.setattr(distill, "_r4_critical_module_sha256", drift)
+    with pytest.raises(distill.DistillationError, match="preflight failed"):
+        distill.bootstrap_r4_candidate_anchor(
+            root=root,
+            tracked_r0_evidence=evidence,
+            source_binding={"source_commit": "a" * 40},
+        )
+    assert not (directory / distill.R4_CANDIDATE_ANCHOR_FILE).exists()
+
+
+def test_r4_candidate_anchor_rejects_busy_candidate_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence = (
+        Path(__file__).resolve().parents[1]
+        / "_handoff/evidence/2026-08-23-recall-distillation-recovery/r0-measured-baseline-4de2cfe3.json"
+    )
+    r0 = json.loads(evidence.read_bytes())
+    ledger = r0["production"]["ledgers"]["candidate-ledger.jsonl"]
+    root = tmp_path / "root"
+    directory = store.distillation_dir(root)
+    directory.mkdir(parents=True)
+    candidate = directory / "candidate-ledger.jsonl"
+    with candidate.open("wb") as handle:
+        handle.truncate(ledger["bytes"])
+    store.write_sealed_state(
+        directory / "candidate-ledger.jsonl.head.json",
+        {
+            "head_sha256": ledger["head_sha256"],
+            "records": ledger["records"],
+            "file_state": ledger["file_state"],
+        },
+    )
+    monkeypatch.setattr(distill, "_r4_critical_module_sha256", lambda: {"x": "y"})
+    candidate_lock = store.acquire_nonblocking_lock(
+        candidate.with_suffix(candidate.suffix + ".lock")
+    )
+    assert candidate_lock is not None
+    try:
+        with pytest.raises(distill.DistillationError, match="bootstrap is busy"):
+            distill.bootstrap_r4_candidate_anchor(
+                root=root,
+                tracked_r0_evidence=evidence,
+                source_binding={"source_commit": "a" * 40},
+            )
+    finally:
+        store.release_lock(candidate_lock)
     assert not (directory / distill.R4_CANDIDATE_ANCHOR_FILE).exists()
 
 
@@ -10256,21 +10426,179 @@ def test_r4_candidate_anchor_cleans_failed_readback(
         {
             "head_sha256": ledger["head_sha256"],
             "records": ledger["records"],
-            "file_state": {"size_bytes": ledger["bytes"]},
+            "file_state": ledger["file_state"],
         },
     )
     monkeypatch.setattr(distill, "_r4_critical_module_sha256", lambda: {"x": "y"})
 
-    def forged_write(path: Path, raw: bytes, backup: bool) -> None:
+    original_write = distill.atomic_write_bytes_at
+
+    def forged_write(directory_fd: int, name: str, raw: bytes) -> None:
         payload = json.loads(raw)
         payload["artifact_id"] = "0" * 64
         payload["seal_sha256"] = canonical_json.canonical_json_sha256_strict(
             {key: value for key, value in payload.items() if key != "seal_sha256"}
         )
-        path.write_bytes(canonical_json.canonical_json_bytes_strict(payload) + b"\n")
+        original_write(
+            directory_fd,
+            name,
+            canonical_json.canonical_json_bytes_strict(payload) + b"\n",
+        )
 
-    monkeypatch.setattr(distill, "atomic_write_bytes", forged_write)
+    monkeypatch.setattr(distill, "atomic_write_bytes_at", forged_write)
 
+    with pytest.raises(distill.DistillationError, match="read-back failed"):
+        distill.bootstrap_r4_candidate_anchor(
+            root=root,
+            tracked_r0_evidence=evidence,
+            source_binding={"source_commit": "a" * 40},
+        )
+    assert not (directory / distill.R4_CANDIDATE_ANCHOR_FILE).exists()
+
+
+def test_r4_candidate_anchor_cleans_pinned_directory_after_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence = (
+        Path(__file__).resolve().parents[1]
+        / "_handoff/evidence/2026-08-23-recall-distillation-recovery/r0-measured-baseline-4de2cfe3.json"
+    )
+    r0 = json.loads(evidence.read_bytes())
+    ledger = r0["production"]["ledgers"]["candidate-ledger.jsonl"]
+    root = tmp_path / "root"
+    directory = store.distillation_dir(root)
+    directory.mkdir(parents=True)
+    candidate = directory / "candidate-ledger.jsonl"
+    with candidate.open("wb") as handle:
+        handle.truncate(ledger["bytes"])
+    store.write_sealed_state(
+        directory / "candidate-ledger.jsonl.head.json",
+        {
+            "head_sha256": ledger["head_sha256"],
+            "records": ledger["records"],
+            "file_state": ledger["file_state"],
+        },
+    )
+    monkeypatch.setattr(distill, "_r4_critical_module_sha256", lambda: {"x": "y"})
+    original_write = distill.atomic_write_bytes_at
+    displaced = root / "displaced-distillation"
+
+    def replace(directory_fd: int, name: str, raw: bytes) -> None:
+        original_write(directory_fd, name, raw)
+        directory.rename(displaced)
+        directory.mkdir()
+
+    monkeypatch.setattr(distill, "atomic_write_bytes_at", replace)
+    with pytest.raises(distill.DistillationError, match="read-back failed"):
+        distill.bootstrap_r4_candidate_anchor(
+            root=root,
+            tracked_r0_evidence=evidence,
+            source_binding={"source_commit": "a" * 40},
+        )
+    assert not (directory / distill.R4_CANDIDATE_ANCHOR_FILE).exists()
+    assert not (displaced / distill.R4_CANDIDATE_ANCHOR_FILE).exists()
+
+
+def _r4_candidate_anchor_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, Path, Path, Mapping[str, Any]]:
+    evidence = (
+        Path(__file__).resolve().parents[1]
+        / "_handoff/evidence/2026-08-23-recall-distillation-recovery/r0-measured-baseline-4de2cfe3.json"
+    )
+    r0 = json.loads(evidence.read_bytes())
+    ledger = r0["production"]["ledgers"]["candidate-ledger.jsonl"]
+    root = tmp_path / "root"
+    directory = store.distillation_dir(root)
+    directory.mkdir(parents=True)
+    candidate = directory / "candidate-ledger.jsonl"
+    with candidate.open("wb") as handle:
+        handle.truncate(ledger["bytes"])
+    checkpoint = directory / "candidate-ledger.jsonl.head.json"
+    store.write_sealed_state(
+        checkpoint,
+        {
+            "head_sha256": ledger["head_sha256"],
+            "records": ledger["records"],
+            "file_state": ledger["file_state"],
+        },
+    )
+    return root, directory, evidence, candidate, checkpoint, ledger
+
+
+def test_r4_candidate_anchor_rejects_directory_replacement_before_input_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, directory, evidence, candidate, checkpoint, _ledger = (
+        _r4_candidate_anchor_fixture(tmp_path)
+    )
+    displaced = root / "displaced-distillation"
+    original_loads = distill.json.loads
+    calls = 0
+
+    def replace(raw: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        result = original_loads(raw, *args, **kwargs)
+        calls += 1
+        if calls == 1:
+            directory.rename(displaced)
+            directory.mkdir()
+            os.link(displaced / candidate.name, candidate)
+            os.link(displaced / checkpoint.name, checkpoint)
+        return result
+
+    monkeypatch.setattr(distill.json, "loads", replace)
+    monkeypatch.setattr(distill, "_r4_critical_module_sha256", lambda: {"x": "y"})
+    with pytest.raises(distill.DistillationError, match="preflight failed"):
+        distill.bootstrap_r4_candidate_anchor(
+            root=root,
+            tracked_r0_evidence=evidence,
+            source_binding={"source_commit": "a" * 40},
+        )
+    assert not (directory / distill.R4_CANDIDATE_ANCHOR_FILE).exists()
+    assert not (displaced / distill.R4_CANDIDATE_ANCHOR_FILE).exists()
+
+
+def test_r4_candidate_anchor_cleans_recursive_readback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, directory, evidence, _candidate, _checkpoint, _ledger = (
+        _r4_candidate_anchor_fixture(tmp_path)
+    )
+    monkeypatch.setattr(distill, "_r4_critical_module_sha256", lambda: {"x": "y"})
+    original_write = distill.atomic_write_bytes_at
+
+    def recursive_write(directory_fd: int, name: str, _raw: bytes) -> None:
+        original_write(
+            directory_fd,
+            name,
+            b"[" * 100_000 + b"0" + b"]" * 100_000,
+        )
+
+    monkeypatch.setattr(distill, "atomic_write_bytes_at", recursive_write)
+    with pytest.raises(distill.DistillationError, match="read-back failed"):
+        distill.bootstrap_r4_candidate_anchor(
+            root=root,
+            tracked_r0_evidence=evidence,
+            source_binding={"source_commit": "a" * 40},
+        )
+    assert not (directory / distill.R4_CANDIDATE_ANCHOR_FILE).exists()
+
+
+def test_r4_candidate_anchor_cleans_critical_module_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, directory, evidence, _candidate, _checkpoint, _ledger = (
+        _r4_candidate_anchor_fixture(tmp_path)
+    )
+    calls = 0
+
+    def critical_modules() -> dict[str, str]:
+        nonlocal calls
+        calls += 1
+        return {"x": "y" if calls == 1 else "z"}
+
+    monkeypatch.setattr(distill, "_r4_critical_module_sha256", critical_modules)
     with pytest.raises(distill.DistillationError, match="read-back failed"):
         distill.bootstrap_r4_candidate_anchor(
             root=root,

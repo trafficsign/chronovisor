@@ -20,6 +20,7 @@ import tomllib
 import unicodedata
 from collections import defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,8 +34,12 @@ from chronovisor.core import (
     runtime_config,
 )
 from chronovisor.core.durable_state import (
+    DurableStateError,
     atomic_write_bytes,
+    atomic_write_bytes_at,
+    file_lock,
     okf_writer_lock,
+    open_directory_nofollow,
     open_regular_nofollow,
     sidecar_exclusive_lock,
 )
@@ -1314,27 +1319,72 @@ def bootstrap_r4_candidate_anchor(
     """
 
     anchor_path = store.distillation_dir(root) / R4_CANDIDATE_ANCHOR_FILE
-    lock = store.acquire_nonblocking_lock(anchor_path.with_suffix(".lock"))
-    if lock is None:
-        raise DistillationError("R4 candidate anchor bootstrap is busy")
+    guards = ExitStack()
     try:
-        if anchor_path.exists():
+        try:
+            anchor_directory_fd = guards.enter_context(
+                open_directory_nofollow(anchor_path.parent)
+            )
+            anchor_directory_state = os.fstat(anchor_directory_fd)
+        except (OSError, ValueError) as exc:
+            raise DistillationError(
+                "R4 candidate anchor bootstrap preflight failed"
+            ) from exc
+        try:
+            guards.enter_context(
+                file_lock(
+                    Path(anchor_path.with_suffix(".lock").name),
+                    blocking=False,
+                    dir_fd=anchor_directory_fd,
+                )
+            )
+            guards.enter_context(
+                file_lock(
+                    Path("candidate-ledger.jsonl.lock"),
+                    blocking=False,
+                    dir_fd=anchor_directory_fd,
+                )
+            )
+        except BlockingIOError as exc:
+            raise DistillationError("R4 candidate anchor bootstrap is busy") from exc
+        except (OSError, ValueError) as exc:
+            raise DistillationError(
+                "R4 candidate anchor bootstrap preflight failed"
+            ) from exc
+        try:
+            os.stat(
+                anchor_path.name,
+                dir_fd=anchor_directory_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            pass
+        else:
             raise DistillationError("R4 candidate anchor already exists")
         try:
             with open_regular_nofollow(tracked_r0_evidence) as handle:
                 before = os.fstat(handle.fileno())
                 if before.st_size > R4_R0_EVIDENCE_MAX_BYTES:
-                    raise DistillationError("R4 candidate anchor bootstrap preflight failed")
+                    raise DistillationError(
+                        "R4 candidate anchor bootstrap preflight failed"
+                    )
                 r0_raw = handle.read(R4_R0_EVIDENCE_MAX_BYTES + 1)
                 after = os.fstat(handle.fileno())
             if (
                 len(r0_raw) > R4_R0_EVIDENCE_MAX_BYTES
                 or len(r0_raw) != before.st_size
                 or before.st_size != after.st_size
-                or (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns)
+                or (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                )
                 != (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns)
             ):
-                raise DistillationError("R4 candidate anchor bootstrap preflight failed")
+                raise DistillationError(
+                    "R4 candidate anchor bootstrap preflight failed"
+                )
             r0 = json.loads(r0_raw)
             store.verify_seal(r0, schema="chronovisor.recall-r0.v1")
             _r4_require_canonical_artifact_id(
@@ -1343,16 +1393,82 @@ def bootstrap_r4_candidate_anchor(
             checkpoint_path = (
                 store.distillation_dir(root) / "candidate-ledger.jsonl.head.json"
             )
-            checkpoint = store.read_sealed(checkpoint_path)
+            checkpoint_handle = guards.enter_context(
+                open_regular_nofollow(checkpoint_path)
+            )
+            checkpoint_before = os.fstat(checkpoint_handle.fileno())
+            checkpoint_raw = checkpoint_handle.read(R4_R0_EVIDENCE_MAX_BYTES + 1)
+            checkpoint_after = os.fstat(checkpoint_handle.fileno())
+            checkpoint_observed = checkpoint_path.lstat()
+            checkpoint_identity = (
+                checkpoint_before.st_dev,
+                checkpoint_before.st_ino,
+                checkpoint_before.st_size,
+                checkpoint_before.st_mtime_ns,
+                checkpoint_before.st_ctime_ns,
+            )
+            if (
+                len(checkpoint_raw) > R4_R0_EVIDENCE_MAX_BYTES
+                or len(checkpoint_raw) != checkpoint_before.st_size
+                or checkpoint_identity
+                != (
+                    checkpoint_after.st_dev,
+                    checkpoint_after.st_ino,
+                    checkpoint_after.st_size,
+                    checkpoint_after.st_mtime_ns,
+                    checkpoint_after.st_ctime_ns,
+                )
+                or checkpoint_identity
+                != (
+                    checkpoint_observed.st_dev,
+                    checkpoint_observed.st_ino,
+                    checkpoint_observed.st_size,
+                    checkpoint_observed.st_mtime_ns,
+                    checkpoint_observed.st_ctime_ns,
+                )
+            ):
+                raise DistillationError(
+                    "R4 candidate anchor bootstrap preflight failed"
+                )
+            checkpoint = store.verify_seal(json.loads(checkpoint_raw))
             candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
+            candidate_handle = guards.enter_context(
+                open_regular_nofollow(candidate_path)
+            )
+            candidate_before = os.fstat(candidate_handle.fileno())
+            candidate_after = os.fstat(candidate_handle.fileno())
+            candidate_observed = candidate_path.lstat()
+            candidate_identity = (
+                candidate_before.st_dev,
+                candidate_before.st_ino,
+                candidate_before.st_size,
+                candidate_before.st_mtime_ns,
+                candidate_before.st_ctime_ns,
+            )
             file_state = checkpoint.get("file_state")
+            r0_candidate = r0["production"]["ledgers"]["candidate-ledger.jsonl"]
             if (
                 not isinstance(file_state, Mapping)
-                or candidate_path.stat().st_size != file_state.get("size_bytes")
-                or checkpoint.get("records")
-                != r0["production"]["ledgers"]["candidate-ledger.jsonl"]["records"]
-                or checkpoint.get("head_sha256")
-                != r0["production"]["ledgers"]["candidate-ledger.jsonl"]["head_sha256"]
+                or file_state != r0_candidate.get("file_state")
+                or candidate_identity
+                != (
+                    candidate_after.st_dev,
+                    candidate_after.st_ino,
+                    candidate_after.st_size,
+                    candidate_after.st_mtime_ns,
+                    candidate_after.st_ctime_ns,
+                )
+                or candidate_identity
+                != (
+                    candidate_observed.st_dev,
+                    candidate_observed.st_ino,
+                    candidate_observed.st_size,
+                    candidate_observed.st_mtime_ns,
+                    candidate_observed.st_ctime_ns,
+                )
+                or candidate_before.st_size != file_state.get("size_bytes")
+                or checkpoint.get("records") != r0_candidate["records"]
+                or checkpoint.get("head_sha256") != r0_candidate["head_sha256"]
                 or not isinstance(source_binding.get("source_commit"), str)
             ):
                 raise DistillationError(
@@ -1361,6 +1477,7 @@ def bootstrap_r4_candidate_anchor(
         except (
             KeyError,
             OSError,
+            RecursionError,
             TypeError,
             ValueError,
             store.DistillationStoreError,
@@ -1373,6 +1490,57 @@ def bootstrap_r4_candidate_anchor(
             raise DistillationError(
                 "R4 candidate anchor runtime binding is unavailable"
             )
+
+        def inputs_unchanged() -> bool:
+            try:
+                anchor_directory_path_state = anchor_path.parent.lstat()
+                checkpoint_state = os.fstat(checkpoint_handle.fileno())
+                checkpoint_path_state = checkpoint_path.lstat()
+                candidate_state = os.fstat(candidate_handle.fileno())
+                candidate_path_state = candidate_path.lstat()
+            except OSError:
+                return False
+            return (
+                stat.S_ISDIR(anchor_directory_path_state.st_mode)
+                and (anchor_directory_state.st_dev, anchor_directory_state.st_ino)
+                == (
+                    anchor_directory_path_state.st_dev,
+                    anchor_directory_path_state.st_ino,
+                )
+                and checkpoint_identity
+                == (
+                    checkpoint_state.st_dev,
+                    checkpoint_state.st_ino,
+                    checkpoint_state.st_size,
+                    checkpoint_state.st_mtime_ns,
+                    checkpoint_state.st_ctime_ns,
+                )
+                == (
+                    checkpoint_path_state.st_dev,
+                    checkpoint_path_state.st_ino,
+                    checkpoint_path_state.st_size,
+                    checkpoint_path_state.st_mtime_ns,
+                    checkpoint_path_state.st_ctime_ns,
+                )
+                and candidate_identity
+                == (
+                    candidate_state.st_dev,
+                    candidate_state.st_ino,
+                    candidate_state.st_size,
+                    candidate_state.st_mtime_ns,
+                    candidate_state.st_ctime_ns,
+                )
+                == (
+                    candidate_path_state.st_dev,
+                    candidate_path_state.st_ino,
+                    candidate_path_state.st_size,
+                    candidate_path_state.st_mtime_ns,
+                    candidate_path_state.st_ctime_ns,
+                )
+            )
+
+        if not inputs_unchanged():
+            raise DistillationError("R4 candidate anchor bootstrap preflight failed")
         candidate = {
             "head_sha256": checkpoint["head_sha256"],
             "records": checkpoint["records"],
@@ -1395,10 +1563,18 @@ def bootstrap_r4_candidate_anchor(
         }
         artifact["seal_sha256"] = canonical_json.canonical_json_sha256_strict(artifact)
         encoded = canonical_json.canonical_json_bytes_strict(artifact) + b"\n"
-        atomic_write_bytes(anchor_path, encoded, backup=False)
         try:
-            with open_regular_nofollow(anchor_path) as handle:
-                created_raw = handle.read()
+            atomic_write_bytes_at(anchor_directory_fd, anchor_path.name, encoded)
+            created_fd = os.open(
+                anchor_path.name,
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=anchor_directory_fd,
+            )
+            try:
+                with os.fdopen(created_fd, "rb", closefd=False) as handle:
+                    created_raw = handle.read()
+            finally:
+                os.close(created_fd)
             created = store.verify_seal(
                 json.loads(created_raw), schema=R4_CANDIDATE_ANCHOR_SCHEMA
             )
@@ -1406,22 +1582,40 @@ def bootstrap_r4_candidate_anchor(
                 created, expected_artifact_id=str(created.get("artifact_id") or "")
             )
             if created_raw != encoded:
-                raise DistillationError("R4 candidate anchor bootstrap read-back failed")
+                raise DistillationError(
+                    "R4 candidate anchor bootstrap read-back failed"
+                )
+            if not inputs_unchanged():
+                raise DistillationError(
+                    "R4 candidate anchor bootstrap read-back failed"
+                )
+            if _r4_critical_module_sha256() != critical_modules:
+                raise DistillationError(
+                    "R4 candidate anchor bootstrap read-back failed"
+                )
         except (
             DistillationError,
+            DurableStateError,
             OSError,
+            RecursionError,
             ValueError,
             json.JSONDecodeError,
             store.DistillationStoreError,
         ) as exc:
             try:
-                anchor_path.unlink(missing_ok=True)
-            except OSError:
+                os.unlink(anchor_path.name, dir_fd=anchor_directory_fd)
+            except FileNotFoundError:
                 pass
-            raise DistillationError("R4 candidate anchor bootstrap read-back failed") from exc
+            except OSError as cleanup_exc:
+                raise DistillationError(
+                    "R4 candidate anchor bootstrap cleanup failed"
+                ) from cleanup_exc
+            raise DistillationError(
+                "R4 candidate anchor bootstrap read-back failed"
+            ) from exc
         return created
     finally:
-        store.release_lock(lock)
+        guards.close()
 
 
 def _r4_runtime_identity_projection(
