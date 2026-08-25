@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import select
+import selectors
 import stat
 import subprocess
 import sys
@@ -4526,7 +4526,9 @@ def test_feedback_writer_blocks_behind_process_lock_then_durably_appends(
     )
     assert holder.stdin is not None
     assert holder.stdout is not None
-    ready, _, _ = select.select([holder.stdout], [], [], 5.0)
+    with selectors.DefaultSelector() as selector:
+        selector.register(holder.stdout, selectors.EVENT_READ)
+        ready = selector.select(5.0)
     assert ready and holder.stdout.readline() == "locked\n"
 
     finished = threading.Event()
@@ -4694,7 +4696,9 @@ def test_concurrent_feedback_writers_preserve_prefix_and_per_writer_order(
         for writer in writers:
             assert writer.stdin is not None
             assert writer.stdout is not None
-            ready, _, _ = select.select([writer.stdout], [], [], 5.0)
+            with selectors.DefaultSelector() as selector:
+                selector.register(writer.stdout, selectors.EVENT_READ)
+                ready = selector.select(5.0)
             assert ready and writer.stdout.readline() == "ready\n"
         for writer in writers:
             assert writer.stdin is not None

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import select
+import selectors
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -2358,7 +2358,9 @@ def test_concurrent_wrong_retrieval_transactions_append_one_row_for_same_key(
         for writer in writers:
             assert writer.stdin is not None
             assert writer.stdout is not None
-            ready, _, _ = select.select([writer.stdout], [], [], 5.0)
+            with selectors.DefaultSelector() as selector:
+                selector.register(writer.stdout, selectors.EVENT_READ)
+                ready = selector.select(5.0)
             assert ready and writer.stdout.readline() == "ready\n"
         for writer in writers:
             assert writer.stdin is not None
