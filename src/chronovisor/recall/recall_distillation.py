@@ -9570,9 +9570,8 @@ def _ox_dispatch_waves(
     config: DistillationConfig,
     guard: Callable[[], None],
     evaluate: Callable[[Sequence[Any]], Mapping[str, Any]],
+    dispatch_claimed_work: Callable[..., Any],
 ) -> tuple[list[Any], bool]:
-    from chronovisor.recall.recall_distillation_dispatcher import dispatch_claimed_work
-
     results: list[Any] = []
     metadata_drift = False
     for start in range(0, len(batches), ramp_cap):
@@ -9821,6 +9820,8 @@ def _ox_dispatch_and_commit(
     # Dispatch one fixed-cap wave at a time.  The generic dispatcher remains a
     # transport primitive; only this OX layer can promote a cap after deep
     # identity, digest, and label validation below.
+    from chronovisor.recall.recall_distillation_dispatcher import dispatch_claimed_work
+
     try:
         contract = _ensure_ox_profile_contract(
             root, config, source_binding=source_binding
@@ -9862,6 +9863,7 @@ def _ox_dispatch_and_commit(
         config=config,
         guard=guard,
         evaluate=evaluate,
+        dispatch_claimed_work=dispatch_claimed_work,
     )
     expected_identity = OX_ALPHA_FIXED_IDENTITY["route_identity"]
     stopped = False
@@ -10304,9 +10306,10 @@ def _ox_candidate_indexed_snapshots(
     split_plan_id: str,
     candidate_indexed: bool,
     snapshots: Mapping[str, Mapping[str, Any]],
-) -> tuple[Path, Mapping[str, Any], Mapping[str, Mapping[str, Any]]]:
+) -> tuple[Path, Mapping[str, Any], Mapping[str, Mapping[str, Any]], Any | None]:
     candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
     candidate_state: Mapping[str, Any] = {}
+    catalog: Any | None = None
     if candidate_indexed:
         from chronovisor.recall import recall_distillation_catalog as catalog
 
@@ -10345,7 +10348,7 @@ def _ox_candidate_indexed_snapshots(
             )
         except catalog.CatalogError as exc:
             raise DistillationError("OX candidate index is unavailable") from exc
-    return candidate_path, candidate_state, snapshots
+    return candidate_path, candidate_state, snapshots, catalog
 
 
 def _run_ox_teacher_batch(
@@ -10366,7 +10369,6 @@ def _run_ox_teacher_batch(
 ) -> _TeacherBatchResult:
     """Advance, claim, dispatch, append, and commit OX work in that order."""
 
-    from chronovisor.recall import recall_distillation_catalog as catalog
     from chronovisor.recall.recall_distillation_workset import DistillationWorkset
 
     teacher = teachers.get(OX_TEACHER_ROLE)
@@ -10424,12 +10426,14 @@ def _run_ox_teacher_batch(
         split_plan_id = ""
         age_bands = {}
 
-    candidate_path, candidate_state, snapshots = _ox_candidate_indexed_snapshots(
-        root=root,
-        workset=workset,
-        split_plan_id=split_plan_id,
-        candidate_indexed=candidate_indexed,
-        snapshots=snapshots,
+    candidate_path, candidate_state, snapshots, catalog = (
+        _ox_candidate_indexed_snapshots(
+            root=root,
+            workset=workset,
+            split_plan_id=split_plan_id,
+            candidate_indexed=candidate_indexed,
+            snapshots=snapshots,
+        )
     )
 
     prepared = _ox_prepare_tasks(
@@ -10560,7 +10564,7 @@ def _run_ox_teacher_batch(
     claims = _ox_restore_claims(
         root=root,
         candidate_path=candidate_path,
-        catalog=catalog if candidate_indexed else None,
+        catalog=catalog,
         candidate_indexed=candidate_indexed,
         claims=claims,
         tasks=tasks,
@@ -13789,6 +13793,8 @@ def _run_local_teacher_route(
             }
         )
 
+    # The caller keeps task-to-label projection; the helper seals that batch.
+    # This preserves the source check before the terminal append/commit boundary.
     return _commit_local_teacher_labels(
         workset=workset,
         config=config,
