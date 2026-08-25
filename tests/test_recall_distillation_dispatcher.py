@@ -7,6 +7,7 @@ import pytest
 
 from chronovisor.recall.recall_distillation_dispatcher import (
     DispatchFailure,
+    DispatchGuardDenied,
     SingleTeacherDispatcher,
     dispatch_claimed_work,
 )
@@ -163,6 +164,73 @@ def test_retry_backoff_is_bounded_and_injected() -> None:
     assert result.attempts == 3
     assert result.rate_limited is True
     assert sleeps == [0.5, 0.75]
+
+
+def test_guard_denial_stops_before_provider_attempt_and_defers_tail() -> None:
+    provider_calls = 0
+    sleeps: list[float] = []
+
+    def evaluate(_: int) -> int:
+        nonlocal provider_calls
+        provider_calls += 1
+        return 1
+
+    def deny() -> None:
+        raise DispatchGuardDenied()
+
+    results = dispatch_claimed_work(
+        range(4),
+        evaluate,
+        max_inflight=2,
+        max_retries=3,
+        sleep=sleeps.append,
+        before_attempt=deny,
+    )
+
+    assert provider_calls == 0
+    assert sleeps == []
+    assert any(result.status == "stopped" for result in results)
+    assert all(result.status in {"stopped", "deferred"} for result in results)
+    assert all(result.category == "ox_guard_denied" for result in results)
+    assert all(result.attempts == 0 for result in results)
+
+
+def test_guard_denial_after_retry_counts_only_completed_provider_attempts() -> None:
+    provider_calls = 0
+    guard_calls = 0
+    sleeps: list[float] = []
+
+    def evaluate(_: int) -> int:
+        nonlocal provider_calls
+        provider_calls += 1
+        raise DispatchFailure("http_429")
+
+    def deny_after_one_attempt() -> None:
+        nonlocal guard_calls
+        guard_calls += 1
+        if guard_calls == 2:
+            raise DispatchGuardDenied()
+
+    result = dispatch_claimed_work(
+        [0],
+        evaluate,
+        max_retries=3,
+        sleep=sleeps.append,
+        jitter_ratio=0,
+        before_attempt=deny_after_one_attempt,
+    )[0]
+
+    assert provider_calls == 1
+    assert guard_calls == 2
+    assert result.status == "stopped"
+    assert result.category == "ox_guard_denied"
+    assert result.attempts == 1
+    assert sleeps == [1.0]
+
+
+def test_guard_rejects_non_callable() -> None:
+    with pytest.raises(ValueError, match="before_attempt"):
+        SingleTeacherDispatcher(lambda item: item, before_attempt=True)  # type: ignore[arg-type]
 
 
 def test_redacted_teacher_failure_envelope_uses_same_retry_policy() -> None:

@@ -18,6 +18,7 @@ from chronovisor.core.openai_compatible_adapter import (
 )
 from chronovisor.core.provider_profiles import generic_openai_profile
 from chronovisor.recall import recall_distillation_remote_teacher as remote
+from chronovisor.recall.recall_distillation_dispatcher import DispatchGuardDenied
 from chronovisor.recall.recall_distillation_remote_teacher import (
     _PROMPT_INPUT_SEPARATOR,
     _PROMPT_PREFIX,
@@ -504,6 +505,35 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
     assert '"candidate_id":{"enum":["candidate-1"]' in prompt
     assert '"additionalProperties":false' in prompt
     assert CANARY not in cast(bytes, sender.calls[0].data).decode("utf-8")
+
+
+def test_guarded_success_runs_final_guard_before_backend_call(tmp_path: Path) -> None:
+    sender = FakeSender(_response(_label_response()))
+    teacher = _teacher(tmp_path, sender)
+    guard_calls = 0
+
+    def allow() -> None:
+        nonlocal guard_calls
+        guard_calls += 1
+
+    result = teacher.evaluate_guarded(_payload(), before_egress=allow)
+
+    assert result["labels"][0]["verdict"] == "relevant"
+    assert guard_calls == 1
+    assert len(sender.calls) == 1
+
+
+def test_guarded_denial_propagates_without_backend_call(tmp_path: Path) -> None:
+    sender = FakeSender(_response(_label_response()))
+    teacher = _teacher(tmp_path, sender)
+
+    def deny() -> None:
+        raise DispatchGuardDenied()
+
+    with pytest.raises(DispatchGuardDenied):
+        teacher.evaluate_guarded(_payload(), before_egress=deny)
+
+    assert sender.calls == []
 
 
 def test_fixed_identity_is_payload_independent_but_request_digest_is_normalized() -> (

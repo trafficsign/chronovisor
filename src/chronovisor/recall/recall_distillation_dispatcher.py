@@ -30,6 +30,7 @@ _STOPPED = {
     "model_unavailable",
     "route_model_drift",
     "kill_switch",
+    "ox_guard_denied",
 }
 _FAILURE_STAGES = frozenset(
     {
@@ -79,6 +80,14 @@ class DispatchStopped(RuntimeError):
     def __init__(self, category: str = "kill_switch") -> None:
         self.category = _normalize_category(category)
         super().__init__(self.category)
+
+
+class DispatchGuardDenied(DispatchStopped):
+    """The egress guard denied an attempt before provider work began."""
+
+    def __init__(self, message: str | None = None) -> None:
+        self.category = "ox_guard_denied"
+        RuntimeError.__init__(self, message or self.category)
 
 
 @dataclass(frozen=True)
@@ -205,6 +214,7 @@ class SingleTeacherDispatcher(Generic[T, R]):
         clock: Callable[[], float] = time.monotonic,
         random_fn: Callable[[], float] = _random.random,
         valid_result_count: Callable[[R], int] | None = None,
+        before_attempt: Callable[[], None] | None = None,
     ) -> None:
         if not 1 <= max_inflight <= 10:
             raise ValueError("max_inflight must be between 1 and 10")
@@ -214,6 +224,8 @@ class SingleTeacherDispatcher(Generic[T, R]):
             raise ValueError("backoff values must be non-negative")
         if jitter_ratio < 0:
             raise ValueError("jitter_ratio must be non-negative")
+        if before_attempt is not None and not callable(before_attempt):
+            raise ValueError("before_attempt must be callable or None")
         if min_valid_results_per_cap < 1:
             raise ValueError("min_valid_results_per_cap must be positive")
         if (
@@ -248,6 +260,7 @@ class SingleTeacherDispatcher(Generic[T, R]):
         self.clock = clock
         self.random_fn: Callable[[], float] = random_fn
         self.valid_result_count = valid_result_count or (lambda _value: 1)
+        self.before_attempt = before_attempt
 
     def dispatch(self, claimed_work: Sequence[T]) -> list[DispatchResult[T, R]]:
         """Evaluate all work in input order; never writes caller-owned state."""
@@ -449,6 +462,24 @@ class SingleTeacherDispatcher(Generic[T, R]):
                     )
                 )
             try:
+                if self.before_attempt is not None:
+                    self.before_attempt()
+            except DispatchGuardDenied as error:
+                with stop_reason_lock:
+                    if not stop_reason:
+                        stop_reason.append(error.category)
+                stop_event.set()
+                return _Attempt(
+                    DispatchResult(
+                        work,
+                        "stopped",
+                        error=error,
+                        category=error.category,
+                        attempts=attempt_number - 1,
+                        rate_limited=rate_limited,
+                    )
+                )
+            try:
                 value = self.evaluate(work)
                 failure = _result_failure(value)
                 if failure is not None:
@@ -458,6 +489,21 @@ class SingleTeacherDispatcher(Generic[T, R]):
                         stage=stage,
                         request_id=request_id,
                     )
+            except DispatchGuardDenied as error:
+                with stop_reason_lock:
+                    if not stop_reason:
+                        stop_reason.append(error.category)
+                stop_event.set()
+                return _Attempt(
+                    DispatchResult(
+                        work,
+                        "stopped",
+                        error=error,
+                        category=error.category,
+                        attempts=attempt_number - 1,
+                        rate_limited=rate_limited,
+                    )
+                )
             except Exception as error:
                 category = _category(error)
                 if category in _STOPPED:
@@ -538,6 +584,7 @@ def dispatch_claimed_work(
 
 __all__ = [
     "DispatchFailure",
+    "DispatchGuardDenied",
     "DispatchResult",
     "DispatchStopped",
     "SingleTeacherDispatcher",

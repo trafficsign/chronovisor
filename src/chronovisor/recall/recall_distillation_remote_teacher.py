@@ -16,7 +16,7 @@ import os
 import re
 import stat
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -825,6 +825,16 @@ class OpenCodeOxAlphaTeacher:
         )
 
     def evaluate(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        return self.evaluate_guarded(payload)
+
+    def evaluate_guarded(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        before_egress: Callable[[], None] | None = None,
+    ) -> Mapping[str, Any]:
+        if before_egress is not None and not callable(before_egress):
+            raise ValueError("before_egress must be callable or None")
         if not self.enabled:
             return self._failure("remote_teacher_disabled")
         if not isinstance(payload, Mapping):
@@ -839,6 +849,8 @@ class OpenCodeOxAlphaTeacher:
         if response_metadata is None:
             return self._failure("remote_payload_rejected")
         request_digest = str(response_metadata["_request_digest"])
+        if before_egress is not None:
+            before_egress()
         try:
             result = self._backend.generate(
                 GenerationRequest(
