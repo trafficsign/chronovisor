@@ -221,6 +221,78 @@ def test_default_preflight_does_not_adopt_the_legacy_root(tmp_path: Path) -> Non
     assert not list(root.glob("*.json"))
 
 
+def _assert_preflight_output(result: dict[str, object], output: Path) -> None:
+    receipt = CUTOVER._read_sealed_regular(output, schema=CUTOVER.CUTOVER_SCHEMA)
+    assert result["output"] == receipt
+    assert {
+        key: value
+        for key, value in receipt.items()
+        if key not in {"schema", "namespace", "artifact_id", "seal_sha256"}
+    } == {key: value for key, value in result.items() if key != "output"}
+
+
+def test_preflight_variants_persist_the_required_output(tmp_path: Path) -> None:
+    root, offline, r0 = _fixture(tmp_path)
+    initial_output = tmp_path / "initial-preflight.json"
+    initial = CUTOVER.cutover(
+        root=root,
+        offline_evidence=offline,
+        r0_evidence=r0,
+        source_commit=SOURCE["source_commit"],
+        output=initial_output,
+    )
+    assert initial["verdict"] == "preflight"
+    _assert_preflight_output(initial, initial_output)
+
+    completed = _run(root, offline, r0)
+    resume_output = tmp_path / "resume-preflight.json"
+    resumed = CUTOVER.cutover(
+        root=root,
+        offline_evidence=offline,
+        r0_evidence=r0,
+        source_commit=SOURCE["source_commit"],
+        output=resume_output,
+    )
+    assert resumed["verdict"] == "resume-preflight"
+    _assert_preflight_output(resumed, resume_output)
+
+    rollback_output = tmp_path / "rollback-preflight.json"
+    rolled = CUTOVER.rollback(
+        root=root,
+        operation_id=Path(str(completed["archive"])).name,
+        output=rollback_output,
+    )
+    assert rolled["verdict"] == "rollback-preflight"
+    _assert_preflight_output(rolled, rollback_output)
+
+
+def test_cli_preflight_persists_required_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, offline, r0 = _fixture(tmp_path)
+    output = tmp_path / "cli-preflight.json"
+
+    exit_code = CUTOVER.main(
+        [
+            "--root",
+            str(root),
+            "--offline-evidence",
+            str(offline),
+            "--r0-evidence",
+            str(r0),
+            "--source-commit",
+            SOURCE["source_commit"],
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["verdict"] == "preflight"
+    _assert_preflight_output(result, output)
+
+
 def test_output_inside_root_is_rejected_for_preflight_and_execute(
     tmp_path: Path,
 ) -> None:

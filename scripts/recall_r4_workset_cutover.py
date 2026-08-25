@@ -1066,7 +1066,7 @@ def cutover(
             if str(exc) != "local R4 root authority is missing":
                 raise
             authority = None
-        return {
+        result = {
             "verdict": "resume-preflight" if manifest_resume else "preflight",
             "root": str(root),
             "authority": authority,
@@ -1079,6 +1079,9 @@ def cutover(
             "provider_calls": 0,
             "ox_enabled": False,
         }
+        if output is not None:
+            result["output"] = _atomic_output(output, result)
+        return result
     # This explicit migration is deliberately before all queue mutations; normal
     # bootstrap must never adopt a populated legacy distillation directory.
     try:
@@ -1348,12 +1351,15 @@ def rollback(
     _validate_archive_shape(archive_root)
     _validate_completion(archive_root, manifest)
     if not execute:
-        return {
+        result = {
             "verdict": "rollback-preflight",
             "operation_id": operation_id,
             "current_sha256": _sha256(old),
             "legacy": legacy,
         }
+        if output is not None:
+            result["output"] = _atomic_output(output, result)
+        return result
     with _cutover_locks(root):
         if _directory_identity(archive_root) != archive_identity:
             raise CutoverError("rollback archive changed")
