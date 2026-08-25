@@ -1022,8 +1022,35 @@ def test_ox_profile_requires_explicit_enable_and_builds_one_remote_teacher(
     from chronovisor.core import (
         llm_config,
         llm_security,
+        ollama,
     )
     from chronovisor.recall import recall_distillation_remote_teacher as remote
+
+    local_roles = (
+        "recall.distill.answer_generator",
+        "recall.distill.utility_judge",
+    )
+    local_routes = tuple(
+        SimpleNamespace(
+            role=role,
+            provider="ollama",
+            model=f"model-{index}",
+            location="local",
+            structured_output=True,
+        )
+        for index, role in enumerate(local_roles)
+    )
+    monkeypatch.setattr(
+        ollama, "runtime_generation_routes", lambda _roles: local_routes
+    )
+    monkeypatch.setattr(
+        ollama,
+        "runtime_generation_route_fingerprints",
+        lambda _routes: {
+            local_roles[0]: "a" * 64,
+            local_roles[1]: "b" * 64,
+        },
+    )
 
     class RemoteTeacher:
         local = False
