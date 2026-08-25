@@ -91,6 +91,7 @@ R4_RECEIPT_SCHEMA = "chronovisor.recall-r4-receipt.v1"
 R4_DIRECTORY_AUTHORITY_SCHEMA = "chronovisor.recall-r4-directory-authority.v1"
 R4_OFFLINE_BOOTSTRAP_SCHEMA = "chronovisor.recall-r4-offline-bootstrap.v1"
 R4_OFFLINE_BOOTSTRAP_MAX_BYTES = 8 * 1024 * 1024
+R4_R0_EVIDENCE_MAX_BYTES = 1024 * 1024
 R4_R0_EVIDENCE_ID = "4de2cfe3f33e5c9c5153b264ebee8fae24d814856e0ac339e53c3077dc7efb33"
 OX_RAMP_RECEIPTS_PER_CAP = 20
 _OX_EXPIRY_RE = re.compile(
@@ -1283,6 +1284,25 @@ def _r4_critical_module_sha256() -> dict[str, str]:
     return result
 
 
+def _r4_require_canonical_artifact_id(
+    payload: Mapping[str, Any], *, expected_artifact_id: str
+) -> None:
+    observed = payload.get("artifact_id")
+    if (
+        not isinstance(observed, str)
+        or observed != expected_artifact_id
+        or canonical_json.canonical_json_sha256_strict(
+            {
+                key: value
+                for key, value in payload.items()
+                if key not in {"artifact_id", "seal_sha256"}
+            }
+        )
+        != observed
+    ):
+        raise DistillationError("R4 artifact identity is invalid")
+
+
 def bootstrap_r4_candidate_anchor(
     *, root: Path, tracked_r0_evidence: Path, source_binding: Mapping[str, str]
 ) -> dict[str, Any]:
@@ -1301,8 +1321,25 @@ def bootstrap_r4_candidate_anchor(
         if anchor_path.exists():
             raise DistillationError("R4 candidate anchor already exists")
         try:
-            r0 = json.loads(tracked_r0_evidence.read_bytes())
+            with open_regular_nofollow(tracked_r0_evidence) as handle:
+                before = os.fstat(handle.fileno())
+                if before.st_size > R4_R0_EVIDENCE_MAX_BYTES:
+                    raise DistillationError("R4 candidate anchor bootstrap preflight failed")
+                r0_raw = handle.read(R4_R0_EVIDENCE_MAX_BYTES + 1)
+                after = os.fstat(handle.fileno())
+            if (
+                len(r0_raw) > R4_R0_EVIDENCE_MAX_BYTES
+                or len(r0_raw) != before.st_size
+                or before.st_size != after.st_size
+                or (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns)
+            ):
+                raise DistillationError("R4 candidate anchor bootstrap preflight failed")
+            r0 = json.loads(r0_raw)
             store.verify_seal(r0, schema="chronovisor.recall-r0.v1")
+            _r4_require_canonical_artifact_id(
+                r0, expected_artifact_id=R4_R0_EVIDENCE_ID
+            )
             checkpoint_path = (
                 store.distillation_dir(root) / "candidate-ledger.jsonl.head.json"
             )
@@ -1310,8 +1347,7 @@ def bootstrap_r4_candidate_anchor(
             candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
             file_state = checkpoint.get("file_state")
             if (
-                r0.get("artifact_id") != R4_R0_EVIDENCE_ID
-                or not isinstance(file_state, Mapping)
+                not isinstance(file_state, Mapping)
                 or candidate_path.stat().st_size != file_state.get("size_bytes")
                 or checkpoint.get("records")
                 != r0["production"]["ledgers"]["candidate-ledger.jsonl"]["records"]
@@ -1348,9 +1384,7 @@ def bootstrap_r4_candidate_anchor(
             "namespace": "recall-distillation",
             "kind": "r4-candidate-anchor",
             "r0_artifact_id": R4_R0_EVIDENCE_ID,
-            "r0_file_sha256": hashlib.sha256(
-                tracked_r0_evidence.read_bytes()
-            ).hexdigest(),
+            "r0_file_sha256": hashlib.sha256(r0_raw).hexdigest(),
             "bootstrap_source_commit": source_binding["source_commit"],
             "candidate_checkpoint": candidate,
             "critical_module_sha256": critical_modules,
@@ -1360,14 +1394,32 @@ def bootstrap_r4_candidate_anchor(
             **unsigned,
         }
         artifact["seal_sha256"] = canonical_json.canonical_json_sha256_strict(artifact)
-        atomic_write_bytes(
-            anchor_path,
-            canonical_json.canonical_json_bytes_strict(artifact) + b"\n",
-            backup=False,
-        )
-        return store.verify_seal(
-            json.loads(anchor_path.read_bytes()), schema=R4_CANDIDATE_ANCHOR_SCHEMA
-        )
+        encoded = canonical_json.canonical_json_bytes_strict(artifact) + b"\n"
+        atomic_write_bytes(anchor_path, encoded, backup=False)
+        try:
+            with open_regular_nofollow(anchor_path) as handle:
+                created_raw = handle.read()
+            created = store.verify_seal(
+                json.loads(created_raw), schema=R4_CANDIDATE_ANCHOR_SCHEMA
+            )
+            _r4_require_canonical_artifact_id(
+                created, expected_artifact_id=str(created.get("artifact_id") or "")
+            )
+            if created_raw != encoded:
+                raise DistillationError("R4 candidate anchor bootstrap read-back failed")
+        except (
+            DistillationError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+            store.DistillationStoreError,
+        ) as exc:
+            try:
+                anchor_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise DistillationError("R4 candidate anchor bootstrap read-back failed") from exc
+        return created
     finally:
         store.release_lock(lock)
 
