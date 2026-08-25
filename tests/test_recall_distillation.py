@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import stat
 import threading
@@ -9742,6 +9743,441 @@ def test_local_r4_root_authority_never_tofus_a_replaced_root_after_deletion(
         distill._r4_distillation_root_authority(tmp_path, register=False)
 
     assert {path.name for path in distillation_root.iterdir()} == {"sentinel"}
+
+
+def _legacy_r4_root_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
+    from chronovisor.core.durable_state import okf_writer_lock
+
+    root = tmp_path / "legacy-root"
+    with okf_writer_lock(root):
+        pass
+    distillation = store.distillation_dir(root)
+    distillation.mkdir()
+    workset_path = distillation / "ox-workset.sqlite3"
+    with sqlite3.connect(workset_path) as connection:
+        connection.execute(
+            "CREATE TABLE work_items (state TEXT, lease_id TEXT, lease_owner TEXT, lease_expires_at REAL)"
+        )
+    workset_path.with_name(f"{workset_path.name}-wal").touch()
+    (distillation / "candidate-ledger.jsonl").write_text("candidate\n")
+    (distillation / "candidate-ledger.jsonl.head.json").write_text("checkpoint\n")
+    (distillation / "distillation-worker.lock").touch()
+    (root / "config.toml").write_text("[recall_distillation]\nenabled = true\n")
+    source = {
+        "source_commit": "a" * 40,
+        "source_tree_sha256": "b" * 64,
+        "source_ox_identity_sha256": "c" * 64,
+    }
+    return root, tmp_path / "offline-bootstrap.json", source
+
+
+def _legacy_r4_file_state(path: Path) -> dict[str, int | str] | None:
+    if not path.exists():
+        return None
+    data = path.read_bytes()
+    observed = path.stat()
+    return {
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size_bytes": observed.st_size,
+        "st_dev": observed.st_dev,
+        "st_ino": observed.st_ino,
+        "st_mtime_ns": observed.st_mtime_ns,
+        "st_ctime_ns": observed.st_ctime_ns,
+    }
+
+
+def _write_legacy_r4_evidence(
+    root: Path, path: Path, source: Mapping[str, str], *, captured_at: int = 1
+) -> None:
+    distillation = store.distillation_dir(root)
+    after = {
+        "candidate": _legacy_r4_file_state(distillation / "candidate-ledger.jsonl"),
+        "candidate_anchor": _legacy_r4_file_state(
+            distillation / distill.R4_CANDIDATE_ANCHOR_FILE
+        ),
+        "candidate_checkpoint": _legacy_r4_file_state(
+            distillation / "candidate-ledger.jsonl.head.json"
+        ),
+        "config": _legacy_r4_file_state(root / "config.toml"),
+        "distillation_lock": _legacy_r4_file_state(
+            distillation / "distillation-worker.lock"
+        ),
+        "workset": _legacy_r4_file_state(distillation / "ox-workset.sqlite3"),
+        "workset_journal": _legacy_r4_file_state(
+            distillation / "ox-workset.sqlite3-journal"
+        ),
+        "workset_shm": _legacy_r4_file_state(distillation / "ox-workset.sqlite3-shm"),
+        "workset_wal": _legacy_r4_file_state(distillation / "ox-workset.sqlite3-wal"),
+    }
+    unsigned = {
+        "captured_at_unix": captured_at,
+        "kind": "r4-offline-bootstrap-receipt",
+        "namespace": "recall-distillation",
+        "production": {
+            "root": str(root),
+            "unchanged": True,
+            "before": after,
+            "after": after,
+        },
+        "schema": distill.R4_OFFLINE_BOOTSTRAP_SCHEMA,
+        "scope": {
+            "provider_calls": 0,
+            "ox_enabled": False,
+            "owned_clone_only": True,
+            "production_certification": False,
+            "r4_checkbox_complete": False,
+        },
+        "source": {"binding": dict(source), "commit": source["source_commit"]},
+        "verdict": "passed",
+    }
+    artifact_id = canonical_json.canonical_json_sha256_strict(unsigned)
+    payload = {"artifact_id": artifact_id, **unsigned}
+    payload["seal_sha256"] = canonical_json.canonical_json_sha256_strict(payload)
+    path.write_bytes(canonical_json.canonical_json_bytes_strict(payload) + b"\n")
+
+
+def _migrate_legacy_r4_root(root: Path, evidence: Path, source: Mapping[str, str]) -> tuple[int, int]:
+    return distill.migrate_r4_legacy_distillation_root_authority(
+        root=root,
+        offline_bootstrap_evidence=evidence,
+        expected_source_binding=source,
+    )
+
+
+def test_legacy_r4_root_migration_is_explicit_and_verifiable(tmp_path: Path) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+
+    with pytest.raises(distill.DistillationError, match="bootstrap is untrusted"):
+        distill.bootstrap_r4_distillation_root_authority(root)
+    observed = _migrate_legacy_r4_root(root, evidence, source)
+
+    assert distill._r4_distillation_root_authority(root, register=False) == observed
+    assert _migrate_legacy_r4_root(root, evidence, source) == observed
+
+
+def test_legacy_r4_root_migration_accepts_only_shm_time_drift(tmp_path: Path) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    shm = store.distillation_dir(root) / "ox-workset.sqlite3-shm"
+    shm.write_bytes(b"same")
+    _write_legacy_r4_evidence(root, evidence, source)
+    now = time.time_ns() + 1_000_000
+    os.utime(shm, ns=(now, now))
+    assert _migrate_legacy_r4_root(root, evidence, source)
+
+    other_root, other_evidence, other_source = _legacy_r4_root_fixture(tmp_path / "other")
+    other_shm = store.distillation_dir(other_root) / "ox-workset.sqlite3-shm"
+    other_shm.write_bytes(b"same")
+    _write_legacy_r4_evidence(other_root, other_evidence, other_source)
+    other_shm.write_bytes(b"different")
+    with pytest.raises(distill.DistillationError, match="content drift"):
+        _migrate_legacy_r4_root(other_root, other_evidence, other_source)
+
+
+@pytest.mark.parametrize("fault", ["unsealed", "source", "root", "lease"])
+def test_legacy_r4_root_migration_rejects_untrusted_preflight(
+    tmp_path: Path, fault: str
+) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+    if fault == "unsealed":
+        payload = json.loads(evidence.read_bytes())
+        payload["seal_sha256"] = "0" * 64
+        evidence.write_text(json.dumps(payload))
+    elif fault == "source":
+        source = {**source, "source_tree_sha256": "d" * 64}
+    elif fault == "root":
+        payload = json.loads(evidence.read_bytes())
+        payload["production"]["root"] = str(tmp_path / "wrong")
+        payload["seal_sha256"] = canonical_json.canonical_json_sha256_strict(
+            {key: value for key, value in payload.items() if key != "seal_sha256"}
+        )
+        evidence.write_bytes(canonical_json.canonical_json_bytes_strict(payload))
+    else:
+        with sqlite3.connect(store.distillation_dir(root) / "ox-workset.sqlite3") as connection:
+            connection.execute(
+                "INSERT INTO work_items VALUES ('leased', 'lease', 'owner', 1.0)"
+            )
+        _write_legacy_r4_evidence(root, evidence, source)
+
+    with pytest.raises(distill.DistillationError):
+        _migrate_legacy_r4_root(root, evidence, source)
+    assert not list(root.glob("*.json"))
+
+
+def test_legacy_r4_root_migration_rechecks_before_immutable_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+    original = distill._r4_legacy_offline_bootstrap
+    calls = 0
+
+    def drift(*args: object, **kwargs: object) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        result = original(*args, **kwargs)
+        if calls == 2:
+            (store.distillation_dir(root) / "candidate-ledger.jsonl").write_text("drift\n")
+        return result
+
+    monkeypatch.setattr(distill, "_r4_legacy_offline_bootstrap", drift)
+    with pytest.raises(distill.DistillationError):
+        _migrate_legacy_r4_root(root, evidence, source)
+    assert not list(root.glob("*.json"))
+
+
+def test_legacy_r4_root_migration_rejects_evidence_replacement_after_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+    original = distill._r4_legacy_offline_bootstrap
+    calls = 0
+
+    def replace(*args: object, **kwargs: object) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            _write_legacy_r4_evidence(root, evidence, source, captured_at=2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(distill, "_r4_legacy_offline_bootstrap", replace)
+    with pytest.raises(distill.DistillationError, match="evidence changed"):
+        _migrate_legacy_r4_root(root, evidence, source)
+    assert not list(root.glob("*.json"))
+
+
+def test_legacy_r4_root_migration_rejects_directory_replacement_after_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+    original = distill._r4_legacy_offline_bootstrap
+    calls = 0
+
+    def replace(*args: object, **kwargs: object) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        result = original(*args, **kwargs)
+        if calls == 2:
+            directory = store.distillation_dir(root)
+            directory.rename(root / "displaced-distillation")
+            directory.mkdir()
+        return result
+
+    monkeypatch.setattr(distill, "_r4_legacy_offline_bootstrap", replace)
+    with pytest.raises(distill.DistillationError, match="content drift"):
+        _migrate_legacy_r4_root(root, evidence, source)
+    assert not list(root.glob("*.json"))
+
+
+def test_legacy_r4_root_migration_cleans_authority_after_write_boundary_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+    original = store.write_immutable_pinned
+    displaced = root.with_name("displaced-root")
+
+    def replace(
+        directory: Path, payload: Mapping[str, Any], **kwargs: Any
+    ) -> tuple[str, Path, dict[str, Any]]:
+        before_persist = kwargs.pop("before_persist")
+
+        def race() -> None:
+            before_persist()
+            root.rename(displaced)
+            root.mkdir()
+
+        return original(directory, payload, before_persist=race, **kwargs)
+
+    monkeypatch.setattr(distill.store, "write_immutable_pinned", replace)
+    with pytest.raises(distill.DistillationError):
+        _migrate_legacy_r4_root(root, evidence, source)
+    assert not list(root.glob("*.json"))
+    assert not list(displaced.glob("*.json"))
+
+
+def test_legacy_r4_root_migration_rechecks_config_after_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+    original = store.write_immutable_pinned
+
+    def replace(
+        directory: Path, payload: Mapping[str, Any], **kwargs: Any
+    ) -> tuple[str, Path, dict[str, Any]]:
+        before_persist = kwargs.pop("before_persist")
+
+        def race() -> None:
+            before_persist()
+            (root / "config.toml").write_text("[recall.distillation]\nox_enabled = true\n")
+
+        return original(directory, payload, before_persist=race, **kwargs)
+
+    monkeypatch.setattr(distill.store, "write_immutable_pinned", replace)
+    with pytest.raises(distill.DistillationError):
+        _migrate_legacy_r4_root(root, evidence, source)
+    assert not list(root.glob("*.json"))
+
+
+@pytest.mark.parametrize("config", ["[recall.distillation]\nox_enabled = true\n", "not toml = ["])
+def test_legacy_r4_root_migration_rechecks_actual_ox_config(
+    tmp_path: Path, config: str
+) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    (root / "config.toml").write_text(config)
+    _write_legacy_r4_evidence(root, evidence, source)
+
+    with pytest.raises(distill.DistillationError):
+        _migrate_legacy_r4_root(root, evidence, source)
+    assert not list(root.glob("*.json"))
+
+
+def test_legacy_r4_root_migration_bounds_offline_evidence_read(tmp_path: Path) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+    evidence.write_bytes(b"[" + b" " * distill.R4_OFFLINE_BOOTSTRAP_MAX_BYTES)
+
+    with pytest.raises(distill.DistillationError, match="evidence is invalid"):
+        _migrate_legacy_r4_root(root, evidence, source)
+    assert not list(root.glob("*.json"))
+
+
+def test_legacy_r4_root_migration_rejects_busy_worker_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+    monkeypatch.setattr(distill.store, "acquire_nonblocking_lock", lambda _path: None)
+
+    with pytest.raises(distill.DistillationError, match="is busy"):
+        _migrate_legacy_r4_root(root, evidence, source)
+    assert not list(root.glob("*.json"))
+
+
+def test_legacy_r4_root_migration_rejects_different_evidence_after_adoption(
+    tmp_path: Path,
+) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+    _migrate_legacy_r4_root(root, evidence, source)
+    _write_legacy_r4_evidence(root, evidence, source, captured_at=2)
+
+    with pytest.raises(distill.DistillationError, match="is invalid"):
+        _migrate_legacy_r4_root(root, evidence, source)
+
+
+def test_legacy_r4_root_migration_remeasures_current_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+    monkeypatch.setattr(
+        distill,
+        "ox_alpha_source_binding",
+        lambda: {**source, "source_tree_sha256": "d" * 64},
+    )
+
+    with pytest.raises(distill.DistillationError, match="evidence is invalid"):
+        _migrate_legacy_r4_root(root, evidence, source)
+    assert not list(root.glob("*.json"))
+
+
+def test_legacy_r4_root_migration_normalizes_source_probe_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+    monkeypatch.setattr(
+        distill,
+        "ox_alpha_source_binding",
+        lambda: (_ for _ in ()).throw(ValueError("unavailable")),
+    )
+
+    with pytest.raises(distill.DistillationError, match="source is invalid"):
+        _migrate_legacy_r4_root(root, evidence, source)
+    assert not list(root.glob("*.json"))
+
+
+def test_legacy_r4_root_verifier_rejects_two_authorities(tmp_path: Path) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+    _migrate_legacy_r4_root(root, evidence, source)
+    normal_id = canonical_json.canonical_json_sha256_strict(
+        {"kind": "local-r4-distillation-root-authority"}
+    )
+    identity = store.pinned_directory_identity(root, create=False)
+    directory = store.pinned_directory_identity(store.distillation_dir(root), create=False)
+    store.write_immutable_pinned(
+        root,
+        {
+            "kind": "local-r4-distillation-root-authority",
+            "directory_identity": {"device": directory[0], "inode": directory[1]},
+        },
+        schema=distill.R4_DIRECTORY_AUTHORITY_SCHEMA,
+        artifact_id=normal_id,
+        expected_directory_identity=identity,
+    )
+
+    with pytest.raises(distill.DistillationError, match="conflicts"):
+        distill._r4_distillation_root_authority(root, register=False)
+
+
+def test_normal_r4_root_bootstrap_rejects_existing_legacy_authority(
+    tmp_path: Path,
+) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+    _migrate_legacy_r4_root(root, evidence, source)
+    previous = store.distillation_dir(root)
+    previous.rename(root / "displaced-distillation")
+
+    with pytest.raises(distill.DistillationError, match="legacy migration exists"):
+        distill.bootstrap_r4_distillation_root_authority(root)
+    assert not store.distillation_dir(root).exists()
+
+
+def test_normal_and_legacy_r4_root_bootstrap_are_mutually_exclusive(
+    tmp_path: Path,
+) -> None:
+    root, evidence, source = _legacy_r4_root_fixture(tmp_path)
+    _write_legacy_r4_evidence(root, evidence, source)
+    barrier = threading.Barrier(2)
+    results: list[object] = []
+
+    def migrate() -> None:
+        barrier.wait()
+        try:
+            results.append(_migrate_legacy_r4_root(root, evidence, source))
+        except distill.DistillationError as exc:
+            results.append(exc)
+
+    def bootstrap() -> None:
+        barrier.wait()
+        try:
+            results.append(distill.bootstrap_r4_distillation_root_authority(root))
+        except distill.DistillationError as exc:
+            results.append(exc)
+
+    first = threading.Thread(target=migrate)
+    second = threading.Thread(target=bootstrap)
+    first.start()
+    second.start()
+    first.join()
+    second.join()
+
+    assert sum(isinstance(result, tuple) for result in results) == 1
+    assert sum(isinstance(result, distill.DistillationError) for result in results) == 1
+    legacy_id = distill._r4_legacy_root_authority_id()
+    normal_id = canonical_json.canonical_json_sha256_strict(
+        {"kind": "local-r4-distillation-root-authority"}
+    )
+    names = {path.stem for path in root.glob("*.json")}
+    assert names in ({legacy_id}, {normal_id})
+    assert distill._r4_distillation_root_authority(root, register=False)
 
 
 def test_authentic_local_r4_owned_failure_source_drift_fails_closed(

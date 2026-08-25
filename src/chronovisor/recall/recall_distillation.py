@@ -32,7 +32,12 @@ from chronovisor.core import (
     pi_transcript,
     runtime_config,
 )
-from chronovisor.core.durable_state import atomic_write_bytes, sidecar_exclusive_lock
+from chronovisor.core.durable_state import (
+    atomic_write_bytes,
+    okf_writer_lock,
+    open_regular_nofollow,
+    sidecar_exclusive_lock,
+)
 from chronovisor.core.raw_store import (
     RawSegmentCorrupt,
     RawStore,
@@ -84,6 +89,8 @@ R4_CANDIDATE_ANCHOR_SCHEMA = "chronovisor.recall-r4-candidate-anchor.v1"
 R4_CANDIDATE_ANCHOR_FILE = "r4-candidate-anchor.json"
 R4_RECEIPT_SCHEMA = "chronovisor.recall-r4-receipt.v1"
 R4_DIRECTORY_AUTHORITY_SCHEMA = "chronovisor.recall-r4-directory-authority.v1"
+R4_OFFLINE_BOOTSTRAP_SCHEMA = "chronovisor.recall-r4-offline-bootstrap.v1"
+R4_OFFLINE_BOOTSTRAP_MAX_BYTES = 8 * 1024 * 1024
 R4_R0_EVIDENCE_ID = "4de2cfe3f33e5c9c5153b264ebee8fae24d814856e0ac339e53c3077dc7efb33"
 OX_RAMP_RECEIPTS_PER_CAP = 20
 _OX_EXPIRY_RE = re.compile(
@@ -10473,7 +10480,373 @@ def _r4_path_has_symlink(path: Path) -> bool:
         current = parent
 
 
+def _r4_legacy_root_authority_id() -> str:
+    return canonical_json.canonical_json_sha256_strict(
+        {
+            "kind": "local-r4-distillation-root-authority",
+            "migration": "legacy-offline-bootstrap-v1",
+        }
+    )
+
+
+def _r4_regular_file_state(path: Path) -> dict[str, int | str] | None:
+    """Read one tracked regular file without following a supplied path link."""
+
+    if _r4_path_has_symlink(path):
+        raise DistillationError("legacy R4 root authority migration is unsafe")
+    try:
+        with open_regular_nofollow(path) as handle:
+            before = os.fstat(handle.fileno())
+            digest = hashlib.sha256()
+            while chunk := handle.read(8 * 1024 * 1024):
+                digest.update(chunk)
+            state = os.fstat(handle.fileno())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise DistillationError("legacy R4 root authority migration is unsafe") from exc
+    if (
+        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        != (state.st_dev, state.st_ino, state.st_size, state.st_mtime_ns, state.st_ctime_ns)
+    ):
+        raise DistillationError("legacy R4 root authority migration content drift")
+    return {
+        "sha256": digest.hexdigest(),
+        "size_bytes": state.st_size,
+        "st_dev": state.st_dev,
+        "st_ino": state.st_ino,
+        "st_mtime_ns": state.st_mtime_ns,
+        "st_ctime_ns": state.st_ctime_ns,
+    }
+
+
+def _r4_legacy_evidence_state(
+    *, root: Path, evidence: Mapping[str, Any]
+) -> tuple[dict[str, dict[str, int | str] | None], Path]:
+    production = evidence.get("production")
+    if (
+        not isinstance(production, Mapping)
+        or production.get("root") != str(root)
+        or production.get("unchanged") is not True
+        or production.get("before") != production.get("after")
+        or not isinstance(production.get("after"), Mapping)
+    ):
+        raise DistillationError("legacy R4 root authority migration evidence is invalid")
+    runtime = root / "runtime"
+    distillation = store.distillation_dir(root)
+    if _r4_path_has_symlink(root) or _r4_path_has_symlink(runtime) or _r4_path_has_symlink(distillation):
+        raise DistillationError("legacy R4 root authority migration is unsafe")
+    try:
+        store.pinned_directory_identity(root, create=False)
+        store.pinned_directory_identity(distillation, create=False)
+    except store.DistillationStoreError as exc:
+        raise DistillationError("legacy R4 root authority migration is unsafe") from exc
+    paths = {
+        "candidate": distillation / "candidate-ledger.jsonl",
+        "candidate_anchor": distillation / R4_CANDIDATE_ANCHOR_FILE,
+        "candidate_checkpoint": distillation / "candidate-ledger.jsonl.head.json",
+        "config": root / "config.toml",
+        "distillation_lock": distillation / "distillation-worker.lock",
+        "workset": distillation / "ox-workset.sqlite3",
+        "workset_journal": distillation / "ox-workset.sqlite3-journal",
+        "workset_shm": distillation / "ox-workset.sqlite3-shm",
+        "workset_wal": distillation / "ox-workset.sqlite3-wal",
+    }
+    expected = production["after"]
+    if set(expected) != set(paths):
+        raise DistillationError("legacy R4 root authority migration evidence is invalid")
+    observed = {name: _r4_regular_file_state(path) for name, path in paths.items()}
+    for name, state in observed.items():
+        evidence_state = expected[name]
+        if evidence_state is None:
+            if state is not None:
+                raise DistillationError("legacy R4 root authority migration content drift")
+            continue
+        if not isinstance(evidence_state, Mapping) or state is None:
+            raise DistillationError("legacy R4 root authority migration content drift")
+        required = {"sha256", "size_bytes", "st_dev", "st_ino", "st_mtime_ns", "st_ctime_ns"}
+        if set(evidence_state) != required:
+            raise DistillationError("legacy R4 root authority migration evidence is invalid")
+        compared = required - ({"st_mtime_ns", "st_ctime_ns"} if name == "workset_shm" else set())
+        if any(state[key] != evidence_state[key] for key in compared):
+            raise DistillationError("legacy R4 root authority migration content drift")
+    if (
+        observed["distillation_lock"] is None
+        or observed["distillation_lock"]["size_bytes"] != 0
+        or observed["workset_wal"] is None
+        or observed["workset_wal"]["size_bytes"] != 0
+    ):
+        raise DistillationError("legacy R4 root authority migration content drift")
+    if observed["workset_journal"] is not None or observed["candidate_anchor"] is not None:
+        raise DistillationError("legacy R4 root authority migration content drift")
+    return observed, paths["workset"]
+
+
+def _r4_legacy_workset_is_idle(path: Path) -> bool:
+    try:
+        uri = f"{path.absolute().as_uri()}?mode=ro&immutable=1"
+        connection = sqlite3.connect(uri, uri=True)
+        try:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM work_items WHERE state = 'leased' "
+                "OR lease_id IS NOT NULL OR lease_owner IS NOT NULL "
+                "OR lease_expires_at IS NOT NULL"
+            ).fetchone()
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error) as exc:
+        raise DistillationError("legacy R4 root authority migration workset is invalid") from exc
+    return row is not None and row[0] == 0
+
+
+def _r4_legacy_offline_bootstrap(
+    evidence_path: Path,
+    *,
+    root: Path,
+    expected_source_binding: Mapping[str, str],
+) -> dict[str, Any]:
+    if _r4_path_has_symlink(evidence_path):
+        raise DistillationError("legacy R4 root authority migration evidence is unsafe")
+    try:
+        with open_regular_nofollow(evidence_path) as handle:
+            before = os.fstat(handle.fileno())
+            if before.st_size > R4_OFFLINE_BOOTSTRAP_MAX_BYTES:
+                raise DistillationError("legacy R4 root authority migration evidence is invalid")
+            raw = handle.read(R4_OFFLINE_BOOTSTRAP_MAX_BYTES + 1)
+            after = os.fstat(handle.fileno())
+            if (
+                len(raw) > R4_OFFLINE_BOOTSTRAP_MAX_BYTES
+                or len(raw) != before.st_size
+                or before.st_size != after.st_size
+                or (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns)
+            ):
+                raise DistillationError("legacy R4 root authority migration evidence is invalid")
+        evidence = json.loads(raw)
+        store.verify_seal(evidence, schema=R4_OFFLINE_BOOTSTRAP_SCHEMA)
+    except DistillationError:
+        raise
+    except (OSError, ValueError, json.JSONDecodeError, store.DistillationStoreError) as exc:
+        raise DistillationError("legacy R4 root authority migration evidence is invalid") from exc
+    try:
+        expected_source = _validate_ox_source_binding(expected_source_binding)
+        current_source = _validate_ox_source_binding(ox_alpha_source_binding())
+    except (TypeError, ValueError) as exc:
+        raise DistillationError("legacy R4 root authority migration source is invalid") from exc
+    source = evidence.get("source")
+    scope = evidence.get("scope")
+    if (
+        evidence.get("kind") != "r4-offline-bootstrap-receipt"
+        or evidence.get("verdict") != "passed"
+        or not isinstance(evidence.get("artifact_id"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", evidence["artifact_id"]) is None
+        or evidence["artifact_id"]
+        != canonical_json.canonical_json_sha256_strict(
+            {
+                key: value
+                for key, value in evidence.items()
+                if key not in {"artifact_id", "seal_sha256"}
+            }
+        )
+        or not isinstance(source, Mapping)
+        or source.get("binding") != expected_source
+        or source.get("binding") != current_source
+        or source.get("commit") != expected_source["source_commit"]
+        or not isinstance(scope, Mapping)
+        or scope
+        != {
+            "provider_calls": 0,
+            "ox_enabled": False,
+            "owned_clone_only": True,
+            "production_certification": False,
+            "r4_checkbox_complete": False,
+        }
+    ):
+        raise DistillationError("legacy R4 root authority migration evidence is invalid")
+    _r4_legacy_evidence_state(root=root, evidence=evidence)
+    return {
+        "artifact_id": evidence["artifact_id"],
+        "file_sha256": hashlib.sha256(raw).hexdigest(),
+        "source_binding": expected_source,
+    }
+
+
+def migrate_r4_legacy_distillation_root_authority(
+    *,
+    root: Path,
+    offline_bootstrap_evidence: Path,
+    expected_source_binding: Mapping[str, str],
+) -> tuple[int, int]:
+    """Adopt one pre-existing root only when sealed offline evidence proves it unchanged."""
+
+    evidence_metadata = _r4_legacy_offline_bootstrap(
+        offline_bootstrap_evidence,
+        root=root,
+        expected_source_binding=expected_source_binding,
+    )
+    legacy_id = _r4_legacy_root_authority_id()
+    normal_id = canonical_json.canonical_json_sha256_strict(
+        {"kind": "local-r4-distillation-root-authority"}
+    )
+    try:
+        with okf_writer_lock(root, exclusive=True, allow_create=False):
+            parent_identity = store.pinned_directory_identity(root, create=False)
+            observed = store.pinned_directory_identity(store.distillation_dir(root), create=False)
+            try:
+                store.read_immutable_pinned(
+                    root,
+                    normal_id,
+                    schema=R4_DIRECTORY_AUTHORITY_SCHEMA,
+                    expected_directory_identity=parent_identity,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                raise DistillationError("legacy R4 root authority migration conflicts")
+            worker_before = _r4_regular_file_state(
+                store.distillation_dir(root) / "distillation-worker.lock"
+            )
+            worker_lock = store.acquire_nonblocking_lock(
+                store.distillation_dir(root) / "distillation-worker.lock"
+            )
+            if worker_lock is None:
+                raise DistillationError("legacy R4 root authority migration is busy")
+            try:
+                worker_held = os.fstat(worker_lock.fileno())
+                if (
+                    worker_before is None
+                    or (worker_before["st_dev"], worker_before["st_ino"])
+                    != (worker_held.st_dev, worker_held.st_ino)
+                ):
+                    raise DistillationError(
+                        "legacy R4 root authority migration is unsafe"
+                    )
+                def preflight() -> dict[str, Any]:
+                    metadata = _r4_legacy_offline_bootstrap(
+                        offline_bootstrap_evidence,
+                        root=root,
+                        expected_source_binding=expected_source_binding,
+                    )
+                    if (
+                        store.pinned_directory_identity(root, create=False)
+                        != parent_identity
+                        or store.pinned_directory_identity(
+                            store.distillation_dir(root), create=False
+                        )
+                        != observed
+                    ):
+                        raise DistillationError(
+                            "legacy R4 root authority migration content drift"
+                        )
+                    if not _r4_legacy_workset_is_idle(
+                        store.distillation_dir(root) / "ox-workset.sqlite3"
+                    ):
+                        raise DistillationError("legacy R4 root authority migration workset is leased")
+                    try:
+                        config_path = root / "config.toml"
+                        with open_regular_nofollow(config_path) as handle:
+                            tomllib.loads(handle.read().decode("utf-8"))
+                        if load_distillation_config(config_path).ox_enabled:
+                            raise DistillationError(
+                                "legacy R4 root authority migration OX is enabled"
+                            )
+                    except (OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError) as exc:
+                        raise DistillationError(
+                            "legacy R4 root authority migration config is invalid"
+                        ) from exc
+                    return metadata
+
+                locked_metadata = preflight()
+                if locked_metadata != evidence_metadata:
+                    raise DistillationError("legacy R4 root authority migration evidence changed")
+
+                def before_persist() -> None:
+                    if preflight() != locked_metadata:
+                        raise DistillationError(
+                            "legacy R4 root authority migration evidence changed"
+                        )
+
+                def after_persist() -> None:
+                    try:
+                        if preflight() != locked_metadata:
+                            raise DistillationError(
+                                "legacy R4 root authority migration evidence changed"
+                            )
+                        if (
+                            store.pinned_directory_identity(root, create=False)
+                            != parent_identity
+                            or store.pinned_directory_identity(
+                                store.distillation_dir(root), create=False
+                            )
+                            != observed
+                        ):
+                            raise DistillationError(
+                                "legacy R4 root authority migration content drift"
+                            )
+                        _r4_distillation_root_authority(root, register=False)
+                    except (FileNotFoundError, store.DistillationStoreError) as exc:
+                        raise DistillationError(
+                            "legacy R4 root authority migration content drift"
+                        ) from exc
+
+                payload = {
+                    "kind": "local-r4-distillation-root-authority",
+                    "directory_identity": {"device": observed[0], "inode": observed[1]},
+                    "legacy_migration": locked_metadata,
+                }
+                try:
+                    _, _, authority = store.write_immutable_pinned(
+                        root,
+                        payload,
+                        schema=R4_DIRECTORY_AUTHORITY_SCHEMA,
+                        artifact_id=legacy_id,
+                        before_persist=before_persist,
+                        after_persist=after_persist,
+                        expected_directory_identity=parent_identity,
+                    )
+                except store.DistillationStoreError as exc:
+                    raise DistillationError("legacy R4 root authority migration is invalid") from exc
+            finally:
+                store.release_lock(worker_lock)
+    except DistillationError:
+        raise
+    except (RuntimeError, ValueError, store.DistillationStoreError) as exc:
+        raise DistillationError("legacy R4 root authority migration is unsafe") from exc
+    expected = {
+        "schema",
+        "namespace",
+        "artifact_id",
+        "seal_sha256",
+        "kind",
+        "directory_identity",
+        "legacy_migration",
+    }
+    if (
+        set(authority) != expected
+        or authority.get("artifact_id") != legacy_id
+        or authority.get("kind") != "local-r4-distillation-root-authority"
+        or authority.get("directory_identity")
+        != {"device": observed[0], "inode": observed[1]}
+        or authority.get("legacy_migration") != locked_metadata
+    ):
+        raise DistillationError("legacy R4 root authority migration changed")
+    return observed
+
+
 def bootstrap_r4_distillation_root_authority(root: Path) -> tuple[int, int]:
+    """Create the one-time R4 root authority under the shared writer lease."""
+
+    try:
+        # Fresh roots have no lock yet; this is the sole allowed bootstrap write.
+        with okf_writer_lock(root, exclusive=True, allow_create=True):
+            return _bootstrap_r4_distillation_root_authority(root)
+    except DistillationError:
+        raise
+    except (RuntimeError, ValueError, store.DistillationStoreError) as exc:
+        raise DistillationError("local R4 root authority is invalid") from exc
+
+
+def _bootstrap_r4_distillation_root_authority(root: Path) -> tuple[int, int]:
     """Create the one-time R4 root authority before any distillation state exists.
 
     This is deliberately separate from verification.  Once a distillation
@@ -10484,8 +10857,20 @@ def bootstrap_r4_distillation_root_authority(root: Path) -> tuple[int, int]:
     authority_parent = root
     authority_identity = {"kind": "local-r4-distillation-root-authority"}
     authority_id = canonical_json.canonical_json_sha256_strict(authority_identity)
+    legacy_id = _r4_legacy_root_authority_id()
     try:
         parent_identity = store.pinned_directory_identity(authority_parent, create=False)
+        try:
+            store.read_immutable_pinned(
+                authority_parent,
+                legacy_id,
+                schema=R4_DIRECTORY_AUTHORITY_SCHEMA,
+                expected_directory_identity=parent_identity,
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            raise DistillationError("local R4 root authority legacy migration exists")
         authority = store.read_immutable_pinned(
             authority_parent,
             authority_id,
@@ -10550,14 +10935,37 @@ def _r4_distillation_root_authority(
     authority_parent = root
     authority_identity = {"kind": "local-r4-distillation-root-authority"}
     authority_id = canonical_json.canonical_json_sha256_strict(authority_identity)
+    legacy_id = _r4_legacy_root_authority_id()
     try:
         parent_identity = store.pinned_directory_identity(authority_parent, create=False)
-        authority = store.read_immutable_pinned(
-            authority_parent,
-            authority_id,
-            schema=R4_DIRECTORY_AUTHORITY_SCHEMA,
-            expected_directory_identity=parent_identity,
-        )
+        try:
+            normal_authority = store.read_immutable_pinned(
+                authority_parent,
+                authority_id,
+                schema=R4_DIRECTORY_AUTHORITY_SCHEMA,
+                expected_directory_identity=parent_identity,
+            )
+        except FileNotFoundError:
+            normal_authority = None
+        try:
+            legacy_authority = store.read_immutable_pinned(
+                authority_parent,
+                legacy_id,
+                schema=R4_DIRECTORY_AUTHORITY_SCHEMA,
+                expected_directory_identity=parent_identity,
+            )
+        except FileNotFoundError:
+            legacy_authority = None
+        if normal_authority is not None and legacy_authority is not None:
+            raise DistillationError("local R4 root authority conflicts")
+        if normal_authority is not None:
+            authority = normal_authority
+            observed_authority_id = authority_id
+        elif legacy_authority is not None:
+            authority = legacy_authority
+            observed_authority_id = legacy_id
+        else:
+            raise FileNotFoundError
         observed = store.pinned_directory_identity(
             store.distillation_dir(root), create=False
         )
@@ -10566,17 +10974,33 @@ def _r4_distillation_root_authority(
     except store.DistillationStoreError as exc:
         raise DistillationError("local R4 root authority is unsafe") from exc
     expected_directory = {"device": observed[0], "inode": observed[1]}
+    expected_keys = {
+        "schema",
+        "namespace",
+        "artifact_id",
+        "seal_sha256",
+        "kind",
+        "directory_identity",
+    }
+    if observed_authority_id == legacy_id:
+        migration = authority.get("legacy_migration")
+        if (
+            not isinstance(migration, Mapping)
+            or set(migration) != {"artifact_id", "file_sha256", "source_binding"}
+            or re.fullmatch(r"[0-9a-f]{64}", str(migration.get("artifact_id") or ""))
+            is None
+            or re.fullmatch(r"[0-9a-f]{64}", str(migration.get("file_sha256") or ""))
+            is None
+            or not isinstance(migration.get("source_binding"), Mapping)
+        ):
+            raise DistillationError("local R4 root authority changed")
+        _validate_ox_source_binding(
+            cast(Mapping[str, str], migration.get("source_binding"))
+        )
+        expected_keys.add("legacy_migration")
     if (
-        set(authority)
-        != {
-            "schema",
-            "namespace",
-            "artifact_id",
-            "seal_sha256",
-            "kind",
-            "directory_identity",
-        }
-        or authority.get("artifact_id") != authority_id
+        set(authority) != expected_keys
+        or authority.get("artifact_id") != observed_authority_id
         or authority.get("kind") != authority_identity["kind"]
         or authority.get("directory_identity") != expected_directory
     ):
