@@ -140,9 +140,6 @@ PRODUCTION_CANDIDATE_ANCHOR_RELATIVE = (
 PRODUCTION_EVENT_ANCHOR_RELATIVE = PRODUCTION_DISTILLATION_RELATIVE / "ox-event-anchors"
 R4_CANDIDATE_ANCHOR_SCHEMA = "chronovisor.recall-r4-candidate-anchor.v1"
 R4_FAULT_SCENARIO_SCHEMA = "chronovisor.recall-r4-fault-scenario.v1"
-PRODUCTION_FAULT_SCENARIO_RELATIVE = (
-    PRODUCTION_DISTILLATION_RELATIVE / "r4-fault-scenarios"
-)
 PRODUCTION_MAX_SQLITE_BYTES = 256 * 1024 * 1024
 PRODUCTION_MAX_LEDGER_BYTES = 4 * 1024 * 1024 * 1024
 PRODUCTION_MAX_FULL_LEDGER_BYTES = 8 * 1024 * 1024
@@ -247,6 +244,19 @@ def _publish_owned_artifact(
     temporary = f".{name}.tmp"
     try:
         opened_directory = os.fstat(directory_fd)
+
+        def verify_directory() -> None:
+            try:
+                named_directory = os.stat(directory, follow_symlinks=False)
+            except OSError as exc:
+                raise R4Error("artifact directory changed during publication") from exc
+            if (
+                stat.S_ISLNK(named_directory.st_mode)
+                or named_directory.st_dev != opened_directory.st_dev
+                or named_directory.st_ino != opened_directory.st_ino
+            ):
+                raise R4Error("artifact directory changed during publication")
+
         try:
             existing_fd = os.open(
                 name,
@@ -261,6 +271,7 @@ def _publish_owned_artifact(
             with os.fdopen(existing_fd, "rb") as handle:
                 if handle.read() != encoded:
                     raise R4Error("owned fault scenario artifact conflict")
+            verify_directory()
             return directory / name
         try:
             fd = os.open(
@@ -287,16 +298,7 @@ def _publish_owned_artifact(
         # opened.  The dirfd keeps publication safe during a rename race; this
         # check prevents returning a pathname redirected to an attacker's
         # replacement directory while the callback was running.
-        try:
-            named_directory = os.stat(directory, follow_symlinks=False)
-        except OSError as exc:
-            raise R4Error("artifact directory changed during publication") from exc
-        if (
-            stat.S_ISLNK(named_directory.st_mode)
-            or named_directory.st_dev != opened_directory.st_dev
-            or named_directory.st_ino != opened_directory.st_ino
-        ):
-            raise R4Error("artifact directory changed during publication")
+        verify_directory()
         return directory / name
     finally:
         try:
@@ -2603,101 +2605,132 @@ def _production_ox_events(
     return result
 
 
-def _production_fault_scenarios(
-    root: Path,
-    *,
-    source: Mapping[str, Any],
-    contract_id: str,
-    workset: Mapping[str, Any],
-    events: Mapping[str, Sequence[Mapping[str, Any]]],
-) -> tuple[set[str], dict[str, Any]]:
-    """Read every required owned-clone scenario artifact without trusting state."""
+def _load_owned_fault_scenarios(
+    path: Path | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Load canonical owned-clone artifacts, never from the managed root."""
 
-    directory = root / PRODUCTION_FAULT_SCENARIO_RELATIVE
-    if _has_symlink_component(directory) or not directory.is_dir():
-        return {"production_fault_scenarios_missing"}, {"count": 0, "scenarios": []}
+    if path is None:
+        return [], {"files": [], "count": 0}
+    if _has_symlink_component(path) or not path.is_dir():
+        raise R4Error("owned fault input path is unsafe")
     try:
-        paths = sorted(directory.iterdir())
+        paths = sorted(path.iterdir())
     except OSError as exc:
-        raise R4Error("fault scenario directory is unavailable") from exc
+        raise R4Error("owned fault input is unavailable") from exc
+    if not paths:
+        return [], {"files": [], "count": 0}
+    artifacts: list[dict[str, Any]] = []
+    files: list[dict[str, Any]] = []
+    for item in paths:
+        if item.is_symlink() or not item.is_file() or item.suffix != ".json":
+            raise R4Error("owned fault input contains an unsafe entry")
+        before = _stat(item)
+        digest = _file_sha256(item)
+        if before["st_size"] > _MAX_RECEIPT_BYTES:
+            raise R4Error("owned fault artifact exceeds bounded size")
+        try:
+            raw = item.read_bytes()
+            artifact = json.loads(raw)
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise R4Error("owned fault artifact JSON is invalid") from exc
+        verified = _verify_seal(artifact, schema=R4_FAULT_SCENARIO_SCHEMA)
+        artifact_id = verified["artifact_id"]
+        if (
+            item.name != f"{artifact_id}.json"
+            or raw != _json_bytes(verified) + b"\n"
+            or _stat(item) != before
+            or _file_sha256(item) != digest
+        ):
+            raise R4Error("owned fault artifact is not canonical")
+        artifacts.append(verified)
+        files.append({"path": item.name, "sha256": digest, "file_state": before})
+    if len({str(item["artifact_id"]) for item in artifacts}) != len(artifacts):
+        raise R4Error("duplicate owned fault artifact id")
+    return artifacts, {"files": files, "count": len(artifacts)}
+
+
+def _validate_owned_fault_scenarios(
+    artifacts: Sequence[Mapping[str, Any]], source: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Validate the nine provider-free public-worker faults as source evidence."""
+
     reasons: set[str] = set()
     found: set[str] = set()
-    entries: list[dict[str, Any]] = []
-    expected_receipt = workset.get("receipts")
-    expected_heads = {
-        name: (str(rows[-1].get("record_sha256") or "") if rows else "")
-        for name, rows in events.items()
+    contract_ids: set[str] = set()
+    expected_source = {
+        "source_commit": source.get("commit"),
+        "source_tree_sha256": source.get("tree_sha256"),
+        "source_ox_identity_sha256": source.get("ox_identity_sha256"),
     }
-    for path in paths:
-        if path.is_symlink() or not path.is_file() or path.suffix != ".json":
-            reasons.add("production_fault_scenario_path_invalid")
-            continue
-        payload, state, digest = _production_json(
-            path, label="production fault scenario", schema=R4_FAULT_SCENARIO_SCHEMA
-        )
-        expected_keys = {
-            "artifact_id",
-            "schema",
-            "namespace",
-            "seal_sha256",
-            "scenario",
-            "writer_path",
-            "test_only",
-            "source",
-            "profile_contract_id",
-            "outcome",
-            "workset_receipt",
-            "event_heads",
-            "owned_root",
+    expected_keys = {
+        "artifact_id", "schema", "namespace", "seal_sha256", "scenario",
+        "writer_path", "test_only", "source", "profile_contract_id", "outcome",
+        "workset_receipt", "event_heads", "owned_root",
+    }
+
+    def valid_file_state(value: object) -> bool:
+        keys = {
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
         }
-        artifact_id = payload.get("artifact_id")
+        return (
+            isinstance(value, Mapping)
+            and set(value) == keys
+            and all(
+                isinstance(value.get(key), int)
+                and not isinstance(value.get(key), bool)
+                and value[key] >= 0
+                for key in keys
+            )
+            and value["st_dev"] > 0
+            and value["st_ino"] > 0
+            and value["st_mode"] == 0o600
+        )
+
+    def valid_sqlite_state(value: object) -> bool:
+        return (
+            isinstance(value, Mapping)
+            and set(value) == {"main", "wal", "shm"}
+            and valid_file_state(value.get("main"))
+            and all(
+                value.get(name) is None or valid_file_state(value.get(name))
+                for name in ("wal", "shm")
+            )
+        )
+
+    for artifact in artifacts:
+        artifact_id = artifact.get("artifact_id")
         unsigned = {
             key: value
-            for key, value in payload.items()
+            for key, value in artifact.items()
             if key not in {"artifact_id", "seal_sha256"}
         }
-        if (
-            set(payload) != expected_keys
+        scenario = artifact.get("scenario")
+        outcome = artifact.get("outcome")
+        receipt = artifact.get("workset_receipt")
+        heads = artifact.get("event_heads")
+        owned_root = artifact.get("owned_root")
+        invalid = (
+            set(artifact) != expected_keys
             or not isinstance(artifact_id, str)
-            or path.stem != artifact_id
             or artifact_id != _sha256(unsigned)
-            or payload.get("writer_path") != "public-run-distillation-chunk-v1"
-            or payload.get("source")
-            != {
-                "source_commit": source.get("commit"),
-                "source_tree_sha256": source.get("tree_sha256"),
-                "source_ox_identity_sha256": source.get("ox_identity_sha256"),
-            }
-            or payload.get("profile_contract_id") != contract_id
-        ):
-            reasons.add("production_fault_scenario_binding_invalid")
-            reasons.add("production_fault_scenario_invalid")
-            continue
-        scenario = payload.get("scenario")
-        outcome = payload.get("outcome")
-        receipt = payload.get("workset_receipt")
-        heads = payload.get("event_heads")
-        owned_root = payload.get("owned_root")
-        if (
-            not isinstance(scenario, str)
+            or artifact.get("writer_path") != "public-run-distillation-chunk-v1"
+            or artifact.get("test_only") is not True
+            or artifact.get("source") != expected_source
+            or not isinstance(scenario, str)
             or scenario not in PRODUCTION_FAULT_SCENARIOS
             or scenario in found
-            or payload.get("test_only") is not False
+            or _SHA.fullmatch(str(artifact.get("profile_contract_id"))) is None
             or not isinstance(outcome, Mapping)
-            or set(outcome)
-            != {
-                "profile_stopped",
-                "backoff_bounded",
-                "quarantined",
-                "ready",
-                "leased",
-                "duplicate_labels",
-                "adapter_calls",
-                "provider_calls",
+            or set(outcome) != {
+                "profile_stopped", "backoff_bounded", "quarantined", "ready",
+                "leased", "duplicate_labels", "adapter_calls", "provider_calls",
             }
-            or outcome.get("leased") != 0
-            or outcome.get("duplicate_labels") != 0
-            or outcome.get("provider_calls") != 0
             or not isinstance(outcome.get("profile_stopped"), bool)
             or not isinstance(outcome.get("backoff_bounded"), bool)
             or any(
@@ -2705,53 +2738,94 @@ def _production_fault_scenarios(
                 or not isinstance(outcome.get(name), int)
                 or outcome[name] < 0
                 for name in (
-                    "quarantined",
-                    "ready",
-                    "leased",
-                    "duplicate_labels",
-                    "adapter_calls",
-                    "provider_calls",
+                    "quarantined", "ready", "leased", "duplicate_labels",
+                    "adapter_calls", "provider_calls",
                 )
             )
+            or outcome.get("leased") != 0
+            or outcome.get("duplicate_labels") != 0
+            or outcome.get("provider_calls") != 0
             or not isinstance(receipt, Mapping)
             or set(receipt) != {"generation", "head_sha256"}
             or isinstance(receipt.get("generation"), bool)
             or not isinstance(receipt.get("generation"), int)
             or receipt["generation"] < 1
             or _SHA.fullmatch(str(receipt.get("head_sha256"))) is None
-            or not isinstance(expected_receipt, Mapping)
-            or receipt.get("generation") != expected_receipt.get("generation")
-            or receipt.get("head_sha256") != expected_receipt.get("head_sha256")
             or not isinstance(heads, Mapping)
             or set(heads) != {"ramp", "failure", "lease"}
-            or dict(heads) != expected_heads
-            or not isinstance(owned_root, Mapping)
-            or set(owned_root) != {"before", "after", "run_status"}
-            or not isinstance(owned_root.get("before"), Mapping)
-            or not isinstance(owned_root.get("after"), Mapping)
-            or not isinstance(owned_root.get("run_status"), str)
             or any(
                 not isinstance(value, str) or (value and _SHA.fullmatch(value) is None)
                 for value in heads.values()
             )
-        ):
-            reasons.add("production_fault_scenario_invalid")
-            continue
-        found.add(scenario)
-        entries.append(
-            {
-                "scenario": scenario,
-                "artifact_id": artifact_id,
-                "sha256": digest,
-                "file_state": state,
-            }
+            or not isinstance(owned_root, Mapping)
+            or set(owned_root) != {"before", "after", "run_status"}
+            or not valid_sqlite_state(owned_root.get("before"))
+            or not valid_sqlite_state(owned_root.get("after"))
+            or owned_root.get("run_status") != "deferred"
         )
+        if invalid:
+            reasons.add("owned_fault_artifact_invalid")
+            continue
+        # ``invalid`` has already rejected these shapes.  Keep the explicit
+        # guard so static analysis retains that fail-closed fact.
+        if not isinstance(scenario, str) or not isinstance(outcome, Mapping):
+            raise R4Error("owned fault validation shape changed")
+        before_main = owned_root["before"]["main"]
+        after_main = owned_root["after"]["main"]
+        if (
+            before_main["st_dev"] != after_main["st_dev"]
+            or before_main["st_ino"] != after_main["st_ino"]
+            or before_main["st_mode"] != after_main["st_mode"]
+        ):
+            reasons.add("owned_fault_safe_outcome_invalid")
+            continue
+        if scenario in {"http_429", "http_5xx", "timeout"} and not outcome[
+            "backoff_bounded"
+        ]:
+            reasons.add("owned_fault_safe_outcome_invalid")
+            continue
+        if scenario in {"http_402_paid", "model_drift", "disable_rollback"} and not outcome[
+            "profile_stopped"
+        ]:
+            reasons.add("owned_fault_safe_outcome_invalid")
+            continue
+        if scenario == "invalid_output_quarantine" and outcome["quarantined"] < 1:
+            reasons.add("owned_fault_safe_outcome_invalid")
+            continue
+        if scenario == "lease_expiry_reclaim" and not heads["lease"]:
+            reasons.add("owned_fault_safe_outcome_invalid")
+            continue
+        if scenario == "resource_pressure_preemption" and outcome["adapter_calls"] < 1:
+            reasons.add("owned_fault_safe_outcome_invalid")
+            continue
+        provider_faults = {
+            "http_429",
+            "http_5xx",
+            "timeout",
+            "http_402_paid",
+            "model_drift",
+            "lease_expiry_reclaim",
+            "resource_pressure_preemption",
+        }
+        if scenario in provider_faults and (
+            outcome["adapter_calls"] < 1 or not heads["failure"]
+        ):
+            reasons.add("owned_fault_safe_outcome_invalid")
+            continue
+        if scenario == "disable_rollback" and outcome["adapter_calls"] != 0:
+            reasons.add("owned_fault_safe_outcome_invalid")
+            continue
+        contract_ids.add(str(artifact["profile_contract_id"]))
+        found.add(scenario)
     if found != set(PRODUCTION_FAULT_SCENARIOS):
-        reasons.add("production_fault_scenarios_incomplete")
-    return reasons, {
-        "count": len(entries),
+        reasons.add("owned_fault_scenarios_incomplete")
+    if len(contract_ids) != 1:
+        reasons.add("owned_fault_contract_mixing")
+    return {
+        "passed": not reasons,
+        "reasons": sorted(reasons),
+        "count": len(artifacts),
         "scenarios": sorted(found),
-        "entries": entries,
     }
 
 
@@ -2762,13 +2836,17 @@ def run_owned_fault_scenarios(
 
     This is intentionally an owned-clone-only contract test.  The adapter has
     no transport and records attempted adapter calls separately from network
-    calls (which are always zero).  Its sealed results are test-only evidence;
-    the production collector rejects them as a certification input.
+    calls (which are always zero).  Its sealed results are source-bound test
+    evidence and can never replace the fixed-root production collector.
     """
 
+    _reject_original_symlinks((("source", source_root), ("fault output", output)))
+    source_root = source_root.expanduser().resolve(strict=True)
+    output = output.expanduser().resolve(strict=False)
+    assert_root_matrix(source_root, output)
+    if _overlap(output, PRODUCTION_ROOT.expanduser().absolute()):
+        raise R4Error("fault output/production paths overlap")
     source = _assert_source(source_root, source_commit)
-    _reject_original_symlinks((("fault output", output),))
-    output = output.resolve(strict=False)
     output.mkdir(parents=True, exist_ok=True)
     from chronovisor.core.llm_runtime import GenerationResult, RouteLocation
     from chronovisor.core.provider_profiles import (
@@ -3103,6 +3181,15 @@ def run_owned_fault_scenarios(
             encoded = _json_bytes(artifact) + b"\n"
             path = _publish_owned_artifact(output, f"{artifact_id}.json", encoded)
             published.append(path)
+    artifacts, inventory = _load_owned_fault_scenarios(output)
+    result = _validate_owned_fault_scenarios(artifacts, source)
+    if (
+        result.get("passed") is not True
+        or inventory.get("count") != len(PRODUCTION_FAULT_SCENARIOS)
+        or len(published) != len(PRODUCTION_FAULT_SCENARIOS)
+        or _assert_source(source_root, source_commit) != source
+    ):
+        raise R4Error("owned fault diagnostic readback failed")
     return published
 
 
@@ -4022,14 +4109,10 @@ def _collect_authoritative_production(
             candidate_rows=candidate_view["rows"],
             rallies=production_rallies,
         )
-        scenario_reasons, scenarios = _production_fault_scenarios(
-            original_root,
-            source=source,
-            contract_id=contract_id,
-            workset=workset,
-            events=events,
-        )
-        reasons = identity_reasons | quality_reasons | scenario_reasons
+        # Fault injection belongs to the explicit, provider-free owned-clone
+        # source contract.  Requiring its test-only artifacts under the live
+        # root made this read-only collector impossible to certify safely.
+        reasons = identity_reasons | quality_reasons
         if _production_stat(state_path, label="production state") != state_file_state:
             raise R4Error("production state changed during validation")
         if _production_stat(config_path, label="production config") != config_state:
@@ -4103,7 +4186,7 @@ def _collect_authoritative_production(
                 }
                 for key, rows in events.items()
             },
-            "scenarios": scenarios,
+            "scenarios": {"scope": "non-authoritative-owned-fault-diagnostic"},
             "quality": quality,
         }
         return output
@@ -4215,15 +4298,30 @@ def _write_immutable_pinned(
     if existing is not None:
         if existing != encoded:
             raise R4Error("owned R4 artifact conflict")
+        verify_directory()
         return artifact_id, name, artifact, True
     if before_publish is not None:
         before_publish()
     verify_directory()
     _authority_publish_fd(directory_fd, name, encoded, label="R4 artifact")
-    verify_directory()
-    observed, _state = _authority_read_fd(directory_fd, name, label="R4 artifact")
-    if observed != encoded:
-        raise R4Error("R4 artifact changed after publication")
+    try:
+        verify_directory()
+        observed, _state = _authority_read_fd(
+            directory_fd, name, label="R4 artifact"
+        )
+        if observed != encoded:
+            raise R4Error("R4 artifact changed after publication")
+    except BaseException:
+        try:
+            current, _state = _authority_read_fd(
+                directory_fd, name, label="R4 artifact"
+            )
+            if current == encoded:
+                os.unlink(name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+        except (OSError, R4Error):
+            pass
+        raise
     return artifact_id, name, artifact, False
 
 
@@ -4388,7 +4486,9 @@ def _authority_publish_fd(directory_fd: int, name: str, raw: bytes, *, label: st
         raise
 
 
-def _authority_receipt_values(raw: bytes, *, name: str, label: str) -> list[dict[str, Any]]:
+def _authority_receipt_values(
+    raw: bytes, *, name: str, label: str
+) -> list[dict[str, Any]]:
     if len(raw) > _MAX_RECEIPT_BYTES:
         raise R4Error("receipt file exceeds bounded size")
     try:
@@ -4434,7 +4534,9 @@ def _capture_authority_input_payloads(
         raw, state, _parent = _read_authority_regular(path, label=f"{kind} receipt")
         name = f"{index:04d}{path.suffix}"
         digest = hashlib.sha256(raw).hexdigest()
-        receipts.extend(_authority_receipt_values(raw, name=path.name, label=f"{kind} receipt"))
+        receipts.extend(
+            _authority_receipt_values(raw, name=path.name, label=f"{kind} receipt")
+        )
         files.append(
             {
                 "path": name,
@@ -4532,6 +4634,9 @@ def produce_source_bound_authority_receipt(
     ox_receipts: Path | None,
     before_stage: Callable[[str], None] | None = None,
     _output_context: tuple[int, int, str, tuple[int, int]] | None = None,
+    _expected_projection: Mapping[str, Any] | None = None,
+    _expected_inventory: Mapping[str, Any] | None = None,
+    _expected_results: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Publish a formal-only authority receipt before its R4 artifact exists."""
 
@@ -4552,6 +4657,8 @@ def produce_source_bound_authority_receipt(
         projection = _collect_authoritative_production(
             source_root=source_root, source=source, production_root=PRODUCTION_ROOT
         )
+        if _expected_projection is not None and projection != _expected_projection:
+            raise R4Error("production projection changed before authority publication")
         if projection.get("passed") is not True or projection.get("provider_calls") != 0:
             return {"available": False, "reason": "formal_production_authority_unavailable"}, {"local": {"files": [], "count": 0}, "ox": {"files": [], "count": 0}, "production": {"files": [], "count": 0}}
         local, local_inventory, local_payloads = _capture_authority_input_payloads(
@@ -4564,9 +4671,17 @@ def produce_source_bound_authority_receipt(
             _authority_receipt_ids(ox, label="ox")
         ):
             raise R4Error("duplicate authority receipt id")
-        if not _validate_local(local, source)["passed"] or not _validate_ox(ox, source)["passed"]:
+        local_result = _validate_local(local, source)
+        ox_result = _validate_ox(ox, source)
+        if not local_result["passed"] or not ox_result["passed"]:
             raise R4Error("authority receipt inputs no longer satisfy source contract")
-        inventory = {"local": local_inventory, "ox": ox_inventory, "production": {"files": [], "count": 0}}
+        input_inventory = {"local": local_inventory, "ox": ox_inventory}
+        input_results = {"local": local_result, "ox": ox_result}
+        if _expected_inventory is not None and input_inventory != _expected_inventory:
+            raise R4Error("authority receipt inputs changed before publication")
+        if _expected_results is not None and input_results != _expected_results:
+            raise R4Error("authority receipt results changed before publication")
+        inventory = {**input_inventory, "production": {"files": [], "count": 0}}
         payload = {
             "schema": R4_AUTHORITY_RECEIPT_SCHEMA,
             "namespace": "recall-distillation",
@@ -4819,7 +4934,8 @@ def read_artifact(path: Path) -> dict[str, Any]:
     }:
         raise R4Error("R4 artifact source contract is missing")
     if (
-        not isinstance(source_contract.get("passed"), bool)
+        source_contract.get("schema") != SOURCE_SCHEMA
+        or not isinstance(source_contract.get("passed"), bool)
         or not isinstance(source_contract.get("local"), Mapping)
         or not isinstance(source_contract.get("ox"), Mapping)
     ):
@@ -4974,6 +5090,14 @@ def validate_source_bound_authority_receipt(
         )
         local_result = _validate_local(local, source)
         ox_result = _validate_ox(ox, source)
+        source_contract = artifact.get("source_contract")
+        if (
+            not isinstance(source_contract, Mapping)
+            or source_contract.get("passed") is not True
+            or local_result.get("passed") is not True
+            or ox_result.get("passed") is not True
+        ):
+            raise R4Error("authority receipt source contract is invalid")
         if (
             receipt.get("artifact_id") != reference.get("artifact_id")
             or authority_path.name != f"{receipt.get('artifact_id')}.authority.json"
@@ -4985,8 +5109,8 @@ def validate_source_bound_authority_receipt(
             or artifact.get("production_certification") != projection
             or receipt.get("receipt_inventory") != observed_inventory
             or artifact.get("receipt_files") != observed_inventory
-            or artifact.get("source_contract", {}).get("local") != local_result
-            or artifact.get("source_contract", {}).get("ox") != ox_result
+            or source_contract.get("local") != local_result
+            or source_contract.get("ox") != ox_result
         ):
             raise R4Error("authority receipt binding is invalid")
         projection_after = _collect_authoritative_production(
@@ -5041,6 +5165,8 @@ def run(
     _reject_original_symlinks(original_paths)
     source_root = source_root.expanduser().resolve(strict=True)
     output = output.expanduser().resolve(strict=False)
+    if _overlap(output, PRODUCTION_ROOT.expanduser().absolute()):
+        raise R4Error("output/production paths overlap")
     production = production_root.expanduser().absolute() if production_root else None
     input_roots = [
         path.expanduser().resolve(strict=True)
@@ -5049,8 +5175,12 @@ def run(
     ]
     assert_root_matrix(source_root, output, production, input_roots)
     source_before = _assert_source(source_root, source_commit)
-    local, local_files = load_receipts(local_receipts)
-    ox, ox_files = load_receipts(ox_receipts)
+    local, local_files, _local_payloads = _capture_authority_input_payloads(
+        local_receipts, kind="local"
+    )
+    ox, ox_files, _ox_payloads = _capture_authority_input_payloads(
+        ox_receipts, kind="ox"
+    )
     # Arbitrary production JSON is never an input to certification.  Keep the
     # old parameter only as a compatibility tripwire for callers that still
     # pass it; the resulting verdict remains false and no file is read.
@@ -5121,13 +5251,38 @@ def run(
                 local_receipts=local_receipts,
                 ox_receipts=ox_receipts,
                 _output_context=(parent_fd, output_fd, output_name, output_identity),
+                _expected_projection=production_result,
+                _expected_inventory={"local": local_files, "ox": ox_files},
+                _expected_results={"local": local_result, "ox": ox_result},
             )
             if source_passed and production_result["passed"] is True
             else (
                 {"available": False, "reason": "formal_production_authority_unavailable"},
-                {"local": local_files, "ox": ox_files, "production": production_files},
+                {
+                    "local": local_files,
+                    "ox": ox_files,
+                    "production": production_files,
+                },
             )
         )
+
+        def cleanup_authority() -> None:
+            if authority_receipt.get("available") is not True:
+                return
+            name = authority_receipt.get("relative_path")
+            expected_sha256 = authority_receipt.get("file_sha256")
+            if not isinstance(name, str) or Path(name).name != name:
+                return
+            try:
+                current, _state = _authority_read_fd(
+                    output_fd, name, label="authority receipt"
+                )
+                if hashlib.sha256(current).hexdigest() == expected_sha256:
+                    os.unlink(name, dir_fd=output_fd)
+                    os.fsync(output_fd)
+            except (OSError, R4Error):
+                pass
+
         payload = {
             "captured_at": datetime.now(UTC).isoformat(),
             "source": source_before,
@@ -5156,12 +5311,18 @@ def run(
                 raise R4Error("source changed during artifact publication")
             source_final = checked
 
-        _artifact_id, artifact_name, artifact, artifact_preexisted = _write_immutable_pinned(
-            output_fd,
-            payload,
-            verify_directory=verify_output,
-            before_publish=_verify_publication_source,
-        )
+        try:
+            _artifact_id, artifact_name, artifact, artifact_preexisted = (
+                _write_immutable_pinned(
+                    output_fd,
+                    payload,
+                    verify_directory=verify_output,
+                    before_publish=_verify_publication_source,
+                )
+            )
+        except BaseException:
+            cleanup_authority()
+            raise
         artifact_encoded = _json_bytes(artifact) + b"\n"
 
         def cleanup_artifact() -> None:
@@ -5175,16 +5336,46 @@ def run(
             except (OSError, R4Error):
                 pass
 
+        def verify_published_output() -> None:
+            try:
+                verify_output()
+            except BaseException:
+                cleanup_artifact()
+                cleanup_authority()
+                raise
+
         try:
             checked_after_publish = _assert_source(source_root, source_commit)
         except R4Error as exc:
             cleanup_artifact()
+            cleanup_authority()
             raise R4Error("source changed after artifact publication") from exc
         if checked_after_publish != source_before or checked_after_publish != source_final:
             cleanup_artifact()
+            cleanup_authority()
             raise R4Error("source changed after artifact publication")
-        verify_output()
-        verify_output()
+        verify_published_output()
+        if artifact["production_certification"]["passed"] is True:
+            if authority_receipt.get("available") is not True:
+                cleanup_artifact()
+                raise R4Error("formal authority receipt is unavailable")
+            authority_path = output / str(authority_receipt["relative_path"])
+            try:
+                validated = validate_source_bound_authority_receipt(
+                    authority_path,
+                    artifact_path=output / artifact_name,
+                    source_root=source_root,
+                    source_commit=source_commit,
+                )
+            except BaseException:
+                cleanup_artifact()
+                cleanup_authority()
+                raise
+            if validated.get("r4_artifact_id") != _artifact_id:
+                cleanup_artifact()
+                cleanup_authority()
+                raise R4Error("formal authority readback disagrees with R4 artifact")
+        verify_published_output()
         return artifact, output / artifact_name
     finally:
         close_errors: list[OSError] = []
@@ -5220,7 +5411,48 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="validate source/local/OX contracts without claiming production certification",
     )
+    parser.add_argument(
+        "--run-owned-faults",
+        action="store_true",
+        help="generate the nine provider-free owned-clone fault artifacts",
+    )
     args = parser.parse_args(argv)
+    if args.run_owned_faults:
+        if any(
+            value is not None
+            for value in (args.local_receipts, args.ox_receipts)
+        ) or args.production or args.source_contract_only:
+            parser.error("--run-owned-faults cannot be combined with validation inputs")
+        try:
+            paths = run_owned_fault_scenarios(
+                source_root=args.source_root,
+                source_commit=args.source_commit,
+                output=args.output,
+            )
+            source = _assert_source(args.source_root, args.source_commit)
+            artifacts, inventory = _load_owned_fault_scenarios(args.output)
+            result = _validate_owned_fault_scenarios(artifacts, source)
+            if (
+                result.get("passed") is not True
+                or inventory.get("count") != len(PRODUCTION_FAULT_SCENARIOS)
+                or len(paths) != len(PRODUCTION_FAULT_SCENARIOS)
+            ):
+                raise R4Error("owned fault diagnostic readback failed")
+        except (R4Error, OSError, ValueError) as exc:
+            print(f"r4 owned faults failed: {exc}", file=sys.stderr)
+            return 2
+        print(
+            json.dumps(
+                {
+                    "artifacts": [str(path) for path in paths],
+                    "authoritative": False,
+                    "provider_calls": 0,
+                    "validation": "passed",
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
     try:
         artifact, path = run(
             source_root=args.source_root,

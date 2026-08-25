@@ -1421,9 +1421,20 @@ def test_formal_clone_requires_production_parity_and_rederived_inventory(
         )
 
 
-@pytest.mark.parametrize("replace", ("artifact", "authority", "swapped"))
+@pytest.mark.parametrize(
+    ("replace", "expected"),
+    (
+        ("artifact", "changed during binding"),
+        ("authority", "changed during binding"),
+        ("swapped", "changed during binding"),
+        ("production_inventory", "matching certified dependency"),
+    ),
+)
 def test_verify_r4_rejects_post_validation_replacement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replace: str,
+    expected: str,
 ) -> None:
     artifact_path = tmp_path / "r4.json"
     authority_path = tmp_path / f"{_id(14)}.authority.json"
@@ -1443,7 +1454,9 @@ def test_verify_r4_rejects_post_validation_replacement(
         "source_final": {**source, "clean": True, "status_count": 0},
         "source_contract": {"passed": True},
         "receipt_files": {
-            key: {"count": 1, "files": [key]} for key in ("local", "ox", "production")
+            "local": {"count": 1, "files": ["local"]},
+            "ox": {"count": 1, "files": ["ox"]},
+            "production": {"count": 0, "files": []},
         },
         "authority_receipt": {
             "available": True, "artifact_id": _id(14), "seal_sha256": _id(15),
@@ -1452,6 +1465,11 @@ def test_verify_r4_rejects_post_validation_replacement(
             "parent_ino": authority_path.parent.stat().st_ino,
         },
     }
+    if replace == "production_inventory":
+        artifact["receipt_files"]["production"] = {
+            "count": 1,
+            "files": ["production"],
+        }
     monkeypatch.setattr(HARNESS.R4, "read_artifact", lambda _path: artifact)
 
     def validate(_authority: Path, **_kwargs: object) -> dict[str, object]:
@@ -1464,7 +1482,7 @@ def test_verify_r4_rejects_post_validation_replacement(
         }
 
     monkeypatch.setattr(HARNESS.R4, "validate_source_bound_authority_receipt", validate)
-    with pytest.raises(HARNESS.R5Error, match="changed during binding"):
+    with pytest.raises(HARNESS.R5Error, match=expected):
         HARNESS._verify_r4(artifact_path, source, tmp_path)
 
 

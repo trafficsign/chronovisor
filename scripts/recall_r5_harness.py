@@ -1914,8 +1914,9 @@ def _verify_r4(
             or receipt["count"] <= 0
             or not isinstance(receipt.get("files"), list)
             or not receipt["files"]
-            for receipt in receipt_files.values()
+            for receipt in (receipt_files.get("local"), receipt_files.get("ox"))
         )
+        or receipt_files.get("production") != {"files": [], "count": 0}
         or not isinstance(authority, Mapping)
         or authority.get("available") is not True
         or set(authority) != {

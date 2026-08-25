@@ -107,6 +107,79 @@ def _write_receipts(path: Path, receipts: list[dict[str, object]]) -> None:
         )
 
 
+def _owned_fault_artifact(
+    source: Path,
+    commit: str,
+    scenario: str,
+    *,
+    provider_calls: int = 0,
+    test_only: bool = True,
+) -> dict[str, object]:
+    snapshot = HARNESS._assert_source(source, commit)
+    stopped = scenario in {"http_402_paid", "model_drift", "disable_rollback"}
+    provider_fault = scenario in {
+        "http_429",
+        "http_5xx",
+        "timeout",
+        "http_402_paid",
+        "model_drift",
+        "lease_expiry_reclaim",
+        "resource_pressure_preemption",
+    }
+    file_state = {
+        "st_dev": 1,
+        "st_ino": 2,
+        "st_mode": 0o600,
+        "st_size": 1,
+        "st_mtime_ns": 1,
+        "st_ctime_ns": 1,
+    }
+    unsigned: dict[str, object] = {
+        "schema": HARNESS.R4_FAULT_SCENARIO_SCHEMA,
+        "namespace": "recall-distillation",
+        "scenario": scenario,
+        "writer_path": "public-run-distillation-chunk-v1",
+        "test_only": test_only,
+        "source": {
+            "source_commit": snapshot["commit"],
+            "source_tree_sha256": snapshot["tree_sha256"],
+            "source_ox_identity_sha256": snapshot["ox_identity_sha256"],
+        },
+        "profile_contract_id": "a" * 64,
+        "outcome": {
+            "profile_stopped": stopped,
+            "backoff_bounded": scenario in {"http_429", "http_5xx", "timeout"},
+            "quarantined": 1 if scenario == "invalid_output_quarantine" else 0,
+            "ready": 0,
+            "leased": 0,
+            "duplicate_labels": 0,
+            "adapter_calls": 0 if scenario == "disable_rollback" else 1,
+            "provider_calls": provider_calls,
+        },
+        "workset_receipt": {"generation": 1, "head_sha256": "b" * 64},
+        "event_heads": {
+            "ramp": "",
+            "failure": "c" * 64 if provider_fault else "",
+            "lease": "d" * 64 if scenario == "lease_expiry_reclaim" else "",
+        },
+        "owned_root": {
+            "before": {"main": file_state, "wal": None, "shm": None},
+            "after": {"main": dict(file_state), "wal": None, "shm": None},
+            "run_status": "deferred",
+        },
+    }
+    return HARNESS._sealed({"artifact_id": HARNESS._sha256(unsigned), **unsigned})
+
+
+def _write_owned_faults(path: Path, source: Path, commit: str) -> None:
+    path.mkdir()
+    for scenario in HARNESS.PRODUCTION_FAULT_SCENARIOS:
+        artifact = _owned_fault_artifact(source, commit, scenario)
+        (path / f"{artifact['artifact_id']}.json").write_bytes(
+            HARNESS._json_bytes(artifact) + b"\n"
+        )
+
+
 @pytest.mark.parametrize(
     ("column", "value"),
     [
@@ -236,7 +309,7 @@ def test_collector_rejects_workset_mutation_after_snapshot(
         "_load_production_anchor",
         lambda _path, **_kwargs: _fixture_candidate_anchor(production),
     )
-    original = HARNESS._production_fault_scenarios
+    original = HARNESS._production_quality
 
     def mutate_after_snapshot(*args: object, **kwargs: object) -> object:
         result = original(*args, **kwargs)
@@ -245,7 +318,7 @@ def test_collector_rejects_workset_mutation_after_snapshot(
             connection.execute("PRAGMA user_version = 1")
         return result
 
-    monkeypatch.setattr(HARNESS, "_production_fault_scenarios", mutate_after_snapshot)
+    monkeypatch.setattr(HARNESS, "_production_quality", mutate_after_snapshot)
     result = HARNESS._collect_authoritative_production(
         source_root=source,
         source=HARNESS._assert_source(source, commit),
@@ -1254,6 +1327,22 @@ def test_read_artifact_requires_canonical_closed_payload(tmp_path: Path) -> None
     with pytest.raises(HARNESS.R4Error, match="payload shape|source contract"):
         HARNESS.read_artifact(forged_path)
 
+    wrong_schema = json.loads(json.dumps(artifact))
+    wrong_schema["source_contract"]["schema"] = "chronovisor.wrong.v1"
+    wrong_unsigned = {
+        key: value
+        for key, value in wrong_schema.items()
+        if key not in {"artifact_id", "seal_sha256"}
+    }
+    wrong_id = HARNESS._sha256(wrong_unsigned)
+    wrong_schema = HARNESS._sealed(
+        {"artifact_id": wrong_id, **wrong_unsigned}
+    )
+    wrong_schema_path = artifact_path.with_name(f"{wrong_id}.json")
+    wrong_schema_path.write_bytes(HARNESS._json_bytes(wrong_schema) + b"\n")
+    with pytest.raises(HARNESS.R4Error, match="source contract"):
+        HARNESS.read_artifact(wrong_schema_path)
+
     wrong_name = artifact_path.with_name("0" * 64 + ".json")
     wrong_name.write_bytes(original)
     with pytest.raises(HARNESS.R4Error, match="filename"):
@@ -1279,6 +1368,86 @@ def test_write_immutable_rejects_directory_swap_during_publish(tmp_path: Path) -
         )
     assert not list(output.iterdir())
     assert len(list(displaced.glob("*.json"))) == 1
+
+
+def test_owned_artifact_existing_fast_path_rejects_directory_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "faults"
+    output.mkdir()
+    encoded = b"{}\n"
+    HARNESS._publish_owned_artifact(output, "artifact.json", encoded)
+    displaced = tmp_path / "displaced"
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    real_stat = os.stat
+    swapped = False
+
+    def swap_before_named_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        nonlocal swapped
+        if Path(cast(str | os.PathLike[str], path)) == output and not swapped:
+            swapped = True
+            os.rename(output, displaced)
+            os.rename(replacement, output)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(HARNESS.os, "stat", swap_before_named_stat)
+    with pytest.raises(HARNESS.R4Error, match="directory changed"):
+        HARNESS._publish_owned_artifact(output, "artifact.json", encoded)
+
+
+def test_pinned_artifact_publish_failure_cleans_created_file(tmp_path: Path) -> None:
+    output = tmp_path / "evidence"
+    parent_fd, output_fd, _name, _identity = HARNESS._open_authority_output_root(
+        output
+    )
+    calls = 0
+
+    def fail_after_publish() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise HARNESS.R4Error("synthetic post-publication failure")
+
+    try:
+        with pytest.raises(HARNESS.R4Error, match="post-publication"):
+            HARNESS._write_immutable_pinned(
+                output_fd,
+                {"captured_at": "2026-08-25T00:00:00Z"},
+                verify_directory=fail_after_publish,
+            )
+    finally:
+        os.close(output_fd)
+        os.close(parent_fd)
+    assert not list(output.iterdir())
+
+
+def test_owned_fault_runner_rejects_source_and_production_overlap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    with pytest.raises(HARNESS.R4Error, match="paths overlap"):
+        HARNESS.run_owned_fault_scenarios(
+            source_root=source, source_commit=commit, output=source
+        )
+    assert HARNESS._assert_source(source, commit)["clean"] is True
+
+    production = tmp_path / "production"
+    production.mkdir()
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    output = production / "faults"
+    with pytest.raises(HARNESS.R4Error, match="production paths overlap"):
+        HARNESS.run_owned_fault_scenarios(
+            source_root=source, source_commit=commit, output=output
+        )
+    assert not output.exists()
+    with pytest.raises(HARNESS.R4Error, match="output/production paths overlap"):
+        HARNESS.run(
+            source_root=source,
+            source_commit=commit,
+            output=production,
+        )
+    assert not list(production.iterdir())
 
 
 def test_authority_reader_rejects_nested_symlink_and_directory_swap(
@@ -1356,6 +1525,52 @@ def test_source_bound_authority_receipt_uses_official_producer_and_validator(
         source_root=source,
         source_commit=commit,
     )["artifact_id"] == reference["artifact_id"]
+
+    real_read_artifact = HARNESS.read_artifact
+    real_validate_local = HARNESS._validate_local
+    failed_local = {
+        **artifact["source_contract"]["local"],
+        "passed": False,
+        "reasons": ["synthetic_semantic_failure"],
+    }
+    forged_artifact = json.loads(json.dumps(artifact))
+    forged_artifact["source_contract"]["local"] = failed_local
+    monkeypatch.setattr(HARNESS, "read_artifact", lambda _path: forged_artifact)
+    monkeypatch.setattr(HARNESS, "_validate_local", lambda *_args: failed_local)
+    with pytest.raises(HARNESS.R4Error, match="source contract"):
+        HARNESS.validate_source_bound_authority_receipt(
+            authority_path,
+            artifact_path=artifact_path,
+            source_root=source,
+            source_commit=commit,
+        )
+    monkeypatch.setattr(HARNESS, "read_artifact", real_read_artifact)
+    monkeypatch.setattr(HARNESS, "_validate_local", real_validate_local)
+
+    real_authority_validator = HARNESS.validate_source_bound_authority_receipt
+
+    def fail_readback(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise HARNESS.R4Error("synthetic final authority readback failure")
+
+    monkeypatch.setattr(
+        HARNESS, "validate_source_bound_authority_receipt", fail_readback
+    )
+    failed_output = tmp_path / "readback-failure"
+    with pytest.raises(HARNESS.R4Error, match="final authority readback"):
+        HARNESS.run(
+            source_root=source,
+            source_commit=commit,
+            output=failed_output,
+            local_receipts=local_dir,
+            ox_receipts=ox_dir,
+            production_root=production,
+        )
+    assert not list(failed_output.iterdir())
+    monkeypatch.setattr(
+        HARNESS,
+        "validate_source_bound_authority_receipt",
+        real_authority_validator,
+    )
 
     forged = json.loads(authority_path.read_text())
     forged["captured_at"] = "2026-08-25T00:00:00+00:00"
@@ -1477,6 +1692,70 @@ def test_authority_validator_rejects_resealed_embedded_duplicate_receipt(
             source_root=source,
             source_commit=commit,
         )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("production", "production projection changed"),
+        (
+            "local",
+            "authority receipt inputs changed|local receipt path changed during read",
+        ),
+    ],
+)
+def test_run_rejects_authority_snapshot_change_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    expected: str,
+) -> None:
+    source, commit = _git_source(tmp_path)
+    production = tmp_path / "production"
+    production.mkdir()
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    local_dir, ox_dir = tmp_path / "local", tmp_path / "ox"
+    _write_receipts(
+        local_dir,
+        [_receipt(row, index) for index, row in enumerate(_local_rows(source, commit))],
+    )
+    _write_receipts(
+        ox_dir,
+        [_receipt(row, index) for index, row in enumerate(_ox_rows(source, commit))],
+    )
+    calls = 0
+
+    def collector(**_kwargs: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        if mutation == "local" and calls == 2:
+            path = next(local_dir.glob("*.json"))
+            values = json.loads(path.read_text())
+            values[0]["receipt_id"] = "f" * 64
+            values[0] = HARNESS._sealed(
+                {key: value for key, value in values[0].items() if key != "seal_sha256"}
+            )
+            path.write_text(json.dumps(values, sort_keys=True))
+        return {
+            "passed": True,
+            "reasons": [],
+            "collector": "test",
+            "provider_calls": 0,
+            "projection": calls if mutation == "production" else 1,
+        }
+
+    monkeypatch.setattr(HARNESS, "_collect_authoritative_production", collector)
+    output = tmp_path / "evidence"
+    with pytest.raises(HARNESS.R4Error, match=expected):
+        HARNESS.run(
+            source_root=source,
+            source_commit=commit,
+            output=output,
+            local_receipts=local_dir,
+            ox_receipts=ox_dir,
+            production_root=production,
+        )
+    assert not list(output.glob("*.json"))
 
 
 def test_embedded_authority_inputs_reject_noncanonical_path_and_base64(
@@ -1694,7 +1973,8 @@ def test_authority_staging_rejects_output_inputs_and_kind_swaps(
     with pytest.raises(HARNESS.R4Error, match="output changed"):
         HARNESS.produce_source_bound_authority_receipt(
             output, source_root=source, source_commit=commit,
-            local_receipts=local_dir, ox_receipts=ox_dir, before_stage=swap_output,
+            local_receipts=local_dir, ox_receipts=ox_dir,
+            before_stage=swap_output,
         )
     assert not list(output.iterdir())
     assert not list(displaced.iterdir())
@@ -1732,7 +2012,8 @@ def test_authority_validator_takes_third_snapshot_after_collector(
     _write_receipts(ox_dir, [_receipt(row, index) for index, row in enumerate(_ox_rows(source, commit))])
     artifact, artifact_path = HARNESS.run(
         source_root=source, source_commit=commit, output=tmp_path / "evidence",
-        local_receipts=local_dir, ox_receipts=ox_dir, production_root=production,
+        local_receipts=local_dir, ox_receipts=ox_dir,
+        production_root=production,
     )
     authority_path = artifact_path.parent / str(artifact["authority_receipt"]["relative_path"])
     authority_raw = authority_path.read_bytes()
@@ -1777,7 +2058,8 @@ def test_authority_validator_rechecks_after_final_authority_read_and_root_bindin
     _write_receipts(ox_dir, [_receipt(row, index) for index, row in enumerate(_ox_rows(source, commit))])
     artifact, artifact_path = HARNESS.run(
         source_root=source, source_commit=commit, output=tmp_path / "evidence",
-        local_receipts=local_dir, ox_receipts=ox_dir, production_root=production,
+        local_receipts=local_dir, ox_receipts=ox_dir,
+        production_root=production,
     )
     authority_path = artifact_path.parent / str(artifact["authority_receipt"]["relative_path"])
     authority_raw = authority_path.read_bytes()
@@ -1809,7 +2091,8 @@ def test_authority_validator_rechecks_after_final_authority_read_and_root_bindin
     monkeypatch.setattr(HARNESS, "_authority_read_fd", real_read)
     artifact, artifact_path = HARNESS.run(
         source_root=source, source_commit=commit, output=tmp_path / "second-evidence",
-        local_receipts=local_dir, ox_receipts=ox_dir, production_root=production,
+        local_receipts=local_dir, ox_receipts=ox_dir,
+        production_root=production,
     )
     authority_path = artifact_path.parent / str(artifact["authority_receipt"]["relative_path"])
     displaced, replacement = tmp_path / "displaced", tmp_path / "replacement"
@@ -1905,10 +2188,11 @@ def test_run_rejects_output_swap_between_authority_and_artifact_publish(
     with pytest.raises(HARNESS.R4Error, match="output changed"):
         HARNESS.run(
             source_root=source, source_commit=commit, output=output,
-            local_receipts=local_dir, ox_receipts=ox_dir, production_root=production,
+            local_receipts=local_dir, ox_receipts=ox_dir,
+            production_root=production,
     )
     assert not list(output.iterdir())
-    assert not [path for path in displaced.glob("*.json") if not path.name.endswith(".authority.json")]
+    assert not list(displaced.glob("*.json"))
 
 
 def test_authority_cleanup_keeps_primary_error_and_closes_parent_after_close_failure(
@@ -2313,14 +2597,12 @@ def test_authoritative_collector_can_certify_only_fixed_sealed_root(
         source=source_snapshot,
         production_root=production,
     )
-    # The persisted writer path is valid, but this fixture deliberately does
-    # not synthesize the six provider-failure transitions.  Production
-    # certification must therefore remain fail-closed while the ramp evidence
-    # itself is still independently readable.
+    # The fixture deliberately lacks provider-failure transitions and runtime
+    # archive binding.  Owned fault injection is a separate source contract,
+    # never a live-root requirement.
     assert result["passed"] is False
     assert set(result["reasons"]) == {
         "production_failure_coverage_incomplete",
-        "production_fault_scenarios_missing",
         "production_label_identity_invalid",
         "production_lease_recovery_invalid",
         "production_runtime_archive_binding_invalid",
@@ -2474,70 +2756,6 @@ def test_production_quality_rejects_self_resealed_payload_source(
         rallies=rallies,
     )
     assert "production_label_identity_invalid" in reasons
-
-
-def test_authoritative_collector_rejects_test_only_fault_scenario_artifact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source, commit = _git_source(tmp_path)
-    production = _authoritative_production_root(tmp_path, source, commit)
-    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
-    monkeypatch.setattr(
-        HARNESS,
-        "_load_production_anchor",
-        lambda _path, **_kwargs: _fixture_candidate_anchor(production),
-    )
-    source_snapshot = HARNESS._assert_source(source, commit)
-    state = json.loads((production / HARNESS.PRODUCTION_STATE_RELATIVE).read_text())
-    contract_id = str(state["profile_contract_id"])
-    workset = HARNESS._production_workset(
-        production / HARNESS.PRODUCTION_WORKSET_RELATIVE
-    )
-    events = HARNESS._production_ox_events(
-        production, source=source_snapshot, contract_id=contract_id
-    )
-    heads = {
-        name: str(rows[-1]["record_sha256"]) if rows else ""
-        for name, rows in events.items()
-    }
-    unsigned = {
-        "schema": HARNESS.R4_FAULT_SCENARIO_SCHEMA,
-        "namespace": "recall-distillation",
-        "scenario": "http_429",
-        "writer_path": "public-run-distillation-chunk-v1",
-        "test_only": True,
-        "source": {
-            "source_commit": source_snapshot["commit"],
-            "source_tree_sha256": source_snapshot["tree_sha256"],
-            "source_ox_identity_sha256": source_snapshot["ox_identity_sha256"],
-        },
-        "profile_contract_id": contract_id,
-        "outcome": {
-            "profile_stopped": False,
-            "backoff_bounded": True,
-            "quarantined": 0,
-            "ready": 0,
-            "leased": 0,
-            "duplicate_labels": 0,
-            "provider_calls": 0,
-        },
-        "workset_receipt": {
-            "generation": workset["receipts"]["generation"],
-            "head_sha256": workset["receipts"]["head_sha256"],
-        },
-        "event_heads": heads,
-    }
-    artifact_id = HARNESS._sha256(unsigned)
-    artifact = HARNESS._sealed({"artifact_id": artifact_id, **unsigned})
-    directory = production / HARNESS.PRODUCTION_FAULT_SCENARIO_RELATIVE
-    directory.mkdir()
-    (directory / f"{artifact_id}.json").write_bytes(HARNESS._json_bytes(artifact) + b"\n")
-    result = HARNESS._collect_authoritative_production(
-        source_root=source, source=source_snapshot, production_root=production
-    )
-    assert result["passed"] is False
-    assert "production_fault_scenario_invalid" in result["reasons"]
-    assert "production_fault_scenarios_incomplete" in result["reasons"]
 
 
 def test_state_ramp_claim_cannot_replace_missing_event_ledgers(
@@ -2871,6 +3089,207 @@ def test_self_reported_attestation_is_rejected(tmp_path: Path) -> None:
     )
     assert result["passed"] is False
     assert result["reasons"] == ["independent_live_provider_attestation_unavailable"]
+
+
+def test_owned_fault_contract_requires_complete_canonical_source_bound_suite(
+    tmp_path: Path,
+) -> None:
+    source, commit = _git_source(tmp_path)
+    faults_dir = tmp_path / "faults"
+    _write_owned_faults(faults_dir, source, commit)
+    faults, inventory = HARNESS._load_owned_fault_scenarios(faults_dir)
+    result = HARNESS._validate_owned_fault_scenarios(
+        faults, HARNESS._assert_source(source, commit)
+    )
+    assert result == {
+        "passed": True,
+        "reasons": [],
+        "count": len(HARNESS.PRODUCTION_FAULT_SCENARIOS),
+        "scenarios": sorted(HARNESS.PRODUCTION_FAULT_SCENARIOS),
+    }
+    assert inventory["count"] == len(HARNESS.PRODUCTION_FAULT_SCENARIOS)
+
+
+def test_owned_fault_producer_reaches_validator_safe_outcomes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    binding = HARNESS._assert_source(source, commit)
+    from chronovisor.recall import recall_distillation_remote_teacher as remote
+
+    # The producer's only test seam is the installed-runtime identity.  It
+    # keeps the public worker, isolated roots, and no-transport adapter real.
+    monkeypatch.setattr(
+        remote,
+        "ox_alpha_source_binding",
+        lambda: {
+            "source_commit": binding["commit"],
+            "source_tree_sha256": binding["tree_sha256"],
+            "source_ox_identity_sha256": binding["ox_identity_sha256"],
+        },
+    )
+    faults_dir = tmp_path / "generated-faults"
+    published = HARNESS.run_owned_fault_scenarios(
+        source_root=source, source_commit=commit, output=faults_dir
+    )
+    faults, inventory = HARNESS._load_owned_fault_scenarios(faults_dir)
+    result = HARNESS._validate_owned_fault_scenarios(faults, binding)
+    assert len(published) == len(HARNESS.PRODUCTION_FAULT_SCENARIOS)
+    assert inventory["count"] == len(HARNESS.PRODUCTION_FAULT_SCENARIOS)
+    assert result["passed"] is True
+    by_scenario = {str(artifact["scenario"]): artifact for artifact in faults}
+    for scenario, artifact in by_scenario.items():
+        outcome = artifact["outcome"]
+        assert isinstance(outcome, Mapping)
+        assert outcome["provider_calls"] == 0
+        assert outcome["leased"] == 0
+        assert outcome["duplicate_labels"] == 0
+        assert artifact["test_only"] is True
+        assert artifact["writer_path"] == "public-run-distillation-chunk-v1"
+        if scenario in {"http_429", "http_5xx", "timeout"}:
+            assert outcome["backoff_bounded"] is True
+        if scenario in {"http_402_paid", "model_drift", "disable_rollback"}:
+            assert outcome["profile_stopped"] is True
+    assert by_scenario["invalid_output_quarantine"]["outcome"]["quarantined"] >= 1
+    assert by_scenario["lease_expiry_reclaim"]["event_heads"]["lease"]
+    assert by_scenario["resource_pressure_preemption"]["outcome"]["adapter_calls"] >= 1
+    assert by_scenario["disable_rollback"]["outcome"]["profile_stopped"] is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("wrong_source", "owned_fault_artifact_invalid"),
+        ("provider", "owned_fault_artifact_invalid"),
+        ("test_only", "owned_fault_artifact_invalid"),
+        ("contract", "owned_fault_contract_mixing"),
+        ("run_status", "owned_fault_artifact_invalid"),
+        ("root_identity", "owned_fault_safe_outcome_invalid"),
+        ("missing_failure", "owned_fault_safe_outcome_invalid"),
+        ("disable_adapter", "owned_fault_safe_outcome_invalid"),
+    ],
+)
+def test_owned_fault_contract_rejects_unsafe_artifacts(
+    tmp_path: Path, mutation: str, expected: str
+) -> None:
+    source, commit = _git_source(tmp_path)
+    faults_dir = tmp_path / "faults"
+    _write_owned_faults(faults_dir, source, commit)
+    path = next(faults_dir.glob("*.json"))
+    if mutation == "missing_failure":
+        path = next(
+            candidate
+            for candidate in faults_dir.glob("*.json")
+            if json.loads(candidate.read_text())["scenario"] == "http_429"
+        )
+    elif mutation == "disable_adapter":
+        path = next(
+            candidate
+            for candidate in faults_dir.glob("*.json")
+            if json.loads(candidate.read_text())["scenario"] == "disable_rollback"
+        )
+    artifact = json.loads(path.read_text())
+    if mutation == "wrong_source":
+        artifact["source"]["source_commit"] = "0" * 40
+    elif mutation == "provider":
+        artifact["outcome"]["provider_calls"] = 1
+    elif mutation == "test_only":
+        artifact["test_only"] = False
+    elif mutation == "contract":
+        artifact["profile_contract_id"] = "e" * 64
+    elif mutation == "run_status":
+        artifact["owned_root"]["run_status"] = "ok"
+    elif mutation == "root_identity":
+        artifact["owned_root"]["after"]["main"]["st_ino"] = 3
+    elif mutation == "missing_failure":
+        artifact["event_heads"]["failure"] = ""
+    else:
+        artifact["outcome"]["adapter_calls"] = 1
+    unsigned = {
+        key: value for key, value in artifact.items() if key not in {"artifact_id", "seal_sha256"}
+    }
+    artifact = HARNESS._sealed({"artifact_id": HARNESS._sha256(unsigned), **unsigned})
+    path.unlink()
+    (faults_dir / f"{artifact['artifact_id']}.json").write_bytes(
+        HARNESS._json_bytes(artifact) + b"\n"
+    )
+    faults, _inventory = HARNESS._load_owned_fault_scenarios(faults_dir)
+    result = HARNESS._validate_owned_fault_scenarios(
+        faults, HARNESS._assert_source(source, commit)
+    )
+    assert result["passed"] is False
+    assert expected in result["reasons"]
+
+
+def test_owned_fault_contract_rejects_missing_duplicate_and_tampered_inputs(
+    tmp_path: Path,
+) -> None:
+    source, commit = _git_source(tmp_path)
+    faults_dir = tmp_path / "faults"
+    _write_owned_faults(faults_dir, source, commit)
+    one = next(faults_dir.glob("*.json"))
+    one.unlink()
+    faults, _inventory = HARNESS._load_owned_fault_scenarios(faults_dir)
+    assert HARNESS._validate_owned_fault_scenarios(
+        faults, HARNESS._assert_source(source, commit)
+    )["reasons"] == ["owned_fault_scenarios_incomplete"]
+    duplicate = next(faults_dir.glob("*.json"))
+    duplicate.with_name("duplicate.json").write_bytes(duplicate.read_bytes())
+    with pytest.raises(HARNESS.R4Error, match="owned fault artifact is not canonical"):
+        HARNESS._load_owned_fault_scenarios(faults_dir)
+    duplicate.with_name("duplicate.json").unlink()
+    extra = faults_dir / "README"
+    extra.write_text("unexpected\n")
+    with pytest.raises(HARNESS.R4Error, match="unsafe entry"):
+        HARNESS._load_owned_fault_scenarios(faults_dir)
+    extra.unlink()
+    duplicate.write_text("{}\n")
+    with pytest.raises(HARNESS.R4Error, match="receipt schema mismatch"):
+        HARNESS._load_owned_fault_scenarios(faults_dir)
+
+
+def test_owned_fault_cli_mode_is_provider_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, commit = _git_source(tmp_path)
+    output = tmp_path / "faults"
+
+    def publish(**_kwargs: object) -> list[Path]:
+        _write_owned_faults(output, source, commit)
+        return sorted(output.glob("*.json"))
+
+    monkeypatch.setattr(HARNESS, "run_owned_fault_scenarios", publish)
+    assert HARNESS.main(
+        [
+            "--source-root", str(source), "--source-commit", commit,
+            "--output", str(output), "--run-owned-faults",
+        ]
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["authoritative"] is False
+    assert result["provider_calls"] == 0
+    assert result["validation"] == "passed"
+    assert len(result["artifacts"]) == len(HARNESS.PRODUCTION_FAULT_SCENARIOS)
+
+
+def test_owned_fault_cli_rejects_unvalidated_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, commit = _git_source(tmp_path)
+    output = tmp_path / "faults"
+
+    def publish(**_kwargs: object) -> list[Path]:
+        output.mkdir()
+        return [output / "missing.json"]
+
+    monkeypatch.setattr(HARNESS, "run_owned_fault_scenarios", publish)
+    assert HARNESS.main(
+        [
+            "--source-root", str(source), "--source-commit", commit,
+            "--output", str(output), "--run-owned-faults",
+        ]
+    ) == 2
+    assert "diagnostic readback failed" in capsys.readouterr().err
 
 
 def test_default_cli_requires_production_certification(tmp_path: Path) -> None:
