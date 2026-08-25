@@ -13377,7 +13377,6 @@ def _reconcile_local_teacher_claims(
 def _commit_local_teacher_labels(
     *,
     workset: Any,
-    route: str,
     config: DistillationConfig,
     root: Path,
     raw_dir: Path,
@@ -13385,11 +13384,7 @@ def _commit_local_teacher_labels(
     snapshots: Mapping[str, Mapping[str, Any]],
     batch: Sequence[Mapping[str, Any]],
     records: Sequence[Mapping[str, Any]],
-    labels_by_id: Mapping[str, Mapping[str, Any]],
     response: Mapping[str, Any],
-    structural_verifier: Callable[
-        [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
-    ],
     source_binding: Mapping[str, str] | None,
     worker_teacher: bool,
 ) -> _TeacherBatchResult:
@@ -13796,7 +13791,6 @@ def _run_local_teacher_route(
 
     return _commit_local_teacher_labels(
         workset=workset,
-        route=route,
         config=config,
         root=root,
         raw_dir=raw_dir,
@@ -13804,9 +13798,7 @@ def _run_local_teacher_route(
         snapshots=snapshots,
         batch=batch,
         records=records,
-        labels_by_id=labels_by_id,
         response=response,
-        structural_verifier=structural_verifier,
         source_binding=source_binding,
         worker_teacher=isinstance(teachers[route], _WorkerTeacher),
     )
