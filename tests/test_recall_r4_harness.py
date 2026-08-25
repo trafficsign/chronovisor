@@ -85,12 +85,31 @@ def _git_source(tmp_path: Path) -> tuple[Path, str]:
 
 
 def _receipt(payload: dict[str, object], index: int) -> dict[str, object]:
+    workset_receipt = payload.get("workset_receipt")
+    receipt_identity = (
+        {
+            "profile": HARNESS.LOCAL_PROFILE,
+            "work_id": payload.get("work_id"),
+            "attempt": payload.get("attempt"),
+            "label_record_sha256": payload.get("label_record_sha256"),
+        }
+        if payload.get("profile") == HARNESS.LOCAL_PROFILE
+        and isinstance(workset_receipt, Mapping)
+        else {
+            "index": index,
+            "payload_sha256": HARNESS._sha256(payload),
+        }
+    )
+    receipt_id = HARNESS._sha256(receipt_identity)
     unsigned = {
         "schema": HARNESS.RECEIPT_SCHEMA,
         "namespace": "recall-distillation",
-        "receipt_id": HARNESS._sha256({"index": index, "payload": payload}),
+        "artifact_id": receipt_id,
+        "receipt_id": receipt_id,
+        "receipt_identity": receipt_identity,
         **payload,
     }
+    unsigned["receipt_sha256"] = HARNESS._producer_receipt_digest(unsigned)
     return cast(dict[str, object], HARNESS._sealed(unsigned))
 
 
@@ -450,21 +469,23 @@ def _local_rows(source: Path, commit: str) -> list[dict[str, object]]:
                 "probe": HARNESS._expected_probe(rally, candidate),
                 "assignment_revision": HARNESS.LOCAL_ASSIGNMENT_REVISION,
                 "probe_assignment_revision": HARNESS.LOCAL_PROBE_REVISION,
+                **_local_evidence_fields(index, rally, candidate, owner),
                 "route_identity": {
                     "role": owner,
-                    "provider": "local",
+                    "provider": "ollama",
                     "model": {
                         role: f"model-{role[-1]}" for role in HARNESS.LOCAL_ROLES
                     }[owner],
                     "location": "local",
                 },
-                "lease": {
-                    "kind": "LocalStructuredSession",
-                    "foreground": True,
+                "lane": {
+                    "mode": "sleep",
+                    "purpose": "sleep",
+                    "admitted": True,
                     "inflight": 1,
                 },
-                "live_recall": {"unaffected": True, "remote_egress": 0},
-                "max_inflight": 1,
+                "live_recall": {"model_calls": 0, "remote_egress": 0},
+                "configured_max_inflight": 10,
                 "failure_injection": True,
                 "outcome": outcome,
             }
@@ -488,15 +509,23 @@ def _local_rows(source: Path, commit: str) -> list[dict[str, object]]:
                 "probe": HARNESS._expected_probe(rally, candidate),
                 "assignment_revision": HARNESS.LOCAL_ASSIGNMENT_REVISION,
                 "probe_assignment_revision": HARNESS.LOCAL_PROBE_REVISION,
+                **_local_evidence_fields(
+                    next_index, rally, candidate, owner
+                ),
                 "route_identity": {
                     "role": owner,
-                    "provider": "local",
+                    "provider": "ollama",
                     "model": f"model-{owner[-1]}",
                     "location": "local",
                 },
-                "lease": {"kind": "LLMRuntime", "foreground": True, "inflight": 1},
-                "live_recall": {"unaffected": True, "remote_egress": 0},
-                "max_inflight": 1,
+                "lane": {
+                    "mode": "sleep",
+                    "purpose": "sleep",
+                    "admitted": True,
+                    "inflight": 1,
+                },
+                "live_recall": {"model_calls": 0, "remote_egress": 0},
+                "configured_max_inflight": 10,
                 "failure_injection": True,
                 "outcome": {
                     "class": "valid",
@@ -522,15 +551,24 @@ def _local_rows(source: Path, commit: str) -> list[dict[str, object]]:
                 "probe": HARNESS._expected_probe(rally, candidate),
                 "assignment_revision": HARNESS.LOCAL_ASSIGNMENT_REVISION,
                 "probe_assignment_revision": HARNESS.LOCAL_PROBE_REVISION,
+                **_local_evidence_fields(
+                    10_000 + index, rally, candidate, owner
+                ),
                 "route_identity": {
                     "role": owner,
-                    "provider": "local",
+                    "provider": "ollama",
                     "model": f"model-{owner[-1]}",
                     "location": "local",
                 },
-                "lease": {"kind": "LLMRuntime", "foreground": True, "inflight": 1},
-                "live_recall": {"unaffected": True, "remote_egress": 0},
-                "max_inflight": 1,
+                "lane": {
+                    "mode": "sleep",
+                    "purpose": "sleep",
+                    "admitted": True,
+                    "inflight": 1,
+                },
+                "live_recall": {"model_calls": 0, "remote_egress": 0},
+                "configured_max_inflight": 10,
+                "failure_injection": False,
                 "outcome": {
                     "class": "valid",
                     "reason": "ok",
@@ -1131,6 +1169,33 @@ def _fixture_candidate_anchor(production: Path) -> dict[str, object]:
     }
 
 
+def _local_evidence_fields(
+    index: int, rally_id: str, candidate_id: str, owner: str
+) -> dict[str, object]:
+    work_id = "local-teacher-" + HARNESS._sha256(
+        {
+            "profile": HARNESS.LOCAL_PROFILE,
+            "rally_id": rally_id,
+            "candidate_id": candidate_id,
+            "owner": owner,
+        }
+    )
+    return {
+        "captured_at": "2026-08-24T00:00:00Z",
+        "work_id": work_id,
+        "attempt": 1,
+        "label_record_sha256": HARNESS._sha256(
+            {"work_id": work_id, "label_index": index}
+        ),
+        "workset_receipt": {
+            "generation": index + 1,
+            "head_sha256": HARNESS._sha256(
+                {"work_id": work_id, "generation": index + 1}
+            ),
+        },
+    }
+
+
 def test_source_contract_passes_but_production_stays_false_without_attestation(
     tmp_path: Path,
 ) -> None:
@@ -1698,10 +1763,10 @@ def test_authority_validator_rejects_resealed_embedded_duplicate_receipt(
     ("mutation", "expected"),
     [
         ("production", "production projection changed"),
-        (
-            "local",
-            "authority receipt inputs changed|local receipt path changed during read",
-        ),
+            (
+                "local",
+                "authority receipt inputs changed|local receipt path changed during read|receipt identity binding is invalid",
+            ),
     ],
 )
 def test_run_rejects_authority_snapshot_change_before_publication(
@@ -3019,7 +3084,10 @@ def test_dirty_source_is_rejected_before_receipt_reads(tmp_path: Path) -> None:
 
 def test_local_skew_and_probe_revision_are_fixed_gates(tmp_path: Path) -> None:
     source, commit = _git_source(tmp_path)
-    rows = _local_rows(source, commit)
+    rows = [
+        _receipt(row, index)
+        for index, row in enumerate(_local_rows(source, commit))
+    ]
     quality = [row for row in rows if row.get("failure_injection") is not True]
     selected: list[dict[str, object]] = []
     for role, _limit in zip(HARNESS.LOCAL_ROLES, (102, 5, 1), strict=True):
@@ -3035,6 +3103,52 @@ def test_local_skew_and_probe_revision_are_fixed_gates(tmp_path: Path) -> None:
     )
     assert probe_result["passed"] is False
     assert "probe_assignment_missing" in probe_result["reasons"]
+
+
+def test_local_contract_requires_truthful_sleep_lane_and_separate_config_cap(
+    tmp_path: Path,
+) -> None:
+    source, commit = _git_source(tmp_path)
+    rows = [
+        _receipt(row, index)
+        for index, row in enumerate(_local_rows(source, commit))
+    ]
+    source_snapshot = HARNESS._assert_source(source, commit)
+    assert HARNESS._validate_local(rows, source_snapshot)["passed"] is True
+
+    legacy = json.loads(json.dumps(rows))
+    legacy[0].pop("lane")
+    legacy[0]["lease"] = {
+        "kind": "LocalStructuredSession",
+        "foreground": True,
+        "inflight": 1,
+    }
+    result = HARNESS._validate_local(legacy, source_snapshot)
+    assert result["passed"] is False
+    assert "local_receipt_shape_invalid" in result["reasons"]
+
+    invalid_cap = json.loads(json.dumps(rows))
+    invalid_cap[0]["configured_max_inflight"] = 0
+    result = HARNESS._validate_local(invalid_cap, source_snapshot)
+    assert result["passed"] is False
+    assert "local_configured_inflight_invalid" in result["reasons"]
+
+    duplicate = [*rows, dict(rows[0])]
+    result = HARNESS._validate_local(duplicate, source_snapshot)
+    assert result["passed"] is False
+    assert "local_work_attempt_duplicate" in result["reasons"]
+
+    leaked = [*rows]
+    leaked[0] = {**rows[0], "raw_prompt": "must never be accepted"}
+    result = HARNESS._validate_local(leaked, source_snapshot)
+    assert result["passed"] is False
+    assert "local_receipt_shape_invalid" in result["reasons"]
+
+    rebound = json.loads(json.dumps(rows))
+    rebound[0]["receipt_identity"]["work_id"] = "f" * 64
+    result = HARNESS._validate_local(rebound, source_snapshot)
+    assert result["passed"] is False
+    assert "local_durable_binding_invalid" in result["reasons"]
 
 
 def test_ox_negative_aliases_and_invalid_backoff_are_vetoes(tmp_path: Path) -> None:

@@ -94,6 +94,37 @@ LOCAL_MIN_INITIAL_RECEIPTS = 20
 LOCAL_MIN_VALID_RATE = 0.95
 LOCAL_MAX_LOAD_SKEW = 0.10
 LOCAL_PROBE_TOLERANCE = 0.02
+_RECEIPT_ENVELOPE_KEYS = {
+    "schema",
+    "namespace",
+    "artifact_id",
+    "receipt_id",
+    "receipt_identity",
+    "receipt_sha256",
+    "seal_sha256",
+}
+_LOCAL_RECEIPT_KEYS = _RECEIPT_ENVELOPE_KEYS | {
+    "profile",
+    "captured_at",
+    "source_commit",
+    "source_tree_sha256",
+    "work_id",
+    "attempt",
+    "rally_id",
+    "candidate_id",
+    "primary_owner",
+    "probe",
+    "assignment_revision",
+    "probe_assignment_revision",
+    "route_identity",
+    "lane",
+    "live_recall",
+    "configured_max_inflight",
+    "failure_injection",
+    "outcome",
+    "label_record_sha256",
+    "workset_receipt",
+}
 
 
 def _account_identity() -> tuple[int, Path]:
@@ -618,6 +649,16 @@ def _verify_seal(value: object, *, schema: str = RECEIPT_SCHEMA) -> dict[str, An
     )
     if not isinstance(receipt_id, str) or _SHA.fullmatch(receipt_id) is None:
         raise R4Error("receipt id is invalid")
+    if schema == RECEIPT_SCHEMA:
+        identity = value.get("receipt_identity")
+        if (
+            value.get("artifact_id") != receipt_id
+            or not isinstance(identity, Mapping)
+            or not identity
+            or receipt_id != _sha256(identity)
+            or value.get("receipt_sha256") != _producer_receipt_digest(value)
+        ):
+            raise R4Error("receipt identity binding is invalid")
     return value
 
 
@@ -712,18 +753,55 @@ def _validate_local(
     quality_rows: list[Mapping[str, Any]] = []
     valid = deferred = invalid = 0
     probe_revision = ""
+    work_attempts: set[tuple[str, int]] = set()
     for row in rows:
+        if set(row) != _LOCAL_RECEIPT_KEYS:
+            reasons.add("local_receipt_shape_invalid")
+            continue
+        work_id = _text(row.get("work_id"))
+        attempt = row.get("attempt")
+        label_record_sha256 = _text(row.get("label_record_sha256"))
+        workset_receipt = row.get("workset_receipt")
+        expected_identity = {
+            "profile": LOCAL_PROFILE,
+            "work_id": work_id,
+            "attempt": attempt,
+            "label_record_sha256": label_record_sha256,
+        }
+        if (
+            _parse_expiry(row.get("captured_at")) is None
+            or re.fullmatch(r"local-teacher-[0-9a-f]{64}", work_id) is None
+            or isinstance(attempt, bool)
+            or not isinstance(attempt, int)
+            or attempt < 1
+            or _SHA.fullmatch(label_record_sha256) is None
+            or not isinstance(workset_receipt, Mapping)
+            or set(workset_receipt) != {"generation", "head_sha256"}
+            or isinstance(workset_receipt.get("generation"), bool)
+            or not isinstance(workset_receipt.get("generation"), int)
+            or workset_receipt["generation"] < 1
+            or _SHA.fullmatch(_text(workset_receipt.get("head_sha256"))) is None
+            or row.get("receipt_identity") != expected_identity
+            or row.get("receipt_id") != _sha256(expected_identity)
+        ):
+            reasons.add("local_durable_binding_invalid")
+        elif (work_id, attempt) in work_attempts:
+            reasons.add("local_work_attempt_duplicate")
+        else:
+            work_attempts.add((work_id, attempt))
         identity = row.get("route_identity")
         if not isinstance(identity, Mapping):
             reasons.add("route_identity_missing")
             continue
+        if set(identity) != {"role", "provider", "model", "location"}:
+            reasons.add("route_identity_shape_invalid")
         role = _text(identity.get("role"))
         provider = _text(identity.get("provider"))
         model = _text(identity.get("model"))
         location = _text(identity.get("location"))
         if (
             role not in LOCAL_ROLES
-            or provider != "local"
+            or not provider
             or location != "local"
             or not model
         ):
@@ -758,18 +836,21 @@ def _validate_local(
             probe_revision = revision
         elif revision != probe_revision:
             reasons.add("probe_assignment_mixing")
-        lease = row.get("lease")
+        lane = row.get("lane")
         if (
-            not isinstance(lease, Mapping)
-            or lease.get("kind") not in {"LocalStructuredSession", "LLMRuntime"}
-            or lease.get("foreground") is not True
-            or lease.get("inflight") != 1
+            not isinstance(lane, Mapping)
+            or set(lane) != {"mode", "purpose", "admitted", "inflight"}
+            or lane.get("mode") != "sleep"
+            or lane.get("purpose") != "sleep"
+            or lane.get("admitted") is not True
+            or lane.get("inflight") != 1
         ):
-            reasons.add("foreground_lease_invalid")
+            reasons.add("scheduler_lane_invalid")
         live = row.get("live_recall")
         if (
             not isinstance(live, Mapping)
-            or live.get("unaffected") is not True
+            or set(live) != {"model_calls", "remote_egress"}
+            or live.get("model_calls") != 0
             or live.get("remote_egress") != 0
         ):
             reasons.add("live_recall_egress")
@@ -779,6 +860,13 @@ def _validate_local(
             continue
         outcome_class = _text(outcome.get("class"))
         reason = _text(outcome.get("reason"))
+        expected_outcome_keys = (
+            {"class", "reason", "schema_valid", "coverage_valid"}
+            if outcome_class == "valid"
+            else {"class", "reason"}
+        )
+        if set(outcome) != expected_outcome_keys:
+            reasons.add("outcome_shape_invalid")
         if outcome_class not in _OUTCOME_CLASSES:
             reasons.add("outcome_class_invalid")
         elif outcome_class == "valid":
@@ -798,9 +886,16 @@ def _validate_local(
                 reasons.add("invalid_reason_invalid")
         if reason:
             categories.add(reason)
-        if row.get("max_inflight") != 1:
-            reasons.add("local_inflight_not_one")
-        if row.get("failure_injection") is not True:
+        configured_max_inflight = row.get("configured_max_inflight")
+        if (
+            isinstance(configured_max_inflight, bool)
+            or not isinstance(configured_max_inflight, int)
+            or not 1 <= configured_max_inflight <= 10
+        ):
+            reasons.add("local_configured_inflight_invalid")
+        if not isinstance(row.get("failure_injection"), bool):
+            reasons.add("failure_injection_invalid")
+        elif row.get("failure_injection") is not True:
             quality_rows.append(row)
     if set(identities) != set(LOCAL_ROLES):
         reasons.add("local_identity_count_not_three")

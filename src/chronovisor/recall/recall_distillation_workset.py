@@ -87,6 +87,11 @@ _MAX_JSON_BYTES = 4_096
 _MAX_RECEIPT_JSON_BYTES = 3 * _MAX_JSON_BYTES
 _MAX_METADATA_DEPTH = 3
 _MAX_METADATA_ITEMS = 32
+# Keep every ``IN`` query well below SQLite's variable limit while allowing a
+# useful repair batch.  The input cap also prevents an unbounded read-only
+# lookup from becoming a memory/CPU denial of service.
+_MAX_COMPLETION_LOOKUP_IDS = 16_384
+_SQLITE_BIND_CHUNK = 500
 _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z")
 _REFERENCE_RE = re.compile(
     r"(?:candidate-snapshot|candidate-ledger|label-ledger):"
@@ -1302,6 +1307,78 @@ class DistillationWorkset:
             )
         return tuple(result)
 
+    def transition_receipt_identity(
+        self, generation: int
+    ) -> dict[str, Any] | None:
+        """Return one verified, payload-free transition identity by generation."""
+
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            raise DistillationWorksetError("receipt generation is invalid")
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT generation, previous_sha256, operation, payload_json, "
+                "receipt_sha256 FROM workset_receipts WHERE generation = ?",
+                (generation,),
+            ).fetchone()
+        if row is None:
+            return None
+
+        row_generation = row["generation"]
+        previous_sha256 = row["previous_sha256"]
+        operation = row["operation"]
+        payload_json = row["payload_json"]
+        receipt_sha256 = row["receipt_sha256"]
+        if (
+            isinstance(row_generation, bool)
+            or not isinstance(row_generation, int)
+            or row_generation != generation
+            or not isinstance(previous_sha256, str)
+            or (
+                generation == 1
+                and previous_sha256 != ""
+            )
+            or (
+                generation > 1
+                and (
+                    len(previous_sha256) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in previous_sha256
+                    )
+                )
+            )
+            or not isinstance(payload_json, str)
+            or not isinstance(receipt_sha256, str)
+            or len(receipt_sha256) != 64
+            or any(
+                character not in "0123456789abcdef" for character in receipt_sha256
+            )
+        ):
+            raise DistillationWorksetError("workset receipt identity is corrupted")
+        try:
+            payload = json.loads(payload_json)
+        except (RecursionError, json.JSONDecodeError) as exc:
+            raise DistillationWorksetError("workset receipt JSON is invalid") from exc
+        if (
+            _json(payload, "workset receipt", max_bytes=_MAX_RECEIPT_JSON_BYTES)
+            != payload_json
+        ):
+            raise DistillationWorksetError("workset receipt JSON is not canonical")
+        self._validate_receipt_payload(operation, payload)
+        envelope = {
+            "generation": row_generation,
+            "previous_sha256": previous_sha256,
+            "operation": operation,
+            "payload": payload,
+        }
+        if canonical_json_sha256_strict(envelope) != receipt_sha256:
+            raise DistillationWorksetError("workset receipt hash mismatch")
+        return {
+            "generation": generation,
+            "receipt_sha256": receipt_sha256,
+            "operation": operation,
+        }
+
     def advance(
         self,
         items: Iterable[Mapping[str, Any]],
@@ -1475,6 +1552,77 @@ class DistillationWorkset:
 
         with closing(self._connect()) as connection:
             return self._progress(connection)
+
+    def completion_identities(
+        self, work_ids: Iterable[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Return verified completion identities without exposing payload data."""
+
+        if isinstance(work_ids, (str, bytes, bytearray, Mapping)):
+            raise DistillationWorksetError(
+                "work_ids must be an iterable of identifiers"
+            )
+        try:
+            iterator = iter(work_ids)
+        except TypeError as exc:
+            raise DistillationWorksetError(
+                "work_ids must be an iterable of identifiers"
+            ) from exc
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_work_id in iterator:
+            if len(normalized) >= _MAX_COMPLETION_LOOKUP_IDS:
+                raise DistillationWorksetError(
+                    "work_ids exceeds bounded lookup limit"
+                )
+            work_id = _identifier(raw_work_id, "work_id")
+            if work_id in seen:
+                raise DistillationWorksetError("work_ids contains duplicate work_id")
+            seen.add(work_id)
+            normalized.append(work_id)
+        if not normalized:
+            return {}
+
+        identities: dict[str, dict[str, Any]] = {}
+        with closing(self._connect()) as connection:
+            for start in range(0, len(normalized), _SQLITE_BIND_CHUNK):
+                chunk = normalized[start : start + _SQLITE_BIND_CHUNK]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = connection.execute(
+                    "SELECT work_id, attempt_count, completion_ref, "
+                    "completion_digest FROM work_items "
+                    "WHERE state = 'completed' AND work_id IN ("
+                    + placeholders
+                    + ")",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    work_id = _identifier(row["work_id"], "work_id")
+                    attempt = row["attempt_count"]
+                    if (
+                        not isinstance(attempt, int)
+                        or isinstance(attempt, bool)
+                        or attempt < 1
+                    ):
+                        raise DistillationWorksetError(
+                            "completed work has an invalid attempt count"
+                        )
+                    identities[work_id] = {
+                        "work_id": work_id,
+                        "attempt": attempt,
+                        "completion_ref": _reference(
+                            row["completion_ref"], "completion_ref"
+                        ),
+                        "completion_digest": _digest(
+                            row["completion_digest"], "completion_digest"
+                        ),
+                    }
+        return {
+            work_id: identities[work_id]
+            for work_id in normalized
+            if work_id in identities
+        }
 
     def claim(
         self, kind: str | None, limit: int, owner: str, lease_seconds: float

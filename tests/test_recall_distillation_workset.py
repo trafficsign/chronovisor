@@ -381,6 +381,81 @@ def test_watermark_is_validated_and_returned_as_a_fresh_value(
     assert workset.watermark() == expected
 
 
+def test_completion_identities_is_completed_only_and_payload_free(
+    tmp_path: Path,
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance(
+        [_item("completed"), _item("ready"), _item("quarantined")], 1
+    )
+    claims = workset.claim("label", 3, "worker", 60)
+    by_id = {claim.work_id: claim for claim in claims}
+    workset.commit(
+        [by_id["completed"], by_id["ready"], by_id["quarantined"]],
+        [
+            _completed(),
+            {"status": "retry", "error_class": "transport_timeout"},
+            {"status": "quarantined", "error_class": "policy_veto"},
+        ],
+    )
+
+    result = workset.completion_identities(
+        ["completed", "ready", "quarantined", "missing"]
+    )
+
+    assert result == {
+        "completed": {
+            "work_id": "completed",
+            "attempt": 1,
+            "completion_ref": "label-ledger:row-1",
+            "completion_digest": "b" * 64,
+        }
+    }
+    assert set(result["completed"]) == {
+        "work_id",
+        "attempt",
+        "completion_ref",
+        "completion_digest",
+    }
+
+
+def test_completion_identities_rejects_unsafe_and_duplicate_inputs(
+    tmp_path: Path,
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+
+    assert workset.completion_identities([]) == {}
+    with pytest.raises(DistillationWorksetError, match="iterable"):
+        workset.completion_identities("one")
+    with pytest.raises(DistillationWorksetError, match="duplicate work_id"):
+        workset.completion_identities(["one", "one"])
+    with pytest.raises(DistillationWorksetError, match="bounded safe identifier"):
+        workset.completion_identities(["../private"])
+    with pytest.raises(DistillationWorksetError, match="work_id must"):
+        workset.completion_identities([1])  # type: ignore[list-item]
+
+
+def test_completion_identities_chunks_large_lookup_without_exposing_payload(
+    tmp_path: Path,
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    work_ids = [f"bulk-{index}" for index in range(1_001)]
+    workset.advance([_item(work_id) for work_id in work_ids], 1)
+    claims = workset.claim("label", len(work_ids), "worker", 60)
+    workset.commit(claims, [_completed() for _ in claims])
+
+    result = workset.completion_identities(work_ids)
+
+    assert len(result) == len(work_ids)
+    assert result["bulk-0"]["attempt"] == 1
+    assert result["bulk-1000"]["completion_ref"] == "label-ledger:row-1"
+    assert all(
+        set(identity)
+        == {"work_id", "attempt", "completion_ref", "completion_digest"}
+        for identity in result.values()
+    )
+
+
 @pytest.mark.parametrize(
     "tampered",
     [
@@ -832,6 +907,42 @@ def test_transition_receipts_cover_progress_and_skip_noops(tmp_path: Path) -> No
         len(json.loads(payload)["details"]["selection_sha256"]) == 64
         for _, payload in rows
     )
+
+
+def test_transition_receipt_identity_is_verified_and_payload_free(
+    tmp_path: Path,
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance([_item("one")], 1)
+
+    identity = workset.transition_receipt_identity(1)
+
+    assert identity is not None
+    assert set(identity) == {"generation", "receipt_sha256", "operation"}
+    assert identity["generation"] == 1
+    assert identity["operation"] == "advance"
+    assert identity["receipt_sha256"] == workset.audit_transition_receipts()[
+        "head_sha256"
+    ]
+    assert workset.transition_receipt_identity(2) is None
+
+    with sqlite3.connect(tmp_path / "workset.sqlite3") as connection:
+        connection.execute(
+            "UPDATE workset_receipts SET receipt_sha256 = ? WHERE generation = 1",
+            ("0" * 64,),
+        )
+    with pytest.raises(DistillationWorksetError, match="hash mismatch"):
+        workset.transition_receipt_identity(1)
+
+
+@pytest.mark.parametrize("generation", [False, 0, -1, 1.0, "1"])
+def test_transition_receipt_identity_rejects_invalid_generation(
+    tmp_path: Path, generation: object
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+
+    with pytest.raises(DistillationWorksetError, match="generation is invalid"):
+        workset.transition_receipt_identity(generation)  # type: ignore[arg-type]
 
 
 def test_non_migrating_open_rejects_missing_and_legacy_without_mutation(

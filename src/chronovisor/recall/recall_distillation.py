@@ -12,6 +12,7 @@ import os
 import re
 import signal
 import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -80,6 +81,7 @@ OX_ALPHA_CREDENTIAL_REF = "oskeyring:codex-router-opencode-go/default"
 OX_PROFILE_SCHEMA = "chronovisor.recall-distill-ox-profile.v1"
 R4_CANDIDATE_ANCHOR_SCHEMA = "chronovisor.recall-r4-candidate-anchor.v1"
 R4_CANDIDATE_ANCHOR_FILE = "r4-candidate-anchor.json"
+R4_RECEIPT_SCHEMA = "chronovisor.recall-r4-receipt.v1"
 R4_R0_EVIDENCE_ID = "4de2cfe3f33e5c9c5153b264ebee8fae24d814856e0ac339e53c3077dc7efb33"
 OX_RAMP_RECEIPTS_PER_CAP = 20
 _OX_EXPIRY_RE = re.compile(
@@ -9695,6 +9697,467 @@ def _prepare_local_teacher_work(
     return tasks, work_items
 
 
+def _local_r4_receipt_entry(
+    *,
+    work_id: object,
+    attempt: object,
+    task: Mapping[str, Any],
+    label: Mapping[str, Any],
+    route_identity: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    assignment = task.get("assignment")
+    if (
+        not isinstance(work_id, str)
+        or re.fullmatch(r"local-teacher-[0-9a-f]{64}", work_id) is None
+        or isinstance(attempt, bool)
+        or not isinstance(attempt, int)
+        or attempt < 1
+        or not isinstance(assignment, Mapping)
+        or set(route_identity) != {"role", "provider", "model", "location"}
+        or route_identity.get("role") != task.get("route")
+        or route_identity.get("location") != "local"
+        or not isinstance(route_identity.get("provider"), str)
+        or not route_identity["provider"]
+        or not isinstance(route_identity.get("model"), str)
+        or not route_identity["model"]
+        or label.get("kind") != "teacher-label"
+        or label.get("status") != "completed"
+        or label.get("teacher_profile") != LOCAL_TRIAD_PROFILE
+        or label.get("work_id") != work_id
+        or label.get("attempt") != attempt
+        or label.get("rally_id") != task["rally"].get("rally_id")
+        or label.get("candidate_id") != task["candidate"].get("candidate_id")
+        or label.get("route") != task.get("route")
+        or label.get("assignment") != assignment
+        or label.get("route_identity") != route_identity
+        or re.fullmatch(r"[0-9a-f]{40}", str(label.get("source_commit") or ""))
+        is None
+        or re.fullmatch(
+            r"[0-9a-f]{64}", str(label.get("source_tree_sha256") or "")
+        )
+        is None
+        or re.fullmatch(
+            r"[0-9a-f]{64}", str(label.get("source_ox_identity_sha256") or "")
+        )
+        is None
+    ):
+        return None
+    return {
+        "work_id": work_id,
+        "attempt": attempt,
+        "task": task,
+        "label": label,
+        "route_identity": dict(route_identity),
+    }
+
+
+def _r4_path_has_symlink(path: Path) -> bool:
+    current = path.expanduser().absolute()
+    while True:
+        try:
+            if stat.S_ISLNK(current.lstat().st_mode):
+                return True
+        except FileNotFoundError:
+            pass
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
+
+
+def _write_r4_local_receipts(
+    *,
+    root: Path,
+    config: DistillationConfig,
+    workset: Any,
+    entries: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Seal one verified batch of privacy-safe local R4 receipts."""
+
+    if not entries:
+        return True
+
+    created: list[tuple[Path, Mapping[str, Any]]] = []
+    try:
+        first_label = entries[0].get("label")
+        if not isinstance(first_label, Mapping):
+            return False
+        source = {
+            "source_commit": first_label.get("source_commit"),
+            "source_tree_sha256": first_label.get("source_tree_sha256"),
+            "source_ox_identity_sha256": first_label.get(
+                "source_ox_identity_sha256"
+            ),
+        }
+        recent = workset.recent_transition_receipts(limit=1)
+        label_path = store.distillation_dir(root) / "label-ledger.jsonl"
+        label_head = store.chain_head(label_path)
+        if (
+            not isinstance(source["source_commit"], str)
+            or re.fullmatch(r"[0-9a-f]{40}", source["source_commit"])
+            is None
+            or not isinstance(source["source_tree_sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", source["source_tree_sha256"])
+            is None
+            or not isinstance(source["source_ox_identity_sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", source["source_ox_identity_sha256"])
+            is None
+            or len(recent) != 1
+            or isinstance(recent[0].get("generation"), bool)
+            or not isinstance(recent[0].get("generation"), int)
+            or recent[0]["generation"] < 1
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(recent[0].get("receipt_sha256") or "")
+            )
+            is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(label_head.get("head_sha256") or "")
+            )
+            is None
+        ):
+            return False
+
+        by_key: dict[tuple[str, int], Mapping[str, Any]] = {}
+        for entry in entries:
+            key = (str(entry.get("work_id") or ""), int(entry.get("attempt") or 0))
+            if key in by_key and by_key[key] != entry:
+                return False
+            by_key[key] = entry
+        work_ids = [key[0] for key in by_key]
+        completions: dict[str, Mapping[str, Any]] = {}
+        for offset in range(0, len(work_ids), 10_000):
+            completions.update(
+                workset.completion_identities(work_ids[offset : offset + 10_000])
+            )
+
+        directory = (
+            store.distillation_dir(root)
+            / "r4-receipts"
+            / "local"
+            / source["source_commit"]
+        )
+        if _r4_path_has_symlink(directory):
+            return False
+        readbacks: list[tuple[Path, Mapping[str, Any]]] = []
+        for (work_id, attempt), entry in by_key.items():
+            task = entry.get("task")
+            label = entry.get("label")
+            route_identity = entry.get("route_identity")
+            if (
+                not isinstance(task, Mapping)
+                or not isinstance(label, Mapping)
+                or not isinstance(route_identity, Mapping)
+                or _local_r4_receipt_entry(
+                    work_id=work_id,
+                    attempt=attempt,
+                    task=task,
+                    label=label,
+                    route_identity=route_identity,
+                )
+                is None
+                or {
+                    "source_commit": label.get("source_commit"),
+                    "source_tree_sha256": label.get("source_tree_sha256"),
+                    "source_ox_identity_sha256": label.get(
+                        "source_ox_identity_sha256"
+                    ),
+                }
+                != source
+            ):
+                return False
+            record = str(label.get("record_sha256") or "")
+            captured_at = label.get("captured_at")
+            label_unsigned = {
+                key: value for key, value in label.items() if key != "record_sha256"
+            }
+            completion = completions.get(work_id)
+            if (
+                re.fullmatch(r"[0-9a-f]{64}", record) is None
+                or canonical_json.canonical_json_sha256_strict(label_unsigned)
+                != record
+                or not isinstance(captured_at, str)
+                or _OX_EXPIRY_RE.fullmatch(captured_at) is None
+                or completion
+                != {
+                    "work_id": work_id,
+                    "attempt": attempt,
+                    "completion_ref": f"label-ledger:{record}",
+                    "completion_digest": record,
+                }
+            ):
+                return False
+            assignment = task["assignment"]
+            receipt_identity = {
+                "profile": LOCAL_TRIAD_PROFILE,
+                "work_id": work_id,
+                "attempt": attempt,
+                "label_record_sha256": record,
+            }
+            receipt_id = canonical_json.canonical_json_sha256_strict(
+                receipt_identity
+            )
+            path = directory / f"{receipt_id}.json"
+            workset_receipt: Mapping[str, Any]
+            if path.exists():
+                if not stat.S_ISREG(path.lstat().st_mode):
+                    return False
+                existing = store.read_sealed(path, schema=R4_RECEIPT_SCHEMA)
+                workset_receipt_value = existing.get("workset_receipt")
+                if not isinstance(workset_receipt_value, Mapping):
+                    return False
+                generation = workset_receipt_value.get("generation")
+                if isinstance(generation, bool) or not isinstance(generation, int):
+                    return False
+                transition = workset.transition_receipt_identity(generation)
+                if (
+                    transition is None
+                    or transition.get("receipt_sha256")
+                    != workset_receipt_value.get("head_sha256")
+                ):
+                    return False
+                workset_receipt = dict(workset_receipt_value)
+            else:
+                workset_receipt = {
+                    "generation": recent[0]["generation"],
+                    "head_sha256": recent[0]["receipt_sha256"],
+                }
+            payload: dict[str, Any] = {
+                "receipt_id": receipt_id,
+                "receipt_identity": receipt_identity,
+                "profile": LOCAL_TRIAD_PROFILE,
+                "source_commit": source["source_commit"],
+                "source_tree_sha256": source["source_tree_sha256"],
+                "captured_at": captured_at,
+                "work_id": work_id,
+                "attempt": attempt,
+                "rally_id": task["rally"]["rally_id"],
+                "candidate_id": task["candidate"]["candidate_id"],
+                "primary_owner": assignment.get("owner"),
+                "probe": assignment.get("probe"),
+                "assignment_revision": assignment.get("revision"),
+                "probe_assignment_revision": assignment.get("probe_revision"),
+                "route_identity": dict(route_identity),
+                "lane": {
+                    "mode": "sleep",
+                    "purpose": "sleep",
+                    "admitted": True,
+                    "inflight": 1,
+                },
+                "live_recall": {"model_calls": 0, "remote_egress": 0},
+                "configured_max_inflight": config.teacher_max_inflight,
+                "failure_injection": False,
+                "outcome": {
+                    "class": "valid",
+                    "reason": "ok",
+                    "schema_valid": True,
+                    "coverage_valid": True,
+                },
+                "label_record_sha256": record,
+                "workset_receipt": dict(workset_receipt),
+            }
+            expected_unsigned = {
+                "artifact_id": receipt_id,
+                "schema": R4_RECEIPT_SCHEMA,
+                "namespace": "recall-distillation",
+                **payload,
+            }
+            payload["receipt_sha256"] = (
+                canonical_json.canonical_json_sha256_strict(expected_unsigned)
+            )
+            expected = {**expected_unsigned, "receipt_sha256": payload["receipt_sha256"]}
+            if path.exists():
+                if set(existing) != {*expected, "seal_sha256"} or any(
+                    existing.get(key) != value for key, value in expected.items()
+                ):
+                    return False
+                readbacks.append((path, existing))
+                continue
+            artifact_id, path, artifact = store.write_immutable(
+                directory,
+                payload,
+                schema=R4_RECEIPT_SCHEMA,
+                artifact_id=receipt_id,
+            )
+            if artifact_id != receipt_id:
+                raise DistillationError("local R4 receipt identity conflicts")
+            created.append((path, artifact))
+            readbacks.append((path, artifact))
+        if (
+            ox_alpha_source_binding() != source
+            or workset.recent_transition_receipts(limit=1) != recent
+            or store.chain_head(label_path) != label_head
+            or any(
+                store.read_sealed(path, schema=R4_RECEIPT_SCHEMA) != artifact
+                for path, artifact in readbacks
+            )
+        ):
+            raise DistillationError("local R4 receipt identity conflicts")
+        return True
+    except (
+        DistillationError,
+        OSError,
+        ValueError,
+        store.DistillationStoreError,
+        KeyError,
+        TypeError,
+    ):
+        for path, expected_artifact in created:
+            try:
+                if store.read_sealed(path, schema=R4_RECEIPT_SCHEMA) == expected_artifact:
+                    path.unlink()
+            except (OSError, store.DistillationStoreError):
+                continue
+        return False
+
+
+def _ensure_r4_local_receipts(
+    *,
+    root: Path,
+    config: DistillationConfig,
+    workset: Any,
+    entries: Sequence[Mapping[str, Any]],
+) -> None:
+    """Publish and read back every authentic receipt in one verified batch."""
+
+    if entries and not _write_r4_local_receipts(
+        root=root,
+        config=config,
+        workset=workset,
+        entries=entries,
+    ):
+        raise DistillationError("local R4 receipt publication failed")
+
+
+def _repair_r4_local_receipts(
+    *,
+    root: Path,
+    config: DistillationConfig,
+    workset: Any,
+    tasks: Mapping[str, Mapping[str, Any]],
+    label_path: Path,
+    label_rows: Sequence[Mapping[str, Any]],
+) -> None:
+    """Advance a sealed label-ledger cursor only after missing receipts settle."""
+
+    commit = runtime_config.runtime_identity().get("commit_id")
+    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        return
+    ledger_head = store.chain_head(label_path)
+    expected_head = (
+        str(label_rows[-1].get("record_sha256") or "") if label_rows else ""
+    )
+    if ledger_head != {
+        "records": len(label_rows),
+        "head_sha256": expected_head,
+    }:
+        raise DistillationError("local R4 repair ledger identity changed")
+    state_path = (
+        store.distillation_dir(root) / "r4-local-repair" / f"{commit}.json"
+    )
+    if _r4_path_has_symlink(state_path):
+        raise DistillationError("local R4 repair state path is unsafe")
+    start = 0
+    if state_path.exists():
+        state = store.read_sealed(state_path, schema=store.DISTILLATION_SCHEMA)
+        if set(state) != {
+            "schema",
+            "namespace",
+            "seal_sha256",
+            "kind",
+            "source_commit",
+            "label_records",
+            "label_head_sha256",
+        }:
+            raise DistillationError("local R4 repair state shape is invalid")
+        start = state.get("label_records")
+        if (
+            state.get("kind") != "local-r4-repair-state"
+            or state.get("source_commit") != commit
+            or isinstance(start, bool)
+            or not isinstance(start, int)
+            or not 0 <= start <= len(label_rows)
+            or state.get("label_head_sha256")
+            != (str(label_rows[start - 1].get("record_sha256") or "") if start else "")
+        ):
+            raise DistillationError("local R4 repair state is invalid")
+    entries: list[dict[str, Any]] = []
+    for label in label_rows[start:]:
+        if (
+            label.get("kind") != "teacher-label"
+            or label.get("source_commit") != commit
+            or label.get("teacher_profile") != LOCAL_TRIAD_PROFILE
+        ):
+            continue
+        work_id = str(label.get("work_id") or "")
+        task = tasks.get(work_id)
+        assignment = label.get("assignment")
+        if task is None and isinstance(assignment, Mapping):
+            task = {
+                "rally": {"rally_id": label.get("rally_id")},
+                "candidate": {"candidate_id": label.get("candidate_id")},
+                "assignment": assignment,
+                "route": label.get("route"),
+            }
+        route_identity = label.get("route_identity")
+        entry = (
+            _local_r4_receipt_entry(
+                work_id=work_id,
+                attempt=label.get("attempt"),
+                task=task,
+                label=label,
+                route_identity=route_identity,
+            )
+            if isinstance(task, Mapping) and isinstance(route_identity, Mapping)
+            else None
+        )
+        if entry is None:
+            raise DistillationError("local R4 repair provenance is incomplete")
+        entries.append(entry)
+    completed: dict[str, Mapping[str, Any]] = {}
+    work_ids = [str(entry["work_id"]) for entry in entries]
+    for offset in range(0, len(work_ids), 10_000):
+        completed.update(
+            workset.completion_identities(work_ids[offset : offset + 10_000])
+        )
+    ready_entries = [
+        entry
+        for entry in entries
+        if completed.get(str(entry["work_id"]))
+        == {
+            "work_id": entry["work_id"],
+            "attempt": entry["attempt"],
+            "completion_ref": (
+                f"label-ledger:{entry['label']['record_sha256']}"
+            ),
+            "completion_digest": entry["label"]["record_sha256"],
+        }
+    ]
+    _ensure_r4_local_receipts(
+        root=root,
+        config=config,
+        workset=workset,
+        entries=ready_entries,
+    )
+    if len(ready_entries) != len(entries):
+        return
+    if store.chain_head(label_path) != ledger_head:
+        raise DistillationError("local R4 repair ledger changed")
+    if _r4_path_has_symlink(state_path):
+        raise DistillationError("local R4 repair state path is unsafe")
+    payload = {
+        "kind": "local-r4-repair-state",
+        "source_commit": commit,
+        "label_records": len(label_rows),
+        "label_head_sha256": expected_head,
+    }
+    written = store.write_sealed_state(state_path, payload)
+    if (
+        store.read_sealed(state_path, schema=store.DISTILLATION_SCHEMA) != written
+        or any(written.get(key) != value for key, value in payload.items())
+    ):
+        raise DistillationError("local R4 repair state read-back failed")
+
+
 def _run_local_teacher_route(
     *,
     workset: Any,
@@ -9770,6 +10233,37 @@ def _run_local_teacher_route(
                 for claim in reconciled
             ],
         )
+        receipt_entries: list[dict[str, Any]] = []
+        for claim in reconciled:
+            task = tasks.get(claim.work_id)
+            label = reconciled_rows[claim.work_id]
+            route_identity = label.get("route_identity")
+            if task is not None and isinstance(route_identity, Mapping):
+                entry = _local_r4_receipt_entry(
+                    work_id=claim.work_id,
+                    attempt=label.get("attempt"),
+                    task=task,
+                    label=label,
+                    route_identity=route_identity,
+                )
+                if entry is not None:
+                    receipt_entries.append(entry)
+                elif any(
+                    field in label
+                    for field in (
+                        "attempt",
+                        "source_commit",
+                        "source_tree_sha256",
+                        "source_ox_identity_sha256",
+                    )
+                ):
+                    raise DistillationError("local R4 label provenance is incomplete")
+        _ensure_r4_local_receipts(
+            root=root,
+            config=config,
+            workset=workset,
+            entries=receipt_entries,
+        )
     claims = [claim for claim in claims if claim not in reconciled]
     active = [claim for claim in claims if claim.work_id in tasks]
     missing = [claim for claim in claims if claim.work_id not in tasks]
@@ -9838,6 +10332,15 @@ def _run_local_teacher_route(
         return _TeacherBatchResult(
             deferred=True, workset_status=workset.status(include_timing=True)
         )
+    source_binding: dict[str, str] | None = None
+    if isinstance(teachers[route], _WorkerTeacher):
+        try:
+            source_binding = _validate_ox_source_binding(ox_alpha_source_binding())
+        except (DistillationError, ValueError):
+            workset.release_unattempted([item["claim"] for item in batch])
+            return _TeacherBatchResult(
+                deferred=True, workset_status=workset.status(include_timing=True)
+            )
     try:
         response = teachers[route].evaluate(worker_input)
         labels = response.get("labels")
@@ -9960,9 +10463,12 @@ def _run_local_teacher_route(
                 "identity_revision": "local-teacher-v1",
                 "request_revision": "local-teacher-v1",
                 "assignment_revision": ASSIGNMENT_REVISION,
+                "captured_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "attempt": item["claim"].attempt,
                 "route_identity": response.get("_route_identity", {}),
                 "model_digest": response.get("_model_digest", ""),
                 "assignment": task["assignment"],
+                **(dict(source_binding) if source_binding is not None else {}),
                 **_teacher_label(
                     label_response,
                     verified_predicate=predicate
@@ -9971,6 +10477,35 @@ def _run_local_teacher_route(
                 ),
             }
         )
+    if source_binding is not None:
+        try:
+            source_stable = (
+                _validate_ox_source_binding(ox_alpha_source_binding())
+                == source_binding
+            )
+        except (DistillationError, ValueError):
+            source_stable = False
+        if not source_stable:
+            workset.commit(
+                [item["claim"] for item in batch],
+                [
+                    {
+                        "status": (
+                            "quarantined" if item["claim"].attempt >= 3 else "retry"
+                        ),
+                        "error_class": "source_drift",
+                        "retry_after_seconds": (
+                            0 if item["claim"].attempt >= 3 else 60
+                        ),
+                    }
+                    for item in batch
+                ],
+            )
+            return _TeacherBatchResult(
+                deferred=True,
+                model_calls=1,
+                workset_status=workset.status(include_timing=True),
+            )
     appended = store.append_chain_batch(label_path, records)
     _advance_local_workset(
         workset,
@@ -9992,6 +10527,29 @@ def _run_local_teacher_route(
             }
             for item in batch
         ],
+    )
+    route_identity = response.get("_route_identity")
+    receipt_entries = []
+    if isinstance(route_identity, Mapping):
+        for item in batch:
+            entry = _local_r4_receipt_entry(
+                work_id=item["claim"].work_id,
+                attempt=item["claim"].attempt,
+                task=item["task"],
+                label=appended_by_work[item["claim"].work_id],
+                route_identity=route_identity,
+            )
+            if entry is not None:
+                receipt_entries.append(entry)
+    if isinstance(teachers[route], _WorkerTeacher) and len(receipt_entries) != len(
+        batch
+    ):
+        raise DistillationError("local R4 receipt cardinality mismatch")
+    _ensure_r4_local_receipts(
+        root=root,
+        config=config,
+        workset=workset,
+        entries=receipt_entries,
     )
     return _TeacherBatchResult(
         labels_written=len(appended),
@@ -10044,6 +10602,14 @@ def _run_local_teacher_batch(
         _local_workset_watermark(
             root=root, raw_dir=raw_dir, label_path=label_path, snapshots=snapshots
         ),
+    )
+    _repair_r4_local_receipts(
+        root=root,
+        config=config,
+        workset=workset,
+        tasks=tasks,
+        label_path=label_path,
+        label_rows=label_rows,
     )
     for route in _ordered_teacher_routes(
         {task["route"]: [task] for task in tasks.values() if task["route"] in teachers},
