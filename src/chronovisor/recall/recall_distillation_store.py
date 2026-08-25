@@ -318,6 +318,7 @@ def write_immutable_pinned(
     schema: str,
     artifact_id: str | None = None,
     before_persist: Callable[[], None] | None = None,
+    after_persist: Callable[[], None] | None = None,
     expected_directory_identity: tuple[int, int] | None = None,
 ) -> tuple[str, Path, dict[str, Any]]:
     """Immutable artifact write relative to a no-follow, inode-pinned directory."""
@@ -348,6 +349,7 @@ def write_immutable_pinned(
                 current = _read_pinned_regular(directory_fd, name)
             except FileNotFoundError:
                 current = None
+            created = False
             if current is not None:
                 if current != encoded:
                     raise DistillationStoreError("immutable artifact conflict")
@@ -369,6 +371,7 @@ def write_immutable_pinned(
                     os.fsync(temporary_fd)
                     os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
                     os.fsync(directory_fd)
+                    created = True
                 finally:
                     os.close(temporary_fd)
                     try:
@@ -377,6 +380,18 @@ def write_immutable_pinned(
                         pass
             if _read_pinned_regular(directory_fd, name) != encoded:
                 raise DistillationStoreError("immutable artifact read-back failed")
+            if after_persist is not None:
+                try:
+                    after_persist()
+                except BaseException as exc:
+                    if created:
+                        if _read_pinned_regular(directory_fd, name) != encoded:
+                            raise DistillationStoreError(
+                                "immutable artifact changed during cleanup"
+                            ) from exc
+                        os.unlink(name, dir_fd=directory_fd)
+                        os.fsync(directory_fd)
+                    raise
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)

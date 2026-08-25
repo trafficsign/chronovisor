@@ -289,3 +289,64 @@ def test_pinned_immutable_write_completes_short_writes(
     assert store.read_immutable_pinned(
         tmp_path / "trusted", artifact_id, schema="test.r4.v1"
     ) == artifact
+
+
+def test_pinned_immutable_write_runs_after_persist_while_artifact_exists(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "trusted"
+    observed: list[bool] = []
+
+    artifact_id, _, artifact = store.write_immutable_pinned(
+        directory,
+        {"kind": "after-persist"},
+        schema="test.r4.v1",
+        after_persist=lambda: observed.append(
+            any(directory.glob("*.json"))
+        ),
+    )
+
+    assert observed == [True]
+    assert store.read_immutable_pinned(directory, artifact_id, schema="test.r4.v1") == artifact
+
+
+def test_pinned_immutable_write_cleans_new_artifact_through_displaced_fd(
+    tmp_path: Path,
+) -> None:
+    directory, displaced = tmp_path / "trusted", tmp_path / "displaced"
+    directory.mkdir()
+
+    def rename_then_fail() -> None:
+        directory.rename(displaced)
+        raise RuntimeError("post-persist failure")
+
+    with pytest.raises(RuntimeError, match="post-persist failure"):
+        store.write_immutable_pinned(
+            directory,
+            {"kind": "displaced-cleanup"},
+            schema="test.r4.v1",
+            after_persist=rename_then_fail,
+        )
+
+    assert not list(displaced.glob("*.json"))
+
+
+def test_pinned_immutable_write_retains_preexisting_artifact_on_after_persist_failure(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "trusted"
+    artifact_id, _, artifact = store.write_immutable_pinned(
+        directory, {"kind": "preexisting"}, schema="test.r4.v1"
+    )
+
+    with pytest.raises(RuntimeError, match="post-persist failure"):
+        store.write_immutable_pinned(
+            directory,
+            {"kind": "preexisting"},
+            schema="test.r4.v1",
+            after_persist=lambda: (_ for _ in ()).throw(
+                RuntimeError("post-persist failure")
+            ),
+        )
+
+    assert store.read_immutable_pinned(directory, artifact_id, schema="test.r4.v1") == artifact
