@@ -1299,6 +1299,7 @@ def cutover(
         "completion": completion,
         "provider_calls": 0,
         "ox_enabled": False,
+        "production_certification": False,
     }
     if output is not None:
         result["output"] = _atomic_output(output, result)

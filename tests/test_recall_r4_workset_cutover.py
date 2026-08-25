@@ -203,6 +203,24 @@ def test_archives_legacy_and_atomically_installs_verified_empty(tmp_path: Path) 
     assert fresh["audit"]["status"] == "verified-empty"
     assert (root / "config.toml").read_bytes() == before
     assert result["provider_calls"] == 0 and result["ox_enabled"] is False
+    assert result["production_certification"] is False
+
+
+def test_completed_cutover_output_seals_noncertifying_scope(tmp_path: Path) -> None:
+    root, offline, r0 = _fixture(tmp_path)
+    output = tmp_path / "cutover-completed.json"
+
+    result = CUTOVER.cutover(
+        root=root,
+        offline_evidence=offline,
+        r0_evidence=r0,
+        source_commit=SOURCE["source_commit"],
+        output=output,
+        execute=True,
+    )
+
+    assert result["verdict"] == "completed"
+    _assert_preflight_output(result, output)
 
 
 def test_default_preflight_does_not_adopt_the_legacy_root(tmp_path: Path) -> None:
