@@ -379,6 +379,58 @@ def test_rollback_restores_legacy_identity(tmp_path: Path) -> None:
     )
 
 
+def test_idempotent_rollback_persists_function_and_cli_receipts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, offline, r0 = _fixture(tmp_path)
+    workset = store.distillation_dir(root) / "ox-workset.sqlite3"
+    legacy = CUTOVER._sqlite_identity(workset)
+    completed = _run(root, offline, r0)
+    operation_id = Path(str(completed["archive"])).name
+
+    first_output = tmp_path / "rollback.json"
+    first = CUTOVER.rollback(
+        root=root,
+        operation_id=operation_id,
+        output=first_output,
+        execute=True,
+    )
+    assert first["verdict"] == "rolled-back"
+    assert CUTOVER._sqlite_identity(workset) == legacy
+    before_retry = CUTOVER._sha256(workset)
+
+    retry_output = tmp_path / "rollback-noop.json"
+    retry = CUTOVER.rollback(
+        root=root,
+        operation_id=operation_id,
+        output=retry_output,
+        execute=True,
+    )
+    assert retry["verdict"] == "rollback-noop"
+    _assert_preflight_output(retry, retry_output)
+    assert CUTOVER._sha256(workset) == before_retry
+    assert CUTOVER._sqlite_identity(workset) == legacy
+
+    cli_output = tmp_path / "rollback-noop-cli.json"
+    exit_code = CUTOVER.main(
+        [
+            "--root",
+            str(root),
+            "--rollback",
+            operation_id,
+            "--execute",
+            "--output",
+            str(cli_output),
+        ]
+    )
+    assert exit_code == 0
+    cli_result = json.loads(capsys.readouterr().out)
+    assert cli_result["verdict"] == "rollback-noop"
+    _assert_preflight_output(cli_result, cli_output)
+    assert CUTOVER._sha256(workset) == before_retry
+    assert CUTOVER._sqlite_identity(workset) == legacy
+
+
 @pytest.mark.parametrize("fault", ("lease", "wal", "symlink", "sidecar"))
 def test_rejects_unsafe_legacy_state(tmp_path: Path, fault: str) -> None:
     root, offline, r0 = _fixture(tmp_path)

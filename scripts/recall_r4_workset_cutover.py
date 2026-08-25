@@ -1411,13 +1411,16 @@ def rollback(
                     raise CutoverError("rollback legacy recovery failed") from exc
             _unlink_sidecars(rollback_temp)
             _fsync_directory(old.parent)
-            return {
+            result = {
                 "verdict": "rollback-noop",
                 "operation_id": operation_id,
                 "provider_calls": 0,
                 "ox_enabled": False,
                 "production_certification": False,
             }
+            if output is not None:
+                result["output"] = _atomic_output(output, result)
+            return result
         if _sha256(old) != manifest.get("fresh_main_sha256"):
             raise CutoverError("canonical workset is unknown")
         temp = rollback_temp
