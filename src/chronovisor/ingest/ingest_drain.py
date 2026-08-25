@@ -238,6 +238,24 @@ def _reconcile_processed_projections() -> dict[str, Any]:
         }
 
 
+def _start_liveness_heartbeat(
+    *, pending: int, authority_preflight: dict[str, Any] | None
+) -> tuple[threading.Event, threading.Thread]:
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_liveness_heartbeat,
+        args=(stop_event,),
+        kwargs={
+            "pending": pending,
+            "authority_preflight": authority_preflight,
+        },
+        name="chronovisor-ingest-liveness",
+        daemon=True,
+    )
+    thread.start()
+    return stop_event, thread
+
+
 def _drain(
     *,
     max_batches: int = DEFAULT_MAX_BATCHES,
@@ -402,18 +420,10 @@ def _drain(
             stop_reason = "no pending raws"
             break
 
-        heartbeat_stop = threading.Event()
-        heartbeat_thread = threading.Thread(
-            target=_liveness_heartbeat,
-            args=(heartbeat_stop,),
-            kwargs={
-                "pending": pending_before,
-                "authority_preflight": authority_preflight,
-            },
-            name="chronovisor-ingest-liveness",
-            daemon=True,
+        heartbeat_stop, heartbeat_thread = _start_liveness_heartbeat(
+            pending=pending_before,
+            authority_preflight=authority_preflight,
         )
-        heartbeat_thread.start()
         try:
             result = orchestrator.run_pending_ingest(
                 force=True,
