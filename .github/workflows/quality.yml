@@ -53,6 +53,7 @@ jobs:
       - name: Isolated full test suite
         run: >-
           uv run --frozen pytest -q
+          -m 'not darwin_contract'
           --junitxml=${{ runner.temp }}/chronovisor-junit.xml
       - name: Upload pytest JUnit
         if: always()

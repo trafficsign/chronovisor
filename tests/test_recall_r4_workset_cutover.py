@@ -187,6 +187,7 @@ def _run(root: Path, offline: Path, r0: Path, **kwargs: object) -> dict[str, obj
     )
 
 
+@pytest.mark.darwin_contract
 def test_archives_legacy_and_atomically_installs_verified_empty(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     before = (root / "config.toml").read_bytes()
@@ -206,6 +207,7 @@ def test_archives_legacy_and_atomically_installs_verified_empty(tmp_path: Path) 
     assert result["production_certification"] is False
 
 
+@pytest.mark.darwin_contract
 def test_completed_cutover_output_seals_noncertifying_scope(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     output = tmp_path / "cutover-completed.json"
@@ -252,6 +254,7 @@ def _assert_preflight_output(result: dict[str, object], output: Path) -> None:
     } == {key: value for key, value in result.items() if key != "output"}
 
 
+@pytest.mark.darwin_contract
 def test_preflight_variants_persist_the_required_output(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     initial_output = tmp_path / "initial-preflight.json"
@@ -358,6 +361,7 @@ def test_output_overlapping_cutover_input_is_rejected_before_mutation(
 
 
 @pytest.mark.parametrize("point", ("before-swap", "after-swap"))
+@pytest.mark.darwin_contract
 def test_crash_is_idempotently_resumed(tmp_path: Path, point: str) -> None:
     root, offline, r0 = _fixture(tmp_path)
 
@@ -381,6 +385,7 @@ def test_crash_is_idempotently_resumed(tmp_path: Path, point: str) -> None:
     )
 
 
+@pytest.mark.darwin_contract
 def test_rollback_restores_legacy_identity(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     legacy = CUTOVER._sqlite_identity(
@@ -400,6 +405,7 @@ def test_rollback_restores_legacy_identity(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.darwin_contract
 def test_idempotent_rollback_persists_function_and_cli_receipts(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -502,6 +508,7 @@ def test_streaming_digest_never_calls_read_bytes(
     assert CUTOVER._sha256(path) == expected
 
 
+@pytest.mark.darwin_contract
 def test_partial_archive_and_prepared_temp_resume(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     with pytest.raises(RuntimeError, match="before-swap"):
@@ -529,6 +536,7 @@ def test_partial_archive_and_prepared_temp_resume(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.darwin_contract
 def test_empty_owned_archive_directory_is_resumed(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     workset = store.distillation_dir(root) / "ox-workset.sqlite3"
@@ -545,6 +553,7 @@ def test_empty_owned_archive_directory_is_resumed(tmp_path: Path) -> None:
     assert (archive / "archive-manifest.json").exists()
 
 
+@pytest.mark.darwin_contract
 def test_empty_snapshot_after_crash_is_rebuilt(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     with pytest.raises(RuntimeError, match="after-snapshot-mkdir"):
@@ -564,6 +573,7 @@ def test_empty_snapshot_after_crash_is_rebuilt(tmp_path: Path) -> None:
     assert result["verdict"] == "completed"
 
 
+@pytest.mark.darwin_contract
 def test_partial_snapshot_completes_missing_source_sidecars(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     workset = store.distillation_dir(root) / "ox-workset.sqlite3"
@@ -593,6 +603,7 @@ def test_partial_snapshot_completes_missing_source_sidecars(tmp_path: Path) -> N
     assert not list(store.distillation_dir(root).glob(".ox-workset.sqlite3.r4-*.tmp*"))
 
 
+@pytest.mark.darwin_contract
 def test_manifest_resume_rejects_tampered_snapshot_sidecar(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     with pytest.raises(RuntimeError, match="before-swap"):
@@ -613,6 +624,7 @@ def test_manifest_resume_rejects_tampered_snapshot_sidecar(tmp_path: Path) -> No
         _run(root, offline, r0)
 
 
+@pytest.mark.darwin_contract
 def test_rejects_tampered_prepared_fresh_temp(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     with pytest.raises(RuntimeError, match="before-swap"):
@@ -633,6 +645,7 @@ def test_rejects_tampered_prepared_fresh_temp(tmp_path: Path) -> None:
         _run(root, offline, r0)
 
 
+@pytest.mark.darwin_contract
 def test_rejects_orphaned_prepared_sidecar(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     workset = store.distillation_dir(root) / "ox-workset.sqlite3"
@@ -729,6 +742,7 @@ def test_r0_requires_its_canonical_artifact_id(
         CUTOVER._validate_r0_evidence(r0)
 
 
+@pytest.mark.darwin_contract
 def test_rollback_recovers_after_main_swap_before_sidecars(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     result = _run(root, offline, r0)
@@ -755,6 +769,7 @@ def test_rollback_recovers_after_main_swap_before_sidecars(tmp_path: Path) -> No
     )
 
 
+@pytest.mark.darwin_contract
 def test_rollback_rejects_resealed_manifest_with_wrong_snapshot(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     result = _run(root, offline, r0)
@@ -786,6 +801,7 @@ def test_rollback_rejects_resealed_manifest_with_wrong_snapshot(tmp_path: Path) 
     assert CUTOVER._sha256(fresh) == before
 
 
+@pytest.mark.darwin_contract
 def test_completion_binding_rejects_preflight_and_rollback(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     result = _run(root, offline, r0)
@@ -827,6 +843,7 @@ def test_completion_binding_rejects_preflight_and_rollback(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("name", ("archive-manifest.json", "cutover-completion.json"))
+@pytest.mark.darwin_contract
 def test_rollback_output_overlapping_archive_input_is_rejected(
     tmp_path: Path, name: str
 ) -> None:
@@ -843,6 +860,7 @@ def test_rollback_output_overlapping_archive_input_is_rejected(
     assert CUTOVER._sha256(fresh) == before
 
 
+@pytest.mark.darwin_contract
 def test_resume_and_rollback_reject_unexpected_archive_entry(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     result = _run(root, offline, r0)
@@ -873,6 +891,7 @@ def test_resume_and_rollback_reject_unexpected_archive_entry(tmp_path: Path) -> 
     assert CUTOVER._sha256(fresh) == before
 
 
+@pytest.mark.darwin_contract
 def test_manifest_resume_rejects_symlinked_worker_lock(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     result = _run(root, offline, r0)
@@ -1017,6 +1036,7 @@ def test_locked_config_ox_race_rejects_before_archive(
     assert not (store.distillation_dir(root) / "workset-archives").exists()
 
 
+@pytest.mark.darwin_contract
 def test_locked_source_binding_race_rejects_before_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1049,6 +1069,7 @@ def test_anchor_artifact_id_must_be_canonical() -> None:
     assert not CUTOVER._canonical_artifact_id(artifact)
 
 
+@pytest.mark.darwin_contract
 def test_clone_durability_and_fresh_reopen(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

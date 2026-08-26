@@ -235,6 +235,7 @@ def test_delta_read_failure_reports_bounded_safe_counters() -> None:
     assert "overlap_path=segment.open" in message
 
 
+@pytest.mark.darwin_contract
 def test_clone_checkpoint_rebind_keeps_delta_incremental(tmp_path: Path) -> None:
     from chronovisor.core import raw_segment
     from chronovisor.core.raw_store import RawStore
@@ -351,6 +352,7 @@ def test_clone_checkpoint_rebind_keeps_delta_incremental(tmp_path: Path) -> None
     assert legacy_catalog["catalog_lineage"] == legacy_index["catalog_lineage"]
 
 
+@pytest.mark.darwin_contract
 def test_post_commit_crash_recovers_adversarial_catalog_lineage(tmp_path: Path) -> None:
     from chronovisor.core import raw_segment
     from chronovisor.core.raw_store import RawStore

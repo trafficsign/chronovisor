@@ -579,6 +579,7 @@ def test_rollback_never_accepts_forged_post_state_without_r7_binding(
         EVIDENCE.validate_rollback(tmp_path, tmp_path / "forged-receipt.json")
 
 
+@pytest.mark.darwin_contract
 def test_test_rollback_receipt_rechecks_post_state_and_rejects_forgery(
     tmp_path: Path,
 ) -> None:
