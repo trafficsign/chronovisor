@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+import signal
 import struct
 import subprocess
 import threading
@@ -1332,6 +1334,7 @@ addEventListener("DOMContentLoaded", () => {
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     text=True,
+                    start_new_session=True,
                 )
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
@@ -1340,14 +1343,25 @@ addEventListener("DOMContentLoaded", () => {
                     if visual_process.poll() is not None:
                         break
                     time.sleep(0.05)
-                visual_process.terminate()
+                try:
+                    os.killpg(visual_process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 try:
                     _, visual_stderr = visual_process.communicate(timeout=2)
                 except subprocess.TimeoutExpired:
-                    visual_process.kill()
-                    _, visual_stderr = visual_process.communicate(timeout=2)
+                    try:
+                        os.killpg(visual_process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        _, visual_stderr = visual_process.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        visual_process.kill()
+                        _, visual_stderr = visual_process.communicate(timeout=2)
                 assert visual_path.is_file() and visual_path.stat().st_size > 0, (
-                    visual_stderr[-4000:]
+                    f"chrome returncode={visual_process.returncode}\n"
+                    f"{visual_stderr[-4000:]}"
                 )
                 assert struct.unpack(">II", visual_path.read_bytes()[16:24]) == (
                     1280,
