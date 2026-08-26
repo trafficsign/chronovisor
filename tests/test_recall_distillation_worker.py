@@ -114,6 +114,7 @@ def test_worker_resolves_fixed_local_route_and_hides_input(monkeypatch) -> None:
         "max_responses": 2,
         "require_returned_model": True,
     }
+    assert worker.MAX_OUTPUT_CHARS == 8_000
     assert "private raw text" not in str(result)
 
 

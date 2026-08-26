@@ -23,7 +23,7 @@ MAX_INPUT_CHARS = 12_000
 # Includes the fixed system prompt and dynamic JSON Schema around the bounded
 # 12 KB worker input while leaving room for two repairs in the 32K context.
 MAX_SESSION_INPUT_BYTES = 18_000
-MAX_OUTPUT_CHARS = 4_000
+MAX_OUTPUT_CHARS = 8_000
 MAX_DEADLINE_MS = 660_000
 MAX_TEACHER_CANDIDATES = 16
 _REQUEST_FIELDS = frozenset(
