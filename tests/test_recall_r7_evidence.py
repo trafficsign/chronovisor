@@ -652,7 +652,7 @@ def test_test_rollback_receipt_rechecks_post_state_and_rejects_forgery(
         evidence_root=evidence,
         source_root=source,
         direct_url_path=direct,
-        executable=Path(sys.executable).resolve(),
+        executable=EVIDENCE._darwin_process_probe(os.getpid())[0],
         pid=os.getpid(),
         stage="100",
         run_id=run_id,
