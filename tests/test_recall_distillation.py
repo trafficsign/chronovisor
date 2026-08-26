@@ -432,6 +432,33 @@ def test_ox_label_projection_ignores_legacy_contract_before_validating_current_l
         )
 
 
+@pytest.mark.parametrize("contract_id", [None, "", "not-a-digest", "F" * 64])
+def test_ox_label_projection_rejects_malformed_contract_ids(
+    tmp_path: Path, contract_id: object
+) -> None:
+    source, contract, _, _ = _ox_projection_work(tmp_path)
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "profile": distill.OX_SINGLE_PROFILE,
+            "profile_contract_id": contract_id,
+        },
+    )
+
+    with pytest.raises(distill.DistillationError, match="profile contract is invalid"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": False, "reasons": ["test"]},
+        )
+
+
 def test_ox_label_projection_rejects_retired_provider_receipt_key(
     tmp_path: Path,
 ) -> None:

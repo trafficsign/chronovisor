@@ -2157,7 +2157,13 @@ def _ox_certifying_labels(
     for row in store.read_chain(label_path):
         if row.get("profile") != OX_SINGLE_PROFILE:
             continue
-        if row.get("profile_contract_id") != profile_contract_id:
+        row_contract_id = row.get("profile_contract_id")
+        if (
+            not isinstance(row_contract_id, str)
+            or re.fullmatch(r"[0-9a-f]{64}", row_contract_id) is None
+        ):
+            raise DistillationError("OX label profile contract is invalid")
+        if row_contract_id != profile_contract_id:
             continue
         referenced = referenced_contract(row)
         if row.get("kind") != "teacher-label" or row.get("status") != "completed":
