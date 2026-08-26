@@ -57,6 +57,7 @@ def _production(tmp_path: Path, *, admitted: bool) -> Path:
     return root
 
 
+@pytest.mark.darwin_contract
 def test_missing_exact_runtime_blocks_without_provider(tmp_path: Path) -> None:
     source, commit = _source(tmp_path)
     result = HARNESS.run_once(production=_production(tmp_path, admitted=False), source=source, output=tmp_path / "output", source_commit=commit)
@@ -280,6 +281,7 @@ def test_exec_family_is_forbidden(tmp_path: Path) -> None:
     assert caught.value.egress_attempts == 1
 
 
+@pytest.mark.darwin_contract
 def test_external_child_watchdog_kills_process_group() -> None:
     started = time.monotonic()
     with pytest.raises(HARNESS.R6Error, match="watchdog"):
@@ -289,6 +291,7 @@ def test_external_child_watchdog_kills_process_group() -> None:
     assert time.monotonic() - started < 5
 
 
+@pytest.mark.darwin_contract
 def test_external_watchdog_never_kills_an_unrelated_same_python_process() -> None:
     unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
@@ -303,6 +306,7 @@ def test_external_watchdog_never_kills_an_unrelated_same_python_process() -> Non
 
 
 @pytest.mark.parametrize("delay", (0.3, 0.5, 0.8))
+@pytest.mark.darwin_contract
 def test_external_rejects_permissive_nested_sandbox_before_delayed_registration(
     tmp_path: Path, delay: float
 ) -> None:
@@ -339,6 +343,7 @@ def test_external_rejects_permissive_nested_sandbox_before_delayed_registration(
     assert source.read_text() == "unchanged"
 
 
+@pytest.mark.darwin_contract
 def test_external_containment_receipt_closes_registry_fd() -> None:
     completed = HARNESS._run_external_bounded([sys.executable, "-c", "pass"], timeout=5)
     assert completed.r6_containment == {
@@ -350,6 +355,7 @@ def test_external_containment_receipt_closes_registry_fd() -> None:
     }
 
 
+@pytest.mark.darwin_contract
 def test_external_registry_rejects_forged_unrelated_pid() -> None:
     unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
@@ -367,6 +373,7 @@ def test_external_registry_rejects_forged_unrelated_pid() -> None:
         unrelated.wait(timeout=5)
 
 
+@pytest.mark.darwin_contract
 def test_external_profile_blocks_subsequent_sandbox_exec(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.write_text("unchanged")
@@ -495,6 +502,7 @@ def test_worker_sandbox_blocks_linked_source_writes_and_escape_primitives(tmp_pa
     assert "fork:allowed" not in completed.stdout
 
 
+@pytest.mark.darwin_contract
 def test_phase_watchdog_returns_blocker_and_cleans_clone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -524,6 +532,7 @@ def test_phase_watchdog_returns_blocker_and_cleans_clone(
     assert result["cleanup_receipt"]["remaining"] == 0
 
 
+@pytest.mark.darwin_contract
 def test_parent_monkeypatch_does_not_reach_isolated_worker_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -605,6 +614,7 @@ def test_nested_artifact_seal_and_content_id_are_recomputed() -> None:
         )
 
 
+@pytest.mark.darwin_contract
 def test_trusted_executable_rejects_symlink_and_path_spoof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -619,6 +629,7 @@ def test_trusted_executable_rejects_symlink_and_path_spoof(
     assert HARNESS._trusted_executable("/usr/bin/git") == Path("/usr/bin/git")
 
 
+@pytest.mark.darwin_contract
 def test_local_git_probe_is_not_egress_but_provider_cli_is(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -681,6 +692,7 @@ def test_local_git_probe_is_not_egress_but_provider_cli_is(
         HARNESS._test_only_official_chunk(module, tmp_path, ROOT)
 
 
+@pytest.mark.darwin_contract
 def test_clone_proof_is_parent_held_and_forgery_or_replace_fails(
     tmp_path: Path,
 ) -> None:
@@ -701,6 +713,7 @@ def test_clone_proof_is_parent_held_and_forgery_or_replace_fails(
         HARNESS._cleanup_clone(clone)
 
 
+@pytest.mark.darwin_contract
 def test_clone_symlink_replacement_is_rejected_and_cleaned(tmp_path: Path) -> None:
     source, _commit = _source(tmp_path)
     production = _production(tmp_path, admitted=False)
@@ -730,6 +743,7 @@ def test_external_git_redirect_environment_is_rejected(tmp_path: Path, monkeypat
         )
 
 
+@pytest.mark.darwin_contract
 def test_source_snapshot_binds_actual_git_layout(tmp_path: Path) -> None:
     source, _commit = _source(tmp_path)
     snapshot = HARNESS.source_snapshot(source)
@@ -773,6 +787,7 @@ def test_official_candidate_requires_official_empty_teacher_promotion(tmp_path: 
         )
 
 
+@pytest.mark.darwin_contract
 def test_admitted_but_unrunnable_official_path_returns_blocker(tmp_path: Path) -> None:
     source, commit = _source(tmp_path)
     production = _production(tmp_path, admitted=True)
@@ -783,6 +798,7 @@ def test_admitted_but_unrunnable_official_path_returns_blocker(tmp_path: Path) -
     assert result["production_candidate_published"] is False
 
 
+@pytest.mark.darwin_contract
 def test_rejects_dirty_source_overlap_symlink_and_tampered_output(tmp_path: Path) -> None:
     source, commit = _source(tmp_path)
     production = _production(tmp_path, admitted=False)
@@ -1067,6 +1083,7 @@ def test_exact_official_worker_fixture_passes_closed_schemas() -> None:
     )
 
 
+@pytest.mark.darwin_contract
 def test_completion_worker_nested_schema_is_closed_and_range_checked() -> None:
     module, pointer, policy, replay, run, state, r5, heads = _closed_candidate_fixture()
     worker = {

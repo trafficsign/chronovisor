@@ -1924,6 +1924,7 @@ def test_completion_identity_mappings_reject_safe_unknown_fields(
 
 
 @pytest.mark.parametrize("action", ["fork-sleep-ignore", "fork-setsid-ignore", "fork-double-setsid-ignore"])
+@pytest.mark.darwin_contract
 def test_supervisor_timeout_kills_test_child_and_cleans_owned_paths(
     action: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1949,6 +1950,7 @@ def test_supervisor_timeout_kills_test_child_and_cleans_owned_paths(
     assert not list(output.glob(".chronovisor-r5-supervisor-*"))
 
 
+@pytest.mark.darwin_contract
 def test_supervisor_sandbox_rejects_double_fork_before_registry_authentication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1974,6 +1976,7 @@ def test_supervisor_sandbox_rejects_double_fork_before_registry_authentication(
 
 
 @pytest.mark.parametrize("action", ["alias-write-outside", "alias-network", "alias-process"])
+@pytest.mark.darwin_contract
 def test_supervisor_kernel_sandbox_rejects_pre_sentinel_aliases(
     action: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2022,6 +2025,7 @@ def test_formal_macos_sandbox_blocks_double_fork_without_touching_unrelated_pid(
         unrelated.wait(timeout=5)
 
 
+@pytest.mark.darwin_contract
 def test_supervisor_fast_test_child_cleans_but_cannot_issue_a_formal_completion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2057,6 +2061,7 @@ def test_test_only_inner_cannot_satisfy_formal_acceptance(tmp_path: Path) -> Non
         )
 
 
+@pytest.mark.darwin_contract
 def test_supervisor_child_exception_cleans_owned_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2106,6 +2111,7 @@ def test_supervisor_setup_failure_cleans_every_owned_path(
     assert not list(output.glob(".chronovisor-r5-supervisor-*"))
 
 
+@pytest.mark.darwin_contract
 def test_supervisor_pre_registry_process_lookup_failure_reaps_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2151,6 +2157,7 @@ def test_supervisor_pre_registry_process_lookup_failure_reaps_child(
     assert not list(output.glob(".chronovisor-r5-supervisor-*"))
 
 
+@pytest.mark.darwin_contract
 def test_supervisor_delayed_none_identity_before_registry_leaves_no_descendants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
