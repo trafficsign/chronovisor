@@ -1815,7 +1815,7 @@ def _independent_dataset_binding(
         if dict(gate) != rederived_gate:
             return False
         contract_id = str(distill._current_ox_profile_contract_id(root) or "")
-        ox_rows = [row for row in rows if row.get("profile") == "ox-alpha-free-v1"]
+        ox_rows = [row for row in rows if row.get("profile") == distill.OX_SINGLE_PROFILE]
         if ox_rows:
             contract = _stable_sealed(
                 store, root,

@@ -1182,6 +1182,86 @@ def test_actual_workset_and_materialization_api_on_owned_clone(tmp_path: Path) -
     )
 
 
+def test_independent_binding_reads_current_ox_profile_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = "ox-alpha-single-v1"
+    contract_id = _id(4)
+    row = {
+        "profile": profile,
+        "cohort": "ox-alpha-backfill-v1",
+        "profile_contract_id": contract_id,
+        "split_plan_id": _id(5),
+    }
+    schemas: list[str] = []
+
+    def stable_sealed(*_args: object, schema: str, **_kwargs: object) -> dict[str, object]:
+        schemas.append(schema)
+        if schema == "chronovisor.recall-distill-ox-profile.v1":
+            return {
+                "artifact_id": contract_id,
+                "route": "opencode-go/ox-alpha-free",
+            }
+        return {
+            "artifact_id": _id(2),
+            "label_chain_head": _id(3),
+            "rows": [row],
+            "schema": HARNESS.CANONICAL_TRAINING_SCHEMA,
+        }
+
+    monkeypatch.setattr(HARNESS, "_inventory_matches", lambda *_args: True)
+    monkeypatch.setattr(HARNESS, "_is_id", lambda _value: True)
+    monkeypatch.setattr(HARNESS, "_stable_sealed", stable_sealed)
+    monkeypatch.setattr(HARNESS, "_read_rows", lambda *_args: [row])
+    monkeypatch.setattr(HARNESS, "_policy_is_canonical", lambda _policy: True)
+    distill = types.SimpleNamespace(
+        OX_SINGLE_PROFILE=profile,
+        OX_PROFILE_SCHEMA="chronovisor.recall-distill-ox-profile.v1",
+        _materialized_row_integrity=lambda *_args, **_kwargs: True,
+        load_distillation_config=lambda _path: types.SimpleNamespace(teacher_profile=profile),
+        _offline_training_gate=lambda *_args, **_kwargs: {"passed": True},
+        _current_ox_profile_contract_id=lambda _root: contract_id,
+    )
+    inventory = {
+        relative: {}
+        for relative in (
+            "runtime/recall-distillation/label-ledger.jsonl",
+            "runtime/recall-distillation/label-ledger.jsonl.checkpoint.json",
+            "runtime/recall-distillation/candidate-ledger.jsonl",
+            "runtime/recall-distillation/candidate-ledger.jsonl.checkpoint.json",
+            "runtime/recall-distillation/exposure-receipts.jsonl",
+            "runtime/recall-distillation/exposure-receipts.jsonl.checkpoint.json",
+            "runtime/recall-distillation/rally-manifest.jsonl",
+            "runtime/recall-distillation/rally-manifest.jsonl.checkpoint.json",
+        )
+    }
+
+    HARNESS._independent_dataset_binding(
+        root=tmp_path,
+        distill=distill,
+        store=object(),
+        workset_runtime=None,
+        rows=[row],
+        labels=[row],
+        gate={"passed": True},
+        preflight={
+            "training_snapshot_sha256": _id(2),
+            "label_chain_head": _id(3),
+        },
+        workset={},
+        inventory=inventory,
+        policy={
+            "training_schema": HARNESS.CANONICAL_TRAINING_SCHEMA,
+            "profile": profile,
+            "cohort": "ox-alpha-backfill-v1",
+            "profile_contract_id": contract_id,
+            "split_plan_id": _id(5),
+        },
+    )
+
+    assert distill.OX_PROFILE_SCHEMA in schemas
+
+
 def test_clone_cleanup_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     production, source, output, clone = (
         tmp_path / name for name in ("production", "source", "output", "clone")
