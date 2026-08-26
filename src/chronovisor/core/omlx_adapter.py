@@ -321,7 +321,7 @@ class OMLXAdapter:
                         ) from None
                     if "error" in event:
                         raise SafeBackendError("http_5xx", transient=True)
-                    if "model" in event:
+                    if "model" in event and event.get("model") != "keepalive":
                         event_model = safe_metadata_identifier(event.get("model"))
                         if event_model is None or (
                             returned_model is not None and event_model != returned_model

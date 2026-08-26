@@ -278,6 +278,7 @@ def test_generate_streams_redacted_progress_and_reassembles_response() -> None:
     updates: list[dict[str, Any]] = []
     observed_model = "served-m"
     chunks = [
+        {"model": "keepalive", "choices": [{"delta": {}, "finish_reason": None}]},
         {"model": observed_model, "choices": [{"delta": {"role": "assistant"}}]},
         {"model": observed_model, "choices": [{"delta": {"reasoning_content": "plan"}}]},
         {"model": observed_model, "choices": [{"delta": {"content": '{"ok":true}'}}]},
