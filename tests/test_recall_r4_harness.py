@@ -2843,6 +2843,28 @@ def test_public_cli_ignores_home_override_for_production_root(
     )
 
 
+def test_missing_fixed_production_root_yields_noncertifying_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    production = tmp_path / "missing-production"
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+
+    artifact, artifact_path = HARNESS.run(
+        source_root=source,
+        source_commit=commit,
+        output=tmp_path / "evidence",
+        production_root=production,
+    )
+
+    assert artifact_path.is_file()
+    assert artifact["production_certification"]["passed"] is False
+    assert artifact["production_certification"]["reasons"] == [
+        "production_root_unavailable"
+    ]
+    assert artifact["production_certification"]["provider_calls"] == 0
+
+
 def test_r4_collector_does_not_fall_back_to_checkout_handoff(tmp_path: Path) -> None:
     source = tmp_path / "source"
     anchor_path = source / HARNESS.R0_EVIDENCE_RELATIVE

@@ -419,8 +419,6 @@ def assert_root_matrix(
                 raise R4Error(f"{left_name}/{right_name} paths overlap")
     if not source_root.is_dir():
         raise R4Error("source root is not a directory")
-    if production_root is not None and not production_root.is_dir():
-        raise R4Error("production root is not a directory")
     if output.exists() and not output.is_dir():
         raise R4Error("output root is not a directory")
     if output.is_dir() and any(item.is_symlink() for item in output.rglob("*")):
