@@ -105,7 +105,7 @@ def test_worker_resolves_fixed_local_route_and_hides_input(monkeypatch) -> None:
         "source_data_class": "raw",
         "source_sensitivity": "high",
         "num_ctx": 32_768,
-        "num_predict": 2_048,
+        "num_predict": 3_072,
         "keep_alive": "0",
         "read_timeout_ms": 30_000,
         "max_input_chars": worker.MAX_SESSION_INPUT_BYTES,

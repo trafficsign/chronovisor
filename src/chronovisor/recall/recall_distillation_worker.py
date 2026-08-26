@@ -331,7 +331,9 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
             source_data_class="raw",
             source_sensitivity="high",
             num_ctx=32_768,
-            num_predict=2_048,
+            # The structured policy reserves one third of this budget. 3,072
+            # keeps a seven-label response at an effective 2,048 tokens.
+            num_predict=3_072,
             keep_alive="0",
             read_timeout_ms=deadline_ms,
             max_input_chars=MAX_SESSION_INPUT_BYTES,
