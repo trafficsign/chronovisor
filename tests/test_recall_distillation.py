@@ -381,6 +381,57 @@ def test_ox_event_projection_keeps_legacy_workset_noncertifying(
     assert "workset_receipts_noncertifying" in projection["quality_gates"]["reasons"]
 
 
+def test_ox_label_projection_ignores_legacy_contract_before_validating_current_labels(
+    tmp_path: Path,
+) -> None:
+    source, contract, work_id, payload_digest = _ox_projection_work(tmp_path)
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "profile": distill.OX_SINGLE_PROFILE,
+            "profile_contract_id": "f" * 64,
+        },
+    )
+
+    projection = distill._ox_event_projection(
+        tmp_path,
+        profile_contract_id=str(contract["artifact_id"]),
+        source_binding=source,
+        workset={"leased": 0},
+        label_path=label_path,
+        authoritative_gate={"passed": False, "reasons": ["test"]},
+    )
+
+    assert projection["quality_gates"]["negative_veto"]["authenticated"] is False
+    store.append_chain(
+        label_path,
+        {
+            "kind": "other",
+            "status": "completed",
+            "work_id": work_id,
+            "payload_digest": payload_digest,
+            "profile": distill.OX_SINGLE_PROFILE,
+            "profile_contract_id": contract["artifact_id"],
+            **source,
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+        },
+    )
+
+    with pytest.raises(distill.DistillationError, match="kind or status is invalid"):
+        distill._ox_event_projection(
+            tmp_path,
+            profile_contract_id=str(contract["artifact_id"]),
+            source_binding=source,
+            workset={"leased": 0},
+            label_path=label_path,
+            authoritative_gate={"passed": True, "reasons": []},
+        )
+
+
 def test_ox_label_projection_rejects_retired_provider_receipt_key(
     tmp_path: Path,
 ) -> None:
