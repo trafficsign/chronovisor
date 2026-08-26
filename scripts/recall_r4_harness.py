@@ -47,6 +47,7 @@ OX_ROUTE = "opencode-go/ox-alpha-free"
 OX_MODEL = "ox-alpha-free"
 OX_ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions"
 OX_SCHEMA = "chronovisor.recall-distill-teacher-batch.v1"
+OX_PROFILE_SCHEMA = "chronovisor.recall-distill-ox-profile.v1"
 OX_COHORT = "ox-alpha-backfill-v1"
 OX_IDENTITY_REVISION = "ox-alpha-fixed-identity-v1"
 OX_REQUEST_REVISION = "json-schema-core-label-abstain-16k-240s-v6"
@@ -1115,9 +1116,163 @@ def _canonical_future_expiry(value: object) -> str | None:
     return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _validate_ox(
-    receipts: Sequence[Mapping[str, Any]], source: Mapping[str, Any]
+def _validate_runtime_ox_projection(
+    projection: Mapping[str, Any], source: Mapping[str, Any]
 ) -> dict[str, Any]:
+    """Validate the producer's sealed OX contract from fixed-root evidence."""
+
+    reasons: set[str] = set()
+    profile = projection.get("profile_contract")
+    contract = profile.get("sealed") if isinstance(profile, Mapping) else None
+    expected_source = {
+        "source_commit": source.get("commit"),
+        "source_tree_sha256": source.get("tree_sha256"),
+        "source_ox_identity_sha256": source.get("ox_identity_sha256"),
+    }
+    expected_keys = {
+        "schema",
+        "namespace",
+        "artifact_id",
+        "seal_sha256",
+        "kind",
+        "profile",
+        "cohort",
+        "route",
+        "endpoint",
+        "request_model",
+        "required_returned_model",
+        "request_revision",
+        "fixed_identity",
+        "free_only",
+        "no_paid_fallback",
+        "official_status",
+        "expires_at",
+        "docs_url",
+        "kill_categories",
+        "max_inflight",
+        "teacher_claim_limit",
+        "live_recall_model_calls",
+        "source_commit",
+        "source_tree_sha256",
+        "source_ox_identity_sha256",
+        "relevant_config_sha256",
+    }
+    if not isinstance(contract, Mapping) or set(contract) != expected_keys:
+        reasons.add("runtime_contract_invalid")
+        contract = {}
+    else:
+        unsigned = {
+            key: value
+            for key, value in contract.items()
+            if key not in {"artifact_id", "seal_sha256"}
+        }
+        expected = {
+            "schema": OX_PROFILE_SCHEMA,
+            "namespace": "recall-distillation",
+            "kind": "ox-alpha-free-profile",
+            "profile": OX_PROFILE,
+            "cohort": OX_COHORT,
+            "route": OX_ROUTE,
+            "endpoint": OX_ENDPOINT,
+            "request_model": OX_MODEL,
+            "required_returned_model": OX_MODEL,
+            "request_revision": OX_REQUEST_REVISION,
+            "fixed_identity": OX_FIXED_IDENTITY,
+            "free_only": True,
+            "no_paid_fallback": True,
+            "official_status": "limited_time",
+            "docs_url": "https://opencode.ai/docs/go/",
+            "kill_categories": list(OX_KILL_CATEGORIES),
+            "max_inflight": 10,
+            "teacher_claim_limit": 1,
+            "live_recall_model_calls": 0,
+            **expected_source,
+        }
+        if (
+            contract.get("artifact_id") != _sha256(unsigned)
+            or contract.get("seal_sha256")
+            != _sha256({"artifact_id": contract.get("artifact_id"), **unsigned})
+            or any(contract.get(key) != value for key, value in expected.items())
+            or _canonical_future_expiry(contract.get("expires_at"))
+            != contract.get("expires_at")
+            or _SHA.fullmatch(_text(contract.get("relevant_config_sha256"))) is None
+        ):
+            reasons.add("runtime_contract_invalid")
+        expected_id = contract.get("artifact_id")
+        if (
+            not isinstance(profile, Mapping)
+            or profile.get("artifact_id") != expected_id
+            or profile.get("sha256")
+            != hashlib.sha256(_json_bytes(contract) + b"\n").hexdigest()
+        ):
+            reasons.add("runtime_contract_binding_invalid")
+    labels = projection.get("labels")
+    events = projection.get("events")
+    quality = projection.get("quality")
+    if (
+        not isinstance(labels, Mapping)
+        or not isinstance(labels.get("count"), int)
+        or labels.get("count", 0) < 80
+        or _SHA.fullmatch(_text(labels.get("head_sha256"))) is None
+        or _SHA.fullmatch(_text(labels.get("sha256"))) is None
+        or not isinstance(events, Mapping)
+        # The runtime projection keeps a zero-count legacy ledger slot for
+        # deterministic backward-compatible readback.  It is part of the
+        # fixed producer shape, not an alternate source of OX authority.
+        or set(events) != {"ramp", "failure", "lease", "legacy"}
+        or any(
+            not isinstance(events.get(kind), Mapping)
+            or not isinstance(events[kind].get("count"), int)
+            or events[kind]["count"] < 1
+            or _SHA.fullmatch(_text(events[kind].get("head_sha256"))) is None
+            for kind in ("ramp", "failure", "lease")
+        )
+        or events.get("legacy") != {"count": 0, "head_sha256": ""}
+        or not isinstance(quality, Mapping)
+        or quality.get("receipt_authority") != "adapter_observed_not_provider_signed"
+        or not isinstance(quality.get("stages"), Mapping)
+        or set(quality["stages"]) != {str(cap) for cap in OX_STAGES}
+        or any(
+            not isinstance(quality["stages"].get(str(cap)), Mapping)
+            or quality["stages"][str(cap)].get("valid_receipts", 0) < 20
+            or quality["stages"][str(cap)].get("valid_rate", 0) < 0.95
+            for cap in OX_STAGES
+        )
+    ):
+        reasons.add("runtime_label_or_event_binding_invalid")
+    if projection.get("passed") is not True or projection.get("provider_calls") != 0:
+        reasons.add("runtime_projection_unavailable")
+    return {
+        "profile": OX_PROFILE,
+        "passed": not reasons,
+        "reasons": sorted(reasons),
+        "rows": 1,
+        "contract": dict(contract),
+        "stages": dict(quality.get("stages", {}))
+        if isinstance(quality, Mapping)
+        else {},
+        "failure_receipts": ["runtime-sealed-fixed-root-v1"],
+    }
+
+
+def _runtime_ox_authority(projection: Mapping[str, Any]) -> dict[str, Any]:
+    """Name the only OX authority allowed for a production R4 verdict."""
+
+    return {
+        "kind": "fixed_root_runtime_sealed_projection",
+        "projection_sha256": _sha256(projection),
+        "receipt_inventory": {"files": [], "count": 0},
+    }
+
+
+def _validate_ox(
+    receipts: Sequence[Mapping[str, Any]],
+    source: Mapping[str, Any],
+    *,
+    production_projection: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not receipts and production_projection is not None:
+        return _validate_runtime_ox_projection(production_projection, source)
     reasons: set[str] = set()
     rows = [row for row in receipts if row.get("profile") == OX_PROFILE]
     if len(rows) != len(receipts):
@@ -5027,6 +5182,7 @@ def _collect_authoritative_production(
             "profile_contract": {
                 "artifact_id": contract_id,
                 "sha256": contract_sha256,
+                "sealed": contract,
             },
             "workset": {
                 "rows": workset["rows"],
@@ -5529,12 +5685,14 @@ def produce_source_bound_authority_receipt(
         ox, ox_inventory, ox_payloads = _capture_authority_input_payloads(
             ox_receipts, kind="ox"
         )
+        if ox:
+            raise R4Error("formal OX authority must be fixed-root runtime evidence")
         if _authority_receipt_ids(local, label="local").intersection(
             _authority_receipt_ids(ox, label="ox")
         ):
             raise R4Error("duplicate authority receipt id")
         local_result = _validate_local(local, source)
-        ox_result = _validate_ox(ox, source)
+        ox_result = _validate_ox((), source, production_projection=projection)
         if not local_result["passed"] or not ox_result["passed"]:
             raise R4Error("authority receipt inputs no longer satisfy source contract")
         input_inventory = {"local": local_inventory, "ox": ox_inventory}
@@ -5544,12 +5702,14 @@ def produce_source_bound_authority_receipt(
         if _expected_results is not None and input_results != _expected_results:
             raise R4Error("authority receipt results changed before publication")
         inventory = {**input_inventory, "production": {"files": [], "count": 0}}
+        ox_authority = _runtime_ox_authority(projection)
         payload = {
             "schema": R4_AUTHORITY_RECEIPT_SCHEMA,
             "namespace": "recall-distillation",
             "captured_at": datetime.now(UTC).isoformat(),
             "source": {"source_commit": source["commit"], "source_tree_sha256": source["tree_sha256"], "source_ox_identity_sha256": source["ox_identity_sha256"]},
             "production_projection_sha256": _sha256(projection),
+            "ox_authority": ox_authority,
             "receipt_inventory": dict(inventory),
             "input_payloads": {"local": local_payloads, "ox": ox_payloads},
         }
@@ -5805,6 +5965,7 @@ def read_artifact(path: Path) -> dict[str, Any]:
         "passed",
         "local",
         "ox",
+        "ox_authority",
     }:
         raise R4Error("R4 artifact source contract is missing")
     if (
@@ -5812,8 +5973,24 @@ def read_artifact(path: Path) -> dict[str, Any]:
         or not isinstance(source_contract.get("passed"), bool)
         or not isinstance(source_contract.get("local"), Mapping)
         or not isinstance(source_contract.get("ox"), Mapping)
+        or not isinstance(source_contract.get("ox_authority"), Mapping)
     ):
         raise R4Error("R4 artifact source contract is invalid")
+    ox_authority = source_contract["ox_authority"]
+    if ox_authority.get("kind") == "fixed_root_runtime_sealed_projection":
+        if (
+            set(ox_authority)
+            != {"kind", "projection_sha256", "receipt_inventory"}
+            or _SHA.fullmatch(_text(ox_authority.get("projection_sha256"))) is None
+            or ox_authority.get("receipt_inventory")
+            != {"files": [], "count": 0}
+        ):
+            raise R4Error("R4 artifact OX authority is invalid")
+    elif ox_authority.get("kind") == "external_sealed_receipts":
+        if set(ox_authority) != {"kind", "receipt_inventory"}:
+            raise R4Error("R4 artifact OX authority is invalid")
+    else:
+        raise R4Error("R4 artifact OX authority is invalid")
     production = artifact.get("production_certification")
     unavailable_production_keys = {
         "passed",
@@ -5943,7 +6120,16 @@ def validate_source_bound_authority_receipt(
         except (ValueError, UnicodeError) as exc:
             raise R4Error("authority receipt is invalid") from exc
         expected = {
-            "schema", "namespace", "artifact_id", "seal_sha256", "captured_at", "source", "production_projection_sha256", "receipt_inventory", "input_payloads"
+            "schema",
+            "namespace",
+            "artifact_id",
+            "seal_sha256",
+            "captured_at",
+            "source",
+            "production_projection_sha256",
+            "ox_authority",
+            "receipt_inventory",
+            "input_payloads",
         }
         if not isinstance(receipt, Mapping) or set(receipt) != expected or _json_bytes(receipt) + b"\n" != raw:
             raise R4Error("authority receipt schema is invalid")
@@ -5963,7 +6149,10 @@ def validate_source_bound_authority_receipt(
             receipt.get("input_payloads"), inventory=observed_inventory
         )
         local_result = _validate_local(local, source)
-        ox_result = _validate_ox(ox, source)
+        if ox:
+            raise R4Error("formal authority embeds external OX receipts")
+        ox_result = _validate_ox((), source, production_projection=projection)
+        ox_authority = _runtime_ox_authority(projection)
         source_contract = artifact.get("source_contract")
         if (
             not isinstance(source_contract, Mapping)
@@ -5980,11 +6169,13 @@ def validate_source_bound_authority_receipt(
             or receipt.get("seal_sha256") != _sha256({"artifact_id": receipt.get("artifact_id"), **unsigned})
             or receipt.get("source") != source_binding
             or receipt.get("production_projection_sha256") != _sha256(projection)
+            or receipt.get("ox_authority") != ox_authority
             or artifact.get("production_certification") != projection
             or receipt.get("receipt_inventory") != observed_inventory
             or artifact.get("receipt_files") != observed_inventory
             or source_contract.get("local") != local_result
             or source_contract.get("ox") != ox_result
+            or source_contract.get("ox_authority") != ox_authority
         ):
             raise R4Error("authority receipt binding is invalid")
         projection_after = _collect_authoritative_production(
@@ -6064,11 +6255,6 @@ def run(
         if local
         else {"passed": False, "reasons": ["local_receipts_missing"], "rows": 0}
     )
-    ox_result = (
-        _validate_ox(ox, source_before)
-        if ox
-        else {"passed": False, "reasons": ["ox_receipts_missing"], "rows": 0}
-    )
     source_after = _assert_source(source_root, source_commit)
     if source_after != source_before:
         raise R4Error("source changed during evidence validation")
@@ -6098,6 +6284,35 @@ def run(
             "reasons": ["independent_live_provider_attestation_unavailable"],
             "collector": "fixed-production-root-workset-v1",
             "provider_calls": 0,
+        }
+    if production is not None:
+        if ox:
+            ox_result = {
+                "passed": False,
+                "reasons": ["formal_ox_receipts_must_use_fixed_root_runtime"],
+                "rows": len(ox),
+            }
+            ox_authority = {
+                "kind": "fixed_root_runtime_sealed_projection",
+                "projection_sha256": _sha256(production_result),
+                "receipt_inventory": {"files": [], "count": 0},
+            }
+        else:
+            ox_result = _validate_ox(
+                (), source_before, production_projection=production_result
+            )
+            ox_authority = _runtime_ox_authority(production_result)
+    elif ox:
+        ox_result = _validate_ox(ox, source_before)
+        ox_authority = {
+            "kind": "external_sealed_receipts",
+            "receipt_inventory": ox_files,
+        }
+    else:
+        ox_result = {"passed": False, "reasons": ["ox_receipts_missing"], "rows": 0}
+        ox_authority = {
+            "kind": "external_sealed_receipts",
+            "receipt_inventory": ox_files,
         }
     # The collector reads a large amount of runtime state.  Re-snapshot the
     # source immediately before publishing the artifact so a source mutation
@@ -6167,6 +6382,7 @@ def run(
                 "passed": source_passed,
                 "local": local_result,
                 "ox": ox_result,
+                "ox_authority": ox_authority,
             },
             "production_certification": {
                 **production_result,

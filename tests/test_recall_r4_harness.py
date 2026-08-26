@@ -1469,6 +1469,20 @@ def _authoritative_production_root(tmp_path: Path, source: Path, commit: str) ->
     return root
 
 
+def _complete_runtime_projection(observed: Mapping[str, object]) -> dict[str, object]:
+    """Test-only complete collector result retaining the real sealed contract."""
+
+    projection = json.loads(json.dumps(observed))
+    projection["passed"] = True
+    projection["reasons"] = []
+    projection["events"] = {
+        **projection["events"],
+        "failure": {"count": 6, "head_sha256": "f" * 64},
+        "lease": {"count": 1, "head_sha256": "e" * 64},
+    }
+    return cast(dict[str, object], projection)
+
+
 def _fixture_candidate_anchor(production: Path) -> dict[str, object]:
     checkpoint_path = production / HARNESS.PRODUCTION_CANDIDATE_CHECKPOINT_RELATIVE
     checkpoint = json.loads(checkpoint_path.read_text())
@@ -2039,7 +2053,7 @@ def test_source_bound_authority_receipt_uses_official_producer_and_validator(
     def certifying_collector(**kwargs: object) -> dict[str, object]:
         observed = real_collector(**kwargs)
         assert observed["provider_calls"] == 0
-        return {**observed, "passed": True, "reasons": []}
+        return _complete_runtime_projection(observed)
 
     monkeypatch.setattr(HARNESS, "_collect_authoritative_production", certifying_collector)
     local_dir, ox_dir = tmp_path / "local", tmp_path / "ox"
@@ -2050,7 +2064,7 @@ def test_source_bound_authority_receipt_uses_official_producer_and_validator(
         source_commit=commit,
         output=tmp_path / "evidence",
         local_receipts=local_dir,
-        ox_receipts=ox_dir,
+        ox_receipts=None,
         production_root=production,
     )
     reference = artifact["authority_receipt"]
@@ -2060,7 +2074,8 @@ def test_source_bound_authority_receipt_uses_official_producer_and_validator(
     authority = json.loads(authority_raw)
     assert set(authority["input_payloads"]) == {"local", "ox"}
     assert authority["input_payloads"]["local"]
-    assert authority["input_payloads"]["ox"]
+    assert authority["input_payloads"]["ox"] == []
+    assert authority["ox_authority"] == artifact["source_contract"]["ox_authority"]
     assert not (authority_path.parent / "authority-inputs").exists()
     assert HARNESS.validate_source_bound_authority_receipt(
         authority_path,
@@ -2105,7 +2120,7 @@ def test_source_bound_authority_receipt_uses_official_producer_and_validator(
             source_commit=commit,
             output=failed_output,
             local_receipts=local_dir,
-            ox_receipts=ox_dir,
+            ox_receipts=None,
             production_root=production,
         )
     assert not list(failed_output.iterdir())
@@ -2148,7 +2163,7 @@ def test_authority_validator_rejects_resealed_embedded_duplicate_receipt(
     monkeypatch.setattr(
         HARNESS,
         "_collect_authoritative_production",
-        lambda **kwargs: {**real_collector(**kwargs), "passed": True, "reasons": []},
+        lambda **kwargs: _complete_runtime_projection(real_collector(**kwargs)),
     )
     local_dir, ox_dir = tmp_path / "local", tmp_path / "ox"
     _write_receipts(local_dir, [_receipt(row, index) for index, row in enumerate(_local_rows(source, commit))])
@@ -2158,7 +2173,7 @@ def test_authority_validator_rejects_resealed_embedded_duplicate_receipt(
         source_commit=commit,
         output=tmp_path / "evidence",
         local_receipts=local_dir,
-        ox_receipts=ox_dir,
+        ox_receipts=None,
         production_root=production,
     )
     authority_path = artifact_path.parent / str(artifact["authority_receipt"]["relative_path"])
@@ -2254,9 +2269,13 @@ def test_run_rejects_authority_snapshot_change_before_publication(
     expected: str,
 ) -> None:
     source, commit = _git_source(tmp_path)
-    production = tmp_path / "production"
-    production.mkdir()
+    production = _authoritative_production_root(tmp_path, source, commit)
     monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    monkeypatch.setattr(
+        HARNESS,
+        "_load_production_anchor",
+        lambda _path, **_kwargs: _fixture_candidate_anchor(production),
+    )
     local_dir, ox_dir = tmp_path / "local", tmp_path / "ox"
     _write_receipts(
         local_dir,
@@ -2268,7 +2287,9 @@ def test_run_rejects_authority_snapshot_change_before_publication(
     )
     calls = 0
 
-    def collector(**_kwargs: object) -> dict[str, object]:
+    real_collector = HARNESS._collect_authoritative_production
+
+    def collector(**kwargs: object) -> dict[str, object]:
         nonlocal calls
         calls += 1
         if mutation == "local" and calls == 2:
@@ -2279,13 +2300,9 @@ def test_run_rejects_authority_snapshot_change_before_publication(
                 {key: value for key, value in values[0].items() if key != "seal_sha256"}
             )
             path.write_text(json.dumps(values, sort_keys=True))
-        return {
-            "passed": True,
-            "reasons": [],
-            "collector": "test",
-            "provider_calls": 0,
-            "projection": calls if mutation == "production" else 1,
-        }
+        projection = _complete_runtime_projection(real_collector(**kwargs))
+        projection["snapshot_marker"] = calls if mutation == "production" else 1
+        return projection
 
     monkeypatch.setattr(HARNESS, "_collect_authoritative_production", collector)
     output = tmp_path / "evidence"
@@ -2295,7 +2312,7 @@ def test_run_rejects_authority_snapshot_change_before_publication(
             source_commit=commit,
             output=output,
             local_receipts=local_dir,
-            ox_receipts=ox_dir,
+            ox_receipts=None,
             production_root=production,
         )
     assert not list(output.glob("*.json"))
@@ -2314,7 +2331,7 @@ def test_embedded_authority_inputs_reject_noncanonical_path_and_base64(
     monkeypatch.setattr(
         HARNESS,
         "_collect_authoritative_production",
-        lambda **kwargs: {**real_collector(**kwargs), "passed": True, "reasons": []},
+        lambda **kwargs: _complete_runtime_projection(real_collector(**kwargs)),
     )
     local_dir, ox_dir = tmp_path / "local", tmp_path / "ox"
     _write_receipts(local_dir, [_receipt(row, index) for index, row in enumerate(_local_rows(source, commit))])
@@ -2324,7 +2341,7 @@ def test_embedded_authority_inputs_reject_noncanonical_path_and_base64(
         source_commit=commit,
         output=tmp_path / "evidence",
         local_receipts=local_dir,
-        ox_receipts=ox_dir,
+        ox_receipts=None,
         production_root=production,
     )
     authority_path = artifact_path.parent / str(artifact["authority_receipt"]["relative_path"])
@@ -2439,7 +2456,7 @@ def test_authority_validator_rejects_resealed_top_level_discriminator(
     monkeypatch.setattr(
         HARNESS,
         "_collect_authoritative_production",
-        lambda **kwargs: {**real_collector(**kwargs), "passed": True, "reasons": []},
+        lambda **kwargs: _complete_runtime_projection(real_collector(**kwargs)),
     )
     local_dir, ox_dir = tmp_path / "local", tmp_path / "ox"
     _write_receipts(local_dir, [_receipt(row, index) for index, row in enumerate(_local_rows(source, commit))])
@@ -2449,7 +2466,7 @@ def test_authority_validator_rejects_resealed_top_level_discriminator(
         source_commit=commit,
         output=tmp_path / "evidence",
         local_receipts=local_dir,
-        ox_receipts=ox_dir,
+        ox_receipts=None,
         production_root=production,
     )
     authority_path = artifact_path.parent / str(artifact["authority_receipt"]["relative_path"])
@@ -2503,6 +2520,11 @@ def test_authority_staging_rejects_output_inputs_and_kind_swaps(
         "_collect_authoritative_production",
         lambda **_kwargs: {"passed": True, "provider_calls": 0, "collector": "test"},
     )
+    monkeypatch.setattr(
+        HARNESS,
+        "_validate_ox",
+        lambda *_args, **_kwargs: {"passed": True, "reasons": [], "rows": 1},
+    )
 
     output = tmp_path / "output-swap"
     displaced, replacement = tmp_path / "displaced", tmp_path / "replacement"
@@ -2516,7 +2538,7 @@ def test_authority_staging_rejects_output_inputs_and_kind_swaps(
     with pytest.raises(HARNESS.R4Error, match="output changed"):
         HARNESS.produce_source_bound_authority_receipt(
             output, source_root=source, source_commit=commit,
-            local_receipts=local_dir, ox_receipts=ox_dir,
+            local_receipts=local_dir, ox_receipts=None,
             before_stage=swap_output,
         )
     assert not list(output.iterdir())
@@ -2529,7 +2551,7 @@ def test_authority_staging_rejects_output_inputs_and_kind_swaps(
     (output / "authority-inputs").symlink_to(outside, target_is_directory=True)
     receipt, _inventory = HARNESS.produce_source_bound_authority_receipt(
         output, source_root=source, source_commit=commit,
-        local_receipts=local_dir, ox_receipts=ox_dir,
+        local_receipts=local_dir, ox_receipts=None,
     )
     assert receipt["available"] is True
     assert not list(outside.iterdir())
@@ -2547,7 +2569,7 @@ def test_authority_validator_takes_third_snapshot_after_collector(
     real_collector = HARNESS._collect_authoritative_production
 
     def certifying_collector(**kwargs: object) -> dict[str, object]:
-        return {**real_collector(**kwargs), "passed": True, "reasons": []}
+        return _complete_runtime_projection(real_collector(**kwargs))
 
     monkeypatch.setattr(HARNESS, "_collect_authoritative_production", certifying_collector)
     local_dir, ox_dir = tmp_path / "local", tmp_path / "ox"
@@ -2555,7 +2577,7 @@ def test_authority_validator_takes_third_snapshot_after_collector(
     _write_receipts(ox_dir, [_receipt(row, index) for index, row in enumerate(_ox_rows(source, commit))])
     artifact, artifact_path = HARNESS.run(
         source_root=source, source_commit=commit, output=tmp_path / "evidence",
-        local_receipts=local_dir, ox_receipts=ox_dir,
+        local_receipts=local_dir, ox_receipts=None,
         production_root=production,
     )
     authority_path = artifact_path.parent / str(artifact["authority_receipt"]["relative_path"])
@@ -2594,14 +2616,14 @@ def test_authority_validator_rechecks_after_final_authority_read_and_root_bindin
     real_collector = HARNESS._collect_authoritative_production
     monkeypatch.setattr(
         HARNESS, "_collect_authoritative_production",
-        lambda **kwargs: {**real_collector(**kwargs), "passed": True, "reasons": []},
+        lambda **kwargs: _complete_runtime_projection(real_collector(**kwargs)),
     )
     local_dir, ox_dir = tmp_path / "local", tmp_path / "ox"
     _write_receipts(local_dir, [_receipt(row, index) for index, row in enumerate(_local_rows(source, commit))])
     _write_receipts(ox_dir, [_receipt(row, index) for index, row in enumerate(_ox_rows(source, commit))])
     artifact, artifact_path = HARNESS.run(
         source_root=source, source_commit=commit, output=tmp_path / "evidence",
-        local_receipts=local_dir, ox_receipts=ox_dir,
+        local_receipts=local_dir, ox_receipts=None,
         production_root=production,
     )
     authority_path = artifact_path.parent / str(artifact["authority_receipt"]["relative_path"])
@@ -2634,7 +2656,7 @@ def test_authority_validator_rechecks_after_final_authority_read_and_root_bindin
     monkeypatch.setattr(HARNESS, "_authority_read_fd", real_read)
     artifact, artifact_path = HARNESS.run(
         source_root=source, source_commit=commit, output=tmp_path / "second-evidence",
-        local_receipts=local_dir, ox_receipts=ox_dir,
+        local_receipts=local_dir, ox_receipts=None,
         production_root=production,
     )
     authority_path = artifact_path.parent / str(artifact["authority_receipt"]["relative_path"])
@@ -2674,6 +2696,11 @@ def test_authority_staging_failure_cleans_owned_entries_and_allows_retry(
         "_collect_authoritative_production",
         lambda **_kwargs: {"passed": True, "provider_calls": 0, "collector": "test"},
     )
+    monkeypatch.setattr(
+        HARNESS,
+        "_validate_ox",
+        lambda *_args, **_kwargs: {"passed": True, "reasons": [], "rows": 1},
+    )
     output = tmp_path / "evidence"
     real_read = HARNESS._authority_read_fd
 
@@ -2688,14 +2715,14 @@ def test_authority_staging_failure_cleans_owned_entries_and_allows_retry(
     with pytest.raises(HARNESS.R4Error, match="synthetic authority"):
         HARNESS.produce_source_bound_authority_receipt(
             output, source_root=source, source_commit=commit,
-            local_receipts=local_dir, ox_receipts=ox_dir,
+            local_receipts=local_dir, ox_receipts=None,
         )
     assert not list(output.glob("*.authority.json"))
     assert not (output / "authority-inputs").exists()
     monkeypatch.setattr(HARNESS, "_authority_read_fd", real_read)
     receipt, _inventory = HARNESS.produce_source_bound_authority_receipt(
         output, source_root=source, source_commit=commit,
-        local_receipts=local_dir, ox_receipts=ox_dir,
+        local_receipts=local_dir, ox_receipts=None,
     )
     assert receipt["available"] is True
 
@@ -2713,7 +2740,7 @@ def test_run_rejects_output_swap_between_authority_and_artifact_publish(
     monkeypatch.setattr(
         HARNESS,
         "_collect_authoritative_production",
-        lambda **kwargs: {**real_collector(**kwargs), "passed": True, "reasons": []},
+        lambda **kwargs: _complete_runtime_projection(real_collector(**kwargs)),
     )
     local_dir, ox_dir = tmp_path / "local", tmp_path / "ox"
     _write_receipts(local_dir, [_receipt(row, index) for index, row in enumerate(_local_rows(source, commit))])
@@ -2731,7 +2758,7 @@ def test_run_rejects_output_swap_between_authority_and_artifact_publish(
     with pytest.raises(HARNESS.R4Error, match="output changed"):
         HARNESS.run(
             source_root=source, source_commit=commit, output=output,
-            local_receipts=local_dir, ox_receipts=ox_dir,
+            local_receipts=local_dir, ox_receipts=None,
             production_root=production,
     )
     assert not list(output.iterdir())
@@ -3183,6 +3210,158 @@ def test_authoritative_collector_can_certify_only_fixed_sealed_root(
         }
         for cap in HARNESS.OX_STAGES
     }
+
+
+def test_runtime_ox_contract_reads_the_actual_sealed_runtime_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4 must consume the producer's contract ID, never a wrapper digest."""
+
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path, source, commit)
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    monkeypatch.setattr(
+        HARNESS,
+        "_load_production_anchor",
+        lambda _path, **_kwargs: _fixture_candidate_anchor(production),
+    )
+    source_snapshot = HARNESS._assert_source(source, commit)
+    projection = HARNESS._collect_authoritative_production(
+        source_root=source, source=source_snapshot, production_root=production
+    )
+    state = json.loads((production / HARNESS.PRODUCTION_STATE_RELATIVE).read_text())
+
+    result = HARNESS._validate_ox(
+        [], source_snapshot, production_projection=projection
+    )
+
+    assert result["passed"] is False  # fixture deliberately lacks failure evidence
+    assert result["contract"]["schema"] == "chronovisor.recall-distill-ox-profile.v1"
+    assert result["contract"]["artifact_id"] == state["profile_contract_id"]
+    assert result["contract"]["teacher_claim_limit"] == 1
+
+
+def test_runtime_ox_contract_accepts_complete_fixed_root_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The complete runtime shape retains the producer's sealed authority."""
+
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path, source, commit)
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    monkeypatch.setattr(
+        HARNESS,
+        "_load_production_anchor",
+        lambda _path, **_kwargs: _fixture_candidate_anchor(production),
+    )
+    source_snapshot = HARNESS._assert_source(source, commit)
+    observed = HARNESS._collect_authoritative_production(
+        source_root=source, source=source_snapshot, production_root=production
+    )
+
+    result = HARNESS._validate_ox(
+        [],
+        source_snapshot,
+        production_projection=_complete_runtime_projection(observed),
+    )
+
+    assert result["passed"] is True
+    assert result["contract"]["artifact_id"] == observed["profile_contract"]["artifact_id"]
+    assert result["stages"] == observed["quality"]["stages"]
+    assert result["failure_receipts"] == ["runtime-sealed-fixed-root-v1"]
+
+
+def test_formal_runtime_ox_rejects_external_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """External OX files cannot replace or disagree with the fixed projection."""
+
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path, source, commit)
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    monkeypatch.setattr(
+        HARNESS,
+        "_load_production_anchor",
+        lambda _path, **_kwargs: _fixture_candidate_anchor(production),
+    )
+    real_collector = HARNESS._collect_authoritative_production
+    monkeypatch.setattr(
+        HARNESS,
+        "_collect_authoritative_production",
+        lambda **kwargs: _complete_runtime_projection(real_collector(**kwargs)),
+    )
+    local_dir, ox_dir = tmp_path / "local", tmp_path / "ox"
+    _write_receipts(
+        local_dir,
+        [_receipt(row, index) for index, row in enumerate(_local_rows(source, commit))],
+    )
+    _write_receipts(
+        ox_dir,
+        [_receipt(row, index) for index, row in enumerate(_ox_rows(source, commit))],
+    )
+
+    artifact, _ = HARNESS.run(
+        source_root=source,
+        source_commit=commit,
+        output=tmp_path / "evidence",
+        local_receipts=local_dir,
+        ox_receipts=ox_dir,
+        production_root=production,
+    )
+
+    assert artifact["source_contract"]["passed"] is False
+    assert artifact["source_contract"]["ox"]["reasons"] == [
+        "formal_ox_receipts_must_use_fixed_root_runtime"
+    ]
+    assert artifact["authority_receipt"]["available"] is False
+
+
+@pytest.mark.parametrize(
+    "mutation", ["missing", "paid", "model", "source", "current_contract", "event", "stage"]
+)
+def test_runtime_ox_contract_fails_closed_on_identity_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path, source, commit)
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    monkeypatch.setattr(
+        HARNESS,
+        "_load_production_anchor",
+        lambda _path, **_kwargs: _fixture_candidate_anchor(production),
+    )
+    source_snapshot = HARNESS._assert_source(source, commit)
+    projection = HARNESS._collect_authoritative_production(
+        source_root=source, source=source_snapshot, production_root=production
+    )
+    forged = _complete_runtime_projection(projection)
+    contract = forged["profile_contract"]["sealed"]
+    if mutation == "missing":
+        contract.pop("relevant_config_sha256")
+    elif mutation == "paid":
+        contract["free_only"] = False
+    elif mutation == "model":
+        contract["request_model"] = "paid-model"
+    elif mutation == "source":
+        contract["source_commit"] = "0" * 40
+    elif mutation == "current_contract":
+        forged["profile_contract"]["artifact_id"] = "0" * 64
+    elif mutation == "event":
+        forged["events"].pop("lease")
+    else:
+        forged["quality"]["stages"].pop("10")
+
+    result = HARNESS._validate_ox(
+        [], source_snapshot, production_projection=forged
+    )
+
+    assert result["passed"] is False
+    if mutation in {"event", "stage"}:
+        assert "runtime_label_or_event_binding_invalid" in result["reasons"]
+    elif mutation == "current_contract":
+        assert "runtime_contract_binding_invalid" in result["reasons"]
+    else:
+        assert "runtime_contract_invalid" in result["reasons"]
 
 
 @pytest.mark.parametrize(
