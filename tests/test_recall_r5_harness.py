@@ -1170,6 +1170,7 @@ def test_actual_workset_and_materialization_api_on_owned_clone(tmp_path: Path) -
     materialized = distill.materialize_training_rows(
         clone, _rallies=[], _snapshots={}, _label_rows=[]
     )
+    assert materialized["schema"] == HARNESS.CANONICAL_TRAINING_SCHEMA
     assert materialized["rows"] == []
     inventory = HARNESS._workset_inventory(clone)
     assert inventory["counts"]["ready"] == 1
@@ -1430,11 +1431,11 @@ def test_formal_artifact_rederives_metric_floor(metric: str) -> None:
         _reseal_inner(inner, dataset=dataset)
 
 
-def test_formal_artifact_rejects_legacy_dataset_policy() -> None:
+def test_formal_artifact_rejects_mismatched_dataset_policy() -> None:
     inner = _formal_inner()
     dataset = dict(cast(dict[str, object], inner["dataset"]))
     policy = dict(cast(dict[str, object], dataset["policy"]))
-    policy["training_schema"] = "chronovisor.recall-distill-training.v1"
+    policy["training_schema"] = "chronovisor.recall-distill-training.v2"
     dataset["policy"] = policy
     with pytest.raises(HARNESS.R5Error, match="policy"):
         _reseal_inner(inner, dataset=dataset)

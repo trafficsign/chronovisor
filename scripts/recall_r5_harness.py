@@ -43,7 +43,7 @@ from typing import Any, cast
 R5_SCHEMA = "chronovisor.recall-r5.v1"
 R5_COMPLETION_SCHEMA = "chronovisor.r5-supervisor-completion.v1"
 R5_FLOOR_POLICY_SCHEMA = "chronovisor.recall-r5-floor-policy.v2"
-CANONICAL_TRAINING_SCHEMA = "chronovisor.recall-distill-training.v2"
+CANONICAL_TRAINING_SCHEMA = "chronovisor.recall-distill-training.v1"
 CANONICAL_GATE_SCHEMA = "chronovisor.recall-offline-training-gate.v2"
 NAMESPACE = "recall-distillation"
 MIN_RALLIES, MIN_DAYS, MIN_WINDOWS = 1000, 30, 3
@@ -1785,7 +1785,7 @@ def _independent_dataset_binding(
             return False
         snapshot = _stable_sealed(
             store, root, Path("runtime/recall-distillation/training-snapshots") / f"{snapshot_id}.json",
-            schema="chronovisor.recall-distill-training.v1", inventory=inventory,
+            schema=CANONICAL_TRAINING_SCHEMA, inventory=inventory,
         )
         official_labels = _read_rows(store, root)
         if list(labels) != official_labels or snapshot.get("rows") != list(rows):
