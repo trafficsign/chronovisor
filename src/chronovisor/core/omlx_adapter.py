@@ -52,6 +52,7 @@ from chronovisor.core.llm_runtime import (
     RouteLocation,
     SafeBackendError,
     TokenUsage,
+    safe_metadata_identifier,
 )
 from chronovisor.core.ollama_lease import model_resource_lease
 
@@ -244,6 +245,7 @@ class OMLXAdapter:
         reasoning: list[str] = []
         usage: dict[str, Any] = {}
         finish_reason: str | None = None
+        returned_model: str | None = None
         output_chunks = 0
         saw_done = False
         started = time.monotonic()
@@ -319,6 +321,15 @@ class OMLXAdapter:
                         ) from None
                     if "error" in event:
                         raise SafeBackendError("http_5xx", transient=True)
+                    if "model" in event:
+                        event_model = safe_metadata_identifier(event.get("model"))
+                        if event_model is None or (
+                            returned_model is not None and event_model != returned_model
+                        ):
+                            raise SafeBackendError(
+                                "invalid_response", transient=False
+                            ) from None
+                        returned_model = event_model
                     event_usage = event.get("usage")
                     if isinstance(event_usage, dict):
                         usage.update(event_usage)
@@ -359,7 +370,7 @@ class OMLXAdapter:
         normalized = httpx.Response(
             200,
             json={
-                "model": str(payload.get("model") or ""),
+                "model": returned_model,
                 "choices": [
                     {"index": 0, "message": message, "finish_reason": finish_reason}
                 ],
@@ -439,6 +450,8 @@ class OMLXAdapter:
             content = reasoning if isinstance(reasoning, str) else ""
         finish_reason = choices[0].get("finish_reason")
         metadata: dict[str, Any] = {}
+        if returned_model := safe_metadata_identifier(payload.get("model")):
+            metadata["returned_model"] = returned_model
         if isinstance(reasoning, str) and reasoning:
             metadata["reasoning_content"] = reasoning
         usage = payload.get("usage")

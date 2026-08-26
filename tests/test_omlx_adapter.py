@@ -259,16 +259,31 @@ def test_generate_normalizes_response() -> None:
     assert result.metadata["total_time"] == 1.5
 
 
+def test_generate_records_independent_returned_model_metadata() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        payload = _chat_json("42")
+        payload["model"] = "served-m"
+        return httpx.Response(200, json=payload, request=request)
+
+    result = OMLXAdapter(transport=httpx.MockTransport(handle)).generate(
+        _minimal_message_request(), model="m"
+    )
+
+    assert result.model == "m"
+    assert result.metadata["returned_model"] == "served-m"
+
+
 def test_generate_streams_redacted_progress_and_reassembles_response() -> None:
     captured: list[dict[str, Any]] = []
     updates: list[dict[str, Any]] = []
+    observed_model = "served-m"
     chunks = [
-        {"model": "m", "choices": [{"delta": {"role": "assistant"}}]},
-        {"model": "m", "choices": [{"delta": {"reasoning_content": "plan"}}]},
-        {"model": "m", "choices": [{"delta": {"content": '{"ok":true}'}}]},
-        {"model": "m", "choices": [{"delta": {}, "finish_reason": "stop"}]},
+        {"model": observed_model, "choices": [{"delta": {"role": "assistant"}}]},
+        {"model": observed_model, "choices": [{"delta": {"reasoning_content": "plan"}}]},
+        {"model": observed_model, "choices": [{"delta": {"content": '{"ok":true}'}}]},
+        {"model": observed_model, "choices": [{"delta": {}, "finish_reason": "stop"}]},
         {
-            "model": "m",
+            "model": observed_model,
             "choices": [],
             "usage": {
                 "prompt_tokens": 12,
@@ -303,6 +318,8 @@ def test_generate_streams_redacted_progress_and_reassembles_response() -> None:
     assert captured[0]["stream_options"] == {"include_usage": True}
     assert result.content == '{"ok":true}'
     assert result.completed is True
+    assert result.model == "m"
+    assert result.metadata["returned_model"] == observed_model
     assert result.metadata["streamed"] is True
     assert result.metadata["reasoning_content"] == "plan"
     assert (result.usage.input_tokens, result.usage.output_tokens) == (12, 4)
@@ -319,7 +336,7 @@ def test_generate_streams_redacted_progress_and_reassembles_response() -> None:
 
 
 def test_generate_marks_stream_without_done_as_incomplete() -> None:
-    body = 'data: {"model":"m","choices":[{"delta":{"content":"x"}}]}\n\n'
+    body = 'data: {"choices":[{"delta":{"content":"x"}}]}\n\n'
     adapter = OMLXAdapter(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(200, content=body, request=request)
@@ -333,7 +350,29 @@ def test_generate_marks_stream_without_done_as_incomplete() -> None:
 
     assert result.content == "x"
     assert result.completed is False
+    assert result.model == "m"
+    assert "returned_model" not in result.metadata
     assert result.metadata["streamed"] is True
+
+
+def test_generate_rejects_inconsistent_stream_returned_model() -> None:
+    body = (
+        'data: {"model":"served-m","choices":[{"delta":{"content":"x"}}]}\n\n'
+        'data: {"model":"other-m","choices":[{"delta":{}}]}\n\n'
+    )
+    adapter = OMLXAdapter(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=body, request=request)
+        )
+    )
+
+    with pytest.raises(SafeBackendError) as exc:
+        adapter.generate(
+            replace(_minimal_message_request(), progress_callback=lambda _event: None),
+            model="m",
+        )
+
+    assert exc.value.safe_category == "invalid_response"
 
 
 def test_generate_falls_back_to_reasoning_content() -> None:
