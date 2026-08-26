@@ -1116,6 +1116,115 @@ def _canonical_future_expiry(value: object) -> str | None:
     return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _runtime_workset_projection_is_valid(
+    workset: object, stages: object
+) -> bool:
+    """Validate the bounded Workset summary carried by the runtime collector."""
+
+    if not isinstance(workset, Mapping) or set(workset) != {
+        "rows",
+        "counts",
+        "sha256",
+        "receipts",
+    }:
+        return False
+    rows = workset.get("rows")
+    counts = workset.get("counts")
+    receipts = workset.get("receipts")
+    if (
+        isinstance(rows, bool)
+        or not isinstance(rows, int)
+        or rows < 1
+        or not isinstance(counts, Mapping)
+        or set(counts) != set(PRODUCTION_WORKSET_STATES)
+        or _SHA.fullmatch(_text(workset.get("sha256"))) is None
+        or not isinstance(receipts, Mapping)
+        or set(receipts)
+        != {
+            "count",
+            "generation",
+            "head_sha256",
+            "by_generation",
+            "verified",
+            "status",
+            "legacy_unverified_excluded",
+        }
+    ):
+        return False
+    if any(
+        isinstance(counts.get(state), bool)
+        or not isinstance(counts.get(state), int)
+        or counts[state] < 0
+        for state in PRODUCTION_WORKSET_STATES
+    ) or rows != sum(counts.values()) or counts.get("leased") != 0:
+        return False
+    receipt_count = receipts.get("count")
+    generation = receipts.get("generation")
+    by_generation = receipts.get("by_generation")
+    if (
+        isinstance(receipt_count, bool)
+        or not isinstance(receipt_count, int)
+        or receipt_count < 1
+        or generation != receipt_count
+        or _SHA.fullmatch(_text(receipts.get("head_sha256"))) is None
+        or receipts.get("verified") is not True
+        or receipts.get("status") != "verified"
+        or receipts.get("legacy_unverified_excluded") is not False
+        or not isinstance(by_generation, Mapping)
+        or set(by_generation) != {str(value) for value in range(1, receipt_count + 1)}
+    ):
+        return False
+    for receipt in by_generation.values():
+        if (
+            not isinstance(receipt, Mapping)
+            or set(receipt) != {"receipt_sha256", "operation", "details"}
+            or _SHA.fullmatch(_text(receipt.get("receipt_sha256"))) is None
+            or receipt.get("operation") not in PRODUCTION_WORKSET_OPERATIONS
+            or not isinstance(receipt.get("details"), Mapping)
+        ):
+            return False
+    if not isinstance(stages, Mapping):
+        return False
+    seen_work_ids: set[str] = set()
+    valid_receipts_total = 0
+    for cap in OX_STAGES:
+        stage = stages.get(str(cap))
+        if not isinstance(stage, Mapping):
+            return False
+        valid = stage.get("valid_receipts")
+        attempts = stage.get("attempts")
+        rate = stage.get("valid_rate")
+        work_ids = stage.get("work_ids")
+        if (
+            isinstance(valid, bool)
+            or not isinstance(valid, int)
+            or valid < 20
+            or isinstance(attempts, bool)
+            or not isinstance(attempts, int)
+            or attempts < valid
+            or type(rate) is not float
+            or not math.isfinite(rate)
+            or rate != round(valid / attempts, 8)
+            or rate < 0.95
+            or not isinstance(work_ids, list)
+            or len(work_ids) != valid
+            or any(
+                not isinstance(work_id, str)
+                or _SHA.fullmatch(work_id) is None
+                for work_id in work_ids
+            )
+        ):
+            return False
+        stage_work_ids = set(work_ids)
+        if len(stage_work_ids) != len(work_ids) or seen_work_ids.intersection(
+            stage_work_ids
+        ):
+            return False
+        seen_work_ids.update(stage_work_ids)
+        valid_receipts_total += valid
+    return counts.get("completed") == valid_receipts_total
+
+
 def _validate_runtime_ox_projection(
     projection: Mapping[str, Any], source: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -1209,6 +1318,13 @@ def _validate_runtime_ox_projection(
     labels = projection.get("labels")
     events = projection.get("events")
     quality = projection.get("quality")
+    stage_bindings_valid = (
+        isinstance(quality, Mapping)
+        and isinstance(quality.get("stages"), Mapping)
+        and _runtime_workset_projection_is_valid(
+            projection.get("workset"), quality["stages"]
+        )
+    )
     if (
         not isinstance(labels, Mapping)
         or not isinstance(labels.get("count"), int)
@@ -1232,14 +1348,11 @@ def _validate_runtime_ox_projection(
         or quality.get("receipt_authority") != "adapter_observed_not_provider_signed"
         or not isinstance(quality.get("stages"), Mapping)
         or set(quality["stages"]) != {str(cap) for cap in OX_STAGES}
-        or any(
-            not isinstance(quality["stages"].get(str(cap)), Mapping)
-            or quality["stages"][str(cap)].get("valid_receipts", 0) < 20
-            or quality["stages"][str(cap)].get("valid_rate", 0) < 0.95
-            for cap in OX_STAGES
-        )
+        or not stage_bindings_valid
     ):
         reasons.add("runtime_label_or_event_binding_invalid")
+    if not stage_bindings_valid:
+        reasons.add("runtime_workset_binding_invalid")
     if projection.get("passed") is not True or projection.get("provider_calls") != 0:
         reasons.add("runtime_projection_unavailable")
     return {
@@ -5960,12 +6073,11 @@ def read_artifact(path: Path) -> dict[str, Any]:
     ):
         raise R4Error("R4 artifact source snapshots disagree")
     source_contract = artifact.get("source_contract")
-    if not isinstance(source_contract, Mapping) or set(source_contract) != {
-        "schema",
-        "passed",
-        "local",
-        "ox",
-        "ox_authority",
+    legacy_source_contract_keys = {"schema", "passed", "local", "ox"}
+    current_source_contract_keys = legacy_source_contract_keys | {"ox_authority"}
+    if not isinstance(source_contract, Mapping) or set(source_contract) not in {
+        frozenset(legacy_source_contract_keys),
+        frozenset(current_source_contract_keys),
     }:
         raise R4Error("R4 artifact source contract is missing")
     if (
@@ -5973,24 +6085,27 @@ def read_artifact(path: Path) -> dict[str, Any]:
         or not isinstance(source_contract.get("passed"), bool)
         or not isinstance(source_contract.get("local"), Mapping)
         or not isinstance(source_contract.get("ox"), Mapping)
-        or not isinstance(source_contract.get("ox_authority"), Mapping)
     ):
         raise R4Error("R4 artifact source contract is invalid")
-    ox_authority = source_contract["ox_authority"]
-    if ox_authority.get("kind") == "fixed_root_runtime_sealed_projection":
-        if (
-            set(ox_authority)
-            != {"kind", "projection_sha256", "receipt_inventory"}
-            or _SHA.fullmatch(_text(ox_authority.get("projection_sha256"))) is None
-            or ox_authority.get("receipt_inventory")
-            != {"files": [], "count": 0}
-        ):
+    if set(source_contract) == current_source_contract_keys:
+        ox_authority = source_contract.get("ox_authority")
+        if not isinstance(ox_authority, Mapping):
             raise R4Error("R4 artifact OX authority is invalid")
-    elif ox_authority.get("kind") == "external_sealed_receipts":
-        if set(ox_authority) != {"kind", "receipt_inventory"}:
+        if ox_authority.get("kind") == "fixed_root_runtime_sealed_projection":
+            if (
+                set(ox_authority)
+                != {"kind", "projection_sha256", "receipt_inventory"}
+                or _SHA.fullmatch(_text(ox_authority.get("projection_sha256")))
+                is None
+                or ox_authority.get("receipt_inventory")
+                != {"files": [], "count": 0}
+            ):
+                raise R4Error("R4 artifact OX authority is invalid")
+        elif ox_authority.get("kind") == "external_sealed_receipts":
+            if set(ox_authority) != {"kind", "receipt_inventory"}:
+                raise R4Error("R4 artifact OX authority is invalid")
+        else:
             raise R4Error("R4 artifact OX authority is invalid")
-    else:
-        raise R4Error("R4 artifact OX authority is invalid")
     production = artifact.get("production_certification")
     unavailable_production_keys = {
         "passed",

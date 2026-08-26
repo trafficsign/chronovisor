@@ -1831,6 +1831,19 @@ def test_read_artifact_requires_canonical_closed_payload(tmp_path: Path) -> None
         source_commit=commit,
         output=tmp_path / "evidence",
     )
+    legacy = json.loads(json.dumps(artifact))
+    del legacy["source_contract"]["ox_authority"]
+    legacy_unsigned = {
+        key: value
+        for key, value in legacy.items()
+        if key not in {"artifact_id", "seal_sha256"}
+    }
+    legacy_id = HARNESS._sha256(legacy_unsigned)
+    legacy = HARNESS._sealed({"artifact_id": legacy_id, **legacy_unsigned})
+    legacy_path = artifact_path.with_name(f"{legacy_id}.json")
+    legacy_path.write_bytes(HARNESS._json_bytes(legacy) + b"\n")
+    assert HARNESS.read_artifact(legacy_path)["artifact_id"] == legacy_id
+
     original = artifact_path.read_bytes()
     artifact_path.write_bytes(original + b" ")
     with pytest.raises(HARNESS.R4Error, match="canonical"):
@@ -3269,6 +3282,65 @@ def test_runtime_ox_contract_accepts_complete_fixed_root_evidence(
     assert result["contract"]["artifact_id"] == observed["profile_contract"]["artifact_id"]
     assert result["stages"] == observed["quality"]["stages"]
     assert result["failure_receipts"] == ["runtime-sealed-fixed-root-v1"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("workset_missing", "runtime_workset_binding_invalid"),
+        ("workset_leased", "runtime_workset_binding_invalid"),
+        ("workset_receipts", "runtime_workset_binding_invalid"),
+        ("stage_valid_bool", "runtime_label_or_event_binding_invalid"),
+        ("stage_attempts_string", "runtime_label_or_event_binding_invalid"),
+        ("stage_rate_bool", "runtime_label_or_event_binding_invalid"),
+        ("stage_rate_nan", "runtime_label_or_event_binding_invalid"),
+        ("stage_duplicate_work", "runtime_label_or_event_binding_invalid"),
+    ],
+)
+def test_runtime_ox_contract_rejects_unbound_workset_and_non_numeric_stages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    reason: str,
+) -> None:
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path, source, commit)
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    monkeypatch.setattr(
+        HARNESS,
+        "_load_production_anchor",
+        lambda _path, **_kwargs: _fixture_candidate_anchor(production),
+    )
+    source_snapshot = HARNESS._assert_source(source, commit)
+    observed = HARNESS._collect_authoritative_production(
+        source_root=source, source=source_snapshot, production_root=production
+    )
+    forged = _complete_runtime_projection(observed)
+    if mutation == "workset_missing":
+        forged.pop("workset")
+    elif mutation == "workset_leased":
+        forged["workset"]["counts"]["leased"] = 1
+    elif mutation == "workset_receipts":
+        forged["workset"]["receipts"]["verified"] = False
+    elif mutation == "stage_valid_bool":
+        forged["quality"]["stages"]["1"]["valid_receipts"] = True
+    elif mutation == "stage_attempts_string":
+        forged["quality"]["stages"]["1"]["attempts"] = "20"
+    elif mutation == "stage_rate_bool":
+        forged["quality"]["stages"]["1"]["valid_rate"] = True
+    elif mutation == "stage_rate_nan":
+        forged["quality"]["stages"]["1"]["valid_rate"] = float("nan")
+    else:
+        forged["quality"]["stages"]["1"]["work_ids"][1] = forged[
+            "quality"
+        ]["stages"]["1"]["work_ids"][0]
+
+    result = HARNESS._validate_ox(
+        [], source_snapshot, production_projection=forged
+    )
+
+    assert result["passed"] is False
+    assert reason in result["reasons"]
 
 
 def test_formal_runtime_ox_rejects_external_receipts(
