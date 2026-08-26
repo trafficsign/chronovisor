@@ -98,6 +98,17 @@ def _receipt(payload: dict[str, object], index: int) -> dict[str, object]:
             "work_id": payload.get("work_id"),
             "attempt": payload.get("attempt"),
             binding_key: payload.get(binding_key),
+            **(
+                {
+                    "captured_at": payload.get("captured_at"),
+                    "claim_receipt_sha256": cast(
+                        Mapping[str, object], payload.get("claim_receipt")
+                    ).get("head_sha256"),
+                }
+                if payload.get("failure_injection") is True
+                and isinstance(payload.get("claim_receipt"), Mapping)
+                else {}
+            ),
         }
         if payload.get("profile") == HARNESS.LOCAL_PROFILE
         and isinstance(workset_receipt, Mapping)
@@ -1472,6 +1483,34 @@ def _fixture_candidate_anchor(production: Path) -> dict[str, object]:
     }
 
 
+def _local_failure_binding(index: int, work_id: str) -> dict[str, object]:
+    claim_generation = index * 2 + 1
+    selection_sha256 = HARNESS._sha256({"work_id": work_id, "claim": index})
+    work_ids_sha256 = HARNESS._sha256([work_id])
+    return {
+        "claim_receipt": {
+            "generation": claim_generation,
+            "head_sha256": HARNESS._sha256(
+                {"work_id": work_id, "generation": claim_generation}
+            ),
+            "selection_sha256": selection_sha256,
+            "work_ids_sha256": work_ids_sha256,
+        },
+        "workset_receipt": {
+            "generation": claim_generation + 1,
+            "head_sha256": HARNESS._sha256(
+                {"work_id": work_id, "generation": claim_generation + 1}
+            ),
+            "operation": "release",
+            "selection_sha256": selection_sha256,
+            "work_ids_sha256": work_ids_sha256,
+            "context_sha256": HARNESS._sha256(
+                {"work_id": work_id, "context": index}
+            ),
+        },
+    }
+
+
 def _local_evidence_fields(
     index: int,
     rally_id: str,
@@ -1492,12 +1531,18 @@ def _local_evidence_fields(
         "captured_at": "2026-08-24T00:00:00Z",
         "work_id": work_id,
         "attempt": 1,
-        "workset_receipt": {
-            "generation": index + 1,
-            "head_sha256": HARNESS._sha256(
-                {"work_id": work_id, "generation": index + 1}
-            ),
-        },
+        **(
+            _local_failure_binding(index, work_id)
+            if failure
+            else {
+                "workset_receipt": {
+                    "generation": index + 1,
+                    "head_sha256": HARNESS._sha256(
+                        {"work_id": work_id, "generation": index + 1}
+                    ),
+                }
+            }
+        ),
     }
     binding_key = "attempt_record_sha256" if failure else "label_record_sha256"
     evidence[binding_key] = HARNESS._sha256(
@@ -3898,6 +3943,14 @@ def test_local_failure_receipts_are_closed_and_excluded_from_quality(
     false_flag = dict(payloads[0])
     attempt_digest = false_flag.pop("attempt_record_sha256")
     false_flag.pop("diagnostic")
+    false_flag.pop("claim_receipt")
+    failure_workset_receipt = cast(
+        Mapping[str, object], false_flag["workset_receipt"]
+    )
+    false_flag["workset_receipt"] = {
+        "generation": failure_workset_receipt["generation"],
+        "head_sha256": failure_workset_receipt["head_sha256"],
+    }
     false_flag["label_record_sha256"] = attempt_digest
     false_flag["failure_injection"] = False
     result = HARNESS._validate_local(
@@ -3910,6 +3963,9 @@ def test_local_failure_receipts_are_closed_and_excluded_from_quality(
     valid_as_failure["attempt_record_sha256"] = label_digest
     valid_as_failure["diagnostic"] = {"provider_calls": 0, "network_egress": 0}
     valid_as_failure["failure_injection"] = True
+    valid_as_failure.update(
+        _local_failure_binding(50_001, cast(str, valid_as_failure["work_id"]))
+    )
     result = HARNESS._validate_local(
         [*rows, _receipt(valid_as_failure, 50_001)], source_snapshot
     )
@@ -3928,6 +3984,31 @@ def test_local_failure_receipts_are_closed_and_excluded_from_quality(
         [_receipt(boolean_zero, 50_003), *rows[1:]], source_snapshot
     )
     assert "failure_diagnostic_egress" in result["reasons"]
+
+    claim_mismatch = dict(payloads[1])
+    claim_mismatch["claim_receipt"] = {
+        **cast(Mapping[str, object], claim_mismatch["claim_receipt"]),
+        "generation": 50_004,
+    }
+    result = HARNESS._validate_local(
+        [rows[0], _receipt(claim_mismatch, 50_004), *rows[2:]], source_snapshot
+    )
+    assert "local_durable_binding_invalid" in result["reasons"]
+
+    work_ids_mismatch = dict(payloads[1])
+    forged_work_ids_sha256 = HARNESS._sha256(["different-work-id"])
+    work_ids_mismatch["claim_receipt"] = {
+        **cast(Mapping[str, object], work_ids_mismatch["claim_receipt"]),
+        "work_ids_sha256": forged_work_ids_sha256,
+    }
+    work_ids_mismatch["workset_receipt"] = {
+        **cast(Mapping[str, object], work_ids_mismatch["workset_receipt"]),
+        "work_ids_sha256": forged_work_ids_sha256,
+    }
+    result = HARNESS._validate_local(
+        [rows[0], _receipt(work_ids_mismatch, 50_005), *rows[2:]], source_snapshot
+    )
+    assert "local_failure_workset_binding_invalid" in result["reasons"]
 
 
 def test_ox_negative_aliases_and_invalid_backoff_are_vetoes(tmp_path: Path) -> None:

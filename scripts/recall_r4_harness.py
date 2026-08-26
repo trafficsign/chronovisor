@@ -129,6 +129,7 @@ _LOCAL_VALID_RECEIPT_KEYS = _LOCAL_RECEIPT_COMMON_KEYS | {
 }
 _LOCAL_FAILURE_RECEIPT_KEYS = _LOCAL_RECEIPT_COMMON_KEYS | {
     "attempt_record_sha256",
+    "claim_receipt",
     "diagnostic",
 }
 
@@ -758,6 +759,7 @@ def _validate_local(
     valid = deferred = invalid = 0
     probe_revision = ""
     work_attempts: set[tuple[str, int]] = set()
+    failure_worksets: dict[str, tuple[str, str, str, list[str]]] = {}
     for row in rows:
         failure_injection = row.get("failure_injection")
         expected_keys = (
@@ -783,6 +785,76 @@ def _validate_local(
             "attempt": attempt,
             binding_key: binding_sha256,
         }
+        claim_receipt = row.get("claim_receipt")
+        if failure_injection is True and isinstance(claim_receipt, Mapping):
+            expected_identity.update(
+                {
+                    "captured_at": row.get("captured_at"),
+                    "claim_receipt_sha256": claim_receipt.get("head_sha256"),
+                }
+            )
+        workset_binding_valid = isinstance(workset_receipt, Mapping)
+        if failure_injection is True:
+            workset_keys = {
+                "generation",
+                "head_sha256",
+                "operation",
+                "selection_sha256",
+                "work_ids_sha256",
+            }
+            workset_binding_valid = (
+                workset_binding_valid
+                and set(workset_receipt)
+                in (workset_keys, {*workset_keys, "context_sha256"})
+                and isinstance(claim_receipt, Mapping)
+                and set(claim_receipt)
+                == {
+                    "generation",
+                    "head_sha256",
+                    "selection_sha256",
+                    "work_ids_sha256",
+                }
+                and not isinstance(claim_receipt.get("generation"), bool)
+                and isinstance(claim_receipt.get("generation"), int)
+                and claim_receipt["generation"] >= 1
+                and not isinstance(workset_receipt.get("generation"), bool)
+                and isinstance(workset_receipt.get("generation"), int)
+                and workset_receipt["generation"]
+                == claim_receipt["generation"] + 1
+                and workset_receipt.get("operation") in {"release", "commit"}
+                and workset_receipt.get("selection_sha256")
+                == claim_receipt.get("selection_sha256")
+                and workset_receipt.get("work_ids_sha256")
+                == claim_receipt.get("work_ids_sha256")
+                and all(
+                    _SHA.fullmatch(_text(receipt.get(key))) is not None
+                    for receipt, keys in (
+                        (
+                            claim_receipt,
+                            ("head_sha256", "selection_sha256", "work_ids_sha256"),
+                        ),
+                        (
+                            workset_receipt,
+                            ("head_sha256", "selection_sha256", "work_ids_sha256"),
+                        ),
+                    )
+                    for key in keys
+                )
+                and (
+                    "context_sha256" not in workset_receipt
+                    or _SHA.fullmatch(_text(workset_receipt.get("context_sha256")))
+                    is not None
+                )
+            )
+        elif workset_binding_valid:
+            workset_binding_valid = (
+                set(workset_receipt) == {"generation", "head_sha256"}
+                and not isinstance(workset_receipt.get("generation"), bool)
+                and isinstance(workset_receipt.get("generation"), int)
+                and workset_receipt["generation"] >= 1
+                and _SHA.fullmatch(_text(workset_receipt.get("head_sha256")))
+                is not None
+            )
         if (
             _parse_expiry(row.get("captured_at")) is None
             or re.fullmatch(r"local-teacher-[0-9a-f]{64}", work_id) is None
@@ -790,12 +862,7 @@ def _validate_local(
             or not isinstance(attempt, int)
             or attempt < 1
             or _SHA.fullmatch(binding_sha256) is None
-            or not isinstance(workset_receipt, Mapping)
-            or set(workset_receipt) != {"generation", "head_sha256"}
-            or isinstance(workset_receipt.get("generation"), bool)
-            or not isinstance(workset_receipt.get("generation"), int)
-            or workset_receipt["generation"] < 1
-            or _SHA.fullmatch(_text(workset_receipt.get("head_sha256"))) is None
+            or not workset_binding_valid
             or row.get("receipt_identity") != expected_identity
             or row.get("receipt_id") != _sha256(expected_identity)
         ):
@@ -804,6 +871,20 @@ def _validate_local(
             reasons.add("local_work_attempt_duplicate")
         else:
             work_attempts.add((work_id, attempt))
+            if failure_injection is True:
+                assert isinstance(claim_receipt, Mapping)
+                assert isinstance(workset_receipt, Mapping)
+                head_sha256 = _text(workset_receipt.get("head_sha256"))
+                binding = (
+                    _text(claim_receipt.get("head_sha256")),
+                    _text(workset_receipt.get("selection_sha256")),
+                    _text(workset_receipt.get("work_ids_sha256")),
+                )
+                group = failure_worksets.setdefault(head_sha256, (*binding, []))
+                if group[:3] != binding:
+                    reasons.add("local_failure_workset_binding_invalid")
+                else:
+                    group[3].append(work_id)
         identity = row.get("route_identity")
         if not isinstance(identity, Mapping):
             reasons.add("route_identity_missing")
@@ -963,6 +1044,11 @@ def _validate_local(
     if abs(probe_rate - LOCAL_PROBE_RATE) > LOCAL_PROBE_TOLERANCE:
         reasons.add("probe_rate_not_fifteen_percent")
     required_categories = _DEFERRED_REASONS | _INVALID_REASONS
+    if any(
+        _sha256(sorted(work_ids)) != expected
+        for _, _, expected, work_ids in failure_worksets.values()
+    ):
+        reasons.add("local_failure_workset_binding_invalid")
     if not required_categories.issubset(categories):
         reasons.add("failure_class_coverage_incomplete")
     if not valid:
