@@ -3114,6 +3114,29 @@ def test_model_lane_scheduler_is_fair_and_reserves_counterfactual_turn() -> None
     assert not distill._is_counterfactual_turn(6, 1, available=False)
 
 
+@pytest.mark.parametrize(
+    ("state_contract", "current_contract", "expected"),
+    [
+        ("a" * 64, "a" * 64, (170, 1)),
+        ("a" * 64, "b" * 64, (0, 0)),
+        (None, "b" * 64, (0, 0)),
+        (None, "", (170, 1)),
+    ],
+)
+def test_model_lane_scheduler_resets_counters_for_a_new_ox_contract(
+    state_contract: object,
+    current_contract: str,
+    expected: tuple[int, int],
+) -> None:
+    state = {
+        "teacher_model_calls": 170,
+        "counterfactual_model_calls": 1,
+        "ox_profile_contract_id": state_contract,
+    }
+
+    assert distill._scheduler_model_calls(state, current_contract) == expected
+
+
 def test_exposure_receipt_is_exact_prospective_and_hash_chained(tmp_path: Path) -> None:
     digest = "d" * 64
     receipt = distill.record_exposure(

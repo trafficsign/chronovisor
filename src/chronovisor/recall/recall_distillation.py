@@ -3575,6 +3575,20 @@ def _is_counterfactual_turn(
     return available and teacher_calls >= 3 * (counterfactual_calls + 1)
 
 
+def _scheduler_model_calls(
+    state: Mapping[str, Any], ox_profile_contract_id: str
+) -> tuple[int, int]:
+    if (
+        ox_profile_contract_id
+        and state.get("ox_profile_contract_id") != ox_profile_contract_id
+    ):
+        return 0, 0
+    return (
+        int(state.get("teacher_model_calls", 0)),
+        int(state.get("counterfactual_model_calls", 0)),
+    )
+
+
 def adjudicate_label(
     verdict: str,
     *,
@@ -14937,9 +14951,8 @@ def _prepare_distillation_chunk(
         scheduler_state = _read_worker_state(root)
     except store.DistillationStoreError:
         scheduler_state = {}
-    teacher_model_calls = int(scheduler_state.get("teacher_model_calls", 0))
-    counterfactual_model_calls = int(
-        scheduler_state.get("counterfactual_model_calls", 0)
+    teacher_model_calls, counterfactual_model_calls = _scheduler_model_calls(
+        scheduler_state, ox_profile_contract_id
     )
     # The catalog owns Raw projection and legacy bootstrap. This worker consumes
     # the current text-free projection and resolves text only on demand.
