@@ -42,6 +42,9 @@ from typing import Any, cast
 
 R5_SCHEMA = "chronovisor.recall-r5.v1"
 R5_COMPLETION_SCHEMA = "chronovisor.r5-supervisor-completion.v1"
+R5_FLOOR_POLICY_SCHEMA = "chronovisor.recall-r5-floor-policy.v2"
+CANONICAL_TRAINING_SCHEMA = "chronovisor.recall-distill-training.v2"
+CANONICAL_GATE_SCHEMA = "chronovisor.recall-offline-training-gate.v2"
 NAMESPACE = "recall-distillation"
 MIN_RALLIES, MIN_DAYS, MIN_WINDOWS = 1000, 30, 3
 MIN_LABELS, MIN_PER_CLASS, MIN_PROBES, MIN_COUNTERFACTUALS = 500, 100, 100, 100
@@ -70,6 +73,7 @@ _DECLINE_REASON_CODES = {
     "workset_label_reconciliation_failed", "workset_receipt_chain_not_independently_verified",
     "baseline_label_head_or_snapshot_binding_missing", "official_materialization_binding_missing",
     "independent_official_evidence_rederivation_failed", "clone_api_capture_failed",
+    "canonical_dataset_policy_missing", "dataset_backlog_remaining",
 }
 
 
@@ -1018,13 +1022,17 @@ def _egress_sentinel(*write_roots: Path) -> Any:
         direct = root_identities.get((state.st_dev, state.st_ino))
         if direct is not None:
             return direct
-        if sys.platform != "darwin":
-            return None
         try:
-            raw = fcntl.fcntl(fd, getattr(fcntl, "F_GETPATH", 50), b"\0" * 1024)
-            if not isinstance(raw, bytes):
-                return None
-            resolved = Path(raw.split(b"\0", 1)[0].decode("utf-8", "strict")).resolve(strict=True)
+            if sys.platform == "darwin":
+                raw = fcntl.fcntl(
+                    fd, getattr(fcntl, "F_GETPATH", 50), b"\0" * 1024
+                )
+                if not isinstance(raw, bytes):
+                    return None
+                path = raw.split(b"\0", 1)[0].decode("utf-8", "strict")
+            else:
+                path = os.readlink(f"/proc/self/fd/{fd}")
+            resolved = Path(path).resolve(strict=True)
         except (OSError, UnicodeError, ValueError):
             return None
         return resolved if any(resolved.is_relative_to(root) for root in roots) else None
@@ -1176,6 +1184,8 @@ def _provider_sentinel(attempts: dict[str, int], *modules: Any) -> Any:
 
     def patch_provider_callable(target: Any, name: str, raw: Any) -> None:
         """Replace a named or provider-signed boundary, including inherited aliases."""
+        if name == "__annotate__":
+            return
         try:
             original = getattr(target, name)
         except AttributeError:
@@ -1596,8 +1606,13 @@ def _rederive_workset_receipts(
     return len(rows), previous
 
 
-def _workset_inventory(root: Path, runtime: Any | None = None) -> dict[str, Any]:
-    path = root / "runtime" / "recall-distillation" / "ox-workset.sqlite3"
+def _workset_inventory(
+    root: Path, runtime: Any | None = None, *, profile: str = "ox-alpha-single-v1"
+) -> dict[str, Any]:
+    filename = (
+        "local-workset.sqlite3" if profile == "local-triad-v1" else "ox-workset.sqlite3"
+    )
+    path = root / "runtime" / "recall-distillation" / filename
     if not path.exists():
         return {
             "present": False,
@@ -1679,7 +1694,9 @@ def _inventory_matches(root: Path, relative: str, expected: Mapping[str, Any]) -
     )
 
 
-def _evidence_inventory(root: Path) -> dict[str, dict[str, Any]]:
+def _evidence_inventory(
+    root: Path, *, profile: str = "ox-alpha-single-v1"
+) -> dict[str, dict[str, Any]]:
     """Capture only the immutable evidence that must predate this verifier."""
     base = root / "runtime" / "recall-distillation"
     directories = (
@@ -1695,11 +1712,13 @@ def _evidence_inventory(root: Path) -> dict[str, dict[str, Any]]:
         base / "exposure-receipts.jsonl.checkpoint.json",
         base / "ox-profile-contract.json",
         base / "split-plan.json",
-        base / "ox-workset.sqlite3",
-        base / "ox-workset.sqlite3-wal",
-        base / "ox-workset.sqlite3-shm",
-        base / "ox-workset.sqlite3-journal",
+        base / "rally-manifest.jsonl",
+        base / "rally-manifest.jsonl.checkpoint.json",
     ]
+    workset_name = (
+        "local-workset.sqlite3" if profile == "local-triad-v1" else "ox-workset.sqlite3"
+    )
+    paths.extend(base / f"{workset_name}{suffix}" for suffix in ("", "-wal", "-shm", "-journal"))
     for directory in directories:
         path = base / directory
         if path.exists():
@@ -1741,6 +1760,7 @@ def _independent_dataset_binding(
     preflight: Mapping[str, Any],
     workset: Mapping[str, Any],
     inventory: Mapping[str, Mapping[str, Any]],
+    policy: Mapping[str, Any] | None,
 ) -> bool:
     """Re-derive R5 inputs from the official clone, never caller envelopes."""
     try:
@@ -1753,7 +1773,8 @@ def _independent_dataset_binding(
             "runtime/recall-distillation/candidate-ledger.jsonl.checkpoint.json",
             "runtime/recall-distillation/exposure-receipts.jsonl",
             "runtime/recall-distillation/exposure-receipts.jsonl.checkpoint.json",
-            "runtime/recall-distillation/ox-workset.sqlite3",
+            "runtime/recall-distillation/rally-manifest.jsonl",
+            "runtime/recall-distillation/rally-manifest.jsonl.checkpoint.json",
         ):
             expected = inventory.get(relative)
             if not isinstance(expected, Mapping) or not _inventory_matches(root, relative, expected):
@@ -1771,6 +1792,8 @@ def _independent_dataset_binding(
             return False
         if snapshot.get("artifact_id") != snapshot_id or snapshot.get("label_chain_head") != label_head:
             return False
+        if not _policy_is_canonical(policy) or snapshot.get("schema") != policy["training_schema"]:
+            return False
         # The official row validator reconstructs ledger, rally, snapshot,
         # split-plan, feature bytes, blind order, and CF exposure bindings.
         if not rows or not all(
@@ -1778,6 +1801,16 @@ def _independent_dataset_binding(
         ):
             return False
         config = distill.load_distillation_config(root / "config.toml")
+        if policy["profile"] != getattr(config, "teacher_profile", None):
+            return False
+        if any(
+            row.get("profile") != policy["profile"]
+            or row.get("cohort") != policy["cohort"]
+            or row.get("profile_contract_id") != policy["profile_contract_id"]
+            or row.get("split_plan_id") != policy["split_plan_id"]
+            for row in rows
+        ):
+            return False
         rederived_gate = distill._offline_training_gate(rows, config, root=root)
         if dict(gate) != rederived_gate:
             return False
@@ -1857,8 +1890,45 @@ def _independent_dataset_binding(
             return False
         if any(not _inventory_matches(root, relative, expected) for relative, expected in inventory.items()):
             return False
-        final_workset = _workset_inventory(root, workset_runtime)
+        selected_workset = (
+            "local-workset.sqlite3"
+            if policy["profile"] == "local-triad-v1"
+            else "ox-workset.sqlite3"
+        )
+        expected = inventory.get(f"runtime/recall-distillation/{selected_workset}")
+        if not isinstance(expected, Mapping) or not _inventory_matches(root, f"runtime/recall-distillation/{selected_workset}", expected):
+            return False
+        rallies = distill.extract_rallies(root / "raw", root=root)
+        manifest_rows = store.read_chain(
+            store.distillation_dir(root) / "rally-manifest.jsonl"
+        )
+        manifest_ids = {
+            str(item.get("manifest", {}).get("rally_id") or "")
+            for item in manifest_rows
+            if isinstance(item, Mapping) and isinstance(item.get("manifest"), Mapping)
+        }
+        candidate_rows = store.read_chain(
+            store.distillation_dir(root) / "candidate-ledger.jsonl"
+        )
+        candidate_ids = {
+            str(item.get("snapshot", {}).get("rally_id") or "")
+            for item in candidate_rows
+            if isinstance(item, Mapping) and isinstance(item.get("snapshot"), Mapping)
+        }
+        rally_ids = {str(row.get("rally_id") or "") for row in rallies}
+        if rally_ids - manifest_ids or rally_ids - candidate_ids:
+            return False
+        final_workset = _workset_inventory(
+            root, workset_runtime, profile=policy["profile"]
+        )
         if final_workset != dict(workset):
+            return False
+        if policy["backlog"] != {
+            "ready": int(final_workset.get("counts", {}).get("ready", -1)),
+            "leased": int(final_workset.get("counts", {}).get("leased", -1)),
+            "manifest": 0,
+            "candidate": 0,
+        }:
             return False
         return (
             isinstance(workset.get("receipt_count"), int)
@@ -1993,6 +2063,82 @@ def _baseline_binding(
     return {}
 
 
+def _canonical_floor_policy(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    materialized: Mapping[str, Any],
+    config: Any,
+    gate: Mapping[str, Any],
+    workset: Mapping[str, Any],
+    manifest_backlog: int,
+    candidate_backlog: int,
+) -> dict[str, Any]:
+    """Bind formal R5 to one current profile and the producer's canonical v2 row set."""
+    profile = str(getattr(config, "teacher_profile", ""))
+    cohorts = {str(row.get("cohort") or "") for row in rows}
+    profiles = {str(row.get("profile") or "") for row in rows}
+    contracts = {str(row.get("profile_contract_id") or "") for row in rows}
+    splits = {str(row.get("split_plan_id") or "") for row in rows}
+    counts = workset.get("counts") if isinstance(workset.get("counts"), Mapping) else {}
+    return {
+        "schema": R5_FLOOR_POLICY_SCHEMA,
+        "training_schema": str(materialized.get("schema") or ""),
+        "gate_schema": str(gate.get("schema") or ""),
+        "truth_authority": str(gate.get("truth_authority") or ""),
+        "profile": profile,
+        "cohort": next(iter(cohorts)) if len(cohorts) == 1 else "",
+        "profile_contract_id": next(iter(contracts)) if len(contracts) == 1 else "",
+        "split_plan_id": next(iter(splits)) if len(splits) == 1 else "",
+        "hard_floors": {
+            "rallies": getattr(config, "hard_floor_rallies", 0),
+            "days": getattr(config, "hard_floor_days", 0),
+            "windows": getattr(config, "hard_floor_windows", 0),
+            "labels": getattr(config, "hard_floor_teacher_labels", 0),
+            "per_class": getattr(config, "hard_floor_teacher_per_class", 0),
+            "probes": getattr(config, "hard_floor_probe_pairs", 0),
+            "counterfactuals": getattr(config, "hard_floor_counterfactual_pairs", 0),
+        },
+        "backlog": {
+            "ready": counts.get("ready", -1),
+            "leased": counts.get("leased", -1),
+            "manifest": manifest_backlog,
+            "candidate": candidate_backlog,
+        },
+        "rows_profile_bound": bool(rows) and profiles == {profile},
+    }
+
+
+def _policy_is_canonical(policy: object) -> bool:
+    if not isinstance(policy, Mapping) or set(policy) != {
+        "schema", "training_schema", "gate_schema", "truth_authority", "profile", "cohort",
+        "profile_contract_id", "split_plan_id", "hard_floors", "backlog", "rows_profile_bound",
+    }:
+        return False
+    floors = policy.get("hard_floors")
+    backlog = policy.get("backlog")
+    if (
+        policy.get("schema") != R5_FLOOR_POLICY_SCHEMA
+        or policy.get("training_schema") != CANONICAL_TRAINING_SCHEMA
+        or policy.get("gate_schema") != CANONICAL_GATE_SCHEMA
+        or policy.get("truth_authority") != "teacher_only_not_verified"
+        or policy.get("profile") not in {"local-triad-v1", "ox-alpha-single-v1"}
+        or not isinstance(policy.get("cohort"), str)
+        or not isinstance(policy.get("profile_contract_id"), str)
+        or not _is_id(policy.get("split_plan_id"))
+        or policy.get("rows_profile_bound") is not True
+        or not isinstance(floors, Mapping)
+        or set(floors) != {"rallies", "days", "windows", "labels", "per_class", "probes", "counterfactuals"}
+        or not all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in floors.values())
+        or not isinstance(backlog, Mapping)
+        or set(backlog) != {"ready", "leased", "manifest", "candidate"}
+        or not all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in backlog.values())
+    ):
+        return False
+    if policy["profile"] == "local-triad-v1":
+        return policy["cohort"] == "local-triad-v1" and policy["profile_contract_id"] == ""
+    return _is_id(policy["profile_contract_id"]) and bool(policy["cohort"])
+
+
 def _reason(reasons: list[str], condition: bool, name: str) -> None:
     if not condition:
         reasons.append(name)
@@ -2011,6 +2157,7 @@ def validate_dataset(
     store: Any | None = None,
     workset_runtime: Any | None = None,
     evidence_inventory: Mapping[str, Mapping[str, Any]] | None = None,
+    policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate only concrete rows; booleans supplied by a producer are not evidence."""
     reasons: list[str] = []
@@ -2172,25 +2319,28 @@ def validate_dataset(
         bool(rows) and all(row.get("feature_parity") is True for row in rows),
         "feature_parity_not_100_percent",
     )
+    canonical_policy = _policy_is_canonical(policy)
+    _reason(reasons, canonical_policy, "canonical_dataset_policy_missing")
+    profile = str(policy.get("profile") or "") if canonical_policy else ""
     _reason(
         reasons,
         (
             gate.get("passed") is True
-            and gate.get("schema") == "chronovisor.recall-single-teacher-gate.v1"
+            and gate.get("schema") == CANONICAL_GATE_SCHEMA
             and gate.get("truth_authority") == "teacher_only_not_verified"
-            and isinstance(gate.get("identity"), Mapping)
-            and gate["identity"].get("route") == "opencode-go/ox-alpha-free"
-            and all(
-                _is_id(gate["identity"].get(key))
-                for key in (
-                    "model_digest", "prompt_sha256", "schema_sha256",
-                    "split_plan_id", "profile_contract_id", "route_digest",
+            and hard.get("p5_allowed") is True
+            and (
+                profile == "local-triad-v1"
+                or (
+                    isinstance(gate.get("identity"), Mapping)
+                    and gate["identity"].get("route") == "opencode-go/ox-alpha-free"
+                    and gate["identity"].get("profile_contract_id")
+                    == policy.get("profile_contract_id")
+                    and isinstance(gate.get("blind_repeat"), Mapping)
+                    and isinstance(gate["blind_repeat"].get("complete_pairs"), int)
+                    and gate["blind_repeat"]["complete_pairs"] >= MIN_PROBES
                 )
             )
-            and isinstance(gate.get("blind_repeat"), Mapping)
-            and isinstance(gate["blind_repeat"].get("complete_pairs"), int)
-            and gate["blind_repeat"]["complete_pairs"] >= MIN_PROBES
-            and hard.get("p5_allowed") is True
         ),
         "source_gate_not_passed",
     )
@@ -2199,8 +2349,14 @@ def validate_dataset(
     )
     _reason(
         reasons,
-        work_counts.get("leased", 0) == 0,
+        work_counts.get("leased", 0) == 0 and work_counts.get("ready", 0) == 0,
         "leased_work_remaining",
+    )
+    _reason(
+        reasons,
+        canonical_policy
+        and all(policy["backlog"][key] == 0 for key in ("ready", "leased", "manifest", "candidate")),
+        "dataset_backlog_remaining",
     )
     completed_raw = workset.get("completed_refs", [])
     completed = completed_raw if isinstance(completed_raw, list) else []
@@ -2255,6 +2411,7 @@ def validate_dataset(
             and official.get("label_chain_head") == preflight.get("label_chain_head")
             and official.get("rows_sha256") == _sha(list(rows))
             and official.get("gate_sha256") == _sha(gate)
+            and official.get("floor_policy_sha256") == _sha(policy)
         ),
         "official_materialization_binding_missing",
     )
@@ -2275,6 +2432,7 @@ def validate_dataset(
             preflight=preflight,
             workset=workset,
             inventory=evidence_inventory,
+            policy=policy,
         ),
         "independent_official_evidence_rederivation_failed",
     )
@@ -2298,6 +2456,7 @@ def validate_dataset(
             if rows and all(row.get("feature_parity") is True for row in rows)
             else 0,
         },
+        "policy": dict(policy) if isinstance(policy, Mapping) else {},
     }
 
 
@@ -2572,7 +2731,14 @@ def _validate_artifact_nested(payload: Mapping[str, Any]) -> None:
         if dataset.get("passed") is not True or dataset.get("test_only") is not True or core["test_only"] is not True or set(dependency) != {"artifact_id", "seal_sha256"}:
             raise R5Error("test-only artifact schema is invalid")
         return  # test-only child receipts cannot pass formal acceptance
-    dataset = _closed_mapping(dataset, {"passed", "capture_only", "reasons", "metrics"}, label="dataset")
+    dataset = _closed_state(
+        dataset,
+        (
+            {"passed", "capture_only", "reasons", "metrics"},
+            {"passed", "capture_only", "reasons", "metrics", "policy"},
+        ),
+        label="dataset",
+    )
     if (
         not isinstance(dataset["passed"], bool)
         or not isinstance(dataset["capture_only"], bool)
@@ -2592,6 +2758,9 @@ def _validate_artifact_nested(payload: Mapping[str, Any]) -> None:
         {"rows", "labels", "valid_labels", "classes", "local_probe_pairs", "blind_pairs", "counterfactual_pairs", "age_bands", "future_leakage", "feature_parity_percent"},
         label="dataset metrics",
     )
+    policy = dataset.get("policy")
+    if policy and not _policy_is_canonical(policy):
+        raise R5Error("artifact dataset policy is invalid")
     strict_dataset = dataset.get("passed") is True and core.get("test_only") is False
     classes = metrics.get("classes")
     if not isinstance(classes, Mapping) or set(classes) - {"relevant", "irrelevant"} or (strict_dataset and set(classes) != {"relevant", "irrelevant"}) or not all(
@@ -2610,6 +2779,8 @@ def _validate_artifact_nested(payload: Mapping[str, Any]) -> None:
     ):
         raise R5Error("artifact dataset metrics values are invalid")
     formal = strict_dataset
+    if formal and not _policy_is_canonical(policy):
+        raise R5Error("formal artifact dataset policy is missing")
     if formal and (
         metrics["rows"] < MIN_LABELS
         or metrics["labels"] < MIN_LABELS
@@ -2623,6 +2794,8 @@ def _validate_artifact_nested(payload: Mapping[str, Any]) -> None:
         or sum(classes.values()) != metrics["valid_labels"]
     ):
         raise R5Error("formal artifact dataset floors are invalid")
+    if formal and policy["backlog"] != {"ready": 0, "leased": 0, "manifest": 0, "candidate": 0}:
+        raise R5Error("formal artifact dataset backlog is nonzero")
     if formal and (
         set(core["source"]) != _SOURCE_KEYS
         or set(core["source_after"]) != _SOURCE_KEYS
@@ -2631,6 +2804,11 @@ def _validate_artifact_nested(payload: Mapping[str, Any]) -> None:
         or set(core["clone"]) != _CLONE_KEYS
     ):
         raise R5Error("formal artifact requires complete identity records")
+    if formal and (
+        core["source"] != core["source_after"]
+        or core["production"] != core["production_after"]
+    ):
+        raise R5Error("formal artifact source or Raw/config identity changed")
 
 
 def _open_owned_directory(
@@ -2837,6 +3015,9 @@ def run(
     store: Any | None = None
     workset_runtime: Any | None = None
     evidence_inventory: Mapping[str, Mapping[str, Any]] | None = None
+    policy: Mapping[str, Any] | None = None
+    labels: list[dict[str, Any]] = []
+    workset: Mapping[str, Any] = {}
     phases: list[dict[str, Any]] = []
     cleanup = {"clone_removed": False, "remaining": 0}
     runtime_modules = _chronovisor_module_snapshot()
@@ -2855,9 +3036,17 @@ def run(
         with _egress_sentinel(clone) as sentinels:
             distill, store, workset_runtime = _load_runtime(source)
             with _provider_sentinel(sentinels, distill):
-                evidence_inventory = _evidence_inventory(clone)
-                labels = _read_rows(store, clone)
                 try:
+                    # The official producer owns clone-only manifest/candidate
+                    # materialization.  Empty workers prohibit every provider call.
+                    distill.run_distillation_chunk(
+                        root=clone,
+                        teachers={},
+                        max_elapsed_seconds=60,
+                    )
+                    config = distill.load_distillation_config(clone / "config.toml")
+                    profile = str(config.teacher_profile)
+                    labels = _read_rows(store, clone)
                     materialized = distill.materialize_training_rows(clone)
                     rows = (
                         materialized.get("rows", [])
@@ -2872,14 +3061,13 @@ def run(
                         runtime_commit="unknown",
                         _training_snapshot=materialized,
                     )
-                    config = distill.load_distillation_config(clone / "config.toml")
                     gate = distill._offline_training_gate(rows, config, root=clone)
                     snapshot_path = (
                         store.distillation_dir(clone) / "training-snapshots"
                         / f"{materialized.get('artifact_id')}.json"
                     )
                     sealed_snapshot = store.read_sealed(
-                        snapshot_path, schema="chronovisor.recall-distill-training.v1"
+                        snapshot_path, schema=CANONICAL_TRAINING_SCHEMA
                     )
                     if (
                         sealed_snapshot.get("artifact_id") != materialized.get("artifact_id")
@@ -2888,6 +3076,38 @@ def run(
                         != materialized.get("label_chain_head")
                     ):
                         raise R5Error("official materialization artifact mismatch")
+                    workset = _workset_inventory(
+                        clone, workset_runtime, profile=profile
+                    )
+                    rally_ids = {
+                        str(row.get("rally_id") or "") for row in rallies
+                    }
+                    manifest_rows = store.read_chain(
+                        store.distillation_dir(clone) / "rally-manifest.jsonl"
+                    )
+                    candidate_rows = store.read_chain(
+                        store.distillation_dir(clone) / "candidate-ledger.jsonl"
+                    )
+                    manifest_backlog = len(rally_ids - {
+                        str(item.get("manifest", {}).get("rally_id") or "")
+                        for item in manifest_rows
+                        if isinstance(item, Mapping) and isinstance(item.get("manifest"), Mapping)
+                    })
+                    candidate_backlog = len(rally_ids - {
+                        str(item.get("snapshot", {}).get("rally_id") or "")
+                        for item in candidate_rows
+                        if isinstance(item, Mapping) and isinstance(item.get("snapshot"), Mapping)
+                    })
+                    policy = _canonical_floor_policy(
+                        rows=rows,
+                        materialized=materialized,
+                        config=config,
+                        gate=gate,
+                        workset=workset,
+                        manifest_backlog=manifest_backlog,
+                        candidate_backlog=candidate_backlog,
+                    )
+                    evidence_inventory = _evidence_inventory(clone, profile=profile)
                     preflight = {
                         **preflight,
                         "baseline": _baseline_binding(store, clone, materialized),
@@ -2897,14 +3117,14 @@ def run(
                             "label_chain_head": materialized.get("label_chain_head"),
                             "rows_sha256": _sha(rows),
                             "gate_sha256": _sha(gate),
+                            "floor_policy_sha256": _sha(policy),
                         },
                     }
                     api_error = None
                 except Exception as exc:  # capture errors must not masquerade as a valid dataset
-                    rows, rallies, preflight, gate, api_error = (
-                        [], [], {}, {"passed": False}, type(exc).__name__,
+                    rows, rallies, preflight, gate, workset, policy, api_error = (
+                        [], [], {}, {"passed": False}, {}, None, type(exc).__name__,
                     )
-        workset = _workset_inventory(clone, workset_runtime)
         dataset = validate_dataset(
             rows=rows,
             labels=labels,
@@ -2917,6 +3137,7 @@ def run(
             store=store,
             workset_runtime=workset_runtime,
             evidence_inventory=evidence_inventory,
+            policy=policy,
         )
         if api_error:
             dataset["passed"] = False

@@ -771,6 +771,31 @@ def test_egress_sentinel_allows_pinned_owned_dirfd_and_rejects_preopened_outside
     assert (nested / "relative").read_bytes() == b"ok"
 
 
+def test_egress_sentinel_resolves_owned_linux_proc_dirfd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owned = tmp_path / "owned"
+    nested = owned / "nested"
+    nested.mkdir(parents=True)
+    owned_dir_fd = os.open(nested, os.O_RDONLY)
+    original_readlink = os.readlink
+    monkeypatch.setattr(HARNESS.sys, "platform", "linux")
+    monkeypatch.setattr(
+        HARNESS.os,
+        "readlink",
+        lambda path: str(nested)
+        if path == f"/proc/self/fd/{owned_dir_fd}"
+        else original_readlink(path),
+    )
+    try:
+        with HARNESS._egress_sentinel(owned):
+            fd = os.open("relative", os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=owned_dir_fd)
+            os.close(fd)
+    finally:
+        os.close(owned_dir_fd)
+    assert (nested / "relative").is_file()
+
+
 @pytest.mark.skipif(not hasattr(os, "writev"), reason="platform lacks writev")
 def test_egress_sentinel_blocks_writev_to_preopened_outside_fd(tmp_path: Path) -> None:
     owned = tmp_path / "owned"
@@ -1224,16 +1249,8 @@ def test_run_detects_production_mutation(
     )
     monkeypatch.setattr(HARNESS, "_read_rows", lambda _store, _clone: [])
 
-    def mutate(_clone: Path, _runtime: object | None = None) -> dict[str, object]:
-        (production / "raw" / "mutation").write_text("detected")
-        return {
-            "present": False,
-            "counts": {},
-            "completed_refs": [],
-            "receipt_head": None,
-        }
-
-    monkeypatch.setattr(HARNESS, "_workset_inventory", mutate)
+    states = [{"raw": {"tree_sha256": "a" * 64}}, {"raw": {"tree_sha256": "b" * 64}}]
+    monkeypatch.setattr(HARNESS, "production_state", lambda _root: states.pop(0))
     with pytest.raises(HARNESS.R5Error, match="production changed"):
         HARNESS.run(
             production=production,
@@ -1331,6 +1348,22 @@ def _formal_inner() -> dict[str, object]:
             "age_bands": {"0_7": 1, "8_30": 1, "31_plus": 1},
             "future_leakage": 0, "feature_parity_percent": 100,
         },
+        "policy": {
+            "schema": HARNESS.R5_FLOOR_POLICY_SCHEMA,
+            "training_schema": HARNESS.CANONICAL_TRAINING_SCHEMA,
+            "gate_schema": HARNESS.CANONICAL_GATE_SCHEMA,
+            "truth_authority": "teacher_only_not_verified",
+            "profile": "local-triad-v1",
+            "cohort": "local-triad-v1",
+            "profile_contract_id": "",
+            "split_plan_id": _id(17),
+            "hard_floors": {
+                "rallies": 1000, "days": 30, "windows": 3, "labels": 500,
+                "per_class": 100, "probes": 100, "counterfactuals": 100,
+            },
+            "backlog": {"ready": 0, "leased": 0, "manifest": 0, "candidate": 0},
+            "rows_profile_bound": True,
+        },
     }
     return cast(dict[str, object], HARNESS._sealed_artifact(
         {
@@ -1395,6 +1428,24 @@ def test_formal_artifact_rederives_metric_floor(metric: str) -> None:
     dataset["metrics"] = metrics
     with pytest.raises(HARNESS.R5Error, match="dataset floors"):
         _reseal_inner(inner, dataset=dataset)
+
+
+def test_formal_artifact_rejects_legacy_dataset_policy() -> None:
+    inner = _formal_inner()
+    dataset = dict(cast(dict[str, object], inner["dataset"]))
+    policy = dict(cast(dict[str, object], dataset["policy"]))
+    policy["training_schema"] = "chronovisor.recall-distill-training.v1"
+    dataset["policy"] = policy
+    with pytest.raises(HARNESS.R5Error, match="policy"):
+        _reseal_inner(inner, dataset=dataset)
+
+
+def test_dataset_declines_without_canonical_profile_policy() -> None:
+    rows, labels, preflight, gate, workset = _base()
+    result = HARNESS.validate_dataset(
+        rows=rows, labels=labels, preflight=preflight, gate=gate, workset=workset
+    )
+    assert "canonical_dataset_policy_missing" in result["reasons"]
 
 
 def test_formal_clone_requires_production_parity_and_rederived_inventory(
