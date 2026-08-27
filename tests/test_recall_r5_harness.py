@@ -1185,11 +1185,11 @@ def test_actual_workset_and_materialization_api_on_owned_clone(tmp_path: Path) -
 def test_independent_binding_reads_current_ox_profile_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    profile = "ox-alpha-single-v1"
+    profile = "deepseek-v4-flash-single-v1"
     contract_id = _id(4)
     row = {
         "profile": profile,
-        "cohort": "ox-alpha-backfill-v1",
+        "cohort": "deepseek-v4-flash-backfill-v1",
         "profile_contract_id": contract_id,
         "split_plan_id": _id(5),
     }
@@ -1197,10 +1197,10 @@ def test_independent_binding_reads_current_ox_profile_contract(
 
     def stable_sealed(*_args: object, schema: str, **_kwargs: object) -> dict[str, object]:
         schemas.append(schema)
-        if schema == "chronovisor.recall-distill-ox-profile.v1":
+        if schema == "chronovisor.recall-distill-remote-profile.v2":
             return {
                 "artifact_id": contract_id,
-                "route": "opencode-go/ox-alpha-free",
+                "route": "opencode-go/deepseek-v4-flash",
             }
         return {
             "artifact_id": _id(2),
@@ -1216,7 +1216,7 @@ def test_independent_binding_reads_current_ox_profile_contract(
     monkeypatch.setattr(HARNESS, "_policy_is_canonical", lambda _policy: True)
     distill = types.SimpleNamespace(
         OX_SINGLE_PROFILE=profile,
-        OX_PROFILE_SCHEMA="chronovisor.recall-distill-ox-profile.v1",
+        OX_PROFILE_SCHEMA="chronovisor.recall-distill-remote-profile.v2",
         _materialized_row_integrity=lambda *_args, **_kwargs: True,
         load_distillation_config=lambda _path: types.SimpleNamespace(teacher_profile=profile),
         _offline_training_gate=lambda *_args, **_kwargs: {"passed": True},
@@ -1253,7 +1253,7 @@ def test_independent_binding_reads_current_ox_profile_contract(
         policy={
             "training_schema": HARNESS.CANONICAL_TRAINING_SCHEMA,
             "profile": profile,
-            "cohort": "ox-alpha-backfill-v1",
+            "cohort": "deepseek-v4-flash-backfill-v1",
             "profile_contract_id": contract_id,
             "split_plan_id": _id(5),
         },

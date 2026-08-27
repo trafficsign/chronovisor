@@ -54,6 +54,8 @@ from chronovisor.recall import recall_distillation_store as store
 from chronovisor.recall.recall_calibration import sigmoid
 from chronovisor.recall.recall_distillation_remote_teacher import (
     OX_ALPHA_FIXED_IDENTITY,
+    OX_ALPHA_REQUEST_MODEL,
+    OX_ALPHA_ROUTE_MODEL,
     OpenCodeOxAlphaTeacher,
     ox_alpha_response_metadata,
     ox_alpha_source_binding,
@@ -80,16 +82,18 @@ TEACHER_ROLES = (
     "recall.distill.teacher.b",
     "recall.distill.teacher.c",
 )
-OX_TEACHER_ROLE = "recall.distill.teacher.ox-alpha"
+OX_TEACHER_ROLE = "recall.distill.teacher.deepseek-v4-flash"
 LOCAL_TRIAD_PROFILE = "local-triad-v1"
-OX_SINGLE_PROFILE = "ox-alpha-single-v1"
-OX_SINGLE_COHORT = "ox-alpha-backfill-v1"
-OX_PROBE_REVISION = "single-teacher-repeat-v2"
-OX_RAMP_REQUEST_REVISION = "json-schema-core-label-abstain-16k-240s-v6"
+# ponytail: legacy OX symbol/file names stay until the completed R6 artifacts
+# no longer consume them; serialized provenance names the real teacher.
+OX_SINGLE_PROFILE = "deepseek-v4-flash-single-v1"
+OX_SINGLE_COHORT = "deepseek-v4-flash-backfill-v1"
+OX_PROBE_REVISION = "deepseek-single-teacher-repeat-v1"
+OX_RAMP_REQUEST_REVISION = "json-schema-core-label-abstain-16k-240s-v7"
 TEACHER_PROFILES = frozenset({LOCAL_TRIAD_PROFILE, OX_SINGLE_PROFILE})
 OX_ALPHA_ENDPOINT = "https://opencode.ai/zen/go/v1"
 OX_ALPHA_CREDENTIAL_REF = "oskeyring:codex-router-opencode-go/default"
-OX_PROFILE_SCHEMA = "chronovisor.recall-distill-ox-profile.v1"
+OX_PROFILE_SCHEMA = "chronovisor.recall-distill-remote-profile.v2"
 R4_CANDIDATE_ANCHOR_SCHEMA = "chronovisor.recall-r4-candidate-anchor.v1"
 R4_CANDIDATE_ANCHOR_FILE = "r4-candidate-anchor.json"
 R4_RECEIPT_SCHEMA = "chronovisor.recall-r4-receipt.v1"
@@ -585,7 +589,7 @@ def _default_workers(
     counterfactual_deadline_ms: int = 60_000,
 ) -> tuple[dict[str, Teacher], CounterfactualGenerator | None]:
     if config.teacher_profile == OX_SINGLE_PROFILE:
-        if not config.ox_enabled or not config.ox_free_only:
+        if not config.ox_enabled or config.ox_free_only:
             return {}, None
         try:
             from chronovisor.core.llm_config import (
@@ -601,7 +605,7 @@ def _default_workers(
                 "opencode-go",
                 OX_ALPHA_ENDPOINT,
                 CredentialRef.parse(OX_ALPHA_CREDENTIAL_REF),
-                structured_output_models={"ox-alpha-free"},
+                structured_output_models={OX_ALPHA_REQUEST_MODEL},
             )
             resolver = CredentialResolver()
             # Do not advertise a runnable remote teacher until the keyring entry
@@ -611,7 +615,7 @@ def _default_workers(
             teacher = OpenCodeOxAlphaTeacher(
                 compose_remote_generation_backend(profile, resolver),
                 enabled=True,
-                free_only=True,
+                free_only=False,
                 allow_paid_fallback=False,
                 max_input_bytes=config.max_input_bytes,
                 timeout_ms=max(240_000, teacher_deadline_ms),
@@ -726,7 +730,7 @@ class DistillationConfig:
     teacher_max_inflight: int = 10
     teacher_claim_limit: int = 500
     ox_enabled: bool = False
-    ox_free_only: bool = True
+    ox_free_only: bool = False
     ox_expires_at: str = "2099-01-01T00:00:00Z"
 
 
@@ -805,7 +809,7 @@ def _ensure_ox_profile_contract(
     if (
         config.teacher_profile != OX_SINGLE_PROFILE
         or config.ox_enabled is not True
-        or config.ox_free_only is not True
+        or config.ox_free_only is not False
         or not 1 <= config.teacher_max_inflight <= 10
         or not 1 <= config.teacher_claim_limit <= 500
     ):
@@ -832,20 +836,20 @@ def _ensure_ox_profile_contract(
     _, _, artifact = store.write_immutable(
         store.distillation_dir(root) / "ox-profile-contracts",
         {
-            "kind": "ox-alpha-free-profile",
+            "kind": "opencode-go-subscription-profile",
             "profile": OX_SINGLE_PROFILE,
             "cohort": OX_SINGLE_COHORT,
-            "route": "opencode-go/ox-alpha-free",
+            "route": OX_ALPHA_ROUTE_MODEL,
             "endpoint": f"{OX_ALPHA_ENDPOINT}/chat/completions",
-            "request_model": "ox-alpha-free",
-            "required_returned_model": "ox-alpha-free",
+            "request_model": OX_ALPHA_REQUEST_MODEL,
+            "required_returned_model": OX_ALPHA_REQUEST_MODEL,
             "request_revision": OX_RAMP_REQUEST_REVISION,
             "fixed_identity": OX_ALPHA_FIXED_IDENTITY,
-            "free_only": True,
+            "free_only": False,
             "no_paid_fallback": True,
-            "official_status": "limited_time",
+            "official_status": "subscription",
             "expires_at": expires_at,
-            "docs_url": "https://opencode.ai/docs/go/",
+            "docs_url": "https://dev.opencode.ai/docs/go/",
             "kill_categories": [
                 "402",
                 "payment_required",
@@ -933,19 +937,19 @@ def _validate_ox_profile_contract(
     expected = {
         "schema": OX_PROFILE_SCHEMA,
         "namespace": "recall-distillation",
-        "kind": "ox-alpha-free-profile",
+        "kind": "opencode-go-subscription-profile",
         "profile": OX_SINGLE_PROFILE,
         "cohort": OX_SINGLE_COHORT,
-        "route": "opencode-go/ox-alpha-free",
+        "route": OX_ALPHA_ROUTE_MODEL,
         "endpoint": f"{OX_ALPHA_ENDPOINT}/chat/completions",
-        "request_model": "ox-alpha-free",
-        "required_returned_model": "ox-alpha-free",
+        "request_model": OX_ALPHA_REQUEST_MODEL,
+        "required_returned_model": OX_ALPHA_REQUEST_MODEL,
         "request_revision": OX_RAMP_REQUEST_REVISION,
         "fixed_identity": OX_ALPHA_FIXED_IDENTITY,
-        "free_only": True,
+        "free_only": False,
         "no_paid_fallback": True,
-        "official_status": "limited_time",
-        "docs_url": "https://opencode.ai/docs/go/",
+        "official_status": "subscription",
+        "docs_url": "https://dev.opencode.ai/docs/go/",
         "kill_categories": [
             "402",
             "payment_required",
@@ -1104,7 +1108,7 @@ def _ox_eligibility_guard(
         if (
             config.teacher_profile != OX_SINGLE_PROFILE
             or config.ox_enabled is not True
-            or config.ox_free_only is not True
+            or config.ox_free_only is not False
             or not 1 <= config.teacher_max_inflight <= 10
             or not 1 <= config.teacher_claim_limit <= 500
             or (type(teacher) is OpenCodeOxAlphaTeacher and teacher.enabled is not True)
@@ -2211,7 +2215,7 @@ def _ox_certifying_labels(
         if any(
             (
                 row.get("cohort") != OX_SINGLE_COHORT,
-                row.get("route") != "opencode-go/ox-alpha-free",
+                row.get("route") != OX_ALPHA_ROUTE_MODEL,
                 row.get("teacher_role") != OX_TEACHER_ROLE,
                 row.get("identity_revision") != OX_ALPHA_FIXED_IDENTITY["revision"],
                 row.get("route_identity") != OX_ALPHA_FIXED_IDENTITY["route_identity"],
@@ -2231,7 +2235,7 @@ def _ox_certifying_labels(
                 "kind": "ox-teacher-label-v1",
                 "profile": OX_SINGLE_PROFILE,
                 "cohort": OX_SINGLE_COHORT,
-                "route": "opencode-go/ox-alpha-free",
+                "route": OX_ALPHA_ROUTE_MODEL,
                 "profile_contract_id": profile_contract_id,
                 "payload_digest": payload_digest,
             }
@@ -2404,7 +2408,7 @@ def _ox_event_projection(
             for key, value in {
                 "profile": OX_SINGLE_PROFILE,
                 "cohort": OX_SINGLE_COHORT,
-                "route": "opencode-go/ox-alpha-free",
+                "route": OX_ALPHA_ROUTE_MODEL,
                 "teacher_role": OX_TEACHER_ROLE,
                 "profile_contract_id": profile_contract_id,
             }.items()
@@ -2479,7 +2483,7 @@ def _ox_event_projection(
                     "kind": "ox-teacher-label-v1",
                     "profile": OX_SINGLE_PROFILE,
                     "cohort": OX_SINGLE_COHORT,
-                    "route": "opencode-go/ox-alpha-free",
+                    "route": OX_ALPHA_ROUTE_MODEL,
                     "profile_contract_id": profile_contract_id,
                     "payload_digest": payload_digest,
                 }
@@ -2895,9 +2899,11 @@ def load_distillation_config(config_path: Path | None = None) -> DistillationCon
     if teacher_profile not in TEACHER_PROFILES:
         raise DistillationError("recall.distillation.teacher_profile is invalid")
     ox_enabled = table.get("ox_enabled", False)
-    ox_free_only = table.get("ox_free_only", True)
-    if not isinstance(ox_enabled, bool) or ox_free_only is not True:
-        raise DistillationError("OX Alpha must be explicitly enabled and free-only")
+    ox_free_only = table.get("ox_free_only", False)
+    if not isinstance(ox_enabled, bool) or ox_free_only is not False:
+        raise DistillationError(
+            "the remote teacher must use its exact subscription route without fallback"
+        )
     ox_expires_at = table.get("ox_expires_at", "")
     if teacher_profile == OX_SINGLE_PROFILE and ox_enabled is True:
         _ox_expiry(ox_expires_at)
@@ -2927,7 +2933,7 @@ def load_distillation_config(config_path: Path | None = None) -> DistillationCon
         teacher_max_inflight=teacher_max_inflight,
         teacher_claim_limit=teacher_claim_limit,
         ox_enabled=ox_enabled,
-        ox_free_only=True,
+        ox_free_only=False,
         ox_expires_at=str(ox_expires_at),
     )
 
@@ -2968,7 +2974,7 @@ def _migration_additions(data: Mapping[str, Any]) -> tuple[str, ...]:
         max_inflight = distillation.get("teacher_max_inflight", 10)
         claim_limit = distillation.get("teacher_claim_limit", 500)
         ox_enabled = distillation.get("ox_enabled", False)
-        ox_free_only = distillation.get("ox_free_only", True)
+        ox_free_only = distillation.get("ox_free_only", False)
         if (
             profile not in TEACHER_PROFILES
             or isinstance(max_inflight, bool)
@@ -2978,7 +2984,7 @@ def _migration_additions(data: Mapping[str, Any]) -> tuple[str, ...]:
             or not isinstance(claim_limit, int)
             or not 1 <= claim_limit <= 500
             or not isinstance(ox_enabled, bool)
-            or ox_free_only is not True
+            or ox_free_only is not False
         ):
             raise DistillationError("recall.distillation profile config is invalid")
         additions.extend(f"recall.distillation.{name}" for name in sorted(missing))
@@ -5513,7 +5519,7 @@ def _materialization_label_row(
                 "kind": "ox-teacher-label-v1",
                 "profile": OX_SINGLE_PROFILE,
                 "cohort": OX_SINGLE_COHORT,
-                "route": "opencode-go/ox-alpha-free",
+                "route": OX_ALPHA_ROUTE_MODEL,
                 "profile_contract_id": current_ox_contract_id,
                 "payload_digest": payload_digest,
             }
@@ -5617,7 +5623,7 @@ def _materialization_label_row(
                 "route_identity_exact": label.get("route_identity")
                 == {
                     "provider": "opencode-go",
-                    "model": "opencode-go/ox-alpha-free",
+                    "model": OX_ALPHA_ROUTE_MODEL,
                     "location": "remote",
                 },
                 "prompt_sha256": str(label.get("prompt_sha256") or ""),
@@ -6232,7 +6238,7 @@ def _materialized_row_integrity(
                 isinstance(source, Mapping)
                 and re.fullmatch(r"[0-9a-f]{64}", payload) is not None
                 and canonical_json.canonical_json_sha256_strict(source) == payload
-                and row.get("route") == "opencode-go/ox-alpha-free"
+                and row.get("route") == OX_ALPHA_ROUTE_MODEL
                 and row.get("teacher_role") == OX_TEACHER_ROLE
                 and row.get("cohort") == OX_SINGLE_COHORT
                 and row.get("assignment_revision") == "single-teacher-v1"
@@ -8497,7 +8503,7 @@ def preflight(
             "profile_contract_id": profile_contract["artifact_id"],
             "routes": [OX_TEACHER_ROLE],
             "local_only": False,
-            "free_only": True,
+            "free_only": False,
             "max_input_bytes": config.max_input_bytes,
             "max_candidates": config.max_candidates,
         }
@@ -8507,7 +8513,7 @@ def preflight(
             "cohort": OX_SINGLE_COHORT,
             "routes": [OX_TEACHER_ROLE],
             "local_only": False,
-            "free_only": True,
+            "free_only": False,
             "enabled": False,
         }
     label_projection = store.label_health_projection(
@@ -8892,7 +8898,7 @@ def _ox_prepare_tasks(
                 "kind": "ox-teacher-label-v1",
                 "profile": OX_SINGLE_PROFILE,
                 "cohort": OX_SINGLE_COHORT,
-                "route": "opencode-go/ox-alpha-free",
+                "route": OX_ALPHA_ROUTE_MODEL,
                 "profile_contract_id": profile_contract_id,
                 "payload_digest": payload_digest,
             }
@@ -8929,7 +8935,7 @@ def _ox_prepare_tasks(
                 "provenance": {
                     "profile": OX_SINGLE_PROFILE,
                     "cohort": OX_SINGLE_COHORT,
-                    "route": "opencode-go/ox-alpha-free",
+                    "route": OX_ALPHA_ROUTE_MODEL,
                     "teacher_role": OX_TEACHER_ROLE,
                     "profile_contract_id": profile_contract_id,
                     "probe": assignment.get("probe") is True,
@@ -9089,7 +9095,7 @@ def _ox_restore_claims(
         if (
             provenance.get("profile") != OX_SINGLE_PROFILE
             or provenance.get("cohort") != OX_SINGLE_COHORT
-            or provenance.get("route") != "opencode-go/ox-alpha-free"
+            or provenance.get("route") != OX_ALPHA_ROUTE_MODEL
             or provenance.get("teacher_role") != OX_TEACHER_ROLE
             or provenance.get("profile_contract_id") != profile_contract_id
         ):
@@ -10118,7 +10124,7 @@ def _ox_dispatch_and_commit(
                     "payload_source": task["payload_source"],
                     "rally_id": rally["rally_id"],
                     "candidate_id": candidate["candidate_id"],
-                    "route": "opencode-go/ox-alpha-free",
+                    "route": OX_ALPHA_ROUTE_MODEL,
                     "teacher_role": OX_TEACHER_ROLE,
                     "profile": OX_SINGLE_PROFILE,
                     "cohort": OX_SINGLE_COHORT,
@@ -10553,7 +10559,7 @@ def _run_ox_teacher_batch(
         for row in label_rows
         if row.get("kind") == "teacher-label"
         and row.get("status") == "completed"
-        and row.get("route") == "opencode-go/ox-alpha-free"
+        and row.get("route") == OX_ALPHA_ROUTE_MODEL
         and row.get("teacher_role") == OX_TEACHER_ROLE
         and row.get("profile") == OX_SINGLE_PROFILE
         and row.get("cohort") == OX_SINGLE_COHORT
@@ -14985,7 +14991,7 @@ def _prepare_distillation_chunk(
     ox_teacher_available = (
         config.teacher_profile == OX_SINGLE_PROFILE
         and config.ox_enabled
-        and config.ox_free_only
+        and not config.ox_free_only
         and set(teachers or {}) == {OX_TEACHER_ROLE}
         and teachers is not None
         and teachers[OX_TEACHER_ROLE].local is False

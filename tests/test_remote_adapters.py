@@ -272,6 +272,34 @@ def test_all_openai_compatible_curated_profiles_share_generation_contract(
     assert CANARY not in repr(request)
 
 
+def test_openai_generation_uses_safe_body_id_when_header_id_is_absent(
+    tmp_path: Path,
+) -> None:
+    response = httpx.Response(
+        200,
+        json={
+            "id": "chatcmpl_deepseek_fixture_1",
+            "model": "deepseek-v4-flash",
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": '{"ok":true}'},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+        },
+    )
+    adapter = compose_openai_compatible_adapter(
+        _curated("deepseek"), _resolver(tmp_path), sender=FakeSender(response)
+    )
+
+    result = adapter.generate(
+        GenerationRequest("prompt", NORMAL_PAGE), model="deepseek-v4-flash"
+    )
+
+    assert result.metadata["request_id"] == "chatcmpl_deepseek_fixture_1"
+
+
 def test_openai_generation_normalizes_body_and_sends_structured_only_when_scoped(
     tmp_path: Path,
 ) -> None:

@@ -72,7 +72,7 @@ def _response(
     content: str,
     *,
     status: int = 200,
-    model: object = "ox-alpha-free",
+    model: object = "deepseek-v4-flash",
     finish_reason: str = "stop",
 ) -> httpx.Response:
     payload: dict[str, object] = {
@@ -138,7 +138,7 @@ def _teacher(
         provider,
         endpoint,
         CREDENTIAL_REF,
-        structured_output_models={"ox-alpha-free"},
+        structured_output_models={"deepseek-v4-flash"},
     )
     backend = compose_openai_compatible_adapter(
         profile,
@@ -146,6 +146,16 @@ def _teacher(
         sender=sender,
     )
     return OpenCodeOxAlphaTeacher(backend, configured_model=configured_model)
+
+
+def test_current_single_teacher_route_is_deepseek_v4_flash() -> None:
+    assert remote.OX_ALPHA_ROUTE_MODEL == "opencode-go/deepseek-v4-flash"
+    assert remote.OX_ALPHA_REQUEST_MODEL == "deepseek-v4-flash"
+    assert OX_ALPHA_FIXED_IDENTITY["route_identity"] == {
+        "provider": "opencode-go",
+        "model": "opencode-go/deepseek-v4-flash",
+        "location": "remote",
+    }
 
 
 def test_source_binding_requires_a_clean_installed_checkout(
@@ -322,7 +332,7 @@ def test_production_rejects_openai_compatible_adapter_subclass(tmp_path: Path) -
         pass
 
     profile = generic_openai_profile(
-        "opencode-go", ENDPOINT, CREDENTIAL_REF, structured_output_models={"ox-alpha-free"},
+        "opencode-go", ENDPOINT, CREDENTIAL_REF, structured_output_models={"deepseek-v4-flash"},
     )
     base = compose_openai_compatible_adapter(
         profile,
@@ -480,7 +490,7 @@ def test_success_uses_shared_adapter_and_records_safe_digests(
     )
     assert result["_identity_revision"] == OX_ALPHA_FIXED_IDENTITY["revision"]
     body = json.loads(cast(bytes, sender.calls[0].data))
-    assert body["model"] == "ox-alpha-free"
+    assert body["model"] == "deepseek-v4-flash"
     assert body["max_tokens"] == 16_000
     assert sender.calls[0].full_url == f"{ENDPOINT}/chat/completions"
     assert body["response_format"] == {
@@ -894,5 +904,5 @@ def test_kill_switch_and_paid_fallback_guard(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         OpenCodeOxAlphaTeacher(
             teacher._backend,
-            free_only=False,
+            free_only=True,
         )

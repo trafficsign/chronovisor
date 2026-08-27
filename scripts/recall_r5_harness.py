@@ -1607,7 +1607,7 @@ def _rederive_workset_receipts(
 
 
 def _workset_inventory(
-    root: Path, runtime: Any | None = None, *, profile: str = "ox-alpha-single-v1"
+    root: Path, runtime: Any | None = None, *, profile: str = "deepseek-v4-flash-single-v1"
 ) -> dict[str, Any]:
     filename = (
         "local-workset.sqlite3" if profile == "local-triad-v1" else "ox-workset.sqlite3"
@@ -1695,7 +1695,7 @@ def _inventory_matches(root: Path, relative: str, expected: Mapping[str, Any]) -
 
 
 def _evidence_inventory(
-    root: Path, *, profile: str = "ox-alpha-single-v1"
+    root: Path, *, profile: str = "deepseek-v4-flash-single-v1"
 ) -> dict[str, dict[str, Any]]:
     """Capture only the immutable evidence that must predate this verifier."""
     base = root / "runtime" / "recall-distillation"
@@ -1825,7 +1825,7 @@ def _independent_dataset_binding(
             if (
                 not _is_id(contract_id)
                 or contract.get("artifact_id") != contract_id
-                or contract.get("route") != "opencode-go/ox-alpha-free"
+                or contract.get("route") != "opencode-go/deepseek-v4-flash"
                 or any(row.get("profile_contract_id") != contract_id for row in ox_rows)
             ):
                 return False
@@ -2121,7 +2121,7 @@ def _policy_is_canonical(policy: object) -> bool:
         or policy.get("training_schema") != CANONICAL_TRAINING_SCHEMA
         or policy.get("gate_schema") != CANONICAL_GATE_SCHEMA
         or policy.get("truth_authority") != "teacher_only_not_verified"
-        or policy.get("profile") not in {"local-triad-v1", "ox-alpha-single-v1"}
+        or policy.get("profile") not in {"local-triad-v1", "deepseek-v4-flash-single-v1"}
         or not isinstance(policy.get("cohort"), str)
         or not isinstance(policy.get("profile_contract_id"), str)
         or not _is_id(policy.get("split_plan_id"))
@@ -2333,7 +2333,7 @@ def validate_dataset(
                 profile == "local-triad-v1"
                 or (
                     isinstance(gate.get("identity"), Mapping)
-                    and gate["identity"].get("route") == "opencode-go/ox-alpha-free"
+                    and gate["identity"].get("route") == "opencode-go/deepseek-v4-flash"
                     and gate["identity"].get("profile_contract_id")
                     == policy.get("profile_contract_id")
                     and isinstance(gate.get("blind_repeat"), Mapping)

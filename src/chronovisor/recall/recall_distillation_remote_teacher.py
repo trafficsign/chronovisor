@@ -1,4 +1,4 @@
-"""Temporary, free-only OpenCode Go teacher adapter for Recall distillation.
+"""Temporary OpenCode Go single-teacher adapter for Recall distillation.
 
 The adapter deliberately has one narrow seam: ``Teacher.evaluate`` receives a
 compact, already-selected batch and returns labels or a redacted failure
@@ -39,8 +39,8 @@ from chronovisor.core.provider_profiles import (
 )
 
 OX_ALPHA_PROVIDER = "opencode-go"
-OX_ALPHA_ROUTE_MODEL = "opencode-go/ox-alpha-free"
-OX_ALPHA_REQUEST_MODEL = "ox-alpha-free"
+OX_ALPHA_ROUTE_MODEL = "opencode-go/deepseek-v4-flash"
+OX_ALPHA_REQUEST_MODEL = "deepseek-v4-flash"
 OX_ALPHA_ENDPOINT = "https://opencode.ai/zen/go/v1"
 TEACHER_BATCH_SCHEMA = "chronovisor.recall-distill-teacher-batch.v1"
 MAX_TEACHER_CANDIDATES = 16
@@ -145,9 +145,9 @@ def ox_provider_receipt_sha256(request_id: object) -> str:
 def resolve_ox_alpha_model(provider: str, configured_model: str) -> str:
     """Resolve the request model from the existing provider/model route.
 
-    Configurations may identify a model as either ``ox-alpha-free`` (the
-    normal route model) or ``opencode-go/ox-alpha-free`` (the catalog identity).
-    No alternative or paid model is accepted.
+    Configurations may identify the current single teacher by either its
+    provider-qualified catalog identity or its upstream request model. No
+    alternative model is accepted.
     """
 
     if provider != OX_ALPHA_PROVIDER or not isinstance(configured_model, str):
@@ -208,7 +208,7 @@ def _teacher_schema(candidate_ids: tuple[str, ...]) -> dict[str, Any]:
     }
 
 
-OX_ALPHA_FIXED_IDENTITY_REVISION = "ox-alpha-fixed-identity-v1"
+OX_ALPHA_FIXED_IDENTITY_REVISION = "deepseek-v4-flash-fixed-identity-v1"
 _SYSTEM_PROMPT = (
     "You are a temporary Recall relevance teacher. Judge only the "
     "supplied point-in-time evidence. Return schema-valid JSON; use "
@@ -657,7 +657,7 @@ def validate_ox_alpha_labels(
 
 
 class OpenCodeOxAlphaTeacher:
-    """A free-only remote adapter satisfying the Recall ``Teacher`` seam."""
+    """An exact-route remote adapter satisfying the Recall ``Teacher`` seam."""
 
     local = False
     location = RouteLocation.REMOTE
@@ -668,7 +668,7 @@ class OpenCodeOxAlphaTeacher:
         *,
         configured_model: str = OX_ALPHA_ROUTE_MODEL,
         enabled: bool = True,
-        free_only: bool = True,
+        free_only: bool = False,
         allow_paid_fallback: bool = False,
         test_only: bool = False,
         simulation_attestation: Path | None = None,
@@ -693,8 +693,8 @@ class OpenCodeOxAlphaTeacher:
             raise ValueError("simulation attestation is test-only")
         if (simulation_attestation is None) != (owned_root is None):
             raise ValueError("simulation attestation root is incomplete")
-        if free_only is not True or allow_paid_fallback is not False:
-            raise ValueError("paid fallback is forbidden for the temporary route")
+        if free_only is not False or allow_paid_fallback is not False:
+            raise ValueError("the subscription route forbids paid fallback")
         if (
             isinstance(max_input_bytes, bool)
             or not isinstance(max_input_bytes, int)
@@ -715,7 +715,7 @@ class OpenCodeOxAlphaTeacher:
             is not True
         ):
             raise ValueError("O× Alpha route lacks structured output")
-        self.role = "recall.distill.teacher.ox-alpha"
+        self.role = "recall.distill.teacher.deepseek-v4-flash"
         self.provider = OX_ALPHA_PROVIDER
         self.model = OX_ALPHA_ROUTE_MODEL
         self.enabled = bool(enabled)

@@ -26,7 +26,7 @@ def _item(work_id: str, *, priority: int = 0, kind: str = "label") -> dict[str, 
         "payload_digest": "a" * 64,
         "priority": priority,
         "temporal_split": {"partition": "train", "cutoff": "2026-08-20"},
-        "provenance": {"teacher_cohort": "ox-alpha-backfill-v1"},
+        "provenance": {"teacher_cohort": "deepseek-v4-flash-backfill-v1"},
     }
 
 
@@ -488,7 +488,7 @@ def test_claim_obeys_priority_then_fifo_and_preserves_metadata(tmp_path: Path) -
 
     assert [claim.work_id for claim in claims] == ["urgent", "first", "second"]
     assert claims[1].temporal_split == {"partition": "train", "cutoff": "2026-08-20"}
-    assert claims[1].provenance == {"teacher_cohort": "ox-alpha-backfill-v1"}
+    assert claims[1].provenance == {"teacher_cohort": "deepseek-v4-flash-backfill-v1"}
     assert claims[1].attempt == 1
 
 
@@ -815,8 +815,8 @@ def test_profile_provenance_key_is_allowed(tmp_path: Path) -> None:
     workset = DistillationWorkset(tmp_path / "workset.sqlite3")
     item = _item("profile")
     item["provenance"] = {
-        "profile": "ox-alpha-single-v1",
-        "route": "opencode-go/ox-alpha-free",
+        "profile": "deepseek-v4-flash-single-v1",
+        "route": "opencode-go/deepseek-v4-flash",
     }
     assert workset.advance([item], 1)["inserted"] == 1
 
@@ -1113,7 +1113,7 @@ def _progress(cursor: int) -> dict[str, object]:
     return {
         "cursor": cursor,
         "ledger_heads": {"labels": "c" * 64},
-        "provenance": {"profile": "ox-alpha-single-v1"},
+        "provenance": {"profile": "deepseek-v4-flash-single-v1"},
         "progress_kind": "ox-label-v2",
     }
 

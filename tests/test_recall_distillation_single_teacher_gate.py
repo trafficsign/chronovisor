@@ -13,8 +13,8 @@ from chronovisor.recall.recall_distillation_single_teacher_gate import (
     expected_ox_request_sha256,
 )
 
-PROFILE = "ox-alpha-single-v1"
-COHORT = "ox-alpha-backfill-v1"
+PROFILE = "deepseek-v4-flash-single-v1"
+COHORT = "deepseek-v4-flash-backfill-v1"
 
 
 def _row(
@@ -40,13 +40,13 @@ def _row(
         "probe": probe,
         "profile": PROFILE,
         "cohort": COHORT,
-        "route": "opencode-go/ox-alpha-free",
+        "route": "opencode-go/deepseek-v4-flash",
         "model_digest": OX_ALPHA_FIXED_IDENTITY["model_digest"],
         "prompt_sha256": OX_ALPHA_FIXED_IDENTITY["prompt_template_sha256"],
         "schema_sha256": OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"],
         "profile_contract_id": "e" * 64,
-        "identity_revision": "ox-alpha-fixed-identity-v1",
-        "request_revision": "json-schema-core-label-abstain-16k-240s-v6",
+        "identity_revision": "deepseek-v4-flash-fixed-identity-v1",
+        "request_revision": "json-schema-core-label-abstain-16k-240s-v7",
         "route_digest": OX_ALPHA_FIXED_IDENTITY["route_digest"],
         "payload_digest": payload_digest,
         "payload_source": payload_source,
@@ -139,7 +139,7 @@ def test_single_teacher_gate_accepts_fixed_chronological_cohort() -> None:
 
     assert gate["passed"] is True
     assert gate["truth_authority"] == "teacher_only_not_verified"
-    assert gate["identity"]["route"] == "opencode-go/ox-alpha-free"
+    assert gate["identity"]["route"] == "opencode-go/deepseek-v4-flash"
     assert gate["locked_test"] == {
         "rows": 4,
         "read_only": True,

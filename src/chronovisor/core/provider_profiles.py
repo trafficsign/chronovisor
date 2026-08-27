@@ -377,8 +377,11 @@ def response_metadata(
     returned_model = safe_metadata_identifier(payload.get("model"))
     if returned_model is not None:
         metadata["returned_model"] = returned_model
-    if request_id is not None:
-        metadata["request_id"] = request_id
+    resolved_request_id = safe_metadata_identifier(
+        request_id
+    ) or safe_metadata_identifier(payload.get("id"))
+    if resolved_request_id is not None:
+        metadata["request_id"] = resolved_request_id
     return metadata
 
 

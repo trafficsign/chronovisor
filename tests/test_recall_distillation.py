@@ -82,7 +82,7 @@ def _ox_projection_payload_source(candidate_id: str = "candidate") -> dict[str, 
 def _ox_projection_label_identity() -> dict[str, Any]:
     return {
         "cohort": distill.OX_SINGLE_COHORT,
-        "route": "opencode-go/ox-alpha-free",
+        "route": "opencode-go/deepseek-v4-flash",
         "teacher_role": distill.OX_TEACHER_ROLE,
         "identity_revision": distill.OX_ALPHA_FIXED_IDENTITY["revision"],
         "route_identity": dict(distill.OX_ALPHA_FIXED_IDENTITY["route_identity"]),
@@ -107,7 +107,7 @@ def _ox_projection_work(
         distill.DistillationConfig(
             teacher_profile=distill.OX_SINGLE_PROFILE,
             ox_enabled=True,
-            ox_free_only=True,
+            ox_free_only=False,
             teacher_claim_limit=1,
             teacher_max_inflight=max_inflight,
         ),
@@ -121,7 +121,7 @@ def _ox_projection_work(
             "kind": "ox-teacher-label-v1",
             "profile": distill.OX_SINGLE_PROFILE,
             "cohort": distill.OX_SINGLE_COHORT,
-            "route": "opencode-go/ox-alpha-free",
+            "route": "opencode-go/deepseek-v4-flash",
             "profile_contract_id": contract["artifact_id"],
             "payload_digest": payload_digest,
         }
@@ -139,7 +139,7 @@ def _ox_projection_work(
                 "provenance": {
                     "profile": distill.OX_SINGLE_PROFILE,
                     "cohort": distill.OX_SINGLE_COHORT,
-                    "route": "opencode-go/ox-alpha-free",
+                    "route": "opencode-go/deepseek-v4-flash",
                     "teacher_role": distill.OX_TEACHER_ROLE,
                     "profile_contract_id": contract["artifact_id"],
                     "probe": False,
@@ -214,7 +214,7 @@ def test_ox_receipt_projection_cannot_promote_shallow_forgery(tmp_path: Path) ->
         distill.DistillationConfig(
             teacher_profile=distill.OX_SINGLE_PROFILE,
             ox_enabled=True,
-            ox_free_only=True,
+            ox_free_only=False,
             ox_expires_at="2099-01-01T00:00:00Z",
         ),
         source_binding=source,
@@ -261,7 +261,7 @@ def test_ox_event_projection_keeps_legacy_provider_receipts_noncertifying(
     config = distill.DistillationConfig(
         teacher_profile=distill.OX_SINGLE_PROFILE,
         ox_enabled=True,
-        ox_free_only=True,
+        ox_free_only=False,
         ox_expires_at="2099-01-01T00:00:00Z",
         teacher_claim_limit=1,
     )
@@ -274,7 +274,7 @@ def test_ox_event_projection_keeps_legacy_provider_receipts_noncertifying(
             "kind": "ox-teacher-label-v1",
             "profile": distill.OX_SINGLE_PROFILE,
             "cohort": distill.OX_SINGLE_COHORT,
-            "route": "opencode-go/ox-alpha-free",
+            "route": "opencode-go/deepseek-v4-flash",
             "profile_contract_id": contract["artifact_id"],
             "payload_digest": payload_digest,
         }
@@ -298,7 +298,7 @@ def test_ox_event_projection_keeps_legacy_provider_receipts_noncertifying(
                 "provenance": {
                     "profile": distill.OX_SINGLE_PROFILE,
                     "cohort": distill.OX_SINGLE_COHORT,
-                    "route": "opencode-go/ox-alpha-free",
+                    "route": "opencode-go/deepseek-v4-flash",
                     "teacher_role": distill.OX_TEACHER_ROLE,
                     "profile_contract_id": contract["artifact_id"],
                     "probe": False,
@@ -358,7 +358,7 @@ def test_ox_event_projection_keeps_legacy_workset_noncertifying(
         distill.DistillationConfig(
             teacher_profile=distill.OX_SINGLE_PROFILE,
             ox_enabled=True,
-            ox_free_only=True,
+            ox_free_only=False,
             ox_expires_at="2099-01-01T00:00:00Z",
         ),
         source_binding=source,
@@ -472,7 +472,7 @@ def test_ox_label_projection_rejects_retired_provider_receipt_key(
         distill.DistillationConfig(
             teacher_profile=distill.OX_SINGLE_PROFILE,
             ox_enabled=True,
-            ox_free_only=True,
+            ox_free_only=False,
             teacher_claim_limit=1,
         ),
         source_binding=source,
@@ -798,7 +798,7 @@ def test_ox_label_projection_accepts_exact_probe_workset_provenance(
                     {
                         "profile": distill.OX_SINGLE_PROFILE,
                         "cohort": distill.OX_SINGLE_COHORT,
-                        "route": "opencode-go/ox-alpha-free",
+                        "route": "opencode-go/deepseek-v4-flash",
                         "teacher_role": distill.OX_TEACHER_ROLE,
                         "profile_contract_id": contract["artifact_id"],
                         "probe": True,
@@ -1004,7 +1004,7 @@ def test_ox_projection_rejects_actual_receipt_reused_across_stages(
             "kind": "ox-teacher-label-v1",
             "profile": distill.OX_SINGLE_PROFILE,
             "cohort": distill.OX_SINGLE_COHORT,
-            "route": "opencode-go/ox-alpha-free",
+            "route": "opencode-go/deepseek-v4-flash",
             "profile_contract_id": contract["artifact_id"],
             "payload_digest": second_payload_digest,
         }
@@ -1022,7 +1022,7 @@ def test_ox_projection_rejects_actual_receipt_reused_across_stages(
                 "provenance": {
                     "profile": distill.OX_SINGLE_PROFILE,
                     "cohort": distill.OX_SINGLE_COHORT,
-                    "route": "opencode-go/ox-alpha-free",
+                    "route": "opencode-go/deepseek-v4-flash",
                     "teacher_role": distill.OX_TEACHER_ROLE,
                     "profile_contract_id": contract["artifact_id"],
                     "probe": False,
@@ -1611,7 +1611,7 @@ def test_ox_event_projection_rejects_revision_drift(
         distill.DistillationConfig(
             teacher_profile=distill.OX_SINGLE_PROFILE,
             ox_enabled=True,
-            ox_free_only=True,
+            ox_free_only=False,
             ox_expires_at="2099-01-01T00:00:00Z",
         ),
         source_binding=source,
@@ -1662,7 +1662,7 @@ def test_ox_event_projection_accepts_configured_terminal_cap(
         distill.DistillationConfig(
             teacher_profile=distill.OX_SINGLE_PROFILE,
             ox_enabled=True,
-            ox_free_only=True,
+            ox_free_only=False,
             ox_expires_at="2099-01-01T00:00:00Z",
             teacher_max_inflight=max_inflight,
         ),
@@ -1732,7 +1732,7 @@ def test_ox_event_projection_binds_certifying_terminal_tail_to_formal_contract(
         distill.DistillationConfig(
             teacher_profile=distill.OX_SINGLE_PROFILE,
             ox_enabled=True,
-            ox_free_only=True,
+            ox_free_only=False,
             ox_expires_at="2099-01-01T00:00:00Z",
             teacher_max_inflight=max_inflight,
             teacher_claim_limit=teacher_claim_limit,
@@ -1754,7 +1754,7 @@ def test_ox_event_projection_binds_certifying_terminal_tail_to_formal_contract(
                     "kind": "ox-teacher-label-v1",
                     "profile": distill.OX_SINGLE_PROFILE,
                     "cohort": distill.OX_SINGLE_COHORT,
-                    "route": "opencode-go/ox-alpha-free",
+                    "route": "opencode-go/deepseek-v4-flash",
                     "profile_contract_id": contract["artifact_id"],
                     "payload_digest": payload_digest,
                 }
@@ -1769,7 +1769,7 @@ def test_ox_event_projection_binds_certifying_terminal_tail_to_formal_contract(
                     "provenance": {
                         "profile": distill.OX_SINGLE_PROFILE,
                         "cohort": distill.OX_SINGLE_COHORT,
-                        "route": "opencode-go/ox-alpha-free",
+                        "route": "opencode-go/deepseek-v4-flash",
                         "teacher_role": distill.OX_TEACHER_ROLE,
                         "profile_contract_id": contract["artifact_id"],
                         "probe": False,
@@ -1860,7 +1860,7 @@ def test_ox_event_projection_rejects_stale_configured_terminal_cap(
         distill.DistillationConfig(
             teacher_profile=distill.OX_SINGLE_PROFILE,
             ox_enabled=True,
-            ox_free_only=True,
+            ox_free_only=False,
             ox_expires_at="2099-01-01T00:00:00Z",
             teacher_max_inflight=max_inflight,
         ),
@@ -1933,7 +1933,7 @@ def test_ox_event_projection_validates_historical_contracts_before_partition(
     config = distill.DistillationConfig(
         teacher_profile=distill.OX_SINGLE_PROFILE,
         ox_enabled=True,
-        ox_free_only=True,
+        ox_free_only=False,
         ox_expires_at="2099-01-01T00:00:00Z",
     )
     contract_a = distill._ensure_ox_profile_contract(
@@ -2024,7 +2024,7 @@ def test_ox_event_projection_rejects_noncanonical_expiry(
         distill.DistillationConfig(
             teacher_profile=distill.OX_SINGLE_PROFILE,
             ox_enabled=True,
-            ox_free_only=True,
+            ox_free_only=False,
             ox_expires_at="2099-01-01T00:00:00Z",
         ),
         source_binding=source,
@@ -2072,7 +2072,7 @@ def test_ox_label_projection_rejects_noncanonical_expiry(
         distill.DistillationConfig(
             teacher_profile=distill.OX_SINGLE_PROFILE,
             ox_enabled=True,
-            ox_free_only=True,
+            ox_free_only=False,
             ox_expires_at="2099-01-01T00:00:00Z",
         ),
         source_binding=source,
@@ -2298,7 +2298,7 @@ def test_ox_profile_contract_is_stable_and_fail_closed(tmp_path: Path) -> None:
     config = distill.DistillationConfig(
         teacher_profile=distill.OX_SINGLE_PROFILE,
         ox_enabled=True,
-        ox_free_only=True,
+        ox_free_only=False,
         ox_expires_at="2099-01-01T00:00:00Z",
         teacher_max_inflight=10,
         teacher_claim_limit=1,
@@ -2307,7 +2307,7 @@ def test_ox_profile_contract_is_stable_and_fail_closed(tmp_path: Path) -> None:
     second = distill._ensure_ox_profile_contract(tmp_path, config)
     assert first["artifact_id"] == second["artifact_id"]
     assert first["endpoint"] == "https://opencode.ai/zen/go/v1/chat/completions"
-    assert first["request_model"] == first["required_returned_model"] == "ox-alpha-free"
+    assert first["request_model"] == first["required_returned_model"] == "deepseek-v4-flash"
     assert first["request_revision"] == distill.OX_RAMP_REQUEST_REVISION
     assert first["expires_at"] == "2099-01-01T00:00:00Z"
     assert first["live_recall_model_calls"] == 0
@@ -2357,7 +2357,7 @@ def test_ox_profile_contract_rejects_resealed_revision_drift(
     config = distill.DistillationConfig(
         teacher_profile=distill.OX_SINGLE_PROFILE,
         ox_enabled=True,
-        ox_free_only=True,
+        ox_free_only=False,
         ox_expires_at="2099-01-01T00:00:00Z",
     )
     contract = distill._ensure_ox_profile_contract(tmp_path, config)
@@ -2387,7 +2387,7 @@ def test_ox_profile_contract_rejects_resealed_revision_drift(
         ("request_model", "evil-model"),
         ("required_returned_model", "evil-model"),
         ("fixed_identity", {}),
-        ("free_only", False),
+        ("free_only", True),
         ("no_paid_fallback", False),
         ("kill_categories", []),
         ("live_recall_model_calls", 99),
@@ -2406,7 +2406,7 @@ def test_ox_contract_reader_rejects_self_consistent_identity_forgery(
         distill.DistillationConfig(
             teacher_profile=distill.OX_SINGLE_PROFILE,
             ox_enabled=True,
-            ox_free_only=True,
+            ox_free_only=False,
             ox_expires_at="2099-01-01T00:00:00Z",
         ),
         source_binding=source,
@@ -4182,7 +4182,7 @@ def test_chunk_commits_ox_ramp_with_the_completed_run(
         tmp_path,
         teacher_profile=distill.OX_SINGLE_PROFILE,
         ox_enabled=True,
-        ox_free_only=True,
+        ox_free_only=False,
         ox_expires_at="2099-01-01T00:00:00Z",
         teacher_claim_limit=1,
     )
@@ -4518,7 +4518,7 @@ def test_ox_single_teacher_materialization_binds_temporal_quality_evidence(
                         "kind": "ox-teacher-label-v1",
                         "profile": distill.OX_SINGLE_PROFILE,
                         "cohort": distill.OX_SINGLE_COHORT,
-                        "route": "opencode-go/ox-alpha-free",
+                        "route": "opencode-go/deepseek-v4-flash",
                         "profile_contract_id": profile_contract_id,
                         "payload_digest": payload_digest,
                     }
@@ -4529,7 +4529,7 @@ def test_ox_single_teacher_materialization_binds_temporal_quality_evidence(
                 "request_revision": distill.OX_RAMP_REQUEST_REVISION,
                 "rally_id": rally["rally_id"],
                 "candidate_id": f"candidate-{index}",
-                "route": "opencode-go/ox-alpha-free",
+                "route": "opencode-go/deepseek-v4-flash",
                 "model_digest": "d" * 64,
                 "prompt_sha256": "e" * 64,
                 "schema_sha256": "f" * 64,
@@ -4541,7 +4541,7 @@ def test_ox_single_teacher_materialization_binds_temporal_quality_evidence(
                 "source_ox_identity_sha256": "c" * 64,
                 "route_identity": {
                     "provider": "opencode-go",
-                    "model": "opencode-go/ox-alpha-free",
+                    "model": "opencode-go/deepseek-v4-flash",
                     "location": "remote",
                 },
                 "as_of": rally["as_of"],
@@ -4870,7 +4870,7 @@ def test_authoritative_row_binding_rejects_recomputed_cross_source(
             "kind": "ox-teacher-label-v1",
             "profile": distill.OX_SINGLE_PROFILE,
             "cohort": distill.OX_SINGLE_COHORT,
-            "route": "opencode-go/ox-alpha-free",
+            "route": "opencode-go/deepseek-v4-flash",
             "profile_contract_id": forged["profile_contract_id"],
             "payload_digest": payload_digest,
         }
@@ -5270,7 +5270,7 @@ def test_ox_probe_revision_reissues_terminal_pairs(
         structural_verifier=lambda *_args: None,
     )
     teacher.accept = True
-    monkeypatch.setattr(distill, "OX_PROBE_REVISION", "single-teacher-repeat-v2")
+    monkeypatch.setattr(distill, "OX_PROBE_REVISION", "deepseek-single-teacher-repeat-v1")
 
     result = distill._run_teacher_batch(
         root=tmp_path,
@@ -5494,7 +5494,7 @@ def test_ox_ramp_resumes_only_for_the_same_profile_contract_and_request_revision
 
 def test_ox_ramp_request_revision_tracks_core_label_schema() -> None:
     assert (
-        distill.OX_RAMP_REQUEST_REVISION == "json-schema-core-label-abstain-16k-240s-v6"
+        distill.OX_RAMP_REQUEST_REVISION == "json-schema-core-label-abstain-16k-240s-v7"
     )
 
 
@@ -5800,7 +5800,7 @@ def test_ox_ramp_only_counts_deep_valid_provider_responses(
                     ],
                     "_route_identity": {
                         "provider": "not-opencode-go",
-                        "model": "opencode-go/ox-alpha-free",
+                        "model": "opencode-go/deepseek-v4-flash",
                         "location": "remote",
                     },
                     "_route_digest": "a" * 64,
@@ -5950,7 +5950,7 @@ def test_ox_single_teacher_batch_dispatches_in_order_and_writes_only_valid_label
     }
     assert result.workset_status["last_durable_progress"]["cursor"]["label_count"] == 2  # type: ignore[index]
     assert [row["candidate_id"] for row in labels] == ["candidate-1", "candidate-2"]
-    assert all(row["route"] == "opencode-go/ox-alpha-free" for row in labels)
+    assert all(row["route"] == "opencode-go/deepseek-v4-flash" for row in labels)
     assert all(row["teacher_role"] == distill.OX_TEACHER_ROLE for row in labels)
     assert all(row["status"] == "completed" for row in labels)
     assert all(row["profile"] == distill.OX_SINGLE_PROFILE for row in labels)
@@ -7118,7 +7118,7 @@ def test_ox_post_append_expiry_releases_mixed_claims_once(
                 "payload_ref": f"candidate-snapshot:rally-{index}:candidate-{index}",
                 "payload_digest": payload_digest,
                 "temporal_split": tasks[work_id]["temporal"],
-                "provenance": {"route": "opencode-go/ox-alpha-free"},
+                "provenance": {"route": "opencode-go/deepseek-v4-flash"},
             }
         )
     queue.advance(items, {"candidate_records": 2})

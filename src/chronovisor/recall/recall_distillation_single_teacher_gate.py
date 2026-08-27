@@ -14,6 +14,7 @@ from typing import Any
 from chronovisor.core import canonical_json
 from chronovisor.recall.recall_distillation_remote_teacher import (
     OX_ALPHA_FIXED_IDENTITY,
+    OX_ALPHA_ROUTE_MODEL,
 )
 
 
@@ -26,7 +27,7 @@ def expected_ox_request_sha256(*, profile_contract_id: str, payload_digest: str)
                 "identity_revision": OX_ALPHA_FIXED_IDENTITY["revision"],
                 "payload_digest": payload_digest,
                 "profile_contract_id": profile_contract_id,
-                "request_revision": "json-schema-core-label-abstain-16k-240s-v6",
+                "request_revision": "json-schema-core-label-abstain-16k-240s-v7",
                 "route_digest": OX_ALPHA_FIXED_IDENTITY["route_digest"],
             },
             ensure_ascii=False,
@@ -224,7 +225,7 @@ def evaluate_single_teacher_gate(
         reasons.append("cohort_identity_mismatch")
     if profile_contract_id and identities["profile_contract_id"] != profile_contract_id:
         reasons.append("profile_contract_mismatch")
-    if identities["route"] and identities["route"] != "opencode-go/ox-alpha-free":
+    if identities["route"] and identities["route"] != OX_ALPHA_ROUTE_MODEL:
         reasons.append("route_mismatch")
     for name, expected in (
         ("model_digest", OX_ALPHA_FIXED_IDENTITY["model_digest"]),
@@ -286,9 +287,9 @@ def evaluate_single_teacher_gate(
     ):
         if identities[name] and re.fullmatch(r"[0-9a-f]{64}", identities[name]) is None:
             reasons.append(f"{name}_identity_invalid")
-    if identities["identity_revision"] != "ox-alpha-fixed-identity-v1":
+    if identities["identity_revision"] != OX_ALPHA_FIXED_IDENTITY["revision"]:
         reasons.append("identity_revision_mismatch")
-    if identities["request_revision"] != "json-schema-core-label-abstain-16k-240s-v6":
+    if identities["request_revision"] != "json-schema-core-label-abstain-16k-240s-v7":
         reasons.append("request_revision_mismatch")
     if any(row.get("route_identity_exact") is not True for row in completed):
         reasons.append("route_identity_mismatch")

@@ -42,19 +42,19 @@ _AUTHORITY_EMBEDDED_NAME = re.compile(r"[0-9]{4,}\.jsonl?")
 RECEIPT_SCHEMA = "chronovisor.recall-r4-receipt.v1"
 SOURCE_SCHEMA = "chronovisor.recall-r4-source-contract.v1"
 LOCAL_PROFILE = "local-triad-v1"
-OX_PROFILE = "ox-alpha-single-v1"
-OX_ROUTE = "opencode-go/ox-alpha-free"
-OX_MODEL = "ox-alpha-free"
+OX_PROFILE = "deepseek-v4-flash-single-v1"
+OX_ROUTE = "opencode-go/deepseek-v4-flash"
+OX_MODEL = "deepseek-v4-flash"
 OX_ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions"
 OX_SCHEMA = "chronovisor.recall-distill-teacher-batch.v1"
-OX_PROFILE_SCHEMA = "chronovisor.recall-distill-ox-profile.v1"
-OX_COHORT = "ox-alpha-backfill-v1"
-OX_IDENTITY_REVISION = "ox-alpha-fixed-identity-v1"
-OX_REQUEST_REVISION = "json-schema-core-label-abstain-16k-240s-v6"
+OX_PROFILE_SCHEMA = "chronovisor.recall-distill-remote-profile.v2"
+OX_COHORT = "deepseek-v4-flash-backfill-v1"
+OX_IDENTITY_REVISION = "deepseek-v4-flash-fixed-identity-v1"
+OX_REQUEST_REVISION = "json-schema-core-label-abstain-16k-240s-v7"
 OX_PROMPT_SHA256 = "f6a61adb72cafa813a7df9afd6d143c7636069358be17508ac7ad1c0a540bf5a"
 OX_SCHEMA_SHA256 = "325a07d3a80d1aa38e9e95569af722b39de962c63994476f57d3baa3444786d7"
-OX_ROUTE_SHA256 = "4683cd125fa04ad59ada878a7dbf5ead1bd3941b8bb9a0ca5d02c4eb72e30a98"
-OX_MODEL_SHA256 = "29c31b2ca8e6d69bf746ac1a158871549b628562cc05bd5773a3bfbfe501d0b0"
+OX_ROUTE_SHA256 = "f9efd571e56d404593011ef2107c2ec56a5bc756193212caec9c0c05c4df576c"
+OX_MODEL_SHA256 = "0e1ac8e00052dc78415580486fb8b4b65ae25525ad7683a4cfee574a6cd35185"
 OX_KILL_CATEGORIES = (
     "402",
     "payment_required",
@@ -75,7 +75,7 @@ OX_FIXED_IDENTITY = {
     "schema_revision_sha256": OX_SCHEMA_SHA256,
 }
 OX_STAGES = (1, 2, 5, 10)
-OX_PROBE_REVISION = "single-teacher-repeat-v2"
+OX_PROBE_REVISION = "deepseek-single-teacher-repeat-v1"
 OX_MIN_BLIND_REPEAT_PAIRS = 20
 LOCAL_ROLES = (
     "recall.distill.teacher.a",
@@ -1278,7 +1278,7 @@ def _validate_runtime_ox_projection(
         expected = {
             "schema": OX_PROFILE_SCHEMA,
             "namespace": "recall-distillation",
-            "kind": "ox-alpha-free-profile",
+            "kind": "opencode-go-subscription-profile",
             "profile": OX_PROFILE,
             "cohort": OX_COHORT,
             "route": OX_ROUTE,
@@ -1287,10 +1287,10 @@ def _validate_runtime_ox_projection(
             "required_returned_model": OX_MODEL,
             "request_revision": OX_REQUEST_REVISION,
             "fixed_identity": OX_FIXED_IDENTITY,
-            "free_only": True,
+            "free_only": False,
             "no_paid_fallback": True,
-            "official_status": "limited_time",
-            "docs_url": "https://opencode.ai/docs/go/",
+            "official_status": "subscription",
+            "docs_url": "https://dev.opencode.ai/docs/go/",
             "kill_categories": list(OX_KILL_CATEGORIES),
             "max_inflight": 10,
             "teacher_claim_limit": 1,
@@ -1453,7 +1453,7 @@ def _validate_ox(
                 or contract.get("cohort") != OX_COHORT
                 or contract.get("identity_revision") != OX_IDENTITY_REVISION
                 or contract.get("fixed_identity") != OX_FIXED_IDENTITY
-                or contract.get("free_only") is not True
+                or contract.get("free_only") is not False
                 or contract.get("no_paid_fallback") is not True
                 or contract.get("kill_categories") != list(OX_KILL_CATEGORIES)
                 or isinstance(contract.get("live_recall_model_calls"), bool)
@@ -1507,7 +1507,7 @@ def _validate_ox(
         if (
             not isinstance(control, Mapping)
             or control.get("ox_enabled") is not True
-            or control.get("free_only") is not True
+            or control.get("free_only") is not False
             or control.get("no_paid_fallback") is not True
             or control.get("kill_switch_supported") is not True
             or control.get("kill_switch_tripped") is not False
@@ -2256,7 +2256,7 @@ def _valid_ox_workset_provenance(
         provenance.get("profile") != OX_PROFILE
         or provenance.get("cohort") != OX_COHORT
         or provenance.get("route") != OX_ROUTE
-        or provenance.get("teacher_role") != "recall.distill.teacher.ox-alpha"
+        or provenance.get("teacher_role") != "recall.distill.teacher.deepseek-v4-flash"
         or provenance.get("profile_contract_id") != contract_id
         or type(provenance.get("probe")) is not bool
     ):
@@ -2965,7 +2965,7 @@ def _production_ox_events(
     contract, _, _ = _production_json(
         root / PRODUCTION_CONTRACT_DIR_RELATIVE / f"{contract_id}.json",
         label="production profile contract",
-        schema="chronovisor.recall-distill-ox-profile.v1",
+        schema="chronovisor.recall-distill-remote-profile.v2",
     )
     if (
         contract.get("artifact_id") != contract_id
@@ -3720,7 +3720,7 @@ def run_owned_fault_scenarios(
                 provider="opencode-go",
                 model=model,
                 finish_reason="stop",
-                metadata={"returned_model": "ox-alpha-free"},
+                metadata={"returned_model": "deepseek-v4-flash"},
             )
 
     published: list[Path] = []
@@ -3774,8 +3774,8 @@ def run_owned_fault_scenarios(
             config.write_text(
                 "[recall.distillation]\n"
                 "enabled = true\n"
-                'teacher_profile = "ox-alpha-single-v1"\n'
-                "ox_enabled = true\nox_free_only = true\n"
+                'teacher_profile = "deepseek-v4-flash-single-v1"\n'
+                "ox_enabled = true\nox_free_only = false\n"
                 'ox_expires_at = "2099-01-01T00:00:00Z"\n'
                 "teacher_claim_limit = 1\nteacher_max_inflight = 1\n",
                 encoding="utf-8",
@@ -4045,7 +4045,7 @@ def _production_identity(
         "teacher_max_inflight": 10,
         "teacher_claim_limit": 1,
         "ox_enabled": True,
-        "ox_free_only": True,
+        "ox_free_only": False,
     }
     for key, expected in required_config.items():
         if distillation.get(key) != expected:
@@ -4166,7 +4166,7 @@ def _production_identity(
         "required_returned_model": OX_MODEL,
         "request_revision": OX_REQUEST_REVISION,
         "fixed_identity": OX_FIXED_IDENTITY,
-        "free_only": True,
+        "free_only": False,
         "no_paid_fallback": True,
         "kill_categories": list(OX_KILL_CATEGORIES),
         "max_inflight": 10,
@@ -4307,7 +4307,7 @@ def _production_quality(
         "required_returned_model": OX_MODEL,
         "request_revision": OX_REQUEST_REVISION,
         "fixed_identity": OX_FIXED_IDENTITY,
-        "free_only": True,
+        "free_only": False,
         "no_paid_fallback": True,
         "kill_categories": list(OX_KILL_CATEGORIES),
         "max_inflight": 10,
@@ -4390,7 +4390,7 @@ def _production_quality(
             or row.get("source_commit") != source.get("commit")
             or row.get("source_tree_sha256") != source.get("tree_sha256")
             or row.get("route") != OX_ROUTE
-            or row.get("teacher_role") != "recall.distill.teacher.ox-alpha"
+            or row.get("teacher_role") != "recall.distill.teacher.deepseek-v4-flash"
             or row.get("identity_revision") != OX_IDENTITY_REVISION
             or row.get("request_revision") != OX_REQUEST_REVISION
             or row.get("request_revision") != contract.get("request_revision")
@@ -5198,7 +5198,7 @@ def _collect_authoritative_production(
         contract, contract_state, contract_sha256 = _production_json(
             contract_path,
             label="production profile contract",
-            schema="chronovisor.recall-distill-ox-profile.v1",
+            schema="chronovisor.recall-distill-remote-profile.v2",
         )
         contract_unsigned = {
             key: value

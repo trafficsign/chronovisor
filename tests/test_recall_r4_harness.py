@@ -889,7 +889,7 @@ def _ox_rows(source: Path, commit: str) -> list[dict[str, object]]:
         "cohort": HARNESS.OX_COHORT,
         "identity_revision": HARNESS.OX_IDENTITY_REVISION,
         "fixed_identity": HARNESS.OX_FIXED_IDENTITY,
-        "free_only": True,
+        "free_only": False,
         "no_paid_fallback": True,
         "kill_categories": list(HARNESS.OX_KILL_CATEGORIES),
         "live_recall_model_calls": 0,
@@ -1001,7 +1001,7 @@ def _ox_rows(source: Path, commit: str) -> list[dict[str, object]]:
                 },
                 "control": {
                     "ox_enabled": True,
-                    "free_only": True,
+                    "free_only": False,
                     "no_paid_fallback": True,
                     "kill_switch_supported": True,
                     "kill_switch_tripped": False,
@@ -1122,11 +1122,11 @@ def _authoritative_production_root(tmp_path: Path, source: Path, commit: str) ->
         "chunk_size = 200\n"
         "max_input_bytes = 4096\n"
         "max_candidates = 200\n"
-        'teacher_profile = "ox-alpha-single-v1"\n'
+        'teacher_profile = "deepseek-v4-flash-single-v1"\n'
         "teacher_max_inflight = 10\n"
         "teacher_claim_limit = 1\n"
         "ox_enabled = true\n"
-        "ox_free_only = true\n"
+        "ox_free_only = false\n"
         'ox_expires_at = "2099-01-01T00:00:00Z"\n'
     )
 
@@ -1195,7 +1195,7 @@ def _authoritative_production_root(tmp_path: Path, source: Path, commit: str) ->
                 model=model,
                 finish_reason="stop",
                 metadata={
-                    "returned_model": "ox-alpha-free",
+                    "returned_model": "deepseek-v4-flash",
                     "request_id": f"r4-fixture-{uuid.uuid4().hex}",
                 },
             )
@@ -3249,7 +3249,7 @@ def test_runtime_ox_contract_reads_the_actual_sealed_runtime_shape(
     )
 
     assert result["passed"] is False  # fixture deliberately lacks failure evidence
-    assert result["contract"]["schema"] == "chronovisor.recall-distill-ox-profile.v1"
+    assert result["contract"]["schema"] == "chronovisor.recall-distill-remote-profile.v2"
     assert result["contract"]["artifact_id"] == state["profile_contract_id"]
     assert result["contract"]["teacher_claim_limit"] == 1
 
@@ -3411,7 +3411,7 @@ def test_runtime_ox_contract_fails_closed_on_identity_drift(
     if mutation == "missing":
         contract.pop("relevant_config_sha256")
     elif mutation == "paid":
-        contract["free_only"] = False
+        contract["free_only"] = True
     elif mutation == "model":
         contract["request_model"] = "paid-model"
     elif mutation == "source":
@@ -3461,7 +3461,7 @@ def test_production_quality_rederives_label_request_binding(
         / HARNESS.PRODUCTION_CONTRACT_DIR_RELATIVE
         / f"{contract_id}.json",
         label="production profile contract",
-        schema="chronovisor.recall-distill-ox-profile.v1",
+        schema="chronovisor.recall-distill-remote-profile.v2",
     )
     workset = HARNESS._production_workset(
         production / HARNESS.PRODUCTION_WORKSET_RELATIVE
@@ -3507,7 +3507,7 @@ def test_production_quality_derives_ramp_units_without_event_self_reports() -> N
         "required_returned_model": HARNESS.OX_MODEL,
         "request_revision": HARNESS.OX_REQUEST_REVISION,
         "fixed_identity": HARNESS.OX_FIXED_IDENTITY,
-        "free_only": True,
+        "free_only": False,
         "no_paid_fallback": True,
         "kill_categories": list(HARNESS.OX_KILL_CATEGORIES),
         "max_inflight": 10,
@@ -3554,7 +3554,7 @@ def test_production_quality_derives_ramp_units_without_event_self_reports() -> N
                     "profile_contract_id": contract_id, "source_commit": source["commit"],
                     "source_tree_sha256": source["tree_sha256"],
                     "source_ox_identity_sha256": source["ox_identity_sha256"],
-                    "route": HARNESS.OX_ROUTE, "teacher_role": "recall.distill.teacher.ox-alpha",
+                    "route": HARNESS.OX_ROUTE, "teacher_role": "recall.distill.teacher.deepseek-v4-flash",
                     "identity_revision": HARNESS.OX_IDENTITY_REVISION,
                     "request_revision": HARNESS.OX_REQUEST_REVISION,
                     "expires_at": contract["expires_at"], "route_digest": HARNESS.OX_ROUTE_SHA256,
@@ -3752,7 +3752,7 @@ def test_production_quality_rejects_self_resealed_payload_source(
         / HARNESS.PRODUCTION_CONTRACT_DIR_RELATIVE
         / f"{contract_id}.json",
         label="production profile contract",
-        schema="chronovisor.recall-distill-ox-profile.v1",
+        schema="chronovisor.recall-distill-remote-profile.v2",
     )
     workset = HARNESS._production_workset(
         production / HARNESS.PRODUCTION_WORKSET_RELATIVE
