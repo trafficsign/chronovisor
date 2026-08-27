@@ -15530,6 +15530,25 @@ def _run_distillation_chunk_impl(
     cold_start = setup["cold_start"]
     config_path = setup["config_path"]
     model_deferred = setup["model_deferred"]
+    counterfactual_result = _CounterfactualBlockResult(
+        pending=counterfactual_probe.pending
+    )
+    counterfactual_attempted = False
+    if prefer_counterfactual and not model_deferred:
+        counterfactual_result = _run_counterfactual_block(
+            execute=True,
+            root=root,
+            raw_dir=raw_dir,
+            config=config,
+            counterfactual=counterfactual,
+            snapshots=model_snapshots,
+            rally_by_id=rally_by_id,
+            texts=texts,
+            label_path=label_path,
+            label_rows=label_rows,
+        )
+        counterfactual_attempted = True
+        prefer_counterfactual = counterfactual_result.written > 0
     teacher_result = _TeacherBatchResult()
     if teachers_available and not prefer_counterfactual and not model_deferred:
         teacher_result = _run_teacher_batch(
@@ -15594,11 +15613,9 @@ def _run_distillation_chunk_impl(
                 else _ox_contract_source_binding(root, ox_profile_contract_id)
             ),
         }
-    counterfactual_result = _CounterfactualBlockResult(
-        pending=counterfactual_probe.pending
-    )
     if (
-        not model_deferred
+        not counterfactual_attempted
+        and not model_deferred
         and labels_written == 0
         and (
             not cold_start
@@ -15619,7 +15636,8 @@ def _run_distillation_chunk_impl(
             label_rows=label_rows,
         )
     elif (
-        not model_deferred
+        not counterfactual_attempted
+        and not model_deferred
         and labels_written == 0
         and counterfactual_probe.pending
         and cold_start
@@ -15627,7 +15645,9 @@ def _run_distillation_chunk_impl(
         model_deferred = True
     counterfactual_written = counterfactual_result.written
     counterfactual_model_calls += counterfactual_result.model_calls
-    model_deferred = model_deferred or counterfactual_result.deferred
+    model_deferred = model_deferred or (
+        counterfactual_result.deferred and labels_written == 0
+    )
     if config.teacher_profile == LOCAL_TRIAD_PROFILE:
         from chronovisor.recall.recall_distillation_workset import DistillationWorkset
 

@@ -4400,6 +4400,60 @@ def test_counterfactual_turn_without_real_work_falls_back_to_teacher(
     assert result["labels_written"] > 0
 
 
+def test_deferred_counterfactual_turn_falls_back_to_teacher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Teacher:
+        local = True
+
+        def __init__(self, role: str) -> None:
+            self.role = role
+
+        def evaluate(self, payload: object) -> dict[str, object]:
+            assert isinstance(payload, dict)
+            return {
+                "labels": [
+                    {
+                        "candidate_id": item["candidate_id"],
+                        "verdict": "uncertain",
+                        "rationale": "bounded",
+                    }
+                    for item in payload["candidates"]
+                ]
+            }
+
+    counterfactual_calls: list[bool] = []
+
+    def counterfactual_block(*, execute: bool, **_kwargs: object) -> object:
+        counterfactual_calls.append(execute)
+        return distill._CounterfactualBlockResult(
+            pending=True, deferred=execute
+        )
+
+    monkeypatch.setattr(distill, "_run_counterfactual_block", counterfactual_block)
+    raw_dir = _raw(tmp_path)
+    config = _config(tmp_path)
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / store.STATE_FILE,
+        {
+            "kind": "worker-state",
+            "status": "capture_only",
+            "rollout_percent": 0,
+            "teacher_model_calls": 3,
+            "counterfactual_model_calls": 0,
+        },
+    )
+    result = distill.run_distillation_chunk(
+        root=tmp_path,
+        raw_dir=raw_dir,
+        config_path=config,
+        teachers={role: Teacher(role) for role in distill.TEACHER_ROLES},
+    )
+
+    assert result["labels_written"] > 0
+    assert counterfactual_calls == [False, True]
+
+
 def test_teacher_routes_make_progress_across_bounded_chunks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
