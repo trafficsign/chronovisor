@@ -4161,6 +4161,25 @@ def test_timeout_reports_payload_free_durable_workset_boundaries(
     assert result["local_workset"] == {"observation": "unavailable"}
 
 
+def test_chunk_accepts_bounded_production_sized_watchdog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        distill,
+        "_run_distillation_chunk_impl",
+        lambda **kwargs: {
+            "status": "ok",
+            "max_elapsed_seconds": kwargs["max_elapsed_seconds"],
+        },
+    )
+
+    result = distill.run_distillation_chunk(root=tmp_path, max_elapsed_seconds=1_800)
+
+    assert result == {"status": "ok", "max_elapsed_seconds": 1_800}
+    with pytest.raises(distill.DistillationError, match="elapsed limit"):
+        distill.run_distillation_chunk(root=tmp_path, max_elapsed_seconds=1_801)
+
+
 def test_timeout_workset_observation_marks_missing_and_corrupt_queue(
     tmp_path: Path,
 ) -> None:

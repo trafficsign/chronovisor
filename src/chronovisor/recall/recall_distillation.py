@@ -15755,7 +15755,7 @@ def run_distillation_chunk(
     if (
         isinstance(max_elapsed_seconds, bool)
         or not isinstance(max_elapsed_seconds, int)
-        or not 60 <= max_elapsed_seconds <= 600
+        or not 60 <= max_elapsed_seconds <= 1_800
     ):
         raise DistillationError("distillation elapsed limit is invalid")
     from chronovisor.recall.recall_runtime import (
