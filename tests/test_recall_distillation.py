@@ -10627,6 +10627,34 @@ def _r4_candidate_anchor_fixture(
     return root, directory, evidence, candidate, checkpoint, ledger
 
 
+def test_r4_candidate_anchor_survives_apfs_device_rebind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _directory, evidence, _candidate, checkpoint, ledger = (
+        _r4_candidate_anchor_fixture(tmp_path)
+    )
+    rebound = {**ledger["file_state"], "st_dev": ledger["file_state"]["st_dev"] + 1}
+    store.write_sealed_state(
+        checkpoint,
+        {
+            "head_sha256": ledger["head_sha256"],
+            "records": ledger["records"],
+            "file_state": rebound,
+        },
+    )
+    monkeypatch.setattr(distill, "_r4_critical_module_sha256", lambda: {"x": "y"})
+
+    anchor = distill.bootstrap_r4_candidate_anchor(
+        root=root,
+        tracked_r0_evidence=evidence,
+        source_binding={"source_commit": "a" * 40},
+    )
+
+    assert anchor["candidate_checkpoint"]["file_state"] == {
+        key: value for key, value in rebound.items() if key != "st_dev"
+    }
+
+
 def test_r4_candidate_anchor_rejects_directory_replacement_before_input_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

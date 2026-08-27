@@ -1306,6 +1306,24 @@ def _r4_require_canonical_artifact_id(
         raise DistillationError("R4 artifact identity is invalid")
 
 
+def _r4_stable_file_state(value: Any) -> dict[str, int]:
+    """Drop the APFS mount-local device id from a durable file identity."""
+
+    stable = {"size_bytes", "st_ino", "st_mtime_ns", "st_ctime_ns"}
+    if not isinstance(value, Mapping) or set(value) not in (
+        stable,
+        stable | {"st_dev"},
+    ):
+        return {}
+    result = {key: value[key] for key in stable}
+    if any(
+        isinstance(item, bool) or not isinstance(item, int) or item < 0
+        for item in result.values()
+    ):
+        return {}
+    return result
+
+
 def _r4_bootstrap_inputs_unchanged(
     *,
     anchor_path: Path,
@@ -1504,9 +1522,11 @@ def bootstrap_r4_candidate_anchor(
             )
             file_state = checkpoint.get("file_state")
             r0_candidate = r0["production"]["ledgers"]["candidate-ledger.jsonl"]
+            stable_file_state = _r4_stable_file_state(file_state)
             if (
-                not isinstance(file_state, Mapping)
-                or file_state != r0_candidate.get("file_state")
+                not stable_file_state
+                or stable_file_state
+                != _r4_stable_file_state(r0_candidate.get("file_state"))
                 or candidate_identity
                 != (
                     candidate_after.st_dev,
@@ -1523,7 +1543,7 @@ def bootstrap_r4_candidate_anchor(
                     candidate_observed.st_mtime_ns,
                     candidate_observed.st_ctime_ns,
                 )
-                or candidate_before.st_size != file_state.get("size_bytes")
+                or candidate_before.st_size != stable_file_state.get("size_bytes")
                 or checkpoint.get("records") != r0_candidate["records"]
                 or checkpoint.get("head_sha256") != r0_candidate["head_sha256"]
                 or not isinstance(source_binding.get("source_commit"), str)
@@ -1562,8 +1582,8 @@ def bootstrap_r4_candidate_anchor(
         candidate = {
             "head_sha256": checkpoint["head_sha256"],
             "records": checkpoint["records"],
-            "bytes": file_state["size_bytes"],
-            "file_state": dict(file_state),
+            "bytes": stable_file_state["size_bytes"],
+            "file_state": stable_file_state,
         }
         unsigned = {
             "schema": R4_CANDIDATE_ANCHOR_SCHEMA,
@@ -1701,12 +1721,14 @@ def _r4_runtime_identity_projection(
             or not isinstance(anchor_candidate, Mapping)
         ):
             return {}
+        anchor_file_state = _r4_stable_file_state(anchor_candidate.get("file_state"))
+        candidate_file_state = _r4_stable_file_state(candidate.get("file_state"))
         anchor_fields = {
             "candidate_anchor_artifact_id": anchor_id,
             "candidate_anchor_head_sha256": anchor_candidate.get("head_sha256"),
             "candidate_anchor_records": anchor_candidate.get("records"),
             "candidate_anchor_bytes": anchor_candidate.get("bytes"),
-            "candidate_anchor_file_state": anchor_candidate.get("file_state"),
+            "candidate_anchor_file_state": anchor_file_state,
             "candidate_anchor_r0_artifact_id": anchor.get("r0_artifact_id"),
             "candidate_anchor_r0_file_sha256": anchor.get("r0_file_sha256"),
             "candidate_anchor_critical_module_sha256": anchor.get(
@@ -1720,9 +1742,9 @@ def _r4_runtime_identity_projection(
             candidate.get("head_sha256")
             != anchor_fields["candidate_anchor_head_sha256"]
             or candidate.get("records") != anchor_fields["candidate_anchor_records"]
-            or candidate.get("file_state")
-            != anchor_fields["candidate_anchor_file_state"]
-            or candidate.get("file_state", {}).get("size_bytes")
+            or not candidate_file_state
+            or candidate_file_state != anchor_fields["candidate_anchor_file_state"]
+            or candidate_file_state.get("size_bytes")
             != anchor_fields["candidate_anchor_bytes"]
             or anchor_fields["candidate_anchor_critical_module_sha256"]
             != critical_modules
@@ -1755,7 +1777,7 @@ def _r4_runtime_identity_projection(
         "workset_receipt_head": receipts.get("head_sha256"),
         "candidate_checkpoint_head": candidate.get("head_sha256"),
         "candidate_checkpoint_records": candidate.get("records"),
-        "candidate_checkpoint_file_state": candidate.get("file_state"),
+        "candidate_checkpoint_file_state": candidate_file_state,
         **anchor_fields,
         "candidate_tail_records": 0,
         "candidate_tail_bytes": 0,

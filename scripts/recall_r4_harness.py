@@ -2813,12 +2813,11 @@ def _production_candidate_tail(
         or current_bytes < anchor_bytes
     ):
         raise R4Error("production candidate checkpoint precedes R0 bytes")
-    anchor_file_state = expected.get("file_state")
-    checkpoint_file_state = checkpoint.get("file_state")
+    anchor_file_state = _stable_candidate_file_state(expected.get("file_state"))
+    checkpoint_file_state = _stable_candidate_file_state(checkpoint.get("file_state"))
     if (
-        not isinstance(anchor_file_state, Mapping)
-        or not isinstance(checkpoint_file_state, Mapping)
-        or dict(checkpoint_file_state) != dict(anchor_file_state)
+        not anchor_file_state
+        or checkpoint_file_state != anchor_file_state
         or records != anchor_records
         or current_bytes != anchor_bytes
         or head != anchor_head
@@ -2846,6 +2845,23 @@ def _production_candidate_tail(
         "tail_bytes": 0,
         "tail_verified": True,
     }
+
+
+def _stable_candidate_file_state(value: Any) -> dict[str, int]:
+    """Normalize durable candidate identity across APFS mount-id changes."""
+
+    stable = {"size_bytes", "st_ino", "st_mtime_ns", "st_ctime_ns"}
+    if not isinstance(value, Mapping) or set(value) not in (
+        stable,
+        stable | {"st_dev"},
+    ):
+        return {}
+    result = {key: value[key] for key in stable}
+    return (
+        result
+        if all(type(item) is int and item >= 0 for item in result.values())
+        else {}
+    )
 
 
 def _production_chain(

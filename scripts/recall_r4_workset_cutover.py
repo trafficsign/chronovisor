@@ -826,8 +826,16 @@ def _verify_or_anchor(root: Path, r0: Path, source: Mapping[str, str]) -> None:
         "head_sha256": checkpoint.get("head_sha256"),
         "records": checkpoint.get("records"),
         "bytes": candidate_observed.st_size,
-        "file_state": checkpoint.get("file_state"),
+        "file_state": distill._r4_stable_file_state(checkpoint.get("file_state")),
     }
+    normalized_candidate = (
+        {
+            **dict(candidate),
+            "file_state": distill._r4_stable_file_state(candidate.get("file_state")),
+        }
+        if isinstance(candidate, Mapping)
+        else {}
+    )
     expected_keys = {
         "schema",
         "namespace",
@@ -847,7 +855,7 @@ def _verify_or_anchor(root: Path, r0: Path, source: Mapping[str, str]) -> None:
         or r0_payload.get("artifact_id") != distill.R4_R0_EVIDENCE_ID
         or any(current.get(key) != value for key, value in expected.items())
         or not isinstance(candidate, Mapping)
-        or dict(candidate) != expected_candidate
+        or normalized_candidate != expected_candidate
         or current.get("critical_module_sha256") != critical
         or not isinstance(expected["r0_artifact_id"], str)
         or not isinstance(expected["r0_file_sha256"], str)
@@ -871,7 +879,8 @@ def _verify_or_anchor(root: Path, r0: Path, source: Mapping[str, str]) -> None:
         or not isinstance(expected_candidate["file_state"], Mapping)
         or expected_candidate["file_state"].get("size_bytes")
         != expected_candidate["bytes"]
-        or r0_candidate.get("file_state") != expected_candidate["file_state"]
+        or distill._r4_stable_file_state(r0_candidate.get("file_state"))
+        != expected_candidate["file_state"]
         or _sha256(r0) != r0_sha
     ):
         raise CutoverError("R0 anchor does not match current root")
