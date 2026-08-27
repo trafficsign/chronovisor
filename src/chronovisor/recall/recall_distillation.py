@@ -110,6 +110,8 @@ _OX_MAX_EXPIRY = datetime(2100, 1, 1, tzinfo=UTC)
 # Deterministic local payload rejects may be skipped in one run, but never
 # indefinitely: after this many extra claims, leave the remainder ready.
 OX_PREFLIGHT_SCAN_CLAIM_BUDGET = 500
+# Bound Raw text retained by one scan; recursion preserves the total budget.
+OX_PREFLIGHT_SCAN_CLAIM_BATCH = 64
 UTILITY_LABELS = frozenset({"helpful", "neutral", "harmful", "uncertain"})
 RELEVANCE_LABELS = frozenset({"relevant", "irrelevant", "uncertain"})
 AUTHORITIES = frozenset({"verified", "teacher-only", "uncertain", "reject"})
@@ -10523,7 +10525,7 @@ def _run_ox_teacher_batch(
     scan_limit = claim_limit
     if claim_limit == 1 and callable(preflight):
         scan_limit = min(
-            OX_PREFLIGHT_SCAN_CLAIM_BUDGET,
+            OX_PREFLIGHT_SCAN_CLAIM_BATCH,
             _payload_scan_remaining
             if _payload_scan_remaining is not None
             else OX_PREFLIGHT_SCAN_CLAIM_BUDGET,

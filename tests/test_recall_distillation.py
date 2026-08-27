@@ -7438,8 +7438,8 @@ def test_ox_scans_adapter_preflight_reject_without_losing_safe_work(
     assert result.workset_status["ready"] == 2  # type: ignore[index]
 
 
-def test_ox_canary_preflights_wide_window_before_one_request(tmp_path: Path) -> None:
-    target_id = "candidate-04-3"
+def test_ox_canary_preflights_bounded_windows_before_one_request(tmp_path: Path) -> None:
+    target_id = "candidate-19-3"
 
     class PrefetchingTexts(dict[str, str]):
         def __init__(self, values: dict[str, str]) -> None:
@@ -7471,7 +7471,7 @@ def test_ox_canary_preflights_wide_window_before_one_request(tmp_path: Path) -> 
             self.requests.append(str(candidates[0]["candidate_id"]))
             return {"_failure": {"class": "invalid_response"}}
 
-    rally_ids = [f"rally-{index:02d}" for index in range(5)]
+    rally_ids = [f"rally-{index:02d}" for index in range(20)]
     candidate_ids = {
         rally_id: [f"candidate-{index:02d}-{position}" for position in range(4)]
         for index, rally_id in enumerate(rally_ids)
@@ -7519,10 +7519,15 @@ def test_ox_canary_preflights_wide_window_before_one_request(tmp_path: Path) -> 
     )
 
     assert teacher.requests == [target_id]
-    assert teacher.preflight_calls == 20
-    assert texts.prefetches == [{"query", *set().union(*candidate_ids.values())}]
+    assert teacher.preflight_calls == 80
+    assert len(texts.prefetches) == 2
+    assert max(map(len, texts.prefetches)) == 65
+    assert set().union(*texts.prefetches) == {
+        "query",
+        *set().union(*candidate_ids.values()),
+    }
     assert result.model_calls == 1
-    assert result.workset_status["quarantined"] == 19  # type: ignore[index]
+    assert result.workset_status["quarantined"] == 79  # type: ignore[index]
     assert result.workset_status["ready"] == 1  # type: ignore[index]
 
 
