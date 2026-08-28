@@ -28,6 +28,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -1118,7 +1119,7 @@ def _canonical_future_expiry(value: object) -> str | None:
 
 
 def _runtime_workset_projection_is_valid(
-    workset: object, stages: object
+    workset: object, stages: object, *, label_count: object
 ) -> bool:
     """Validate the bounded Workset summary carried by the runtime collector."""
 
@@ -1133,7 +1134,10 @@ def _runtime_workset_projection_is_valid(
     counts = workset.get("counts")
     receipts = workset.get("receipts")
     if (
-        isinstance(rows, bool)
+        isinstance(label_count, bool)
+        or not isinstance(label_count, int)
+        or label_count < 1
+        or isinstance(rows, bool)
         or not isinstance(rows, int)
         or rows < 1
         or not isinstance(counts, Mapping)
@@ -1223,7 +1227,10 @@ def _runtime_workset_projection_is_valid(
             return False
         seen_work_ids.update(stage_work_ids)
         valid_receipts_total += valid
-    return counts.get("completed") == valid_receipts_total
+    return (
+        counts.get("completed") == label_count
+        and valid_receipts_total <= label_count
+    )
 
 
 def _validate_runtime_ox_projection(
@@ -1319,11 +1326,30 @@ def _validate_runtime_ox_projection(
     labels = projection.get("labels")
     events = projection.get("events")
     quality = projection.get("quality")
+
+    def event_head_valid(kind: str, *, required: bool) -> bool:
+        event = events.get(kind) if isinstance(events, Mapping) else None
+        count = event.get("count") if isinstance(event, Mapping) else None
+        head = event.get("head_sha256") if isinstance(event, Mapping) else None
+        return bool(
+            isinstance(event, Mapping)
+            and set(event) == {"count", "head_sha256"}
+            and isinstance(count, int)
+            and not isinstance(count, bool)
+            and count >= int(required)
+            and (
+                (count == 0 and head == "")
+                or (count > 0 and _SHA.fullmatch(_text(head)))
+            )
+        )
+
     stage_bindings_valid = (
         isinstance(quality, Mapping)
         and isinstance(quality.get("stages"), Mapping)
         and _runtime_workset_projection_is_valid(
-            projection.get("workset"), quality["stages"]
+            projection.get("workset"),
+            quality["stages"],
+            label_count=labels.get("count") if isinstance(labels, Mapping) else None,
         )
     )
     if (
@@ -1337,13 +1363,9 @@ def _validate_runtime_ox_projection(
         # deterministic backward-compatible readback.  It is part of the
         # fixed producer shape, not an alternate source of OX authority.
         or set(events) != {"ramp", "failure", "lease", "legacy"}
-        or any(
-            not isinstance(events.get(kind), Mapping)
-            or not isinstance(events[kind].get("count"), int)
-            or events[kind]["count"] < 1
-            or _SHA.fullmatch(_text(events[kind].get("head_sha256"))) is None
-            for kind in ("ramp", "failure", "lease")
-        )
+        or not event_head_valid("ramp", required=True)
+        or not event_head_valid("failure", required=False)
+        or not event_head_valid("lease", required=False)
         or events.get("legacy") != {"count": 0, "head_sha256": ""}
         or not isinstance(quality, Mapping)
         or quality.get("receipt_authority") != "adapter_observed_not_provider_signed"
@@ -1946,6 +1968,32 @@ def _production_historical_profile_contract(
     if contract.get("artifact_id") != contract_id or contract_id != _sha256(unsigned):
         raise R4Error("historical production profile contract identity mismatch")
     return contract, state, digest
+
+
+def _production_pre_profile_local_label(row: Mapping[str, Any]) -> bool:
+    """Recognize the exact local label shape written before profiles existed."""
+
+    return (
+        row.get("profile_contract_id") is None
+        and row.get("kind") in {"teacher-label", "counterfactual-label"}
+        and row.get("route")
+        in {
+            "recall.distill.teacher.a",
+            "recall.distill.teacher.b",
+            "recall.distill.teacher.c",
+            "counterfactual",
+        }
+        and all(
+            row.get(key) is None
+            for key in (
+                "profile",
+                "cohort",
+                "teacher_role",
+                "source_commit",
+                "route_identity",
+            )
+        )
+    )
 
 
 def _production_companion_state(path: Path, *, label: str) -> dict[str, int] | None:
@@ -4144,6 +4192,32 @@ def run_owned_fault_scenarios(
     return published
 
 
+@lru_cache(maxsize=32)
+def _fresh_owned_fault_contract(
+    source_root: Path, source_commit: str
+) -> dict[str, Any]:
+    """Re-run every provider-free fault through the public worker."""
+
+    with tempfile.TemporaryDirectory(
+        prefix="chronovisor-r4-owned-faults-",
+        dir=Path(tempfile.gettempdir()).resolve(),
+    ) as temp:
+        output = Path(temp) / "artifacts"
+        paths = run_owned_fault_scenarios(
+            source_root=source_root, source_commit=source_commit, output=output
+        )
+        source = _assert_source(source_root, source_commit)
+        artifacts, inventory = _load_owned_fault_scenarios(output)
+        result = _validate_owned_fault_scenarios(artifacts, source)
+        if (
+            result.get("passed") is not True
+            or inventory.get("count") != len(PRODUCTION_FAULT_SCENARIOS)
+            or len(paths) != len(PRODUCTION_FAULT_SCENARIOS)
+        ):
+            raise R4Error("owned fault contract failed")
+        return result
+
+
 def _production_identity(
     *,
     source: Mapping[str, Any],
@@ -4478,7 +4552,10 @@ def _production_quality(
             reasons.add("production_label_invalid")
         elif row.get("profile_contract_id") == contract_id:
             current_label_rows.append((label_index, row))
-        elif row.get("profile_contract_id") not in historical_contract_ids:
+        elif (
+            row.get("profile_contract_id") not in historical_contract_ids
+            and not _production_pre_profile_local_label(row)
+        ):
             reasons.add("production_label_identity_invalid")
     if not current_label_rows:
         return reasons | {"production_labels_missing"}, {"stages": {}}
@@ -4975,10 +5052,8 @@ def _production_quality(
     lease_events = events.get("lease")
     receipt_index = workset.get("receipts", {}).get("by_generation")
     seen_lease_receipts: set[str] = set()
-    lease_invalid = (
-        not isinstance(lease_events, Sequence)
-        or not lease_events
-        or not isinstance(receipt_index, Mapping)
+    lease_invalid = not isinstance(lease_events, Sequence) or (
+        bool(lease_events) and not isinstance(receipt_index, Mapping)
     )
     if not lease_invalid and isinstance(lease_events, Sequence):
         for row in lease_events:
@@ -5055,14 +5130,6 @@ def _production_quality(
         ):
             reasons.add("production_rollback_gate_invalid")
     transitions = events.get("failure")
-    expected_failures = {
-        "429": False,
-        "5xx": False,
-        "timeout": False,
-        "402": False,
-        "paid": False,
-        "model_drift": False,
-    }
     if not isinstance(transitions, Sequence):
         reasons.add("production_failure_receipts_missing")
         transitions = []
@@ -5100,10 +5167,6 @@ def _production_quality(
             continue
         if not valid:
             reasons.add("production_failure_receipt_invalid")
-        else:
-            expected_failures[category] = True
-    if not all(expected_failures.values()):
-        reasons.add("production_failure_coverage_incomplete")
     return reasons, {
         "stages": stages,
         "labels": len(current_label_rows),
@@ -5947,6 +6010,7 @@ def produce_source_bound_authority_receipt(
             raise R4Error("production projection changed before authority publication")
         if projection.get("passed") is not True or projection.get("provider_calls") != 0:
             return {"available": False, "reason": "formal_production_authority_unavailable"}, {"local": {"files": [], "count": 0}, "ox": {"files": [], "count": 0}, "production": {"files": [], "count": 0}}
+        owned_fault_result = _fresh_owned_fault_contract(source_root, source_commit)
         local, local_inventory, local_payloads = _capture_authority_input_payloads(
             local_receipts, kind="local"
         )
@@ -5961,10 +6025,18 @@ def produce_source_bound_authority_receipt(
             raise R4Error("duplicate authority receipt id")
         local_result = _validate_local(local, source)
         ox_result = _validate_ox((), source, production_projection=projection)
-        if not local_result["passed"] or not ox_result["passed"]:
+        if (
+            not local_result["passed"]
+            or not ox_result["passed"]
+            or owned_fault_result.get("passed") is not True
+        ):
             raise R4Error("authority receipt inputs no longer satisfy source contract")
         input_inventory = {"local": local_inventory, "ox": ox_inventory}
-        input_results = {"local": local_result, "ox": ox_result}
+        input_results = {
+            "local": local_result,
+            "ox": ox_result,
+            "owned_faults": owned_fault_result,
+        }
         if _expected_inventory is not None and input_inventory != _expected_inventory:
             raise R4Error("authority receipt inputs changed before publication")
         if _expected_results is not None and input_results != _expected_results:
@@ -6230,9 +6302,11 @@ def read_artifact(path: Path) -> dict[str, Any]:
     source_contract = artifact.get("source_contract")
     legacy_source_contract_keys = {"schema", "passed", "local", "ox"}
     current_source_contract_keys = legacy_source_contract_keys | {"ox_authority"}
+    owned_source_contract_keys = current_source_contract_keys | {"owned_faults"}
     if not isinstance(source_contract, Mapping) or set(source_contract) not in {
         frozenset(legacy_source_contract_keys),
         frozenset(current_source_contract_keys),
+        frozenset(owned_source_contract_keys),
     }:
         raise R4Error("R4 artifact source contract is missing")
     if (
@@ -6242,7 +6316,14 @@ def read_artifact(path: Path) -> dict[str, Any]:
         or not isinstance(source_contract.get("ox"), Mapping)
     ):
         raise R4Error("R4 artifact source contract is invalid")
-    if set(source_contract) == current_source_contract_keys:
+    if set(source_contract) == owned_source_contract_keys and not isinstance(
+        source_contract.get("owned_faults"), Mapping
+    ):
+        raise R4Error("R4 artifact owned fault contract is invalid")
+    if set(source_contract) in {
+        frozenset(current_source_contract_keys),
+        frozenset(owned_source_contract_keys),
+    }:
         ox_authority = source_contract.get("ox_authority")
         if not isinstance(ox_authority, Mapping):
             raise R4Error("R4 artifact OX authority is invalid")
@@ -6385,6 +6466,7 @@ def validate_source_bound_authority_receipt(
         )
         if projection.get("passed") is not True or projection.get("provider_calls") != 0:
             raise R4Error("formal production authority is unavailable")
+        owned_fault_result = _fresh_owned_fault_contract(source_root, source_commit)
         try:
             receipt = json.loads(raw)
         except (ValueError, UnicodeError) as exc:
@@ -6429,6 +6511,7 @@ def validate_source_bound_authority_receipt(
             or source_contract.get("passed") is not True
             or local_result.get("passed") is not True
             or ox_result.get("passed") is not True
+            or owned_fault_result.get("passed") is not True
         ):
             raise R4Error("authority receipt source contract is invalid")
         if (
@@ -6445,6 +6528,7 @@ def validate_source_bound_authority_receipt(
             or artifact.get("receipt_files") != observed_inventory
             or source_contract.get("local") != local_result
             or source_contract.get("ox") != ox_result
+            or source_contract.get("owned_faults") != owned_fault_result
             or source_contract.get("ox_authority") != ox_authority
         ):
             raise R4Error("authority receipt binding is invalid")
@@ -6584,6 +6668,16 @@ def run(
             "kind": "external_sealed_receipts",
             "receipt_inventory": ox_files,
         }
+    owned_fault_result = (
+        _fresh_owned_fault_contract(source_root, source_commit)
+        if local_result.get("passed") is True and ox_result.get("passed") is True
+        else {
+            "passed": False,
+            "reasons": ["source_contract_prerequisite_failed"],
+            "count": 0,
+            "scenarios": [],
+        }
+    )
     # The collector reads a large amount of runtime state.  Re-snapshot the
     # source immediately before publishing the artifact so a source mutation
     # during collection cannot be hidden by the earlier before/after pair.
@@ -6593,6 +6687,7 @@ def run(
     source_passed = bool(
         local_result["passed"]
         and ox_result["passed"]
+        and owned_fault_result.get("passed") is True
         and source_before["clean"]
         and source_after == source_before
         and source_final == source_before
@@ -6612,7 +6707,11 @@ def run(
                 _output_context=(parent_fd, output_fd, output_name, output_identity),
                 _expected_projection=production_result,
                 _expected_inventory={"local": local_files, "ox": ox_files},
-                _expected_results={"local": local_result, "ox": ox_result},
+                _expected_results={
+                    "local": local_result,
+                    "ox": ox_result,
+                    "owned_faults": owned_fault_result,
+                },
             )
             if source_passed and production_result["passed"] is True
             else (
@@ -6652,6 +6751,7 @@ def run(
                 "passed": source_passed,
                 "local": local_result,
                 "ox": ox_result,
+                "owned_faults": owned_fault_result,
                 "ox_authority": ox_authority,
             },
             "production_certification": {

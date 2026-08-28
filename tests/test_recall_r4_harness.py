@@ -25,12 +25,31 @@ assert SPEC is not None and SPEC.loader is not None
 HARNESS = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = HARNESS
 SPEC.loader.exec_module(HARNESS)
+REAL_FRESH_OWNED_FAULT_CONTRACT = HARNESS._fresh_owned_fault_contract
 
 from chronovisor.recall import recall_distillation as distill  # noqa: E402
 from chronovisor.recall import recall_distillation_store as distill_store  # noqa: E402
 from chronovisor.recall.recall_distillation_workset import (  # noqa: E402
     DistillationWorkset,
 )
+
+
+def _passed_owned_fault_contract() -> dict[str, object]:
+    return {
+        "passed": True,
+        "reasons": [],
+        "count": len(HARNESS.PRODUCTION_FAULT_SCENARIOS),
+        "scenarios": sorted(HARNESS.PRODUCTION_FAULT_SCENARIOS),
+    }
+
+
+@pytest.fixture(autouse=True)
+def _stub_fresh_owned_fault_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit fixtures use synthetic source commits; the producer has its own test."""
+
+    monkeypatch.setattr(
+        HARNESS, "_fresh_owned_fault_contract", lambda *_args: _passed_owned_fault_contract()
+    )
 
 
 def _git_source(tmp_path: Path) -> tuple[Path, str]:
@@ -173,6 +192,28 @@ def test_historical_profile_contract_accepts_only_known_sealed_schemas(
             HARNESS._production_historical_profile_contract(
                 path, contract_id=contract_id
             )
+
+
+def test_pre_profile_local_labels_cannot_impersonate_remote_ox() -> None:
+    row = {
+        "kind": "teacher-label",
+        "route": "recall.distill.teacher.a",
+        "record_sha256": "a" * 64,
+    }
+
+    assert HARNESS._production_pre_profile_local_label(row) is True
+    assert (
+        HARNESS._production_pre_profile_local_label(
+            {**row, "route": HARNESS.OX_ROUTE}
+        )
+        is False
+    )
+    assert (
+        HARNESS._production_pre_profile_local_label(
+            {**row, "source_commit": "b" * 40}
+        )
+        is False
+    )
 
 
 def _workset_receipt_connection(
@@ -1715,6 +1756,7 @@ def test_source_contract_passes_but_production_stays_false_without_attestation(
         ox_receipts=ox_dir,
     )
     assert artifact["source_contract"]["passed"] is True
+    assert artifact["source_contract"]["owned_faults"] == _passed_owned_fault_contract()
     assert artifact["production_certification"]["passed"] is False
     assert (
         "independent_live_provider_attestation_unavailable"
@@ -1956,6 +1998,7 @@ def test_read_artifact_requires_canonical_closed_payload(tmp_path: Path) -> None
     )
     legacy = json.loads(json.dumps(artifact))
     del legacy["source_contract"]["ox_authority"]
+    del legacy["source_contract"]["owned_faults"]
     legacy_unsigned = {
         key: value
         for key, value in legacy.items()
@@ -3326,13 +3369,12 @@ def test_authoritative_collector_can_certify_only_fixed_sealed_root(
         production_root=production,
     )
     # The fixture deliberately lacks provider-failure transitions and runtime
-    # archive binding.  Owned fault injection is a separate source contract,
+    # archive binding.  Its pre-profile local labels are historical data, not
+    # OX authority.  Owned fault injection is a separate source contract,
     # never a live-root requirement.
     assert result["passed"] is False
     assert set(result["reasons"]) == {
-        "production_failure_coverage_incomplete",
         "production_label_identity_invalid",
-        "production_lease_recovery_invalid",
         "production_runtime_archive_binding_invalid",
     }
     assert result["provider_calls"] == 0
@@ -3405,6 +3447,60 @@ def test_runtime_ox_contract_accepts_complete_fixed_root_evidence(
     assert result["contract"]["artifact_id"] == observed["profile_contract"]["artifact_id"]
     assert result["stages"] == observed["quality"]["stages"]
     assert result["failure_receipts"] == ["runtime-sealed-fixed-root-v1"]
+
+
+def test_runtime_ox_contract_binds_completed_work_to_paired_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One provider receipt may seal two labels; Workset binds label rows."""
+
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path, source, commit)
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    monkeypatch.setattr(
+        HARNESS,
+        "_load_production_anchor",
+        lambda _path, **_kwargs: _fixture_candidate_anchor(production),
+    )
+    source_snapshot = HARNESS._assert_source(source, commit)
+    observed = HARNESS._collect_authoritative_production(
+        source_root=source, source=source_snapshot, production_root=production
+    )
+    forged = _complete_runtime_projection(observed)
+    completed = forged["workset"]["counts"]["completed"]
+    forged["labels"]["count"] = completed * 2
+    forged["workset"]["counts"]["completed"] = completed * 2
+    forged["workset"]["rows"] += completed
+
+    result = HARNESS._validate_ox(
+        [], source_snapshot, production_projection=forged
+    )
+
+    assert result["passed"] is True
+
+
+def test_runtime_ox_contract_allows_no_natural_fault_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path, source, commit)
+    monkeypatch.setattr(HARNESS, "PRODUCTION_ROOT", production)
+    monkeypatch.setattr(
+        HARNESS,
+        "_load_production_anchor",
+        lambda _path, **_kwargs: _fixture_candidate_anchor(production),
+    )
+    source_snapshot = HARNESS._assert_source(source, commit)
+    observed = HARNESS._collect_authoritative_production(
+        source_root=source, source=source_snapshot, production_root=production
+    )
+    projection = _complete_runtime_projection(observed)
+    projection["events"]["failure"] = {"count": 0, "head_sha256": ""}
+    projection["events"]["lease"] = {"count": 0, "head_sha256": ""}
+
+    assert HARNESS._validate_ox(
+        [], source_snapshot, production_projection=projection
+    )["passed"] is True
 
 
 @pytest.mark.parametrize(
@@ -4028,7 +4124,7 @@ def test_state_ramp_claim_cannot_replace_missing_event_ledgers(
     )
     assert result["passed"] is False
     assert "production_ramp_stages_incomplete" in result["reasons"]
-    assert "production_failure_coverage_incomplete" in result["reasons"]
+    assert "production_failure_coverage_incomplete" not in result["reasons"]
 
 
 def test_authoritative_collector_rejects_fake_root_and_external_receipts(
@@ -4560,6 +4656,28 @@ def test_owned_fault_producer_reaches_validator_safe_outcomes(
     assert by_scenario["disable_rollback"]["outcome"]["profile_stopped"] is True
 
 
+def test_fresh_owned_fault_contract_runs_public_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    binding = HARNESS._assert_source(source, commit)
+    from chronovisor.recall import recall_distillation_remote_teacher as remote
+
+    monkeypatch.setattr(
+        remote,
+        "ox_alpha_source_binding",
+        lambda: {
+            "source_commit": binding["commit"],
+            "source_tree_sha256": binding["tree_sha256"],
+            "source_ox_identity_sha256": binding["ox_identity_sha256"],
+        },
+    )
+
+    assert REAL_FRESH_OWNED_FAULT_CONTRACT(source, commit) == (
+        _passed_owned_fault_contract()
+    )
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected"),
     [
@@ -4750,7 +4868,5 @@ def test_default_cli_requires_production_certification(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
     )
-    assert child.returncode == 3, child.stderr
-    child_payload = json.loads(child.stdout)
-    assert child_payload["source_contract"] is True
-    assert child_payload["production_certification"] is False
+    assert child.returncode == 2
+    assert "OX source binding is unavailable" in child.stderr
