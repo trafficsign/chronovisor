@@ -203,8 +203,40 @@ def test_pre_profile_local_labels_cannot_impersonate_remote_ox() -> None:
 
     assert HARNESS._production_pre_profile_local_label(row) is True
     assert (
+        HARNESS._production_pre_profile_local_label({**row, "route_identity": {}})
+        is True
+    )
+    assert (
+        HARNESS._production_pre_profile_local_label(
+            {
+                **row,
+                "route_identity": {
+                    "location": "local",
+                    "model": "gemma4:26b",
+                    "provider": "ollama",
+                    "role": "recall.distill.teacher.a",
+                },
+            }
+        )
+        is True
+    )
+    assert (
         HARNESS._production_pre_profile_local_label(
             {**row, "route": HARNESS.OX_ROUTE}
+        )
+        is False
+    )
+    assert (
+        HARNESS._production_pre_profile_local_label(
+            {
+                **row,
+                "route_identity": {
+                    "location": "remote",
+                    "model": HARNESS.OX_ROUTE,
+                    "provider": "opencode-go",
+                    "role": "recall.distill.teacher.a",
+                },
+            }
         )
         is False
     )

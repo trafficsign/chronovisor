@@ -1973,6 +1973,14 @@ def _production_historical_profile_contract(
 def _production_pre_profile_local_label(row: Mapping[str, Any]) -> bool:
     """Recognize the exact local label shape written before profiles existed."""
 
+    route_identity = row.get("route_identity")
+    local_identity = (
+        isinstance(route_identity, Mapping)
+        and set(route_identity) == {"location", "model", "provider", "role"}
+        and route_identity.get("location") == "local"
+        and route_identity.get("role") == row.get("route")
+        and all(route_identity.get(key) for key in ("model", "provider"))
+    )
     return (
         row.get("profile_contract_id") is None
         and row.get("kind") in {"teacher-label", "counterfactual-label"}
@@ -1990,9 +1998,9 @@ def _production_pre_profile_local_label(row: Mapping[str, Any]) -> bool:
                 "cohort",
                 "teacher_role",
                 "source_commit",
-                "route_identity",
             )
         )
+        and (route_identity in (None, {}) or local_identity)
     )
 
 
