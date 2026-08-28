@@ -1214,8 +1214,10 @@ def _authoritative_production_root(tmp_path: Path, source: Path, commit: str) ->
         candidate_indexed: bool,
         candidate_state: Mapping[str, object],
         age_bands: Mapping[str, object] | None,
+        texts: Mapping[str, str] | None,
+        preflight: object,
     ) -> dict[str, object]:
-        del config, assignments, age_bands
+        del config, assignments, age_bands, texts, preflight
         nonlocal run_number
         for rally_id, snapshot in snapshots.items():
             rally = rally_by_id.get(rally_id)

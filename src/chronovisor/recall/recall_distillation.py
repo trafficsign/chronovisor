@@ -8664,6 +8664,7 @@ def _teacher_payload(
     texts: Mapping[str, str],
     *,
     max_input_bytes: int,
+    include_context: bool = True,
 ) -> dict[str, Any] | None:
     query = texts.get(str(rally["query_sha256"]), "")
     candidate_text = texts.get(str(candidate["text_sha256"]), "")
@@ -8682,12 +8683,100 @@ def _teacher_payload(
         or len(canonical_json.canonical_json_bytes_strict(payload)) > max_input_bytes
     ):
         return None
+    if not include_context:
+        return payload
     for ref in reversed(rally.get("context_refs", [])):
         context.insert(0, texts.get(str(ref["semantic_sha256"]), ""))
         if len(canonical_json.canonical_json_bytes_strict(payload)) > max_input_bytes:
             context.pop(0)
             break
     return payload
+
+
+def _ox_select_remote_probe_rallies(
+    *,
+    config: DistillationConfig,
+    eligible: Sequence[
+        tuple[str, Mapping[str, Any], Mapping[str, Any], list[Mapping[str, Any]]]
+    ],
+    texts: Mapping[str, str],
+    preflight: Callable[[Mapping[str, Any]], bool],
+) -> list[
+    tuple[str, Mapping[str, Any], Mapping[str, Any], list[Mapping[str, Any]]]
+]:
+    ordered = sorted(
+        eligible,
+        key=lambda item: (_source_epoch(item[2]), item[0]),
+    )
+    prefetch = getattr(texts, "prefetch", None)
+    if callable(prefetch):
+        prefetch(
+            {
+                value
+                for _rally_id, _snapshot, rally, candidates in ordered
+                for value in (
+                    str(rally.get("query_sha256") or ""),
+                    *(str(candidate.get("text_sha256") or "") for candidate in candidates),
+                )
+                if value
+            }
+        )
+
+    def accepted(payload: Mapping[str, Any]) -> bool:
+        try:
+            return preflight(payload) is True
+        except Exception:
+            return False
+
+    selected = []
+    for rally_id, snapshot, rally, candidates in ordered:
+        safe: list[tuple[int, str, Mapping[str, Any], dict[str, Any]]] = []
+        for candidate in sorted(
+            candidates, key=lambda value: str(value.get("candidate_id") or "")
+        ):
+            payload = _teacher_payload(
+                rally,
+                candidate,
+                texts,
+                max_input_bytes=config.max_input_bytes,
+                include_context=False,
+            )
+            if payload is None:
+                continue
+            candidate_input = {
+                "candidate_id": candidate["candidate_id"],
+                "rally_id": rally["rally_id"],
+                "query": payload["query"],
+                "context": [],
+                "evidence": payload["candidate"],
+            }
+            single = {
+                "schema": "chronovisor.recall-distill-teacher-batch.v1",
+                "candidates": [candidate_input],
+            }
+            if accepted(single):
+                safe.append(
+                    (
+                        len(canonical_json.canonical_json_bytes_strict(candidate_input)),
+                        str(candidate["candidate_id"]),
+                        candidate,
+                        candidate_input,
+                    )
+                )
+        safe.sort(key=lambda item: (item[0], item[1]))
+        if len(safe) < 2:
+            continue
+        pair = safe[:2]
+        batch = {
+            "schema": "chronovisor.recall-distill-teacher-batch.v1",
+            "candidates": [item[3] for item in pair],
+        }
+        if not accepted(batch):
+            continue
+        selected.append((rally_id, snapshot, rally, [item[2] for item in pair]))
+        if len(selected) >= config.hard_floor_probe_pairs:
+            break
+    return selected
 
 
 def _teacher_label(
@@ -8880,6 +8969,8 @@ def _ox_prepare_tasks(
     candidate_indexed: bool,
     candidate_state: Mapping[str, Any],
     age_bands: Mapping[str, str] | None = None,
+    texts: Mapping[str, str] | None = None,
+    preflight: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> dict[str, Any]:
     tasks: dict[str, dict[str, Any]] = {}
     work_items: list[dict[str, Any]] = []
@@ -8909,11 +9000,7 @@ def _ox_prepare_tasks(
             "snapshot_sha256": snapshot.get("snapshot_sha256", ""),
             "query_sha256": rally.get("query_sha256", ""),
             "candidate_text_sha256": candidate.get("text_sha256", ""),
-            "context_sha256": [
-                ref.get("semantic_sha256", "")
-                for ref in rally.get("context_refs", [])
-                if isinstance(ref, Mapping)
-            ],
+            "context_sha256": [],
             **({"assignment": dict(assignment)} if assignment.get("probe") else {}),
         }
         payload_digest = canonical_json.canonical_json_sha256_strict(source)
@@ -8997,10 +9084,19 @@ def _ox_prepare_tasks(
         ]
         if len(candidates) >= 2:
             eligible_probe_rallies.append((rally_id, snapshot, rally, candidates))
-    probe_rallies = sorted(
-        eligible_probe_rallies,
-        key=lambda item: (_source_epoch(item[2]), item[0]),
-    )[: config.hard_floor_probe_pairs]
+    probe_rallies = (
+        _ox_select_remote_probe_rallies(
+            config=config,
+            eligible=eligible_probe_rallies,
+            texts=texts,
+            preflight=preflight,
+        )
+        if candidate_indexed and texts is not None and callable(preflight)
+        else sorted(
+            eligible_probe_rallies,
+            key=lambda item: (_source_epoch(item[2]), item[0]),
+        )[: config.hard_floor_probe_pairs]
+    )
     for rally_id, snapshot in sorted(
         snapshots.items(),
         key=lambda item: (_source_epoch(rally_by_id.get(item[0], {})), item[0]),
@@ -9313,6 +9409,7 @@ def _ox_resolve_claim_payloads(
             task["candidate"],
             texts,
             max_input_bytes=config.max_input_bytes,
+            include_context=False,
         )
         if payload is None:
             local_payload_rejects.append(claim)
@@ -10489,6 +10586,7 @@ def _run_ox_teacher_batch(
         )
     )
 
+    preflight = getattr(teacher, "accepts_egress_payload", None)
     prepared = _ox_prepare_tasks(
         config=config,
         snapshots=snapshots,
@@ -10499,6 +10597,8 @@ def _run_ox_teacher_batch(
         candidate_indexed=candidate_indexed,
         candidate_state=candidate_state,
         age_bands=age_bands if isinstance(age_bands, Mapping) else None,
+        texts=texts,
+        preflight=preflight if callable(preflight) else None,
     )
     tasks = prepared["tasks"]
     work_items = prepared["work_items"]
@@ -10524,7 +10624,6 @@ def _run_ox_teacher_batch(
         or not 1 <= claim_limit <= 500
     ):
         raise DistillationError("teacher_claim_limit must be between 1 and 500")
-    preflight = getattr(teacher, "accepts_egress_payload", None)
     scan_limit = claim_limit
     if claim_limit == 1 and callable(preflight):
         scan_limit = min(

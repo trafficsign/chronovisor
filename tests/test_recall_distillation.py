@@ -7634,6 +7634,142 @@ def test_teacher_payload_does_not_resolve_context_older_than_bounded_suffix() ->
     assert texts.reads == ["query", "candidate", "new", "old"]
 
 
+def test_remote_teacher_payload_omits_context_and_binds_empty_context(
+    tmp_path: Path,
+) -> None:
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def __init__(self) -> None:
+            self.requests: list[dict[str, object]] = []
+
+        def evaluate(self, payload: object) -> dict[str, object]:
+            assert isinstance(payload, dict)
+            candidates = payload["candidates"]
+            assert isinstance(candidates, list)
+            self.requests.extend(candidates)
+            return {
+                "labels": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "verdict": "relevant",
+                        "confidence": 0.9,
+                        "rationale": "direct_match",
+                    }
+                    for candidate in candidates
+                ],
+                **_ox_metadata(payload),
+            }
+
+    teacher = RemoteTeacher()
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    features = distill.build_fast_features(
+        query_chargram_coverage=1, candidate_chargram_precision=1
+    )
+    rally = {
+        "rally_id": "rally-1",
+        "session_cluster_id": "session-1",
+        "as_of": "2026-01-03T00:00:00Z",
+        "query_sha256": "query",
+        "context_refs": [{"semantic_sha256": "private-context"}],
+    }
+    distill._ensure_split_plan(
+        tmp_path,
+        [rally],
+        raw_watermark="a" * 64,
+        model_cohort_sha256="b" * 64,
+    )
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            teacher_claim_limit=1,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: teacher},
+        snapshots={
+            "rally-1": {
+                "as_of": rally["as_of"],
+                "snapshot_sha256": "a" * 64,
+                "feature_revision": distill.TEXT_FEATURE_REVISION,
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-1",
+                        "text_sha256": "candidate",
+                        "features": features,
+                    }
+                ],
+            }
+        },
+        rally_by_id={"rally-1": rally},
+        texts={
+            "query": "what proves the claim",
+            "candidate": "bounded fact",
+            "private-context": "private context stays local",
+        },
+        label_path=label_path,
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert result.labels_written == 1
+    assert [request["context"] for request in teacher.requests] == [[]]
+    labels = store.read_chain(label_path)
+    assert labels[0]["payload_source"]["context_sha256"] == []
+
+
+def test_remote_probe_selection_uses_provider_safe_candidate_pair() -> None:
+    class PrefetchingTexts(dict[str, str]):
+        def __init__(self) -> None:
+            super().__init__(
+                query="what proves the claim",
+                blocked_a="blocked a",
+                blocked_b="blocked b",
+                safe_a="short safe a",
+                safe_b="short safe b",
+                private_context="must stay local",
+            )
+            self.prefetches: list[set[str]] = []
+
+        def prefetch(self, hashes: Iterable[str]) -> None:
+            self.prefetches.append(set(hashes))
+
+    texts = PrefetchingTexts()
+    eligible = [
+        (
+            "rally-1",
+            {"snapshot_sha256": "a" * 64},
+            {
+                "rally_id": "rally-1",
+                "as_of": "2026-01-01T00:00:00Z",
+                "query_sha256": "query",
+                "context_refs": [{"semantic_sha256": "private_context"}],
+            },
+            [
+                {"candidate_id": "a", "text_sha256": "blocked_a"},
+                {"candidate_id": "b", "text_sha256": "blocked_b"},
+                {"candidate_id": "c", "text_sha256": "safe_a"},
+                {"candidate_id": "d", "text_sha256": "safe_b"},
+            ],
+        )
+    ]
+
+    selected = distill._ox_select_remote_probe_rallies(
+        config=distill.DistillationConfig(hard_floor_probe_pairs=1),
+        eligible=eligible,
+        texts=texts,
+        preflight=lambda payload: all(
+            candidate["candidate_id"] not in {"a", "b"}
+            and candidate["context"] == []
+            for candidate in payload["candidates"]
+        ),
+    )
+
+    assert [candidate["candidate_id"] for candidate in selected[0][3]] == ["c", "d"]
+    assert texts.prefetches == [{"query", "blocked_a", "blocked_b", "safe_a", "safe_b"}]
+
+
 def test_ox_bulk_claim_config_seals_and_batches_provider_dispatch(tmp_path: Path) -> None:
     class RemoteTeacher:
         local = False
