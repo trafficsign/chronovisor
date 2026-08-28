@@ -27,7 +27,7 @@ def expected_ox_request_sha256(*, profile_contract_id: str, payload_digest: str)
                 "identity_revision": OX_ALPHA_FIXED_IDENTITY["revision"],
                 "payload_digest": payload_digest,
                 "profile_contract_id": profile_contract_id,
-                "request_revision": "json-schema-core-label-abstain-16k-240s-v7",
+                "request_revision": "json-schema-core-label-abstain-16k-600s-v8",
                 "route_digest": OX_ALPHA_FIXED_IDENTITY["route_digest"],
             },
             ensure_ascii=False,
@@ -289,7 +289,7 @@ def evaluate_single_teacher_gate(
             reasons.append(f"{name}_identity_invalid")
     if identities["identity_revision"] != OX_ALPHA_FIXED_IDENTITY["revision"]:
         reasons.append("identity_revision_mismatch")
-    if identities["request_revision"] != "json-schema-core-label-abstain-16k-240s-v7":
+    if identities["request_revision"] != "json-schema-core-label-abstain-16k-600s-v8":
         reasons.append("request_revision_mismatch")
     if any(row.get("route_identity_exact") is not True for row in completed):
         reasons.append("route_identity_mismatch")

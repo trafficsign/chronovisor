@@ -46,7 +46,7 @@ def _row(
         "schema_sha256": OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"],
         "profile_contract_id": "e" * 64,
         "identity_revision": "deepseek-v4-flash-fixed-identity-v1",
-        "request_revision": "json-schema-core-label-abstain-16k-240s-v7",
+        "request_revision": "json-schema-core-label-abstain-16k-600s-v8",
         "route_digest": OX_ALPHA_FIXED_IDENTITY["route_digest"],
         "payload_digest": payload_digest,
         "payload_source": payload_source,

@@ -2724,7 +2724,7 @@ def test_ox_profile_requires_explicit_enable_and_builds_one_remote_teacher(
     assert counterfactual is None
     assert set(teachers) == {distill.OX_TEACHER_ROLE}
     assert teachers[distill.OX_TEACHER_ROLE].local is False
-    assert teachers[distill.OX_TEACHER_ROLE].kwargs["timeout_ms"] == 240_000
+    assert teachers[distill.OX_TEACHER_ROLE].kwargs["timeout_ms"] == 600_000
     assert counterfactual_enabled is not None
     assert counterfactual_enabled.local is True
 
@@ -5600,7 +5600,7 @@ def test_ox_claim_limit_one_keeps_one_batch_per_ramp_slot() -> None:
 
 def test_ox_ramp_request_revision_tracks_core_label_schema() -> None:
     assert (
-        distill.OX_RAMP_REQUEST_REVISION == "json-schema-core-label-abstain-16k-240s-v7"
+        distill.OX_RAMP_REQUEST_REVISION == "json-schema-core-label-abstain-16k-600s-v8"
     )
 
 
