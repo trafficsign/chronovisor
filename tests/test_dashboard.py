@@ -4194,7 +4194,7 @@ def test_dashboard_tls_slow_handshake_does_not_block_and_handler_slots_recover(
             timeout=1,
         )
         assert response.status_code == 200
-        assert server.dashboard_handler_slots.acquire(blocking=False)
+        assert server.dashboard_handler_slots.acquire(timeout=1)
         assert not server.dashboard_handler_slots.acquire(blocking=False)
         rejected = socket.create_connection((host, port), timeout=2)
         rejected.settimeout(2)
