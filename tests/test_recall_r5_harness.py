@@ -1827,6 +1827,19 @@ def test_managed_inventory_hashes_content_not_restorable_metadata(tmp_path: Path
     assert HARNESS._managed_inventory(root) != before
 
 
+def test_managed_inventory_tracks_oversized_files_by_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "production"
+    root.mkdir()
+    item = root / "model.safetensors"
+    item.write_bytes(b"x")
+    monkeypatch.setattr(HARNESS, "MAX_FILE_BYTES", 0)
+    before = HARNESS._managed_inventory(root)
+    item.write_bytes(b"xx")
+    assert HARNESS._managed_inventory(root) != before
+
+
 def test_inner_alone_or_mixed_completion_cannot_formally_pass(tmp_path: Path) -> None:
     inner = _formal_inner()
     with pytest.raises(HARNESS.R5Error, match="completion"):

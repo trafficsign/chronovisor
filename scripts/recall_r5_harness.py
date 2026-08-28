@@ -449,7 +449,7 @@ def source_state(source: Path, expected_commit: str) -> dict[str, Any]:
 
 
 def _managed_inventory(root: Path) -> dict[str, Any]:
-    """Hash every regular managed file; metadata alone is not an identity."""
+    """Hash bounded files and retain metadata identity for oversized files."""
     started = time.monotonic()
     records: list[tuple[str, int, int, int, int, str, str | None]] = []
     for base, directories, files in os.walk(root, followlinks=False):
@@ -464,9 +464,7 @@ def _managed_inventory(root: Path) -> dict[str, Any]:
                 else "directory" if stat.S_ISDIR(state.st_mode) else "special"
             )
             digest: str | None = None
-            if kind == "file":
-                if state.st_size > MAX_FILE_BYTES:
-                    raise R5Error("managed inventory file exceeds bounded limit")
+            if kind == "file" and state.st_size <= MAX_FILE_BYTES:
                 hasher = hashlib.sha256()
                 with path.open("rb") as handle:
                     while block := handle.read(1024 * 1024):
