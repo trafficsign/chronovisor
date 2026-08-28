@@ -1349,7 +1349,7 @@ def _validate_runtime_ox_projection(
         and _runtime_workset_projection_is_valid(
             projection.get("workset"),
             quality["stages"],
-            label_count=labels.get("count") if isinstance(labels, Mapping) else None,
+            label_count=quality.get("labels"),
         )
     )
     if (

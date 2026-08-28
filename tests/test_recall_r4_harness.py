@@ -3468,11 +3468,11 @@ def test_runtime_ox_contract_accepts_complete_fixed_root_evidence(
     observed = HARNESS._collect_authoritative_production(
         source_root=source, source=source_snapshot, production_root=production
     )
+    projection = _complete_runtime_projection(observed)
+    projection["labels"]["count"] += 1_013
 
     result = HARNESS._validate_ox(
-        [],
-        source_snapshot,
-        production_projection=_complete_runtime_projection(observed),
+        [], source_snapshot, production_projection=projection
     )
 
     assert result["passed"] is True
@@ -3501,6 +3501,7 @@ def test_runtime_ox_contract_binds_completed_work_to_paired_labels(
     forged = _complete_runtime_projection(observed)
     completed = forged["workset"]["counts"]["completed"]
     forged["labels"]["count"] = completed * 2
+    forged["quality"]["labels"] = completed * 2
     forged["workset"]["counts"]["completed"] = completed * 2
     forged["workset"]["rows"] += completed
 
