@@ -2588,32 +2588,23 @@ def _production_ledger_checkpoint(
 def _production_workset_candidate_binding(
     workset: Mapping[str, Any],
     candidate: Mapping[str, Any],
-    candidate_rows: Sequence[Mapping[str, Any]],
-) -> None:
-    """Bind every workset reference to the same sealed candidate generation."""
+    candidate_path: Path,
+) -> list[dict[str, Any]]:
+    """Stream every workset reference from the sealed candidate generation."""
 
     watermark = workset.get("watermark")
     items = workset.get("items")
+    completed = workset.get("completed")
     if (
         not isinstance(watermark, Mapping)
         or not isinstance(items, Mapping)
+        or not isinstance(completed, Mapping)
         or watermark.get("candidate_records") != candidate.get("records")
         or watermark.get("candidate_head") != candidate.get("head_sha256")
     ):
         raise R4Error("production workset candidate watermark is unbound")
-    snapshots: dict[str, Mapping[str, Any]] = {}
-    for record in candidate_rows:
-        snapshot = record.get("snapshot") if isinstance(record, Mapping) else None
-        rally_id = record.get("rally_id") if isinstance(record, Mapping) else None
-        if (
-            not isinstance(rally_id, str)
-            or not rally_id
-            or not isinstance(snapshot, Mapping)
-            or snapshot.get("rally_id") != rally_id
-        ):
-            raise R4Error("production candidate ledger snapshot is invalid")
-        snapshots[rally_id] = snapshot
-    references: set[tuple[str, str]] = set()
+    references: dict[str, set[str]] = {}
+    completed_rallies: set[str] = set()
     for work_id, item in items.items():
         if _SHA.fullmatch(str(work_id)) is None or not isinstance(item, Mapping):
             raise R4Error("production workset item inventory is invalid")
@@ -2628,20 +2619,78 @@ def _production_workset_candidate_binding(
             or not parts[2]
         ):
             raise R4Error("production workset payload reference is invalid")
-        snapshot = snapshots.get(parts[1])
-        candidates = snapshot.get("candidates") if isinstance(snapshot, Mapping) else None
-        if (
-            not isinstance(candidates, list)
-            or sum(
-                isinstance(value, Mapping) and value.get("candidate_id") == parts[2]
-                for value in candidates
-            )
-            != 1
-        ):
-            raise R4Error("production workset payload does not resolve in candidate ledger")
-        references.add((parts[1], parts[2]))
+        references.setdefault(parts[1], set()).add(parts[2])
+        if work_id in completed:
+            completed_rallies.add(parts[1])
     if not references:
         raise R4Error("production workset has no candidate references")
+
+    before = _production_stat(candidate_path, label="production candidate ledger")
+    if candidate.get("ledger_state") != before:
+        raise R4Error("production candidate ledger changed before workset binding")
+    resolved: set[str] = set()
+    completed_rows: list[dict[str, Any]] = []
+    records = 0
+    head = ""
+    try:
+        with candidate_path.open("rb") as handle:
+            for records, raw in enumerate(handle, start=1):
+                if records > PRODUCTION_MAX_ROWS:
+                    raise R4Error("production candidate ledger is unbounded")
+                if not raw.endswith(b"\n") or raw == b"\n":
+                    raise R4Error("production candidate ledger is truncated")
+                try:
+                    record = json.loads(raw[:-1])
+                except (ValueError, UnicodeError, RecursionError) as exc:
+                    raise R4Error("production candidate ledger JSON is invalid") from exc
+                if not isinstance(record, dict):
+                    raise R4Error("production candidate ledger row is invalid")
+                head = str(record.get("record_sha256") or "")
+                rally_id = record.get("rally_id")
+                if not isinstance(rally_id, str) or not rally_id:
+                    raise R4Error("production candidate ledger snapshot is invalid")
+                if rally_id not in references:
+                    continue
+                if rally_id in resolved:
+                    raise R4Error("production candidate ledger snapshot is invalid")
+                snapshot = record.get("snapshot")
+                candidates = (
+                    snapshot.get("candidates")
+                    if isinstance(snapshot, Mapping)
+                    else None
+                )
+                if (
+                    not isinstance(snapshot, Mapping)
+                    or snapshot.get("rally_id") != rally_id
+                    or not isinstance(candidates, list)
+                    or any(
+                        sum(
+                            isinstance(value, Mapping)
+                            and value.get("candidate_id") == candidate_id
+                            for value in candidates
+                        )
+                        != 1
+                        for candidate_id in references[rally_id]
+                    )
+                ):
+                    raise R4Error(
+                        "production workset payload does not resolve in candidate ledger"
+                    )
+                resolved.add(rally_id)
+                if rally_id in completed_rallies:
+                    completed_rows.append(record)
+    except OSError as exc:
+        raise R4Error("production candidate ledger read failed") from exc
+    if (
+        records != candidate.get("records")
+        or head != candidate.get("head_sha256")
+        or resolved != set(references)
+        or len(completed_rows) != len(completed_rallies)
+    ):
+        raise R4Error("production workset payload does not resolve in candidate ledger")
+    if _production_stat(candidate_path, label="production candidate ledger") != before:
+        raise R4Error("production candidate ledger changed during workset binding")
+    return completed_rows
 
 
 def _production_critical_module_sha256(source_root: Path) -> dict[str, str]:
@@ -5184,8 +5233,8 @@ def _collect_authoritative_production(
             or candidate_view["file_state"] != candidate["ledger_state"]
         ):
             raise R4Error("production candidate ledger checkpoint is inconsistent")
-        _production_workset_candidate_binding(
-            workset, candidate, candidate_view["rows"]
+        completed_candidate_rows = _production_workset_candidate_binding(
+            workset, candidate, candidate_path
         )
         labels = _production_chain(label_path, label_checkpoint_path)
         try:
@@ -5252,7 +5301,7 @@ def _collect_authoritative_production(
             source=source,
             contract=contract,
             contract_id=contract_id,
-            candidate_rows=candidate_view["rows"],
+            candidate_rows=completed_candidate_rows,
             rallies=production_rallies,
         )
         # Fault injection belongs to the explicit, provider-free owned-clone

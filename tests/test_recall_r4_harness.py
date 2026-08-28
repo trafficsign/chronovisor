@@ -443,6 +443,36 @@ def test_collector_rejects_payload_ref_absent_from_candidate_ledger(
     ]
 
 
+def test_collector_streams_full_candidate_binding_beyond_bounded_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, commit = _git_source(tmp_path)
+    production = _authoritative_production_root(tmp_path, source, commit)
+    candidate_path = production / HARNESS.PRODUCTION_CANDIDATE_RELATIVE
+    checkpoint_path = production / HARNESS.PRODUCTION_CANDIDATE_CHECKPOINT_RELATIVE
+    workset = HARNESS._production_workset(
+        production / HARNESS.PRODUCTION_WORKSET_RELATIVE
+    )
+    candidate = HARNESS._production_ledger_checkpoint(
+        candidate_path, checkpoint_path, ledger_name="candidate-ledger.jsonl"
+    )
+    monkeypatch.setattr(HARNESS, "PRODUCTION_MAX_FULL_LEDGER_BYTES", 1)
+    bounded = HARNESS._production_chain(
+        candidate_path, checkpoint_path, ledger_name="candidate-ledger.jsonl"
+    )
+
+    assert len(bounded["rows"]) < bounded["count"]
+    completed_rows = HARNESS._production_workset_candidate_binding(
+        workset, candidate, candidate_path
+    )
+    completed_rallies = {
+        workset["items"][work_id]["payload_ref"].split(":")[1]
+        for work_id in workset["completed"]
+    }
+
+    assert {row["rally_id"] for row in completed_rows} == completed_rallies
+
+
 def test_collector_rejects_workset_mutation_after_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
