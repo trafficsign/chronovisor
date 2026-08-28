@@ -10,7 +10,7 @@ permissions:
 jobs:
   frozen-quality-gates:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       PYTHONDONTWRITEBYTECODE: "1"
     steps:

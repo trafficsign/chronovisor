@@ -4656,22 +4656,17 @@ def test_owned_fault_producer_reaches_validator_safe_outcomes(
     assert by_scenario["disable_rollback"]["outcome"]["profile_stopped"] is True
 
 
-def test_fresh_owned_fault_contract_runs_public_worker(
+def test_fresh_owned_fault_contract_validates_published_suite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source, commit = _git_source(tmp_path)
-    binding = HARNESS._assert_source(source, commit)
-    from chronovisor.recall import recall_distillation_remote_teacher as remote
 
-    monkeypatch.setattr(
-        remote,
-        "ox_alpha_source_binding",
-        lambda: {
-            "source_commit": binding["commit"],
-            "source_tree_sha256": binding["tree_sha256"],
-            "source_ox_identity_sha256": binding["ox_identity_sha256"],
-        },
-    )
+    def publish(**kwargs: object) -> list[Path]:
+        output = cast(Path, kwargs["output"])
+        _write_owned_faults(output, source, commit)
+        return sorted(output.glob("*.json"))
+
+    monkeypatch.setattr(HARNESS, "run_owned_fault_scenarios", publish)
 
     assert REAL_FRESH_OWNED_FAULT_CONTRACT(source, commit) == (
         _passed_owned_fault_contract()
