@@ -2882,7 +2882,7 @@ def _production_candidate_tail(
         "anchor_artifact_id": anchor.get("artifact_id"),
         "anchor_file_sha256": anchor.get("file_sha256"),
         "anchor_seal_sha256": anchor.get("seal_sha256"),
-        "anchor_file_state": anchor.get("file_state"),
+        "anchor_file_state": anchor_file_state,
         "anchor_r0_artifact_id": anchor.get("r0_artifact_id"),
         "anchor_r0_file_sha256": anchor.get("r0_file_sha256"),
         "anchor_bootstrap_source_commit": anchor.get("bootstrap_source_commit"),
@@ -3041,6 +3041,7 @@ def _production_ox_events(
     contract_expiry = _canonical_future_expiry(contract.get("expires_at"))
     if contract_expiry is None or contract.get("expires_at") != contract_expiry:
         raise R4Error("production OX contract expiry is invalid")
+    contracts: dict[str, Mapping[str, Any]] = {contract_id: contract}
 
     names = {
         "ramp": "ox-ramp-receipts.jsonl",
@@ -3133,13 +3134,59 @@ def _production_ox_events(
             event_version = payload.get("event_version")
             if not isinstance(kind, str) or kind not in legacy_allowed:
                 raise R4Error("production OX event schema is invalid")
+            event_contract_id = payload.get("profile_contract_id")
+            if (
+                not isinstance(event_contract_id, str)
+                or _SHA.fullmatch(event_contract_id) is None
+            ):
+                raise R4Error("production OX event contract id is invalid")
+            event_contract = contracts.get(event_contract_id)
+            if event_contract is None:
+                event_contract, _, _ = _production_json(
+                    root
+                    / PRODUCTION_CONTRACT_DIR_RELATIVE
+                    / f"{event_contract_id}.json",
+                    label="historical production profile contract",
+                    schema="chronovisor.recall-distill-remote-profile.v2",
+                )
+                contracts[event_contract_id] = event_contract
+            historical = event_contract_id != contract_id
+            if historical:
+                event_revision = event_contract.get("request_revision")
+                event_expiry = event_contract.get("expires_at")
+                event_common = {
+                    "profile_contract_id": event_contract_id,
+                    "source_commit": event_contract.get("source_commit"),
+                    "source_tree_sha256": event_contract.get("source_tree_sha256"),
+                    "source_ox_identity_sha256": event_contract.get(
+                        "source_ox_identity_sha256"
+                    ),
+                }
+                if (
+                    event_contract.get("artifact_id") != event_contract_id
+                    or not isinstance(event_revision, str)
+                    or not event_revision
+                    or _parse_expiry(event_expiry) is None
+                    or _COMMIT.fullmatch(str(event_common["source_commit"])) is None
+                    or _SHA.fullmatch(str(event_common["source_tree_sha256"])) is None
+                    or _SHA.fullmatch(
+                        str(event_common["source_ox_identity_sha256"])
+                    )
+                    is None
+                ):
+                    raise R4Error("historical production OX contract is invalid")
+            else:
+                event_revision = contract_revision
+                event_expiry = contract_expiry
+                event_common = common
             if (
                 kind != group_kinds[group]
-                or any(payload.get(key) != value for key, value in common.items())
-                or payload.get("request_revision") != contract_revision
-                or payload.get("expires_at") != contract_expiry
-                or _canonical_future_expiry(payload.get("expires_at"))
-                != payload.get("expires_at")
+                or any(
+                    payload.get(key) != value for key, value in event_common.items()
+                )
+                or payload.get("request_revision") != event_revision
+                or payload.get("expires_at") != event_expiry
+                or _parse_expiry(payload.get("expires_at")) is None
                 or not isinstance(payload.get("captured_at"), str)
                 or not isinstance(record.get("event_key"), str)
                 or not isinstance(record.get("event_binding_sha256"), str)
@@ -3299,29 +3346,29 @@ def _production_ox_events(
                             not isinstance(provider_requests, Mapping)
                             or provider_requests.get(work_id)
                         != _expected_ox_provider_request_sha256(
-                            profile_contract_id=contract_id,
+                            profile_contract_id=event_contract_id,
                             payload_digest=payload_digest,
                             work_id=work_id,
-                            expires_at=contract_expiry,
+                            expires_at=str(event_expiry),
                         )
                         )
                     ):
                         raise R4Error("production OX provider request is unbound")
                     if legacy and provider_receipts.get(work_id) != _expected_ox_provider_request_sha256(
-                        profile_contract_id=contract_id,
+                        profile_contract_id=event_contract_id,
                         payload_digest=payload_digest,
                         work_id=work_id,
-                        expires_at=contract_expiry,
+                        expires_at=str(event_expiry),
                     ):
                         raise R4Error("production OX legacy provider receipt is unbound")
                     if (
                         not legacy
                         and provider_receipts.get(work_id)
                         == _expected_ox_provider_request_sha256(
-                            profile_contract_id=contract_id,
+                            profile_contract_id=event_contract_id,
                             payload_digest=payload_digest,
                             work_id=work_id,
-                            expires_at=contract_expiry,
+                            expires_at=str(event_expiry),
                         )
                     ):
                         raise R4Error("production OX actual provider receipt is synthetic")
@@ -3465,6 +3512,8 @@ def _production_ox_events(
                 != _sha256(expected_anchor)
             ):
                 raise R4Error("production OX event anchor is invalid")
+            if historical:
+                continue
             event = {
                 **payload,
                 "record_sha256": record["record_sha256"],
@@ -4157,10 +4206,10 @@ def _production_identity(
         "workset_receipt_head": workset.get("receipts", {}).get("head_sha256"),
         "candidate_checkpoint_head": candidate.get("head_sha256"),
         "candidate_checkpoint_records": candidate.get("records"),
-        "candidate_checkpoint_file_state": candidate.get("file_state"),
+        "candidate_checkpoint_file_state": _stable_candidate_file_state(
+            candidate.get("file_state")
+        ),
         "candidate_anchor_artifact_id": candidate.get("anchor_artifact_id"),
-        "candidate_anchor_file_sha256": candidate.get("anchor_file_sha256"),
-        "candidate_anchor_seal_sha256": candidate.get("anchor_seal_sha256"),
         "candidate_anchor_file_state": candidate.get("anchor_file_state"),
         "candidate_anchor_r0_artifact_id": candidate.get("anchor_r0_artifact_id"),
         "candidate_anchor_r0_file_sha256": candidate.get("anchor_r0_file_sha256"),
@@ -4179,8 +4228,6 @@ def _production_identity(
         "label_checkpoint_records": labels.get("count"),
         "label_checkpoint_file_state": labels.get("checkpoint_file_state"),
     }
-    if labels.get("sha256") is not None:
-        expected_runtime["label_sha256"] = labels.get("sha256")
     if critical_modules:
         expected_runtime["critical_module_sha256"] = dict(critical_modules)
         expected_runtime["candidate_anchor_critical_module_sha256"] = dict(
@@ -4343,7 +4390,9 @@ def _production_payload_source_matches(
         row.get("payload_source"),
         rally_id=rally_id,
         candidate_id=candidate_id,
-        rally=rally,
+        # The remote producer deliberately excludes conversation context;
+        # verify that closed payload shape instead of the richer local rally.
+        rally={**rally, "context_refs": []},
         snapshot_sha256=str(snapshot.get("snapshot_sha256") or ""),
         candidate_text_sha256=candidate_text_sha256,
         assignment=assignment if isinstance(assignment, Mapping) else None,
@@ -4361,6 +4410,7 @@ def _production_quality(
     contract_id: str,
     candidate_rows: Sequence[Mapping[str, Any]] | None = None,
     rallies: Mapping[str, Mapping[str, Any]] | None = None,
+    historical_contract_ids: frozenset[str] = frozenset(),
 ) -> tuple[set[str], dict[str, Any]]:
     reasons: set[str] = set()
     contract_identity = {
@@ -4404,6 +4454,16 @@ def _production_quality(
     label_rows = labels.get("rows")
     if not isinstance(label_rows, list) or not label_rows:
         return {"production_labels_missing"}, {"stages": {}}
+    current_label_rows: list[tuple[int, Mapping[str, Any]]] = []
+    for label_index, row in enumerate(label_rows):
+        if not isinstance(row, Mapping):
+            reasons.add("production_label_invalid")
+        elif row.get("profile_contract_id") == contract_id:
+            current_label_rows.append((label_index, row))
+        elif row.get("profile_contract_id") not in historical_contract_ids:
+            reasons.add("production_label_identity_invalid")
+    if not current_label_rows:
+        return reasons | {"production_labels_missing"}, {"stages": {}}
     completed = workset.get("completed")
     if not isinstance(completed, Mapping):
         return {"production_completed_inventory_missing"}, {"stages": {}}
@@ -4432,10 +4492,7 @@ def _production_quality(
     stage_work_units: dict[int, list[dict[str, Any]]] = {
         cap: [] for cap in PRODUCTION_RAMP_CAPS
     }
-    for label_index, row in enumerate(label_rows):
-        if not isinstance(row, Mapping):
-            reasons.add("production_label_invalid")
-            continue
+    for label_index, row in current_label_rows:
         digest = _text(row.get("record_sha256"))
         work_id = _text(row.get("work_id"))
         # The production label writer's durable identity is the chained
@@ -5031,7 +5088,7 @@ def _production_quality(
         reasons.add("production_failure_coverage_incomplete")
     return reasons, {
         "stages": stages,
-        "labels": len(label_rows),
+        "labels": len(current_label_rows),
         # OX exposes no provider-signed receipt.  These hashes are durable
         # adapter observations, bound by the event chain, immutable anchor,
         # exact runtime source, and single-writer Workset/label evidence.
@@ -5274,6 +5331,31 @@ def _collect_authoritative_production(
             contract_unsigned
         ):
             raise R4Error("production profile contract identity mismatch")
+        historical_contract_ids: set[str] = set()
+        for row in labels["rows"]:
+            if not isinstance(row, Mapping):
+                continue
+            historical_id = _text(row.get("profile_contract_id"))
+            if historical_id == contract_id or _SHA.fullmatch(historical_id) is None:
+                continue
+            historical_contract, _, _ = _production_json(
+                collection_root
+                / PRODUCTION_CONTRACT_DIR_RELATIVE
+                / f"{historical_id}.json",
+                label="historical production profile contract",
+                schema="chronovisor.recall-distill-remote-profile.v2",
+            )
+            historical_unsigned = {
+                key: value
+                for key, value in historical_contract.items()
+                if key not in {"artifact_id", "seal_sha256"}
+            }
+            if (
+                historical_contract.get("artifact_id") != historical_id
+                or historical_id != _sha256(historical_unsigned)
+            ):
+                raise R4Error("historical production profile contract identity mismatch")
+            historical_contract_ids.add(historical_id)
         events = _production_ox_events(
             original_root,
             source=source,
@@ -5303,6 +5385,7 @@ def _collect_authoritative_production(
             contract_id=contract_id,
             candidate_rows=completed_candidate_rows,
             rallies=production_rallies,
+            historical_contract_ids=frozenset(historical_contract_ids),
         )
         # Fault injection belongs to the explicit, provider-free owned-clone
         # source contract.  Requiring its test-only artifacts under the live
