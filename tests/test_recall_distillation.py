@@ -5497,6 +5497,7 @@ def test_ox_ramp_resumes_only_for_the_same_profile_contract_and_request_revision
         {
             "kind": state_kind,
             "status": "capture_only",
+            "ox_profile_stopped": not matching_contract,
             "ox_profile_contract_id": (
                 profile_contract_id if matching_contract else "0" * 64
             ),

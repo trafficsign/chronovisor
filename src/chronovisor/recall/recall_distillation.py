@@ -10552,7 +10552,10 @@ def _run_ox_teacher_batch(
         )
     try:
         worker_state = _read_worker_state(root)
-        if worker_state.get("ox_profile_stopped") is True:
+        if (
+            worker_state.get("ox_profile_stopped") is True
+            and worker_state.get("ox_profile_contract_id") == profile_contract_id
+        ):
             return _TeacherBatchResult(
                 deferred=True,
                 workset_status=workset.status("ox"),
