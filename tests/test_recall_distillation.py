@@ -7357,6 +7357,60 @@ def test_ox_canary_failure_is_single_attempt(
     assert result.workset_status[terminal_state] == terminal_count  # type: ignore[index]
 
 
+def test_ox_unreceipted_provider_attempt_stops_the_profile(tmp_path: Path) -> None:
+    class TimeoutTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def evaluate(self, _payload: object) -> dict[str, object]:
+            return {
+                "_failure": {
+                    "class": "timeout",
+                    "retryable": True,
+                    "labelable": False,
+                }
+            }
+
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            teacher_claim_limit=1,
+        ),
+        teachers={distill.OX_TEACHER_ROLE: TimeoutTeacher()},
+        snapshots={
+            "rally-1": {
+                "candidates": [
+                    {"candidate_id": "candidate-1", "text_sha256": "candidate-1"}
+                ]
+            }
+        },
+        rally_by_id={
+            "rally-1": {
+                "rally_id": "rally-1",
+                "query_sha256": "query",
+                "context_refs": [],
+            }
+        },
+        texts={"query": "what proves the claim", "candidate-1": "bounded fact"},
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert result.profile_stopped is True
+    assert result.ramp_provider_attempts == 1
+    assert result.workset_status["ready"] == 1  # type: ignore[index]
+    assert result.workset_status["leased"] == 0  # type: ignore[index]
+    assert store.read_chain(
+        store.distillation_dir(tmp_path) / "ox-ramp-receipts.jsonl"
+    ) == []
+    assert store.read_chain(
+        store.distillation_dir(tmp_path) / "ox-failure-receipts.jsonl"
+    ) == []
+
+
 def test_ox_failure_stage_is_durable_without_changing_retry_policy(
     tmp_path: Path,
 ) -> None:

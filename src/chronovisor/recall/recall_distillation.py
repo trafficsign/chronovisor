@@ -10016,7 +10016,13 @@ def _ox_dispatch_and_commit(
         dispatch_claimed_work=dispatch_claimed_work,
     )
     expected_identity = OX_ALPHA_FIXED_IDENTITY["route_identity"]
-    stopped = False
+    # An attempted provider call without an authoritative receipt cannot be
+    # included in a certifiable ramp denominator.  Stop this sealed profile
+    # instead of fabricating evidence or allowing a later success to advance it.
+    stopped = any(
+        result.attempts > 0 and not _ox_provider_receipt_from_result(result)
+        for result in results
+    )
     deferred = False
     records: list[dict[str, Any]] = []
     completed_claims: list[Any] = []
