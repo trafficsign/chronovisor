@@ -426,6 +426,7 @@ def _sqlite_identity(path: Path) -> dict[str, Any]:
     try:
         uri = f"{path.absolute().as_uri()}?mode=ro&immutable=1"
         connection = sqlite3.connect(uri, uri=True)
+        connection.row_factory = sqlite3.Row
         try:
             tables = {
                 str(name)
@@ -512,12 +513,25 @@ def _sqlite_identity(path: Path) -> dict[str, Any]:
                 if "workset_receipts" in tables
                 else 0
             )
+            receipt_audit = (
+                DistillationWorkset(path, migrate=False).audit_transition_receipts(
+                    connection=connection
+                )
+                if receipt_count
+                else None
+            )
             integrity = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
         finally:
             connection.close()
     except (OSError, sqlite3.Error, DistillationWorksetError) as exc:
         raise CutoverError("workset is invalid") from exc
-    if integrity != "ok" or lease_count != 0 or receipt_count != 0 or row_count == 0:
+    if (
+        integrity != "ok"
+        or lease_count != 0
+        or row_count == 0
+        or receipt_count
+        and (receipt_audit is None or receipt_audit.get("status") != "verified")
+    ):
         raise CutoverError("workset is not an idle legacy queue")
     return {
         "main_sha256": _sha256(path),
@@ -527,7 +541,9 @@ def _sqlite_identity(path: Path) -> dict[str, Any]:
             for state in ("ready", "leased", "completed", "quarantined")
         },
         "logical_sha256": logical,
-        "audit_status": "legacy-unverified",
+        "audit_status": (
+            str(receipt_audit["status"]) if receipt_audit else "legacy-unverified"
+        ),
     }
 
 

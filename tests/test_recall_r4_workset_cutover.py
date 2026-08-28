@@ -208,6 +208,38 @@ def test_archives_legacy_and_atomically_installs_verified_empty(tmp_path: Path) 
 
 
 @pytest.mark.darwin_contract
+def test_archives_verified_v2_and_atomically_installs_empty(tmp_path: Path) -> None:
+    root, offline, r0 = _fixture(tmp_path)
+    workset_path = store.distillation_dir(root) / "ox-workset.sqlite3"
+    for suffix in ("", "-wal", "-shm"):
+        workset_path.with_name(workset_path.name + suffix).unlink(missing_ok=True)
+    workset = DistillationWorkset(workset_path)
+    workset.advance(
+        [
+            {
+                "work_id": "w1",
+                "kind": "ox",
+                "payload_ref": "candidate-ledger:w1",
+                "payload_digest": "a" * 64,
+                "priority": 0,
+                "temporal_split": {"partition": "train"},
+                "provenance": {"profile": "deepseek-v4-flash-single-v1"},
+            }
+        ],
+        {"candidate_records": 1},
+    )
+    with sqlite3.connect(workset_path) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    _offline_evidence(root, offline)
+
+    result = _run(root, offline, r0)
+
+    archived = Path(str(result["archive"])) / "snapshot" / workset_path.name
+    assert CUTOVER._sqlite_identity(archived)["audit_status"] == "verified"
+    assert CUTOVER._fresh_identity(workset_path)["audit"]["status"] == "verified-empty"
+
+
+@pytest.mark.darwin_contract
 def test_completed_cutover_output_seals_noncertifying_scope(tmp_path: Path) -> None:
     root, offline, r0 = _fixture(tmp_path)
     output = tmp_path / "cutover-completed.json"
@@ -476,6 +508,38 @@ def test_rejects_unsafe_legacy_state(tmp_path: Path, fault: str) -> None:
 
     with pytest.raises((CUTOVER.CutoverError, distill.DistillationError)):
         _run(root, offline, r0)
+
+
+def test_sqlite_identity_accepts_only_verified_v2_receipts(tmp_path: Path) -> None:
+    path = tmp_path / "workset.sqlite3"
+    workset = DistillationWorkset(path)
+    workset.advance(
+        [
+            {
+                "work_id": "w1",
+                "kind": "ox",
+                "payload_ref": "candidate-ledger:w1",
+                "payload_digest": "a" * 64,
+                "priority": 0,
+                "temporal_split": {"partition": "train"},
+                "provenance": {"profile": "deepseek-v4-flash-single-v1"},
+            }
+        ],
+        {"candidate_records": 1},
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    assert CUTOVER._sqlite_identity(path)["audit_status"] == "verified"
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE workset_receipts SET receipt_sha256 = ? WHERE generation = 1",
+            ("f" * 64,),
+        )
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    with pytest.raises(CUTOVER.CutoverError, match="workset is invalid"):
+        CUTOVER._sqlite_identity(path)
 
 
 def test_rejects_busy_worker_after_authority_preflight(

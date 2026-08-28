@@ -11,7 +11,7 @@ import stat
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1123,10 +1123,13 @@ class DistillationWorkset:
                 raise DistillationWorksetError("workset commit delta is invalid")
         return before, after, delta, dict(details)
 
-    def audit_transition_receipts(self) -> dict[str, Any]:
+    def audit_transition_receipts(
+        self, *, connection: sqlite3.Connection | None = None
+    ) -> dict[str, Any]:
         """Validate the append-only transition chain and reconcile its final state."""
 
-        with closing(self._connect()) as connection:
+        manager = closing(self._connect()) if connection is None else nullcontext(connection)
+        with manager as connection:
             rows = connection.execute(
                 "SELECT generation, previous_sha256, operation, payload_json, "
                 "receipt_sha256 FROM workset_receipts ORDER BY generation ASC"
