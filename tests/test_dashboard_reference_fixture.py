@@ -1340,7 +1340,7 @@ addEventListener("DOMContentLoaded", () => {
                 while time.monotonic() < deadline:
                     if visual_path.is_file() and visual_path.stat().st_size > 0:
                         break
-                    if visual_process.poll() is not None:
+                    if visual_process.poll() not in (None, 0):
                         break
                     time.sleep(0.05)
                 try:
