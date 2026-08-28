@@ -48,6 +48,7 @@ OX_MODEL = "deepseek-v4-flash"
 OX_ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions"
 OX_SCHEMA = "chronovisor.recall-distill-teacher-batch.v1"
 OX_PROFILE_SCHEMA = "chronovisor.recall-distill-remote-profile.v2"
+OX_LEGACY_PROFILE_SCHEMA = "chronovisor.recall-distill-ox-profile.v1"
 OX_COHORT = "deepseek-v4-flash-backfill-v1"
 OX_IDENTITY_REVISION = "deepseek-v4-flash-fixed-identity-v1"
 OX_REQUEST_REVISION = "json-schema-core-label-abstain-16k-240s-v7"
@@ -1929,6 +1930,24 @@ def _production_json(
     return payload, state, digest
 
 
+def _production_historical_profile_contract(
+    path: Path, *, contract_id: str
+) -> tuple[dict[str, Any], dict[str, int], str]:
+    contract, state, digest = _production_json(
+        path, label="historical production profile contract"
+    )
+    if contract.get("schema") not in {OX_PROFILE_SCHEMA, OX_LEGACY_PROFILE_SCHEMA}:
+        raise R4Error("historical production profile contract schema is invalid")
+    unsigned = {
+        key: value
+        for key, value in contract.items()
+        if key not in {"artifact_id", "seal_sha256"}
+    }
+    if contract.get("artifact_id") != contract_id or contract_id != _sha256(unsigned):
+        raise R4Error("historical production profile contract identity mismatch")
+    return contract, state, digest
+
+
 def _production_companion_state(path: Path, *, label: str) -> dict[str, int] | None:
     try:
         value = path.lstat()
@@ -3142,12 +3161,11 @@ def _production_ox_events(
                 raise R4Error("production OX event contract id is invalid")
             event_contract = contracts.get(event_contract_id)
             if event_contract is None:
-                event_contract, _, _ = _production_json(
+                event_contract, _, _ = _production_historical_profile_contract(
                     root
                     / PRODUCTION_CONTRACT_DIR_RELATIVE
                     / f"{event_contract_id}.json",
-                    label="historical production profile contract",
-                    schema="chronovisor.recall-distill-remote-profile.v2",
+                    contract_id=event_contract_id,
                 )
                 contracts[event_contract_id] = event_contract
             historical = event_contract_id != contract_id
@@ -5338,23 +5356,12 @@ def _collect_authoritative_production(
             historical_id = _text(row.get("profile_contract_id"))
             if historical_id == contract_id or _SHA.fullmatch(historical_id) is None:
                 continue
-            historical_contract, _, _ = _production_json(
+            _production_historical_profile_contract(
                 collection_root
                 / PRODUCTION_CONTRACT_DIR_RELATIVE
                 / f"{historical_id}.json",
-                label="historical production profile contract",
-                schema="chronovisor.recall-distill-remote-profile.v2",
+                contract_id=historical_id,
             )
-            historical_unsigned = {
-                key: value
-                for key, value in historical_contract.items()
-                if key not in {"artifact_id", "seal_sha256"}
-            }
-            if (
-                historical_contract.get("artifact_id") != historical_id
-                or historical_id != _sha256(historical_unsigned)
-            ):
-                raise R4Error("historical production profile contract identity mismatch")
             historical_contract_ids.add(historical_id)
         events = _production_ox_events(
             original_root,

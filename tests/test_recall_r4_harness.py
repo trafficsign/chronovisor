@@ -143,6 +143,38 @@ def _write_receipts(path: Path, receipts: list[dict[str, object]]) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("schema", "accepted"),
+    [
+        ("chronovisor.recall-distill-ox-profile.v1", True),
+        ("chronovisor.recall-distill-unknown-profile.v1", False),
+    ],
+)
+def test_historical_profile_contract_accepts_only_known_sealed_schemas(
+    tmp_path: Path, schema: str, accepted: bool
+) -> None:
+    unsigned = {
+        "schema": schema,
+        "namespace": "recall-distillation",
+        "profile": "ox-alpha-single-v1",
+    }
+    contract_id = HARNESS._sha256(unsigned)
+    contract = HARNESS._sealed({"artifact_id": contract_id, **unsigned})
+    path = tmp_path / f"{contract_id}.json"
+    path.write_bytes(HARNESS._json_bytes(contract) + b"\n")
+
+    if accepted:
+        loaded, _, _ = HARNESS._production_historical_profile_contract(
+            path, contract_id=contract_id
+        )
+        assert loaded == contract
+    else:
+        with pytest.raises(HARNESS.R4Error, match="schema is invalid"):
+            HARNESS._production_historical_profile_contract(
+                path, contract_id=contract_id
+            )
+
+
 def _workset_receipt_connection(
     *, version: int, operation: str, details: Mapping[str, object]
 ) -> sqlite3.Connection:
@@ -604,13 +636,22 @@ def test_production_ox_events_partitions_legacy_and_rejects_noninteger_v2(
         "source_tree_sha256": source["tree_sha256"], "source_ox_identity_sha256": source["ox_identity_sha256"],
         "request_revision": HARNESS.OX_REQUEST_REVISION, "expires_at": expiry,
     }
-    historical_contract_id = "9" * 64
     historical_source = {
         "commit": "8" * 40,
         "tree_sha256": "7" * 64,
         "ox_identity_sha256": source["ox_identity_sha256"],
     }
     historical_expiry = "2098-01-01T00:00:00Z"
+    historical_contract_unsigned = {
+        "schema": HARNESS.OX_PROFILE_SCHEMA,
+        "namespace": "recall-distillation",
+        "request_revision": HARNESS.OX_REQUEST_REVISION,
+        "expires_at": historical_expiry,
+        "source_commit": historical_source["commit"],
+        "source_tree_sha256": historical_source["tree_sha256"],
+        "source_ox_identity_sha256": historical_source["ox_identity_sha256"],
+    }
+    historical_contract_id = HARNESS._sha256(historical_contract_unsigned)
     historical_v2 = {
         "event_version": 2,
         "kind": "ox-ramp-stage",
@@ -741,13 +782,7 @@ def test_production_ox_events_partitions_legacy_and_rejects_noninteger_v2(
                 },
                 historical_contract_id: {
                     "artifact_id": historical_contract_id,
-                    "request_revision": HARNESS.OX_REQUEST_REVISION,
-                    "expires_at": historical_expiry,
-                    "source_commit": historical_source["commit"],
-                    "source_tree_sha256": historical_source["tree_sha256"],
-                    "source_ox_identity_sha256": historical_source[
-                        "ox_identity_sha256"
-                    ],
+                    **historical_contract_unsigned,
                 },
             }.get(path.stem)
             or anchors[path.stem],
