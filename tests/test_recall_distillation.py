@@ -5565,6 +5565,38 @@ def test_ox_ramp_resumes_only_for_the_same_profile_contract_and_request_revision
     assert result.ramp_provider_attempts == expected_initial[2]
 
 
+def test_ox_claim_limit_one_keeps_one_batch_per_ramp_slot() -> None:
+    claims = [SimpleNamespace(work_id=f"work-{index}") for index in range(3)]
+    tasks = {
+        claim.work_id: {
+            "probe_batch_id": "",
+            "candidate": {"candidate_id": f"candidate-{index}"},
+            "assignment": {},
+            "input": {"candidate_id": f"candidate-{index}"},
+        }
+        for index, claim in enumerate(claims)
+    }
+    released: list[object] = []
+    queue = SimpleNamespace(release_unattempted=released.extend)
+
+    batches, rescanned = distill._ox_prepare_batches(
+        claims=claims,
+        tasks=tasks,
+        workset=queue,
+        claim_limit=1,
+        ramp_cap=2,
+        preflight=None,
+        payload_scan_remaining=None,
+    )
+
+    assert [[claim.work_id for claim in batch] for batch in batches] == [
+        ["work-0"],
+        ["work-1"],
+    ]
+    assert released == [claims[2]]
+    assert rescanned == 0
+
+
 def test_ox_ramp_request_revision_tracks_core_label_schema() -> None:
     assert (
         distill.OX_RAMP_REQUEST_REVISION == "json-schema-core-label-abstain-16k-240s-v7"

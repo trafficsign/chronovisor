@@ -9399,6 +9399,7 @@ def _ox_prepare_batches(
     tasks: Mapping[str, Mapping[str, Any]],
     workset: Any,
     claim_limit: int,
+    ramp_cap: int,
     preflight: Callable[[Mapping[str, Any]], bool] | None,
     payload_scan_remaining: int | None,
 ) -> tuple[list[list[Any]], int]:
@@ -9564,9 +9565,11 @@ def _ox_prepare_batches(
         ) - rejected_count
         if rejected_count and remaining > 0:
             return [], rejected_count
-    if claim_limit == 1 and len(batches) > 1:
-        workset.release_unattempted([claim for batch in batches[1:] for claim in batch])
-        batches = batches[:1]
+    if claim_limit == 1 and len(batches) > ramp_cap:
+        workset.release_unattempted(
+            [claim for batch in batches[ramp_cap:] for claim in batch]
+        )
+        batches = batches[:ramp_cap]
     return batches, 0
 
 
@@ -10670,6 +10673,7 @@ def _run_ox_teacher_batch(
         tasks=tasks,
         workset=workset,
         claim_limit=claim_limit,
+        ramp_cap=ramp_cap,
         preflight=preflight,
         payload_scan_remaining=_payload_scan_remaining,
     )
