@@ -66,13 +66,13 @@ td.num{text-align:right;white-space:nowrap}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_23f41aa9cef6401eae743d7fbfae7d32","created_at":"2026-08-29T17:29:12+09:00","状態":"running","slug":"chronovisor-qwen38-flash-next-125b-cutover"}
+{"task_id":"plan_23f41aa9cef6401eae743d7fbfae7d32","created_at":"2026-08-29T17:29:12+09:00","状態":"done","slug":"chronovisor-qwen38-flash-next-125b-cutover"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor Qwen3.8-Flash-Next 125B 一括切替</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="running">running</span>
+<span class="badge" data-bind="状態" data-state="done">done</span>
 <span><code data-bind="task_id">plan_23f41aa9cef6401eae743d7fbfae7d32</code></span>
 <span data-bind="created_at">2026-08-29T17:29:12+09:00</span>
 </div>
@@ -447,6 +447,7 @@ td.num{text-align:right;white-space:nowrap}
 <li><time>2026-08-30 00:00</time><span>証跡commit <code>4e5e40f744dddec7676ac55b532010b1efb5bf88</code> のpush後、healthのexpected commitがremote main先端へ進む仕様によりruntime drift=trueとなることを最終read-backで検出。コード差分が証跡だけでもgateを緩めず、この最終Plan commitをproduction runtime sourceへ追随させ、semantic/reranker/Dashboard/LAN/ingestの5 consumerだけを再登録することを最終処置とした。oMLXは再起動しない。完了条件はhealth=ok/drift=false、LAN 401、single authorityの実ブラウザ端点差0・旧lane可視0・overflow 0の再read-back。</span></li>
 <li><time>2026-08-30 04:50</time><span>ユーザーの実操作指摘により受入を再開。前回は「6パターン」をDecision Trace内のA-F分岐と誤解し、Dashboardの6つのクリック対象（Ingest/Recall/Audit/Improve/Repair/Typed Graph）を個別に開く受入を実施していなかった。Ingest以外で旧3モデル表示が残る症状を6クリックの実ブラウザ回帰として再現し、API→選択状態→Decision Trace投影→DOMを各対象ごとに修正・検証するためPlanをrunningへ戻した。</span></li>
 <li><time>2026-08-30 05:17</time><span>未実行レーンを選ぶAPI分岐が空トレースをlegacy quorumとして再生成していたroot causeを特定。現在のproduction authority contractと <code>classification.authority</code> routeからidle placeholderを組み立て直し、6レーン列挙testを旧コードRED→新コードGREENで固定した。Dashboard 159件、reference fixture 8件、Ruff、diff checkを通過。隔離Dashboardで6タブを1つずつクリックし、全件で125B/revision、Single Authority 1 lane、旧3 model route・NEXT VOTER・Agree?・QUORUM?の可視0、primary transform 450、横overflow 0、console error 0をDOMと6枚の実画面で確認。全体suiteは6304 passed / 1 skipped / 8 failedで、失敗8件は前回と同一のarchitecture baseline 7件と保護中R6 dirty差分1件、新規失敗0。production反映とlive 6クリック再受入は未実施のためPlanはrunningを維持。</span></li>
+<li><time>2026-08-30 05:22</time><span>fix commit <code>1f03b49233813b3c770da777bc79f1f41e4251f0</code> をpushし、production runtime sourceを同commitへ固定。semantic/reranker/Dashboard/LAN/Ingestの5 consumerだけを依存順に再登録し、各 <code>active / runs=1</code>、runtime commit=expected、drift=false、LAN未認証401を確認。oMLXはPID <code>65982</code>・18125のまま再起動なし。本番DashboardでIngest/Recall/Audit/Improve/Repair/Typed Graphを1つずつ実クリックし、6枚すべてを目視。各タブの選択状態が一致し、API/DOMとも125B固定revision、single mode、primary 1 lane、Single Authority、旧3 model route・NEXT VOTER・Agree?・QUORUM?の可視0、primary transform 450、横overflow 0、console error 0であることを再確認し、Planをdoneとした。</span></li>
 </ol>
 </section>
 </main>
