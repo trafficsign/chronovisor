@@ -83,7 +83,7 @@ td.num{text-align:right;white-space:nowrap}
 <h2>目的</h2>
 <div class="callout"><strong>結論:</strong> 切替は確定済み。旧 Qwen 27B / Gemma / Muse による3社合意を廃止し、選定済み <code>Jundot/Qwen3.8-Flash-Next-oQ4e-mtp</code> の <code>single_model_v1</code> へ、1回のmaintenance windowで全role・runtime・ingestを一括切替する。shadow、段階昇格、旧モデルとの再比較は行わない。</div>
 <ul>
-<li>旧3モデルを参照する36個の生成 role と、8001/8002 の旧 provider 経路を125B/8000へ統合する。</li>
+<li>旧3モデルを参照する36個の生成 role と、8000/8001/8002 の旧 provider 経路を125B/18125へ統合する。</li>
 <li>同一モデルへの repair / retry / self-review を独立票として数えず、監査証跡へ正直に記録する。</li>
 <li>切替後は125B単体のidentity、structured output、114,688 token、メモリ、実ingestを確認する。旧モデルを比較対象にしない。</li>
 <li>Embedding / reranker / semantic / Ornith の補助モデルは今回の一本化対象外として維持する。</li>
@@ -100,7 +100,8 @@ td.num{text-align:right;white-space:nowrap}
 <tr><td>量子化 / 実行</td><td>mixed 4-bit、PLE SSD mmap、MTP depth 3</td><td><code>mtp_enabled=true</code>、<code>mtp_num_draft_tokens=3</code>、<code>qwen4_ple_ssd_offload=true</code>。</td></tr>
 <tr><td>無効機能</td><td>DFlash / TurboQuant / VLM MTP</td><td>対象モデルの実測条件を固定し、不要な DFlash lease を避ける。</td></tr>
 <tr><td>権限方式</td><td><code>single_model_v1</code></td><td>1 route / 1 result。repair は最大2回だが票数は常に1以下。</td></tr>
-<tr><td>oMLX</td><td>0.6.3、base <code>~/.omlx</code>、<code>127.0.0.1:8000</code>、初期 concurrency 1</td><td>8001/8002 は旧重みがないため削除。API は <code>/v1</code>。</td></tr>
+<tr><td>oMLX</td><td>0.6.3、base <code>~/.omlx</code>、<code>127.0.0.1:18125</code>、初期 concurrency 1</td><td>専用portへ固定し、APIは <code>http://127.0.0.1:18125/v1</code>。8000/8001/8002は使用しない。</td></tr>
+<tr><td>port方針</td><td><code>18125/TCP</code>、loopback限定</td><td>8000は汎用開発port、8125はStatsDの慣用portなので避ける。Plan更新時点で18125のTCP/UDP listenerは0。</td></tr>
 <tr><td>常駐数</td><td><code>max_resident_models=1</code></td><td>選定モデル実ロード 69.93 GB。補助サービス込みの実測 gate を別途通す。</td></tr>
 <tr><td>residency</td><td><code>is_pinned=true</code>、<code>ttl_seconds=null</code></td><td>最速構成を優先し、requestごとのload/unloadを行わない。</td></tr>
 <tr><td>context</td><td>Chronovisor 上限 114,688</td><td>モデル宣言は262,144だが、ベンチ設定は32,768まで。32K/114,688だけをcutover前に確認する。</td></tr>
@@ -117,7 +118,7 @@ td.num{text-align:right;white-space:nowrap}
 <tr><td><code>primary/challenger/tie_break</code>、distinct 3 routes、quorum=2</td><td>同じ125Bを3 roleへ設定すると独立性がなく、現行validatorにも拒否される。</td><td>active router/configから3-role/quorum契約を削除し、authority 1 routeへ置換。旧proofはread-only parserだけ残す。</td></tr>
 <tr><td>authority / artifact / receipt が2票以上を要求</td><td>単純に <code>quorum=1</code> へ緩和すると、過去契約と安全境界を壊す。</td><td><code>authority_kind</code> と schema version を分離し、単一モデル用proofを明示。</td></tr>
 <tr><td>旧Qwen 20、Gemma 10、Muse 6 role</td><td>重みは削除済みで、現在の設定では起動しても復旧不能。</td><td>36 roleを直接生成、単一authority、明示self-evaluationの3種へ分類して移行。</td></tr>
-<tr><td>providers 8000/8001/8002</td><td>8001/8002 listenerも重みも存在しない。</td><td>生成providerは8000だけ。stale provider / model settingsを除去。</td></tr>
+<tr><td>providers 8000/8001/8002</td><td>8000は汎用portで、8001/8002 listenerと旧重みは存在しない。</td><td>生成providerは専用18125だけ。旧portとstale provider/model settingsを除去。</td></tr>
 <tr><td>oMLX context 32,768</td><td>DecisionRouterは最大114,688を要求し得る。</td><td>silent truncation禁止。114,688をexact tokenizer・server log・needleで実証。</td></tr>
 </tbody></table></div>
 </section>
@@ -155,7 +156,7 @@ td.num{text-align:right;white-space:nowrap}
 <li>114,688 tokenを実証する前にcontext設定だけを引き上げない。silent truncationを許さない。</li>
 <li>99 GiBの重みをcopyして二重保持しない。sandbox directoryを恒久runtime rootとして参照しない。</li>
 <li>旧quorum artifactをsingle policyで再生・昇格しない。新旧proofのschemaを暗黙変換しない。</li>
-<li>旧8001/8002 provider、削除済みモデル、stale DFlash設定を残したまま起動しない。</li>
+<li>旧8000/8001/8002 provider、削除済みモデル、stale DFlash設定を残したまま起動しない。</li>
 <li>API keyやsecretをrepository、plist、Plan、evidenceへ直書きしない。</li>
 <li><code>scripts/recall_r6_harness.py</code> と <code>tests/test_recall_r6_harness.py</code> の保護中差分を編集、整形、commitしない。</li>
 <li>Chronovisorを途中で自動起動しない。live mutation、push、restartは移行実行の明示承認前に行わない。</li>
@@ -166,7 +167,7 @@ td.num{text-align:right;white-space:nowrap}
 <section data-section="前提・仮定">
 <h2>前提・仮定</h2>
 <ul>
-<li>Chronovisor、teacher、semantic、reranker、dashboard、LAN dashboard、ingest、oMLX、8000/8001/8002 listenerは停止状態を維持する。実行開始時に再取得したreceiptを正本とする。</li>
+<li>Chronovisor、teacher、semantic、reranker、dashboard、LAN dashboard、ingest、oMLX、8000/8001/8002/18125 listenerは停止状態を維持する。実行開始時に再取得したreceiptを正本とする。</li>
 <li>対象モデルは21 safetensors shard、missing/incomplete/symlink 0。index total sizeは106,294,664,646 bytes。</li>
 <li>固定hash: <code>config.json 319b334a1abb705acf06035aa0331bcb7c25976ff93a5035b543548738a10824</code>、<code>model.safetensors.index.json 05f70b017f328d7d9f955186bd9868d1f5c3fb708df89cd47d7d1c14b73b73d2</code>。</li>
 <li>対象モデルの実ロード実績は69.93 GB。これはmemory guard設定にだけ使い、旧モデルとの比較や再選定には使わない。</li>
@@ -211,7 +212,7 @@ td.num{text-align:right;white-space:nowrap}
 <div class="phase"><h3>Phase 2 — 切替前の必須確認（旧モデル比較なし）</h3>
 <ol class="checklist">
 <li><input type="checkbox"><span>関連unit/integration testとfull suiteをisolated <code>CHRONOVISOR_ROOT</code> で通し、ユーザーruntimeへ書き込まない。</span></li>
-<li><input type="checkbox"><span>36個の旧role利用箇所が新しい125B routeへ置換され、旧role/model ID・8001/8002参照が0、補助8 roleが不変であることをstaticに確認する。</span></li>
+<li><input type="checkbox"><span>36個の旧role利用箇所が新しい125B/18125 routeへ置換され、active config/LaunchAgentの旧role/model ID・8000/8001/8002参照が0、補助8 roleが不変であることをstaticに確認する。</span></li>
 <li><input type="checkbox"><span>distinct response schemaを各1件だけ125Bへdirect smokeし、最終structured output 100%、最大2 repair、returned-model mismatch 0を確認する。</span></li>
 <li><input type="checkbox"><span>4K/32K/114,688 tokenを各1回通し、silent truncation、HTTP/model error、garbage outputがないことを確認する。</span></li>
 </ol>
@@ -222,8 +223,9 @@ td.num{text-align:right;white-space:nowrap}
 <ol class="checklist">
 <li><input type="checkbox"><span>Chronovisor全serviceが停止したまま、実装commit、production config、oMLX settings/model_settings、LaunchAgentをstagingし、全ファイルを切替可能な状態まで完成させる。</span></li>
 <li><input type="checkbox"><span>selected modelをsandboxからstable model rootへ同一volume atomic renameし、source消失、target1個、21 shard、総byte、config/index hashを確認する。</span></li>
-<li><input type="checkbox"><span>正規oMLX base <code>~/.omlx</code> をatomic更新し、8000、concurrency 1、memory guard、pinned常駐、TTLなし、MTP depth 3、PLE mmap、DFlash/TurboQuant/VLM MTP offを固定する。</span></li>
-<li><input type="checkbox"><span>同じtransactionで36個の旧role利用箇所を125B/8000へ置換し、旧Qwen/Gemma/Muse role/model settings、8001/8002 provider、旧quorum active policyを除去する。</span></li>
+<li><input type="checkbox"><span>正規oMLX base <code>~/.omlx</code> をatomic更新し、host <code>127.0.0.1</code>、port <code>18125</code>、concurrency 1、memory guard、pinned常駐、TTLなし、MTP depth 3、PLE mmap、DFlash/TurboQuant/VLM MTP offを固定する。</span></li>
+<li><input type="checkbox"><span>同じtransactionで36個の旧role利用箇所を <code>http://127.0.0.1:18125/v1</code> へ置換し、旧Qwen/Gemma/Muse role/model settings、8000/8001/8002 provider、旧quorum active policyを除去する。</span></li>
+<li><input type="checkbox"><span>production config、全consumer LaunchAgent、Dashboard fallback、検証harnessの <code>OMLX_BASE_URL</code> を <code>http://127.0.0.1:18125/v1</code> へ揃える。</span></li>
 <li><input type="checkbox"><span>実装をscoped commitする。GitHub-backed productionを使う場合は明示されたpush権限の下で先にpushし、そのcommitをruntime sourceとして固定する。</span></li>
 <li><input type="checkbox"><span>切替後の初回起動から <code>single_model_v1</code> を本番authorityとして有効化する。shadow route、旧routeとの併存、段階的traffic配分は作らない。</span></li>
 <li><input type="checkbox"><span>依存順序だけ守って oMLX → semantic/reranker → Dashboard/LAN → ingest を同じmaintenance window内で連続起動する。OXは別承認がない限りfalse。</span></li>
@@ -255,7 +257,7 @@ td.num{text-align:right;white-space:nowrap}
 <section data-section="完了条件">
 <h2>完了条件</h2>
 <ul>
-<li>旧Qwen/Gemma/Museの36 roleと8001/8002参照が0で、生成authorityは125B/8000の1 routeだけ。</li>
+<li>旧Qwen/Gemma/Museの36 roleとactive runtimeの8000/8001/8002参照が0で、生成authorityは125B/18125の1 routeだけ。</li>
 <li>proof/UI/API/logのすべてがsingle modelを示し、vote_countを3または2に偽装していない。</li>
 <li>旧quorum artifactは監査読取のみ、新single artifactは固定policy epochで署名・検証・read-backできる。</li>
 <li>全static/unit/integration/full-suite、125B単体smoke、context/memory、実ingest、restart/soak gateがgreen。</li>
@@ -272,6 +274,7 @@ td.num{text-align:right;white-space:nowrap}
 <thead><tr><th>Gate</th><th>合格</th><th>停止 / rollback条件</th></tr></thead>
 <tbody>
 <tr><td>Identity</td><td>revision、model ID、returned model、21 shard、総byte、config/index hashが全一致</td><td>missing/incomplete/symlink/重複ID/route driftが1件でもある</td></tr>
+<tr><td>Port</td><td>oMLXだけが <code>127.0.0.1:18125/TCP</code> をLISTENし、全active endpointが <code>http://127.0.0.1:18125/v1</code> と一致</td><td>0.0.0.0 bind、port競合、8000/8001/8002 fallback、endpoint drift</td></tr>
 <tr><td>Functional smoke</td><td>distinct response schemaを各1件、repair後100%、最大2 repair、garbage output 0</td><td>invalid output、returned-model mismatch、repair loop、context guard bypass</td></tr>
 <tr><td>Context</td><td>4K/32K/114,688を各1回、no truncation、no HTTP/model error</td><td>tokenizer/server logとrequested context不一致、silent truncation、memory abort</td></tr>
 <tr><td>Runtime settings</td><td>pinned=true、TTLなし、MTP depth 3、PLE mmap、DFlash/TurboQuant/VLM MTP offをAPI/logでread-back</td><td>設定値とeffective runtimeの不一致</td></tr>
@@ -313,9 +316,9 @@ td.num{text-align:right;white-space:nowrap}
 <section data-section="受け渡しメモ">
 <h2>受け渡しメモ（次担当へ）</h2>
 <ul>
-<li>実行開始時は最新HEADを再取得する。元Plan commitは <code>d6ac731</code>。保護中R6差分を混ぜない。</li>
+<li>実行開始時は最新HEADを再取得し、保護中R6差分を混ぜない。</li>
 <li>対象モデルの選定は確定済み。<code>_handoff/2026-08-29_qwen38-flash-next-benchmark.md</code> はmodel identity/settingsの参照だけに使い、旧モデル比較や量子化再評価を行わない。target weightsは <code>/Users/trafficsign/projects/sandbox/chronovisor-qwen-next-bench/</code>。</li>
-<li>現行oMLX main settingsは32,768 context、concurrency 2、旧model_settingsが残る。target settings不在時はadapterがDFlash利用と保守判定するため、<code>dflash_enabled=false</code>を明示する。</li>
+<li>現行oMLX main settingsはport 8000、32,768 context、concurrency 2で、旧model_settingsが残る。cutover時はport 18125へ置換し、target settings不在時のDFlash保守判定を避けるため <code>dflash_enabled=false</code>を明示する。</li>
 <li>service開始順は oMLX → semantic/reranker → Dashboard/LAN → ingest。これは依存順序であり、段階rolloutではない。すべて同じmaintenance window内で一括切替する。</li>
 <li>実装時はcodebase graphを再index/coverage確認し、direct role callerをsource searchでも照合する。best-effort graphだけで「全件」と断定しない。</li>
 </ul>
@@ -329,6 +332,7 @@ td.num{text-align:right;white-space:nowrap}
 <li><time>2026-08-29 17:42</time><span>metadata JSONと表示badgeのready一致、section構造、placeholder 0、保護2 fileのSHA256不変を検証。</span></li>
 <li><time>2026-08-29 17:43</time><span>ChatGPT app-server配下に再出現したchronovisor-mcp 2組を検出し、SIGTERM停止。再確認でChronovisor/oMLX label、listener、対象processはいずれも0。</span></li>
 <li><time>2026-08-29 17:47</time><span>切替確定・一括cutoverというユーザー判断を反映。shadow、段階昇格、100件adoption、旧モデルとの品質/速度比較を削除し、125B単体の機能・安全確認だけへ縮約。</span></li>
+<li><time>2026-08-29 17:52</time><span>oMLX専用portを18125/TCPへ確定。8000/8001/8002 active参照を全廃し、provider、LaunchAgent、Dashboard fallback、harnessのendpoint一致をcutover gateへ追加。</span></li>
 </ol>
 </section>
 </main>
