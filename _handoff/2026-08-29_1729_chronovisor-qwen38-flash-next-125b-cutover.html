@@ -86,6 +86,7 @@ td.num{text-align:right;white-space:nowrap}
 <li>旧3モデルを参照する36個の生成 role と、8000/8001/8002 の旧 provider 経路を125B/18125へ統合する。</li>
 <li>同一モデルへの repair / retry / self-review を独立票として数えず、監査証跡へ正直に記録する。</li>
 <li>切替後は125B単体のidentity、structured output、114,688 token、メモリ、実ingestを確認する。旧モデルを比較対象にしない。</li>
+<li>切替前に高速化候補を固定し、実測済みのANE hybrid prefillとprefix cacheを採用する。未対応機能を試験目的で本番設定へ混ぜない。</li>
 <li>Embedding / reranker / semantic / Ornith の補助モデルは今回の一本化対象外として維持する。</li>
 <li>失敗時は書き込みを止める。旧3モデルの重みは削除済みなので、設定復元だけを rollback 完了とは扱わない。</li>
 </ul>
@@ -98,17 +99,35 @@ td.num{text-align:right;white-space:nowrap}
 <tbody>
 <tr><td>対象モデル</td><td><code>Jundot/Qwen3.8-Flash-Next-oQ4e-mtp</code></td><td>revision <code>2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8</code> を固定。</td></tr>
 <tr><td>量子化 / 実行</td><td>mixed 4-bit、PLE SSD mmap、MTP depth 3</td><td><code>mtp_enabled=true</code>、<code>mtp_num_draft_tokens=3</code>、<code>qwen4_ple_ssd_offload=true</code>。</td></tr>
-<tr><td>無効機能</td><td>DFlash / TurboQuant / VLM MTP</td><td>対象モデルの実測条件を固定し、不要な DFlash lease を避ける。</td></tr>
+<tr><td>ANE高速化</td><td>hybrid prefill ON、compile cache ON</td><td>2,048-token、MLP 0.60、GDN 0.375、tail 1436、dual ANE、CPU/fused-down off。独立A/Bで4K/16K/32Kが約10%改善、needle 9/9、swap増分0。</td></tr>
+<tr><td>Prefix cache</td><td>SSD 5GB + hot 2GB、write-through off</td><td>16K共通prefixはcold 28.27秒からwarm 4.57秒、再起動後5.44秒、14,336 token再利用。cacheは再生成可能なので容量を制限する。</td></tr>
+<tr><td>無効機能</td><td>DFlash / TurboQuant / SpecPrefill / VLM MTP</td><td>Qwen4 target/QSA/draft parityがない機能は除外。PLE residentは推定103.94GBで85GiB gateを超えるためloadしない。</td></tr>
 <tr><td>権限方式</td><td><code>single_model_v1</code></td><td>1 route / 1 result。repair は最大2回だが票数は常に1以下。</td></tr>
 <tr><td>Dashboard</td><td>125Bの1レーンだけを表示</td><td>現行3レーンのtemplate/renderer/testは削除せず休眠保持する。single運用中はPrimary/Challenger/Tie-break、空レーン、合意分岐を画面へ表示せず、手動切替toggleも作らない。</td></tr>
-<tr><td>oMLX</td><td>0.6.3、base <code>~/.omlx</code>、<code>127.0.0.1:18125</code>、初期 concurrency 1</td><td>専用portへ固定し、APIは <code>http://127.0.0.1:18125/v1</code>。8000/8001/8002は使用しない。</td></tr>
+<tr><td>oMLX</td><td>0.6.3、base <code>~/.omlx</code>、<code>127.0.0.1:18125</code>、concurrency 1</td><td>専用portへ固定し、APIは <code>http://127.0.0.1:18125/v1</code>。concurrency 2はaggregate改善なし・個別latency悪化のため使わない。</td></tr>
 <tr><td>port方針</td><td><code>18125/TCP</code>、loopback限定</td><td>8000は汎用開発port、8125はStatsDの慣用portなので避ける。Plan更新時点で18125のTCP/UDP listenerは0。</td></tr>
-<tr><td>常駐数</td><td><code>max_resident_models=1</code></td><td>選定モデル実ロード 69.93 GB。補助サービス込みの実測 gate を別途通す。</td></tr>
+<tr><td>常駐数</td><td><code>max_resident_models=1</code></td><td>ANE込み実ロード73.92GB、prefix hot上限2GB。補助サービス込みでsteady ≤85GiB gateを通す。</td></tr>
 <tr><td>residency</td><td><code>is_pinned=true</code>、<code>ttl_seconds=null</code></td><td>最速構成を優先し、requestごとのload/unloadを行わない。</td></tr>
 <tr><td>context</td><td>Chronovisor 上限 114,688</td><td>モデル宣言は262,144だが、ベンチ設定は32,768まで。32K/114,688だけをcutover前に確認する。</td></tr>
 <tr><td>重み配置</td><td><code>~/.omlx/models/Jundot/Qwen3.8-Flash-Next-oQ4e-mtp</code></td><td>同一volume上の atomic rename。99 GiBを複製しない。</td></tr>
 <tr><td>補助経路</td><td>Ornith / bge-m3 / BAAI reranker / Nemotron を維持</td><td>旧3社合意の置換とは独立した用途のため、別判断なしに125Bへ寄せない。</td></tr>
 </tbody></table></div>
+</section>
+
+<section data-section="高速化選定">
+<h2>実装前の高速化選定（完了）</h2>
+<div class="callout"><strong>採用profile:</strong> q4e + PLE mmap + Lightning MTP depth 3 + ANE hybrid prefill + bounded prefix cache + concurrency 1。内蔵tunerの予測値ではなく、独立A/Bの実測を採用根拠にする。</div>
+<div class="table-wrap"><table>
+<thead><tr><th>候補</th><th>実測 / 根拠</th><th>判定</th></tr></thead>
+<tbody>
+<tr><td>ANE</td><td>49 MLP + 36 GDNをdual ANEへcompileしnative operations/duty &gt; 0。ANE off→onの3回中央値は4K 574.3→629.8、16K 554.7→616.8、32K 488.5→538.3 tok/s。needle 9/9、短decode 63.1 tok/s、swap増分0。</td><td>採用</td></tr>
+<tr><td>Prefix cache</td><td>16K suffix-changeでcold 28.27秒、warm 4.57/3.90秒、再起動後5.44秒。回答一致、<code>cached_tokens=14336</code>。</td><td>上限付きで採用</td></tr>
+<tr><td>Concurrency 2</td><td>異なる4K cache miss×2は逐次13.40秒、同時13.67秒。個別待ち時間は6.19/7.18秒から10.36/13.64秒へ悪化。</td><td>不採用、1固定</td></tr>
+<tr><td>MTP / PLE</td><td>oMLX 0.6.3のexact target supportと既存実測を再確認。depth 3のacceptanceは87.5–100%、PLEは実効<code>mmap</code>。</td><td>現設定を維持</td></tr>
+<tr><td>TurboQuant / DFlash / SpecPrefill</td><td>Qwen4 QSA auxiliary state、qwen4 target backend、専用draft/parityが不足。設定ONだけのsilent no-opや品質破壊を避ける。</td><td>本番matrixから除外</td></tr>
+<tr><td>PLE resident</td><td>full model推定103.94GBでsteady 85GiB gateとMetal 107.5GB ceilingに近すぎる。</td><td>危険なload testをせず除外</td></tr>
+</tbody></table></div>
+<p class="small">詳細と一次情報: <code>_handoff/2026-08-29_qwen38-flash-next-125b-acceleration-research.md</code>。raw: <code>ane-tuner-result.json</code> / <code>ane-on-performance.json</code> / isolated <code>server.log</code>。114,688 token、production schema、実ingest、30分steady-stateは後続のcutover受入gateとして残す。</p>
 </section>
 
 <section data-section="実装差分">
@@ -157,6 +176,8 @@ td.num{text-align:right;white-space:nowrap}
 <li>同じ125Bを primary / challenger / tie-break に複製し、3社合意または2-of-3と称さない。</li>
 <li>temperature、seed、repair、再試行の違いを独立したvoter identityとして数えない。</li>
 <li>旧モデルとの品質・速度比較、100問評価、shadow adoptionをcutover条件へ戻さない。モデル選定は完了済み。</li>
+<li>TurboQuant、DFlash、SpecPrefill、PLE resident、concurrency 2以上を「設定できる」という理由だけで再導入しない。Qwen4専用supportと独立parityがupstreamへ入った場合だけ別計画で再評価する。</li>
+<li>ANE tunerの+42.68%予測を本番性能として表示しない。独立A/Bの約10%だけを今回の実測値として使う。</li>
 <li>114,688 tokenを実証する前にcontext設定だけを引き上げない。silent truncationを許さない。</li>
 <li>99 GiBの重みをcopyして二重保持しない。sandbox directoryを恒久runtime rootとして参照しない。</li>
 <li>旧quorum artifactをsingle policyで再生・昇格しない。新旧proofのschemaを暗黙変換しない。</li>
@@ -201,6 +222,18 @@ td.num{text-align:right;white-space:nowrap}
 </ol>
 </div>
 
+<div class="phase"><h3>Phase 0.5 — 高速化qualification（2026-08-29 完了）</h3>
+<ol class="checklist">
+<li><input type="checkbox" checked><span>oMLX 0.6.3 release/sourceと実装を照合し、Qwen4 125Bで実在する候補、競合、silent no-op evidenceを整理した。</span></li>
+<li><input type="checkbox" checked><span>隔離runtimeでANE tunerを実行し、49 MLP + 36 GDN、dual ANE、native operation/duty &gt; 0を確認した。</span></li>
+<li><input type="checkbox" checked><span>cache offの独立4K/16K/32Kを各3回測り、約10%改善、needle 9/9、swap増分0、実ロード73.92GBを確認した。</span></li>
+<li><input type="checkbox" checked><span>prefix cacheのcold→warm→suffix change→restart後hitを確認し、SSD 5GB + hot 2GBを採用した。</span></li>
+<li><input type="checkbox" checked><span>4K×2の逐次/同時A/Bでconcurrency 2にaggregate改善がないことを確認し、1へ固定した。</span></li>
+<li><input type="checkbox" checked><span>TurboQuant/DFlash/SpecPrefill/PLE residentをsupport・品質・memory gateで除外し、追加model downloadや危険なloadを行わなかった。</span></li>
+<li><input type="checkbox" checked><span>最終runtime profileを q4e + PLE mmap + MTP3 + ANE + bounded prefix cache + concurrency1 として凍結した。</span></li>
+</ol>
+</div>
+
 <div class="phase"><h3>Phase 1 — Single-model契約をtest-firstで実装</h3>
 <ol class="checklist">
 <li><input type="checkbox"><span><code>DecisionRouterConfig</code>のlive 3-role/quorum設定を単一authority roleへ置換し、quorumへ戻すruntime toggleは追加しない。</span></li>
@@ -220,7 +253,8 @@ td.num{text-align:right;white-space:nowrap}
 <li><input type="checkbox"><span>関連unit/integration testとfull suiteをisolated <code>CHRONOVISOR_ROOT</code> で通し、ユーザーruntimeへ書き込まない。</span></li>
 <li><input type="checkbox"><span>36個の旧role利用箇所が新しい125B/18125 routeへ置換され、active config/LaunchAgentの旧role/model ID・8000/8001/8002参照が0、補助8 roleが不変であることをstaticに確認する。</span></li>
 <li><input type="checkbox"><span>distinct response schemaを各1件だけ125Bへdirect smokeし、最終structured output 100%、最大2 repair、returned-model mismatch 0を確認する。</span></li>
-<li><input type="checkbox"><span>4K/32K/114,688 tokenを各1回通し、silent truncation、HTTP/model error、garbage outputがないことを確認する。</span></li>
+<li><input type="checkbox"><span>凍結済みのANE + prefix cache profileで4K/32K/114,688 tokenを各1回通し、silent truncation、HTTP/model error、garbage outputがないことを確認する。114,688はcache missとする。</span></li>
+<li><input type="checkbox"><span>ANE procedure数、MTP acceptance、PLE mmap、prefix cache miss/hit/cached_tokens、SSD error 0、concurrency 1をAPI/logからread-backし、設定だけONのsilent no-opがないことを確認する。</span></li>
 </ol>
 <p class="small">ここでは旧モデル、他量子化、過去の3社合意とのscore比較は行わない。isolated runtimeで切替対象が壊れていないことだけを確認し、production trafficへ露出するのはPhase 3の1回だけ。</p>
 </div>
@@ -229,7 +263,7 @@ td.num{text-align:right;white-space:nowrap}
 <ol class="checklist">
 <li><input type="checkbox"><span>Chronovisor全serviceが停止したまま、実装commit、production config、oMLX settings/model_settings、LaunchAgentをstagingし、全ファイルを切替可能な状態まで完成させる。</span></li>
 <li><input type="checkbox"><span>selected modelをsandboxからstable model rootへ同一volume atomic renameし、source消失、target1個、21 shard、総byte、config/index hashを確認する。</span></li>
-<li><input type="checkbox"><span>正規oMLX base <code>~/.omlx</code> をatomic更新し、host <code>127.0.0.1</code>、port <code>18125</code>、concurrency 1、memory guard、pinned常駐、TTLなし、MTP depth 3、PLE mmap、DFlash/TurboQuant/VLM MTP offを固定する。</span></li>
+<li><input type="checkbox"><span>正規oMLX base <code>~/.omlx</code> をatomic更新し、host <code>127.0.0.1</code>、port <code>18125</code>、concurrency 1、memory guard、pinned常駐、TTLなし、MTP depth 3、PLE mmap、ANE推奨値、ANE compile cache、prefix SSD 5GB/hot 2GB/write-through offを固定する。DFlash/TurboQuant/SpecPrefill/VLM MTPはoff。</span></li>
 <li><input type="checkbox"><span>同じtransactionで36個の旧role利用箇所を <code>http://127.0.0.1:18125/v1</code> へ置換し、旧Qwen/Gemma/Muse role/model settings、8000/8001/8002 provider、旧quorum active policyを除去する。</span></li>
 <li><input type="checkbox"><span>production config、全consumer LaunchAgent、Dashboard fallback、検証harnessの <code>OMLX_BASE_URL</code> を <code>http://127.0.0.1:18125/v1</code> へ揃える。</span></li>
 <li><input type="checkbox"><span>実装をscoped commitする。GitHub-backed productionを使う場合は明示されたpush権限の下で先にpushし、そのcommitをruntime sourceとして固定する。</span></li>
@@ -240,11 +274,11 @@ td.num{text-align:right;white-space:nowrap}
 
 <div class="phase"><h3>Phase 4 — 切替直後の本番受入</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span><code>/v1/models/status</code>、status API、server logからmodel/revision/qwen4_exp/PLE mmap/Lightning MTP/context/memory ceilingをread-backする。</span></li>
+<li><input type="checkbox"><span><code>/v1/models/status</code>、status API、server logからmodel/revision/qwen4_exp/PLE mmap/Lightning MTP/ANE 49+36 procedures/prefix cache/concurrency 1/context/memory ceilingをread-backする。</span></li>
 <li><input type="checkbox"><span>API <code>/api/health</code>、<code>/api/snapshot</code>、<code>/api/local-consensus</code>、<code>/api/activity</code>、<code>/api/model-status</code>がsingle mode/model/revision/1 resultを返すことを確認する。</span></li>
 <li><input type="checkbox"><span>実ブラウザDOM/SVG/traceで125Bのsingle laneが中央・全幅に表示され、repair≠vote、Primary/Challenger/Tie-break・空レーン・NEXT VOTER・pair/tie/quorum分岐のvisible element数0、不要な縦余白0、console error 0、秘密情報非表示を確認する。</span></li>
 <li><input type="checkbox"><span>1件の実ingestをraw→decision→single artifact→apply→durable ack→read-backまで追い、再実行が重複applyしないことを確認する。</span></li>
-<li><input type="checkbox"><span>warm-up/load/settle/steadyのOS memory、swap delta、pageout/swapout、process footprintを記録し、安全閾値内を確認する。</span></li>
+<li><input type="checkbox"><span>warm-up/load/settle/steadyのOS memory、swap delta、pageout/swapout、process footprint、prefix SSD/hot使用量を記録し、安全閾値内を確認する。</span></li>
 <li><input type="checkbox"><span>queue/lease/authority/liveness/API/DOM/memoryを30分監視し、restartを1回行って同じcommit/config/hash/model/healthへ戻ることを確認する。</span></li>
 </ol>
 </div>
@@ -269,7 +303,9 @@ td.num{text-align:right;white-space:nowrap}
 <li>3レーンのtemplate/renderer/projection testは削除されず休眠し、productionに手動表示toggleはなく、single traceやlegacy proofから誤って再表示されない。</li>
 <li>旧quorum artifactは監査読取のみ、新single artifactは固定policy epochで署名・検証・read-backできる。</li>
 <li>全static/unit/integration/full-suite、125B単体smoke、context/memory、実ingest、restart/soak gateがgreen。</li>
-<li>pinned常駐・TTLなし・MTP depth 3・PLE mmapの設定とruntime read-backが一致。</li>
+<li>pinned常駐・TTLなし・MTP depth 3・PLE mmap・ANE 49+36 procedures・bounded prefix cache・concurrency 1の設定とruntime read-backが一致。</li>
+<li>ANEは4K/16K/32Kの独立A/Bで約10%改善、needle 9/9、swap増分0というpre-cutover receiptを保持し、本番114,688/structured schemaでも品質・memory gateを通過。</li>
+<li>prefix cacheはsuffix-changeとrestart後hitで回答一致・cached_tokens &gt; 0、SSD error 0。unique promptの性能をcache hitとして誤計上しない。</li>
 <li>旧routeとの併存、shadow、段階的traffic配分を一度も作らず、一括cutover receiptが残っている。</li>
 <li>保護中のR6 2 filesとbenchmark raw resultsに変更なし。秘密情報をcommitしていない。</li>
 <li>Plan checklist/logが逐次更新され、stateが <code>done</code>。不合格なら <code>blocked</code> とrollback receiptが残る。</li>
@@ -285,7 +321,9 @@ td.num{text-align:right;white-space:nowrap}
 <tr><td>Port</td><td>oMLXだけが <code>127.0.0.1:18125/TCP</code> をLISTENし、全active endpointが <code>http://127.0.0.1:18125/v1</code> と一致</td><td>0.0.0.0 bind、port競合、8000/8001/8002 fallback、endpoint drift</td></tr>
 <tr><td>Functional smoke</td><td>distinct response schemaを各1件、repair後100%、最大2 repair、garbage output 0</td><td>invalid output、returned-model mismatch、repair loop、context guard bypass</td></tr>
 <tr><td>Context</td><td>4K/32K/114,688を各1回、no truncation、no HTTP/model error</td><td>tokenizer/server logとrequested context不一致、silent truncation、memory abort</td></tr>
-<tr><td>Runtime settings</td><td>pinned=true、TTLなし、MTP depth 3、PLE mmap、DFlash/TurboQuant/VLM MTP offをAPI/logでread-back</td><td>設定値とeffective runtimeの不一致</td></tr>
+<tr><td>Runtime settings</td><td>pinned=true、TTLなし、MTP depth 3、PLE mmap、ANE推奨値、compile cache、prefix SSD 5GB/hot 2GB、concurrency 1、DFlash/TurboQuant/SpecPrefill/VLM MTP offをAPI/logでread-back</td><td>設定値とeffective runtimeの不一致</td></tr>
+<tr><td>Acceleration</td><td>ANE 49 MLP + 36 GDN procedures、native operations/duty &gt; 0、4K/16K/32K needle 100%、114,688/structured schema green</td><td>procedure/operation 0、ANE fallback、回答差、HTTP/model error、swap増分 &gt;1GiB</td></tr>
+<tr><td>Prefix cache</td><td>suffix-changeとrestart後hitで回答一致、cached_tokens &gt; 0、SSD error 0、上限5GB</td><td>state復元差、stale signature、SSD error、容量超過、unique promptをhitとして計上</td></tr>
 <tr><td>Single proof</td><td>authority route=1、valid result=1、repairはattemptのみ、artifact signature/policy 100%</td><td>self-labelled consensus、alias voter、旧artifact replay、unbound digest</td></tr>
 <tr><td>Atomicity</td><td>最初のservice traffic前に36個の旧role利用箇所、旧model/provider/active quorum参照がすべて0</td><td>新旧route併存、shadow、部分traffic、stale providerが1件でもある</td></tr>
 <tr><td>Memory</td><td>steady footprint ≤85 GiB、headroom ≥20 GiB、preflightからswap増分 ≤1 GiB</td><td>&gt;90 GiB、swap増分 &gt;4 GiB、free ≤10%が60秒、pageout/swapout急増、Metal/process kill</td></tr>
@@ -327,6 +365,7 @@ td.num{text-align:right;white-space:nowrap}
 <li>実行開始時は最新HEADを再取得し、保護中R6差分を混ぜない。</li>
 <li>対象モデルの選定は確定済み。<code>_handoff/2026-08-29_qwen38-flash-next-benchmark.md</code> はmodel identity/settingsの参照だけに使い、旧モデル比較や量子化再評価を行わない。target weightsは <code>/Users/trafficsign/projects/sandbox/chronovisor-qwen-next-bench/</code>。</li>
 <li>現行oMLX main settingsはport 8000、32,768 context、concurrency 2で、旧model_settingsが残る。cutover時はport 18125へ置換し、target settings不在時のDFlash保守判定を避けるため <code>dflash_enabled=false</code>を明示する。</li>
+<li>高速化profileは再選定しない。ANEはsequence 2048 / MLP 0.60 / GDN 0.375 / tail 1436 / dual / CPU・fused-down off、prefix cacheはSSD 5GB + hot 2GB / write-through off、concurrency 1。TurboQuant/DFlash/SpecPrefill/PLE residentは明示off。</li>
 <li>service開始順は oMLX → semantic/reranker → Dashboard/LAN → ingest。これは依存順序であり、段階rolloutではない。すべて同じmaintenance window内で一括切替する。</li>
 <li>実装時はcodebase graphを再index/coverage確認し、direct role callerをsource searchでも照合する。best-effort graphだけで「全件」と断定しない。</li>
 </ul>
@@ -343,6 +382,11 @@ td.num{text-align:right;white-space:nowrap}
 <li><time>2026-08-29 17:52</time><span>oMLX専用portを18125/TCPへ確定。8000/8001/8002 active参照を全廃し、provider、LaunchAgent、Dashboard fallback、harnessのendpoint一致をcutover gateへ追加。</span></li>
 <li><time>2026-08-29 18:01</time><span>Dashboard方針を確定。productionのsingle modeでは125B 1レーンだけを中央・全幅表示し、旧role・空レーン・合意分岐は完全に非表示。現行3レーン実装とtestは削除せず休眠保持し、手動toggleは作らない契約へ更新。</span></li>
 <li><time>2026-08-29 18:02</time><span>Plan metadata JSONと表示badgeのready一致、必須Dashboard契約、placeholder 0、HTML差分、保護中R6 2 filesのSHA256不変を検証。</span></li>
+<li><time>2026-08-29 18:21</time><span>oMLX 0.6.3内蔵ANE tunerを隔離runtimeで実行。49 MLP + 36 GDN、dual ANE、native operations/duty &gt; 0を確認。tuner予測は+42.68%だが本番値として不採用。</span></li>
+<li><time>2026-08-29 18:31</time><span>ANE推奨値を独立A/B。4K/16K/32KはANE off比+9.7/+11.2/+10.2%、needle 9/9、短decode 63.1 tok/s、実ロード73.92GB、swap増分0。ANE採用を確定。</span></li>
+<li><time>2026-08-29 18:33</time><span>prefix cacheをcold/warm/suffix-changeでA/B。16Kは28.27秒→4.57/3.90秒、cached_tokens=14,336、全回答一致。</span></li>
+<li><time>2026-08-29 18:35</time><span>prefix cacheの再起動後hit 5.44秒を確認。concurrency 2は4K×2のaggregateを改善せず個別latencyを悪化させたため不採用、1固定。</span></li>
+<li><time>2026-08-29 18:36</time><span>高速化調査をPlanへ反映。採用profileをq4e + PLE mmap + MTP3 + ANE + bounded prefix cache + concurrency1へ凍結し、unsupported候補を本番matrixから除外。移行実装は未着手。</span></li>
 </ol>
 </section>
 </main>
