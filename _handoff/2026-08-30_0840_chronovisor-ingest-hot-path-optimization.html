@@ -82,7 +82,7 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <li>モデル生成時間を除く ingest のホスト側クリティカルパスを、通常の1ページ変更で <strong>p95 10秒以内</strong>、無変更で <strong>p95 1秒以内</strong>にする。</li>
 <li>重複判定、ページ同一性、曖昧時の fail-closed、strict semantic publication、read-back を一切弱めず、現在と同じ判断結果をより少ない処理で得る。</li>
 </ul>
-<div class="callout"><strong>結論:</strong> LLMは止まっていない。遅延の主体は、LLM応答後の全ページ反復読込と、成果物確定後のCPU 1件ずつ埋め込みである。新しいキャッシュ基盤は作らず、既存の <code>IndexStore</code> と既に常駐しているMPS前景埋め込み経路を再利用する。</div>
+<div class="callout"><strong>結論:</strong> LLMは止まっていない。遅延の主体は、LLM応答後の全ページ反復読込と、成果物確定後のCPU 1件ずつ埋め込みである。全ページ照合はprocess起動・障害復旧・明示rebuild時だけに限定し、通常のingestでは既存のwrite receiptから変更ページだけを <code>IndexStore</code> へ反映する。新しいキャッシュ基盤は作らず、既存storeと既に常駐しているMPS前景埋め込み経路を再利用する。</div>
 </section>
 
 <section data-section="現状の実測">
@@ -94,6 +94,7 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <tr><td>Validate → Vote</td><td>直近30件 median 47ms、max 26.867s</td><td>遅い3件はいずれも create。候補解決中に同じ全ページ走査を反復している。</td></tr>
 <tr><td><code>_find_existing_create_target()</code></td><td class="metric-bad">13.255s / 1回</td><td><code>_find_page_resilient()</code> 配下で <code>all_pages()</code> を2回実行。validator内でも同じcreateを2回解決し、後段dedupeでも再実行。</td></tr>
 <tr><td><code>all_pages()</code></td><td class="metric-bad">5.556–5.817s / 1回</td><td>5,535ページをcanonical parse・検証。検索用の単純な存在確認に対して処理が重すぎる。</td></tr>
+<tr><td><code>IndexStore.refresh()</code></td><td class="metric-bad">変更時も全5,535件をstat</td><td>本文parseは変更ページだけだが、毎回 <code>_scan_disk()</code> で全ページを列挙・statする。変更後に1回へ減らすだけではsteady-stateのO(N)走査が残る。</td></tr>
 <tr><td>Stage 1開始 → catalog完成</td><td class="metric-bad">12–21s</td><td><code>triage()</code> がfolder抽出と総件数表示のために <code>all_pages()</code> を2回実行。</td></tr>
 <tr><td>Artifact確定 → 次rawのtriage開始</td><td class="metric-bad">median 69.871s、max 111.445s</td><td>同期semantic delta publicationがCPU、<code>incremental_max_batch=1</code>。代表17KBページ14文書のjobは約66.6s。</td></tr>
 <tr><td>IndexStore収録</td><td class="metric-ok">stable 5,535 / canonical 5,535、欠落0</td><td>現在コーパスでは既存のインメモリ索引が損失なく全ページを表現できる。</td></tr>
@@ -104,21 +105,27 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 
 <section data-section="採用設計">
 <h2>採用設計</h2>
-<pre>LLM response
+<pre>process bootstrap / crash recovery / explicit rebuild
+  → IndexStore full reconcileを1回だけ実行
+
+LLM response
   → plan validation
-      IndexStore上で存在・casefold・loose一致を確認
+      起動時に確定したIndexStore snapshot上で存在・casefold・loose一致を確認
       同一createは1回だけ解決
   → generate / review / apply
-  → changed_pages == [] ? 完了
-  → IndexStoreを1回だけrefresh
+      exact write receipt = {created/updated page_id, path}
+  → changed_pages == [] ? store更新なし
+  → receipt対象だけIndexStoreへupsert（full refreshなし）
   → strict semantic deltaを常駐MPS document encoderで公開
   → claims / state register
   → 同じstore snapshotでread-back
   → 次のraw</pre>
 <ol>
+<li><strong>全ページ照合は起動時だけ:</strong> process bootstrapで <code>IndexStore.refresh()</code> を1回実行してbaselineを確定する。通常のtriage、validation、apply後、read-backでは <code>all_pages()</code>、<code>_scan_disk()</code>、full <code>refresh()</code> を呼ばない。crash recovery、明示rebuild、検出不能な外部変更の復旧だけを例外にする。</li>
 <li><strong>全ページ再読込をゼロ化:</strong> <code>triage()</code> のfolder/countは既存の <code>IndexStore.all_canonical_page_keys()</code> と <code>page_count()</code> から得る。<code>_find_page_casefold()</code> とloose一致も <code>all_page_ids()</code> / <code>meta()</code> 上で行い、最後のcanonical path検証は残す。</li>
 <li><strong>同じ判断を一度だけ:</strong> <code>_triage_plan_validation_issues()</code> 内で同じoperationのeffective targetをリクエストスコープのdictにmemoizeする。グローバルcacheや新DBは作らない。</li>
-<li><strong>refreshを1回に統合:</strong> 変更なしならderived refresh全体をskip。変更ありなら既存のmutation lock下で1回だけrefreshし、そのsnapshotをread-backへ渡す。最初のrefreshが失敗した場合だけ現在の再試行を残す。</li>
+<li><strong>write receiptで差分反映:</strong> ingestが既に返す <code>created</code>/<code>updated</code> page idとprepared pathを正本receiptにし、既存 <code>IndexStore</code> へ最小の <code>apply_changes(upsert_paths, removed_page_ids)</code> seamを1つだけ追加する。変更ファイルだけをstat/parseし、canonical entries・backlinks・associations・generationを同じmutation境界で更新する。通常ingestにdeleteはないためremoveは既存の削除writerが必要になった時だけ使う。</li>
+<li><strong>同期失敗はfail closed:</strong> page本体のcommit後にstore差分反映が失敗した場合、成功したふりをして古いsnapshotをread-backしない。indexをdirtyとして当該jobをrecoveryへ送り、対象receiptの再適用、なお不明ならhot path外のfull reconcileで回復する。</li>
 <li><strong>strictだけMPS fast lane:</strong> <code>index_pages(wait=True)</code> のdocument embeddingだけ、既存の <code>_embed_foreground_documents()</code> を使う。これは既にmodel lock、accelerator lease、source classification、document purpose、MPS self-testを持ち、maintenance batch 32を利用できる。<code>wait=False</code> のbackground workerは現在のCPU経路を維持する。</li>
 <li><strong>見えない待ちをなくす:</strong> 新しいSVG topologyは作らず、既存のruntime status / console eventに <code>target-resolution</code>、<code>semantic-publish</code>、<code>read-back</code> と経過msを出す。500ms超の空白は必ず名前付きstageとして見えるようにする。</li>
 </ol>
@@ -131,6 +138,8 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <tbody>
 <tr><td>read-backを非同期化して次rawを先に進める</td><td>不採用</td><td>速く見えるだけで、semantic delta未公開のまま次処理へ進み、過去に起きたfalse missを再導入する。</td></tr>
 <tr><td>全ページ用の新cache / DBを追加</td><td>不採用</td><td><code>IndexStore</code> が既に同じ責務を持ち、現コーパス5,535件を欠落なく保持している。</td></tr>
+<tr><td>変更後にfull <code>IndexStore.refresh()</code>を1回だけ実行</td><td>不採用</td><td>回数は減るが、1ページ変更のたびに全5,535ページの列挙・statが残るため。</td></tr>
+<tr><td>既存write receiptから対象entryだけ更新</td><td><strong>採用</strong></td><td>writerは変更したpage id/pathを既に知っている。新しいjournalやcacheを作らず、処理量をO(全ページ数)からO(変更ページ数)へ落とせる。</td></tr>
 <tr><td>重複候補をtop-kだけに限定</td><td>不採用</td><td>品質と重複防止の意味を変える。全候補比較は残し、データ供給だけをdisk parseからmemoryへ変える。</td></tr>
 <tr><td>CPU batchだけを1→8/16へ変更</td><td>fallback</td><td>改善はするが、CPU modelのcold loadと二重常駐を残す。MPS gate不合格時のみ実測最速値を選ぶ。</td></tr>
 <tr><td>strict MPS、background CPU</td><td><strong>採用</strong></td><td>既にwarmな同一model・同一document encoderを再利用し、正本deltaとbackground耐障害性を両立する。</td></tr>
@@ -145,6 +154,7 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <li>Qwen3.8-Flash-Next-125B-oQ4e-mtp、port 8125、context、MTP、single-authority構成をこの作業で変更しない。</li>
 <li>重複判定のscore閾値、SequenceMatcherによる全候補比較、alias順序、case/Unicode/loose一致、曖昧時fail-closedを弱めない。</li>
 <li>strict semantic publicationまたはread-backをfire-and-forgetへ戻さない。</li>
+<li>通常のingest前後に <code>all_pages()</code>、<code>_scan_disk()</code>、full <code>IndexStore.refresh()</code> を呼ばない。「1回だけならよい」として戻さない。</li>
 <li>新しいcache database、queue、feature flag、抽象interface、model copy、CoreML変換物を追加しない。</li>
 <li>background CPU indexingを根拠なくMPSへ全面移行しない。同期critical pathだけを対象にする。</li>
 <li>ユーザーの未完了差分 <code>scripts/recall_r6_harness.py</code>、<code>tests/test_recall_r6_harness.py</code>、<code>_handoff/evidence/2026-08-29-recall-teacher-salvage/</code> に触れない・commitしない。</li>
@@ -157,6 +167,8 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <h2>前提・仮定</h2>
 <ul>
 <li>現在の5,535 stable pagesに対して <code>IndexStore</code> とcanonical enumerationの差が0である。実装直前に再確認し、差が1件でもあれば作業を止めて原因を解消する。</li>
+<li>全ページparity確認はbootstrap/recoveryの責務とし、以後のChronovisor管理下writeは変更対象を特定できるreceiptを必ず残す。receiptを出さないwriterが見つかった場合は、そのwriterだけ既存mutation APIへ寄せてからhot pathを切り替える。</li>
+<li>手動編集・Git checkoutなどChronovisor管理外の変更はingest前景で毎回探索しない。既存のfilesystem change signalがあれば対象pathを差分反映し、対象を特定できないoverflow/障害だけdirty markerからbackground full reconcileする。新しい常駐watcherはこのPlanでは作らない。</li>
 <li>foreground semantic routeはMPS、incremental routeはCPUで、別backend instanceとして構成されている。MPS document encodeは既存self-testで実行済み。</li>
 <li>125B generation終了後にstrict publicationへ入るため、通常はgeneration用accelerator activityと重ならない。実機gateでは125Bをresidentのまま確認する。</li>
 <li>semantic deltaの形式、dimensions、source hash、generation identityは変えないため、data migrationは不要。</li>
@@ -172,7 +184,7 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <tbody>
 <tr><td>A: 新規create・既存一致なし</td><td>最悪の存在確認、全候補score、semantic fallback、dedupeを通す。</td><td>microbench 0回 / live 1回</td></tr>
 <tr><td>B: create提案だがsame/near titleあり</td><td>create→update変換、同一target衝突、score/reason/result parityを通す。</td><td>microbench 0回 / live 1回</td></tr>
-<tr><td>C: 既存update + 17KB/14 semantic documents</td><td>casefold/Unicode/loose/alias、1回refresh、strict publish、read-backを通す。</td><td>microbench 0回 / live 1回</td></tr>
+<tr><td>C: 既存update + 17KB/14 semantic documents</td><td>casefold/Unicode/loose/alias、対象entry 1件のupsert、strict publish、read-backを通す。</td><td>microbench 0回 / live 1回</td></tr>
 </tbody>
 </table>
 <p>semantic候補matrixは warm-up 1回後に各3回だけ測る: 現行CPU batch 1、CPU batch 4/8/16、既存MPS document route。ANEは既存実行可能routeが発見された場合だけ同じmatrixへ加え、変換やdownloadはしない。</p>
@@ -181,15 +193,15 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <section data-section="実行手順">
 <h2>実行手順</h2>
 <ol class="checklist">
-<li><input type="checkbox"><span><strong>0. 実行前freeze:</strong> git status、running services、125B runtime identity、IndexStore 5,535件parity、background semantic jobs、memory/swapをread-onlyで記録する。保護中dirty差分をmanifestへ明記する。</span></li>
-<li><input type="checkbox"><span><strong>1. Red-capable feedback loop:</strong> <code>scripts/benchmark-ingest-hot-path</code> を最小1ファイルで作り、A–Cをmodel callなしで再現する。baselineとしてtarget resolution、catalog、refresh回数、semantic publish、artifact→next triggerをJSON保存し、現状の遅さを再現する。</span></li>
-<li><input type="checkbox"><span><strong>2. 全件disk scan除去:</strong> <code>ingest_triage.py</code> のfolder/countを <code>IndexStore</code> へ置換し、<code>_find_page_casefold()</code>/<code>_find_page_resilient()</code> をインメモリpage id集合から解決する。canonical path検証とalias/曖昧contractは維持する。</span></li>
+<li><input type="checkbox"><span><strong>0. 実行前freeze:</strong> git status、running services、125B runtime identity、IndexStore 5,535件parity、background semantic jobs、memory/swapをread-onlyで記録する。process起動時のfull reconcileを1回実測し、全writer/callerの <code>refresh()</code> とmutation receiptを棚卸しする。保護中dirty差分をmanifestへ明記する。</span></li>
+<li><input type="checkbox"><span><strong>1. Red-capable feedback loop:</strong> <code>scripts/benchmark-ingest-hot-path</code> を最小1ファイルで作り、A–Cをmodel callなしで再現する。baselineとしてtarget resolution、catalog、<code>all_pages</code>/<code>_scan_disk</code>/full refresh/targeted upsertの各回数、semantic publish、artifact→next triggerをJSON保存し、現状の遅さを再現する。</span></li>
+<li><input type="checkbox"><span><strong>2. bootstrap snapshot化:</strong> process起動時だけfull reconcileしてstoreをreadyにする。<code>ingest_triage.py</code> のfolder/countを <code>IndexStore</code> へ置換し、<code>_find_page_casefold()</code>/<code>_find_page_resilient()</code> を同じインメモリpage id集合から解決する。canonical path検証とalias/曖昧contractは維持する。</span></li>
 <li><input type="checkbox"><span><strong>3. 同一解決のmemoize:</strong> validator 1回の中で同じoperationのeffective targetをdictで1回だけ解決する。まずここまでを測り、target-resolution gateを満たせばglobal cacheや候補indexは作らない。</span></li>
-<li><input type="checkbox"><span><strong>4. refresh統合:</strong> <code>changed_pages=[]</code> はderived refreshをskip。変更時は正常系1回・失敗時のみretryとし、同じstore snapshotをread-backへ渡す。テストでrefresh call countを固定する。</span></li>
+<li><input type="checkbox"><span><strong>4. receipt差分反映:</strong> 既存のcreated/updated receiptとprepared pathから、変更entryだけを同じmutation境界で <code>IndexStore</code> へupsertする。<code>changed_pages=[]</code> は0件、1ページ変更は1件、Nページ変更はunique N件とし、full refreshは常に0回。同じ更新済みsnapshotをread-backへ渡し、差分反映失敗はdirty + recoveryとしてfail closedにする。</span></li>
 <li><input type="checkbox"><span><strong>5. semantic matrix:</strong> 125B resident状態でCPU batch 1/4/8/16とMPS document routeを比較し、速度、cosine parity、query競合、RSS、swap、lease timeoutを記録する。選定ルールを満たした1案だけを実装する。</span></li>
 <li><input type="checkbox"><span><strong>6. strict fast lane実装:</strong> MPSがgate合格なら <code>index_pages(wait=True)</code> のみ <code>_embed_foreground_documents()</code> へ通し、<code>wait=False</code> workerはCPUのままにする。不合格なら既存 <code>incremental_max_batch</code> の実測最速値だけを採用する。</span></li>
 <li><input type="checkbox"><span><strong>7. 可視化:</strong> 既存runtime status / console eventへ4つのhost phaseとmonotonic elapsed msを追加する。Decision Traceの線・node・6パターン表示には触れない。</span></li>
-<li><input type="checkbox"><span><strong>8. 行動parityと回帰テスト:</strong> exact、casefold、NFC/NFD、loose、alias、ambiguous、reserved system、same-title、near-title、missing update、no-op、strict read-back、MPS failure fallbackをred→greenで確認する。</span></li>
+<li><input type="checkbox"><span><strong>8. 行動parityと回帰テスト:</strong> exact、casefold、NFC/NFD、loose、alias、ambiguous、reserved system、same-title、near-title、missing update、no-op、strict read-back、MPS failure fallbackをred→greenで確認する。bootstrap後は <code>all_pages()</code>、<code>_scan_disk()</code>、full <code>refresh()</code> を例外化してA–Cが完走すること、create/update、複数page、idempotent replay、差分反映失敗→recovery、外部dirty→background reconcileを固定する。</span></li>
 <li><input type="checkbox"><span><strong>9. 全体quality gate:</strong> focused pytest、semantic tests、全pytest、ruff、mypy、import-linterを実行する。debug instrumentationとthrowaway artifactを除去する。</span></li>
 <li><input type="checkbox"><span><strong>10. 実機acceptance:</strong> A–Cのlive rawを各1回だけ通す。trace/API/runtime log/semantic generation/read-back/dashboard stageを同じjob idで照合し、下記すべての閾値を満たす。</span></li>
 <li><input type="checkbox"><span><strong>11. scoped commit:</strong> scan/refresh最適化とsemantic fast laneを分離commitし、保護中dirty差分を含めない。pushはユーザーが明示した時だけ行い、GitHub-backed runtimeではpush後にrestart、archive commit、health、live checkの順を守る。</span></li>
@@ -215,7 +227,8 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <tr><td>create target resolution / Validate → Vote</td><td>warm p95 ≤ 750ms、max ≤ 1.5s。現在の26.867s級outlierを0件にする。</td></tr>
 <tr><td>triage catalog準備</td><td>warm p95 ≤ 250ms、max ≤ 500ms。</td></tr>
 <tr><td>hot pathの <code>all_pages()</code></td><td>0回。monkeypatchで呼ばれたら失敗するテストを残す。</td></tr>
-<tr><td>IndexStore refresh</td><td>変更なし0回、変更あり正常系1回。失敗時retryのみ例外。</td></tr>
+<tr><td>full disk reconcile</td><td>process bootstrapで1回。steady-state ingestでは <code>_scan_disk()</code> / full <code>IndexStore.refresh()</code> ともに0回。crash recovery・明示rebuild・対象不明の外部dirtyだけhot path外で許可。</td></tr>
+<tr><td>IndexStore targeted apply</td><td>変更なし0件。create/update N件ならunique N件だけstat/parse/upsertし、read-back前に同一snapshotへ反映。1ページ変更で全5,535件statは0件。</td></tr>
 <tr><td>14-document strict semantic publish</td><td>125B residentでwarm p95 ≤ 5s、max ≤ 8s。</td></tr>
 <tr><td>Artifact確定 → 次raw triage開始</td><td>1ページ変更 p95 ≤ 10s、max ≤ 15s。変更なし p95 ≤ 1s。</td></tr>
 <tr><td>判断品質</td><td>既存・追加fixtureでtarget path、type、reason、曖昧errorが旧実装と100%一致。既知の重複create 0。</td></tr>
@@ -233,6 +246,7 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <ul>
 <li><code>uv run scripts/benchmark-ingest-hot-path --cases create-miss,create-match,update-semantic --format json</code></li>
 <li><code>uv run pytest -q tests/test_ingest.py -k 'SearchBeforeCreate or TriagePlanSchema or ReadBackVerification or ApplyOperations'</code></li>
+<li>bootstrap完了後に <code>all_pages()</code>、<code>IndexStore._scan_disk()</code>、<code>IndexStore.refresh()</code> をraiseさせ、A–C、no-op、recovery fixtureを実行する。receiptのunique page数とtargeted apply数が一致することをassertする。</li>
 <li><code>uv run pytest -q tests/test_semantic_service.py tests/test_semantic_jobs.py tests/test_search_semantic_backend.py</code></li>
 <li><code>CHRONOVISOR_ROOT="$(mktemp -d)" uv run pytest -q</code>（実行時はtrapで一時rootを回収し、実データを参照しない）</li>
 <li><code>uv run ruff check --no-cache src scripts tests</code></li>
@@ -245,8 +259,8 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <section data-section="Rollback">
 <h2>Rollback</h2>
 <ul>
-<li>data schemaとsemantic delta形式を変えないため、rollback migrationは不要。</li>
-<li>semantic gateに失敗した場合はfast-lane commitだけをrevertし、同期CPU経路へ戻す。scan/refresh改善は独立commitとして保持できる。</li>
+<li>data schemaとsemantic delta形式を変えないため、rollback migrationは不要。page本体が正本なので、IndexStore差分が不完全でもfull reconcileで再構築できる。</li>
+<li>semantic gateに失敗した場合はfast-lane commitだけをrevertし、同期CPU経路へ戻す。targeted applyに失敗した場合はそのcommitだけをrevertして従来refreshへ戻し、full reconcile後にA–C parityを確認する。</li>
 <li>read-back miss、cosine &lt; 0.999、query regression &gt; 10%、125B tok/s regression &gt; 5%、memory/swap超過、lease timeout発生のいずれかで即rollback。</li>
 <li>GitHub-backed productionでrollbackする場合も <code>push → restart → archive commit → health → live check</code> の順を守る。</li>
 <li>rollback後にA–Cを再実行し、旧correctnessとruntime identityの回復をreceipt化する。</li>
@@ -263,6 +277,8 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <ul>
 <li>最初に触るべきroot causeは <code>src/chronovisor/ingest/ingest.py</code> の <code>_find_page_casefold()</code> / <code>_find_page_resilient()</code> と、<code>src/chronovisor/ingest/ingest_triage.py</code> の2つの <code>all_pages()</code>。CSSやoMLX tuningから始めない。</li>
 <li><code>_existing_candidate_metas()</code> は既に <code>IndexStore</code> を使っている。新しい候補cacheを作る前に、shared page finderを直し、同一validator内の重複解決だけをdictで止める。</li>
+<li><code>IndexStore.refresh()</code> は変更本文だけをparseするが、<code>_scan_disk()</code> で全ページをstatする。変更後に1回へまとめる案も最終形ではない。起動時baselineの後は、<code>apply_prepared_operations()</code> が既に返すcreated/updatedとprepared pathを差分receiptとして使う。</li>
+<li>最初のtargeted applyは既存entry builderとin-memory derived rebuildを再利用する。そこで閾値を満たす限り、差分backlink engine、journal、別DBは作らない。永続cache flushが残余遅延になった場合だけ、page本体から起動時再構築できる性質を使ってhot path外flushを追加検討する。</li>
 <li>strict semanticの候補は <code>src/chronovisor/search/semantic_service.py</code> の既存 <code>_embed_foreground_documents()</code>。新providerは不要。</li>
 <li>read-backの正しさは速度より優先。非同期化ではなく、同期処理そのものを短縮する。</li>
 <li>Phase 1–3で閾値を達成したら、job coalescing、複数raw並列化、normalized candidate global indexは実装しない。実測で残余が閾値を超えた時だけ次Planに分離する。</li>
@@ -273,6 +289,7 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <h2>実行ログ</h2>
 <ol class="log">
 <li><time>2026-08-30 08:40</time><span>Plan生成。現時点では調査・設計のみで、runtime/code/configは未変更。</span></li>
+<li><time>2026-08-30 08:53</time><span>ユーザー判断を反映。変更後のfull refresh 1回案を撤回し、起動時full reconcile 1回 + write receiptによるO(変更ページ数)差分反映へ更新。runtime/code/configは未変更。</span></li>
 </ol>
 </section>
 
