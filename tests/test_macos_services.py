@@ -166,6 +166,4 @@ def test_refresh_reenrolls_after_replacing_signed_bundle(
         "sleep:3",
         "register-one",
     ]
-    assert len(launchctl_commands) == 1
-    assert launchctl_commands[0][:2] == ["/bin/launchctl", "kickstart"]
-    assert launchctl_commands[0][2].endswith("/service.label")
+    assert launchctl_commands == []

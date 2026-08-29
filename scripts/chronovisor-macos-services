@@ -322,23 +322,13 @@ def refresh_service(
                 "phase": "reenroll-register",
                 "detail": register.stdout.strip() or register.stderr.strip(),
             }
-    kickstart = subprocess.run(
-        [
-            "/bin/launchctl",
-            "kickstart",
-            f"gui/{os.getuid()}/{label}",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
     return {
-        "status": "ok" if kickstart.returncode == 0 else "error",
+        "status": "ok",
         "service": suffix,
         "plist": plist_name,
         "label": label,
-        "phase": "ready" if kickstart.returncode == 0 else "kickstart",
-        "detail": kickstart.stderr.strip(),
+        "phase": "ready",
+        "detail": "",
     }
 
 
