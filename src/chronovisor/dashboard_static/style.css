@@ -3130,7 +3130,7 @@ canvas {
 }
 
 .decision-trace-harness.single-model .decision-lane[data-decision-lane="primary"] {
-  transform: translate(0 450px) !important;
+  transform: translate(0, 450px) !important;
 }
 
 .decision-trace-panel:has(.decision-single-authority:not([hidden])) .decision-facts [data-decision-fact="quorum"] {

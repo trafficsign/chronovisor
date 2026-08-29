@@ -441,6 +441,123 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert matching("data-plan-value", "context-selection")[0]["y"] == "239"
 
 
+def test_single_model_css_connects_live_svg_paths(tmp_path: Path) -> None:
+    style = ROOT / "src/chronovisor/dashboard_static/style.css"
+    page = tmp_path / "single-model-geometry.html"
+    page.write_text(
+        """<!doctype html>
+<link rel="stylesheet" href="/style.css">
+<svg class="decision-trace-harness single-model" viewBox="0 0 1500 650" width="1500" height="650">
+  <path id="dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 440 Q180 450 190 450 H220"></path>
+  <path id="single-artifact" d="M920 450 H1300 Q1310 450 1310 440 V393"></path>
+  <g class="decision-lane" data-decision-lane="primary" transform="translate(0 325)">
+    <g id="trigger" transform="translate(230 0)"><circle r="10"></circle></g>
+    <g id="validate" transform="translate(910 0)"><circle r="10"></circle></g>
+  </g>
+</svg>
+<script src="/geometry.js"></script>
+""",
+        encoding="utf-8",
+    )
+    script = tmp_path / "geometry.js"
+    script.write_text(
+        """
+const screenPoint = (node, point) => point.matrixTransform(node.getScreenCTM());
+const dispatch = document.querySelector("#dispatch");
+const single = document.querySelector("#single-artifact");
+const lane = document.querySelector('[data-decision-lane="primary"]');
+const trigger = screenPoint(document.querySelector("#trigger"), new DOMPoint(0, 0));
+const validate = screenPoint(document.querySelector("#validate"), new DOMPoint(0, 0));
+const dispatchEnd = screenPoint(dispatch, dispatch.getPointAtLength(dispatch.getTotalLength()));
+const singleStart = screenPoint(single, single.getPointAtLength(0));
+fetch("/geometry-result", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    transform: getComputedStyle(lane).transform,
+    dispatchDeltaY: Math.abs(trigger.y - dispatchEnd.y),
+    singleDeltaY: Math.abs(validate.y - singleStart.y),
+  }),
+});
+""",
+        encoding="utf-8",
+    )
+    chrome = next(
+        (
+            candidate
+            for candidate in (
+                shutil.which("google-chrome"),
+                shutil.which("chromium"),
+                shutil.which("chromium-browser"),
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            )
+            if candidate and Path(candidate).is_file()
+        ),
+        None,
+    )
+    assert chrome is not None, "headless Chrome is required for Dashboard DOM tests"
+    geometry: list[dict[str, object]] = []
+    result_ready = threading.Event()
+
+    class Handler(dashboard.DashboardHandler):
+        def do_GET(self) -> None:
+            if self.path in {"/", "/geometry.js", "/style.css"}:
+                source = {"/": page, "/geometry.js": script, "/style.css": style}[
+                    self.path
+                ]
+                dashboard._file_response(self, source)
+                return
+            self.send_error(404)
+
+        def do_POST(self) -> None:
+            if self.path != "/geometry-result":
+                self.send_error(404)
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            geometry.append(json.loads(self.rfile.read(length)))
+            result_ready.set()
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    process = subprocess.Popen(
+        [
+            chrome,
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--no-first-run",
+            f"--user-data-dir={tmp_path / 'single-model-profile'}",
+            f"http://127.0.0.1:{server.server_port}/",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert result_ready.wait(10)
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+    assert geometry[0]["transform"] == "matrix(1, 0, 0, 1, 0, 450)"
+    assert geometry[0]["dispatchDeltaY"] <= 0.01
+    assert geometry[0]["singleDeltaY"] <= 0.01
+
+
 def test_dashboard_reference_quorum_hold_paths_and_label_stay_in_bounds() -> None:
     parser = _DashboardMarkup()
     parser.feed(

@@ -66,13 +66,13 @@ td.num{text-align:right;white-space:nowrap}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_23f41aa9cef6401eae743d7fbfae7d32","created_at":"2026-08-29T17:29:12+09:00","状態":"done","slug":"chronovisor-qwen38-flash-next-125b-cutover"}
+{"task_id":"plan_23f41aa9cef6401eae743d7fbfae7d32","created_at":"2026-08-29T17:29:12+09:00","状態":"running","slug":"chronovisor-qwen38-flash-next-125b-cutover"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor Qwen3.8-Flash-Next 125B 一括切替</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="done">done</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_23f41aa9cef6401eae743d7fbfae7d32</code></span>
 <span data-bind="created_at">2026-08-29T17:29:12+09:00</span>
 </div>
@@ -441,6 +441,8 @@ td.num{text-align:right;white-space:nowrap}
 <li><time>2026-08-29 22:27</time><span>実ingest負荷下で30.13分ソーク。oMLX steady footprint最大83.9GiB、終了80.4GiB、最低headroom 28.16GiB、swap差−120MiB、swapout差0、oMLX error/OOM/rejection 0。PLE mmap、MTP、ANE 49+36、SSD cache 5GB上限を維持してmemory gate合格。</span></li>
 <li><time>2026-08-29 22:33</time><span>consumerを逆順停止後、公式CLIでoMLXを1回再起動（PID <code>87710→65982</code>、23秒）。oMLX→semantic→reranker→Dashboard→LAN→ingestを依存順起動し、全5 serviceは同一commit <code>8cec0955705dee37fcc1456929b484e9440ce15d</code>、running/runs=1/never exited。config 3 hash、model identity、18125 listener、LAN 401を復元。</span></li>
 <li><time>2026-08-29 22:35</time><span>再起動後も実rawのprocessed event/stateは各1、page/ACK hash不変でduplicate apply 0。APIはstatus=ok、runtime drift=false、semantic/ingest live fresh。実ブラウザは125B Single Authority可視1 lane、旧3 lane/合意分岐0、secret pattern 0、console error 0。重いhealth snapshotのstale flagは既存60秒判定/300秒最短再build cadenceとしてreceiptに明記し、Planをdoneとした。</span></li>
+<li><time>2026-08-29 23:21</time><span>ユーザーの実画面指摘を受けDashboard受入を再開。single modeのPrimary laneとdispatch/single-artifact pathが約125 SVG unit不連続なことをCodex実ブラウザで再現し、21:58/22:35の受入はvisible要素数だけを見て実線接続を検査していなかったため無効化。Planをrunningへ戻し、実ブラウザgeometry regression、A-F 6ケース全103 frame、live目視の再受入を開始。</span></li>
+<li><time>2026-08-29 23:47</time><span>root causeをsingle-mode CSSの無効な <code>translate(0 450px)</code> と確定。実Chrome regressionを旧CSSでtransform 325 / path delta 125のRED、新CSS <code>translate(0, 450px)</code> でtransform 450 / delta各0.01以下のGREENとして固定した。A-F 6ケースを5/13/17/21/24/23、計103 frameすべてCodexブラウザで1段ずつ表示・保存し、projection failure 0、width failure 0、全frame sheetと6終端を目視。関連suiteは8 + 158 + 15 passed。全体は6303 passed / 1 skipped / 8 unrelated failedで、7件は既存architecture baseline drift、1件は保護中R6 dirty差分のlarge-function上限超過として今回scope外を確認。</span></li>
 </ol>
 </section>
 </main>
