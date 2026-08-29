@@ -66,13 +66,13 @@ td.num{text-align:right;white-space:nowrap}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_23f41aa9cef6401eae743d7fbfae7d32","created_at":"2026-08-29T17:29:12+09:00","状態":"running","slug":"chronovisor-qwen38-flash-next-125b-cutover"}
+{"task_id":"plan_23f41aa9cef6401eae743d7fbfae7d32","created_at":"2026-08-29T17:29:12+09:00","状態":"done","slug":"chronovisor-qwen38-flash-next-125b-cutover"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor Qwen3.8-Flash-Next 125B 一括切替</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="running">running</span>
+<span class="badge" data-bind="状態" data-state="done">done</span>
 <span><code data-bind="task_id">plan_23f41aa9cef6401eae743d7fbfae7d32</code></span>
 <span data-bind="created_at">2026-08-29T17:29:12+09:00</span>
 </div>
@@ -285,20 +285,20 @@ td.num{text-align:right;white-space:nowrap}
 <li><input type="checkbox" checked><span>正規oMLX base <code>~/.omlx</code> をatomic更新し、host <code>127.0.0.1</code>、port <code>18125</code>、concurrency 1、memory guard、pinned常駐、TTLなし、MTP depth 3、PLE mmap、ANE推奨値、ANE compile cache、prefix SSD 5GB/hot 2GB/write-through offを固定する。DFlash/TurboQuant/SpecPrefill/VLM MTPはoff。</span></li>
 <li><input type="checkbox" checked><span>同じtransactionで36個の旧role利用箇所を <code>http://127.0.0.1:18125/v1</code> へ置換し、旧Qwen/Gemma/Muse role/model settings、8000/8001/8002 provider、旧quorum active policyを除去する。</span></li>
 <li><input type="checkbox" checked><span>production config、全consumer LaunchAgent、Dashboard fallback、検証harnessの <code>OMLX_BASE_URL</code> を <code>http://127.0.0.1:18125/v1</code> へ揃える。</span></li>
-<li><input type="checkbox"><span>実装をscoped commitする。GitHub-backed productionを使う場合は明示されたpush権限の下で先にpushし、そのcommitをruntime sourceとして固定する。</span></li>
-<li><input type="checkbox"><span>切替後の初回起動から <code>single_model_v1</code> を本番authorityとして有効化する。shadow route、旧routeとの併存、段階的traffic配分は作らない。</span></li>
-<li><input type="checkbox"><span>公式CLIでapp-managed oMLXを起動し、依存順序だけ守って oMLX → semantic/reranker → Dashboard/LAN → ingest を同じmaintenance window内で連続起動する。OXは別承認がない限りfalse。</span></li>
+<li><input type="checkbox" checked><span>実装をscoped commitする。GitHub-backed productionを使う場合は明示されたpush権限の下で先にpushし、そのcommitをruntime sourceとして固定する。</span></li>
+<li><input type="checkbox" checked><span>切替後の初回起動から <code>single_model_v1</code> を本番authorityとして有効化する。shadow route、旧routeとの併存、段階的traffic配分は作らない。</span></li>
+<li><input type="checkbox" checked><span>公式CLIでapp-managed oMLXを起動し、依存順序だけ守って oMLX → semantic/reranker → Dashboard/LAN → ingest を同じmaintenance window内で連続起動する。OXは別承認がない限りfalse。</span></li>
 </ol>
 </div>
 
 <div class="phase"><h3>Phase 4 — 切替直後の本番受入</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span><code>/v1/models/status</code>、status API、server logからmodel/revision/qwen4_exp/PLE mmap/Lightning MTP/ANE 49+36 procedures/prefix cache/concurrency 1/context/memory ceilingをread-backする。</span></li>
-<li><input type="checkbox"><span>API <code>/api/health</code>、<code>/api/snapshot</code>、<code>/api/local-consensus</code>、<code>/api/activity</code>、<code>/api/model-status</code>がsingle mode/model/revision/1 resultを返すことを確認する。</span></li>
-<li><input type="checkbox"><span>実ブラウザDOM/SVG/traceで125Bのsingle laneが中央・全幅に表示され、repair≠vote、Primary/Challenger/Tie-break・空レーン・NEXT VOTER・pair/tie/quorum分岐のvisible element数0、不要な縦余白0、console error 0、秘密情報非表示を確認する。</span></li>
-<li><input type="checkbox"><span>1件の実ingestをraw→decision→single artifact→apply→durable ack→read-backまで追い、再実行が重複applyしないことを確認する。</span></li>
-<li><input type="checkbox"><span>warm-up/load/settle/steadyのOS memory、swap delta、pageout/swapout、process footprint、prefix SSD/hot使用量を記録し、安全閾値内を確認する。</span></li>
-<li><input type="checkbox"><span>queue/lease/authority/liveness/API/DOM/memoryを30分監視し、restartを1回行って同じcommit/config/hash/model/healthへ戻ることを確認する。</span></li>
+<li><input type="checkbox" checked><span><code>/v1/models/status</code>、status API、server logからmodel/revision/qwen4_exp/PLE mmap/Lightning MTP/ANE 49+36 procedures/prefix cache/concurrency 1/context/memory ceilingをread-backする。</span></li>
+<li><input type="checkbox" checked><span>API <code>/api/health</code>、<code>/api/snapshot</code>、<code>/api/local-consensus</code>、<code>/api/activity</code>、<code>/api/model-status</code>がsingle mode/model/revision/1 resultを返すことを確認する。</span></li>
+<li><input type="checkbox" checked><span>実ブラウザDOM/SVG/traceで125Bのsingle laneが中央・全幅に表示され、repair≠vote、Primary/Challenger/Tie-break・空レーン・NEXT VOTER・pair/tie/quorum分岐のvisible element数0、不要な縦余白0、console error 0、秘密情報非表示を確認する。</span></li>
+<li><input type="checkbox" checked><span>1件の実ingestをraw→decision→single artifact→apply→durable ack→read-backまで追い、再実行が重複applyしないことを確認する。</span></li>
+<li><input type="checkbox" checked><span>warm-up/load/settle/steadyのOS memory、swap delta、pageout/swapout、process footprint、prefix SSD/hot使用量を記録し、安全閾値内を確認する。</span></li>
+<li><input type="checkbox" checked><span>queue/lease/authority/liveness/API/DOM/memoryを30分監視し、restartを1回行って同じcommit/config/hash/model/healthへ戻ることを確認する。</span></li>
 </ol>
 </div>
 
@@ -430,6 +430,17 @@ td.num{text-align:right;white-space:nowrap}
 <li><time>2026-08-29 20:54</time><span>16,050-token同一prefixでcold 28.03秒/cached 0 → warm 4.08秒/cached 14,336、回答hash一致。MTP depth 3は8/8受理。ANE 170 warm、49 MLP + 36 GDN/2 program、PLE mmap、SSD error 0、concurrency 1をread-back。</span></li>
 <li><time>2026-08-29 20:55</time><span>公式CLIでoMLXをstop/start。server PID 68440→87710、起動22.61秒、settings/model_settings/Chronovisor config SHA256不変、SSD cache 31 block/4.98GB/errors 0を復元。再起動後もcached 14,336、7.44秒、回答hash一致。</span></li>
 <li><time>2026-08-29 20:57</time><span>保護中R6 2 fileと教師salvageを除外し、実装・設定例・test・pre-cutover receiptをcommit <code>4ad27575f40ba8a3d8812fd0c704da30d8570eb2</code>へscoped commit。pushは明示権限待ちのため未実施。</span></li>
+<li><time>2026-08-29 21:04</time><span>ユーザーの明示承認を受け、実装を含む11 commitを <code>origin/main</code> へpush。remote refが <code>aee53aea8e0b59e5b3ddccc96973fafb8e8845cc</code> と一致し、production runtimeの固定対象を実装commit <code>4ad27575f40ba8a3d8812fd0c704da30d8570eb2</code> とした。</span></li>
+<li><time>2026-08-29 21:16</time><span>旧source plistの削除済みsandbox参照を検出し、全11 source executableを正規pathへ再生成。失敗rollbackと <code>kickstart -k</code> がRunAtLoad直後のsemantic/rerankerを二重起動してaccelerator lease timeoutを起こす再現を固定し、<code>-k</code>だけを除去。旧コードでregression test red、新コードで6 test・Ruff・compile・実reranker installer green。fix commit <code>dcceee6292f23d7beb2783bd90153631f68ed6f6</code> をpushし、runtime sourceも同commitへ更新した。</span></li>
+<li><time>2026-08-29 21:23</time><span>DashboardでServiceManagementのlightweight code requirement更新前に <code>kickstart</code> 自体がspawnを急がせる再現を追加確認。RunAtLoadを唯一の起動責任にしてkickstart blockを削除し、旧コードでtest red、新コードで6 test・Ruff・compile・実Dashboard <code>runs=1</code> / listener / health 200を確認。最終fix <code>0fdad1dd3d3de2ed88c12203fa94726e4a2ec444</code> をpushし、production runtime sourceを同commitへ固定した。</span></li>
+<li><time>2026-08-29 21:28</time><span>初回LAN登録でも既存appの存在だけを根拠に不要なregister→unregister→registerが走ることを特定。native statusで対象labelが実登録済みかを判定し、未登録はbuild→register 1回、既存のみ再enrollするよう修正。2 branchを旧コードred→新コードgreen、全7 test・Ruff・compile、実LAN listenerと未認証401で検証し、commit <code>24ea00005e0596d30ef5ce0ecd971e9c68a362eb</code> をpush・runtime source固定した。</span></li>
+<li><time>2026-08-29 21:35</time><span>修正済み正規installerでingestを対象限定再登録。旧BTM UUIDのLWCR失敗を引き継がず、新UUID <code>209640D8-3739-4BB1-A0F1-08313896CAD1</code> で <code>runs=1</code> / running、fresh liveness、lock holderを確認。oMLXとsemantic/reranker/Dashboard/LAN/ingestの全5 consumerは同一runtime commit <code>24ea00005e0596d30ef5ce0ecd971e9c68a362eb</code>、OX=falseで一括起動完了。</span></li>
+<li><time>2026-08-29 21:45</time><span>実raw <code>semantic-05c22…a30.md</code>（job <code>b71b5e1f</code>）をproposal→125B単一artifact→page create→durable ACK→read-back成功まで追跡。artifactは <code>single_model_v1</code>、route 1、valid result 1、repair 0。ACKと現page postimageを再検証し、processed state登録済み・pending再出現0のためduplicate apply対象外を確認。</span></li>
+<li><time>2026-08-29 21:52</time><span>single authorityの実行事実をtraceへ保存するproducer修正 <code>2442eeeba1db3558fb6f6a6f43677c9e34749f65</code> と、trace-event境界でmodel/revision/routeを安全に保持する修正 <code>8cec0955705dee37fcc1456929b484e9440ce15d</code> を順にpush。283 test、Ruff、compileを通し、全5 consumerを最終commitへ再登録した。</span></li>
+<li><time>2026-08-29 21:58</time><span>全5 APIでruntime drift=false、125B、固定revision、single projection、authority route/result各1をread-back。実ブラウザDOMは <code>decision-trace-harness single-model</code>、Single Authority 1 lane、Validated、target 1、repair≠voteを表示し、旧3 lane、NEXT VOTER、AGREE/QUORUMのvisible elementは0。</span></li>
+<li><time>2026-08-29 22:27</time><span>実ingest負荷下で30.13分ソーク。oMLX steady footprint最大83.9GiB、終了80.4GiB、最低headroom 28.16GiB、swap差−120MiB、swapout差0、oMLX error/OOM/rejection 0。PLE mmap、MTP、ANE 49+36、SSD cache 5GB上限を維持してmemory gate合格。</span></li>
+<li><time>2026-08-29 22:33</time><span>consumerを逆順停止後、公式CLIでoMLXを1回再起動（PID <code>87710→65982</code>、23秒）。oMLX→semantic→reranker→Dashboard→LAN→ingestを依存順起動し、全5 serviceは同一commit <code>8cec0955705dee37fcc1456929b484e9440ce15d</code>、running/runs=1/never exited。config 3 hash、model identity、18125 listener、LAN 401を復元。</span></li>
+<li><time>2026-08-29 22:35</time><span>再起動後も実rawのprocessed event/stateは各1、page/ACK hash不変でduplicate apply 0。APIはstatus=ok、runtime drift=false、semantic/ingest live fresh。実ブラウザは125B Single Authority可視1 lane、旧3 lane/合意分岐0、secret pattern 0、console error 0。重いhealth snapshotのstale flagは既存60秒判定/300秒最短再build cadenceとしてreceiptに明記し、Planをdoneとした。</span></li>
 </ol>
 </section>
 </main>
