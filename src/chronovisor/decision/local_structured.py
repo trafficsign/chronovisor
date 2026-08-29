@@ -921,6 +921,36 @@ class _StructuredResourceError(RuntimeError):
         super().__init__(reason)
 
 
+def _single_authority_execution_metadata(
+    route: ollama.RuntimeGenerationRoute,
+) -> dict[str, Any]:
+    """Persist single-authority facts only for the exact authority route."""
+
+    from chronovisor.core.runtime_config import load_decision_router_config
+
+    try:
+        config = load_decision_router_config()
+        authority_route = ollama.runtime_generation_routes(
+            (config.single_route_identity,)
+        )[0]
+    except Exception:
+        return {}
+    identity_fields = (
+        "provider",
+        "model",
+        "location",
+        "protocol",
+        "endpoint_sha256",
+        "revision",
+    )
+    if not config.is_single_model or any(
+        getattr(route, field) != getattr(authority_route, field)
+        for field in identity_fields
+    ):
+        return {}
+    return {"authority_kind": config.authority_kind, "quorum_flow": False}
+
+
 def _default_transport_resource_request(
     *,
     model: str,
@@ -1449,6 +1479,8 @@ class LocalConsensusAuditStore:
             "required_num_ctx",
             "requested_num_ctx",
             "context_tokens",
+            "authority_kind",
+            "quorum_flow",
         ):
             if row.get(key) is not None:
                 event[key] = row[key]
@@ -3556,6 +3588,7 @@ class LocalStructuredSession:
                         )
                         if value is not None
                     }
+                    route_metadata.update(_single_authority_execution_metadata(route))
                     if (
                         self._runtime_role_explicit
                         and configured_model

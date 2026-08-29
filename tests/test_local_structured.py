@@ -733,6 +733,63 @@ def test_resource_managed_default_local_emits_one_load_before_context(
     _assert_single_load_before_context(audit_root)
 
 
+def test_default_single_authority_persists_exact_execution_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit_root = tmp_path / "audit"
+    adapter = OllamaAdapter()
+    runtime = LLMRuntime(
+        generation={
+            "classification.authority": GenerationRoute(adapter, "authority:test"),
+            "ingest.generation": GenerationRoute(adapter, "authority:test"),
+            "gate": GenerationRoute(adapter, "helper:test"),
+        },
+        local_controls={
+            "classification.authority": adapter,
+            "ingest.generation": adapter,
+            "gate": adapter,
+        },
+    )
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        local_structured, "shared_model_resource_lease_mode", lambda: "exclusive"
+    )
+    monkeypatch.setattr(
+        ollama,
+        "chat",
+        lambda *_args, **_kwargs: ollama.ChatResponse(
+            content='{"decision":"apply","summary":"single"}'
+        ),
+    )
+
+    authority_route, helper_route = ollama.runtime_generation_routes(
+        ("ingest.generation", "gate")
+    )
+    assert local_structured._single_authority_execution_metadata(helper_route) == {}
+    assert local_structured._single_authority_execution_metadata(authority_route) == {
+        "authority_kind": "single_model_v1",
+        "quorum_flow": False,
+    }
+
+    result = LocalStructuredSession(
+        model="authority:test",
+        runtime_role="ingest.generation",
+        audit_root=audit_root,
+        resource_managed=True,
+    ).run("decide", SCHEMA)
+
+    audit = json.loads((audit_root / "audit.jsonl").read_text())
+    trace = [
+        json.loads(line)
+        for line in (audit_root / "trace-events.jsonl").read_text().splitlines()
+    ]
+    assert result.ok is True
+    assert audit["authority_kind"] == "single_model_v1"
+    assert audit["quorum_flow"] is False
+    assert all(row["authority_kind"] == "single_model_v1" for row in trace)
+    assert all(row["quorum_flow"] is False for row in trace)
+
+
 def test_default_transport_egress_denial_is_safe_and_call_free(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
