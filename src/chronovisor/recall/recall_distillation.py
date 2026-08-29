@@ -946,7 +946,6 @@ def _validate_ox_profile_contract(
         "endpoint": f"{OX_ALPHA_ENDPOINT}/chat/completions",
         "request_model": OX_ALPHA_REQUEST_MODEL,
         "required_returned_model": OX_ALPHA_REQUEST_MODEL,
-        "request_revision": OX_RAMP_REQUEST_REVISION,
         "fixed_identity": OX_ALPHA_FIXED_IDENTITY,
         "free_only": False,
         "no_paid_fallback": True,
@@ -961,6 +960,11 @@ def _validate_ox_profile_contract(
         ],
     }
     if any(contract.get(key) != value for key, value in expected.items()):
+        return {}
+    if contract.get("request_revision") not in {
+        OX_RAMP_REQUEST_REVISION,
+        "json-schema-core-label-abstain-16k-240s-v7",
+    }:
         return {}
     max_inflight = contract.get("max_inflight")
     if (

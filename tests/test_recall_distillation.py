@@ -2347,6 +2347,41 @@ def test_ox_expiry_normalizes_offsets_and_rejects_noncanonical_or_far_future() -
             distill._ox_expiry(value)
 
 
+def test_ox_profile_contract_reader_accepts_previous_remote_revision(
+    tmp_path: Path,
+) -> None:
+    contract = distill._ensure_ox_profile_contract(
+        tmp_path,
+        distill.DistillationConfig(
+            teacher_profile=distill.OX_SINGLE_PROFILE,
+            ox_enabled=True,
+            ox_free_only=False,
+            ox_expires_at="2099-01-01T00:00:00Z",
+        ),
+        source_binding={
+            "source_commit": "a" * 40,
+            "source_tree_sha256": "b" * 64,
+            "source_ox_identity_sha256": "c" * 64,
+        },
+    )
+    payload = {
+        key: value
+        for key, value in contract.items()
+        if key not in {"schema", "namespace", "artifact_id", "seal_sha256"}
+    }
+    payload["request_revision"] = "json-schema-core-label-abstain-16k-240s-v7"
+    _, _, historical = store.write_immutable(
+        store.distillation_dir(tmp_path) / "ox-profile-contracts",
+        payload,
+        schema=distill.OX_PROFILE_SCHEMA,
+    )
+
+    assert (
+        distill._read_ox_profile_contract(tmp_path, historical["artifact_id"])
+        == historical
+    )
+
+
 @pytest.mark.parametrize(
     "request_revision",
     [None, "json-schema-core-label-abstain-16k-240s-v5"],
