@@ -280,7 +280,7 @@ td.num{text-align:right;white-space:nowrap}
 
 <div class="phase"><h3>Phase 3 — 一括cutover（単一maintenance window）</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>Chronovisor全serviceが停止したまま、実装commit、production config、oMLX settings/model_settingsをstagingし、公式app-managed serverを含む全経路を切替可能な状態まで完成させる。</span></li>
+<li><input type="checkbox" checked><span>Chronovisor全serviceが停止したまま、実装commit、production config、oMLX settings/model_settingsをstagingし、公式app-managed serverを含む全経路を切替可能な状態まで完成させる。</span></li>
 <li><input type="checkbox" checked><span>selected modelをsandboxからstable model rootへ同一volume atomic renameし、source消失、target1個、21 shard、総byte、config/index hashを確認する。</span></li>
 <li><input type="checkbox" checked><span>正規oMLX base <code>~/.omlx</code> をatomic更新し、host <code>127.0.0.1</code>、port <code>18125</code>、concurrency 1、memory guard、pinned常駐、TTLなし、MTP depth 3、PLE mmap、ANE推奨値、ANE compile cache、prefix SSD 5GB/hot 2GB/write-through offを固定する。DFlash/TurboQuant/SpecPrefill/VLM MTPはoff。</span></li>
 <li><input type="checkbox" checked><span>同じtransactionで36個の旧role利用箇所を <code>http://127.0.0.1:18125/v1</code> へ置換し、旧Qwen/Gemma/Muse role/model settings、8000/8001/8002 provider、旧quorum active policyを除去する。</span></li>
@@ -429,6 +429,7 @@ td.num{text-align:right;white-space:nowrap}
 <li><time>2026-08-29 20:52</time><span>凍結profileで4K=4,009、32K=32,602、114,688枠=114,479 prompt tokensを各1回実行。両端needle、JSON schema、model identity、finish_reason=stopが全件一致し、HTTP/model error、silent truncation、swap増分は0。</span></li>
 <li><time>2026-08-29 20:54</time><span>16,050-token同一prefixでcold 28.03秒/cached 0 → warm 4.08秒/cached 14,336、回答hash一致。MTP depth 3は8/8受理。ANE 170 warm、49 MLP + 36 GDN/2 program、PLE mmap、SSD error 0、concurrency 1をread-back。</span></li>
 <li><time>2026-08-29 20:55</time><span>公式CLIでoMLXをstop/start。server PID 68440→87710、起動22.61秒、settings/model_settings/Chronovisor config SHA256不変、SSD cache 31 block/4.98GB/errors 0を復元。再起動後もcached 14,336、7.44秒、回答hash一致。</span></li>
+<li><time>2026-08-29 20:57</time><span>保護中R6 2 fileと教師salvageを除外し、実装・設定例・test・pre-cutover receiptをcommit <code>4ad27575f40ba8a3d8812fd0c704da30d8570eb2</code>へscoped commit。pushは明示権限待ちのため未実施。</span></li>
 </ol>
 </section>
 </main>

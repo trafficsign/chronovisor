@@ -2,6 +2,8 @@
   "schema_version": "chronovisor.qwen125b.precutover-acceptance.v1",
   "recorded_at": "2026-08-29T20:55:10+09:00",
   "result": "pass",
+  "implementation_commit": "4ad27575f40ba8a3d8812fd0c704da30d8570eb2",
+  "push_status": "pending_explicit_authorization",
   "runtime": {
     "distribution": "/Applications/oMLX.app",
     "version": "0.6.3",
