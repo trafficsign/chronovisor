@@ -1,0 +1,102 @@
+#!/bin/sh
+set -eu
+
+# Start the managed macOS app. Do not add a second supervisor here: oMLX.app
+# owns its process and reads the persisted settings under OMLX_BASE_PATH.
+
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+NO_WAIT=0
+START_TIMEOUT=${OMLX_START_TIMEOUT_SECONDS:-300}
+HEALTH_TIMEOUT=${OMLX_HEALTH_TIMEOUT_SECONDS:-300}
+
+usage() {
+  cat >&2 <<'EOF'
+usage: start-omlx-service [--timeout SECONDS] [--health-timeout SECONDS] [--no-wait]
+
+Starts the official /Applications/oMLX.app managed server through the
+app-installed ~/.omlx/bin/omlx wrapper. Settings are read from ~/.omlx.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --timeout|--health-timeout)
+      [ "$#" -ge 2 ] || { usage; exit 64; }
+      if [ "$1" = "--timeout" ]; then
+        START_TIMEOUT=$2
+      else
+        HEALTH_TIMEOUT=$2
+      fi
+      shift 2
+      ;;
+    --no-wait)
+      NO_WAIT=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      exit 64
+      ;;
+  esac
+done
+
+. "$SCRIPT_DIR/omlx-runtime-env"
+
+case "$START_TIMEOUT" in
+  ''|*[!0-9.]*|.*|*.*.*|*.)
+    echo "start timeout must be a non-negative number" >&2
+    exit 64
+    ;;
+esac
+case "$HEALTH_TIMEOUT" in
+  ''|*[!0-9]*)
+    echo "health timeout must be a non-negative integer" >&2
+    exit 64
+    ;;
+esac
+
+version=$("$OMLX_CLI" --version 2>/dev/null || true)
+case "$version" in
+  *"$OMLX_REQUIRED_VERSION"*) ;;
+  *)
+    echo "oMLX $OMLX_REQUIRED_VERSION is required; found: ${version:-unavailable}" >&2
+    exit 65
+    ;;
+esac
+
+if [ "$NO_WAIT" -eq 1 ]; then
+  "$OMLX_CLI" start --timeout "$START_TIMEOUT" --no-wait
+else
+  "$OMLX_CLI" start --timeout "$START_TIMEOUT"
+fi
+
+if [ "$NO_WAIT" -eq 1 ] || [ "$HEALTH_TIMEOUT" -eq 0 ]; then
+  printf '%s\n' "started oMLX ($OMLX_BASE_URL)"
+  exit 0
+fi
+
+CURL=$(command -v curl 2>/dev/null || true)
+[ -n "$CURL" ] || {
+  echo "curl is required for the health check" >&2
+  exit 69
+}
+
+elapsed=0
+while [ "$elapsed" -lt "$HEALTH_TIMEOUT" ]; do
+  health=$($CURL --silent --show-error --max-time 5 "$OMLX_HEALTH_URL" 2>/dev/null || true)
+  case "$health" in
+    *'"status":"healthy"'*|*'"status": "healthy"'*)
+      printf '%s\n' "healthy $OMLX_HEALTH_URL"
+      exit 0
+      ;;
+  esac
+  sleep 1
+  elapsed=$((elapsed + 1))
+done
+
+echo "oMLX health did not reach healthy within ${HEALTH_TIMEOUT}s: $OMLX_HEALTH_URL" >&2
+exit 1

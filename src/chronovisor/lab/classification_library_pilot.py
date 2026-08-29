@@ -409,6 +409,7 @@ def _phase_e0_adjudicate(root: Path, state: dict[str, Any]) -> dict[str, Any]:
         timeout_seconds=1_800,
         run_namespace=f"library-fixture-{FIXTURE_EPOCH}",
         adjudication_mode="dual-blind",
+        authority_kind="quorum_v1",
     )
     by_uid = {str(row["uid"]): row for row in decisions}
     for row in batch:
@@ -904,6 +905,7 @@ def _run_decision_stage(
             purpose="explicit",
             timeout_seconds=1_800,
             run_namespace=f"library-evidence-dev-{arm.casefold()}",
+            authority_kind="quorum_v1",
         )
         _write_jsonl(output, decisions)
     return _advance(root, state, next_stage)
@@ -949,6 +951,7 @@ def _run_latin_square_decisions(
                     run_namespace=(
                         f"library-evidence-{split}-latin-{position}-{arm.casefold()}"
                     ),
+                    authority_kind="quorum_v1",
                 )
                 if cohort
                 else []
@@ -1068,6 +1071,7 @@ def _run_replay(
             timeout_seconds=1_800,
             run_namespace=f"library-evidence-{split}-{arm.casefold()}-replay",
             stage_cache_epoch=f"library-evidence-{split}-replay-2",
+            authority_kind="quorum_v1",
         )
         _write_jsonl(output, decisions)
     return read_jsonl(output)
@@ -1405,6 +1409,7 @@ def _run_holdout_decision_stage(
             purpose="explicit",
             timeout_seconds=1_800,
             run_namespace=f"library-evidence-holdout-{arm.casefold()}",
+            authority_kind="quorum_v1",
         )
         _write_jsonl(output, decisions)
     return _advance(root, state, next_stage)

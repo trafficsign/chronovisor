@@ -182,8 +182,8 @@ def test_router_excludes_only_canonical_producer_roles(
         lambda **values: kwargs.append(values) or SimpleNamespace(),
     )
 
-    consensus_module._router_for_producer("primary")
-    consensus_module._router_for_producer("deterministic")
+    consensus_module._router_for_producer("primary", authority_kind="quorum_v1")
+    consensus_module._router_for_producer("deterministic", authority_kind="quorum_v1")
 
     assert kwargs[0]["excluded_roles"] == ("primary",)
     assert kwargs[1]["excluded_roles"] == ()
@@ -423,7 +423,9 @@ def test_entity_merge_snapshot_keeps_local_vote_receipts(
         ),
     )
 
-    consolidated = consolidate_entity_candidates(root=tmp_path, store=store)
+    consolidated = consolidate_entity_candidates(
+        root=tmp_path, store=store, authority_kind="quorum_v1"
+    )
     snapshot = store.load_snapshot()  # Relation snapshot remains independent.
     assert snapshot["relations"] == {}
     entity_snapshot = read_sealed_json(store.entity_snapshot_file)
@@ -475,7 +477,9 @@ def test_entity_merge_embedding_failure_keeps_exact_fallback_route_null(
         lambda _values, **_kwargs: (_ for _ in ()).throw(RuntimeError("unavailable")),
     )
 
-    result = consolidate_entity_candidates(root=tmp_path, store=store, limit=0)
+    result = consolidate_entity_candidates(
+        root=tmp_path, store=store, limit=0, authority_kind="quorum_v1"
+    )
     snapshot = read_sealed_json(store.entity_snapshot_file)
 
     assert result["merge_candidates"] == 1
@@ -1235,6 +1239,7 @@ def test_verified_relation_receipt_uses_producer_independent_vote_roles(
         store=store,
         receipt_file=tmp_path / "receipts.jsonl",
         router_factory=lambda role: router if role == producer_role else None,
+        authority_kind="quorum_v1",
     )
 
     verified = store.relations()[0]
@@ -1298,12 +1303,106 @@ def test_no_quorum_and_unknown_endpoint_are_held(tmp_path: Path) -> None:
                 votes=(),
             )
         ),
+        authority_kind="quorum_v1",
     )
 
     assert result["held"] == 1
     assert result["external_model_calls"] == 0
     assert store.relations()[0].status == "held"
     assert store.relations()[0].reason_code == "no_quorum"
+
+
+def test_single_authority_relation_receipt_has_no_quorum_projection(
+    tmp_path: Path,
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    source = pages / "a.md"
+    target = pages / "b.md"
+    source.write_text(_canonical_page("A", "See B.\n"), encoding="utf-8")
+    target.write_text(_canonical_page("B", "Target.\n"), encoding="utf-8")
+    evidence = EvidenceRef(
+        page_id="a",
+        content_sha256=sha256(source.read_text(encoding="utf-8")),
+        span_sha256=sha256("See B."),
+        source_line=1,
+    )
+    record = RelationRecord(
+        relation_id=relation_id(
+            source_page_id="a",
+            target_page_id="b",
+            predicate="references",
+            evidence_sha256=sha256([asdict(evidence)]),
+            model_sha256="c" * 64,
+            rubric_sha256="d" * 64,
+        ),
+        source_page_id="a",
+        target_page_id="b",
+        predicate="references",
+        direction="forward",
+        status="proposed",
+        evidence=(evidence,),
+        model_sha256="c" * 64,
+        rubric_sha256="d" * 64,
+        producer_role="deterministic",
+        confidence=0.9,
+    )
+    store = KnowledgeGraphStore(tmp_path / "knowledge-graph")
+    store.append(record, action="propose")
+    approved = {
+        "decision": "approved",
+        "confidence": 0.9,
+        "evidence_supported": True,
+        "contradiction_found": False,
+        "unknown_endpoint": False,
+        "digest_valid": True,
+    }
+    vote_result = SimpleNamespace(
+        ok=True,
+        value=approved,
+        failure_class=None,
+        audit_record=lambda: {"attempts": [{"status": "validated"}]},
+    )
+    vote = SimpleNamespace(
+        role="authority",
+        model="authority-model",
+        provider="remote",
+        valid=True,
+        route_provenance={
+            "role": "classification.authority",
+            "provider": "remote",
+            "model": "authority-model",
+            "location": "remote",
+            "revision": "rev-1",
+        },
+        result=vote_result,
+    )
+    router = SimpleNamespace(
+        decide=lambda *_args, **_kwargs: SimpleNamespace(
+            ok=True,
+            value=approved,
+            agreement_sha256="result-digest",
+            failure_class=None,
+            votes=(vote,),
+        )
+    )
+    receipt_path = tmp_path / "receipts.jsonl"
+
+    result = verify_pending_relations(
+        root=tmp_path,
+        store=store,
+        receipt_file=receipt_path,
+        router_factory=lambda _role: router,
+        authority_kind="single_model_v1",
+    )
+
+    assert result["verified"] == 1
+    assert store.relations()[0].consensus is None
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["authority_kind"] == "single_model_v1"
+    assert receipt["authority"]["model"] == "authority-model"
+    assert receipt["authority"]["validation_count"] == 1
+    assert not {"quorum", "votes", "vote_manifest_sha256"} & receipt.keys()
 
 
 def test_consensus_blocks_duplicate_stems_without_writing_receipts(
@@ -1324,6 +1423,7 @@ def test_consensus_blocks_duplicate_stems_without_writing_receipts(
         store=store,
         receipt_file=receipt_file,
         router_factory=lambda _role: pytest.fail("duplicate corpus must not route"),
+        authority_kind="quorum_v1",
     )
 
     assert result["status"] == "blocked"

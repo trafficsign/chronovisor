@@ -1,0 +1,55 @@
+#!/bin/sh
+set -eu
+
+# Stop the managed macOS app through its official lifecycle command. This
+# helper never unloads an external job or kills a process directly.
+
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+STOP_TIMEOUT=${OMLX_STOP_TIMEOUT_SECONDS:-60}
+
+usage() {
+  cat >&2 <<'EOF'
+usage: stop-omlx-service [--timeout SECONDS]
+
+Stops the official /Applications/oMLX.app managed server. Settings, caches,
+and model weights are left untouched.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --timeout)
+      [ "$#" -ge 2 ] || { usage; exit 64; }
+      STOP_TIMEOUT=$2
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      exit 64
+      ;;
+  esac
+done
+
+. "$SCRIPT_DIR/omlx-runtime-env"
+
+case "$STOP_TIMEOUT" in
+  ''|*[!0-9.]*|.*|*.*.*|*.)
+    echo "stop timeout must be a non-negative number" >&2
+    exit 64
+    ;;
+esac
+
+version=$("$OMLX_CLI" --version 2>/dev/null || true)
+case "$version" in
+  *"$OMLX_REQUIRED_VERSION"*) ;;
+  *)
+    echo "oMLX $OMLX_REQUIRED_VERSION is required; found: ${version:-unavailable}" >&2
+    exit 65
+    ;;
+esac
+
+"$OMLX_CLI" stop --timeout "$STOP_TIMEOUT"

@@ -33,14 +33,23 @@ _CANONICAL_PRODUCER_ROLES = frozenset(("primary", "challenger", "tie_break"))
 
 
 def _router_for_producer(
-    producer_role: str, decision_lane: str = "relation_verification"
+    producer_role: str,
+    decision_lane: str = "relation_verification",
+    *,
+    authority_kind: str | None = None,
 ) -> DecisionRouter:
+    if authority_kind is None:
+        authority_kind = "single_model_v1"
+    if authority_kind not in {"quorum_v1", "single_model_v1"}:
+        raise ValueError("unsupported decision authority kind")
     return DecisionRouter(
         decision_lane=decision_lane,
         audit_role=f"typed_graph_{decision_lane}",
         excluded_roles=(
             (producer_role,) if producer_role in _CANONICAL_PRODUCER_ROLES else ()
-        ),
+        )
+        if authority_kind == "quorum_v1"
+        else (),
     )
 
 
@@ -81,7 +90,12 @@ def verify_pending_relations(
     router_factory: RouterFactory = _router_for_producer,
     limit: int = 3,
     dry_run: bool = False,
+    authority_kind: str | None = None,
 ) -> dict[str, Any]:
+    if authority_kind is None:
+        authority_kind = "single_model_v1"
+    if authority_kind not in {"quorum_v1", "single_model_v1"}:
+        raise ValueError("unsupported decision authority kind")
     graph_store = store or KnowledgeGraphStore(root / "knowledge-graph")
     pending = [row for row in graph_store.relations(statuses={"proposed"})][
         : max(0, limit)
@@ -123,31 +137,99 @@ def verify_pending_relations(
                 "span_sha256s": [row.span_sha256 for row in record.evidence],
                 "source_lines": [row.source_line for row in record.evidence],
             }
-            result = router_factory(record.producer_role).decide(
+            router = (
+                router_factory(
+                    record.producer_role,
+                    authority_kind=authority_kind,
+                )
+                if router_factory is _router_for_producer
+                else router_factory(record.producer_role)
+            )
+            result = router.decide(
                 build_relation_verification_prompt(evidence),
                 RELATION_VERIFICATION_SCHEMA,
                 decision_lane="relation_verification",
             )
             value = result.value if isinstance(result.value, dict) else {}
-            approved = bool(
-                result.ok
-                and value.get("decision") == "approved"
-                and value.get("evidence_supported") is True
-                and value.get("contradiction_found") is False
-                and value.get("unknown_endpoint") is False
-                and value.get("digest_valid") is True
-            )
+            if authority_kind == "single_model_v1":
+                authority_votes = tuple(getattr(result, "votes", ()) or ())
+                valid_authority = len(authority_votes) == 1 and bool(
+                    getattr(authority_votes[0], "valid", True)
+                )
+                approved = bool(
+                    valid_authority
+                    and result.ok
+                    and value.get("decision") == "approved"
+                    and value.get("evidence_supported") is True
+                    and value.get("contradiction_found") is False
+                    and value.get("unknown_endpoint") is False
+                    and value.get("digest_valid") is True
+                )
+            else:
+                approved = bool(
+                    result.ok
+                    and value.get("decision") == "approved"
+                    and value.get("evidence_supported") is True
+                    and value.get("contradiction_found") is False
+                    and value.get("unknown_endpoint") is False
+                    and value.get("digest_valid") is True
+                )
             outcome = "verified" if approved else "held"
+            failure_reason = str(
+                getattr(result, "failure_class", None)
+                or value.get("decision")
+                or ""
+            )
+            if authority_kind == "single_model_v1" and "quorum" in failure_reason:
+                failure_reason = "single_authority_validation_failed"
             reason = (
-                "local_quorum"
+                "single_authority"
+                if authority_kind == "single_model_v1" and approved
+                else "local_quorum"
                 if approved
-                else result.failure_class or str(value.get("decision") or "no_quorum")
+                else failure_reason
+                or str(value.get("decision") or (
+                    "single_authority_validation_failed"
+                    if authority_kind == "single_model_v1"
+                    else "no_quorum"
+                ))
             )
         receipt_id = "receipt_" + sha256([record.relation_id, outcome, reason])[:24]
         vote_rows = []
         consensus_votes: list[ConsensusVote] = []
         record_external_model_calls = 0
-        if result is not None:
+        authority: dict[str, Any] | None = None
+        if result is not None and authority_kind == "single_model_v1":
+            authority_votes = tuple(getattr(result, "votes", ()) or ())
+            if len(authority_votes) == 1:
+                vote = authority_votes[0]
+                route = dict(getattr(vote, "route_provenance", {}) or {})
+                route.setdefault("role", "classification.authority")
+                route.setdefault("provider", getattr(vote, "provider", None))
+                route.setdefault("model", getattr(vote, "model", None))
+                route.setdefault("location", route.get("location") or "local")
+                authority_result_digest = str(
+                    getattr(result, "agreement_sha256", None)
+                    or sha256(getattr(result, "value", {}) or {})
+                )
+                attempts = []
+                result_obj = getattr(vote, "result", None)
+                if result_obj is not None:
+                    audit = getattr(result_obj, "audit_record", None)
+                    if callable(audit):
+                        attempts = list(audit().get("attempts") or [])
+                authority = {
+                    "kind": "single_model_v1",
+                    "route": route,
+                    "model": getattr(vote, "model", None),
+                    "revision": route.get("revision"),
+                    "result_sha256": authority_result_digest,
+                    "validation_count": 1,
+                    "attempts": attempts,
+                }
+                if route.get("location") == "remote":
+                    record_external_model_calls = 1
+        elif result is not None:
             for vote in result.votes:
                 route_provenance = getattr(vote, "route_provenance", None)
                 if (
@@ -186,30 +268,48 @@ def verify_pending_relations(
                     }
                 )
         external_model_calls += record_external_model_calls
-        receipt = {
-            "schema_version": 1,
-            "receipt_id": receipt_id,
-            "relation_id": record.relation_id,
-            "outcome": outcome,
-            "producer_role": record.producer_role,
-            "vote_manifest_sha256": sha256(vote_rows),
-            "quorum": 2,
-            "reason_code": reason[:160],
-            "external_model_calls": record_external_model_calls,
-        }
+        receipt = (
+            {
+                "schema": "chronovisor.knowledge-graph-authority-receipt.v1",
+                "authority_kind": "single_model_v1",
+                "receipt_id": receipt_id,
+                "relation_id": record.relation_id,
+                "outcome": outcome,
+                "producer_role": record.producer_role,
+                "authority": authority,
+                "reason_code": reason[:160],
+                "external_model_calls": record_external_model_calls,
+            }
+            if authority_kind == "single_model_v1"
+            else {
+                "schema_version": 1,
+                "receipt_id": receipt_id,
+                "relation_id": record.relation_id,
+                "outcome": outcome,
+                "producer_role": record.producer_role,
+                "vote_manifest_sha256": sha256(vote_rows),
+                "quorum": 2,
+                "reason_code": reason[:160],
+                "external_model_calls": record_external_model_calls,
+            }
+        )
         if not dry_run:
             append_jsonl_durable(receipt_file, [receipt], sort_keys=True)
             updated = replace(
                 record,
                 status=outcome,
                 reason_code=reason[:160],
-                consensus=ConsensusReceipt(
-                    receipt_id=receipt_id,
-                    producer_role=record.producer_role,
-                    quorum=2,
-                    outcome=outcome,
-                    votes=tuple(consensus_votes),
-                    hold_reason=reason[:160] if outcome == "held" else "",
+                consensus=(
+                    None
+                    if authority_kind == "single_model_v1"
+                    else ConsensusReceipt(
+                        receipt_id=receipt_id,
+                        producer_role=record.producer_role,
+                        quorum=2,
+                        outcome=outcome,
+                        votes=tuple(consensus_votes),
+                        hold_reason=reason[:160] if outcome == "held" else "",
+                    )
                 ),
             )
             graph_store.append(

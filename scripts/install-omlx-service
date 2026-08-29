@@ -1,0 +1,123 @@
+#!/bin/sh
+set -eu
+
+# Stage the operator-owned oMLX settings files. Process lifecycle remains
+# exclusively with the official DMG's ~/.omlx/bin/omlx wrapper; this script
+# never creates a launchd job or owns a foreground process.
+
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
+SETTINGS_TEMPLATE="$PROJECT_ROOT/config/omlx/settings.json.example"
+MODEL_SETTINGS_TEMPLATE="$PROJECT_ROOT/config/omlx/model_settings.json.example"
+
+BASE_PATH=${OMLX_BASE_PATH:-}
+MODEL_DIR=${OMLX_MODEL_DIR:-}
+DRY_RUN=0
+START=0
+
+usage() {
+  cat >&2 <<'EOF'
+usage: install-omlx-service [options]
+
+Stages missing oMLX 0.6.3 settings files. Existing files are never
+overwritten, including when --force is supplied for compatibility with older
+cutover instructions. The official app owns the server process.
+
+  --base-path PATH       oMLX base directory (default: ~/.omlx)
+  --model-dir PATH       model directory (default: BASE_PATH/models)
+  --dry-run              print resolved paths without writing
+  --start                stage files, then call start-omlx-service
+  --force                deprecated no-op; settings are always preserved
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --base-path)
+      [ "$#" -ge 2 ] || { usage; exit 64; }
+      BASE_PATH=$2
+      shift 2
+      ;;
+    --model-dir)
+      [ "$#" -ge 2 ] || { usage; exit 64; }
+      MODEL_DIR=$2
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --start)
+      START=1
+      shift
+      ;;
+    --force)
+      # Kept only so an old operator command cannot accidentally overwrite
+      # credentials or model policy. It intentionally has no effect.
+      shift
+      ;;
+    --launch-agent|--load)
+      echo "$1 is unsupported: lifecycle belongs to the official oMLX app" >&2
+      exit 64
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      exit 64
+      ;;
+  esac
+done
+
+[ -n "$BASE_PATH" ] && export OMLX_BASE_PATH="$BASE_PATH"
+[ -n "$MODEL_DIR" ] && export OMLX_MODEL_DIR="$MODEL_DIR"
+. "$SCRIPT_DIR/omlx-runtime-env"
+
+case "$OMLX_BASE_PATH:$OMLX_MODEL_DIR:$OMLX_MODEL_SETTINGS_PATH" in
+  /*:/*:/*) ;;
+  *) echo "oMLX paths must be absolute" >&2; exit 64 ;;
+esac
+
+if [ ! -f "$SETTINGS_TEMPLATE" ] || [ ! -f "$MODEL_SETTINGS_TEMPLATE" ]; then
+  echo "oMLX settings templates are missing from the checkout" >&2
+  exit 66
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  printf '%s\n' "oMLX lifecycle: $OMLX_CLI"
+  printf '%s\n' "oMLX app CLI: $OMLX_APP_CLI"
+  printf '%s\n' "oMLX base path: $OMLX_BASE_PATH"
+  printf '%s\n' "oMLX model dir: $OMLX_MODEL_DIR"
+  printf '%s\n' "oMLX settings: $OMLX_BASE_PATH/settings.json"
+  printf '%s\n' "oMLX model settings: $OMLX_MODEL_SETTINGS_PATH"
+  printf '%s\n' "oMLX endpoint: $OMLX_BASE_URL"
+  exit 0
+fi
+
+mkdir -p "$OMLX_BASE_PATH" "$OMLX_MODEL_DIR" "$OMLX_BASE_PATH/logs" \
+  "${OMLX_MODEL_SETTINGS_PATH%/*}"
+
+copy_if_missing() {
+  source=$1
+  destination=$2
+  if [ -e "$destination" ]; then
+    printf '%s\n' "preserving existing $destination (installer never overwrites settings)"
+    return 0
+  fi
+  temporary=$(mktemp "$destination.tmp.XXXXXX")
+  trap 'rm -f "$temporary"' 0 1 2 3 15
+  cp "$source" "$temporary"
+  chmod 0600 "$temporary"
+  mv -f "$temporary" "$destination"
+  trap - 0 1 2 3 15
+}
+
+copy_if_missing "$SETTINGS_TEMPLATE" "$OMLX_BASE_PATH/settings.json"
+copy_if_missing "$MODEL_SETTINGS_TEMPLATE" "$OMLX_MODEL_SETTINGS_PATH"
+
+printf '%s\n' "staged oMLX settings under $OMLX_BASE_PATH"
+if [ "$START" -eq 1 ]; then
+  exec "$SCRIPT_DIR/start-omlx-service"
+fi

@@ -33,9 +33,11 @@ from chronovisor.core.canonical_json import (
 )
 from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.decision.decision_authority import (
+    SINGLE_MODEL_AUTHORITY_KIND,
     semantic_authority_shape_error,
     semantic_verdict_authority_provenance_error,
     session_audit_is_safe,
+    single_route_provenance_error,
 )
 from chronovisor.decision.semantic_epoch import (
     STRUCTURED_REVIEW_HOLD_EPOCH_VERSION,
@@ -51,7 +53,9 @@ from chronovisor.decision.semantic_epoch import (
 
 LOCAL_SEMANTIC_NO_QUORUM = "local_semantic_no_quorum"
 SEMANTIC_NO_QUORUM_HOLD_KIND = "local_semantic_no_quorum_hold"
+SINGLE_MODEL_VALIDATION_HOLD_KIND = "single_model_validation_hold"
 SCHEMA_VERSION = 2
+SINGLE_MODEL_HOLD_SCHEMA_VERSION = 1
 
 STRUCTURED_REVIEW_HOLD_CACHE_SCHEMA_VERSION = 2
 STRUCTURED_REVIEW_HOLD_CACHE_KIND = "structured_review_semantic_no_quorum_cache"
@@ -79,6 +83,7 @@ _HOLD_FIELDS = frozenset(
         "hold_sha256",
     }
 )
+_SINGLE_HOLD_FIELDS = _HOLD_FIELDS | {"authority_kind"}
 
 
 STRUCTURED_REVIEW_HOLD_RESOLVER_SHA256 = canonical_sha256(
@@ -757,6 +762,281 @@ def persisted_semantic_no_quorum_hold(
     return copy.deepcopy(dict(candidate))
 
 
+def persisted_single_model_validation_hold(
+    value: object,
+    lane: str | None = None,
+    epoch: Mapping[str, Any] | None = None,
+    authority: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Extract a validated single-route validation hold."""
+
+    if not isinstance(value, Mapping):
+        return None
+    candidate: object
+    if value.get("kind") == SINGLE_MODEL_VALIDATION_HOLD_KIND:
+        candidate = value
+    elif "semantic_hold" in value:
+        candidate = value.get("semantic_hold")
+    else:
+        result = value.get("result")
+        candidate = result.get("semantic_hold") if isinstance(result, Mapping) else None
+    if not isinstance(candidate, Mapping):
+        return None
+    resolved_lane = lane if lane is not None else candidate.get("lane")
+    if not isinstance(resolved_lane, str) or not resolved_lane:
+        return None
+    if (
+        single_model_validation_hold_error(
+            candidate,
+            resolved_lane,
+            epoch=epoch,
+            authority=authority,
+        )
+        is not None
+    ):
+        return None
+    return copy.deepcopy(dict(candidate))
+
+
+def _single_router_policy_error(policy: object, *, lane: str) -> str | None:
+    if not isinstance(policy, Mapping):
+        return "decision policy audit is missing"
+    expected_fields = {
+        "lane",
+        "kind",
+        "schema_name",
+        "mode",
+        "error",
+        "expected_schema_sha256",
+        "actual_schema_sha256",
+        "router_policy",
+    }
+    if set(policy) != expected_fields:
+        return "decision policy audit fields are invalid"
+    if (
+        policy.get("lane") != lane
+        or policy.get("kind") not in {"consensus", "local_batch"}
+        or not isinstance(policy.get("schema_name"), str)
+        or not policy.get("schema_name")
+        or policy.get("mode") != "enabled"
+        or policy.get("error") is not None
+    ):
+        return "decision policy lane provenance is invalid"
+    expected_schema = policy.get("expected_schema_sha256")
+    if not _is_sha256(expected_schema) or policy.get("actual_schema_sha256") != expected_schema:
+        return "decision policy schema provenance is invalid"
+    router = policy.get("router_policy")
+    routes = router.get("routes") if isinstance(router, Mapping) else None
+    if (
+        not isinstance(router, Mapping)
+        or set(router) != {"source", "error", "routes"}
+        or router.get("source") != "runtime_role_mapping"
+        or router.get("error") is not None
+        or single_route_provenance_error(routes) is not None
+    ):
+        return "decision policy single route provenance is invalid"
+    return None
+
+
+def _single_hold_review_error(review: object, *, lane: str) -> str | None:
+    if not isinstance(review, Mapping):
+        return "semantic review is missing"
+    failure = review.get("frontier_failure")
+    if not isinstance(failure, Mapping) or set(failure) != {
+        "failure_class",
+        "rescue_status",
+        "summary",
+        "human_required",
+        "notify_user",
+    }:
+        return "semantic review frontier failure is missing"
+    policy = review.get("decision_policy")
+    policy_error = _single_router_policy_error(policy, lane=lane)
+    if policy_error is not None:
+        return policy_error
+    consensus = review.get("local_consensus")
+    if not isinstance(consensus, Mapping):
+        return "single-model validation hold proof is missing"
+    required = _SINGLE_MODEL_HOLD_AUDIT_FIELDS
+    if set(consensus) != required:
+        return "single-model validation hold proof fields are invalid"
+    if (
+        consensus.get("authority_kind") != SINGLE_MODEL_AUTHORITY_KIND
+        or consensus.get("quorum_flow") is not False
+        or consensus.get("repair_is_vote") is not False
+        or consensus.get("status") != "quarantined"
+        or consensus.get("ok") is not False
+        or consensus.get("validation_status") != "held"
+        or consensus.get("vote_count") not in {0, 1}
+        or consensus.get("valid_votes") != 0
+        or not isinstance(consensus.get("repair_turns"), int)
+        or not 0 <= consensus["repair_turns"] <= 2
+        or not isinstance(consensus.get("attempts"), list)
+        or not isinstance(consensus.get("votes"), list)
+        or len(consensus["votes"]) != consensus.get("vote_count")
+        or consensus.get("failure_class") is None
+        or consensus.get("quarantine_reason") is None
+        or consensus.get("agreement_sha256") is not None
+        or consensus.get("conservative_veto_fired") is not False
+        or consensus.get("conservative_veto_bypassed_by_lane_policy") is not False
+        or consensus.get("dissent_effect_class") is not None
+    ):
+        return "single-model validation hold proof is invalid"
+    if (
+        failure.get("failure_class") != "single_model_validation_failed"
+        or failure.get("rescue_status") != "local_quarantined"
+        or failure.get("summary") != consensus.get("quarantine_reason")
+        or failure.get("human_required") is not False
+        or failure.get("notify_user") is not False
+        or review.get("reviewer") != "single_model"
+        or review.get("human_required") is not False
+    ):
+        return "single-model validation hold failure envelope is invalid"
+    return None
+
+
+_SINGLE_MODEL_HOLD_AUDIT_FIELDS = frozenset(
+    {
+        "status",
+        "ok",
+        "conservative_veto_fired",
+        "conservative_veto_bypassed_by_lane_policy",
+        "dissent_effect_class",
+        "quorum_safety_policy_version",
+        "agreement_sha256",
+        "failure_class",
+        "quarantine_reason",
+        "num_ctx",
+        "residency",
+        "votes",
+        "authority_kind",
+        "quorum_flow",
+        "repair_is_vote",
+        "validation_status",
+        "vote_count",
+        "valid_votes",
+        "repair_turns",
+        "attempts",
+    }
+)
+
+
+def build_single_model_validation_hold(
+    lane: str,
+    epoch: Mapping[str, Any],
+    authority: Mapping[str, Any],
+    review: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build a versioned hold for one route's invalid/unsafe result."""
+
+    if not isinstance(lane, str) or not lane.strip() or lane != lane.strip():
+        raise ValueError("semantic hold lane is invalid")
+    if not isinstance(epoch, Mapping) or not epoch:
+        raise ValueError("semantic hold epoch is missing")
+    authority_error = semantic_authority_shape_error(authority, lane=lane)
+    if authority_error is not None:
+        raise ValueError(authority_error)
+    if authority.get("authority_kind") != SINGLE_MODEL_AUTHORITY_KIND:
+        raise ValueError("single-model validation hold requires single authority")
+    review_error = _single_hold_review_error(review, lane=lane)
+    if review_error is not None:
+        raise ValueError(review_error)
+    forbidden_key = _forbidden_plaintext_key(review)
+    if forbidden_key is not None:
+        raise ValueError(f"semantic hold forbids plaintext field:{forbidden_key}")
+    epoch_copy = copy.deepcopy(dict(epoch))
+    authority_copy = copy.deepcopy(dict(authority))
+    payload: dict[str, Any] = {
+        "schema_version": SINGLE_MODEL_HOLD_SCHEMA_VERSION,
+        "kind": SINGLE_MODEL_VALIDATION_HOLD_KIND,
+        "authority_kind": SINGLE_MODEL_AUTHORITY_KIND,
+        "lane": lane,
+        "epoch": epoch_copy,
+        "epoch_sha256": canonical_sha256(epoch_copy),
+        "authority": authority_copy,
+        "authority_sha256": canonical_sha256(authority_copy),
+        "frontier_failure": copy.deepcopy(dict(review["frontier_failure"])),
+        "local_consensus": copy.deepcopy(dict(review["local_consensus"])),
+        "decision_policy": copy.deepcopy(dict(review["decision_policy"])),
+        "review_sha256": canonical_sha256(review),
+    }
+    payload["hold_sha256"] = canonical_sha256(payload)
+    error = single_model_validation_hold_error(
+        payload, lane, epoch=epoch_copy, authority=authority_copy
+    )
+    if error is not None:
+        raise ValueError(error)
+    return payload
+
+
+def single_model_validation_hold_error(
+    hold: object,
+    lane: str,
+    epoch: Mapping[str, Any] | None = None,
+    authority: Mapping[str, Any] | None = None,
+) -> str | None:
+    if not isinstance(hold, Mapping) or set(hold) != _SINGLE_HOLD_FIELDS:
+        return "single-model validation hold fields are invalid"
+    if (
+        hold.get("schema_version") != SINGLE_MODEL_HOLD_SCHEMA_VERSION
+        or hold.get("kind") != SINGLE_MODEL_VALIDATION_HOLD_KIND
+        or hold.get("authority_kind") != SINGLE_MODEL_AUTHORITY_KIND
+        or hold.get("lane") != lane
+    ):
+        return "single-model validation hold identity is invalid"
+    stored_epoch = hold.get("epoch")
+    if not isinstance(stored_epoch, Mapping) or not stored_epoch:
+        return "semantic hold epoch is invalid"
+    try:
+        epoch_sha = canonical_sha256(stored_epoch)
+    except (TypeError, ValueError):
+        return "semantic hold epoch is not canonical JSON"
+    if hold.get("epoch_sha256") != epoch_sha:
+        return "semantic hold epoch digest is invalid"
+    if epoch is not None:
+        try:
+            if dict(epoch) != dict(stored_epoch) or canonical_sha256(epoch) != epoch_sha:
+                return "semantic hold epoch changed"
+        except (TypeError, ValueError):
+            return "semantic hold current epoch is not canonical JSON"
+    stored_authority = hold.get("authority")
+    authority_error = semantic_authority_shape_error(stored_authority, lane=lane)
+    if authority_error is not None:
+        return authority_error
+    if not isinstance(stored_authority, Mapping) or stored_authority.get(
+        "authority_kind"
+    ) != SINGLE_MODEL_AUTHORITY_KIND:
+        return "single-model validation hold authority is invalid"
+    authority_sha = canonical_sha256(stored_authority)
+    if hold.get("authority_sha256") != authority_sha:
+        return "semantic hold authority digest is invalid"
+    if authority is not None:
+        current_error = semantic_authority_shape_error(authority, lane=lane)
+        if current_error is not None:
+            return current_error
+        if dict(authority) != dict(stored_authority):
+            return "semantic hold authority changed"
+    review_stub = {
+        "reviewer": "single_model",
+        "human_required": False,
+        "frontier_failure": hold.get("frontier_failure"),
+        "local_consensus": hold.get("local_consensus"),
+        "decision_policy": hold.get("decision_policy"),
+    }
+    review_error = _single_hold_review_error(review_stub, lane=lane)
+    if review_error is not None:
+        return review_error
+    if not _is_sha256(hold.get("review_sha256")) or not _is_sha256(
+        hold.get("hold_sha256")
+    ):
+        return "single-model validation hold digest is invalid"
+    unsigned = dict(hold)
+    unsigned.pop("hold_sha256", None)
+    if hold.get("hold_sha256") != canonical_sha256(unsigned):
+        return "single-model validation hold self digest changed"
+    return None
+
+
 def build_structured_review_hold_epoch(
     *,
     lane: str,
@@ -1036,6 +1316,9 @@ __all__ = [
     "LOCAL_SEMANTIC_NO_QUORUM",
     "SCHEMA_VERSION",
     "SEMANTIC_NO_QUORUM_HOLD_KIND",
+    "SINGLE_MODEL_AUTHORITY_KIND",
+    "SINGLE_MODEL_HOLD_SCHEMA_VERSION",
+    "SINGLE_MODEL_VALIDATION_HOLD_KIND",
     "STRUCTURED_REVIEW_HOLD_CACHE_KIND",
     "STRUCTURED_REVIEW_HOLD_CACHE_SCHEMA_VERSION",
     "STRUCTURED_REVIEW_HOLD_EPOCH_VERSION",
@@ -1044,12 +1327,15 @@ __all__ = [
     "StructuredReviewHoldLease",
     "StructuredReviewSemanticHoldCache",
     "build_semantic_no_quorum_hold",
+    "build_single_model_validation_hold",
     "build_structured_review_hold_epoch",
     "canonical_sha256",
     "frontier_failure_class",
     "is_local_semantic_no_quorum",
     "persisted_semantic_no_quorum_hold",
+    "persisted_single_model_validation_hold",
     "semantic_no_quorum_hold_error",
+    "single_model_validation_hold_error",
     "structured_review_hold_epoch_error",
     "structured_review_authority_observation_sha256",
 ]

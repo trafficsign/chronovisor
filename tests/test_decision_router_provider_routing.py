@@ -98,6 +98,7 @@ def _frontier_payload(decision: str) -> str:
 
 def _config() -> DecisionRouterConfig:
     return DecisionRouterConfig(
+        authority_kind="quorum_v1",
         num_ctx=16_384,
         num_predict=256,
         read_timeout_ms=5_000,

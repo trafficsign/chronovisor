@@ -424,6 +424,8 @@ def test_single_model_and_explicitly_unattempted_quorum_paths() -> None:
     )
 
     assert standalone["paths"]["single-artifact"] == "done"
+    assert standalone["single_model"] is False
+    assert list(standalone["lanes"]) == ["primary", "challenger", "tie_break"]
     assert standalone["paths"]["quorum-artifact-join"] == "pending"
     assert standalone["nodes"]["seal"] == "done"
     assert held_without_quorum["context"]["selected_tokens"] == 65_536
@@ -431,6 +433,48 @@ def test_single_model_and_explicitly_unattempted_quorum_paths() -> None:
     assert held_without_quorum["nodes"]["agree"] == "active"
     assert held_without_quorum["nodes"]["hold"] == "pending"
     assert held_without_quorum["labels"]["hold"] == "Custom hold"
+
+
+def test_single_model_authority_projects_one_lane_and_binds_identity() -> None:
+    result = projection.project_decision_trace(
+        _trace(
+            state="ready",
+            artifact="done",
+            decision="done",
+            lanes=[
+                {
+                    **_lane("primary", "done", think="low", context=32_768),
+                    "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+                    "revision": "a" * 64,
+                },
+                _lane("challenger", "skipped"),
+                _lane("tie_break", "skipped"),
+            ],
+            authority_kind="single_model_v1",
+            quorum_flow=False,
+        )
+    )
+
+    assert result["single_model"] is True
+    assert result["mode"] == "single"
+    assert result["authority_kind"] == "single_model_v1"
+    assert result["authority"] == {
+        "kind": "single_model_v1",
+        "label": "Single Authority",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "a" * 64,
+        "target": 1,
+        "validated": True,
+        "repair_is_vote": False,
+    }
+    assert list(result["lanes"]) == ["primary"]
+    assert result["lanes"]["primary"]["label"] == "Single Authority"
+    assert result["model_routes"] == {"primary": "done"}
+    assert result["paths"]["single-artifact"] == "done"
+    assert result["labels"]["authority"] == "Single Authority"
+    assert result["labels"]["validation"] == "Validated"
+    assert result["labels"]["target"] == "1"
+    assert result["labels"]["repair"] == "REPAIR ≠ VOTE"
 
 
 def test_active_reasoning_fit_is_checking() -> None:

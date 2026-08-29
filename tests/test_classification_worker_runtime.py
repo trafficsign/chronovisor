@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -218,6 +219,250 @@ def _worker_payload(root: Path) -> dict[str, object]:
             }
         ],
     }
+
+
+def _single_route(*, location: str = "remote") -> Any:
+    return classification_model_worker.ollama.RuntimeGenerationRoute(
+        role="classification.authority",
+        provider="remote" if location == "remote" else "ollama",
+        model="authority-model",
+        location=location,
+        structured_output=True,
+    )
+
+
+def test_single_authority_worker_executes_one_route_without_quorum_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _single_route()
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        classification_model_worker,
+        "load_decision_router_config",
+        lambda: SimpleNamespace(
+            authority_kind="single_model_v1",
+            num_ctx=16_384,
+            read_timeout_ms=5_000,
+            authority_keep_alive="1m",
+            primary_keep_alive="1m",
+            challenger_keep_alive="1m",
+            tie_break_keep_alive="1m",
+        ),
+    )
+    monkeypatch.setattr(
+        classification_model_worker,
+        "resolve_single_runtime_route",
+        lambda supplied=None: (
+            pytest.fail("unexpected supplied route")
+            if supplied is not None
+            else {
+                "role": route.role,
+                "provider": route.provider,
+                "model": route.model,
+                "location": route.location,
+                "model_digest": None,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        classification_model_worker,
+        "_stage_cache_path",
+        lambda *args, **kwargs: ("single-test", tmp_path / "cache.json"),
+    )
+    monkeypatch.setattr(
+        classification_model_worker.ollama,
+        "runtime_structured_chat",
+        lambda _messages, **kwargs: (
+            calls.append(str(kwargs["runtime_role"]))
+            or classification_model_worker.ollama.ChatResponse(
+                content=json.dumps(
+                    {
+                        "decisions": [
+                            {
+                                "uid": "uid-1",
+                                "primary_notation": "004.8",
+                                "secondary_notations": [],
+                                "confidence": 0.9,
+                                "rationale": "supported",
+                            }
+                        ]
+                    }
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        classification_model_worker,
+        "load_udc_package",
+        lambda _root: SimpleNamespace(checksum="sha256:package", complete=True),
+    )
+
+    result = classification_model_worker.run(
+        {
+            **_worker_payload(tmp_path),
+            "schema": classification_engine.AUTHORITY_SCHEMA,
+            "authority_kind": "single_model_v1",
+        }
+    )
+
+    assert calls == ["classification.authority"]
+    assert result["authority_kind"] == "single_model_v1"
+    assert result["runtime_routes"] == [
+        {
+            "role": "classification.authority",
+            "provider": "remote",
+            "model": "authority-model",
+            "location": "remote",
+            "model_digest": None,
+        }
+    ]
+    decision = result["decisions"][0]
+    assert decision["authority_model"] == "authority-model"
+    assert decision["validation_count"] == 1
+    assert decision["status"] == "proposed"
+    assert decision["authority_digest"]
+    assert result["authority"]["kind"] == "single_model_v1"
+    assert result["authority"]["validation_count"] == 1
+    assert decision["authority"] == result["authority"]
+    assert not {
+        "quorum",
+        "primary_model",
+        "challenger_model",
+        "tie_break_model",
+        "consensus_sha256",
+    } & decision.keys()
+
+
+def test_single_runtime_route_requires_exactly_one_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        classification_runtime.ollama,
+        "runtime_generation_routes",
+        lambda roles: (
+            classification_runtime.ollama.RuntimeGenerationRoute(
+                role="classification.authority",
+                provider="remote",
+                model="authority-model",
+                location="remote",
+                structured_output=True,
+            ),
+        )
+        if roles == ("classification.authority",)
+        else (),
+    )
+    route = classification_runtime.resolve_single_runtime_route()
+    assert route["role"] == "classification.authority"
+    with pytest.raises(ClassificationError, match="contract is invalid"):
+        classification_runtime.resolve_single_runtime_route([route, route])
+
+
+def test_engine_single_authority_binds_queue_and_worker_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = {
+        "role": "classification.authority",
+        "provider": "remote",
+        "model": "authority-model",
+        "location": "remote",
+        "model_digest": None,
+    }
+    captured: dict[str, Any] = {}
+
+    class FakeStore:
+        def merge_item(self, **kwargs: Any) -> dict[str, Any]:
+            captured["input_data"] = kwargs["input_data"]
+            return {"item": {"key": "single-key", "status": "pending_local"}}
+
+        def claim_attempt(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"claimed": True}
+
+        def fail_attempt(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("single worker result should validate")
+
+        def complete(self, *_args: Any, **kwargs: Any) -> None:
+            captured["result"] = kwargs["result"]
+
+    monkeypatch.setattr(
+        classification_engine,
+        "resolve_single_runtime_route",
+        lambda: route,
+    )
+    monkeypatch.setattr(
+        classification_engine,
+        "load_udc_package",
+        lambda _root: SimpleNamespace(checksum="sha256:package"),
+    )
+    monkeypatch.setattr(
+        classification_engine,
+        "librarian_convergence_store",
+        lambda _root: FakeStore(),
+    )
+
+    @contextmanager
+    def fake_lane(*_args: Any, **_kwargs: Any):
+        yield object()
+
+    monkeypatch.setattr(classification_engine, "research_lane", fake_lane)
+    monkeypatch.setattr(classification_engine, "sync_pending", lambda: False)
+
+    def run_worker(command: Any, worker_input: str, *_args: Any, **_kwargs: Any) -> Any:
+        del command
+        captured["worker_input"] = json.loads(worker_input)
+        return SimpleNamespace(
+            status="completed",
+            error="",
+            value={
+                "authority_kind": "single_model_v1",
+                "authority": {
+                    "kind": "single_model_v1",
+                    "route": route,
+                    "model": route["model"],
+                    "revision": None,
+                    "result_sha256": "result",
+                    "validation_count": 1,
+                    "attempts": [],
+                },
+                "runtime_routes": [route],
+                "model_calls": 1,
+                "decisions": [
+                    {
+                        "uid": "uid-1",
+                        "primary_notation": "004.8",
+                        "secondary_notations": [],
+                        "confidence": 0.9,
+                        "rationale": "supported",
+                        "status": "proposed",
+                        "authority_kind": "single_model_v1",
+                        "authority_model": "authority-model",
+                        "authority_digest": "decision-result",
+                        "validation_count": 1,
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(classification_engine, "run_cancellable_command", run_worker)
+
+    decisions = classification_engine.run_consensus_batches(
+        [
+            {
+                "uid": "uid-1",
+                "source_sha256": "sha256:source",
+                "candidates": [{"notation": "004.8"}],
+            }
+        ],
+        root=tmp_path,
+    )
+
+    assert decisions[0]["uid"] == "uid-1"
+    assert captured["worker_input"]["schema"] == classification_engine.AUTHORITY_SCHEMA
+    assert captured["worker_input"]["authority_kind"] == "single_model_v1"
+    assert captured["result"]["authority_kind"] == "single_model_v1"
+    assert "consensus_schema" not in captured["result"]
 
 
 @pytest.mark.parametrize(("worker", "role", "payload", "response"), _CASES)

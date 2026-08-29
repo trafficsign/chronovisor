@@ -134,6 +134,7 @@ def test_light_dashboard_probe_projects_aggregate_snapshot(
 
 def _config() -> DecisionRouterConfig:
     return DecisionRouterConfig(
+        authority_kind="quorum_v1",
         primary_model="primary:test",
         challenger_model="challenger:test",
         tie_break_model="tie:test",

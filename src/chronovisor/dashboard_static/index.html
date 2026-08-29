@@ -110,6 +110,14 @@
             <span id="decision-trace-caption">Job --</span>
           </div>
         </div>
+        <div class="decision-single-authority" id="decision-single-authority" hidden aria-label="Single-model authority">
+          <span class="decision-single-authority-title" data-single-authority-label>Single Authority</span>
+          <span><b>MODEL</b><strong data-single-model>--</strong></span>
+          <span><b>REVISION</b><strong data-single-revision>--</strong></span>
+          <span><b>STATUS</b><strong data-single-status>Validated</strong></span>
+          <span><b>TARGET</b><strong data-single-target>1</strong></span>
+          <span><b>REPAIR</b><strong data-single-repair>REPAIR ≠ VOTE</strong></span>
+        </div>
 
         <div class="decision-trace-scroll" id="decision-trace-scroll" tabindex="0" aria-label="Decision trace harness; narrow screens can scroll horizontally for the complete trace">
           <svg class="decision-trace-harness" id="decision-trace-harness" viewBox="0 0 1500 650" width="1400" height="607" role="img" aria-labelledby="decision-trace-svg-title decision-trace-svg-description">
@@ -133,7 +141,7 @@
 
             <g class="trace-plan" aria-label="Execution plan">
               <text class="trace-section-title" x="38" y="84">EXECUTION PLAN</text>
-              <text class="trace-kicker" x="62" y="112">MODEL ROUTES</text>
+              <text class="trace-kicker" data-model-routes-label="true" x="62" y="112">MODEL ROUTES</text>
               <path class="trace-divider" d="M250 96 V214"></path>
               <g class="trace-model-route" data-model-key="primary" transform="translate(68 141)"><circle r="5"></circle><text x="14" y="4">Primary · <tspan data-model-value="primary">--</tspan></text></g>
               <g class="trace-model-route" data-model-key="challenger" transform="translate(68 171)"><circle r="5"></circle><text x="14" y="4">Challenger · <tspan data-model-value="challenger">--</tspan></text></g>
@@ -171,12 +179,12 @@
               <path class="trace-path trace-reasoning-path" data-path-key="plan-fit" d="M1270 164 H1280" marker-end="url(#trace-arrow)"></path>
               <g class="trace-diamond" data-plan-key="fit"><path d="M1330 118 1380 164 1330 210 1280 164Z"></path><text x="1330" y="146">FIT GATE</text><text data-plan-value="fit" x="1330" y="174">WAITING</text><text class="trace-pass" data-plan-fit-pass="true" x="1330" y="190">PASS</text></g>
               <path class="trace-path" data-path-key="plan-dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V315 Q180 325 190 325 H220" marker-end="url(#trace-arrow)"></path>
-              <text class="trace-path-label" x="700" y="258" text-anchor="middle">DISPATCH → PRIMARY</text>
+              <text class="trace-path-label" data-dispatch-label="true" x="700" y="258" text-anchor="middle">DISPATCH → PRIMARY</text>
             </g>
 
             <g class="trace-lanes" id="decision-lanes" aria-label="Local model lanes" aria-live="polite">
               <path class="trace-path trace-next-voter" data-path-key="primary-challenger" d="M1096 370 V377 Q1096 387 1086 387 H190 Q180 387 180 397 V440 Q180 450 190 450 H220" marker-end="url(#trace-arrow)"></path>
-              <text class="trace-path-label" x="490" y="381">NEXT VOTER</text>
+              <text class="trace-path-label trace-next-voter-label" x="490" y="381">NEXT VOTER</text>
               <path class="trace-path trace-single-path" data-path-key="single-artifact" d="M1106 360 H1300 Q1310 360 1310 370 V393" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-next-voter" data-path-key="challenger-agree" d="M1106 450 H1168" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-yes-path" data-path-key="pair-artifact-join" d="M1248 450 H1278 Q1288 450 1288 440 V414 Q1288 404 1298 404 H1299" marker-end="url(#trace-arrow)"></path>
@@ -196,7 +204,7 @@
 
               <g class="decision-lane" data-decision-lane="primary" transform="translate(0 325)">
                 <text class="decision-role" data-lane-label="primary" x="36" y="-6">Primary</text>
-                <text class="decision-sublabel" x="36" y="12">LOCAL DECISION</text>
+                <text class="decision-sublabel" data-lane-sublabel="primary" x="36" y="12">LOCAL DECISION</text>
                 <text class="decision-think" data-lane-think="primary" x="36" y="28">—</text>
                 <path class="trace-path trace-lane-rail" data-lane-path="trigger-load" d="M240 0 H374" marker-end="url(#trace-arrow)"></path>
                 <path class="trace-path trace-lane-rail" data-lane-path="load-context" d="M394 0 H555" marker-end="url(#trace-arrow)"></path>
@@ -268,9 +276,9 @@
 
               <g class="trace-diamond trace-agree" data-trace-key="agree"><path d="M1208 410 1248 450 1208 490 1168 450Z"></path><text x="1208" y="454">Agree?</text></g>
               <g class="trace-diamond trace-quorum-gate" data-trace-key="quorum"><path d="M1248 545 1278 575 1248 605 1218 575Z"></path><text x="1248" y="572">SAFE</text><text x="1248" y="584">QUORUM?</text></g>
-              <g class="trace-node trace-shared-node" data-trace-key="artifact" transform="translate(1310 404)"><circle r="11"></circle><text class="trace-artifact-label" x="-16" y="-18" text-anchor="end">Artifact</text></g>
+              <g class="trace-node trace-shared-node" data-trace-key="artifact" transform="translate(1310 404)"><circle r="11"></circle><text class="trace-artifact-label" data-artifact-label="true" x="-16" y="-18" text-anchor="end">Artifact</text></g>
               <g class="trace-diamond trace-seal-gate" data-trace-key="seal"><path d="M1370 470 1404 500 1370 530 1336 500Z"></path><text x="1370" y="503">SEAL OK?</text></g>
-              <g class="trace-node trace-shared-node" data-trace-key="decision" transform="translate(1460 500)"><circle r="11"></circle><text y="-22">Decision</text></g>
+              <g class="trace-node trace-shared-node" data-trace-key="decision" transform="translate(1460 500)"><circle r="11"></circle><text data-decision-label="true" y="-22">Decision</text></g>
               <g class="trace-node trace-hold-node" data-trace-key="hold" transform="translate(1460 600)"><circle r="12"></circle><text class="trace-hold-title" y="28">Hold</text><text class="trace-hold-reason" data-hold-reason="true" x="28" y="43">No safe quorum</text></g>
             </g>
           </svg>
@@ -317,7 +325,8 @@
           </div>
           <div class="decision-facts">
             <div><span>MODEL CALLS</span><strong id="decision-model-calls">0</strong></div>
-            <div><span>QUORUM</span><strong id="decision-quorum">0 / 2</strong></div>
+            <div data-decision-fact="quorum"><span data-decision-fact-label="quorum">QUORUM</span><strong id="decision-quorum">0 / 2</strong></div>
+            <div data-decision-fact="target" hidden><span>TARGET</span><strong id="decision-target">1</strong></div>
             <div><span>MUTATION</span><strong id="decision-mutation">Locked</strong></div>
           </div>
         </div>

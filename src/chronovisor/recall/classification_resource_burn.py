@@ -25,7 +25,10 @@ from chronovisor.core.runtime_config import (
 )
 from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.ingest.convergence import ConvergenceStore, RetryPolicy
-from chronovisor.recall.classification import ClassificationError
+from chronovisor.recall.classification import (
+    ClassificationError,
+    resolve_single_runtime_route,
+)
 from chronovisor.recall.classification_embedding_worker import (
     resolved_route_identity,
 )
@@ -312,15 +315,30 @@ def run_resource_burn(
             "resource burn requires at least 50 samples per stage"
         )
     config = load_decision_router_config()
+    authority_kind = str(getattr(config, "authority_kind", "quorum_v1"))
+    if authority_kind not in {"quorum_v1", "single_model_v1"}:
+        raise ClassificationError("classification authority kind is invalid")
     embedding_route = resolved_route_identity()
     embedding_model = str(embedding_route["model"] or "")
-    protected_model = config.primary_model
+    authority_route = (
+        resolve_single_runtime_route()
+        if authority_kind == "single_model_v1"
+        else None
+    )
+    protected_model = str(
+        authority_route["model"]
+        if authority_route is not None
+        else config.primary_model
+    )
+    authority_keep_alive = getattr(config, "authority_keep_alive", None) or getattr(
+        config, "primary_keep_alive", "24h"
+    )
     ollama.generate(
         "Reply with OK.",
         model=protected_model,
         num_ctx=2_048,
         num_predict=8,
-        keep_alive="24h",
+        keep_alive=authority_keep_alive,
         read_timeout_ms=120_000,
         temperature=0,
         seed=0,
@@ -329,11 +347,15 @@ def run_resource_burn(
     baseline = [row for row, _fingerprint in baseline_rows]
     baseline_fingerprints = {fingerprint for _row, fingerprint in baseline_rows}
     queue_store, queue_key = _isolated_requeue_store(root)
-    stages = [
-        ("proposal", "llm", config.primary_model),
-        ("audit", "llm", config.challenger_model),
-        ("tie_break", "llm", config.tie_break_model),
-    ]
+    stages = (
+        [("authority", "llm", protected_model)]
+        if authority_kind == "single_model_v1"
+        else [
+            ("proposal", "llm", config.primary_model),
+            ("audit", "llm", config.challenger_model),
+            ("tie_break", "llm", config.tie_break_model),
+        ]
+    )
     if (
         embedding_route["provider"] == "ollama"
         and embedding_route["location"] == "local"
@@ -446,6 +468,7 @@ def run_resource_burn(
         "status": "passed" if all(gates.values()) else "failed",
         "gates": gates,
         "samples_per_stage": samples_per_stage,
+        "authority_kind": authority_kind,
         "protected_model": protected_model,
         "baseline": {
             "sample_count": len(baseline),
@@ -455,12 +478,19 @@ def run_resource_burn(
         "stages": summaries,
         "embedding_route": embedding_route,
         "samples": stage_rows,
-        "models": {
-            "proposal": config.primary_model,
-            "audit": config.challenger_model,
-            "tie_break": config.tie_break_model,
-            "dense_embedding": embedding_model,
-        },
+        "models": (
+            {
+                "authority": protected_model,
+                "dense_embedding": embedding_model,
+            }
+            if authority_kind == "single_model_v1"
+            else {
+                "proposal": config.primary_model,
+                "audit": config.challenger_model,
+                "tie_break": config.tie_break_model,
+                "dense_embedding": embedding_model,
+            }
+        ),
         "page_or_registry_mutations": 0,
     }
     path = (

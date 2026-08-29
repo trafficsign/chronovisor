@@ -53,6 +53,13 @@ STRUCTURED_GENERATION_TEMPERATURE = 0
 STRUCTURED_GENERATION_SEED = 0
 _DEFAULT_STRUCTURED_MEMORY_RESERVE_GIB = 16
 _DEFAULT_RUNTIME_ROLE = "librarian.review"
+# Production single-model compatibility is keyed by the API model ID and its
+# immutable route revision.  Legacy model entries below remain only for
+# candidate/replay fixtures; DecisionRouter resolves production by role.
+QWEN_FLASH_MODEL = ollama.SINGLE_MODEL_RUNTIME_MODEL
+QWEN_FLASH_REVISION = ollama.SINGLE_MODEL_RUNTIME_REVISION
+QWEN_FLASH_MODEL_TYPE = ollama.SINGLE_MODEL_RUNTIME_MODEL_TYPE
+QWEN_FLASH_ARCHITECTURE = ollama.SINGLE_MODEL_RUNTIME_ARCHITECTURE
 _QWEN_STRUCTURED_COMPAT_MODEL = "qwen3.8:27b-axq4"
 _MUSE_STRUCTURED_COMPAT_MODEL = "muse-glimmer:30b-q4k-dynamic"
 _FORMATLESS_THINKING_MODELS = frozenset(
@@ -215,6 +222,12 @@ def structured_generation_policy() -> dict[str, Any]:
             },
         },
         "compatibility": {
+            QWEN_FLASH_MODEL: {
+                "revision": QWEN_FLASH_REVISION,
+                "model_type": QWEN_FLASH_MODEL_TYPE,
+                "architecture": QWEN_FLASH_ARCHITECTURE,
+                "initial": {"think": "selected", "format": "json_schema"},
+            },
             _QWEN_STRUCTURED_COMPAT_MODEL: {
                 "initial": {"think": "selected_boolean", "format": None},
             },
@@ -3753,6 +3766,10 @@ __all__ = [
     "LocalStructuredSession",
     "MAX_REPAIR_TURNS",
     "MAX_RESPONSES",
+    "QWEN_FLASH_ARCHITECTURE",
+    "QWEN_FLASH_MODEL",
+    "QWEN_FLASH_MODEL_TYPE",
+    "QWEN_FLASH_REVISION",
     "STRUCTURED_GENERATION_POLICY_VERSION",
     "STRUCTURED_GENERATION_SEED",
     "STRUCTURED_GENERATION_TEMPERATURE",

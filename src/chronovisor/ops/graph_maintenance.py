@@ -489,7 +489,11 @@ def _run_maintenance_lanes(
     consensus = (
         _paused()
         if busy
-        else verify_pending_relations(root=root, store=store, dry_run=dry_run)
+        else verify_pending_relations(
+            root=root,
+            store=store,
+            dry_run=dry_run,
+        )
     )
     trace_file = root / "runtime" / "typed-graph" / "candidate-trace.jsonl"
     pull_file = root / "recall" / "pull-log.jsonl"
@@ -503,7 +507,11 @@ def _run_maintenance_lanes(
     entities = (
         _paused()
         if busy
-        else consolidate_entity_candidates(root=root, store=store, dry_run=dry_run)
+        else consolidate_entity_candidates(
+            root=root,
+            store=store,
+            dry_run=dry_run,
+        )
     )
     used_entities = (
         advance_used_entities(

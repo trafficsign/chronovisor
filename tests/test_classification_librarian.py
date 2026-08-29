@@ -501,6 +501,7 @@ def test_consensus_batch_retries_foreground_preemption(monkeypatch) -> None:
             }
         ],
         root=Path("/tmp/test-chronovisor"),
+        authority_kind="quorum_v1",
     )
 
     assert decisions[0]["uid"] == "uid-1"

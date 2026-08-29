@@ -108,9 +108,10 @@ def run_full_model_shadow(
     limit: int = -1,
     batch_size: int = 20,
 ) -> dict[str, Any]:
-    """Classify every stale page with local 2-of-3 consensus."""
+    """Classify every stale page with the configured authority contract."""
 
     started = time.monotonic()
+    authority_kind = "single_model_v1"
     authority = classification_authority_status(root)
     if authority.get("bundle_resolver_status") != "legacy" and not authority.get(
         "mutation_capability"
@@ -169,13 +170,24 @@ def run_full_model_shadow(
         batch_size=batch_size,
         purpose="explicit",
         timeout_seconds=1_800,
+        authority_kind=authority_kind,
     )
     by_uid = {str(row["uid"]): row for row in decisions}
     updates: dict[str, dict[str, Any]] = {}
     holds = 0
     for page in rows:
         decision = by_uid[str(page["uid"])]
-        status = "proposed" if int(decision.get("quorum") or 0) >= 2 else "held"
+        status = (
+            "proposed"
+            if (
+                decision.get("status") == "proposed"
+                and (
+                    authority_kind == "single_model_v1"
+                    or int(decision.get("quorum") or 0) >= 2
+                )
+            )
+            else "held"
+        )
         record = record_from_consensus(
             page,
             decision,
@@ -184,23 +196,33 @@ def run_full_model_shadow(
             status=status,
             authority_digest=authority_digest or None,
         )
-        updates[str(page["uid"])] = {
-            "classification": record.to_dict(),
-            "classification_status": status,
-            "classification_consensus": {
-                "sha256": decision["consensus_sha256"],
-                "quorum": decision["quorum"],
-                "models": [
-                    decision["primary_model"],
-                    decision["challenger_model"],
-                    *(
-                        [decision["tie_break_model"]]
-                        if decision.get("tie_break_model")
-                        else []
-                    ),
-                ],
-            },
-        }
+        authority = decision.get("authority")
+        if authority_kind == "single_model_v1":
+            if not isinstance(authority, Mapping):
+                raise RuntimeError("single classification authority receipt is missing")
+            updates[str(page["uid"])] = {
+                "classification": record.to_dict(),
+                "classification_status": status,
+                "classification_authority": dict(authority),
+            }
+        else:
+            updates[str(page["uid"])] = {
+                "classification": record.to_dict(),
+                "classification_status": status,
+                "classification_consensus": {
+                    "sha256": decision["consensus_sha256"],
+                    "quorum": decision["quorum"],
+                    "models": [
+                        decision["primary_model"],
+                        decision["challenger_model"],
+                        *(
+                            [decision["tie_break_model"]]
+                            if decision.get("tie_break_model")
+                            else []
+                        ),
+                    ],
+                },
+            }
         holds += status == "held"
     current = registry.load()
     result = registry.apply_page_updates(
@@ -238,6 +260,7 @@ def run_full_model_shadow(
     receipt = {
         "schema": MIGRATION_RECEIPT_SCHEMA,
         "event": "full_model_shadow",
+        "authority_kind": authority_kind,
         "timestamp": librarian_now_iso(),
         "selected": len(rows),
         "proposed": len(rows) - holds,

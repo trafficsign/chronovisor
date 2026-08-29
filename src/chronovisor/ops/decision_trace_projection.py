@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any, Final
 
 TRACE_PROJECTION_SCHEMA: Final = "chronovisor.decision-trace-projection.v1"
+TRACE_SINGLE_AUTHORITY_KIND: Final = "single_model_v1"
 TRACE_STATES: Final = frozenset({"pending", "active", "done", "skipped", "error"})
 TRACE_ROLES: Final = ("primary", "challenger", "tie_break")
 TRACE_PHASES: Final = ("trigger", "load", "context", "generate", "validate", "vote")
@@ -122,7 +123,17 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
         and not seal_failure
         and trace.get("quorum_attempted") is not False
     )
-    single_model = trace.get("quorum_flow") is False
+    authority_kind_value = trace.get("authority_kind")
+    authority_kind = (
+        authority_kind_value.strip()
+        if isinstance(authority_kind_value, str) and authority_kind_value.strip()
+        else None
+    )
+    single_flow = trace.get("quorum_flow") is False
+    # A single-model projection is enabled only by persisted execution facts.
+    # A bare quorum_flow=False snapshot remains compatible with the legacy
+    # three-lane projection used by synthetic fixtures.
+    single_model = single_flow and authority_kind == TRACE_SINGLE_AUTHORITY_KIND
 
     lanes: dict[str, dict[str, Any]] = {}
     for role in TRACE_ROLES:
@@ -164,13 +175,18 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
             if repair_count or repair_events
             else "pending"
         )
-        lanes[role] = {
+        lane_projection: dict[str, Any] = {
             "state": _state(lane.get("state")),
             "steps": step_states,
             "rails": {key: step_states[phase] for key, phase in TRACE_RAILS.items()},
             "repair": repair_state,
             "repair_attempt": repair_count,
         }
+        for key in ("model", "revision"):
+            value = lane.get(key)
+            if isinstance(value, str) and value:
+                lane_projection[key] = value
+        lanes[role] = lane_projection
 
     selected_lane = next(
         (
@@ -216,11 +232,11 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
         and trace.get("quorum_attempted") is True
         else "pending"
     )
-    safe_no_quorum = no_safe_quorum and not single_model
+    safe_no_quorum = no_safe_quorum and not single_flow
     tie_finished = tie_state in {"done", "error"}
     tie_quorum = _selected_path(
         quorum_payload,
-        selected=not single_model and tie_observed and tie_finished,
+        selected=not single_flow and tie_observed and tie_finished,
     )
     safe_tie_quorum = tie_quorum == "done" and not safe_no_quorum
     pair_yes = _selected_path(artifact_payload, selected=pair_agreement)
@@ -273,7 +289,7 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
             else "pending",
             "plan-dispatch": plan_state,
             "primary-challenger": lanes["challenger"]["steps"]["trigger"],
-            "single-artifact": artifact_state if single_model else "pending",
+            "single-artifact": artifact_state if single_flow else "pending",
             "challenger-agree": (
                 lanes["challenger"]["steps"]["vote"]
                 if lanes["challenger"]["steps"]["vote"] in {"done", "error"}
@@ -302,12 +318,63 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
         if seal_failure
         else str(trace.get("summary") or "No safe quorum").split("·", 1)[0].strip()
     )
-    return {
+    display_lanes = lanes
+    display_model_routes = {
+        role: lanes[role]["state"] for role in TRACE_ROLES
+    }
+    labels: dict[str, Any] = {
+        "fit": "BYPASS"
+        if selected_reasoning == "off" and fit_state != "pending"
+        else "headroom OK"
+        if fit_state == "done"
+        else "CHECKING"
+        if fit_state == "active"
+        else "WAITING",
+        "fit_pass": fit_state == "done" and selected_reasoning != "off",
+        "hold": hold_reason,
+    }
+    authority: dict[str, Any] | None = None
+    if single_model:
+        primary_lane = lane_rows.get("primary", {})
+        model = primary_lane.get("model") or trace.get("model")
+        revision = primary_lane.get("revision") or trace.get("revision")
+        model = model if isinstance(model, str) and model else None
+        revision = revision if isinstance(revision, str) and revision else None
+        authority = {
+            "kind": TRACE_SINGLE_AUTHORITY_KIND,
+            "label": "Single Authority",
+            "model": model,
+            "revision": revision,
+            "target": 1,
+            "validated": trace_state in {"ready", "agreed"}
+            and artifact_payload == "done"
+            and decision_payload == "done",
+            "repair_is_vote": False,
+        }
+        display_lanes = {"primary": {**lanes["primary"], "label": "Single Authority"}}
+        display_model_routes = {"primary": lanes["primary"]["state"]}
+        labels.update(
+            {
+                "authority": "Single Authority",
+                "validation": "Validated"
+                if authority["validated"]
+                else "Held"
+                if trace_state == "quarantined"
+                else "Validating",
+                "target": "1",
+                "repair": "REPAIR ≠ VOTE",
+            }
+        )
+
+    result = {
         "schema": TRACE_PROJECTION_SCHEMA,
+        "mode": "single" if single_model else "quorum",
+        "single_model": single_model,
+        "authority_kind": authority_kind,
         "nodes": nodes,
         "paths": paths,
-        "lanes": lanes,
-        "model_routes": {role: lanes[role]["state"] for role in TRACE_ROLES},
+        "lanes": display_lanes,
+        "model_routes": display_model_routes,
         "context": {
             "selected_tokens": selected_context,
             "options": _context_options(selected_context, plan_state),
@@ -320,15 +387,8 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
                 for mode in _REASONING_MODES
             },
         },
-        "labels": {
-            "fit": "BYPASS"
-            if selected_reasoning == "off" and fit_state != "pending"
-            else "headroom OK"
-            if fit_state == "done"
-            else "CHECKING"
-            if fit_state == "active"
-            else "WAITING",
-            "fit_pass": fit_state == "done" and selected_reasoning != "off",
-            "hold": hold_reason,
-        },
+        "labels": labels,
     }
+    if authority is not None:
+        result["authority"] = authority
+    return result

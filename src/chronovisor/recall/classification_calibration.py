@@ -82,6 +82,7 @@ def adjudicate(root: Path, *, batch_size: int) -> dict[str, Any]:
         purpose="explicit",
         timeout_seconds=1_800,
         run_namespace="adjudication-epoch2-v2",
+        authority_kind="quorum_v1",
     )
     initial_by_uid = {str(row["uid"]): row for row in decisions}
     refinement_rows = [
@@ -97,6 +98,7 @@ def adjudicate(root: Path, *, batch_size: int) -> dict[str, Any]:
             purpose="explicit",
             timeout_seconds=1_800,
             run_namespace="adjudication-tie-policy-v3",
+            authority_kind="quorum_v1",
         )
         initial_by_uid.update({str(row["uid"]): row for row in refined})
         decisions = [initial_by_uid[str(row["uid"])] for row in rows]
@@ -323,6 +325,7 @@ def apply_dev_audit(root: Path, audit_path: Path) -> dict[str, Any]:
 def _config_digest() -> str:
     payload = json.dumps(
         {
+            "authority_kind": "quorum_v1",
             "runtime_routes": list(resolve_consensus_runtime_routes()),
             "engine": f"classification-consensus-v{ENGINE_VERSION}",
         },
@@ -389,6 +392,7 @@ def _evaluate_locked_holdout(
         purpose="explicit",
         timeout_seconds=1_800,
         run_namespace=run_namespace,
+        authority_kind="quorum_v1",
     )
     holdout_decisions = [
         {
@@ -497,6 +501,7 @@ def calibrate(
         purpose="explicit",
         timeout_seconds=1_800,
         run_namespace=f"calibration-dev-{namespace_suffix}",
+        authority_kind="quorum_v1",
     )
     sweep = []
     for minimum_confidence in (0.45, 0.50, 0.55, 0.60, 0.65, 0.70):

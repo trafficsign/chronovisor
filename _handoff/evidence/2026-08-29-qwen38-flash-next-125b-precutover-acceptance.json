@@ -1,0 +1,179 @@
+{
+  "schema_version": "chronovisor.qwen125b.precutover-acceptance.v1",
+  "recorded_at": "2026-08-29T20:55:10+09:00",
+  "result": "pass",
+  "runtime": {
+    "distribution": "/Applications/oMLX.app",
+    "version": "0.6.3",
+    "endpoint": "http://127.0.0.1:18125/v1",
+    "host": "127.0.0.1",
+    "port": 18125,
+    "lifecycle": "official_app_managed_cli",
+    "max_concurrent_requests": 1,
+    "max_context_window": 114688,
+    "memory_ceiling_bytes": 111669149696
+  },
+  "model": {
+    "api_id": "Qwen3.8-Flash-Next-oQ4e-mtp",
+    "repository": "Jundot/Qwen3.8-Flash-Next-oQ4e-mtp",
+    "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+    "model_type": "qwen4_exp",
+    "architecture": "Qwen4ExpForConditionalGeneration",
+    "model_context_length": 262144,
+    "actual_loaded_bytes": 78673239248,
+    "shard_count": 21,
+    "indexed_tensor_bytes": 106294664646,
+    "config_sha256": "319b334a1abb705acf06035aa0331bcb7c25976ff93a5035b543548738a10824",
+    "index_sha256": "05f70b017f328d7d9f955186bd9868d1f5c3fb708df89cd47d7d1c14b73b73d2"
+  },
+  "structured_schema_acceptance": {
+    "named_schema_count": 13,
+    "distinct_schema_count": 11,
+    "passed": 11,
+    "failed": 0,
+    "repairs": 0,
+    "returned_model_mismatches": 0,
+    "finish_reason": "stop"
+  },
+  "context_acceptance": [
+    {
+      "requested_context": 4096,
+      "prompt_tokens": 4009,
+      "completion_tokens": 57,
+      "seconds": 9.498,
+      "first_marker_ok": true,
+      "last_marker_ok": true,
+      "json_schema_ok": true,
+      "model_identity_ok": true,
+      "finish_reason": "stop"
+    },
+    {
+      "requested_context": 32768,
+      "prompt_tokens": 32602,
+      "completion_tokens": 59,
+      "seconds": 63.807,
+      "first_marker_ok": true,
+      "last_marker_ok": true,
+      "json_schema_ok": true,
+      "model_identity_ok": true,
+      "finish_reason": "stop"
+    },
+    {
+      "requested_context": 114688,
+      "prompt_tokens": 114479,
+      "completion_tokens": 27,
+      "seconds": 684.309,
+      "first_marker_ok": true,
+      "last_marker_ok": true,
+      "json_schema_ok": true,
+      "model_identity_ok": true,
+      "finish_reason": "stop",
+      "cache_state": "miss"
+    }
+  ],
+  "discarded_harness_attempt": {
+    "prompt_tokens": 114568,
+    "completion_tokens": 64,
+    "seconds": 569.71,
+    "finish_reason": "length",
+    "cause": "acceptance harness max_tokens was too small for its verbose marker values",
+    "runtime_error": false,
+    "replacement_attempt_passed": true
+  },
+  "acceleration_readback": {
+    "ple_mode": "mmap",
+    "lightning_mtp": {
+      "enabled": true,
+      "checkpoint_layout": "mtp.",
+      "max_draft_depth": 3,
+      "sample_drafted_tokens": 8,
+      "sample_accepted_tokens": 8,
+      "sample_acceptance_rate": 1.0
+    },
+    "ane": {
+      "enabled": true,
+      "warmed_procedures": 170,
+      "mlp_procedures": 49,
+      "gdn_procedures": 36,
+      "resident_programs": 2,
+      "sequence_length": 2048
+    },
+    "moe_gate_up_fused_layers": 49,
+    "prefix_cache": {
+      "ssd_max_bytes": 5368709120,
+      "hot_max_bytes": 2147483648,
+      "pre_restart_file_count": 31,
+      "pre_restart_disk_kib": 5218540,
+      "restart_scan_indexed": 31,
+      "restart_scan_errors": 0,
+      "restart_scan_total_bytes_label": "4.98 GB",
+      "cold": {
+        "prompt_tokens": 16050,
+        "cached_tokens": 0,
+        "seconds": 28.03
+      },
+      "warm": {
+        "prompt_tokens": 16050,
+        "cached_tokens": 14336,
+        "seconds": 4.08
+      },
+      "post_restart": {
+        "prompt_tokens": 16050,
+        "cached_tokens": 14336,
+        "seconds": 7.435
+      },
+      "completion_sha256": "22f8ce2d4dfa731baad190493e47381937a8cce5ad7de4d551795fd33bf17dc4",
+      "completion_hash_equal": true
+    }
+  },
+  "restart_acceptance": {
+    "pre_restart_server_pid": 68440,
+    "post_restart_server_pid": 87710,
+    "startup_seconds": 22.612,
+    "health": "healthy",
+    "default_model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+    "loaded_model_count": 2,
+    "discovered_model_count": 3,
+    "settings_sha256_before_after": "99ef9327f5e59162981c6968e318b481eca05c0b7c4bbfcb9487c14d2c2ccea0",
+    "model_settings_sha256_before_after": "2eb78dfa8e5be093e33fb283aca809c07b7a7e9f61d2e648e4510a761661a9d8",
+    "chronovisor_config_sha256_before_after": "6c9cd4c2606a5b62522cb968c5a86c97bbeca552cb77445bb2b55f940044b66d"
+  },
+  "resource_acceptance": {
+    "omlx_only_soak_minutes_before_restart": 31.65,
+    "initial_swap_used_mib": 3348.88,
+    "pre_restart_swap_used_mib": 3284.88,
+    "post_restart_swap_used_mib": 3284.88,
+    "swap_delta_mib": -64.0,
+    "hard_memory_pressure_events": 0,
+    "oom_events": 0,
+    "request_rejections": 0,
+    "post_restart_memory_free_percent": 75
+  },
+  "code_acceptance": {
+    "full_suite_passed": 6307,
+    "full_suite_skipped": 1,
+    "ruff": "pass",
+    "node_syntax": "pass",
+    "shell_syntax": "pass",
+    "compileall": "pass",
+    "diff_check": "pass",
+    "architecture_exception_gate": "pass",
+    "codebase_graph_paths_checked": 54,
+    "codebase_graph_partial_paths": [
+      "src/chronovisor/dashboard_static/style.css"
+    ],
+    "partial_ranges_directly_read": true
+  },
+  "protected_worktree": {
+    "scripts/recall_r6_harness.py": "d90b88329c574803ebde4fc2404ddb738071ef1770d5870562b78ba16f97b6ed",
+    "tests/test_recall_r6_harness.py": "a81f14afd9b75b521af81c0d9d2c8204478e7ea4d8c707be8e9b0ffd22c9972e",
+    "included_in_cutover_commit": false
+  },
+  "evidence_sources": [
+    "/Users/trafficsign/.omlx/logs/server.log",
+    "/Users/trafficsign/.omlx/settings.json",
+    "/Users/trafficsign/.omlx/model_settings.json",
+    "/Users/trafficsign/.chronovisor/config.toml"
+  ],
+  "secrets_recorded": false
+}

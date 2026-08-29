@@ -17,11 +17,13 @@ from chronovisor.core.durable_state import (
 )
 from chronovisor.core.runtime_config import load_decision_router_config
 from chronovisor.recall.classification import (
+    AUTHORITY_KINDS,
     ClassificationError,
     load_udc_package,
     resolve_consensus_runtime_routes,
+    resolve_single_runtime_route,
 )
-from chronovisor.recall.classification_engine import CONSENSUS_SCHEMA
+from chronovisor.recall.classification_engine import AUTHORITY_SCHEMA, CONSENSUS_SCHEMA
 
 STAGE_CACHE_SCHEMA = "chronovisor.classification-stage-cache.v4"
 # A page's classification must not depend on unrelated pages sharing its batch.
@@ -290,10 +292,13 @@ def _stage_cache_path(
     runtime_routes: Sequence[Mapping[str, Any]],
     adjudication_mode: str,
     stage_cache_epoch: str,
+    authority_kind: str = "quorum_v1",
 ) -> tuple[str, Path]:
+    schema = AUTHORITY_SCHEMA if authority_kind == "single_model_v1" else CONSENSUS_SCHEMA
     identity = {
         "schema": STAGE_CACHE_SCHEMA,
-        "consensus_schema": CONSENSUS_SCHEMA,
+        "authority_kind": authority_kind,
+        "stage_schema": schema,
         "adjudication_mode": adjudication_mode,
         "stage_cache_epoch": stage_cache_epoch,
         "runtime_routes": [dict(route) for route in runtime_routes],
@@ -454,9 +459,128 @@ def _decision_digest(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _authority_digest(uid: str, authority: Mapping[str, Any]) -> str:
+    payload = json.dumps(
+        {"uid": uid, "authority": dict(authority)},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _run_single_authority(
+    *,
+    root: Path,
+    package: Any,
+    pages: Sequence[Mapping[str, Any]],
+    authority_route: Mapping[str, Any],
+    config: Any,
+    adjudication_mode: str,
+    stage_cache_epoch: str,
+    source_sensitivity: str,
+) -> dict[str, Any]:
+    runtime_routes = (dict(authority_route),)
+    cache_key, cache_path = _stage_cache_path(
+        root,
+        pages,
+        runtime_routes=runtime_routes,
+        adjudication_mode=adjudication_mode,
+        stage_cache_epoch=stage_cache_epoch,
+        authority_kind="single_model_v1",
+    )
+    cache = _load_stage_cache(cache_path, cache_key)
+    keep_alive = getattr(config, "authority_keep_alive", None) or getattr(
+        config, "primary_keep_alive", "20m"
+    )
+    authority_rows, model_calls = _cached_stage_call(
+        cache=cache,
+        cache_path=cache_path,
+        stage="authority",
+        route=authority_route,
+        keep_alive=keep_alive,
+        pages=pages,
+        role="single-authority",
+        source_sensitivity=source_sensitivity,
+        dual_blind=False,
+    )
+    decisions: list[dict[str, Any]] = []
+    for page, row in zip(pages, authority_rows, strict=True):
+        uid = str(page["uid"])
+        notation = str(row.get("primary_notation") or "")
+        secondary = [
+            str(value) for value in row.get("secondary_notations") or []
+        ][:3]
+        invalid_reason = str(row.get("_invalid_reason") or "")
+        valid = not invalid_reason
+        try:
+            confidence = float(row.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+            valid = False
+            invalid_reason = invalid_reason or "invalid_confidence"
+        confidence = max(0.0, min(1.0, confidence)) if valid else 0.0
+        authority_digest = _authority_digest(uid, row)
+        decisions.append(
+            {
+                "uid": uid,
+                "primary_notation": notation,
+                "secondary_notations": secondary,
+                "confidence": confidence,
+                "rationale": str(row.get("rationale") or "")[:400],
+                "status": "proposed" if valid else "held",
+                "authority_kind": "single_model_v1",
+                "authority_model": str(authority_route["model"]),
+                "authority_digest": authority_digest,
+                "validation_count": 1,
+                **({"_invalid_reason": invalid_reason} if invalid_reason else {}),
+            }
+        )
+    authority = {
+        "kind": "single_model_v1",
+        "route": dict(authority_route),
+        "model": str(authority_route["model"]),
+        "revision": authority_route.get("revision"),
+        "result_sha256": _authority_digest(
+            "batch",
+            {"decisions": decisions, "route": authority_route},
+        ),
+        "validation_count": 1,
+        "attempts": [
+            {
+                "stage": "authority",
+                "model": str(authority_route["model"]),
+                "calls": model_calls,
+            }
+        ],
+    }
+    for decision in decisions:
+        decision["authority"] = dict(authority)
+    return {
+        "schema": AUTHORITY_SCHEMA,
+        "authority_kind": "single_model_v1",
+        "authority": authority,
+        "package_checksum": package.checksum,
+        "model_calls": model_calls,
+        "runtime_routes": [dict(authority_route)],
+        "decisions": decisions,
+    }
+
+
 def run(payload: Mapping[str, Any]) -> dict[str, Any]:
-    if payload.get("schema") != CONSENSUS_SCHEMA:
-        raise ValueError("unsupported classification consensus schema")
+    schema = payload.get("schema")
+    if schema not in {CONSENSUS_SCHEMA, AUTHORITY_SCHEMA}:
+        raise ValueError("unsupported classification authority schema")
+    authority_kind = str(
+        payload.get("authority_kind")
+        or ("single_model_v1" if schema == AUTHORITY_SCHEMA else "quorum_v1")
+    )
+    if authority_kind not in AUTHORITY_KINDS:
+        raise ClassificationError("classification authority kind is invalid")
+    if schema == AUTHORITY_SCHEMA and authority_kind != "single_model_v1":
+        raise ClassificationError("authority schema requires single_model_v1")
+    if schema == CONSENSUS_SCHEMA and authority_kind != "quorum_v1":
+        raise ClassificationError("consensus schema requires quorum_v1")
     root = Path(str(payload["root"]))
     package = load_udc_package(root)
     if not package.complete:
@@ -470,6 +594,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         "primary_model",
         "challenger_model",
         "tie_break_model",
+        "authority_model",
     }
     if forbidden_overrides & payload.keys():
         raise ClassificationError("classification runtime route override is forbidden")
@@ -492,6 +617,22 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         "high",
     }:
         raise ClassificationError("classification source sensitivity is invalid")
+    if authority_kind == "single_model_v1":
+        runtime_route_payload = payload.get("runtime_route")
+        if runtime_route_payload is None:
+            runtime_route_payload = payload.get("runtime_routes")
+        authority_route = resolve_single_runtime_route(runtime_route_payload)
+        config = load_decision_router_config()
+        return _run_single_authority(
+            root=root,
+            package=package,
+            pages=pages,
+            authority_route=authority_route,
+            config=config,
+            adjudication_mode=adjudication_mode,
+            stage_cache_epoch=stage_cache_epoch,
+            source_sensitivity=source_sensitivity,
+        )
     runtime_routes = resolve_consensus_runtime_routes(payload.get("runtime_routes"))
     primary_route, challenger_route, tie_break_route = runtime_routes
     config = load_decision_router_config()
@@ -502,6 +643,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         runtime_routes=runtime_routes,
         adjudication_mode=adjudication_mode,
         stage_cache_epoch=stage_cache_epoch,
+        authority_kind=authority_kind,
     )
     cache = _load_stage_cache(cache_path, cache_key)
     primary, primary_calls = _cached_stage_call(
@@ -679,6 +821,7 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         )
     return {
         "schema": CONSENSUS_SCHEMA,
+        "authority_kind": "quorum_v1",
         "package_checksum": package.checksum,
         "model_calls": model_calls,
         "runtime_routes": list(runtime_routes),

@@ -38,6 +38,21 @@ queue_size = 8
 [ingest]
 # Numeric generation limits live here; the model is selected only by the
 # fixed llm.roles."ingest.generation" route below.
+keep_alive = "0"
+num_ctx = 114688
+max_num_ctx = 262144
+
+[decision_router]
+# The cutover uses one pinned oMLX resident model. The quorum field remains
+# owned by the decision policy and is intentionally not relaxed here.
+authority_kind = "single_model_v1"
+single_runtime_role = "classification.authority"
+authority_keep_alive = "0"
+num_ctx = 114688
+max_resident_models = 1
+adaptive_residency = true
+residency_policy_version = 2
+memory_reserve_gib = 16
 
 [research]
 enabled = false
@@ -67,8 +82,11 @@ ox_expires_at = ""
 rollout_stages = [5, 25, 100]
 canary_min_days = 7
 
-[llm.providers.local]
-kind = "ollama"
+# Dedicated oMLX 0.6.3 service. Per-model residency/PLE/MTP/ANE settings live
+# in ~/.omlx/model_settings.json; this endpoint is intentionally loopback-only.
+[llm.providers.omlx]
+kind = "omlx"
+endpoint = "http://127.0.0.1:18125/v1"
 
 [llm.providers.local_reranker]
 kind = "local-transformers"
@@ -86,23 +104,25 @@ device = "cpu"
 
 [llm.roles."knowledge.embedding"]
 capability = "embedding"
-provider = "local"
-model = "bge-m3"
+provider = "omlx"
+model = "bge-m3-mlx-fp16"
 
 [llm.roles."knowledge.relation_extraction"]
 capability = "generation"
-provider = "local"
-model = "gemma4:26b-optiq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."knowledge.community_summary"]
 capability = "generation"
-provider = "local"
-model = "gemma4:26b-optiq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."classification.embedding"]
 capability = "embedding"
-provider = "local"
-model = "bge-m3"
+provider = "omlx"
+model = "bge-m3-mlx-fp16"
 
 [llm.roles."search.rerank"]
 capability = "rerank"
@@ -121,203 +141,244 @@ model = "nvidia/Nemotron-3-Embed-1B-BF16"
 
 [llm.roles."librarian.review"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."librarian.review.challenger"]
 capability = "generation"
-provider = "local"
-model = "gpt-oss:20b"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."recall.answer.runner"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."recall.answer.scorer"]
 capability = "generation"
-provider = "local"
-model = "gemma4:26b-optiq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."recall.certificate_judge.primary"]
 capability = "generation"
-provider = "local"
-model = "ornith:9b-q4_K_M"
+provider = "omlx"
+model = "Ornith-1.5-9B-MLX-4bit"
 
 [llm.roles."recall.certificate_judge.escalation"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."ingest.generation"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."lint.tag_repair"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."lint.orphan_link"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."recall.content_correction.proposer"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."recall.auditor"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."recall.gate"]
 capability = "generation"
-provider = "local"
-model = "ornith:9b-q4_K_M"
+provider = "omlx"
+model = "Ornith-1.5-9B-MLX-4bit"
 
 [llm.roles."recall.query_rewriter"]
 capability = "generation"
-provider = "local"
-model = "ornith:9b-q4_K_M"
+provider = "omlx"
+model = "Ornith-1.5-9B-MLX-4bit"
 
 [llm.roles."recall.policy_proposer.primary"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.policy_proposer.challenger"]
 capability = "generation"
-provider = "local"
-model = "gemma4:26b-optiq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.rubric.variant"]
 capability = "generation"
-provider = "local"
-model = "gemma4:26b-optiq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 required_capabilities = ["structured_output"]
 
 # Offline Recall distillation is local-only. These raw/high inputs must never
 # use a remote route, even if an egress opt-in exists elsewhere in this file.
 [llm.roles."recall.distill.teacher.a"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.teacher.b"]
 capability = "generation"
-provider = "local"
-model = "gpt-oss:20b"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.teacher.c"]
 capability = "generation"
-provider = "local"
-model = "gemma4:26b-optiq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.answer_generator"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.utility_judge"]
 capability = "generation"
-provider = "local"
-model = "gemma4:26b-optiq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.planner"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.challenge"]
 capability = "generation"
-provider = "local"
-model = "gpt-oss:20b"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.tie_break"]
 capability = "generation"
-provider = "local"
-model = "gemma4:26b-optiq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.deep_retrieval_requery"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 required_capabilities = ["structured_output"]
 
-# Each classification vote remains an independently replaceable single route.
+[llm.roles."classification.authority"]
+capability = "generation"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+
+# Legacy classification role names remain mapped to the same model for replay
+# compatibility; production authority resolves only the route above.
 [llm.roles."classification.primary"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."classification.challenger"]
 capability = "generation"
-provider = "local"
-model = "muse-glimmer:30b-q4k-dynamic"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."classification.tie_break"]
 capability = "generation"
-provider = "local"
-model = "gemma4:26b-optiq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."classification.anchor_set"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."classification.decision"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."classification.direct_decision"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."classification.hierarchy"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."classification.query"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."classification.query_v2"]
 capability = "generation"
-provider = "local"
-model = "qwen3.8:27b-axq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."classification.anchor"]
 capability = "generation"
-provider = "local"
-model = "gpt-oss:20b"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."classification.anchor.primary"]
 capability = "generation"
-provider = "local"
-model = "gemma4:26b-optiq4"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 [llm.roles."classification.anchor.challenger"]
 capability = "generation"
-provider = "local"
-model = "gpt-oss:20b"
+provider = "omlx"
+model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+revision = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
 
 # Cloud-only alternative: one OpenAI credential/profile can serve both roles.
 # Store it with `chronovisor credentials set openai/default`; never put its

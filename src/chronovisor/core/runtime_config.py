@@ -22,6 +22,19 @@ TRUE_VALUES = {"1", "true", "True", "yes", "YES", "on", "ON"}
 DEFAULT_DECISION_PRIMARY_MODEL = "qwen3.8:27b-axq4"
 DEFAULT_DECISION_CHALLENGER_MODEL = "muse-glimmer:30b-q4k-dynamic"
 DEFAULT_DECISION_TIE_BREAK_MODEL = "gemma4:26b-optiq4"
+# The production decision authority is intentionally a single configured
+# runtime route.  The legacy triplet remains in this dataclass so old
+# evaluation/replay records can still be decoded without making them current.
+SINGLE_MODEL_AUTHORITY_KIND = "single_model_v1"
+QUORUM_AUTHORITY_KIND = "quorum_v1"
+DEFAULT_DECISION_SINGLE_RUNTIME_ROLE = "classification.authority"
+# Immutable production route identity for the Jundot Qwen cutover.  The
+# model name remains a runtime-role concern; these constants are shared by the
+# route/proof validators and structured-session compatibility table.
+SINGLE_MODEL_RUNTIME_MODEL = "Qwen3.8-Flash-Next-oQ4e-mtp"
+SINGLE_MODEL_RUNTIME_REVISION = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+SINGLE_MODEL_RUNTIME_MODEL_TYPE = "qwen4_exp"
+SINGLE_MODEL_RUNTIME_ARCHITECTURE = "Qwen4ExpForConditionalGeneration"
 DEFAULT_HEAVY_NUM_CTX = 32_768
 DEFAULT_HEAVY_KEEP_ALIVE = "20m"
 MAX_SEMANTIC_PROJECTION_CHILD_BYTES = 24_000
@@ -464,7 +477,17 @@ class IngestAuditConfig:
 
 @dataclass(frozen=True)
 class DecisionRouterConfig:
-    """Evaluation model triplet plus production consensus runtime limits."""
+    """Decision runtime limits and the versioned authority contract.
+
+    ``primary_model``/``challenger_model``/``tie_break_model`` are retained as
+    compatibility fields for candidate evaluation and audit-only legacy
+    quorum artifacts.  Production model selection is resolved from the
+    configured runtime role named by :attr:`single_runtime_role`.
+    """
+
+    authority_kind: str = SINGLE_MODEL_AUTHORITY_KIND
+    single_runtime_role: str = DEFAULT_DECISION_SINGLE_RUNTIME_ROLE
+    authority_keep_alive: str = DEFAULT_HEAVY_KEEP_ALIVE
 
     primary_model: str = DEFAULT_DECISION_PRIMARY_MODEL
     challenger_model: str = DEFAULT_DECISION_CHALLENGER_MODEL
@@ -490,6 +513,16 @@ class DecisionRouterConfig:
     # Evaluation callers may nominate an artifact; production model selection
     # is resolved only from llm.roles.classification.* by DecisionRouter.
     adoption_artifact: str = ""
+
+    @property
+    def single_route_identity(self) -> str:
+        """Return the canonical runtime role used by single-model authority."""
+
+        return self.single_runtime_role
+
+    @property
+    def is_single_model(self) -> bool:
+        return self.authority_kind == SINGLE_MODEL_AUTHORITY_KIND
 
 
 def active_config_file(path: Path | str | None = None) -> Path:
@@ -899,12 +932,24 @@ def load_ingest_audit_config(path: Path | str | None = None) -> IngestAuditConfi
 def load_decision_router_config(
     path: Path | str | None = None,
 ) -> DecisionRouterConfig:
-    """Load production consensus limits without accepting model selectors."""
+    """Load production decision limits without accepting model selectors.
+
+    The authority kind is a versioned contract, not a traffic-splitting
+    switch.  Unknown values fail closed to the production single-model kind;
+    candidate/replay loaders remain responsible for explicitly selecting the
+    legacy quorum contract.
+    """
 
     data = load_toml_file(path)
     section = data.get("decision_router")
     if not isinstance(section, dict):
         return DecisionRouterConfig()
+
+    # Production has one immutable authority contract.  A TOML value cannot
+    # re-enable the legacy quorum; candidate/replay loading below is the only
+    # path that can construct ``quorum_v1`` explicitly.
+    authority_kind = SINGLE_MODEL_AUTHORITY_KIND
+    single_runtime_role = DecisionRouterConfig.single_runtime_role
 
     def keep_alive(name: str, default: str, *, alias: str | None = None) -> str:
         value = section.get(name)
@@ -913,6 +958,11 @@ def load_decision_router_config(
         return value.strip() if isinstance(value, str) and value.strip() else default
 
     return DecisionRouterConfig(
+        authority_kind=authority_kind,
+        single_runtime_role=single_runtime_role.strip(),
+        authority_keep_alive=keep_alive(
+            "authority_keep_alive", DecisionRouterConfig.authority_keep_alive
+        ),
         primary_keep_alive=keep_alive(
             "primary_keep_alive", DecisionRouterConfig.primary_keep_alive
         ),
@@ -979,7 +1029,7 @@ def load_decision_router_config(
             3,
             _positive_int(
                 section.get("max_resident_models"),
-                DecisionRouterConfig.max_resident_models,
+                3 if authority_kind == QUORUM_AUTHORITY_KIND else 1,
                 minimum=1,
             ),
         ),
@@ -993,6 +1043,9 @@ def load_decision_router_config(
 
 _DECISION_ROUTER_STRING_FIELDS = frozenset(
     {
+        "authority_kind",
+        "single_runtime_role",
+        "authority_keep_alive",
         "primary_model",
         "challenger_model",
         "tie_break_model",
@@ -1089,6 +1142,18 @@ def load_candidate_decision_router_config(path: Path | str) -> DecisionRouterCon
             raise ValueError(
                 f"candidate config field {name} must be a non-empty string"
             )
+    if section.get("authority_kind", QUORUM_AUTHORITY_KIND) not in {
+        SINGLE_MODEL_AUTHORITY_KIND,
+        QUORUM_AUTHORITY_KIND,
+    }:
+        raise ValueError("candidate config field authority_kind is invalid")
+    single_runtime_role = section.get(
+        "single_runtime_role", DEFAULT_DECISION_SINGLE_RUNTIME_ROLE
+    )
+    if not re.fullmatch(
+        r"[a-z][a-z0-9_.-]{0,79}", str(single_runtime_role).strip()
+    ):
+        raise ValueError("candidate config field single_runtime_role is invalid")
     for name, (minimum, maximum) in _DECISION_ROUTER_INTEGER_BOUNDS.items():
         if name not in section:
             continue
@@ -1119,6 +1184,12 @@ def load_candidate_decision_router_config(path: Path | str) -> DecisionRouterCon
 
     config = replace(
         load_decision_router_config(resolved),
+        authority_kind=str(
+            section.get("authority_kind", QUORUM_AUTHORITY_KIND)
+        ).strip(),
+        single_runtime_role=str(
+            section.get("single_runtime_role", DEFAULT_DECISION_SINGLE_RUNTIME_ROLE)
+        ).strip(),
         primary_model=str(section["primary_model"]).strip(),
         challenger_model=str(section["challenger_model"]).strip(),
         tie_break_model=str(

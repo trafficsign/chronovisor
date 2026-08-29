@@ -145,6 +145,7 @@ class ModelTransport:
 
 def _config(**overrides: object) -> DecisionRouterConfig:
     values = {
+        "authority_kind": "quorum_v1",
         "primary_model": "ornith:test",
         "challenger_model": "gpt-oss:test",
         "tie_break_model": "gemma:test",

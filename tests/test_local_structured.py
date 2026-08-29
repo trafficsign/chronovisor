@@ -29,6 +29,10 @@ from chronovisor.core.llm_runtime import (
 from chronovisor.core.ollama_adapter import OllamaAdapter
 from chronovisor.decision import local_structured
 from chronovisor.decision.local_structured import (
+    QWEN_FLASH_ARCHITECTURE,
+    QWEN_FLASH_MODEL,
+    QWEN_FLASH_MODEL_TYPE,
+    QWEN_FLASH_REVISION,
     STRUCTURED_GENERATION_POLICY_VERSION,
     ChatRequest,
     LocalConsensusAuditStore,
@@ -181,6 +185,12 @@ def test_structured_generation_policy_seals_adaptive_reasoning_authority() -> No
             },
         },
         "compatibility": {
+            QWEN_FLASH_MODEL: {
+                "revision": QWEN_FLASH_REVISION,
+                "model_type": QWEN_FLASH_MODEL_TYPE,
+                "architecture": QWEN_FLASH_ARCHITECTURE,
+                "initial": {"think": "selected", "format": "json_schema"},
+            },
             QWEN_STRUCTURED_MODEL: {
                 "initial": {"think": "selected_boolean", "format": None},
             },
@@ -893,6 +903,7 @@ def test_content_correction_review_skips_initial_reasoning() -> None:
         ("Muse-Glimmer-30B-4bit", "low", "low", None),
         ("gemma-4-26b-a4b-it-4bit", "low", "low", None),
         ("gemma4:26b", "low", "low", SCHEMA),
+        (QWEN_FLASH_MODEL, "low", "low", SCHEMA),
     ],
 )
 def test_all_model_repairs_use_strict_schema_without_thinking(

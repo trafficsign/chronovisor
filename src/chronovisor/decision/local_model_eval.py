@@ -3244,7 +3244,15 @@ def _candidate_config(value: Any) -> DecisionRouterConfig:
     if not isinstance(value, Mapping):
         raise ValueError("artifact config must be an object")
     field_names = {item.name for item in fields(DecisionRouterConfig)}
-    required = field_names - {"adoption_artifact"}
+    # Adoption artifacts written before the single-model cutover do not carry
+    # the authority contract fields.  They remain readable as explicit legacy
+    # quorum candidates; newly written artifacts include all three fields.
+    optional_compat_fields = {
+        "authority_kind",
+        "single_runtime_role",
+        "authority_keep_alive",
+    }
+    required = field_names - {"adoption_artifact"} - optional_compat_fields
     missing = sorted(required - set(value))
     unknown = sorted(set(value) - field_names)
     if missing:
@@ -3252,6 +3260,9 @@ def _candidate_config(value: Any) -> DecisionRouterConfig:
     if unknown:
         raise ValueError(f"artifact config has unknown fields: {','.join(unknown)}")
     string_fields = {
+        "authority_kind",
+        "single_runtime_role",
+        "authority_keep_alive",
         "primary_model",
         "challenger_model",
         "tie_break_model",
@@ -3265,6 +3276,8 @@ def _candidate_config(value: Any) -> DecisionRouterConfig:
     kwargs: dict[str, Any] = {}
     for name in string_fields:
         item = value.get(name)
+        if name in optional_compat_fields and item is None:
+            continue
         if not isinstance(item, str) or not item.strip():
             raise ValueError(f"artifact config field {name} must be non-empty")
         kwargs[name] = item.strip()
@@ -3279,6 +3292,12 @@ def _candidate_config(value: Any) -> DecisionRouterConfig:
             raise ValueError(f"artifact config field {name} must be a boolean")
         kwargs[name] = item
     kwargs["adoption_artifact"] = ""
+    # Missing authority fields identify a pre-cutover adoption artifact.  Do
+    # not silently make it production-single: candidate evaluation must retain
+    # its explicit quorum semantics until a caller migrates the artifact.
+    kwargs.setdefault("authority_kind", "quorum_v1")
+    kwargs.setdefault("single_runtime_role", DecisionRouterConfig.single_runtime_role)
+    kwargs.setdefault("authority_keep_alive", kwargs["primary_keep_alive"])
     candidate = DecisionRouterConfig(**kwargs)
     if error := _config_error(candidate):
         raise ValueError(error)

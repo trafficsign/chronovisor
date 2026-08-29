@@ -225,6 +225,7 @@ def run_paired_judgment(
             purpose="explicit",
             timeout_seconds=timeout_seconds,
             run_namespace=f"library-evidence-{arm.casefold()}",
+            authority_kind="single_model_v1",
         )
         arm_results[arm] = decisions
         path = output_dir / f"{arm.casefold()}-decisions.jsonl"

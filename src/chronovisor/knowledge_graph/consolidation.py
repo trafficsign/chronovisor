@@ -125,8 +125,14 @@ def consolidate_entity_candidates(
     store: KnowledgeGraphStore | None = None,
     limit: int = 3,
     dry_run: bool = False,
+    authority_kind: str | None = None,
 ) -> dict[str, Any]:
     """Build Nemotron-assisted merge candidates and verify them independently."""
+
+    if authority_kind is None:
+        authority_kind = "single_model_v1"
+    if authority_kind not in {"quorum_v1", "single_model_v1"}:
+        raise ValueError("unsupported decision authority kind")
 
     graph_store = store or KnowledgeGraphStore(root / "knowledge-graph")
     try:
@@ -200,7 +206,11 @@ def consolidate_entity_candidates(
                 str(row.get("alias_evidence_sha256") or "") for row in members
             ],
         }
-        result = _router_for_producer("tie_break", "entity_merge_verification").decide(
+        result = _router_for_producer(
+            "tie_break",
+            "entity_merge_verification",
+            authority_kind=authority_kind,
+        ).decide(
             build_entity_merge_verification_prompt(evidence),
             ENTITY_MERGE_VERIFICATION_SCHEMA,
             decision_lane="entity_merge_verification",
@@ -214,6 +224,15 @@ def consolidate_entity_candidates(
             and value.get("collision_risk") is False
             and value.get("split_required") is False
         )
+        authority_votes = tuple(getattr(result, "votes", ()) or ())
+        if authority_kind == "single_model_v1" and (
+            len(authority_votes) != 1
+            or not bool(getattr(authority_votes[0], "valid", True))
+        ):
+            is_approved = False
+        failure_reason = str(getattr(result, "failure_class", None) or "")
+        if authority_kind == "single_model_v1" and "quorum" in failure_reason:
+            failure_reason = "single_authority_validation_failed"
         receipt_id = (
             "entity_receipt_"
             + sha256([merge_id, result.agreement_sha256, is_approved])[:20]
@@ -222,65 +241,123 @@ def consolidate_entity_candidates(
             proposal, approved=is_approved, receipt_id=receipt_id
         )
         decided["reason_code"] = (
-            "local_quorum" if is_approved else result.failure_class or "held"
+            "single_authority"
+            if authority_kind == "single_model_v1" and is_approved
+            else "local_quorum"
+            if is_approved
+            else failure_reason
+            or (
+                "single_authority_validation_failed"
+                if authority_kind == "single_model_v1"
+                else "held"
+            )
         )
-        votes = []
-        seen_roles: set[str] = set()
-        for vote in result.votes:
-            if vote.role in seen_roles:
-                continue
-            seen_roles.add(vote.role)
-            vote_value = (
-                vote.result.value if isinstance(vote.result.value, dict) else {}
-            )
-            raw_decision = str(vote_value.get("decision") or "abstained")
-            votes.append(
-                {
-                    "role": vote.role,
-                    "model_sha256": sha256(vote.model),
-                    "decision": (
-                        "approve"
-                        if raw_decision == "approved"
-                        else "reject"
-                        if raw_decision == "rejected"
-                        else "abstain"
+        authority: dict[str, Any] | None = None
+        if authority_kind == "single_model_v1":
+            authority_votes = tuple(getattr(result, "votes", ()) or ())
+            if len(authority_votes) != 1:
+                decided["status"] = "held"
+                decided["reason_code"] = "single_authority_result_invalid"
+            else:
+                vote = authority_votes[0]
+                route = dict(getattr(vote, "route_provenance", {}) or {})
+                route.setdefault("role", "classification.authority")
+                route.setdefault("provider", getattr(vote, "provider", None))
+                route.setdefault("model", getattr(vote, "model", None))
+                route.setdefault("location", route.get("location") or "local")
+                attempts = []
+                result_obj = getattr(vote, "result", None)
+                if result_obj is not None:
+                    audit = getattr(result_obj, "audit_record", None)
+                    if callable(audit):
+                        attempts = list(audit().get("attempts") or [])
+                authority = {
+                    "kind": "single_model_v1",
+                    "route": route,
+                    "model": getattr(vote, "model", None),
+                    "revision": route.get("revision"),
+                    "result_sha256": str(
+                        getattr(result, "agreement_sha256", None)
+                        or sha256(getattr(result, "value", {}) or {})
                     ),
-                    "confidence": float(vote_value.get("confidence") or 0.0),
-                    "vote_sha256": sha256(
-                        [
-                            vote.signature_sha256,
-                            vote_value,
-                            vote.result.failure_class,
-                        ]
-                    ),
+                    "validation_count": 1,
+                    "attempts": attempts,
                 }
-            )
-        decided["consensus"] = {
-            "receipt_id": receipt_id,
-            "producer_role": "tie_break",
-            "quorum": 2,
-            "outcome": "verified" if is_approved else "held",
-            "hold_reason": "" if is_approved else decided["reason_code"],
-            "votes": votes,
-        }
+        if authority_kind == "single_model_v1":
+            votes = []
+            decided["authority"] = authority
+        else:
+            votes = []
+            seen_roles: set[str] = set()
+            for vote in result.votes:
+                if vote.role in seen_roles:
+                    continue
+                seen_roles.add(vote.role)
+                vote_value = (
+                    vote.result.value if isinstance(vote.result.value, dict) else {}
+                )
+                raw_decision = str(vote_value.get("decision") or "abstained")
+                votes.append(
+                    {
+                        "role": vote.role,
+                        "model_sha256": sha256(vote.model),
+                        "decision": (
+                            "approve"
+                            if raw_decision == "approved"
+                            else "reject"
+                            if raw_decision == "rejected"
+                            else "abstain"
+                        ),
+                        "confidence": float(vote_value.get("confidence") or 0.0),
+                        "vote_sha256": sha256(
+                            [
+                                vote.signature_sha256,
+                                vote_value,
+                                vote.result.failure_class,
+                            ]
+                        ),
+                    }
+                )
+            decided["consensus"] = {
+                "receipt_id": receipt_id,
+                "producer_role": "tie_break",
+                "quorum": 2,
+                "outcome": "verified" if is_approved else "held",
+                "hold_reason": "" if is_approved else decided["reason_code"],
+                "votes": votes,
+            }
         merges[merge_id] = decided
         if not dry_run:
             append_jsonl_durable(
                 root / "runtime" / "typed-graph" / "entity-decisions.jsonl",
                 [
-                    {
-                        "schema_version": 1,
-                        "entity_merge_id": merge_id,
-                        "subject_id": merge_id,
-                        "receipt_id": receipt_id,
-                        "polarity": "positive" if is_approved else "exposure",
-                        "quality": "silver",
-                        "outcome": decided["status"],
-                        "vote_manifest_sha256": sha256(
-                            [vote.signature_sha256 for vote in result.votes]
-                        ),
-                        "votes": votes,
-                    }
+                    (
+                        {
+                            "schema": "chronovisor.knowledge-graph-authority-receipt.v1",
+                            "authority_kind": "single_model_v1",
+                            "entity_merge_id": merge_id,
+                            "subject_id": merge_id,
+                            "receipt_id": receipt_id,
+                            "polarity": "positive" if is_approved else "exposure",
+                            "quality": "silver",
+                            "outcome": decided["status"],
+                            "authority": authority,
+                        }
+                        if authority_kind == "single_model_v1"
+                        else {
+                            "schema_version": 1,
+                            "entity_merge_id": merge_id,
+                            "subject_id": merge_id,
+                            "receipt_id": receipt_id,
+                            "polarity": "positive" if is_approved else "exposure",
+                            "quality": "silver",
+                            "outcome": decided["status"],
+                            "vote_manifest_sha256": sha256(
+                                [vote.signature_sha256 for vote in result.votes]
+                            ),
+                            "votes": votes,
+                        }
+                    )
                 ],
                 sort_keys=True,
             )

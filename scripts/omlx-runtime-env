@@ -1,0 +1,63 @@
+#!/bin/sh
+
+# Shared environment for the oMLX lifecycle helpers.  The macOS DMG owns the
+# server process; these values only describe its loopback endpoint and the
+# operator-owned settings files.  There is deliberately no Homebrew or
+# LaunchAgent fallback here.
+
+: "${HOME:?HOME is required}"
+
+omlx_is_executable() {
+  [ -f "$1" ] && [ -x "$1" ]
+}
+
+omlx_require_absolute_executable() {
+  case "$1" in
+    /*) ;;
+    *)
+      echo "oMLX executable must be an absolute path: $1" >&2
+      return 64
+      ;;
+  esac
+  if ! omlx_is_executable "$1"; then
+    echo "oMLX executable is not available: $1" >&2
+    return 127
+  fi
+}
+
+# The app-bundle path is intentionally explicit.  A user shim is preferred
+# because it imports the app's bootstrap base path before dispatching to this
+# same 0.6.3 binary.  If the shim is absent, use the bundled binary directly;
+# never discover a Homebrew/PATH executable by accident.
+OMLX_APP_CLI=${OMLX_APP_CLI:-/Applications/oMLX.app/Contents/MacOS/omlx-cli}
+
+if [ "${OMLX_CLI+x}" = x ] && [ -n "$OMLX_CLI" ]; then
+  omlx_require_absolute_executable "$OMLX_CLI"
+else
+  omlx_require_absolute_executable "$OMLX_APP_CLI"
+  OMLX_CLI=$HOME/.omlx/bin/omlx
+  if ! omlx_is_executable "$OMLX_CLI"; then
+    OMLX_CLI=$OMLX_APP_CLI
+  fi
+fi
+
+OMLX_BASE_PATH=${OMLX_BASE_PATH:-$HOME/.omlx}
+OMLX_MODEL_DIR=${OMLX_MODEL_DIR:-$OMLX_BASE_PATH/models}
+OMLX_MODEL_SETTINGS_PATH=${OMLX_MODEL_SETTINGS_PATH:-$OMLX_BASE_PATH/model_settings.json}
+OMLX_HOST=${OMLX_HOST:-127.0.0.1}
+OMLX_PORT=${OMLX_PORT:-18125}
+OMLX_BASE_URL=${OMLX_BASE_URL:-http://$OMLX_HOST:$OMLX_PORT/v1}
+OMLX_HEALTH_URL=${OMLX_HEALTH_URL:-http://$OMLX_HOST:$OMLX_PORT/health}
+OMLX_REQUIRED_VERSION=${OMLX_REQUIRED_VERSION:-0.6.3}
+OMLX_MAX_CONCURRENT_REQUESTS=${OMLX_MAX_CONCURRENT_REQUESTS:-1}
+OMLX_MEMORY_GUARD_GB=${OMLX_MEMORY_GUARD_GB:-104}
+OMLX_CACHE_ENABLED=${OMLX_CACHE_ENABLED:-true}
+OMLX_SSD_CACHE_MAX_SIZE=${OMLX_SSD_CACHE_MAX_SIZE:-5GB}
+OMLX_HOT_CACHE_MAX_SIZE=${OMLX_HOT_CACHE_MAX_SIZE:-2GB}
+OMLX_HOT_CACHE_WRITE_THROUGH=${OMLX_HOT_CACHE_WRITE_THROUGH:-false}
+
+export OMLX_CLI OMLX_APP_CLI OMLX_BASE_PATH OMLX_MODEL_DIR
+export OMLX_MODEL_SETTINGS_PATH OMLX_HOST OMLX_PORT OMLX_BASE_URL OMLX_HEALTH_URL
+export OMLX_REQUIRED_VERSION OMLX_MAX_CONCURRENT_REQUESTS OMLX_MEMORY_GUARD_GB
+export OMLX_CACHE_ENABLED OMLX_SSD_CACHE_MAX_SIZE OMLX_HOT_CACHE_MAX_SIZE
+export OMLX_HOT_CACHE_WRITE_THROUGH

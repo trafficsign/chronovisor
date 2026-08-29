@@ -884,6 +884,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "classification.primary",
         "classification.challenger",
         "classification.tie_break",
+        "classification.authority",
         "classification.anchor_set",
         "classification.decision",
         "classification.direct_decision",
@@ -895,25 +896,60 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "classification.anchor.challenger",
         "classification.embedding",
     }
-    knowledge_embedding = config.roles["knowledge.embedding"]
-    assert knowledge_embedding.provider_id == "local"
-    assert knowledge_embedding.model == "bge-m3"
-    classification_embedding = config.roles["classification.embedding"]
-    assert classification_embedding.provider_id == "local"
-    assert classification_embedding.model == "bge-m3"
-    assert [
-        config.roles[role].model
-        for role in (
-            "classification.primary",
-            "classification.challenger",
-            "classification.tie_break",
-        )
-    ] == [
+    text = example.read_text(encoding="utf-8")
+    parsed = tomllib.loads(text)
+    qwen_model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+    ornith_model = "Ornith-1.5-9B-MLX-4bit"
+    authority = config.roles["classification.authority"]
+    assert authority.provider_id == "omlx"
+    assert authority.model == qwen_model
+    assert authority.revision == "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+    assert parsed["decision_router"]["authority_kind"] == "single_model_v1"
+    assert parsed["decision_router"]["single_runtime_role"] == (
+        "classification.authority"
+    )
+    assert parsed["llm"]["providers"]["omlx"]["endpoint"] == (
+        "http://127.0.0.1:18125/v1"
+    )
+    active_generation_roles = {
+        role
+        for role, route in config.roles.items()
+        if route.provider_id == "omlx" and route.model == qwen_model
+    }
+    active_generation_roles.remove("classification.authority")
+    assert len(active_generation_roles) == 36
+    assert all(config.roles[role].model == qwen_model for role in active_generation_roles)
+    assert all(
+        config.roles[role].revision == "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+        for role in active_generation_roles | {"classification.authority"}
+    )
+    auxiliary_roles = {
+        role
+        for role, route in config.roles.items()
+        if role not in active_generation_roles
+        and role != "classification.authority"
+    }
+    assert len(auxiliary_roles) == 8
+    assert {
+        role
+        for role in auxiliary_roles
+        if config.roles[role].model == ornith_model
+    } == {
+        "recall.certificate_judge.primary",
+        "recall.gate",
+        "recall.query_rewriter",
+    }
+    assert config.roles["knowledge.embedding"].model == "bge-m3-mlx-fp16"
+    assert config.roles["classification.embedding"].model == "bge-m3-mlx-fp16"
+    stale_refs = (
         "qwen3.8:27b-axq4",
         "muse-glimmer:30b-q4k-dynamic",
         "gemma4:26b-optiq4",
-    ]
-    text = example.read_text(encoding="utf-8")
+        "gpt-oss:20b",
+        "ornith:9b-q4_K_M",
+        'provider = "local"',
+    )
+    assert all(stale not in text for stale in stale_refs)
     for role, data_class in (
         ("search.semantic.foreground", "raw"),
         ("search.semantic.foreground", "system"),
@@ -921,31 +957,16 @@ def test_repository_example_has_representative_local_role_map() -> None:
         ("search.semantic.incremental", "system"),
     ):
         assert f'# role = "{role}"\n# data_class = "{data_class}"' in text
-    librarian = config.roles["librarian.review"]
-    challenger = config.roles["librarian.review.challenger"]
-    assert librarian.model != challenger.model
-    answer_runner = config.roles["recall.answer.runner"]
-    answer_scorer = config.roles["recall.answer.scorer"]
-    assert answer_runner.model != answer_scorer.model
-    certificate_primary = config.roles["recall.certificate_judge.primary"]
-    certificate_escalation = config.roles["recall.certificate_judge.escalation"]
-    assert certificate_primary.model != certificate_escalation.model
-    auditor = config.roles["recall.auditor"]
-    assert auditor.provider_id == "local"
-    assert auditor.model == "qwen3.8:27b-axq4"
     recall_gate = config.roles["recall.gate"]
     recall_rewriter = config.roles["recall.query_rewriter"]
-    assert recall_gate.provider_id == recall_rewriter.provider_id == "local"
-    assert recall_gate.model == recall_rewriter.model == "ornith:9b-q4_K_M"
+    assert recall_gate.provider_id == recall_rewriter.provider_id == "omlx"
+    assert recall_gate.model == recall_rewriter.model == ornith_model
     proposer_roles = (
         "recall.policy_proposer.primary",
         "recall.policy_proposer.challenger",
     )
     proposer_routes = [config.roles[role] for role in proposer_roles]
-    assert [route.model for route in proposer_routes] == [
-        "qwen3.8:27b-axq4",
-        "gemma4:26b-optiq4",
-    ]
+    assert [route.model for route in proposer_routes] == [qwen_model, qwen_model]
     assert all(
         route.required_capabilities == ("structured_output",)
         for route in proposer_routes
@@ -953,8 +974,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
     for role in proposer_roles:
         assert f'# role = "{role}"\n# data_class = "raw"' in text
     rubric_variant = config.roles["recall.rubric.variant"]
-    assert rubric_variant.provider_id == "local"
-    assert rubric_variant.model == "gemma4:26b-optiq4"
+    assert rubric_variant.provider_id == "omlx"
+    assert rubric_variant.model == qwen_model
     assert rubric_variant.required_capabilities == ("structured_output",)
     assert (
         '# role = "recall.rubric.variant"\n# data_class = "raw"' in text
@@ -967,15 +988,12 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "recall.distill.utility_judge",
     )
     distill_routes = [config.roles[role] for role in distill_roles]
-    assert [route.provider_id for route in distill_routes] == ["local"] * 5
+    assert [route.provider_id for route in distill_routes] == ["omlx"] * 5
     assert all(
         route.required_capabilities == ("structured_output",)
         for route in distill_routes
     )
-    assert (
-        config.roles["recall.distill.answer_generator"].model
-        != config.roles["recall.distill.utility_judge"].model
-    )
+    assert all(route.model == qwen_model for route in distill_routes)
     assert 'raw/high inputs must never\n# use a remote route' in text
     distillation = tomllib.loads(text)["recall"]["distillation"]
     assert distillation == {
@@ -994,33 +1012,25 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "rollout_stages": [5, 25, 100],
         "canary_min_days": 7,
     }
-    assert [
-        config.roles[role].model
-        for role in (
-            "research.planner",
-            "research.challenge",
-            "research.tie_break",
-        )
-    ] == [
-        "qwen3.8:27b-axq4",
-        "gpt-oss:20b",
-        "gemma4:26b-optiq4",
-    ]
+    assert all(
+        config.roles[role].model == qwen_model
+        for role in ("research.planner", "research.challenge", "research.tie_break")
+    )
     deep_retrieval_requery = config.roles["research.deep_retrieval_requery"]
-    assert deep_retrieval_requery.provider_id == "local"
-    assert deep_retrieval_requery.model == "qwen3.8:27b-axq4"
+    assert deep_retrieval_requery.provider_id == "omlx"
+    assert deep_retrieval_requery.model == qwen_model
     assert deep_retrieval_requery.required_capabilities == ("structured_output",)
     assert (
         '# role = "research.deep_retrieval_requery"\n# data_class = "raw"'
         in text
     )
     ingest_generation = config.roles["ingest.generation"]
-    assert ingest_generation.provider_id == "local"
-    assert ingest_generation.model == "qwen3.8:27b-axq4"
+    assert ingest_generation.provider_id == "omlx"
+    assert ingest_generation.model == qwen_model
     assert config.roles["lint.tag_repair"].model == ingest_generation.model
     assert config.roles["lint.orphan_link"].model == ingest_generation.model
-    assert config.roles["knowledge.relation_extraction"].model == "gemma4:26b-optiq4"
-    assert config.roles["knowledge.community_summary"].model == "gemma4:26b-optiq4"
+    assert config.roles["knowledge.relation_extraction"].model == qwen_model
+    assert config.roles["knowledge.community_summary"].model == qwen_model
     assert (
         config.roles["recall.content_correction.proposer"].model
         == ingest_generation.model

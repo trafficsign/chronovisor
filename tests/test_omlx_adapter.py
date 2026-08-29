@@ -144,6 +144,10 @@ def test_adapter_uses_configured_local_server() -> None:
     assert urlparse(urls[0]).port == 8001
 
 
+def test_adapter_default_targets_cutover_loopback_port() -> None:
+    assert omlx_adapter.OMLX_BASE_URL == "http://127.0.0.1:18125/v1"
+
+
 def test_generate_maps_reasoning_level_to_omlx_controls() -> None:
     captured: list[dict[str, Any]] = []
 

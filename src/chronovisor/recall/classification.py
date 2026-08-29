@@ -42,6 +42,8 @@ CONSENSUS_RUNTIME_ROLES = (
     "classification.challenger",
     "classification.tie_break",
 )
+SINGLE_RUNTIME_ROLE = "classification.authority"
+AUTHORITY_KINDS = frozenset({"quorum_v1", "single_model_v1"})
 _CONSENSUS_ROUTE_KEYS = {
     "role",
     "provider",
@@ -199,6 +201,99 @@ def resolve_consensus_runtime_routes(
     if supplied is not None and supplied != list(contract):
         raise ClassificationError("classification runtime route contract changed")
     return contract
+
+
+def resolve_single_runtime_route(supplied: object = None) -> dict[str, Any]:
+    """Resolve the one production authority route without model duplication.
+
+    ``runtime_generation_routes`` is the sole source of the model identity.  A
+    supplied row is only an integrity echo from a queued worker payload; it can
+    never select or replace the runtime route.
+    """
+
+    supplied_row: Mapping[str, Any] | None = None
+    if supplied is not None:
+        if isinstance(supplied, Mapping):
+            supplied_row = supplied
+        elif isinstance(supplied, list) and len(supplied) == 1:
+            row = supplied[0]
+            if isinstance(row, Mapping):
+                supplied_row = row
+        if (
+            supplied_row is None
+            or set(supplied_row) != _CONSENSUS_ROUTE_KEYS
+            or supplied_row.get("role") != SINGLE_RUNTIME_ROLE
+            or not isinstance(supplied_row.get("provider"), str)
+            or not str(supplied_row["provider"]).strip()
+            or not isinstance(supplied_row.get("model"), str)
+            or not str(supplied_row["model"]).strip()
+            or supplied_row.get("location") not in {"local", "remote"}
+            or (
+                supplied_row.get("provider") == "ollama"
+                and supplied_row.get("location") == "local"
+                and (
+                    not isinstance(supplied_row.get("model_digest"), str)
+                    or not str(supplied_row["model_digest"]).strip()
+                )
+            )
+            or (
+                (
+                    supplied_row.get("provider") != "ollama"
+                    or supplied_row.get("location") != "local"
+                )
+                and supplied_row.get("model_digest") is not None
+            )
+        ):
+            raise ClassificationError("classification runtime route contract is invalid")
+    try:
+        routes = ollama.runtime_generation_routes((SINGLE_RUNTIME_ROLE,))
+    except ollama.RuntimeBridgeError as exc:
+        raise ClassificationError(
+            f"classification runtime route is unavailable: {exc.category}"
+        ) from None
+    if len(routes) != 1 or routes[0].role != SINGLE_RUNTIME_ROLE:
+        raise ClassificationError("classification runtime route identity mismatch")
+    route = routes[0]
+    if not route.structured_output:
+        raise ClassificationError("classification route lacks structured output")
+    if supplied_row is not None and {
+        key: supplied_row[key]
+        for key in ("role", "provider", "model", "location")
+    } != route_identity(route):
+        raise ClassificationError("classification runtime route contract changed")
+    local_digests = (
+        ollama.model_digests([route.model])
+        if route.provider == "ollama" and route.location == "local"
+        else {}
+    )
+    _validated, digest, _sensitivity = resolve_structured_route(
+        {
+            "runtime_role": route.role,
+            "model": supplied_row.get("model") if supplied_row is not None else None,
+            "model_digest": (
+                supplied_row.get("model_digest") if supplied_row is not None else None
+            ),
+        },
+        role=route.role,
+        resolved_route=route,
+        local_model_digests=local_digests,
+    )
+    resolved = {**route_identity(route), "model_digest": digest}
+    if supplied is not None and supplied_row is not None:
+        # A one-row list is the canonical queued representation; a mapping is
+        # accepted for API ergonomics but is normalized to the same result.
+        supplied_identity = (
+            dict(supplied)
+            if isinstance(supplied, Mapping)
+            else dict(supplied[0])
+            if isinstance(supplied, list)
+            and supplied
+            and isinstance(supplied[0], Mapping)
+            else {}
+        )
+        if supplied_identity != resolved:
+            raise ClassificationError("classification runtime route contract changed")
+    return resolved
 
 
 @dataclass(frozen=True)

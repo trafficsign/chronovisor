@@ -1,7 +1,8 @@
 """oMLX components for the provider-neutral LLM runtime.
 
-oMLX (z-lab DFlash fork) exposes an OpenAI-compatible HTTP API on
-`http://127.0.0.1:8000/v1` with `x-api-key` header auth.  This adapter
+oMLX (z-lab DFlash fork) exposes an OpenAI-compatible HTTP API on the
+dedicated loopback endpoint `http://127.0.0.1:18125/v1` with `x-api-key`
+header auth.  This adapter
 mirrors `OllamaAdapter` but speaks that schema, with measured
 parameter mapping:
 
@@ -20,10 +21,10 @@ parameter mapping:
   are oMLX-managed; see the migration handoff brief).
 - embeddings via ``POST /v1/embeddings`` (normalized vectors).
 
-DFlash engines are singleton per server (models swap; pinned DFlash
-models block other DFlash loads), so separate local servers can keep one
-DFlash model resident each while cross-process serialization via
-``ollama_lease.model_resource_lease`` keeps inference exclusive.
+DFlash engines are singleton per server (models swap; pinned DFlash models
+block other DFlash loads).  The production cutover uses one official
+app-managed server; cross-process serialization via
+``ollama_lease.model_resource_lease`` keeps DFlash inference exclusive.
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ from chronovisor.core.llm_runtime import (
 )
 from chronovisor.core.ollama_lease import model_resource_lease
 
-OMLX_BASE_URL = os.environ.get("OMLX_BASE_URL", "http://127.0.0.1:8000/v1")
+OMLX_BASE_URL = os.environ.get("OMLX_BASE_URL", "http://127.0.0.1:18125/v1")
 OMLX_API_KEY = os.environ.get("OMLX_API_KEY", "omlx-local")
 OMLX_MODEL_SETTINGS_PATH = Path(
     os.environ.get("OMLX_MODEL_SETTINGS_PATH", "~/.omlx/model_settings.json")

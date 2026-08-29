@@ -29,6 +29,11 @@ from chronovisor.core.sealed_artifact_decoder import schema_matches
 
 EXECUTION_FINGERPRINT_VERSION = 2
 DECISION_ARTIFACT_SCHEMA = "chronovisor.canonical-decision-artifact.v2"
+SINGLE_MODEL_DECISION_ARTIFACT_SCHEMA = (
+    "chronovisor.canonical-decision-artifact.single-model-v1"
+)
+SINGLE_MODEL_AUTHORITY_KIND = "single_model_v1"
+QUORUM_AUTHORITY_KIND = "quorum_v1"
 
 
 class DecisionArtifactError(RuntimeError):
@@ -87,7 +92,10 @@ class DecisionArtifactStore:
             payload = verify_sealed_object(json.loads(raw.decode("utf-8")))
         except Exception as exc:
             raise DecisionArtifactError("decision artifact seal is invalid") from exc
-        if not schema_matches(payload.get("schema"), DECISION_ARTIFACT_SCHEMA):
+        schema = payload.get("schema")
+        if schema_matches(schema, SINGLE_MODEL_DECISION_ARTIFACT_SCHEMA):
+            return self._load_single(payload, fingerprint)
+        if not schema_matches(schema, DECISION_ARTIFACT_SCHEMA):
             raise DecisionArtifactError("decision artifact schema is invalid")
         if payload.get("execution_fingerprint") != fingerprint:
             raise DecisionArtifactError("decision artifact path identity mismatch")
@@ -145,6 +153,75 @@ class DecisionArtifactStore:
             )
         return payload
 
+    @staticmethod
+    def _load_single(payload: Mapping[str, Any], fingerprint: str) -> dict[str, Any]:
+        """Validate a one-route artifact without treating repairs as votes."""
+
+        if payload.get("execution_fingerprint") != fingerprint:
+            raise DecisionArtifactError("decision artifact path identity mismatch")
+        identity = payload.get("execution_identity")
+        if not isinstance(identity, dict) or canonical_sha256(identity) != fingerprint:
+            raise DecisionArtifactError("decision artifact execution identity mismatch")
+        if payload.get("decision_sha256") != canonical_sha256(payload.get("decision")):
+            raise DecisionArtifactError("decision artifact payload digest mismatch")
+        if payload.get("authority_kind") != SINGLE_MODEL_AUTHORITY_KIND:
+            raise DecisionArtifactError("single-model artifact authority is invalid")
+        if payload.get("mutation_authority") != SINGLE_MODEL_AUTHORITY_KIND:
+            raise DecisionArtifactError("single-model artifact mutation authority is invalid")
+        proof = payload.get("single_model_proof")
+        if not isinstance(proof, dict):
+            raise DecisionArtifactError("single-model artifact proof is missing")
+        required = {
+            "role",
+            "provider",
+            "model",
+            "route_provenance",
+            "returned_model",
+            "signature_sha256",
+            "valid",
+            "repair_turns",
+            "attempts",
+        }
+        if set(proof) != required:
+            raise DecisionArtifactError("single-model artifact proof is invalid")
+        role = proof.get("role")
+        provider = proof.get("provider")
+        model = proof.get("model")
+        route = proof.get("route_provenance")
+        signature = proof.get("signature_sha256")
+        repairs = proof.get("repair_turns")
+        attempts = proof.get("attempts")
+        returned_model = proof.get("returned_model")
+        if (
+            not isinstance(role, str)
+            or role != "classification.authority"
+            or not isinstance(provider, str)
+            or not provider
+            or not isinstance(model, str)
+            or not model
+            or not isinstance(route, dict)
+            or route.get("role") != role
+            or route.get("provider") != provider
+            or route.get("model") != model
+            or not isinstance(signature, str)
+            or len(signature) != 64
+            or any(char not in "0123456789abcdef" for char in signature)
+            or proof.get("valid") is not True
+            or isinstance(repairs, bool)
+            or not isinstance(repairs, int)
+            or not 0 <= repairs <= 2
+            or not isinstance(attempts, list)
+            or len(attempts) != repairs + 1
+            or (
+                route.get("location") == "remote"
+                and returned_model != model
+            )
+            or returned_model is not None
+            and (not isinstance(returned_model, str) or not returned_model)
+        ):
+            raise DecisionArtifactError("single-model artifact proof is invalid")
+        return dict(payload)
+
     def publish(
         self,
         *,
@@ -152,13 +229,33 @@ class DecisionArtifactStore:
         identity: Mapping[str, Any],
         decision: Any,
         agreement_sha256: str,
-        quorum_proof: list[dict[str, Any]],
+        quorum_proof: list[dict[str, Any]] | None,
         provenance: Mapping[str, Any],
+        authority_kind: str = QUORUM_AUTHORITY_KIND,
+        single_model_proof: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if canonical_sha256(identity) != fingerprint:
             raise DecisionArtifactError("execution identity does not match fingerprint")
-        payload = seal_object(
-            {
+        if authority_kind == SINGLE_MODEL_AUTHORITY_KIND:
+            if not isinstance(single_model_proof, Mapping):
+                raise DecisionArtifactError("single-model artifact proof is missing")
+            payload_body = {
+                "schema": SINGLE_MODEL_DECISION_ARTIFACT_SCHEMA,
+                "execution_fingerprint": fingerprint,
+                "execution_identity": dict(identity),
+                "decision": decision,
+                "decision_sha256": canonical_sha256(decision),
+                "agreement_sha256": agreement_sha256,
+                "single_model_proof": dict(single_model_proof),
+                "authority_kind": SINGLE_MODEL_AUTHORITY_KIND,
+                "provenance": dict(provenance),
+                "mutation_authority": SINGLE_MODEL_AUTHORITY_KIND,
+                "frontier_calls": 0,
+            }
+        else:
+            if not isinstance(quorum_proof, list):
+                raise DecisionArtifactError("decision artifact quorum proof is missing")
+            payload_body = {
                 "schema": DECISION_ARTIFACT_SCHEMA,
                 "execution_fingerprint": fingerprint,
                 "execution_identity": dict(identity),
@@ -170,7 +267,7 @@ class DecisionArtifactStore:
                 "mutation_authority": "configured_route_quorum",
                 "frontier_calls": 0,
             }
-        )
+        payload = seal_object(payload_body)
         encoded = canonical_bytes(payload)
         path = self.path_for(fingerprint)
         with file_lock(self._lock_path(fingerprint), exclusive=True):

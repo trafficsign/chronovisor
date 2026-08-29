@@ -442,6 +442,11 @@ def test_live_eval_resets_surviving_runners_and_wires_exact_mode(
 
 def _config(**overrides: object) -> DecisionRouterConfig:
     values: dict[str, object] = {
+        # These fixtures exercise the retained candidate/quorum evaluator.  A
+        # production DecisionRouterConfig defaults to single_model_v1; make
+        # the legacy contract explicit so the tests do not accidentally claim
+        # two-vote adoption evidence from one route.
+        "authority_kind": "quorum_v1",
         "primary_model": "ornith:test",
         "challenger_model": "gpt-oss:test",
         "tie_break_model": "gemma:test",

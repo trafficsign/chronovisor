@@ -29,6 +29,7 @@ from chronovisor.core.runtime_config import (
     load_ingest_config,
 )
 from chronovisor.decision.decision_artifact import (
+    DECISION_ARTIFACT_SCHEMA,
     DecisionArtifactError,
     DecisionArtifactStore,
     default_store_root,
@@ -85,6 +86,9 @@ _DECISION_RUNTIME_ROLES = (
     "classification.tie_break",
 )
 _ROLE_NAMES = ("primary", "challenger", "tie_break")
+_SINGLE_ROLE_NAME = "authority"
+SINGLE_MODEL_AUTHORITY_KIND = "single_model_v1"
+QUORUM_AUTHORITY_KIND = "quorum_v1"
 AUDIT_ROLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 DECISION_SEMANTICS_POLICY_VERSION = 12
 QUORUM_SAFETY_POLICY_VERSION = 4
@@ -1489,11 +1493,104 @@ class DecisionRouterResult:
         }
 
 
+@dataclass(frozen=True)
+class SingleModelDecisionRouterResult(DecisionRouterResult):
+    """One-route authority result with repairs kept out of the vote count."""
+
+    authority_kind: str = SINGLE_MODEL_AUTHORITY_KIND
+    quorum_flow: bool = False
+    repair_is_vote: bool = False
+
+    def audit_record(self) -> dict[str, Any]:
+        audit = super().audit_record()
+        repairs = sum(vote.result.repair_turns for vote in self.votes)
+        audit.update(
+            {
+                "authority_kind": self.authority_kind,
+                "quorum_flow": self.quorum_flow,
+                "repair_is_vote": self.repair_is_vote,
+                "validation_status": "validated" if self.ok else "held",
+                "vote_count": len(self.votes),
+                "valid_votes": sum(vote.valid for vote in self.votes),
+                "repair_turns": repairs,
+                "attempts": [
+                    {
+                        "role": vote.role,
+                        "model": vote.model,
+                        "attempts": vote.result.audit_record().get("attempts", []),
+                    }
+                    for vote in self.votes
+                ],
+            }
+        )
+        return audit
+
+
+def _single_runtime_route_identity_error(route: object) -> str | None:
+    """Fail closed when production single route drifts from the pinned model."""
+
+    if not isinstance(route, ollama.RuntimeGenerationRoute):
+        return "single-model runtime route identity is invalid"
+    # Synthetic transports intentionally use test model names and have no
+    # configured revision; they are dependency-injection fixtures, not live
+    # authority.  All configured production routes must be the pinned oMLX
+    # model and immutable revision.
+    if route.provider == "custom_transport":
+        return None
+    if (
+        route.provider != "omlx"
+        or route.location != "local"
+        or route.protocol != "omlx-native"
+        or route.model != ollama.SINGLE_MODEL_RUNTIME_MODEL
+        or route.revision != ollama.SINGLE_MODEL_RUNTIME_REVISION
+    ):
+        return "single-model runtime route identity is invalid"
+    return None
+
+
 def _config_error(
     config: DecisionRouterConfig,
     *,
     model_identities: Sequence[tuple[str, ...]] | None = None,
 ) -> str | None:
+    authority_kind = getattr(config, "authority_kind", QUORUM_AUTHORITY_KIND)
+    if authority_kind == SINGLE_MODEL_AUTHORITY_KIND:
+        runtime_role = getattr(config, "single_runtime_role", "")
+        if (
+            not isinstance(runtime_role, str)
+            or not runtime_role.strip()
+            or not re.fullmatch(r"classification\.[a-z][a-z0-9_.-]{0,79}", runtime_role)
+        ):
+            return "single-model runtime role is invalid"
+        if model_identities is not None and len(model_identities) != 1:
+            return "single-model authority requires exactly one runtime route"
+        integer_minimums = {
+            "min_num_ctx": 2_048,
+            "num_ctx": 2_048,
+            "num_predict": 128,
+            "read_timeout_ms": 1_000,
+            "max_input_chars": 4_096,
+            "max_output_chars": 256,
+            "max_feedback_chars": 512,
+            "memory_reserve_gib": 4,
+            "max_resident_models": 1,
+            "residency_policy_version": 1,
+        }
+        for name, minimum in integer_minimums.items():
+            value = getattr(config, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                return f"{name} must be an integer >= {minimum}"
+        if config.min_num_ctx > config.num_ctx:
+            return "min_num_ctx must not exceed num_ctx"
+        if config.max_resident_models > 3:
+            return "max_resident_models must not exceed three"
+        if config.residency_policy_version != 2:
+            return "residency_policy_version is unsupported"
+        if not isinstance(config.adaptive_residency, bool):
+            return "adaptive_residency must be a boolean"
+        return None
+    if authority_kind != QUORUM_AUTHORITY_KIND:
+        return "decision authority kind is unsupported"
     models = (
         config.primary_model.strip(),
         config.challenger_model.strip(),
@@ -1668,28 +1765,46 @@ class DecisionRouter:
     ) -> None:
         if not isinstance(audit_role, str) or not AUDIT_ROLE_RE.fullmatch(audit_role):
             raise ValueError("audit_role must be a safe identifier of at most 80 chars")
-        try:
-            self.excluded_roles = frozenset(excluded_roles)
-        except TypeError as exc:
-            raise ValueError(
-                "excluded_roles must contain canonical route roles"
-            ) from exc
-        if len(self.excluded_roles) > 1 or not self.excluded_roles.issubset(
-            _ROLE_NAMES
-        ):
-            raise ValueError(
-                "excluded_roles must contain at most one canonical route role"
-            )
-        self._active_roles = tuple(
-            role for role in _ROLE_NAMES if role not in self.excluded_roles
-        )
         baseline_config = config or load_decision_router_config()
+        self.authority_kind = getattr(
+            baseline_config, "authority_kind", QUORUM_AUTHORITY_KIND
+        )
+        self.single_model_mode = self.authority_kind == SINGLE_MODEL_AUTHORITY_KIND
+        self._runtime_role = getattr(
+            baseline_config,
+            "single_runtime_role",
+            "classification.authority",
+        )
+        if self.single_model_mode:
+            if excluded_roles:
+                raise ValueError("single-model authority does not support excluded roles")
+            self.excluded_roles = frozenset()
+            self._active_roles = (_SINGLE_ROLE_NAME,)
+        else:
+            try:
+                self.excluded_roles = frozenset(excluded_roles)
+            except TypeError as exc:
+                raise ValueError(
+                    "excluded_roles must contain canonical route roles"
+                ) from exc
+            if len(self.excluded_roles) > 1 or not self.excluded_roles.issubset(
+                _ROLE_NAMES
+            ):
+                raise ValueError(
+                    "excluded_roles must contain at most one canonical route role"
+                )
+            self._active_roles = tuple(
+                role for role in _ROLE_NAMES if role not in self.excluded_roles
+            )
         route_error: str | None = None
         if transport is None:
             try:
-                resolved_routes = ollama.runtime_generation_routes(
-                    _DECISION_RUNTIME_ROLES
+                requested_roles = (
+                    (self._runtime_role,)
+                    if self.single_model_mode
+                    else _DECISION_RUNTIME_ROLES
                 )
+                resolved_routes = ollama.runtime_generation_routes(requested_roles)
             except ollama.RuntimeBridgeError as exc:
                 resolved_routes = ()
                 route_error = exc.category
@@ -1697,17 +1812,33 @@ class DecisionRouter:
                 route.structured_output for route in resolved_routes
             ):
                 route_error = "capability_unavailable"
+            expected_route_count = 1 if self.single_model_mode else 3
+            if resolved_routes and len(resolved_routes) != expected_route_count:
+                route_error = "runtime_route_missing"
+            if self.single_model_mode and resolved_routes:
+                route_error = route_error or _single_runtime_route_identity_error(
+                    resolved_routes[0]
+                )
+            route_names = (
+                (_SINGLE_ROLE_NAME,) if self.single_model_mode else _ROLE_NAMES
+            )
             self.routes = (
-                dict(zip(_ROLE_NAMES, resolved_routes, strict=True))
-                if resolved_routes
+                dict(zip(route_names, resolved_routes, strict=True))
+                if len(resolved_routes) == len(route_names)
                 else {}
             )
             routed_config = (
                 replace(
                     baseline_config,
-                    primary_model=self.routes["primary"].model,
-                    challenger_model=self.routes["challenger"].model,
-                    tie_break_model=self.routes["tie_break"].model,
+                    **(
+                        {
+                            "primary_model": self.routes["primary"].model,
+                            "challenger_model": self.routes["challenger"].model,
+                            "tie_break_model": self.routes["tie_break"].model,
+                        }
+                        if not self.single_model_mode
+                        else {}
+                    ),
                     adoption_artifact="",
                 )
                 if self.routes
@@ -1720,25 +1851,37 @@ class DecisionRouter:
             )
             self._adoption_artifact_nominated = False
         else:
-            self.routes = {
-                role: ollama.RuntimeGenerationRoute(
-                    role=f"classification.{role}",
-                    provider="custom_transport",
-                    model=model,
-                    location="local",
-                    structured_output=True,
-                    protocol="custom-transport",
-                )
-                for role, model in zip(
-                    _ROLE_NAMES,
-                    (
-                        baseline_config.primary_model,
-                        baseline_config.challenger_model,
-                        baseline_config.tie_break_model,
-                    ),
-                    strict=True,
-                )
-            }
+            if self.single_model_mode:
+                self.routes = {
+                    _SINGLE_ROLE_NAME: ollama.RuntimeGenerationRoute(
+                        role=self._runtime_role,
+                        provider="custom_transport",
+                        model=baseline_config.primary_model,
+                        location="local",
+                        structured_output=True,
+                        protocol="custom-transport",
+                    )
+                }
+            else:
+                self.routes = {
+                    role: ollama.RuntimeGenerationRoute(
+                        role=f"classification.{role}",
+                        provider="custom_transport",
+                        model=model,
+                        location="local",
+                        structured_output=True,
+                        protocol="custom-transport",
+                    )
+                    for role, model in zip(
+                        _ROLE_NAMES,
+                        (
+                            baseline_config.primary_model,
+                            baseline_config.challenger_model,
+                            baseline_config.tie_break_model,
+                        ),
+                        strict=True,
+                    )
+                }
             self._adoption_artifact_nominated = bool(
                 baseline_config.adoption_artifact.strip()
             )
@@ -1754,7 +1897,7 @@ class DecisionRouter:
                 )
             )
         self.config = self.policy.config
-        if transport is not None:
+        if transport is not None and not self.single_model_mode:
             self.routes = {
                 role: replace(route, model=model)
                 for (role, route), model in zip(
@@ -1875,9 +2018,12 @@ class DecisionRouter:
     def authority_router(self, *, refresh: bool = False) -> dict[str, Any]:
         """Return ordered safe route provenance for one authority epoch."""
 
+        route_names = (
+            (_SINGLE_ROLE_NAME,) if self.single_model_mode else _ROLE_NAMES
+        )
         if self._route_provenance_snapshot is not None and not refresh:
             routes = [
-                dict(self._route_provenance_snapshot[role]) for role in _ROLE_NAMES
+                dict(self._route_provenance_snapshot[role]) for role in route_names
             ]
             return {"source": self.policy.source, "error": None, "routes": routes}
 
@@ -1913,7 +2059,7 @@ class DecisionRouter:
             metadata.get("models") if isinstance(metadata, Mapping) else None
         )
         model_metadata = model_metadata if isinstance(model_metadata, Mapping) else {}
-        for role in _ROLE_NAMES:
+        for role in route_names:
             route = self.routes.get(role)
             if route is None:
                 error = error or "runtime_route_missing"
@@ -1941,15 +2087,15 @@ class DecisionRouter:
                 "revision": route.revision,
                 "ollama": ollama_identity,
             }
-        if error is None and len(route_rows) == 3:
+        if error is None and len(route_rows) == len(route_names):
             self._route_provenance_snapshot = {
-                role: dict(route_rows[role]) for role in _ROLE_NAMES
+                role: dict(route_rows[role]) for role in route_names
             }
         return {
             "source": self.policy.source,
             "error": error,
             "routes": [
-                dict(route_rows[role]) for role in _ROLE_NAMES if role in route_rows
+                dict(route_rows[role]) for role in route_names if role in route_rows
             ],
         }
 
@@ -2023,15 +2169,12 @@ class DecisionRouter:
             else self.policy.audit_record()
         )
         model_runtime = {
-            "primary_model": self.config.primary_model,
-            "challenger_model": self.config.challenger_model,
-            "tie_break_model": self.config.tie_break_model,
+            "authority_kind": self.authority_kind,
             "num_predict": self.config.num_predict,
             "max_input_chars": self.config.max_input_chars,
             "max_output_chars": self.config.max_output_chars,
             "max_feedback_chars": self.config.max_feedback_chars,
             "read_timeout_ms": self.config.read_timeout_ms,
-            "quorum": self.config.quorum,
             "routes": [
                 {
                     "role": route.role,
@@ -2045,6 +2188,20 @@ class DecisionRouter:
                 for route in self.routes.values()
             ],
         }
+        if self.single_model_mode:
+            model_runtime["single_runtime_role"] = self._runtime_role
+            model_runtime["authority_keep_alive"] = getattr(
+                self.config, "authority_keep_alive", self.config.primary_keep_alive
+            )
+        else:
+            model_runtime.update(
+                {
+                    "primary_model": self.config.primary_model,
+                    "challenger_model": self.config.challenger_model,
+                    "tie_break_model": self.config.tie_break_model,
+                    "quorum": self.config.quorum,
+                }
+            )
         return (
             *execution_fingerprint(
                 request_sha256=structured_request_sha256(
@@ -2069,6 +2226,10 @@ class DecisionRouter:
         schema: Mapping[str, Any],
         context_tier: int,
     ) -> DecisionRouterResult:
+        if self.single_model_mode:
+            return self._replay_single_artifact(
+                artifact, schema=schema, context_tier=context_tier
+            )
         value = artifact.get("decision")
         signature = canonical_agreement_signature(value, schema=schema)
         signature_sha256 = hashlib.sha256(signature.encode("utf-8")).hexdigest()
@@ -2163,6 +2324,83 @@ class DecisionRouter:
             },
         )
 
+    def _replay_single_artifact(
+        self,
+        artifact: Mapping[str, Any],
+        *,
+        schema: Mapping[str, Any],
+        context_tier: int,
+    ) -> SingleModelDecisionRouterResult:
+        from chronovisor.decision.decision_artifact import (
+            SINGLE_MODEL_DECISION_ARTIFACT_SCHEMA,
+        )
+
+        if artifact.get("schema") == DECISION_ARTIFACT_SCHEMA:
+            raise DecisionArtifactError(
+                "legacy quorum artifact replay is rejected under single-model policy"
+            )
+        if artifact.get("schema") != SINGLE_MODEL_DECISION_ARTIFACT_SCHEMA:
+            raise DecisionArtifactError("single-model artifact schema is invalid")
+        proof = artifact.get("single_model_proof")
+        if not isinstance(proof, Mapping):
+            raise DecisionArtifactError("single-model artifact proof is missing")
+        value = artifact.get("decision")
+        signature = canonical_agreement_signature(value, schema=schema)
+        signature_sha256 = hashlib.sha256(signature.encode("utf-8")).hexdigest()
+        if artifact.get("agreement_sha256") != signature_sha256:
+            raise DecisionArtifactError(
+                "canonical decision agreement digest no longer matches schema"
+            )
+        route = self.routes.get(_SINGLE_ROLE_NAME)
+        if route is None:
+            raise DecisionArtifactError("single-model runtime route is missing")
+        route_provenance = proof.get("route_provenance")
+        current_provenance = self.authority_router().get("routes")
+        current_route = (
+            current_provenance[0]
+            if isinstance(current_provenance, list) and current_provenance
+            else None
+        )
+        if route_provenance != current_route or proof.get("model") != route.model:
+            raise DecisionArtifactError(
+                "single-model artifact proof voter differs from current policy"
+            )
+        result = LocalStructuredResult(
+            ok=True,
+            model=route.model,
+            value=value,
+            returned_model=(
+                proof.get("returned_model")
+                if isinstance(proof.get("returned_model"), str)
+                else None
+            ),
+        )
+        vote = DecisionVote(
+            role=_SINGLE_ROLE_NAME,
+            model=route.model,
+            provider=route.provider,
+            result=result,
+            requested_num_ctx=context_tier,
+            route_provenance=dict(route_provenance),
+            signature=signature,
+            signature_sha256=signature_sha256,
+            runtime_observation_status="artifact_replay",
+        )
+        return SingleModelDecisionRouterResult(
+            status="agreed",
+            value=value,
+            agreement_sha256=signature_sha256,
+            votes=(vote,),
+            num_ctx=context_tier,
+            residency={
+                "source": "single_model_artifact_replay",
+                "execution_fingerprint": artifact.get("execution_fingerprint"),
+                "decision_artifact_seal_sha256": artifact.get("seal_sha256"),
+                "model_invocations": 0,
+                "num_ctx": context_tier,
+            },
+        )
+
     def _publish_artifact(
         self,
         result: DecisionRouterResult,
@@ -2172,6 +2410,72 @@ class DecisionRouter:
         context_tier: int,
         decision_lane: str,
     ) -> dict[str, Any]:
+        if self.single_model_mode:
+            if len(result.votes) != 1 or not result.ok:
+                raise DecisionArtifactError(
+                    "single-model artifact requires one validated result"
+                )
+            vote = result.votes[0]
+            if not vote.valid or vote.signature_sha256 != result.agreement_sha256:
+                raise DecisionArtifactError(
+                    "single-model artifact proof does not match result"
+                )
+            proof = {
+                "role": vote.route_provenance.get("role"),
+                "provider": vote.provider,
+                "model": vote.model,
+                "route_provenance": dict(vote.route_provenance),
+                "returned_model": vote.result.returned_model,
+                "signature_sha256": vote.signature_sha256,
+                "valid": True,
+                "repair_turns": vote.result.repair_turns,
+                "attempts": [
+                    attempt.audit_record() for attempt in vote.result.attempts
+                ],
+            }
+            if proof["role"] != self._runtime_role:
+                raise DecisionArtifactError("single-model artifact route identity invalid")
+            return self.decision_artifact_store.publish(
+                fingerprint=fingerprint,
+                identity=identity,
+                decision=result.value,
+                agreement_sha256=str(result.agreement_sha256),
+                quorum_proof=None,
+                single_model_proof=proof,
+                authority_kind=SINGLE_MODEL_AUTHORITY_KIND,
+                provenance={
+                    "decision_lane": decision_lane,
+                    "context_tier": context_tier,
+                    "router_policy": self.authority_router(),
+                    "structured_generation_policy": structured_generation_policy(),
+                    "vote_manifest": [
+                        {
+                            "role": vote.role,
+                            "provider": vote.provider,
+                            "model": vote.model,
+                            "route_provenance": dict(vote.route_provenance),
+                            "returned_model": vote.result.returned_model,
+                            "valid": vote.valid,
+                            "signature_sha256": vote.signature_sha256,
+                            "invalid_reason": vote.invalid_reason,
+                        }
+                    ],
+                    "vote_manifest_sha256": canonical_sha256(
+                        [
+                            {
+                                "role": vote.role,
+                                "provider": vote.provider,
+                                "model": vote.model,
+                                "route_provenance": dict(vote.route_provenance),
+                                "returned_model": vote.result.returned_model,
+                                "valid": vote.valid,
+                                "signature_sha256": vote.signature_sha256,
+                                "invalid_reason": vote.invalid_reason,
+                            }
+                        ]
+                    ),
+                },
+            )
         vote_manifest = [
             {
                 "role": vote.role,
@@ -2250,7 +2554,7 @@ class DecisionRouter:
             model=model,
             transport=self.transport,
             role=f"{self.audit_role}:{role}",
-            runtime_role=f"classification.{role}",
+            runtime_role=self.routes[role].role,
             runtime_location=self.routes[role].location,
             source_data_class=source_data_class,
             source_sensitivity=source_sensitivity,
@@ -2376,6 +2680,14 @@ class DecisionRouter:
                     failure_class="value_materialization_error",
                     failure_reason=f"{type(exc).__name__}: {str(exc)[:500]}",
                 )
+        if result.ok and result.returned_model is not None and result.returned_model != model:
+            result = replace(
+                result,
+                ok=False,
+                value=None,
+                failure_class="returned_model_mismatch",
+                failure_reason="returned_model_mismatch",
+            )
         if not result.ok:
             return DecisionVote(
                 role=role,
@@ -3749,26 +4061,30 @@ class DecisionRouter:
                         )
                     return replayed
         except DecisionArtifactError:
+            if self.single_model_mode:
+                return self._single_quarantined(
+                    (),
+                    "single_model_artifact_replay_rejected",
+                    failure_class="decision_artifact_invalid",
+                )
             return self._quarantined(
                 (),
                 "canonical_decision_artifact_invalid",
                 failure_class="decision_artifact_invalid",
             )
 
-        def execute() -> DecisionRouterResult:
-            if self.live_resource_control and not self._defer_local_control_until_tie:
-                with ollama.model_resource_lease(exclusive=True):
-                    return self._decide_locked(
-                        prompt,
-                        schema,
-                        system=system,
-                        agreement_key=agreement_key,
-                        decision_lane=effective_lane,
-                        ingest_repair_contract=ingest_repair_contract,
-                        replay_prompt=replay_prompt,
-                        source=source,
-                        artifact_expected=artifact_identity is not None,
-                    )
+        def run_locked() -> DecisionRouterResult:
+            if self.single_model_mode:
+                return self._decide_single_locked(
+                    prompt,
+                    schema,
+                    system=system,
+                    agreement_key=agreement_key,
+                    decision_lane=effective_lane,
+                    ingest_repair_contract=ingest_repair_contract,
+                    source=source,
+                    artifact_expected=artifact_identity is not None,
+                )
             return self._decide_locked(
                 prompt,
                 schema,
@@ -3780,6 +4096,12 @@ class DecisionRouter:
                 source=source,
                 artifact_expected=artifact_identity is not None,
             )
+
+        def execute() -> DecisionRouterResult:
+            if self.live_resource_control and not self._defer_local_control_until_tie:
+                with ollama.model_resource_lease(exclusive=True):
+                    return run_locked()
+            return run_locked()
 
         result = execute()
         if result.ok and artifact_identity is not None and effective_lane is not None:
@@ -3845,6 +4167,12 @@ class DecisionRouter:
                             "lane_contract_sha256": contract_sha256,
                             "artifact_expected": True,
                         }
+                    )
+                if self.single_model_mode:
+                    return self._single_quarantined(
+                        result.votes,
+                        "single_model_artifact_publish_failed",
+                        failure_class="decision_artifact_invalid",
                     )
                 return self._quarantined(
                     result.votes,
@@ -3921,6 +4249,233 @@ class DecisionRouter:
                 source="request_preflight_failed_no_probe",
             )
         return request_preflight, required_num_ctx, selected_num_ctx, plan
+
+    @staticmethod
+    def _single_quarantined(
+        votes: Sequence[DecisionVote],
+        reason: str,
+        *,
+        failure_class: str = "single_model_validation_failed",
+    ) -> SingleModelDecisionRouterResult:
+        return SingleModelDecisionRouterResult(
+            status="quarantined",
+            votes=tuple(votes),
+            failure_class=failure_class,
+            quarantine_reason=reason,
+        )
+
+    def _decide_single_locked(
+        self,
+        prompt: str,
+        schema: Mapping[str, Any],
+        *,
+        system: str | None = None,
+        agreement_key: AgreementKey | None = None,
+        decision_lane: str | None = None,
+        ingest_repair_contract: _IngestRepairContract | None = None,
+        artifact_expected: bool = False,
+        source: object | None = None,
+    ) -> SingleModelDecisionRouterResult:
+        """Run one authoritative route; repairs remain inside that one vote."""
+
+        role = _SINGLE_ROLE_NAME
+        started = time.monotonic()
+        effective_system = decision_system_with_policy(schema, system)
+        request_schema = schema
+        if decision_lane == "ingest_reconciliation" and ingest_repair_contract:
+            with contextlib.suppress(TypeError, ValueError):
+                request_schema = _ingest_reconciliation_format_schema(
+                    schema, ingest_repair_contract
+                )
+        request_sha256 = structured_request_sha256(
+            prompt, request_schema, effective_system
+        )
+        eviction_events: list[dict[str, Any]] = []
+        (
+            request_preflight,
+            required_num_ctx,
+            selected_num_ctx,
+            residency_plan,
+        ) = self._request_plan(prompt, request_schema, effective_system)
+        authority_snapshot = self.authority_router()
+
+        def finalize(result: SingleModelDecisionRouterResult) -> SingleModelDecisionRouterResult:
+            if result.ok:
+                try:
+                    actual_signature = canonical_agreement_signature(
+                        result.value, schema=schema
+                    )
+                    actual_agreement_sha256 = hashlib.sha256(
+                        actual_signature.encode("utf-8")
+                    ).hexdigest()
+                except Exception:
+                    actual_agreement_sha256 = None
+                valid_votes = [vote for vote in result.votes if vote.valid]
+                if (
+                    len(result.votes) != 1
+                    or len(valid_votes) != 1
+                    or actual_agreement_sha256 != result.agreement_sha256
+                ):
+                    result = self._single_quarantined(
+                        result.votes,
+                        "single_model_result_proof_invalid",
+                    )
+                else:
+                    current_authority = self.authority_router(refresh=True)
+                    if (
+                        current_authority.get("error") is not None
+                        or current_authority.get("routes")
+                        != authority_snapshot.get("routes")
+                    ):
+                        result = self._single_quarantined(
+                            result.votes,
+                            "single_model_route_drift",
+                            failure_class="route_configuration_invalid",
+                        )
+            if result.ok and result.votes:
+                model = result.votes[0].model
+                if self.live_resource_control:
+                    self._evict_model(model, eviction_events)
+            residency = {
+                **residency_plan.audit_record(),
+                "required_num_ctx": required_num_ctx,
+                "evictions": list(eviction_events),
+            }
+            result = replace(
+                result,
+                num_ctx=selected_num_ctx,
+                residency=residency,
+            )
+            vote = result.votes[0] if result.votes else None
+            route = self.routes.get(role)
+            try:
+                self.audit_store.append(
+                    {
+                        "kind": "decision",
+                        "request_sha256": request_sha256,
+                        "role": self.audit_role,
+                        "decision_lane": decision_lane,
+                        "artifact_expected": artifact_expected,
+                        "authority_kind": SINGLE_MODEL_AUTHORITY_KIND,
+                        "validation_status": "validated" if result.ok else "held",
+                        "quorum_flow": False,
+                        "repair_is_vote": False,
+                        "authority_route": dict(route.__dict__) if route else None,
+                        "authority_model": vote.model if vote else None,
+                        "authority_revision": route.revision if route else None,
+                        "status": result.status,
+                        "failure_class": result.failure_class,
+                        "quarantine_reason": result.quarantine_reason,
+                        "agreement_sha256": result.agreement_sha256,
+                        "num_ctx": selected_num_ctx,
+                        "residency": residency,
+                        "vote_count": len(result.votes),
+                        "valid_votes": sum(vote.valid for vote in result.votes),
+                        "repair_turns": sum(
+                            vote.result.repair_turns for vote in result.votes
+                        ),
+                        "attempts": [
+                            {
+                                "role": vote.role,
+                                "model": vote.model,
+                                "attempts": vote.result.audit_record().get(
+                                    "attempts", []
+                                ),
+                            }
+                            for vote in result.votes
+                        ],
+                        "models": [vote.model for vote in result.votes],
+                        "votes": [vote.audit_record() for vote in result.votes],
+                        "policy": self.policy.audit_record(),
+                        "latency_seconds": max(0.0, time.monotonic() - started),
+                    }
+                )
+            except Exception:
+                pass
+            return result
+
+        if self.config_error:
+            return finalize(
+                self._single_quarantined(
+                    (), f"router_config_invalid:{self.config_error}",
+                    failure_class="route_configuration_invalid",
+                )
+            )
+        if authority_snapshot.get("error") is not None:
+            return finalize(
+                self._single_quarantined(
+                    (), "single_model_route_provenance_invalid",
+                    failure_class="route_configuration_invalid",
+                )
+            )
+        if request_preflight is not None and not request_preflight.ok:
+            return finalize(
+                self._single_quarantined(
+                    (),
+                    "structured_request_preflight_failed:"
+                    f"{request_preflight.failure_class}:"
+                    f"{request_preflight.failure_reason}",
+                    failure_class=(request_preflight.failure_class or "input_invalid"),
+                )
+            )
+        if required_num_ctx > self.config.num_ctx:
+            return finalize(
+                self._single_quarantined(
+                    (),
+                    "structured_request_exceeds_maximum_context_bucket",
+                    failure_class="context_window_exceeded",
+                )
+            )
+        model = self.routes[role].model
+        if not self._model_fits(role, model, residency_plan):
+            return finalize(
+                self._single_quarantined(
+                    (),
+                    "authority_runner_does_not_fit_reserved_memory",
+                    failure_class="local_resource_quarantined",
+                )
+            )
+        keep_alive = getattr(
+            self.config, "authority_keep_alive", self.config.primary_keep_alive
+        )
+        vote = self._observe_vote(
+            self._vote(
+                role=role,
+                model=model,
+                keep_alive=keep_alive,
+                num_ctx=residency_plan.context_for(model),
+                prompt=prompt,
+                schema=schema,
+                system=effective_system,
+                agreement_key=agreement_key or self.agreement_key,
+                decision_lane=decision_lane,
+                ingest_repair_contract=ingest_repair_contract,
+                source=source,
+            )
+        )
+        if vote.invalid_reason == "remote_route_revision_required":
+            return finalize(
+                self._single_quarantined(
+                    (vote,),
+                    "single_model_route_provenance_invalid",
+                    failure_class="route_configuration_invalid",
+                )
+            )
+        if not vote.valid:
+            return finalize(
+                self._single_quarantined(
+                    (vote,),
+                    "single_model_validation_failed",
+                    failure_class=vote.invalid_reason or "schema_invalid",
+                )
+            )
+        result = SingleModelDecisionRouterResult(
+            status="agreed",
+            value=vote.result.value,
+            agreement_sha256=vote.signature_sha256,
+            votes=(vote,),
+        )
+        return finalize(result)
 
     def _decide_locked(
         self,
@@ -4437,6 +4992,7 @@ __all__ = [
     "AgreementKey",
     "DecisionRouter",
     "DecisionRouterResult",
+    "SingleModelDecisionRouterResult",
     "DecisionVote",
     "DECISION_REQUEST_FINGERPRINT_VERSION",
     "QUORUM_SAFETY_POLICY_VERSION",

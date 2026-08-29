@@ -9,7 +9,11 @@ from typing import Any
 import pytest
 
 from chronovisor.core import ollama
-from chronovisor.core.runtime_config import DecisionRouterConfig, IngestConfig
+from chronovisor.core.runtime_config import (
+    QUORUM_AUTHORITY_KIND,
+    DecisionRouterConfig,
+    IngestConfig,
+)
 from chronovisor.decision.decision_router import (
     DecisionRouter,
     decision_context_buckets,
@@ -72,6 +76,7 @@ def _payload(decision: str) -> str:
 
 def _config(**overrides: Any) -> DecisionRouterConfig:
     values: dict[str, Any] = {
+        "authority_kind": QUORUM_AUTHORITY_KIND,
         "primary_model": PRIMARY,
         "challenger_model": CHALLENGER,
         "tie_break_model": TIE_BREAK,

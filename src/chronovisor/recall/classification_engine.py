@@ -45,6 +45,7 @@ from chronovisor.recall.classification import (
     classification_source_sha256,
     load_udc_package,
     resolve_consensus_runtime_routes,
+    resolve_single_runtime_route,
     validate_record,
 )
 
@@ -52,6 +53,8 @@ ENGINE_VERSION = "2"
 FIXTURE_SCHEMA = "chronovisor.classification-fixture.v1"
 FIXTURE_MANIFEST_SCHEMA = "chronovisor.classification-fixture-manifest.v1"
 CONSENSUS_SCHEMA = "chronovisor.classification-consensus.v1"
+AUTHORITY_SCHEMA = "chronovisor.classification-authority.v1"
+AUTHORITY_KINDS = frozenset({"quorum_v1", "single_model_v1"})
 TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]*|[\u3040-\u30ff\u3400-\u9fff]{2,}")
 DEFAULT_BATCH_SIZE = 20
 DEFAULT_CANDIDATE_LIMIT = 12
@@ -348,6 +351,30 @@ def record_from_consensus(
         if len(secondary) == 3:
             break
     confidence = float(decision.get("confidence") or 0.0)
+    authority_kind = str(decision.get("authority_kind") or "quorum_v1")
+    if authority_kind not in AUTHORITY_KINDS:
+        raise ClassificationError("classification authority kind is invalid")
+    authority_row = decision.get("authority")
+    if isinstance(authority_row, Mapping):
+        authority_result_digest = str(
+            authority_row.get("result_sha256")
+            or authority_row.get("authority_digest")
+            or ""
+        )
+    else:
+        authority_result_digest = str(decision.get("authority_digest") or "")
+    if authority_kind == "single_model_v1":
+        if not authority_result_digest:
+            raise ClassificationError("single authority digest is required")
+        evidence_refs = (
+            f"page-sha256:{page.get('source_sha256')}",
+            f"authority-sha256:{authority_result_digest}",
+        )
+    else:
+        evidence_refs = (
+            f"page-sha256:{page.get('source_sha256')}",
+            f"consensus-sha256:{decision.get('consensus_sha256')}",
+        )
     record = ClassificationRecord(
         schema=CLASSIFICATION_SCHEMA,
         subject_scheme="udcs",
@@ -394,10 +421,7 @@ def record_from_consensus(
             ),
         },
         confidence=max(0.0, min(1.0, confidence)),
-        evidence_refs=(
-            f"page-sha256:{page.get('source_sha256')}",
-            f"consensus-sha256:{decision.get('consensus_sha256')}",
-        ),
+        evidence_refs=evidence_refs,
         classifier_authority_epoch=authority_epoch,
         status=status,
         classifier_authority_digest=authority_digest,
@@ -547,11 +571,13 @@ def _classification_batch_input(
     stage_cache_epoch: str,
     runtime_routes: Sequence[Mapping[str, Any]] = (),
     source_sensitivity: str = "high",
+    authority_kind: str = "quorum_v1",
 ) -> dict[str, Any]:
     """Build the stable convergence identity for one classification batch."""
 
     return {
         "engine_version": ENGINE_VERSION,
+        "authority_kind": authority_kind,
         "adjudication_mode": adjudication_mode,
         "stage_cache_epoch": stage_cache_epoch,
         "package_checksum": package_checksum,
@@ -603,11 +629,14 @@ def _classification_worker_input(
     stage_cache_epoch: str,
     runtime_routes: Sequence[Mapping[str, Any]],
     source_sensitivity: str,
+    authority_kind: str = "quorum_v1",
 ) -> str:
+    schema = AUTHORITY_SCHEMA if authority_kind == "single_model_v1" else CONSENSUS_SCHEMA
     return json.dumps(
         {
-            "schema": CONSENSUS_SCHEMA,
+            "schema": schema,
             "root": str(root),
+            "authority_kind": authority_kind,
             "adjudication_mode": adjudication_mode,
             "stage_cache_epoch": stage_cache_epoch,
             "runtime_routes": list(runtime_routes),
@@ -622,13 +651,94 @@ def _valid_classification_worker_result(
     value: Mapping[str, Any],
     batch: Sequence[Mapping[str, Any]],
     runtime_routes: Sequence[Mapping[str, Any]],
+    authority_kind: str = "quorum_v1",
 ) -> bool:
     decisions = value.get("decisions")
-    return (
+    valid = (
         isinstance(decisions, list)
         and len(decisions) == len(batch)
         and value.get("runtime_routes") == list(runtime_routes)
     )
+    if not valid:
+        return False
+    if authority_kind == "single_model_v1" and value.get("authority_kind") != authority_kind:
+        return False
+    if authority_kind == "quorum_v1" and value.get("authority_kind") not in {
+        None,
+        authority_kind,
+    }:
+        return False
+    if authority_kind == "single_model_v1":
+        authority = value.get("authority")
+        if not isinstance(authority, Mapping) or authority.get("kind") != authority_kind:
+            return False
+        forbidden = {
+            "quorum",
+            "primary_model",
+            "challenger_model",
+            "tie_break_model",
+            "consensus_sha256",
+        }
+        return all(
+            isinstance(decision, Mapping)
+            and decision.get("authority_kind") == authority_kind
+            and isinstance(decision.get("authority_model"), str)
+            and bool(str(decision.get("authority_digest") or ""))
+            and decision.get("validation_count") == 1
+            and not forbidden.intersection(decision)
+            for decision in decisions
+        )
+    return True
+
+
+def _classification_authority_routes(
+    authority_kind: str | None,
+) -> tuple[str, tuple[Mapping[str, Any], ...]]:
+    kind = authority_kind or "single_model_v1"
+    if kind not in AUTHORITY_KINDS:
+        raise ClassificationError("classification authority kind is invalid")
+    routes = (
+        (resolve_single_runtime_route(),)
+        if kind == "single_model_v1"
+        else resolve_consensus_runtime_routes()
+    )
+    return kind, tuple(routes)
+
+
+def _classification_completed_result(
+    value: Mapping[str, Any],
+    decisions: Sequence[Mapping[str, Any]],
+    authority_kind: str,
+    runtime_routes: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    completed = {
+        "decisions": decisions,
+        "model_calls": int(value.get("model_calls") or 0),
+        "authority_kind": authority_kind,
+        "runtime_routes": list(runtime_routes),
+    }
+    if authority_kind == "single_model_v1":
+        completed["authority"] = dict(value["authority"])
+    else:
+        completed["consensus_schema"] = CONSENSUS_SCHEMA
+    return completed
+
+
+def _validate_classification_batch_settings(
+    adjudication_mode: str, stage_cache_epoch: str
+) -> None:
+    if adjudication_mode not in {"proposal-audit", "dual-blind"}:
+        raise ClassificationError("unsupported classification adjudication mode")
+    if not stage_cache_epoch.strip() or len(stage_cache_epoch) > 80:
+        raise ClassificationError("classification stage cache epoch is invalid")
+
+
+def _classification_source_id(
+    run_namespace: str, offset: int, batch_size: int
+) -> str:
+    namespace = run_namespace.strip() or "classification"
+    batch = offset // max(1, batch_size)
+    return f"batch:{batch:06d}" if namespace == "legacy" else f"{namespace}:batch:{batch:06d}"
 
 
 def run_consensus_batches(
@@ -641,16 +751,14 @@ def run_consensus_batches(
     run_namespace: str = "classification",
     adjudication_mode: str = "proposal-audit",
     stage_cache_epoch: str = "default",
+    authority_kind: str | None = None,
 ) -> list[dict[str, Any]]:
     """Run provider-neutral classification in cancellable isolated workers."""
 
-    if adjudication_mode not in {"proposal-audit", "dual-blind"}:
-        raise ClassificationError("unsupported classification adjudication mode")
-    if not stage_cache_epoch.strip() or len(stage_cache_epoch) > 80:
-        raise ClassificationError("classification stage cache epoch is invalid")
+    _validate_classification_batch_settings(adjudication_mode, stage_cache_epoch)
     if not rows:
         return []
-    runtime_routes = resolve_consensus_runtime_routes()
+    authority_kind, runtime_routes = _classification_authority_routes(authority_kind)
     package_checksum = load_udc_package(root).checksum
     store = librarian_convergence_store(root)
     outputs: list[dict[str, Any]] = []
@@ -664,16 +772,11 @@ def run_consensus_batches(
             stage_cache_epoch=stage_cache_epoch,
             runtime_routes=runtime_routes,
             source_sensitivity=source_sensitivity,
-        )
-        namespace = run_namespace.strip() or "classification"
-        source_id = (
-            f"batch:{offset // max(1, batch_size):06d}"
-            if namespace == "legacy"
-            else f"{namespace}:batch:{offset // max(1, batch_size):06d}"
+            authority_kind=authority_kind,
         )
         merged = store.merge_item(
             lane="librarian_classify",
-            source_id=source_id,
+            source_id=_classification_source_id(run_namespace, offset, batch_size),
             input_data=input_data,
             resolver_version=ENGINE_VERSION,
             metadata={
@@ -710,6 +813,7 @@ def run_consensus_batches(
                 stage_cache_epoch=stage_cache_epoch,
                 runtime_routes=runtime_routes,
                 source_sensitivity=source_sensitivity,
+                authority_kind=authority_kind,
             )
             with research_lane(
                 run_id,
@@ -754,7 +858,12 @@ def run_consensus_batches(
                     result.error or "classification worker failed"
                 )
             decisions = result.value.get("decisions")
-            if not _valid_classification_worker_result(result.value, batch, runtime_routes):
+            if not _valid_classification_worker_result(
+                result.value,
+                batch,
+                runtime_routes,
+                authority_kind,
+            ):
                 store.fail_attempt(
                     key,
                     "local",
@@ -770,12 +879,12 @@ def run_consensus_batches(
                 key,
                 "applied",
                 owner=owner,
-                result={
-                    "decisions": decisions,
-                    "model_calls": int(result.value.get("model_calls") or 0),
-                    "consensus_schema": CONSENSUS_SCHEMA,
-                    "runtime_routes": list(runtime_routes),
-                },
+                result=_classification_completed_result(
+                    result.value,
+                    decisions,
+                    authority_kind,
+                    runtime_routes,
+                ),
             )
             outputs.extend(dict(value) for value in decisions)
             break

@@ -465,6 +465,12 @@ const DECISION_LANE_PHASES = [
 let latestLiveConsensus = null;
 const DECISION_TRACE_STATES = ["pending", "active", "done", "skipped", "error"];
 const DECISION_TRACE_PROJECTION_SCHEMA = "chronovisor.decision-trace-projection.v1";
+const SINGLE_MODEL_AUTHORITY_KIND = "single_model_v1";
+
+function isSingleModelTrace(trace) {
+  return trace?.authority_kind === SINGLE_MODEL_AUTHORITY_KIND
+    && trace?.quorum_flow === false;
+}
 
 function setDecisionSvgState(node, state = "pending") {
   if (!node) return;
@@ -482,11 +488,50 @@ function decisionTraceProjection(trace) {
   const projection = trace?.projection;
   return projection?.schema === DECISION_TRACE_PROJECTION_SCHEMA ? projection : null;
 }
+
+function updateSingleAuthorityMeta(trace, projection) {
+  if (typeof document === "undefined") return;
+  const panel = document.getElementById("decision-single-authority");
+  if (!panel) return;
+  const single = isSingleModelTrace(trace) && projection?.single_model === true;
+  panel.hidden = !single;
+  const authority = projection?.authority || {};
+  const values = {
+    "[data-single-authority-label]": fmt(authority.label, "Single Authority"),
+    "[data-single-model]": shortName(authority.model || trace?.model),
+    "[data-single-revision]": shortName(authority.revision || trace?.revision),
+    "[data-single-status]": fmt(
+      projection?.labels?.validation,
+      trace?.state === "ready" || trace?.state === "agreed"
+        ? "Validated"
+        : trace?.state === "quarantined" ? "Held" : "Validating"
+    ),
+    "[data-single-target]": fmt(authority.target, "1"),
+    "[data-single-repair]": "REPAIR ≠ VOTE",
+  };
+  Object.entries(values).forEach(([selector, value]) => {
+    const node = panel.querySelector(selector);
+    if (node) node.textContent = value;
+  });
+}
+
+function updateDecisionFactMode(single) {
+  if (typeof document === "undefined") return;
+  const quorum = document.querySelector('[data-decision-fact="quorum"]');
+  const target = document.querySelector('[data-decision-fact="target"]');
+  if (quorum) quorum.hidden = single;
+  if (target) target.hidden = !single;
+}
+
 function updateDecisionSvgHarness(trace, focusEvent = null) {
   const harness = els.decisionTraceHarness;
   if (!harness) return;
   const projection = decisionTraceProjection(trace);
   harness.dataset.projectionStatus = projection ? "ok" : "missing";
+  const single = isSingleModelTrace(trace) && projection?.single_model === true;
+  harness.classList.toggle("single-model", single);
+  harness.dataset.authorityKind = single ? SINGLE_MODEL_AUTHORITY_KIND : "";
+  updateSingleAuthorityMeta(trace, projection);
   if (!projection) {
     harness.querySelectorAll(
       "[data-trace-key], [data-overall-key], [data-plan-key], [data-path-key], "
@@ -495,6 +540,19 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     ).forEach((node) => setDecisionSvgState(node, "pending"));
     harness.querySelectorAll("[data-context-option], [data-reasoning-key]")
       .forEach((node) => node.classList.remove("selected"));
+    setDecisionSvgText("[data-dispatch-label]", "DISPATCH → PRIMARY");
+    setDecisionSvgText("[data-lane-sublabel=\"primary\"]", "LOCAL DECISION");
+    setDecisionSvgText("[data-artifact-label]", "Artifact");
+    setDecisionSvgText("[data-decision-label]", "Decision");
+    harness.querySelector("[data-path-key=\"plan-dispatch\"]")?.setAttribute(
+      "d",
+      "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V315 Q180 325 190 325 H220"
+    );
+    harness.querySelector("[data-path-key=\"single-artifact\"]")?.setAttribute(
+      "d",
+      "M1106 360 H1300 Q1310 360 1310 370 V393"
+    );
+    updateDecisionFactMode(false);
     return;
   }
 
@@ -502,6 +560,35 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   harness.dataset.traceState = fmt(trace.state, "idle");
   harness.dataset.outcomeKind = fmt(trace.outcome?.kind, "idle");
   harness.dataset.taskRole = fmt(trace.task_role, "idle");
+  setDecisionSvgText(
+    "[data-dispatch-label]",
+    single ? "DISPATCH → SINGLE AUTHORITY" : "DISPATCH → PRIMARY"
+  );
+  setDecisionSvgText(
+    "[data-lane-sublabel=\"primary\"]",
+    single ? "SINGLE MODEL · STRUCTURED" : "LOCAL DECISION"
+  );
+  setDecisionSvgText("[data-artifact-label]", single ? "Validated" : "Artifact");
+  setDecisionSvgText("[data-decision-label]", single ? "Validated" : "Decision");
+  setDecisionSvgText(
+    "#decision-trace-svg-description",
+    single
+      ? "Packet, execution planning, one single authority lane, validated output and decision. Structured repair is separate from voting."
+      : "Packet, execution planning, fixed primary, challenger and tie-break lanes, then one shared artifact and decision. Unsafe quorum branches to hold before the artifact; only a seal failure branches from the artifact."
+  );
+  harness.querySelector("[data-path-key=\"plan-dispatch\"]")?.setAttribute(
+    "d",
+    single
+      ? "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 440 Q180 450 190 450 H220"
+      : "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V315 Q180 325 190 325 H220"
+  );
+  harness.querySelector("[data-path-key=\"single-artifact\"]")?.setAttribute(
+    "d",
+    single
+      ? "M920 450 H1300 Q1310 450 1310 440 V393"
+      : "M1106 360 H1300 Q1310 360 1310 370 V393"
+  );
+  updateDecisionFactMode(single);
   harness.querySelectorAll("[data-trace-key]").forEach((node) => {
     setDecisionSvgState(node, nodes[node.dataset.traceKey]);
   });
@@ -599,7 +686,17 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     );
     setDecisionSvgText(`[data-repair-count="${key}"]`, "REPAIR JSON");
     setDecisionSvgText(`[data-repair-number="${key}"]`, String(laneState.repair_attempt || 0));
-    const resultLabel = laneState.state === "pending"
+    const resultLabel = single
+      ? laneState.state === "pending"
+        ? "WAITING"
+        : laneState.state === "active"
+          ? "VALIDATING"
+          : laneState.state === "done"
+            ? "VALIDATED"
+            : laneState.state === "error"
+              ? "INVALID"
+              : "NOT NEEDED"
+      : laneState.state === "pending"
       ? "WAITING"
       : laneState.state === "skipped"
         ? key === "tie_break" ? "STANDBY" : "NOT NEEDED"
@@ -628,7 +725,10 @@ function decisionEventText(event) {
 }
 
 function decisionConsoleText(event, trace) {
-  const lane = event?.lane
+  const single = isSingleModelTrace(trace);
+  const lane = single
+    ? "single authority"
+    : event?.lane
     ? event.lane === "tie_break"
       ? "tie-break"
       : event.lane
@@ -642,9 +742,10 @@ function decisionConsoleText(event, trace) {
     ? `${generation.tokens_per_second.toFixed(1)} tok/s`
     : "";
   if (event?.kind === "session") {
+    const failurePhase = single && event.phase === "vote" ? "validation" : fmt(event.phase, "runtime");
     const result = event.status === "error"
-      ? `session failed at ${fmt(event.phase, "runtime")}`
-      : "vote accepted";
+      ? `session failed at ${failurePhase}`
+      : single ? "validated result" : "vote accepted";
     return [lane, tokens, speed, result].filter(Boolean).join(" · ");
   }
   if (event?.phase === "trigger") return `dispatch ${lane} → ${model}`;
@@ -666,8 +767,11 @@ function decisionConsoleText(event, trace) {
     return `repair JSON · retry ${Number(event.attempt || 0)}`;
   }
   if (event?.phase === "validate") return "validate structured output";
-  if (event?.phase === "vote") return `${lane} · vote ready`;
+  if (event?.phase === "vote") return single ? "validation pending" : `${lane} · vote ready`;
   if (event?.phase === "decision") {
+    if (single) {
+      return `Validated · target 1 · ${fmt(event.label, trace?.summary || "structured result")}`;
+    }
     const target = trace?.quorum_flow === false ? 1 : trace?.tie_break_used ? 3 : 2;
     const votes = Number.isInteger(trace?.valid_votes)
       ? `${Math.min(trace.valid_votes, target)}/${target}`
@@ -719,9 +823,14 @@ function renderDecisionGeneration(trace) {
 }
 
 function decisionTimelineSteps(trace) {
+  const single = trace?.authority_kind === "single_model_v1"
+    && trace?.quorum_flow === false;
   const events = Array.isArray(trace?.events) ? trace.events : [];
   if (!events.length && Array.isArray(trace?.overall) && trace.overall.length) {
-    return trace.overall.map((step) => ({ ...step }));
+    return trace.overall.map((step) => ({
+      ...step,
+      label: single && step.key === "quorum" ? "Validated" : step.label,
+    }));
   }
   const steps = [];
   if (trace?.request_sha256) {
@@ -735,7 +844,7 @@ function decisionTimelineSteps(trace) {
       const vote = [...steps].reverse().find(
         (step) => step.lane === lane && step.phase === "vote"
       );
-      if (vote && event.status !== "error") {
+      if (!single && vote && event.status !== "error") {
         vote.status = "done";
         return;
       }
@@ -743,13 +852,21 @@ function decisionTimelineSteps(trace) {
     const countKey = `${lane}:${phase}`;
     const count = Number(counts.get(countKey) || 0) + 1;
     counts.set(countKey, count);
-    const laneLabel = lane === "tie_break"
+    const laneLabel = single
+      ? "Single Authority"
+      : lane === "tie_break"
       ? "Tie-break"
       : lane === "system"
         ? "System"
         : `${lane.charAt(0).toUpperCase()}${lane.slice(1)}`;
     const terminalSession = event?.kind === "session";
-    const phaseLabel = phase === "decision"
+    const phaseLabel = single && phase === "vote"
+      ? event.status === "error" ? "Validation failed" : "Validated"
+      : single && phase === "decision"
+        ? "Validated"
+        : single && terminalSession
+          ? event.status === "error" ? "Validation failed" : "Validated"
+        : phase === "decision"
       ? fmt(event?.label, "Decision")
       : terminalSession
         ? fmt(event?.label, "Vote result")
@@ -842,6 +959,7 @@ function renderDecisionTraceFrame(trace, focusEvent = null) {
   trace = trace || {};
   const outcome = trace.outcome || {};
   const traceState = String(trace.state || "idle");
+  const single = isSingleModelTrace(trace);
   const request = String(trace.request_sha256 || "");
   const active = trace.active === true;
   els.decisionTraceCaption.textContent = request ? `Job ${request.slice(0, 8)}` : "Job --";
@@ -888,9 +1006,14 @@ function renderDecisionTraceFrame(trace, focusEvent = null) {
       || (Array.isArray(trace.lanes) ? trace.lanes : []).some((lane) =>
         lane.key === "tie_break" && ["active", "done", "error"].includes(lane.state)
       );
-    const quorumTarget = trace.quorum_flow === false ? 1 : tieBreakUsed ? 3 : 2;
-    const badge =
-      traceState === "agreed"
+    const quorumTarget = single ? 1 : trace.quorum_flow === false ? 1 : tieBreakUsed ? 3 : 2;
+    const badge = single
+      ? traceState === "ready" || traceState === "agreed"
+        ? "VALIDATED"
+        : traceState === "quarantined"
+          ? "HELD"
+          : active ? "VALIDATING" : "WAITING"
+      : traceState === "agreed"
         ? "APPROVED"
         : traceState === "quarantined"
           ? "HELD"
@@ -914,6 +1037,8 @@ function renderDecisionTraceFrame(trace, focusEvent = null) {
     els.decisionBadge.textContent = badge;
     els.decisionModelCalls.textContent = String(trace.artifact_replay ? 0 : modelCalls);
     els.decisionQuorum.textContent = `${Math.min(validVotes, quorumTarget)} / ${quorumTarget}`;
+    const targetNode = document.getElementById("decision-target");
+    if (targetNode) targetNode.textContent = String(quorumTarget);
     els.decisionMutation.textContent =
       traceState === "agreed" || traceState === "ready" ? "Ready" : traceState === "quarantined" ? "Held" : "Locked";
     setWorkState(stateKind);
@@ -925,6 +1050,7 @@ function renderDecisionTraceFrame(trace, focusEvent = null) {
     els.decisionModelCalls.textContent = "0";
     els.decisionQuorum.textContent = "0 / 2";
     els.decisionMutation.textContent = "Locked";
+    updateDecisionFactMode(false);
     els.workOverview.dataset.outcomeKind = "idle";
     els.workOverview.title = "";
     els.decisionOutcomeReason.textContent = "Waiting for local work";
@@ -938,8 +1064,13 @@ function setDecisionTransitionState(trace) {
   const latest = events[events.length - 1];
   els.decisionTransitionState.classList.remove("catching-up");
   if (trace?.active) {
+    const latestLabel = isSingleModelTrace(trace) && latest
+      ? latest.kind === "session"
+        ? latest.status === "error" ? "Validation failed" : "Validated"
+        : latest.phase === "vote" ? "Validation" : fmt(latest.label, latest.phase)
+      : latest ? fmt(latest.label, latest.phase) : "observing";
     els.decisionTransitionState.textContent = latest
-      ? `Live · ${fmt(latest.label, latest.phase)}`
+      ? `Live · ${latestLabel}`
       : "Live · observing";
   } else if (trace?.request_sha256) {
     els.decisionTransitionState.textContent = `Sealed · ${events.length} events`;
@@ -957,6 +1088,8 @@ function renderDecisionTrace(consensus) {
 window.__chronovisorDashboardTest = Object.assign(window.__chronovisorDashboardTest || {}, {
   decisionTimelineSteps,
   decisionTraceProjection,
+  isSingleModelTrace,
+  updateDecisionSvgHarness,
   processingLaneForTrace,
   selectProcessingLane,
   renderDecisionTrace,

@@ -1583,6 +1583,38 @@ def test_decision_trace_successful_standalone_session_completes_validation() -> 
     assert trace["overall"][-1]["status"] == "done"
 
 
+def test_decision_trace_persisted_single_authority_projects_one_lane() -> None:
+    request = "6" * 64
+    trace = dashboard._decision_trace_snapshot(
+        [],
+        [
+            {
+                "kind": "session",
+                "timestamp": "2026-07-15T12:00:01Z",
+                "request_sha256": request,
+                "role": "wiki_generation",
+                "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+                "revision": "b" * 64,
+                "authority_kind": "single_model_v1",
+                "quorum_flow": False,
+                "ok": True,
+                "repair_turns": 1,
+                "context_tokens": 32_768,
+            }
+        ],
+        None,
+    )
+
+    assert trace["authority_kind"] == "single_model_v1"
+    assert trace["quorum_flow"] is False
+    assert trace["projection"]["single_model"] is True
+    assert [lane["key"] for lane in trace["lanes"]] == ["primary"]
+    assert trace["lanes"][0]["label"] == "Single Authority"
+    assert trace["lanes"][0]["model"] == "Qwen3.8-Flash-Next-oQ4e-mtp"
+    assert trace["lanes"][0]["revision"] == "b" * 64
+    assert trace["projection"]["authority"]["validated"] is True
+
+
 def test_decision_trace_excludes_previous_execution_with_same_request_hash(
     monkeypatch,
 ) -> None:
@@ -2724,6 +2756,8 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'id="frontier-repair"' in page
     assert "Frontier Repair" in page
     assert 'id="decision-trace-panel"' in page
+    assert 'id="decision-single-authority"' in page
+    assert 'data-decision-fact="target"' in page
     assert 'data-decision-lane="primary"' in page
     assert 'data-decision-lane="challenger"' in page
     assert 'data-decision-lane="tie_break"' in page
@@ -2784,6 +2818,10 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "projection.paths" in app
     assert "projection.model_routes" in app
     assert ".decision-trace-panel" in style
+    assert ".decision-trace-harness.single-model" in style
+    assert "[data-decision-lane=\"challenger\"]" in style
+    assert "[data-decision-lane-step=\"vote\"]" in style
+    assert "[data-trace-key=\"quorum\"]" in style
     assert ".processing-lane.active" in style
     assert "processing-electric-pulse" in style
     assert "grid-template-columns: repeat(6, minmax(0, 1fr));" in style
@@ -2796,6 +2834,173 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
         < page.index("/static/app-renderer.js")
         < page.index("/static/app-client.js")
     )
+
+
+def test_single_model_decision_trace_dom_contract() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+class FakeClassList {{
+  constructor(node) {{ this.node = node; this.values = new Set(); }}
+  add(...values) {{ values.forEach((value) => this.values.add(value)); this.sync(); }}
+  remove(...values) {{ values.forEach((value) => this.values.delete(value)); this.sync(); }}
+  toggle(value, force) {{
+    const next = force === undefined ? !this.values.has(value) : force;
+    if (next) this.values.add(value); else this.values.delete(value);
+    this.sync();
+    return next;
+  }}
+  contains(value) {{ return this.values.has(value); }}
+  sync() {{ this.node.className = [...this.values].join(" "); }}
+}}
+class FakeNode {{
+  constructor(tag = "g", id = "") {{
+    this.tag = tag;
+    this.id = id;
+    this.dataset = {{}};
+    this.children = [];
+    this.parent = null;
+    this.className = "";
+    this.classList = new FakeClassList(this);
+    this.textContent = "";
+    this.hidden = false;
+    this.style = {{}};
+    this.attributes = {{}};
+  }}
+  append(...children) {{ children.forEach((child) => this.appendChild(child)); }}
+  appendChild(child) {{ child.parent = this; this.children.push(child); return child; }}
+  setAttribute(key, value) {{ this.attributes[key] = String(value); if (key === "id") this.id = String(value); }}
+  matches(selector) {{
+    selector = selector.trim();
+    if (selector.includes(",")) return selector.split(",").some((item) => this.matches(item));
+    if (selector.startsWith("#")) return this.id === selector.slice(1);
+    if (selector.startsWith(".")) return this.classList.contains(selector.slice(1));
+    const attr = selector.match(/^\\[([^=\\]]+)(?:="([^"]*)")?\\]$/);
+    if (attr) {{
+      const key = attr[1].startsWith("data-")
+        ? attr[1].slice(5).replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase())
+        : attr[1];
+      return Object.prototype.hasOwnProperty.call(this.dataset, key)
+        && (attr[2] === undefined || this.dataset[key] === attr[2]);
+    }}
+    return this.tag === selector;
+  }}
+  querySelectorAll(selector) {{
+    const found = [];
+    const visit = (node) => node.children.forEach((child) => {{
+      if (child.matches(selector)) found.push(child);
+      visit(child);
+    }});
+    visit(this);
+    return found;
+  }}
+  querySelector(selector) {{ return this.querySelectorAll(selector)[0] || null; }}
+}}
+const root = new FakeNode("main");
+const panel = new FakeNode("section", "decision-single-authority");
+const harness = new FakeNode("svg", "decision-trace-harness");
+const add = (parent, tag, {{ id = "", className = "", dataset = {{}}, text = "" }} = {{}}) => {{
+  const node = new FakeNode(tag, id);
+  node.classList.add(...className.split(/\\s+/).filter(Boolean));
+  Object.assign(node.dataset, dataset);
+  node.textContent = text;
+  parent.appendChild(node);
+  return node;
+}};
+add(panel, "strong", {{ dataset: {{ singleAuthorityLabel: "" }} }});
+add(panel, "strong", {{ dataset: {{ singleModel: "" }} }});
+add(panel, "strong", {{ dataset: {{ singleRevision: "" }} }});
+add(panel, "strong", {{ dataset: {{ singleStatus: "" }} }});
+add(panel, "strong", {{ dataset: {{ singleTarget: "" }} }});
+add(panel, "strong", {{ dataset: {{ singleRepair: "" }} }});
+add(harness, "title", {{ id: "decision-trace-svg-description" }});
+add(harness, "text", {{ dataset: {{ dispatchLabel: "" }} }});
+add(harness, "text", {{ dataset: {{ artifactLabel: "" }} }});
+add(harness, "text", {{ dataset: {{ decisionLabel: "" }} }});
+add(harness, "text", {{ dataset: {{ holdReason: "" }} }});
+["agree", "quorum", "artifact", "decision"].forEach((key) => add(harness, "g", {{ dataset: {{ traceKey: key }} }}));
+["plan-dispatch", "primary-challenger", "single-artifact", "quorum-hold"].forEach((key) => add(harness, "path", {{ dataset: {{ pathKey: key }} }}));
+["primary", "challenger", "tie_break"].forEach((key) => {{
+  const lane = add(harness, "g", {{ dataset: {{ decisionLane: key }} }});
+  add(lane, "text", {{ dataset: {{ laneLabel: key }} }});
+  add(lane, "text", {{ dataset: {{ laneThink: key }} }});
+  add(lane, "text", {{ dataset: {{ laneResult: key }} }});
+  add(lane, "text", {{ dataset: {{ modelValue: key }} }});
+  add(lane, "g", {{ dataset: {{ decisionLaneStep: "vote" }} }});
+  add(lane, "path", {{ dataset: {{ lanePath: "validate-vote" }} }});
+}});
+["primary", "challenger", "tie_break"].forEach((key) => add(harness, "g", {{ dataset: {{ modelKey: key }} }}));
+const quorumFact = add(root, "div", {{ dataset: {{ decisionFact: "quorum" }} }});
+const targetFact = add(root, "div", {{ dataset: {{ decisionFact: "target" }} }});
+root.append(panel, harness);
+const document = {{
+  getElementById: (id) => root.id === id ? root : root.querySelector("#" + id),
+  querySelector: (selector) => root.querySelector(selector),
+}};
+const els = {{ decisionTraceHarness: harness }};
+const sandbox = {{ window: {{}}, document, els }};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(renderer)}, sandbox);
+sandbox.window.__chronovisorDashboardTest.updateDecisionSvgHarness({{
+  state: "ready",
+  authority_kind: "single_model_v1",
+  quorum_flow: false,
+  lanes: [{{ key: "primary", model: "Qwen3.8-Flash-Next-oQ4e-mtp" }}],
+  projection: {{
+    schema: "chronovisor.decision-trace-projection.v1",
+    single_model: true,
+    authority: {{
+      label: "Single Authority",
+      model: "Qwen3.8-Flash-Next-oQ4e-mtp",
+      revision: "b".repeat(64),
+      target: 1,
+      validated: true,
+      repair_is_vote: false,
+    }},
+    nodes: {{ agree: "pending", quorum: "pending", artifact: "done", decision: "done" }},
+    paths: {{ "single-artifact": "done" }},
+    lanes: {{ primary: {{ state: "done", steps: {{ vote: "done" }}, rails: {{ "validate-vote": "done" }}, repair: "done", repair_attempt: 1 }} }},
+    model_routes: {{ primary: "done" }},
+    context: {{ options: [] }},
+    reasoning: {{ options: {{}} }},
+    labels: {{ hold: "No safe quorum", validation: "Validated" }},
+  }},
+}});
+process.stdout.write(JSON.stringify({{
+  singleClass: harness.classList.contains("single-model"),
+  panelHidden: panel.hidden,
+  authority: panel.children[0].textContent,
+  model: panel.children[1].textContent,
+  revision: panel.children[2].textContent,
+  status: panel.children[3].textContent,
+  target: panel.children[4].textContent,
+  repair: panel.children[5].textContent,
+  dispatch: harness.querySelector("[data-dispatch-label]").textContent,
+  artifact: harness.querySelector("[data-artifact-label]").textContent,
+  dispatchPath: harness.querySelector('[data-path-key="plan-dispatch"]').attributes.d,
+  singlePath: harness.querySelector('[data-path-key="single-artifact"]').attributes.d,
+  quorumHidden: quorumFact.hidden,
+  targetVisible: !targetFact.hidden,
+}}));
+"""
+    result = json.loads(_run_node_scenario(scenario).stdout)
+
+    assert result == {
+        "singleClass": True,
+        "panelHidden": False,
+        "authority": "Single Authority",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "b" * 64,
+        "status": "Validated",
+        "target": "1",
+        "repair": "REPAIR ≠ VOTE",
+        "dispatch": "DISPATCH → SINGLE AUTHORITY",
+        "artifact": "Validated",
+        "dispatchPath": "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 440 Q180 450 190 450 H220",
+        "singlePath": "M920 450 H1300 Q1310 450 1310 440 V393",
+        "quorumHidden": True,
+        "targetVisible": True,
+    }
 
 
 def test_processing_activity_rejects_out_of_order_poll_after_newer_stream() -> None:
@@ -3483,6 +3688,50 @@ process.stdout.write(JSON.stringify(events.map(
         "challenger · session failed at generate",
         "Decision approved · quorum 2/2 · Safe output",
     ]
+
+
+def test_single_model_console_and_timeline_omit_quorum_vocabulary() -> None:
+    renderer_path = dashboard.STATIC_DIR / "app-renderer.js"
+    renderer = renderer_path.read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{ window: {{ matchMedia: () => ({{ matches: false }}) }} }};
+vm.createContext(sandbox);
+vm.runInContext(
+  {json.dumps(renderer)}
+    + "\\nthis.__test = {{ decisionConsoleText, decisionTimelineSteps }};",
+  sandbox,
+);
+const trace = {{
+  request_sha256: "single",
+  authority_kind: "single_model_v1",
+  quorum_flow: false,
+  active: false,
+  state: "ready",
+}};
+const events = [
+  {{ event_id: "generate", lane: "primary", phase: "generate", kind: "phase", status: "done" }},
+  {{ event_id: "session", lane: "primary", phase: "vote", kind: "session", status: "done" }},
+  {{ event_id: "decision", phase: "decision", kind: "decision", status: "done", label: "Decision approved" }},
+];
+const consoleText = events.map((event) => sandbox.__test.decisionConsoleText(event, trace));
+const failedText = sandbox.__test.decisionConsoleText(
+  {{ kind: "session", lane: "primary", phase: "vote", status: "error" }},
+  trace,
+);
+const timeline = sandbox.__test.decisionTimelineSteps({{ ...trace, events }}).map((step) => step.label);
+process.stdout.write(JSON.stringify({{ consoleText, failedText, timeline }}));
+"""
+    result = json.loads(_run_node_scenario(scenario).stdout)
+    rendered = " ".join([*result["consoleText"], *result["timeline"]]).lower()
+
+    assert result["consoleText"][1] == "single authority · validated result"
+    assert result["consoleText"][2] == "Validated · target 1 · Decision approved"
+    assert result["failedText"] == "single authority · session failed at validation"
+    assert "single authority validated" in " ".join(result["timeline"]).lower()
+    assert "vote" not in rendered
+    assert "quorum" not in rendered
+    assert "consensus" not in rendered
 
 
 def test_decision_trace_timeline_uses_authoritative_events_in_order() -> None:

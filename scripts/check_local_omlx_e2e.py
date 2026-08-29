@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Drive real oMLX models through build_llm_runtime (provider kind omlx).
+"""Drive the Chronovisor oMLX cutover profile through ``build_llm_runtime``.
 
-Requires the oMLX server on OMLX_BASE_URL (default http://127.0.0.1:8000/v1)
-with the models registered. Uses a temporary config so the production
-~/.chronovisor/config.toml is never touched. Prints per-role latency and
-token throughput.
+The harness intentionally targets the dedicated loopback service on port
+18125.  It builds an in-memory config, so the production
+``~/.chronovisor/config.toml`` is never read or written.  Model names remain
+CLI overrides for fixture tests, while the defaults match the one-model
+Qwen3.8 Flash Next deployment.
 """
 
 from __future__ import annotations
@@ -26,6 +27,11 @@ from chronovisor.core.llm_runtime import (
 
 NORMAL_PAGE = SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL)
 
+DEFAULT_OMLX_ENDPOINT = "http://127.0.0.1:18125/v1"
+# oMLX discovers the child directory name as the API model ID.  The stable
+# layout is ~/.omlx/models/Jundot/Qwen3.8-Flash-Next-oQ4e-mtp.
+DEFAULT_GENERATION_MODEL = "Qwen3.8-Flash-Next-oQ4e-mtp"
+
 GENERATION_ROLES = (
     "ingest.generation",
     "librarian.review",
@@ -38,6 +44,7 @@ EMBEDDING_ROLES = ("classification.embedding",)
 
 
 def build_config(args: argparse.Namespace) -> dict[str, object]:
+    endpoint = getattr(args, "endpoint", DEFAULT_OMLX_ENDPOINT)
     roles = {
         role: ("generation", args.generation_model) for role in GENERATION_ROLES
     }
@@ -59,6 +66,7 @@ def build_config(args: argparse.Namespace) -> dict[str, object]:
     payload = f"""\
 [llm.providers.omlx]
 kind = "omlx"
+endpoint = {json.dumps(endpoint)}
 
 {role_tables}
 """
@@ -67,11 +75,24 @@ kind = "omlx"
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--generation-model", default="Qwen3.8-27B-4bit")
+    parser.add_argument("--endpoint", default=DEFAULT_OMLX_ENDPOINT)
+    parser.add_argument("--generation-model", default=DEFAULT_GENERATION_MODEL)
     parser.add_argument("--gate-model", default="Ornith-1.5-9B-MLX-4bit")
-    parser.add_argument("--challenger-model", default="Muse-Glimmer-30B-4bit")
-    parser.add_argument("--tie-break-model", default="gemma-4-26b-a4b-it-4bit")
+    parser.add_argument("--challenger-model", default=DEFAULT_GENERATION_MODEL)
+    parser.add_argument("--tie-break-model", default=DEFAULT_GENERATION_MODEL)
     parser.add_argument("--embedding-model", default="bge-m3-mlx-fp16")
+    parser.add_argument(
+        "--num-ctx",
+        default=114_688,
+        type=int,
+        help="generation context sent by the harness (default: 114688)",
+    )
+    parser.add_argument(
+        "--gate-num-ctx",
+        default=2_048,
+        type=int,
+        help="low-latency gate context (default: 2048)",
+    )
     parser.add_argument("--max-tokens", default=128, type=int)
     args = parser.parse_args()
 
@@ -86,7 +107,7 @@ def main() -> int:
             ),
             format=None,
             source=NORMAL_PAGE,
-            num_ctx=4096,
+            num_ctx=args.num_ctx,
             max_output_tokens=args.max_tokens,
             keep_alive="0",
             timeout_ms=120_000,
@@ -113,7 +134,7 @@ def main() -> int:
         ),
         format=None,
         source=NORMAL_PAGE,
-        num_ctx=2048,
+        num_ctx=args.gate_num_ctx,
         max_output_tokens=16,
         keep_alive="0",
         timeout_ms=15_000,

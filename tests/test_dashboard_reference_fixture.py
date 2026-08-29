@@ -377,7 +377,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert [
         attrs.get("y")
         for _tag, attrs in elements
-        if attrs.get("class") == "trace-path-label"
+        if "trace-path-label" in (attrs.get("class") or "").split()
     ] == ["258", "381"]
     assert 325 - 262 == 450 - 387 == 575 - 512 == 63
     assert matching("class", "trace-branch-label trace-yes-label")[0]["y"] == "438"

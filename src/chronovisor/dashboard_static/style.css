@@ -3054,6 +3054,85 @@ canvas {
   display: none;
 }
 
+.decision-single-authority {
+  display: none;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin: 4px 6px 8px;
+  padding: 7px 10px;
+  border: 1px solid rgba(142, 145, 255, 0.34);
+  border-radius: 7px;
+  background: rgba(10, 31, 48, 0.76);
+  color: #b7b9ff;
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.decision-single-authority:not([hidden]) {
+  display: flex;
+}
+
+.decision-single-authority-title {
+  color: #eff2f5;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.decision-single-authority span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+
+.decision-single-authority b {
+  color: #697783;
+  font-size: 8px;
+  letter-spacing: 0.04em;
+}
+
+.decision-single-authority span strong {
+  overflow: hidden;
+  color: #e0e5e9;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.decision-trace-harness.single-model .decision-lane[data-decision-lane="challenger"],
+.decision-trace-harness.single-model .decision-lane[data-decision-lane="tie_break"],
+.decision-trace-harness.single-model [data-model-routes-label],
+.decision-trace-harness.single-model .trace-divider,
+.decision-trace-harness.single-model [data-model-key],
+.decision-trace-harness.single-model [data-decision-lane-step="vote"],
+.decision-trace-harness.single-model [data-lane-path="validate-vote"],
+.decision-trace-harness.single-model [data-path-key="primary-challenger"],
+.decision-trace-harness.single-model [data-path-key="challenger-agree"],
+.decision-trace-harness.single-model [data-path-key="pair-artifact-join"],
+.decision-trace-harness.single-model [data-path-key="pair-tie_break"],
+.decision-trace-harness.single-model [data-path-key="tie_break-quorum"],
+.decision-trace-harness.single-model [data-path-key="quorum-artifact-join"],
+.decision-trace-harness.single-model [data-path-key="quorum-hold"],
+.decision-trace-harness.single-model [data-trace-key="agree"],
+.decision-trace-harness.single-model [data-trace-key="quorum"],
+.decision-trace-harness.single-model [data-trace-key="hold"],
+.decision-trace-harness.single-model .trace-next-voter,
+.decision-trace-harness.single-model .trace-next-voter-label,
+.decision-trace-harness.single-model [data-pair-yes-label],
+.decision-trace-harness.single-model [data-pair-no-label],
+.decision-trace-harness.single-model [data-quorum-yes-label],
+.decision-trace-harness.single-model [data-quorum-no-label] {
+  display: none;
+}
+
+.decision-trace-harness.single-model .decision-lane[data-decision-lane="primary"] {
+  transform: translate(0 450px) !important;
+}
+
+.decision-trace-panel:has(.decision-single-authority:not([hidden])) .decision-facts [data-decision-fact="quorum"] {
+  display: none;
+}
+
 .decision-trace-scroll {
   width: 100%;
   overflow-x: hidden;

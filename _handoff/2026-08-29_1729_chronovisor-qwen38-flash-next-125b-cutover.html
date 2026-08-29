@@ -66,13 +66,13 @@ td.num{text-align:right;white-space:nowrap}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_23f41aa9cef6401eae743d7fbfae7d32","created_at":"2026-08-29T17:29:12+09:00","状態":"ready","slug":"chronovisor-qwen38-flash-next-125b-cutover"}
+{"task_id":"plan_23f41aa9cef6401eae743d7fbfae7d32","created_at":"2026-08-29T17:29:12+09:00","状態":"running","slug":"chronovisor-qwen38-flash-next-125b-cutover"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor Qwen3.8-Flash-Next 125B 一括切替</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_23f41aa9cef6401eae743d7fbfae7d32</code></span>
 <span data-bind="created_at">2026-08-29T17:29:12+09:00</span>
 </div>
@@ -87,6 +87,7 @@ td.num{text-align:right;white-space:nowrap}
 <li>同一モデルへの repair / retry / self-review を独立票として数えず、監査証跡へ正直に記録する。</li>
 <li>切替後は125B単体のidentity、structured output、114,688 token、メモリ、実ingestを確認する。旧モデルを比較対象にしない。</li>
 <li>切替前に高速化候補を固定し、実測済みのANE hybrid prefillとprefix cacheを採用する。未対応機能を試験目的で本番設定へ混ぜない。</li>
+<li>oMLXの配布・更新・process管理は公式DMG版へ一本化し、Homebrew版、古いsource checkout、独自oMLX LaunchAgentをruntime経路へ残さない。</li>
 <li>Embedding / reranker / semantic / Ornith の補助モデルは今回の一本化対象外として維持する。</li>
 <li>失敗時は書き込みを止める。旧3モデルの重みは削除済みなので、設定復元だけを rollback 完了とは扱わない。</li>
 </ul>
@@ -104,7 +105,7 @@ td.num{text-align:right;white-space:nowrap}
 <tr><td>無効機能</td><td>DFlash / TurboQuant / SpecPrefill / VLM MTP</td><td>Qwen4 target/QSA/draft parityがない機能は除外。PLE residentは推定103.94GBで85GiB gateを超えるためloadしない。</td></tr>
 <tr><td>権限方式</td><td><code>single_model_v1</code></td><td>1 route / 1 result。repair は最大2回だが票数は常に1以下。</td></tr>
 <tr><td>Dashboard</td><td>125Bの1レーンだけを表示</td><td>現行3レーンのtemplate/renderer/testは削除せず休眠保持する。single運用中はPrimary/Challenger/Tie-break、空レーン、合意分岐を画面へ表示せず、手動切替toggleも作らない。</td></tr>
-<tr><td>oMLX</td><td>0.6.3、base <code>~/.omlx</code>、<code>127.0.0.1:18125</code>、concurrency 1</td><td>専用portへ固定し、APIは <code>http://127.0.0.1:18125/v1</code>。concurrency 2はaggregate改善なし・個別latency悪化のため使わない。</td></tr>
+<tr><td>oMLX</td><td>公式DMG <code>/Applications/oMLX.app</code> 0.6.3、state <code>~/.omlx</code>、<code>127.0.0.1:18125</code>、concurrency 1</td><td>公式CLI shim <code>~/.omlx/bin/omlx</code> とアプリ内managed lifecycleだけを使う。Homebrew install、source checkout実行、独自oMLX LaunchAgentは使わない。</td></tr>
 <tr><td>port方針</td><td><code>18125/TCP</code>、loopback限定</td><td>8000は汎用開発port、8125はStatsDの慣用portなので避ける。Plan更新時点で18125のTCP/UDP listenerは0。</td></tr>
 <tr><td>常駐数</td><td><code>max_resident_models=1</code></td><td>ANE込み実ロード73.92GB、prefix hot上限2GB。補助サービス込みでsteady ≤85GiB gateを通す。</td></tr>
 <tr><td>residency</td><td><code>is_pinned=true</code>、<code>ttl_seconds=null</code></td><td>最速構成を優先し、requestごとのload/unloadを行わない。</td></tr>
@@ -140,6 +141,7 @@ td.num{text-align:right;white-space:nowrap}
 <tr><td>旧Qwen 20、Gemma 10、Muse 6 role</td><td>重みは削除済みで、現在の設定では起動しても復旧不能。</td><td>36 roleを直接生成、単一authority、明示self-evaluationの3種へ分類して移行。</td></tr>
 <tr><td>providers 8000/8001/8002</td><td>8000は汎用portで、8001/8002 listenerと旧重みは存在しない。</td><td>生成providerは専用18125だけ。旧portとstale provider/model settingsを除去。</td></tr>
 <tr><td>oMLX context 32,768</td><td>DecisionRouterは最大114,688を要求し得る。</td><td>silent truncation禁止。114,688をexact tokenizer・server log・needleで実証。</td></tr>
+<tr><td>公式app、CLI shim、RC2 source checkout、独自service案が併存</td><td>実体と入口を混同するとRC版実行や二重process managerを再発させる。</td><td><code>/Applications/oMLX.app</code> を唯一のbinary、<code>~/.omlx</code> を唯一のstate/model root、公式CLIを唯一のlifecycle入口とし、古いcheckoutと独自service資材を除去。</td></tr>
 <tr><td>Dashboardの固定3レーンSVG</td><td>single運用でも旧role、空レーン、quorum分岐が見えると、実際のauthority構成を誤認させる。</td><td><code>single_model_v1</code>では125Bの1レーンを中央・全幅表示し、3レーン表示コードは将来の明示的なquorum再導入用として休眠保持。</td></tr>
 </tbody></table></div>
 </section>
@@ -214,11 +216,20 @@ td.num{text-align:right;white-space:nowrap}
 <section data-section="実行手順">
 <h2>実行手順</h2>
 
+<div class="phase"><h3>Phase -1 — Recall成果物救出と前任タスク残骸の清掃</h3>
+<ol class="checklist">
+<li><input type="checkbox" checked><span>教師データ1009件、failure sidecar、import receipt、生成script、SHA256を単一salvage bundleへ保存し、read-backで一致を確認する。</span></li>
+<li><input type="checkbox" checked><span>保護中R6 2 filesを変更せず、dirty worktreeは差分manifestを保存してから削除可否を決める。</span></li>
+<li><input type="checkbox" checked><span>46GiBの反復rollback archive、重複self-test、cleanかつmain同等のworktree、空temp、stale worktree metadataを削除する。</span></li>
+<li><input type="checkbox" checked><span>選定済みQwen 125B重みを除外した前後disk使用量と削除対象をreceiptへ記録する。</span></li>
+</ol>
+</div>
+
 <div class="phase"><h3>Phase 0 — Freezeと再現可能な開始receipt</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>Chronovisor関連label、process、listener、runtime lock、workset lease、OXを再確認し、すべて停止/0でなければ開始しない。</span></li>
-<li><input type="checkbox"><span>worktree/HEAD/branch、保護2 fileのhash、selected modelのrevision/index/21 shard/総byteを記録する。</span></li>
-<li><input type="checkbox"><span><code>~/.chronovisor/config.toml</code>、oMLX settings/model_settings、service plist、runtime archive commit、<code>vm.swapusage</code>/<code>vm_stat</code>/<code>memory_pressure -Q</code>をtimestamp付きでbackupする。secretはredactする。</span></li>
+<li><input type="checkbox" checked><span>Chronovisor関連label、process、listener、runtime lock、workset lease、OXを再確認し、すべて停止/0でなければ開始しない。</span></li>
+<li><input type="checkbox" checked><span>worktree/HEAD/branch、保護2 fileのhash、selected modelのrevision/index/21 shard/総byteを記録する。</span></li>
+<li><input type="checkbox" checked><span><code>~/.chronovisor/config.toml</code>、oMLX settings/model_settings、service plist、runtime archive commit、<code>vm.swapusage</code>/<code>vm_stat</code>/<code>memory_pressure -Q</code>をtimestamp付きでbackupする。secretはredactする。</span></li>
 </ol>
 </div>
 
@@ -234,41 +245,49 @@ td.num{text-align:right;white-space:nowrap}
 </ol>
 </div>
 
+<div class="phase"><h3>Phase 0.75 — oMLX配布・runtime管理の一本化</h3>
+<ol class="checklist">
+<li><input type="checkbox" checked><span><code>/Applications/oMLX.app</code> と公式CLI shimが同じ0.6.3を返すことを確認し、Homebrew package、pip/uv/pipx install、別app copyがない状態をreceipt化する。</span></li>
+<li><input type="checkbox" checked><span>古い <code>~/projects/personal/omlx</code> RC2 source checkoutをrecoverableに隔離してから除去し、runtime/config/serviceから参照0を確認する。</span></li>
+<li><input type="checkbox" checked><span>独自oMLX KeepAlive LaunchAgent案をrepo/runtimeから除去し、start/stop/restartを <code>~/.omlx/bin/omlx</code> のapp-managed lifecycleへ統一する。</span></li>
+</ol>
+</div>
+
 <div class="phase"><h3>Phase 1 — Single-model契約をtest-firstで実装</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span><code>DecisionRouterConfig</code>のlive 3-role/quorum設定を単一authority roleへ置換し、quorumへ戻すruntime toggleは追加しない。</span></li>
-<li><input type="checkbox"><span><code>DecisionRouter</code>のactive経路を1 call、最大2 repairへ置換し、invalid/route drift/returned-model mismatchでholdする。</span></li>
-<li><input type="checkbox"><span>authority、artifact、receipt、semantic holdをversioned <code>single_model_v1</code> proofへ置換する。旧artifactは監査読取だけ許可し、replayを拒否する。</span></li>
-<li><input type="checkbox"><span>classification worker/engine/calibration/resource-burn、knowledge-graph producer除外処理をsingle route対応にし、vote/quorum由来の名前とmetricをsingle時に出さない。</span></li>
-<li><input type="checkbox"><span>旧3モデルの36 roleを上記移行ルールでremapし、補助8 roleが不変であるstatic testを追加する。</span></li>
-<li><input type="checkbox"><span><code>LocalStructuredSession</code>の既存parse/schema/context/initial+2 repairを再利用し、Qwen4Expのcompat/reasoning/model identity tableを固定revisionへ更新する。</span></li>
-<li><input type="checkbox"><span>Dashboard/Decision Traceの既存 <code>quorum_flow=false</code> / <code>single-artifact</code> 経路を再利用し、traceへpersistした <code>authority_kind=single_model_v1</code> / <code>quorum_flow=false</code> で1レーン表示を選ぶ。target=1、single authority、repair≠vote、model/revisionをAPI/DOMへ表示する。</span></li>
-<li><input type="checkbox"><span>single modeでは125B laneを中央・全幅へ配置し、Primary/Challenger/Tie-breakのroute/lane/空き領域、NEXT VOTER、pair/tie/quorum分岐をvisible DOM/SVGから外す。Vote/Quorum/Consensus文言はSingle Authority/Validatedへ置換する。</span></li>
-<li><input type="checkbox"><span>既存3レーンtemplate/renderer/projectionを削除せず、synthetic quorum fixtureの描画testで休眠経路を維持する。production UIへ手動toggleは追加せず、legacy proofだけでは3レーンを再表示しない。</span></li>
+<li><input type="checkbox" checked><span><code>DecisionRouterConfig</code>のlive 3-role/quorum設定を単一authority roleへ置換し、quorumへ戻すruntime toggleは追加しない。</span></li>
+<li><input type="checkbox" checked><span><code>DecisionRouter</code>のactive経路を1 call、最大2 repairへ置換し、invalid/route drift/returned-model mismatchでholdする。</span></li>
+<li><input type="checkbox" checked><span>authority、artifact、receipt、semantic holdをversioned <code>single_model_v1</code> proofへ置換する。旧artifactは監査読取だけ許可し、replayを拒否する。</span></li>
+<li><input type="checkbox" checked><span>classification worker/engine/calibration/resource-burn、knowledge-graph producer除外処理をsingle route対応にし、vote/quorum由来の名前とmetricをsingle時に出さない。</span></li>
+<li><input type="checkbox" checked><span>旧3モデルの36 roleを上記移行ルールでremapし、補助8 roleが不変であるstatic testを追加する。</span></li>
+<li><input type="checkbox" checked><span><code>LocalStructuredSession</code>の既存parse/schema/context/initial+2 repairを再利用し、Qwen4Expのcompat/reasoning/model identity tableを固定revisionへ更新する。</span></li>
+<li><input type="checkbox" checked><span>Dashboard/Decision Traceの既存 <code>quorum_flow=false</code> / <code>single-artifact</code> 経路を再利用し、traceへpersistした <code>authority_kind=single_model_v1</code> / <code>quorum_flow=false</code> で1レーン表示を選ぶ。target=1、single authority、repair≠vote、model/revisionをAPI/DOMへ表示する。</span></li>
+<li><input type="checkbox" checked><span>single modeでは125B laneを中央・全幅へ配置し、Primary/Challenger/Tie-breakのroute/lane/空き領域、NEXT VOTER、pair/tie/quorum分岐をvisible DOM/SVGから外す。Vote/Quorum/Consensus文言はSingle Authority/Validatedへ置換する。</span></li>
+<li><input type="checkbox" checked><span>既存3レーンtemplate/renderer/projectionを削除せず、synthetic quorum fixtureの描画testで休眠経路を維持する。production UIへ手動toggleは追加せず、legacy proofだけでは3レーンを再表示しない。</span></li>
 </ol>
 </div>
 
 <div class="phase"><h3>Phase 2 — 切替前の必須確認（旧モデル比較なし）</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>関連unit/integration testとfull suiteをisolated <code>CHRONOVISOR_ROOT</code> で通し、ユーザーruntimeへ書き込まない。</span></li>
-<li><input type="checkbox"><span>36個の旧role利用箇所が新しい125B/18125 routeへ置換され、active config/LaunchAgentの旧role/model ID・8000/8001/8002参照が0、補助8 roleが不変であることをstaticに確認する。</span></li>
-<li><input type="checkbox"><span>distinct response schemaを各1件だけ125Bへdirect smokeし、最終structured output 100%、最大2 repair、returned-model mismatch 0を確認する。</span></li>
-<li><input type="checkbox"><span>凍結済みのANE + prefix cache profileで4K/32K/114,688 tokenを各1回通し、silent truncation、HTTP/model error、garbage outputがないことを確認する。114,688はcache missとする。</span></li>
-<li><input type="checkbox"><span>ANE procedure数、MTP acceptance、PLE mmap、prefix cache miss/hit/cached_tokens、SSD error 0、concurrency 1をAPI/logからread-backし、設定だけONのsilent no-opがないことを確認する。</span></li>
+<li><input type="checkbox" checked><span>関連unit/integration testとfull suiteをisolated <code>CHRONOVISOR_ROOT</code> で通し、ユーザーruntimeへ書き込まない。</span></li>
+<li><input type="checkbox" checked><span>36個の旧role利用箇所が新しい125B/18125 routeへ置換され、active config、consumer LaunchAgent、oMLX settingsの旧role/model ID・8000/8001/8002参照が0、補助8 roleが不変であることをstaticに確認する。</span></li>
+<li><input type="checkbox" checked><span>distinct response schemaを各1件だけ125Bへdirect smokeし、最終structured output 100%、最大2 repair、returned-model mismatch 0を確認する。</span></li>
+<li><input type="checkbox" checked><span>凍結済みのANE + prefix cache profileで4K/32K/114,688 tokenを各1回通し、silent truncation、HTTP/model error、garbage outputがないことを確認する。114,688はcache missとする。</span></li>
+<li><input type="checkbox" checked><span>ANE procedure数、MTP acceptance、PLE mmap、prefix cache miss/hit/cached_tokens、SSD error 0、concurrency 1をAPI/logからread-backし、設定だけONのsilent no-opがないことを確認する。</span></li>
 </ol>
 <p class="small">ここでは旧モデル、他量子化、過去の3社合意とのscore比較は行わない。isolated runtimeで切替対象が壊れていないことだけを確認し、production trafficへ露出するのはPhase 3の1回だけ。</p>
 </div>
 
 <div class="phase"><h3>Phase 3 — 一括cutover（単一maintenance window）</h3>
 <ol class="checklist">
-<li><input type="checkbox"><span>Chronovisor全serviceが停止したまま、実装commit、production config、oMLX settings/model_settings、LaunchAgentをstagingし、全ファイルを切替可能な状態まで完成させる。</span></li>
-<li><input type="checkbox"><span>selected modelをsandboxからstable model rootへ同一volume atomic renameし、source消失、target1個、21 shard、総byte、config/index hashを確認する。</span></li>
-<li><input type="checkbox"><span>正規oMLX base <code>~/.omlx</code> をatomic更新し、host <code>127.0.0.1</code>、port <code>18125</code>、concurrency 1、memory guard、pinned常駐、TTLなし、MTP depth 3、PLE mmap、ANE推奨値、ANE compile cache、prefix SSD 5GB/hot 2GB/write-through offを固定する。DFlash/TurboQuant/SpecPrefill/VLM MTPはoff。</span></li>
-<li><input type="checkbox"><span>同じtransactionで36個の旧role利用箇所を <code>http://127.0.0.1:18125/v1</code> へ置換し、旧Qwen/Gemma/Muse role/model settings、8000/8001/8002 provider、旧quorum active policyを除去する。</span></li>
-<li><input type="checkbox"><span>production config、全consumer LaunchAgent、Dashboard fallback、検証harnessの <code>OMLX_BASE_URL</code> を <code>http://127.0.0.1:18125/v1</code> へ揃える。</span></li>
+<li><input type="checkbox"><span>Chronovisor全serviceが停止したまま、実装commit、production config、oMLX settings/model_settingsをstagingし、公式app-managed serverを含む全経路を切替可能な状態まで完成させる。</span></li>
+<li><input type="checkbox" checked><span>selected modelをsandboxからstable model rootへ同一volume atomic renameし、source消失、target1個、21 shard、総byte、config/index hashを確認する。</span></li>
+<li><input type="checkbox" checked><span>正規oMLX base <code>~/.omlx</code> をatomic更新し、host <code>127.0.0.1</code>、port <code>18125</code>、concurrency 1、memory guard、pinned常駐、TTLなし、MTP depth 3、PLE mmap、ANE推奨値、ANE compile cache、prefix SSD 5GB/hot 2GB/write-through offを固定する。DFlash/TurboQuant/SpecPrefill/VLM MTPはoff。</span></li>
+<li><input type="checkbox" checked><span>同じtransactionで36個の旧role利用箇所を <code>http://127.0.0.1:18125/v1</code> へ置換し、旧Qwen/Gemma/Muse role/model settings、8000/8001/8002 provider、旧quorum active policyを除去する。</span></li>
+<li><input type="checkbox" checked><span>production config、全consumer LaunchAgent、Dashboard fallback、検証harnessの <code>OMLX_BASE_URL</code> を <code>http://127.0.0.1:18125/v1</code> へ揃える。</span></li>
 <li><input type="checkbox"><span>実装をscoped commitする。GitHub-backed productionを使う場合は明示されたpush権限の下で先にpushし、そのcommitをruntime sourceとして固定する。</span></li>
 <li><input type="checkbox"><span>切替後の初回起動から <code>single_model_v1</code> を本番authorityとして有効化する。shadow route、旧routeとの併存、段階的traffic配分は作らない。</span></li>
-<li><input type="checkbox"><span>依存順序だけ守って oMLX → semantic/reranker → Dashboard/LAN → ingest を同じmaintenance window内で連続起動する。OXは別承認がない限りfalse。</span></li>
+<li><input type="checkbox"><span>公式CLIでapp-managed oMLXを起動し、依存順序だけ守って oMLX → semantic/reranker → Dashboard/LAN → ingest を同じmaintenance window内で連続起動する。OXは別承認がない限りfalse。</span></li>
 </ol>
 </div>
 
@@ -308,6 +327,8 @@ td.num{text-align:right;white-space:nowrap}
 <li>prefix cacheはsuffix-changeとrestart後hitで回答一致・cached_tokens &gt; 0、SSD error 0。unique promptの性能をcache hitとして誤計上しない。</li>
 <li>旧routeとの併存、shadow、段階的traffic配分を一度も作らず、一括cutover receiptが残っている。</li>
 <li>保護中のR6 2 filesとbenchmark raw resultsに変更なし。秘密情報をcommitしていない。</li>
+<li>Recall教師データのsalvage bundleがhash一致し、前任タスク残骸の清掃receiptと回収byteが残っている。</li>
+<li>oMLX binaryは公式DMG 0.6.3だけ、state/model rootは <code>~/.omlx</code>だけ、lifecycleは公式CLIだけで、RC2 source/Homebrew install/独自oMLX LaunchAgent参照が0。</li>
 <li>Plan checklist/logが逐次更新され、stateが <code>done</code>。不合格なら <code>blocked</code> とrollback receiptが残る。</li>
 </ul>
 </section>
@@ -327,7 +348,7 @@ td.num{text-align:right;white-space:nowrap}
 <tr><td>Single proof</td><td>authority route=1、valid result=1、repairはattemptのみ、artifact signature/policy 100%</td><td>self-labelled consensus、alias voter、旧artifact replay、unbound digest</td></tr>
 <tr><td>Atomicity</td><td>最初のservice traffic前に36個の旧role利用箇所、旧model/provider/active quorum参照がすべて0</td><td>新旧route併存、shadow、部分traffic、stale providerが1件でもある</td></tr>
 <tr><td>Memory</td><td>steady footprint ≤85 GiB、headroom ≥20 GiB、preflightからswap増分 ≤1 GiB</td><td>&gt;90 GiB、swap増分 &gt;4 GiB、free ≤10%が60秒、pageout/swapout急増、Metal/process kill</td></tr>
-<tr><td>Runtime</td><td>oMLX 0.6.3、target loaded/pinned、cross-model unload 0、30分 leak/error 0</td><td>version/config drift、repeated unload、status/log不一致</td></tr>
+<tr><td>Runtime</td><td>公式DMG oMLX 0.6.3、app-managed process 1、target loaded/pinned、cross-model unload 0、30分 leak/error 0</td><td>別binary/source/Homebrew service、二重supervisor、version/config drift、repeated unload、status/log不一致</td></tr>
 <tr><td>API / UI</td><td>全5 endpoint正常。125B single laneだけが中央・全幅で可視、旧role/空レーン/合意分岐のvisible element数0、不要な空き領域0、console error 0、secret非開示。synthetic fixtureでは休眠3レーン描画testがgreen</td><td>3社合意表示の残存、hidden要素の描画領域残存、single時のVote/Quorum/Consensus文言、manual toggle、stale model、traceとartifact不一致</td></tr>
 <tr><td>Ingest</td><td>preflight→1件apply→durable ack→read-back成功、再実行duplicate 0、leased=0で収束</td><td>authority outageをraw failure化、重複apply、read-back不一致、queue非収束</td></tr>
 <tr><td>Restart</td><td>再起動後model/config/policy/archive hash同一、health green、30分soak green</td><td>自動起動順序違反、archive drift、health/DOM/API退行</td></tr>
@@ -347,8 +368,8 @@ td.num{text-align:right;white-space:nowrap}
 <h2>Rollback</h2>
 <div class="callout warn"><strong>重要:</strong> 旧3モデルの重みは削除済みで、即時のモデルrollback先はない。安全なrollbackは「旧3社合意へ即復帰」ではなく「新authorityを停止し、変異をholdしたまま補助経路だけを稼働可能にする」こと。</div>
 <ol>
-<li><strong>Live前:</strong> oMLX専用serviceをbootoutし、config/settings/model_settings/plistをatomic restoreする。Chronovisorは停止のまま。stable weightは削除せず検証可能な状態で保持する。</li>
-<li><strong>一括cutover失敗:</strong> 全Chronovisor serviceとoMLXを停止し、staging前のcode/config/settings/plistをatomic restoreする。ingest/OXと生成依存laneはglobal holdのままにする。</li>
+<li><strong>Live前:</strong> 公式CLIでapp-managed oMLXを停止し、config/settings/model_settingsをatomic restoreする。Chronovisorは停止のまま。stable weightは削除せず検証可能な状態で保持する。</li>
+<li><strong>一括cutover失敗:</strong> 全Chronovisor serviceとapp-managed oMLXを停止し、staging前のcode/config/settings/model_settingsをatomic restoreする。ingest/OXと生成依存laneはglobal holdのままにする。</li>
 <li><strong>Live後:</strong> 新artifactとackを削除しない。policy namespaceでquarantineし、raw/page/state/read-backを照合して二重applyを防ぐ。コードはscoped revertし、GitHub-backed runtimeならpush後にrestart/archive/healthを再検証する。</li>
 <li><strong>旧構成が必要な場合:</strong> 旧Qwen/Gemma/Museの再取得はこのcutoverのrollbackに含めない。別作業としてrevision固定downloadと完全性確認を行う。</li>
 </ol>
@@ -356,7 +377,7 @@ td.num{text-align:right;white-space:nowrap}
 
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
-<ul><li>なし。移行実装・runtime変更・push/restartは今回の依頼範囲外のため未着手。</li></ul>
+<ul><li>なし。2026-08-29 18:54にユーザーが救出・清掃・125B一括切替の連続実行を承認。</li></ul>
 </section>
 
 <section data-section="受け渡しメモ">
@@ -365,6 +386,7 @@ td.num{text-align:right;white-space:nowrap}
 <li>実行開始時は最新HEADを再取得し、保護中R6差分を混ぜない。</li>
 <li>対象モデルの選定は確定済み。<code>_handoff/2026-08-29_qwen38-flash-next-benchmark.md</code> はmodel identity/settingsの参照だけに使い、旧モデル比較や量子化再評価を行わない。target weightsは <code>/Users/trafficsign/projects/sandbox/chronovisor-qwen-next-bench/</code>。</li>
 <li>現行oMLX main settingsはport 8000、32,768 context、concurrency 2で、旧model_settingsが残る。cutover時はport 18125へ置換し、target settings不在時のDFlash保守判定を避けるため <code>dflash_enabled=false</code>を明示する。</li>
+<li>oMLXのcanonical binaryは <code>/Applications/oMLX.app</code> 0.6.3、CLIは <code>~/.omlx/bin/omlx</code>。<code>/opt/homebrew/bin/omlx</code> はそのshimへのsymlinkでありHomebrew packageではない。独自service managerを追加しない。</li>
 <li>高速化profileは再選定しない。ANEはsequence 2048 / MLP 0.60 / GDN 0.375 / tail 1436 / dual / CPU・fused-down off、prefix cacheはSSD 5GB + hot 2GB / write-through off、concurrency 1。TurboQuant/DFlash/SpecPrefill/PLE residentは明示off。</li>
 <li>service開始順は oMLX → semantic/reranker → Dashboard/LAN → ingest。これは依存順序であり、段階rolloutではない。すべて同じmaintenance window内で一括切替する。</li>
 <li>実装時はcodebase graphを再index/coverage確認し、direct role callerをsource searchでも照合する。best-effort graphだけで「全件」と断定しない。</li>
@@ -387,6 +409,26 @@ td.num{text-align:right;white-space:nowrap}
 <li><time>2026-08-29 18:33</time><span>prefix cacheをcold/warm/suffix-changeでA/B。16Kは28.27秒→4.57/3.90秒、cached_tokens=14,336、全回答一致。</span></li>
 <li><time>2026-08-29 18:35</time><span>prefix cacheの再起動後hit 5.44秒を確認。concurrency 2は4K×2のaggregateを改善せず個別latencyを悪化させたため不採用、1固定。</span></li>
 <li><time>2026-08-29 18:36</time><span>高速化調査をPlanへ反映。採用profileをq4e + PLE mmap + MTP3 + ANE + bounded prefix cache + concurrency1へ凍結し、unsupported候補を本番matrixから除外。移行実装は未着手。</span></li>
+<li><time>2026-08-29 18:54</time><span>ユーザー承認を受けPlanをrunningへ更新。教師データ救出・前任タスク残骸清掃をPhase -1として追加し、その後125B単一モデル切替を中断せず実行開始。</span></li>
+<li><time>2026-08-29 18:55</time><span>Recall教師データ1009件、failure 379件、import receipt、生成scriptを4.2MiBのsalvage bundleへcopy。destination read-backでdataset/failure SHA256が停止receiptと一致。</span></li>
+<li><time>2026-08-29 18:57</time><span>再出現したchronovisor-mcp 2 processをSIGTERM。全Chronovisor/oMLX label unloaded、8000/8001/8002/18125 listener 0、lock holder 0、OX false、active workset 2 DBのleased 0を再確認。</span></li>
+<li><time>2026-08-29 18:58</time><span>HEAD d7fbbbe、runtime archive b71cd315、保護2 file SHA256不変、target 21 shard/106294664646 bytes/symlink・partial 0/config・index hash一致を記録。config/oMLX settings/5 LaunchAgentをprivate backupし、swap 3636.19MiB・memory free 93%をbaseline化。</span></li>
+<li><time>2026-08-29 19:01</time><span>旧linked worktree 66 HEADをrefs/archive/pre-125bへ保全。dirty 5 worktreeをbinary patch化し、旧cutoverのbuilder/JSON receiptもprivate salvageへ保存。保護中R6 2 file hashは不変。</span></li>
+<li><time>2026-08-29 19:06</time><span>旧sandbox 84、cache 55、repo junk 6を専用stagingへ隔離後に消去し、worktree metadataをprune。sandbox残存はQwen bench 1件、対象cache 0、旧linked worktree 0。論理54GiB stagingに対しAPFS共有block込みの実空き増分は8,150,636KiB（約7.77GiB）。</span></li>
+<li><time>2026-08-29 19:07</time><span>清掃後にQwen 21 shard/106294664646 bytes/config・index hash、教師dataset/failure hash、保護R6 2 file hashを再読取し全一致。</span></li>
+<li><time>2026-08-29 19:24</time><span>ユーザー決定を受けoMLX配布・process管理方針を更新。公式DMG /Applications/oMLX.app 0.6.3、~/.omlx state、公式CLI app-managed lifecycleへ一本化し、Homebrew install、RC2 source実行、独自oMLX LaunchAgentを禁止。</span></li>
+<li><time>2026-08-29 19:26</time><span>公式app/CLIはともに0.6.3、app copy 1、Homebrew/pip/uv/pipx package 0を確認。/opt/homebrew/bin/omlxは公式shimへのsymlinkで重複installではない。</span></li>
+<li><time>2026-08-29 19:27</time><span>cleanな旧source checkout c295b5bf（v0.6.3rc2-1）へのruntime/config/service参照0とopen file 0を確認し、~/.Trash/omlx-v0.6.3rc2-c295b5bf-20260829へrecoverable移動。元path消失をread-back。</span></li>
+<li><time>2026-08-29 19:29</time><span>selected 125Bを同一device上でsandboxから ~/.omlx/models/Jundot/Qwen3.8-Flash-Next-oQ4e-mtp へatomic rename。source消失、21 shard、total 106294664646 bytes、config/index SHA256一致をread-back。</span></li>
+<li><time>2026-08-29 19:41</time><span>独自oMLX plist/render/launchctl/serve supervisorをrepo案から除去。公式shim優先・app bundle明示fallbackのstart/stop wrapper、18125 profile、settings-preserving stagingへ置換し、39 focused tests・shell syntax・bundled parser read-backを通過。</span></li>
+<li><time>2026-08-29 19:44</time><span>停止中の ~/.omlx settings/model_settingsをatomic merge。auth/integrations hash不変、旧3モデル+Q3 settings 0、補助Ornith/bge保持、target pinned/TTLなし/MTP3/PLE mmap/ANE/prefix/concurrency1/context114688をread-back。</span></li>
+<li><time>2026-08-29 20:03</time><span>single_model_v1 routing/proof/hold、37 role fixed revision、Qwen4Exp structured repair、single-lane Dashboardを実装。旧3レーンrendererはsynthetic fixtureで保持し、focused suites 232+108+79+173件を通過。</span></li>
+<li><time>2026-08-29 20:08</time><span>production configをbackup後にatomic移行。生成37 roleを同一125B/revisionへ固定、authority=classification.authority、oMLX=127.0.0.1:18125、max resident=1、旧3 provider/model/port参照0、補助生成3 role保持、distillation停止をparser/read-back確認。</span></li>
+<li><time>2026-08-29 20:26</time><span>isolated CHRONOVISOR_ROOTでfull suite 6307 passed / 1 skipped。Ruff、Node syntax、shell syntax、compileall、architecture exception gate、diff checkを通過し、保護中R6 2 fileは対象外のまま保持。</span></li>
+<li><time>2026-08-29 20:28</time><span>production response schema 13名称・11 distinctを125Bへ各1回direct smoke。11/11 structured validation成功、repair 0、returned-model mismatch 0。</span></li>
+<li><time>2026-08-29 20:52</time><span>凍結profileで4K=4,009、32K=32,602、114,688枠=114,479 prompt tokensを各1回実行。両端needle、JSON schema、model identity、finish_reason=stopが全件一致し、HTTP/model error、silent truncation、swap増分は0。</span></li>
+<li><time>2026-08-29 20:54</time><span>16,050-token同一prefixでcold 28.03秒/cached 0 → warm 4.08秒/cached 14,336、回答hash一致。MTP depth 3は8/8受理。ANE 170 warm、49 MLP + 36 GDN/2 program、PLE mmap、SSD error 0、concurrency 1をread-back。</span></li>
+<li><time>2026-08-29 20:55</time><span>公式CLIでoMLXをstop/start。server PID 68440→87710、起動22.61秒、settings/model_settings/Chronovisor config SHA256不変、SSD cache 31 block/4.98GB/errors 0を復元。再起動後もcached 14,336、7.44秒、回答hash一致。</span></li>
 </ol>
 </section>
 </main>

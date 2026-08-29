@@ -21,10 +21,12 @@ from chronovisor.core.durable_state import (
 )
 from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.decision.decision_artifact import (
+    SINGLE_MODEL_DECISION_ARTIFACT_SCHEMA,
     DecisionArtifactStore,
     default_store_root,
 )
 from chronovisor.decision.decision_authority import (
+    SINGLE_MODEL_AUTHORITY_KIND,
     compare_semantic_authority,
     current_semantic_authority,
     returned_model_evidence_is_safe,
@@ -42,6 +44,7 @@ from chronovisor.decision.local_structured import (
 )
 
 MACHINE_CONSENSUS_RECEIPT_VERSION = 2
+SINGLE_MODEL_RECEIPT_VERSION = 3
 DETERMINISTIC_PRODUCER_KIND = "deterministic_evidence_projection"
 _SHA256_ZERO = "0" * 64
 _RECEIPT_FIELDS = {
@@ -63,6 +66,7 @@ _RECEIPT_FIELDS = {
     "previous_receipt_sha256",
     "receipt_sha256",
 }
+_SINGLE_RECEIPT_FIELDS = _RECEIPT_FIELDS | {"authority_kind"}
 _KIND_TO_SUBJECT_KIND = {
     "gold_entry_review": "gold_entry",
     "scorer_calibration_case_review": "scorer_calibration_case",
@@ -390,6 +394,14 @@ def _vote_manifest_error(
 ) -> str:
     router = authority.get("router")
     routes = router.get("routes") if isinstance(router, Mapping) else None
+    if authority.get("authority_kind") == SINGLE_MODEL_AUTHORITY_KIND:
+        return _single_vote_manifest_error(
+            value,
+            decision=decision,
+            agreement_sha256=agreement_sha256,
+            authority=authority,
+            artifact_proof=artifact_proof,
+        )
     if (
         not isinstance(value, list)
         or not isinstance(routes, list)
@@ -487,6 +499,80 @@ def _vote_manifest_error(
     return ""
 
 
+def _single_vote_manifest_error(
+    value: object,
+    *,
+    decision: object,
+    agreement_sha256: object,
+    authority: Mapping[str, Any],
+    artifact_proof: object,
+) -> str:
+    router = authority.get("router")
+    routes = router.get("routes") if isinstance(router, Mapping) else None
+    if (
+        not isinstance(value, list)
+        or len(value) != 1
+        or not isinstance(routes, list)
+        or len(routes) != 1
+    ):
+        return "machine_single_model_vote_manifest_invalid"
+    route = routes[0]
+    if not isinstance(route, Mapping):
+        return "machine_single_model_vote_authority_invalid"
+    expected_signature = canonical_agreement_signature(
+        decision,
+        schema=_decision_schema_for_authority(authority),
+    )
+    expected_agreement = hashlib.sha256(expected_signature.encode("utf-8")).hexdigest()
+    if agreement_sha256 != expected_agreement:
+        return "machine_consensus_agreement_invalid"
+    raw = value[0]
+    if not isinstance(raw, Mapping):
+        return "machine_single_model_vote_invalid"
+    if set(raw) != {
+        "role",
+        "provider",
+        "model",
+        "route_provenance",
+        "returned_model",
+        "valid",
+        "signature_sha256",
+        "invalid_reason",
+    }:
+        return "machine_single_model_vote_invalid"
+    if (
+        raw.get("role") != "authority"
+        or raw.get("provider") != route.get("provider")
+        or raw.get("model") != route.get("model")
+        or raw.get("route_provenance") != route
+        or not returned_model_evidence_is_safe(raw.get("returned_model"))
+        or raw.get("valid") is not True
+        or raw.get("invalid_reason") is not None
+        or raw.get("signature_sha256") != agreement_sha256
+    ):
+        return "machine_single_model_vote_authority_invalid"
+    expected_proof = {
+        "role": route.get("role"),
+        "provider": route.get("provider"),
+        "model": route.get("model"),
+        "route_provenance": dict(route),
+        "returned_model": raw.get("returned_model"),
+        "signature_sha256": raw.get("signature_sha256"),
+    }
+    if isinstance(artifact_proof, Mapping):
+        observed_proof = {
+            key: artifact_proof.get(key)
+            for key in expected_proof
+        }
+    elif isinstance(artifact_proof, list) and len(artifact_proof) == 1:
+        observed_proof = artifact_proof[0]
+    else:
+        observed_proof = None
+    if observed_proof != expected_proof:
+        return "machine_single_model_artifact_proof_mismatch"
+    return ""
+
+
 def _decision_schema_for_authority(authority: Mapping[str, Any]) -> Mapping[str, Any]:
     from chronovisor.decision.decision_schema_manifest import (
         background_decision_schemas,
@@ -535,9 +621,18 @@ def _ledger_chain_error(path: Path) -> tuple[list[dict[str, Any]], str]:
     for row in rows:
         receipt_sha = row.get("receipt_sha256")
         unsigned = {key: value for key, value in row.items() if key != "receipt_sha256"}
+        schema_version = row.get("schema_version")
+        expected_fields = (
+            _SINGLE_RECEIPT_FIELDS
+            if schema_version == SINGLE_MODEL_RECEIPT_VERSION
+            else _RECEIPT_FIELDS
+        )
         if (
-            set(row) != _RECEIPT_FIELDS
-            or row.get("schema_version") != MACHINE_CONSENSUS_RECEIPT_VERSION
+            set(row) != expected_fields
+            or schema_version not in {
+                MACHINE_CONSENSUS_RECEIPT_VERSION,
+                SINGLE_MODEL_RECEIPT_VERSION,
+            }
             or row.get("previous_receipt_sha256") != previous
             or receipt_sha != canonical_sha256(unsigned)
             or not isinstance(receipt_sha, str)
@@ -592,11 +687,19 @@ def validate_machine_consensus_receipt(
     if loaded.get("passed") is not True:
         return loaded
     row = loaded["receipt"]
-    if not isinstance(row, Mapping) or set(row) != _RECEIPT_FIELDS:
+    if not isinstance(row, Mapping) or set(row) not in (
+        _RECEIPT_FIELDS,
+        _SINGLE_RECEIPT_FIELDS,
+    ):
         return {"passed": False, "reason": "machine_consensus_receipt_fields_invalid"}
+    single_mode = row.get("schema_version") == SINGLE_MODEL_RECEIPT_VERSION
+    if single_mode and row.get("authority_kind") != SINGLE_MODEL_AUTHORITY_KIND:
+        return {"passed": False, "reason": "machine_consensus_authority_kind_invalid"}
     authority = row.get("authority")
     if not isinstance(authority, Mapping):
         return {"passed": False, "reason": "machine_consensus_authority_invalid"}
+    if single_mode and authority.get("authority_kind") != SINGLE_MODEL_AUTHORITY_KIND:
+        return {"passed": False, "reason": "machine_consensus_authority_kind_invalid"}
     shape_error = semantic_authority_shape_error(authority, lane=lane)
     if shape_error is not None:
         return {"passed": False, "reason": shape_error}
@@ -687,7 +790,11 @@ def validate_machine_consensus_receipt(
         decision=artifact.get("decision"),
         agreement_sha256=artifact.get("agreement_sha256"),
         authority=authority,
-        artifact_proof=artifact.get("quorum_proof"),
+        artifact_proof=(
+            artifact.get("single_model_proof")
+            if single_mode
+            else artifact.get("quorum_proof")
+        ),
     )
     decision = artifact.get("decision")
     decision_error = _approved_subject_decision_error(
@@ -709,6 +816,10 @@ def validate_machine_consensus_receipt(
         or artifact.get("seal_sha256") != row.get("decision_artifact_seal_sha256")
         or artifact.get("agreement_sha256") != row.get("agreement_sha256")
         or artifact.get("decision_sha256") != canonical_sha256(decision)
+        or (
+            single_mode
+            and artifact.get("schema") != SINGLE_MODEL_DECISION_ARTIFACT_SCHEMA
+        )
         or decision_error
         or vote_error
     ):
@@ -837,6 +948,7 @@ def append_machine_consensus_receipt(
         lane, prompt, schema, system
     )
     effective_system = decision_system_with_policy(schema, bound_system)
+    single_mode = authority.get("authority_kind") == SINGLE_MODEL_AUTHORITY_KIND
     with sidecar_exclusive_lock(ledger_file):
         rows, chain_error = _ledger_chain_error(ledger_file)
         if chain_error:
@@ -857,7 +969,11 @@ def append_machine_consensus_receipt(
         else:
             previous = str(rows[-1]["receipt_sha256"]) if rows else _SHA256_ZERO
             row = {
-                "schema_version": MACHINE_CONSENSUS_RECEIPT_VERSION,
+                "schema_version": (
+                    SINGLE_MODEL_RECEIPT_VERSION
+                    if single_mode
+                    else MACHINE_CONSENSUS_RECEIPT_VERSION
+                ),
                 "kind": kind,
                 "lane": lane,
                 "subject": subject_payload,
@@ -876,6 +992,8 @@ def append_machine_consensus_receipt(
                 "created_at": receipt_created_at,
                 "previous_receipt_sha256": previous,
             }
+            if single_mode:
+                row["authority_kind"] = SINGLE_MODEL_AUTHORITY_KIND
             row["receipt_sha256"] = canonical_sha256(row)
             append_jsonl_durable(ledger_file, [row], sort_keys=True)
     checked = validate_machine_consensus_receipt(
@@ -925,6 +1043,7 @@ __all__ = [
     "DETERMINISTIC_PRODUCER_KIND",
     "GOLD_ENTRY_PRODUCER_POLICY_SHA256",
     "MACHINE_CONSENSUS_RECEIPT_VERSION",
+    "SINGLE_MODEL_RECEIPT_VERSION",
     "SCORER_CALIBRATION_PRODUCER_POLICY_SHA256",
     "SEARCH_LABEL_CANDIDATE_PRODUCER_POLICY_SHA256",
     "append_machine_consensus_receipt",

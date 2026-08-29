@@ -16,7 +16,22 @@ from chronovisor.core import ollama_transport as _ollama_transport
 from chronovisor.core.llm_runtime import (
     safe_metadata_identifier as safe_metadata_identifier,
 )
-from chronovisor.core.runtime_config import IngestConfig, load_ingest_config
+from chronovisor.core.runtime_config import (
+    SINGLE_MODEL_RUNTIME_ARCHITECTURE as SINGLE_MODEL_RUNTIME_ARCHITECTURE,
+)
+from chronovisor.core.runtime_config import (
+    SINGLE_MODEL_RUNTIME_MODEL as SINGLE_MODEL_RUNTIME_MODEL,
+)
+from chronovisor.core.runtime_config import (
+    SINGLE_MODEL_RUNTIME_MODEL_TYPE as SINGLE_MODEL_RUNTIME_MODEL_TYPE,
+)
+from chronovisor.core.runtime_config import (
+    SINGLE_MODEL_RUNTIME_REVISION as SINGLE_MODEL_RUNTIME_REVISION,
+)
+from chronovisor.core.runtime_config import (
+    IngestConfig,
+    load_ingest_config,
+)
 from chronovisor.core.store import CHRONOVISOR_ROOT
 
 GIB = _ollama_calibration.GIB

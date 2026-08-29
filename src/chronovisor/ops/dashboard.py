@@ -3037,6 +3037,22 @@ def _decision_trace_role(value: object) -> tuple[str, str, bool]:
     return role, "primary", False
 
 
+def _decision_trace_persisted_value(
+    rows: list[Mapping[str, Any]],
+    key: str,
+) -> object:
+    """Read an execution fact without deriving it from the active config."""
+
+    for row in reversed(rows):
+        value = row.get(key)
+        if value is not None:
+            return value
+        authority = row.get("authority")
+        if isinstance(authority, Mapping) and authority.get(key) is not None:
+            return authority[key]
+    return None
+
+
 def _decision_trace_models() -> dict[str, str]:
     try:
         routes = _decision_runtime_routes()
@@ -3229,6 +3245,7 @@ def _decision_trace_outcome(
     *,
     trace_state: str,
     task_role: str,
+    single_model: bool = False,
 ) -> dict[str, str]:
     """Explain a redacted decision without exposing prompts or vote payloads."""
 
@@ -3236,6 +3253,14 @@ def _decision_trace_outcome(
         "Raw retained" if task_role.startswith("ingest") else "Input retained"
     )
     if trace_state == "agreed":
+        if single_model:
+            return {
+                "kind": "ready",
+                "reason": "Structured result validated",
+                "data": source_state,
+                "next": "Ready for the caller",
+                "code": "single_model_result_ready",
+            }
         if (decision or {}).get("conservative_veto_bypassed_by_lane_policy") is True:
             dissent_effect = str(
                 (decision or {}).get("dissent_effect_class") or "unclassifiable"
@@ -3456,6 +3481,7 @@ def _decision_trace_overall_steps(
     validation_completed: bool,
     artifact_expected: bool,
     artifact_status: str,
+    single_model: bool = False,
 ) -> list[dict[str, str]]:
     active_phases = {str(row.get("phase") or "trigger") for row in active_rows}
     generating = bool(active_phases & {"trigger", "load", "context", "generate"})
@@ -3512,7 +3538,11 @@ def _decision_trace_overall_steps(
             if not generating and (voting or validation_completed)
             else "pending",
         },
-        {"key": "quorum", "label": "Quorum", "status": quorum_status},
+        {
+            "key": "quorum",
+            "label": "Validated" if single_model else "Quorum",
+            "status": quorum_status,
+        },
         {
             "key": "artifact",
             "label": "Artifact",
@@ -3532,7 +3562,7 @@ def _decision_trace_overall_steps(
         },
         {
             "key": "decision",
-            "label": "Decision",
+            "label": "Validated" if single_model else "Decision",
             "status": "skipped"
             if decision_status == "quarantined"
             else "done"
@@ -3563,8 +3593,13 @@ def _decision_trace_lanes(
     quorum_attempted: bool,
     decision_status: str,
     pair_agreement: bool | None,
+    single_model: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
     models = _decision_trace_models()
+    if single_model:
+        # Single-mode identity must come from the persisted execution row,
+        # never from the current runtime configuration.
+        models["primary"] = "not recorded"
     routes: dict[str, dict[str, Any]] = {}
     decision_routes = decision.get("routes") if isinstance(decision, dict) else None
     if isinstance(decision_routes, list):
@@ -3581,6 +3616,19 @@ def _decision_trace_lanes(
         for lane, model in zip(_DECISION_TRACE_ROLES, decision_models, strict=False):
             if isinstance(model, str) and model:
                 models[lane] = model
+    if single_model and isinstance(decision, Mapping):
+        authority_model = decision.get("authority_model") or decision.get("model")
+        if isinstance(authority_model, str) and authority_model:
+            models["primary"] = authority_model
+        authority_route = decision.get("authority_route")
+        if isinstance(authority_route, Mapping):
+            routes["primary"] = dict(authority_route)
+            route_model = authority_route.get("model")
+            if isinstance(route_model, str) and route_model:
+                models["primary"] = route_model
+        authority_revision = decision.get("authority_revision")
+        if isinstance(authority_revision, str) and authority_revision:
+            routes.setdefault("primary", {})["revision"] = authority_revision
 
     active_by_lane: dict[str, dict[str, Any]] = {}
     for row in active_rows:
@@ -3659,7 +3707,10 @@ def _decision_trace_lanes(
         "challenger": "Challenger",
         "tie_break": "Tie-break",
     }
-    for lane in _DECISION_TRACE_ROLES:
+    lane_names = ("primary",) if single_model else _DECISION_TRACE_ROLES
+    if single_model:
+        lane_labels["primary"] = "Single Authority"
+    for lane in lane_names:
         active = active_by_lane.get(lane)
         session = session_by_lane.get(lane)
         state = "pending"
@@ -3685,13 +3736,33 @@ def _decision_trace_lanes(
             if bool(session.get("ok")):
                 state = "done"
                 repairs = int(session.get("repair_turns") or 0)
-                result = "Valid after repair" if repairs else "Valid first pass"
+                result = (
+                    "Validated"
+                    if single_model
+                    else "Valid after repair"
+                    if repairs
+                    else "Valid first pass"
+                )
                 detail = f"{repairs} repair turn{'s' if repairs != 1 else ''}"
             else:
                 state = "error"
                 phase = terminal_phase_by_lane.get(lane, "trigger")
-                result = "Invalid vote"
+                result = "Validation failed" if single_model else "Invalid vote"
                 detail = str(session.get("failure_class") or "validation failed")
+        elif single_model and decision is not None:
+            if decision_status == "agreed":
+                state = "done"
+                result = "Validated"
+                repairs = int(decision.get("repair_turns") or 0)
+                detail = f"{repairs} repair turn{'s' if repairs != 1 else ''}"
+            elif decision_status == "quarantined":
+                state = "error"
+                result = "Validation failed"
+                detail = str(
+                    decision.get("failure_class")
+                    or decision.get("quarantine_reason")
+                    or "validation failed"
+                )
         elif not quorum_flow and lane != "primary":
             state, result, detail = (
                 "skipped",
@@ -3714,9 +3785,13 @@ def _decision_trace_lanes(
                 ),
             )
         observed = active if active is not None else session
+        if observed is None and single_model and decision is not None:
+            observed = decision
         repair_turns = (
             session.get("repair_turns")
             if session is not None and active is None and not artifact_replay
+            else decision.get("repair_turns", 0)
+            if single_model and decision is not None and active is None
             else 0
         )
         if (
@@ -3805,6 +3880,53 @@ def _decision_trace_history_from_events(
         row["requested_context_tokens"] = event.get("requested_num_ctx")
         history.append(row)
     return history
+
+
+def _decision_trace_authority_mode(
+    *,
+    related: list[dict[str, Any]],
+    trace_events: list[dict[str, Any]],
+    active_rows: list[dict[str, Any]],
+    session_rows: list[dict[str, Any]],
+    decision: dict[str, Any] | None,
+    latest_decision: dict[str, Any] | None,
+    request_sha256: str,
+) -> tuple[str | None, bool, bool]:
+    derived_quorum_flow = bool(
+        decision
+        or any(_decision_trace_role(row.get("role"))[2] for row in active_rows)
+        or any(_decision_trace_role(row.get("role"))[2] for row in session_rows)
+    )
+    fact_rows: list[Mapping[str, Any]] = [*related, *trace_events]
+    if decision is not None:
+        fact_rows.append(decision)
+    if (
+        latest_decision is not None
+        and str(latest_decision.get("request_sha256") or "") == request_sha256
+        and latest_decision is not decision
+    ):
+        fact_rows.append(latest_decision)
+    value = _decision_trace_persisted_value(fact_rows, "authority_kind")
+    authority_kind = value.strip() if isinstance(value, str) and value.strip() else None
+    persisted = _decision_trace_persisted_value(fact_rows, "quorum_flow")
+    quorum_flow = persisted if isinstance(persisted, bool) else derived_quorum_flow
+    return authority_kind, quorum_flow, (
+        authority_kind == "single_model_v1" and quorum_flow is False
+    )
+
+
+def _decision_trace_task_role(
+    active_rows: list[dict[str, Any]],
+    decision: dict[str, Any] | None,
+    latest_session: dict[str, Any] | None,
+) -> str:
+    if active_rows:
+        return _decision_trace_role(active_rows[-1].get("role"))[0]
+    if decision:
+        return str(decision.get("role") or decision.get("decision_lane") or "routine")
+    if latest_session:
+        return _decision_trace_role(latest_session.get("role"))[0]
+    return "idle"
 
 
 def _decision_trace_snapshot(
@@ -3950,10 +4072,14 @@ def _decision_trace_snapshot(
         }
     session_rows = [row for row in related if row.get("kind") == "session"]
     latest_related_session = session_rows[-1] if session_rows else None
-    quorum_flow = bool(
-        decision
-        or any(_decision_trace_role(row.get("role"))[2] for row in active_rows)
-        or any(_decision_trace_role(row.get("role"))[2] for row in session_rows)
+    authority_kind, quorum_flow, single_model = _decision_trace_authority_mode(
+        related=related,
+        trace_events=bounded_trace_events,
+        active_rows=active_rows,
+        session_rows=session_rows,
+        decision=decision,
+        latest_decision=latest_decision,
+        request_sha256=request_sha256,
     )
 
     decision_facts = decision or {}
@@ -3992,15 +4118,7 @@ def _decision_trace_snapshot(
         quorum_attempted or (not quorum_flow and successful_session)
     )
 
-    task_role = "idle"
-    if active_rows:
-        task_role = _decision_trace_role(active_rows[-1].get("role"))[0]
-    elif decision:
-        task_role = str(
-            decision.get("role") or decision.get("decision_lane") or "routine"
-        )
-    elif latest_related_session:
-        task_role = _decision_trace_role(latest_related_session.get("role"))[0]
+    task_role = _decision_trace_task_role(active_rows, decision, latest_related_session)
 
     lanes, events, artifact_replay = _decision_trace_lanes(
         active_rows=active_rows,
@@ -4013,6 +4131,7 @@ def _decision_trace_snapshot(
         quorum_attempted=quorum_attempted,
         decision_status=decision_status,
         pair_agreement=pair_agreement,
+        single_model=single_model,
     )
 
     if active_rows:
@@ -4023,7 +4142,9 @@ def _decision_trace_snapshot(
         summary = f"{active_lane['label']} · {active_lane['result']}"
     elif decision_status == "agreed":
         trace_state = "agreed"
-        if artifact_replay:
+        if single_model:
+            summary = "Structured result validated"
+        elif artifact_replay:
             summary = "Canonical artifact replay · 0 model calls"
         elif pair_agreement is True:
             summary = "2/2 pair agreement"
@@ -4063,6 +4184,7 @@ def _decision_trace_snapshot(
         validation_completed=validation_completed,
         artifact_expected=artifact_expected,
         artifact_status=artifact_status,
+        single_model=single_model,
     )
     updated_at = (
         (active_rows[-1] if active_rows else {}).get("updated_at")
@@ -4076,6 +4198,7 @@ def _decision_trace_snapshot(
         decision,
         trace_state=trace_state,
         task_role=task_role,
+        single_model=single_model,
     )
     observed_context = next(
         (
@@ -4098,6 +4221,7 @@ def _decision_trace_snapshot(
         "updated_at": updated_at,
         "context_tokens": observed_context,
         "quorum_flow": quorum_flow,
+        "authority_kind": authority_kind,
         "quorum_attempted": quorum_attempted,
         "vote_count": vote_count,
         "valid_votes": valid_votes,

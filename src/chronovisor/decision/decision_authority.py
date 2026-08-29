@@ -22,6 +22,8 @@ INJECTED_REVIEWER_SOURCE = "injected_reviewer_boundary"
 RUNTIME_ROUTE_SOURCE = "configured_runtime_consensus"
 # Compatibility name for callers that compare against the exported constant.
 ADOPTED_LOCAL_SOURCE = RUNTIME_ROUTE_SOURCE
+SINGLE_MODEL_AUTHORITY_KIND = runtime_config.SINGLE_MODEL_AUTHORITY_KIND
+QUORUM_AUTHORITY_KIND = runtime_config.QUORUM_AUTHORITY_KIND
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _SAFE_DIAGNOSTIC_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+\-]{0,127}\Z")
 _CONSENSUS_AUDIT_FIELDS = {
@@ -37,6 +39,16 @@ _CONSENSUS_AUDIT_FIELDS = {
     "num_ctx",
     "residency",
     "votes",
+}
+_SINGLE_MODEL_AUDIT_FIELDS = _CONSENSUS_AUDIT_FIELDS | {
+    "authority_kind",
+    "quorum_flow",
+    "repair_is_vote",
+    "validation_status",
+    "vote_count",
+    "valid_votes",
+    "repair_turns",
+    "attempts",
 }
 _VOTE_AUDIT_FIELDS = {
     "role",
@@ -367,6 +379,11 @@ def base_semantic_authority(
         authority = {
             "source": RUNTIME_ROUTE_SOURCE,
             "authority_version": AUTHORITY_VERSION,
+            "authority_kind": getattr(
+                getattr(resolved_router, "config", None),
+                "authority_kind",
+                QUORUM_AUTHORITY_KIND,
+            ),
             "lane": lane,
             "lane_contract_sha256": lane_contract_sha256(lane),
             "lane_contract_manifest_sha256": lane_contract_manifest_sha256(),
@@ -435,7 +452,7 @@ def semantic_authority_shape_error(
         return None
     if source != RUNTIME_ROUTE_SOURCE:
         return "decision authority source is invalid"
-    expected_fields = {
+    base_expected_fields = {
         "source",
         "authority_version",
         "lane",
@@ -446,6 +463,15 @@ def semantic_authority_shape_error(
         "policy",
         "router",
     }
+    authority_kind = authority.get("authority_kind", QUORUM_AUTHORITY_KIND)
+    if authority_kind not in {SINGLE_MODEL_AUTHORITY_KIND, QUORUM_AUTHORITY_KIND}:
+        return "decision authority kind is invalid"
+    expected_fields = base_expected_fields | (
+        {"authority_kind"}
+        if authority_kind == SINGLE_MODEL_AUTHORITY_KIND
+        or "authority_kind" in authority
+        else set()
+    )
     if set(authority) != expected_fields:
         return "decision authority fields are invalid"
     quorum_safety_policy_version = authority.get("quorum_safety_policy_version")
@@ -481,7 +507,12 @@ def semantic_authority_shape_error(
         or set(router) != {"source", "error", "routes"}
         or router.get("source") != "runtime_role_mapping"
         or router.get("error") is not None
-        or route_provenance_error(routes) is not None
+        or (
+            single_route_provenance_error(routes)
+            if authority_kind == SINGLE_MODEL_AUTHORITY_KIND
+            else route_provenance_error(routes)
+        )
+        is not None
     ):
         return "decision authority router identity is invalid"
     return None
@@ -540,6 +571,14 @@ def semantic_verdict_authority_error(
     assert isinstance(review, Mapping)
     router = authority.get("router")
     router_routes = router.get("routes") if isinstance(router, Mapping) else None
+    if authority.get("authority_kind") == SINGLE_MODEL_AUTHORITY_KIND:
+        consensus_error = _single_model_proof_error(
+            review.get("local_consensus"),
+            router_routes=router_routes,
+        )
+        if consensus_error is not None:
+            return consensus_error
+        return _canonical_action_proof_error(review, authority=authority)
     consensus_error = _local_consensus_proof_error(
         review.get("local_consensus"),
         router_routes=router_routes,
@@ -552,6 +591,81 @@ def semantic_verdict_authority_error(
     )
     if action_proof_error is not None:
         return action_proof_error
+    return None
+
+
+def _single_model_proof_error(
+    consensus: object,
+    *,
+    router_routes: object,
+) -> str | None:
+    """Validate one result and its bounded repair history.
+
+    A repair is part of the same LocalStructuredSession and therefore never
+    contributes another vote or an independent authority identity.
+    """
+
+    if (
+        not isinstance(router_routes, list)
+        or single_route_provenance_error(router_routes) is not None
+        or not isinstance(consensus, Mapping)
+        or set(consensus) != _SINGLE_MODEL_AUDIT_FIELDS
+        or consensus.get("status") != "agreed"
+        or consensus.get("ok") is not True
+        or consensus.get("authority_kind") != SINGLE_MODEL_AUTHORITY_KIND
+        or consensus.get("quorum_flow") is not False
+        or consensus.get("repair_is_vote") is not False
+        or consensus.get("validation_status") != "validated"
+        or consensus.get("vote_count") != 1
+        or consensus.get("valid_votes") != 1
+        or isinstance(consensus.get("repair_turns"), bool)
+        or not isinstance(consensus.get("repair_turns"), int)
+        or not 0 <= consensus["repair_turns"] <= 2
+        or not isinstance(consensus.get("attempts"), list)
+        or not isinstance(consensus.get("agreement_sha256"), str)
+        or _SHA256_RE.fullmatch(consensus["agreement_sha256"]) is None
+        or consensus.get("failure_class") is not None
+        or consensus.get("quarantine_reason") is not None
+        or not isinstance(consensus.get("num_ctx"), int)
+        or consensus["num_ctx"] < 1
+        or not _safe_diagnostic(consensus.get("residency"))
+        or not isinstance(consensus.get("votes"), list)
+        or len(consensus["votes"]) != 1
+        or consensus.get("conservative_veto_fired") is not False
+        or consensus.get("conservative_veto_bypassed_by_lane_policy") is not False
+        or consensus.get("dissent_effect_class") is not None
+    ):
+        return "single-model authority proof is invalid"
+    vote = consensus["votes"][0]
+    route = router_routes[0]
+    if not isinstance(vote, Mapping) or set(vote) != _VOTE_AUDIT_FIELDS:
+        return "single-model authority vote is invalid"
+    if (
+        vote.get("role") != "authority"
+        or vote.get("provider") != route.get("provider")
+        or vote.get("model") != route.get("model")
+        or vote.get("route_provenance") != route
+        or not returned_model_evidence_is_safe(vote.get("returned_model"))
+        or vote.get("valid") is not True
+        or vote.get("invalid_reason") is not None
+        or not isinstance(vote.get("signature_sha256"), str)
+        or vote.get("signature_sha256") != consensus.get("agreement_sha256")
+        or not isinstance(vote.get("requested_num_ctx"), int)
+        or vote.get("requested_num_ctx") < 1
+        or not _runtime_audit_is_safe(vote.get("runtime_observation"))
+        or not session_audit_is_safe(
+            vote.get("session"),
+            model=route.get("model"),
+            returned_model=vote.get("returned_model"),
+        )
+    ):
+        return "single-model authority vote identity is invalid"
+    session = vote.get("session")
+    if isinstance(session, Mapping) and (
+        session.get("repair_turns") != consensus.get("repair_turns")
+        or len(session.get("attempts", [])) != consensus.get("repair_turns") + 1
+    ):
+        return "single-model authority repair history is invalid"
     return None
 
 
@@ -807,6 +921,94 @@ def route_provenance_error(routes: object) -> str | None:
     return None
 
 
+def single_route_provenance_error(routes: object) -> str | None:
+    """Validate the one authoritative ``classification.authority`` route."""
+
+    if not isinstance(routes, list) or len(routes) != 1:
+        return "single authority route is invalid"
+    route = routes[0]
+    if not isinstance(route, Mapping) or set(route) != {
+        "role",
+        "provider",
+        "model",
+        "location",
+        "protocol",
+        "endpoint_sha256",
+        "revision",
+        "ollama",
+    }:
+        return "single authority route fields are invalid"
+    provider = route.get("provider")
+    model = route.get("model")
+    location = route.get("location")
+    protocol = route.get("protocol")
+    endpoint_sha256 = route.get("endpoint_sha256")
+    revision = route.get("revision")
+    ollama_identity = route.get("ollama")
+    if (
+        route.get("role") != "classification.authority"
+        or not isinstance(provider, str)
+        or llm_runtime.safe_metadata_identifier(provider) != provider
+        or not isinstance(model, str)
+        or llm_runtime.safe_metadata_identifier(model) != model
+        or location not in {"local", "remote"}
+        or not isinstance(protocol, str)
+        or llm_runtime.safe_metadata_identifier(protocol) != protocol
+        or protocol == "unknown"
+        or endpoint_sha256 is not None
+        and (
+            not isinstance(endpoint_sha256, str)
+            or _SHA256_RE.fullmatch(endpoint_sha256) is None
+        )
+        or revision is not None
+        and llm_runtime.safe_metadata_identifier(revision) != revision
+        or location == "remote"
+        and (
+            revision is None
+            or not isinstance(endpoint_sha256, str)
+            or _SHA256_RE.fullmatch(endpoint_sha256) is None
+            or protocol
+            not in {item.value for item in provider_profiles.ProviderProtocol}
+        )
+    ):
+        return "single authority route identity is invalid"
+    if provider != "custom_transport" and (
+        provider != "omlx"
+        or location != "local"
+        or protocol != "omlx-native"
+        or model != runtime_config.SINGLE_MODEL_RUNTIME_MODEL
+        or revision != runtime_config.SINGLE_MODEL_RUNTIME_REVISION
+    ):
+        return "single authority route identity is invalid"
+    if provider == "ollama" and location == "local":
+        engine = (
+            ollama_identity.get("engine")
+            if isinstance(ollama_identity, Mapping)
+            else None
+        )
+        if (
+            not isinstance(ollama_identity, Mapping)
+            or set(ollama_identity)
+            != {"engine", "digest", "quantization_level"}
+            or not isinstance(engine, Mapping)
+            or set(engine) != {"name", "version"}
+            or engine.get("name") != "ollama"
+            or not isinstance(engine.get("version"), str)
+            or not engine.get("version")
+            or not isinstance(ollama_identity.get("digest"), str)
+            or not ollama_identity.get("digest")
+            or not isinstance(ollama_identity.get("quantization_level"), str)
+            or not ollama_identity.get("quantization_level")
+            or protocol != "ollama-native"
+            or not isinstance(endpoint_sha256, str)
+            or _SHA256_RE.fullmatch(endpoint_sha256) is None
+        ):
+            return "single Ollama route identity is invalid"
+    elif ollama_identity is not None:
+        return "single non-Ollama route has Ollama identity"
+    return None
+
+
 def seal_semantic_artifact(
     payload: Mapping[str, Any],
     *,
@@ -848,11 +1050,14 @@ __all__ = [
     "ADOPTED_LOCAL_SOURCE",
     "AUTHORITY_VERSION",
     "INJECTED_REVIEWER_SOURCE",
+    "QUORUM_AUTHORITY_KIND",
     "RUNTIME_ROUTE_SOURCE",
+    "SINGLE_MODEL_AUTHORITY_KIND",
     "base_semantic_authority",
     "compare_semantic_authority",
     "current_semantic_authority",
     "route_provenance_error",
+    "single_route_provenance_error",
     "returned_model_evidence_is_safe",
     "seal_semantic_artifact",
     "semantic_authority_shape_error",
