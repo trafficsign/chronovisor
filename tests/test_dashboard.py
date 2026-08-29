@@ -1925,6 +1925,67 @@ def test_decision_trace_pipeline_tabs_select_concurrent_workflows(
     assert empty["decision_trace"]["summary"] == "No Typed Graph decision yet"
 
 
+def test_decision_trace_idle_pipeline_tabs_use_single_authority(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_local_consensus_activities", lambda: [])
+    monkeypatch.setattr(dashboard, "_read_json_file", lambda _path: {})
+    monkeypatch.setattr(dashboard, "_read_jsonl_file", lambda _path, *, limit: [])
+    monkeypatch.setattr(
+        dashboard,
+        "load_decision_router_config",
+        lambda: SimpleNamespace(
+            authority_kind="single_model_v1",
+            is_single_model=True,
+            single_route_identity="classification.authority",
+        ),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "runtime_generation_routes",
+        lambda roles: tuple(
+            ollama.RuntimeGenerationRoute(
+                role=role,
+                provider="omlx",
+                model="Qwen3.8-Flash-Next-oQ4e-mtp",
+                location="local",
+                structured_output=True,
+                protocol="omlx-native",
+                endpoint_sha256="e" * 64,
+                revision="2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+            )
+            for role in roles
+        ),
+    )
+
+    traces = {
+        pipeline: dashboard._local_consensus_snapshot(preferred_pipeline=pipeline)[
+            "decision_trace"
+        ]
+        for pipeline, _label, _steps in dashboard._PROCESSING_LANES
+    }
+
+    assert set(traces) == {
+        "ingest",
+        "recall",
+        "audit",
+        "improve",
+        "repair",
+        "typed_graph",
+    }
+    for trace in traces.values():
+        assert trace["authority_kind"] == "single_model_v1"
+        assert trace["quorum_flow"] is False
+        assert trace["projection"]["single_model"] is True
+        assert [lane["key"] for lane in trace["lanes"]] == ["primary"]
+        assert trace["lanes"][0]["label"] == "Single Authority"
+        assert trace["lanes"][0]["model"] == "Qwen3.8-Flash-Next-oQ4e-mtp"
+        assert trace["lanes"][0]["revision"] == (
+            "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+        )
+
+
 def test_decision_trace_pipeline_tabs_ignore_noncanonical_processing_lanes(
     tmp_path: Path, monkeypatch
 ) -> None:

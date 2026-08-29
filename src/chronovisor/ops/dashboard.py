@@ -4408,11 +4408,57 @@ def _local_consensus_snapshot(
             for key, label, _steps in _PROCESSING_LANES
             if key == preferred_pipeline
         )
-        decision_trace = {
-            **_decision_trace_snapshot([], [], None),
-            "task_role": preferred_pipeline,
-            "summary": f"No {label} decision yet",
-        }
+        decision_trace = _decision_trace_snapshot([], [], None)
+        decision_trace.update(
+            {
+                "task_role": preferred_pipeline,
+                "summary": f"No {label} decision yet",
+            }
+        )
+        router_config = load_decision_router_config()
+        if router_config.is_single_model:
+            try:
+                authority_route = runtime_generation_routes(
+                    (router_config.single_route_identity,)
+                )[0]
+            except Exception:
+                authority_route = None
+            primary = decision_trace["lanes"][0]
+            decision_trace.update(
+                {
+                    "authority_kind": router_config.authority_kind,
+                    "quorum_flow": False,
+                    "lanes": [
+                        {
+                            **primary,
+                            "label": "Single Authority",
+                            "model": getattr(
+                                authority_route, "model", "not configured"
+                            ),
+                            **{
+                                key: getattr(authority_route, key, None)
+                                for key in (
+                                    "provider",
+                                    "protocol",
+                                    "endpoint_sha256",
+                                    "revision",
+                                    "location",
+                                )
+                            },
+                        }
+                    ],
+                    "overall": [
+                        {
+                            **step,
+                            "label": "Validated"
+                            if step["key"] in {"quorum", "decision"}
+                            else step["label"],
+                        }
+                        for step in decision_trace["overall"]
+                    ],
+                }
+            )
+        decision_trace["projection"] = project_decision_trace(decision_trace)
     else:
         decision_trace = build_trace(preferred_request_sha256)
     if (
