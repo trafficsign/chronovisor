@@ -3119,7 +3119,6 @@ canvas {
 .decision-trace-harness.single-model [data-path-key="quorum-hold"],
 .decision-trace-harness.single-model [data-trace-key="agree"],
 .decision-trace-harness.single-model [data-trace-key="quorum"],
-.decision-trace-harness.single-model [data-trace-key="hold"],
 .decision-trace-harness.single-model .trace-next-voter,
 .decision-trace-harness.single-model .trace-next-voter-label,
 .decision-trace-harness.single-model [data-pair-yes-label],

@@ -475,6 +475,7 @@ def test_single_model_authority_projects_one_lane_and_binds_identity() -> None:
     assert result["labels"]["validation"] == "Validated"
     assert result["labels"]["target"] == "1"
     assert result["labels"]["repair"] == "REPAIR ≠ VOTE"
+    assert result["labels"]["hold"] == "Validation failed"
 
 
 def test_active_reasoning_fit_is_checking() -> None:

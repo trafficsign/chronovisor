@@ -450,10 +450,12 @@ def test_single_model_css_connects_live_svg_paths(tmp_path: Path) -> None:
 <svg class="decision-trace-harness single-model" viewBox="0 0 1500 650" width="1500" height="650">
   <path id="dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V383 Q180 393 190 393 H220"></path>
   <path id="single-artifact" d="M920 393 H1310"></path>
+  <path id="seal-hold" data-path-key="seal-hold" d="M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588"></path>
   <g class="decision-lane" data-decision-lane="primary" transform="translate(0 325)">
     <g id="trigger" transform="translate(230 0)"><circle r="10"></circle></g>
     <g id="validate" transform="translate(910 0)"><circle r="10"></circle></g>
   </g>
+  <g id="hold" data-trace-key="hold" transform="translate(1460 600)"><circle r="12"></circle><text>Hold</text></g>
 </svg>
 <script src="/geometry.js"></script>
 """,
@@ -465,11 +467,16 @@ def test_single_model_css_connects_live_svg_paths(tmp_path: Path) -> None:
 const screenPoint = (node, point) => point.matrixTransform(node.getScreenCTM());
 const dispatch = document.querySelector("#dispatch");
 const single = document.querySelector("#single-artifact");
+const sealHold = document.querySelector("#seal-hold");
+const hold = document.querySelector("#hold");
 const lane = document.querySelector('[data-decision-lane="primary"]');
 const trigger = screenPoint(document.querySelector("#trigger"), new DOMPoint(0, 0));
 const validate = screenPoint(document.querySelector("#validate"), new DOMPoint(0, 0));
 const dispatchEnd = screenPoint(dispatch, dispatch.getPointAtLength(dispatch.getTotalLength()));
 const singleStart = screenPoint(single, single.getPointAtLength(0));
+const holdDisplay = getComputedStyle(hold).display;
+const sealHoldEnd = screenPoint(sealHold, sealHold.getPointAtLength(sealHold.getTotalLength()));
+const holdCenter = holdDisplay === "none" ? null : screenPoint(hold, new DOMPoint(0, 0));
 fetch("/geometry-result", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
@@ -477,6 +484,10 @@ fetch("/geometry-result", {
     transform: getComputedStyle(lane).transform,
     dispatchDeltaY: Math.abs(trigger.y - dispatchEnd.y),
     singleDeltaY: Math.abs(validate.y - singleStart.y),
+    holdDisplay,
+    sealHoldDeltaX: holdCenter ? Math.abs(holdCenter.x - sealHoldEnd.x) : null,
+    sealHoldDeltaY: holdCenter ? Math.abs(holdCenter.y - sealHoldEnd.y) : null,
+    holdRadiusY: holdCenter ? 12 * Math.abs(hold.getScreenCTM().d) : null,
   }),
 });
 """,
@@ -556,6 +567,9 @@ fetch("/geometry-result", {
     assert geometry[0]["transform"] == "matrix(1, 0, 0, 1, 0, 393)"
     assert geometry[0]["dispatchDeltaY"] <= 0.01
     assert geometry[0]["singleDeltaY"] <= 0.01
+    assert geometry[0]["holdDisplay"] != "none"
+    assert geometry[0]["sealHoldDeltaX"] <= 0.01
+    assert abs(geometry[0]["sealHoldDeltaY"] - geometry[0]["holdRadiusY"]) <= 0.01
 
 
 def test_dashboard_reference_quorum_hold_paths_and_label_stay_in_bounds() -> None:

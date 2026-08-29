@@ -316,6 +316,8 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
     hold_reason = (
         "Seal failed"
         if seal_failure
+        else "Validation failed"
+        if single_model
         else str(trace.get("summary") or "No safe quorum").split("·", 1)[0].strip()
     )
     display_lanes = lanes
