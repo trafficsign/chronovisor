@@ -3420,7 +3420,9 @@ def _decision_trace_execution_window(
     standalone_rows = [
         (index, row)
         for index, row in same_request
-        if row.get("kind") == "session" and not _decision_trace_role(row.get("role"))[2]
+        if row.get("kind") == "session"
+        and not str(row.get("role") or "").endswith(":authority")
+        and not _decision_trace_role(row.get("role"))[2]
     ]
     boundary_rows = sorted([*decision_rows, *standalone_rows])
     if active_rows:

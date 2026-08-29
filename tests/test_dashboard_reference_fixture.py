@@ -1202,6 +1202,58 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         ]
         payload.append({"case": {**case, "kind": "decision"}, "trace": trace})
 
+    single_request = "9" * 64
+    single_case = {
+        "id": "S",
+        "workflow": "ingest",
+        "processing_stage": "consensus",
+        "state": "agreed",
+        "kind": "decision",
+    }
+    single_decision = {
+        "kind": "decision",
+        "timestamp": "2026-08-15T00:02:02Z",
+        "request_sha256": single_request,
+        "role": "ingest_reconciliation",
+        "status": "agreed",
+        "authority_kind": "single_model_v1",
+        "authority_model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "authority_revision": "b" * 64,
+        "quorum_flow": False,
+        "vote_count": 1,
+        "valid_votes": 1,
+        "artifact_expected": True,
+    }
+    single_trace = dashboard._decision_trace_snapshot(
+        [],
+        [
+            {
+                "kind": "session",
+                "timestamp": "2026-08-15T00:02:01Z",
+                "request_sha256": single_request,
+                "role": "ingest_reconciliation:authority",
+                "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+                "revision": "b" * 64,
+                "think": False,
+                "context_tokens": 65_536,
+                "required_context_tokens": 34_028,
+                "requested_context_tokens": 65_536,
+                "ok": True,
+                "first_pass_valid": True,
+                "repair_turns": 0,
+            },
+            single_decision,
+            {
+                "kind": "decision_artifact",
+                "timestamp": "2026-08-15T00:02:03Z",
+                "request_sha256": single_request,
+                "artifact_status": "sealed",
+            },
+        ],
+        single_decision,
+    )
+    payload.append({"case": single_case, "trace": single_trace})
+
     harness = """
 const fixtures = __FIXTURES__;
 const workflowKeys = [...new Set(fixtures.map(({ case: fixture }) => fixture.workflow).filter(Boolean))];
@@ -1220,6 +1272,75 @@ addEventListener("chronovisor:processing-lane-select", (event) => {
 });
 addEventListener("DOMContentLoaded", () => {
   const api = window.__chronovisorDashboardTest;
+  const routeStates = new Set(["active", "done", "error"]);
+  const visible = (node) => {
+    const style = getComputedStyle(node);
+    return style.display !== "none" && style.visibility !== "hidden";
+  };
+  const screenPoint = (node, point) => point.matrixTransform(node.getScreenCTM());
+  const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const segmentDistance = (point, start, end) => {
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const lengthSquared = dx * dx + dy * dy;
+    const t = lengthSquared
+      ? Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared))
+      : 0;
+    return distance(point, { x: start.x + t * dx, y: start.y + t * dy });
+  };
+  const shapeDistance = (point, group) => {
+    const shape = group.querySelector(":scope > circle, :scope > path");
+    if (!shape) return Infinity;
+    const bounds = shape.getBoundingClientRect();
+    if (shape.tagName.toLowerCase() === "circle") {
+      const rx = bounds.width / 2;
+      const ry = bounds.height / 2;
+      const radial = Math.hypot(
+        (point.x - (bounds.left + rx)) / rx,
+        (point.y - (bounds.top + ry)) / ry
+      );
+      return Math.abs(radial - 1) * Math.max(rx, ry);
+    }
+    const midX = bounds.left + bounds.width / 2;
+    const midY = bounds.top + bounds.height / 2;
+    const vertices = [
+      { x: midX, y: bounds.top },
+      { x: bounds.right, y: midY },
+      { x: midX, y: bounds.bottom },
+      { x: bounds.left, y: midY },
+      { x: midX, y: bounds.top },
+    ];
+    return Math.min(...vertices.slice(0, -1).map(
+      (vertex, index) => segmentDistance(point, vertex, vertices[index + 1])
+    ));
+  };
+  const disconnectedPathEnds = () => {
+    const paths = [...document.querySelectorAll(
+      "[data-path-key], [data-reasoning-output], [data-lane-path], [data-repair-lane]"
+    )].filter((node) => visible(node) && routeStates.has(node.dataset.state));
+    const ends = paths.flatMap((path, pathIndex) => {
+      const length = path.getTotalLength();
+      const lane = path.closest("[data-decision-lane]")?.dataset.decisionLane;
+      const key = path.dataset.pathKey || path.dataset.reasoningOutput
+        || `${lane}:${path.dataset.lanePath || path.dataset.repairLane}`;
+      return [0, length].map((offset, endIndex) => ({
+        key,
+        pathIndex,
+        end: endIndex ? "end" : "start",
+        point: screenPoint(path, path.getPointAtLength(offset)),
+      }));
+    });
+    const nodes = [...document.querySelectorAll(
+      "[data-trace-key], [data-overall-key], [data-plan-key], [data-context-option], "
+        + "[data-reasoning-key], [data-decision-lane-step]"
+    )].filter((node) => visible(node) && routeStates.has(node.dataset.state));
+    return ends.filter((entry) => (
+      !nodes.some((node) => shapeDistance(entry.point, node) <= 2.5)
+      && !ends.some((other) => (
+        other.pathIndex !== entry.pathIndex && distance(entry.point, other.point) <= 1.5
+      ))
+    )).map(({ key, end }) => `${key}:${end}`);
+  };
   const renderFixture = (fixture, trace, revision) => {
     api.renderProcessingActivity({
       generated_at: `2026-08-15T00:01:${revision}Z`,
@@ -1312,6 +1433,7 @@ addEventListener("DOMContentLoaded", () => {
         '[data-reasoning-key="medium"] [data-reasoning-label]'
       )?.textContent,
       fitLabel: document.querySelector('[data-plan-value="fit"]')?.textContent,
+      disconnectedPathEnds: disconnectedPathEnds(),
       nodes: Object.fromEntries([...document.querySelectorAll("[data-trace-key]")]
         .map((node) => [node.dataset.traceKey, node.dataset.state])),
       paths,
@@ -1526,7 +1648,7 @@ addEventListener("DOMContentLoaded", () => {
     assert len(browser_results) == len(payload), diagnostics
     assert screenshot_path.is_file() and screenshot_path.stat().st_size > 0
 
-    assert len(visual_paths) == 8
+    assert len(visual_paths) == 9
 
     by_id = {result["id"]: result for result in browser_results}
     by_trace = {item["case"]["id"]: item["trace"] for item in payload}
@@ -1540,6 +1662,7 @@ addEventListener("DOMContentLoaded", () => {
         assert result["layout"]["rightReachable"] is True
         assert result["layout"]["fitsWidth"] is True
         assert result["layout"]["nextPanelGap"] == 12
+        assert result["disconnectedPathEnds"] == [], case["id"]
         projection = trace["projection"]
         assert result["nodes"] == {
             key: value
@@ -1600,6 +1723,12 @@ addEventListener("DOMContentLoaded", () => {
         assert result["reasoningCoreOpacities"].count("1") == int(
             selected_reasoning is not None
         )
+
+    single_result = by_id[single_case["id"]]
+    assert single_result["projectionStatus"] == "ok"
+    assert single_result["context"] == "65536"
+    assert single_result["reasoning"] == "off"
+    assert single_result["disconnectedPathEnds"] == []
 
     assert by_id[cases[0]["id"]]["tabClick"] == {
         "event": "recall",

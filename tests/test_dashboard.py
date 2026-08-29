@@ -1631,6 +1631,56 @@ def test_decision_trace_persisted_single_authority_projects_one_lane() -> None:
     assert trace["projection"]["authority"]["validated"] is True
 
 
+def test_decision_trace_terminal_single_authority_keeps_session_plan() -> None:
+    request = "7" * 64
+    session = {
+        "kind": "session",
+        "timestamp": "2026-08-29T21:51:04.389925Z",
+        "request_sha256": request,
+        "role": "ingest_reconciliation:authority",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "b" * 64,
+        "think": False,
+        "context_tokens": 65_536,
+        "required_context_tokens": 34_028,
+        "requested_context_tokens": 65_536,
+        "ok": True,
+        "first_pass_valid": True,
+        "repair_turns": 0,
+    }
+    decision = {
+        "kind": "decision",
+        "timestamp": "2026-08-29T21:51:04.419700Z",
+        "request_sha256": request,
+        "role": "ingest_reconciliation",
+        "status": "agreed",
+        "authority_kind": "single_model_v1",
+        "authority_model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "authority_revision": "b" * 64,
+        "quorum_flow": False,
+        "vote_count": 1,
+        "valid_votes": 1,
+        "artifact_expected": True,
+    }
+    artifact = {
+        "kind": "decision_artifact",
+        "timestamp": "2026-08-29T21:51:04.450000Z",
+        "request_sha256": request,
+        "artifact_status": "sealed",
+    }
+
+    trace = dashboard._decision_trace_snapshot(
+        [], [session, decision, artifact], decision
+    )
+
+    assert trace["context_tokens"] == 65_536
+    assert trace["lanes"][0]["think"] == "off"
+    assert trace["projection"]["context"]["selected_tokens"] == 65_536
+    assert trace["projection"]["reasoning"]["selected"] == "off"
+    assert trace["projection"]["nodes"]["fit"] == "done"
+    assert trace["projection"]["paths"]["reasoning-off"] == "done"
+
+
 def test_decision_trace_excludes_previous_execution_with_same_request_hash(
     monkeypatch,
 ) -> None:
