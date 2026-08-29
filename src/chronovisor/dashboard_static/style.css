@@ -2964,6 +2964,10 @@ canvas {
   grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
+.processing-track:has(.processing-step:nth-child(4):last-child) {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .processing-track:has(.processing-step:nth-child(6):last-child) {
   grid-template-columns: repeat(6, minmax(0, 1fr));
 }

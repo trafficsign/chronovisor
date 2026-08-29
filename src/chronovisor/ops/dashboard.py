@@ -40,6 +40,7 @@ from chronovisor.core.ollama import (
 )
 from chronovisor.core.omlx_adapter import OMLX_API_KEY, OMLX_BASE_URL
 from chronovisor.core.runtime_config import (
+    load_decision_router_config,
     load_reranker_config,
     load_search_embedding_config,
     runtime_identity,
@@ -2348,6 +2349,13 @@ _PROCESSING_LANES: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]], ...]
     ),
 )
 
+_SINGLE_MODEL_RECALL_STEPS = (
+    ("search", "Search", "context"),
+    ("rerank", "Rerank", "context"),
+    ("primary", "Authority", "generate"),
+    ("commit", "Commit", "vote"),
+)
+
 
 def _processing_pipeline_for_role(role: object) -> str:
     normalized = str(role or "").casefold()
@@ -2583,8 +2591,12 @@ def _build_processing_activity_snapshot() -> dict[str, Any]:
             "active_jobs": int(frontier_reviews.get("count") or 1),
         }
 
+    single_model = load_decision_router_config().is_single_model
     lanes: list[dict[str, Any]] = []
     for key, label, steps in _PROCESSING_LANES:
+        visible_steps = (
+            _SINGLE_MODEL_RECALL_STEPS if single_model and key == "recall" else steps
+        )
         active = active_by_lane.get(key)
         current_step = str((active or {}).get("current_step") or "") or None
         lanes.append(
@@ -2608,7 +2620,7 @@ def _build_processing_activity_snapshot() -> dict[str, Any]:
                     if key == "typed_graph"
                     else "waiting for work"
                 ),
-                "steps": _processing_step_rows(steps, current_step),
+                "steps": _processing_step_rows(visible_steps, current_step),
             }
         )
 

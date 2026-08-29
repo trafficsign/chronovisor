@@ -47,6 +47,11 @@ def isolate_live_runtime_routes(
             for role in roles
         ),
     )
+    monkeypatch.setattr(
+        dashboard,
+        "load_decision_router_config",
+        lambda: SimpleNamespace(is_single_model=False),
+    )
 
 
 def _reset_processing_activity_cache() -> None:
@@ -653,6 +658,11 @@ def test_processing_activity_projects_simultaneous_llm_workflows(monkeypatch) ->
 
 def test_processing_activity_projects_direct_ollama_calls(monkeypatch) -> None:
     _reset_processing_activity_cache()
+    monkeypatch.setattr(
+        dashboard,
+        "load_decision_router_config",
+        lambda: SimpleNamespace(is_single_model=True),
+    )
     monkeypatch.setattr(runtime_status, "read_status", lambda: {})
     monkeypatch.setattr(orchestrator, "_load_state", lambda: {})
     monkeypatch.setattr(
@@ -697,6 +707,12 @@ def test_processing_activity_projects_direct_ollama_calls(monkeypatch) -> None:
     assert by_key["recall"]["role"] == "Recall Processor"
     assert by_key["recall"]["phase"] == "judge_candidates"
     assert by_key["recall"]["model"] == "recall:test"
+    assert [(step["key"], step["label"]) for step in by_key["recall"]["steps"]] == [
+        ("search", "Search"),
+        ("rerank", "Rerank"),
+        ("primary", "Authority"),
+        ("commit", "Commit"),
+    ]
 
 
 def test_processing_activity_cache_single_flights_concurrent_callers(
@@ -2824,6 +2840,7 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "[data-trace-key=\"quorum\"]" in style
     assert ".processing-lane.active" in style
     assert "processing-electric-pulse" in style
+    assert "grid-template-columns: repeat(4, minmax(0, 1fr));" in style
     assert "grid-template-columns: repeat(6, minmax(0, 1fr));" in style
     assert "--processing-step-count" not in app
     assert "place-items: start;" in style
