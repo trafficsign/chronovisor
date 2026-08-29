@@ -111,9 +111,31 @@ def test_app_metadata_uses_bundled_icon(tmp_path: Path) -> None:
     assert module.ICON_SOURCE.is_file()
 
 
-def test_refresh_reenrolls_after_replacing_signed_bundle(
+@pytest.mark.parametrize(
+    ("service_status", "expected_events"),
+    [
+        (
+            "enabled",
+            [
+                "status",
+                "unregister-one",
+                "sleep:3",
+                "build",
+                "register-one",
+                "sleep:2",
+                "unregister-one",
+                "sleep:3",
+                "register-one",
+            ],
+        ),
+        ("not_registered", ["status", "build", "register-one"]),
+    ],
+)
+def test_refresh_only_reenrolls_registered_service(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    service_status: str,
+    expected_events: list[str],
 ) -> None:
     module = _module()
     app = tmp_path / module.APP_NAME
@@ -126,14 +148,17 @@ def test_refresh_reenrolls_after_replacing_signed_bundle(
         "_managed_service",
         lambda _app, _suffix: ("service.plist", "service.label"),
     )
-    monkeypatch.setattr(
-        module,
-        "_manager",
-        lambda _app, command, *_args: (
-            events.append(command)
-            or SimpleNamespace(returncode=0, stdout="", stderr="")
-        ),
-    )
+    def manager(_app, command, *_args):
+        events.append(command)
+        stdout = (
+            f'{{"services":[{{"plist":"service.plist",'
+            f'"status":"{service_status}"}}]}}'
+            if command == "status"
+            else ""
+        )
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module, "_manager", manager)
     monkeypatch.setattr(
         module,
         "build_app",
@@ -156,14 +181,5 @@ def test_refresh_reenrolls_after_replacing_signed_bundle(
     result = module.refresh_service(tmp_path, app, "dashboard")
 
     assert result["status"] == "ok"
-    assert events == [
-        "unregister-one",
-        "sleep:3",
-        "build",
-        "register-one",
-        "sleep:2",
-        "unregister-one",
-        "sleep:3",
-        "register-one",
-    ]
+    assert events == expected_events
     assert launchctl_commands == []

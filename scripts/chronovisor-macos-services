@@ -265,6 +265,21 @@ def _manager(
     )
 
 
+def _service_is_registered(app: Path, plist_name: str) -> bool:
+    completed = _manager(app, "status")
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stdout.strip() or completed.stderr.strip())
+    try:
+        services = json.loads(completed.stdout)["services"]
+        row = next(item for item in services if item.get("plist") == plist_name)
+        status = row["status"]
+    except (json.JSONDecodeError, KeyError, StopIteration, TypeError) as exc:
+        raise RuntimeError(f"invalid service status for {plist_name}") from exc
+    if not isinstance(status, str):
+        raise RuntimeError(f"invalid service status for {plist_name}")
+    return status not in {"not_registered", "not_found"}
+
+
 def refresh_service(
     home: Path,
     app: Path,
@@ -272,22 +287,33 @@ def refresh_service(
     signing_identity: str | None = None,
 ) -> dict[str, Any]:
     previous_plist: str | None = None
+    was_registered = False
     if app.is_dir():
         previous_plist, _ = _managed_service(app, suffix)
-        unregister = _manager(app, "unregister-one", previous_plist)
-        if unregister.returncode != 0:
+        try:
+            was_registered = _service_is_registered(app, previous_plist)
+        except RuntimeError as exc:
             return {
                 "status": "error",
                 "service": suffix,
-                "phase": "unregister",
-                "detail": unregister.stdout.strip() or unregister.stderr.strip(),
+                "phase": "status",
+                "detail": str(exc),
             }
-        # smd commits removal asynchronously even after unregister returns.
-        time.sleep(3)
+        if was_registered:
+            unregister = _manager(app, "unregister-one", previous_plist)
+            if unregister.returncode != 0:
+                return {
+                    "status": "error",
+                    "service": suffix,
+                    "phase": "unregister",
+                    "detail": unregister.stdout.strip() or unregister.stderr.strip(),
+                }
+            # smd commits removal asynchronously even after unregister returns.
+            time.sleep(3)
     try:
         build_app(home, app, signing_identity)
     except Exception:
-        if previous_plist is not None:
+        if was_registered and previous_plist is not None:
             _manager(app, "register-one", previous_plist)
         raise
     plist_name, label = _managed_service(app, suffix)
@@ -300,7 +326,7 @@ def refresh_service(
             "phase": "register",
             "detail": register.stdout.strip() or register.stderr.strip(),
         }
-    if previous_plist is not None:
+    if was_registered:
         # launchd can retain the replaced bundle's lightweight code
         # requirement until it sees one enrollment against the stable bundle.
         time.sleep(2)
