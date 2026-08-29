@@ -119,6 +119,7 @@ def test_refresh_reenrolls_after_replacing_signed_bundle(
     app = tmp_path / module.APP_NAME
     app.mkdir()
     events: list[str] = []
+    launchctl_commands: list[list[str]] = []
 
     monkeypatch.setattr(
         module,
@@ -146,7 +147,10 @@ def test_refresh_reenrolls_after_replacing_signed_bundle(
     monkeypatch.setattr(
         module.subprocess,
         "run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stderr=""),
+        lambda command, **_kwargs: (
+            launchctl_commands.append(command)
+            or SimpleNamespace(returncode=0, stderr="")
+        ),
     )
 
     result = module.refresh_service(tmp_path, app, "dashboard")
@@ -162,3 +166,6 @@ def test_refresh_reenrolls_after_replacing_signed_bundle(
         "sleep:3",
         "register-one",
     ]
+    assert len(launchctl_commands) == 1
+    assert launchctl_commands[0][:2] == ["/bin/launchctl", "kickstart"]
+    assert launchctl_commands[0][2].endswith("/service.label")

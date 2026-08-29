@@ -326,7 +326,6 @@ def refresh_service(
         [
             "/bin/launchctl",
             "kickstart",
-            "-k",
             f"gui/{os.getuid()}/{label}",
         ],
         check=False,
