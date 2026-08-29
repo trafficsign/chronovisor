@@ -74,13 +74,13 @@ oQ4eとoQ3のpaired比較では、oQ4eだけが通ったcaseは1、oQ3だけが�
 ## 運用状態
 
 - Chronovisor、teacher、semantic/reranker/dashboard/ingest、関連 LaunchAgent、MCP 接続は停止済み。Codex、Claude Code、共通MCP設定からChronovisorの自動起動定義も除去し、ベンチマーク中に再起動していない。
-- 旧 oMLX 0.6.2 / 0.6.3rc2 の実行物、2本のRC2実験runtime、uv package archive、旧cache、log、LaunchAgent は recoverable quarantine へ退避し、final 0.6.3 だけで測定した。`~/.omlx/bin/omlx` と app CLI はともに0.6.3。
-- ユーザーが比較対象から外した27B/100問の結果と、旧symlink/materialize test runtimeも同じrecoverable quarantineへ退避した。125Bの重みと本測定結果は保持した。
-- cutover合意前なので Chronovisor のモデル設定・routing は変更していない。
+- 旧 oMLX 0.6.2 / 0.6.3rc2 の実行物、2本のRC2実験runtime、uv package archive、旧cache、log、LaunchAgent、27B/100問の旧成果物は選定後にquarantineごと永久削除した。`~/.omlx/bin/omlx` と app CLI はともに0.6.3。
+- 不採用125B 3本、oQ3の重複HF cache、旧27B AXQ実験2本、旧3社合意のQwen 27B / Muse / Gemmaと各DFlash draftを永久削除した。表示値で約481 GBを回収し、Data volumeは使用1.2 TiB・空き633 GiBから使用718 GiB・空き1.1 TiBになった。
+- 合意回答用の生成モデル実体は採用したJundot oQ4e 99 GBだけを保持した。別用途のbge-m3、Ornith、BAAI reranker、Nemotron embed、および全benchmark raw resultは保持した。
+- Chronovisor のモデル設定・routing cutoverはまだ実行していない。
 
 ## 成果物
 
 - harness: `scripts/qwen_next_benchmark.py`
 - raw results: `/Users/trafficsign/projects/sandbox/chronovisor-qwen-next-bench/results/`
-- model/runtime workspace: `/Users/trafficsign/projects/sandbox/chronovisor-qwen-next-bench/`
-- recoverable quarantine: `/Users/trafficsign/.Trash/omlx-old-runtime-20260829-T46eRS/`
+- selected model/runtime workspace: `/Users/trafficsign/projects/sandbox/chronovisor-qwen-next-bench/`
