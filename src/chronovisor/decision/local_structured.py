@@ -1495,6 +1495,25 @@ class LocalConsensusAuditStore:
             event["models"] = [
                 model for model in models if safe_metadata_identifier(model) is not None
             ][:3]
+        authority_route = row.get("authority_route")
+        if isinstance(authority_route, Mapping):
+            event["authority_route"] = {
+                key: value
+                for key in (
+                    "role",
+                    "provider",
+                    "model",
+                    "location",
+                    "protocol",
+                    "endpoint_sha256",
+                    "revision",
+                )
+                if (value := safe_metadata_identifier(authority_route.get(key)))
+                is not None
+            }
+        for key in ("authority_model", "authority_revision"):
+            if (value := safe_metadata_identifier(row.get(key))) is not None:
+                event[key] = value
         votes = row.get("votes")
         if isinstance(votes, list):
             routes: list[dict[str, Any]] = []

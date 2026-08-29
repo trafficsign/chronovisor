@@ -1560,6 +1560,47 @@ def test_trace_store_keeps_ordered_redacted_bounded_transitions(tmp_path: Path) 
     assert not any("prompt" in row or "raw_output" in row for row in rows)
 
 
+def test_decision_trace_preserves_bounded_single_authority_identity(
+    tmp_path: Path,
+) -> None:
+    store = LocalConsensusAuditStore(tmp_path / "audit")
+    store.append(
+        {
+            "kind": "decision",
+            "request_sha256": "a" * 64,
+            "status": "agreed",
+            "authority_kind": "single_model_v1",
+            "quorum_flow": False,
+            "authority_model": "Jundot/Qwen3.8-Flash-Next-oQ4e-mtp",
+            "authority_revision": "main",
+            "authority_route": {
+                "role": "classification.primary",
+                "provider": "omlx",
+                "model": "Jundot/Qwen3.8-Flash-Next-oQ4e-mtp",
+                "location": "local",
+                "protocol": "openai",
+                "endpoint_sha256": "b" * 64,
+                "revision": "main",
+                "prompt": "never-copy-this-prompt",
+            },
+        }
+    )
+
+    row = json.loads(store.trace_file.read_text(encoding="utf-8"))
+    assert row["authority_model"] == "Jundot/Qwen3.8-Flash-Next-oQ4e-mtp"
+    assert row["authority_revision"] == "main"
+    assert row["authority_route"] == {
+        "role": "classification.primary",
+        "provider": "omlx",
+        "model": "Jundot/Qwen3.8-Flash-Next-oQ4e-mtp",
+        "location": "local",
+        "protocol": "openai",
+        "endpoint_sha256": "b" * 64,
+        "revision": "main",
+    }
+    assert "never-copy-this-prompt" not in json.dumps(row)
+
+
 def test_session_trace_records_real_phases_and_terminal_result(tmp_path: Path) -> None:
     audit_root = tmp_path / "local-consensus"
     result = _session(
