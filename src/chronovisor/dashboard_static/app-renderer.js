@@ -579,13 +579,13 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   harness.querySelector("[data-path-key=\"plan-dispatch\"]")?.setAttribute(
     "d",
     single
-      ? "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V383 Q180 393 190 393 H220"
+      ? "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V394 Q180 404 190 404 H220"
       : "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V315 Q180 325 190 325 H220"
   );
   harness.querySelector("[data-path-key=\"single-artifact\"]")?.setAttribute(
     "d",
     single
-      ? "M920 393 H1310"
+      ? "M920 404 H1299"
       : "M1106 360 H1300 Q1310 360 1310 370 V393"
   );
   updateDecisionFactMode(single);

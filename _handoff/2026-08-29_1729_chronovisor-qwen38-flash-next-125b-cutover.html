@@ -66,13 +66,13 @@ td.num{text-align:right;white-space:nowrap}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_23f41aa9cef6401eae743d7fbfae7d32","created_at":"2026-08-29T17:29:12+09:00","状態":"done","slug":"chronovisor-qwen38-flash-next-125b-cutover"}
+{"task_id":"plan_23f41aa9cef6401eae743d7fbfae7d32","created_at":"2026-08-29T17:29:12+09:00","状態":"running","slug":"chronovisor-qwen38-flash-next-125b-cutover"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor Qwen3.8-Flash-Next 125B 一括切替</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="done">done</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_23f41aa9cef6401eae743d7fbfae7d32</code></span>
 <span data-bind="created_at">2026-08-29T17:29:12+09:00</span>
 </div>
@@ -457,6 +457,8 @@ td.num{text-align:right;white-space:nowrap}
 <li><time>2026-08-30 07:11</time><span>ユーザー提示の完成画面（job <code>ac3863b1</code>）で、計画経路の前後だけが完了色となり中間が未選択になる切断を再現。該当requestにはsession正本として <code>context=65K</code> / <code>think=off</code> が存在する一方、同一requestの実行境界が <code>:authority</code> sessionを独立した前回実行と誤認して投影から除外していた。既存実Chrome testはpathの長さ・dashだけを検査し、強調path端点と同状態node/pathの接続を見ていなかったため不足。Planをrunningへ戻し、同一session→decision→artifact回帰と全強調端点の実座標検査を追加した。</span></li>
 <li><time>2026-08-30 07:12</time><span>境界判定から <code>:authority</code> sessionの誤ったstandalone扱いだけを除外。旧コードで <code>context=None</code> のRED、新コードで65K / OFF / BYPASSの連続経路へGREEN。実ChromeでA-H 8状態と単一モデル完成状態の計9画面を生成し、全強調pathの始点・終点が同状態nodeまたは隣接pathへ接続すること（切断0）を機械判定し、9枚を個別目視。Dashboard/fixture/projection 183件、Ruff、diff checkを通過。本番未反映のためrunningを維持。</span></li>
 <li><time>2026-08-30 07:18</time><span>fix commit <code>1d11ddff3c2ce9aea529953e7a7ca0910daf392c</code> をpushし、production runtime sourceを同commitへ固定。oMLXはPID <code>8073</code>・18125のまま再起動せず、Semantic/Reranker/Dashboard/LAN/Ingestだけを依存順に再登録。本番Ingestの完了トレースでcontext 131K / think lowを含む上段・下段の全経路が同じdone状態で連続し、実ブラウザでRecall/Audit/Improve/Repair/Typed Graphも1つずつ実クリック・撮影。全6件でsingle mode、125B/revision、旧3モデル要素可視0、overflow 0を確認し、A-H＋単一完成状態の強調端点切断0と合わせて受入完了。Planをdoneとした。</span></li>
+<li><time>2026-08-30 07:46</time><span>ユーザー提示の本番完成画面で、single authorityの水平railがValidated円の中心ではなく上側へ接続する不整合を再現。本番DOMの生SVG座標は <code>single-artifact Y=393</code>、artifact center <code>Y=404</code>、実画面差 <code>-8.49px</code>。従来の「同状態要素へ接触」検査は円中心接続を要求しておらず受入不足だったため、Planをrunningへ戻し、線終点Y＝円中心Yの実Chrome回帰をRED化して修正・6クリック本番受入をやり直す。</span></li>
+<li><time>2026-08-30 07:54</time><span>single authorityのprimary lane、dispatch、artifact railをすべて <code>Y=404</code> に統一し、artifact rail終点を円左端 <code>X=1299</code> へ補正。旧実装を使うREDではfixture差 <code>10.27px</code>・実Dashboard差 <code>6.81px</code>を検出し、修正後は両軸 <code>0.01px以下</code>でGREEN。A-H＋単一完成状態の実Chrome 9画面を1枚ずつ目視し、関連183件、Node構文、Ruff、diff checkを通過。本番未反映のためrunningを維持。</span></li>
 </ol>
 </section>
 </main>

@@ -448,13 +448,14 @@ def test_single_model_css_connects_live_svg_paths(tmp_path: Path) -> None:
         """<!doctype html>
 <link rel="stylesheet" href="/style.css">
 <svg class="decision-trace-harness single-model" viewBox="0 0 1500 650" width="1500" height="650">
-  <path id="dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V383 Q180 393 190 393 H220"></path>
-  <path id="single-artifact" d="M920 393 H1310"></path>
+  <path id="dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V394 Q180 404 190 404 H220"></path>
+  <path id="single-artifact" d="M920 404 H1299"></path>
   <path id="seal-hold" data-path-key="seal-hold" d="M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588"></path>
   <g class="decision-lane" data-decision-lane="primary" transform="translate(0 325)">
     <g id="trigger" transform="translate(230 0)"><circle r="10"></circle></g>
     <g id="validate" transform="translate(910 0)"><circle r="10"></circle></g>
   </g>
+  <g id="artifact" transform="translate(1310 404)"><circle r="11"></circle></g>
   <g id="hold" data-trace-key="hold" transform="translate(1460 600)"><circle r="12"></circle><text>Hold</text></g>
 </svg>
 <script src="/geometry.js"></script>
@@ -474,6 +475,9 @@ const trigger = screenPoint(document.querySelector("#trigger"), new DOMPoint(0, 
 const validate = screenPoint(document.querySelector("#validate"), new DOMPoint(0, 0));
 const dispatchEnd = screenPoint(dispatch, dispatch.getPointAtLength(dispatch.getTotalLength()));
 const singleStart = screenPoint(single, single.getPointAtLength(0));
+const singleEnd = screenPoint(single, single.getPointAtLength(single.getTotalLength()));
+const artifact = document.querySelector("#artifact");
+const artifactLeft = screenPoint(artifact, new DOMPoint(-11, 0));
 const holdDisplay = getComputedStyle(hold).display;
 const sealHoldEnd = screenPoint(sealHold, sealHold.getPointAtLength(sealHold.getTotalLength()));
 const holdCenter = holdDisplay === "none" ? null : screenPoint(hold, new DOMPoint(0, 0));
@@ -484,6 +488,8 @@ fetch("/geometry-result", {
     transform: getComputedStyle(lane).transform,
     dispatchDeltaY: Math.abs(trigger.y - dispatchEnd.y),
     singleDeltaY: Math.abs(validate.y - singleStart.y),
+    singleArtifactDeltaX: Math.abs(artifactLeft.x - singleEnd.x),
+    singleArtifactDeltaY: Math.abs(artifactLeft.y - singleEnd.y),
     holdDisplay,
     sealHoldDeltaX: holdCenter ? Math.abs(holdCenter.x - sealHoldEnd.x) : null,
     sealHoldDeltaY: holdCenter ? Math.abs(holdCenter.y - sealHoldEnd.y) : null,
@@ -564,9 +570,11 @@ fetch("/geometry-result", {
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=2)
-    assert geometry[0]["transform"] == "matrix(1, 0, 0, 1, 0, 393)"
+    assert geometry[0]["transform"] == "matrix(1, 0, 0, 1, 0, 404)"
     assert geometry[0]["dispatchDeltaY"] <= 0.01
     assert geometry[0]["singleDeltaY"] <= 0.01
+    assert geometry[0]["singleArtifactDeltaX"] <= 0.01
+    assert geometry[0]["singleArtifactDeltaY"] <= 0.01
     assert geometry[0]["holdDisplay"] != "none"
     assert geometry[0]["sealHoldDeltaX"] <= 0.01
     assert abs(geometry[0]["sealHoldDeltaY"] - geometry[0]["holdRadiusY"]) <= 0.01
@@ -1380,6 +1388,13 @@ addEventListener("DOMContentLoaded", () => {
     const harness = document.querySelector("#decision-trace-harness");
     const selectedContext = document.querySelector("[data-context-option].selected");
     const selectedReasoning = document.querySelector("[data-reasoning-key].selected");
+    const singleArtifact = document.querySelector('[data-path-key="single-artifact"]');
+    const artifact = document.querySelector('[data-trace-key="artifact"]');
+    const singleArtifactEnd = screenPoint(
+      singleArtifact,
+      singleArtifact.getPointAtLength(singleArtifact.getTotalLength())
+    );
+    const artifactLeft = screenPoint(artifact, new DOMPoint(-11, 0));
     const opacity = (node) => node ? getComputedStyle(node).opacity : null;
     scroller.scrollLeft = scroller.scrollWidth;
     const scrollerBounds = scroller.getBoundingClientRect();
@@ -1434,6 +1449,10 @@ addEventListener("DOMContentLoaded", () => {
       )?.textContent,
       fitLabel: document.querySelector('[data-plan-value="fit"]')?.textContent,
       disconnectedPathEnds: disconnectedPathEnds(),
+      singleArtifactDelta: {
+        x: Math.abs(artifactLeft.x - singleArtifactEnd.x),
+        y: Math.abs(artifactLeft.y - singleArtifactEnd.y),
+      },
       nodes: Object.fromEntries([...document.querySelectorAll("[data-trace-key]")]
         .map((node) => [node.dataset.traceKey, node.dataset.state])),
       paths,
@@ -1729,6 +1748,8 @@ addEventListener("DOMContentLoaded", () => {
     assert single_result["context"] == "65536"
     assert single_result["reasoning"] == "off"
     assert single_result["disconnectedPathEnds"] == []
+    assert single_result["singleArtifactDelta"]["x"] <= 0.01
+    assert single_result["singleArtifactDelta"]["y"] <= 0.01
 
     assert by_id[cases[0]["id"]]["tabClick"] == {
         "event": "recall",
