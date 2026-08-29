@@ -8995,7 +8995,11 @@ def _ox_prepare_tasks(
             "snapshot_sha256": snapshot.get("snapshot_sha256", ""),
             "query_sha256": rally.get("query_sha256", ""),
             "candidate_text_sha256": candidate.get("text_sha256", ""),
-            "context_sha256": [],
+            "context_sha256": [
+                ref.get("semantic_sha256", "")
+                for ref in rally.get("context_refs", [])
+                if isinstance(ref, Mapping)
+            ],
             **({"assignment": dict(assignment)} if assignment.get("probe") else {}),
         }
         payload_digest = canonical_json.canonical_json_sha256_strict(source)

@@ -7831,7 +7831,7 @@ def test_teacher_payload_does_not_resolve_context_older_than_bounded_suffix() ->
     assert texts.reads == ["query", "candidate", "new", "old"]
 
 
-def test_remote_teacher_payload_omits_context_and_binds_empty_context(
+def test_remote_teacher_payload_omits_context_and_binds_local_context_hashes(
     tmp_path: Path,
 ) -> None:
     class RemoteTeacher:
@@ -7913,7 +7913,15 @@ def test_remote_teacher_payload_omits_context_and_binds_empty_context(
     assert result.labels_written == 1
     assert [request["context"] for request in teacher.requests] == [[]]
     labels = store.read_chain(label_path)
-    assert labels[0]["payload_source"]["context_sha256"] == []
+    assert labels[0]["payload_source"]["context_sha256"] == ["private-context"]
+    assert distill._materialization_payload_source_matches(
+        labels[0]["payload_source"],
+        rally_id="rally-1",
+        candidate_id="candidate-1",
+        rally=rally,
+        snapshot_sha256="a" * 64,
+        candidate_text_sha256="candidate",
+    )
 
 
 def test_remote_probe_selection_uses_provider_safe_candidate_pair() -> None:
