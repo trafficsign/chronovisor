@@ -1385,7 +1385,7 @@ def test_ox_projection_rejects_failure_attempt_reused_with_distinct_receipts(
         )
 
 
-def test_ox_projection_rejects_stale_terminal_ramp_checkpoint(tmp_path: Path) -> None:
+def test_ox_projection_accepts_post_ramp_label_tail(tmp_path: Path) -> None:
     source, contract, work_id, _payload_digest = _ox_projection_work(tmp_path)
     label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
     first_label = store.append_chain(
@@ -1427,15 +1427,16 @@ def test_ox_projection_rejects_stale_terminal_ramp_checkpoint(tmp_path: Path) ->
         },
     )
 
-    with pytest.raises(distill.DistillationError, match="terminal ramp checkpoint is stale"):
-        distill._ox_event_projection(
-            tmp_path,
-            profile_contract_id=str(contract["artifact_id"]),
-            source_binding=source,
-            workset={"leased": 0},
-            label_path=label_path,
-            authoritative_gate={"passed": True, "reasons": []},
-        )
+    projection = distill._ox_event_projection(
+        tmp_path,
+        profile_contract_id=str(contract["artifact_id"]),
+        source_binding=source,
+        workset={"leased": 0},
+        label_path=label_path,
+        authoritative_gate={"passed": True, "reasons": []},
+    )
+
+    assert len(projection["ramp_receipts"]) == 1
 
 
 def test_ox_projection_accepts_historical_terminal_before_429_requalification(
@@ -1847,7 +1848,7 @@ def test_ox_event_projection_binds_certifying_terminal_tail_to_formal_contract(
 
 
 @pytest.mark.parametrize("max_inflight", [3, 5])
-def test_ox_event_projection_rejects_stale_configured_terminal_cap(
+def test_ox_event_projection_accepts_post_ramp_tail_for_configured_terminal_cap(
     tmp_path: Path, max_inflight: int
 ) -> None:
     source = {
@@ -1906,15 +1907,16 @@ def test_ox_event_projection_rejects_stale_configured_terminal_cap(
         },
     )
 
-    with pytest.raises(distill.DistillationError, match="terminal ramp checkpoint is stale"):
-        distill._ox_event_projection(
-            tmp_path,
-            profile_contract_id=str(contract["artifact_id"]),
-            source_binding=source,
-            workset={"leased": 0},
-            label_path=label_path,
-            authoritative_gate={"passed": False, "reasons": ["test"]},
-        )
+    projection = distill._ox_event_projection(
+        tmp_path,
+        profile_contract_id=str(contract["artifact_id"]),
+        source_binding=source,
+        workset={"leased": 0},
+        label_path=label_path,
+        authoritative_gate={"passed": False, "reasons": ["test"]},
+    )
+
+    assert projection["quality_gates"]["ramp_complete"] is False
 
 
 def test_ox_event_projection_validates_historical_contracts_before_partition(
@@ -5599,6 +5601,111 @@ def test_ox_ramp_resumes_only_for_the_same_profile_contract_and_request_revision
     assert result.ramp_cap == expected_initial[0]
     assert result.ramp_valid_receipts == expected_initial[1]
     assert result.ramp_provider_attempts == expected_initial[2]
+
+
+def test_ox_bulk_resume_does_not_reseal_completed_ramp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_distillation_dispatcher as dispatcher
+
+    config = distill.DistillationConfig(
+        teacher_profile=distill.OX_SINGLE_PROFILE,
+        ox_enabled=True,
+        teacher_max_inflight=10,
+    )
+    contract = distill._ensure_ox_profile_contract(tmp_path, config)
+    first_label = store.append_chain(
+        store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "profile": distill.LOCAL_TRIAD_PROFILE,
+        },
+    )
+    distill._append_ox_event(
+        tmp_path,
+        "ox-ramp-receipts.jsonl",
+        {
+            "event_version": 2,
+            "kind": "ox-ramp-stage",
+            "profile_contract_id": contract["artifact_id"],
+            "source_commit": contract["source_commit"],
+            "source_tree_sha256": contract["source_tree_sha256"],
+            "source_ox_identity_sha256": contract["source_ox_identity_sha256"],
+            "request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "expires_at": contract["expires_at"],
+            "cap": 10,
+            "next_cap": 10,
+            "valid_receipts": 20,
+            "attempts": 20,
+            "work_ids": [f"{index + 1:064x}" for index in range(20)],
+            "label_count": 1,
+            "label_head_sha256": first_label["record_sha256"],
+            "failure_record_count": 0,
+            "failure_head_sha256": "",
+            "captured_at": "2026-08-25T00:00:00Z",
+        },
+    )
+    store.append_chain(
+        store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        {
+            "kind": "teacher-label",
+            "status": "completed",
+            "profile": distill.LOCAL_TRIAD_PROFILE,
+        },
+    )
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / store.STATE_FILE,
+        {
+            "kind": "worker-state",
+            "status": "capture_only",
+            "ox_profile_stopped": False,
+            "ox_profile_contract_id": contract["artifact_id"],
+            "ox_ramp_cap": 10,
+            "ox_ramp_valid_receipts": 20,
+            "ox_ramp_request_revision": distill.OX_RAMP_REQUEST_REVISION,
+            "ox_ramp_provider_attempts": 20,
+        },
+    )
+    monkeypatch.setattr(
+        dispatcher, "dispatch_claimed_work", lambda *_args, **_kwargs: []
+    )
+
+    class RemoteTeacher:
+        local = False
+        role = distill.OX_TEACHER_ROLE
+
+        def evaluate(self, _payload: object) -> dict[str, object]:
+            raise AssertionError("intercepted dispatcher must not evaluate")
+
+    result = distill._run_teacher_batch(
+        root=tmp_path,
+        config=config,
+        teachers={distill.OX_TEACHER_ROLE: RemoteTeacher()},
+        snapshots={
+            "rally": {
+                "candidates": [
+                    {"candidate_id": "candidate", "text_sha256": "candidate"}
+                ]
+            }
+        },
+        rally_by_id={
+            "rally": {
+                "rally_id": "rally",
+                "query_sha256": "query",
+                "context_refs": [],
+            }
+        },
+        texts={"query": "what proves the claim", "candidate": "bounded fact"},
+        label_path=store.distillation_dir(tmp_path) / "label-ledger.jsonl",
+        label_rows=[],
+        structural_verifier=lambda *_args: None,
+    )
+
+    assert result.ramp_cap == 10
+    assert len(
+        store.read_chain(store.distillation_dir(tmp_path) / "ox-ramp-receipts.jsonl")
+    ) == 1
 
 
 def test_ox_claim_limit_one_keeps_one_batch_per_ramp_slot() -> None:

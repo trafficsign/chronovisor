@@ -2768,15 +2768,6 @@ def _ox_event_projection(
     if len(required_caps) == 1 and terminal_requalification and len(caps) > 1:
         latest_start = len(caps) - 1
     latest_caps = caps[latest_start:]
-    if (
-        ramp
-        and ramp[-1].get("cap") == required_caps[-1]
-        and (
-            ramp[-1].get("label_count") != len(label_chain)
-            or ramp[-1].get("failure_record_count") != len(failure_chain)
-        )
-    ):
-        raise DistillationError("OX terminal ramp checkpoint is stale")
     expected_suffix = (
         list(required_caps[required_caps.index(latest_caps[0]) :])
         if latest_caps and latest_caps[0] in required_caps
@@ -10397,19 +10388,10 @@ def _ox_dispatch_and_commit(
         ):
             prior_stage = row
             break
-    current_label_head = store.chain_head(label_path)
-    current_failure_head = store.chain_head(
-        store.distillation_dir(root) / "ox-failure-receipts.jsonl"
-    )
     final_receipt_emitted = (
         prior_stage is not None
         and prior_stage.get("cap") == final_cap
         and prior_stage.get("next_cap") == final_cap
-        and prior_stage.get("label_count") == current_label_head["records"]
-        and prior_stage.get("label_head_sha256") == current_label_head["head_sha256"]
-        and prior_stage.get("failure_record_count") == current_failure_head["records"]
-        and prior_stage.get("failure_head_sha256")
-        == current_failure_head["head_sha256"]
     )
     stage_event_needed = ramp_cap > previous_cap or (
         final_stage_completed and not final_receipt_emitted
