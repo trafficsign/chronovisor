@@ -3074,8 +3074,8 @@ process.stdout.write(JSON.stringify({{
         "repair": "REPAIR ≠ VOTE",
         "dispatch": "DISPATCH → SINGLE AUTHORITY",
         "artifact": "Validated",
-        "dispatchPath": "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 440 Q180 450 190 450 H220",
-        "singlePath": "M920 450 H1300 Q1310 450 1310 440 V393",
+        "dispatchPath": "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V383 Q180 393 190 393 H220",
+        "singlePath": "M920 393 H1310",
         "quorumHidden": True,
         "targetVisible": True,
     }

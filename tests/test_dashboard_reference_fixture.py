@@ -448,8 +448,8 @@ def test_single_model_css_connects_live_svg_paths(tmp_path: Path) -> None:
         """<!doctype html>
 <link rel="stylesheet" href="/style.css">
 <svg class="decision-trace-harness single-model" viewBox="0 0 1500 650" width="1500" height="650">
-  <path id="dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 440 Q180 450 190 450 H220"></path>
-  <path id="single-artifact" d="M920 450 H1300 Q1310 450 1310 440 V393"></path>
+  <path id="dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V383 Q180 393 190 393 H220"></path>
+  <path id="single-artifact" d="M920 393 H1310"></path>
   <g class="decision-lane" data-decision-lane="primary" transform="translate(0 325)">
     <g id="trigger" transform="translate(230 0)"><circle r="10"></circle></g>
     <g id="validate" transform="translate(910 0)"><circle r="10"></circle></g>
@@ -553,7 +553,7 @@ fetch("/geometry-result", {
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=2)
-    assert geometry[0]["transform"] == "matrix(1, 0, 0, 1, 0, 450)"
+    assert geometry[0]["transform"] == "matrix(1, 0, 0, 1, 0, 393)"
     assert geometry[0]["dispatchDeltaY"] <= 0.01
     assert geometry[0]["singleDeltaY"] <= 0.01
 
