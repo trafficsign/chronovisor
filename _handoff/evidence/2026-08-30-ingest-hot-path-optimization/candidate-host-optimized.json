@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "collected_at": "2026-08-30T09:56:13+09:00",
+  "command": "uv run scripts/benchmark-ingest-hot-path --cases create-miss,create-match,update-semantic --format json",
+  "runs": 5,
+  "page_count": 5539,
+  "bootstrap_ms": [359.99, 358.704, 356.524, 361.587, 428.812],
+  "create_miss_target_resolution_ms": [427.827, 417.447, 417.784, 409.383, 443.189],
+  "create_match_target_resolution_ms": [1.84, 1.701, 1.698, 1.668, 1.753],
+  "update_target_resolution_ms": [17.603, 19.103, 18.466, 19.517, 18.467],
+  "catalog_ms": [10.854, 11.315, 10.966, 10.873, 10.71, 11.032, 10.73, 11.578, 10.556, 10.732, 10.509, 11.099, 11.14, 10.55, 10.257],
+  "targeted_apply_ms": [48.305, 46.064, 48.029, 47.435, 60.188],
+  "artifact_to_next_trigger_ms": [0.015, 0.016, 0.013, 0.018, 0.011],
+  "summary": {
+    "create_miss_warm_p95_ms": 443.189,
+    "create_miss_max_ms": 443.189,
+    "create_match_warm_p95_ms": 1.84,
+    "update_target_warm_p95_ms": 19.517,
+    "catalog_max_ms": 11.578,
+    "targeted_apply_max_ms": 60.188,
+    "artifact_to_next_trigger_max_ms": 0.018,
+    "read_back_pass_rate": 1.0,
+    "semantic_strict": true,
+    "model_calls": 0,
+    "steady_state_calls": {
+      "all_pages": 0,
+      "scan_disk": 0,
+      "full_refresh": 0,
+      "targeted_apply_per_run": 1
+    }
+  },
+  "thresholds": {
+    "create_target_resolution_p95_ms": 750,
+    "create_target_resolution_max_ms": 1500,
+    "catalog_p95_ms": 250,
+    "catalog_max_ms": 500,
+    "passed": true
+  }
+}

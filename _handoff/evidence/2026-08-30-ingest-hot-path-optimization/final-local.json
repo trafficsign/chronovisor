@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "collected_at": "2026-08-30T11:06:00+09:00",
+  "status": "local_implementation_complete_managed_acceptance_pending",
+  "repository": {
+    "head": "b751542d204fffa3bd832eaaf672faeb4f5d4f2a",
+    "origin_main": "8ee34d0cfbda4c8ebc72e33c14c49eaaad4cd224",
+    "ahead": 6,
+    "task_commits": [
+      "2dcdd9c",
+      "dd9c3fc",
+      "75cb22c",
+      "48350ae",
+      "451eb93",
+      "b751542"
+    ],
+    "protected_dirty": [
+      "scripts/recall_r6_harness.py",
+      "tests/test_recall_r6_harness.py",
+      "_handoff/evidence/2026-08-29-recall-teacher-salvage/"
+    ]
+  },
+  "quality": {
+    "focused_pytest": {
+      "passed": 593,
+      "failed": 0,
+      "warnings": 1,
+      "elapsed_seconds": 39.51
+    },
+    "full_pytest": {
+      "passed": 6332,
+      "skipped": 1,
+      "failed": 0,
+      "warnings": 2,
+      "elapsed_seconds": 944.11,
+      "isolated_chronovisor_root": true
+    },
+    "ruff": "passed",
+    "mypy": "passed_90_source_files",
+    "import_linter": "passed_1_contract",
+    "architecture_baseline": "passed",
+    "large_function_policy": "passed",
+    "shell_syntax": "passed",
+    "git_diff_check": "passed"
+  },
+  "final_model_free_live_store_benchmark": {
+    "runs": 5,
+    "page_count": 5546,
+    "bootstrap_ms": [509.045, 450.803, 476.933, 470.942, 562.638],
+    "create_miss_target_resolution_ms": [
+      971.422,
+      473.37,
+      506.209,
+      459.191,
+      485.304
+    ],
+    "create_match_target_resolution_ms": [1.16, 1.351, 1.37, 2.187, 1.321],
+    "update_target_resolution_ms": [17.415, 17.477, 23.68, 17.866, 22.22],
+    "catalog_ms": [
+      10.856,
+      10.995,
+      10.912,
+      11.067,
+      10.926,
+      10.857,
+      19.705,
+      11.575,
+      19.717,
+      10.998,
+      35.332,
+      11.067,
+      11.128,
+      11.077,
+      11.268
+    ],
+    "targeted_apply_ms": [55.397, 63.905, 65.371, 78.605, 55.372],
+    "artifact_to_next_trigger_ms": [0.014, 0.036, 0.027, 0.016, 0.031],
+    "summary": {
+      "create_miss_warm_p95_ms_after_first_warmup": 506.209,
+      "create_miss_all_run_max_ms": 971.422,
+      "create_match_max_ms": 2.187,
+      "update_target_max_ms": 23.68,
+      "catalog_max_ms": 35.332,
+      "targeted_apply_max_ms": 78.605,
+      "artifact_to_next_trigger_max_ms": 0.036,
+      "read_back_pass_rate": 1.0,
+      "semantic_strict": true,
+      "model_calls": 0,
+      "steady_state_calls": {
+        "all_pages": 0,
+        "scan_disk": 0,
+        "full_refresh": 0,
+        "targeted_apply_per_run": 1
+      },
+      "thresholds_passed": true
+    }
+  },
+  "semantic_matrix": {
+    "selected": "mps-maintenance-batch-32",
+    "strict_publish_p95_ms": 1304.706,
+    "cosine_min": 0.999921918,
+    "contended_query_p99_ms": 1533.821,
+    "query_p95_regression_pct": -0.347,
+    "semantic_error_delta": 0,
+    "swap_delta_mib": 0.0,
+    "read_back_pass_rate": 1.0,
+    "ane": "n/a_no_existing_route_or_artifact"
+  },
+  "runtime": {
+    "omlx_version": "0.6.4",
+    "omlx_port": 18125,
+    "omlx_health": "healthy",
+    "omlx_default_model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+    "omlx_engine_model_count": 3,
+    "omlx_loaded_count": 2,
+    "omlx_current_model_memory_bytes": 83299305817,
+    "omlx_server_rss_kib": 20272832,
+    "swap_used_mib": 24.44,
+    "filesystem_used": "631GiB",
+    "filesystem_available": "1.2TiB"
+  },
+  "deployment": {
+    "pushed": false,
+    "restarted": false,
+    "managed_ingest_semantic_archive_commit": "7357a3621235ab2935e72c82147851fb29f922ca",
+    "managed_dashboard_archive_commit": "8ee34d0cfbda4c8ebc72e33c14c49eaaad4cd224",
+    "live_raw_canaries_completed": 0,
+    "reason": "Push requires explicit user authorization. Managed GitHub-backed services therefore cannot yet execute the local hot-path commits."
+  },
+  "evidence_sha256": {
+    "baseline.json": "5032f2f39fce69678bd4bffab169066c0da057c4c367af7fbcefa6dbbd791a15",
+    "candidate-host.json": "d8bb4b2970ca89713d486821ca5d332b2301b4d57343e2de3df3bd52a17b9431",
+    "candidate-host-optimized.json": "2a87caba3fbe0def9bdbfb6905feb114b780549ec5723a49fcbe9a14021ee7f9",
+    "semantic-matrix.json": "8ad5308db8f61d397995587fc6762eeb04008cfa4a41a0ff131831bafc89a520"
+  }
+}

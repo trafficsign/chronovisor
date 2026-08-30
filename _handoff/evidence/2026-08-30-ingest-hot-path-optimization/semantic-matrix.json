@@ -1,0 +1,90 @@
+{
+  "ane": {
+    "artifact_found": false,
+    "candidate": "n/a",
+    "reason": "No existing CoreML or ANE model artifact/backend route was present; no conversion or download was performed."
+  },
+  "candidate_selected": "mps-maintenance-batch-32",
+  "candidates": [
+    {
+      "candidate": "cpu-batch-1",
+      "cosine_vs_cpu_batch1_mean": 1.0,
+      "cosine_vs_cpu_batch1_min": 0.999999881,
+      "document_ms": [13202.479, 13092.516, 11537.043],
+      "document_p95_ms": 13202.479,
+      "query_contended_ms": [334.929, 69.252, 74.793]
+    },
+    {
+      "candidate": "cpu-batch-4",
+      "cosine_vs_cpu_batch1_mean": 0.999983668,
+      "cosine_vs_cpu_batch1_min": 0.999950349,
+      "document_ms": [18517.874, 18100.336, 21159.789],
+      "document_p95_ms": 21159.789,
+      "query_contended_ms": [309.117, 172.503, 124.637]
+    },
+    {
+      "candidate": "cpu-batch-8",
+      "cosine_vs_cpu_batch1_mean": 0.999975741,
+      "cosine_vs_cpu_batch1_min": 0.999919116,
+      "document_ms": [29828.5, 41801.144, 34113.403],
+      "document_p95_ms": 41801.144,
+      "query_contended_ms": [121.14, 116.794, 123.35]
+    },
+    {
+      "candidate": "cpu-batch-16",
+      "cosine_vs_cpu_batch1_mean": 0.999975264,
+      "cosine_vs_cpu_batch1_min": 0.999919116,
+      "document_ms": [48902.475, 49918.089, 50463.549],
+      "document_p95_ms": 50463.549,
+      "query_contended_ms": [124.218, 146.272, 866.615]
+    },
+    {
+      "candidate": "mps-maintenance-batch-32",
+      "cosine_vs_cpu_batch1_mean": 0.999971569,
+      "cosine_vs_cpu_batch1_min": 0.999921918,
+      "document_ms": [1295.39, 1296.27, 1304.706],
+      "document_p95_ms": 1304.706,
+      "query_contended_ms": [1533.821, 1313.991, 1320.425],
+      "query_contended_p99_ms": 1533.821
+    }
+  ],
+  "environment": {
+    "after": {
+      "omlx_rss_kib": 22603776,
+      "omlx_runtime_model_bytes": 83299305817,
+      "semantic_query_errors": 2,
+      "semantic_query_p95_ms": 349.597,
+      "semantic_rss_kib": 2878512,
+      "swap_used_mib": 24.44
+    },
+    "before": {
+      "omlx_rss_kib": 24946960,
+      "omlx_runtime_model_bytes": 83299305817,
+      "semantic_query_errors": 2,
+      "semantic_query_p95_ms": 350.815,
+      "semantic_rss_kib": 3031264,
+      "swap_used_mib": 24.44
+    },
+    "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+    "omlx_port": 18125,
+    "omlx_status": "healthy",
+    "query_p95_regression_pct": -0.347,
+    "swap_delta_mib": 0.0
+  },
+  "page": {
+    "bytes": 16965,
+    "documents": 14,
+    "page_id": "agi-era-lifestyle-paradigm-shift",
+    "path": "/Users/trafficsign/.chronovisor/pages/agi-era-lifestyle-and-nomadism/agi-era-lifestyle-paradigm-shift.md"
+  },
+  "runs_per_candidate": 3,
+  "schema_version": 1,
+  "selection": {
+    "cosine_gate": 0.999,
+    "document_max_gate_ms": 8000,
+    "document_p95_gate_ms": 5000,
+    "query_contended_p99_gate_ms": 2000,
+    "reason": "MPS was the only candidate that passed both strict publication latency gates while preserving cosine parity and query availability.",
+    "warmups_per_candidate": 1
+  }
+}
