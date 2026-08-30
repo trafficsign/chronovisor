@@ -246,6 +246,7 @@ function selectProcessingLane(key, focus = false) {
   if (!latestProcessingLanes.has(key)) return false;
   pinnedProcessingLaneKey = key;
   updateProcessingTraceSelection();
+  updateDecisionSvgHarness(latestDecisionTrace);
   window.dispatchEvent(new window.CustomEvent(
     "chronovisor:processing-lane-select",
     { detail: { pipeline: key } },
@@ -345,18 +346,10 @@ function renderProcessingActivity(activity) {
   });
   els.processingPanel.dataset.activeCount = String(intValue(activity?.active_count));
   document.body.dataset.processingRevision = revision;
-  if (latestDecisionTrace.request_sha256) {
-    const projection = decisionTraceProjection(latestDecisionTrace);
-    updateSingleAuthorityMeta(latestDecisionTrace, projection);
-    updateIngestJobTrace(
-      latestDecisionTrace,
-      typeof latestRenderedStatus === "undefined" ? {} : latestRenderedStatus || {},
-      isSingleModelTrace(latestDecisionTrace)
-        && projection?.single_model === true
-        && isIngestJobTrace(latestDecisionTrace),
-    );
-  }
   updateProcessingTraceSelection();
+  if (decisionTraceProjection(latestDecisionTrace)) {
+    updateDecisionSvgHarness(latestDecisionTrace);
+  }
   return true;
 }
 
@@ -734,6 +727,67 @@ function updateIngestJobTrace(trace, status, visible) {
   });
 }
 
+function updateProcessingJobTrace(lane, visible) {
+  const harness = els.decisionTraceHarness;
+  if (!harness) return;
+  if (!visible || !lane) {
+    delete harness.dataset.processingJobLane;
+    delete harness.dataset.processingJobStep;
+    return;
+  }
+
+  const steps = (Array.isArray(lane.steps) ? lane.steps : []).slice(0, 5);
+  const firstX = 680 - (steps.length - 1) * 110;
+  const xAt = (index) => firstX + index * 220;
+  const activeIndex = steps.findIndex((step) => step.key === lane.current_step);
+  const currentIndex = activeIndex < 0 ? 0 : activeIndex;
+  harness.dataset.processingJobLane = fmt(lane.key, "waiting");
+  harness.dataset.processingJobStep = fmt(lane.current_step, "waiting");
+  const flow = harness.querySelector("[data-processing-job-flow]");
+  flow?.setAttribute("aria-label", `${fmt(lane.label, lane.key)} workflow`);
+  const title = flow?.querySelector("[data-processing-job-title]");
+  if (title) title.textContent = `${fmt(lane.label, lane.key)} workflow`;
+
+  const entry = harness.querySelector("[data-processing-job-entry]");
+  if (entry && steps.length) {
+    entry.dataset.processingJobEntry = fmt(steps[currentIndex].key, "waiting");
+    entry.setAttribute(
+      "d",
+      `M1190 505 V520 Q1190 530 1180 530 H${xAt(currentIndex) + 10} `
+        + `Q${xAt(currentIndex)} 530 ${xAt(currentIndex)} 540 V560`,
+    );
+    setDecisionSvgState(entry, fmt(steps[currentIndex].status, "pending"));
+  }
+
+  harness.querySelectorAll("[data-processing-job-step-slot]").forEach((node, index) => {
+    const step = steps[index];
+    node.style.display = step ? "" : "none";
+    if (!step) return;
+    node.dataset.processingJobStep = fmt(step.key, `step-${index}`);
+    node.setAttribute("transform", `translate(${xAt(index)} 570)`);
+    const label = node.querySelector("text");
+    if (label) label.textContent = fmt(step.label, step.key);
+    setDecisionSvgState(node, fmt(step.status, "pending"));
+  });
+
+  harness.querySelectorAll("[data-processing-job-path-slot]").forEach((path, index) => {
+    const from = steps[index];
+    const to = steps[index + 1];
+    path.style.display = from && to ? "" : "none";
+    if (!from || !to) return;
+    path.dataset.processingJobTo = fmt(to.key, `step-${index + 1}`);
+    path.setAttribute("d", `M${xAt(index) + 10} 570 H${xAt(index + 1) - 10}`);
+    const fromState = fmt(from.status, "pending");
+    const toState = fmt(to.status, "pending");
+    setDecisionSvgState(
+      path,
+      fromState === "error" || toState === "error"
+        ? "error"
+        : fromState === "done" ? toState : "pending",
+    );
+  });
+}
+
 function updateSingleAuthorityMeta(trace, projection) {
   if (typeof document === "undefined") return;
   const panel = document.getElementById("decision-single-authority");
@@ -794,16 +848,27 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   harness.dataset.projectionStatus = projection ? "ok" : "missing";
   const single = isSingleModelTrace(trace) && projection?.single_model === true;
   const ingestJob = single && isIngestJobTrace(trace);
+  const processingLaneKey = selectedProcessingLaneKey || processingLaneForTrace(trace);
+  const processingLane = latestProcessingLanes.get(processingLaneKey);
+  const processingJob = single
+    && processingLaneKey !== "ingest"
+    && Array.isArray(processingLane?.steps)
+    && processingLane.steps.length > 0;
   harness.classList.toggle("single-model", single);
   harness.classList.toggle("ingest-job", ingestJob);
+  harness.classList.toggle("processing-job", processingJob);
   harness.dataset.authorityKind = single ? SINGLE_MODEL_AUTHORITY_KIND : "";
-  harness.setAttribute("viewBox", ingestJob ? "0 0 1500 750" : single ? "0 0 1500 550" : "0 0 1500 650");
-  harness.setAttribute("height", ingestJob ? "700" : single ? "513" : "607");
+  harness.setAttribute(
+    "viewBox",
+    ingestJob ? "0 0 1500 750" : processingJob ? "0 0 1500 650" : single ? "0 0 1500 550" : "0 0 1500 650",
+  );
+  harness.setAttribute("height", ingestJob ? "700" : processingJob ? "607" : single ? "513" : "607");
   updateIngestJobTrace(
     trace,
     typeof latestRenderedStatus === "undefined" ? {} : latestRenderedStatus || {},
     ingestJob,
   );
+  updateProcessingJobTrace(processingLane, processingJob);
   [
     [
       '[data-path-key="plan-dispatch"]',
@@ -881,6 +946,8 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     "#decision-trace-svg-description",
     ingestJob
       ? "Current model call detail continues into the remaining ingest job, including apply, no-op, retry and hold outcomes."
+      : processingJob
+      ? `Current model call detail continues through the selected ${fmt(processingLane.label, processingLane.key)} workflow.`
       : single
       ? "Packet, execution planning, one single authority lane, validated output and decision. Structured repair is separate from voting."
       : "Packet, execution planning, fixed primary, challenger and tie-break lanes, then one shared artifact and decision. Unsafe quorum branches to hold before the artifact; only a seal failure branches from the artifact."
@@ -1322,8 +1389,8 @@ function renderDecisionTraceFrame(trace, focusEvent = null) {
     : "Context --";
 
   const overall = decisionTimelineSteps(trace);
-  updateDecisionSvgHarness(trace, focusEvent);
   updateProcessingTraceSelection(trace);
+  updateDecisionSvgHarness(trace, focusEvent);
 
   const timelineCurrent = decisionTimelineCurrent(overall);
   const overallPosition = timelineCurrent.position;

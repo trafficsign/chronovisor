@@ -3157,6 +3157,14 @@ canvas {
   display: none;
 }
 
+.decision-trace-harness .trace-processing-job {
+  display: none;
+}
+
+.decision-trace-harness.single-model.processing-job:not(.ingest-job) .trace-processing-job {
+  display: block;
+}
+
 .decision-trace-harness.single-model.ingest-job .trace-ingest-job {
   display: block;
 }

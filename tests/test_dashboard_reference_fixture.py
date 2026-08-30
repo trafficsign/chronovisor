@@ -1340,7 +1340,11 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
     processing_steps = {
         key: [
             {"key": step_key, "label": label, "status": "pending"}
-            for step_key, label, _phase in definitions
+            for step_key, label, _phase in (
+                dashboard._SINGLE_MODEL_RECALL_STEPS
+                if key == "recall"
+                else definitions
+            )
         ]
         for key, _label, definitions in dashboard._PROCESSING_LANES
     }
@@ -1694,7 +1698,9 @@ addEventListener("DOMContentLoaded", () => {
   const routeStates = new Set(["active", "done", "error"]);
   const visible = (node) => {
     const style = getComputedStyle(node);
-    return style.display !== "none" && style.visibility !== "hidden";
+    return style.display !== "none"
+      && style.visibility !== "hidden"
+      && node.getClientRects().length > 0;
   };
   const screenPoint = (node, point) => point.matrixTransform(node.getScreenCTM());
   const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -1736,7 +1742,8 @@ addEventListener("DOMContentLoaded", () => {
     const disconnectedPathEnds = () => {
       const paths = [...document.querySelectorAll(
         "[data-path-key], [data-reasoning-output], [data-lane-path], [data-repair-lane], "
-        + "[data-ingest-job-to], [data-ingest-job-entry]"
+        + "[data-ingest-job-to], [data-ingest-job-entry], "
+        + "[data-processing-job-to], [data-processing-job-entry]"
       )].filter((node) => visible(node) && routeStates.has(node.dataset.state));
     const ends = paths.flatMap((path, pathIndex) => {
       const length = path.getTotalLength();
@@ -1744,6 +1751,8 @@ addEventListener("DOMContentLoaded", () => {
       const key = path.dataset.pathKey || path.dataset.reasoningOutput
         || (path.dataset.ingestJobEntry ? `ingest-entry:${path.dataset.ingestJobEntry}` : "")
         || (path.dataset.ingestJobTo ? `ingest:${path.dataset.ingestJobTo}` : "")
+        || (path.dataset.processingJobEntry ? `processing-entry:${path.dataset.processingJobEntry}` : "")
+        || (path.dataset.processingJobTo ? `processing:${path.dataset.processingJobTo}` : "")
         || `${lane}:${path.dataset.lanePath || path.dataset.repairLane}`;
       return [0, length].map((offset, endIndex) => ({
         key,
@@ -1754,7 +1763,8 @@ addEventListener("DOMContentLoaded", () => {
     });
     const nodes = [...document.querySelectorAll(
       "[data-trace-key], [data-overall-key], [data-plan-key], [data-context-option], "
-        + "[data-reasoning-key], [data-decision-lane-step], [data-ingest-job-step]"
+        + "[data-reasoning-key], [data-decision-lane-step], [data-ingest-job-step], "
+        + "[data-processing-job-step]"
     )].filter((node) => visible(node) && routeStates.has(node.dataset.state));
     return ends.filter((entry) => (
       !nodes.some((node) => shapeDistance(entry.point, node) <= 2.5)
@@ -1826,13 +1836,21 @@ addEventListener("DOMContentLoaded", () => {
       );
     }
     if (requestedPipeline) {
+      const requestedSteps = processingSteps[requestedPipeline];
+      renderFixture(
+        {
+          ...selected.case,
+          workflow: requestedPipeline,
+          processing_stage: requestedSteps[Math.floor(requestedSteps.length / 2)].key,
+        },
+        selected.trace,
+        `screenshot-${requestedPipeline}`,
+      );
       const row = document.querySelector(`[data-processing-lane="${requestedPipeline}"]`);
       if (!row) throw new Error(`unknown pipeline: ${requestedPipeline}`);
       row.click();
     }
-    document.querySelector(
-      requestedPipeline ? "#processing-panel" : "#decision-trace-panel"
-    )?.scrollIntoView({ block: "start" });
+    document.querySelector("#decision-trace-panel")?.scrollIntoView({ block: "start" });
     document.documentElement.dataset.fixtureReady = [
       requestedFixture,
       requestedIngestState,
@@ -2049,16 +2067,55 @@ addEventListener("DOMContentLoaded", () => {
     height: document.querySelector("#decision-trace-harness").getAttribute("height"),
     dispatchLabelY: document.querySelector("[data-dispatch-label]").getAttribute("y"),
   };
-  results[0].tabClicks = workflowKeys.map((pipeline) => {
+  const singleFixture = fixtures.find(({ case: fixture }) => fixture.id === "S");
+  renderFixture(singleFixture.case, singleFixture.trace, "lane-tabs");
+  results[0].tabClicks = workflowKeys.map((pipeline, pipelineIndex) => {
+    const activeIndex = Math.floor(processingSteps[pipeline].length / 2);
+    api.renderProcessingActivity({
+      generated_at: `2026-08-15T00:03:0${pipelineIndex}Z`,
+      revision: `lane-tab-${pipelineIndex}`,
+      active_count: 1,
+      lanes: workflowKeys.map((key) => ({
+        key,
+        label: key,
+        state: key === pipeline ? "active" : "idle",
+        current_step: key === pipeline ? processingSteps[key][activeIndex].key : null,
+        steps: processingSteps[key].map((step, index) => ({
+          ...step,
+          status: key !== pipeline ? "pending"
+            : index < activeIndex ? "done"
+              : index === activeIndex ? "active" : "pending",
+        })),
+      })),
+    });
     document.querySelector(`[data-processing-lane="${pipeline}"]`).click();
+    const ingestFlow = document.querySelector("[data-ingest-job-flow]");
+    const processingFlow = document.querySelector("[data-processing-job-flow]");
     return {
       event: selectedPipelines.at(-1),
       selected: document.querySelector('[data-processing-lane][aria-selected="true"]')
         ?.dataset.processingLane,
       tabCount: document.querySelectorAll('[data-processing-lane][role="tab"]').length,
       panelRole: document.querySelector("#decision-trace-panel")?.getAttribute("role"),
+      ingestVisible: Boolean(ingestFlow && visible(ingestFlow)),
+      processingVisible: Boolean(processingFlow && visible(processingFlow)),
+      processingLane: document.querySelector("#decision-trace-harness")
+        ?.dataset.processingJobLane || null,
+      processingCurrent: document.querySelector("#decision-trace-harness")
+        ?.dataset.processingJobStep || null,
+      processingSteps: [...document.querySelectorAll(
+        ".trace-processing-job [data-processing-job-step] > text"
+      )].filter(visible).map((node) => node.textContent.trim()),
+      processingStates: [...document.querySelectorAll(
+        ".trace-processing-job [data-processing-job-step]"
+      )].filter(visible).map((node) => node.dataset.state),
+      processingPathStates: [...document.querySelectorAll(
+        ".trace-processing-job [data-processing-job-path-slot]"
+      )].filter(visible).map((node) => node.dataset.state),
+      disconnectedPathEnds: disconnectedPathEnds(),
     };
   });
+  renderFixture(fixtures[0].case, fixtures[0].trace, "restore-after-tabs");
   document.querySelector(
     `[data-processing-lane="${fixtures[0].case.workflow}"]`
   ).click();
@@ -2499,6 +2556,38 @@ addEventListener("DOMContentLoaded", () => {
             "selected": pipeline,
             "tabCount": 6,
             "panelRole": "tabpanel",
+            "ingestVisible": pipeline == "ingest",
+            "processingVisible": pipeline != "ingest",
+            "processingLane": None if pipeline == "ingest" else pipeline,
+            "processingCurrent": (
+                None
+                if pipeline == "ingest"
+                else processing_steps[pipeline][len(processing_steps[pipeline]) // 2][
+                    "key"
+                ]
+            ),
+            "processingSteps": (
+                []
+                if pipeline == "ingest"
+                else [step["label"] for step in processing_steps[pipeline]]
+            ),
+            "processingStates": (
+                []
+                if pipeline == "ingest"
+                else [
+                    "done" if index < len(processing_steps[pipeline]) // 2 else
+                    "active" if index == len(processing_steps[pipeline]) // 2 else
+                    "pending"
+                    for index, _step in enumerate(processing_steps[pipeline])
+                ]
+            ),
+            "processingPathStates": (
+                []
+                if pipeline == "ingest"
+                else ["active"]
+                + ["pending"] * (len(processing_steps[pipeline]) - 2)
+            ),
+            "disconnectedPathEnds": [],
         }
         for pipeline in (
             "ingest",

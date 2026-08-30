@@ -282,6 +282,21 @@
               <g class="trace-node trace-hold-node" data-trace-key="hold" transform="translate(1460 600)"><circle r="12"></circle><text class="trace-hold-title" y="28">Hold</text><text class="trace-hold-reason" data-hold-reason="true" x="28" y="43">No safe quorum</text></g>
             </g>
 
+            <g class="trace-processing-job" data-processing-job-flow aria-label="Selected processing workflow">
+              <title data-processing-job-title>Selected processing workflow</title>
+              <path class="trace-path trace-lane-rail" data-processing-job-entry="waiting" d="M1190 505 V560 Q1190 570 1180 570 H1130" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-lane-rail" data-processing-job-path-slot="0" data-processing-job-to="waiting" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-lane-rail" data-processing-job-path-slot="1" data-processing-job-to="waiting" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-lane-rail" data-processing-job-path-slot="2" data-processing-job-to="waiting" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-lane-rail" data-processing-job-path-slot="3" data-processing-job-to="waiting" marker-end="url(#trace-arrow)"></path>
+
+              <g class="decision-lane-step" data-processing-job-step-slot="0" data-processing-job-step="waiting"><circle r="10"></circle><text y="32">Waiting</text></g>
+              <g class="decision-lane-step" data-processing-job-step-slot="1" data-processing-job-step="waiting"><circle r="10"></circle><text y="32">Waiting</text></g>
+              <g class="decision-lane-step" data-processing-job-step-slot="2" data-processing-job-step="waiting"><circle r="10"></circle><text y="32">Waiting</text></g>
+              <g class="decision-lane-step" data-processing-job-step-slot="3" data-processing-job-step="waiting"><circle r="10"></circle><text y="32">Waiting</text></g>
+              <g class="decision-lane-step" data-processing-job-step-slot="4" data-processing-job-step="waiting"><circle r="10"></circle><text y="32">Waiting</text></g>
+            </g>
+
             <g class="trace-ingest-job" data-ingest-job-flow aria-label="Remaining ingest job flow">
               <path class="trace-path trace-lane-rail" data-ingest-job-entry="target" d="M1330 415 V560 Q1330 570 1320 570 H1130" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-lane-rail" data-ingest-job-path="target-generate" data-ingest-job-to="generate" d="M1110 570 H910" marker-end="url(#trace-arrow)"></path>
