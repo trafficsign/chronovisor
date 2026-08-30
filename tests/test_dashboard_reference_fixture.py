@@ -967,7 +967,17 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert ".decision-console-lights i:first-child {\n  background: #ff5f57;" in style
     assert "grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);" in style
     assert "grid-template-rows: 32px 32px minmax(0, 1fr);" in style
-    assert "grid-template-rows: 32px minmax(0, 1fr) 55px;" in style
+    assert (
+        ".decision-stream-pane {\n"
+        "  grid-template-rows: 32px minmax(0, 1fr) 32px;"
+    ) in style
+    responsive_style = style.split("@media (max-width: 980px) {", 1)[1].split(
+        "@media (prefers-reduced-motion: reduce)", 1
+    )[0]
+    assert (
+        ".decision-stream-pane {\n"
+        "    grid-template-rows: 32px minmax(0, 1fr) 55px;"
+    ) in responsive_style
     assert "height: 261px;" in style
     assert "min-height: 261px;" in style
     assert ".decision-transition-feed {\n  display: grid;" in style
@@ -1811,6 +1821,8 @@ addEventListener("DOMContentLoaded", () => {
       rightReachable: harnessRight <= scrollerRight + 1,
       fitsWidth: Math.abs(harnessBounds.width - scrollerBounds.width) <= 1,
       nextPanelGap: saveHistoryBounds.top - decisionBounds.bottom,
+      generationMeterHeight: document.querySelector("#decision-generation-meter")
+        .getBoundingClientRect().height,
     };
     const paths = Object.fromEntries([
       ...[...document.querySelectorAll("[data-path-key]")]
@@ -2149,6 +2161,7 @@ addEventListener("DOMContentLoaded", () => {
         assert result["layout"]["rightReachable"] is True
         assert result["layout"]["fitsWidth"] is True
         assert result["layout"]["nextPanelGap"] == 12
+        assert result["layout"]["generationMeterHeight"] == 32
         assert result["singleLayout"]["viewBox"] == "0 0 1500 650"
         assert result["singleLayout"]["height"] == "607"
         assert result["disconnectedPathEnds"] == [], case["id"]

@@ -3691,7 +3691,7 @@ canvas {
 }
 
 .decision-stream-pane {
-  grid-template-rows: 32px minmax(0, 1fr) 55px;
+  grid-template-rows: 32px minmax(0, 1fr) 32px;
   border-left: 1px solid rgba(58, 96, 119, 0.44);
 }
 
@@ -4139,6 +4139,10 @@ canvas {
   .decision-transition-event {
     grid-template-columns: 60px 12px minmax(0, 1fr);
     padding-inline: 10px;
+  }
+
+  .decision-stream-pane {
+    grid-template-rows: 32px minmax(0, 1fr) 55px;
   }
 
   .decision-generation-meter {
