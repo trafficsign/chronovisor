@@ -287,7 +287,9 @@ def apply_page_writes(items: Iterable[PreparedWikiWrite]) -> dict[str, Any]:
     written: list[PreparedWikiWrite] = []
     enforced: dict[str, list[dict[str, Any]]] = {}
     try:
-        with chronovisor_mutation_lock():
+        with chronovisor_mutation_lock(
+            changed_paths=[item.path for item in plans],
+        ):
             try:
                 for item in plans:
                     # The comparison sits inside the shared lock immediately

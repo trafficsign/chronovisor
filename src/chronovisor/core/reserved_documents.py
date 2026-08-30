@@ -8,6 +8,8 @@ from pathlib import Path, PurePosixPath
 
 from chronovisor.core.canonical_document import (
     CanonicalDocument,
+    extract_markdown_links,
+    parse_document,
     serialize_document,
     validate_canonical_document,
 )
@@ -52,7 +54,7 @@ def stable_page_index_entry(data: bytes, relative_path: str) -> PageIndexEntry |
 def render_pages_index(entries: Iterable[PageIndexEntry]) -> bytes:
     """Render the deterministic portable page index, excluding reserved docs."""
 
-    rows: list[str] = []
+    rows: dict[str, str] = {}
     for entry in sorted(entries, key=lambda item: item.relative_path):
         path = PurePosixPath(entry.relative_path)
         if (
@@ -62,15 +64,24 @@ def render_pages_index(entries: Iterable[PageIndexEntry]) -> bytes:
             or path.name in RESERVED_FILENAMES
         ):
             continue
-        destination = entry.relative_path
-        if any(character.isspace() for character in destination):
-            destination = f"<{destination}>"
-        label = entry.title.strip() or path.stem
-        suffix = f" - {entry.description.strip()}" if entry.description.strip() else ""
-        rows.append(f"- [{_markdown_label(label)}]({destination}){suffix}")
+        rows[entry.relative_path] = _render_page_index_row(entry)
+    return _render_page_index_rows(rows)
+
+
+def _render_page_index_row(entry: PageIndexEntry) -> str:
+    path = PurePosixPath(entry.relative_path)
+    destination = entry.relative_path
+    if any(character.isspace() for character in destination):
+        destination = f"<{destination}>"
+    label = entry.title.strip() or path.stem
+    suffix = f" - {entry.description.strip()}" if entry.description.strip() else ""
+    return f"- [{_markdown_label(label)}]({destination}){suffix}"
+
+
+def _render_page_index_rows(rows: dict[str, str]) -> bytes:
     body = "# Chronovisor pages\n"
     if rows:
-        body += "\n" + "\n".join(rows) + "\n"
+        body += "\n" + "\n".join(rows[path] for path in sorted(rows)) + "\n"
     return serialize_document(
         CanonicalDocument(
             metadata={"okf_version": OKF_VERSION},
@@ -114,6 +125,73 @@ def rebuild_pages_index(pages_dir: Path) -> bytes:
         backup=False,
         min_free_bytes=0,
     )
+    return rendered
+
+
+def update_pages_index(pages_dir: Path, changed_paths: Iterable[Path]) -> bytes | None:
+    """Apply an exact page receipt to the portable index without a corpus scan."""
+
+    from chronovisor.core.durable_state import atomic_write_bytes
+    from chronovisor.core.index_store import canonical_document_bytes
+
+    root = pages_dir.resolve(strict=True)
+    changes: dict[str, PageIndexEntry | None] = {}
+    for supplied in dict.fromkeys(Path(path) for path in changed_paths):
+        path = supplied.expanduser().resolve(strict=False)
+        try:
+            relative_path = path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        relative = PurePosixPath(relative_path)
+        if relative.name in RESERVED_FILENAMES or relative.suffix != ".md":
+            continue
+        entry: PageIndexEntry | None = None
+        if path.is_file():
+            data = canonical_document_bytes(path, root)
+            if data is None:
+                raise ValueError(f"changed page is not canonical: {path}")
+            entry = stable_page_index_entry(data, relative_path)
+        changes[relative_path] = entry
+
+    if not changes:
+        return None
+
+    index_path = root / "index.md"
+    try:
+        current = index_path.read_bytes()
+        document = parse_document(current)
+        if str(document.metadata.get("okf_version")) != OKF_VERSION:
+            raise ValueError("pages index OKF version mismatch")
+        lines = document.body.decode("utf-8").splitlines()
+        if not lines or lines[0] != "# Chronovisor pages":
+            raise ValueError("pages index heading mismatch")
+        rows: dict[str, str] = {}
+        for line in lines[1:]:
+            if not line:
+                continue
+            destinations = extract_markdown_links(line)
+            if not line.startswith("- [") or not destinations:
+                raise ValueError("pages index contains an unsupported row")
+            destination = destinations[0]
+            if destination in rows:
+                raise ValueError(f"duplicate pages index destination: {destination}")
+            rows[destination] = line
+    except (FileNotFoundError, UnicodeDecodeError, ValueError):
+        return rebuild_pages_index(root)
+
+    for relative_path, entry in changes.items():
+        if entry is None:
+            rows.pop(relative_path, None)
+        else:
+            rows[relative_path] = _render_page_index_row(entry)
+    rendered = _render_page_index_rows(rows)
+    if rendered != current:
+        atomic_write_bytes(
+            index_path,
+            rendered,
+            backup=False,
+            min_free_bytes=0,
+        )
     return rendered
 
 

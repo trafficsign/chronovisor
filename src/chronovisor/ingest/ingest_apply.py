@@ -58,7 +58,9 @@ def apply_prepared_operations(
     # The same lock is used by the autonomous correction lane. This prevents
     # Stop-hook ingest and correction from both passing their read checks and
     # then replacing the same page with different snapshots.
-    with chronovisor_mutation_lock():
+    with chronovisor_mutation_lock(
+        changed_paths=[entry.path for entry in planned],
+    ):
         try:
             for entry in planned:
                 if (

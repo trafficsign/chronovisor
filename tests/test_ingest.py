@@ -11184,6 +11184,10 @@ class TestReadBackVerification:
         assert phases == [
             "semantic-publish:start",
             "semantic-publish:done",
+            "claim-publish:start",
+            "claim-publish:done",
+            "state-register:start",
+            "state-register:done",
             "read-back:start",
             "read-back:done",
         ]
@@ -14866,7 +14870,7 @@ class TestLogFailuresDontBreakRollback:
         correction = "---\ntitle: X\nupdated: 2026-07-11\nstatus: stable\ntype: knowledge\n---\nfrontier correction\n"
 
         @contextmanager
-        def correction_wins_before_ingest_commit():
+        def correction_wins_before_ingest_commit(**_kwargs):
             target.write_text(correction)
             yield
 

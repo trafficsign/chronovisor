@@ -190,10 +190,12 @@ def chronovisor_mutation_lock(
     path: Path | None = None,
     *,
     pages_dir: Path | None = None,
+    changed_paths: Iterable[Path] | None = None,
 ) -> Iterator[None]:
     """Serialize writers; nested same-thread mutations share the outer lease."""
 
     target_pages = pages_dir or CHRONOVISOR_ROOT / "pages"
+    exact_changes = None if changed_paths is None else tuple(changed_paths)
     operation_root = target_pages.parent
     lock_path = path or operation_root / "runtime" / "chronovisor-mutation.lock"
     with okf_runtime_operation(operation_root) as startup:
@@ -207,9 +209,13 @@ def chronovisor_mutation_lock(
                     try:
                         from chronovisor.core.reserved_documents import (
                             rebuild_pages_index,
+                            update_pages_index,
                         )
 
-                        rebuild_pages_index(target_pages)
+                        if exact_changes is None:
+                            rebuild_pages_index(target_pages)
+                        else:
+                            update_pages_index(target_pages, exact_changes)
                     except Exception:
                         if completed:
                             raise

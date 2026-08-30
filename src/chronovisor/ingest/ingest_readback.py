@@ -153,6 +153,7 @@ def _refresh_ingest_derived_artifacts(
                 update_embeddings(page_ids=changed_pages, strict=True)
             except Exception as exc:
                 runtime._safe_log(f"ingest | semantic index enqueue failed: {exc}")
+        with runtime._host_phase("claim-publish"):
             try:
                 from chronovisor.core.claims import append_page_claims
 
@@ -163,6 +164,7 @@ def _refresh_ingest_derived_artifacts(
                 )
             except Exception as exc:
                 runtime._safe_log(f"ingest | claim ledger failed (non-fatal): {exc}")
+        with runtime._host_phase("state-register"):
             try:
                 from chronovisor.ingest.state_register import refresh_state_register
 

@@ -96,30 +96,84 @@ def test_legacy_mutation_does_not_create_or_validate_final_index(
 
 def test_mutation_projection_tracks_update_deprecate_restore_and_delete(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _fresh_root(tmp_path)
     pages = root / "pages"
     path = pages / "alpha.md"
+    untouched = pages / "untouched.md"
 
     with page_mutation.chronovisor_mutation_lock(pages_dir=pages):
         path.write_bytes(_page("Alpha"))
+        untouched.write_bytes(_page("Untouched"))
     assert b"[Alpha](alpha.md)" in (pages / "index.md").read_bytes()
+    assert b"[Untouched](untouched.md)" in (pages / "index.md").read_bytes()
 
-    with page_mutation.chronovisor_mutation_lock(pages_dir=pages):
+    def unexpected_full_rebuild(_pages_dir: Path) -> bytes:
+        raise AssertionError("exact mutation receipts must not rescan all pages")
+
+    monkeypatch.setattr(
+        reserved_documents,
+        "rebuild_pages_index",
+        unexpected_full_rebuild,
+    )
+
+    with page_mutation.chronovisor_mutation_lock(
+        pages_dir=pages,
+        changed_paths=[path],
+    ):
         atomic_write(path, _page("Alpha updated").decode())
     assert b"[Alpha updated](alpha.md)" in (pages / "index.md").read_bytes()
+    assert b"[Untouched](untouched.md)" in (pages / "index.md").read_bytes()
 
-    with page_mutation.chronovisor_mutation_lock(pages_dir=pages):
+    with page_mutation.chronovisor_mutation_lock(
+        pages_dir=pages,
+        changed_paths=[path],
+    ):
         atomic_write(path, _page("Alpha updated", status="deprecated").decode())
     assert b"alpha.md" not in (pages / "index.md").read_bytes()
+    assert b"[Untouched](untouched.md)" in (pages / "index.md").read_bytes()
 
-    with page_mutation.chronovisor_mutation_lock(pages_dir=pages):
+    with page_mutation.chronovisor_mutation_lock(
+        pages_dir=pages,
+        changed_paths=[path],
+    ):
         atomic_write(path, _page("Alpha restored").decode())
     assert b"[Alpha restored](alpha.md)" in (pages / "index.md").read_bytes()
 
-    with page_mutation.chronovisor_mutation_lock(pages_dir=pages):
+    with page_mutation.chronovisor_mutation_lock(
+        pages_dir=pages,
+        changed_paths=[path],
+    ):
         path.unlink()
     assert b"alpha.md" not in (pages / "index.md").read_bytes()
+    assert b"[Untouched](untouched.md)" in (pages / "index.md").read_bytes()
+
+
+def test_nonpage_receipt_does_not_rebuild_pages_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _fresh_root(tmp_path)
+    pages = root / "pages"
+    index_before = (pages / "index.md").read_bytes()
+    system_path = root / "system" / "current-state.md"
+
+    def unexpected_full_rebuild(_pages_dir: Path) -> bytes:
+        raise AssertionError("a system-only mutation must not scan pages")
+
+    monkeypatch.setattr(
+        reserved_documents,
+        "rebuild_pages_index",
+        unexpected_full_rebuild,
+    )
+    with page_mutation.chronovisor_mutation_lock(
+        pages_dir=pages,
+        changed_paths=[system_path],
+    ):
+        system_path.write_bytes(_page("Current State"))
+
+    assert (pages / "index.md").read_bytes() == index_before
 
 
 def test_refresh_failure_does_not_mask_original_mutation_error(

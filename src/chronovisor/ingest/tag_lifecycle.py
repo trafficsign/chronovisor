@@ -137,7 +137,7 @@ def record_new_tag(tag: str, reason: str = "ingest auto-gen") -> None:
         path = _changelog_path()
         today = date.today().isoformat()
         line = f"- {today} | {tag} | {reason}"
-        with chronovisor_mutation_lock():
+        with chronovisor_mutation_lock(changed_paths=[path]):
             path.parent.mkdir(parents=True, exist_ok=True)
             if not path.exists():
                 atomic_write(path, _TAG_CHANGELOG_HEADER.format(today=today))
