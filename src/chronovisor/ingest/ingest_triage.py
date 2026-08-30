@@ -33,7 +33,6 @@ _structured_chat_transport = _runtime_call("_structured_chat_transport")
 _structured_generate_transport = _runtime_call("_structured_generate_transport")
 _triage_plan_validation_issues = _runtime_call("_triage_plan_validation_issues")
 _validate_triage_plan = _runtime_call("_validate_triage_plan")
-all_pages = _runtime_call("all_pages")
 load_ingest_config = _runtime_call("load_ingest_config")
 required_structured_context_tokens = _runtime_call("required_structured_context_tokens")
 LocalStructuredSession = _runtime_call("LocalStructuredSession")
@@ -135,8 +134,16 @@ def triage(
     raw files un-marked so the next tick retries them, while a legitimate
     empty plan should mark the raws processed to avoid forever-retry.
     """
+    from chronovisor.core.index_store import get_store
+
+    store = get_store()
+    store.ensure_loaded()
     existing_folders = sorted(
-        {p.parent.name for p in all_pages() if p.parent != _runtime().PAGES_DIR}
+        {
+            parts[1]
+            for key in store.all_canonical_page_keys()
+            if len(parts := key.split("/")) > 2 and parts[0] == "pages"
+        }
     )
     catalog_lines = [
         (
@@ -181,7 +188,8 @@ def triage(
     for r in results:
         catalog_lines.append(f"  [[{r.page_id}]] — {r.title}")
     _safe_log(
-        f"ingest | triage catalog filtered to {len(results)} pages (of {len(list(all_pages()))} total)"
+        f"ingest | triage catalog filtered to {len(results)} pages "
+        f"(of {store.page_count()} total)"
     )
 
     catalog = "\n".join(catalog_lines)

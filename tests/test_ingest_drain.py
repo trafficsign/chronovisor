@@ -121,6 +121,29 @@ def test_release_ingest_runner_unloads_only_when_resident(
     assert events[0][0:2] == ("info", "ingest drain | runner released")
 
 
+def test_main_bootstraps_index_before_first_drain(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    events: list[str] = []
+
+    class Store:
+        def refresh(self) -> None:
+            events.append("index")
+
+    monkeypatch.setattr("chronovisor.core.index_store.get_store", lambda: Store())
+    monkeypatch.setattr(
+        ingest_drain,
+        "drain",
+        lambda **_kwargs: events.append("drain") or {"status": "drained"},
+    )
+
+    assert ingest_drain._main_locked(["--max-batches", "1"]) == 0
+
+    assert events == ["index", "drain"]
+    assert json.loads(capsys.readouterr().out) == {"status": "drained"}
+
+
 def test_release_ingest_runner_does_not_wake_absent_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

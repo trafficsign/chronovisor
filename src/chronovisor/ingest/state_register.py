@@ -231,7 +231,7 @@ def refresh_state_register(
     from chronovisor.core.index_store import get_store
 
     store = get_store()
-    store.refresh()
+    store.ensure_loaded()
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
     candidates: list[dict[str, Any]]

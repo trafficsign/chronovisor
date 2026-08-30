@@ -105,7 +105,7 @@ def test_refresh_state_register_writes_recent_pages(
     path = tmp_path / "current-state.md"
 
     class FakeStore:
-        def refresh(self) -> None:
+        def ensure_loaded(self) -> None:
             pass
 
         def meta(self, page_id: str):
@@ -171,7 +171,7 @@ def test_refresh_preserves_approved_current_state_correction(
     assert page_mutation.apply_prepared_mutations([prepared])["status"] == "applied"
 
     class FakeStore:
-        def refresh(self) -> None:
+        def ensure_loaded(self) -> None:
             pass
 
         def meta(self, page_id: str):
@@ -220,7 +220,7 @@ def test_refresh_state_register_skips_placeholder_pages(
     )
 
     class FakeStore:
-        def refresh(self) -> None:
+        def ensure_loaded(self) -> None:
             pass
 
         def meta(self, page_id: str):
@@ -275,7 +275,7 @@ def test_refresh_state_register_skips_deprecated_pages(
     )
 
     class FakeStore:
-        def refresh(self) -> None:
+        def ensure_loaded(self) -> None:
             pass
 
         def meta(self, page_id: str):

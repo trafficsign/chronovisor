@@ -46,7 +46,7 @@ def verify_changed_pages_read_back(page_ids: list[str], *, top_n: int = 10) -> d
         from chronovisor.core.search import search
 
         store = get_store()
-        store.refresh()
+        store.ensure_loaded()
     except Exception as e:
         runtime._safe_log(f"ingest | read-back unavailable: {e}")
         return {"checked": 0, "passed": 0, "failed": [{"error": str(e)}]}
@@ -134,17 +134,6 @@ def _refresh_ingest_derived_artifacts(
     """Refresh rebuildable indexes and return the normal read-back result."""
 
     runtime = _runtime()
-    try:
-        runtime._rebuild_index()
-    except Exception as exc:
-        runtime._safe_log(f"ingest | index.md rebuild failed (non-fatal): {exc}")
-
-    try:
-        from chronovisor.core.index_store import get_store
-
-        get_store().refresh()
-    except Exception as exc:
-        runtime._safe_log(f"ingest | index_store refresh failed: {exc}")
 
     if changed_pages:
         try:

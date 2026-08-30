@@ -134,6 +134,15 @@ def apply_prepared_operations(
                     written.append(entry)
                     updated.append(entry.page_id)
                     _safe_log(f"ingest | updated {entry.page_id}")
+
+            changed_ids = set(created) | set(updated)
+            changed_paths = [
+                entry.path for entry in planned if entry.page_id in changed_ids
+            ]
+            if changed_paths:
+                from chronovisor.core.index_store import get_store
+
+                get_store().apply_changes(changed_paths)
         except Exception as write_err:
             # Best-effort rollback. Each revert is gated by a CAS check: only
             # restore if the file still contains exactly what we wrote. If

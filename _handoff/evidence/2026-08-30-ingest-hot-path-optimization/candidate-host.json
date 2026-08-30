@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "collected_at": "2026-08-30T09:18:09+09:00",
+  "command": "uv run scripts/benchmark-ingest-hot-path --cases create-miss,create-match,update-semantic --format json",
+  "bootstrap_ms": 430.997,
+  "page_count": 5536,
+  "cases": {
+    "create-miss": {
+      "catalog_ms": 10.607,
+      "target_resolution_ms": 1124.088,
+      "matched": false,
+      "model_calls": 0
+    },
+    "create-match": {
+      "catalog_ms": 10.87,
+      "target_resolution_ms": 1.38,
+      "matched": true,
+      "model_calls": 0
+    },
+    "update-semantic": {
+      "catalog_ms": 10.554,
+      "target_resolution_ms": 17.573,
+      "targeted_apply_ms": 50.144,
+      "semantic_publish_calls": 1,
+      "semantic_strict": true,
+      "artifact_to_next_trigger_ms": 0.012,
+      "read_back": {
+        "checked": 1,
+        "passed": 1,
+        "failed": []
+      },
+      "model_calls": 0
+    }
+  },
+  "steady_state_calls": {
+    "all_pages": 0,
+    "scan_disk": 0,
+    "full_refresh": 0,
+    "targeted_apply": 1
+  }
+}

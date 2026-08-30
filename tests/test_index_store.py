@@ -402,6 +402,142 @@ class TestRefreshWindow:
         assert store.meta("p")["title"] == "After"
 
 
+class TestTargetedChanges:
+    def test_created_page_is_visible_without_a_second_full_scan(
+        self,
+        isolated_index: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _seed(
+            isolated_index,
+            "existing.md",
+            "---\ntitle: Existing\nupdated: 2026-01-01\n---\nbody\n",
+        )
+        store = IndexStore()
+        store.refresh()
+        created = _seed(
+            isolated_index,
+            "nested/created.md",
+            "---\ntitle: Created\nupdated: 2026-08-30\n---\nnew body\n",
+        )
+
+        monkeypatch.setattr(
+            store,
+            "_scan_disk",
+            lambda: pytest.fail("targeted update performed a full disk scan"),
+        )
+
+        store.apply_changes([created])
+
+        assert store.meta("created") == {
+            "page_id": "created",
+            "title": "Created",
+            "updated": "2026-08-30",
+            "uid": "",
+            "classification_primary": "",
+            "classification_notation": "",
+            "classification_status": "unclassified",
+            "path": str(created.resolve()),
+            "relative_path": "nested/created.md",
+            "mtime_ns": created.stat().st_mtime_ns,
+            "is_system": False,
+            "namespace": "pages",
+            "description": "",
+            "summary": "",
+            "recall_questions": [],
+            "status": "stable",
+            "superseded_by": "",
+            "page_type": "knowledge",
+            "entities": [],
+            "sensitivity": "normal",
+        }
+        assert store.page_count() == 2
+
+    def test_duplicate_receipt_path_is_parsed_once(
+        self,
+        isolated_index: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store = IndexStore()
+        store.refresh()
+        created = _seed(
+            isolated_index,
+            "created.md",
+            "---\ntitle: Created\nupdated: 2026-08-30\n---\nbody\n",
+        )
+        real_build = store._build_entry
+        calls: list[Path] = []
+
+        def build(*args, **kwargs):
+            calls.append(args[1])
+            return real_build(*args, **kwargs)
+
+        monkeypatch.setattr(store, "_build_entry", build)
+
+        store.apply_changes([created, created])
+
+        assert calls == [created.resolve()]
+
+    def test_other_process_loads_new_generation_without_a_full_scan(
+        self,
+        isolated_index: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _seed(
+            isolated_index,
+            "existing.md",
+            "---\ntitle: Existing\nupdated: 2026-01-01\n---\nbody\n",
+        )
+        writer = IndexStore()
+        reader = IndexStore()
+        writer.refresh()
+        reader.refresh()
+        created = _seed(
+            isolated_index,
+            "created.md",
+            "---\ntitle: Created\nupdated: 2026-08-30\n---\nbody\n",
+        )
+        writer.apply_changes([created])
+        monkeypatch.setattr(
+            reader,
+            "_scan_disk",
+            lambda: pytest.fail("cache generation reload performed a full scan"),
+        )
+
+        reader.refresh_if_stale(max_age_seconds=0)
+
+        assert reader.meta("created")["title"] == "Created"
+
+    def test_persist_failure_restores_previous_in_memory_snapshot(
+        self,
+        isolated_index: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _seed(
+            isolated_index,
+            "existing.md",
+            "---\ntitle: Existing\nupdated: 2026-01-01\n---\nbody\n",
+        )
+        store = IndexStore()
+        store.refresh()
+        created = _seed(
+            isolated_index,
+            "created.md",
+            "---\ntitle: Created\nupdated: 2026-08-30\n---\nbody\n",
+        )
+        monkeypatch.setattr(
+            store,
+            "_persist",
+            lambda _generation: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        with pytest.raises(OSError, match="disk full"):
+            store.apply_changes([created])
+
+        assert store.meta("created") is None
+        assert store.page_count() == 1
+
+
 # ---------------------------------------------------------------------------
 # Schema migration: v1 cache must invalidate and rebuild on first refresh
 # ---------------------------------------------------------------------------

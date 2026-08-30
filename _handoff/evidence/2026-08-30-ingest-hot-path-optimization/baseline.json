@@ -48,6 +48,16 @@
     "warm_full_refresh_ms": 406.555,
     "canonical_enumeration_ms": 5977.644
   },
+  "hot_path": {
+    "create_target_resolution_ms": 13255.0,
+    "all_pages_per_create_resolution": 2,
+    "validate_to_vote_max_ms": 26867.0,
+    "triage_catalog_all_pages_calls": 2,
+    "triage_catalog_ms_range": [12000.0, 21000.0],
+    "strict_semantic_14_document_ms": 66600.0,
+    "artifact_to_next_triage_median_ms": 69871.0,
+    "artifact_to_next_triage_max_ms": 111445.0
+  },
   "notes": [
     "Production services were observed only; no process or runtime state was changed during freeze.",
     "The checked-out Plan had stale port 8125 and corpus count 5535; live values are 18125 and 5536 pages (5542 including system).",

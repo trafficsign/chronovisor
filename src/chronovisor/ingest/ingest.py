@@ -53,8 +53,6 @@ from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     PAGES_DIR,
     SYSTEM_DIR,
-    all_pages,
-    find_page,
     page_id_from_path,
 )
 from chronovisor.decision import decision_authority
@@ -817,10 +815,23 @@ def _triage_plan_validation_issues(
         return issues
 
     operations = [entry for entry in value if isinstance(entry, dict)]
+    effective_target_cache: dict[str, str | None] = {}
+
+    def effective_target(operation: dict) -> str | None:
+        key = json.dumps(
+            operation,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if key not in effective_target_cache:
+            effective_target_cache[key] = _effective_triage_target_filename(operation)
+        return effective_target_cache[key]
+
     reserved_system_keys = _reserved_system_page_collision_keys()
     for index, operation in enumerate(operations):
         filename = (
-            _effective_triage_target_filename(operation)
+            effective_target(operation)
             if resolve_effective_targets
             else operation.get("filename")
         )
@@ -897,7 +908,7 @@ def _triage_plan_validation_issues(
     _collapsed, collisions = distinct_target_collisions(
         operations,
         effective_filename=(
-            _effective_triage_target_filename if resolve_effective_targets else None
+            effective_target if resolve_effective_targets else None
         ),
     )
     for collision in collisions:
@@ -1150,7 +1161,7 @@ def _relative_page_filename(path: Path) -> str:
 def _existing_candidate_metas() -> list[dict]:
     try:
         store = get_store()
-        store.refresh()
+        store.ensure_loaded()
         metas: list[dict] = []
         for item in store.all_pages_meta(include_system=False):
             if item.get("page_type") == "reference":
@@ -1165,18 +1176,28 @@ def _existing_candidate_metas() -> list[dict]:
         return []
 
 
-def _candidate_score_for_create(op: dict, meta: dict) -> tuple[float, str]:
-    requested_title = _normalize_match_text(_op_title_or_slug(op))
+def _candidate_score_for_create(
+    op: dict,
+    meta: dict,
+    *,
+    needle: tuple[str, str] | None = None,
+) -> tuple[float, str]:
+    if needle is None:
+        requested_title = _normalize_match_text(_op_title_or_slug(op))
+        requested_filename = op.get("filename")
+        requested_slug = ""
+        if isinstance(requested_filename, str):
+            try:
+                requested_slug = _normalize_for_loose_page_id(
+                    _safe_resolve_page_path(requested_filename).stem
+                )
+            except IngestApplyError:
+                requested_slug = _normalize_for_loose_page_id(
+                    Path(requested_filename).stem
+                )
+    else:
+        requested_title, requested_slug = needle
     existing_title = _normalize_match_text(meta.get("title"))
-    requested_filename = op.get("filename")
-    requested_slug = ""
-    if isinstance(requested_filename, str):
-        try:
-            requested_slug = _normalize_for_loose_page_id(
-                _safe_resolve_page_path(requested_filename).stem
-            )
-        except IngestApplyError:
-            requested_slug = _normalize_for_loose_page_id(Path(requested_filename).stem)
     existing_slug = _normalize_for_loose_page_id(str(meta.get("page_id", "")))
 
     if requested_slug and requested_slug == existing_slug:
@@ -1240,11 +1261,16 @@ def _find_existing_create_target(op: dict) -> tuple[Path, str, float] | None:
     except IngestApplyError:
         return None
 
+    needle = (
+        _normalize_match_text(_op_title_or_slug(op)),
+        _normalize_for_loose_page_id(requested_path.stem),
+    )
+
     best_path: Path | None = None
     best_reason = ""
     best_score = 0.0
     for meta in _existing_candidate_metas():
-        score, reason = _candidate_score_for_create(op, meta)
+        score, reason = _candidate_score_for_create(op, meta, needle=needle)
         if score > best_score:
             try:
                 best_path = Path(str(meta["path"]))
@@ -1257,7 +1283,7 @@ def _find_existing_create_target(op: dict) -> tuple[Path, str, float] | None:
         return best_path, best_reason, best_score
 
     for meta in _search_candidate_metas(op):
-        score, reason = _candidate_score_for_create(op, meta)
+        score, reason = _candidate_score_for_create(op, meta, needle=needle)
         if score >= 0.88:
             try:
                 return Path(str(meta["path"])), f"search-{reason}", score
@@ -1878,7 +1904,7 @@ def _search_related_pages(
         bm25.build()
         results = bm25.query(" ".join(keywords), top_n=top_n)
         index = get_store()
-        index.refresh()
+        index.ensure_loaded()
         paths = [
             path
             for result in results
@@ -1899,7 +1925,16 @@ def _search_related_pages(
     # Fallback: simple keyword matching
     query_terms = [k.lower() for k in keywords]
     scored = []
-    for path in all_pages():
+    index = get_store()
+    index.ensure_loaded()
+    for page_id in sorted(index.all_page_ids()):
+        path = stable_indexed_document_path(
+            index.meta(page_id),
+            pages_dir=PAGES_DIR,
+            system_dir=SYSTEM_DIR,
+        )
+        if path is None:
+            continue
         content = path.read_text()
         content_lower = content.lower()
         fm_match = re.search(r"title:\s*(.+)", content)
@@ -2568,30 +2603,30 @@ def _normalize_for_loose_page_id(name: str) -> str:
 
 
 def _find_page_casefold(page_id: str) -> Path | None:
-    """find_page with macOS-case-insensitive + NFC-normalized semantics."""
-    direct = find_page(page_id)
-    if direct is not None and canonical_document_path(
-        direct,
-        PAGES_DIR,
-        namespace="pages",
-        reserved_filenames=PAGE_RESERVED_FILENAMES,
-        require_stable=True,
-    ) is not None:
-        # ``Path.rglob('foo.md')`` can return a query-spelled path on a
-        # case-insensitive filesystem even when the directory entry is
-        # actually ``Foo.md``.  Preserve the filesystem spelling because the
-        # page_id is a durable identity surfaced in ingest results and logs.
-        try:
-            for candidate in direct.parent.iterdir():
-                if candidate.is_file() and candidate.samefile(direct):
-                    return candidate
-        except OSError:
-            pass
+    """Resolve exact/casefold identity from the bootstrapped page snapshot."""
+
+    store = get_store()
+    store.ensure_loaded()
+    direct = stable_indexed_document_path(
+        store.meta(page_id),
+        pages_dir=PAGES_DIR,
+        system_dir=SYSTEM_DIR,
+    )
+    if direct is not None:
         return direct
     target = _normalize_for_collision(page_id)
-    for p in all_pages():
-        if _normalize_for_collision(p.stem) == target:
-            return p
+    candidates = sorted(
+        store.all_page_ids(),
+        key=lambda candidate: str((store.meta(candidate) or {}).get("path", "")),
+    )
+    for candidate in candidates:
+        if _normalize_for_collision(candidate) != target:
+            continue
+        return stable_indexed_document_path(
+            store.meta(candidate),
+            pages_dir=PAGES_DIR,
+            system_dir=SYSTEM_DIR,
+        )
     return None
 
 
@@ -2618,10 +2653,27 @@ def _find_page_resilient(page_id: str, *, emit_logs: bool = True) -> Path | None
     target = _normalize_for_loose_page_id(page_id)
     if not target:
         return None
+    store = get_store()
+    store.ensure_loaded()
+    matching_ids = sorted(
+        (
+            candidate
+            for candidate in store.all_page_ids()
+            if _normalize_for_loose_page_id(candidate) == target
+        ),
+        key=lambda candidate: str((store.meta(candidate) or {}).get("path", "")),
+    )
     matches = [
-        p
-        for p in all_pages()
-        if _normalize_for_loose_page_id(p.stem) == target
+        path
+        for candidate in matching_ids
+        if (
+            path := stable_indexed_document_path(
+                store.meta(candidate),
+                pages_dir=PAGES_DIR,
+                system_dir=SYSTEM_DIR,
+            )
+        )
+        is not None
     ]
     if not matches:
         return None

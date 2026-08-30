@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Model-free timing and call-count check for the ingest host hot path."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import time
+from pathlib import Path
+from typing import Any
+
+from chronovisor.core import claims, search
+from chronovisor.core.index_store import get_store, stable_indexed_document_path
+from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR
+from chronovisor.ingest import ingest, ingest_readback, state_register
+
+KNOWN_CASES = ("create-miss", "create-match", "update-semantic")
+
+
+def _elapsed_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1_000, 3)
+
+
+def _existing_pages() -> list[dict[str, Any]]:
+    store = get_store()
+    pages = []
+    for item in store.all_pages_meta(include_system=False):
+        meta = store.meta(str(item.get("page_id") or ""))
+        if isinstance(meta, dict) and meta.get("page_type") != "reference":
+            pages.append(meta)
+    if not pages:
+        raise RuntimeError("benchmark requires at least one stable non-reference page")
+    return pages
+
+
+def _case_create_miss() -> dict[str, Any]:
+    operation = {
+        "type": "create",
+        "filename": "benchmark/chronovisor-hot-path-unique-miss.md",
+        "title": "Chronovisor hot path unique miss 7f54c9",
+        "keywords": ["chronovisor-hot-path-unique-miss-7f54c9"],
+        "summary": "A deterministic benchmark-only target that must not exist.",
+    }
+    started = time.perf_counter()
+    match = ingest._find_existing_create_target(operation)
+    return {
+        "target_resolution_ms": _elapsed_ms(started),
+        "matched": match is not None,
+        "model_calls": 0,
+    }
+
+
+def _case_create_match(meta: dict[str, Any]) -> dict[str, Any]:
+    operation = {
+        "type": "create",
+        "filename": f"benchmark/{meta['page_id']}.md",
+        "title": str(meta.get("title") or meta["page_id"]),
+        "keywords": [str(meta["page_id"])],
+        "summary": str(meta.get("summary") or meta.get("title") or meta["page_id"]),
+    }
+    started = time.perf_counter()
+    match = ingest._find_existing_create_target(operation)
+    return {
+        "target_resolution_ms": _elapsed_ms(started),
+        "matched": match is not None,
+        "matched_page_id": match[0].stem if match else None,
+        "model_calls": 0,
+    }
+
+
+def _case_update_semantic(meta: dict[str, Any]) -> dict[str, Any]:
+    store = get_store()
+    page_id = str(meta["page_id"])
+    loose_id = re.sub(r"[^a-z0-9]+", "-", page_id.casefold()).strip("-")
+    started = time.perf_counter()
+    resolved = ingest._find_page_resilient(loose_id or page_id, emit_logs=False)
+    target_resolution_ms = _elapsed_ms(started)
+    path = stable_indexed_document_path(
+        meta,
+        pages_dir=PAGES_DIR,
+        system_dir=SYSTEM_DIR,
+    )
+    if resolved is None or path is None:
+        raise RuntimeError(f"benchmark update target is unavailable: {page_id}")
+
+    started = time.perf_counter()
+    store.apply_changes([path])
+    targeted_apply_ms = _elapsed_ms(started)
+
+    semantic_calls: list[tuple[list[str], bool]] = []
+    originals = (
+        search.update_embeddings,
+        claims.append_page_claims,
+        state_register.refresh_state_register,
+        ingest_readback.verify_changed_pages_read_back,
+    )
+    search.update_embeddings = lambda page_ids=None, *, strict=False: semantic_calls.append(  # type: ignore[assignment]
+        (list(page_ids or ()), strict)
+    )
+    claims.append_page_claims = lambda *_args, **_kwargs: {}  # type: ignore[assignment]
+    state_register.refresh_state_register = lambda *_args, **_kwargs: {}  # type: ignore[assignment]
+    ingest_readback.verify_changed_pages_read_back = (  # type: ignore[assignment]
+        lambda page_ids, *, top_n=10: {
+            "checked": len(page_ids),
+            "passed": len(page_ids),
+            "failed": [],
+        }
+    )
+    try:
+        started = time.perf_counter()
+        readback = ingest_readback._refresh_ingest_derived_artifacts(
+            [page_id], source_raw="benchmark-raw.md"
+        )
+        artifact_to_next_trigger_ms = _elapsed_ms(started)
+    finally:
+        (
+            search.update_embeddings,
+            claims.append_page_claims,
+            state_register.refresh_state_register,
+            ingest_readback.verify_changed_pages_read_back,
+        ) = originals
+
+    return {
+        "target_resolution_ms": target_resolution_ms,
+        "targeted_apply_ms": targeted_apply_ms,
+        "semantic_publish_calls": len(semantic_calls),
+        "semantic_strict": semantic_calls == [([page_id], True)],
+        "read_back": readback,
+        "artifact_to_next_trigger_ms": artifact_to_next_trigger_ms,
+        "model_calls": 0,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cases", default=",".join(KNOWN_CASES))
+    parser.add_argument("--format", choices=("json",), default="json")
+    args = parser.parse_args()
+    requested = [value.strip() for value in args.cases.split(",") if value.strip()]
+    unknown = sorted(set(requested) - set(KNOWN_CASES))
+    if unknown:
+        parser.error(f"unknown cases: {', '.join(unknown)}")
+
+    store = get_store()
+    started = time.perf_counter()
+    store.ensure_loaded()
+    bootstrap_ms = _elapsed_ms(started)
+    pages = _existing_pages()
+    matched = pages[0]
+    loose = next(
+        (
+            meta
+            for meta in pages
+            if re.sub(r"[^a-z0-9]+", "-", str(meta["page_id"]).casefold()).strip("-")
+            != meta["page_id"]
+        ),
+        matched,
+    )
+
+    counts = {"all_pages": 0, "scan_disk": 0, "full_refresh": 0, "targeted_apply": 0}
+    real_scan = store._scan_disk
+    real_refresh = store.refresh
+    real_apply = store.apply_changes
+    real_log = ingest._safe_log
+
+    def scan_disk():
+        counts["scan_disk"] += 1
+        return real_scan()
+
+    def refresh():
+        counts["full_refresh"] += 1
+        return real_refresh()
+
+    def apply_changes(paths, *, removed_page_ids=()):
+        unique = tuple(dict.fromkeys(Path(path) for path in paths))
+        counts["targeted_apply"] += len(unique) + len(set(removed_page_ids))
+        return real_apply(unique, removed_page_ids=removed_page_ids)
+
+    store._scan_disk = scan_disk  # type: ignore[method-assign]
+    store.refresh = refresh  # type: ignore[method-assign]
+    store.apply_changes = apply_changes  # type: ignore[method-assign]
+    ingest._safe_log = lambda *_args, **_kwargs: None
+    results: dict[str, Any] = {}
+    try:
+        for case in requested:
+            catalog_started = time.perf_counter()
+            store.all_canonical_page_keys()
+            store.page_count()
+            catalog_ms = _elapsed_ms(catalog_started)
+            if case == "create-miss":
+                result = _case_create_miss()
+            elif case == "create-match":
+                result = _case_create_match(matched)
+            else:
+                result = _case_update_semantic(loose)
+            results[case] = {"catalog_ms": catalog_ms, **result}
+    finally:
+        store._scan_disk = real_scan  # type: ignore[method-assign]
+        store.refresh = real_refresh  # type: ignore[method-assign]
+        store.apply_changes = real_apply  # type: ignore[method-assign]
+        ingest._safe_log = real_log
+
+    payload = {
+        "schema_version": 1,
+        "bootstrap_ms": bootstrap_ms,
+        "page_count": store.page_count(),
+        "cases": results,
+        "steady_state_calls": counts,
+    }
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

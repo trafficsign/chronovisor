@@ -16,7 +16,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -477,28 +477,40 @@ class IndexStore:
         self._loaded = False
         self._persistence_dirty = False
         self._last_refresh_monotonic = 0.0
+        self._cache_signature: tuple[int, int, int, int] | None = None
 
     # -- persistence ------------------------------------------------------
 
-    def _load_from_disk(self) -> None:
-        if (
-            not self._pages_index_file.exists()
-            or not self._backlinks_index_file.exists()
-        ):
-            return
+    def _cache_files_signature(self) -> tuple[int, int, int, int] | None:
+        try:
+            pages_stat = self._pages_index_file.stat()
+            backlinks_stat = self._backlinks_index_file.stat()
+        except OSError:
+            return None
+        return (
+            pages_stat.st_mtime_ns,
+            pages_stat.st_size,
+            backlinks_stat.st_mtime_ns,
+            backlinks_stat.st_size,
+        )
+
+    def _load_from_disk(self) -> bool:
+        signature = self._cache_files_signature()
+        if signature is None:
+            return False
         try:
             pages_doc = json.loads(self._pages_index_file.read_text())
             backlinks_doc = json.loads(self._backlinks_index_file.read_text())
         except (OSError, json.JSONDecodeError):
-            return
+            return False
         if pages_doc.get("schema_version") != SCHEMA_VERSION:
-            return
+            return False
         if backlinks_doc.get("schema_version") != SCHEMA_VERSION:
-            return
+            return False
         # Cross-file integrity: matching generation IDs.
         # Mismatch => one file is stale; rebuild from scratch on next refresh.
         if pages_doc.get("generation") != backlinks_doc.get("generation"):
-            return
+            return False
         try:
             entries = {
                 pid: PageEntry.from_dict(d)
@@ -509,12 +521,14 @@ class IndexStore:
                 pid: list(refs) for pid, refs in backlinks_doc.get("edges", {}).items()
             }
         except (KeyError, TypeError, ValueError):
-            return
+            return False
         self._entries = entries
         self._rebuild_canonical_entries()
         self._page_order = [pid for pid in order if pid in entries]
         self._backlinks = backlinks
         self._rebuild_associations()
+        self._cache_signature = signature
+        return True
 
     def _persist(self, generation: int) -> None:
         self._index_dir.mkdir(parents=True, exist_ok=True)
@@ -540,6 +554,7 @@ class IndexStore:
             self._backlinks_index_file,
             json.dumps(backlinks_doc, ensure_ascii=False),
         )
+        self._cache_signature = self._cache_files_signature()
 
     # -- refresh ----------------------------------------------------------
 
@@ -704,23 +719,157 @@ class IndexStore:
             self._last_refresh_monotonic = time.monotonic()
 
     def refresh_if_stale(self, max_age_seconds: float = 2.0) -> None:
-        """Refresh at most once per short read transaction window.
+        """Reload a newer writer snapshot without walking the page corpus.
 
         A recall request consults metadata through several independent
         retrieval channels. They must share one coherent snapshot instead of
-        each walking every page on disk. Explicit ``refresh()`` calls retain
-        their immediate semantics for mutation and administrative paths.
+        each walking every page on disk. Explicit ``refresh()`` remains the
+        bootstrap, recovery, and administrative full-reconcile operation.
         """
 
         with self._lock:
-            if (
-                self._loaded
-                and self._last_refresh_monotonic
+            if not self._loaded:
+                needs_bootstrap = True
+            elif (
+                self._last_refresh_monotonic
                 and time.monotonic() - self._last_refresh_monotonic
                 < max(0.0, max_age_seconds)
             ):
                 return
+            else:
+                needs_bootstrap = False
+                signature = self._cache_files_signature()
+                if signature is not None and signature != self._cache_signature:
+                    self._load_from_disk()
+                self._last_refresh_monotonic = time.monotonic()
+        if needs_bootstrap:
             self.refresh()
+
+    def ensure_loaded(self) -> None:
+        """Build the corpus snapshot once, then reuse it until a writer updates it."""
+
+        with self._lock:
+            if self._loaded:
+                return
+        self.refresh()
+
+    def apply_changes(
+        self,
+        upsert_paths: Iterable[Path],
+        *,
+        removed_page_ids: Iterable[str] = (),
+    ) -> None:
+        """Apply an exact writer receipt without walking the whole corpus."""
+
+        paths = tuple(dict.fromkeys(Path(path) for path in upsert_paths))
+        removed = {page_id for page_id in removed_page_ids if page_id}
+        self.ensure_loaded()
+
+        updates: dict[str, PageEntry] = {}
+        for path in paths:
+            entry: PageEntry | None = None
+            for root, is_system, reserved in (
+                (self._pages_dir, False, PAGE_RESERVED_FILENAMES),
+                (self._system_dir, True, SYSTEM_RESERVED_FILENAMES),
+            ):
+                resolved = contained_file(path, root)
+                if resolved is None:
+                    continue
+                if resolved.name in reserved:
+                    break
+                stat = resolved.stat()
+                entry = self._build_entry(
+                    resolved.stem,
+                    resolved,
+                    is_system,
+                    stat.st_mtime_ns,
+                    stat.st_size,
+                    pages_dir=self._pages_dir,
+                    system_dir=self._system_dir,
+                )
+                break
+            if entry is None:
+                raise CanonicalDocumentError(
+                    f"changed page is not a canonical document: {path}"
+                )
+            previous = updates.get(entry.page_id)
+            if previous is not None and previous.path != entry.path:
+                raise DuplicatePageIdError(
+                    f"Duplicate page_id stems detected: {[entry.page_id]}"
+                )
+            updates[entry.page_id] = entry
+
+        overlap = removed & updates.keys()
+        if overlap:
+            raise ValueError(
+                f"page ids cannot be removed and upserted together: {sorted(overlap)}"
+            )
+
+        with okf_runtime_operation(self._root), self._lock:
+            for page_id, entry in updates.items():
+                existing = self._entries.get(page_id)
+                if (
+                    existing is not None
+                    and existing.path != entry.path
+                    and Path(existing.path).exists()
+                ):
+                    raise DuplicatePageIdError(
+                        f"Duplicate page_id stems detected: {[page_id]}"
+                    )
+            previous_state = (
+                self._entries,
+                self._canonical_entries,
+                self._page_order,
+                self._backlinks,
+                self._tag_pages,
+                self._entity_pages,
+                self._persistence_dirty,
+                self._cache_signature,
+                self._last_refresh_monotonic,
+            )
+            next_entries = dict(self._entries)
+            changed = False
+            for page_id in removed:
+                if next_entries.pop(page_id, None) is not None:
+                    changed = True
+            for page_id, entry in updates.items():
+                existing = next_entries.get(page_id)
+                if existing != entry:
+                    next_entries[page_id] = entry
+                    changed = True
+
+            try:
+                if changed:
+                    self._entries = next_entries
+                    ordered = sorted(
+                        self._entries.values(),
+                        key=lambda entry: (entry.is_system, entry.path),
+                    )
+                    self._page_order = [entry.page_id for entry in ordered]
+                    self._rebuild_canonical_entries()
+                    self._rebuild_backlinks()
+                    self._rebuild_associations()
+                    self._persistence_dirty = True
+                if (
+                    self._persistence_dirty
+                    and os.environ.get("CHRONOVISOR_READ_ONLY") != "1"
+                ):
+                    self._persist(self._next_generation())
+                    self._persistence_dirty = False
+                self._last_refresh_monotonic = time.monotonic()
+            except Exception:
+                (
+                    self._entries,
+                    self._canonical_entries,
+                    self._page_order,
+                    self._backlinks,
+                    self._tag_pages,
+                    self._entity_pages,
+                    self._persistence_dirty,
+                    self._cache_signature,
+                    self._last_refresh_monotonic,
+                ) = previous_state
+                raise
 
     @staticmethod
     def _build_entry(

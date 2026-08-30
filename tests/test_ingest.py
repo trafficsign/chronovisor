@@ -1434,6 +1434,130 @@ def test_ingest_artifact_schema_tracks_proposal_envelope_schema() -> None:
 
 
 class TestApplyOperations:
+    def test_create_updates_bootstrap_index_without_a_full_refresh(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from chronovisor.core import index_store
+
+        store = index_store.get_store()
+        store.refresh()
+        monkeypatch.setattr(
+            store,
+            "_scan_disk",
+            lambda: pytest.fail("ingest performed a second full disk scan"),
+        )
+
+        created, updated = _apply_operations(
+            [
+                {
+                    "type": "create",
+                    "filename": "memory/receipt-page.md",
+                    "content": (
+                        "---\ntitle: Receipt page\nupdated: 2026-08-30\n"
+                        "status: stable\ntype: knowledge\n---\nbody"
+                    ),
+                }
+            ]
+        )
+
+        assert created == ["receipt-page"]
+        assert updated == []
+        assert store.meta("receipt-page")["title"] == "Receipt page"
+
+    def test_index_receipt_failure_rolls_back_page_write(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from chronovisor.core import index_store
+
+        store = index_store.get_store()
+        store.refresh()
+        monkeypatch.setattr(
+            store,
+            "apply_changes",
+            lambda _paths: (_ for _ in ()).throw(RuntimeError("receipt failed")),
+        )
+
+        with pytest.raises(IngestApplyError, match="receipt failed"):
+            _apply_operations(
+                [
+                    {
+                        "type": "create",
+                        "filename": "memory/rolled-back.md",
+                        "content": (
+                            "---\ntitle: Rolled back\nupdated: 2026-08-30\n"
+                            "status: stable\ntype: knowledge\n---\nbody"
+                        ),
+                    }
+                ]
+            )
+
+        assert not (isolated_wiki / "pages/memory/rolled-back.md").exists()
+
+    def test_multi_page_receipt_applies_each_unique_path_once(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from chronovisor.core import index_store
+
+        store = index_store.get_store()
+        store.refresh()
+        real_apply = store.apply_changes
+        receipts: list[list[Path]] = []
+
+        def apply(paths) -> None:
+            received = list(paths)
+            receipts.append(received)
+            real_apply(received)
+
+        monkeypatch.setattr(store, "apply_changes", apply)
+        operations = [
+            {
+                "type": "create",
+                "filename": f"memory/receipt-{page_id}.md",
+                "content": (
+                    f"---\ntitle: Receipt {page_id}\nupdated: 2026-08-30\n"
+                    "status: stable\ntype: knowledge\n---\nbody"
+                ),
+            }
+            for page_id in ("one", "two")
+        ]
+
+        created, updated = _apply_operations(operations)
+
+        assert created == ["receipt-one", "receipt-two"]
+        assert updated == []
+        assert receipts == [
+            [
+                isolated_wiki / "pages/memory/receipt-one.md",
+                isolated_wiki / "pages/memory/receipt-two.md",
+            ]
+        ]
+        assert store.meta("receipt-one") is not None
+        assert store.meta("receipt-two") is not None
+
+    def test_empty_prepared_batch_does_not_apply_index_receipt(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from chronovisor.core import index_store
+        from chronovisor.ingest import ingest
+
+        store = index_store.get_store()
+        store.refresh()
+        monkeypatch.setattr(
+            store,
+            "apply_changes",
+            lambda _paths: pytest.fail("empty batch applied an index receipt"),
+        )
+
+        assert ingest._apply_prepared_operations([]) == ([], [])
+
     def test_create_writes_atomically(self, isolated_wiki: Path) -> None:
         ops = [
             {
@@ -10731,6 +10855,81 @@ class TestPhase6Compatibility:
 
 
 class TestSearchBeforeCreate:
+    def test_create_candidate_needle_is_normalized_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.ingest import ingest
+
+        operation = {
+            "type": "create",
+            "filename": "memory/one-page.md",
+            "title": "One Page",
+            "keywords": ["one"],
+            "summary": "One page",
+        }
+        candidates = [
+            {"page_id": f"candidate-{index}", "title": f"Candidate {index}"}
+            for index in range(3)
+        ]
+        real_resolve = ingest._safe_resolve_page_path
+        calls = 0
+
+        def resolve(filename: str) -> Path:
+            nonlocal calls
+            calls += 1
+            return real_resolve(filename)
+
+        monkeypatch.setattr(ingest, "_safe_resolve_page_path", resolve)
+        monkeypatch.setattr(ingest, "_find_page_resilient", lambda _page_id: None)
+        monkeypatch.setattr(ingest, "_existing_candidate_metas", lambda: candidates)
+        monkeypatch.setattr(ingest, "_search_candidate_metas", lambda _op: [])
+
+        assert ingest._find_existing_create_target(operation) is None
+        assert calls == 1
+
+    def test_casefold_and_loose_lookup_use_bootstrap_snapshot(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from chronovisor.core import index_store
+        from chronovisor.ingest import ingest
+
+        cased = _seed_page(
+            isolated_wiki,
+            "memory/Foo.md",
+            "---\ntitle: Foo\nupdated: 2026-08-30\nstatus: stable\n"
+            "type: knowledge\n---\nbody\n",
+        )
+        loose = _seed_page(
+            isolated_wiki,
+            "memory/opus-4.7.md",
+            "---\ntitle: Opus\nupdated: 2026-08-30\nstatus: stable\n"
+            "type: knowledge\n---\nbody\n",
+        )
+        store = index_store.get_store()
+        store.refresh()
+        monkeypatch.setattr(
+            ingest,
+            "all_pages",
+            lambda: pytest.fail("lookup called all_pages"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            ingest,
+            "find_page",
+            lambda _page_id: pytest.fail("lookup walked page directories"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            store,
+            "refresh",
+            lambda: pytest.fail("lookup performed a full refresh"),
+        )
+
+        assert ingest._find_page_casefold("foo") == cased
+        assert ingest._find_page_resilient("opus-4-7") == loose
+
     def test_create_with_existing_title_is_rewritten_to_update(
         self, isolated_wiki: Path
     ) -> None:
@@ -10771,7 +10970,7 @@ class TestReadBackVerification:
         from chronovisor.ingest import ingest_readback
 
         class Store:
-            def refresh(self) -> None:
+            def ensure_loaded(self) -> None:
                 pass
 
             def meta(self, page_id: str) -> dict:
@@ -10809,7 +11008,7 @@ class TestReadBackVerification:
         failure_log = isolated_wiki / "runtime" / "patched-failures.jsonl"
 
         class Store:
-            def refresh(self) -> None:
+            def ensure_loaded(self) -> None:
                 pass
 
             def meta(self, page_id: str) -> dict:
@@ -10838,14 +11037,10 @@ class TestReadBackVerification:
     def test_refresh_waits_for_semantic_delta_before_read_back(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.core import claims, index_store, search
-        from chronovisor.ingest import ingest, ingest_readback, state_register
+        from chronovisor.core import claims, search
+        from chronovisor.ingest import ingest_readback, state_register
 
         events: list[object] = []
-
-        class Store:
-            def refresh(self) -> None:
-                events.append("store-refresh")
 
         def update_embeddings(page_ids=None, *, strict=False):
             events.append(("semantic-index", list(page_ids or ()), strict))
@@ -10855,8 +11050,6 @@ class TestReadBackVerification:
             events.append(("read-back", list(page_ids), top_n))
             return {"checked": 1, "passed": 1, "failed": []}
 
-        monkeypatch.setattr(ingest, "_rebuild_index", lambda: events.append("index"))
-        monkeypatch.setattr(index_store, "get_store", lambda: Store())
         monkeypatch.setattr(search, "update_embeddings", update_embeddings)
         monkeypatch.setattr(
             claims,
@@ -10883,8 +11076,6 @@ class TestReadBackVerification:
 
         assert result == {"checked": 1, "passed": 1, "failed": []}
         assert events == [
-            "index",
-            "store-refresh",
             ("semantic-index", ["p"], True),
             ("claims", ["p"], "raw.md", "ingest"),
             ("state", ["p"], "raw.md"),
@@ -10894,7 +11085,7 @@ class TestReadBackVerification:
     def test_refresh_failures_are_logged_and_nonfatal(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from chronovisor.core import claims, index_store, search
+        from chronovisor.core import claims, search
         from chronovisor.ingest import ingest, ingest_readback, state_register
 
         events: list[str] = []
@@ -10904,16 +11095,10 @@ class TestReadBackVerification:
             events.append(stage)
             raise RuntimeError(stage)
 
-        class Store:
-            def refresh(self) -> None:
-                fail("store")
-
         def read_back(page_ids, *, top_n=10):
             events.append("read-back")
             return {"checked": len(page_ids), "passed": len(page_ids), "failed": []}
 
-        monkeypatch.setattr(ingest, "_rebuild_index", lambda: fail("index"))
-        monkeypatch.setattr(index_store, "get_store", lambda: Store())
         monkeypatch.setattr(
             search, "update_embeddings", lambda **_kwargs: fail("semantic")
         )
@@ -10935,10 +11120,8 @@ class TestReadBackVerification:
         )
 
         assert result == {"checked": 1, "passed": 1, "failed": []}
-        assert events == ["index", "store", "semantic", "claims", "state", "read-back"]
+        assert events == ["semantic", "claims", "state", "read-back"]
         assert logs == [
-            "ingest | index.md rebuild failed (non-fatal): index",
-            "ingest | index_store refresh failed: store",
             "ingest | semantic index enqueue failed: semantic",
             "ingest | claim ledger failed (non-fatal): claims",
             "ingest | state register refresh failed (non-fatal): state",
@@ -10964,6 +11147,33 @@ class _QueueStructuredTransport:
 
 
 class TestTriagePlanSchema:
+    def test_effective_create_target_is_resolved_once_per_validation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.ingest import ingest
+
+        operation = {
+            "type": "create",
+            "filename": "memory/one.md",
+            "title": "One",
+            "keywords": ["one"],
+            "summary": "One durable fact",
+        }
+        calls: list[dict] = []
+
+        def effective(op: dict) -> str:
+            calls.append(op)
+            return str(op["filename"])
+
+        monkeypatch.setattr(ingest, "_effective_triage_target_filename", effective)
+        monkeypatch.setattr(
+            ingest, "_reserved_system_page_collision_keys", lambda: frozenset()
+        )
+
+        assert ingest._triage_plan_validation_issues(
+            [operation], resolve_effective_targets=True
+        ) == []
+        assert calls == [operation]
     def test_ollama_grammar_schema_uses_host_side_numeric_bounds(self) -> None:
         from chronovisor.ingest.ingest import (
             _TRIAGE_PLAN_VALIDATION_SCHEMA,
@@ -11128,20 +11338,19 @@ class TestTriagePlanSchema:
         from chronovisor.core import search
         from chronovisor.ingest import failure_supervisor, ingest
 
-        class CatalogPage:
-            parent = ingest.PAGES_DIR / "catalog"
-            stem = "must-not-be-read"
-
-            def read_text(self) -> str:
-                pytest.fail("triage enumerated the full page catalog")
-
         calls: list[str] = []
-        page_scans = 0
+        snapshot_reads: list[str] = []
 
-        def pages():
-            nonlocal page_scans
-            page_scans += 1
-            return [CatalogPage() for _ in range(4_241)]
+        class CatalogStore:
+            def ensure_loaded(self) -> None:
+                snapshot_reads.append("loaded")
+
+            def all_canonical_page_keys(self) -> set[str]:
+                snapshot_reads.append("keys")
+                return {"pages/catalog/known"}
+
+            def page_count(self) -> int:
+                return 4_241
 
         def unavailable(_query: str, *, top_n: int, semantic: bool):
             assert top_n == ingest._TRIAGE_CATALOG_TOP_N
@@ -11154,7 +11363,9 @@ class TestTriagePlanSchema:
             calls.append("existing_bm25")
             raise RuntimeError("catalog unavailable")
 
-        monkeypatch.setattr(ingest, "all_pages", pages)
+        monkeypatch.setattr(
+            "chronovisor.core.index_store.get_store", lambda: CatalogStore()
+        )
         monkeypatch.setattr(search, "search", unavailable)
         monkeypatch.setattr(search, "search_existing_bm25", unavailable_bm25)
         events: list[dict] = []
@@ -11168,7 +11379,7 @@ class TestTriagePlanSchema:
             )
 
         assert calls == ["hybrid", "existing_bm25"]
-        assert page_scans == 1
+        assert snapshot_reads == ["loaded", "keys"]
         assert raised.value.failure_class == "transport_error"
         assert raised.value.reason == (
             "triage catalog search unavailable after bounded lexical fallback"
