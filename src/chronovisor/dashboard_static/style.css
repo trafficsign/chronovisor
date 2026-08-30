@@ -2500,7 +2500,7 @@ canvas {
   }
 
   .processing-track {
-    min-width: 520px;
+    min-width: 0;
   }
 
   .processing-lane-meta {
@@ -2874,7 +2874,7 @@ canvas {
 
 .processing-lane,
 .processing-lane.active {
-  grid-template-columns: 350px minmax(800px, 1fr);
+  grid-template-columns: 350px minmax(0, 1fr);
   gap: 12px;
   min-height: 26px;
   padding: 1px 10px;
@@ -3940,7 +3940,7 @@ canvas {
 
   .processing-lane,
   .processing-lane.active {
-    grid-template-columns: 150px minmax(680px, 1fr);
+    grid-template-columns: 150px minmax(0, 1fr);
   }
 
   .decision-trace-harness {
@@ -3960,7 +3960,7 @@ canvas {
 
   .processing-lane,
   .processing-lane.active {
-    grid-template-columns: 118px minmax(520px, 1fr);
+    grid-template-columns: 118px minmax(0, 1fr);
     min-height: 30px;
     overflow: hidden;
   }

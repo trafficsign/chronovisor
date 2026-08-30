@@ -14,6 +14,8 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote
 
+import pytest
+
 from chronovisor.ops import dashboard
 from tests.decision_trace_stepper import (
     decision_trace_step_scenarios,
@@ -441,12 +443,50 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert matching("data-plan-value", "context-selection")[0]["y"] == "239"
 
 
-def test_single_model_css_connects_live_svg_paths(tmp_path: Path) -> None:
+@pytest.mark.parametrize("viewport_width", [640, 700, 900, 1050])
+def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
+    tmp_path: Path,
+    viewport_width: int,
+) -> None:
     style = ROOT / "src/chronovisor/dashboard_static/style.css"
     page = tmp_path / "single-model-geometry.html"
     page.write_text(
         """<!doctype html>
 <link rel="stylesheet" href="/style.css">
+<div class="processing-lanes-card">
+  <div class="processing-lanes">
+    <section class="processing-lane" data-count="4" aria-selected="false">
+      <strong class="processing-lane-label">Four</strong>
+      <div class="processing-track">
+        <span class="processing-step"><span>Search</span></span>
+        <span class="processing-step"><span>Rerank</span></span>
+        <span class="processing-step"><span>Authority</span></span>
+        <span class="processing-step"><span>Commit</span></span>
+      </div>
+    </section>
+    <section class="processing-lane" data-count="5" aria-selected="false">
+      <strong class="processing-lane-label">Five</strong>
+      <div class="processing-track">
+        <span class="processing-step"><span>Raw</span></span>
+        <span class="processing-step"><span>Triage</span></span>
+        <span class="processing-step"><span>Generate</span></span>
+        <span class="processing-step"><span>Consensus</span></span>
+        <span class="processing-step"><span>Apply</span></span>
+      </div>
+    </section>
+    <section class="processing-lane" data-count="6" aria-selected="false">
+      <strong class="processing-lane-label">Six</strong>
+      <div class="processing-track">
+        <span class="processing-step"><span>Discover</span></span>
+        <span class="processing-step"><span>Extract</span></span>
+        <span class="processing-step"><span>Verify</span></span>
+        <span class="processing-step"><span>Consolidate</span></span>
+        <span class="processing-step"><span>Evaluate</span></span>
+        <span class="processing-step"><span>Promote</span></span>
+      </div>
+    </section>
+  </div>
+</div>
 <svg class="decision-trace-harness single-model" viewBox="0 0 1500 550" width="1500" height="550">
   <path id="dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V394 Q180 404 190 404 H220"></path>
   <path id="single-artifact" d="M920 404 H1039"></path>
@@ -481,6 +521,19 @@ const artifactLeft = screenPoint(artifact, new DOMPoint(-11, 0));
 const holdDisplay = getComputedStyle(hold).display;
 const sealHoldEnd = screenPoint(sealHold, sealHold.getPointAtLength(sealHold.getTotalLength()));
 const holdCenter = holdDisplay === "none" ? null : screenPoint(hold, new DOMPoint(0, 0));
+const processing = [...document.querySelectorAll(".processing-lane")].map((lane) => {
+  const track = lane.querySelector(".processing-track");
+  const lastLabel = track.querySelector(".processing-step:last-child > span");
+  const laneBounds = lane.getBoundingClientRect();
+  const trackBounds = track.getBoundingClientRect();
+  const labelBounds = lastLabel.getBoundingClientRect();
+  return {
+    count: Number(lane.dataset.count),
+    laneRight: laneBounds.right,
+    trackRight: trackBounds.right,
+    labelRight: labelBounds.right,
+  };
+});
 fetch("/geometry-result", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
@@ -494,6 +547,7 @@ fetch("/geometry-result", {
     sealHoldDeltaX: holdCenter ? Math.abs(holdCenter.x - sealHoldEnd.x) : null,
     sealHoldDeltaY: holdCenter ? Math.abs(holdCenter.y - sealHoldEnd.y) : null,
     holdRadiusY: holdCenter ? 12 * Math.abs(hold.getScreenCTM().d) : null,
+    processing,
   }),
 });
 """,
@@ -542,6 +596,7 @@ fetch("/geometry-result", {
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
+    screenshot = tmp_path / f"processing-{viewport_width}.png"
     process = subprocess.Popen(
         [
             chrome,
@@ -551,6 +606,8 @@ fetch("/geometry-result", {
             "--disable-background-networking",
             "--disable-component-update",
             "--no-first-run",
+            f"--window-size={viewport_width},900",
+            f"--screenshot={screenshot}",
             f"--user-data-dir={tmp_path / 'single-model-profile'}",
             f"http://127.0.0.1:{server.server_port}/",
         ],
@@ -560,6 +617,11 @@ fetch("/geometry-result", {
     )
     try:
         assert result_ready.wait(10)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not screenshot.is_file():
+            if process.poll() not in (None, 0):
+                break
+            time.sleep(0.05)
     finally:
         process.terminate()
         try:
@@ -570,6 +632,11 @@ fetch("/geometry-result", {
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=2)
+    assert screenshot.is_file() and screenshot.stat().st_size > 0
+    assert struct.unpack(">II", screenshot.read_bytes()[16:24]) == (
+        viewport_width,
+        900,
+    )
     assert geometry[0]["transform"] == "matrix(1, 0, 0, 1, 0, 404)"
     assert geometry[0]["dispatchDeltaY"] <= 0.01
     assert geometry[0]["singleDeltaY"] <= 0.01
@@ -578,6 +645,10 @@ fetch("/geometry-result", {
     assert geometry[0]["holdDisplay"] != "none"
     assert geometry[0]["sealHoldDeltaX"] <= 0.01
     assert abs(geometry[0]["sealHoldDeltaY"] - geometry[0]["holdRadiusY"]) <= 0.01
+    assert [row["count"] for row in geometry[0]["processing"]] == [4, 5, 6]
+    for row in geometry[0]["processing"]:
+        assert row["trackRight"] <= row["laneRight"]
+        assert row["labelRight"] <= row["laneRight"]
 
 
 def test_dashboard_reference_quorum_hold_paths_and_label_stay_in_bounds() -> None:
