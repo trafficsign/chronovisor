@@ -2317,34 +2317,28 @@ _PROCESSING_LANES: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]], ...]
             ("primary", "Primary", "generate"),
             ("challenger", "Challenger", "validate"),
             ("tie_break", "Tie-break", "vote"),
-            ("commit", "Commit", "vote"),
         ),
     ),
     (
         "audit",
         "Audit",
         (
-            ("select", "Select", "trigger"),
             ("inspect", "Inspect", "context"),
             ("consensus", "Consensus", "vote"),
-            ("report", "Report", "vote"),
         ),
     ),
     (
         "improve",
         "Improve",
         (
-            ("discover", "Discover", "trigger"),
             ("generate", "Generate", "generate"),
             ("verify", "Verify", "validate"),
-            ("apply", "Apply", "vote"),
         ),
     ),
     (
         "repair",
         "Repair",
         (
-            ("detect", "Detect", "trigger"),
             ("local_fix", "Local fix", "generate"),
             ("verify", "Verify", "validate"),
             ("escalate", "Escalate", "vote"),
@@ -2354,12 +2348,8 @@ _PROCESSING_LANES: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]], ...]
         "typed_graph",
         "Typed Graph",
         (
-            ("discover", "Discover", "trigger"),
             ("extract", "Extract", "generate"),
             ("verify", "Verify", "validate"),
-            ("consolidate", "Consolidate", "validate"),
-            ("evaluate", "Evaluate", "validate"),
-            ("promote", "Promote", "vote"),
         ),
     ),
 )
@@ -2368,7 +2358,6 @@ _SINGLE_MODEL_RECALL_STEPS = (
     ("search", "Search", "context"),
     ("rerank", "Rerank", "context"),
     ("primary", "Authority", "generate"),
-    ("commit", "Commit", "vote"),
 )
 
 

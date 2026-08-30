@@ -721,7 +721,6 @@ def test_processing_activity_projects_direct_ollama_calls(monkeypatch) -> None:
         ("search", "Search"),
         ("rerank", "Rerank"),
         ("primary", "Authority"),
-        ("commit", "Commit"),
     ]
 
 
@@ -2103,7 +2102,7 @@ def test_decision_trace_pipeline_tabs_ignore_noncanonical_processing_lanes(
     assert all("source" not in trace for trace in traces.values())
 
 
-def test_processing_lane_definitions_cover_every_declared_stage() -> None:
+def test_processing_lane_definitions_only_expose_instrumented_stages() -> None:
     expected = {
         "ingest": {
             "raw": "trigger",
@@ -2118,33 +2117,23 @@ def test_processing_lane_definitions_cover_every_declared_stage() -> None:
             "primary": "generate",
             "challenger": "validate",
             "tie_break": "vote",
-            "commit": "vote",
         },
         "audit": {
-            "select": "trigger",
             "inspect": "context",
             "consensus": "vote",
-            "report": "vote",
         },
         "improve": {
-            "discover": "trigger",
             "generate": "generate",
             "verify": "validate",
-            "apply": "vote",
         },
         "repair": {
-            "detect": "trigger",
             "local_fix": "generate",
             "verify": "validate",
             "escalate": "vote",
         },
         "typed_graph": {
-            "discover": "trigger",
             "extract": "generate",
             "verify": "validate",
-            "consolidate": "validate",
-            "evaluate": "validate",
-            "promote": "vote",
         },
     }
     declared = {
@@ -2153,7 +2142,7 @@ def test_processing_lane_definitions_cover_every_declared_stage() -> None:
     }
 
     assert declared == expected
-    assert sum(len(steps) for steps in declared.values()) == 29
+    assert sum(len(steps) for steps in declared.values()) == 19
 
     for _pipeline, _label, definitions in dashboard._PROCESSING_LANES:
         phase_indexes = [
@@ -3476,12 +3465,12 @@ process.stdout.write(JSON.stringify({{
         "dispatchPath": "M1380 164 H1466 Q1476 164 1476 174 V297 Q1476 307 1466 307 H190 Q180 307 180 317 V394 Q180 404 190 404 H220",
         "singlePath": "M920 404 H1039",
         "artifactSealPath": "M1061 404 H1156",
-        "sealDecisionPath": "M1224 404 H1319",
-        "sealHoldPath": "M1190 434 V482",
+        "sealDecisionPath": "M1190 434 V483",
+        "sealHoldPath": "M1224 404 H1318",
         "artifactTransform": "translate(1050 404)",
         "sealTransform": "translate(-180 -96)",
-        "decisionTransform": "translate(1330 404)",
-        "holdTransform": "translate(1190 494)",
+        "decisionTransform": "translate(1190 494)",
+        "holdTransform": "translate(1330 404)",
         "quorumHidden": True,
         "targetVisible": True,
     }

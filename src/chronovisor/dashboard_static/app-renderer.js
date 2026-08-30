@@ -517,9 +517,9 @@ const INGEST_JOB_TRACE_STEPS = [
 ];
 
 const INGEST_JOB_ENTRY_PATHS = {
-  target: "M1330 415 V560 Q1330 570 1320 570 H1130",
-  authority: "M1330 415 V560 Q1330 570 1320 570 H690",
-  route: "M1330 415 V560 Q1330 570 1320 570 H500",
+  target: "M1190 505 V560 Q1190 570 1180 570 H1130",
+  authority: "M1190 505 V560 Q1190 570 1180 570 H690",
+  route: "M1190 505 V560 Q1190 570 1180 570 H500",
 };
 
 function ingestJobTraceState(status = {}, trace = {}, ingestLane = null) {
@@ -826,23 +826,23 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     [
       '[data-path-key="seal-decision"]',
       "d",
-      single ? "M1224 404 H1319" : "M1404 500 H1449",
+      single ? "M1190 434 V483" : "M1404 500 H1449",
     ],
     [
       '[data-path-key="seal-hold"]',
       "d",
       single
-        ? "M1190 434 V482"
+        ? "M1224 404 H1318"
         : "M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588",
     ],
     ['[data-trace-key="artifact"]', "transform", single ? "translate(1050 404)" : "translate(1310 404)"],
     ['[data-trace-key="seal"]', "transform", single ? "translate(-180 -96)" : "translate(0 0)"],
-    ['[data-trace-key="decision"]', "transform", single ? "translate(1330 404)" : "translate(1460 500)"],
-    ['[data-trace-key="hold"]', "transform", single ? "translate(1190 494)" : "translate(1460 600)"],
-    ["[data-seal-yes-label]", "x", single ? "1268" : "1422"],
-    ["[data-seal-yes-label]", "y", single ? "396" : "492"],
-    ["[data-seal-no-label]", "x", single ? "1202" : "1382"],
-    ["[data-seal-no-label]", "y", single ? "452" : "544"],
+    ['[data-trace-key="decision"]', "transform", single ? "translate(1190 494)" : "translate(1460 500)"],
+    ['[data-trace-key="hold"]', "transform", single ? "translate(1330 404)" : "translate(1460 600)"],
+    ["[data-seal-yes-label]", "x", single ? "1202" : "1422"],
+    ["[data-seal-yes-label]", "y", single ? "452" : "492"],
+    ["[data-seal-no-label]", "x", single ? "1268" : "1382"],
+    ["[data-seal-no-label]", "y", single ? "396" : "544"],
   ].forEach(([selector, name, value]) => {
     harness.querySelector(selector)?.setAttribute(name, value);
   });

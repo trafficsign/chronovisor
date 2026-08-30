@@ -488,6 +488,21 @@ def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
 <link rel="stylesheet" href="/style.css">
 <div class="processing-lanes-card">
   <div class="processing-lanes">
+    <section class="processing-lane" data-count="2" aria-selected="false">
+      <strong class="processing-lane-label">Two</strong>
+      <div class="processing-track">
+        <span class="processing-step"><span>Inspect</span></span>
+        <span class="processing-step"><span>Consensus</span></span>
+      </div>
+    </section>
+    <section class="processing-lane" data-count="3" aria-selected="false">
+      <strong class="processing-lane-label">Three</strong>
+      <div class="processing-track">
+        <span class="processing-step"><span>Local fix</span></span>
+        <span class="processing-step"><span>Verify</span></span>
+        <span class="processing-step"><span>Escalate</span></span>
+      </div>
+    </section>
     <section class="processing-lane" data-count="4" aria-selected="false">
       <strong class="processing-lane-label">Four</strong>
       <div class="processing-track">
@@ -531,13 +546,15 @@ def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
 <svg class="decision-trace-harness single-model" viewBox="0 0 1500 550" width="1500" height="550">
   <path id="dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V297 Q1476 307 1466 307 H190 Q180 307 180 317 V394 Q180 404 190 404 H220"></path>
   <path id="single-artifact" d="M920 404 H1039"></path>
-  <path id="seal-hold" data-path-key="seal-hold" d="M1190 434 V482"></path>
+  <path id="seal-decision" data-path-key="seal-decision" d="M1190 434 V483"></path>
+  <path id="seal-hold" data-path-key="seal-hold" d="M1224 404 H1318"></path>
   <g class="decision-lane" data-decision-lane="primary" transform="translate(0 325)">
     <g id="trigger" transform="translate(230 0)"><circle r="10"></circle></g>
     <g id="validate" transform="translate(910 0)"><circle r="10"></circle></g>
   </g>
   <g id="artifact" transform="translate(1050 404)"><circle r="11"></circle></g>
-  <g id="hold" data-trace-key="hold" transform="translate(1190 494)"><circle r="12"></circle><text>Hold</text></g>
+  <g id="decision" data-trace-key="decision" transform="translate(1190 494)"><circle r="11"></circle><text>Validated</text></g>
+  <g id="hold" data-trace-key="hold" transform="translate(1330 404)"><circle r="12"></circle><text>Hold</text></g>
 </svg>
 <script src="/geometry.js"></script>
 """,
@@ -549,7 +566,9 @@ def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
 const screenPoint = (node, point) => point.matrixTransform(node.getScreenCTM());
 const dispatch = document.querySelector("#dispatch");
 const single = document.querySelector("#single-artifact");
+const sealDecision = document.querySelector("#seal-decision");
 const sealHold = document.querySelector("#seal-hold");
+const decision = document.querySelector("#decision");
 const hold = document.querySelector("#hold");
 const lane = document.querySelector('[data-decision-lane="primary"]');
 const trigger = screenPoint(document.querySelector("#trigger"), new DOMPoint(0, 0));
@@ -562,6 +581,9 @@ const singleEnd = screenPoint(single, single.getPointAtLength(single.getTotalLen
 const artifact = document.querySelector("#artifact");
 const artifactLeft = screenPoint(artifact, new DOMPoint(-11, 0));
 const holdDisplay = getComputedStyle(hold).display;
+const sealDecisionStart = screenPoint(sealDecision, sealDecision.getPointAtLength(0));
+const sealDecisionEnd = screenPoint(sealDecision, sealDecision.getPointAtLength(sealDecision.getTotalLength()));
+const decisionCenter = screenPoint(decision, new DOMPoint(0, 0));
 const sealHoldStart = screenPoint(sealHold, sealHold.getPointAtLength(0));
 const sealHoldEnd = screenPoint(sealHold, sealHold.getPointAtLength(sealHold.getTotalLength()));
 const holdCenter = holdDisplay === "none" ? null : screenPoint(hold, new DOMPoint(0, 0));
@@ -597,10 +619,14 @@ fetch("/geometry-result", {
     singleArtifactDeltaX: Math.abs(artifactLeft.x - singleEnd.x),
     singleArtifactDeltaY: Math.abs(artifactLeft.y - singleEnd.y),
     holdDisplay,
-    sealHoldStraightDeltaX: Math.abs(sealHoldStart.x - sealHoldEnd.x),
+    sealDecisionStraightDeltaX: Math.abs(sealDecisionStart.x - sealDecisionEnd.x),
+    sealDecisionDeltaX: Math.abs(decisionCenter.x - sealDecisionEnd.x),
+    sealDecisionDeltaY: Math.abs(decisionCenter.y - sealDecisionEnd.y),
+    decisionRadiusY: 11 * Math.abs(decision.getScreenCTM().d),
+    sealHoldStraightDeltaY: Math.abs(sealHoldStart.y - sealHoldEnd.y),
     sealHoldDeltaX: holdCenter ? Math.abs(holdCenter.x - sealHoldEnd.x) : null,
     sealHoldDeltaY: holdCenter ? Math.abs(holdCenter.y - sealHoldEnd.y) : null,
-    holdRadiusY: holdCenter ? 12 * Math.abs(hold.getScreenCTM().d) : null,
+    holdRadiusX: holdCenter ? 12 * Math.abs(hold.getScreenCTM().a) : null,
     authority: {
       shortHeight: shortAuthorityHeight,
       longHeight: longAuthorityHeight,
@@ -704,12 +730,17 @@ fetch("/geometry-result", {
     assert geometry[0]["singleArtifactDeltaX"] <= 0.01
     assert geometry[0]["singleArtifactDeltaY"] <= 0.01
     assert geometry[0]["holdDisplay"] != "none"
-    assert geometry[0]["sealHoldStraightDeltaX"] <= 0.01
-    assert geometry[0]["sealHoldDeltaX"] <= 0.01
-    assert abs(geometry[0]["sealHoldDeltaY"] - geometry[0]["holdRadiusY"]) <= 0.01
+    assert geometry[0]["sealDecisionStraightDeltaX"] <= 0.01
+    assert geometry[0]["sealDecisionDeltaX"] <= 0.01
+    assert abs(
+        geometry[0]["sealDecisionDeltaY"] - geometry[0]["decisionRadiusY"]
+    ) <= 0.01
+    assert geometry[0]["sealHoldStraightDeltaY"] <= 0.01
+    assert abs(geometry[0]["sealHoldDeltaX"] - geometry[0]["holdRadiusX"]) <= 0.01
+    assert geometry[0]["sealHoldDeltaY"] <= 0.01
     assert geometry[0]["authority"]["longHeight"] == geometry[0]["authority"]["shortHeight"]
     assert geometry[0]["authority"]["scrollWidth"] <= geometry[0]["authority"]["clientWidth"]
-    assert [row["count"] for row in geometry[0]["processing"]] == [4, 5, 6]
+    assert [row["count"] for row in geometry[0]["processing"]] == [2, 3, 4, 5, 6]
     for row in geometry[0]["processing"]:
         assert row["trackRight"] <= row["laneRight"]
         assert abs(row["lastStepLeft"] - row["trackRight"]) <= 0.1
@@ -1715,7 +1746,6 @@ addEventListener("DOMContentLoaded", () => {
       document.querySelector('[data-decision-lane="primary"] [data-decision-lane-step="validate"]'),
       artifact,
       document.querySelector('[data-trace-key="seal"]'),
-      document.querySelector('[data-trace-key="decision"]'),
     ].map(shapeCenter);
     const dispatch = document.querySelector('[data-path-key="plan-dispatch"]');
     const dispatchRail = screenPoint(
@@ -1729,6 +1759,7 @@ addEventListener("DOMContentLoaded", () => {
       ? screenPoint(ingestEntry, ingestEntry.getPointAtLength(0))
       : null;
     const decisionNode = document.querySelector('[data-trace-key="decision"]');
+    const decisionCenter = shapeCenter(decisionNode);
     const mutationGate = document.querySelector('g[data-ingest-job-step="mutation"]');
     const acceptedPath = document.querySelector('[data-ingest-job-path="accepted"]');
     const applyPath = document.querySelector('[data-ingest-job-path="apply"]');
@@ -1848,8 +1879,10 @@ addEventListener("DOMContentLoaded", () => {
         )),
         railSpread: Math.max(...terminalCenters.map(({ y }) => y))
           - Math.min(...terminalCenters.map(({ y }) => y)),
-        holdSealDeltaX: Math.abs(holdCenter.x - terminalCenters.at(-2).x),
-        holdSealDrop: holdCenter.y - terminalCenters.at(-2).y,
+        decisionSealDeltaX: Math.abs(decisionCenter.x - terminalCenters.at(-1).x),
+        decisionSealDrop: decisionCenter.y - terminalCenters.at(-1).y,
+        holdSealOffset: holdCenter.x - terminalCenters.at(-1).x,
+        holdSealDeltaY: Math.abs(holdCenter.y - terminalCenters.at(-1).y),
         ingestEntryStartDelta: ingestEntryStart
           ? shapeDistance(ingestEntryStart, decisionNode)
           : null,
@@ -1877,14 +1910,16 @@ addEventListener("DOMContentLoaded", () => {
     height: document.querySelector("#decision-trace-harness").getAttribute("height"),
     dispatchLabelY: document.querySelector("[data-dispatch-label]").getAttribute("y"),
   };
-  document.querySelector('[data-processing-lane="recall"]').click();
-  results[0].tabClick = {
-    event: selectedPipelines.at(-1),
-    selected: document.querySelector('[data-processing-lane][aria-selected="true"]')
-      ?.dataset.processingLane,
-    tabCount: document.querySelectorAll('[data-processing-lane][role="tab"]').length,
-    panelRole: document.querySelector("#decision-trace-panel")?.getAttribute("role"),
-  };
+  results[0].tabClicks = workflowKeys.map((pipeline) => {
+    document.querySelector(`[data-processing-lane="${pipeline}"]`).click();
+    return {
+      event: selectedPipelines.at(-1),
+      selected: document.querySelector('[data-processing-lane][aria-selected="true"]')
+        ?.dataset.processingLane,
+      tabCount: document.querySelectorAll('[data-processing-lane][role="tab"]').length,
+      panelRole: document.querySelector("#decision-trace-panel")?.getAttribute("role"),
+    };
+  });
   document.querySelector(
     `[data-processing-lane="${fixtures[0].case.workflow}"]`
   ).click();
@@ -2192,12 +2227,14 @@ addEventListener("DOMContentLoaded", () => {
     gaps = single_result["singleLayout"]["gaps"]
     assert max(gaps) - min(gaps) <= 1
     assert single_result["singleLayout"]["railSpread"] <= 1
-    assert single_result["singleLayout"]["holdSealDeltaX"] <= 1
+    assert single_result["singleLayout"]["decisionSealDeltaX"] <= 1
     assert (
         0.6
-        <= single_result["singleLayout"]["holdSealDrop"] / (sum(gaps) / 3)
+        <= single_result["singleLayout"]["decisionSealDrop"] / (sum(gaps) / 2)
         <= 0.7
     )
+    assert abs(single_result["singleLayout"]["holdSealOffset"] - gaps[-1]) <= 1
+    assert single_result["singleLayout"]["holdSealDeltaY"] <= 1
     assert single_result["singleLayout"]["ingestEntryStartDelta"] is not None
     assert single_result["singleLayout"]["ingestEntryStartDelta"] <= 1
     mutation_geometry = single_result["singleLayout"]["ingestMutationGeometry"]
@@ -2298,12 +2335,22 @@ addEventListener("DOMContentLoaded", () => {
         },
     ]
 
-    assert by_id[cases[0]["id"]]["tabClick"] == {
-        "event": "recall",
-        "selected": "recall",
-        "tabCount": 6,
-        "panelRole": "tabpanel",
-    }
+    assert by_id[cases[0]["id"]]["tabClicks"] == [
+        {
+            "event": pipeline,
+            "selected": pipeline,
+            "tabCount": 6,
+            "panelRole": "tabpanel",
+        }
+        for pipeline in (
+            "ingest",
+            "recall",
+            "audit",
+            "improve",
+            "repair",
+            "typed_graph",
+        )
+    ]
     assert by_id[cases[0]["id"]]["restoredLayout"] == {
         "viewBox": "0 0 1500 650",
         "height": "607",
