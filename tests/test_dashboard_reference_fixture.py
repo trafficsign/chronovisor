@@ -490,13 +490,13 @@ def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
 <svg class="decision-trace-harness single-model" viewBox="0 0 1500 550" width="1500" height="550">
   <path id="dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V394 Q180 404 190 404 H220"></path>
   <path id="single-artifact" d="M920 404 H1039"></path>
-  <path id="seal-hold" data-path-key="seal-hold" d="M1190 434 V454 Q1190 464 1200 464 H1320 Q1330 464 1330 474 V482"></path>
+  <path id="seal-hold" data-path-key="seal-hold" d="M1190 434 V482"></path>
   <g class="decision-lane" data-decision-lane="primary" transform="translate(0 325)">
     <g id="trigger" transform="translate(230 0)"><circle r="10"></circle></g>
     <g id="validate" transform="translate(910 0)"><circle r="10"></circle></g>
   </g>
   <g id="artifact" transform="translate(1050 404)"><circle r="11"></circle></g>
-  <g id="hold" data-trace-key="hold" transform="translate(1330 494)"><circle r="12"></circle><text>Hold</text></g>
+  <g id="hold" data-trace-key="hold" transform="translate(1190 494)"><circle r="12"></circle><text>Hold</text></g>
 </svg>
 <script src="/geometry.js"></script>
 """,
@@ -519,6 +519,7 @@ const singleEnd = screenPoint(single, single.getPointAtLength(single.getTotalLen
 const artifact = document.querySelector("#artifact");
 const artifactLeft = screenPoint(artifact, new DOMPoint(-11, 0));
 const holdDisplay = getComputedStyle(hold).display;
+const sealHoldStart = screenPoint(sealHold, sealHold.getPointAtLength(0));
 const sealHoldEnd = screenPoint(sealHold, sealHold.getPointAtLength(sealHold.getTotalLength()));
 const holdCenter = holdDisplay === "none" ? null : screenPoint(hold, new DOMPoint(0, 0));
 const processing = [...document.querySelectorAll(".processing-lane")].map((lane) => {
@@ -544,6 +545,7 @@ fetch("/geometry-result", {
     singleArtifactDeltaX: Math.abs(artifactLeft.x - singleEnd.x),
     singleArtifactDeltaY: Math.abs(artifactLeft.y - singleEnd.y),
     holdDisplay,
+    sealHoldStraightDeltaX: Math.abs(sealHoldStart.x - sealHoldEnd.x),
     sealHoldDeltaX: holdCenter ? Math.abs(holdCenter.x - sealHoldEnd.x) : null,
     sealHoldDeltaY: holdCenter ? Math.abs(holdCenter.y - sealHoldEnd.y) : null,
     holdRadiusY: holdCenter ? 12 * Math.abs(hold.getScreenCTM().d) : null,
@@ -643,6 +645,7 @@ fetch("/geometry-result", {
     assert geometry[0]["singleArtifactDeltaX"] <= 0.01
     assert geometry[0]["singleArtifactDeltaY"] <= 0.01
     assert geometry[0]["holdDisplay"] != "none"
+    assert geometry[0]["sealHoldStraightDeltaX"] <= 0.01
     assert geometry[0]["sealHoldDeltaX"] <= 0.01
     assert abs(geometry[0]["sealHoldDeltaY"] - geometry[0]["holdRadiusY"]) <= 0.01
     assert [row["count"] for row in geometry[0]["processing"]] == [4, 5, 6]
@@ -1543,8 +1546,8 @@ addEventListener("DOMContentLoaded", () => {
         )),
         railSpread: Math.max(...terminalCenters.map(({ y }) => y))
           - Math.min(...terminalCenters.map(({ y }) => y)),
-        holdDeltaX: Math.abs(holdCenter.x - terminalCenters.at(-1).x),
-        holdDrop: holdCenter.y - terminalCenters.at(-1).y,
+        holdSealDeltaX: Math.abs(holdCenter.x - terminalCenters.at(-2).x),
+        holdSealDrop: holdCenter.y - terminalCenters.at(-2).y,
       },
       nodes: Object.fromEntries([...document.querySelectorAll("[data-trace-key]")]
         .map((node) => [node.dataset.traceKey, node.dataset.state])),
@@ -1854,8 +1857,12 @@ addEventListener("DOMContentLoaded", () => {
     gaps = single_result["singleLayout"]["gaps"]
     assert max(gaps) - min(gaps) <= 1
     assert single_result["singleLayout"]["railSpread"] <= 1
-    assert single_result["singleLayout"]["holdDeltaX"] <= 1
-    assert 0.6 <= single_result["singleLayout"]["holdDrop"] / (sum(gaps) / 3) <= 0.7
+    assert single_result["singleLayout"]["holdSealDeltaX"] <= 1
+    assert (
+        0.6
+        <= single_result["singleLayout"]["holdSealDrop"] / (sum(gaps) / 3)
+        <= 0.7
+    )
 
     assert by_id[cases[0]["id"]]["tabClick"] == {
         "event": "recall",

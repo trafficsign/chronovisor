@@ -563,13 +563,13 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
       '[data-path-key="seal-hold"]',
       "d",
       single
-        ? "M1190 434 V454 Q1190 464 1200 464 H1320 Q1330 464 1330 474 V482"
+        ? "M1190 434 V482"
         : "M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588",
     ],
     ['[data-trace-key="artifact"]', "transform", single ? "translate(1050 404)" : "translate(1310 404)"],
     ['[data-trace-key="seal"]', "transform", single ? "translate(-180 -96)" : "translate(0 0)"],
     ['[data-trace-key="decision"]', "transform", single ? "translate(1330 404)" : "translate(1460 500)"],
-    ['[data-trace-key="hold"]', "transform", single ? "translate(1330 494)" : "translate(1460 600)"],
+    ['[data-trace-key="hold"]', "transform", single ? "translate(1190 494)" : "translate(1460 600)"],
     ["[data-seal-yes-label]", "x", single ? "1268" : "1422"],
     ["[data-seal-yes-label]", "y", single ? "396" : "492"],
     ["[data-seal-no-label]", "x", single ? "1202" : "1382"],

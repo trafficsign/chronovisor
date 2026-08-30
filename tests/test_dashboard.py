@@ -3148,11 +3148,11 @@ process.stdout.write(JSON.stringify({{
         "singlePath": "M920 404 H1039",
         "artifactSealPath": "M1061 404 H1156",
         "sealDecisionPath": "M1224 404 H1319",
-        "sealHoldPath": "M1190 434 V454 Q1190 464 1200 464 H1320 Q1330 464 1330 474 V482",
+        "sealHoldPath": "M1190 434 V482",
         "artifactTransform": "translate(1050 404)",
         "sealTransform": "translate(-180 -96)",
         "decisionTransform": "translate(1330 404)",
-        "holdTransform": "translate(1330 494)",
+        "holdTransform": "translate(1190 494)",
         "quorumHidden": True,
         "targetVisible": True,
     }
