@@ -196,6 +196,13 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         "seal-hold",
     }.issubset(paths)
     assert all(paths[key] for key in paths)
+    core_rails = {
+        attrs["data-path-key"]: (attrs.get("class") or "").split()
+        for tag, attrs in elements
+        if tag == "path" and attrs.get("data-path-key")
+    }
+    assert "trace-lane-rail" in core_rails["single-artifact"]
+    assert "trace-lane-rail" in core_rails["artifact-seal"]
     assert (
         not {
             "pair-artifact",
@@ -2067,6 +2074,13 @@ addEventListener("DOMContentLoaded", () => {
         .map((node) => [node.dataset.traceKey, node.dataset.state])),
       paths,
       rails,
+      coreBackboneDashes: Object.fromEntries([...harness.querySelectorAll(
+        '[data-decision-lane="primary"] .trace-lane-rail, '
+          + '[data-path-key="single-artifact"], [data-path-key="artifact-seal"]'
+      )].filter(visible).map((node) => [
+        node.dataset.lanePath || node.dataset.pathKey,
+        getComputedStyle(node).strokeDasharray,
+      ])),
     };
   });
   renderFixture(fixtures[0].case, fixtures[0].trace, "59");
@@ -2410,6 +2424,8 @@ addEventListener("DOMContentLoaded", () => {
                 assert rail["state"] in {"active", "done", "error"}
                 assert rail["dash"] in {"none", ""}
                 assert rail["length"] > 0
+
+        assert set(result["coreBackboneDashes"].values()) <= {"none", ""}
 
         selected_tokens = projection["context"]["selected_tokens"]
         selected_reasoning = projection["reasoning"]["selected"]
