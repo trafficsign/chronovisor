@@ -18,6 +18,7 @@ let decisionTracePinnedRequest = "";
 let decisionTraceSelectedPipeline = "";
 let processingRefreshInFlight = false;
 let processingEventSource = null;
+let modelStreamEventSource = null;
 
 async function refreshFast() {
   const controller = new AbortController();
@@ -166,13 +167,15 @@ async function refreshDecisionTrace() {
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const consensus = (await response.json()).local_consensus || {};
+    const payload = await response.json();
+    const consensus = payload.local_consensus || {};
     if (selectedPipeline !== decisionTraceSelectedPipeline) return;
     const trace = consensus.decision_trace || {};
     if (!selectedPipeline && trace.request_sha256) {
       decisionTracePinnedRequest = String(trace.request_sha256);
     }
     renderLiveConsensus(consensus);
+    renderModelStream(payload.model_stream || {});
     void refreshLiveModelStatus(consensus.activities || []);
     nextDecisionRefreshDelayMs = consensus.active
       ? ACTIVE_DECISION_REFRESH_DELAY_MS
@@ -255,6 +258,21 @@ function connectProcessingActivityStream() {
   };
 }
 
+function connectModelStream() {
+  if (!("EventSource" in window)) return;
+  modelStreamEventSource = new EventSource("/api/model-stream");
+  modelStreamEventSource.addEventListener("model-stream", (event) => {
+    try {
+      renderModelStream(JSON.parse(event.data));
+    } catch {
+      els.decisionStreamState.textContent = "RECONNECTING";
+    }
+  });
+  modelStreamEventSource.onerror = () => {
+    els.decisionStreamState.textContent = "RECONNECTING";
+  };
+}
+
 async function processingFallbackLoop() {
   const streamOpen = processingEventSource
     && processingEventSource.readyState === EventSource.OPEN;
@@ -278,6 +296,20 @@ els.knowledgeModeButtons.forEach((button) => {
 
 els.pendingChart.addEventListener("mousemove", handleSaveLoadHover);
 els.pendingChart.addEventListener("mouseleave", hideSaveLoadTooltip);
+
+els.decisionModelStream.addEventListener("scroll", () => {
+  const pinned = (
+    els.decisionModelStream.scrollHeight
+    - els.decisionModelStream.scrollTop
+    - els.decisionModelStream.clientHeight
+  ) < 24;
+  els.decisionStreamLatest.hidden = pinned;
+});
+
+els.decisionStreamLatest.addEventListener("click", () => {
+  els.decisionModelStream.scrollTop = els.decisionModelStream.scrollHeight;
+  els.decisionStreamLatest.hidden = true;
+});
 
 async function copyLanLink() {
   const original = "Recovery link";
@@ -317,6 +349,7 @@ void decisionTraceRefreshLoop();
 void refreshRecallFieldLoop();
 void refreshProcessingActivity();
 connectProcessingActivityStream();
+connectModelStream();
 void processingFallbackLoop();
 window.setInterval(updateProcessingElapsed, 1000);
 window.addEventListener("resize", refresh);

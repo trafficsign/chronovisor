@@ -7,7 +7,9 @@ from collections.abc import Callable
 from inspect import Parameter, signature
 from typing import Any, Protocol
 
+from chronovisor.core.live_model_stream import publish_model_stream
 from chronovisor.core.ollama import ChatResponse, GenerateResponse
+from chronovisor.core.store import CHRONOVISOR_ROOT
 from chronovisor.decision.local_structured import ChatRequest, ChatTransport
 
 
@@ -144,6 +146,11 @@ def llm_progress_callback(
 ) -> Callable[[dict[str, Any]], None]:
     started = time.time()
     started_at = runtime_status.now_iso()
+    stream_context = {
+        "job_id": job_id,
+        "phase": phase,
+        "target": target,
+    }
 
     def emit(update: dict[str, Any]) -> None:
         elapsed = update.get("elapsed_seconds")
@@ -173,10 +180,48 @@ def llm_progress_callback(
             "total_duration",
             "eval_duration",
             "error",
+            "output_tokens",
+            "tokens_per_second",
+            "generation_seconds",
         ):
             if key in update:
                 status_payload[key] = update[key]
         runtime_status.safe_write_status(llm=status_payload)
+        event = str(update.get("event") or "progress")
+        publish_model_stream(
+            CHRONOVISOR_ROOT,
+            {
+                **stream_context,
+                "event": event if event in {"start", "done", "error"} else "progress",
+                **{
+                    key: update[key]
+                    for key in (
+                        "output_tokens",
+                        "tokens_per_second",
+                        "generation_seconds",
+                    )
+                    if key in update
+                },
+            },
+        )
+
+    def stream_delta(
+        *,
+        channel: str | None = None,
+        text: str | None = None,
+        event: str = "delta",
+    ) -> None:
+        publish_model_stream(
+            CHRONOVISOR_ROOT,
+            {
+                **stream_context,
+                "event": event,
+                "channel": channel,
+                "text": text,
+            },
+        )
+
+    emit.stream_delta = stream_delta  # type: ignore[attr-defined]
 
     emit(
         {

@@ -33,6 +33,10 @@ import httpx
 
 from chronovisor.core import activity_log, index_store, llm_config, runtime_status
 from chronovisor.core.jsonl import read_jsonl
+from chronovisor.core.live_model_stream import (
+    LiveModelStreamReceiver,
+    empty_model_stream_snapshot,
+)
 from chronovisor.core.ollama import (
     OLLAMA_URL,
     ingest_model,
@@ -141,6 +145,8 @@ PROCESSING_ACTIVITY_POLL_SECONDS = 0.25
 PROCESSING_ACTIVITY_HEARTBEAT_SECONDS = 10.0
 PROCESSING_ACTIVITY_AUDIT_SECONDS = 1.0
 PROCESSING_ACTIVITY_RECENT_AUDIT_SECONDS = PROCESSING_ACTIVITY_POLL_SECONDS
+MODEL_STREAM_POLL_SECONDS = 0.25
+MODEL_STREAM_HEARTBEAT_SECONDS = 10.0
 DASHBOARD_CREDENTIAL_VERSION = 2
 DASHBOARD_SESSION_COOKIE = "__Host-chronovisor_dashboard_session"
 DASHBOARD_SESSION_MAX_AGE_SECONDS = 12 * 60 * 60
@@ -6973,6 +6979,61 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionError, OSError):
             return
 
+    def _model_stream_snapshot(self) -> dict[str, Any]:
+        stream = getattr(self.server, "dashboard_model_stream", None)
+        snapshot = getattr(stream, "snapshot", None)
+        if not callable(snapshot):
+            return empty_model_stream_snapshot()
+        try:
+            value = snapshot()
+        except Exception:
+            return empty_model_stream_snapshot()
+        return value if isinstance(value, dict) else empty_model_stream_snapshot()
+
+    def _model_stream_response(self) -> None:
+        if not self._acquire_stream_slot():
+            self._deny_remote(HTTPStatus.TOO_MANY_REQUESTS, "Stream limit reached.")
+            return
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-transform")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            _send_security_headers(self)
+            self.end_headers()
+            self.close_connection = True
+
+            last_revision = -1
+            last_heartbeat = 0.0
+            self.wfile.write(b"retry: 1000\n\n")
+            self.wfile.flush()
+            while True:
+                snapshot = self._model_stream_snapshot()
+                revision = int(snapshot.get("revision") or 0)
+                now = time.monotonic()
+                if revision != last_revision:
+                    encoded = json.dumps(
+                        snapshot,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    self.wfile.write(f"id: {revision}\n".encode("ascii"))
+                    self.wfile.write(b"event: model-stream\n")
+                    self.wfile.write(b"data: " + encoded + b"\n\n")
+                    self.wfile.flush()
+                    last_revision = revision
+                    last_heartbeat = now
+                elif now - last_heartbeat >= MODEL_STREAM_HEARTBEAT_SECONDS:
+                    self.wfile.write(b": heartbeat\n\n")
+                    self.wfile.flush()
+                    last_heartbeat = now
+                time.sleep(MODEL_STREAM_POLL_SECONDS)
+        except (BrokenPipeError, ConnectionError, OSError):
+            return
+        finally:
+            self._release_stream_slot()
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
@@ -7038,9 +7099,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             preferred_request_sha256=preferred_request_sha256,
                             preferred_pipeline=preferred_pipeline,
                             next_active=next_trace == "active",
-                        )
+                        ),
+                        "model_stream": self._model_stream_snapshot(),
                     },
                 )
+            elif path == "/api/model-stream":
+                self._model_stream_response()
             elif path == "/api/activity":
                 _json_response(self, _processing_activity_snapshot())
             elif path == "/api/activity-stream":
@@ -7241,10 +7305,17 @@ def _serve_locked(
         server.dashboard_sessions = {}  # type: ignore[attr-defined]
     else:
         server = ThreadingHTTPServer((host, port), DashboardHandler)
+    model_stream = LiveModelStreamReceiver(CHRONOVISOR_ROOT, lan=lan)
+    model_stream.start()
+    server.dashboard_model_stream = model_stream  # type: ignore[attr-defined]
     server.lan_access_enabled = lan  # type: ignore[attr-defined]
     server.dashboard_public_host = host  # type: ignore[attr-defined]
     print(f"Chronovisor dashboard: {'https' if lan else 'http'}://{host}:{port}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        model_stream.close()
+        server.server_close()
 
 
 def build_parser() -> argparse.ArgumentParser:

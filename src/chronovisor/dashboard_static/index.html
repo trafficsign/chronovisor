@@ -285,31 +285,47 @@
         </div>
 
         <div class="decision-transition-bar" aria-label="Local decision console">
-          <div class="decision-console-chrome">
-            <span class="decision-console-lights" aria-hidden="true"><i></i><i></i><i></i></span>
-            <span class="decision-console-title">LOCAL DECISION CONSOLE</span>
-            <span class="decision-transition-state" id="decision-transition-state" aria-live="polite">LIVE · waiting</span>
-            <span class="decision-console-count">EVENTS <b id="decision-event-count">0</b></span>
-          </div>
-          <div class="decision-console-command">
-            <span aria-hidden="true">chronovisor<span class="decision-console-prompt">$</span></span>
-            <strong class="decision-transition-detail" id="decision-transition-detail">Waiting for observed work</strong>
-          </div>
-          <ol class="decision-transition-feed" id="decision-transition-feed" aria-label="Observed decision transitions"></ol>
-          <div class="decision-generation-meter" id="decision-generation-meter" hidden>
-            <div class="decision-generation-head">
-              <span id="decision-generation-model">LOCAL MODEL</span>
-              <span id="decision-generation-reasoning">DIRECT</span>
+          <section class="decision-console-pane" aria-label="System events">
+            <div class="decision-console-chrome">
+              <span class="decision-console-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="decision-console-title">SYSTEM EVENTS</span>
+              <span class="decision-transition-state" id="decision-transition-state" aria-live="polite">LIVE · waiting</span>
+              <span class="decision-console-count">EVENTS <b id="decision-event-count">0</b></span>
             </div>
-            <div class="decision-generation-track" role="progressbar" id="decision-generation-track" aria-label="Generation token budget">
-              <i id="decision-generation-fill"></i>
+            <div class="decision-console-command">
+              <span aria-hidden="true">chronovisor<span class="decision-console-prompt">$</span></span>
+              <strong class="decision-transition-detail" id="decision-transition-detail">Waiting for observed work</strong>
             </div>
-            <div class="decision-generation-stats">
-              <span id="decision-generation-tokens">-- tok</span>
-              <span id="decision-generation-speed">-- tok/s</span>
-              <span id="decision-generation-time">--</span>
+            <ol class="decision-transition-feed" id="decision-transition-feed" aria-label="Observed decision transitions"></ol>
+          </section>
+          <section class="decision-stream-pane" aria-label="Live model stream">
+            <div class="decision-stream-chrome">
+              <span class="decision-stream-title">MODEL STREAM</span>
+              <span class="decision-stream-state" id="decision-stream-state" aria-live="polite">IDLE</span>
+              <button class="decision-stream-latest" id="decision-stream-latest" type="button" hidden>LATEST ↓</button>
             </div>
-          </div>
+            <div class="decision-model-stream" id="decision-model-stream" role="log" aria-label="Live model reasoning and output">
+              <section class="decision-stream-thinking">
+                <header><span>THINKING</span><b id="decision-stream-thinking-state">WAITING</b></header>
+                <pre id="decision-stream-thinking">Waiting for model reasoning.</pre>
+              </section>
+              <section class="decision-stream-output">
+                <header><span>OUTPUT</span><b id="decision-stream-output-state">WAITING</b></header>
+                <pre id="decision-stream-output">Waiting for model output.</pre>
+              </section>
+            </div>
+            <div class="decision-generation-meter" id="decision-generation-meter">
+              <div class="decision-generation-head">
+                <span id="decision-generation-model">LOCAL MODEL</span>
+                <span id="decision-generation-reasoning">DIRECT</span>
+              </div>
+              <div class="decision-generation-stats">
+                <span id="decision-generation-tokens">-- tok</span>
+                <span id="decision-generation-speed">-- tok/s</span>
+                <span id="decision-generation-time">--</span>
+              </div>
+            </div>
+          </section>
         </div>
 
         <div class="decision-summary work-overview" id="work-overview" aria-live="polite">

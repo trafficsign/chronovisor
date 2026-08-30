@@ -340,6 +340,92 @@ def test_generate_streams_redacted_progress_and_reassembles_response() -> None:
     )
 
 
+def test_generate_streams_live_deltas_only_to_explicit_ephemeral_sink() -> None:
+    class ProgressReporter:
+        def __init__(self) -> None:
+            self.updates: list[dict[str, Any]] = []
+            self.deltas: list[dict[str, Any]] = []
+
+        def __call__(self, update: dict[str, Any]) -> None:
+            self.updates.append(update)
+
+        def stream_delta(self, **delta: Any) -> None:
+            self.deltas.append(delta)
+
+    reporter = ProgressReporter()
+    chunks = [
+        {"choices": [{"delta": {"reasoning_content": "plan"}}]},
+        {"choices": [{"delta": {"content": "answer"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    ]
+    body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+    body += "data: [DONE]\n\n"
+    adapter = OMLXAdapter(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=body, request=request)
+        )
+    )
+
+    result = adapter.generate(
+        replace(_minimal_message_request(), progress_callback=reporter),
+        model="m",
+    )
+
+    assert result.content == "answer"
+    assert reporter.deltas == [
+        {"event": "start"},
+        {"channel": "thinking", "text": "plan"},
+        {"channel": "output", "text": "answer"},
+        {"event": "done"},
+    ]
+    assert not any(
+        "content" in update or "reasoning_content" in update
+        for update in reporter.updates
+    )
+
+
+def test_generate_streams_to_default_ephemeral_sink_for_plain_progress_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    published: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        omlx_adapter,
+        "publish_model_stream",
+        lambda _root, event: published.append(dict(event)),
+    )
+    chunks = [
+        {"choices": [{"delta": {"reasoning_content": "plan"}}]},
+        {"choices": [{"delta": {"content": "answer"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    ]
+    body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+    body += "data: [DONE]\n\n"
+    adapter = OMLXAdapter(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=body, request=request)
+        )
+    )
+
+    result = adapter.generate(
+        replace(_minimal_message_request(), progress_callback=lambda _event: None),
+        model="m",
+    )
+
+    assert result.content == "answer"
+    assert [event["event"] for event in published] == [
+        "start",
+        "delta",
+        "delta",
+        "progress",
+        "done",
+    ]
+    assert published[1]["channel"] == "thinking"
+    assert published[1]["text"] == "plan"
+    assert published[2]["channel"] == "output"
+    assert published[2]["text"] == "answer"
+    assert all(event["model"] == "m" for event in published)
+
+
 def test_generate_marks_stream_without_done_as_incomplete() -> None:
     body = 'data: {"choices":[{"delta":{"content":"x"}}]}\n\n'
     adapter = OMLXAdapter(

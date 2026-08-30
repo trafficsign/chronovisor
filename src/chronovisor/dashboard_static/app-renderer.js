@@ -834,7 +834,6 @@ function renderDecisionGeneration(trace) {
   const lane = (trace?.lanes || []).find(
     (item) => item.state === "active" && ["generate", "repair"].includes(item.phase)
   );
-  els.decisionGenerationMeter.hidden = !lane;
   if (!lane) return;
   const liveEvent = [...(trace?.events || [])].reverse().find(
     (event) => event.lane === lane.key && ["generate", "repair"].includes(event.phase)
@@ -844,9 +843,6 @@ function renderDecisionGeneration(trace) {
     ...(lane.generation || {}),
   };
   const output = numeric(generation.output_tokens) ? generation.output_tokens : 0;
-  const maximum = numeric(generation.max_output_tokens)
-    ? generation.max_output_tokens
-    : 0;
   const speed = numeric(generation.tokens_per_second)
     ? generation.tokens_per_second
     : 0;
@@ -854,21 +850,75 @@ function renderDecisionGeneration(trace) {
     ? generation.generation_seconds
     : 0;
   const think = fmt(liveEvent?.think ?? lane.think, "—").toUpperCase();
-  const percent = maximum ? Math.min(100, (output / maximum) * 100) : 0;
   els.decisionGenerationModel.textContent = shortName(liveEvent?.model || lane.model);
   els.decisionGenerationReasoning.textContent = think === "OFF"
     ? "DIRECT · NO REASONING"
     : `REASONING · ${think}`;
   els.decisionGenerationTokens.textContent = output
-    ? `${generation.token_count_exact ? "" : "~"}${output.toLocaleString()} tok${maximum ? ` / ${maximum.toLocaleString()}` : ""}`
+    ? `${generation.token_count_exact ? "" : "~"}${output.toLocaleString()} tok`
     : "warming up";
   els.decisionGenerationSpeed.textContent = speed ? `${speed.toFixed(1)} tok/s` : "-- tok/s";
   els.decisionGenerationTime.textContent = seconds ? `${seconds.toFixed(1)}s` : "awaiting first token";
-  els.decisionGenerationFill.style.width = maximum ? `${Math.max(2, percent)}%` : "24%";
-  els.decisionGenerationTrack.classList.toggle("indeterminate", !maximum || !output);
-  els.decisionGenerationTrack.setAttribute("aria-valuemin", "0");
-  els.decisionGenerationTrack.setAttribute("aria-valuemax", String(maximum || 1));
-  els.decisionGenerationTrack.setAttribute("aria-valuenow", String(output));
+}
+
+function renderModelStream(stream) {
+  const value = stream && typeof stream === "object" ? stream : {};
+  const pinned = (
+    els.decisionModelStream.scrollHeight
+    - els.decisionModelStream.scrollTop
+    - els.decisionModelStream.clientHeight
+  ) < 24;
+  const active = value.active === true;
+  const status = fmt(value.status, "idle").toLowerCase();
+  const thinking = typeof value.thinking === "string" ? value.thinking : "";
+  const output = typeof value.output === "string" ? value.output : "";
+  const lastChannel = ["thinking", "output"].includes(value.last_channel)
+    ? value.last_channel
+    : "";
+  const outputTokens = numeric(value.output_tokens) ? value.output_tokens : 0;
+  const speed = numeric(value.tokens_per_second) ? value.tokens_per_second : 0;
+  const seconds = numeric(value.generation_seconds) ? value.generation_seconds : 0;
+
+  els.decisionModelStream.dataset.status = active ? "streaming" : status;
+  els.decisionModelStream.dataset.channel = lastChannel;
+  els.decisionStreamState.textContent = active
+    ? `LIVE · ${lastChannel ? lastChannel.toUpperCase() : "WAITING"}`
+    : status === "complete" ? "COMPLETE" : status.toUpperCase();
+  els.decisionStreamThinking.textContent = thinking || (
+    active
+      ? "Waiting for reasoning or the first output chunk…"
+      : status === "complete"
+        ? "No separate reasoning stream was returned."
+        : "Waiting for model reasoning."
+  );
+  els.decisionStreamOutput.textContent = output || (
+    active
+      ? "Waiting for the first output chunk…"
+      : status === "complete"
+        ? "No output was returned."
+        : "Waiting for model output."
+  );
+  els.decisionStreamThinkingState.textContent = thinking
+    ? active && lastChannel === "thinking" ? "LIVE" : "CAPTURED"
+    : active ? "WAITING" : "NONE";
+  els.decisionStreamOutputState.textContent = output
+    ? active && lastChannel === "output" ? "LIVE" : "CAPTURED"
+    : active ? "WAITING" : "NONE";
+  if (typeof value.model === "string" && value.model) {
+    els.decisionGenerationModel.textContent = shortName(value.model);
+  }
+  els.decisionGenerationTokens.textContent = outputTokens
+    ? `${outputTokens.toLocaleString()} tok`
+    : "warming up";
+  els.decisionGenerationSpeed.textContent = speed ? `${speed.toFixed(1)} tok/s` : "-- tok/s";
+  els.decisionGenerationTime.textContent = seconds ? `${seconds.toFixed(1)}s` : "awaiting first token";
+
+  if (pinned) {
+    els.decisionModelStream.scrollTop = els.decisionModelStream.scrollHeight;
+    els.decisionStreamLatest.hidden = true;
+  } else {
+    els.decisionStreamLatest.hidden = false;
+  }
 }
 
 function decisionTimelineSteps(trace) {

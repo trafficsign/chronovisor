@@ -40,6 +40,7 @@ from typing import Any
 
 import httpx
 
+from chronovisor.core.live_model_stream import publish_model_stream
 from chronovisor.core.llm_runtime import (
     BackendCapabilities,
     EmbeddingRequest,
@@ -56,6 +57,7 @@ from chronovisor.core.llm_runtime import (
     safe_metadata_identifier,
 )
 from chronovisor.core.ollama_lease import model_resource_lease
+from chronovisor.core.store import CHRONOVISOR_ROOT
 
 OMLX_BASE_URL = os.environ.get("OMLX_BASE_URL", "http://127.0.0.1:18125/v1")
 OMLX_API_KEY = os.environ.get("OMLX_API_KEY", "omlx-local")
@@ -87,6 +89,22 @@ class OMLXAdapter:
         progress_callback = getattr(request, "progress_callback", None)
         streamed = callable(progress_callback)
         stream_complete: bool | None = None
+
+        def emit_stream_error() -> None:
+            if not streamed:
+                return
+            live_delta = getattr(progress_callback, "stream_delta", None)
+            try:
+                if callable(live_delta):
+                    live_delta(event="error")
+                else:
+                    publish_model_stream(
+                        CHRONOVISOR_ROOT,
+                        {"event": "error", "model": model},
+                    )
+            except Exception:
+                pass
+
         try:
             # ponytail: one DFlash engine per oMLX server; replace this global
             # lease only if oMLX gains native per-engine request queueing.
@@ -110,9 +128,14 @@ class OMLXAdapter:
                         payload,
                         timeout_ms=request.timeout_ms,
                     )
+        except SafeBackendError:
+            emit_stream_error()
+            raise
         except (TimeoutError, httpx.TimeoutException):
+            emit_stream_error()
             raise SafeBackendError("timeout", transient=True) from None
         except httpx.TransportError:
+            emit_stream_error()
             raise SafeBackendError("transport_error", transient=True) from None
         return self._normalize_chat(
             response,
@@ -251,6 +274,26 @@ class OMLXAdapter:
         saw_done = False
         started = time.monotonic()
         last_emitted = started
+        live_delta = getattr(progress_callback, "stream_delta", None)
+        stream_model = payload.get("model")
+
+        def emit_live(**event: Any) -> None:
+            try:
+                if callable(live_delta):
+                    live_delta(**event)
+                else:
+                    publish_model_stream(
+                        CHRONOVISOR_ROOT,
+                        {
+                            "event": event.get("event", "delta"),
+                            "model": stream_model,
+                            **event,
+                        },
+                    )
+            except Exception:
+                pass
+
+        emit_live(event="start")
 
         def emit(*, exact: bool = False) -> None:
             nonlocal last_emitted
@@ -287,6 +330,8 @@ class OMLXAdapter:
                 progress_callback(event)
             except Exception:
                 pass
+            if not callable(live_delta):
+                emit_live(event="progress", **event)
             last_emitted = now
 
         with httpx.Client(base_url=self.base_url, transport=self._transport) as client:
@@ -345,10 +390,12 @@ class OMLXAdapter:
                             value = delta.get("content")
                             if isinstance(value, str) and value:
                                 content.append(value)
+                                emit_live(channel="output", text=value)
                                 emitted_text = True
                             value = delta.get("reasoning_content")
                             if isinstance(value, str) and value:
                                 reasoning.append(value)
+                                emit_live(channel="thinking", text=value)
                                 emitted_text = True
                         if emitted_text:
                             output_chunks += 1
@@ -378,6 +425,8 @@ class OMLXAdapter:
                 "usage": usage,
             },
         )
+        if saw_done and finish_reason:
+            emit_live(event="done")
         return normalized, bool(saw_done and finish_reason)
 
     @staticmethod

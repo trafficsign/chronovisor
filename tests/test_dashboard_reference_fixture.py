@@ -836,7 +836,7 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert (
         ".decision-trace-harness .decision-lane-step.active circle,\n"
         "  .decision-trace-harness .trace-lane-rail.active,\n"
-        "  .decision-generation-track.indeterminate i {\n"
+        "  .decision-model-stream pre::after {\n"
         "    animation: none;"
     ) in style
     assert '<radialGradient id="trace-processing-core">' in page
@@ -879,13 +879,16 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     )
     assert ".decision-console-chrome {\n  display: grid;" in style
     assert ".decision-console-lights i:first-child {\n  background: #ff5f57;" in style
-    assert "grid-template-rows: 32px 32px 142px 55px;" in style
+    assert "grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);" in style
+    assert "grid-template-rows: 32px 32px minmax(0, 1fr);" in style
+    assert "grid-template-rows: 32px minmax(0, 1fr) 55px;" in style
+    assert "height: 261px;" in style
     assert "min-height: 261px;" in style
     assert ".decision-transition-feed {\n  display: grid;" in style
     assert ".decision-transition-event {\n  display: grid;" in style
     assert ".decision-generation-meter {\n  display: grid;" in style
-    assert ".decision-generation-track.indeterminate i {" in style
-    assert "@keyframes decision-console-scan" in style
+    assert ".decision-generation-track.indeterminate i {" not in style
+    assert "@keyframes decision-console-scan" not in style
     assert ".decision-events" not in page
     frame = renderer.split("function renderDecisionTraceFrame", 1)[1].split(
         "function setDecisionTransitionState", 1

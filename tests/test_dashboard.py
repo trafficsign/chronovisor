@@ -2901,7 +2901,13 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'id="decision-transition-state"' in page
     assert 'id="decision-transition-feed"' in page
     assert 'id="decision-generation-meter"' in page
-    assert 'id="decision-generation-track"' in page
+    assert 'class="decision-console-pane"' in page
+    assert 'class="decision-stream-pane"' in page
+    assert 'id="decision-model-stream"' in page
+    assert 'id="decision-stream-thinking"' in page
+    assert 'id="decision-stream-output"' in page
+    assert 'id="decision-stream-latest"' in page
+    assert 'id="decision-generation-track"' not in page
     assert 'id="decision-generation-speed"' in page
     assert 'id="lan-share-button"' in page
     assert "Runnable Work" in page
@@ -2943,6 +2949,12 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "const ACTIVE_DECISION_REFRESH_DELAY_MS = 800" in app
     assert 'fetch("/api/local-consensus"' in app
     assert 'new EventSource("/api/activity-stream")' in app
+    assert 'new EventSource("/api/model-stream")' in app
+    assert "function renderModelStream(stream)" in app
+    assert "grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);" in style
+    assert "height: 261px;" in style
+    assert ".decision-stream-pane" in style
+    assert ".decision-stream-output" in style
     assert 'fetch("/api/activity"' in app
     assert "function renderProcessingActivity" in app
     assert "els.pending.textContent = fmt(ready);" in app
@@ -2969,6 +2981,67 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
         < page.index("/static/app-renderer.js")
         < page.index("/static/app-client.js")
     )
+
+
+def test_model_stream_renderer_projects_real_text_and_metrics() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    renderer_test = renderer + "\nthis.__test = { renderModelStream };"
+    scenario = f"""
+const vm = require("node:vm");
+const element = () => ({{
+  textContent: "",
+  hidden: false,
+  dataset: {{}},
+  scrollHeight: 240,
+  scrollTop: 120,
+  clientHeight: 120,
+}});
+const els = new Proxy({{}}, {{
+  get(target, key) {{
+    if (!(key in target)) target[key] = element();
+    return target[key];
+  }},
+}});
+const sandbox = {{ els, window: {{}} }};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(renderer_test)}, sandbox);
+sandbox.__test.renderModelStream({{
+  active: true,
+  status: "streaming",
+  last_channel: "output",
+  model: "Qwen3.8-Flash-Next-oQ4e-mtp",
+  thinking: "private <plan>",
+  output: "answer <b>as text</b>",
+  output_tokens: 42,
+  tokens_per_second: 21,
+  generation_seconds: 2,
+}});
+process.stdout.write(JSON.stringify({{
+  state: els.decisionStreamState.textContent,
+  thinking: els.decisionStreamThinking.textContent,
+  output: els.decisionStreamOutput.textContent,
+  channel: els.decisionModelStream.dataset.channel,
+  scrollTop: els.decisionModelStream.scrollTop,
+  latestHidden: els.decisionStreamLatest.hidden,
+  tokens: els.decisionGenerationTokens.textContent,
+  speed: els.decisionGenerationSpeed.textContent,
+  time: els.decisionGenerationTime.textContent,
+}}));
+"""
+
+    rendered = json.loads(_run_node_scenario(scenario).stdout)
+
+    assert rendered == {
+        "state": "LIVE · OUTPUT",
+        "thinking": "private <plan>",
+        "output": "answer <b>as text</b>",
+        "channel": "output",
+        "scrollTop": 240,
+        "latestHidden": True,
+        "tokens": "42 tok",
+        "speed": "21.0 tok/s",
+        "time": "2.0s",
+    }
 
 
 def test_single_model_decision_trace_dom_contract() -> None:
@@ -3439,6 +3512,7 @@ const DECISION_REFRESH_TIMEOUT_MS = 2500;
 const ACTIVE_DECISION_REFRESH_DELAY_MS = 800;
 const IDLE_DECISION_REFRESH_DELAY_MS = 2500;
 const renderLiveConsensus = (consensus) => rendered.push(consensus.decision_trace.state);
+const renderModelStream = () => {{}};
 const refreshLiveModelStatus = () => Promise.resolve();\n`
   + {json.dumps(refresh)}
   + `\nthis.__test = {{
@@ -4198,6 +4272,45 @@ def test_model_status_handler_reads_live_runtime_without_snapshot_cache(
     assert muse["status"] == "loaded"
     assert muse["running"] is True
     assert payload["local_runtime"]["provider"] == "ollama"
+
+
+def test_local_consensus_handler_includes_ephemeral_model_stream(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "_local_consensus_snapshot",
+        lambda **_kwargs: {"active": True, "decision_trace": {"state": "active"}},
+    )
+
+    class ModelStream:
+        def snapshot(self) -> dict[str, Any]:
+            return {
+                "revision": 4,
+                "active": True,
+                "thinking": "plan",
+                "output": "answer",
+            }
+
+    server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.DashboardHandler)
+    server.dashboard_model_stream = ModelStream()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    try:
+        response = dashboard.httpx.get(
+            f"http://{host}:{port}/api/local-consensus?pipeline=ingest", timeout=2
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert response.status_code == 200
+    assert response.json()["model_stream"] == {
+        "revision": 4,
+        "active": True,
+        "thinking": "plan",
+        "output": "answer",
+    }
 
 
 def test_dashboard_private_client_scope_rejects_public_addresses() -> None:
