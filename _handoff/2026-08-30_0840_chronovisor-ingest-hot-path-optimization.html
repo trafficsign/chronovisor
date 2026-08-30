@@ -63,13 +63,13 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_71cea22bf5304670b3aabeaeedacfa71","created_at":"2026-08-30T08:40:14+09:00","状態":"ready","slug":"chronovisor-ingest-hot-path-optimization"}
+{"task_id":"plan_71cea22bf5304670b3aabeaeedacfa71","created_at":"2026-08-30T08:40:14+09:00","状態":"running","slug":"chronovisor-ingest-hot-path-optimization"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor Ingest Hot Path 最適化</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_71cea22bf5304670b3aabeaeedacfa71</code></span>
 <span data-bind="created_at">2026-08-30T08:40:14+09:00</span>
 </div>
@@ -93,11 +93,11 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <tr><td>oMLX完了 → Validate開始</td><td class="metric-ok">約3ms</td><td>LLM応答の受け渡し自体は即時。oMLXは今回の待ち時間の主因ではない。</td></tr>
 <tr><td>Validate → Vote</td><td>直近30件 median 47ms、max 26.867s</td><td>遅い3件はいずれも create。候補解決中に同じ全ページ走査を反復している。</td></tr>
 <tr><td><code>_find_existing_create_target()</code></td><td class="metric-bad">13.255s / 1回</td><td><code>_find_page_resilient()</code> 配下で <code>all_pages()</code> を2回実行。validator内でも同じcreateを2回解決し、後段dedupeでも再実行。</td></tr>
-<tr><td><code>all_pages()</code></td><td class="metric-bad">5.556–5.817s / 1回</td><td>5,535ページをcanonical parse・検証。検索用の単純な存在確認に対して処理が重すぎる。</td></tr>
-<tr><td><code>IndexStore.refresh()</code></td><td class="metric-bad">変更時も全5,535件をstat</td><td>本文parseは変更ページだけだが、毎回 <code>_scan_disk()</code> で全ページを列挙・statする。変更後に1回へ減らすだけではsteady-stateのO(N)走査が残る。</td></tr>
+<tr><td><code>all_pages()</code></td><td class="metric-bad">5.556–5.817s / 1回</td><td>freeze時点5,536ページをcanonical parse・検証。検索用の単純な存在確認に対して処理が重すぎる。</td></tr>
+<tr><td><code>IndexStore.refresh()</code></td><td class="metric-bad">変更時も全5,536件をstat</td><td>本文parseは変更ページだけだが、毎回 <code>_scan_disk()</code> で全ページを列挙・statする。変更後に1回へ減らすだけではsteady-stateのO(N)走査が残る。</td></tr>
 <tr><td>Stage 1開始 → catalog完成</td><td class="metric-bad">12–21s</td><td><code>triage()</code> がfolder抽出と総件数表示のために <code>all_pages()</code> を2回実行。</td></tr>
 <tr><td>Artifact確定 → 次rawのtriage開始</td><td class="metric-bad">median 69.871s、max 111.445s</td><td>同期semantic delta publicationがCPU、<code>incremental_max_batch=1</code>。代表17KBページ14文書のjobは約66.6s。</td></tr>
-<tr><td>IndexStore収録</td><td class="metric-ok">stable 5,535 / canonical 5,535、欠落0</td><td>現在コーパスでは既存のインメモリ索引が損失なく全ページを表現できる。</td></tr>
+<tr><td>IndexStore収録</td><td class="metric-ok">pages 5,536 / system込み 5,542 / canonical 5,542、欠落0</td><td>2026-08-30 09:01 freeze。warm full refresh 406.555ms、全canonical列挙5,977.644ms。既存のインメモリ索引が損失なく全ページを表現できる。</td></tr>
 </tbody>
 </table>
 <p class="small">実測日は 2026-08-30。実装開始時に同じ3ケースを再測定し、baseline JSONとして固定する。</p>
@@ -137,7 +137,7 @@ LLM response
 <thead><tr><th>案</th><th>判断</th><th>理由</th></tr></thead>
 <tbody>
 <tr><td>read-backを非同期化して次rawを先に進める</td><td>不採用</td><td>速く見えるだけで、semantic delta未公開のまま次処理へ進み、過去に起きたfalse missを再導入する。</td></tr>
-<tr><td>全ページ用の新cache / DBを追加</td><td>不採用</td><td><code>IndexStore</code> が既に同じ責務を持ち、現コーパス5,535件を欠落なく保持している。</td></tr>
+<tr><td>全ページ用の新cache / DBを追加</td><td>不採用</td><td><code>IndexStore</code> が既に同じ責務を持ち、現コーパス5,536件を欠落なく保持している。</td></tr>
 <tr><td>変更後にfull <code>IndexStore.refresh()</code>を1回だけ実行</td><td>不採用</td><td>回数は減るが、1ページ変更のたびに全5,535ページの列挙・statが残るため。</td></tr>
 <tr><td>既存write receiptから対象entryだけ更新</td><td><strong>採用</strong></td><td>writerは変更したpage id/pathを既に知っている。新しいjournalやcacheを作らず、処理量をO(全ページ数)からO(変更ページ数)へ落とせる。</td></tr>
 <tr><td>重複候補をtop-kだけに限定</td><td>不採用</td><td>品質と重複防止の意味を変える。全候補比較は残し、データ供給だけをdisk parseからmemoryへ変える。</td></tr>
@@ -151,7 +151,7 @@ LLM response
 <section data-section="やってはいけないこと">
 <h2>やってはいけないこと（必須）</h2>
 <ul>
-<li>Qwen3.8-Flash-Next-125B-oQ4e-mtp、port 8125、context、MTP、single-authority構成をこの作業で変更しない。</li>
+<li>Qwen3.8-Flash-Next-oQ4e-mtp、port 18125、context、MTP、single-authority構成をこの作業で変更しない。freezeでoMLX 0.6.4と <code>/health</code> healthyを確認済み。</li>
 <li>重複判定のscore閾値、SequenceMatcherによる全候補比較、alias順序、case/Unicode/loose一致、曖昧時fail-closedを弱めない。</li>
 <li>strict semantic publicationまたはread-backをfire-and-forgetへ戻さない。</li>
 <li>通常のingest前後に <code>all_pages()</code>、<code>_scan_disk()</code>、full <code>IndexStore.refresh()</code> を呼ばない。「1回だけならよい」として戻さない。</li>
@@ -166,7 +166,7 @@ LLM response
 <section data-section="前提・仮定">
 <h2>前提・仮定</h2>
 <ul>
-<li>現在の5,535 stable pagesに対して <code>IndexStore</code> とcanonical enumerationの差が0である。実装直前に再確認し、差が1件でもあれば作業を止めて原因を解消する。</li>
+<li>freeze時点の5,536 stable pages（system込み5,542件）に対して <code>IndexStore</code> とcanonical enumerationの差が0である。実装直前に再確認し、差が1件でもあれば作業を止めて原因を解消する。</li>
 <li>全ページparity確認はbootstrap/recoveryの責務とし、以後のChronovisor管理下writeは変更対象を特定できるreceiptを必ず残す。receiptを出さないwriterが見つかった場合は、そのwriterだけ既存mutation APIへ寄せてからhot pathを切り替える。</li>
 <li>手動編集・Git checkoutなどChronovisor管理外の変更はingest前景で毎回探索しない。既存のfilesystem change signalがあれば対象pathを差分反映し、対象を特定できないoverflow/障害だけdirty markerからbackground full reconcileする。新しい常駐watcherはこのPlanでは作らない。</li>
 <li>foreground semantic routeはMPS、incremental routeはCPUで、別backend instanceとして構成されている。MPS document encodeは既存self-testで実行済み。</li>
@@ -193,7 +193,7 @@ LLM response
 <section data-section="実行手順">
 <h2>実行手順</h2>
 <ol class="checklist">
-<li><input type="checkbox"><span><strong>0. 実行前freeze:</strong> git status、running services、125B runtime identity、IndexStore 5,535件parity、background semantic jobs、memory/swapをread-onlyで記録する。process起動時のfull reconcileを1回実測し、全writer/callerの <code>refresh()</code> とmutation receiptを棚卸しする。保護中dirty差分をmanifestへ明記する。</span></li>
+<li><input type="checkbox" checked><span><strong>0. 実行前freeze:</strong> git status、running services、125B runtime identity、IndexStore 5,536件parity、background semantic jobs、memory/swapをread-onlyで記録する。process起動時のfull reconcileを1回実測し、ingest前景writer/callerの <code>refresh()</code> とmutation receiptを棚卸しする。保護中dirty差分をmanifestへ明記する。</span></li>
 <li><input type="checkbox"><span><strong>1. Red-capable feedback loop:</strong> <code>scripts/benchmark-ingest-hot-path</code> を最小1ファイルで作り、A–Cをmodel callなしで再現する。baselineとしてtarget resolution、catalog、<code>all_pages</code>/<code>_scan_disk</code>/full refresh/targeted upsertの各回数、semantic publish、artifact→next triggerをJSON保存し、現状の遅さを再現する。</span></li>
 <li><input type="checkbox"><span><strong>2. bootstrap snapshot化:</strong> process起動時だけfull reconcileしてstoreをreadyにする。<code>ingest_triage.py</code> のfolder/countを <code>IndexStore</code> へ置換し、<code>_find_page_casefold()</code>/<code>_find_page_resilient()</code> を同じインメモリpage id集合から解決する。canonical path検証とalias/曖昧contractは維持する。</span></li>
 <li><input type="checkbox"><span><strong>3. 同一解決のmemoize:</strong> validator 1回の中で同じoperationのeffective targetをdictで1回だけ解決する。まずここまでを測り、target-resolution gateを満たせばglobal cacheや候補indexは作らない。</span></li>
@@ -290,6 +290,7 @@ LLM response
 <ol class="log">
 <li><time>2026-08-30 08:40</time><span>Plan生成。現時点では調査・設計のみで、runtime/code/configは未変更。</span></li>
 <li><time>2026-08-30 08:53</time><span>ユーザー判断を反映。変更後のfull refresh 1回案を撤回し、起動時full reconcile 1回 + write receiptによるO(変更ページ数)差分反映へ更新。runtime/code/configは未変更。</span></li>
+<li><time>2026-08-30 09:01</time><span>手順0完了。liveはoMLX 0.6.4 / port 18125 / Qwen3.8-Flash-Next-oQ4e-mtp、IndexStoreはpages 5,536件・system込み5,542件・canonical差分0、warm full refresh 406.555ms、旧全列挙5,977.644ms。semantic jobsはcompleted 2,726 / leased 1 / pending 2、swap 0。既存runtimeは変更せずbaseline.jsonへ固定。</span></li>
 </ol>
 </section>
 

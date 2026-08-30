@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "collected_at": "2026-08-30T09:01:51+09:00",
+  "repository": {
+    "head": "dd9c3fcca4292d45a1ca7faea451634d2d2c8307",
+    "origin_main": "8ee34d0cfbda4c8ebc72e33c14c49eaaad4cd224",
+    "branch": "main",
+    "ahead": 2,
+    "protected_dirty": [
+      "scripts/recall_r6_harness.py",
+      "tests/test_recall_r6_harness.py",
+      "_handoff/evidence/2026-08-29-recall-teacher-salvage/"
+    ]
+  },
+  "runtime": {
+    "omlx_version": "0.6.4",
+    "omlx_port": 18125,
+    "omlx_default_model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+    "omlx_health": "healthy",
+    "omlx_loaded_models": 2,
+    "omlx_current_model_memory_bytes": 83299305817,
+    "ingest_pid": 1143,
+    "ingest_archive_commit": "7357a3621235ab2935e72c82147851fb29f922ca",
+    "semantic_pid": 987,
+    "semantic_device": "mps",
+    "semantic_archive_commit": "7357a3621235ab2935e72c82147851fb29f922ca",
+    "semantic_jobs": {
+      "completed": 2726,
+      "leased": 1,
+      "pending": 2
+    },
+    "reranker_pid": 1332,
+    "dashboard_pid": 16652,
+    "dashboard_archive_commit": "8ee34d0cfbda4c8ebc72e33c14c49eaaad4cd224"
+  },
+  "host": {
+    "swap_used_bytes": 0,
+    "filesystem_used": "627GiB",
+    "filesystem_available": "1.2TiB"
+  },
+  "index_store": {
+    "root": "/Users/trafficsign/.chronovisor",
+    "page_count": 5536,
+    "page_count_with_system": 5542,
+    "canonical_stable_count": 5542,
+    "missing_count": 0,
+    "extra_count": 0,
+    "warm_full_refresh_ms": 406.555,
+    "canonical_enumeration_ms": 5977.644
+  },
+  "notes": [
+    "Production services were observed only; no process or runtime state was changed during freeze.",
+    "The checked-out Plan had stale port 8125 and corpus count 5535; live values are 18125 and 5536 pages (5542 including system).",
+    "Production GitHub-backed archives lag the local checkout; local implementation tests must use isolated roots until an explicitly authorized push and restart."
+  ]
+}
