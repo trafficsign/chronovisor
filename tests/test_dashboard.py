@@ -3078,7 +3078,7 @@ const els = {{ decisionTraceHarness: harness }};
 const sandbox = {{ window: {{}}, document, els }};
 vm.createContext(sandbox);
 vm.runInContext({json.dumps(renderer)}, sandbox);
-sandbox.window.__chronovisorDashboardTest.updateDecisionSvgHarness({{
+const readyTrace = {{
   state: "ready",
   authority_kind: "single_model_v1",
   quorum_flow: false,
@@ -3102,6 +3102,16 @@ sandbox.window.__chronovisorDashboardTest.updateDecisionSvgHarness({{
     reasoning: {{ options: {{}} }},
     labels: {{ hold: "No safe quorum", validation: "Validated" }},
   }},
+}};
+sandbox.window.__chronovisorDashboardTest.updateDecisionSvgHarness(readyTrace);
+const terminalStatus = panel.children[3].textContent;
+vm.runInContext(`latestProcessingLanes.set("ingest", {{
+  state: "active",
+  current_step: "generate",
+}});`, sandbox);
+sandbox.window.__chronovisorDashboardTest.updateDecisionSvgHarness({{
+  ...readyTrace,
+  task_role: "ingest_triage",
 }});
 process.stdout.write(JSON.stringify({{
   singleClass: harness.classList.contains("single-model"),
@@ -3109,7 +3119,9 @@ process.stdout.write(JSON.stringify({{
   authority: panel.children[0].textContent,
   model: panel.children[1].textContent,
   revision: panel.children[2].textContent,
+  terminalStatus,
   status: panel.children[3].textContent,
+  traceRelation: panel.dataset.traceRelation,
   target: panel.children[4].textContent,
   repair: panel.children[5].textContent,
   dispatch: harness.querySelector("[data-dispatch-label]").textContent,
@@ -3137,7 +3149,9 @@ process.stdout.write(JSON.stringify({{
         "authority": "Single Authority",
         "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
         "revision": "b" * 64,
-        "status": "Validated",
+        "terminalStatus": "Validated",
+        "status": "Triage done · Generate active",
+        "traceRelation": "previous",
         "target": "1",
         "repair": "REPAIR ≠ VOTE",
         "dispatch": "DISPATCH → SINGLE AUTHORITY",

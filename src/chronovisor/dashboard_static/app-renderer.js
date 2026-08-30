@@ -345,6 +345,9 @@ function renderProcessingActivity(activity) {
   });
   els.processingPanel.dataset.activeCount = String(intValue(activity?.active_count));
   document.body.dataset.processingRevision = revision;
+  if (latestDecisionTrace.request_sha256) {
+    updateSingleAuthorityMeta(latestDecisionTrace, decisionTraceProjection(latestDecisionTrace));
+  }
   updateProcessingTraceSelection();
   return true;
 }
@@ -497,18 +500,37 @@ function updateSingleAuthorityMeta(trace, projection) {
   const panel = document.getElementById("decision-single-authority");
   if (!panel) return;
   const single = isSingleModelTrace(trace) && projection?.single_model === true;
+  const ingestLane = latestProcessingLanes.get("ingest");
+  const role = String(trace?.task_role || "").toLowerCase();
+  const traceStep = role.startsWith("ingest_triage")
+    ? "triage"
+    : role.startsWith("ingest_recall_metadata")
+      ? "generate"
+      : role.startsWith("ingest_reconciliation") || role.startsWith("ingest_review")
+        ? "consensus"
+        : "";
+  const ingestSteps = ["raw", "triage", "generate", "consensus", "apply"];
+  const currentStep = String(ingestLane?.current_step || "");
+  const previous = single
+    && ["ready", "agreed"].includes(String(trace?.state || ""))
+    && ingestLane?.state === "active"
+    && ingestSteps.indexOf(currentStep) > ingestSteps.indexOf(traceStep)
+    && ingestSteps.includes(traceStep);
   panel.hidden = !single;
+  panel.dataset.traceRelation = previous ? "previous" : "current";
   const authority = projection?.authority || {};
   const values = {
     "[data-single-authority-label]": fmt(authority.label, "Single Authority"),
     "[data-single-model]": shortName(authority.model || trace?.model),
     "[data-single-revision]": shortName(authority.revision || trace?.revision),
-    "[data-single-status]": fmt(
-      projection?.labels?.validation,
-      trace?.state === "ready" || trace?.state === "agreed"
-        ? "Validated"
-        : trace?.state === "quarantined" ? "Held" : "Validating"
-    ),
+    "[data-single-status]": previous
+      ? `${traceStep[0].toUpperCase()}${traceStep.slice(1)} done · ${currentStep[0].toUpperCase()}${currentStep.slice(1)} active`
+      : fmt(
+        projection?.labels?.validation,
+        trace?.state === "ready" || trace?.state === "agreed"
+          ? "Validated"
+          : trace?.state === "quarantined" ? "Held" : "Validating"
+      ),
     "[data-single-target]": fmt(authority.target, "1"),
     "[data-single-repair]": "REPAIR ≠ VOTE",
   };
