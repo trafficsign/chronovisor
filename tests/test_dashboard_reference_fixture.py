@@ -443,7 +443,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert matching("data-plan-value", "context-selection")[0]["y"] == "239"
 
 
-@pytest.mark.parametrize("viewport_width", [640, 700, 900, 1050])
+@pytest.mark.parametrize("viewport_width", [640, 700, 900, 1050, 2048])
 def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
     tmp_path: Path,
     viewport_width: int,
@@ -524,6 +524,7 @@ const sealHoldEnd = screenPoint(sealHold, sealHold.getPointAtLength(sealHold.get
 const holdCenter = holdDisplay === "none" ? null : screenPoint(hold, new DOMPoint(0, 0));
 const processing = [...document.querySelectorAll(".processing-lane")].map((lane) => {
   const track = lane.querySelector(".processing-track");
+  const lastStep = track.querySelector(".processing-step:last-child");
   const lastLabel = track.querySelector(".processing-step:last-child > span");
   const laneBounds = lane.getBoundingClientRect();
   const trackBounds = track.getBoundingClientRect();
@@ -532,6 +533,7 @@ const processing = [...document.querySelectorAll(".processing-lane")].map((lane)
     count: Number(lane.dataset.count),
     laneRight: laneBounds.right,
     trackRight: trackBounds.right,
+    lastStepLeft: lastStep.getBoundingClientRect().left,
     labelRight: labelBounds.right,
   };
 });
@@ -651,6 +653,7 @@ fetch("/geometry-result", {
     assert [row["count"] for row in geometry[0]["processing"]] == [4, 5, 6]
     for row in geometry[0]["processing"]:
         assert row["trackRight"] <= row["laneRight"]
+        assert abs(row["lastStepLeft"] - row["trackRight"]) <= 0.1
         assert row["labelRight"] <= row["laneRight"]
 
 

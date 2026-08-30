@@ -2961,15 +2961,22 @@ canvas {
 }
 
 .processing-track:has(.processing-step:nth-child(5):last-child) {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr)) 0;
 }
 
 .processing-track:has(.processing-step:nth-child(4):last-child) {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr)) 0;
 }
 
 .processing-track:has(.processing-step:nth-child(6):last-child) {
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr)) 0;
+}
+
+.processing-step:last-child > span {
+  position: absolute;
+  top: 0;
+  right: -10px;
+  max-width: none;
 }
 
 .processing-step {
