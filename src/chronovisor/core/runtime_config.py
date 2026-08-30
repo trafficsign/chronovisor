@@ -414,7 +414,7 @@ class SearchEmbeddingConfig:
     canary_percent: int = 0
     sync_recall: bool = False
     query_timeout_ms: int = 250
-    interactive_timeout_ms: int = 1_000
+    interactive_timeout_ms: int = 5_000
 
 
 @dataclass(frozen=True)

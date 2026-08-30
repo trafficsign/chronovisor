@@ -822,7 +822,7 @@ incremental_idle_unload_seconds = 300
 maintenance_max_batch = 32
 offline = true
 query_timeout_ms = 250
-interactive_timeout_ms = 1000
+interactive_timeout_ms = 5000
 
 [search.embedding.rollout]
 mode = "on"

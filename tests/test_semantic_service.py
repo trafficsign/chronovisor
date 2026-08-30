@@ -161,7 +161,7 @@ def _forbid_local_controls(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(ollama, name, forbidden)
 
 
-def test_remote_normal_document_uses_fixed_role_without_local_controls(
+def test_remote_normal_document_uses_interactive_deadline_without_local_controls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class RemoteBackend(FakeEmbeddingBackend):
@@ -185,7 +185,7 @@ def test_remote_normal_document_uses_fixed_role_without_local_controls(
         EmbeddingRequest(
             ("document",),
             DOCUMENT_SOURCE,
-            state.config.query_timeout_ms,
+            state.config.interactive_timeout_ms,
             EmbeddingPurpose.DOCUMENT,
         )
     ]

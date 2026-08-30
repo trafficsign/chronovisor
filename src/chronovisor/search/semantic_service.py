@@ -352,10 +352,14 @@ class SemanticServiceState:
         purpose: EmbeddingPurpose,
         *,
         source: SourceDataClassification,
+        timeout_ms: int | None = None,
     ) -> np.ndarray:
+        effective_timeout_ms = (
+            self.config.query_timeout_ms if timeout_ms is None else timeout_ms
+        )
         with self._model_lock:
             resources = (
-                accelerator_lease(timeout_ms=self.config.query_timeout_ms)
+                accelerator_lease(timeout_ms=effective_timeout_ms)
                 if self._uses_local_controls(self._foreground_route)
                 else contextlib.nullcontext()
             )
@@ -374,7 +378,7 @@ class SemanticServiceState:
                     texts,
                     purpose,
                     source=source,
-                    timeout_ms=self.config.query_timeout_ms,
+                    timeout_ms=effective_timeout_ms,
                 )
 
     def _embed_foreground_documents(
@@ -384,7 +388,10 @@ class SemanticServiceState:
         source: SourceDataClassification = DOCUMENT_SOURCE,
     ) -> np.ndarray:
         return self._embed_foreground(
-            texts, EmbeddingPurpose.DOCUMENT, source=source
+            texts,
+            EmbeddingPurpose.DOCUMENT,
+            source=source,
+            timeout_ms=self.config.interactive_timeout_ms,
         )
 
     def _embed_incremental_documents(
