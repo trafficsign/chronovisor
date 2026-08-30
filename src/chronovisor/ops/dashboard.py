@@ -111,8 +111,10 @@ ACTIVE_BATCH_STAGES = {
     "batch",
     "raw",
     "triage",
+    "target-resolution",
     "generate",
     "authorization",
+    "authorization-continuation",
     "local-consensus-review",
     "local-regenerate",
     "frontier-review",
@@ -120,6 +122,14 @@ ACTIVE_BATCH_STAGES = {
     # ingest convergence was relabeled as a local-consensus operation.
     "frontier-regenerate",
     "apply",
+    "semantic-publish",
+    "claim-publish",
+    "state-register",
+    "read-back",
+    "complete",
+    "completion-ack",
+    "projection",
+    "semantic-noop",
 }
 AUDITOR_RUNTIME_ROLE = "recall.auditor"
 RECALL_GATE_RUNTIME_ROLE = "recall.gate"
@@ -2389,12 +2399,45 @@ def _processing_consensus_step(pipeline: str, role: object, phase: object) -> st
             return "challenger"
         return "primary"
     if pipeline == "ingest":
+        if normalized_role.startswith("ingest_triage"):
+            return "triage"
+        if normalized_role.startswith("ingest_recall_metadata"):
+            return "generate"
         return "consensus"
     if pipeline == "improve":
         return "verify" if normalized_phase in {"validate", "vote"} else "generate"
     if pipeline == "repair":
         return "verify" if normalized_phase in {"validate", "vote"} else "local_fix"
     return "consensus" if normalized_phase in {"validate", "vote"} else "inspect"
+
+
+def _processing_ingest_step(stage: object) -> str:
+    normalized = str(stage or "raw").casefold()
+    if normalized in {"triage", "target-resolution"}:
+        return "triage"
+    if normalized in {"generate", "local-regenerate", "frontier-regenerate"}:
+        return "generate"
+    if normalized in {
+        "authorization",
+        "authorization-continuation",
+        "local-consensus-review",
+        "frontier-review",
+        "locked",
+    }:
+        return "consensus"
+    if normalized in {
+        "apply",
+        "semantic-publish",
+        "claim-publish",
+        "state-register",
+        "read-back",
+        "complete",
+        "completion-ack",
+        "projection",
+        "semantic-noop",
+    }:
+        return "apply"
+    return "raw"
 
 
 def _processing_model_step(pipeline: str, operation: object) -> str:
@@ -2478,21 +2521,8 @@ def _build_processing_activity_snapshot() -> dict[str, Any]:
     )
     if ingest_active:
         raw_stage = str(status.get("stage") or status.get("current_op") or "raw")
-        stage_aliases = {
-            "batch": "raw",
-            "raw": "raw",
-            "triage": "triage",
-            "generate": "generate",
-            "local-regenerate": "generate",
-            "frontier-regenerate": "generate",
-            "authorization": "consensus",
-            "local-consensus-review": "consensus",
-            "frontier-review": "consensus",
-            "locked": "consensus",
-            "apply": "apply",
-        }
         active_by_lane["ingest"] = {
-            "current_step": stage_aliases.get(raw_stage, "raw"),
+            "current_step": _processing_ingest_step(raw_stage),
             "model": str(llm.get("model") or ingest_model()),
             "think": llm.get("think", False),
             "role": str(status.get("current_op") or raw_stage),

@@ -182,9 +182,19 @@ def test_mark_batch_activity_requires_a_running_batch_job() -> None:
 
 def test_mark_batch_activity_accepts_local_consensus_stages_and_legacy_cache() -> None:
     for stage in (
+        "target-resolution",
         "local-consensus-review",
         "local-regenerate",
         "frontier-regenerate",
+        "authorization-continuation",
+        "semantic-publish",
+        "claim-publish",
+        "state-register",
+        "read-back",
+        "complete",
+        "completion-ack",
+        "projection",
+        "semantic-noop",
     ):
         status = {
             "state": "running",
@@ -1090,6 +1100,25 @@ def test_processing_role_projection_covers_dashboard_lanes() -> None:
     assert dashboard._processing_model_step("recall", "search") == "search"
     assert dashboard._processing_model_step("recall", "rerank") == "rerank"
     assert dashboard._processing_model_step("recall", "chat") == "primary"
+    assert dashboard._processing_consensus_step("ingest", "ingest_triage", "generate") == "triage"
+    assert (
+        dashboard._processing_consensus_step(
+            "ingest", "ingest_recall_metadata", "generate"
+        )
+        == "generate"
+    )
+    assert (
+        dashboard._processing_consensus_step(
+            "ingest", "ingest_reconciliation:authority", "generate"
+        )
+        == "consensus"
+    )
+    assert dashboard._processing_ingest_step("target-resolution") == "triage"
+    assert dashboard._processing_ingest_step("semantic-publish") == "apply"
+    assert dashboard._processing_ingest_step("claim-publish") == "apply"
+    assert dashboard._processing_ingest_step("state-register") == "apply"
+    assert dashboard._processing_ingest_step("read-back") == "apply"
+    assert dashboard._processing_ingest_step("complete") == "apply"
 
 
 def test_decision_trace_keeps_transport_boolean_on_the_reasoning_path() -> None:
@@ -2895,6 +2924,10 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'data-decision-lane="primary"' in page
     assert 'data-decision-lane="challenger"' in page
     assert 'data-decision-lane="tie_break"' in page
+    assert 'data-ingest-job-flow' in page
+    assert 'data-ingest-job-step="authority"' in page
+    assert 'data-ingest-job-step="complete"' in page
+    assert 'data-ingest-job-to="generate"' in page
     assert 'id="decision-outcome-reason"' in page
     assert 'id="decision-outcome-data"' in page
     assert 'id="decision-outcome-next"' in page
@@ -2965,6 +2998,7 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "projection.model_routes" in app
     assert ".decision-trace-panel" in style
     assert ".decision-trace-harness.single-model" in style
+    assert ".decision-trace-harness.single-model.ingest-job" in style
     assert "[data-decision-lane=\"challenger\"]" in style
     assert "[data-decision-lane-step=\"vote\"]" in style
     assert "[data-trace-key=\"quorum\"]" in style
@@ -3042,6 +3076,82 @@ process.stdout.write(JSON.stringify({{
         "speed": "21.0 tok/s",
         "time": "2.0s",
     }
+
+
+def test_ingest_job_trace_projects_all_model_and_host_phases() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{ window: {{}} }};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(renderer)}, sandbox);
+const project = sandbox.window.__chronovisorDashboardTest.ingestJobTraceState;
+const rows = [
+  project({{
+    state: "running",
+    stage: "target-resolution",
+    current_job_id: "job-1",
+    host_phase: {{ name: "target-resolution", state: "complete" }},
+  }}, {{ task_role: "ingest_triage", state: "ready" }}),
+  project({{
+    state: "running",
+    stage: "generate",
+    current_job_id: "job-1",
+    llm: {{ active: false, event: "done", phase: "generate" }},
+  }}, {{ task_role: "ingest_triage", state: "ready" }}),
+  project({{
+    state: "running",
+    stage: "authorization",
+    current_job_id: "job-1",
+  }}, {{ task_role: "ingest_reconciliation:authority", state: "active", active: true }}),
+  project({{
+    state: "running",
+    stage: "apply",
+    current_job_id: "job-1",
+    host_phase: {{ name: "apply", state: "active" }},
+  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
+  project({{
+    state: "running",
+    stage: "state-register",
+    current_job_id: "job-1",
+    host_phase: {{ name: "state-register", state: "complete" }},
+  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
+  project({{
+    state: "running",
+    stage: "read-back",
+    current_job_id: "job-1",
+    host_phase: {{ name: "read-back", state: "complete" }},
+  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
+  project({{
+    state: "idle",
+    stage: "idle",
+    last_success: {{ job_id: "job-1", raw: "raw.md" }},
+  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
+];
+process.stdout.write(JSON.stringify(rows.map((row) => ({{
+  current: row.current,
+  states: row.states,
+}}))));
+"""
+
+    rows = json.loads(_run_node_scenario(scenario).stdout)
+
+    assert [row["current"] for row in rows] == [
+        "generate",
+        "page_validate",
+        "authority",
+        "apply",
+        "readback",
+        "complete",
+        "complete",
+    ]
+    assert rows[0]["states"]["target"] == "done"
+    assert rows[1]["states"]["generate"] == "done"
+    assert rows[2]["states"]["draft_ready"] == "done"
+    assert rows[3]["states"]["validated"] == "done"
+    assert rows[4]["states"]["publish"] == "done"
+    assert rows[5]["states"]["readback"] == "done"
+    assert all(state == "done" for state in rows[6]["states"].values())
 
 
 def test_single_model_decision_trace_dom_contract() -> None:
@@ -3188,6 +3298,7 @@ sandbox.window.__chronovisorDashboardTest.updateDecisionSvgHarness({{
 }});
 process.stdout.write(JSON.stringify({{
   singleClass: harness.classList.contains("single-model"),
+  ingestClass: harness.classList.contains("ingest-job"),
   panelHidden: panel.hidden,
   authority: panel.children[0].textContent,
   model: panel.children[1].textContent,
@@ -3219,6 +3330,7 @@ process.stdout.write(JSON.stringify({{
 
     assert result == {
         "singleClass": True,
+        "ingestClass": True,
         "panelHidden": False,
         "authority": "Single Authority",
         "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
@@ -3230,8 +3342,8 @@ process.stdout.write(JSON.stringify({{
         "repair": "REPAIR ≠ VOTE",
         "dispatch": "DISPATCH → SINGLE AUTHORITY",
         "artifact": "Validated",
-        "viewBox": "0 0 1500 550",
-        "height": "513",
+        "viewBox": "0 0 1500 850",
+        "height": "793",
         "dispatchLabelY": "303",
         "dispatchPath": "M1380 164 H1466 Q1476 164 1476 174 V297 Q1476 307 1466 307 H190 Q180 307 180 317 V394 Q180 404 190 404 H220",
         "singlePath": "M920 404 H1039",

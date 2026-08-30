@@ -346,7 +346,15 @@ function renderProcessingActivity(activity) {
   els.processingPanel.dataset.activeCount = String(intValue(activity?.active_count));
   document.body.dataset.processingRevision = revision;
   if (latestDecisionTrace.request_sha256) {
-    updateSingleAuthorityMeta(latestDecisionTrace, decisionTraceProjection(latestDecisionTrace));
+    const projection = decisionTraceProjection(latestDecisionTrace);
+    updateSingleAuthorityMeta(latestDecisionTrace, projection);
+    updateIngestJobTrace(
+      latestDecisionTrace,
+      typeof latestRenderedStatus === "undefined" ? {} : latestRenderedStatus || {},
+      isSingleModelTrace(latestDecisionTrace)
+        && projection?.single_model === true
+        && isIngestJobTrace(latestDecisionTrace),
+    );
   }
   updateProcessingTraceSelection();
   return true;
@@ -495,6 +503,127 @@ function decisionTraceProjection(trace) {
   return projection?.schema === DECISION_TRACE_PROJECTION_SCHEMA ? projection : null;
 }
 
+const INGEST_JOB_TRACE_STEPS = [
+  "raw",
+  "triage",
+  "target",
+  "generate",
+  "page_validate",
+  "draft_ready",
+  "authority",
+  "validated",
+  "apply",
+  "publish",
+  "readback",
+  "complete",
+];
+
+function ingestJobTraceState(status = {}, trace = {}, ingestLane = null) {
+  const stage = String(status?.stage || status?.current_op || "").toLowerCase();
+  const llm = status?.llm && typeof status.llm === "object" ? status.llm : {};
+  const host = status?.host_phase && typeof status.host_phase === "object"
+    ? status.host_phase
+    : {};
+  const role = String(trace?.task_role || "").toLowerCase();
+  const currentJob = Boolean(
+    status?.current_job_id
+      || status?.current_raw
+      || status?.batch?.active
+      || llm.active
+      || (ingestLane?.state === "active" && ingestLane?.recent !== true)
+  );
+  const terminal = ["complete", "completion-ack", "projection", "semantic-noop"].includes(stage)
+    || (!currentJob && Boolean(status?.last_success));
+  const stageSteps = {
+    batch: "raw",
+    raw: "raw",
+    triage: "triage",
+    "target-resolution": "target",
+    generate: "generate",
+    "local-regenerate": "generate",
+    "frontier-regenerate": "generate",
+    authorization: "authority",
+    "authorization-continuation": "authority",
+    "local-consensus-review": "authority",
+    "frontier-review": "authority",
+    locked: "authority",
+    apply: "apply",
+    "semantic-publish": "publish",
+    "claim-publish": "publish",
+    "state-register": "publish",
+    "read-back": "readback",
+  };
+  const laneSteps = {
+    raw: "raw",
+    triage: "triage",
+    generate: "generate",
+    consensus: "authority",
+    apply: "apply",
+  };
+  let current = terminal
+    ? "complete"
+    : stageSteps[stage] || laneSteps[String(ingestLane?.current_step || "")] || "";
+  const hostMatchesStage = String(host.name || "").toLowerCase() === stage;
+  const hostComplete = hostMatchesStage && host.state === "complete";
+  if (stage === "target-resolution" && hostComplete) current = "generate";
+  if (
+    ["generate", "local-regenerate", "frontier-regenerate"].includes(stage)
+    && llm.active === false
+    && llm.event === "done"
+  ) current = "page_validate";
+  if (
+    ["authorization", "authorization-continuation", "local-consensus-review"].includes(stage)
+    && role.startsWith("ingest_reconciliation")
+    && ["ready", "agreed"].includes(String(trace?.state || ""))
+  ) current = "apply";
+  if (stage === "apply" && hostComplete) current = "publish";
+  if (stage === "state-register" && hostComplete) current = "readback";
+  if (stage === "read-back" && hostComplete) current = "complete";
+
+  const states = Object.fromEntries(INGEST_JOB_TRACE_STEPS.map((key) => [key, "pending"]));
+  if (terminal) {
+    INGEST_JOB_TRACE_STEPS.forEach((key) => { states[key] = "done"; });
+    return { current: "complete", states };
+  }
+  const currentIndex = INGEST_JOB_TRACE_STEPS.indexOf(current);
+  if (currentIndex < 0) return { current: "", states };
+  INGEST_JOB_TRACE_STEPS.slice(0, currentIndex).forEach((key) => { states[key] = "done"; });
+  const failed = String(status?.state || "").toLowerCase() === "error"
+    || (hostMatchesStage && host.state === "error")
+    || llm.event === "error";
+  states[current] = failed ? "error" : "active";
+  return { current, states };
+}
+
+function isIngestJobTrace(trace) {
+  if (pinnedProcessingLaneKey) return pinnedProcessingLaneKey === "ingest";
+  const role = String(trace?.task_role || "").toLowerCase();
+  return processingLaneForTrace(trace) === "ingest" || role.startsWith("ingest");
+}
+
+function updateIngestJobTrace(trace, status, visible) {
+  const harness = els.decisionTraceHarness;
+  if (!harness) return;
+  if (!visible) {
+    delete harness.dataset.ingestJobStep;
+    return;
+  }
+  const projection = ingestJobTraceState(
+    status || {},
+    trace,
+    latestProcessingLanes.get("ingest") || null,
+  );
+  harness.dataset.ingestJobStep = projection.current || "waiting";
+  harness.querySelectorAll("[data-ingest-job-step]").forEach((node) => {
+    setDecisionSvgState(node, projection.states[node.dataset.ingestJobStep]);
+  });
+  harness.querySelectorAll("[data-ingest-job-to]").forEach((node) => {
+    setDecisionSvgState(node, projection.states[node.dataset.ingestJobTo]);
+  });
+  const statusNode = harness.querySelector("[data-ingest-job-status]");
+  if (statusNode) statusNode.textContent = (projection.current || "waiting").replaceAll("_", " ").toUpperCase();
+}
+
 function updateSingleAuthorityMeta(trace, projection) {
   if (typeof document === "undefined") return;
   const panel = document.getElementById("decision-single-authority");
@@ -554,10 +683,17 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   const projection = decisionTraceProjection(trace);
   harness.dataset.projectionStatus = projection ? "ok" : "missing";
   const single = isSingleModelTrace(trace) && projection?.single_model === true;
+  const ingestJob = single && isIngestJobTrace(trace);
   harness.classList.toggle("single-model", single);
+  harness.classList.toggle("ingest-job", ingestJob);
   harness.dataset.authorityKind = single ? SINGLE_MODEL_AUTHORITY_KIND : "";
-  harness.setAttribute("viewBox", single ? "0 0 1500 550" : "0 0 1500 650");
-  harness.setAttribute("height", single ? "513" : "607");
+  harness.setAttribute("viewBox", ingestJob ? "0 0 1500 850" : single ? "0 0 1500 550" : "0 0 1500 650");
+  harness.setAttribute("height", ingestJob ? "793" : single ? "513" : "607");
+  updateIngestJobTrace(
+    trace,
+    typeof latestRenderedStatus === "undefined" ? {} : latestRenderedStatus || {},
+    ingestJob,
+  );
   [
     [
       '[data-path-key="plan-dispatch"]',
@@ -633,7 +769,9 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   setDecisionSvgText("[data-decision-label]", single ? "Validated" : "Decision");
   setDecisionSvgText(
     "#decision-trace-svg-description",
-    single
+    ingestJob
+      ? "Current model call detail followed by the complete ingest job: triage, page generation, authority validation, apply, publish, read-back and completion."
+      : single
       ? "Packet, execution planning, one single authority lane, validated output and decision. Structured repair is separate from voting."
       : "Packet, execution planning, fixed primary, challenger and tie-break lanes, then one shared artifact and decision. Unsafe quorum branches to hold before the artifact; only a seal failure branches from the artifact."
   );
@@ -1187,6 +1325,7 @@ function renderDecisionTrace(consensus) {
 window.__chronovisorDashboardTest = Object.assign(window.__chronovisorDashboardTest || {}, {
   decisionTimelineSteps,
   decisionTraceProjection,
+  ingestJobTraceState,
   isSingleModelTrace,
   updateDecisionSvgHarness,
   processingLaneForTrace,

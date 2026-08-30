@@ -1408,12 +1408,14 @@ addEventListener("DOMContentLoaded", () => {
   };
   const disconnectedPathEnds = () => {
     const paths = [...document.querySelectorAll(
-      "[data-path-key], [data-reasoning-output], [data-lane-path], [data-repair-lane]"
+      "[data-path-key], [data-reasoning-output], [data-lane-path], [data-repair-lane], "
+        + "[data-ingest-job-to]"
     )].filter((node) => visible(node) && routeStates.has(node.dataset.state));
     const ends = paths.flatMap((path, pathIndex) => {
       const length = path.getTotalLength();
       const lane = path.closest("[data-decision-lane]")?.dataset.decisionLane;
       const key = path.dataset.pathKey || path.dataset.reasoningOutput
+        || (path.dataset.ingestJobTo ? `ingest:${path.dataset.ingestJobTo}` : "")
         || `${lane}:${path.dataset.lanePath || path.dataset.repairLane}`;
       return [0, length].map((offset, endIndex) => ({
         key,
@@ -1424,7 +1426,7 @@ addEventListener("DOMContentLoaded", () => {
     });
     const nodes = [...document.querySelectorAll(
       "[data-trace-key], [data-overall-key], [data-plan-key], [data-context-option], "
-        + "[data-reasoning-key], [data-decision-lane-step]"
+        + "[data-reasoning-key], [data-decision-lane-step], [data-ingest-job-step]"
     )].filter((node) => visible(node) && routeStates.has(node.dataset.state));
     return ends.filter((entry) => (
       !nodes.some((node) => shapeDistance(entry.point, node) <= 2.5)
@@ -1873,8 +1875,8 @@ addEventListener("DOMContentLoaded", () => {
     assert single_result["disconnectedPathEnds"] == []
     assert single_result["singleArtifactDelta"]["x"] <= 0.01
     assert single_result["singleArtifactDelta"]["y"] <= 0.01
-    assert single_result["singleLayout"]["viewBox"] == "0 0 1500 550"
-    assert single_result["singleLayout"]["height"] == "513"
+    assert single_result["singleLayout"]["viewBox"] == "0 0 1500 850"
+    assert single_result["singleLayout"]["height"] == "793"
     assert single_result["singleLayout"]["dispatchLabelY"] == "303"
     assert single_result["singleLayout"]["dispatchCenterDeltaY"] <= 0.01
     gaps = single_result["singleLayout"]["gaps"]

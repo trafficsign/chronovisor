@@ -3139,6 +3139,18 @@ canvas {
   transform: translate(0, 404px) !important;
 }
 
+.decision-trace-harness .trace-ingest-job {
+  display: none;
+}
+
+.decision-trace-harness.single-model.ingest-job .trace-ingest-job {
+  display: block;
+}
+
+.decision-trace-harness .trace-ingest-job-status {
+  fill: #8e91ff;
+}
+
 .decision-trace-panel:has(.decision-single-authority:not([hidden])) .decision-facts [data-decision-fact="quorum"] {
   display: none;
 }
@@ -4039,6 +4051,11 @@ canvas {
     width: 1400px;
     max-width: none;
     height: 607px;
+  }
+
+  .decision-trace-scroll:has(.decision-trace-harness.ingest-job),
+  .decision-trace-harness.ingest-job {
+    height: 793px;
   }
 
   .decision-transition-bar {
