@@ -482,6 +482,17 @@ def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
     viewport_width: int,
 ) -> None:
     style = ROOT / "src/chronovisor/dashboard_static/style.css"
+    parser = _DashboardMarkup()
+    parser.feed(
+        (ROOT / "src/chronovisor/dashboard_static/index.html").read_text(
+            encoding="utf-8"
+        )
+    )
+    ingest_retry_path = next(
+        attrs["d"]
+        for tag, attrs in parser.elements
+        if tag == "path" and attrs.get("data-ingest-job-path") == "retry"
+    )
     page = tmp_path / "single-model-geometry.html"
     page.write_text(
         """<!doctype html>
@@ -548,6 +559,7 @@ def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
   <path id="single-artifact" d="M920 404 H1039"></path>
   <path id="seal-decision" data-path-key="seal-decision" d="M1190 434 V483"></path>
   <path id="seal-hold" data-path-key="seal-hold" d="M1224 404 H1318"></path>
+  <path id="ingest-retry" d="__INGEST_RETRY_PATH__"></path>
   <g class="decision-lane" data-decision-lane="primary" transform="translate(0 325)">
     <g id="trigger" transform="translate(230 0)"><circle r="10"></circle></g>
     <g id="validate" transform="translate(910 0)"><circle r="10"></circle></g>
@@ -555,9 +567,10 @@ def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
   <g id="artifact" transform="translate(1050 404)"><circle r="11"></circle></g>
   <g id="decision" data-trace-key="decision" transform="translate(1190 494)"><circle r="11"></circle><text data-decision-label="true" y="-22">Validated</text></g>
   <g id="hold" data-trace-key="hold" transform="translate(1330 404)"><circle r="12"></circle><text>Hold</text></g>
+  <g id="ingest-generate" class="decision-lane-step" transform="translate(900 570)"><circle r="10"></circle><text y="-17">Generate</text></g>
 </svg>
 <script src="/geometry.js"></script>
-""",
+""".replace("__INGEST_RETRY_PATH__", ingest_retry_path),
         encoding="utf-8",
     )
     script = tmp_path / "geometry.js"
@@ -568,6 +581,9 @@ const dispatch = document.querySelector("#dispatch");
 const single = document.querySelector("#single-artifact");
 const sealDecision = document.querySelector("#seal-decision");
 const sealHold = document.querySelector("#seal-hold");
+const ingestRetry = document.querySelector("#ingest-retry");
+const ingestGenerate = document.querySelector("#ingest-generate");
+const ingestGenerateLabel = ingestGenerate.querySelector("text");
 const decision = document.querySelector("#decision");
 const hold = document.querySelector("#hold");
 const lane = document.querySelector('[data-decision-lane="primary"]');
@@ -592,6 +608,21 @@ const decisionLabelPathOverlap = sealDecisionStart.x >= decisionLabelBounds.left
 const sealHoldStart = screenPoint(sealHold, sealHold.getPointAtLength(0));
 const sealHoldEnd = screenPoint(sealHold, sealHold.getPointAtLength(sealHold.getTotalLength()));
 const holdCenter = holdDisplay === "none" ? null : screenPoint(hold, new DOMPoint(0, 0));
+const ingestGenerateLabelBounds = ingestGenerateLabel.getBoundingClientRect();
+const ingestGenerateCenter = screenPoint(ingestGenerate, new DOMPoint(0, 0));
+const ingestRetryEnd = screenPoint(
+  ingestRetry,
+  ingestRetry.getPointAtLength(ingestRetry.getTotalLength()),
+);
+const ingestRetryLabelOverlap = Array.from(
+  { length: Math.ceil(ingestRetry.getTotalLength()) + 1 },
+  (_, index) => screenPoint(ingestRetry, ingestRetry.getPointAtLength(index)),
+).some((point) =>
+  point.x >= ingestGenerateLabelBounds.left
+    && point.x <= ingestGenerateLabelBounds.right
+    && point.y >= ingestGenerateLabelBounds.top
+    && point.y <= ingestGenerateLabelBounds.bottom
+);
 const authority = document.querySelector("#decision-single-authority");
 const authorityStatus = authority.querySelector("[data-single-status]");
 authorityStatus.textContent = "Validating";
@@ -648,6 +679,10 @@ fetch("/geometry-result", {
     sealHoldDeltaX: holdCenter ? Math.abs(holdCenter.x - sealHoldEnd.x) : null,
     sealHoldDeltaY: holdCenter ? Math.abs(holdCenter.y - sealHoldEnd.y) : null,
     holdRadiusX: holdCenter ? 12 * Math.abs(hold.getScreenCTM().a) : null,
+    ingestRetryLabelOverlap,
+    ingestRetryDeltaX: Math.abs(ingestGenerateCenter.x - ingestRetryEnd.x),
+    ingestRetryDeltaY: Math.abs(ingestGenerateCenter.y - ingestRetryEnd.y),
+    ingestGenerateRadiusX: 10 * Math.abs(ingestGenerate.getScreenCTM().a),
     authority: {
       shortHeight: shortAuthorityHeight,
       longHeight: longAuthorityHeight,
@@ -760,6 +795,11 @@ fetch("/geometry-result", {
     assert geometry[0]["sealHoldStraightDeltaY"] <= 0.01
     assert abs(geometry[0]["sealHoldDeltaX"] - geometry[0]["holdRadiusX"]) <= 0.01
     assert geometry[0]["sealHoldDeltaY"] <= 0.01
+    assert geometry[0]["ingestRetryLabelOverlap"] is False
+    assert abs(
+        geometry[0]["ingestRetryDeltaX"] - geometry[0]["ingestGenerateRadiusX"]
+    ) <= 0.01
+    assert geometry[0]["ingestRetryDeltaY"] <= 0.01
     assert geometry[0]["authority"]["longHeight"] == geometry[0]["authority"]["shortHeight"]
     assert geometry[0]["authority"]["scrollWidth"] <= geometry[0]["authority"]["clientWidth"]
     assert [row["count"] for row in geometry[0]["processing"]] == [2, 3, 4, 5, 6]
