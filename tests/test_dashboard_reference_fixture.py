@@ -447,16 +447,16 @@ def test_single_model_css_connects_live_svg_paths(tmp_path: Path) -> None:
     page.write_text(
         """<!doctype html>
 <link rel="stylesheet" href="/style.css">
-<svg class="decision-trace-harness single-model" viewBox="0 0 1500 650" width="1500" height="650">
+<svg class="decision-trace-harness single-model" viewBox="0 0 1500 550" width="1500" height="550">
   <path id="dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V394 Q180 404 190 404 H220"></path>
-  <path id="single-artifact" d="M920 404 H1299"></path>
-  <path id="seal-hold" data-path-key="seal-hold" d="M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588"></path>
+  <path id="single-artifact" d="M920 404 H1039"></path>
+  <path id="seal-hold" data-path-key="seal-hold" d="M1190 434 V454 Q1190 464 1200 464 H1320 Q1330 464 1330 474 V482"></path>
   <g class="decision-lane" data-decision-lane="primary" transform="translate(0 325)">
     <g id="trigger" transform="translate(230 0)"><circle r="10"></circle></g>
     <g id="validate" transform="translate(910 0)"><circle r="10"></circle></g>
   </g>
-  <g id="artifact" transform="translate(1310 404)"><circle r="11"></circle></g>
-  <g id="hold" data-trace-key="hold" transform="translate(1460 600)"><circle r="12"></circle><text>Hold</text></g>
+  <g id="artifact" transform="translate(1050 404)"><circle r="11"></circle></g>
+  <g id="hold" data-trace-key="hold" transform="translate(1330 494)"><circle r="12"></circle><text>Hold</text></g>
 </svg>
 <script src="/geometry.js"></script>
 """,
@@ -1395,6 +1395,17 @@ addEventListener("DOMContentLoaded", () => {
       singleArtifact.getPointAtLength(singleArtifact.getTotalLength())
     );
     const artifactLeft = screenPoint(artifact, new DOMPoint(-11, 0));
+    const shapeCenter = (node) => {
+      const bounds = node.querySelector(":scope > circle, :scope > path").getBoundingClientRect();
+      return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+    };
+    const terminalCenters = [
+      document.querySelector('[data-decision-lane="primary"] [data-decision-lane-step="validate"]'),
+      artifact,
+      document.querySelector('[data-trace-key="seal"]'),
+      document.querySelector('[data-trace-key="decision"]'),
+    ].map(shapeCenter);
+    const holdCenter = shapeCenter(document.querySelector('[data-trace-key="hold"]'));
     const opacity = (node) => node ? getComputedStyle(node).opacity : null;
     scroller.scrollLeft = scroller.scrollWidth;
     const scrollerBounds = scroller.getBoundingClientRect();
@@ -1453,6 +1464,17 @@ addEventListener("DOMContentLoaded", () => {
         x: Math.abs(artifactLeft.x - singleArtifactEnd.x),
         y: Math.abs(artifactLeft.y - singleArtifactEnd.y),
       },
+      singleLayout: {
+        viewBox: harness.getAttribute("viewBox"),
+        height: harness.getAttribute("height"),
+        gaps: terminalCenters.slice(1).map((point, index) => (
+          point.x - terminalCenters[index].x
+        )),
+        railSpread: Math.max(...terminalCenters.map(({ y }) => y))
+          - Math.min(...terminalCenters.map(({ y }) => y)),
+        holdDeltaX: Math.abs(holdCenter.x - terminalCenters.at(-1).x),
+        holdDrop: holdCenter.y - terminalCenters.at(-1).y,
+      },
       nodes: Object.fromEntries([...document.querySelectorAll("[data-trace-key]")]
         .map((node) => [node.dataset.traceKey, node.dataset.state])),
       paths,
@@ -1460,6 +1482,10 @@ addEventListener("DOMContentLoaded", () => {
     };
   });
   renderFixture(fixtures[0].case, fixtures[0].trace, "59");
+  results[0].restoredLayout = {
+    viewBox: document.querySelector("#decision-trace-harness").getAttribute("viewBox"),
+    height: document.querySelector("#decision-trace-harness").getAttribute("height"),
+  };
   document.querySelector('[data-processing-lane="recall"]').click();
   results[0].tabClick = {
     event: selectedPipelines.at(-1),
@@ -1681,6 +1707,8 @@ addEventListener("DOMContentLoaded", () => {
         assert result["layout"]["rightReachable"] is True
         assert result["layout"]["fitsWidth"] is True
         assert result["layout"]["nextPanelGap"] == 12
+        assert result["singleLayout"]["viewBox"] == "0 0 1500 650"
+        assert result["singleLayout"]["height"] == "607"
         assert result["disconnectedPathEnds"] == [], case["id"]
         projection = trace["projection"]
         assert result["nodes"] == {
@@ -1750,10 +1778,21 @@ addEventListener("DOMContentLoaded", () => {
     assert single_result["disconnectedPathEnds"] == []
     assert single_result["singleArtifactDelta"]["x"] <= 0.01
     assert single_result["singleArtifactDelta"]["y"] <= 0.01
+    assert single_result["singleLayout"]["viewBox"] == "0 0 1500 550"
+    assert single_result["singleLayout"]["height"] == "513"
+    gaps = single_result["singleLayout"]["gaps"]
+    assert max(gaps) - min(gaps) <= 1
+    assert single_result["singleLayout"]["railSpread"] <= 1
+    assert single_result["singleLayout"]["holdDeltaX"] <= 1
+    assert 0.6 <= single_result["singleLayout"]["holdDrop"] / (sum(gaps) / 3) <= 0.7
 
     assert by_id[cases[0]["id"]]["tabClick"] == {
         "event": "recall",
         "selected": "recall",
         "tabCount": 6,
         "panelRole": "tabpanel",
+    }
+    assert by_id[cases[0]["id"]]["restoredLayout"] == {
+        "viewBox": "0 0 1500 650",
+        "height": "607",
     }

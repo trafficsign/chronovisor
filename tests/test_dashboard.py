@@ -3053,8 +3053,10 @@ add(harness, "text", {{ dataset: {{ dispatchLabel: "" }} }});
 add(harness, "text", {{ dataset: {{ artifactLabel: "" }} }});
 add(harness, "text", {{ dataset: {{ decisionLabel: "" }} }});
 add(harness, "text", {{ dataset: {{ holdReason: "" }} }});
-["agree", "quorum", "artifact", "decision"].forEach((key) => add(harness, "g", {{ dataset: {{ traceKey: key }} }}));
-["plan-dispatch", "primary-challenger", "single-artifact", "quorum-hold"].forEach((key) => add(harness, "path", {{ dataset: {{ pathKey: key }} }}));
+["agree", "quorum", "artifact", "seal", "decision", "hold"].forEach((key) => add(harness, "g", {{ dataset: {{ traceKey: key }} }}));
+["plan-dispatch", "primary-challenger", "single-artifact", "quorum-hold", "artifact-seal", "seal-decision", "seal-hold"].forEach((key) => add(harness, "path", {{ dataset: {{ pathKey: key }} }}));
+add(harness, "text", {{ dataset: {{ sealYesLabel: "" }} }});
+add(harness, "text", {{ dataset: {{ sealNoLabel: "" }} }});
 ["primary", "challenger", "tie_break"].forEach((key) => {{
   const lane = add(harness, "g", {{ dataset: {{ decisionLane: key }} }});
   add(lane, "text", {{ dataset: {{ laneLabel: key }} }});
@@ -3112,8 +3114,17 @@ process.stdout.write(JSON.stringify({{
   repair: panel.children[5].textContent,
   dispatch: harness.querySelector("[data-dispatch-label]").textContent,
   artifact: harness.querySelector("[data-artifact-label]").textContent,
+  viewBox: harness.attributes.viewBox,
+  height: harness.attributes.height,
   dispatchPath: harness.querySelector('[data-path-key="plan-dispatch"]').attributes.d,
   singlePath: harness.querySelector('[data-path-key="single-artifact"]').attributes.d,
+  artifactSealPath: harness.querySelector('[data-path-key="artifact-seal"]').attributes.d,
+  sealDecisionPath: harness.querySelector('[data-path-key="seal-decision"]').attributes.d,
+  sealHoldPath: harness.querySelector('[data-path-key="seal-hold"]').attributes.d,
+  artifactTransform: harness.querySelector('[data-trace-key="artifact"]').attributes.transform,
+  sealTransform: harness.querySelector('[data-trace-key="seal"]').attributes.transform,
+  decisionTransform: harness.querySelector('[data-trace-key="decision"]').attributes.transform,
+  holdTransform: harness.querySelector('[data-trace-key="hold"]').attributes.transform,
   quorumHidden: quorumFact.hidden,
   targetVisible: !targetFact.hidden,
 }}));
@@ -3131,8 +3142,17 @@ process.stdout.write(JSON.stringify({{
         "repair": "REPAIR ≠ VOTE",
         "dispatch": "DISPATCH → SINGLE AUTHORITY",
         "artifact": "Validated",
+        "viewBox": "0 0 1500 550",
+        "height": "513",
         "dispatchPath": "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V394 Q180 404 190 404 H220",
-        "singlePath": "M920 404 H1299",
+        "singlePath": "M920 404 H1039",
+        "artifactSealPath": "M1061 404 H1156",
+        "sealDecisionPath": "M1224 404 H1319",
+        "sealHoldPath": "M1190 434 V454 Q1190 464 1200 464 H1320 Q1330 464 1330 474 V482",
+        "artifactTransform": "translate(1050 404)",
+        "sealTransform": "translate(-180 -96)",
+        "decisionTransform": "translate(1330 404)",
+        "holdTransform": "translate(1330 494)",
         "quorumHidden": True,
         "targetVisible": True,
     }

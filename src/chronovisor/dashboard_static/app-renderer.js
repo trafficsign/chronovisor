@@ -534,6 +534,49 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   const single = isSingleModelTrace(trace) && projection?.single_model === true;
   harness.classList.toggle("single-model", single);
   harness.dataset.authorityKind = single ? SINGLE_MODEL_AUTHORITY_KIND : "";
+  harness.setAttribute("viewBox", single ? "0 0 1500 550" : "0 0 1500 650");
+  harness.setAttribute("height", single ? "513" : "607");
+  [
+    [
+      '[data-path-key="plan-dispatch"]',
+      "d",
+      single
+        ? "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V394 Q180 404 190 404 H220"
+        : "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V315 Q180 325 190 325 H220",
+    ],
+    [
+      '[data-path-key="single-artifact"]',
+      "d",
+      single ? "M920 404 H1039" : "M1106 360 H1300 Q1310 360 1310 370 V393",
+    ],
+    [
+      '[data-path-key="artifact-seal"]',
+      "d",
+      single ? "M1061 404 H1156" : "M1321 404 H1360 Q1370 404 1370 414 V470",
+    ],
+    [
+      '[data-path-key="seal-decision"]',
+      "d",
+      single ? "M1224 404 H1319" : "M1404 500 H1449",
+    ],
+    [
+      '[data-path-key="seal-hold"]',
+      "d",
+      single
+        ? "M1190 434 V454 Q1190 464 1200 464 H1320 Q1330 464 1330 474 V482"
+        : "M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588",
+    ],
+    ['[data-trace-key="artifact"]', "transform", single ? "translate(1050 404)" : "translate(1310 404)"],
+    ['[data-trace-key="seal"]', "transform", single ? "translate(-180 -96)" : "translate(0 0)"],
+    ['[data-trace-key="decision"]', "transform", single ? "translate(1330 404)" : "translate(1460 500)"],
+    ['[data-trace-key="hold"]', "transform", single ? "translate(1330 494)" : "translate(1460 600)"],
+    ["[data-seal-yes-label]", "x", single ? "1268" : "1422"],
+    ["[data-seal-yes-label]", "y", single ? "396" : "492"],
+    ["[data-seal-no-label]", "x", single ? "1202" : "1382"],
+    ["[data-seal-no-label]", "y", single ? "452" : "544"],
+  ].forEach(([selector, name, value]) => {
+    harness.querySelector(selector)?.setAttribute(name, value);
+  });
   updateSingleAuthorityMeta(trace, projection);
   if (!projection) {
     harness.querySelectorAll(
@@ -547,14 +590,6 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     setDecisionSvgText("[data-lane-sublabel=\"primary\"]", "LOCAL DECISION");
     setDecisionSvgText("[data-artifact-label]", "Artifact");
     setDecisionSvgText("[data-decision-label]", "Decision");
-    harness.querySelector("[data-path-key=\"plan-dispatch\"]")?.setAttribute(
-      "d",
-      "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V315 Q180 325 190 325 H220"
-    );
-    harness.querySelector("[data-path-key=\"single-artifact\"]")?.setAttribute(
-      "d",
-      "M1106 360 H1300 Q1310 360 1310 370 V393"
-    );
     updateDecisionFactMode(false);
     return;
   }
@@ -578,18 +613,6 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     single
       ? "Packet, execution planning, one single authority lane, validated output and decision. Structured repair is separate from voting."
       : "Packet, execution planning, fixed primary, challenger and tie-break lanes, then one shared artifact and decision. Unsafe quorum branches to hold before the artifact; only a seal failure branches from the artifact."
-  );
-  harness.querySelector("[data-path-key=\"plan-dispatch\"]")?.setAttribute(
-    "d",
-    single
-      ? "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V394 Q180 404 190 404 H220"
-      : "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V315 Q180 325 190 325 H220"
-  );
-  harness.querySelector("[data-path-key=\"single-artifact\"]")?.setAttribute(
-    "d",
-    single
-      ? "M920 404 H1299"
-      : "M1106 360 H1300 Q1310 360 1310 370 V393"
   );
   updateDecisionFactMode(single);
   harness.querySelectorAll("[data-trace-key]").forEach((node) => {
