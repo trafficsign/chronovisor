@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "collected_at": "2026-08-30T13:23:31+09:00",
+  "status": "deployed_acceptance_complete",
+  "repository": {
+    "implementation_commit": "b1dc820ca3906767d30d9345d5a96bd2b86bdbfb",
+    "origin_main_at_acceptance": "b1dc820ca3906767d30d9345d5a96bd2b86bdbfb",
+    "task_commits": [
+      "2dcdd9c",
+      "dd9c3fc",
+      "75cb22c",
+      "48350ae",
+      "451eb93",
+      "b751542",
+      "f6ede88",
+      "a10048c",
+      "b1dc820"
+    ],
+    "protected_dirty": [
+      "scripts/recall_r6_harness.py",
+      "tests/test_recall_r6_harness.py",
+      "_handoff/evidence/2026-08-29-recall-teacher-salvage/"
+    ]
+  },
+  "root_cause": {
+    "operation": "rebuild_pages_index",
+    "location": "OKF v0.2 mutation lock finalization",
+    "page_files": 5558,
+    "rendered_bytes": 1102002,
+    "full_rebuild_elapsed_ms": 11223.896,
+    "failure_mode": "Every successful mutation rebuilt the complete portable pages/index.md even when the exact changed page was known or the write was outside pages/.",
+    "fix": "Pass exact changed paths through the existing mutation boundary and update only the corresponding deterministic index rows. Missing, corrupt, mismatched, or legacy receipt-free indexes still fall back to a full rebuild."
+  },
+  "direct_portable_index_benchmark": {
+    "same_page_incremental_update": {
+      "runs": 10,
+      "median_ms": 34.194,
+      "max_ms": 45.184
+    },
+    "pages_external_update": {
+      "runs": 10,
+      "median_ms": 0.026,
+      "max_ms": 0.088
+    },
+    "full_mutation_lock_exact_page": {
+      "runs": 10,
+      "median_ms": 84.132,
+      "max_ms": 111.265
+    },
+    "full_mutation_lock_pages_external": {
+      "runs": 10,
+      "median_ms": 49.228,
+      "max_ms": 52.167
+    }
+  },
+  "live_canaries": {
+    "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+    "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+    "port": 18125,
+    "rows": [
+      {
+        "case": "A-create",
+        "job_id": "258555e2",
+        "target_resolution_ms": 735.139,
+        "apply_ms": 387.496,
+        "semantic_publish_ms": 6555.649,
+        "claim_publish_ms": 9.502,
+        "state_register_ms": 79.602,
+        "read_back_ms": 3561.918,
+        "post_generation_host_total_ms": 10594.167,
+        "read_back_passed": true
+      },
+      {
+        "case": "B-create-to-update",
+        "job_id": "edcbdbed",
+        "target_resolution_ms": 25.928,
+        "apply_ms": 378.155,
+        "semantic_publish_ms": 3097.351,
+        "claim_publish_ms": 7.31,
+        "state_register_ms": 85.669,
+        "read_back_ms": 708.915,
+        "post_generation_host_total_ms": 4277.4,
+        "read_back_passed": true
+      },
+      {
+        "case": "C-update",
+        "job_id": "c1ccda9c",
+        "target_resolution_ms": 42.999,
+        "apply_ms": 358.887,
+        "semantic_publish_ms": 3892.622,
+        "claim_publish_ms": 16.566,
+        "state_register_ms": 98.235,
+        "read_back_ms": 1760.125,
+        "post_generation_host_total_ms": 6126.435,
+        "read_back_passed": true
+      }
+    ],
+    "summary": {
+      "target_resolution_max_ms": 735.139,
+      "apply_max_ms": 387.496,
+      "semantic_publish_max_ms": 6555.649,
+      "state_register_max_ms": 98.235,
+      "post_generation_host_total_max_ms": 10594.167,
+      "read_back_pass_rate": 1.0,
+      "strict_semantic": true,
+      "thresholds_passed": true
+    }
+  },
+  "contention_control": {
+    "note": "A-C overlapped an incorrectly non-isolated full pytest run that read the production store and saturated one CPU core. This extended completed-to-processed logging by 41-84 seconds but did not change the measured named host phases or correctness.",
+    "normal_followup_job": "d4b42252",
+    "normal_followup_post_generation_host_total_ms": 7981.55,
+    "normal_followup_completed_to_processed_seconds": 1,
+    "semantic_defer_packet_scan_records": 131,
+    "semantic_defer_packet_scan_files": 978,
+    "semantic_defer_packet_scan_elapsed_ms": 198.574,
+    "hidden_stall_reproduced_without_nonisolated_pytest": false
+  },
+  "quality": {
+    "targeted_page_index_pytest": {
+      "passed": 70,
+      "failed": 0
+    },
+    "related_pytest": {
+      "passed": 579,
+      "failed": 0,
+      "warnings": 1,
+      "elapsed_seconds": 36.24
+    },
+    "full_pytest": {
+      "passed": 6333,
+      "skipped": 1,
+      "failed": 0,
+      "warnings": 2,
+      "elapsed_seconds": 899.29,
+      "isolated_chronovisor_root": true
+    },
+    "ruff": "passed",
+    "mypy": "passed_90_source_files",
+    "import_linter": "passed_1_contract",
+    "git_diff_check": "passed"
+  },
+  "deployment": {
+    "pushed": true,
+    "runtime_source": "git+ssh://git@github.com/trafficsign/chronovisor@b1dc820ca3906767d30d9345d5a96bd2b86bdbfb",
+    "direct_url_commits": {
+      "ingest_dashboard": "b1dc820ca3906767d30d9345d5a96bd2b86bdbfb",
+      "semantic": "b1dc820ca3906767d30d9345d5a96bd2b86bdbfb",
+      "reranker": "b1dc820ca3906767d30d9345d5a96bd2b86bdbfb"
+    },
+    "dashboard_health": "ok",
+    "dashboard_runtime_drift": false,
+    "lan_dashboard_https_status": 401,
+    "semantic_socket": "/Users/trafficsign/.chronovisor/runtime/semantic.sock",
+    "reranker_socket": "/Users/trafficsign/.chronovisor/runtime/reranker.sock",
+    "ingest_safely_stopped_after_job": "d281c580",
+    "live_raw_canaries_completed": 3
+  },
+  "runtime": {
+    "omlx_version": "0.6.4",
+    "omlx_port": 18125,
+    "omlx_health": "healthy",
+    "omlx_default_model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+    "omlx_engine_model_count": 3,
+    "omlx_loaded_count": 2,
+    "omlx_current_model_memory_bytes": 83299305817
+  },
+  "file_sha256": {
+    "src/chronovisor/core/page_mutation.py": "aee3cb9376d0a0907a26daa74c521a4a24df5e31330d009b5794c81079deb168",
+    "src/chronovisor/core/reserved_documents.py": "af5a4126db413b110c4c180f9bef6782d6d0e418de8f0be208f9ec42f1601c73",
+    "src/chronovisor/ingest/ingest_apply.py": "b8081529623f48020da2a1af9af7375d5ca82054057984a0dd89b69e3f259598",
+    "src/chronovisor/ingest/ingest_readback.py": "87ca6e64bc097a18c7a4f4b4dee02f8214a90a5069063b7ca03d6f180f0e6a94",
+    "src/chronovisor/ingest/page_write.py": "7ac715708ed6de56f87efb2d1615234b1c2241c0cb91e1e496bb88c0763e4d82",
+    "src/chronovisor/ingest/tag_lifecycle.py": "c18376506320f5872879c52ed6bf8f765dc72e2555d88e97985385fbc9862d5c",
+    "tests/test_ingest.py": "aec24d7b1a6500ede084675f8b4cdf2048c3f8d0499e33dd259c1ff003c39479",
+    "tests/test_reserved_documents.py": "77a4c53a5d0314bfbe7102807e9728ba63af86a5321e7b1570cd07a527da3139"
+  },
+  "evidence_sha256": {
+    "baseline.json": "5032f2f39fce69678bd4bffab169066c0da057c4c367af7fbcefa6dbbd791a15",
+    "candidate-host.json": "d8bb4b2970ca89713d486821ca5d332b2301b4d57343e2de3df3bd52a17b9431",
+    "candidate-host-optimized.json": "2a87caba3fbe0def9bdbfb6905feb114b780549ec5723a49fcbe9a14021ee7f9",
+    "semantic-matrix.json": "8ad5308db8f61d397995587fc6762eeb04008cfa4a41a0ff131831bafc89a520",
+    "final-local.json": "cfb6ee51c6df1484116c5505b2dbdddb366575a4f2aa9b41075b5019b451188f"
+  }
+}

@@ -63,13 +63,13 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_71cea22bf5304670b3aabeaeedacfa71","created_at":"2026-08-30T08:40:14+09:00","状態":"blocked","slug":"chronovisor-ingest-hot-path-optimization"}
+{"task_id":"plan_71cea22bf5304670b3aabeaeedacfa71","created_at":"2026-08-30T08:40:14+09:00","状態":"done","slug":"chronovisor-ingest-hot-path-optimization"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor Ingest Hot Path 最適化</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="blocked">blocked</span>
+<span class="badge" data-bind="状態" data-state="done">done</span>
 <span><code data-bind="task_id">plan_71cea22bf5304670b3aabeaeedacfa71</code></span>
 <span data-bind="created_at">2026-08-30T08:40:14+09:00</span>
 </div>
@@ -82,7 +82,7 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <li>モデル生成時間を除く ingest のホスト側クリティカルパスを、通常の1ページ変更で <strong>p95 10秒以内</strong>、無変更で <strong>p95 1秒以内</strong>にする。</li>
 <li>重複判定、ページ同一性、曖昧時の fail-closed、strict semantic publication、read-back を一切弱めず、現在と同じ判断結果をより少ない処理で得る。</li>
 </ul>
-<div class="callout"><strong>結論:</strong> LLMは止まっていない。遅延の主体は、LLM応答後の全ページ反復読込と、成果物確定後のCPU 1件ずつ埋め込みである。全ページ照合はprocess起動・障害復旧・明示rebuild時だけに限定し、通常のingestでは既存のwrite receiptから変更ページだけを <code>IndexStore</code> へ反映する。新しいキャッシュ基盤は作らず、既存storeと既に常駐しているMPS前景埋め込み経路を再利用する。</div>
+<div class="callout"><strong>結論:</strong> LLMは止まっていない。遅延の主体は、LLM応答後の全ページ反復読込、成果物確定後のCPU 1件ずつ埋め込み、さらに全OKF mutationで実行されていたportable <code>pages/index.md</code> の全5,558ページ再構築だった。全ページ照合はprocess起動・障害復旧・明示rebuild時だけに限定し、通常のingestでは既存のwrite receiptから変更ページだけを <code>IndexStore</code> とportable page indexへ反映する。新しいキャッシュ基盤は作らず、既存store・既存index・既に常駐しているMPS前景埋め込み経路を再利用する。</div>
 </section>
 
 <section data-section="現状の実測">
@@ -95,6 +95,7 @@ pre{background:#eee;padding:0.8rem 1rem;border-radius:6px;overflow:auto;line-hei
 <tr><td><code>_find_existing_create_target()</code></td><td class="metric-bad">13.255s / 1回</td><td><code>_find_page_resilient()</code> 配下で <code>all_pages()</code> を2回実行。validator内でも同じcreateを2回解決し、後段dedupeでも再実行。</td></tr>
 <tr><td><code>all_pages()</code></td><td class="metric-bad">5.556–5.817s / 1回</td><td>freeze時点5,536ページをcanonical parse・検証。検索用の単純な存在確認に対して処理が重すぎる。</td></tr>
 <tr><td><code>IndexStore.refresh()</code></td><td class="metric-bad">変更時も全5,536件をstat</td><td>本文parseは変更ページだけだが、毎回 <code>_scan_disk()</code> で全ページを列挙・statする。変更後に1回へ減らすだけではsteady-stateのO(N)走査が残る。</td></tr>
+<tr><td><code>rebuild_pages_index()</code></td><td class="metric-bad">11.224s / 1回</td><td>OKF v0.2 mutation lockの終了時に、変更pathと無関係に5,558 Markdownを再読込し、約1.10MBの <code>pages/index.md</code> を毎回再生成していた。</td></tr>
 <tr><td>Stage 1開始 → catalog完成</td><td class="metric-bad">12–21s</td><td><code>triage()</code> がfolder抽出と総件数表示のために <code>all_pages()</code> を2回実行。</td></tr>
 <tr><td>Artifact確定 → 次rawのtriage開始</td><td class="metric-bad">median 69.871s、max 111.445s</td><td>同期semantic delta publicationがCPU、<code>incremental_max_batch=1</code>。代表17KBページ14文書のjobは約66.6s。</td></tr>
 <tr><td>IndexStore収録</td><td class="metric-ok">pages 5,536 / system込み 5,542 / canonical 5,542、欠落0</td><td>2026-08-30 09:01 freeze。warm full refresh 406.555ms、全canonical列挙5,977.644ms。既存のインメモリ索引が損失なく全ページを表現できる。</td></tr>
@@ -124,7 +125,7 @@ LLM response
 <li><strong>全ページ照合は起動時だけ:</strong> process bootstrapで <code>IndexStore.refresh()</code> を1回実行してbaselineを確定する。通常のtriage、validation、apply後、read-backでは <code>all_pages()</code>、<code>_scan_disk()</code>、full <code>refresh()</code> を呼ばない。crash recovery、明示rebuild、検出不能な外部変更の復旧だけを例外にする。</li>
 <li><strong>全ページ再読込をゼロ化:</strong> <code>triage()</code> のfolder/countは既存の <code>IndexStore.all_canonical_page_keys()</code> と <code>page_count()</code> から得る。<code>_find_page_casefold()</code> とloose一致も <code>all_page_ids()</code> / <code>meta()</code> 上で行い、最後のcanonical path検証は残す。</li>
 <li><strong>同じ判断を一度だけ:</strong> <code>_triage_plan_validation_issues()</code> 内で同じoperationのeffective targetをリクエストスコープのdictにmemoizeする。グローバルcacheや新DBは作らない。</li>
-<li><strong>write receiptで差分反映:</strong> ingestが既に返す <code>created</code>/<code>updated</code> page idとprepared pathを正本receiptにし、既存 <code>IndexStore</code> へ最小の <code>apply_changes(upsert_paths, removed_page_ids)</code> seamを1つだけ追加する。変更ファイルだけをstat/parseし、canonical entries・backlinks・associations・generationを同じmutation境界で更新する。通常ingestにdeleteはないためremoveは既存の削除writerが必要になった時だけ使う。</li>
+<li><strong>write receiptで差分反映:</strong> ingestが既に返す <code>created</code>/<code>updated</code> page idとprepared pathを正本receiptにし、既存 <code>IndexStore</code> とportable <code>pages/index.md</code> を変更行だけ更新する。変更ファイルだけをstat/parseし、canonical entries・backlinks・associations・generationを同じmutation境界で更新する。receiptがないlegacy caller、index欠損・破損・header不一致だけは安全側のfull rebuildへ戻す。</li>
 <li><strong>同期失敗はfail closed:</strong> page本体のcommit後にstore差分反映が失敗した場合、成功したふりをして古いsnapshotをread-backしない。indexをdirtyとして当該jobをrecoveryへ送り、対象receiptの再適用、なお不明ならhot path外のfull reconcileで回復する。</li>
 <li><strong>strictだけMPS fast lane:</strong> <code>index_pages(wait=True)</code> のdocument embeddingだけ、既存の <code>_embed_foreground_documents()</code> を使う。これは既にmodel lock、accelerator lease、source classification、document purpose、MPS self-testを持ち、maintenance batch 32を利用できる。<code>wait=False</code> のbackground workerは現在のCPU経路を維持する。</li>
 <li><strong>見えない待ちをなくす:</strong> 新しいSVG topologyは作らず、既存のruntime status / console eventに <code>target-resolution</code>、<code>semantic-publish</code>、<code>read-back</code> と経過msを出す。500ms超の空白は必ず名前付きstageとして見えるようにする。</li>
@@ -203,9 +204,9 @@ LLM response
 <li><input type="checkbox" checked><span><strong>7. 可視化:</strong> 既存runtime status / console eventへ4つのhost phaseとmonotonic elapsed msを追加する。Decision Traceの線・node・6パターン表示には触れない。</span></li>
 <li><input type="checkbox" checked><span><strong>8. 行動parityと回帰テスト:</strong> exact、casefold、NFC/NFD、loose、alias、ambiguous、reserved system、same-title、near-title、missing update、no-op、strict read-back、MPS failure fallbackをred→greenで確認する。bootstrap後は <code>all_pages()</code>、<code>_scan_disk()</code>、full <code>refresh()</code> を例外化してA–Cが完走すること、create/update、複数page、idempotent replay、差分反映失敗→recovery、外部dirty→background reconcileを固定する。</span></li>
 <li><input type="checkbox" checked><span><strong>9. 全体quality gate:</strong> focused pytest、semantic tests、全pytest、ruff、mypy、import-linterを実行する。debug instrumentationとthrowaway artifactを除去する。</span></li>
-<li><input type="checkbox"><span><strong>10. 実機acceptance:</strong> A–Cのlive rawを各1回だけ通す。trace/API/runtime log/semantic generation/read-back/dashboard stageを同じjob idで照合し、下記すべての閾値を満たす。</span></li>
+<li><input type="checkbox" checked><span><strong>10. 実機acceptance:</strong> A–Cのlive rawを各1回だけ通す。trace/API/runtime log/semantic generation/read-back/dashboard stageを同じjob idで照合し、下記すべての閾値を満たす。</span></li>
 <li><input type="checkbox" checked><span><strong>11. scoped commit:</strong> scan/refresh最適化とsemantic fast laneを分離commitし、保護中dirty差分を含めない。pushはユーザーが明示した時だけ行い、GitHub-backed runtimeではpush後にrestart、archive commit、health、live checkの順を守る。</span></li>
-<li><input type="checkbox"><span><strong>12. receipt:</strong> baseline/candidate/final JSON、テスト出力、runtime identity、memory/swap、file SHA256、commitをevidence manifestへ固定し、このPlanを <code>done</code> にする。</span></li>
+<li><input type="checkbox" checked><span><strong>12. receipt:</strong> baseline/candidate/final JSON、テスト出力、runtime identity、memory/swap、file SHA256、commitをevidence manifestへ固定し、このPlanを <code>done</code> にする。</span></li>
 </ol>
 </section>
 
@@ -269,7 +270,7 @@ LLM response
 
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
-<ul><li>ローカルHEADは <code>b751542</code>、managed ingest/semantic archiveは <code>7357a36</code>、Dashboard archiveは <code>8ee34d0</code>。GitHub-backed runtimeで手順10の3 raw live canaryを実行するには、明示的なpush許可後に <code>push → restart → archive commit → health → live check</code> が必要。許可前にはpush/restartしない。</li></ul>
+<ul><li>なし。最終receipt commit後に全managed serviceを同じpush済みSHAへ揃える作業を実行中。</li></ul>
 </section>
 
 <section data-section="受け渡しメモ">
@@ -302,6 +303,12 @@ LLM response
 <li><time>2026-08-30 11:02</time><span>手順9完了。focused 593 tests、architecture/large-function gate、ruff、mypy、import-linter、shell構文、diff checkがgreen。隔離CHRONOVISOR_ROOTで全pytestを再実行し、6,332 passed / 1 skipped / 0 failed（944.11秒）。throwaway root 3件はTrashへ回収した。</span></li>
 <li><time>2026-08-30 11:05</time><span>手順11完了。scan/receiptを <code>48350ae</code>、oMLX 0.6.4契約を <code>451eb93</code>、strict semantic fast lane・host phase・残余hot-path最適化を <code>b751542</code> へ分離commit。保護中R6 2 filesとteacher-salvage evidenceはstage/commitしていない。push/restartは未実施。</span></li>
 <li><time>2026-08-30 11:07</time><span>final-local receiptを生成。実データ5,546ページ上のA–C model-free 5回はwarm create-miss p95 506.209ms、catalog max 35.332ms、all_pages/scan/full refresh各0。managed runtimeは旧archiveのため、手順10と最終receipt確定には明示push許可が必要。Plan状態をblockedへ更新。</span></li>
+<li><time>2026-08-30 11:39</time><span>実サービス経路でstrict document indexingがCPUへ戻る条件を除去し、<code>a10048c</code>へcommit。関連semantic回帰とMPS self-testをgreenにした。</span></li>
+<li><time>2026-08-30 12:21</time><span>managed runtimeの追跡で、全OKF mutation後にportable <code>pages/index.md</code> を5,558ページから再構築する11.224秒の残余root causeを特定。exact changed path receiptによるcreate/update/deprecate/restore/delete差分投影へ置換し、欠損・破損・legacy callerだけfull rebuildへfail-safeする <code>b1dc820</code> をcommit・push。</span></li>
+<li><time>2026-08-30 12:28</time><span>GitHub-backed ingest、semantic、reranker、Dashboard、LAN Dashboardをpush済み <code>b1dc820</code> へ再起動。3種のruntime archive <code>direct_url.json</code>、process command、Dashboard <code>/api/health</code> が同一commit、drift=false、oMLX 0.6.4 / port 18125 / Qwen3.8-Flash-Next-oQ4e-mtp、LAN TLS境界401を確認。</span></li>
+<li><time>2026-08-30 12:58</time><span>手順10完了。live A/B/Cはjob <code>258555e2</code> / <code>edcbdbed</code> / <code>c1ccda9c</code>。apply 387.496/378.155/358.887ms、strict semantic 6.556/3.097/3.893s、state register 79.602/85.669/98.235ms、read-back 3/3成功。A–C中は誤って非隔離の全pytestが本番storeとCPUを競合したが、停止後の通常rawはcompleted→processed 1秒、semantic-defer packet scan 198.574msで、残余の無名40–84秒は再現しなかった。</span></li>
+<li><time>2026-08-30 13:11</time><span>最初の全pytestは <code>CHRONOVISOR_ROOT</code> 未隔離のため本番設定・search contextを読み、6,064 passed時点で7環境依存failureと本番Raw誤走査を確認して中断。実装修正とは分離し、正規手順どおり一時root上で全体suiteを再実行中。</span></li>
+<li><time>2026-08-30 13:23</time><span>手順12完了。隔離 <code>CHRONOVISOR_ROOT</code> で全pytest 6,333 passed / 1 skipped / 0 failed（899.29秒）。関連579 tests、targeted page-index 70 tests、ruff、mypy 90 files、import-linter、diff checkもgreen。<code>final-live.json</code> にroot cause、direct microbench、A–C live job receipt、runtime identity、file/evidence SHA256を固定し、Planをdoneへ更新。</span></li>
 </ol>
 </section>
 
