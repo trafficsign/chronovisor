@@ -968,7 +968,10 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         "  opacity: 0.66;\n"
         "}"
     ) in style
-    assert ".decision-trace-harness .trace-lane-rail.pending" not in style
+    pending_lane_rail_style = style.split(
+        ".decision-trace-harness .trace-lane-rail.pending {", 1
+    )[1].split("}", 1)[0]
+    assert "stroke-dasharray: none;" in pending_lane_rail_style
     assert (
         ".decision-trace-harness .decision-lane-step.active circle {\n"
         "  fill: url(#trace-processing-core);\n"
@@ -1986,6 +1989,11 @@ addEventListener("DOMContentLoaded", () => {
         name,
         branch: harness.dataset.ingestJobBranch,
         current: harness.dataset.ingestJobStep,
+        coreRailDashes: [...new Set(
+          [...harness.querySelectorAll(".trace-ingest-job .trace-lane-rail")]
+            .filter(visible)
+            .map((node) => getComputedStyle(node).strokeDasharray)
+        )],
         disconnectedPathEnds: disconnectedPathEnds(),
       };
     }) : [];
@@ -2475,6 +2483,8 @@ addEventListener("DOMContentLoaded", () => {
         "HOLD",
         "ACCEPTED",
     }
+    for state in single_result["ingestBranchStates"]:
+        assert state.pop("coreRailDashes") == ["none"]
     assert single_result["ingestBranchStates"] == [
         {
             "name": "target",
