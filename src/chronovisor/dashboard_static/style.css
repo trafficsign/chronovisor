@@ -3148,6 +3148,11 @@ canvas {
   transform: translate(0, 404px) !important;
 }
 
+.decision-trace-harness.single-model [data-decision-label] {
+  text-anchor: start;
+  transform: translate(18px, 26px);
+}
+
 .decision-trace-harness .trace-ingest-job {
   display: none;
 }

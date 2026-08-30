@@ -553,7 +553,7 @@ def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
     <g id="validate" transform="translate(910 0)"><circle r="10"></circle></g>
   </g>
   <g id="artifact" transform="translate(1050 404)"><circle r="11"></circle></g>
-  <g id="decision" data-trace-key="decision" transform="translate(1190 494)"><circle r="11"></circle><text>Validated</text></g>
+  <g id="decision" data-trace-key="decision" transform="translate(1190 494)"><circle r="11"></circle><text data-decision-label="true" y="-22">Validated</text></g>
   <g id="hold" data-trace-key="hold" transform="translate(1330 404)"><circle r="12"></circle><text>Hold</text></g>
 </svg>
 <script src="/geometry.js"></script>
@@ -584,6 +584,11 @@ const holdDisplay = getComputedStyle(hold).display;
 const sealDecisionStart = screenPoint(sealDecision, sealDecision.getPointAtLength(0));
 const sealDecisionEnd = screenPoint(sealDecision, sealDecision.getPointAtLength(sealDecision.getTotalLength()));
 const decisionCenter = screenPoint(decision, new DOMPoint(0, 0));
+const decisionLabelBounds = decision.querySelector("[data-decision-label]").getBoundingClientRect();
+const decisionLabelPathOverlap = sealDecisionStart.x >= decisionLabelBounds.left
+  && sealDecisionStart.x <= decisionLabelBounds.right
+  && Math.max(sealDecisionStart.y, sealDecisionEnd.y) >= decisionLabelBounds.top
+  && Math.min(sealDecisionStart.y, sealDecisionEnd.y) <= decisionLabelBounds.bottom;
 const sealHoldStart = screenPoint(sealHold, sealHold.getPointAtLength(0));
 const sealHoldEnd = screenPoint(sealHold, sealHold.getPointAtLength(sealHold.getTotalLength()));
 const holdCenter = holdDisplay === "none" ? null : screenPoint(hold, new DOMPoint(0, 0));
@@ -623,6 +628,7 @@ fetch("/geometry-result", {
     sealDecisionDeltaX: Math.abs(decisionCenter.x - sealDecisionEnd.x),
     sealDecisionDeltaY: Math.abs(decisionCenter.y - sealDecisionEnd.y),
     decisionRadiusY: 11 * Math.abs(decision.getScreenCTM().d),
+    decisionLabelPathOverlap,
     sealHoldStraightDeltaY: Math.abs(sealHoldStart.y - sealHoldEnd.y),
     sealHoldDeltaX: holdCenter ? Math.abs(holdCenter.x - sealHoldEnd.x) : null,
     sealHoldDeltaY: holdCenter ? Math.abs(holdCenter.y - sealHoldEnd.y) : null,
@@ -735,6 +741,7 @@ fetch("/geometry-result", {
     assert abs(
         geometry[0]["sealDecisionDeltaY"] - geometry[0]["decisionRadiusY"]
     ) <= 0.01
+    assert geometry[0]["decisionLabelPathOverlap"] is False
     assert geometry[0]["sealHoldStraightDeltaY"] <= 0.01
     assert abs(geometry[0]["sealHoldDeltaX"] - geometry[0]["holdRadiusX"]) <= 0.01
     assert geometry[0]["sealHoldDeltaY"] <= 0.01
@@ -1770,6 +1777,17 @@ addEventListener("DOMContentLoaded", () => {
       : null;
     const decisionNode = document.querySelector('[data-trace-key="decision"]');
     const decisionCenter = shapeCenter(decisionNode);
+    const decisionLabelBounds = decisionNode.querySelector("[data-decision-label]").getBoundingClientRect();
+    const sealDecision = document.querySelector('[data-path-key="seal-decision"]');
+    const sealDecisionStart = screenPoint(sealDecision, sealDecision.getPointAtLength(0));
+    const sealDecisionEnd = screenPoint(
+      sealDecision,
+      sealDecision.getPointAtLength(sealDecision.getTotalLength())
+    );
+    const decisionLabelPathOverlap = Math.max(sealDecisionStart.x, sealDecisionEnd.x) >= decisionLabelBounds.left
+      && Math.min(sealDecisionStart.x, sealDecisionEnd.x) <= decisionLabelBounds.right
+      && Math.max(sealDecisionStart.y, sealDecisionEnd.y) >= decisionLabelBounds.top
+      && Math.min(sealDecisionStart.y, sealDecisionEnd.y) <= decisionLabelBounds.bottom;
     const mutationGate = document.querySelector('g[data-ingest-job-step="mutation"]');
     const acceptedPath = document.querySelector('[data-ingest-job-path="accepted"]');
     const applyPath = document.querySelector('[data-ingest-job-path="apply"]');
@@ -1823,6 +1841,7 @@ addEventListener("DOMContentLoaded", () => {
       nextPanelGap: saveHistoryBounds.top - decisionBounds.bottom,
       generationMeterHeight: document.querySelector("#decision-generation-meter")
         .getBoundingClientRect().height,
+      decisionLabelPathOverlap,
     };
     const paths = Object.fromEntries([
       ...[...document.querySelectorAll("[data-path-key]")]
@@ -2162,6 +2181,7 @@ addEventListener("DOMContentLoaded", () => {
         assert result["layout"]["fitsWidth"] is True
         assert result["layout"]["nextPanelGap"] == 12
         assert result["layout"]["generationMeterHeight"] == 32
+        assert result["layout"]["decisionLabelPathOverlap"] is False
         assert result["singleLayout"]["viewBox"] == "0 0 1500 650"
         assert result["singleLayout"]["height"] == "607"
         assert result["disconnectedPathEnds"] == [], case["id"]
