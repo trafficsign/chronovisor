@@ -3001,8 +3001,8 @@ canvas {
 
 .processing-step:not(:last-child)::after {
   top: 17px;
-  left: 12px;
-  width: calc(100% - 14px);
+  left: 8px;
+  width: calc(100% - 8px);
   background: #536471;
 }
 

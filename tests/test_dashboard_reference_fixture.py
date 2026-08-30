@@ -600,17 +600,32 @@ authorityStatus.textContent = "Triage done · Generate active";
 const longAuthorityHeight = authority.getBoundingClientRect().height;
 const processing = [...document.querySelectorAll(".processing-lane")].map((lane) => {
   const track = lane.querySelector(".processing-track");
+  const steps = [...track.querySelectorAll(".processing-step")];
   const lastStep = track.querySelector(".processing-step:last-child");
   const lastLabel = track.querySelector(".processing-step:last-child > span");
   const laneBounds = lane.getBoundingClientRect();
   const trackBounds = track.getBoundingClientRect();
   const labelBounds = lastLabel.getBoundingClientRect();
+  const railGaps = steps.slice(0, -1).map((step, index) => {
+    const stepBounds = step.getBoundingClientRect();
+    const nextBounds = steps[index + 1].getBoundingClientRect();
+    const dotStyle = getComputedStyle(step, "::before");
+    const railStyle = getComputedStyle(step, "::after");
+    const dotRight = stepBounds.left + parseFloat(dotStyle.width);
+    const railLeft = stepBounds.left + parseFloat(railStyle.left);
+    const railRight = railLeft + parseFloat(railStyle.width);
+    return {
+      start: railLeft - dotRight,
+      end: nextBounds.left - railRight,
+    };
+  });
   return {
     count: Number(lane.dataset.count),
     laneRight: laneBounds.right,
     trackRight: trackBounds.right,
     lastStepLeft: lastStep.getBoundingClientRect().left,
     labelRight: labelBounds.right,
+    railGaps,
   };
 });
 fetch("/geometry-result", {
@@ -752,6 +767,9 @@ fetch("/geometry-result", {
         assert row["trackRight"] <= row["laneRight"]
         assert abs(row["lastStepLeft"] - row["trackRight"]) <= 0.1
         assert row["labelRight"] <= row["laneRight"]
+        for gap in row["railGaps"]:
+            assert abs(gap["start"]) <= 0.1
+            assert abs(gap["end"]) <= 0.1
 
 
 def test_dashboard_reference_quorum_hold_paths_and_label_stay_in_bounds() -> None:
@@ -1279,6 +1297,14 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         "repair": "local_repair",
         "typed_graph": "relation_extract",
     }
+    processing_steps = {
+        key: [
+            {"key": step_key, "label": label, "status": "pending"}
+            for step_key, label, _phase in definitions
+        ]
+        for key, _label, definitions in dashboard._PROCESSING_LANES
+    }
+    assert list(processing_steps) == list(roles)
     models = {
         "primary": "qwen3.8:27b-axq4",
         "challenger": "challenger:model",
@@ -1608,6 +1634,7 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
     harness = """
 const fixtures = __FIXTURES__;
 const ingestVisualCases = __INGEST_VISUAL_CASES__;
+const processingSteps = __PROCESSING_STEPS__;
 const workflowKeys = [...new Set(fixtures.map(({ case: fixture }) => fixture.workflow).filter(Boolean))];
 const selectedPipelines = [];
 function browserFailure(detail) {
@@ -1696,7 +1723,37 @@ addEventListener("DOMContentLoaded", () => {
       ))
     )).map(({ key, end }) => `${key}:${end}`);
   };
+  const processingRailGaps = () => Object.fromEntries(
+    [...document.querySelectorAll("[data-processing-lane]")].map((row) => {
+      const steps = [...row.querySelectorAll(".processing-step")];
+      return [row.dataset.processingLane, steps.slice(0, -1).map((step, index) => {
+        const stepBounds = step.getBoundingClientRect();
+        const nextBounds = steps[index + 1].getBoundingClientRect();
+        const dotStyle = getComputedStyle(step, "::before");
+        const railStyle = getComputedStyle(step, "::after");
+        const dotRight = stepBounds.left + parseFloat(dotStyle.width);
+        const railLeft = stepBounds.left + parseFloat(railStyle.left);
+        const railRight = railLeft + parseFloat(railStyle.width);
+        return {
+          start: railLeft - dotRight,
+          end: nextBounds.left - railRight,
+        };
+      })];
+    })
+  );
   const renderFixture = (fixture, trace, revision) => {
+    const stepsFor = (key) => {
+      const steps = processingSteps[key] || [];
+      const activeIndex = key === fixture.workflow
+        ? steps.findIndex(({ key: stepKey }) => stepKey === fixture.processing_stage)
+        : -1;
+      return steps.map((step, index) => ({
+        ...step,
+        status: activeIndex < 0 ? "pending"
+          : index < activeIndex ? "done"
+            : index === activeIndex ? "active" : "pending",
+      }));
+    };
     api.renderProcessingActivity({
       generated_at: `2026-08-15T00:01:${revision}Z`,
       revision,
@@ -1706,7 +1763,7 @@ addEventListener("DOMContentLoaded", () => {
         label: key,
         state: key === fixture.workflow && trace.active ? "active" : "idle",
         current_step: key === fixture.workflow ? fixture.processing_stage : null,
-        steps: [],
+        steps: stepsFor(key),
       })),
     });
     api.renderDecisionTraceFrame(trace);
@@ -1718,6 +1775,7 @@ addEventListener("DOMContentLoaded", () => {
     if (!selected) throw new Error(`unknown fixture: ${requestedFixture}`);
     renderFixture(selected.case, selected.trace, "screenshot");
     const requestedIngestState = requestedParams.get("ingest-state");
+    const requestedPipeline = requestedParams.get("pipeline");
     if (requestedIngestState) {
       const ingestCase = ingestVisualCases.find(({ name }) => name === requestedIngestState);
       if (!ingestCase) throw new Error(`unknown ingest state: ${requestedIngestState}`);
@@ -1727,10 +1785,19 @@ addEventListener("DOMContentLoaded", () => {
         true,
       );
     }
-    document.querySelector("#decision-trace-panel")?.scrollIntoView({ block: "start" });
-    document.documentElement.dataset.fixtureReady = requestedIngestState
-      ? `${requestedFixture}:${requestedIngestState}`
-      : requestedFixture;
+    if (requestedPipeline) {
+      const row = document.querySelector(`[data-processing-lane="${requestedPipeline}"]`);
+      if (!row) throw new Error(`unknown pipeline: ${requestedPipeline}`);
+      row.click();
+    }
+    document.querySelector(
+      requestedPipeline ? "#processing-panel" : "#decision-trace-panel"
+    )?.scrollIntoView({ block: "start" });
+    document.documentElement.dataset.fixtureReady = [
+      requestedFixture,
+      requestedIngestState,
+      requestedPipeline,
+    ].filter(Boolean).join(":");
     return;
   }
   const results = fixtures.map(({ case: fixture, trace }, index) => {
@@ -1874,6 +1941,7 @@ addEventListener("DOMContentLoaded", () => {
       selectionEvent: selectedPipelines.length > selectionStart ? selectedPipelines.at(-1) : null,
       selected: [...document.querySelectorAll('[data-processing-lane][aria-selected="true"]')]
         .map((node) => node.dataset.processingLane),
+      processingRailGaps: processingRailGaps(),
       context: selectedContext?.dataset.contextTokens ?? null,
       contextState: selectedContext?.dataset.state ?? null,
       contextClass: selectedContext?.getAttribute("class") ?? null,
@@ -1963,6 +2031,9 @@ addEventListener("DOMContentLoaded", () => {
 """.replace("__FIXTURES__", json.dumps(payload, ensure_ascii=False)).replace(
         "__INGEST_VISUAL_CASES__",
         json.dumps(ingest_visual_cases, ensure_ascii=False),
+    ).replace(
+        "__PROCESSING_STEPS__",
+        json.dumps(processing_steps, ensure_ascii=False),
     )
     page = (
         (dashboard.STATIC_DIR / "index.html")
@@ -2074,16 +2145,24 @@ addEventListener("DOMContentLoaded", () => {
             )
             visual_dir.mkdir(parents=True, exist_ok=True)
             visual_requests = [
-                (item["case"]["id"], None) for item in payload
-            ] + [("S", item["name"]) for item in ingest_visual_cases]
-            for index, (case_id, ingest_state) in enumerate(visual_requests):
+                (item["case"]["id"], None, None) for item in payload
+            ] + [
+                ("S", item["name"], None) for item in ingest_visual_cases
+            ] + [
+                ("S", None, pipeline) for pipeline in roles
+            ]
+            for index, (case_id, ingest_state, pipeline) in enumerate(visual_requests):
                 stem = case_id.replace("::", "__")
                 if ingest_state:
                     stem += f"__{ingest_state}"
+                if pipeline:
+                    stem = f"lane__{pipeline}"
                 visual_path = visual_dir / f"{stem}.png"
                 query = f"fixture={quote(case_id)}"
                 if ingest_state:
                     query += f"&ingest-state={quote(ingest_state)}"
+                if pipeline:
+                    query += f"&pipeline={quote(pipeline)}"
                 visual_process = subprocess.Popen(
                     [
                         chrome,
@@ -2166,7 +2245,7 @@ addEventListener("DOMContentLoaded", () => {
     assert len(browser_results) == len(payload), diagnostics
     assert screenshot_path.is_file() and screenshot_path.stat().st_size > 0
 
-    assert len(visual_paths) == len(payload) + len(ingest_visual_cases)
+    assert len(visual_paths) == len(payload) + len(ingest_visual_cases) + len(roles)
 
     by_id = {result["id"]: result for result in browser_results}
     by_trace = {item["case"]["id"]: item["trace"] for item in payload}
@@ -2176,6 +2255,12 @@ addEventListener("DOMContentLoaded", () => {
         assert result["projectionStatus"] == "ok"
         assert result["selected"] == [case["workflow"] or "ingest"]
         assert result["selectionEvent"] is None
+        assert set(result["processingRailGaps"]) == set(roles)
+        for pipeline, gaps in result["processingRailGaps"].items():
+            assert len(gaps) == len(processing_steps[pipeline]) - 1
+            for gap in gaps:
+                assert abs(gap["start"]) <= 0.1
+                assert abs(gap["end"]) <= 0.1
         assert result["layout"]["scrollWidth"] == result["layout"]["clientWidth"]
         assert result["layout"]["rightReachable"] is True
         assert result["layout"]["fitsWidth"] is True
