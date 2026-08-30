@@ -19,7 +19,7 @@ usage() {
   cat >&2 <<'EOF'
 usage: install-omlx-service [options]
 
-Stages missing oMLX 0.6.3 settings files. Existing files are never
+Stages missing oMLX 0.6.4 settings files. Existing files are never
 overwritten, including when --force is supplied for compatibility with older
 cutover instructions. The official app owns the server process.
 

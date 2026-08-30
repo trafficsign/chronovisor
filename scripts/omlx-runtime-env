@@ -27,7 +27,7 @@ omlx_require_absolute_executable() {
 
 # The app-bundle path is intentionally explicit.  A user shim is preferred
 # because it imports the app's bootstrap base path before dispatching to this
-# same 0.6.3 binary.  If the shim is absent, use the bundled binary directly;
+# same 0.6.4 binary.  If the shim is absent, use the bundled binary directly;
 # never discover a Homebrew/PATH executable by accident.
 OMLX_APP_CLI=${OMLX_APP_CLI:-/Applications/oMLX.app/Contents/MacOS/omlx-cli}
 
@@ -48,7 +48,7 @@ OMLX_HOST=${OMLX_HOST:-127.0.0.1}
 OMLX_PORT=${OMLX_PORT:-18125}
 OMLX_BASE_URL=${OMLX_BASE_URL:-http://$OMLX_HOST:$OMLX_PORT/v1}
 OMLX_HEALTH_URL=${OMLX_HEALTH_URL:-http://$OMLX_HOST:$OMLX_PORT/health}
-OMLX_REQUIRED_VERSION=${OMLX_REQUIRED_VERSION:-0.6.3}
+OMLX_REQUIRED_VERSION=${OMLX_REQUIRED_VERSION:-0.6.4}
 OMLX_MAX_CONCURRENT_REQUESTS=${OMLX_MAX_CONCURRENT_REQUESTS:-1}
 OMLX_MEMORY_GUARD_GB=${OMLX_MEMORY_GUARD_GB:-104}
 OMLX_CACHE_ENABLED=${OMLX_CACHE_ENABLED:-true}

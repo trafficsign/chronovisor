@@ -174,7 +174,7 @@ def test_lifecycle_helpers_delegate_to_official_cli(tmp_path: Path) -> None:
     log = tmp_path / "argv.log"
     fake_cli.write_text(
         "#!/bin/sh\n"
-        "if [ \"$1\" = \"--version\" ]; then echo 0.6.3; exit 0; fi\n"
+        "if [ \"$1\" = \"--version\" ]; then echo 0.6.4; exit 0; fi\n"
         "printf '%s\\n' \"$*\" > \"$OMLX_TEST_ARGV_LOG\"\n",
         encoding="utf-8",
     )
@@ -196,7 +196,7 @@ def test_official_cli_parser_smoke() -> None:
     version = subprocess.run(
         [str(APP_CLI), "--version"], check=True, capture_output=True, text=True
     )
-    assert version.stdout.strip() == "0.6.3"
+    assert version.stdout.strip() == "0.6.4"
     for command in ("start", "stop", "restart"):
         result = subprocess.run(
             [str(APP_CLI), command, "--help"],
