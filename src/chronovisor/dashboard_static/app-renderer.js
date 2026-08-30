@@ -563,9 +563,10 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
       '[data-path-key="plan-dispatch"]',
       "d",
       single
-        ? "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V394 Q180 404 190 404 H220"
+        ? "M1380 164 H1466 Q1476 164 1476 174 V297 Q1476 307 1466 307 H190 Q180 307 180 317 V394 Q180 404 190 404 H220"
         : "M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V315 Q180 325 190 325 H220",
     ],
+    ["[data-dispatch-label]", "y", single ? "303" : "258"],
     [
       '[data-path-key="single-artifact"]',
       "d",

@@ -488,7 +488,7 @@ def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
   </div>
 </div>
 <svg class="decision-trace-harness single-model" viewBox="0 0 1500 550" width="1500" height="550">
-  <path id="dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V394 Q180 404 190 404 H220"></path>
+  <path id="dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V297 Q1476 307 1466 307 H190 Q180 307 180 317 V394 Q180 404 190 404 H220"></path>
   <path id="single-artifact" d="M920 404 H1039"></path>
   <path id="seal-hold" data-path-key="seal-hold" d="M1190 434 V482"></path>
   <g class="decision-lane" data-decision-lane="primary" transform="translate(0 325)">
@@ -514,6 +514,8 @@ const lane = document.querySelector('[data-decision-lane="primary"]');
 const trigger = screenPoint(document.querySelector("#trigger"), new DOMPoint(0, 0));
 const validate = screenPoint(document.querySelector("#validate"), new DOMPoint(0, 0));
 const dispatchEnd = screenPoint(dispatch, dispatch.getPointAtLength(dispatch.getTotalLength()));
+const dispatchRail = screenPoint(dispatch, dispatch.getPointAtLength(dispatch.getTotalLength() / 2));
+const planBottom = screenPoint(document.querySelector("svg"), new DOMPoint(0, 210));
 const singleStart = screenPoint(single, single.getPointAtLength(0));
 const singleEnd = screenPoint(single, single.getPointAtLength(single.getTotalLength()));
 const artifact = document.querySelector("#artifact");
@@ -543,6 +545,7 @@ fetch("/geometry-result", {
   body: JSON.stringify({
     transform: getComputedStyle(lane).transform,
     dispatchDeltaY: Math.abs(trigger.y - dispatchEnd.y),
+    dispatchCenterDeltaY: Math.abs(dispatchRail.y - ((planBottom.y + trigger.y) / 2)),
     singleDeltaY: Math.abs(validate.y - singleStart.y),
     singleArtifactDeltaX: Math.abs(artifactLeft.x - singleEnd.x),
     singleArtifactDeltaY: Math.abs(artifactLeft.y - singleEnd.y),
@@ -643,6 +646,7 @@ fetch("/geometry-result", {
     )
     assert geometry[0]["transform"] == "matrix(1, 0, 0, 1, 0, 404)"
     assert geometry[0]["dispatchDeltaY"] <= 0.01
+    assert geometry[0]["dispatchCenterDeltaY"] <= 0.01
     assert geometry[0]["singleDeltaY"] <= 0.01
     assert geometry[0]["singleArtifactDeltaX"] <= 0.01
     assert geometry[0]["singleArtifactDeltaY"] <= 0.01
@@ -1482,6 +1486,12 @@ addEventListener("DOMContentLoaded", () => {
       document.querySelector('[data-trace-key="seal"]'),
       document.querySelector('[data-trace-key="decision"]'),
     ].map(shapeCenter);
+    const dispatch = document.querySelector('[data-path-key="plan-dispatch"]');
+    const dispatchRail = screenPoint(
+      dispatch,
+      dispatch.getPointAtLength(dispatch.getTotalLength() / 2)
+    );
+    const planBottom = screenPoint(harness, new DOMPoint(0, 210));
     const holdCenter = shapeCenter(document.querySelector('[data-trace-key="hold"]'));
     const opacity = (node) => node ? getComputedStyle(node).opacity : null;
     scroller.scrollLeft = scroller.scrollWidth;
@@ -1544,6 +1554,10 @@ addEventListener("DOMContentLoaded", () => {
       singleLayout: {
         viewBox: harness.getAttribute("viewBox"),
         height: harness.getAttribute("height"),
+        dispatchLabelY: document.querySelector("[data-dispatch-label]")?.getAttribute("y"),
+        dispatchCenterDeltaY: Math.abs(
+          dispatchRail.y - ((planBottom.y + terminalCenters[0].y) / 2)
+        ),
         gaps: terminalCenters.slice(1).map((point, index) => (
           point.x - terminalCenters[index].x
         )),
@@ -1562,6 +1576,7 @@ addEventListener("DOMContentLoaded", () => {
   results[0].restoredLayout = {
     viewBox: document.querySelector("#decision-trace-harness").getAttribute("viewBox"),
     height: document.querySelector("#decision-trace-harness").getAttribute("height"),
+    dispatchLabelY: document.querySelector("[data-dispatch-label]").getAttribute("y"),
   };
   document.querySelector('[data-processing-lane="recall"]').click();
   results[0].tabClick = {
@@ -1857,6 +1872,8 @@ addEventListener("DOMContentLoaded", () => {
     assert single_result["singleArtifactDelta"]["y"] <= 0.01
     assert single_result["singleLayout"]["viewBox"] == "0 0 1500 550"
     assert single_result["singleLayout"]["height"] == "513"
+    assert single_result["singleLayout"]["dispatchLabelY"] == "303"
+    assert single_result["singleLayout"]["dispatchCenterDeltaY"] <= 0.01
     gaps = single_result["singleLayout"]["gaps"]
     assert max(gaps) - min(gaps) <= 1
     assert single_result["singleLayout"]["railSpread"] <= 1
@@ -1876,4 +1893,5 @@ addEventListener("DOMContentLoaded", () => {
     assert by_id[cases[0]["id"]]["restoredLayout"] == {
         "viewBox": "0 0 1500 650",
         "height": "607",
+        "dispatchLabelY": "258",
     }
