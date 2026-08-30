@@ -40,7 +40,6 @@ from chronovisor.core.ollama import (
 )
 from chronovisor.core.omlx_adapter import OMLX_API_KEY, OMLX_BASE_URL
 from chronovisor.core.runtime_config import (
-    load_decision_router_config,
     load_reranker_config,
     load_search_embedding_config,
     runtime_identity,
@@ -2591,7 +2590,7 @@ def _build_processing_activity_snapshot() -> dict[str, Any]:
             "active_jobs": int(frontier_reviews.get("count") or 1),
         }
 
-    single_model = load_decision_router_config().is_single_model
+    single_model = llm_config.load_decision_router_config().is_single_model
     lanes: list[dict[str, Any]] = []
     for key, label, steps in _PROCESSING_LANES:
         visible_steps = (
@@ -4417,7 +4416,7 @@ def _local_consensus_snapshot(
                 "summary": f"No {label} decision yet",
             }
         )
-        router_config = load_decision_router_config()
+        router_config = llm_config.load_decision_router_config()
         if router_config.is_single_model:
             try:
                 authority_route = runtime_generation_routes(

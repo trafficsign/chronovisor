@@ -134,34 +134,42 @@ def _refresh_ingest_derived_artifacts(
     """Refresh rebuildable indexes and return the normal read-back result."""
 
     runtime = _runtime()
+    try:
+        from chronovisor.core.index_store import get_store
+
+        get_store().ensure_loaded()
+    except Exception as exc:
+        runtime._safe_log(f"ingest | index_store unavailable: {exc}")
 
     if changed_pages:
-        try:
-            from chronovisor.core.search import update_embeddings
+        with runtime._host_phase("semantic-publish"):
+            try:
+                from chronovisor.core.search import update_embeddings
 
-            # Read-back is a correctness gate, so publication of the delta
-            # index must complete before retrieval is evaluated. The previous
-            # fire-and-forget enqueue produced false misses that passed when
-            # the same query was repeated after the worker caught up.
-            update_embeddings(page_ids=changed_pages, strict=True)
-        except Exception as exc:
-            runtime._safe_log(f"ingest | semantic index enqueue failed: {exc}")
-        try:
-            from chronovisor.core.claims import append_page_claims
+                # Read-back is a correctness gate, so publication of the delta
+                # index must complete before retrieval is evaluated. The previous
+                # fire-and-forget enqueue produced false misses that passed when
+                # the same query was repeated after the worker caught up.
+                update_embeddings(page_ids=changed_pages, strict=True)
+            except Exception as exc:
+                runtime._safe_log(f"ingest | semantic index enqueue failed: {exc}")
+            try:
+                from chronovisor.core.claims import append_page_claims
 
-            append_page_claims(
-                changed_pages,
-                source_raw=source_raw or "",
-                op="ingest",
-            )
-        except Exception as exc:
-            runtime._safe_log(f"ingest | claim ledger failed (non-fatal): {exc}")
-        try:
-            from chronovisor.ingest.state_register import refresh_state_register
+                append_page_claims(
+                    changed_pages,
+                    source_raw=source_raw or "",
+                    op="ingest",
+                )
+            except Exception as exc:
+                runtime._safe_log(f"ingest | claim ledger failed (non-fatal): {exc}")
+            try:
+                from chronovisor.ingest.state_register import refresh_state_register
 
-            refresh_state_register(changed_pages, source_raw=source_raw or "")
-        except Exception as exc:
-            runtime._safe_log(
-                f"ingest | state register refresh failed (non-fatal): {exc}"
-            )
-    return verify_changed_pages_read_back(changed_pages)
+                refresh_state_register(changed_pages, source_raw=source_raw or "")
+            except Exception as exc:
+                runtime._safe_log(
+                    f"ingest | state register refresh failed (non-fatal): {exc}"
+                )
+    with runtime._host_phase("read-back"):
+        return verify_changed_pages_read_back(changed_pages)

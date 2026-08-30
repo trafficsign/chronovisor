@@ -696,9 +696,9 @@ def _main_locked(argv: list[str] | None) -> int:
             json.dumps({"status": "blocked", "category": "okf_startup_blocked"})
         )
         return 75
-    from chronovisor.core.index_store import get_store
+    from chronovisor.ingest import ingest
 
-    get_store().refresh()
+    ingest.get_store().refresh()
     if args.watch:
         watch(
             max_batches=args.max_batches,

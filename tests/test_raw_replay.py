@@ -1594,7 +1594,13 @@ def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
     )
 
     class FakeIndex:
+        def ensure_loaded(self) -> None:
+            pass
+
         def refresh(self) -> None:
+            pass
+
+        def apply_changes(self, _paths) -> None:
             pass
 
         def all_pages_meta(self, include_system=True):
@@ -1610,7 +1616,9 @@ def test_replay_ingest_cannot_restore_claim_removed_by_applied_correction(
         def all_tags(self, include_system=False):
             return set()
 
-    monkeypatch.setattr(index_store, "get_store", lambda: FakeIndex())
+    fake_index = FakeIndex()
+    monkeypatch.setattr(index_store, "get_store", lambda: fake_index)
+    monkeypatch.setattr(ingest, "get_store", lambda: fake_index)
     prepared = page_mutation.prepare_page_mutation(
         "display",
         [

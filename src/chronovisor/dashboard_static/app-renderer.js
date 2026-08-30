@@ -435,7 +435,10 @@ function renderWorkStatus(status) {
       }
     } else {
       const current = shortName(status.current_raw || (llm && (llm.raw || llm.target)) || status.current_job_id);
-      const op = fmt(status.current_op || stage, "work");
+      const hostPhase = status.host_phase || {};
+      const op = hostPhase.state === "active"
+        ? stageMetricLabel(hostPhase.name)
+        : fmt(status.current_op || stage, "work");
       detail = `${op} on ${current}`;
     }
   } else if (lastSuccess) {

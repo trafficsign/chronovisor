@@ -27,6 +27,7 @@ def _runtime_call(name: str):
 _admit_ingest_context = _runtime_call("_admit_ingest_context")
 _emit_triage_failure = _runtime_call("_emit_triage_failure")
 _generate_with_progress = _runtime_call("_generate_with_progress")
+_host_phase = _runtime_call("_host_phase")
 _safe_log = _runtime_call("_safe_log")
 _select_ingest_context = _runtime_call("_select_ingest_context")
 _structured_chat_transport = _runtime_call("_structured_chat_transport")
@@ -46,6 +47,14 @@ create | folder/page-id.md | Page title | keyword one; keyword two | Brief summa
 update | existing-page-id.md | Existing title | keyword one; keyword two | New facts
 Use semicolons only to separate keywords. Keep every operation on one line.
 """
+
+
+def _validate_effective_triage_plan(value: Any) -> list[Any]:
+    with _host_phase("target-resolution"):
+        return _triage_plan_validation_issues(
+            value,
+            resolve_effective_targets=True,
+        )
 
 
 def _decode_triage_output(text: str) -> list[dict[str, Any]]:
@@ -134,9 +143,7 @@ def triage(
     raw files un-marked so the next tick retries them, while a legitimate
     empty plan should mark the raws processed to avoid forever-retry.
     """
-    from chronovisor.core.index_store import get_store
-
-    store = get_store()
+    store = _runtime().get_store()
     store.ensure_loaded()
     existing_folders = sorted(
         {
@@ -291,10 +298,7 @@ Analyze the raw data above and return the page-operation record."""
                 prompt,
                 TRIAGE_PLAN_SCHEMA,
                 system=TRIAGE_SYSTEM_PROMPT,
-                value_validator=lambda value: _triage_plan_validation_issues(
-                    value,
-                    resolve_effective_targets=True,
-                ),
+                value_validator=_validate_effective_triage_plan,
                 plain_text_contract=TRIAGE_TEXT_OUTPUT_CONTRACT,
                 plain_text_decoder=_decode_triage_output,
             )

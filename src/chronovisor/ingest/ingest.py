@@ -7,9 +7,10 @@ import json
 import os
 import re
 import threading
+import time
 import unicodedata
 from collections.abc import Callable
-from contextlib import nullcontext, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path, PurePosixPath
@@ -53,6 +54,8 @@ from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     PAGES_DIR,
     SYSTEM_DIR,
+    all_pages,  # noqa: F401 - compatibility seam; hot path tests forbid calls
+    find_page,  # noqa: F401 - compatibility seam; IndexStore owns lookups
     page_id_from_path,
 )
 from chronovisor.decision import decision_authority
@@ -1181,6 +1184,7 @@ def _candidate_score_for_create(
     meta: dict,
     *,
     needle: tuple[str, str] | None = None,
+    minimum_score: float = 0.0,
 ) -> tuple[float, str]:
     if needle is None:
         requested_title = _normalize_match_text(_op_title_or_slug(op))
@@ -1205,16 +1209,16 @@ def _candidate_score_for_create(
     if requested_title and existing_title and requested_title == existing_title:
         return 1.0, "same-title"
 
-    title_score = (
-        SequenceMatcher(None, requested_title, existing_title).ratio()
-        if requested_title and existing_title
-        else 0.0
-    )
-    slug_score = (
-        SequenceMatcher(None, requested_slug, existing_slug).ratio()
-        if requested_slug and existing_slug
-        else 0.0
-    )
+    def score(left: str, right: str) -> float:
+        if not left or not right:
+            return 0.0
+        matcher = SequenceMatcher(None, left, right)
+        if minimum_score and matcher.quick_ratio() < minimum_score:
+            return 0.0
+        return matcher.ratio()
+
+    title_score = score(requested_title, existing_title)
+    slug_score = score(requested_slug, existing_slug)
     if title_score >= 0.92:
         return title_score, "near-title"
     if slug_score >= 0.95:
@@ -1270,7 +1274,12 @@ def _find_existing_create_target(op: dict) -> tuple[Path, str, float] | None:
     best_reason = ""
     best_score = 0.0
     for meta in _existing_candidate_metas():
-        score, reason = _candidate_score_for_create(op, meta, needle=needle)
+        score, reason = _candidate_score_for_create(
+            op,
+            meta,
+            needle=needle,
+            minimum_score=0.92,
+        )
         if score > best_score:
             try:
                 best_path = Path(str(meta["path"]))
@@ -1283,7 +1292,12 @@ def _find_existing_create_target(op: dict) -> tuple[Path, str, float] | None:
         return best_path, best_reason, best_score
 
     for meta in _search_candidate_metas(op):
-        score, reason = _candidate_score_for_create(op, meta, needle=needle)
+        score, reason = _candidate_score_for_create(
+            op,
+            meta,
+            needle=needle,
+            minimum_score=0.88,
+        )
         if score >= 0.88:
             try:
                 return Path(str(meta["path"])), f"search-{reason}", score
@@ -2602,8 +2616,26 @@ def _normalize_for_loose_page_id(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
 
 
-def _find_page_casefold(page_id: str) -> Path | None:
+def _find_page_casefold(
+    page_id: str,
+    *,
+    candidate_paths: tuple[Path, ...] | None = None,
+) -> Path | None:
     """Resolve exact/casefold identity from the bootstrapped page snapshot."""
+
+    if candidate_paths is not None:
+        exact = next((path for path in candidate_paths if path.stem == page_id), None)
+        if exact is not None:
+            return exact
+        target = _normalize_for_collision(page_id)
+        return next(
+            (
+                path
+                for path in candidate_paths
+                if _normalize_for_collision(path.stem) == target
+            ),
+            None,
+        )
 
     store = get_store()
     store.ensure_loaded()
@@ -2630,9 +2662,14 @@ def _find_page_casefold(page_id: str) -> Path | None:
     return None
 
 
-def _find_page_resilient(page_id: str, *, emit_logs: bool = True) -> Path | None:
+def _find_page_resilient(
+    page_id: str,
+    *,
+    emit_logs: bool = True,
+    candidate_paths: tuple[Path, ...] | None = None,
+) -> Path | None:
     """Find a page by exact id first, then by safe single-candidate loose id."""
-    existing = _find_page_casefold(page_id)
+    existing = _find_page_casefold(page_id, candidate_paths=candidate_paths)
     if existing is not None:
         return existing
 
@@ -2653,28 +2690,35 @@ def _find_page_resilient(page_id: str, *, emit_logs: bool = True) -> Path | None
     target = _normalize_for_loose_page_id(page_id)
     if not target:
         return None
-    store = get_store()
-    store.ensure_loaded()
-    matching_ids = sorted(
-        (
-            candidate
-            for candidate in store.all_page_ids()
-            if _normalize_for_loose_page_id(candidate) == target
-        ),
-        key=lambda candidate: str((store.meta(candidate) or {}).get("path", "")),
-    )
-    matches = [
-        path
-        for candidate in matching_ids
-        if (
-            path := stable_indexed_document_path(
-                store.meta(candidate),
-                pages_dir=PAGES_DIR,
-                system_dir=SYSTEM_DIR,
-            )
+    if candidate_paths is not None:
+        matches = [
+            path
+            for path in candidate_paths
+            if _normalize_for_loose_page_id(path.stem) == target
+        ]
+    else:
+        store = get_store()
+        store.ensure_loaded()
+        matching_ids = sorted(
+            (
+                candidate
+                for candidate in store.all_page_ids()
+                if _normalize_for_loose_page_id(candidate) == target
+            ),
+            key=lambda candidate: str((store.meta(candidate) or {}).get("path", "")),
         )
-        is not None
-    ]
+        matches = [
+            path
+            for candidate in matching_ids
+            if (
+                path := stable_indexed_document_path(
+                    store.meta(candidate),
+                    pages_dir=PAGES_DIR,
+                    system_dir=SYSTEM_DIR,
+                )
+            )
+            is not None
+        ]
     if not matches:
         return None
     if len(matches) > 1:
@@ -4322,6 +4366,51 @@ def _safe_log(
         source="ingest",
         outcome_kind=outcome_kind,
     )
+
+
+@contextmanager
+def _host_phase(name: str):
+    """Expose one synchronous host phase through existing status and journals."""
+
+    status = runtime_status.read_status()
+    job_id = status.get("current_job_id")
+    raw_file = status.get("current_raw")
+    started = time.monotonic()
+    runtime_status.safe_write_status(
+        stage=name,
+        host_phase={"name": name, "state": "active", "elapsed_ms": 0.0},
+    )
+    outcome = "complete"
+    try:
+        yield
+    except BaseException:
+        outcome = "error"
+        raise
+    finally:
+        elapsed_ms = round((time.monotonic() - started) * 1_000, 3)
+        runtime_status.safe_write_status(
+            stage=name,
+            host_phase={
+                "name": name,
+                "state": outcome,
+                "elapsed_ms": elapsed_ms,
+            },
+        )
+        fields = {
+            "stage": name,
+            "elapsed_ms": elapsed_ms,
+            "outcome": outcome,
+            "job_id": job_id,
+            "raw_file": raw_file,
+        }
+        runtime_status.safe_append_event(
+            "error" if outcome == "error" else "info",
+            f"ingest | host phase {name}: {elapsed_ms:.3f} ms",
+            source="ingest",
+            outcome_kind="host_phase",
+            **fields,
+        )
+        runtime_status.safe_append_metric("ingest_host_phase", **fields)
 
 
 def _complete_pretriage_terminal_recovery(

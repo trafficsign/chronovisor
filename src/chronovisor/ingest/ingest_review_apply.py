@@ -44,6 +44,7 @@ _build_ingest_review_shard_plan = _runtime_call("_build_ingest_review_shard_plan
 _canonical_json_sha256 = _runtime_call("_canonical_json_sha256")
 _current_ingest_review_authority = _runtime_call("_current_ingest_review_authority")
 _has_sharded_ingest_review_artifact_family = _runtime_call("_has_sharded_ingest_review_artifact_family")
+_host_phase = _runtime_call("_host_phase")
 _historical_ingest_sharded_review_recovery_error = _runtime_call("_historical_ingest_sharded_review_recovery_error")
 _ingest_artifact_paths = _runtime_call("_ingest_artifact_paths")
 _ingest_review_authority_error = _runtime_call("_ingest_review_authority_error")
@@ -216,10 +217,13 @@ def _apply_authorized_ingest_review(
                     "updated": [],
                     "audit": audit_decision,
                 }
-        if decision == "confirmed_noop":
-            created, updated = [], []
-        else:
-            created, updated = _apply_prepared_operations(planned, link_totals=totals)
+        with _host_phase("apply"):
+            if decision == "confirmed_noop":
+                created, updated = [], []
+            else:
+                created, updated = _apply_prepared_operations(
+                    planned, link_totals=totals
+                )
     return {
         "status": decision,
         "source_key": source_key,
@@ -257,7 +261,6 @@ def review_and_apply_ingest_operations(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Authorize by risk policy, durably bind the verdict, and CAS apply."""
-
     source_key = _ingest_source_key(raw_content, raw_keywords)
     proposal_path, review_path = _ingest_artifact_paths(source_key)
     audit_state_path = proposal_path.parent / "audit-state.json"
@@ -477,11 +480,12 @@ def review_and_apply_ingest_operations(
         and _ingest_review_authority_error(artifact_review, artifact_authority) is None
         and exact_postimages_already_applied
     ):
-        created, updated = _apply_prepared_operations(
-            planned,
-            link_totals=totals,
-            recovery_only=True,
-        )
+        with _host_phase("apply"):
+            created, updated = _apply_prepared_operations(
+                planned,
+                link_totals=totals,
+                recovery_only=True,
+            )
         return {
             "status": "apply_available",
             "source_key": source_key,

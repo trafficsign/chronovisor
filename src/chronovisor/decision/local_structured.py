@@ -926,10 +926,8 @@ def _single_authority_execution_metadata(
 ) -> dict[str, Any]:
     """Persist single-authority facts only for the exact authority route."""
 
-    from chronovisor.core.runtime_config import load_decision_router_config
-
     try:
-        config = load_decision_router_config()
+        config = ollama.load_decision_router_config()
         authority_route = ollama.runtime_generation_routes(
             (config.single_route_identity,)
         )[0]
@@ -3620,10 +3618,8 @@ class LocalStructuredSession:
                             "route_configuration_invalid",
                             "route_configuration_invalid",
                         )
-        can_execute = (
-            not format_schema_error
-            and preflight_failure is None
-            and route_failure is None
+        can_execute = not (
+            format_schema_error or preflight_failure or route_failure
         )
         resource_request: _StructuredResourceRequest | None = None
         resource_request_error: _StructuredResourceError | None = None

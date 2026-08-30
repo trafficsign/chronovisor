@@ -691,7 +691,7 @@ class SemanticServiceState:
             raise ServiceBusy("full semantic rebuild is required first")
         updated = 0
         for page_id in unique:
-            self._index_page(page_id, expected_hash="")
+            self._index_page(page_id, expected_hash="", foreground=True)
             updated += 1
         return {"status": "ok", "pages_updated": updated}
 
@@ -741,7 +741,9 @@ class SemanticServiceState:
                 self._runtime.release_embedding(INCREMENTAL_ROLE)
             self._cpu_ready = False
 
-    def _index_page(self, page_id: str, *, expected_hash: str) -> None:
+    def _index_page(
+        self, page_id: str, *, expected_hash: str, foreground: bool = False
+    ) -> None:
         generation = self._generation
         if generation is None:
             raise ServiceBusy("no active semantic generation")
@@ -755,11 +757,17 @@ class SemanticServiceState:
             enqueue_pages([page_id], source_hashes={page_id: current_hash})
             return
         if documents:
-            self._ensure_cpu()
-            vectors = self._embed_incremental_documents(
-                [document.text for document in documents],
-                source=self._document_source(documents),
-            )
+            texts = [document.text for document in documents]
+            source = self._document_source(documents)
+            if foreground:
+                try:
+                    vectors = self._embed_foreground_documents(texts, source=source)
+                except Exception:
+                    self._ensure_cpu()
+                    vectors = self._embed_incremental_documents(texts, source=source)
+            else:
+                self._ensure_cpu()
+                vectors = self._embed_incremental_documents(texts, source=source)
             refreshed = extract_page_documents(path) if path is not None else []
             refreshed_hash = refreshed[0].source_sha256 if refreshed else ""
             if refreshed_hash != current_hash:

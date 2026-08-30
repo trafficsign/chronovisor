@@ -216,6 +216,7 @@ const WORK_STAGE_ALIASES = {
   raw: "raw",
   triage: "triage",
   classify: "triage",
+  "target-resolution": "triage",
   generate: "generate",
   generating: "generate",
   llm: "generate",
@@ -225,6 +226,8 @@ const WORK_STAGE_ALIASES = {
   write: "apply",
   index: "index",
   indexing: "index",
+  "semantic-publish": "index",
+  "read-back": "index",
   complete: "index",
   done: "index",
 };
@@ -235,6 +238,9 @@ const STAGE_METRIC_LABELS = {
   "frontier-review": "Consensus review",
   "frontier-regenerate": "Consensus retry",
   authorization: "Authorize",
+  "target-resolution": "Resolve target",
+  "semantic-publish": "Publish semantic",
+  "read-back": "Read back",
 };
 
 let saveHistoryMode = "daily";

@@ -101,7 +101,18 @@ def test_ingest_validator_requests_semantic_merge_in_same_session(
         keywords=[f"keyword-{index}" for index in range(7)],
     )
     transport = _QueueTransport(json.dumps(invalid), json.dumps([valid]))
-    monkeypatch.setattr(ingest, "all_pages", lambda: [])
+
+    class EmptyIndex:
+        def ensure_loaded(self) -> None:
+            pass
+
+        def all_canonical_page_keys(self) -> set[str]:
+            return set()
+
+        def page_count(self) -> int:
+            return 0
+
+    monkeypatch.setattr(ingest, "get_store", EmptyIndex)
     monkeypatch.setattr(search, "search", lambda *_args, **_kwargs: ([], "bm25"))
     monkeypatch.setattr(ingest, "_find_existing_create_target", lambda _op: None)
     monkeypatch.setattr(

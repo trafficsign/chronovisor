@@ -283,11 +283,10 @@ def consolidate_entity_candidates(
                     "validation_count": 1,
                     "attempts": attempts,
                 }
+        votes: list[dict[str, Any]] = []
         if authority_kind == "single_model_v1":
-            votes = []
             decided["authority"] = authority
         else:
-            votes = []
             seen_roles: set[str] = set()
             for vote in result.votes:
                 if vote.role in seen_roles:

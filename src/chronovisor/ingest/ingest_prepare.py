@@ -149,6 +149,7 @@ def _prepare_operation(
     allowed_targets: set[tuple[Namespace, str]],
     existing_tags_snapshot: list[str],
     read_only: bool,
+    candidate_paths: tuple[Path, ...] | None,
     frontmatter_parse: Any,
     frontmatter_patch: Any,
 ) -> tuple[PreparedIngestOperation, dict[str, int]]:
@@ -170,7 +171,11 @@ def _prepare_operation(
     raw_keywords = cast(list[str], op_raw_keywords) if propagate_raw_keywords else []
 
     if op_type == "create":
-        existing = _find_page_resilient(page_id, emit_logs=not read_only)
+        existing = _find_page_resilient(
+            page_id,
+            emit_logs=not read_only,
+            candidate_paths=candidate_paths,
+        )
         if existing is not None:
             if not read_only:
                 _safe_log(
@@ -238,7 +243,11 @@ def _prepare_operation(
     existing_path = (
         full_path
         if full_path.exists()
-        else _find_page_resilient(page_id, emit_logs=not read_only)
+        else _find_page_resilient(
+            page_id,
+            emit_logs=not read_only,
+            candidate_paths=candidate_paths,
+        )
     )
     if existing_path is None or not existing_path.exists():
         raise IngestApplyError(f"update target not found for page_id {page_id!r}")
@@ -353,6 +362,17 @@ def prepare_operations(
     # Keep the final mutation boundary fail-closed even when an installed core
     # system page is temporarily absent from the index snapshot.
     reserved_system_ids.update(_reserved_system_page_collision_keys())
+    candidate_paths = (
+        tuple(
+            sorted(
+                _runtime().PAGES_DIR / relative_path
+                for namespace, relative_path in allowed_targets
+                if namespace == "pages"
+            )
+        )
+        if read_only
+        else None
+    )
 
     # ---- Prepare phase -----------------------------------------------------
     # Resolve every filename, validate every op, build the final write plan.
@@ -400,7 +420,11 @@ def prepare_operations(
 
         target_path = full_path
         if op_type == "create":
-            existing = _find_page_resilient(page_id, emit_logs=False)
+            existing = _find_page_resilient(
+                page_id,
+                emit_logs=False,
+                candidate_paths=candidate_paths,
+            )
             if existing is not None:
                 target_path = existing
         allowed_targets.add(("pages", _page_relative_path(target_path)))
@@ -414,6 +438,7 @@ def prepare_operations(
             allowed_targets=allowed_targets,
             existing_tags_snapshot=existing_tags_snapshot,
             read_only=read_only,
+            candidate_paths=candidate_paths,
             frontmatter_parse=_canonical_parse,
             frontmatter_patch=_canonical_patch,
         )

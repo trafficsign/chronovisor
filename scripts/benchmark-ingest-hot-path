@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -162,7 +163,9 @@ def main() -> int:
     real_scan = store._scan_disk
     real_refresh = store.refresh
     real_apply = store.apply_changes
+    real_all_pages = ingest.all_pages
     real_log = ingest._safe_log
+    real_host_phase = ingest._host_phase
 
     def scan_disk():
         counts["scan_disk"] += 1
@@ -177,10 +180,16 @@ def main() -> int:
         counts["targeted_apply"] += len(unique) + len(set(removed_page_ids))
         return real_apply(unique, removed_page_ids=removed_page_ids)
 
+    def all_pages(*args, **kwargs):
+        counts["all_pages"] += 1
+        return real_all_pages(*args, **kwargs)
+
     store._scan_disk = scan_disk  # type: ignore[method-assign]
     store.refresh = refresh  # type: ignore[method-assign]
     store.apply_changes = apply_changes  # type: ignore[method-assign]
+    ingest.all_pages = all_pages
     ingest._safe_log = lambda *_args, **_kwargs: None
+    ingest._host_phase = lambda _name: nullcontext()
     results: dict[str, Any] = {}
     try:
         for case in requested:
@@ -199,7 +208,9 @@ def main() -> int:
         store._scan_disk = real_scan  # type: ignore[method-assign]
         store.refresh = real_refresh  # type: ignore[method-assign]
         store.apply_changes = real_apply  # type: ignore[method-assign]
+        ingest.all_pages = real_all_pages
         ingest._safe_log = real_log
+        ingest._host_phase = real_host_phase
 
     payload = {
         "schema_version": 1,

@@ -65,6 +65,9 @@ from chronovisor.core.runtime_config import (
     SearchEmbeddingConfig,
     load_search_embedding_config,
 )
+from chronovisor.core.runtime_config import (
+    load_decision_router_config as load_decision_router_config,
+)
 
 _PROFILE_ID = re.compile(r"[a-z][a-z0-9._-]{0,63}\Z")
 _ROLE_ID = re.compile(r"[a-z][a-z0-9._-]{0,127}\Z")

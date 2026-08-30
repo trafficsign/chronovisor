@@ -686,6 +686,75 @@ def test_generate_one_failure_logs_are_confined_to_isolated_wiki(
     assert "isolated transport sentinel" in runtime_status.EVENTS_FILE.read_text()
 
 
+def test_host_phase_uses_monotonic_elapsed_and_existing_observability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import runtime_status
+    from chronovisor.ingest import ingest
+
+    writes: list[dict] = []
+    events: list[tuple[str, str, dict]] = []
+    metrics: list[tuple[str, dict]] = []
+    ticks = iter((10.0, 10.75))
+    monkeypatch.setattr(ingest.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        runtime_status,
+        "read_status",
+        lambda: {"current_job_id": "job", "current_raw": "raw.md"},
+    )
+    monkeypatch.setattr(
+        runtime_status, "safe_write_status", lambda **fields: writes.append(fields)
+    )
+    monkeypatch.setattr(
+        runtime_status,
+        "safe_append_event",
+        lambda level, message, **fields: events.append((level, message, fields)),
+    )
+    monkeypatch.setattr(
+        runtime_status,
+        "safe_append_metric",
+        lambda kind, **fields: metrics.append((kind, fields)),
+    )
+
+    with ingest._host_phase("read-back"):
+        pass
+
+    assert writes[0]["stage"] == "read-back"
+    assert writes[0]["host_phase"]["state"] == "active"
+    assert writes[1]["host_phase"] == {
+        "name": "read-back",
+        "state": "complete",
+        "elapsed_ms": 750.0,
+    }
+    assert events == [
+        (
+            "info",
+            "ingest | host phase read-back: 750.000 ms",
+            {
+                "source": "ingest",
+                "outcome_kind": "host_phase",
+                "stage": "read-back",
+                "elapsed_ms": 750.0,
+                "outcome": "complete",
+                "job_id": "job",
+                "raw_file": "raw.md",
+            },
+        )
+    ]
+    assert metrics == [
+        (
+            "ingest_host_phase",
+            {
+                "stage": "read-back",
+                "elapsed_ms": 750.0,
+                "outcome": "complete",
+                "job_id": "job",
+                "raw_file": "raw.md",
+            },
+        )
+    ]
+
+
 def test_generate_one_exhausts_after_two_distinct_targeted_repairs(
     monkeypatch: pytest.MonkeyPatch,
     isolated_wiki: Path,
@@ -10855,6 +10924,29 @@ class TestPhase6Compatibility:
 
 
 class TestSearchBeforeCreate:
+    def test_candidate_scoring_skips_ratio_below_required_upper_bound(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.ingest import ingest
+
+        class Matcher:
+            def __init__(self, *_args) -> None:
+                pass
+
+            def quick_ratio(self) -> float:
+                return 0.5
+
+            def ratio(self) -> float:
+                raise AssertionError("exact ratio cannot reach the required score")
+
+        monkeypatch.setattr(ingest, "SequenceMatcher", Matcher)
+
+        assert ingest._candidate_score_for_create(
+            {"filename": "misc/new.md", "title": "New"},
+            {"page_id": "old", "title": "Old"},
+            minimum_score=0.92,
+        ) == (0.0, "below-threshold")
+
     def test_create_candidate_needle_is_normalized_once(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -11038,9 +11130,16 @@ class TestReadBackVerification:
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from chronovisor.core import claims, search
-        from chronovisor.ingest import ingest_readback, state_register
+        from chronovisor.ingest import ingest, ingest_readback, state_register
 
         events: list[object] = []
+        phases: list[str] = []
+
+        @contextmanager
+        def host_phase(name: str):
+            phases.append(f"{name}:start")
+            yield
+            phases.append(f"{name}:done")
 
         def update_embeddings(page_ids=None, *, strict=False):
             events.append(("semantic-index", list(page_ids or ()), strict))
@@ -11068,6 +11167,7 @@ class TestReadBackVerification:
         monkeypatch.setattr(
             ingest_readback, "verify_changed_pages_read_back", read_back
         )
+        monkeypatch.setattr(ingest, "_host_phase", host_phase)
 
         result = ingest_readback._refresh_ingest_derived_artifacts(
             ["p"],
@@ -11080,6 +11180,12 @@ class TestReadBackVerification:
             ("claims", ["p"], "raw.md", "ingest"),
             ("state", ["p"], "raw.md"),
             ("read-back", ["p"], 10),
+        ]
+        assert phases == [
+            "semantic-publish:start",
+            "semantic-publish:done",
+            "read-back:start",
+            "read-back:done",
         ]
 
     def test_refresh_failures_are_logged_and_nonfatal(
@@ -11126,6 +11232,81 @@ class TestReadBackVerification:
             "ingest | claim ledger failed (non-fatal): claims",
             "ingest | state register refresh failed (non-fatal): state",
         ]
+
+
+def test_effective_triage_validation_reports_target_resolution_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.ingest import ingest, ingest_triage
+
+    phases: list[str] = []
+
+    @contextmanager
+    def host_phase(name: str):
+        phases.append(name)
+        yield
+
+    monkeypatch.setattr(ingest, "_host_phase", host_phase)
+
+    assert ingest_triage._validate_effective_triage_plan([]) == []
+    assert phases == ["target-resolution"]
+
+
+def test_authorized_page_effect_reports_apply_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.decision import decision_authority
+    from chronovisor.ingest import ingest, ingest_review_apply
+
+    phases: list[str] = []
+
+    @contextmanager
+    def host_phase(name: str):
+        phases.append(name)
+        yield
+
+    authority = {"policy": "test"}
+    monkeypatch.setattr(ingest, "_host_phase", host_phase)
+    monkeypatch.setattr(
+        ingest_review_apply,
+        "_current_ingest_review_authority",
+        lambda **_kwargs: (authority, None),
+    )
+    monkeypatch.setattr(
+        decision_authority, "compare_semantic_authority", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(
+        ingest_review_apply, "_ingest_review_authority_error", lambda *_a: None
+    )
+    monkeypatch.setattr(
+        ingest_review_apply,
+        "_write_and_readback_ingest_review_artifact",
+        lambda *_a, **_k: ({}, None),
+    )
+    monkeypatch.setattr(
+        ingest_review_apply,
+        "_apply_prepared_operations",
+        lambda *_a, **_k: (["page"], []),
+    )
+
+    result = ingest_review_apply._apply_authorized_ingest_review(
+        decision="apply_available",
+        source_key="source",
+        proposal_sha256="a" * 64,
+        review={"decision": "apply_available"},
+        review_authority=authority,
+        reviewer=None,
+        review_path=Path("review.json"),
+        reused_review=False,
+        recovered_artifact=False,
+        audit_decision={},
+        planned=[object()],
+        totals={},
+        stale_review_reason=None,
+    )
+
+    assert result["created"] == ["page"]
+    assert phases == ["apply"]
 
 
 # ---------------------------------------------------------------------------
@@ -11363,9 +11544,7 @@ class TestTriagePlanSchema:
             calls.append("existing_bm25")
             raise RuntimeError("catalog unavailable")
 
-        monkeypatch.setattr(
-            "chronovisor.core.index_store.get_store", lambda: CatalogStore()
-        )
+        monkeypatch.setattr(ingest, "get_store", lambda: CatalogStore())
         monkeypatch.setattr(search, "search", unavailable)
         monkeypatch.setattr(search, "search_existing_bm25", unavailable_bm25)
         events: list[dict] = []
@@ -13907,6 +14086,9 @@ def test_search_related_pages_uses_exact_stable_system_index_path(
             return [SimpleNamespace(page_id="same")]
 
     class FakeIndex:
+        def ensure_loaded(self) -> None:
+            return None
+
         def refresh(self) -> None:
             return None
 

@@ -32,6 +32,9 @@ from chronovisor.core.runtime_config import (
     IngestConfig,
     load_ingest_config,
 )
+from chronovisor.core.runtime_config import (
+    load_decision_router_config as load_decision_router_config,
+)
 from chronovisor.core.store import CHRONOVISOR_ROOT
 
 GIB = _ollama_calibration.GIB

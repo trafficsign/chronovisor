@@ -131,7 +131,7 @@ def test_main_bootstraps_index_before_first_drain(
         def refresh(self) -> None:
             events.append("index")
 
-    monkeypatch.setattr("chronovisor.core.index_store.get_store", lambda: Store())
+    monkeypatch.setattr("chronovisor.ingest.ingest.get_store", lambda: Store())
     monkeypatch.setattr(
         ingest_drain,
         "drain",

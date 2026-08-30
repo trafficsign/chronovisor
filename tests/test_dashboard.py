@@ -48,7 +48,7 @@ def isolate_live_runtime_routes(
         ),
     )
     monkeypatch.setattr(
-        dashboard,
+        dashboard.llm_config,
         "load_decision_router_config",
         lambda: SimpleNamespace(is_single_model=False),
     )
@@ -659,7 +659,7 @@ def test_processing_activity_projects_simultaneous_llm_workflows(monkeypatch) ->
 def test_processing_activity_projects_direct_ollama_calls(monkeypatch) -> None:
     _reset_processing_activity_cache()
     monkeypatch.setattr(
-        dashboard,
+        dashboard.llm_config,
         "load_decision_router_config",
         lambda: SimpleNamespace(is_single_model=True),
     )
@@ -1983,7 +1983,7 @@ def test_decision_trace_idle_pipeline_tabs_use_single_authority(
     monkeypatch.setattr(dashboard, "_read_json_file", lambda _path: {})
     monkeypatch.setattr(dashboard, "_read_jsonl_file", lambda _path, *, limit: [])
     monkeypatch.setattr(
-        dashboard,
+        dashboard.llm_config,
         "load_decision_router_config",
         lambda: SimpleNamespace(
             authority_kind="single_model_v1",
@@ -2868,7 +2868,14 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "Local consensus reviewing" in app
     assert "Local model evaluation" in app
     assert '"local-consensus-review": "Local review"' in app
+    assert '"target-resolution": "triage"' in app
+    assert '"semantic-publish": "index"' in app
+    assert '"read-back": "index"' in app
+    assert '"target-resolution": "Resolve target"' in app
+    assert '"semantic-publish": "Publish semantic"' in app
+    assert '"read-back": "Read back"' in app
     assert "function stageMetricLabel(value)" in app
+    assert 'hostPhase.state === "active"' in app
     assert "els.stage.textContent = stageMetricLabel(stageValue);" in app
     assert "els.stage.title = stageValue;" in app
     assert "correction uncertainty" in app

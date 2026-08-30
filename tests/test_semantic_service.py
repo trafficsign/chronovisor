@@ -3,6 +3,7 @@ import json
 import threading
 import time
 from collections import OrderedDict, deque
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -319,6 +320,95 @@ def test_incremental_model_is_released_when_lazy_self_test_fails() -> None:
 
     assert released == [INCREMENTAL_ROLE]
     assert state._cpu_ready is False
+
+
+def _index_test_state(monkeypatch: pytest.MonkeyPatch) -> SemanticServiceState:
+    document = SemanticDocument(
+        doc_id="page:page",
+        page_id="page",
+        kind="page",
+        ordinal=-1,
+        text="document",
+        source_path="/wiki/page.md",
+        source_sha256="a" * 64,
+        source_mtime_ns=1,
+        source_data_class="page",
+        source_sensitivity="normal",
+    )
+    state = object.__new__(SemanticServiceState)
+    state.config = SearchEmbeddingConfig(dimensions=2)
+    state.root = Path("/semantic")
+    state._generation = SimpleNamespace(
+        manifest=SimpleNamespace(generation_id="generation")
+    )
+    state.reload = lambda **_kwargs: {"ready": True}  # type: ignore[method-assign]
+    monkeypatch.setattr(semantic_service, "find_page", lambda _page_id: Path("page.md"))
+    monkeypatch.setattr(
+        semantic_service, "extract_page_documents", lambda _path: [document]
+    )
+    monkeypatch.setattr(semantic_service, "write_page_delta", lambda *_args, **_kwargs: None)
+    return state
+
+
+def test_strict_page_index_uses_foreground_document_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _index_test_state(monkeypatch)
+    routes: list[str] = []
+    state._embed_foreground_documents = (  # type: ignore[method-assign]
+        lambda _texts, **_kwargs: routes.append("foreground")
+        or np.asarray([[1.0, 0.0]], dtype=np.float32)
+    )
+    state._ensure_cpu = lambda: pytest.fail("strict fast lane loaded CPU")  # type: ignore[method-assign]
+    state._embed_incremental_documents = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: pytest.fail("strict fast lane used CPU")
+    )
+
+    assert state.index_pages(["page"], wait=True) == {
+        "status": "ok",
+        "pages_updated": 1,
+    }
+    assert routes == ["foreground"]
+
+
+def test_background_page_index_keeps_incremental_cpu_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _index_test_state(monkeypatch)
+    routes: list[str] = []
+    state._ensure_cpu = lambda: routes.append("ensure-cpu")  # type: ignore[method-assign]
+    state._embed_incremental_documents = (  # type: ignore[method-assign]
+        lambda _texts, **_kwargs: routes.append("incremental")
+        or np.asarray([[1.0, 0.0]], dtype=np.float32)
+    )
+    state._embed_foreground_documents = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: pytest.fail("background index used MPS")
+    )
+
+    state._index_page("page", expected_hash="")
+
+    assert routes == ["ensure-cpu", "incremental"]
+
+
+def test_strict_page_index_falls_back_to_incremental_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _index_test_state(monkeypatch)
+    routes: list[str] = []
+    state._embed_foreground_documents = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SemanticModelError("mps unavailable")
+        )
+    )
+    state._ensure_cpu = lambda: routes.append("ensure-cpu")  # type: ignore[method-assign]
+    state._embed_incremental_documents = (  # type: ignore[method-assign]
+        lambda _texts, **_kwargs: routes.append("incremental")
+        or np.asarray([[1.0, 0.0]], dtype=np.float32)
+    )
+
+    state.index_pages(["page"], wait=True)
+
+    assert routes == ["ensure-cpu", "incremental"]
 
 
 def test_query_batcher_combines_concurrent_requests() -> None:
