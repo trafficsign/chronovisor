@@ -443,7 +443,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert matching("data-plan-value", "context-selection")[0]["y"] == "239"
 
 
-@pytest.mark.parametrize("viewport_width", [640, 700, 900, 1050, 2048])
+@pytest.mark.parametrize("viewport_width", [640, 700, 900, 980, 1050, 2048])
 def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
     tmp_path: Path,
     viewport_width: int,
@@ -487,6 +487,14 @@ def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
     </section>
   </div>
 </div>
+<div class="decision-single-authority" id="decision-single-authority">
+  <span class="decision-single-authority-title">Single Authority</span>
+  <span><b>MODEL</b><strong>Qwen3.8-Flash-Next-oQ4e-mtp</strong></span>
+  <span><b>REVISION</b><strong>2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8</strong></span>
+  <span><b>STATUS</b><strong data-single-status>Validating</strong></span>
+  <span><b>TARGET</b><strong>1</strong></span>
+  <span><b>REPAIR</b><strong>REPAIR ≠ VOTE</strong></span>
+</div>
 <svg class="decision-trace-harness single-model" viewBox="0 0 1500 550" width="1500" height="550">
   <path id="dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V297 Q1476 307 1466 307 H190 Q180 307 180 317 V394 Q180 404 190 404 H220"></path>
   <path id="single-artifact" d="M920 404 H1039"></path>
@@ -524,6 +532,12 @@ const holdDisplay = getComputedStyle(hold).display;
 const sealHoldStart = screenPoint(sealHold, sealHold.getPointAtLength(0));
 const sealHoldEnd = screenPoint(sealHold, sealHold.getPointAtLength(sealHold.getTotalLength()));
 const holdCenter = holdDisplay === "none" ? null : screenPoint(hold, new DOMPoint(0, 0));
+const authority = document.querySelector("#decision-single-authority");
+const authorityStatus = authority.querySelector("[data-single-status]");
+authorityStatus.textContent = "Validating";
+const shortAuthorityHeight = authority.getBoundingClientRect().height;
+authorityStatus.textContent = "Triage done · Generate active";
+const longAuthorityHeight = authority.getBoundingClientRect().height;
 const processing = [...document.querySelectorAll(".processing-lane")].map((lane) => {
   const track = lane.querySelector(".processing-track");
   const lastStep = track.querySelector(".processing-step:last-child");
@@ -554,6 +568,12 @@ fetch("/geometry-result", {
     sealHoldDeltaX: holdCenter ? Math.abs(holdCenter.x - sealHoldEnd.x) : null,
     sealHoldDeltaY: holdCenter ? Math.abs(holdCenter.y - sealHoldEnd.y) : null,
     holdRadiusY: holdCenter ? 12 * Math.abs(hold.getScreenCTM().d) : null,
+    authority: {
+      shortHeight: shortAuthorityHeight,
+      longHeight: longAuthorityHeight,
+      clientWidth: authority.clientWidth,
+      scrollWidth: authority.scrollWidth,
+    },
     processing,
   }),
 });
@@ -654,6 +674,8 @@ fetch("/geometry-result", {
     assert geometry[0]["sealHoldStraightDeltaX"] <= 0.01
     assert geometry[0]["sealHoldDeltaX"] <= 0.01
     assert abs(geometry[0]["sealHoldDeltaY"] - geometry[0]["holdRadiusY"]) <= 0.01
+    assert geometry[0]["authority"]["longHeight"] == geometry[0]["authority"]["shortHeight"]
+    assert geometry[0]["authority"]["scrollWidth"] <= geometry[0]["authority"]["clientWidth"]
     assert [row["count"] for row in geometry[0]["processing"]] == [4, 5, 6]
     for row in geometry[0]["processing"]:
         assert row["trackRight"] <= row["laneRight"]

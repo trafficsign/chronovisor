@@ -3068,7 +3068,7 @@ canvas {
 .decision-single-authority {
   display: none;
   align-items: center;
-  flex-wrap: wrap;
+  grid-template-columns: max-content max-content minmax(0, 1fr);
   gap: 8px 16px;
   margin: 4px 6px 8px;
   padding: 7px 10px;
@@ -3081,7 +3081,7 @@ canvas {
 }
 
 .decision-single-authority:not([hidden]) {
-  display: flex;
+  display: grid;
 }
 
 .decision-single-authority-title {
@@ -3095,6 +3095,7 @@ canvas {
   align-items: baseline;
   gap: 5px;
   min-width: 0;
+  white-space: nowrap;
 }
 
 .decision-single-authority b {
