@@ -274,6 +274,39 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     )
     assert not {"quorum-artifact-trunk", "artifact-input"} & paths.keys()
 
+    ingest_markup = markup.split(
+        '<g class="trace-ingest-job" data-ingest-job-flow', 1
+    )[1].split("</svg>", 1)[0]
+    ingest_entries = [
+        attrs
+        for tag, attrs in elements
+        if tag == "path" and attrs.get("data-ingest-job-entry")
+    ]
+    assert len(ingest_entries) == 1
+    ingest_paths = {
+        attrs["data-ingest-job-path"]: attrs
+        for tag, attrs in elements
+        if tag == "path" and attrs.get("data-ingest-job-path")
+    }
+    assert matching("data-ingest-job-step", "mutation")
+    assert ingest_paths["accepted"].get("data-ingest-job-to") == "mutation"
+    assert ingest_paths["apply"]["d"].split(" ", 2)[:2] != (
+        ingest_paths["noop"]["d"].split(" ", 2)[:2]
+    )
+    assert "decision-role" not in ingest_markup
+    assert "decision-sublabel" not in ingest_markup
+    assert ">Raw</text>" not in ingest_markup
+    assert ">Triage LLM</text>" not in ingest_markup
+    for branch, label in {
+        "accepted": "ACCEPTED",
+        "apply": "APPLY",
+        "noop": "NOOP",
+        "retry": "RETRY",
+        "hold": "HOLD",
+    }.items():
+        assert f'data-ingest-branch-label="{branch}"' in ingest_markup
+        assert f">{label}</text>" in ingest_markup
+
     repair_paths = [
         attrs
         for tag, attrs in elements
@@ -1367,9 +1400,166 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         single_decision,
     )
     payload.append({"case": single_case, "trace": single_trace})
+    ingest_visual_cases = [
+        {
+            "name": "target",
+            "status": {
+                "state": "running",
+                "stage": "target-resolution",
+                "current_job_id": "job",
+                "host_phase": {"name": "target-resolution", "state": "active"},
+            },
+            "trace": {"task_role": "ingest_triage", "state": "ready"},
+        },
+        {
+            "name": "generate",
+            "status": {
+                "state": "running",
+                "stage": "generate",
+                "current_job_id": "job",
+                "llm": {"active": True, "event": "start", "phase": "generate"},
+            },
+            "trace": {"task_role": "ingest_recall_metadata", "state": "ready"},
+        },
+        {
+            "name": "authority",
+            "status": {
+                "state": "running",
+                "stage": "authorization",
+                "current_job_id": "job",
+            },
+            "trace": {
+                "task_role": "ingest_reconciliation:authority",
+                "state": "active",
+            },
+        },
+        {
+            "name": "route",
+            "status": {
+                "state": "running",
+                "stage": "authorization",
+                "current_job_id": "job",
+            },
+            "trace": {
+                "task_role": "ingest_reconciliation:authority",
+                "state": "ready",
+            },
+        },
+        {
+            "name": "retry",
+            "status": {
+                "state": "running",
+                "stage": "local-regenerate",
+                "current_job_id": "job",
+            },
+            "trace": {
+                "task_role": "ingest_reconciliation:authority",
+                "state": "ready",
+            },
+        },
+        {
+            "name": "apply",
+            "status": {
+                "state": "running",
+                "stage": "apply",
+                "current_job_id": "job",
+                "ingest_disposition": "apply_available",
+                "host_phase": {"name": "apply", "state": "active"},
+            },
+            "trace": {
+                "task_role": "ingest_reconciliation:authority",
+                "state": "ready",
+            },
+        },
+        {
+            "name": "publish",
+            "status": {
+                "state": "running",
+                "stage": "semantic-publish",
+                "current_job_id": "job",
+                "ingest_disposition": "apply_available",
+                "host_phase": {"name": "semantic-publish", "state": "active"},
+            },
+            "trace": {
+                "task_role": "ingest_reconciliation:authority",
+                "state": "ready",
+            },
+        },
+        {
+            "name": "readback-apply",
+            "status": {
+                "state": "running",
+                "stage": "read-back",
+                "current_job_id": "job",
+                "ingest_disposition": "apply_available",
+                "host_phase": {"name": "read-back", "state": "active"},
+            },
+            "trace": {
+                "task_role": "ingest_reconciliation:authority",
+                "state": "ready",
+            },
+        },
+        {
+            "name": "readback-noop",
+            "status": {
+                "state": "running",
+                "stage": "read-back",
+                "current_job_id": "job",
+                "ingest_disposition": "confirmed_noop",
+                "host_phase": {"name": "read-back", "state": "active"},
+            },
+            "trace": {
+                "task_role": "ingest_reconciliation:authority",
+                "state": "ready",
+            },
+        },
+        {
+            "name": "complete-apply",
+            "status": {
+                "state": "idle",
+                "stage": "idle",
+                "last_success": {
+                    "job_id": "job",
+                    "local_consensus_status": "apply_available",
+                },
+            },
+            "trace": {
+                "task_role": "ingest_reconciliation:authority",
+                "state": "ready",
+            },
+        },
+        {
+            "name": "complete-noop",
+            "status": {
+                "state": "idle",
+                "stage": "idle",
+                "last_success": {
+                    "job_id": "job",
+                    "local_consensus_status": "confirmed_noop",
+                },
+            },
+            "trace": {
+                "task_role": "ingest_reconciliation:authority",
+                "state": "ready",
+            },
+        },
+        {
+            "name": "hold",
+            "status": {
+                "state": "error",
+                "stage": "failed",
+                "current_job_id": "job",
+            },
+            "trace": {
+                "task_role": "ingest_reconciliation:authority",
+                "state": "ready",
+            },
+        },
+    ]
 
     harness = """
 const fixtures = __FIXTURES__;
+const ingestVisualCases = __INGEST_VISUAL_CASES__;
 const workflowKeys = [...new Set(fixtures.map(({ case: fixture }) => fixture.workflow).filter(Boolean))];
 const selectedPipelines = [];
 function browserFailure(detail) {
@@ -1428,15 +1618,16 @@ addEventListener("DOMContentLoaded", () => {
       (vertex, index) => segmentDistance(point, vertex, vertices[index + 1])
     ));
   };
-  const disconnectedPathEnds = () => {
-    const paths = [...document.querySelectorAll(
-      "[data-path-key], [data-reasoning-output], [data-lane-path], [data-repair-lane], "
-        + "[data-ingest-job-to]"
-    )].filter((node) => visible(node) && routeStates.has(node.dataset.state));
+    const disconnectedPathEnds = () => {
+      const paths = [...document.querySelectorAll(
+        "[data-path-key], [data-reasoning-output], [data-lane-path], [data-repair-lane], "
+        + "[data-ingest-job-to], [data-ingest-job-entry]"
+      )].filter((node) => visible(node) && routeStates.has(node.dataset.state));
     const ends = paths.flatMap((path, pathIndex) => {
       const length = path.getTotalLength();
       const lane = path.closest("[data-decision-lane]")?.dataset.decisionLane;
       const key = path.dataset.pathKey || path.dataset.reasoningOutput
+        || (path.dataset.ingestJobEntry ? `ingest-entry:${path.dataset.ingestJobEntry}` : "")
         || (path.dataset.ingestJobTo ? `ingest:${path.dataset.ingestJobTo}` : "")
         || `${lane}:${path.dataset.lanePath || path.dataset.repairLane}`;
       return [0, length].map((offset, endIndex) => ({
@@ -1472,13 +1663,26 @@ addEventListener("DOMContentLoaded", () => {
     });
     api.renderDecisionTraceFrame(trace);
   };
-  const requestedFixture = new URLSearchParams(location.search).get("fixture");
+  const requestedParams = new URLSearchParams(location.search);
+  const requestedFixture = requestedParams.get("fixture");
   if (requestedFixture) {
     const selected = fixtures.find(({ case: fixture }) => fixture.id === requestedFixture);
     if (!selected) throw new Error(`unknown fixture: ${requestedFixture}`);
     renderFixture(selected.case, selected.trace, "screenshot");
+    const requestedIngestState = requestedParams.get("ingest-state");
+    if (requestedIngestState) {
+      const ingestCase = ingestVisualCases.find(({ name }) => name === requestedIngestState);
+      if (!ingestCase) throw new Error(`unknown ingest state: ${requestedIngestState}`);
+      api.updateIngestJobTrace(
+        { ...selected.trace, ...ingestCase.trace },
+        ingestCase.status,
+        true,
+      );
+    }
     document.querySelector("#decision-trace-panel")?.scrollIntoView({ block: "start" });
-    document.documentElement.dataset.fixtureReady = requestedFixture;
+    document.documentElement.dataset.fixtureReady = requestedIngestState
+      ? `${requestedFixture}:${requestedIngestState}`
+      : requestedFixture;
     return;
   }
   const results = fixtures.map(({ case: fixture, trace }, index) => {
@@ -1504,7 +1708,7 @@ addEventListener("DOMContentLoaded", () => {
     );
     const artifactLeft = screenPoint(artifact, new DOMPoint(-11, 0));
     const shapeCenter = (node) => {
-      const bounds = node.querySelector(":scope > circle, :scope > path").getBoundingClientRect();
+      const bounds = node.querySelector("circle, path").getBoundingClientRect();
       return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
     };
     const terminalCenters = [
@@ -1520,6 +1724,47 @@ addEventListener("DOMContentLoaded", () => {
     );
     const planBottom = screenPoint(harness, new DOMPoint(0, 210));
     const holdCenter = shapeCenter(document.querySelector('[data-trace-key="hold"]'));
+    const ingestEntry = document.querySelector("[data-ingest-job-entry]");
+    const ingestEntryStart = ingestEntry
+      ? screenPoint(ingestEntry, ingestEntry.getPointAtLength(0))
+      : null;
+    const decisionNode = document.querySelector('[data-trace-key="decision"]');
+    const mutationGate = document.querySelector('g[data-ingest-job-step="mutation"]');
+    const acceptedPath = document.querySelector('[data-ingest-job-path="accepted"]');
+    const applyPath = document.querySelector('[data-ingest-job-path="apply"]');
+    const noopPath = document.querySelector('[data-ingest-job-path="noop"]');
+    const ingestMutationGeometry = fixture.id === "S" ? (() => {
+      const applyStart = screenPoint(applyPath, applyPath.getPointAtLength(0));
+      const noopStart = screenPoint(noopPath, noopPath.getPointAtLength(0));
+      const acceptedEnd = screenPoint(
+        acceptedPath,
+        acceptedPath.getPointAtLength(acceptedPath.getTotalLength())
+      );
+      return {
+        branchStartSeparation: distance(applyStart, noopStart),
+        applyStartDelta: shapeDistance(applyStart, mutationGate),
+        noopStartDelta: shapeDistance(noopStart, mutationGate),
+        acceptedEndDelta: shapeDistance(acceptedEnd, mutationGate),
+      };
+    })() : null;
+    const ingestGridGeometry = fixture.id === "S" ? (() => {
+      const centers = (keys) => keys.map((key) => shapeCenter(
+        document.querySelector(`g[data-ingest-job-step="${key}"]`)
+      ));
+      const upper = centers(["hold", "route", "authority", "generate", "target"]);
+      const lower = centers(["mutation", "apply", "publish", "readback", "complete"]);
+      const gapSpread = (points) => {
+        const gaps = points.slice(1).map((point, index) => point.x - points[index].x);
+        return Math.max(...gaps) - Math.min(...gaps);
+      };
+      return {
+        upperGapSpread: gapSpread(upper),
+        lowerGapSpread: gapSpread(lower),
+        upperRailSpread: Math.max(...upper.map(({ y }) => y)) - Math.min(...upper.map(({ y }) => y)),
+        lowerRailSpread: Math.max(...lower.map(({ y }) => y)) - Math.min(...lower.map(({ y }) => y)),
+        decisionColumnDelta: Math.abs(upper[1].x - lower[0].x),
+      };
+    })() : null;
     const opacity = (node) => node ? getComputedStyle(node).opacity : null;
     scroller.scrollLeft = scroller.scrollWidth;
     const scrollerBounds = scroller.getBoundingClientRect();
@@ -1546,6 +1791,18 @@ addEventListener("DOMContentLoaded", () => {
       .map((lane) => [lane.dataset.decisionLane, [...lane.querySelectorAll("[data-lane-path]")]
         .map((node) => ({ key: node.dataset.lanePath, ...pathState(node) }))]));
     scroller.scrollLeft = 0;
+    const ingestBranchStates = fixture.id === "S" ? ingestVisualCases.map((item) => {
+      const branchTrace = { ...trace, ...item.trace };
+      const { name, status } = item;
+      api.updateIngestJobTrace(branchTrace, status, true);
+      return {
+        name,
+        branch: harness.dataset.ingestJobBranch,
+        current: harness.dataset.ingestJobStep,
+        disconnectedPathEnds: disconnectedPathEnds(),
+      };
+    }) : [];
+    renderFixture(fixture, trace, `restore-${index}`);
     return {
       id: fixture.id,
       kind: fixture.kind,
@@ -1573,6 +1830,7 @@ addEventListener("DOMContentLoaded", () => {
         '[data-reasoning-key="medium"] [data-reasoning-label]'
       )?.textContent,
       fitLabel: document.querySelector('[data-plan-value="fit"]')?.textContent,
+      ingestBranchStates,
       disconnectedPathEnds: disconnectedPathEnds(),
       singleArtifactDelta: {
         x: Math.abs(artifactLeft.x - singleArtifactEnd.x),
@@ -1592,6 +1850,20 @@ addEventListener("DOMContentLoaded", () => {
           - Math.min(...terminalCenters.map(({ y }) => y)),
         holdSealDeltaX: Math.abs(holdCenter.x - terminalCenters.at(-2).x),
         holdSealDrop: holdCenter.y - terminalCenters.at(-2).y,
+        ingestEntryStartDelta: ingestEntryStart
+          ? shapeDistance(ingestEntryStart, decisionNode)
+          : null,
+        ingestMutationGeometry,
+        ingestGridGeometry,
+        ingestLaneLabels: [...document.querySelectorAll(
+          ".trace-ingest-job .decision-role, .trace-ingest-job .decision-sublabel"
+        )].filter(visible).map((node) => node.textContent.trim()),
+        ingestStepLabels: [...document.querySelectorAll(
+          ".trace-ingest-job [data-ingest-job-step] > text"
+        )].filter(visible).map((node) => node.textContent.trim()),
+        ingestBranchLabels: [...document.querySelectorAll(
+          ".trace-ingest-job [data-ingest-branch-label]"
+        )].filter(visible).map((node) => node.textContent.trim()),
       },
       nodes: Object.fromEntries([...document.querySelectorAll("[data-trace-key]")]
         .map((node) => [node.dataset.traceKey, node.dataset.state])),
@@ -1622,7 +1894,10 @@ addEventListener("DOMContentLoaded", () => {
     body: JSON.stringify(results),
   }).catch(browserFailure);
 });
-""".replace("__FIXTURES__", json.dumps(payload, ensure_ascii=False))
+""".replace("__FIXTURES__", json.dumps(payload, ensure_ascii=False)).replace(
+        "__INGEST_VISUAL_CASES__",
+        json.dumps(ingest_visual_cases, ensure_ascii=False),
+    )
     page = (
         (dashboard.STATIC_DIR / "index.html")
         .read_text(encoding="utf-8")
@@ -1725,11 +2000,24 @@ addEventListener("DOMContentLoaded", () => {
                 pass
         browser_exit = process.poll()
         if received:
-            visual_dir = tmp_path / "decision-trace-visuals"
-            visual_dir.mkdir()
-            for index, item in enumerate(payload):
-                case = item["case"]
-                visual_path = visual_dir / f"{case['id'].replace('::', '__')}.png"
+            visual_dir = Path(
+                os.environ.get(
+                    "CHRONOVISOR_DASHBOARD_VISUAL_DIR",
+                    tmp_path / "decision-trace-visuals",
+                )
+            )
+            visual_dir.mkdir(parents=True, exist_ok=True)
+            visual_requests = [
+                (item["case"]["id"], None) for item in payload
+            ] + [("S", item["name"]) for item in ingest_visual_cases]
+            for index, (case_id, ingest_state) in enumerate(visual_requests):
+                stem = case_id.replace("::", "__")
+                if ingest_state:
+                    stem += f"__{ingest_state}"
+                visual_path = visual_dir / f"{stem}.png"
+                query = f"fixture={quote(case_id)}"
+                if ingest_state:
+                    query += f"&ingest-state={quote(ingest_state)}"
                 visual_process = subprocess.Popen(
                     [
                         chrome,
@@ -1746,7 +2034,7 @@ addEventListener("DOMContentLoaded", () => {
                         "--window-size=1280,1400",
                         f"--screenshot={visual_path}",
                         f"--user-data-dir={tmp_path / f'visual-profile-{index}'}",
-                        f"http://127.0.0.1:{server.server_port}/?fixture={quote(case['id'])}",
+                        f"http://127.0.0.1:{server.server_port}/?{query}",
                     ],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
@@ -1812,7 +2100,7 @@ addEventListener("DOMContentLoaded", () => {
     assert len(browser_results) == len(payload), diagnostics
     assert screenshot_path.is_file() and screenshot_path.stat().st_size > 0
 
-    assert len(visual_paths) == 9
+    assert len(visual_paths) == len(payload) + len(ingest_visual_cases)
 
     by_id = {result["id"]: result for result in browser_results}
     by_trace = {item["case"]["id"]: item["trace"] for item in payload}
@@ -1897,8 +2185,8 @@ addEventListener("DOMContentLoaded", () => {
     assert single_result["disconnectedPathEnds"] == []
     assert single_result["singleArtifactDelta"]["x"] <= 0.01
     assert single_result["singleArtifactDelta"]["y"] <= 0.01
-    assert single_result["singleLayout"]["viewBox"] == "0 0 1500 850"
-    assert single_result["singleLayout"]["height"] == "793"
+    assert single_result["singleLayout"]["viewBox"] == "0 0 1500 750"
+    assert single_result["singleLayout"]["height"] == "700"
     assert single_result["singleLayout"]["dispatchLabelY"] == "303"
     assert single_result["singleLayout"]["dispatchCenterDeltaY"] <= 0.01
     gaps = single_result["singleLayout"]["gaps"]
@@ -1910,6 +2198,105 @@ addEventListener("DOMContentLoaded", () => {
         <= single_result["singleLayout"]["holdSealDrop"] / (sum(gaps) / 3)
         <= 0.7
     )
+    assert single_result["singleLayout"]["ingestEntryStartDelta"] is not None
+    assert single_result["singleLayout"]["ingestEntryStartDelta"] <= 1
+    mutation_geometry = single_result["singleLayout"]["ingestMutationGeometry"]
+    assert mutation_geometry is not None
+    assert mutation_geometry["branchStartSeparation"] > 5
+    assert mutation_geometry["applyStartDelta"] <= 1
+    assert mutation_geometry["noopStartDelta"] <= 1
+    assert mutation_geometry["acceptedEndDelta"] <= 1
+    grid_geometry = single_result["singleLayout"]["ingestGridGeometry"]
+    assert grid_geometry is not None
+    assert grid_geometry["upperGapSpread"] <= 1
+    assert grid_geometry["lowerGapSpread"] <= 1
+    assert grid_geometry["upperRailSpread"] <= 1
+    assert grid_geometry["lowerRailSpread"] <= 1
+    assert grid_geometry["decisionColumnDelta"] <= 1
+    assert single_result["singleLayout"]["ingestLaneLabels"] == []
+    assert "Raw" not in single_result["singleLayout"]["ingestStepLabels"]
+    assert "Triage LLM" not in single_result["singleLayout"]["ingestStepLabels"]
+    assert set(single_result["singleLayout"]["ingestBranchLabels"]) == {
+        "APPLY",
+        "NOOP",
+        "RETRY",
+        "HOLD",
+        "ACCEPTED",
+    }
+    assert single_result["ingestBranchStates"] == [
+        {
+            "name": "target",
+            "branch": "waiting",
+            "current": "target",
+            "disconnectedPathEnds": [],
+        },
+        {
+            "name": "generate",
+            "branch": "waiting",
+            "current": "generate",
+            "disconnectedPathEnds": [],
+        },
+        {
+            "name": "authority",
+            "branch": "waiting",
+            "current": "authority",
+            "disconnectedPathEnds": [],
+        },
+        {
+            "name": "route",
+            "branch": "waiting",
+            "current": "route",
+            "disconnectedPathEnds": [],
+        },
+        {
+            "name": "retry",
+            "branch": "retry",
+            "current": "generate",
+            "disconnectedPathEnds": [],
+        },
+        {
+            "name": "apply",
+            "branch": "apply",
+            "current": "apply",
+            "disconnectedPathEnds": [],
+        },
+        {
+            "name": "publish",
+            "branch": "apply",
+            "current": "publish",
+            "disconnectedPathEnds": [],
+        },
+        {
+            "name": "readback-apply",
+            "branch": "apply",
+            "current": "readback",
+            "disconnectedPathEnds": [],
+        },
+        {
+            "name": "readback-noop",
+            "branch": "noop",
+            "current": "readback",
+            "disconnectedPathEnds": [],
+        },
+        {
+            "name": "complete-apply",
+            "branch": "apply",
+            "current": "complete",
+            "disconnectedPathEnds": [],
+        },
+        {
+            "name": "complete-noop",
+            "branch": "noop",
+            "current": "complete",
+            "disconnectedPathEnds": [],
+        },
+        {
+            "name": "hold",
+            "branch": "hold",
+            "current": "hold",
+            "disconnectedPathEnds": [],
+        },
+    ]
 
     assert by_id[cases[0]["id"]]["tabClick"] == {
         "event": "recall",

@@ -217,6 +217,7 @@ def _apply_authorized_ingest_review(
                     "updated": [],
                     "audit": audit_decision,
                 }
+        runtime_status.safe_write_status(ingest_disposition=decision)
         with _host_phase("apply"):
             if decision == "confirmed_noop":
                 created, updated = [], []
@@ -480,6 +481,7 @@ def review_and_apply_ingest_operations(
         and _ingest_review_authority_error(artifact_review, artifact_authority) is None
         and exact_postimages_already_applied
     ):
+        runtime_status.safe_write_status(ingest_disposition="apply_available")
         with _host_phase("apply"):
             created, updated = _apply_prepared_operations(
                 planned,

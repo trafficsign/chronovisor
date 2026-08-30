@@ -5468,6 +5468,7 @@ def run_ingest(
                 current_job_id=job_id,
                 current_raw=source_raw,
                 current_op=None,
+                ingest_disposition=None,
             )
             _safe_log(
                 "ingest | stage 1: triage started"

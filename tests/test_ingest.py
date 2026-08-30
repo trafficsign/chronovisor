@@ -7031,6 +7031,10 @@ class TestRunIngestFrontierDisposition:
             update.get("stage") == "local-regenerate" for update in status_updates
         )
         assert any(
+            update.get("ingest_disposition") == "apply_available"
+            for update in status_updates
+        )
+        assert any(
             isinstance(update.get("llm"), dict)
             and update["llm"].get("phase") == "local-regenerate-generate"
             for update in status_updates

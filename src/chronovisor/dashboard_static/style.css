@@ -3148,8 +3148,20 @@ canvas {
   display: block;
 }
 
-.decision-trace-harness .trace-ingest-job-status {
-  fill: #8e91ff;
+.decision-trace-harness .trace-ingest-retry-label {
+  fill: #7d8992;
+  opacity: 0.18;
+}
+
+.decision-trace-harness .trace-ingest-retry-label.active {
+  fill: #ffb340;
+  opacity: 1;
+}
+
+.decision-trace-harness .trace-ingest-retry-path.active {
+  stroke: #ff9d00;
+  opacity: 1;
+  filter: drop-shadow(0 0 3px rgba(255, 157, 0, 0.42));
 }
 
 .decision-trace-panel:has(.decision-single-authority:not([hidden])) .decision-facts [data-decision-fact="quorum"] {
@@ -4056,7 +4068,7 @@ canvas {
 
   .decision-trace-scroll:has(.decision-trace-harness.ingest-job),
   .decision-trace-harness.ingest-job {
-    height: 793px;
+    height: 700px;
   }
 
   .decision-transition-bar {

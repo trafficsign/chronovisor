@@ -504,19 +504,23 @@ function decisionTraceProjection(trace) {
 }
 
 const INGEST_JOB_TRACE_STEPS = [
-  "raw",
-  "triage",
   "target",
   "generate",
-  "page_validate",
-  "draft_ready",
   "authority",
-  "validated",
+  "route",
+  "mutation",
   "apply",
   "publish",
   "readback",
   "complete",
+  "hold",
 ];
+
+const INGEST_JOB_ENTRY_PATHS = {
+  target: "M1330 415 V560 Q1330 570 1320 570 H1130",
+  authority: "M1330 415 V560 Q1330 570 1320 570 H690",
+  route: "M1330 415 V560 Q1330 570 1320 570 H500",
+};
 
 function ingestJobTraceState(status = {}, trace = {}, ingestLane = null) {
   const stage = String(status?.stage || status?.current_op || "").toLowerCase();
@@ -534,65 +538,159 @@ function ingestJobTraceState(status = {}, trace = {}, ingestLane = null) {
   );
   const terminal = ["complete", "completion-ack", "projection", "semantic-noop"].includes(stage)
     || (!currentJob && Boolean(status?.last_success));
-  const stageSteps = {
-    batch: "raw",
-    raw: "raw",
-    triage: "triage",
-    "target-resolution": "target",
-    generate: "generate",
-    "local-regenerate": "generate",
-    "frontier-regenerate": "generate",
-    authorization: "authority",
-    "authorization-continuation": "authority",
-    "local-consensus-review": "authority",
-    "frontier-review": "authority",
-    locked: "authority",
-    apply: "apply",
-    "semantic-publish": "publish",
-    "claim-publish": "publish",
-    "state-register": "publish",
-    "read-back": "readback",
-  };
-  const laneSteps = {
-    raw: "raw",
-    triage: "triage",
-    generate: "generate",
-    consensus: "authority",
-    apply: "apply",
-  };
-  let current = terminal
-    ? "complete"
-    : stageSteps[stage] || laneSteps[String(ingestLane?.current_step || "")] || "";
   const hostMatchesStage = String(host.name || "").toLowerCase() === stage;
   const hostComplete = hostMatchesStage && host.state === "complete";
-  if (stage === "target-resolution" && hostComplete) current = "generate";
-  if (
-    ["generate", "local-regenerate", "frontier-regenerate"].includes(stage)
-    && llm.active === false
-    && llm.event === "done"
-  ) current = "page_validate";
-  if (
-    ["authorization", "authorization-continuation", "local-consensus-review"].includes(stage)
-    && role.startsWith("ingest_reconciliation")
-    && ["ready", "agreed"].includes(String(trace?.state || ""))
-  ) current = "apply";
-  if (stage === "apply" && hostComplete) current = "publish";
-  if (stage === "state-register" && hostComplete) current = "readback";
-  if (stage === "read-back" && hostComplete) current = "complete";
-
   const states = Object.fromEntries(INGEST_JOB_TRACE_STEPS.map((key) => [key, "pending"]));
-  if (terminal) {
-    INGEST_JOB_TRACE_STEPS.forEach((key) => { states[key] = "done"; });
-    return { current: "complete", states };
-  }
-  const currentIndex = INGEST_JOB_TRACE_STEPS.indexOf(current);
-  if (currentIndex < 0) return { current: "", states };
-  INGEST_JOB_TRACE_STEPS.slice(0, currentIndex).forEach((key) => { states[key] = "done"; });
   const failed = String(status?.state || "").toLowerCase() === "error"
+    || stage === "failed"
     || (hostMatchesStage && host.state === "error")
     || llm.event === "error";
-  states[current] = failed ? "error" : "active";
-  return { current, states };
+  const traceReady = ["ready", "agreed"].includes(String(trace?.state || ""));
+  const authorityReady = role.startsWith("ingest_reconciliation") && traceReady;
+  const retrying = ["local-regenerate", "frontier-regenerate"].includes(stage);
+  const lastSuccess = status?.last_success && typeof status.last_success === "object"
+    ? status.last_success
+    : {};
+  const disposition = String(
+    status?.ingest_disposition
+      || lastSuccess.local_consensus_status
+      || lastSuccess.frontier_status
+      || ""
+  ).toLowerCase();
+  const dispositionBranch = disposition === "confirmed_noop"
+    ? "noop"
+    : disposition === "apply_available" ? "apply" : "";
+  const entry = stage === "triage" || role.startsWith("ingest_triage")
+    ? "target"
+    : role.startsWith("ingest_recall_metadata")
+      ? "authority"
+      : "route";
+  const markDone = (...keys) => keys.forEach((key) => { states[key] = "done"; });
+  let current = "";
+  let branch = "";
+
+  if (terminal) {
+    markDone("target", "generate", "authority", "route", "mutation", "readback", "complete");
+    branch = dispositionBranch || "apply";
+    if (branch === "noop") {
+      states.apply = "skipped";
+      states.publish = "skipped";
+    } else {
+      markDone("apply", "publish");
+    }
+    current = "complete";
+  } else if (failed) {
+    states.route = "error";
+    states.hold = "error";
+    branch = "hold";
+    current = "hold";
+  } else if (retrying) {
+    markDone("target", "route");
+    states.generate = "active";
+    branch = "retry";
+    current = "generate";
+  } else if (stage === "triage") {
+    states.target = traceReady ? "active" : "pending";
+    current = "target";
+  } else if (stage === "target-resolution") {
+    states.target = hostComplete ? "done" : "active";
+    current = hostComplete ? "generate" : "target";
+  } else if (stage === "generate") {
+    markDone("target");
+    const generated = llm.active === false && llm.event === "done";
+    states.generate = generated ? "done" : "active";
+    current = generated ? "authority" : "generate";
+  } else if ([
+    "authorization",
+    "authorization-continuation",
+    "local-consensus-review",
+    "frontier-review",
+    "locked",
+  ].includes(stage)) {
+    markDone("target", "generate");
+    states.authority = authorityReady ? "done" : "active";
+    states.route = authorityReady ? "active" : "pending";
+    current = authorityReady ? "route" : "authority";
+  } else if (stage === "apply") {
+    markDone("target", "generate", "authority", "route");
+    branch = dispositionBranch;
+    if (branch) markDone("mutation");
+    else states.mutation = "active";
+    if (branch === "noop") {
+      states.apply = "skipped";
+      states.publish = "skipped";
+      current = hostComplete ? "readback" : "mutation";
+    } else if (branch === "apply") {
+      states.apply = hostComplete ? "done" : "active";
+      current = hostComplete ? "publish" : "apply";
+    } else {
+      current = "mutation";
+    }
+  } else if (["semantic-publish", "claim-publish", "state-register"].includes(stage)) {
+    markDone("target", "generate", "authority", "route", "mutation", "apply");
+    states.publish = hostComplete ? "done" : "active";
+    branch = "apply";
+    current = hostComplete ? "readback" : "publish";
+  } else if (stage === "read-back") {
+    markDone("target", "generate", "authority", "route", "mutation");
+    branch = dispositionBranch;
+    if (branch === "apply") markDone("apply", "publish");
+    if (branch === "noop") {
+      states.apply = "skipped";
+      states.publish = "skipped";
+    }
+    states.readback = hostComplete ? "done" : "active";
+    current = hostComplete ? "complete" : "readback";
+  } else {
+    current = entry;
+    if (traceReady) states[entry] = "active";
+  }
+
+  const onward = (from, to) => states[from] === "done" ? states[to] : "pending";
+  const paths = {
+    "target-generate": onward("target", "generate"),
+    "generate-authority": onward("generate", "authority"),
+    "authority-route": onward("authority", "route"),
+    retry: branch === "retry" ? "active" : "pending",
+    hold: branch === "hold" ? "error" : "pending",
+    accepted: branch === "apply" || branch === "noop" || states.mutation !== "pending"
+      ? onward("route", "mutation")
+      : "pending",
+    apply: branch === "apply" ? onward("mutation", "apply") : "pending",
+    noop: branch === "noop"
+      ? states.readback === "pending" ? "active" : onward("mutation", "readback")
+      : "pending",
+    "apply-publish": branch === "apply" ? onward("apply", "publish") : "pending",
+    "publish-readback": branch === "apply" ? onward("publish", "readback") : "pending",
+    "readback-complete": branch || states.readback !== "pending"
+      ? onward("readback", "complete")
+      : "pending",
+  };
+  const visibleSteps = new Set(INGEST_JOB_TRACE_STEPS);
+  const visiblePaths = new Set([
+    "target-generate",
+    "generate-authority",
+    "authority-route",
+    "retry",
+    "hold",
+    "accepted",
+    "apply",
+    "noop",
+    "apply-publish",
+    "publish-readback",
+    "readback-complete",
+  ]);
+  const entryState = failed ? "error" : states[entry];
+  return {
+    branch,
+    current,
+    entry,
+    entryState,
+    paths,
+    states,
+    visiblePaths: [...visiblePaths],
+    visibleSteps: [...visibleSteps],
+  };
 }
 
 function isIngestJobTrace(trace) {
@@ -614,14 +712,26 @@ function updateIngestJobTrace(trace, status, visible) {
     latestProcessingLanes.get("ingest") || null,
   );
   harness.dataset.ingestJobStep = projection.current || "waiting";
+  harness.dataset.ingestJobBranch = projection.branch || "waiting";
+  const visibleSteps = new Set(projection.visibleSteps);
+  const visiblePaths = new Set(projection.visiblePaths);
+  const entry = harness.querySelector("[data-ingest-job-entry]");
+  if (entry) {
+    entry.dataset.ingestJobEntry = projection.entry;
+    entry.setAttribute("d", INGEST_JOB_ENTRY_PATHS[projection.entry]);
+    setDecisionSvgState(entry, projection.entryState);
+  }
   harness.querySelectorAll("[data-ingest-job-step]").forEach((node) => {
+    node.style.display = visibleSteps.has(node.dataset.ingestJobStep) ? "" : "none";
     setDecisionSvgState(node, projection.states[node.dataset.ingestJobStep]);
   });
-  harness.querySelectorAll("[data-ingest-job-to]").forEach((node) => {
-    setDecisionSvgState(node, projection.states[node.dataset.ingestJobTo]);
+  harness.querySelectorAll("[data-ingest-job-path]").forEach((node) => {
+    node.style.display = visiblePaths.has(node.dataset.ingestJobPath) ? "" : "none";
+    setDecisionSvgState(node, projection.paths[node.dataset.ingestJobPath]);
   });
-  const statusNode = harness.querySelector("[data-ingest-job-status]");
-  if (statusNode) statusNode.textContent = (projection.current || "waiting").replaceAll("_", " ").toUpperCase();
+  harness.querySelectorAll("[data-ingest-branch-label]").forEach((node) => {
+    setDecisionSvgState(node, projection.paths[node.dataset.ingestBranchLabel]);
+  });
 }
 
 function updateSingleAuthorityMeta(trace, projection) {
@@ -687,8 +797,8 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   harness.classList.toggle("single-model", single);
   harness.classList.toggle("ingest-job", ingestJob);
   harness.dataset.authorityKind = single ? SINGLE_MODEL_AUTHORITY_KIND : "";
-  harness.setAttribute("viewBox", ingestJob ? "0 0 1500 850" : single ? "0 0 1500 550" : "0 0 1500 650");
-  harness.setAttribute("height", ingestJob ? "793" : single ? "513" : "607");
+  harness.setAttribute("viewBox", ingestJob ? "0 0 1500 750" : single ? "0 0 1500 550" : "0 0 1500 650");
+  harness.setAttribute("height", ingestJob ? "700" : single ? "513" : "607");
   updateIngestJobTrace(
     trace,
     typeof latestRenderedStatus === "undefined" ? {} : latestRenderedStatus || {},
@@ -770,7 +880,7 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   setDecisionSvgText(
     "#decision-trace-svg-description",
     ingestJob
-      ? "Current model call detail followed by the complete ingest job: triage, page generation, authority validation, apply, publish, read-back and completion."
+      ? "Current model call detail continues into the remaining ingest job, including apply, no-op, retry and hold outcomes."
       : single
       ? "Packet, execution planning, one single authority lane, validated output and decision. Structured repair is separate from voting."
       : "Packet, execution planning, fixed primary, challenger and tie-break lanes, then one shared artifact and decision. Unsafe quorum branches to hold before the artifact; only a seal failure branches from the artifact."
@@ -1327,12 +1437,14 @@ window.__chronovisorDashboardTest = Object.assign(window.__chronovisorDashboardT
   decisionTraceProjection,
   ingestJobTraceState,
   isSingleModelTrace,
+  updateIngestJobTrace,
   updateDecisionSvgHarness,
   processingLaneForTrace,
   selectProcessingLane,
   renderDecisionTrace,
   renderDecisionTraceFrame,
   renderProcessingActivity,
+  newestDashboardStatus,
 });
 
 function llmSignalKey(llm) {
@@ -3436,14 +3548,22 @@ function renderLocalRuntimeMetric(modelStatus, runtime) {
     : model.name || model.model || "no model";
 }
 
+function newestDashboardStatus(previous, candidate) {
+  const previousMs = parseMs(previous?.updated_at);
+  const candidateMs = parseMs(candidate?.updated_at);
+  return previousMs !== null && candidateMs !== null && candidateMs < previousMs
+    ? previous
+    : candidate;
+}
+
 function render(snapshot) {
   const snapshotStatus = snapshot.status || {};
   const snapshotConsensus = snapshot.local_consensus || snapshotStatus.local_consensus || {};
-  const status = {
+  const status = newestDashboardStatus(latestRenderedStatus, {
     ...snapshotStatus,
     local_consensus: latestLiveConsensus || snapshotConsensus,
     frontier_repair: snapshot.frontier_repair || snapshotStatus.frontier_repair || {},
-  };
+  });
   latestRenderedStatus = status;
   const metrics = snapshot.metrics || [];
   const batch = status.batch || {};

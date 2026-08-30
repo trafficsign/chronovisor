@@ -282,47 +282,37 @@
               <g class="trace-node trace-hold-node" data-trace-key="hold" transform="translate(1460 600)"><circle r="12"></circle><text class="trace-hold-title" y="28">Hold</text><text class="trace-hold-reason" data-hold-reason="true" x="28" y="43">No safe quorum</text></g>
             </g>
 
-            <g class="trace-ingest-job" data-ingest-job-flow aria-label="Complete ingest job flow">
-              <text class="trace-section-title" x="38" y="570">INGEST JOB FLOW</text>
-              <text class="trace-kicker trace-ingest-job-status" data-ingest-job-status x="1460" y="570" text-anchor="end">WAITING</text>
+            <g class="trace-ingest-job" data-ingest-job-flow aria-label="Remaining ingest job flow">
+              <path class="trace-path trace-lane-rail" data-ingest-job-entry="target" d="M1330 415 V560 Q1330 570 1320 570 H1130" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-lane-rail" data-ingest-job-path="target-generate" data-ingest-job-to="generate" d="M1110 570 H910" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-lane-rail" data-ingest-job-path="generate-authority" data-ingest-job-to="authority" d="M890 570 H690" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-lane-rail" data-ingest-job-path="authority-route" data-ingest-job-to="route" d="M670 570 H500" marker-end="url(#trace-arrow)"></path>
 
-              <g class="ingest-job-lane" transform="translate(0 620)">
-                <text class="decision-role" x="36" y="-6">Triage &amp; Route</text>
-                <text class="decision-sublabel" x="36" y="12">PLAN TARGET</text>
-                <path class="trace-path trace-lane-rail" data-ingest-job-to="triage" d="M240 0 H680" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-ingest-job-to="target" d="M700 0 H1150" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail trace-ingest-wrap" data-ingest-job-to="generate" d="M1170 0 H1440 Q1450 0 1450 10 V80 Q1450 90 1440 90 H240" marker-end="url(#trace-arrow)"></path>
-                <g class="decision-lane-step" data-ingest-job-step="raw" transform="translate(230)"><circle r="10"></circle><text y="-17">Raw</text></g>
-                <g class="decision-lane-step" data-ingest-job-step="triage" transform="translate(690)"><circle r="10"></circle><text y="-17">Triage LLM</text></g>
-                <g class="decision-lane-step" data-ingest-job-step="target" transform="translate(1160)"><circle r="10"></circle><text y="-17">Target Resolved</text></g>
-              </g>
+              <path class="trace-path trace-ingest-retry-path" data-ingest-job-path="retry" data-ingest-job-to="generate" d="M460 536 V510 Q460 500 470 500 H890 Q900 500 900 510 V560" marker-end="url(#trace-arrow)"></path>
+              <text class="trace-branch-label trace-ingest-retry-label" data-ingest-branch-label="retry" x="684" y="494">RETRY</text>
+              <path class="trace-path trace-no-path" data-ingest-job-path="hold" data-ingest-job-to="hold" d="M420 570 H250" marker-end="url(#trace-arrow)"></path>
+              <text class="trace-branch-label trace-no-label" data-ingest-branch-label="hold" x="328" y="559">HOLD</text>
+              <path class="trace-path trace-yes-path" data-ingest-job-path="accepted" data-ingest-job-to="mutation" d="M460 604 V655" marker-end="url(#trace-arrow)"></path>
+              <text class="trace-branch-label trace-yes-label" data-ingest-branch-label="accepted" x="472" y="632">ACCEPTED</text>
+              <path class="trace-path trace-yes-path" data-ingest-job-path="apply" data-ingest-job-to="apply" d="M500 690 H670" marker-end="url(#trace-arrow)"></path>
+              <text class="trace-branch-label trace-yes-label" data-ingest-branch-label="apply" x="582" y="679">APPLY</text>
+              <path class="trace-path trace-yes-path" data-ingest-job-path="noop" data-ingest-job-to="readback" d="M460 724 V730 Q460 740 470 740 H1110 Q1120 740 1120 730 V700" marker-end="url(#trace-arrow)"></path>
+              <text class="trace-branch-label trace-yes-label" data-ingest-branch-label="noop" x="802" y="734">NOOP</text>
 
-              <g class="ingest-job-lane" transform="translate(0 710)">
-                <text class="decision-role" x="36" y="-6">Page Draft</text>
-                <text class="decision-sublabel" x="36" y="12">GENERATE + CHECK</text>
-                <path class="trace-path trace-lane-rail" data-ingest-job-to="page_validate" d="M240 0 H680" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-ingest-job-to="draft_ready" d="M700 0 H1150" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail trace-ingest-wrap" data-ingest-job-to="authority" d="M1170 0 H1440 Q1450 0 1450 10 V80 Q1450 90 1440 90 H240" marker-end="url(#trace-arrow)"></path>
-                <g class="decision-lane-step" data-ingest-job-step="generate" transform="translate(230)"><circle r="10"></circle><text y="-17">Generate Page</text></g>
-                <g class="decision-lane-step" data-ingest-job-step="page_validate" transform="translate(690)"><circle r="10"></circle><text y="-17">Validate Page</text></g>
-                <g class="decision-lane-step" data-ingest-job-step="draft_ready" transform="translate(1160)"><circle r="10"></circle><text y="-17">Draft Ready</text></g>
-              </g>
+              <path class="trace-path trace-lane-rail" data-ingest-job-path="apply-publish" data-ingest-job-to="publish" d="M690 690 H890" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-lane-rail" data-ingest-job-path="publish-readback" data-ingest-job-to="readback" d="M910 690 H1110" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-lane-rail" data-ingest-job-path="readback-complete" data-ingest-job-to="complete" d="M1130 690 H1330" marker-end="url(#trace-arrow)"></path>
 
-              <g class="ingest-job-lane" transform="translate(0 800)">
-                <text class="decision-role" x="36" y="-6">Authorize &amp; Apply</text>
-                <text class="decision-sublabel" x="36" y="12">SEAL + PUBLISH</text>
-                <path class="trace-path trace-lane-rail" data-ingest-job-to="validated" d="M240 0 H440" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-ingest-job-to="apply" d="M460 0 H660" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-ingest-job-to="publish" d="M680 0 H880" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-ingest-job-to="readback" d="M900 0 H1100" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-lane-rail" data-ingest-job-to="complete" d="M1120 0 H1320" marker-end="url(#trace-arrow)"></path>
-                <g class="decision-lane-step" data-ingest-job-step="authority" transform="translate(230)"><circle r="10"></circle><text y="-17">Authority</text></g>
-                <g class="decision-lane-step" data-ingest-job-step="validated" transform="translate(450)"><circle r="10"></circle><text y="-17">Validated</text></g>
-                <g class="decision-lane-step" data-ingest-job-step="apply" transform="translate(670)"><circle r="10"></circle><text y="-17">Apply</text></g>
-                <g class="decision-lane-step" data-ingest-job-step="publish" transform="translate(890)"><circle r="10"></circle><text y="-17">Publish</text></g>
-                <g class="decision-lane-step" data-ingest-job-step="readback" transform="translate(1110)"><circle r="10"></circle><text y="-17">Read-back</text></g>
-                <g class="decision-lane-step" data-ingest-job-step="complete" transform="translate(1330)"><circle r="10"></circle><text y="-17">Complete</text></g>
-              </g>
+              <g class="decision-lane-step" data-ingest-job-step="target" transform="translate(1120 570)"><circle r="10"></circle><text y="-17">Target</text></g>
+              <g class="decision-lane-step" data-ingest-job-step="generate" transform="translate(900 570)"><circle r="10"></circle><text y="-17">Generate</text></g>
+              <g class="decision-lane-step" data-ingest-job-step="authority" transform="translate(680 570)"><circle r="10"></circle><text y="-17">Authority</text></g>
+              <g class="trace-diamond trace-ingest-route" data-ingest-job-step="route"><path d="M460 536 500 570 460 604 420 570Z"></path><text x="460" y="567">RESULT</text><text x="460" y="579">ROUTE</text></g>
+              <g class="trace-node trace-hold-node" data-ingest-job-step="hold" transform="translate(240 570)"><circle r="11"></circle><text class="trace-hold-title" y="29">Hold</text><text class="trace-hold-reason" x="22" y="44">Retry later</text></g>
+              <g class="trace-diamond trace-ingest-mutation" data-ingest-job-step="mutation"><path d="M460 656 500 690 460 724 420 690Z"></path><text x="460" y="687">PAGE</text><text x="460" y="699">CHANGE?</text></g>
+              <g class="decision-lane-step" data-ingest-job-step="apply" transform="translate(680 690)"><circle r="10"></circle><text y="-17">Apply</text></g>
+              <g class="decision-lane-step" data-ingest-job-step="publish" transform="translate(900 690)"><circle r="10"></circle><text y="-17">Publish</text></g>
+              <g class="decision-lane-step" data-ingest-job-step="readback" transform="translate(1120 690)"><circle r="10"></circle><text y="-17">Read-back</text></g>
+              <g class="decision-lane-step" data-ingest-job-step="complete" transform="translate(1340 690)"><circle r="10"></circle><text y="-17">Complete</text></g>
             </g>
           </svg>
         </div>

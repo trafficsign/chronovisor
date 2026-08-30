@@ -3098,7 +3098,7 @@ const rows = [
     stage: "generate",
     current_job_id: "job-1",
     llm: {{ active: false, event: "done", phase: "generate" }},
-  }}, {{ task_role: "ingest_triage", state: "ready" }}),
+  }}, {{ task_role: "ingest_recall_metadata", state: "ready" }}),
   project({{
     state: "running",
     stage: "authorization",
@@ -3106,31 +3106,84 @@ const rows = [
   }}, {{ task_role: "ingest_reconciliation:authority", state: "active", active: true }}),
   project({{
     state: "running",
+    stage: "authorization",
+    current_job_id: "job-1",
+  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
+  project({{
+    state: "running",
+    stage: "local-regenerate",
+    current_job_id: "job-1",
+  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
+  project({{
+    state: "running",
     stage: "apply",
     current_job_id: "job-1",
+    ingest_disposition: "apply_available",
     host_phase: {{ name: "apply", state: "active" }},
   }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
   project({{
     state: "running",
     stage: "state-register",
     current_job_id: "job-1",
+    ingest_disposition: "apply_available",
     host_phase: {{ name: "state-register", state: "complete" }},
   }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
   project({{
     state: "running",
     stage: "read-back",
     current_job_id: "job-1",
+    ingest_disposition: "apply_available",
     host_phase: {{ name: "read-back", state: "complete" }},
+  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
+  project({{
+    state: "running",
+    stage: "read-back",
+    current_job_id: "job-2",
+    ingest_disposition: "confirmed_noop",
+    host_phase: {{ name: "read-back", state: "active" }},
   }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
   project({{
     state: "idle",
     stage: "idle",
-    last_success: {{ job_id: "job-1", raw: "raw.md" }},
+    last_success: {{
+      job_id: "job-1",
+      raw: "raw.md",
+      local_consensus_status: "apply_available",
+    }},
+  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
+  project({{
+    state: "idle",
+    stage: "idle",
+    last_success: {{
+      job_id: "job-2",
+      raw: "noop.md",
+      local_consensus_status: "confirmed_noop",
+    }},
+  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
+  project({{
+    state: "error",
+    stage: "failed",
+    current_job_id: "job-3",
+  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
+  project({{
+    state: "running",
+    stage: "triage",
+    current_job_id: "job-4",
+  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
+  project({{
+    state: "running",
+    stage: "generate",
+    current_job_id: "job-4",
+    llm: {{ active: true, event: "start", phase: "generate" }},
   }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
 ];
 process.stdout.write(JSON.stringify(rows.map((row) => ({{
+  branch: row.branch,
   current: row.current,
+  entry: row.entry,
+  paths: row.paths,
   states: row.states,
+  visibleSteps: row.visibleSteps,
 }}))));
 """
 
@@ -3138,20 +3191,95 @@ process.stdout.write(JSON.stringify(rows.map((row) => ({{
 
     assert [row["current"] for row in rows] == [
         "generate",
-        "page_validate",
         "authority",
+        "authority",
+        "route",
+        "generate",
         "apply",
         "readback",
         "complete",
+        "readback",
         "complete",
+        "complete",
+        "hold",
+        "target",
+        "generate",
     ]
     assert rows[0]["states"]["target"] == "done"
     assert rows[1]["states"]["generate"] == "done"
-    assert rows[2]["states"]["draft_ready"] == "done"
-    assert rows[3]["states"]["validated"] == "done"
-    assert rows[4]["states"]["publish"] == "done"
-    assert rows[5]["states"]["readback"] == "done"
-    assert all(state == "done" for state in rows[6]["states"].values())
+    assert rows[1]["entry"] == "authority"
+    assert rows[2]["states"]["authority"] == "active"
+    assert rows[3]["states"]["route"] == "active"
+    assert rows[4]["branch"] == "retry"
+    assert rows[4]["paths"]["retry"] == "active"
+    assert {"generate", "authority", "route"} <= set(rows[4]["visibleSteps"])
+    assert rows[5]["branch"] == "apply"
+    assert rows[5]["states"]["mutation"] == "done"
+    assert rows[5]["paths"]["accepted"] == "done"
+    assert rows[6]["states"]["publish"] == "done"
+    assert rows[7]["states"]["readback"] == "done"
+    assert rows[8]["branch"] == "noop"
+    assert rows[8]["states"]["apply"] == "skipped"
+    assert rows[8]["paths"]["noop"] == "active"
+    assert rows[9]["branch"] == "apply"
+    assert rows[9]["paths"]["apply"] == "done"
+    assert rows[10]["branch"] == "noop"
+    assert rows[10]["states"]["mutation"] == "done"
+    assert rows[10]["states"]["apply"] == "skipped"
+    assert rows[10]["paths"]["noop"] == "done"
+    assert rows[11]["branch"] == "hold"
+    assert rows[11]["states"]["hold"] == "error"
+    assert rows[12]["entry"] == "target"
+    assert rows[12]["states"]["target"] == "active"
+    assert rows[13]["states"]["generate"] == "active"
+    assert set(rows[13]["visibleSteps"]) == {
+        "target",
+        "generate",
+        "authority",
+        "route",
+        "mutation",
+        "apply",
+        "publish",
+        "readback",
+        "complete",
+        "hold",
+    }
+
+
+def test_dashboard_status_snapshot_cannot_regress_to_an_older_stage() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{
+  window: {{}},
+  parseMs: (value) => value ? Date.parse(value) : null,
+}};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(renderer)}, sandbox);
+const newest = sandbox.window.__chronovisorDashboardTest.newestDashboardStatus;
+const apply = {{ updated_at: "2026-08-30T20:00:10Z", current_job_id: "job", stage: "apply" }};
+const staleGenerate = {{ updated_at: "2026-08-30T20:00:09Z", current_job_id: "job", stage: "generate" }};
+const publish = {{ updated_at: "2026-08-30T20:00:11Z", current_job_id: "job", stage: "semantic-publish" }};
+process.stdout.write(JSON.stringify({{
+  afterStale: newest(apply, staleGenerate),
+  afterNewer: newest(apply, publish),
+}}));
+"""
+
+    result = json.loads(_run_node_scenario(scenario).stdout)
+
+    assert result == {
+        "afterStale": {
+            "updated_at": "2026-08-30T20:00:10Z",
+            "current_job_id": "job",
+            "stage": "apply",
+        },
+        "afterNewer": {
+            "updated_at": "2026-08-30T20:00:11Z",
+            "current_job_id": "job",
+            "stage": "semantic-publish",
+        },
+    }
 
 
 def test_single_model_decision_trace_dom_contract() -> None:
@@ -3342,8 +3470,8 @@ process.stdout.write(JSON.stringify({{
         "repair": "REPAIR ≠ VOTE",
         "dispatch": "DISPATCH → SINGLE AUTHORITY",
         "artifact": "Validated",
-        "viewBox": "0 0 1500 850",
-        "height": "793",
+        "viewBox": "0 0 1500 750",
+        "height": "700",
         "dispatchLabelY": "303",
         "dispatchPath": "M1380 164 H1466 Q1476 164 1476 174 V297 Q1476 307 1466 307 H190 Q180 307 180 317 V394 Q180 404 190 404 H220",
         "singlePath": "M920 404 H1039",
