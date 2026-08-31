@@ -65,13 +65,13 @@ th{background:#f0efe9}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_d505a7bd888242138dcf9527f8f22ef7","created_at":"2026-08-31T22:59:27+09:00","状態":"ready","slug":"decision-trace-foundation-and-architecture-guardrails"}
+{"task_id":"plan_d505a7bd888242138dcf9527f8f22ef7","created_at":"2026-08-31T22:59:27+09:00","状態":"done","slug":"decision-trace-foundation-and-architecture-guardrails"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Chronovisor Decision Trace 投影基盤の置換と増築防止</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span class="badge" data-bind="状態" data-state="done">done</span>
 <span><code data-bind="task_id">plan_d505a7bd888242138dcf9527f8f22ef7</code></span>
 <span data-bind="created_at">2026-08-31T22:59:27+09:00</span>
 <span>baseline <code>ca7b093</code></span>
@@ -213,17 +213,17 @@ optional 500ms presentation queue # 見せ方だけ。事実・geometryは変更
 <section data-section="実行手順">
 <h2>実行手順</h2>
 <ol class="checklist">
-<li><input type="checkbox"><span><strong>Phase 0 — baseline固定:</strong> HEAD/origin/runtime SHA、dirty worktree、preview/prod process、現行testsを記録する。A–Fの既存state matrixと全レーンの基準スクリーンショット・DOM/SVG snapshotを保存する。</span></li>
-<li><input type="checkbox"><span><strong>Phase 1 — 実イベント契約:</strong> producer → API → <code>project_decision_trace()</code> の全状態遷移を列挙し、各node/edge/branchを根拠イベントへ対応付ける。根拠のないdiamond/edgeをこの段階で削除対象にする。実イベント表が完成するまでUI実装へ進まない。</span></li>
-<li><input type="checkbox"><span><strong>Phase 2 — red architecture tests:</strong> 固定geometry、revision単調性、no-regression、edge endpoint、branch topology、全6レーンcoverage、renderer raw-source禁止を失敗するtestとして先に追加する。</span></li>
-<li><input type="checkbox"><span><strong>Phase 3 — projection置換:</strong> <code>project_decision_trace()</code> から最小 <code>TraceView</code> を返すpure reductionへ統一する。新endpointや並列adapterは作らず、既存consumerを一つずつこの出力へ切り替える。</span></li>
-<li><input type="checkbox"><span><strong>Phase 4 — fixed renderer:</strong> Decision Traceを固定SVG topology + state class/textだけのrendererへ置換する。logical edgeごとに安定IDを持たせ、mount後にgeometryを変更しない。</span></li>
-<li><input type="checkbox"><span><strong>Phase 5 — Processing Lanes統一:</strong> Ingest / Recall / Audit / Improve / Repair / Typed Graphを同じ <code>TraceView</code> から描画し、各レーンの末端整列・接続・clippingを検証する。</span></li>
-<li><input type="checkbox"><span><strong>Phase 6 — 旧経路削除:</strong> <code>processingLaneForTrace()</code> の再推論、<code>ingestJobTraceState()</code> の第二state machine、<code>updateDecisionSvgHarness()</code> のgeometry mutation、重複mega-SVG modeと対応する古いtestを削除する。削除が終わるまで移行完了にしない。</span></li>
-<li><input type="checkbox"><span><strong>Phase 7 — presentation queue:</strong> 同時到着した複数stateを約500ms間隔で順に表示する小さなqueueを追加する。新execution/revisionでcancel可能にし、事実・branch・geometryには触れさせない。</span></li>
-<li><input type="checkbox"><span><strong>Phase 8 — 増築防止契約:</strong> architecture testsをCI対象にし、<code>chronovisor-dashboard-check</code> Skillへ全state screenshot、DOM/SVG geometry hash、console、全レーン検査を組み込む。新flow追加手順を「graph definition + event mapping + fixture」に限定する。</span></li>
-<li><input type="checkbox"><span><strong>Phase 9 — preview受入:</strong> previewだけを起動し、全scenario/frameを実ブラウザで撮影・実測する。差分contact sheetと失敗一覧を作り、ユーザーが確認できるURL/証跡を提示する。本番には触れない。</span></li>
-<li><input type="checkbox"><span><strong>Phase 10 — 完了整理:</strong> 不要コード・不要fixtureを削除し、関連test一式、static checks、preview smokeを再実行する。scoped commitsとPlanログを整え、明示依頼がある場合だけ別工程でpush → 本番再起動 → runtime SHA/health/live確認を行う。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 0 — baseline固定:</strong> HEAD/origin/runtime SHA、dirty worktree、preview/prod process、現行testsを記録する。A–Fの既存state matrixと全レーンの基準スクリーンショット・DOM/SVG snapshotを保存する。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 1 — 実イベント契約:</strong> producer → API → <code>project_decision_trace()</code> の全状態遷移を列挙し、各node/edge/branchを根拠イベントへ対応付ける。根拠のないdiamond/edgeをこの段階で削除対象にする。実イベント表が完成するまでUI実装へ進まない。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 2 — red architecture tests:</strong> 固定geometry、revision単調性、no-regression、edge endpoint、branch topology、全6レーンcoverage、renderer raw-source禁止を失敗するtestとして先に追加する。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 3 — projection置換:</strong> <code>project_decision_trace()</code> から最小 <code>TraceView</code> を返すpure reductionへ統一する。新endpointや並列adapterは作らず、既存consumerを一つずつこの出力へ切り替える。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 4 — fixed renderer:</strong> Decision Traceを固定SVG topology + state class/textだけのrendererへ置換する。logical edgeごとに安定IDを持たせ、mount後にgeometryを変更しない。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 5 — Processing Lanes統一:</strong> Ingest / Recall / Audit / Improve / Repair / Typed Graphを同じ <code>TraceView</code> から描画し、各レーンの末端整列・接続・clippingを検証する。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 6 — 旧経路削除:</strong> <code>processingLaneForTrace()</code> の再推論、<code>ingestJobTraceState()</code> の第二state machine、<code>updateDecisionSvgHarness()</code> のgeometry mutation、重複mega-SVG modeと対応する古いtestを削除する。削除が終わるまで移行完了にしない。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 7 — presentation queue:</strong> 同時到着した複数stateを約500ms間隔で順に表示する小さなqueueを追加する。新execution/revisionでcancel可能にし、事実・branch・geometryには触れさせない。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 8 — 増築防止契約:</strong> architecture testsをCI対象にし、<code>chronovisor-dashboard-check</code> Skillへ全state screenshot、DOM/SVG geometry hash、console、全レーン検査を組み込む。新flow追加手順を「graph definition + event mapping + fixture」に限定する。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 9 — preview受入:</strong> previewだけを起動し、全scenario/frameを実ブラウザで撮影・実測する。差分contact sheetと失敗一覧を作り、ユーザーが確認できるURL/証跡を提示する。本番には触れない。</span></li>
+<li><input type="checkbox" checked><span><strong>Phase 10 — 完了整理:</strong> 不要コード・不要fixtureを削除し、関連test一式、static checks、preview smokeを再実行する。scoped commitsとPlanログを整え、明示依頼がある場合だけ別工程でpush → 本番再起動 → runtime SHA/health/live確認を行う。</span></li>
 </ol>
 </section>
 
@@ -363,6 +363,11 @@ optional 500ms presentation queue # 見せ方だけ。事実・geometryは変更
 <h2>実行ログ</h2>
 <ol class="log">
 <li><time>2026-08-31 22:59</time><span>Plan作成。baseline <code>main@ca7b093</code>、originより5 commits ahead、別作業のdirty files 2件 + evidence directory 1件を保護対象として記録。実装・push・restartは未実施。</span></li>
+<li><time>2026-09-01 05:22</time><span>実行開始。HEAD <code>eeba030</code>、origin/main <code>3788c7b</code>、別作業のdirty files 2件 + evidence directory 1件を再確認し、保護したまま進行する。</span></li>
+<li><time>2026-09-01 05:47</time><span>Phase 0–2完了。producer/API/projection経路を固定し、projection v2・全6レーン・固定geometry・raw再推論禁止の契約testを追加。旧実装で再現し、新契約でgreenを確認。</span></li>
+<li><time>2026-09-01 06:03</time><span>Phase 3–8完了。server projectionへ統一し、frontendのIngest専用state machine、lane再推論、runtime geometry mutationを削除。固定SVG topology、全6レーン共通renderer、500ms単調表示queue、Dashboard check Skillの再発防止契約を実装。</span></li>
+<li><time>2026-09-01 06:28</time><span>Phase 9完了。関連202 tests、responsive 7 tests、全状態browser matrixを合格。A–H/S、Ingest 13状態、全6レーンの計28 screenshotと3 contact sheetを保存し、desktop/tabletのDOM/SVG・横スクロール境界・console 0件を確認。本番は未変更。</span></li>
+<li><time>2026-09-01 06:36</time><span>Phase 10完了。実装commit <code>c4d0914</code>をpushし、通常/LAN Dashboardを再起動。両runtime archive、HEAD、origin/mainを同SHAへ揃え、health <code>status=ok</code> / <code>drift=false</code>、LAN TLS <code>401</code>、配信asset byte一致、本番全6レーンprojection v2・dangling edge 0、実DOM/SVGを確認。証跡31枚は <code>~/.chronovisor/evidence/dashboard/2026-09-01-decision-trace-foundation/</code> に保存。</span></li>
 </ol>
 </section>
 
