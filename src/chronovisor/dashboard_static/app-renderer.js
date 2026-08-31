@@ -510,9 +510,9 @@ const INGEST_JOB_TRACE_STEPS = [
 ];
 
 const INGEST_JOB_ENTRY_PATHS = {
-  target: "M1190 505 V560 Q1190 570 1180 570 H1130",
-  authority: "M1190 505 V560 Q1190 570 1180 570 H690",
-  route: "M1190 505 V560 Q1190 570 1180 570 H500",
+  target: "M1190 505 V610 Q1190 620 1180 620 H1130 Q1120 620 1120 610 V580",
+  authority: "M1190 505 V610 Q1190 620 1180 620 H800 Q790 620 790 610 V584",
+  route: "M1190 505 V610 Q1190 620 1180 620 H510 Q500 620 500 610 V570",
 };
 
 function ingestJobTraceState(status = {}, trace = {}, ingestLane = null) {
@@ -717,6 +717,9 @@ function updateIngestJobTrace(trace, status, visible) {
   harness.querySelectorAll("[data-ingest-job-step]").forEach((node) => {
     node.style.display = visibleSteps.has(node.dataset.ingestJobStep) ? "" : "none";
     setDecisionSvgState(node, projection.states[node.dataset.ingestJobStep]);
+  });
+  harness.querySelectorAll("[data-ingest-job-merge]").forEach((node) => {
+    setDecisionSvgState(node, projection.states[node.dataset.ingestJobMerge]);
   });
   harness.querySelectorAll("[data-ingest-job-path]").forEach((node) => {
     node.style.display = visiblePaths.has(node.dataset.ingestJobPath) ? "" : "none";

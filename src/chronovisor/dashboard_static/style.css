@@ -3229,7 +3229,7 @@ canvas {
 
 .decision-trace-harness .trace-path {
   stroke: #7d8992;
-  stroke-dasharray: 4 5;
+  stroke-dasharray: 3 7;
   opacity: 0.66;
 }
 
