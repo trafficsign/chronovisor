@@ -3233,10 +3233,6 @@ canvas {
   opacity: 0.66;
 }
 
-.decision-trace-harness .trace-lane-rail.pending {
-  stroke-dasharray: none;
-}
-
 .decision-trace-harness .trace-divider {
   opacity: 0.56;
 }

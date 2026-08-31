@@ -574,7 +574,7 @@ def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
   <g id="artifact" transform="translate(1050 404)"><circle r="11"></circle></g>
   <g id="decision" data-trace-key="decision" transform="translate(1190 494)"><circle r="11"></circle><text data-decision-label="true" y="-22">Validated</text></g>
   <g id="hold" data-trace-key="hold" transform="translate(1330 404)"><circle r="12"></circle><text>Hold</text></g>
-  <g id="ingest-generate" class="decision-lane-step" transform="translate(900 570)"><circle r="10"></circle><text y="-17">Generate</text></g>
+  <g id="ingest-generate" class="decision-lane-step" transform="translate(900 570)"><circle r="10"></circle><text x="38" y="-17">Generate</text></g>
 </svg>
 <script src="/geometry.js"></script>
 """.replace("__INGEST_RETRY_PATH__", ingest_retry_path),
@@ -690,6 +690,7 @@ fetch("/geometry-result", {
     ingestRetryDeltaX: Math.abs(ingestGenerateCenter.x - ingestRetryEnd.x),
     ingestRetryDeltaY: Math.abs(ingestGenerateCenter.y - ingestRetryEnd.y),
     ingestGenerateRadiusX: 10 * Math.abs(ingestGenerate.getScreenCTM().a),
+    ingestGenerateRadiusY: 10 * Math.abs(ingestGenerate.getScreenCTM().d),
     authority: {
       shortHeight: shortAuthorityHeight,
       longHeight: longAuthorityHeight,
@@ -803,10 +804,10 @@ fetch("/geometry-result", {
     assert abs(geometry[0]["sealHoldDeltaX"] - geometry[0]["holdRadiusX"]) <= 0.01
     assert geometry[0]["sealHoldDeltaY"] <= 0.01
     assert geometry[0]["ingestRetryLabelOverlap"] is False
+    assert geometry[0]["ingestRetryDeltaX"] <= 0.01
     assert abs(
-        geometry[0]["ingestRetryDeltaX"] - geometry[0]["ingestGenerateRadiusX"]
+        geometry[0]["ingestRetryDeltaY"] - geometry[0]["ingestGenerateRadiusY"]
     ) <= 0.01
-    assert geometry[0]["ingestRetryDeltaY"] <= 0.01
     assert geometry[0]["authority"]["longHeight"] == geometry[0]["authority"]["shortHeight"]
     assert geometry[0]["authority"]["scrollWidth"] <= geometry[0]["authority"]["clientWidth"]
     assert [row["count"] for row in geometry[0]["processing"]] == [2, 3, 4, 5, 6]
@@ -975,10 +976,7 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         "  opacity: 0.66;\n"
         "}"
     ) in style
-    pending_lane_rail_style = style.split(
-        ".decision-trace-harness .trace-lane-rail.pending {", 1
-    )[1].split("}", 1)[0]
-    assert "stroke-dasharray: none;" in pending_lane_rail_style
+    assert ".decision-trace-harness .trace-lane-rail.pending" not in style
     assert (
         ".decision-trace-harness .decision-lane-step.active circle {\n"
         "  fill: url(#trace-processing-core);\n"
@@ -1996,11 +1994,12 @@ addEventListener("DOMContentLoaded", () => {
         name,
         branch: harness.dataset.ingestJobBranch,
         current: harness.dataset.ingestJobStep,
-        coreRailDashes: [...new Set(
-          [...harness.querySelectorAll(".trace-ingest-job .trace-lane-rail")]
-            .filter(visible)
-            .map((node) => getComputedStyle(node).strokeDasharray)
-        )],
+        pathStyles: Object.fromEntries([...harness.querySelectorAll(
+          ".trace-ingest-job [data-ingest-job-path]"
+        )].filter(visible).map((node) => [node.dataset.ingestJobPath, {
+          state: node.dataset.state,
+          dash: getComputedStyle(node).strokeDasharray,
+        }])),
         disconnectedPathEnds: disconnectedPathEnds(),
       };
     }) : [];
@@ -2074,12 +2073,15 @@ addEventListener("DOMContentLoaded", () => {
         .map((node) => [node.dataset.traceKey, node.dataset.state])),
       paths,
       rails,
-      coreBackboneDashes: Object.fromEntries([...harness.querySelectorAll(
+      coreBackboneStyles: Object.fromEntries([...harness.querySelectorAll(
         '[data-decision-lane="primary"] .trace-lane-rail, '
           + '[data-path-key="single-artifact"], [data-path-key="artifact-seal"]'
       )].filter(visible).map((node) => [
         node.dataset.lanePath || node.dataset.pathKey,
-        getComputedStyle(node).strokeDasharray,
+        {
+          state: node.dataset.state,
+          dash: getComputedStyle(node).strokeDasharray,
+        },
       ])),
     };
   });
@@ -2425,7 +2427,11 @@ addEventListener("DOMContentLoaded", () => {
                 assert rail["dash"] in {"none", ""}
                 assert rail["length"] > 0
 
-        assert set(result["coreBackboneDashes"].values()) <= {"none", ""}
+        for style in result["coreBackboneStyles"].values():
+            if style["state"] in {"pending", "skipped"}:
+                assert style["dash"] not in {"none", ""}
+            else:
+                assert style["dash"] in {"none", ""}
 
         selected_tokens = projection["context"]["selected_tokens"]
         selected_reasoning = projection["reasoning"]["selected"]
@@ -2500,7 +2506,11 @@ addEventListener("DOMContentLoaded", () => {
         "ACCEPTED",
     }
     for state in single_result["ingestBranchStates"]:
-        assert state.pop("coreRailDashes") == ["none"]
+        for style in state.pop("pathStyles").values():
+            if style["state"] in {"pending", "skipped"}:
+                assert style["dash"] not in {"none", ""}
+            else:
+                assert style["dash"] in {"none", ""}
     assert single_result["ingestBranchStates"] == [
         {
             "name": "target",

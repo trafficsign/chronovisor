@@ -303,7 +303,7 @@
               <path class="trace-path trace-lane-rail" data-ingest-job-path="generate-authority" data-ingest-job-to="authority" d="M890 570 H690" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-lane-rail" data-ingest-job-path="authority-route" data-ingest-job-to="route" d="M670 570 H500" marker-end="url(#trace-arrow)"></path>
 
-              <path class="trace-path trace-ingest-retry-path" data-ingest-job-path="retry" data-ingest-job-to="generate" d="M460 536 V510 Q460 500 470 500 H850 Q860 500 860 510 V560 Q860 570 870 570 H890" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-ingest-retry-path" data-ingest-job-path="retry" data-ingest-job-to="generate" d="M460 536 V510 Q460 500 470 500 H890 Q900 500 900 510 V560" marker-end="url(#trace-arrow)"></path>
               <text class="trace-branch-label trace-ingest-retry-label" data-ingest-branch-label="retry" x="684" y="494">RETRY</text>
               <path class="trace-path trace-no-path" data-ingest-job-path="hold" data-ingest-job-to="hold" d="M420 570 H250" marker-end="url(#trace-arrow)"></path>
               <text class="trace-branch-label trace-no-label" data-ingest-branch-label="hold" x="328" y="559">HOLD</text>
@@ -319,7 +319,7 @@
               <path class="trace-path trace-lane-rail" data-ingest-job-path="readback-complete" data-ingest-job-to="complete" d="M1130 690 H1330" marker-end="url(#trace-arrow)"></path>
 
               <g class="decision-lane-step" data-ingest-job-step="target" transform="translate(1120 570)"><circle r="10"></circle><text y="-17">Target</text></g>
-              <g class="decision-lane-step" data-ingest-job-step="generate" transform="translate(900 570)"><circle r="10"></circle><text y="-17">Generate</text></g>
+              <g class="decision-lane-step" data-ingest-job-step="generate" transform="translate(900 570)"><circle r="10"></circle><text x="38" y="-17">Generate</text></g>
               <g class="decision-lane-step" data-ingest-job-step="authority" transform="translate(680 570)"><circle r="10"></circle><text y="-17">Authority</text></g>
               <g class="trace-diamond trace-ingest-route" data-ingest-job-step="route"><path d="M460 536 500 570 460 604 420 570Z"></path><text x="460" y="567">RESULT</text><text x="460" y="579">ROUTE</text></g>
               <g class="trace-node trace-hold-node" data-ingest-job-step="hold" transform="translate(240 570)"><circle r="11"></circle><text class="trace-hold-title" y="29">Hold</text><text class="trace-hold-reason" x="22" y="44">Retry later</text></g>
