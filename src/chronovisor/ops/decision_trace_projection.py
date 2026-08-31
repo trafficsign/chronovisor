@@ -559,6 +559,11 @@ def project_decision_trace(
         )
         lane_projection: dict[str, Any] = {
             "state": _state(lane.get("state")),
+            "phase": (
+                str(lane.get("phase"))
+                if lane.get("phase") in {*TRACE_PHASES, "repair"}
+                else None
+            ),
             "steps": step_states,
             "rails": {key: step_states[phase] for key, phase in TRACE_RAILS.items()},
             "repair": repair_state,
@@ -721,6 +726,7 @@ def project_decision_trace(
     authority: dict[str, Any] | None = None
     if single_model:
         primary_lane = lane_rows.get("primary", {})
+        primary_projection = lanes["primary"]
         model = primary_lane.get("model") or trace.get("model")
         revision = primary_lane.get("revision") or trace.get("revision")
         model = model if isinstance(model, str) and model else None
@@ -738,14 +744,25 @@ def project_decision_trace(
         }
         display_lanes = {"primary": {**lanes["primary"], "label": "Single Authority"}}
         display_model_routes = {"primary": lanes["primary"]["state"]}
+        active_status = {
+            "trigger": "Starting",
+            "load": "Loading",
+            "context": "Building context",
+            "generate": "Generating",
+            "repair": "Repairing",
+            "validate": "Validating",
+            "vote": "Finalizing",
+        }.get(primary_projection["phase"], "Working")
+        validation_status = {
+            "done": "Validated",
+            "error": "Held",
+            "skipped": "Not required",
+            "pending": "Waiting",
+        }.get(primary_projection["state"], active_status)
         labels.update(
             {
                 "authority": "Single Authority",
-                "validation": "Validated"
-                if authority["validated"]
-                else "Held"
-                if trace_state == "quarantined"
-                else "Validating",
+                "validation": validation_status,
                 "target": "1",
                 "repair": "REPAIR ≠ VOTE",
             }

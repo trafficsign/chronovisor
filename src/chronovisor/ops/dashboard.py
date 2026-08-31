@@ -3276,6 +3276,51 @@ def _decision_trace_events(
     return events[-_DECISION_TRACE_EVENT_LIMIT:]
 
 
+def _decision_trace_reconcile_active_rows(
+    active_rows: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Use the newest observation as the phase authority for each live row."""
+
+    phase_by_lane: dict[str, dict[str, Any]] = {}
+    for event in events:
+        lane = event.get("lane")
+        if not isinstance(lane, str) or not lane:
+            continue
+        if event.get("kind") == "phase" and event.get("status") == "active":
+            phase_by_lane[lane] = event
+
+    reconciled: list[dict[str, Any]] = []
+    for row in active_rows:
+        _base, lane, _explicit = _decision_trace_role(row.get("role"))
+        event = phase_by_lane.get(lane)
+        row_epoch = next(
+            (
+                parsed
+                for key in ("updated_at", "started_at")
+                if (parsed := _failure_timestamp(row.get(key))[0]) is not None
+            ),
+            None,
+        )
+        event_epoch = _failure_timestamp((event or {}).get("timestamp"))[0]
+        if event is None or (
+            row_epoch is not None
+            and event_epoch is not None
+            and row_epoch >= event_epoch
+        ):
+            reconciled.append(row)
+            continue
+        reconciled.append(
+            {
+                **row,
+                "phase": event["phase"],
+                "attempt": event.get("attempt", row.get("attempt")),
+                "updated_at": event.get("timestamp") or row.get("updated_at"),
+            }
+        )
+    return reconciled
+
+
 def _decision_trace_outcome(
     decision: dict[str, Any] | None,
     *,
@@ -3624,8 +3669,7 @@ def _decision_trace_lanes(
     active_rows: list[dict[str, Any]],
     session_rows: list[dict[str, Any]],
     decision: dict[str, Any] | None,
-    trace_events: list[dict[str, Any]],
-    request_sha256: str,
+    events: list[dict[str, Any]],
     quorum_flow: bool,
     tie_break_used: bool,
     quorum_attempted: bool,
@@ -3705,10 +3749,6 @@ def _decision_trace_lanes(
 
     artifact_replay = bool(
         decision and decision.get("kind") == "decision_artifact_replay"
-    )
-    events = _decision_trace_events(
-        trace_events,
-        request_sha256=request_sha256,
     )
     decision_vote_lanes = {
         str(role)
@@ -3884,7 +3924,7 @@ def _decision_trace_lanes(
                 "steps": _decision_trace_steps(state, phase=phase),
             }
         )
-    return lanes, events, artifact_replay
+    return lanes, artifact_replay
 
 
 def _decision_trace_history_from_events(
@@ -4112,6 +4152,11 @@ def _decision_trace_snapshot(
         }
     session_rows = [row for row in related if row.get("kind") == "session"]
     latest_related_session = session_rows[-1] if session_rows else None
+    events = _decision_trace_events(
+        bounded_trace_events,
+        request_sha256=request_sha256,
+    )
+    active_rows = _decision_trace_reconcile_active_rows(active_rows, events)
     authority_kind, quorum_flow, single_model = _decision_trace_authority_mode(
         related=related,
         trace_events=bounded_trace_events,
@@ -4160,12 +4205,11 @@ def _decision_trace_snapshot(
 
     task_role = _decision_trace_task_role(active_rows, decision, latest_related_session)
 
-    lanes, events, artifact_replay = _decision_trace_lanes(
+    lanes, artifact_replay = _decision_trace_lanes(
         active_rows=active_rows,
         session_rows=session_rows,
         decision=decision,
-        trace_events=bounded_trace_events,
-        request_sha256=request_sha256,
+        events=events,
         quorum_flow=quorum_flow,
         tie_break_used=tie_break_used,
         quorum_attempted=quorum_attempted,

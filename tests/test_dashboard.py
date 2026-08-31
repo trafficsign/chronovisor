@@ -1254,6 +1254,82 @@ def test_decision_trace_active_validation_marks_generation_done(monkeypatch) -> 
     assert trace["overall"][3]["status"] == "active"
 
 
+@pytest.mark.parametrize(
+    ("marker_phase", "marker_updated_at", "event_phases", "expected_updated_at"),
+    (
+        (
+            "generate",
+            "2026-09-01T00:00:03Z",
+            ("trigger", "load", "context", "generate", "validate"),
+            "2026-09-01T00:00:05Z",
+        ),
+        (
+            "validate",
+            "2026-09-01T00:00:06Z",
+            ("trigger", "load", "context", "generate"),
+            "2026-09-01T00:00:06Z",
+        ),
+    ),
+)
+def test_decision_trace_newest_phase_observation_wins(
+    marker_phase: str,
+    marker_updated_at: str,
+    event_phases: tuple[str, ...],
+    expected_updated_at: str,
+) -> None:
+    request = "e" * 64
+    activity = {
+        "request_sha256": request,
+        "role": "ingest_reconciliation:authority",
+        "model": "primary:model",
+        "phase": marker_phase,
+        "attempt": 0,
+        "started_at": "2026-09-01T00:00:00Z",
+        "updated_at": marker_updated_at,
+    }
+    events = [
+        {
+            "event_id": f"event-{phase}",
+            "kind": "phase",
+            "timestamp": f"2026-09-01T00:00:0{index}Z",
+            "request_sha256": request,
+            "role": "ingest_reconciliation:authority",
+            "phase": phase,
+            "status": "active",
+            "attempt": 0,
+            "authority_kind": "single_model_v1",
+            "quorum_flow": False,
+        }
+        for index, phase in enumerate(event_phases, start=1)
+    ]
+
+    trace = dashboard._decision_trace_snapshot(
+        [activity],
+        [],
+        None,
+        events,
+        request,
+    )
+    lane = trace["lanes"][0]
+
+    assert lane["phase"] == "validate"
+    assert {step["key"]: step["status"] for step in lane["steps"]} == {
+        "trigger": "done",
+        "load": "done",
+        "context": "done",
+        "generate": "done",
+        "validate": "active",
+        "vote": "pending",
+    }
+    assert {step["key"]: step["status"] for step in trace["overall"]}[
+        "generate"
+    ] == "done"
+    assert {step["key"]: step["status"] for step in trace["overall"]}[
+        "validate"
+    ] == "active"
+    assert trace["updated_at"] == expected_updated_at
+
+
 def test_decision_trace_projects_only_bounded_generation_counters(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,

@@ -650,6 +650,55 @@ def test_single_model_authority_projects_one_lane_and_binds_identity() -> None:
     assert result["labels"]["hold"] == "Validation failed"
 
 
+@pytest.mark.parametrize(
+    ("phase", "label"),
+    [
+        ("trigger", "Starting"),
+        ("load", "Loading"),
+        ("context", "Building context"),
+        ("generate", "Generating"),
+        ("repair", "Repairing"),
+        ("validate", "Validating"),
+        ("vote", "Finalizing"),
+    ],
+)
+def test_single_model_status_tracks_the_active_lane_phase(
+    phase: str, label: str
+) -> None:
+    result = projection.project_decision_trace(
+        _trace(
+            lanes=[
+                _lane("primary", "active", phase=phase),
+                _lane("challenger", "skipped"),
+                _lane("tie_break", "skipped"),
+            ],
+            authority_kind="single_model_v1",
+            quorum_flow=False,
+        )
+    )
+
+    assert result["lanes"]["primary"]["phase"] == phase
+    assert result["labels"]["validation"] == label
+
+
+def test_single_model_completed_lane_is_validated_while_artifact_is_pending() -> None:
+    result = projection.project_decision_trace(
+        _trace(
+            state="ready",
+            lanes=[
+                _lane("primary", "done"),
+                _lane("challenger", "skipped"),
+                _lane("tie_break", "skipped"),
+            ],
+            authority_kind="single_model_v1",
+            quorum_flow=False,
+        )
+    )
+
+    assert result["authority"]["validated"] is False
+    assert result["labels"]["validation"] == "Validated"
+
+
 def test_active_reasoning_fit_is_checking() -> None:
     result = projection.project_decision_trace(
         _trace(
