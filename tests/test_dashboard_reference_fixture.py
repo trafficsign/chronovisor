@@ -987,8 +987,16 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert "filter: url(#trace-glow-violet);" in done_node_style
     assert ".decision-trace-harness .trace-single-path.pending" not in style
     assert ".decision-trace-harness .trace-hold-path.pending" not in style
-    assert ".decision-trace-harness .skipped.trace-path" in style
-    assert ".decision-trace-harness .trace-branch-label.skipped" in style
+    skipped_path_style = style.split(
+        ".decision-trace-harness .skipped.trace-path,", 1
+    )[1].split("}", 1)[0]
+    assert "stroke-dasharray: 3 7;" in skipped_path_style
+    assert "opacity: 0.28;" in skipped_path_style
+    assert "filter: none;" in skipped_path_style
+    skipped_label_style = style.split(
+        ".decision-trace-harness .trace-branch-label.skipped {", 1
+    )[1].split("}", 1)[0]
+    assert "opacity: 0.18;" in skipped_label_style
     assert ".decision-trace-harness .trace-tie-path.pending" not in style
     assert ".decision-trace-harness .done .trace-path" not in style
     assert (
@@ -1036,6 +1044,14 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         ".decision-trace-harness .trace-lane-rail.active {", 1
     )[1].split("}", 1)[0]
     assert "filter: url(" not in active_rail_style
+    ingest_active_style = style.split(
+        ".decision-trace-harness .trace-ingest-job .trace-path.active {", 1
+    )[1].split("}", 1)[0]
+    assert "stroke: #ff8a00;" in ingest_active_style
+    assert "stroke-dasharray: none;" in ingest_active_style
+    assert style.index(
+        ".decision-trace-harness .trace-ingest-job .trace-path.active {"
+    ) > style.index(".decision-trace-harness .trace-path.active {")
     assert (
         ".decision-trace-harness .decision-lane-step.active circle,\n"
         "  .decision-trace-harness .trace-lane-rail.active,\n"
@@ -1058,7 +1074,11 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
         "  opacity: 0.18;"
     ) in style
     assert (
-        ".decision-trace-harness .trace-yes-label.active,\n"
+        ".decision-trace-harness .trace-yes-label.active {\n"
+        "  fill: #ffb340;\n"
+        "  opacity: 1;"
+    ) in style
+    assert (
         ".decision-trace-harness .trace-yes-label.done {\n"
         "  fill: #74d84f;\n"
         "  opacity: 1;"
@@ -1886,6 +1906,16 @@ addEventListener("DOMContentLoaded", () => {
         ingestCase.status,
         true,
       );
+      const ingestHarness = document.querySelector("#decision-trace-harness");
+      const current = ingestHarness.dataset.ingestJobStep;
+      const branch = ingestHarness.dataset.ingestJobBranch;
+      document.querySelector("[data-single-status]").textContent = current === "hold"
+        ? "Held"
+        : current === "complete"
+          ? "Complete"
+          : branch === "retry"
+            ? "Retry · Generate active"
+            : `${current[0].toUpperCase()}${current.slice(1)} active`;
     }
     if (requestedPipeline) {
       const requestedSteps = processingSteps[requestedPipeline];
@@ -2059,6 +2089,7 @@ addEventListener("DOMContentLoaded", () => {
           state: node.dataset.state,
           dash: getComputedStyle(node).strokeDasharray,
           opacity: getComputedStyle(node).opacity,
+          stroke: getComputedStyle(node).stroke,
         }])),
         disconnectedPathEnds: disconnectedPathEnds(),
         entryCrossings: ingestEntryCrossings(),
@@ -2573,10 +2604,13 @@ addEventListener("DOMContentLoaded", () => {
                 assert style["dash"] not in {"none", ""}
                 assert style["opacity"] != "0"
             elif style["state"] == "skipped":
-                assert style["opacity"] == "0"
+                assert style["dash"] not in {"none", ""}
+                assert 0 < float(style["opacity"]) < 0.5
             else:
                 assert style["dash"] in {"none", ""}
                 assert style["opacity"] != "0"
+                if style["state"] == "active":
+                    assert style["stroke"] == "rgb(255, 138, 0)"
     assert single_result["ingestBranchStates"] == [
         {
             "name": "target",

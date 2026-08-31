@@ -3179,12 +3179,6 @@ canvas {
   opacity: 1;
 }
 
-.decision-trace-harness .trace-ingest-retry-path.active {
-  stroke: #ff9d00;
-  opacity: 1;
-  filter: drop-shadow(0 0 3px rgba(255, 157, 0, 0.42));
-}
-
 .decision-trace-panel:has(.decision-single-authority:not([hidden])) .decision-facts [data-decision-fact="quorum"] {
   display: none;
 }
@@ -3238,9 +3232,14 @@ canvas {
 }
 
 .decision-trace-harness .skipped.trace-path,
-.decision-trace-harness .trace-path.skipped,
+.decision-trace-harness .trace-path.skipped {
+  stroke-dasharray: 3 7;
+  opacity: 0.28;
+  filter: none;
+}
+
 .decision-trace-harness .trace-branch-label.skipped {
-  opacity: 0;
+  opacity: 0.18;
 }
 
 .decision-trace-harness .trace-divider {
@@ -3504,6 +3503,14 @@ canvas {
   animation: trace-processing-pulse 0.9s ease-in-out infinite alternate;
 }
 
+.decision-trace-harness .trace-ingest-job .trace-path.active {
+  stroke: #ff8a00;
+  stroke-dasharray: none;
+  opacity: 1;
+  filter: drop-shadow(0 0 3px rgba(255, 138, 0, 0.68));
+  animation: trace-processing-pulse 0.9s ease-in-out infinite alternate;
+}
+
 @keyframes trace-processing-pulse {
   from { opacity: 0.72; }
   to { opacity: 1; }
@@ -3601,7 +3608,11 @@ canvas {
   opacity: 0.18;
 }
 
-.decision-trace-harness .trace-yes-label.active,
+.decision-trace-harness .trace-yes-label.active {
+  fill: #ffb340;
+  opacity: 1;
+}
+
 .decision-trace-harness .trace-yes-label.done {
   fill: #74d84f;
   opacity: 1;
