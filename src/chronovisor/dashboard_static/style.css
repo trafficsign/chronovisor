@@ -3233,6 +3233,16 @@ canvas {
   opacity: 0.66;
 }
 
+.decision-trace-harness .trace-ingest-job .trace-path {
+  transition: none;
+}
+
+.decision-trace-harness .skipped.trace-path,
+.decision-trace-harness .trace-path.skipped,
+.decision-trace-harness .trace-branch-label.skipped {
+  opacity: 0;
+}
+
 .decision-trace-harness .trace-divider {
   opacity: 0.56;
 }

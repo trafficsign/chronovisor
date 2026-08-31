@@ -299,13 +299,11 @@
 
             <g class="trace-ingest-job" data-ingest-job-flow aria-label="Remaining ingest job flow">
               <path class="trace-path trace-lane-rail" data-ingest-job-entry="target" d="M1190 505 V610 Q1190 620 1180 620 H1130 Q1120 620 1120 610 V580" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-lane-rail" data-ingest-job-path="target-generate" data-ingest-job-to="generate-merge" d="M1110 570 H1024" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-lane-rail" data-ingest-job-path="target-generate" data-ingest-job-to="generate" d="M996 570 H910" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-lane-rail" data-ingest-job-path="generate-authority" data-ingest-job-to="authority-merge" d="M890 570 H804" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-lane-rail" data-ingest-job-path="generate-authority" data-ingest-job-to="authority" d="M776 570 H690" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-lane-rail" data-ingest-job-path="target-generate" data-ingest-job-to="generate" d="M1110 570 H910" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-lane-rail" data-ingest-job-path="generate-authority" data-ingest-job-to="authority" d="M890 570 H690" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-lane-rail" data-ingest-job-path="authority-route" data-ingest-job-to="route" d="M670 570 H500" marker-end="url(#trace-arrow)"></path>
 
-              <path class="trace-path trace-ingest-retry-path" data-ingest-job-path="retry" data-ingest-job-to="generate-merge" d="M460 536 V510 Q460 500 470 500 H1000 Q1010 500 1010 510 V556" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-ingest-retry-path" data-ingest-job-path="retry" data-ingest-job-to="generate" d="M460 536 V510 Q460 500 470 500 H890 Q900 500 900 510 V560" marker-end="url(#trace-arrow)"></path>
               <text class="trace-branch-label trace-ingest-retry-label" data-ingest-branch-label="retry" x="684" y="494">RETRY</text>
               <path class="trace-path trace-no-path" data-ingest-job-path="hold" data-ingest-job-to="hold" d="M420 570 H250" marker-end="url(#trace-arrow)"></path>
               <text class="trace-branch-label trace-no-label" data-ingest-branch-label="hold" x="328" y="559">HOLD</text>
@@ -313,25 +311,21 @@
               <text class="trace-branch-label trace-yes-label" data-ingest-branch-label="accepted" x="472" y="632">ACCEPTED</text>
               <path class="trace-path trace-yes-path" data-ingest-job-path="apply" data-ingest-job-to="apply" d="M500 690 H670" marker-end="url(#trace-arrow)"></path>
               <text class="trace-branch-label trace-yes-label" data-ingest-branch-label="apply" x="582" y="679">APPLY</text>
-              <path class="trace-path trace-yes-path" data-ingest-job-path="noop" data-ingest-job-to="readback-merge" d="M460 724 V730 Q460 740 470 740 H1000 Q1010 740 1010 730 V704" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-yes-path" data-ingest-job-path="noop" data-ingest-job-to="readback" d="M460 724 V730 Q460 740 470 740 H1110 Q1120 740 1120 730 V700" marker-end="url(#trace-arrow)"></path>
               <text class="trace-branch-label trace-yes-label" data-ingest-branch-label="noop" x="802" y="734">NOOP</text>
 
               <path class="trace-path trace-lane-rail" data-ingest-job-path="apply-publish" data-ingest-job-to="publish" d="M690 690 H890" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-lane-rail" data-ingest-job-path="publish-readback" data-ingest-job-to="readback-merge" d="M910 690 H996" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-lane-rail" data-ingest-job-path="publish-readback" data-ingest-job-to="readback" d="M1024 690 H1110" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-lane-rail" data-ingest-job-path="publish-readback" data-ingest-job-to="readback" d="M910 690 H1110" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-lane-rail" data-ingest-job-path="readback-complete" data-ingest-job-to="complete" d="M1130 690 H1330" marker-end="url(#trace-arrow)"></path>
 
               <g class="decision-lane-step" data-ingest-job-step="target" transform="translate(1120 570)"><circle r="10"></circle><text y="-17">Target</text></g>
-              <g class="trace-diamond trace-ingest-merge" data-ingest-job-merge="generate" transform="translate(1010 570)"><title>Generation paths merge</title><path d="M0 -14 14 0 0 14 -14 0Z"></path></g>
               <g class="decision-lane-step" data-ingest-job-step="generate" transform="translate(900 570)"><circle r="10"></circle><text x="38" y="-17">Generate</text></g>
-              <g class="trace-diamond trace-ingest-merge" data-ingest-job-merge="authority" transform="translate(790 570)"><title>Authority paths merge</title><path d="M0 -14 14 0 0 14 -14 0Z"></path></g>
               <g class="decision-lane-step" data-ingest-job-step="authority" transform="translate(680 570)"><circle r="10"></circle><text y="-17">Authority</text></g>
               <g class="trace-diamond trace-ingest-route" data-ingest-job-step="route"><path d="M460 536 500 570 460 604 420 570Z"></path><text x="460" y="567">RESULT</text><text x="460" y="579">ROUTE</text></g>
               <g class="trace-node trace-hold-node" data-ingest-job-step="hold" transform="translate(240 570)"><circle r="11"></circle><text class="trace-hold-title" y="29">Hold</text><text class="trace-hold-reason" x="22" y="44">Retry later</text></g>
               <g class="trace-diamond trace-ingest-mutation" data-ingest-job-step="mutation"><path d="M460 656 500 690 460 724 420 690Z"></path><text x="460" y="687">PAGE</text><text x="460" y="699">CHANGE?</text></g>
               <g class="decision-lane-step" data-ingest-job-step="apply" transform="translate(680 690)"><circle r="10"></circle><text y="-17">Apply</text></g>
               <g class="decision-lane-step" data-ingest-job-step="publish" transform="translate(900 690)"><circle r="10"></circle><text y="-17">Publish</text></g>
-              <g class="trace-diamond trace-ingest-merge" data-ingest-job-merge="readback" transform="translate(1010 690)"><title>Read-back paths merge</title><path d="M0 -14 14 0 0 14 -14 0Z"></path></g>
               <g class="decision-lane-step" data-ingest-job-step="readback" transform="translate(1120 690)"><circle r="10"></circle><text y="-17">Read-back</text></g>
               <g class="decision-lane-step" data-ingest-job-step="complete" transform="translate(1340 690)"><circle r="10"></circle><text y="-17">Complete</text></g>
             </g>

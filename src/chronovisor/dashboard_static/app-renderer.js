@@ -511,7 +511,7 @@ const INGEST_JOB_TRACE_STEPS = [
 
 const INGEST_JOB_ENTRY_PATHS = {
   target: "M1190 505 V610 Q1190 620 1180 620 H1130 Q1120 620 1120 610 V580",
-  authority: "M1190 505 V610 Q1190 620 1180 620 H800 Q790 620 790 610 V584",
+  authority: "M1190 505 V610 Q1190 620 1180 620 H690 Q680 620 680 610 V580",
   route: "M1190 505 V610 Q1190 620 1180 620 H510 Q500 620 500 610 V570",
 };
 
@@ -578,7 +578,7 @@ function ingestJobTraceState(status = {}, trace = {}, ingestLane = null) {
     branch = "hold";
     current = "hold";
   } else if (retrying) {
-    markDone("target", "route");
+    markDone("target", "authority", "route");
     states.generate = "active";
     branch = "retry";
     current = "generate";
@@ -639,25 +639,33 @@ function ingestJobTraceState(status = {}, trace = {}, ingestLane = null) {
     if (traceReady) states[entry] = "active";
   }
 
+  if (branch && branch !== "hold") states.hold = "skipped";
   const onward = (from, to) => states[from] === "done" ? states[to] : "pending";
+  const routeResolved = Boolean(branch) || states.mutation !== "pending";
   const paths = {
-    "target-generate": onward("target", "generate"),
-    "generate-authority": onward("generate", "authority"),
-    "authority-route": onward("authority", "route"),
-    retry: branch === "retry" ? "active" : "pending",
-    hold: branch === "hold" ? "error" : "pending",
+    "target-generate": branch === "retry" ? "done" : onward("target", "generate"),
+    "generate-authority": branch === "retry" ? "done" : onward("generate", "authority"),
+    "authority-route": branch === "retry" ? "done" : onward("authority", "route"),
+    retry: branch === "retry" ? "active" : routeResolved ? "skipped" : "pending",
+    hold: branch === "hold" ? "error" : routeResolved ? "skipped" : "pending",
     accepted: branch === "apply" || branch === "noop" || states.mutation !== "pending"
       ? onward("route", "mutation")
-      : "pending",
-    apply: branch === "apply" ? onward("mutation", "apply") : "pending",
+      : routeResolved ? "skipped" : "pending",
+    apply: branch === "apply"
+      ? onward("mutation", "apply")
+      : branch ? "skipped" : "pending",
     noop: branch === "noop"
       ? states.readback === "pending" ? "active" : onward("mutation", "readback")
-      : "pending",
-    "apply-publish": branch === "apply" ? onward("apply", "publish") : "pending",
-    "publish-readback": branch === "apply" ? onward("publish", "readback") : "pending",
-    "readback-complete": branch || states.readback !== "pending"
+      : branch ? "skipped" : "pending",
+    "apply-publish": branch === "apply"
+      ? onward("apply", "publish")
+      : branch ? "skipped" : "pending",
+    "publish-readback": branch === "apply"
+      ? onward("publish", "readback")
+      : branch ? "skipped" : "pending",
+    "readback-complete": branch === "apply" || branch === "noop" || states.readback !== "pending"
       ? onward("readback", "complete")
-      : "pending",
+      : branch ? "skipped" : "pending",
   };
   const visibleSteps = new Set(INGEST_JOB_TRACE_STEPS);
   const visiblePaths = new Set([
@@ -717,9 +725,6 @@ function updateIngestJobTrace(trace, status, visible) {
   harness.querySelectorAll("[data-ingest-job-step]").forEach((node) => {
     node.style.display = visibleSteps.has(node.dataset.ingestJobStep) ? "" : "none";
     setDecisionSvgState(node, projection.states[node.dataset.ingestJobStep]);
-  });
-  harness.querySelectorAll("[data-ingest-job-merge]").forEach((node) => {
-    setDecisionSvgState(node, projection.states[node.dataset.ingestJobMerge]);
   });
   harness.querySelectorAll("[data-ingest-job-path]").forEach((node) => {
     node.style.display = visiblePaths.has(node.dataset.ingestJobPath) ? "" : "none";

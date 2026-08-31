@@ -298,41 +298,40 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         for tag, attrs in elements
         if tag == "path" and attrs.get("data-ingest-job-path")
     }
-    ingest_action_steps = {
+    ingest_steps = {
+        attrs["data-ingest-job-step"]
+        for tag, attrs in elements
+        if tag == "g" and attrs.get("data-ingest-job-step")
+    }
+    ingest_targets = {
+        attrs["data-ingest-job-to"]
+        for tag, attrs in elements
+        if tag == "path" and attrs.get("data-ingest-job-to")
+    }
+    assert ingest_targets <= ingest_steps
+    assert not [
+        attrs
+        for tag, attrs in elements
+        if tag == "g" and attrs.get("data-ingest-job-merge")
+    ]
+    ingest_decisions = {
         attrs["data-ingest-job-step"]
         for tag, attrs in elements
         if tag == "g"
-        and "decision-lane-step" in (attrs.get("class") or "").split()
+        and "trace-diamond" in (attrs.get("class") or "").split()
         and attrs.get("data-ingest-job-step")
     }
-    ambiguous_action_inputs = {
-        step: sorted(
-            key
-            for key, attrs in ingest_paths.items()
-            if attrs.get("data-ingest-job-to") == step
-        )
-        for step in ingest_action_steps
-        if sum(
-            attrs.get("data-ingest-job-to") == step
-            for attrs in ingest_paths.values()
-        )
-        > 1
-    }
-    assert ambiguous_action_inputs == {}
-    ingest_merges = {
-        attrs["data-ingest-job-merge"]
+    assert ingest_decisions == {"route", "mutation"}
+    assert sum(
+        attrs.get("data-ingest-job-to") == "generate"
         for tag, attrs in elements
-        if tag == "g" and attrs.get("data-ingest-job-merge")
-    }
-    assert ingest_merges == {"generate", "authority", "readback"}
-    assert {
-        merge: sum(
-            attrs.get("data-ingest-job-to") == f"{merge}-merge"
-            for tag, attrs in elements
-            if tag == "path"
-        )
-        for merge in {"generate", "readback"}
-    } == {"generate": 2, "readback": 2}
+        if tag == "path"
+    ) == 2
+    assert sum(
+        attrs.get("data-ingest-job-to") == "readback"
+        for tag, attrs in elements
+        if tag == "path"
+    ) == 2
     assert matching("data-ingest-job-step", "mutation")
     assert ingest_paths["accepted"].get("data-ingest-job-to") == "mutation"
     assert ingest_paths["apply"]["d"].split(" ", 2)[:2] != (
@@ -612,7 +611,6 @@ def test_dashboard_css_keeps_processing_milestones_and_svg_paths_connected(
   <g id="artifact" transform="translate(1050 404)"><circle r="11"></circle></g>
   <g id="decision" data-trace-key="decision" transform="translate(1190 494)"><circle r="11"></circle><text data-decision-label="true" y="-22">Validated</text></g>
   <g id="hold" data-trace-key="hold" transform="translate(1330 404)"><circle r="12"></circle><text>Hold</text></g>
-  <g id="ingest-generate-merge" class="trace-diamond" transform="translate(1010 570)"><path d="M0 -14 14 0 0 14 -14 0Z"></path></g>
   <g id="ingest-generate" class="decision-lane-step" transform="translate(900 570)"><circle r="10"></circle><text x="38" y="-17">Generate</text></g>
 </svg>
 <script src="/geometry.js"></script>
@@ -629,7 +627,6 @@ const sealDecision = document.querySelector("#seal-decision");
 const sealHold = document.querySelector("#seal-hold");
 const ingestRetry = document.querySelector("#ingest-retry");
 const ingestGenerate = document.querySelector("#ingest-generate");
-const ingestGenerateMerge = document.querySelector("#ingest-generate-merge");
 const ingestGenerateLabel = ingestGenerate.querySelector("text");
 const decision = document.querySelector("#decision");
 const hold = document.querySelector("#hold");
@@ -656,7 +653,7 @@ const sealHoldStart = screenPoint(sealHold, sealHold.getPointAtLength(0));
 const sealHoldEnd = screenPoint(sealHold, sealHold.getPointAtLength(sealHold.getTotalLength()));
 const holdCenter = holdDisplay === "none" ? null : screenPoint(hold, new DOMPoint(0, 0));
 const ingestGenerateLabelBounds = ingestGenerateLabel.getBoundingClientRect();
-const ingestGenerateMergeCenter = screenPoint(ingestGenerateMerge, new DOMPoint(0, 0));
+const ingestGenerateCenter = screenPoint(ingestGenerate, new DOMPoint(0, 0));
 const ingestRetryEnd = screenPoint(
   ingestRetry,
   ingestRetry.getPointAtLength(ingestRetry.getTotalLength()),
@@ -727,9 +724,9 @@ fetch("/geometry-result", {
     sealHoldDeltaY: holdCenter ? Math.abs(holdCenter.y - sealHoldEnd.y) : null,
     holdRadiusX: holdCenter ? 12 * Math.abs(hold.getScreenCTM().a) : null,
     ingestRetryLabelOverlap,
-    ingestRetryMergeDeltaX: Math.abs(ingestGenerateMergeCenter.x - ingestRetryEnd.x),
-    ingestRetryMergeDeltaY: Math.abs(ingestGenerateMergeCenter.y - ingestRetryEnd.y),
-    ingestGenerateMergeRadiusY: 14 * Math.abs(ingestGenerateMerge.getScreenCTM().d),
+    ingestRetryGenerateDeltaX: Math.abs(ingestGenerateCenter.x - ingestRetryEnd.x),
+    ingestRetryGenerateDeltaY: Math.abs(ingestGenerateCenter.y - ingestRetryEnd.y),
+    ingestGenerateRadiusY: 10 * Math.abs(ingestGenerate.getScreenCTM().d),
     pendingDash: getComputedStyle(ingestRetry).strokeDasharray,
     authority: {
       shortHeight: shortAuthorityHeight,
@@ -844,10 +841,10 @@ fetch("/geometry-result", {
     assert abs(geometry[0]["sealHoldDeltaX"] - geometry[0]["holdRadiusX"]) <= 0.01
     assert geometry[0]["sealHoldDeltaY"] <= 0.01
     assert geometry[0]["ingestRetryLabelOverlap"] is False
-    assert geometry[0]["ingestRetryMergeDeltaX"] <= 0.01
+    assert geometry[0]["ingestRetryGenerateDeltaX"] <= 0.01
     assert abs(
-        geometry[0]["ingestRetryMergeDeltaY"]
-        - geometry[0]["ingestGenerateMergeRadiusY"]
+        geometry[0]["ingestRetryGenerateDeltaY"]
+        - geometry[0]["ingestGenerateRadiusY"]
     ) <= 0.01
     dash, gap = (
         float(value.strip().removesuffix("px"))
@@ -990,7 +987,8 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert "filter: url(#trace-glow-violet);" in done_node_style
     assert ".decision-trace-harness .trace-single-path.pending" not in style
     assert ".decision-trace-harness .trace-hold-path.pending" not in style
-    assert ".decision-trace-harness .skipped.trace-path" not in style
+    assert ".decision-trace-harness .skipped.trace-path" in style
+    assert ".decision-trace-harness .trace-branch-label.skipped" in style
     assert ".decision-trace-harness .trace-tie-path.pending" not in style
     assert ".decision-trace-harness .done .trace-path" not in style
     assert (
@@ -1818,7 +1816,6 @@ addEventListener("DOMContentLoaded", () => {
     const nodes = [...document.querySelectorAll(
       "[data-trace-key], [data-overall-key], [data-plan-key], [data-context-option], "
         + "[data-reasoning-key], [data-decision-lane-step], [data-ingest-job-step], "
-        + "[data-ingest-job-merge], "
         + "[data-processing-job-step]"
     )].filter((node) => visible(node) && routeStates.has(node.dataset.state));
     return ends.filter((entry) => (
@@ -2007,22 +2004,18 @@ addEventListener("DOMContentLoaded", () => {
     const opacity = (node) => node ? getComputedStyle(node).opacity : null;
     const ingestEntryCrossings = () => {
       const entryPath = document.querySelector("[data-ingest-job-entry]");
-      const allowed = entryPath.dataset.ingestJobEntry === "authority"
-        ? "authority-merge"
-        : entryPath.dataset.ingestJobEntry;
+      const allowed = entryPath.dataset.ingestJobEntry;
       const samples = Array.from(
         { length: Math.ceil(entryPath.getTotalLength()) + 1 },
         (_, offset) => screenPoint(entryPath, entryPath.getPointAtLength(offset)),
       );
       return [...document.querySelectorAll(
-        ".trace-ingest-job [data-ingest-job-step], .trace-ingest-job [data-ingest-job-merge]"
+        ".trace-ingest-job [data-ingest-job-step]"
       )].filter(visible).filter((node) => {
-        const key = node.dataset.ingestJobStep
-          || `${node.dataset.ingestJobMerge}-merge`;
+        const key = node.dataset.ingestJobStep;
         return key !== allowed
           && samples.some((point) => shapeDistance(point, node) <= 1);
-      }).map((node) => node.dataset.ingestJobStep
-        || `${node.dataset.ingestJobMerge}-merge`);
+      }).map((node) => node.dataset.ingestJobStep);
     };
     scroller.scrollLeft = scroller.scrollWidth;
     const scrollerBounds = scroller.getBoundingClientRect();
@@ -2065,6 +2058,7 @@ addEventListener("DOMContentLoaded", () => {
         )].filter(visible).map((node) => [node.dataset.ingestJobPath, {
           state: node.dataset.state,
           dash: getComputedStyle(node).strokeDasharray,
+          opacity: getComputedStyle(node).opacity,
         }])),
         disconnectedPathEnds: disconnectedPathEnds(),
         entryCrossings: ingestEntryCrossings(),
@@ -2575,10 +2569,14 @@ addEventListener("DOMContentLoaded", () => {
     for state in single_result["ingestBranchStates"]:
         assert state.pop("entryCrossings") == []
         for style in state.pop("pathStyles").values():
-            if style["state"] in {"pending", "skipped"}:
+            if style["state"] == "pending":
                 assert style["dash"] not in {"none", ""}
+                assert style["opacity"] != "0"
+            elif style["state"] == "skipped":
+                assert style["opacity"] == "0"
             else:
                 assert style["dash"] in {"none", ""}
+                assert style["opacity"] != "0"
     assert single_result["ingestBranchStates"] == [
         {
             "name": "target",
