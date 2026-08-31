@@ -291,7 +291,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     ]
     assert len(ingest_entries) == 1
     assert ingest_entries[0]["d"] == (
-        "M1190 505 V610 Q1190 620 1180 620 H1130 Q1120 620 1120 610 V580"
+        "M1190 505 V560 Q1190 570 1180 570 H1130"
     )
     ingest_paths = {
         attrs["data-ingest-job-path"]: attrs
@@ -2083,6 +2083,8 @@ addEventListener("DOMContentLoaded", () => {
         name,
         branch: harness.dataset.ingestJobBranch,
         current: harness.dataset.ingestJobStep,
+        entryKey: document.querySelector("[data-ingest-job-entry]").dataset.ingestJobEntry,
+        entryPath: document.querySelector("[data-ingest-job-entry]").getAttribute("d"),
         pathStyles: Object.fromEntries([...harness.querySelectorAll(
           ".trace-ingest-job [data-ingest-job-path]"
         )].filter(visible).map((node) => [node.dataset.ingestJobPath, {
@@ -2599,6 +2601,8 @@ addEventListener("DOMContentLoaded", () => {
     }
     for state in single_result["ingestBranchStates"]:
         assert state.pop("entryCrossings") == []
+        assert state.pop("entryKey") == "target"
+        assert state.pop("entryPath") == "M1190 505 V560 Q1190 570 1180 570 H1130"
         for style in state.pop("pathStyles").values():
             if style["state"] == "pending":
                 assert style["dash"] not in {"none", ""}

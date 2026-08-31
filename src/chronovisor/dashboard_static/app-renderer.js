@@ -509,12 +509,6 @@ const INGEST_JOB_TRACE_STEPS = [
   "hold",
 ];
 
-const INGEST_JOB_ENTRY_PATHS = {
-  target: "M1190 505 V610 Q1190 620 1180 620 H1130 Q1120 620 1120 610 V580",
-  authority: "M1190 505 V610 Q1190 620 1180 620 H690 Q680 620 680 610 V580",
-  route: "M1190 505 V610 Q1190 620 1180 620 H510 Q500 620 500 610 V570",
-};
-
 function ingestJobTraceState(status = {}, trace = {}, ingestLane = null) {
   const stage = String(status?.stage || status?.current_op || "").toLowerCase();
   const llm = status?.llm && typeof status.llm === "object" ? status.llm : {};
@@ -681,12 +675,10 @@ function ingestJobTraceState(status = {}, trace = {}, ingestLane = null) {
     "publish-readback",
     "readback-complete",
   ]);
-  const entryState = failed ? "error" : states[entry];
   return {
     branch,
     current,
     entry,
-    entryState,
     paths,
     states,
     visiblePaths: [...visiblePaths],
@@ -718,9 +710,7 @@ function updateIngestJobTrace(trace, status, visible) {
   const visiblePaths = new Set(projection.visiblePaths);
   const entry = harness.querySelector("[data-ingest-job-entry]");
   if (entry) {
-    entry.dataset.ingestJobEntry = projection.entry;
-    entry.setAttribute("d", INGEST_JOB_ENTRY_PATHS[projection.entry]);
-    setDecisionSvgState(entry, projection.entryState);
+    setDecisionSvgState(entry, projection.states.target);
   }
   harness.querySelectorAll("[data-ingest-job-step]").forEach((node) => {
     node.style.display = visibleSteps.has(node.dataset.ingestJobStep) ? "" : "none";
