@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Plan: Chronovisor Decision Trace 投影基盤の置換と増築防止</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+h3{font-size:1rem;margin:1.15rem 0 0.35rem 0}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+pre{background:#151a20;color:#edf2f7;padding:1rem;border-radius:6px;overflow:auto;line-height:1.5}
+pre code{background:transparent;color:inherit;padding:0}
+table{width:100%;border-collapse:collapse;margin:0.75rem 0;font-size:0.9rem}
+th,td{border:1px solid var(--rule);padding:0.55rem 0.65rem;vertical-align:top;text-align:left}
+th{background:#f0efe9}
+.callout{background:#eef5ff;border-left:4px solid var(--accent);padding:0.8rem 1rem;border-radius:4px;margin:0.75rem 0}
+.danger{background:#fff2f0;border-left-color:var(--warn)}
+.ok{background:#eef8ef;border-left-color:var(--ok)}
+.small{font-size:0.88rem;color:var(--muted)}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_d505a7bd888242138dcf9527f8f22ef7","created_at":"2026-08-31T22:59:27+09:00","状態":"ready","slug":"decision-trace-foundation-and-architecture-guardrails"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">Chronovisor Decision Trace 投影基盤の置換と増築防止</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="ready">ready</span>
+<span><code data-bind="task_id">plan_d505a7bd888242138dcf9527f8f22ef7</code></span>
+<span data-bind="created_at">2026-08-31T22:59:27+09:00</span>
+<span>baseline <code>ca7b093</code></span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<div class="callout ok">
+<strong>結論:</strong> Dashboard全体や実行ロジックをゼロから作り直さない。一方で、Decision Traceの
+<strong>「実行事実 → 表示状態 → グラフ → SVG描画」</strong>の境界は、既存コードへの追加工事ではなく一つの経路へ置換する。
+</div>
+<ul>
+<li>実処理の状態と、Decision Trace / Processing Lanes の表示を一対一で追跡できるようにする。</li>
+<li>線・ノード・分岐の構造を実行途中で変えず、固定されたレール上で状態だけが前進する表示にする。</li>
+<li>Ingestだけの特例を廃止し、Ingest / Recall / Audit / Improve / Repair / Typed Graph の全レーンを同じ投影契約で表示する。</li>
+<li>今後の修正が再び「増築」にならないよう、禁止事項を自動検査するアーキテクチャテストとDashboardチェックSkillを残す。</li>
+<li>本番反映前にローカルpreviewで全状態をスクリーンショット・DOM・SVG実測し、ユーザーが結果を確認できる状態にする。</li>
+</ul>
+</section>
+
+<section data-section="設計判断">
+<h2>設計判断</h2>
+<table>
+<thead><tr><th>判断</th><th>採用</th><th>理由</th></tr></thead>
+<tbody>
+<tr><td>Dashboard全面再構築</td><td>しない</td><td>正常なAPI、実行ロジック、イベント、監査ログ、外観まで捨てる必要はない。</td></tr>
+<tr><td>Decision Trace投影境界</td><td>置換する</td><td>現在はbackend projectionの後でfrontendが再推論し、複数の表示経路が同じ画面を上書きしている。</td></tr>
+<tr><td>描画技術</td><td>既存SVG/CSSを再利用</td><td>新しいgraph libraryやframeworkは不要。固定座標とclass切替だけで要件を満たせる。</td></tr>
+<tr><td>移行方法</td><td>replace, then delete</td><td>新旧経路を恒久併存させない。切替と同じ作業単位で旧推論・旧geometry mutationを削除する。</td></tr>
+<tr><td>ロールバック</td><td>Git revert</td><td>feature flagを増やさず、完全に整合した旧版へ戻す方が単純で安全。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="現状の根本原因">
+<h2>現状の根本原因と調査基準</h2>
+<table>
+<thead><tr><th>場所</th><th>現状</th><th>起きる問題</th></tr></thead>
+<tbody>
+<tr><td><code>ops/decision_trace_projection.py</code></td><td><code>project_decision_trace()</code> という集約点はある。</td><td>ここを表示の唯一の正本にできていない。</td></tr>
+<tr><td><code>dashboard_static/app-renderer.js</code></td><td><code>processingLaneForTrace()</code> が <code>task_role</code> 等からレーンを再推論する。</td><td>backendの状態とProcessing Lanesが別判断になる。</td></tr>
+<tr><td><code>dashboard_static/app-renderer.js</code></td><td><code>ingestJobTraceState()</code> がIngest専用の第二のstate machineを持つ。</td><td>Ingestだけ進み、他レーンは古い表示のままになる。</td></tr>
+<tr><td><code>dashboard_static/app-renderer.js</code></td><td><code>updateDecisionSvgHarness()</code> が描画中に <code>viewBox</code>、<code>height</code>、path <code>d</code>、<code>transform</code> を変更する。</td><td>進行時に線が移動・消失・切断して見える。</td></tr>
+<tr><td><code>dashboard_static/index.html</code></td><td>quorum / generic / ingestの複数flowを一つの巨大SVGに重ね、CSSで表示を切り替える。</td><td>不要な点線、幽霊分岐、二重線、文字との重なりが残る。</td></tr>
+<tr><td>既存tests/fixtures</td><td>多数の状態fixtureはあるが、固定geometry・単一正本・単調前進という境界を強制していない。</td><td>個別修正がtest greenでも構造的な退行を防げない。</td></tr>
+</tbody>
+</table>
+<p class="small">この表は baseline <code>ca7b093e474765da15ff930c89cb24596a54243d</code> の調査結果。実行開始時に差分があれば再確認する。</p>
+</section>
+
+<section data-section="目標構造">
+<h2>目標構造</h2>
+<pre><code>runtime facts / emitted events
+        │
+        ▼
+project_decision_trace(...)      # 唯一の投影・純粋なstate reduction
+        │
+        ▼
+TraceView                        # 表示に必要な値だけ
+  graph_id / execution_id / revision
+  nodes[] / edges[] / selected_branch / cursor / labels
+        │
+        ├── Decision Trace renderer
+        └── Processing Lanes renderer
+                 │
+                 ▼
+fixed SVG geometry               # d / transform / endpointはmount後不変
+state classes + text only        # pending / active / complete / failed / skipped
+        │
+        ▼
+optional 500ms presentation queue # 見せ方だけ。事実・geometryは変更しない</code></pre>
+
+<h3>最小データ契約</h3>
+<ul>
+<li><code>execution_id</code>: 新しい実行だけが表示状態を初期化できる。</li>
+<li><code>graph_id</code>: flow topologyを特定する。同じ実行中は不変。</li>
+<li><code>revision</code>: 単調増加。古いpoll結果は破棄する。</li>
+<li><code>nodes</code> / <code>edges</code>: ID、label、state、接続関係。rendererが業務状態を推測する材料は渡さない。</li>
+<li><code>selected_branch</code>: 分岐結果はproducer/reducerが明示する。rendererが点線や色から逆算しない。</li>
+</ul>
+<p>新しい抽象framework、factory、plugin、外部dependencyは作らない。既存の <code>project_decision_trace()</code> を唯一の境界として深くし、並列endpointは増やさない。</p>
+</section>
+
+<section data-section="不変条件">
+<h2>壊してはいけない不変条件</h2>
+<ol>
+<li><strong>単一正本:</strong> Decision Trace / Processing Lanes のrendererは <code>TraceView</code> 以外のraw status、global lanes、<code>task_role</code> を読まない。</li>
+<li><strong>固定レール:</strong> 同じ <code>execution_id + graph_id</code> の全frameでpath <code>d</code>、node座標、<code>transform</code>、viewBoxが一致する。</li>
+<li><strong>単調前進:</strong> completeになったnode/edgeは、同じexecution内でpendingへ戻らない。古いpoll responseは表示を巻き戻さない。</li>
+<li><strong>枝の意味:</strong> diamondは二つ以上のlabel付き出口がある場合だけ使用する。分岐のない処理は通常nodeにする。</li>
+<li><strong>接続完全性:</strong> 全edgeの始点・終点が存在し、切断・孤立・同一出口から無関係な入口への接続がない。</li>
+<li><strong>状態の一意表示:</strong> 進行済みedgeは一本の実線として見え、同じ位置に点線が残らない。未進行edgeだけが点線になる。</li>
+<li><strong>全レーン同契約:</strong> Ingest / Recall / Audit / Improve / Repair / Typed Graph に専用rendererや隠れstate machineを作らない。</li>
+<li><strong>animation非干渉:</strong> 500msの表示queueは到着済みstateを順に見せるだけで、state reductionやSVG topologyを変更しない。</li>
+</ol>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<ul>
+<li>症状ごとの座標補正、特定preview/stateだけのCSS例外、Ingest専用分岐を追加しない。</li>
+<li>新しい経路を追加したまま旧経路を残さない。移行完了条件に旧コード削除を含める。</li>
+<li>renderer内で <code>setAttribute("d", ...)</code>、<code>setAttribute("transform", ...)</code>、viewBox/heightの状態依存変更をしない。</li>
+<li>描画側でruntime status文字列を解析し、branch、lane、完了位置を決めない。</li>
+<li>実体イベントを確認せず、見た目だけを根拠にdiamondやbranchを作らない。</li>
+<li>新しいUI framework / graph library / state libraryを追加しない。</li>
+<li>preview検証とユーザー確認より前にpush・本番再起動しない。</li>
+<li>無関係なdirty filesを編集・stage・commitしない。</li>
+</ul>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定</h2>
+<ul>
+<li>作業開始baselineは <code>main@ca7b093</code>。現在 <code>origin/main</code> より5 commits aheadのため、実行開始時にlocal/remote/runtime archiveのSHAを再照合する。</li>
+<li><code>scripts/recall_r6_harness.py</code>、<code>tests/test_recall_r6_harness.py</code>、<code>_handoff/evidence/2026-08-29-recall-teacher-salvage/</code> は別作業のため保護する。</li>
+<li>既存のruntime events、Decision Trace projection、SVG visual language、system events/model stream、state fixturesは再利用対象。</li>
+<li>業務フローの正解は現在の絵ではなくproducer eventと実行結果で確定する。Target、Authority、Generate、Apply、Publish、Read-back、Hold/Retry等の関係はPhase 1でイベントごとに確認する。</li>
+<li>ローカルpreviewは実行時点の正しい起動手順とportを再確認する。現在の運用上はpreview <code>127.0.0.1:8875</code>、本番 <code>127.0.0.1:8765</code> を分離する。</li>
+</ul>
+</section>
+
+<section data-section="変更対象">
+<h2>変更対象と残すもの</h2>
+<table>
+<thead><tr><th>分類</th><th>対象</th></tr></thead>
+<tbody>
+<tr><td>深くする既存境界</td><td><code>src/chronovisor/ops/decision_trace_projection.py</code> の <code>project_decision_trace()</code></td></tr>
+<tr><td>薄くするrenderer</td><td><code>src/chronovisor/dashboard_static/app-renderer.js</code></td></tr>
+<tr><td>固定topologyへ整理</td><td><code>src/chronovisor/dashboard_static/index.html</code> と必要最小限の <code>style.css</code></td></tr>
+<tr><td>契約test</td><td><code>tests/test_decision_trace_projection.py</code>、<code>tests/test_dashboard.py</code>、<code>tests/decision_trace_stepper.py</code>、<code>tests/fixtures/dashboard_decision_trace_states.json</code></td></tr>
+<tr><td>外部受入契約</td><td><code>/Users/trafficsign/.config/codex/skills/chronovisor-dashboard-check/SKILL.md</code> と必要最小限のhelper</td></tr>
+<tr><td>変更しない</td><td>model execution、quorum/authority判断、ingest本体、保存/公開処理、system events/model streamの意味</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist">
+<li><input type="checkbox"><span><strong>Phase 0 — baseline固定:</strong> HEAD/origin/runtime SHA、dirty worktree、preview/prod process、現行testsを記録する。A–Fの既存state matrixと全レーンの基準スクリーンショット・DOM/SVG snapshotを保存する。</span></li>
+<li><input type="checkbox"><span><strong>Phase 1 — 実イベント契約:</strong> producer → API → <code>project_decision_trace()</code> の全状態遷移を列挙し、各node/edge/branchを根拠イベントへ対応付ける。根拠のないdiamond/edgeをこの段階で削除対象にする。実イベント表が完成するまでUI実装へ進まない。</span></li>
+<li><input type="checkbox"><span><strong>Phase 2 — red architecture tests:</strong> 固定geometry、revision単調性、no-regression、edge endpoint、branch topology、全6レーンcoverage、renderer raw-source禁止を失敗するtestとして先に追加する。</span></li>
+<li><input type="checkbox"><span><strong>Phase 3 — projection置換:</strong> <code>project_decision_trace()</code> から最小 <code>TraceView</code> を返すpure reductionへ統一する。新endpointや並列adapterは作らず、既存consumerを一つずつこの出力へ切り替える。</span></li>
+<li><input type="checkbox"><span><strong>Phase 4 — fixed renderer:</strong> Decision Traceを固定SVG topology + state class/textだけのrendererへ置換する。logical edgeごとに安定IDを持たせ、mount後にgeometryを変更しない。</span></li>
+<li><input type="checkbox"><span><strong>Phase 5 — Processing Lanes統一:</strong> Ingest / Recall / Audit / Improve / Repair / Typed Graphを同じ <code>TraceView</code> から描画し、各レーンの末端整列・接続・clippingを検証する。</span></li>
+<li><input type="checkbox"><span><strong>Phase 6 — 旧経路削除:</strong> <code>processingLaneForTrace()</code> の再推論、<code>ingestJobTraceState()</code> の第二state machine、<code>updateDecisionSvgHarness()</code> のgeometry mutation、重複mega-SVG modeと対応する古いtestを削除する。削除が終わるまで移行完了にしない。</span></li>
+<li><input type="checkbox"><span><strong>Phase 7 — presentation queue:</strong> 同時到着した複数stateを約500ms間隔で順に表示する小さなqueueを追加する。新execution/revisionでcancel可能にし、事実・branch・geometryには触れさせない。</span></li>
+<li><input type="checkbox"><span><strong>Phase 8 — 増築防止契約:</strong> architecture testsをCI対象にし、<code>chronovisor-dashboard-check</code> Skillへ全state screenshot、DOM/SVG geometry hash、console、全レーン検査を組み込む。新flow追加手順を「graph definition + event mapping + fixture」に限定する。</span></li>
+<li><input type="checkbox"><span><strong>Phase 9 — preview受入:</strong> previewだけを起動し、全scenario/frameを実ブラウザで撮影・実測する。差分contact sheetと失敗一覧を作り、ユーザーが確認できるURL/証跡を提示する。本番には触れない。</span></li>
+<li><input type="checkbox"><span><strong>Phase 10 — 完了整理:</strong> 不要コード・不要fixtureを削除し、関連test一式、static checks、preview smokeを再実行する。scoped commitsとPlanログを整え、明示依頼がある場合だけ別工程でpush → 本番再起動 → runtime SHA/health/live確認を行う。</span></li>
+</ol>
+</section>
+
+<section data-section="フェーズゲート">
+<h2>フェーズゲート</h2>
+<table>
+<thead><tr><th>Gate</th><th>通過条件</th><th>失敗時</th></tr></thead>
+<tbody>
+<tr><td>G1: semantics</td><td>全表示elementに根拠eventがあり、分岐条件とoutcomeが明示される。</td><td>描画を作らずproducer/APIの調査へ戻る。</td></tr>
+<tr><td>G2: contract</td><td>architecture testsが旧実装でred、新projectionでgreenになる。</td><td>CSS座標調整を禁止し、projection boundaryを修正する。</td></tr>
+<tr><td>G3: cutover</td><td>全consumerが新 <code>TraceView</code> を使用し、旧再推論/mutationの参照が0件。</td><td>新旧併存のまま次へ進まない。</td></tr>
+<tr><td>G4: preview</td><td>全state/全レーンの自動検査と人間のvisual reviewが合格。</td><td>本番反映を行わない。</td></tr>
+<tr><td>G5: production</td><td>ユーザーの明示的なpush・再起動指示がある。</td><td>previewとcommitsを保持して停止する。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>Exit Criteria（完了条件）</h2>
+<ul>
+<li>Decision Traceと全Processing Lanesが一つのserver projection contractから描画される。</li>
+<li>旧frontend inference、Ingest専用state machine、runtime geometry mutation、重複表示経路が削除されている。</li>
+<li>同じexecution/graphの全frameでgeometry hashが100%一致する。</li>
+<li>complete → pendingの巻き戻り、古いpoll responseによる退行、線の移動・瞬断が0件。</li>
+<li>orphan node/edge、切断edge、無分岐diamond、labelなしbranch、重複点線が0件。</li>
+<li>A–Fの既存103-state matrixと追加された全flow/branch fixtureがgreen。</li>
+<li>全6レーンに最低1つの実行sequence fixtureがあり、末端・label・line continuityが合格。</li>
+<li>Decision Trace / Processing Lanes のrendererからraw status/global lanes/task_role参照、および状態依存の <code>d</code>/<code>transform</code>/viewBox変更が0件。</li>
+<li>実処理のoutcome/event sequenceがbaselineと一致し、表示変更が業務ロジックを変えていない。</li>
+<li><code>chronovisor-dashboard-check</code> Skillが新契約を検査でき、実行証跡が保存されている。</li>
+<li>previewの全スクリーンショット・DOM/SVG実測・console結果をユーザーが確認できる。本番は明示承認前に変更されていない。</li>
+</ul>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<h3>1. Projection / topology</h3>
+<ul>
+<li><code>pytest tests/test_decision_trace_projection.py tests/test_dashboard.py tests/test_dashboard_reference_fixture.py</code></li>
+<li>全graphでnode ID unique、edge endpoints existing、diamond exits &gt;= 2、branch labels presentを検査する。</li>
+<li>同じexecutionの連続frameへreducerを適用し、revision増加・completed set包含・selected branch不変を検査する。</li>
+</ul>
+
+<h3>2. Renderer architecture</h3>
+<ul>
+<li><code>tests/decision_trace_stepper.py</code> とfrontend harnessで、同じgraphの全frameの <code>d</code> / <code>transform</code> / viewBox / node座標をhash比較する。</li>
+<li>renderer sourceに禁止されたraw-state inferenceとstate依存geometry writeが存在しないことをstatic checkする。</li>
+<li>active/completed/pendingをclassだけで切り替え、一本のlogical edgeに点線と実線が同時表示されないことをDOMで確認する。</li>
+</ul>
+
+<h3>3. Exhaustive browser matrix</h3>
+<ul>
+<li><code>tests/fixtures/dashboard_decision_trace_states.json</code> のA–F 103 statesを保持し、全6 Processing Lanesと実在branch outcomeを追加する。</li>
+<li>各fixtureをpreviewで描画し、スクリーンショット、SVG/DOM snapshot、geometry hash、console logを一つのmanifestへ記録する。</li>
+<li>desktop幅とtablet幅で、線切れ、文字重なり、clipping、端点不揃い、UIの高さ変動をvisual/geometry双方で確認する。</li>
+<li>状態を実時間順に再生し、レール不変、0.5秒queue、poll順序逆転、execution切替を動画または連番shotで確認する。</li>
+</ul>
+
+<h3>4. Live preview acceptance</h3>
+<ul>
+<li>preview process/PID/served SHA/API response/DOM/consoleを同一実行として照合する。</li>
+<li>全scenarioのcontact sheetと失敗0件のsummaryを生成する。</li>
+<li>ユーザー確認後も、本番作業は別の明示指示があるまで実施しない。</li>
+</ul>
+</section>
+
+<section data-section="受入閾値">
+<h2>受入閾値</h2>
+<table>
+<thead><tr><th>指標</th><th>合格値</th></tr></thead>
+<tbody>
+<tr><td>同一graph geometry hash一致率</td><td>100%</td></tr>
+<tr><td>completedからpendingへの退行</td><td>0</td></tr>
+<tr><td>orphan / dangling / disconnected edge</td><td>0</td></tr>
+<tr><td>出口が2未満のdiamond</td><td>0</td></tr>
+<tr><td>labelなしbranch</td><td>0</td></tr>
+<tr><td>Decision Trace / Processing Lanes rendererのraw-state再推論</td><td>0</td></tr>
+<tr><td>状態依存のSVG geometry mutation</td><td>0</td></tr>
+<tr><td>未対応Processing Lane</td><td>0 / 6</td></tr>
+<tr><td>browser console error</td><td>0</td></tr>
+<tr><td>fixture screenshot未確認</td><td>0</td></tr>
+<tr><td>baselineとの業務outcome差分</td><td>0（明示仕様変更を除く）</td></tr>
+</tbody>
+</table>
+</section>
+
+<section data-section="Rollback">
+<h2>Rollback</h2>
+<ul>
+<li>各Phaseを意味のあるscoped commitにし、切替commitと旧経路削除commitの関係を実行ログへ記録する。</li>
+<li>previewで重大な退行が出た場合は、混在した新旧経路を残さず、最後に完全整合していたcommitへrevertする。</li>
+<li>production反映後に失敗した場合はdeploy commit全体をrevertし、push → restart → runtime archive SHA → health → live DOMを再照合する。</li>
+<li>スクリーンショット、DOM/SVG manifest、test logはrollback後も保持し、原因をprojection / topology / renderer / runtimeへ分類する。</li>
+</ul>
+</section>
+
+<section data-section="リスク">
+<h2>主要リスクと対策</h2>
+<table>
+<thead><tr><th>リスク</th><th>対策</th></tr></thead>
+<tbody>
+<tr><td>現在の絵を仕様と誤認する</td><td>Phase 1でproducer eventと実行結果からflowを再構成する。</td></tr>
+<tr><td>新旧二重経路が残る</td><td>G3で旧symbol/DOM group/geometry writeが0件になるまでcutover未完了とする。</td></tr>
+<tr><td>animationが状態を壊す</td><td>queue入力を完成済みTraceView snapshotに限定し、reducerと分離する。</td></tr>
+<tr><td>大量screenshotを目視だけで見落とす</td><td>geometry/topology/consoleを機械判定し、contact sheetは最終visual reviewに使う。</td></tr>
+<tr><td>別作業のdirty files混入</td><td>path-scoped diff/add/commitとpre-commit status確認を必須にする。</td></tr>
+</tbody>
+</table>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>なし</li></ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul>
+<li>このPlanの目的は個別の見た目修正ではなく、表示を再推論できない一方向の投影境界を作ること。</li>
+<li>最初のimplementation diffにCSS座標調整しか含まれない場合は設計違反。Phase 1/2へ戻る。</li>
+<li>新しいflowを追加するときにrenderer変更が必要なら、契約が浅い。原則はgraph definition + event mapping + fixtureだけで追加可能にする。</li>
+<li>実行開始時はPlan状態を <code>running</code> にし、各checkboxと実行ログをPhase直後に更新する。</li>
+<li>preview合格時点で一度ユーザーへ見せる。push・本番再起動は同じ意味に解釈せず、明示指示を待つ。</li>
+</ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log">
+<li><time>2026-08-31 22:59</time><span>Plan作成。baseline <code>main@ca7b093</code>、originより5 commits ahead、別作業のdirty files 2件 + evidence directory 1件を保護対象として記録。実装・push・restartは未実施。</span></li>
+</ol>
+</section>
+
+</body>
+</html>
