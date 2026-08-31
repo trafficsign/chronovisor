@@ -222,7 +222,7 @@ async function refreshProcessingActivity() {
   try {
     const response = await fetch("/api/activity", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    renderProcessingActivity(await response.json());
+    scheduleProcessingActivity(await response.json());
     const streamOpen = processingEventSource
       && processingEventSource.readyState === EventSource.OPEN;
     setProcessingConnection(
@@ -244,7 +244,7 @@ function connectProcessingActivityStream() {
   processingEventSource = new EventSource("/api/activity-stream");
   processingEventSource.addEventListener("activity", (event) => {
     try {
-      renderProcessingActivity(JSON.parse(event.data));
+      scheduleProcessingActivity(JSON.parse(event.data));
       setProcessingConnection("live", "LIVE · ≤250MS");
     } catch {
       setProcessingConnection("polling", "POLLING");

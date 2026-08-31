@@ -2979,6 +2979,8 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert ".decision-stream-output" in style
     assert 'fetch("/api/activity"' in app
     assert "function renderProcessingActivity" in app
+    assert "const PROCESSING_PROGRESS_INTERVAL_MS = 500" in app
+    assert app.count("scheduleProcessingActivity(") == 3
     assert "els.pending.textContent = fmt(ready);" in app
     assert "els.held.textContent = fmt(held);" in app
     assert "${semanticDeferred} semantic · ${operationalDeferred} operational" in app
@@ -3510,7 +3512,7 @@ process.stdout.write(JSON.stringify({{
     }
 
 
-def test_processing_activity_rejects_out_of_order_poll_after_newer_stream() -> None:
+def test_processing_activity_rejects_old_frames_and_paces_visible_milestones() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
     scenario = f"""
 const vm = require("node:vm");
@@ -3555,6 +3557,22 @@ class FakeNode {{
   querySelector(selector) {{ return this.querySelectorAll(selector)[0] || null; }}
 }}
 const processingLanes = new FakeNode("main");
+const clock = {{ now: 0 }};
+const timers = new Map();
+let nextTimerId = 1;
+const FakeDate = class extends Date {{ static now() {{ return clock.now; }} }};
+function advanceClock(target) {{
+  while (true) {{
+    const due = [...timers.entries()]
+      .filter(([, timer]) => timer.at <= target)
+      .sort((left, right) => left[1].at - right[1].at)[0];
+    if (!due) break;
+    clock.now = due[1].at;
+    timers.delete(due[0]);
+    due[1].callback();
+  }}
+  clock.now = target;
+}}
 const document = {{
   body: {{ dataset: {{}} }},
   createElement: (tag) => new FakeNode(tag),
@@ -3568,13 +3586,20 @@ const window = {{
     constructor(type, init = {{}}) {{ this.type = type; this.detail = init.detail; }}
   }},
   dispatchEvent: (event) => selectionEvents.push(event.detail?.pipeline || ""),
+  setTimeout: (callback, delay) => {{
+    const timerId = nextTimerId++;
+    timers.set(timerId, {{ at: clock.now + delay, callback }});
+    return timerId;
+  }},
+  clearTimeout: (timerId) => timers.delete(timerId),
 }};
-const sandbox = {{ window, document, els, STAGE_METRIC_LABELS: {{}} }};
+const sandbox = {{ window, document, els, Date: FakeDate, STAGE_METRIC_LABELS: {{}} }};
 vm.createContext(sandbox);
 vm.runInContext({json.dumps(renderer)}, sandbox);
 const renderProcessingActivity = window.__chronovisorDashboardTest.renderProcessingActivity;
+const scheduleProcessingActivity = window.__chronovisorDashboardTest.scheduleProcessingActivity;
 const keys = ["ingest", "recall", "audit", "improve", "repair", "typed_graph"];
-const payload = (generatedAt, revision, state) => ({{
+const payload = (generatedAt, revision, state, milestone = "work") => ({{
   generated_at: generatedAt,
   revision,
   active_count: state === "active" ? keys.length : 0,
@@ -3582,8 +3607,8 @@ const payload = (generatedAt, revision, state) => ({{
     key,
     label: key,
     state,
-    current_step: "work",
-    steps: [{{ key: "work", label: "Work", status: state }}],
+    current_step: milestone,
+    steps: [{{ key: milestone, label: milestone, status: state }}],
   }})),
 }});
 const acceptedStream = renderProcessingActivity(
@@ -3598,6 +3623,30 @@ const acceptedDuplicate = renderProcessingActivity(
 const acceptedBetween = renderProcessingActivity(
   payload("2026-08-12T12:00:10.500Z", "poll-between", "idle")
 );
+scheduleProcessingActivity(
+  payload("2026-08-12T12:00:12.000Z", "paced-raw", "active", "raw")
+);
+clock.now = 100;
+scheduleProcessingActivity(
+  payload("2026-08-12T12:00:13.000Z", "paced-triage", "active", "triage")
+);
+clock.now = 200;
+scheduleProcessingActivity(
+  payload("2026-08-12T12:00:14.000Z", "paced-generate-old", "active", "generate")
+);
+clock.now = 250;
+scheduleProcessingActivity(
+  payload("2026-08-12T12:00:15.000Z", "paced-generate", "active", "generate")
+);
+const pacedRevisions = [document.body.dataset.processingRevision];
+advanceClock(499);
+pacedRevisions.push(document.body.dataset.processingRevision);
+advanceClock(500);
+pacedRevisions.push(document.body.dataset.processingRevision);
+advanceClock(999);
+pacedRevisions.push(document.body.dataset.processingRevision);
+advanceClock(1000);
+pacedRevisions.push(document.body.dataset.processingRevision);
 process.stdout.write(JSON.stringify({{
   acceptedStream,
   acceptedOldPoll,
@@ -3605,6 +3654,8 @@ process.stdout.write(JSON.stringify({{
   acceptedBetween,
   selectionEvents,
   revision: document.body.dataset.processingRevision,
+  pacedRevisions,
+  pendingTimers: timers.size,
   lanes: processingLanes.querySelectorAll(".processing-lane").map((row) => ({{
     key: row.dataset.processingLane,
     state: row.className,
@@ -3621,7 +3672,15 @@ process.stdout.write(JSON.stringify({{
         "acceptedDuplicate": False,
         "acceptedBetween": False,
         "selectionEvents": [],
-        "revision": "stream-new",
+        "revision": "paced-generate",
+        "pacedRevisions": [
+            "paced-raw",
+            "paced-raw",
+            "paced-triage",
+            "paced-triage",
+            "paced-generate",
+        ],
+        "pendingTimers": 0,
         "lanes": [
             {"key": key, "state": "processing-lane active"}
             for key in ("ingest", "recall", "audit", "improve", "repair", "typed_graph")

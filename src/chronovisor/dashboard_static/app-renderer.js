@@ -154,6 +154,14 @@ let selectedProcessingLaneKey = "";
 let pinnedProcessingLaneKey = "";
 let latestProcessingGeneratedAtMs = null;
 let latestProcessingRevision = "";
+const PROCESSING_PROGRESS_INTERVAL_MS = 500;
+const processingActivityPlayback = {
+  initialized: false,
+  visibleKey: "",
+  lastRenderedAt: 0,
+  queue: [],
+  timer: null,
+};
 
 function setProcessingConnection(state, label) {
   els.processingConnection.dataset.state = state;
@@ -350,6 +358,73 @@ function renderProcessingActivity(activity) {
   if (decisionTraceProjection(latestDecisionTrace)) {
     updateDecisionSvgHarness(latestDecisionTrace);
   }
+  return true;
+}
+
+function processingActivityFrameKey(activity) {
+  const lanes = Array.isArray(activity?.lanes) ? activity.lanes : [];
+  return JSON.stringify(lanes.map((lane) => [
+    lane.key,
+    lane.work_item,
+    lane.state,
+    lane.current_step,
+    Boolean(lane.recent),
+    (Array.isArray(lane.steps) ? lane.steps : []).map((step) => [step.key, step.status]),
+  ]));
+}
+
+function scheduleProcessingActivityDrain() {
+  if (processingActivityPlayback.timer !== null || !processingActivityPlayback.queue.length) return;
+  processingActivityPlayback.timer = window.setTimeout(
+    drainProcessingActivityPlayback,
+    Math.max(
+      0,
+      PROCESSING_PROGRESS_INTERVAL_MS
+        - (Date.now() - processingActivityPlayback.lastRenderedAt),
+    ),
+  );
+}
+
+function drainProcessingActivityPlayback() {
+  processingActivityPlayback.timer = null;
+  while (processingActivityPlayback.queue.length) {
+    const next = processingActivityPlayback.queue.shift();
+    if (!renderProcessingActivity(next.activity)) continue;
+    processingActivityPlayback.visibleKey = next.key;
+    processingActivityPlayback.lastRenderedAt = Date.now();
+    break;
+  }
+  scheduleProcessingActivityDrain();
+}
+
+function scheduleProcessingActivity(activity) {
+  const key = processingActivityFrameKey(activity);
+  const skipPacing = document.visibilityState === "hidden"
+    || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  if (!processingActivityPlayback.initialized || skipPacing) {
+    if (processingActivityPlayback.timer !== null) {
+      window.clearTimeout(processingActivityPlayback.timer);
+      processingActivityPlayback.timer = null;
+    }
+    processingActivityPlayback.queue.length = 0;
+    const rendered = renderProcessingActivity(activity);
+    if (rendered) {
+      processingActivityPlayback.initialized = true;
+      processingActivityPlayback.visibleKey = key;
+      processingActivityPlayback.lastRenderedAt = Date.now();
+    }
+    return rendered;
+  }
+  if (!processingActivityPlayback.queue.length && key === processingActivityPlayback.visibleKey) {
+    return renderProcessingActivity(activity);
+  }
+  const tail = processingActivityPlayback.queue.at(-1);
+  if (tail?.key === key) {
+    tail.activity = activity;
+    return true;
+  }
+  processingActivityPlayback.queue.push({ activity, key });
+  scheduleProcessingActivityDrain();
   return true;
 }
 
@@ -1525,6 +1600,7 @@ window.__chronovisorDashboardTest = Object.assign(window.__chronovisorDashboardT
   renderDecisionTrace,
   renderDecisionTraceFrame,
   renderProcessingActivity,
+  scheduleProcessingActivity,
   newestDashboardStatus,
 });
 
