@@ -3948,8 +3948,10 @@ def _decision_trace_authority_mode(
     authority_kind = value.strip() if isinstance(value, str) and value.strip() else None
     persisted = _decision_trace_persisted_value(fact_rows, "quorum_flow")
     quorum_flow = persisted if isinstance(persisted, bool) else derived_quorum_flow
-    return authority_kind, quorum_flow, (
-        authority_kind == "single_model_v1" and quorum_flow is False
+    return (
+        authority_kind,
+        quorum_flow,
+        (authority_kind == "single_model_v1" and quorum_flow is False),
     )
 
 
@@ -4275,7 +4277,10 @@ def _decision_trace_snapshot(
         "events": events,
         "event_count": len(events),
     }
-    return snapshot | {"projection": project_decision_trace(snapshot)}
+    pipeline = _processing_pipeline_for_role(task_role) if request_sha256 else None
+    return snapshot | {
+        "projection": project_decision_trace(snapshot, pipeline=pipeline)
+    }
 
 
 def _local_consensus_snapshot(
@@ -4284,6 +4289,8 @@ def _local_consensus_snapshot(
     preferred_request_sha256: str | None = None,
     preferred_pipeline: str | None = None,
     next_active: bool = False,
+    processing_activity: Mapping[str, Any] | None = None,
+    runtime_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return live local review truth plus a redacted bounded audit tail."""
 
@@ -4513,6 +4520,43 @@ def _local_consensus_snapshot(
             decision_trace = handoff
         elif preferred_request_sha256 and not preferred_present:
             decision_trace = None
+
+    if decision_trace is not None:
+        pipeline = preferred_pipeline or (
+            _processing_pipeline_for_role(decision_trace.get("task_role"))
+            if decision_trace.get("request_sha256")
+            else None
+        )
+        activity_rows = (
+            processing_activity.get("lanes")
+            if isinstance(processing_activity, Mapping)
+            else []
+        )
+        processing_lane = next(
+            (
+                row
+                for row in activity_rows
+                if isinstance(row, Mapping) and row.get("key") == pipeline
+            ),
+            None,
+        )
+        if pipeline and processing_lane is None:
+            definitions = next(
+                (steps for key, _label, steps in _PROCESSING_LANES if key == pipeline),
+                (),
+            )
+            processing_lane = {
+                "key": pipeline,
+                "state": "idle",
+                "current_step": None,
+                "steps": _processing_step_rows(definitions, None),
+            }
+        decision_trace["projection"] = project_decision_trace(
+            decision_trace,
+            pipeline=pipeline,
+            processing_lane=processing_lane,
+            runtime_status=runtime_snapshot,
+        )
 
     snapshot = {
         "active": bool(activities)
@@ -5474,13 +5518,10 @@ def _health_materialized_snapshot(raw_paths: list[Path]) -> dict[str, Any]:
     payload_fingerprint = payload.get("fingerprint")
     result = dict(value)
     liveness = result.get("ingest_liveness")
-    liveness_stale = (
-        isinstance(liveness, dict)
-        and (
-            liveness.get("stale") is True
-            or isinstance(liveness.get("liveness"), dict)
-            and liveness["liveness"].get("stale") is True
-        )
+    liveness_stale = isinstance(liveness, dict) and (
+        liveness.get("stale") is True
+        or isinstance(liveness.get("liveness"), dict)
+        and liveness["liveness"].get("stale") is True
     )
     result["stale"] = bool(
         payload_fingerprint != fingerprint
@@ -5493,9 +5534,9 @@ def _health_materialized_snapshot(raw_paths: list[Path]) -> dict[str, Any]:
     )
     result["refreshing"] = refreshing
     result["materialized_at"] = (
-        datetime.fromtimestamp(built_at, tz=UTC).isoformat(timespec="seconds").replace(
-            "+00:00", "Z"
-        )
+        datetime.fromtimestamp(built_at, tz=UTC)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
         if built_at
         else None
     )
@@ -7109,6 +7150,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if next_trace not in {None, "active"}:
                     self.send_error(HTTPStatus.BAD_REQUEST, "Invalid next")
                     return
+                processing_activity = _processing_activity_snapshot()
                 _json_response(
                     self,
                     {
@@ -7118,6 +7160,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             preferred_request_sha256=preferred_request_sha256,
                             preferred_pipeline=preferred_pipeline,
                             next_active=next_trace == "active",
+                            processing_activity=processing_activity,
+                            runtime_snapshot=runtime_status.read_status(),
                         ),
                         "model_stream": self._model_stream_snapshot(),
                     },

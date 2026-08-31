@@ -120,7 +120,7 @@
         </div>
 
         <div class="decision-trace-scroll" id="decision-trace-scroll" tabindex="0" aria-label="Decision trace harness; narrow screens can scroll horizontally for the complete trace">
-          <svg class="decision-trace-harness" id="decision-trace-harness" viewBox="0 0 1500 650" width="1400" height="607" role="img" aria-labelledby="decision-trace-svg-title decision-trace-svg-description">
+          <svg class="decision-trace-harness" id="decision-trace-harness" viewBox="0 0 1500 750" width="1400" height="700" role="img" aria-labelledby="decision-trace-svg-title decision-trace-svg-description">
             <title id="decision-trace-svg-title">Local decision execution trace</title>
             <desc id="decision-trace-svg-description">Packet, execution planning, fixed primary, challenger and tie-break lanes, then one shared artifact and decision. Unsafe quorum branches to hold before the artifact; only a seal failure branches from the artifact.</desc>
             <defs>
@@ -148,8 +148,14 @@
               <g class="trace-model-route" data-model-key="tie_break" transform="translate(68 201)"><circle r="5"></circle><text x="14" y="4">Tie-break · <tspan data-model-value="tie_break">--</tspan></text></g>
 
               <path class="trace-context-guide" data-context-guide="all" d="M492 56 V76 Q492 86 482 86 H352 Q342 86 342 96 V140 M492 56 V76 Q492 86 482 86 H452 Q442 86 442 96 V140 M492 56 V76 Q492 86 502 86 H532 Q542 86 542 96 V140 M492 56 V76 Q492 86 502 86 H632 Q642 86 642 96 V140 M442 160 V204 Q442 214 452 214 M542 160 V204 Q542 214 552 214 M642 160 V204 Q642 214 652 214 M342 160 V204 Q342 214 352 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766"></path>
-              <path class="trace-path" data-path-key="execution-plan-context" d="M492 56 V76 Q492 86 482 86 H452 Q442 86 442 96 V140" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path" data-path-key="plan-context" d="M442 160 V204 Q442 214 452 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-context-route" data-context-path="32768" data-path-key="execution-plan-context" d="M492 56 V76 Q492 86 482 86 H352 Q342 86 342 96 V140" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-context-route" data-context-path="32768" data-path-key="plan-context" d="M342 160 V204 Q342 214 352 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-context-route" data-context-path="65536" data-path-key="execution-plan-context" d="M492 56 V76 Q492 86 482 86 H452 Q442 86 442 96 V140" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-context-route" data-context-path="65536" data-path-key="plan-context" d="M442 160 V204 Q442 214 452 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-context-route" data-context-path="98304" data-path-key="execution-plan-context" d="M492 56 V76 Q492 86 502 86 H532 Q542 86 542 96 V140" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-context-route" data-context-path="98304" data-path-key="plan-context" d="M542 160 V204 Q542 214 552 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-context-route" data-context-path="131072" data-path-key="execution-plan-context" d="M492 56 V76 Q492 86 502 86 H632 Q642 86 642 96 V140" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-context-route" data-context-path="131072" data-path-key="plan-context" d="M642 160 V204 Q642 214 652 214 H724 Q734 214 734 204 V174 Q734 164 744 164 H766" marker-end="url(#trace-arrow)"></path>
               <rect class="trace-label-backdrop trace-context-kicker-backdrop" x="304" y="60" width="88" height="19" rx="3"></rect>
               <text class="trace-kicker" x="312" y="74">CONTEXT WINDOW</text>
               <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="32768" transform="translate(342 150)"><circle r="10"></circle><circle class="trace-selected-core" r="3"></circle><text data-context-label="true" x="15" y="27">32K</text></g>
@@ -178,14 +184,16 @@
 
               <path class="trace-path trace-reasoning-path" data-path-key="plan-fit" d="M1270 164 H1280" marker-end="url(#trace-arrow)"></path>
               <g class="trace-diamond" data-plan-key="fit"><path d="M1330 118 1380 164 1330 210 1280 164Z"></path><text x="1330" y="146">FIT GATE</text><text data-plan-value="fit" x="1330" y="174">WAITING</text><text class="trace-pass" data-plan-fit-pass="true" x="1330" y="190">PASS</text></g>
-              <path class="trace-path" data-path-key="plan-dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V315 Q180 325 190 325 H220" marker-end="url(#trace-arrow)"></path>
-              <text class="trace-path-label" data-dispatch-label="true" x="700" y="258" text-anchor="middle">DISPATCH → PRIMARY</text>
+              <path class="trace-path trace-quorum-only" data-path-key="plan-dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V252 Q1476 262 1466 262 H190 Q180 262 180 272 V315 Q180 325 190 325 H220" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-single-only" data-path-key="plan-dispatch" d="M1380 164 H1466 Q1476 164 1476 174 V297 Q1476 307 1466 307 H190 Q180 307 180 317 V394 Q180 404 190 404 H220" marker-end="url(#trace-arrow)"></path>
+              <text class="trace-path-label trace-quorum-only" data-dispatch-label="true" x="700" y="258" text-anchor="middle">DISPATCH → PRIMARY</text>
+              <text class="trace-path-label trace-single-only" data-dispatch-label="true" x="700" y="303" text-anchor="middle">DISPATCH → SINGLE AUTHORITY</text>
             </g>
 
             <g class="trace-lanes" id="decision-lanes" aria-label="Local model lanes" aria-live="polite">
               <path class="trace-path trace-next-voter" data-path-key="primary-challenger" d="M1096 370 V377 Q1096 387 1086 387 H190 Q180 387 180 397 V440 Q180 450 190 450 H220" marker-end="url(#trace-arrow)"></path>
               <text class="trace-path-label trace-next-voter-label" x="490" y="381">NEXT VOTER</text>
-              <path class="trace-path trace-lane-rail trace-single-path" data-path-key="single-artifact" d="M1106 360 H1300 Q1310 360 1310 370 V393" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-lane-rail trace-single-only" data-path-key="single-artifact" d="M920 404 H1039" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-next-voter" data-path-key="challenger-agree" d="M1106 450 H1168" marker-end="url(#trace-arrow)"></path>
               <path class="trace-path trace-yes-path" data-path-key="pair-artifact-join" d="M1248 450 H1278 Q1288 450 1288 440 V414 Q1288 404 1298 404 H1299" marker-end="url(#trace-arrow)"></path>
               <text class="trace-branch-label trace-yes-label" data-pair-yes-label="true" x="1258" y="438">YES</text>
@@ -196,11 +204,16 @@
               <text class="trace-branch-label trace-yes-label" data-quorum-yes-label="true" x="1268" y="506">YES</text>
               <path class="trace-path trace-no-path trace-hold-path" data-path-key="quorum-hold" d="M1278 575 H1408 Q1418 575 1418 585 V590 Q1418 600 1428 600 H1448" marker-end="url(#trace-arrow)"></path>
               <text class="trace-branch-label trace-no-label" data-quorum-no-label="true" x="1336" y="568">NO</text>
-              <path class="trace-path trace-lane-rail" data-path-key="artifact-seal" d="M1321 404 H1360 Q1370 404 1370 414 V470" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-yes-path" data-path-key="seal-decision" d="M1404 500 H1449" marker-end="url(#trace-arrow)"></path>
-              <text class="trace-branch-label trace-yes-label trace-seal-branch" data-seal-yes-label="true" x="1422" y="492">YES</text>
-              <path class="trace-path trace-no-path trace-hold-path" data-path-key="seal-hold" d="M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588" marker-end="url(#trace-arrow)"></path>
-              <text class="trace-branch-label trace-no-label trace-seal-branch" data-seal-no-label="true" x="1382" y="544">NO</text>
+              <path class="trace-path trace-lane-rail trace-quorum-only" data-path-key="artifact-seal" d="M1321 404 H1360 Q1370 404 1370 414 V470" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-yes-path trace-quorum-only" data-path-key="seal-decision" d="M1404 500 H1449" marker-end="url(#trace-arrow)"></path>
+              <text class="trace-branch-label trace-yes-label trace-seal-branch trace-quorum-only" data-seal-yes-label="true" x="1422" y="492">YES</text>
+              <path class="trace-path trace-no-path trace-hold-path trace-quorum-only" data-path-key="seal-hold" d="M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588" marker-end="url(#trace-arrow)"></path>
+              <text class="trace-branch-label trace-no-label trace-seal-branch trace-quorum-only" data-seal-no-label="true" x="1382" y="544">NO</text>
+              <path class="trace-path trace-lane-rail trace-single-only" data-path-key="artifact-seal" d="M1061 404 H1156" marker-end="url(#trace-arrow)"></path>
+              <path class="trace-path trace-yes-path trace-single-only" data-path-key="seal-decision" d="M1190 438 V483" marker-end="url(#trace-arrow)"></path>
+              <text class="trace-branch-label trace-yes-label trace-seal-branch trace-single-only" data-seal-yes-label="true" x="1202" y="462">YES</text>
+              <path class="trace-path trace-no-path trace-hold-path trace-single-only" data-path-key="seal-hold" d="M1224 404 H1318" marker-end="url(#trace-arrow)"></path>
+              <text class="trace-branch-label trace-no-label trace-seal-branch trace-single-only" data-seal-no-label="true" x="1268" y="396">NO</text>
 
               <g class="decision-lane" data-decision-lane="primary" transform="translate(0 325)">
                 <text class="decision-role" data-lane-label="primary" x="36" y="-6">Primary</text>
@@ -276,25 +289,44 @@
 
               <g class="trace-diamond trace-agree" data-trace-key="agree"><path d="M1208 410 1248 450 1208 490 1168 450Z"></path><text x="1208" y="454">Agree?</text></g>
               <g class="trace-diamond trace-quorum-gate" data-trace-key="quorum"><path d="M1248 545 1278 575 1248 605 1218 575Z"></path><text x="1248" y="572">SAFE</text><text x="1248" y="584">QUORUM?</text></g>
-              <g class="trace-node trace-shared-node" data-trace-key="artifact" transform="translate(1310 404)"><circle r="11"></circle><text class="trace-artifact-label" data-artifact-label="true" x="-16" y="-18" text-anchor="end">Artifact</text></g>
-              <g class="trace-diamond trace-seal-gate" data-trace-key="seal"><path d="M1370 470 1404 500 1370 530 1336 500Z"></path><text x="1370" y="503">SEAL OK?</text></g>
-              <g class="trace-node trace-shared-node" data-trace-key="decision" transform="translate(1460 500)"><circle r="11"></circle><text data-decision-label="true" y="-22">Decision</text></g>
-              <g class="trace-node trace-hold-node" data-trace-key="hold" transform="translate(1460 600)"><circle r="12"></circle><text class="trace-hold-title" y="28">Hold</text><text class="trace-hold-reason" data-hold-reason="true" x="28" y="43">No safe quorum</text></g>
+              <g class="trace-node trace-shared-node trace-quorum-only" data-trace-key="artifact" transform="translate(1310 404)"><circle r="11"></circle><text class="trace-artifact-label" data-artifact-label="true" x="-16" y="-18" text-anchor="end">Artifact</text></g>
+              <g class="trace-diamond trace-seal-gate trace-quorum-only" data-trace-key="seal"><path d="M1370 470 1404 500 1370 530 1336 500Z"></path><text x="1370" y="503">SEAL OK?</text></g>
+              <g class="trace-node trace-shared-node trace-quorum-only" data-trace-key="decision" transform="translate(1460 500)"><circle r="11"></circle><text data-decision-label="true" y="-22">Decision</text></g>
+              <g class="trace-node trace-hold-node trace-quorum-only" data-trace-key="hold" transform="translate(1460 600)"><circle r="12"></circle><text class="trace-hold-title" y="28">Hold</text><text class="trace-hold-reason" data-hold-reason="true" x="28" y="43">No safe quorum</text></g>
+              <g class="trace-node trace-shared-node trace-single-only" data-trace-key="artifact" transform="translate(1050 404)"><circle r="11"></circle><text class="trace-artifact-label" data-artifact-label="true" x="-16" y="-18" text-anchor="end">Validated</text></g>
+              <g class="trace-diamond trace-seal-gate trace-single-only" data-trace-key="seal"><path d="M1190 370 1224 404 1190 438 1156 404Z"></path><text x="1190" y="407">SEAL OK?</text></g>
+              <g class="trace-node trace-shared-node trace-single-only" data-trace-key="decision" transform="translate(1190 494)"><circle r="11"></circle><text data-decision-label="true" y="-22">Validated</text></g>
+              <g class="trace-node trace-hold-node trace-single-only" data-trace-key="hold" transform="translate(1330 404)"><circle r="12"></circle><text class="trace-hold-title" y="28">Hold</text><text class="trace-hold-reason" data-hold-reason="true" x="28" y="43">Validation failed</text></g>
             </g>
 
             <g class="trace-processing-job" data-processing-job-flow aria-label="Selected processing workflow">
               <title data-processing-job-title>Selected processing workflow</title>
-              <path class="trace-path trace-lane-rail" data-processing-job-entry="waiting" d="M1190 505 V560 Q1190 570 1180 570 H1130" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-lane-rail" data-processing-job-path-slot="0" data-processing-job-to="waiting" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-lane-rail" data-processing-job-path-slot="1" data-processing-job-to="waiting" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-lane-rail" data-processing-job-path-slot="2" data-processing-job-to="waiting" marker-end="url(#trace-arrow)"></path>
-              <path class="trace-path trace-lane-rail" data-processing-job-path-slot="3" data-processing-job-to="waiting" marker-end="url(#trace-arrow)"></path>
-
-              <g class="decision-lane-step" data-processing-job-step-slot="0" data-processing-job-step="waiting"><circle r="10"></circle><text y="32">Waiting</text></g>
-              <g class="decision-lane-step" data-processing-job-step-slot="1" data-processing-job-step="waiting"><circle r="10"></circle><text y="32">Waiting</text></g>
-              <g class="decision-lane-step" data-processing-job-step-slot="2" data-processing-job-step="waiting"><circle r="10"></circle><text y="32">Waiting</text></g>
-              <g class="decision-lane-step" data-processing-job-step-slot="3" data-processing-job-step="waiting"><circle r="10"></circle><text y="32">Waiting</text></g>
-              <g class="decision-lane-step" data-processing-job-step-slot="4" data-processing-job-step="waiting"><circle r="10"></circle><text y="32">Waiting</text></g>
+              <g data-processing-job-layout="2">
+                <path class="trace-path trace-lane-rail" data-processing-job-entry="waiting" d="M1190 505 V530 Q1190 540 1180 540 H530 Q520 540 520 550 V560" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-processing-job-path-slot="0" data-processing-job-to="waiting" d="M530 570 H970" marker-end="url(#trace-arrow)"></path>
+                <g class="decision-lane-step" data-processing-job-step-slot="0" data-processing-job-step="waiting" transform="translate(520 570)"><circle r="10"></circle><text y="32">Waiting</text></g>
+                <g class="decision-lane-step" data-processing-job-step-slot="1" data-processing-job-step="waiting" transform="translate(980 570)"><circle r="10"></circle><text y="32">Waiting</text></g>
+              </g>
+              <g data-processing-job-layout="3">
+                <path class="trace-path trace-lane-rail" data-processing-job-entry="waiting" d="M1190 505 V530 Q1190 540 1180 540 H320 Q310 540 310 550 V560" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-processing-job-path-slot="0" data-processing-job-to="waiting" d="M320 570 H740" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-processing-job-path-slot="1" data-processing-job-to="waiting" d="M760 570 H1180" marker-end="url(#trace-arrow)"></path>
+                <g class="decision-lane-step" data-processing-job-step-slot="0" data-processing-job-step="waiting" transform="translate(310 570)"><circle r="10"></circle><text y="32">Waiting</text></g>
+                <g class="decision-lane-step" data-processing-job-step-slot="1" data-processing-job-step="waiting" transform="translate(750 570)"><circle r="10"></circle><text y="32">Waiting</text></g>
+                <g class="decision-lane-step" data-processing-job-step-slot="2" data-processing-job-step="waiting" transform="translate(1190 570)"><circle r="10"></circle><text y="32">Waiting</text></g>
+              </g>
+              <g data-processing-job-layout="5">
+                <path class="trace-path trace-lane-rail" data-processing-job-entry="waiting" d="M1190 505 V530 Q1190 540 1180 540 H240 Q230 540 230 550 V560" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-processing-job-path-slot="0" data-processing-job-to="waiting" d="M240 570 H480" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-processing-job-path-slot="1" data-processing-job-to="waiting" d="M500 570 H740" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-processing-job-path-slot="2" data-processing-job-to="waiting" d="M760 570 H1000" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-lane-rail" data-processing-job-path-slot="3" data-processing-job-to="waiting" d="M1020 570 H1260" marker-end="url(#trace-arrow)"></path>
+                <g class="decision-lane-step" data-processing-job-step-slot="0" data-processing-job-step="waiting" transform="translate(230 570)"><circle r="10"></circle><text y="32">Waiting</text></g>
+                <g class="decision-lane-step" data-processing-job-step-slot="1" data-processing-job-step="waiting" transform="translate(490 570)"><circle r="10"></circle><text y="32">Waiting</text></g>
+                <g class="decision-lane-step" data-processing-job-step-slot="2" data-processing-job-step="waiting" transform="translate(750 570)"><circle r="10"></circle><text y="32">Waiting</text></g>
+                <g class="decision-lane-step" data-processing-job-step-slot="3" data-processing-job-step="waiting" transform="translate(1010 570)"><circle r="10"></circle><text y="32">Waiting</text></g>
+                <g class="decision-lane-step" data-processing-job-step-slot="4" data-processing-job-step="waiting" transform="translate(1270 570)"><circle r="10"></circle><text y="32">Waiting</text></g>
+              </g>
             </g>
 
             <g class="trace-ingest-job" data-ingest-job-flow aria-label="Remaining ingest job flow">

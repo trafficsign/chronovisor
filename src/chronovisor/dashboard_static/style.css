@@ -3119,6 +3119,23 @@ canvas {
   white-space: nowrap;
 }
 
+.decision-trace-harness .trace-single-only,
+.decision-trace-harness .trace-context-route {
+  display: none;
+}
+
+.decision-trace-harness.single-model .trace-quorum-only {
+  display: none;
+}
+
+.decision-trace-harness.single-model .trace-single-only,
+.decision-trace-harness[data-context-route="32768"] [data-context-path="32768"],
+.decision-trace-harness[data-context-route="65536"] [data-context-path="65536"],
+.decision-trace-harness[data-context-route="98304"] [data-context-path="98304"],
+.decision-trace-harness[data-context-route="131072"] [data-context-path="131072"] {
+  display: block;
+}
+
 .decision-trace-harness.single-model .decision-lane[data-decision-lane="challenger"],
 .decision-trace-harness.single-model .decision-lane[data-decision-lane="tie_break"],
 .decision-trace-harness.single-model [data-model-routes-label],
@@ -3161,7 +3178,17 @@ canvas {
   display: none;
 }
 
+.decision-trace-harness .trace-processing-job [data-processing-job-layout] {
+  display: none;
+}
+
 .decision-trace-harness.single-model.processing-job:not(.ingest-job) .trace-processing-job {
+  display: block;
+}
+
+.decision-trace-harness[data-processing-job-layout="2"] [data-processing-job-layout="2"],
+.decision-trace-harness[data-processing-job-layout="3"] [data-processing-job-layout="3"],
+.decision-trace-harness[data-processing-job-layout="5"] [data-processing-job-layout="5"] {
   display: block;
 }
 

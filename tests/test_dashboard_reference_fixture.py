@@ -17,6 +17,10 @@ from urllib.parse import quote
 import pytest
 
 from chronovisor.ops import dashboard
+from chronovisor.ops.decision_trace_projection import (
+    project_decision_trace,
+    project_processing_trace,
+)
 from tests.decision_trace_stepper import (
     decision_trace_step_scenarios,
     stepper_handler,
@@ -124,15 +128,15 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert not matching("id", "processing-trace-connector-path")
     assert not matching("data-trace-entry", "true")
     assert len(matching("id", "decision-trace-harness")) == 1
-    assert matching("id", "decision-trace-harness")[0]["viewbox"] == ("0 0 1500 650")
-    assert matching("id", "decision-trace-harness")[0]["height"] == "607"
+    assert matching("id", "decision-trace-harness")[0]["viewbox"] == ("0 0 1500 750")
+    assert matching("id", "decision-trace-harness")[0]["height"] == "700"
     assert matching("id", "trace-arrow")[0]["refx"] == "6"
 
-    assert len(matching("data-trace-key", "artifact")) == 1
+    assert len(matching("data-trace-key", "artifact")) == 2
     assert len(matching("data-trace-key", "quorum")) == 1
-    assert len(matching("data-trace-key", "seal")) == 1
-    assert len(matching("data-trace-key", "decision")) == 1
-    assert len(matching("data-trace-key", "hold")) == 1
+    assert len(matching("data-trace-key", "seal")) == 2
+    assert len(matching("data-trace-key", "decision")) == 2
+    assert len(matching("data-trace-key", "hold")) == 2
     assert [
         attrs.get("data-overall-key")
         for _tag, attrs in elements
@@ -175,8 +179,8 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         'data-decision-lane-step="vote" transform="translate(1096 35)"><circle r="10"></circle><text x="-25" y="-17">Vote</text>'
         in primary_lane_markup
     )
-    assert len(matching("data-seal-yes-label", "true")) == 1
-    assert len(matching("data-seal-no-label", "true")) == 1
+    assert len(matching("data-seal-yes-label", "true")) == 2
+    assert len(matching("data-seal-no-label", "true")) == 2
     assert len(matching("data-pair-no-label", "true")) == 1
 
     paths = {
@@ -248,7 +252,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
             "M1096 370 V377 Q1096 387 1086 387 H190 Q180 387 180 397 "
             "V440 Q180 450 190 450 H220"
         ),
-        "single-artifact": "M1106 360 H1300 Q1310 360 1310 370 V393",
+        "single-artifact": "M920 404 H1039",
         "challenger-agree": "M1106 450 H1168",
         "pair-tie_break": (
             "M1208 490 V502 Q1208 512 1198 512 "
@@ -268,9 +272,13 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         "seal-decision": "M1404 500 H1449",
         "seal-hold": "M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588",
     }
-    assert {key: paths[key] for key in expected_boundary_paths} == (
-        expected_boundary_paths
-    )
+    for key, geometry in expected_boundary_paths.items():
+        assert any(
+            tag == "path"
+            and attrs.get("data-path-key") == key
+            and attrs.get("d") == geometry
+            for tag, attrs in elements
+        ), key
     assert all(
         matching("data-path-key", key)[0].get("marker-end") == "url(#trace-arrow)"
         for key in (
@@ -281,18 +289,16 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     )
     assert not {"quorum-artifact-trunk", "artifact-input"} & paths.keys()
 
-    ingest_markup = markup.split(
-        '<g class="trace-ingest-job" data-ingest-job-flow', 1
-    )[1].split("</svg>", 1)[0]
+    ingest_markup = markup.split('<g class="trace-ingest-job" data-ingest-job-flow', 1)[
+        1
+    ].split("</svg>", 1)[0]
     ingest_entries = [
         attrs
         for tag, attrs in elements
         if tag == "path" and attrs.get("data-ingest-job-entry")
     ]
     assert len(ingest_entries) == 1
-    assert ingest_entries[0]["d"] == (
-        "M1190 505 V560 Q1190 570 1180 570 H1130"
-    )
+    assert ingest_entries[0]["d"] == ("M1190 505 V560 Q1190 570 1180 570 H1130")
     ingest_paths = {
         attrs["data-ingest-job-path"]: attrs
         for tag, attrs in elements
@@ -322,20 +328,27 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         and attrs.get("data-ingest-job-step")
     }
     assert ingest_decisions == {"route", "mutation"}
-    assert sum(
-        attrs.get("data-ingest-job-to") == "generate"
-        for tag, attrs in elements
-        if tag == "path"
-    ) == 2
-    assert sum(
-        attrs.get("data-ingest-job-to") == "readback"
-        for tag, attrs in elements
-        if tag == "path"
-    ) == 2
+    assert (
+        sum(
+            attrs.get("data-ingest-job-to") == "generate"
+            for tag, attrs in elements
+            if tag == "path"
+        )
+        == 2
+    )
+    assert (
+        sum(
+            attrs.get("data-ingest-job-to") == "readback"
+            for tag, attrs in elements
+            if tag == "path"
+        )
+        == 2
+    )
     assert matching("data-ingest-job-step", "mutation")
     assert ingest_paths["accepted"].get("data-ingest-job-to") == "mutation"
-    assert ingest_paths["apply"]["d"].split(" ", 2)[:2] != (
-        ingest_paths["noop"]["d"].split(" ", 2)[:2]
+    assert (
+        ingest_paths["apply"]["d"].split(" ", 2)[:2]
+        != (ingest_paths["noop"]["d"].split(" ", 2)[:2])
     )
     assert "decision-role" not in ingest_markup
     assert "decision-sublabel" not in ingest_markup
@@ -457,7 +470,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
         attrs.get("y")
         for _tag, attrs in elements
         if "trace-path-label" in (attrs.get("class") or "").split()
-    ] == ["258", "381"]
+    ] == ["258", "303", "381"]
     assert 325 - 262 == 450 - 387 == 575 - 512 == 63
     assert matching("class", "trace-branch-label trace-yes-label")[0]["y"] == "438"
     assert matching("class", "trace-branch-label trace-no-label")[0]["y"] == "506"
@@ -469,7 +482,7 @@ def test_dashboard_reference_svg_has_one_fixed_safe_topology() -> None:
     assert matching("data-seal-yes-label", "true")[0]["x"] == "1422"
     assert matching("data-seal-no-label", "true")[0]["x"] == "1382"
     assert paths["plan-context"] == (
-        "M442 160 V204 Q442 214 452 214 H724 Q734 214 734 204 "
+        "M642 160 V204 Q642 214 652 214 H724 Q734 214 734 204 "
         "V174 Q734 164 744 164 H766"
     )
     assert "plan-headroom" not in paths
@@ -833,26 +846,35 @@ fetch("/geometry-result", {
     assert geometry[0]["holdDisplay"] != "none"
     assert geometry[0]["sealDecisionStraightDeltaX"] <= 0.01
     assert geometry[0]["sealDecisionDeltaX"] <= 0.01
-    assert abs(
-        geometry[0]["sealDecisionDeltaY"] - geometry[0]["decisionRadiusY"]
-    ) <= 0.01
+    assert (
+        abs(geometry[0]["sealDecisionDeltaY"] - geometry[0]["decisionRadiusY"]) <= 0.01
+    )
     assert geometry[0]["decisionLabelPathOverlap"] is False
     assert geometry[0]["sealHoldStraightDeltaY"] <= 0.01
     assert abs(geometry[0]["sealHoldDeltaX"] - geometry[0]["holdRadiusX"]) <= 0.01
     assert geometry[0]["sealHoldDeltaY"] <= 0.01
     assert geometry[0]["ingestRetryLabelOverlap"] is False
     assert geometry[0]["ingestRetryGenerateDeltaX"] <= 0.01
-    assert abs(
-        geometry[0]["ingestRetryGenerateDeltaY"]
-        - geometry[0]["ingestGenerateRadiusY"]
-    ) <= 0.01
+    assert (
+        abs(
+            geometry[0]["ingestRetryGenerateDeltaY"]
+            - geometry[0]["ingestGenerateRadiusY"]
+        )
+        <= 0.01
+    )
     dash, gap = (
         float(value.strip().removesuffix("px"))
         for value in geometry[0]["pendingDash"].split(",")
     )
     assert gap >= dash * 2
-    assert geometry[0]["authority"]["longHeight"] == geometry[0]["authority"]["shortHeight"]
-    assert geometry[0]["authority"]["scrollWidth"] <= geometry[0]["authority"]["clientWidth"]
+    assert (
+        geometry[0]["authority"]["longHeight"]
+        == geometry[0]["authority"]["shortHeight"]
+    )
+    assert (
+        geometry[0]["authority"]["scrollWidth"]
+        <= geometry[0]["authority"]["clientWidth"]
+    )
     assert [row["count"] for row in geometry[0]["processing"]] == [2, 3, 4, 5, 6]
     for row in geometry[0]["processing"]:
         assert row["trackRight"] <= row["laneRight"]
@@ -872,17 +894,17 @@ def test_dashboard_reference_quorum_hold_paths_and_label_stay_in_bounds() -> Non
     )
     elements = parser.elements
     paths = {
-        attrs["data-path-key"]: attrs.get("d")
+        (attrs["data-path-key"], attrs.get("class")): attrs.get("d")
         for tag, attrs in elements
         if tag == "path" and attrs.get("data-path-key")
     }
 
-    assert paths["quorum-hold"] == (
+    assert paths[("quorum-hold", "trace-path trace-no-path trace-hold-path")] == (
         "M1278 575 H1408 Q1418 575 1418 585 V590 Q1418 600 1428 600 H1448"
     )
-    assert paths["seal-hold"] == (
-        "M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588"
-    )
+    assert paths[
+        ("seal-hold", "trace-path trace-no-path trace-hold-path trace-quorum-only")
+    ] == ("M1370 530 V540 Q1370 550 1380 550 H1450 Q1460 550 1460 560 V588")
 
     hold_reason = next(
         attrs for _tag, attrs in elements if attrs.get("data-hold-reason") == "true"
@@ -891,7 +913,7 @@ def test_dashboard_reference_quorum_hold_paths_and_label_stay_in_bounds() -> Non
     assert hold_reason["x"] == "28"
     assert 1460 + int(hold_reason["x"]) == 1488 < 1500
     assert hold_reason["y"] == "43"
-    assert 600 + int(hold_reason["y"]) == 643 < 650
+    assert 600 + int(hold_reason["y"]) == 643 < 750
 
     style = (ROOT / "src/chronovisor/dashboard_static/style.css").read_text(
         encoding="utf-8"
@@ -987,9 +1009,9 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert "filter: url(#trace-glow-violet);" in done_node_style
     assert ".decision-trace-harness .trace-single-path.pending" not in style
     assert ".decision-trace-harness .trace-hold-path.pending" not in style
-    skipped_path_style = style.split(
-        ".decision-trace-harness .skipped.trace-path,", 1
-    )[1].split("}", 1)[0]
+    skipped_path_style = style.split(".decision-trace-harness .skipped.trace-path,", 1)[
+        1
+    ].split("}", 1)[0]
     assert "stroke-dasharray: 3 7;" in skipped_path_style
     assert "opacity: 0.28;" in skipped_path_style
     assert "filter: none;" in skipped_path_style
@@ -1105,15 +1127,13 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert "grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);" in style
     assert "grid-template-rows: 32px 32px minmax(0, 1fr);" in style
     assert (
-        ".decision-stream-pane {\n"
-        "  grid-template-rows: 32px minmax(0, 1fr) 32px;"
+        ".decision-stream-pane {\n  grid-template-rows: 32px minmax(0, 1fr) 32px;"
     ) in style
     responsive_style = style.split("@media (max-width: 980px) {", 1)[1].split(
         "@media (prefers-reduced-motion: reduce)", 1
     )[0]
     assert (
-        ".decision-stream-pane {\n"
-        "    grid-template-rows: 32px minmax(0, 1fr) 55px;"
+        ".decision-stream-pane {\n    grid-template-rows: 32px minmax(0, 1fr) 55px;"
     ) in responsive_style
     assert "height: 261px;" in style
     assert "min-height: 261px;" in style
@@ -1139,7 +1159,8 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert "projection.context" in harness
     assert "projection.reasoning" in harness
     assert "projection.lanes" in harness
-    assert "decisionTracePlayback" not in renderer
+    assert "const DECISION_PROGRESS_INTERVAL_MS = 500;" in renderer
+    assert "const decisionTracePlayback =" in renderer
     assert "decisionOverallState" not in renderer
     assert "decisionSealStates" not in renderer
     assert "decisionPairBranchStates" not in renderer
@@ -1149,12 +1170,8 @@ def test_dashboard_reference_keeps_selection_and_bucket_truth() -> None:
     assert '["[data-seal-no-label]", "seal-hold"]' in harness
     assert "quorum-artifact-trunk" not in harness
     assert "artifact-input" not in harness
-    assert "Math.sign(contextX - 492)" in harness
-    assert "Math.abs(contextX - 492) / 2" in harness
-    assert "`M492 56 V${86 - contextRadius} Q492 86 ${492 +" in harness
-    assert "${86 + contextRadius} V140`" in harness
-    assert "`M${contextX} 160 V204 Q${contextX} 214 ${contextX + 10} 214 `" in harness
-    assert '+ "H724 Q734 214 734 204 V174 Q734 164 744 164 H766"' in harness
+    assert "Math.sign(contextX - 492)" not in harness
+    assert 'setAttribute("d"' not in harness
     assert 'data-reasoning-output="${mode}"' in harness
     assert 'node.classList.toggle("selected", option.selected === true);' in harness
     assert 'node.classList.toggle("selected", mode === reasoning.selected);' in harness
@@ -1413,9 +1430,7 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         key: [
             {"key": step_key, "label": label, "status": "pending"}
             for step_key, label, _phase in (
-                dashboard._SINGLE_MODEL_RECALL_STEPS
-                if key == "recall"
-                else definitions
+                dashboard._SINGLE_MODEL_RECALL_STEPS if key == "recall" else definitions
             )
         ]
         for key, _label, definitions in dashboard._PROCESSING_LANES
@@ -1427,6 +1442,61 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         "tie_break": "tie:model",
     }
     monkeypatch.setattr(dashboard, "_decision_trace_models", lambda: dict(models))
+
+    def with_processing(
+        trace: dict,
+        pipeline: str | None,
+        current_step: str | None,
+        *,
+        runtime_status: dict | None = None,
+    ) -> dict:
+        if pipeline is None:
+            return trace
+        steps = processing_steps[pipeline]
+        active_index = next(
+            (
+                index
+                for index, step in enumerate(steps)
+                if step["key"] == current_step
+            ),
+            -1,
+        )
+        state = str(trace.get("state") or "idle")
+        rows = []
+        for index, step in enumerate(steps):
+            status = "pending"
+            if state == "agreed":
+                status = "done"
+            elif state == "quarantined" and active_index >= 0:
+                status = (
+                    "done"
+                    if index < active_index
+                    else "error"
+                    if index == active_index
+                    else "pending"
+                )
+            elif trace.get("active") and active_index >= 0:
+                status = (
+                    "done"
+                    if index < active_index
+                    else "active"
+                    if index == active_index
+                    else "pending"
+                )
+            rows.append({**step, "status": status})
+        projected = dict(trace)
+        projected["projection"] = project_decision_trace(
+            projected,
+            pipeline=pipeline,
+            processing_lane={
+                "key": pipeline,
+                "state": "active" if trace.get("active") else "idle",
+                "current_step": current_step,
+                "steps": rows,
+            },
+            runtime_status=runtime_status,
+        )
+        return projected
 
     payload = []
     for case_index, case in enumerate(cases):
@@ -1537,6 +1607,32 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         assert [lane["context_tokens"] for lane in trace["lanes"]] == case[
             "lane_context_tokens"
         ]
+        ingest_runtime = None
+        if case["workflow"] == "ingest":
+            ingest_runtime = (
+                {
+                    "state": "error",
+                    "stage": "failed",
+                    "current_job_id": request,
+                }
+                if trace["state"] == "quarantined"
+                else {
+                    "state": "running",
+                    "stage": {
+                        "triage": "triage",
+                        "generate": "generate",
+                        "consensus": "authorization",
+                        "apply": "apply",
+                    }.get(case["processing_stage"], "authorization"),
+                    "current_job_id": request,
+                }
+            )
+        trace = with_processing(
+            trace,
+            case["workflow"],
+            case["processing_stage"],
+            runtime_status=ingest_runtime,
+        )
         payload.append({"case": {**case, "kind": "decision"}, "trace": trace})
 
     single_request = "9" * 64
@@ -1588,6 +1684,16 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
             },
         ],
         single_decision,
+    )
+    single_trace = with_processing(
+        single_trace,
+        "ingest",
+        "consensus",
+        runtime_status={
+            "state": "running",
+            "stage": "authorization",
+            "current_job_id": single_request,
+        },
     )
     payload.append({"case": single_case, "trace": single_trace})
     ingest_visual_cases = [
@@ -1756,11 +1862,47 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
             },
         },
     ]
+    for item in ingest_visual_cases:
+        item["processing"] = project_processing_trace(
+            "ingest",
+            {
+                "key": "ingest",
+                "state": (
+                    "active" if item["status"].get("state") == "running" else "idle"
+                ),
+                "current_step": item.get("lane_step"),
+                "steps": processing_steps["ingest"],
+            },
+            item["status"],
+            {**single_trace, **item["trace"]},
+        )
 
-    harness = """
+    pipeline_projections = {}
+    for pipeline, steps in processing_steps.items():
+        middle = steps[len(steps) // 2]["key"]
+        pipeline_trace = {**single_trace, "active": True, "state": "active"}
+        runtime_status = (
+            {
+                "state": "running",
+                "stage": "authorization",
+                "current_job_id": single_request,
+            }
+            if pipeline == "ingest"
+            else None
+        )
+        pipeline_projections[pipeline] = with_processing(
+            pipeline_trace,
+            pipeline,
+            middle,
+            runtime_status=runtime_status,
+        )["projection"]
+
+    harness = (
+        """
 const fixtures = __FIXTURES__;
 const ingestVisualCases = __INGEST_VISUAL_CASES__;
 const processingSteps = __PROCESSING_STEPS__;
+const pipelineProjections = __PIPELINE_PROJECTIONS__;
 const workflowKeys = [...new Set(fixtures.map(({ case: fixture }) => fixture.workflow).filter(Boolean))];
 const selectedPipelines = [];
 function browserFailure(detail) {
@@ -1919,8 +2061,7 @@ addEventListener("DOMContentLoaded", () => {
         );
       }
       api.updateIngestJobTrace(
-        { ...selected.trace, ...ingestCase.trace },
-        ingestCase.status,
+        ingestCase.processing,
         true,
       );
       const ingestHarness = document.querySelector("#decision-trace-harness");
@@ -1936,13 +2077,17 @@ addEventListener("DOMContentLoaded", () => {
     }
     if (requestedPipeline) {
       const requestedSteps = processingSteps[requestedPipeline];
+      const projectedTrace = {
+        ...selected.trace,
+        projection: pipelineProjections[requestedPipeline],
+      };
       renderFixture(
         {
           ...selected.case,
           workflow: requestedPipeline,
           processing_stage: requestedSteps[Math.floor(requestedSteps.length / 2)].key,
         },
-        selected.trace,
+        projectedTrace,
         `screenshot-${requestedPipeline}`,
       );
       const row = document.querySelector(`[data-processing-lane="${requestedPipeline}"]`);
@@ -1972,8 +2117,14 @@ addEventListener("DOMContentLoaded", () => {
     const harness = document.querySelector("#decision-trace-harness");
     const selectedContext = document.querySelector("[data-context-option].selected");
     const selectedReasoning = document.querySelector("[data-reasoning-key].selected");
+    const visibleTraceNode = (key) => [...document.querySelectorAll(
+      `[data-trace-key="${key}"]`
+    )].find(visible);
+    const visiblePath = (key) => [...document.querySelectorAll(
+      `[data-path-key="${key}"]`
+    )].find(visible);
     const singleArtifact = document.querySelector('[data-path-key="single-artifact"]');
-    const artifact = document.querySelector('[data-trace-key="artifact"]');
+    const artifact = visibleTraceNode("artifact");
     const singleArtifactEnd = screenPoint(
       singleArtifact,
       singleArtifact.getPointAtLength(singleArtifact.getTotalLength())
@@ -1986,23 +2137,23 @@ addEventListener("DOMContentLoaded", () => {
     const terminalCenters = [
       document.querySelector('[data-decision-lane="primary"] [data-decision-lane-step="validate"]'),
       artifact,
-      document.querySelector('[data-trace-key="seal"]'),
+      visibleTraceNode("seal"),
     ].map(shapeCenter);
-    const dispatch = document.querySelector('[data-path-key="plan-dispatch"]');
+    const dispatch = visiblePath("plan-dispatch");
     const dispatchRail = screenPoint(
       dispatch,
       dispatch.getPointAtLength(dispatch.getTotalLength() / 2)
     );
     const planBottom = screenPoint(harness, new DOMPoint(0, 210));
-    const holdCenter = shapeCenter(document.querySelector('[data-trace-key="hold"]'));
+    const holdCenter = shapeCenter(visibleTraceNode("hold"));
     const ingestEntry = document.querySelector("[data-ingest-job-entry]");
     const ingestEntryStart = ingestEntry
       ? screenPoint(ingestEntry, ingestEntry.getPointAtLength(0))
       : null;
-    const decisionNode = document.querySelector('[data-trace-key="decision"]');
+    const decisionNode = visibleTraceNode("decision");
     const decisionCenter = shapeCenter(decisionNode);
     const decisionLabelBounds = decisionNode.querySelector("[data-decision-label]").getBoundingClientRect();
-    const sealDecision = document.querySelector('[data-path-key="seal-decision"]');
+    const sealDecision = visiblePath("seal-decision");
     const sealDecisionStart = screenPoint(sealDecision, sealDecision.getPointAtLength(0));
     const sealDecisionEnd = screenPoint(
       sealDecision,
@@ -2093,8 +2244,7 @@ addEventListener("DOMContentLoaded", () => {
         .map((node) => ({ key: node.dataset.lanePath, ...pathState(node) }))]));
     scroller.scrollLeft = 0;
     const ingestBranchStates = fixture.id === "S" ? ingestVisualCases.map((item) => {
-      const branchTrace = { ...trace, ...item.trace };
-      const { name, status } = item;
+      const { name } = item;
       renderFixture(fixture, trace, `ingest-${item.name}`);
       if (item.lane_step) {
         renderFixture(
@@ -2103,7 +2253,7 @@ addEventListener("DOMContentLoaded", () => {
           `source-lag-${item.name}`,
         );
       }
-      api.updateIngestJobTrace(branchTrace, status, true);
+      api.updateIngestJobTrace(item.processing, true);
       return {
         name,
         branch: harness.dataset.ingestJobBranch,
@@ -2161,7 +2311,8 @@ addEventListener("DOMContentLoaded", () => {
       singleLayout: {
         viewBox: harness.getAttribute("viewBox"),
         height: harness.getAttribute("height"),
-        dispatchLabelY: document.querySelector("[data-dispatch-label]")?.getAttribute("y"),
+        dispatchLabelY: [...document.querySelectorAll("[data-dispatch-label]")]
+          .find(visible)?.getAttribute("y"),
         dispatchCenterDeltaY: Math.abs(
           dispatchRail.y - ((planBottom.y + terminalCenters[0].y) / 2)
         ),
@@ -2209,7 +2360,8 @@ addEventListener("DOMContentLoaded", () => {
   results[0].restoredLayout = {
     viewBox: document.querySelector("#decision-trace-harness").getAttribute("viewBox"),
     height: document.querySelector("#decision-trace-harness").getAttribute("height"),
-    dispatchLabelY: document.querySelector("[data-dispatch-label]").getAttribute("y"),
+    dispatchLabelY: [...document.querySelectorAll("[data-dispatch-label]")]
+      .find(visible).getAttribute("y"),
   };
   const singleFixture = fixtures.find(({ case: fixture }) => fixture.id === "S");
   renderFixture(singleFixture.case, singleFixture.trace, "lane-tabs");
@@ -2233,6 +2385,10 @@ addEventListener("DOMContentLoaded", () => {
       })),
     });
     document.querySelector(`[data-processing-lane="${pipeline}"]`).click();
+    api.renderDecisionTraceFrame({
+      ...singleFixture.trace,
+      projection: pipelineProjections[pipeline],
+    });
     const ingestFlow = document.querySelector("[data-ingest-job-flow]");
     const processingFlow = document.querySelector("[data-processing-job-flow]");
     return {
@@ -2269,12 +2425,19 @@ addEventListener("DOMContentLoaded", () => {
     body: JSON.stringify(results),
   }).catch(browserFailure);
 });
-""".replace("__FIXTURES__", json.dumps(payload, ensure_ascii=False)).replace(
-        "__INGEST_VISUAL_CASES__",
-        json.dumps(ingest_visual_cases, ensure_ascii=False),
-    ).replace(
-        "__PROCESSING_STEPS__",
-        json.dumps(processing_steps, ensure_ascii=False),
+""".replace("__FIXTURES__", json.dumps(payload, ensure_ascii=False))
+        .replace(
+            "__INGEST_VISUAL_CASES__",
+            json.dumps(ingest_visual_cases, ensure_ascii=False),
+        )
+        .replace(
+            "__PROCESSING_STEPS__",
+            json.dumps(processing_steps, ensure_ascii=False),
+        )
+        .replace(
+            "__PIPELINE_PROJECTIONS__",
+            json.dumps(pipeline_projections, ensure_ascii=False),
+        )
     )
     page = (
         (dashboard.STATIC_DIR / "index.html")
@@ -2385,13 +2548,11 @@ addEventListener("DOMContentLoaded", () => {
                 )
             )
             visual_dir.mkdir(parents=True, exist_ok=True)
-            visual_requests = [
-                (item["case"]["id"], None, None) for item in payload
-            ] + [
-                ("S", item["name"], None) for item in ingest_visual_cases
-            ] + [
-                ("S", None, pipeline) for pipeline in roles
-            ]
+            visual_requests = (
+                [(item["case"]["id"], None, None) for item in payload]
+                + [("S", item["name"], None) for item in ingest_visual_cases]
+                + [("S", None, pipeline) for pipeline in roles]
+            )
             for index, (case_id, ingest_state, pipeline) in enumerate(visual_requests):
                 stem = case_id.replace("::", "__")
                 if ingest_state:
@@ -2508,8 +2669,8 @@ addEventListener("DOMContentLoaded", () => {
         assert result["layout"]["nextPanelGap"] == 12
         assert result["layout"]["generationMeterHeight"] == 32
         assert result["layout"]["decisionLabelPathOverlap"] is False
-        assert result["singleLayout"]["viewBox"] == "0 0 1500 650"
-        assert result["singleLayout"]["height"] == "607"
+        assert result["singleLayout"]["viewBox"] == "0 0 1500 750"
+        assert result["singleLayout"]["height"] == "700"
         assert result["disconnectedPathEnds"] == [], case["id"]
         projection = trace["projection"]
         assert result["nodes"] == {
@@ -2750,17 +2911,25 @@ addEventListener("DOMContentLoaded", () => {
                 []
                 if pipeline == "ingest"
                 else [
-                    "done" if index < len(processing_steps[pipeline]) // 2 else
-                    "active" if index == len(processing_steps[pipeline]) // 2 else
-                    "pending"
+                    "done"
+                    if index < len(processing_steps[pipeline]) // 2
+                    else "active"
+                    if index == len(processing_steps[pipeline]) // 2
+                    else "pending"
                     for index, _step in enumerate(processing_steps[pipeline])
                 ]
             ),
             "processingPathStates": (
                 []
                 if pipeline == "ingest"
-                else ["active"]
-                + ["pending"] * (len(processing_steps[pipeline]) - 2)
+                else [
+                    "done"
+                    if index < len(processing_steps[pipeline]) // 2 - 1
+                    else "active"
+                    if index == len(processing_steps[pipeline]) // 2 - 1
+                    else "pending"
+                    for index in range(len(processing_steps[pipeline]) - 1)
+                ]
             ),
             "disconnectedPathEnds": [],
         }
@@ -2774,7 +2943,7 @@ addEventListener("DOMContentLoaded", () => {
         )
     ]
     assert by_id[cases[0]["id"]]["restoredLayout"] == {
-        "viewBox": "0 0 1500 650",
-        "height": "607",
+        "viewBox": "0 0 1500 750",
+        "height": "700",
         "dispatchLabelY": "258",
     }

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Final
 
-TRACE_PROJECTION_SCHEMA: Final = "chronovisor.decision-trace-projection.v1"
+TRACE_PROJECTION_SCHEMA: Final = "chronovisor.decision-trace-projection.v2"
 TRACE_SINGLE_AUTHORITY_KIND: Final = "single_model_v1"
 TRACE_STATES: Final = frozenset({"pending", "active", "done", "skipped", "error"})
 TRACE_ROLES: Final = ("primary", "challenger", "tie_break")
@@ -43,6 +43,31 @@ TRACE_PATH_KEYS: Final = (
 
 _CONTEXT_OPTIONS: Final = (32_768, 65_536, 98_304, 131_072)
 _REASONING_MODES: Final = ("off", "low", "medium", "high")
+_INGEST_JOB_STEPS: Final = (
+    "target",
+    "generate",
+    "authority",
+    "route",
+    "mutation",
+    "apply",
+    "publish",
+    "readback",
+    "complete",
+    "hold",
+)
+_INGEST_JOB_EDGES: Final = {
+    "target-generate": ("target", "generate", None),
+    "generate-authority": ("generate", "authority", None),
+    "authority-route": ("authority", "route", None),
+    "retry": ("route", "generate", "RETRY"),
+    "hold": ("route", "hold", "HOLD"),
+    "accepted": ("route", "mutation", "ACCEPTED"),
+    "apply": ("mutation", "apply", "APPLY"),
+    "noop": ("mutation", "readback", "NOOP"),
+    "apply-publish": ("apply", "publish", None),
+    "publish-readback": ("publish", "readback", None),
+    "readback-complete": ("readback", "complete", None),
+}
 
 
 def _state(value: object, default: str = "pending") -> str:
@@ -97,7 +122,364 @@ def _selected_path(target_state: str, *, selected: bool) -> str:
     return "active" if target_state == "pending" else target_state
 
 
-def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
+def _ingest_processing_projection(
+    status: Mapping[str, Any],
+    trace: Mapping[str, Any],
+    lane: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reduce ingest runtime facts into the fixed continuation graph."""
+
+    stage = str(status.get("stage") or status.get("current_op") or "").lower()
+    llm_value = status.get("llm")
+    llm = llm_value if isinstance(llm_value, Mapping) else {}
+    host_value = status.get("host_phase")
+    host = host_value if isinstance(host_value, Mapping) else {}
+    role = str(trace.get("task_role") or "").lower()
+    batch_value = status.get("batch")
+    batch = batch_value if isinstance(batch_value, Mapping) else {}
+    current_job = bool(
+        status.get("current_job_id")
+        or status.get("current_raw")
+        or batch.get("active")
+        or llm.get("active")
+        or (lane.get("state") == "active" and lane.get("recent") is not True)
+    )
+    terminal = stage in {
+        "complete",
+        "completion-ack",
+        "projection",
+        "semantic-noop",
+    } or (not current_job and bool(status.get("last_success")))
+    host_matches_stage = str(host.get("name") or "").lower() == stage
+    host_complete = host_matches_stage and host.get("state") == "complete"
+    states = dict.fromkeys(_INGEST_JOB_STEPS, "pending")
+    failed = (
+        str(status.get("state") or "").lower() == "error"
+        or stage == "failed"
+        or (host_matches_stage and host.get("state") == "error")
+        or llm.get("event") == "error"
+    )
+    trace_ready = str(trace.get("state") or "") in {"ready", "agreed"}
+    authority_ready = role.startswith("ingest_reconciliation") and trace_ready
+    retrying = stage in {"local-regenerate", "frontier-regenerate"}
+    success_value = status.get("last_success")
+    last_success = success_value if isinstance(success_value, Mapping) else {}
+    disposition = str(
+        status.get("ingest_disposition")
+        or last_success.get("local_consensus_status")
+        or last_success.get("frontier_status")
+        or ""
+    ).lower()
+    disposition_branch = (
+        "noop"
+        if disposition == "confirmed_noop"
+        else "apply"
+        if disposition == "apply_available"
+        else ""
+    )
+    entry = (
+        "target"
+        if stage == "triage" or role.startswith("ingest_triage")
+        else "authority"
+        if role.startswith("ingest_recall_metadata")
+        else "route"
+    )
+
+    def mark_done(*keys: str) -> None:
+        for key in keys:
+            states[key] = "done"
+
+    current = ""
+    branch = ""
+    if terminal:
+        mark_done(
+            "target",
+            "generate",
+            "authority",
+            "route",
+            "mutation",
+            "readback",
+            "complete",
+        )
+        branch = disposition_branch or "apply"
+        if branch == "noop":
+            states["apply"] = "skipped"
+            states["publish"] = "skipped"
+        else:
+            mark_done("apply", "publish")
+        current = "complete"
+    elif failed:
+        states["route"] = "error"
+        states["hold"] = "error"
+        branch = "hold"
+        current = "hold"
+    elif retrying:
+        mark_done("target", "authority", "route")
+        states["generate"] = "active"
+        branch = "retry"
+        current = "generate"
+    elif stage == "triage":
+        states["target"] = "active" if trace_ready else "pending"
+        current = "target"
+    elif stage == "target-resolution":
+        states["target"] = "done" if host_complete else "active"
+        current = "generate" if host_complete else "target"
+    elif stage == "generate":
+        mark_done("target")
+        generated = llm.get("active") is False and llm.get("event") == "done"
+        states["generate"] = "done" if generated else "active"
+        current = "authority" if generated else "generate"
+    elif stage in {
+        "authorization",
+        "authorization-continuation",
+        "local-consensus-review",
+        "frontier-review",
+        "locked",
+    }:
+        mark_done("target", "generate")
+        states["authority"] = "done" if authority_ready else "active"
+        states["route"] = "active" if authority_ready else "pending"
+        current = "route" if authority_ready else "authority"
+    elif stage == "apply":
+        mark_done("target", "generate", "authority", "route")
+        branch = disposition_branch
+        if branch:
+            mark_done("mutation")
+        else:
+            states["mutation"] = "active"
+        if branch == "noop":
+            states["apply"] = "skipped"
+            states["publish"] = "skipped"
+            current = "readback" if host_complete else "mutation"
+        elif branch == "apply":
+            states["apply"] = "done" if host_complete else "active"
+            current = "publish" if host_complete else "apply"
+        else:
+            current = "mutation"
+    elif stage in {"semantic-publish", "claim-publish", "state-register"}:
+        mark_done("target", "generate", "authority", "route", "mutation", "apply")
+        states["publish"] = "done" if host_complete else "active"
+        branch = "apply"
+        current = "readback" if host_complete else "publish"
+    elif stage == "read-back":
+        mark_done("target", "generate", "authority", "route", "mutation")
+        branch = disposition_branch
+        if branch == "apply":
+            mark_done("apply", "publish")
+        elif branch == "noop":
+            states["apply"] = "skipped"
+            states["publish"] = "skipped"
+        states["readback"] = "done" if host_complete else "active"
+        current = "complete" if host_complete else "readback"
+    else:
+        current = entry
+        if trace_ready:
+            states[entry] = "active"
+
+    lane_floor = (
+        {"generate": "generate", "consensus": "authority", "apply": "mutation"}.get(
+            str(lane.get("current_step") or "").lower(),
+            "",
+        )
+        if lane.get("state") == "active" and lane.get("recent") is not True
+        else ""
+    )
+    if (
+        not branch
+        and lane_floor
+        and _INGEST_JOB_STEPS.index(current) < _INGEST_JOB_STEPS.index(lane_floor)
+    ):
+        floor_index = _INGEST_JOB_STEPS.index(lane_floor)
+        mark_done(*_INGEST_JOB_STEPS[:floor_index])
+        states[lane_floor] = "active"
+        current = lane_floor
+
+    if branch and branch != "hold":
+        states["hold"] = "skipped"
+
+    def onward(source: str, target: str) -> str:
+        return states[target] if states[source] == "done" else "pending"
+
+    route_resolved = bool(branch) or states["mutation"] != "pending"
+    paths = {
+        "target-generate": "done"
+        if branch == "retry"
+        else onward("target", "generate"),
+        "generate-authority": "done"
+        if branch == "retry"
+        else onward("generate", "authority"),
+        "authority-route": "done"
+        if branch == "retry"
+        else onward("authority", "route"),
+        "retry": "active"
+        if branch == "retry"
+        else "skipped"
+        if route_resolved
+        else "pending",
+        "hold": "error"
+        if branch == "hold"
+        else "skipped"
+        if route_resolved
+        else "pending",
+        "accepted": (
+            onward("route", "mutation")
+            if branch in {"apply", "noop"} or states["mutation"] != "pending"
+            else "skipped"
+            if route_resolved
+            else "pending"
+        ),
+        "apply": (
+            onward("mutation", "apply")
+            if branch == "apply"
+            else "skipped"
+            if branch
+            else "pending"
+        ),
+        "noop": (
+            (
+                "active"
+                if states["readback"] == "pending"
+                else onward("mutation", "readback")
+            )
+            if branch == "noop"
+            else "skipped"
+            if branch
+            else "pending"
+        ),
+        "apply-publish": (
+            onward("apply", "publish")
+            if branch == "apply"
+            else "skipped"
+            if branch
+            else "pending"
+        ),
+        "publish-readback": (
+            onward("publish", "readback")
+            if branch == "apply"
+            else "skipped"
+            if branch
+            else "pending"
+        ),
+        "readback-complete": (
+            onward("readback", "complete")
+            if branch in {"apply", "noop"} or states["readback"] != "pending"
+            else "skipped"
+            if branch
+            else "pending"
+        ),
+    }
+    node_labels = {
+        "target": "Target",
+        "generate": "Generate",
+        "authority": "Authority",
+        "route": "Result route",
+        "mutation": "Page change?",
+        "apply": "Apply",
+        "publish": "Publish",
+        "readback": "Read-back",
+        "complete": "Complete",
+        "hold": "Hold",
+    }
+    return {
+        "kind": "ingest",
+        "pipeline": "ingest",
+        "graph_id": "processing:ingest:v2",
+        "current": current,
+        "selected_branch": branch or None,
+        "entry": entry,
+        "states": states,
+        "paths": paths,
+        "nodes": [
+            {
+                "id": key,
+                "label": node_labels[key],
+                "state": states[key],
+                "type": "decision" if key in {"route", "mutation"} else "milestone",
+            }
+            for key in _INGEST_JOB_STEPS
+        ],
+        "edges": [
+            {
+                "id": key,
+                "source": source,
+                "target": target,
+                "label": label,
+                "state": paths[key],
+            }
+            for key, (source, target, label) in _INGEST_JOB_EDGES.items()
+        ],
+    }
+
+
+def _linear_processing_projection(
+    pipeline: str, lane: Mapping[str, Any]
+) -> dict[str, Any]:
+    rows = lane.get("steps")
+    steps = (
+        [row for row in rows if isinstance(row, Mapping)]
+        if isinstance(rows, list)
+        else []
+    )
+    nodes = [
+        {
+            "id": str(row.get("key") or f"step-{index}"),
+            "label": str(row.get("label") or row.get("key") or f"Step {index + 1}"),
+            "state": _state(row.get("status")),
+            "type": "milestone",
+        }
+        for index, row in enumerate(steps[:5])
+    ]
+    edges = []
+    for source, target in zip(nodes, nodes[1:], strict=False):
+        target_state = target["state"]
+        state = target_state if source["state"] == "done" else "pending"
+        edges.append(
+            {
+                "id": f"{source['id']}-{target['id']}",
+                "source": source["id"],
+                "target": target["id"],
+                "label": None,
+                "state": state,
+            }
+        )
+    return {
+        "kind": "linear",
+        "pipeline": pipeline,
+        "graph_id": f"processing:{pipeline}:v2",
+        "current": str(lane.get("current_step") or "") or None,
+        "selected_branch": None,
+        "entry": nodes[0]["id"] if nodes else None,
+        "nodes": nodes,
+        "edges": edges,
+        "states": {node["id"]: node["state"] for node in nodes},
+        "paths": {edge["id"]: edge["state"] for edge in edges},
+    }
+
+
+def project_processing_trace(
+    pipeline: str | None,
+    lane: Mapping[str, Any] | None = None,
+    runtime_status: Mapping[str, Any] | None = None,
+    trace: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Project any Processing Lane through one display contract."""
+
+    if not pipeline:
+        return None
+    lane = lane or {}
+    trace = trace or {}
+    if pipeline == "ingest":
+        return _ingest_processing_projection(runtime_status or {}, trace, lane)
+    return _linear_processing_projection(pipeline, lane)
+
+
+def project_decision_trace(
+    trace: Mapping[str, Any],
+    *,
+    pipeline: str | None = None,
+    processing_lane: Mapping[str, Any] | None = None,
+    runtime_status: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return the complete, versioned display contract for the fixed SVG topology."""
 
     overall = _rows_by_key(trace.get("overall"))
@@ -181,6 +563,9 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
             "rails": {key: step_states[phase] for key, phase in TRACE_RAILS.items()},
             "repair": repair_state,
             "repair_attempt": repair_count,
+            "label": str(lane.get("label") or role.replace("_", " ").title()),
+            "think": str(lane.get("think") or "") or None,
+            "result": str(lane.get("result") or "") or None,
         }
         for key in ("model", "revision"):
             value = lane.get(key)
@@ -321,9 +706,7 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
         else str(trace.get("summary") or "No safe quorum").split("·", 1)[0].strip()
     )
     display_lanes = lanes
-    display_model_routes = {
-        role: lanes[role]["state"] for role in TRACE_ROLES
-    }
+    display_model_routes = {role: lanes[role]["state"] for role in TRACE_ROLES}
     labels: dict[str, Any] = {
         "fit": "BYPASS"
         if selected_reasoning == "off" and fit_state != "pending"
@@ -368,8 +751,36 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
             }
         )
 
+    processing = project_processing_trace(
+        pipeline,
+        processing_lane,
+        runtime_status,
+        trace,
+    )
+    execution_id = str(
+        trace.get("request_sha256")
+        or (runtime_status or {}).get("current_job_id")
+        or (runtime_status or {}).get("current_raw")
+        or "idle"
+    )
+    revision_candidates = [
+        str(value)
+        for value in (
+            trace.get("updated_at"),
+            (runtime_status or {}).get("updated_at"),
+            (runtime_status or {}).get("timestamp"),
+        )
+        if value
+    ]
+    revision = max(revision_candidates, default=str(trace.get("event_count") or "0"))
     result = {
         "schema": TRACE_PROJECTION_SCHEMA,
+        "execution_id": execution_id,
+        "graph_id": f"decision:{'single' if single_model else 'quorum'}:v2",
+        "revision": revision,
+        "pipeline": pipeline,
+        "trace_state": trace_state,
+        "outcome_kind": str(outcome.get("kind") or "idle"),
         "mode": "single" if single_model else "quorum",
         "single_model": single_model,
         "authority_kind": authority_kind,
@@ -391,6 +802,8 @@ def project_decision_trace(trace: Mapping[str, Any]) -> dict[str, Any]:
         },
         "labels": labels,
     }
+    if processing is not None:
+        result["processing"] = processing
     if authority is not None:
         result["authority"] = authority
     return result

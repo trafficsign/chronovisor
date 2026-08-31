@@ -82,6 +82,178 @@ def test_projection_topology_matches_the_svg_contract() -> None:
     assert projection.TRACE_ROLES == ("primary", "challenger", "tie_break")
 
 
+@pytest.mark.parametrize(
+    ("status", "trace", "lane", "current", "branch"),
+    [
+        (
+            {
+                "state": "running",
+                "stage": "target-resolution",
+                "current_job_id": "job-1",
+                "host_phase": {"name": "target-resolution", "state": "complete"},
+            },
+            {"task_role": "ingest_triage", "state": "ready"},
+            {},
+            "generate",
+            None,
+        ),
+        (
+            {
+                "state": "running",
+                "stage": "generate",
+                "current_job_id": "job-1",
+                "llm": {"active": False, "event": "done"},
+            },
+            {"task_role": "ingest_recall_metadata", "state": "ready"},
+            {},
+            "authority",
+            None,
+        ),
+        (
+            {
+                "state": "running",
+                "stage": "local-regenerate",
+                "current_job_id": "job-1",
+            },
+            {"task_role": "ingest_reconciliation:authority", "state": "ready"},
+            {},
+            "generate",
+            "retry",
+        ),
+        (
+            {
+                "state": "running",
+                "stage": "apply",
+                "current_job_id": "job-1",
+                "ingest_disposition": "apply_available",
+                "host_phase": {"name": "apply", "state": "active"},
+            },
+            {"task_role": "ingest_reconciliation:authority", "state": "ready"},
+            {},
+            "apply",
+            "apply",
+        ),
+        (
+            {
+                "state": "running",
+                "stage": "read-back",
+                "current_job_id": "job-2",
+                "ingest_disposition": "confirmed_noop",
+                "host_phase": {"name": "read-back", "state": "active"},
+            },
+            {"task_role": "ingest_reconciliation:authority", "state": "ready"},
+            {},
+            "readback",
+            "noop",
+        ),
+        (
+            {
+                "state": "idle",
+                "stage": "idle",
+                "last_success": {"local_consensus_status": "apply_available"},
+            },
+            {"task_role": "ingest_reconciliation:authority", "state": "ready"},
+            {},
+            "complete",
+            "apply",
+        ),
+        (
+            {
+                "state": "idle",
+                "stage": "idle",
+                "last_success": {"local_consensus_status": "confirmed_noop"},
+            },
+            {"task_role": "ingest_reconciliation:authority", "state": "ready"},
+            {},
+            "complete",
+            "noop",
+        ),
+        (
+            {"state": "error", "stage": "failed", "current_job_id": "job-3"},
+            {"task_role": "ingest_reconciliation:authority", "state": "ready"},
+            {},
+            "hold",
+            "hold",
+        ),
+        (
+            {"state": "running", "stage": "triage", "current_job_id": "job-5"},
+            {"task_role": "ingest_triage", "state": "active"},
+            {"state": "active", "current_step": "generate"},
+            "generate",
+            None,
+        ),
+    ],
+)
+def test_ingest_processing_projection_covers_runtime_branches(
+    status: dict[str, Any],
+    trace: dict[str, Any],
+    lane: dict[str, Any],
+    current: str,
+    branch: str | None,
+) -> None:
+    result = projection.project_processing_trace("ingest", lane, status, trace)
+
+    assert result is not None
+    assert result["current"] == current
+    assert result["selected_branch"] == branch
+    assert result["graph_id"] == "processing:ingest:v2"
+
+
+def test_processing_projection_has_connected_truthful_topology_for_all_lanes() -> None:
+    definitions = {
+        "ingest": ["target", "generate", "authority", "route", "mutation"],
+        "recall": ["search", "rerank", "primary", "challenger", "tie_break"],
+        "audit": ["inspect", "consensus"],
+        "improve": ["generate", "verify"],
+        "repair": ["local_fix", "verify", "escalate"],
+        "typed_graph": ["extract", "verify"],
+    }
+    for pipeline, keys in definitions.items():
+        lane = {
+            "current_step": keys[0],
+            "steps": [
+                {
+                    "key": key,
+                    "label": key.replace("_", " ").title(),
+                    "status": "pending",
+                }
+                for key in keys
+            ],
+        }
+        result = projection.project_processing_trace(pipeline, lane, {}, {})
+        assert result is not None
+        node_ids = {node["id"] for node in result["nodes"]}
+        assert all(
+            edge["source"] in node_ids and edge["target"] in node_ids
+            for edge in result["edges"]
+        )
+        exits: dict[str, int] = {}
+        for edge in result["edges"]:
+            exits[edge["source"]] = exits.get(edge["source"], 0) + 1
+        for node in result["nodes"]:
+            if node["type"] == "decision":
+                assert exits.get(node["id"], 0) >= 2
+        if pipeline != "ingest":
+            assert all(node["type"] == "milestone" for node in result["nodes"])
+
+
+def test_renderer_has_no_second_state_machine_or_runtime_geometry_mutation() -> None:
+    renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
+        encoding="utf-8"
+    )
+    harness = renderer.split("function updateDecisionSvgHarness", 1)[1].split(
+        "function decisionEventText", 1
+    )[0]
+
+    assert "ingestJobTraceState" not in renderer
+    assert "latestRenderedStatus" not in harness
+    assert "latestProcessingLanes" not in harness
+    assert "trace.lanes" not in harness
+    assert not re.search(
+        r'setAttribute\(\s*["\'](?:d|transform|viewBox|height)["\']', harness
+    )
+
+
 def test_projection_normalizes_helper_inputs() -> None:
     assert projection._state("active") == "active"
     assert projection._state("unknown", "skipped") == "skipped"

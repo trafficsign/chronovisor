@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import socket
 import ssl
 import subprocess
@@ -1099,7 +1100,10 @@ def test_processing_role_projection_covers_dashboard_lanes() -> None:
     assert dashboard._processing_model_step("recall", "search") == "search"
     assert dashboard._processing_model_step("recall", "rerank") == "rerank"
     assert dashboard._processing_model_step("recall", "chat") == "primary"
-    assert dashboard._processing_consensus_step("ingest", "ingest_triage", "generate") == "triage"
+    assert (
+        dashboard._processing_consensus_step("ingest", "ingest_triage", "generate")
+        == "triage"
+    )
     assert (
         dashboard._processing_consensus_step(
             "ingest", "ingest_recall_metadata", "generate"
@@ -1206,7 +1210,7 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
     ]
     assert trace["overall"][2]["status"] == "done"
     assert trace["overall"][3]["status"] == "active"
-    assert trace["projection"]["schema"] == "chronovisor.decision-trace-projection.v1"
+    assert trace["projection"]["schema"] == "chronovisor.decision-trace-projection.v2"
     assert trace["projection"]["context"]["selected_tokens"] == 32_768
     assert trace["projection"]["reasoning"]["selected"] == "high"
     assert trace["projection"]["model_routes"] == {
@@ -2913,7 +2917,7 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'data-decision-lane="primary"' in page
     assert 'data-decision-lane="challenger"' in page
     assert 'data-decision-lane="tie_break"' in page
-    assert 'data-ingest-job-flow' in page
+    assert "data-ingest-job-flow" in page
     assert 'data-ingest-job-step="authority"' in page
     assert 'data-ingest-job-step="complete"' in page
     assert 'data-ingest-job-to="generate"' in page
@@ -2942,7 +2946,7 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "${pageChanges} changes" in app
     assert "${pages} pages" not in app
     assert 'class="decision-trace-scroll" id="decision-trace-scroll"' in page
-    assert 'id="decision-trace-harness" viewBox="0 0 1500 650"' in page
+    assert 'id="decision-trace-harness" viewBox="0 0 1500 750"' in page
     assert ".decision-trace-scroll {\n  width: 100%;\n  overflow-x: hidden;" in style
     assert ".decision-trace-harness {\n  display: block;\n  width: 100%;" in style
     assert (
@@ -2966,7 +2970,7 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert ".decision-transition-event.current" in style
     assert "function updateDecisionSvgHarness" in app
     assert "DECISION_TRACE_PROJECTION_SCHEMA" in app
-    assert "const decisionTracePlayback" not in app
+    assert "const decisionTracePlayback =" in app
     assert "mergeDecisionTraceSnapshot" not in app
     assert "const ACTIVE_DECISION_REFRESH_DELAY_MS = 800" in app
     assert 'fetch("/api/local-consensus"' in app
@@ -2990,9 +2994,9 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert ".decision-trace-panel" in style
     assert ".decision-trace-harness.single-model" in style
     assert ".decision-trace-harness.single-model.ingest-job" in style
-    assert "[data-decision-lane=\"challenger\"]" in style
-    assert "[data-decision-lane-step=\"vote\"]" in style
-    assert "[data-trace-key=\"quorum\"]" in style
+    assert '[data-decision-lane="challenger"]' in style
+    assert '[data-decision-lane-step="vote"]' in style
+    assert '[data-trace-key="quorum"]' in style
     assert ".processing-lane.active" in style
     assert "processing-electric-pulse" in style
     assert "grid-template-columns: repeat(4, minmax(0, 1fr));" in style
@@ -3069,206 +3073,16 @@ process.stdout.write(JSON.stringify({{
     }
 
 
-def test_ingest_job_trace_projects_all_model_and_host_phases() -> None:
+def test_ingest_job_trace_is_projected_only_by_the_backend() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
-    scenario = f"""
-const vm = require("node:vm");
-const sandbox = {{ window: {{}} }};
-vm.createContext(sandbox);
-vm.runInContext({json.dumps(renderer)}, sandbox);
-const project = sandbox.window.__chronovisorDashboardTest.ingestJobTraceState;
-const rows = [
-  project({{
-    state: "running",
-    stage: "target-resolution",
-    current_job_id: "job-1",
-    host_phase: {{ name: "target-resolution", state: "complete" }},
-  }}, {{ task_role: "ingest_triage", state: "ready" }}),
-  project({{
-    state: "running",
-    stage: "generate",
-    current_job_id: "job-1",
-    llm: {{ active: false, event: "done", phase: "generate" }},
-  }}, {{ task_role: "ingest_recall_metadata", state: "ready" }}),
-  project({{
-    state: "running",
-    stage: "authorization",
-    current_job_id: "job-1",
-  }}, {{ task_role: "ingest_reconciliation:authority", state: "active", active: true }}),
-  project({{
-    state: "running",
-    stage: "authorization",
-    current_job_id: "job-1",
-  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
-  project({{
-    state: "running",
-    stage: "local-regenerate",
-    current_job_id: "job-1",
-  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
-  project({{
-    state: "running",
-    stage: "apply",
-    current_job_id: "job-1",
-    ingest_disposition: "apply_available",
-    host_phase: {{ name: "apply", state: "active" }},
-  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
-  project({{
-    state: "running",
-    stage: "state-register",
-    current_job_id: "job-1",
-    ingest_disposition: "apply_available",
-    host_phase: {{ name: "state-register", state: "complete" }},
-  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
-  project({{
-    state: "running",
-    stage: "read-back",
-    current_job_id: "job-1",
-    ingest_disposition: "apply_available",
-    host_phase: {{ name: "read-back", state: "complete" }},
-  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
-  project({{
-    state: "running",
-    stage: "read-back",
-    current_job_id: "job-2",
-    ingest_disposition: "confirmed_noop",
-    host_phase: {{ name: "read-back", state: "active" }},
-  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
-  project({{
-    state: "idle",
-    stage: "idle",
-    last_success: {{
-      job_id: "job-1",
-      raw: "raw.md",
-      local_consensus_status: "apply_available",
-    }},
-  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
-  project({{
-    state: "idle",
-    stage: "idle",
-    last_success: {{
-      job_id: "job-2",
-      raw: "noop.md",
-      local_consensus_status: "confirmed_noop",
-    }},
-  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
-  project({{
-    state: "error",
-    stage: "failed",
-    current_job_id: "job-3",
-  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
-  project({{
-    state: "running",
-    stage: "triage",
-    current_job_id: "job-4",
-  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
-  project({{
-    state: "running",
-    stage: "generate",
-    current_job_id: "job-4",
-    llm: {{ active: true, event: "start", phase: "generate" }},
-  }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
-  project({{
-    state: "running",
-    stage: "triage",
-    current_job_id: "job-5",
-  }}, {{ task_role: "ingest_triage", state: "active" }}, {{
-    state: "active",
-    current_step: "generate",
-  }}),
-];
-process.stdout.write(JSON.stringify(rows.map((row) => ({{
-  branch: row.branch,
-  current: row.current,
-  entry: row.entry,
-  paths: row.paths,
-  states: row.states,
-  visibleSteps: row.visibleSteps,
-}}))));
-"""
 
-    rows = json.loads(_run_node_scenario(scenario).stdout)
-
-    assert [row["current"] for row in rows] == [
-        "generate",
-        "authority",
-        "authority",
-        "route",
-        "generate",
-        "apply",
-        "readback",
-        "complete",
-        "readback",
-        "complete",
-        "complete",
-        "hold",
-        "target",
-        "generate",
-        "generate",
-    ]
-    assert rows[0]["states"]["target"] == "done"
-    assert rows[1]["states"]["generate"] == "done"
-    assert rows[1]["entry"] == "authority"
-    assert rows[2]["states"]["authority"] == "active"
-    assert rows[3]["states"]["route"] == "active"
-    assert rows[4]["branch"] == "retry"
-    assert rows[4]["states"]["authority"] == "done"
-    assert rows[4]["paths"]["target-generate"] == "done"
-    assert rows[4]["paths"]["generate-authority"] == "done"
-    assert rows[4]["paths"]["authority-route"] == "done"
-    assert rows[4]["paths"]["retry"] == "active"
-    assert rows[4]["paths"]["hold"] == "skipped"
-    assert rows[4]["paths"]["accepted"] == "skipped"
-    assert rows[4]["paths"]["readback-complete"] == "skipped"
-    assert {"generate", "authority", "route"} <= set(rows[4]["visibleSteps"])
-    assert rows[5]["branch"] == "apply"
-    assert rows[5]["states"]["mutation"] == "done"
-    assert rows[5]["states"]["hold"] == "skipped"
-    assert rows[5]["paths"]["accepted"] == "done"
-    assert rows[5]["paths"]["retry"] == "skipped"
-    assert rows[5]["paths"]["hold"] == "skipped"
-    assert rows[5]["paths"]["noop"] == "skipped"
-    assert rows[6]["states"]["publish"] == "done"
-    assert rows[7]["states"]["readback"] == "done"
-    assert rows[8]["branch"] == "noop"
-    assert rows[8]["states"]["apply"] == "skipped"
-    assert rows[8]["paths"]["noop"] == "active"
-    assert rows[8]["paths"]["apply"] == "skipped"
-    assert rows[8]["paths"]["apply-publish"] == "skipped"
-    assert rows[8]["paths"]["publish-readback"] == "skipped"
-    assert rows[9]["branch"] == "apply"
-    assert rows[9]["paths"]["apply"] == "done"
-    assert rows[10]["branch"] == "noop"
-    assert rows[10]["states"]["mutation"] == "done"
-    assert rows[10]["states"]["apply"] == "skipped"
-    assert rows[10]["paths"]["noop"] == "done"
-    assert rows[10]["paths"]["retry"] == "skipped"
-    assert rows[10]["paths"]["hold"] == "skipped"
-    assert rows[10]["paths"]["apply"] == "skipped"
-    assert rows[10]["paths"]["apply-publish"] == "skipped"
-    assert rows[10]["paths"]["publish-readback"] == "skipped"
-    assert rows[11]["branch"] == "hold"
-    assert rows[11]["states"]["hold"] == "error"
-    assert rows[11]["paths"]["retry"] == "skipped"
-    assert rows[11]["paths"]["accepted"] == "skipped"
-    assert rows[11]["paths"]["readback-complete"] == "skipped"
-    assert rows[12]["entry"] == "target"
-    assert rows[12]["states"]["target"] == "active"
-    assert rows[13]["states"]["generate"] == "active"
-    assert rows[14]["states"]["target"] == "done"
-    assert rows[14]["states"]["generate"] == "active"
-    assert rows[14]["paths"]["target-generate"] == "active"
-    assert set(rows[13]["visibleSteps"]) == {
-        "target",
-        "generate",
-        "authority",
-        "route",
-        "mutation",
-        "apply",
-        "publish",
-        "readback",
-        "complete",
-        "hold",
-    }
+    assert "ingestJobTraceState" not in renderer
+    assert (
+        "latestRenderedStatus"
+        not in renderer.split("function updateDecisionSvgHarness", 1)[1].split(
+            "function decisionEventText", 1
+        )[0]
+    )
 
 
 def test_dashboard_status_snapshot_cannot_regress_to_an_older_stage() -> None:
@@ -3307,385 +3121,44 @@ process.stdout.write(JSON.stringify({{
     }
 
 
-def test_single_model_decision_trace_dom_contract() -> None:
+def test_single_model_decision_trace_dom_contract_is_fixed_in_markup() -> None:
+    page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
-    scenario = f"""
-const vm = require("node:vm");
-class FakeClassList {{
-  constructor(node) {{ this.node = node; this.values = new Set(); }}
-  add(...values) {{ values.forEach((value) => this.values.add(value)); this.sync(); }}
-  remove(...values) {{ values.forEach((value) => this.values.delete(value)); this.sync(); }}
-  toggle(value, force) {{
-    const next = force === undefined ? !this.values.has(value) : force;
-    if (next) this.values.add(value); else this.values.delete(value);
-    this.sync();
-    return next;
-  }}
-  contains(value) {{ return this.values.has(value); }}
-  sync() {{ this.node.className = [...this.values].join(" "); }}
-}}
-class FakeNode {{
-  constructor(tag = "g", id = "") {{
-    this.tag = tag;
-    this.id = id;
-    this.dataset = {{}};
-    this.children = [];
-    this.parent = null;
-    this.className = "";
-    this.classList = new FakeClassList(this);
-    this.textContent = "";
-    this.hidden = false;
-    this.style = {{}};
-    this.attributes = {{}};
-  }}
-  append(...children) {{ children.forEach((child) => this.appendChild(child)); }}
-  appendChild(child) {{ child.parent = this; this.children.push(child); return child; }}
-  setAttribute(key, value) {{ this.attributes[key] = String(value); if (key === "id") this.id = String(value); }}
-  matches(selector) {{
-    selector = selector.trim();
-    if (selector.includes(",")) return selector.split(",").some((item) => this.matches(item));
-    if (selector.startsWith("#")) return this.id === selector.slice(1);
-    if (selector.startsWith(".")) return this.classList.contains(selector.slice(1));
-    const attr = selector.match(/^\\[([^=\\]]+)(?:="([^"]*)")?\\]$/);
-    if (attr) {{
-      const key = attr[1].startsWith("data-")
-        ? attr[1].slice(5).replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase())
-        : attr[1];
-      return Object.prototype.hasOwnProperty.call(this.dataset, key)
-        && (attr[2] === undefined || this.dataset[key] === attr[2]);
-    }}
-    return this.tag === selector;
-  }}
-  querySelectorAll(selector) {{
-    const found = [];
-    const visit = (node) => node.children.forEach((child) => {{
-      if (child.matches(selector)) found.push(child);
-      visit(child);
-    }});
-    visit(this);
-    return found;
-  }}
-  querySelector(selector) {{ return this.querySelectorAll(selector)[0] || null; }}
-}}
-const root = new FakeNode("main");
-const panel = new FakeNode("section", "decision-single-authority");
-const harness = new FakeNode("svg", "decision-trace-harness");
-const add = (parent, tag, {{ id = "", className = "", dataset = {{}}, text = "" }} = {{}}) => {{
-  const node = new FakeNode(tag, id);
-  node.classList.add(...className.split(/\\s+/).filter(Boolean));
-  Object.assign(node.dataset, dataset);
-  node.textContent = text;
-  parent.appendChild(node);
-  return node;
-}};
-add(panel, "strong", {{ dataset: {{ singleAuthorityLabel: "" }} }});
-add(panel, "strong", {{ dataset: {{ singleModel: "" }} }});
-add(panel, "strong", {{ dataset: {{ singleRevision: "" }} }});
-add(panel, "strong", {{ dataset: {{ singleStatus: "" }} }});
-add(panel, "strong", {{ dataset: {{ singleTarget: "" }} }});
-add(panel, "strong", {{ dataset: {{ singleRepair: "" }} }});
-add(harness, "title", {{ id: "decision-trace-svg-description" }});
-add(harness, "text", {{ dataset: {{ dispatchLabel: "" }} }});
-add(harness, "text", {{ dataset: {{ artifactLabel: "" }} }});
-add(harness, "text", {{ dataset: {{ decisionLabel: "" }} }});
-add(harness, "text", {{ dataset: {{ holdReason: "" }} }});
-["agree", "quorum", "artifact", "seal", "decision", "hold"].forEach((key) => add(harness, "g", {{ dataset: {{ traceKey: key }} }}));
-["plan-dispatch", "primary-challenger", "single-artifact", "quorum-hold", "artifact-seal", "seal-decision", "seal-hold"].forEach((key) => add(harness, "path", {{ dataset: {{ pathKey: key }} }}));
-add(harness, "text", {{ dataset: {{ sealYesLabel: "" }} }});
-add(harness, "text", {{ dataset: {{ sealNoLabel: "" }} }});
-["primary", "challenger", "tie_break"].forEach((key) => {{
-  const lane = add(harness, "g", {{ dataset: {{ decisionLane: key }} }});
-  add(lane, "text", {{ dataset: {{ laneLabel: key }} }});
-  add(lane, "text", {{ dataset: {{ laneThink: key }} }});
-  add(lane, "text", {{ dataset: {{ laneResult: key }} }});
-  add(lane, "text", {{ dataset: {{ modelValue: key }} }});
-  add(lane, "g", {{ dataset: {{ decisionLaneStep: "vote" }} }});
-  add(lane, "path", {{ dataset: {{ lanePath: "validate-vote" }} }});
-}});
-["primary", "challenger", "tie_break"].forEach((key) => add(harness, "g", {{ dataset: {{ modelKey: key }} }}));
-const quorumFact = add(root, "div", {{ dataset: {{ decisionFact: "quorum" }} }});
-const targetFact = add(root, "div", {{ dataset: {{ decisionFact: "target" }} }});
-root.append(panel, harness);
-const document = {{
-  getElementById: (id) => root.id === id ? root : root.querySelector("#" + id),
-  querySelector: (selector) => root.querySelector(selector),
-}};
-const els = {{ decisionTraceHarness: harness }};
-const sandbox = {{ window: {{}}, document, els }};
-vm.createContext(sandbox);
-vm.runInContext({json.dumps(renderer)}, sandbox);
-const readyTrace = {{
-  state: "ready",
-  authority_kind: "single_model_v1",
-  quorum_flow: false,
-  lanes: [{{ key: "primary", model: "Qwen3.8-Flash-Next-oQ4e-mtp" }}],
-  projection: {{
-    schema: "chronovisor.decision-trace-projection.v1",
-    single_model: true,
-    authority: {{
-      label: "Single Authority",
-      model: "Qwen3.8-Flash-Next-oQ4e-mtp",
-      revision: "b".repeat(64),
-      target: 1,
-      validated: true,
-      repair_is_vote: false,
-    }},
-    nodes: {{ agree: "pending", quorum: "pending", artifact: "done", decision: "done" }},
-    paths: {{ "single-artifact": "done" }},
-    lanes: {{ primary: {{ state: "done", steps: {{ vote: "done" }}, rails: {{ "validate-vote": "done" }}, repair: "done", repair_attempt: 1 }} }},
-    model_routes: {{ primary: "done" }},
-    context: {{ options: [] }},
-    reasoning: {{ options: {{}} }},
-    labels: {{ hold: "No safe quorum", validation: "Validated" }},
-  }},
-}};
-sandbox.window.__chronovisorDashboardTest.updateDecisionSvgHarness(readyTrace);
-const terminalStatus = panel.children[3].textContent;
-vm.runInContext(`latestProcessingLanes.set("ingest", {{
-  state: "active",
-  current_step: "generate",
-}});`, sandbox);
-sandbox.window.__chronovisorDashboardTest.updateDecisionSvgHarness({{
-  ...readyTrace,
-  task_role: "ingest_triage",
-}});
-process.stdout.write(JSON.stringify({{
-  singleClass: harness.classList.contains("single-model"),
-  ingestClass: harness.classList.contains("ingest-job"),
-  panelHidden: panel.hidden,
-  authority: panel.children[0].textContent,
-  model: panel.children[1].textContent,
-  revision: panel.children[2].textContent,
-  terminalStatus,
-  status: panel.children[3].textContent,
-  traceRelation: panel.dataset.traceRelation,
-  target: panel.children[4].textContent,
-  repair: panel.children[5].textContent,
-  dispatch: harness.querySelector("[data-dispatch-label]").textContent,
-  artifact: harness.querySelector("[data-artifact-label]").textContent,
-  viewBox: harness.attributes.viewBox,
-  height: harness.attributes.height,
-  dispatchLabelY: harness.querySelector("[data-dispatch-label]").attributes.y,
-  dispatchPath: harness.querySelector('[data-path-key="plan-dispatch"]').attributes.d,
-  singlePath: harness.querySelector('[data-path-key="single-artifact"]').attributes.d,
-  artifactSealPath: harness.querySelector('[data-path-key="artifact-seal"]').attributes.d,
-  sealDecisionPath: harness.querySelector('[data-path-key="seal-decision"]').attributes.d,
-  sealHoldPath: harness.querySelector('[data-path-key="seal-hold"]').attributes.d,
-  artifactTransform: harness.querySelector('[data-trace-key="artifact"]').attributes.transform,
-  sealTransform: harness.querySelector('[data-trace-key="seal"]').attributes.transform,
-  decisionTransform: harness.querySelector('[data-trace-key="decision"]').attributes.transform,
-  holdTransform: harness.querySelector('[data-trace-key="hold"]').attributes.transform,
-  quorumHidden: quorumFact.hidden,
-  targetVisible: !targetFact.hidden,
-}}));
-"""
-    result = json.loads(_run_node_scenario(scenario).stdout)
+    harness = renderer.split("function updateDecisionSvgHarness", 1)[1].split(
+        "function decisionEventText", 1
+    )[0]
 
-    assert result == {
-        "singleClass": True,
-        "ingestClass": True,
-        "panelHidden": False,
-        "authority": "Single Authority",
-        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
-        "revision": "b" * 64,
-        "terminalStatus": "Validated",
-        "status": "Triage done · Generate active",
-        "traceRelation": "previous",
-        "target": "1",
-        "repair": "REPAIR ≠ VOTE",
-        "dispatch": "DISPATCH → SINGLE AUTHORITY",
-        "artifact": "Validated",
-        "viewBox": "0 0 1500 750",
-        "height": "700",
-        "dispatchLabelY": "303",
-        "dispatchPath": "M1380 164 H1466 Q1476 164 1476 174 V297 Q1476 307 1466 307 H190 Q180 307 180 317 V394 Q180 404 190 404 H220",
-        "singlePath": "M920 404 H1039",
-        "artifactSealPath": "M1061 404 H1156",
-        "sealDecisionPath": "M1190 434 V483",
-        "sealHoldPath": "M1224 404 H1318",
-        "artifactTransform": "translate(1050 404)",
-        "sealTransform": "translate(-180 -96)",
-        "decisionTransform": "translate(1190 494)",
-        "holdTransform": "translate(1330 404)",
-        "quorumHidden": True,
-        "targetVisible": True,
-    }
-
-
-def test_processing_activity_rejects_old_frames_and_paces_visible_milestones() -> None:
-    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
-    scenario = f"""
-const vm = require("node:vm");
-class FakeNode {{
-  constructor(tag = "div") {{
-    this.tag = tag;
-    this.dataset = {{}};
-    this.children = [];
-    this.className = "";
-    this.attributes = {{}};
-    this.textContent = "";
-    this.title = "";
-    this.tabIndex = -1;
-    this.parent = null;
-  }}
-  appendChild(child) {{
-    if (child.parent) child.parent.children = child.parent.children.filter((item) => item !== child);
-    child.parent = this;
-    this.children.push(child);
-    return child;
-  }}
-  append(...children) {{ children.forEach((child) => this.appendChild(child)); }}
-  addEventListener() {{}}
-  setAttribute(key, value) {{ this.attributes[key] = String(value); }}
-  remove() {{
-    if (this.parent) this.parent.children = this.parent.children.filter((item) => item !== this);
-    this.parent = null;
-  }}
-  matches(selector) {{
-    if (selector.startsWith(".")) return this.className.split(/\\s+/).includes(selector.slice(1));
-    return this.tag === selector;
-  }}
-  querySelectorAll(selector) {{
-    const matches = [];
-    const visit = (node) => node.children.forEach((child) => {{
-      if (child.matches(selector)) matches.push(child);
-      visit(child);
-    }});
-    visit(this);
-    return matches;
-  }}
-  querySelector(selector) {{ return this.querySelectorAll(selector)[0] || null; }}
-}}
-const processingLanes = new FakeNode("main");
-const clock = {{ now: 0 }};
-const timers = new Map();
-let nextTimerId = 1;
-const FakeDate = class extends Date {{ static now() {{ return clock.now; }} }};
-function advanceClock(target) {{
-  while (true) {{
-    const due = [...timers.entries()]
-      .filter(([, timer]) => timer.at <= target)
-      .sort((left, right) => left[1].at - right[1].at)[0];
-    if (!due) break;
-    clock.now = due[1].at;
-    timers.delete(due[0]);
-    due[1].callback();
-  }}
-  clock.now = target;
-}}
-const document = {{
-  body: {{ dataset: {{}} }},
-  createElement: (tag) => new FakeNode(tag),
-  visibilityState: "visible",
-}};
-const els = {{ processingLanes, processingPanel: {{ dataset: {{}} }} }};
-const selectionEvents = [];
-const window = {{
-  matchMedia: () => ({{ matches: false }}),
-  CustomEvent: class {{
-    constructor(type, init = {{}}) {{ this.type = type; this.detail = init.detail; }}
-  }},
-  dispatchEvent: (event) => selectionEvents.push(event.detail?.pipeline || ""),
-  setTimeout: (callback, delay) => {{
-    const timerId = nextTimerId++;
-    timers.set(timerId, {{ at: clock.now + delay, callback }});
-    return timerId;
-  }},
-  clearTimeout: (timerId) => timers.delete(timerId),
-}};
-const sandbox = {{ window, document, els, Date: FakeDate, STAGE_METRIC_LABELS: {{}} }};
-vm.createContext(sandbox);
-vm.runInContext({json.dumps(renderer)}, sandbox);
-const renderProcessingActivity = window.__chronovisorDashboardTest.renderProcessingActivity;
-const scheduleProcessingActivity = window.__chronovisorDashboardTest.scheduleProcessingActivity;
-const keys = ["ingest", "recall", "audit", "improve", "repair", "typed_graph"];
-const payload = (generatedAt, revision, state, milestone = "work") => ({{
-  generated_at: generatedAt,
-  revision,
-  active_count: state === "active" ? keys.length : 0,
-  lanes: keys.map((key) => ({{
-    key,
-    label: key,
-    state,
-    current_step: milestone,
-    steps: [{{ key: milestone, label: milestone, status: state }}],
-  }})),
-}});
-const acceptedStream = renderProcessingActivity(
-  payload("2026-08-12T12:00:10.000Z", "stream-new", "active")
-);
-const acceptedOldPoll = renderProcessingActivity(
-  payload("2026-08-12T12:00:09.000Z", "poll-old", "idle")
-);
-const acceptedDuplicate = renderProcessingActivity(
-  payload("2026-08-12T12:00:11.000Z", "stream-new", "idle")
-);
-const acceptedBetween = renderProcessingActivity(
-  payload("2026-08-12T12:00:10.500Z", "poll-between", "idle")
-);
-scheduleProcessingActivity(
-  payload("2026-08-12T12:00:12.000Z", "paced-raw", "active", "raw")
-);
-clock.now = 100;
-scheduleProcessingActivity(
-  payload("2026-08-12T12:00:13.000Z", "paced-triage", "active", "triage")
-);
-clock.now = 200;
-scheduleProcessingActivity(
-  payload("2026-08-12T12:00:14.000Z", "paced-generate-old", "active", "generate")
-);
-clock.now = 250;
-scheduleProcessingActivity(
-  payload("2026-08-12T12:00:15.000Z", "paced-generate", "active", "generate")
-);
-const pacedRevisions = [document.body.dataset.processingRevision];
-advanceClock(499);
-pacedRevisions.push(document.body.dataset.processingRevision);
-advanceClock(500);
-pacedRevisions.push(document.body.dataset.processingRevision);
-advanceClock(999);
-pacedRevisions.push(document.body.dataset.processingRevision);
-advanceClock(1000);
-pacedRevisions.push(document.body.dataset.processingRevision);
-process.stdout.write(JSON.stringify({{
-  acceptedStream,
-  acceptedOldPoll,
-  acceptedDuplicate,
-  acceptedBetween,
-  selectionEvents,
-  revision: document.body.dataset.processingRevision,
-  pacedRevisions,
-  pendingTimers: timers.size,
-  lanes: processingLanes.querySelectorAll(".processing-lane").map((row) => ({{
-    key: row.dataset.processingLane,
-    state: row.className,
-  }})),
-}}));
-"""
-
-    completed = _run_node_scenario(scenario)
-    result = json.loads(completed.stdout)
-
-    assert result == {
-        "acceptedStream": True,
-        "acceptedOldPoll": False,
-        "acceptedDuplicate": False,
-        "acceptedBetween": False,
-        "selectionEvents": [],
-        "revision": "paced-generate",
-        "pacedRevisions": [
-            "paced-raw",
-            "paced-raw",
-            "paced-triage",
-            "paced-triage",
-            "paced-generate",
-        ],
-        "pendingTimers": 0,
-        "lanes": [
-            {"key": key, "state": "processing-lane active"}
-            for key in ("ingest", "recall", "audit", "improve", "repair", "typed_graph")
-        ],
-    }
+    assert 'id="decision-trace-harness" viewBox="0 0 1500 750"' in page
+    assert 'width="1400" height="700"' in page
+    for geometry in (
+        "M1380 164 H1466 Q1476 164 1476 174 V297 Q1476 307 1466 307 H190 Q180 307 180 317 V394 Q180 404 190 404 H220",
+        "M920 404 H1039",
+        "M1061 404 H1156",
+        "M1190 438 V483",
+        "M1224 404 H1318",
+    ):
+        assert f'd="{geometry}"' in page
+    for transform in (
+        "translate(1050 404)",
+        "translate(1190 494)",
+        "translate(1330 404)",
+    ):
+        assert f'transform="{transform}"' in page
+    assert "trace-single-only" in page
+    assert "trace-quorum-only" in page
+    assert page.count('data-processing-job-layout="') == 3
+    for layout, boundary, geometry in (
+        ("2", '<g data-processing-job-layout="3">', 'transform="translate(520 570)"'),
+        ("3", '<g data-processing-job-layout="5">', 'transform="translate(750 570)"'),
+        ("5", '<g class="trace-ingest-job"', 'transform="translate(750 570)"'),
+    ):
+        layout_markup = page.split(
+            f'<g data-processing-job-layout="{layout}">', 1
+        )[1].split(boundary, 1)[0]
+        assert geometry in layout_markup
+    assert not re.search(
+        r'setAttribute\(\s*["\'](?:d|transform|viewBox|height)["\']', harness
+    )
 
 
 def test_decision_trace_lane_rails_start_at_source_node_edges() -> None:
@@ -4091,61 +3564,33 @@ process.stdout.write(JSON.stringify({{
     ]
 
 
-def test_processing_lane_selection_maps_workflows_and_active_tab() -> None:
+def test_processing_lane_selection_uses_only_the_projection_pipeline() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
     scenario = f"""
 const vm = require("node:vm");
-const sandbox = {{ window: {{ matchMedia: () => ({{ matches: false }}) }} }};
+const sandbox = {{ window: {{}} }};
 vm.createContext(sandbox);
 vm.runInContext(
   {json.dumps(renderer)}
     + "\\nthis.__test = {{ processingLaneForTrace, lanes: latestProcessingLanes }};",
   sandbox,
 );
-const laneKeys = ["ingest", "recall", "audit", "improve", "repair", "typed_graph"];
-laneKeys.forEach((key) => sandbox.__test.lanes.set(key, {{ state: "idle" }}));
-const roles = {{
-  ingest: "ingest_review",
-  recall: "recall_auto_apply",
-  audit: "content_correction_classification",
-  improve: "model_eval",
-  repair: "local_repair",
-  typed_graph: "relation_extract",
-}};
-const mapped = Object.fromEntries(Object.entries(roles).map(([key, task_role]) => [
-  key,
-  sandbox.__test.processingLaneForTrace({{ request_sha256: "request", task_role }}),
-]));
-sandbox.__test.lanes.get("recall").state = "active";
-sandbox.__test.lanes.get("recall").current_step = "consensus";
-const consensusFallback = sandbox.__test.processingLaneForTrace({{}});
-sandbox.__test.lanes.get("recall").current_step = "search";
-sandbox.__test.lanes.get("ingest").state = "active";
-const activeFallback = sandbox.__test.processingLaneForTrace({{}});
-laneKeys.forEach((key) => sandbox.__test.lanes.set(key, {{ state: "idle" }}));
-const idleFallback = sandbox.__test.processingLaneForTrace({{}});
-process.stdout.write(JSON.stringify({{
-  mapped,
-  consensusFallback,
-  activeFallback,
-  idleFallback,
-}}));
+["ingest", "recall", "audit", "improve", "repair", "typed_graph"]
+  .forEach((key) => sandbox.__test.lanes.set(key, {{ state: "active" }}));
+const projected = sandbox.__test.processingLaneForTrace({{
+  task_role: "ingest_review",
+  projection: {{
+    schema: "chronovisor.decision-trace-projection.v2",
+    pipeline: "repair",
+  }},
+}});
+const missing = sandbox.__test.processingLaneForTrace({{ task_role: "ingest_review" }});
+process.stdout.write(JSON.stringify({{ projected, missing }}));
 """
 
-    completed = _run_node_scenario(scenario)
-    result = json.loads(completed.stdout)
+    result = json.loads(_run_node_scenario(scenario).stdout)
 
-    assert result["mapped"] == {
-        "ingest": "ingest",
-        "recall": "recall",
-        "audit": "audit",
-        "improve": "improve",
-        "repair": "repair",
-        "typed_graph": "typed_graph",
-    }
-    assert result["consensusFallback"] == "recall"
-    assert result["activeFallback"] == "ingest"
-    assert result["idleFallback"] == ""
+    assert result == {"projected": "repair", "missing": ""}
 
 
 def test_decision_trace_renderer_applies_each_authoritative_snapshot_directly() -> None:
@@ -4187,7 +3632,8 @@ process.stdout.write(JSON.stringify(sandbox.__test.frames));
         {"request": "same", "events": ["generate"]},
     ]
     assert "mergeDecisionTraceSnapshot" not in renderer
-    assert "decisionTracePlayback" not in renderer
+    assert "const DECISION_PROGRESS_INTERVAL_MS = 500;" in renderer
+    assert "const decisionTracePlayback =" in renderer
 
 
 def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() -> None:
@@ -4275,6 +3721,11 @@ const trace = {{
   quorum_flow: false,
   active: false,
   state: "ready",
+  projection: {{
+    schema: "chronovisor.decision-trace-projection.v2",
+    mode: "single",
+    single_model: true,
+  }},
 }};
 const events = [
   {{ event_id: "generate", lane: "primary", phase: "generate", kind: "phase", status: "done" }},
@@ -7514,9 +6965,7 @@ def test_omlx_snapshot_reports_all_endpoint_failures(monkeypatch) -> None:
 
     runtime = dashboard._omlx_snapshot()
 
-    assert observed == [
-        f"{endpoint}/models/status" for endpoint in endpoints
-    ]
+    assert observed == [f"{endpoint}/models/status" for endpoint in endpoints]
     assert runtime["available"] is False
     assert runtime["models"] == []
     assert runtime["error"]
