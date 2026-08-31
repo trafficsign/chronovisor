@@ -633,6 +633,22 @@ function ingestJobTraceState(status = {}, trace = {}, ingestLane = null) {
     if (traceReady) states[entry] = "active";
   }
 
+  const laneFloor = ingestLane?.state === "active" && ingestLane?.recent !== true
+    ? { generate: "generate", consensus: "authority", apply: "mutation" }[
+      String(ingestLane.current_step || "").toLowerCase()
+    ]
+    : "";
+  if (
+    !branch
+    && laneFloor
+    && INGEST_JOB_TRACE_STEPS.indexOf(current) < INGEST_JOB_TRACE_STEPS.indexOf(laneFloor)
+  ) {
+    const floorIndex = INGEST_JOB_TRACE_STEPS.indexOf(laneFloor);
+    markDone(...INGEST_JOB_TRACE_STEPS.slice(0, floorIndex));
+    states[laneFloor] = "active";
+    current = laneFloor;
+  }
+
   if (branch && branch !== "hold") states.hold = "skipped";
   const onward = (from, to) => states[from] === "done" ? states[to] : "pending";
   const routeResolved = Boolean(branch) || states.mutation !== "pending";

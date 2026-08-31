@@ -1612,6 +1612,16 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
             "trace": {"task_role": "ingest_recall_metadata", "state": "ready"},
         },
         {
+            "name": "generate-source-lag",
+            "lane_step": "generate",
+            "status": {
+                "state": "running",
+                "stage": "triage",
+                "current_job_id": "job",
+            },
+            "trace": {"task_role": "ingest_triage", "state": "active"},
+        },
+        {
             "name": "authority",
             "status": {
                 "state": "running",
@@ -1901,6 +1911,13 @@ addEventListener("DOMContentLoaded", () => {
     if (requestedIngestState) {
       const ingestCase = ingestVisualCases.find(({ name }) => name === requestedIngestState);
       if (!ingestCase) throw new Error(`unknown ingest state: ${requestedIngestState}`);
+      if (ingestCase.lane_step) {
+        renderFixture(
+          { ...selected.case, processing_stage: ingestCase.lane_step },
+          { ...selected.trace, active: true },
+          `source-lag-${ingestCase.name}`,
+        );
+      }
       api.updateIngestJobTrace(
         { ...selected.trace, ...ingestCase.trace },
         ingestCase.status,
@@ -2078,6 +2095,14 @@ addEventListener("DOMContentLoaded", () => {
     const ingestBranchStates = fixture.id === "S" ? ingestVisualCases.map((item) => {
       const branchTrace = { ...trace, ...item.trace };
       const { name, status } = item;
+      renderFixture(fixture, trace, `ingest-${item.name}`);
+      if (item.lane_step) {
+        renderFixture(
+          { ...fixture, processing_stage: item.lane_step },
+          { ...trace, active: true },
+          `source-lag-${item.name}`,
+        );
+      }
       api.updateIngestJobTrace(branchTrace, status, true);
       return {
         name,
@@ -2085,6 +2110,7 @@ addEventListener("DOMContentLoaded", () => {
         current: harness.dataset.ingestJobStep,
         entryKey: document.querySelector("[data-ingest-job-entry]").dataset.ingestJobEntry,
         entryPath: document.querySelector("[data-ingest-job-entry]").getAttribute("d"),
+        entryState: document.querySelector("[data-ingest-job-entry]").dataset.state,
         pathStyles: Object.fromEntries([...harness.querySelectorAll(
           ".trace-ingest-job [data-ingest-job-path]"
         )].filter(visible).map((node) => [node.dataset.ingestJobPath, {
@@ -2603,6 +2629,9 @@ addEventListener("DOMContentLoaded", () => {
         assert state.pop("entryCrossings") == []
         assert state.pop("entryKey") == "target"
         assert state.pop("entryPath") == "M1190 505 V560 Q1190 570 1180 570 H1130"
+        entry_state = state.pop("entryState")
+        if state["name"] == "generate-source-lag":
+            assert entry_state == "done"
         for style in state.pop("pathStyles").values():
             if style["state"] == "pending":
                 assert style["dash"] not in {"none", ""}
@@ -2624,6 +2653,12 @@ addEventListener("DOMContentLoaded", () => {
         },
         {
             "name": "generate",
+            "branch": "waiting",
+            "current": "generate",
+            "disconnectedPathEnds": [],
+        },
+        {
+            "name": "generate-source-lag",
             "branch": "waiting",
             "current": "generate",
             "disconnectedPathEnds": [],

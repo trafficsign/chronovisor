@@ -3165,6 +3165,14 @@ const rows = [
     current_job_id: "job-4",
     llm: {{ active: true, event: "start", phase: "generate" }},
   }}, {{ task_role: "ingest_reconciliation:authority", state: "ready" }}),
+  project({{
+    state: "running",
+    stage: "triage",
+    current_job_id: "job-5",
+  }}, {{ task_role: "ingest_triage", state: "active" }}, {{
+    state: "active",
+    current_step: "generate",
+  }}),
 ];
 process.stdout.write(JSON.stringify(rows.map((row) => ({{
   branch: row.branch,
@@ -3192,6 +3200,7 @@ process.stdout.write(JSON.stringify(rows.map((row) => ({{
         "complete",
         "hold",
         "target",
+        "generate",
         "generate",
     ]
     assert rows[0]["states"]["target"] == "done"
@@ -3243,6 +3252,9 @@ process.stdout.write(JSON.stringify(rows.map((row) => ({{
     assert rows[12]["entry"] == "target"
     assert rows[12]["states"]["target"] == "active"
     assert rows[13]["states"]["generate"] == "active"
+    assert rows[14]["states"]["target"] == "done"
+    assert rows[14]["states"]["generate"] == "active"
+    assert rows[14]["paths"]["target-generate"] == "active"
     assert set(rows[13]["visibleSteps"]) == {
         "target",
         "generate",
