@@ -653,7 +653,7 @@ function workflowNodePositions(nodes) {
     ["execution_plan", { x: 448, y: 160 }],
     ["context_choice", { x: 624, y: 104 }],
     ["headroom", { x: 800, y: 160 }],
-    ["reasoning_choice", { x: 912, y: 104 }],
+    ["reasoning_choice", { x: 960, y: 104 }],
     ["fit", { x: 1328, y: 160 }],
   ]);
   main.forEach((node, index) => {

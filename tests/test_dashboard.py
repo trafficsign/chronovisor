@@ -3248,7 +3248,7 @@ def test_decision_trace_plan_nodes_share_an_eight_pixel_grid() -> None:
     )
 
     assert plan_positions == [("96", "160"), ("272", "160"), ("448", "160")]
-    assert reasoning_positions == [("912", y) for y in ("48", "104", "160", "216")]
+    assert reasoning_positions == [("960", y) for y in ("48", "104", "160", "216")]
     assert all(int(value) % 8 == 0 for position in plan_positions + reasoning_positions for value in position)
 
 
