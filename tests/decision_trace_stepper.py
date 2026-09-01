@@ -31,7 +31,7 @@ def decision_trace_step_scenarios() -> list[dict[str, Any]]:
                 projection = {
                     "schema": TRACE_PROJECTION_SCHEMA,
                     "execution_id": f"stepper-{pipeline}-{route_name}",
-                    "graph_id": f"workflow:{pipeline}:v1",
+                    "graph_id": f"workflow:{pipeline}:v2",
                     "revision": str(cursor),
                     "pipeline": pipeline,
                     "trace_state": "quarantined"
@@ -43,6 +43,20 @@ def decision_trace_step_scenarios() -> list[dict[str, Any]]:
                     "mode": "single",
                     "single_model": True,
                     "authority_kind": "single_model_v1",
+                    "context": {
+                        "selected_tokens": 65_536,
+                        "options": [
+                            {"tokens": 32_768, "label": "32K", "selected": False},
+                            {"tokens": 65_536, "label": "65K", "selected": True},
+                            {"tokens": 98_304, "label": "98K", "selected": False},
+                            {"tokens": 131_072, "label": "131K", "selected": False},
+                        ],
+                        "label": "required 55K → selected 65K",
+                    },
+                    "reasoning": {
+                        "selected": "low",
+                        "options": ["off", "low", "medium", "high"],
+                    },
                     "workflow": {
                         "nodes": [dict(node) for node in workflow["nodes"]],
                         "edges": [dict(edge) for edge in workflow["edges"]],
@@ -103,6 +117,8 @@ const api = window.__chronovisorDashboardTest;
 const query = new URLSearchParams(location.search);
 const selectedId = query.get("scenario");
 const selectedStep = Number(query.get("step") || 0);
+const selectedContext = Number(query.get("context") || 0);
+const selectedReasoning = query.get("reasoning");
 
 document.documentElement.dataset.traceStepper = "true";
 document.head.insertAdjacentHTML("beforeend", `<style>
@@ -121,8 +137,18 @@ document.head.insertAdjacentHTML("beforeend", `<style>
 const nextPaint = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 function renderFrame(scenario, frame) {
-  const workflow = frame.trace.projection.workflow;
-  api.updateDecisionSvgHarness(frame.trace, null, {
+  const trace = structuredClone(frame.trace);
+  if (selectedContext) {
+    trace.projection.context.selected_tokens = selectedContext;
+    trace.projection.context.options.forEach((option) => {
+      option.selected = option.tokens === selectedContext;
+    });
+    const option = trace.projection.context.options.find((item) => item.selected);
+    trace.projection.context.label = `required 55K → selected ${option?.label || "—"}`;
+  }
+  if (selectedReasoning) trace.projection.reasoning.selected = selectedReasoning;
+  const workflow = trace.projection.workflow;
+  api.updateDecisionSvgHarness(trace, null, {
     ...workflow,
     cursor: frame.cursor,
   });
@@ -158,7 +184,7 @@ function captureFrame(scenario, frame) {
   const pathLabelCollisions = [];
   const endpointErrors = [];
   for (const group of harness.querySelectorAll("[data-workflow-edge]")) {
-    const path = group.querySelector("path");
+    const path = group.querySelector("path.selected") || group.querySelector("path");
     const matrix = path.getScreenCTM();
     const length = path.getTotalLength();
     for (let distance = 0; distance <= length; distance += 3) {

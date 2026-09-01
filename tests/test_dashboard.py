@@ -1211,7 +1211,7 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
     assert trace["overall"][2]["status"] == "done"
     assert trace["overall"][3]["status"] == "active"
     assert trace["projection"]["schema"] == "chronovisor.decision-trace-projection.v3"
-    assert trace["projection"]["graph_id"] == "workflow:ingest:v1"
+    assert trace["projection"]["graph_id"] == "workflow:ingest:v2"
     assert trace["projection"]["workflow"]["target_node"] == "authority"
     assert trace["projection"]["detail"]["context_tokens"] == 32_768
     assert trace["projection"]["detail"]["think"] == "high"
@@ -3019,13 +3019,13 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "${pageChanges} changes" in app
     assert "${pages} pages" not in app
     assert 'class="decision-trace-scroll" id="decision-trace-scroll"' in page
-    assert 'id="decision-trace-harness" viewBox="0 0 1500 520"' in page
+    assert 'id="decision-trace-harness" viewBox="0 0 1500 840"' in page
     assert ".decision-trace-scroll {" in style
     assert "overflow-x: auto;" in style
     assert ".decision-trace-harness {\n  display: block;\n  width: 100%;" in style
     assert (
         "@media (max-width: 980px) {" in style
-        and ".decision-trace-scroll {\n    height: 486px;\n    overflow-x: auto;"
+            and ".decision-trace-scroll {\n    height: 784px;\n    overflow-x: auto;"
         in style
         and ".decision-trace-harness {\n    width: 1400px;" in style
     )
@@ -3201,8 +3201,8 @@ def test_decision_trace_dom_contract_has_one_dynamic_fixed_rail() -> None:
         "function decisionEventText", 1
     )[0]
 
-    assert 'id="decision-trace-harness" viewBox="0 0 1500 520"' in page
-    assert 'width="1400" height="486"' in page
+    assert 'id="decision-trace-harness" viewBox="0 0 1500 840"' in page
+    assert 'width="1400" height="784"' in page
     assert page.count("data-workflow-edges") == 1
     assert page.count("data-workflow-nodes") == 1
     assert "data-decision-lane-step" not in page

@@ -9,6 +9,17 @@ TRACE_PROJECTION_SCHEMA: Final = "chronovisor.decision-trace-projection.v3"
 TRACE_SINGLE_AUTHORITY_KIND: Final = "single_model_v1"
 TRACE_STATES: Final = frozenset({"pending", "active", "done", "skipped", "error"})
 TRACE_PHASES: Final = ("trigger", "load", "context", "generate", "validate", "vote")
+_CONTEXT_OPTIONS: Final = (32_768, 65_536, 98_304, 131_072)
+_REASONING_MODES: Final = ("off", "low", "medium", "high")
+_PLAN_ROUTE: Final = (
+    "packet",
+    "preflight",
+    "execution_plan",
+    "context_choice",
+    "headroom",
+    "reasoning_choice",
+    "fit",
+)
 
 
 def _node(key: str, label: str, kind: str = "step") -> dict[str, str]:
@@ -58,6 +69,36 @@ def _linear_workflow(
             "success": tuple(success),
             "hold": (*success[: result_index + 1], "hold"),
         },
+    }
+
+
+def _with_execution_plan(workflow: dict[str, Any]) -> None:
+    first = workflow["routes"]["success"][0]
+    workflow["nodes"] = [
+        *(
+            _node(key, label, "plan")
+            for key, label in (
+                ("packet", "Packet"),
+                ("preflight", "Preflight"),
+                ("execution_plan", "Execution Plan"),
+                ("context_choice", "Context Window"),
+                ("headroom", "Task + headroom"),
+                ("reasoning_choice", "Reasoning Budget"),
+                ("fit", "Fit Gate"),
+            )
+        ),
+        *workflow["nodes"],
+    ]
+    workflow["edges"] = [
+        *(
+            _edge(source, target)
+            for source, target in zip(_PLAN_ROUTE, _PLAN_ROUTE[1:], strict=False)
+        ),
+        _edge("fit", first, "DISPATCH"),
+        *workflow["edges"],
+    ]
+    workflow["routes"] = {
+        name: (*_PLAN_ROUTE, *route) for name, route in workflow["routes"].items()
     }
 
 
@@ -241,6 +282,9 @@ TRACE_WORKFLOWS["repair"]["routes"]["escalate"] = (
     "complete",
 )
 
+for _workflow in TRACE_WORKFLOWS.values():
+    _with_execution_plan(_workflow)
+
 _PIPELINE_STAGE_ALIASES: Final = {
     "ingest": {"consensus": "authority", "apply": "apply"},
     "recall": {
@@ -288,6 +332,27 @@ def _positive_int(value: object) -> int | None:
         if isinstance(value, int) and not isinstance(value, bool) and value > 0
         else None
     )
+
+
+def _context_label(value: int | None) -> str:
+    return f"{value // 1000}K" if value else "—"
+
+
+def _context_options(selected: int | None) -> list[dict[str, Any]]:
+    displayed = list(_CONTEXT_OPTIONS)
+    if selected and selected not in displayed:
+        nearest = min(
+            range(len(displayed)), key=lambda index: abs(displayed[index] - selected)
+        )
+        displayed[nearest] = selected
+    return [
+        {
+            "tokens": tokens,
+            "label": _context_label(tokens),
+            "selected": tokens == selected,
+        }
+        for tokens in displayed
+    ]
 
 
 def _pipeline_from_trace(trace: Mapping[str, Any]) -> str:
@@ -462,6 +527,18 @@ def project_decision_trace(
         else "pending"
     )
     active_lane = _active_lane(trace)
+    selected_context = _positive_int(active_lane.get("requested_context_tokens"))
+    selected_context = selected_context or _positive_int(
+        active_lane.get("context_tokens") or trace.get("context_tokens")
+    )
+    required_context = _positive_int(
+        active_lane.get("required_context_tokens")
+        or trace.get("required_context_tokens")
+    )
+    requested_mode = str(active_lane.get("think") or "").casefold()
+    selected_reasoning = (
+        requested_mode if requested_mode in _REASONING_MODES else None
+    )
     single_model = trace.get("authority_kind") == TRACE_SINGLE_AUTHORITY_KIND
     identity = (
         (
@@ -488,7 +565,7 @@ def project_decision_trace(
     result = {
         "schema": TRACE_PROJECTION_SCHEMA,
         "execution_id": str(identity or "idle"),
-        "graph_id": f"workflow:{selected_pipeline}:v1",
+        "graph_id": f"workflow:{selected_pipeline}:v2",
         "revision": max(revision_values, default="0"),
         "pipeline": selected_pipeline,
         "trace_state": "active" if runtime_active else trace_state,
@@ -512,6 +589,15 @@ def project_decision_trace(
             "context_tokens": _positive_int(
                 active_lane.get("context_tokens") or trace.get("context_tokens")
             ),
+        },
+        "context": {
+            "selected_tokens": selected_context,
+            "options": _context_options(selected_context),
+            "label": f"required {_context_label(required_context)} → selected {_context_label(selected_context)}",
+        },
+        "reasoning": {
+            "selected": selected_reasoning,
+            "options": list(_REASONING_MODES),
         },
         "labels": {
             "validation": "Held"

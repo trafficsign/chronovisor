@@ -3179,6 +3179,77 @@ canvas {
   letter-spacing: 0.05em;
 }
 
+.decision-trace-harness .trace-kicker,
+.decision-trace-harness .trace-value,
+.decision-trace-harness .trace-reasoning text,
+.decision-trace-harness .trace-diamond text {
+  font-size: 9px;
+}
+
+.decision-trace-harness .trace-kicker {
+  fill: #697783;
+  letter-spacing: 0.04em;
+}
+
+.decision-trace-harness .trace-value,
+.decision-trace-harness .trace-reasoning-detail {
+  fill: #65737e;
+}
+
+.decision-trace-harness .trace-label-backdrop {
+  fill: #031522;
+  stroke: none;
+}
+
+.decision-trace-harness .trace-context-guide,
+.decision-trace-harness .trace-reasoning-guide {
+  fill: none;
+  stroke: #7d8992;
+  stroke-width: 1.05;
+  stroke-dasharray: 4 5;
+  opacity: 0.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.decision-trace-harness .trace-choice-path {
+  display: none;
+}
+
+.decision-trace-harness .trace-choice-path.selected {
+  display: block;
+}
+
+.decision-trace-harness .trace-reasoning circle,
+.decision-trace-harness .trace-diamond path {
+  fill: #061724;
+  stroke: #667783;
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.decision-trace-harness .trace-diamond text {
+  text-anchor: middle;
+}
+
+.decision-trace-harness .trace-context-option.selected [data-context-label],
+.decision-trace-harness .trace-reasoning.selected [data-reasoning-label] {
+  fill: #ffb340;
+}
+
+.decision-trace-harness .trace-context-option .trace-selected-core,
+.decision-trace-harness .trace-reasoning .trace-selected-core {
+  fill: #8e91ff;
+  stroke: none;
+  opacity: 0;
+}
+
+.decision-trace-harness .trace-context-option.done .trace-selected-core,
+.decision-trace-harness .trace-context-option.active .trace-selected-core,
+.decision-trace-harness .trace-reasoning.done .trace-selected-core,
+.decision-trace-harness .trace-reasoning.active .trace-selected-core {
+  opacity: 1;
+}
+
 .decision-trace-harness .trace-path.done {
   stroke: #8e91ff;
   stroke-dasharray: none;
@@ -3188,6 +3259,13 @@ canvas {
 .decision-trace-harness .trace-node.done > circle,
 .decision-trace-harness .trace-node.done > path {
   fill: url(#trace-active-core);
+  stroke: #a5a8ff;
+  stroke-width: 2;
+  filter: url(#trace-glow-violet);
+}
+
+.decision-trace-harness .trace-diamond.done path,
+.decision-trace-harness .trace-reasoning.done circle {
   stroke: #a5a8ff;
   stroke-width: 2;
   filter: url(#trace-glow-violet);
@@ -3207,6 +3285,14 @@ canvas {
 .decision-trace-harness .trace-node.active > circle,
 .decision-trace-harness .trace-node.active > path {
   fill: url(#trace-processing-core);
+  stroke: #ff9d00;
+  stroke-width: 2.2;
+  filter: url(#trace-glow-orange);
+  animation: trace-processing-pulse 0.9s ease-in-out infinite alternate;
+}
+
+.decision-trace-harness .trace-diamond.active path,
+.decision-trace-harness .trace-reasoning.active circle {
   stroke: #ff9d00;
   stroke-width: 2.2;
   filter: url(#trace-glow-orange);
@@ -3652,7 +3738,7 @@ canvas {
   }
 
   .decision-trace-scroll {
-    height: 486px;
+    height: 784px;
     overflow-x: auto;
     scrollbar-gutter: stable;
   }
@@ -3665,7 +3751,7 @@ canvas {
   .decision-trace-harness {
     width: 1400px;
     max-width: none;
-    height: 486px;
+    height: 784px;
   }
 
   .decision-transition-bar {

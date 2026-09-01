@@ -72,6 +72,16 @@ EXPECTED_WORKFLOW_MILESTONES = {
     ),
 }
 
+COMMON_PLAN_MILESTONES = (
+    "packet",
+    "preflight",
+    "execution_plan",
+    "context_choice",
+    "headroom",
+    "reasoning_choice",
+    "fit",
+)
+
 
 def _trace(**extra: Any) -> dict[str, Any]:
     return {
@@ -98,9 +108,10 @@ def test_six_workflow_patterns_inventory_every_milestone() -> None:
     assert set(projection.TRACE_WORKFLOWS) == set(EXPECTED_WORKFLOW_MILESTONES)
     for pipeline, expected in EXPECTED_WORKFLOW_MILESTONES.items():
         workflow = projection.TRACE_WORKFLOWS[pipeline]
-        assert tuple(node["id"] for node in workflow["nodes"]) == expected
-        node_ids = set(expected)
-        assert len(node_ids) == len(expected)
+        all_expected = COMMON_PLAN_MILESTONES + expected
+        assert tuple(node["id"] for node in workflow["nodes"]) == all_expected
+        node_ids = set(all_expected)
+        assert len(node_ids) == len(all_expected)
         assert all(
             edge["source"] in node_ids and edge["target"] in node_ids
             for edge in workflow["edges"]
@@ -114,9 +125,45 @@ def test_six_workflow_patterns_inventory_every_milestone() -> None:
             if node["type"] == "decision"
         )
         assert all(
-            route[0] != "hold" and route[-1] in {"complete", "hold"}
+            tuple(route[: len(COMMON_PLAN_MILESTONES)]) == COMMON_PLAN_MILESTONES
+            and route[-1] in {"complete", "hold"}
             for route in workflow["routes"].values()
         )
+
+
+def test_projection_restores_context_and_reasoning_choices() -> None:
+    result = projection.project_decision_trace(
+        _trace(
+            lanes=[
+                {
+                    "key": "primary",
+                    "state": "active",
+                    "phase": "generate",
+                    "think": "low",
+                    "model": "Qwen",
+                    "context_tokens": 65_536,
+                    "required_context_tokens": 55_000,
+                }
+            ]
+        ),
+        pipeline="ingest",
+        processing_lane={"work_item": "child"},
+    )
+
+    assert result["context"] == {
+        "selected_tokens": 65_536,
+        "options": [
+            {"tokens": 32_768, "label": "32K", "selected": False},
+            {"tokens": 65_536, "label": "65K", "selected": True},
+            {"tokens": 98_304, "label": "98K", "selected": False},
+            {"tokens": 131_072, "label": "131K", "selected": False},
+        ],
+        "label": "required 55K → selected 65K",
+    }
+    assert result["reasoning"] == {
+        "selected": "low",
+        "options": ["off", "low", "medium", "high"],
+    }
 
 
 @pytest.mark.parametrize(
@@ -140,7 +187,7 @@ def test_each_pipeline_projects_its_observed_stage(
         processing_lane={"work_item": f"{pipeline}-job", "current_step": current_step},
     )
 
-    assert result["graph_id"] == f"workflow:{pipeline}:v1"
+    assert result["graph_id"] == f"workflow:{pipeline}:v2"
     assert result["execution_id"] == f"{pipeline}-job"
     assert result["workflow"]["target_node"] == expected
     assert (
@@ -292,6 +339,7 @@ def test_renderer_owns_geometry_only_when_mounting_a_graph() -> None:
     assert "projection.processing" not in renderer
     assert "function advanceDecisionTraceOneStep" in renderer
     assert "DECISION_PROGRESS_INTERVAL_MS = 500" in renderer
+    assert 'setAttribute("d"' not in renderer
     assert not re.search(
         r'setAttribute\(\s*["\'](?:d|transform|viewBox|height)["\']',
         update,
@@ -514,13 +562,17 @@ process.stdout.write(JSON.stringify({{ route: playback.frame.route, observed }})
     }
 
 
-def test_markup_contains_only_the_dynamic_workflow_mount() -> None:
+def test_markup_restores_the_fixed_execution_plan_before_the_dynamic_workflow() -> None:
     page = (ROOT / "src/chronovisor/dashboard_static/index.html").read_text(
         encoding="utf-8"
     )
 
-    assert 'id="decision-trace-harness" viewBox="0 0 1500 520"' in page
+    assert 'id="decision-trace-harness" viewBox="0 0 1500 840"' in page
     assert page.count("data-workflow-edges") == 1
     assert page.count("data-workflow-nodes") == 1
+    assert page.count("data-context-option") == 4
+    assert page.count("data-reasoning-key") == 4
+    assert "CONTEXT WINDOW" in page
+    assert "REASONING BUDGET" in page
     assert "data-ingest-job-step" not in page
     assert "data-decision-lane-step" not in page

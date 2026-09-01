@@ -524,6 +524,10 @@ const DECISION_TRACE_STATES = ["pending", "active", "done", "skipped", "error"];
 const DECISION_TRACE_PROJECTION_SCHEMA = "chronovisor.decision-trace-projection.v3";
 const SINGLE_MODEL_AUTHORITY_KIND = "single_model_v1";
 const SVG_NS = "http://www.w3.org/2000/svg";
+const DECISION_PLAN_NODE_IDS = new Set([
+  "packet", "preflight", "execution_plan", "context_choice",
+  "headroom", "reasoning_choice", "fit",
+]);
 
 function isSingleModelTrace(trace) {
   return decisionTraceProjection(trace)?.single_model === true;
@@ -578,15 +582,85 @@ function svgElement(name, attributes = {}) {
   return node;
 }
 
+function updateDecisionPlanSelection(projection) {
+  const harness = els.decisionTraceHarness;
+  if (!harness) return;
+  const contextOptions = [...harness.querySelectorAll("[data-context-option]")];
+  const projectedContext = Array.isArray(projection?.context?.options)
+    ? projection.context.options : [];
+  projectedContext.forEach((option, index) => {
+    const node = contextOptions[index];
+    if (!node) return;
+    node.dataset.contextTokens = String(option.tokens);
+    const label = node.querySelector("[data-context-label]");
+    if (label) label.textContent = fmt(option.label, "—");
+  });
+  contextOptions.forEach((node) => {
+    node.removeAttribute("data-workflow-node");
+    node.classList.remove("selected");
+    setDecisionSvgState(node, "pending");
+  });
+  const contextIndex = Math.max(
+    0,
+    projectedContext.findIndex((option) => option.selected),
+  );
+  const contextNode = contextOptions[contextIndex] || contextOptions[1];
+  contextNode?.setAttribute("data-workflow-node", "context_choice");
+  contextNode?.classList.toggle("selected", Boolean(projection?.context?.selected_tokens));
+  harness.querySelectorAll("[data-context-path]").forEach((path) => {
+    path.classList.toggle(
+      "selected",
+      path.dataset.contextPath === contextNode?.dataset.contextTokens,
+    );
+  });
+  const contextLabel = harness.querySelector('[data-plan-value="context-selection"]');
+  if (contextLabel) contextLabel.textContent = fmt(
+    projection?.context?.label,
+    "required — → selected —",
+  );
+
+  const reasoningNodes = [...harness.querySelectorAll("[data-reasoning-key]")];
+  reasoningNodes.forEach((node) => {
+    node.removeAttribute("data-workflow-node");
+    node.classList.remove("selected");
+    setDecisionSvgState(node, "pending");
+  });
+  const selectedReasoning = String(projection?.reasoning?.selected || "");
+  const reasoningNode = reasoningNodes.find(
+    (node) => node.dataset.reasoningKey === selectedReasoning,
+  ) || reasoningNodes[0];
+  reasoningNode?.setAttribute("data-workflow-node", "reasoning_choice");
+  reasoningNode?.classList.toggle("selected", Boolean(selectedReasoning));
+  harness.querySelectorAll("[data-reasoning-path]").forEach((path) => {
+    path.classList.toggle(
+      "selected",
+      path.dataset.reasoningPath === reasoningNode?.dataset.reasoningKey,
+    );
+  });
+  const fitLabel = harness.querySelector('[data-plan-value="fit"]');
+  if (fitLabel) fitLabel.textContent = selectedReasoning === "off"
+    ? "BYPASS" : selectedReasoning ? "PASS" : "WAITING";
+}
+
 function workflowNodePositions(nodes) {
   const branches = new Set(["hold", "escalate"]);
-  const main = nodes.filter((node) => !branches.has(node.id));
-  const positions = new Map();
+  const main = nodes.filter(
+    (node) => !DECISION_PLAN_NODE_IDS.has(node.id) && !branches.has(node.id),
+  );
+  const positions = new Map([
+    ["packet", { x: 96, y: 20 }],
+    ["preflight", { x: 298, y: 20 }],
+    ["execution_plan", { x: 492, y: 56 }],
+    ["context_choice", { x: 442, y: 150 }],
+    ["headroom", { x: 812, y: 164 }],
+    ["reasoning_choice", { x: 912, y: 106 }],
+    ["fit", { x: 1330, y: 164 }],
+  ]);
   main.forEach((node, index) => {
     const row = Math.floor(index / 5);
     const column = index % 5;
     const visualColumn = row % 2 ? 4 - column : column;
-    positions.set(node.id, { x: 110 + visualColumn * 290, y: 100 + row * 160 });
+    positions.set(node.id, { x: 110 + visualColumn * 290, y: 420 + row * 160 });
   });
   const result = positions.get("result") || positions.get(main.at(-1)?.id) || { x: 750, y: 100 };
   const hasEscalate = nodes.some((node) => node.id === "escalate");
@@ -604,6 +678,9 @@ function workflowPath(edge, positions) {
   const source = positions.get(edge.source);
   const target = positions.get(edge.target);
   if (!source || !target) return "";
+  if (edge.source === "fit") {
+    return `M${source.x} ${source.y} H1450 V310 H80 V${target.y} H${target.x}`;
+  }
   if (edge.kind === "loop" && edge.source === "escalate") {
     const floor = Math.max(source.y, target.y) + 95;
     return `M${source.x} ${source.y} V${floor} H${target.x} V${target.y}`;
@@ -625,6 +702,7 @@ function workflowPath(edge, positions) {
 function workflowEdgeLabelPosition(edge, positions) {
   const source = positions.get(edge.source);
   const target = positions.get(edge.target);
+  if (edge.source === "fit") return { x: 765, y: 300 };
   if (edge.kind === "loop" && edge.source === "escalate") {
     const floor = Math.max(source.y, target.y) + 95;
     return { x: (source.x + target.x) / 2, y: floor - 9 };
@@ -670,6 +748,7 @@ function mountDecisionWorkflow(projection) {
 
   const positions = workflowNodePositions(workflow.nodes || []);
   (workflow.edges || []).forEach((edge) => {
+    if (harness.querySelector(`[data-workflow-edge="${edge.id}"]`)) return;
     const group = svgElement("g", {
       "data-workflow-edge": edge.id,
       "data-source": edge.source,
@@ -696,6 +775,7 @@ function mountDecisionWorkflow(projection) {
     edgeLayer.append(group);
   });
   (workflow.nodes || []).forEach((item) => {
+    if (item.type === "plan") return;
     const position = positions.get(item.id);
     const group = svgElement("g", {
       transform: `translate(${position.x} ${position.y})`,
@@ -773,6 +853,7 @@ function updateDecisionSvgHarness(trace, _focusEvent = null, visibleFrame = null
   updateDecisionFactMode(projection?.single_model === true);
   if (!projection?.workflow) return;
 
+  updateDecisionPlanSelection(projection);
   mountDecisionWorkflow(projection);
   const target = projection.workflow;
   const frame = visibleFrame || {
@@ -792,7 +873,13 @@ function updateDecisionSvgHarness(trace, _focusEvent = null, visibleFrame = null
   harness.querySelectorAll("[data-workflow-edge]").forEach((group) => {
     const state = edgeStates[group.dataset.workflowEdge];
     setDecisionSvgState(group, state);
-    setDecisionSvgState(group.querySelector(".trace-path"), state);
+    group.querySelectorAll(".trace-path").forEach((path) => {
+      setDecisionSvgState(
+        path,
+        path.classList.contains("trace-choice-path")
+          && !path.classList.contains("selected") ? "pending" : state,
+      );
+    });
     setDecisionSvgState(group.querySelector(".trace-branch-label"), state);
   });
 }

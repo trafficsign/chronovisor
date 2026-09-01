@@ -54,12 +54,14 @@ def test_stepper_inventory_covers_all_six_workflows_and_every_route_step() -> No
         assert [frame["milestone"] for frame in scenario["frames"]] == list(route)
 
 
-def test_dashboard_mount_is_empty_until_one_backend_graph_arrives() -> None:
+def test_dashboard_keeps_one_fixed_plan_and_one_dynamic_pipeline_mount() -> None:
     page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
 
     assert page.count("data-workflow-edges") == 1
     assert page.count("data-workflow-nodes") == 1
+    assert page.count("data-context-option") == 4
+    assert page.count("data-reasoning-key") == 4
     assert "data-ingest-job-step" not in page
     assert "data-decision-lane-step" not in page
     assert "function mountDecisionWorkflow" in renderer
@@ -158,7 +160,7 @@ def test_all_workflow_frames_keep_geometry_fixed_and_advance_one_node(
         assert result["cursor"] == frame["cursor"]
         assert result["visibleCursor"] == frame["cursor"]
         assert result["milestone"] == frame["milestone"]
-        assert result["graphId"] == f"workflow:{scenario['pipeline']}:v1"
+        assert result["graphId"] == f"workflow:{scenario['pipeline']}:v2"
 
         geometry = str(result["geometry"])
         previous_geometry = geometry_by_pipeline.setdefault(
