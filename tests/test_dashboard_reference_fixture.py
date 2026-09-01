@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -89,7 +91,69 @@ def test_dashboard_css_has_one_state_system_for_nodes_and_edges() -> None:
     assert ".trace-repair-loop" not in style
 
 
-def test_all_workflow_frames_keep_geometry_fixed_and_advance_one_node(
+def _capture_stepper_visuals(
+    scenarios: list[dict[str, object]], visual_dir: Path, tmp_path: Path
+) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), stepper_handler(scenarios))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        visual_dir.mkdir(parents=True, exist_ok=True)
+        image_index = 0
+        for scenario in scenarios:
+            for frame in scenario["frames"]:
+                screenshot = visual_dir / (
+                    f"{scenario['id']}-{frame['cursor']:02d}-{frame['milestone']}.png"
+                )
+                process = subprocess.Popen(
+                    [
+                        _chrome(),
+                        "--headless=new",
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-background-networking",
+                        "--disable-component-update",
+                        "--no-first-run",
+                        "--force-prefers-reduced-motion=reduce",
+                        "--run-all-compositor-stages-before-draw",
+                        "--virtual-time-budget=1000",
+                        "--hide-scrollbars",
+                        "--window-size=2048,1800",
+                        f"--screenshot={screenshot}",
+                        f"--user-data-dir={tmp_path / f'trace-visual-profile-{image_index}'}",
+                        (
+                            f"http://127.0.0.1:{server.server_port}/"
+                            f"?scenario={scenario['id']}&step={frame['cursor']}"
+                        ),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                deadline = time.monotonic() + 15
+                while not screenshot.is_file() and time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                if process.poll() is None:
+                    process.terminate()
+                try:
+                    _, stderr = process.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    _, stderr = process.communicate(timeout=3)
+                assert screenshot.is_file() and screenshot.stat().st_size > 0
+                assert process.returncode in {0, -signal.SIGTERM}, stderr[-2000:]
+                assert screenshot.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+                image_index += 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
+def test_all_decision_inputs_keep_real_dashboard_paths_connected(
     tmp_path: Path,
 ) -> None:
     scenarios = decision_trace_step_scenarios()
@@ -151,6 +215,7 @@ def test_all_workflow_frames_keep_geometry_fixed_and_advance_one_node(
     assert len(browser_results) == len(expected_frames), stderr[-4000:]
 
     geometry_by_pipeline: dict[str, str] = {}
+    overlaps: list[tuple[str, object]] = []
     for result, (scenario, frame) in zip(
         browser_results,
         expected_frames,
@@ -170,10 +235,14 @@ def test_all_workflow_frames_keep_geometry_fixed_and_advance_one_node(
         assert geometry == previous_geometry
 
         paths = result["paths"]
+        path_states = {
+            (path["source"], path["target"]): path["state"] for path in paths
+        }
         nodes = {node["id"]: node["state"] for node in result["nodes"]}
         assert all(path["d"] for path in paths)
         assert result["pathLabelCollisions"] == []
         assert result["pathIntersections"] == []
+        assert result["guideOverlaps"] == []
         assert result["textOverlaps"] == []
         assert max(error["distance"] for error in result["endpointErrors"]) < 0.75
         final = frame["cursor"] == len(scenario["frames"]) - 1
@@ -186,11 +255,22 @@ def test_all_workflow_frames_keep_geometry_fixed_and_advance_one_node(
         )
         assert nodes[frame["milestone"]] == expected_state
         route = TRACE_WORKFLOWS[scenario["pipeline"]]["routes"][scenario["route"]]
+        if frame["cursor"]:
+            incoming = (route[frame["cursor"] - 1], route[frame["cursor"]])
+            assert path_states[incoming] == (
+                "active" if expected_state == "active" else "done"
+            ), (scenario["id"], frame["cursor"], incoming, path_states[incoming])
         assert all(
             nodes[node] == "done"
             for node in set(route[: frame["cursor"]])
             if node != frame["milestone"]
         )
+        if result["pathOverlaps"]:
+            overlaps.append((scenario["id"], result["pathOverlaps"]))
+
+    assert overlaps == []
+    if visual_dir := os.environ.get("CHRONOVISOR_DASHBOARD_VISUAL_DIR"):
+        _capture_stepper_visuals(scenarios, Path(visual_dir), tmp_path)
 
 
 def test_stepper_scenarios_are_json_serializable() -> None:

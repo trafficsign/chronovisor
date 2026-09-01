@@ -215,17 +215,23 @@ function captureFrame(scenario, frame) {
     }
   }
   const segments = (d) => {
-    const tokens = d.match(/[MHV]|-?\d+(?:\.\d+)?/g) || [];
+    const tokens = d.match(/[MLHV]|-?\d+(?:\.\d+)?/g) || [];
     const rows = [];
     let command = "";
     let x = 0;
     let y = 0;
     for (let index = 0; index < tokens.length;) {
-      if (/^[MHV]$/.test(tokens[index])) command = tokens[index++];
+      if (/^[MLHV]$/.test(tokens[index])) command = tokens[index++];
       if (command === "M") {
         x = Number(tokens[index++]);
         y = Number(tokens[index++]);
         command = "";
+      } else if (command === "L") {
+        const nextX = Number(tokens[index++]);
+        const nextY = Number(tokens[index++]);
+        rows.push({ x1: x, y1: y, x2: nextX, y2: nextY });
+        x = nextX;
+        y = nextY;
       } else if (command === "H") {
         const nextX = Number(tokens[index++]);
         rows.push({ x1: x, y1: y, x2: nextX, y2: y });
@@ -243,6 +249,11 @@ function captureFrame(scenario, frame) {
   const intersects = (left, right) => {
     const leftVertical = left.x1 === left.x2;
     const rightVertical = right.x1 === right.x2;
+    const leftHorizontal = left.y1 === left.y2;
+    const rightHorizontal = right.y1 === right.y2;
+    if ((!leftVertical && !leftHorizontal) || (!rightVertical && !rightHorizontal)) {
+      return false;
+    }
     if (leftVertical !== rightVertical) {
       const vertical = leftVertical ? left : right;
       const horizontal = leftVertical ? right : left;
@@ -256,10 +267,37 @@ function captureFrame(scenario, frame) {
     }
     return left.y1 === right.y1
       && Math.max(Math.min(left.x1, left.x2), Math.min(right.x1, right.x2))
-        <= Math.min(Math.max(left.x1, left.x2), Math.max(right.x1, right.x2));
+      <= Math.min(Math.max(left.x1, left.x2), Math.max(right.x1, right.x2));
+  };
+  const overlapLength = (left, right) => {
+    const leftVertical = left.x1 === left.x2;
+    const rightVertical = right.x1 === right.x2;
+    const leftHorizontal = left.y1 === left.y2;
+    const rightHorizontal = right.y1 === right.y2;
+    if ((!leftVertical && !leftHorizontal) || (!rightVertical && !rightHorizontal)) {
+      return 0;
+    }
+    if (leftVertical !== rightVertical) return 0;
+    if (leftVertical) {
+      if (left.x1 !== right.x1) return 0;
+      return Math.max(0,
+        Math.min(Math.max(left.y1, left.y2), Math.max(right.y1, right.y2))
+          - Math.max(Math.min(left.y1, left.y2), Math.min(right.y1, right.y2))
+      );
+    }
+    if (left.y1 !== right.y1) return 0;
+    return Math.max(0,
+      Math.min(Math.max(left.x1, left.x2), Math.max(right.x1, right.x2))
+        - Math.max(Math.min(left.x1, left.x2), Math.min(right.x1, right.x2))
+    );
   };
   const pathIntersections = [];
+  const pathOverlaps = [];
   paths.forEach((left, index) => paths.slice(index + 1).forEach((right) => {
+    const overlap = Math.max(
+      ...segments(left.d).flatMap((a) => segments(right.d).map((b) => overlapLength(a, b))),
+    );
+    if (overlap > 0.5) pathOverlaps.push([left.id, right.id, overlap]);
     if (
       left.source === right.source || left.source === right.target
       || left.target === right.source || left.target === right.target
@@ -268,6 +306,14 @@ function captureFrame(scenario, frame) {
       pathIntersections.push([left.id, right.id]);
     }
   }));
+  const guideOverlaps = [];
+  for (const guide of harness.querySelectorAll(".trace-context-guide, .trace-reasoning-guide")) {
+    const guideSegments = segments(guide.getAttribute("d"));
+    guideSegments.forEach((left, index) => guideSegments.slice(index + 1).forEach((right) => {
+      const overlap = overlapLength(left, right);
+      if (overlap > 0.5) guideOverlaps.push([guide.getAttribute("class"), overlap]);
+    }));
+  }
   const textOverlaps = [];
   labels.forEach((left, index) => labels.slice(index + 1).forEach((right) => {
     if (
@@ -291,6 +337,8 @@ function captureFrame(scenario, frame) {
     nodes,
     pathLabelCollisions: [...new Set(pathLabelCollisions.map(JSON.stringify))].map(JSON.parse),
     pathIntersections,
+    pathOverlaps,
+    guideOverlaps,
     endpointErrors,
     textOverlaps,
   };

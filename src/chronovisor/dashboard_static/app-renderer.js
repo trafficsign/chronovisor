@@ -681,6 +681,11 @@ function workflowPath(edge, positions) {
   if (edge.source === "fit") {
     return `M${source.x} ${source.y} H1450 V310 H80 V${target.y} H${target.x}`;
   }
+  if (edge.source === "result" && positions.has("escalate")
+      && ["hold", "escalate"].includes(edge.target)) {
+    const branchX = source.x + (edge.target === "hold" ? -15 : 15);
+    return `M${source.x} ${source.y} L${branchX} ${source.y + 15} V${target.y} H${target.x}`;
+  }
   if (edge.kind === "loop" && edge.source === "escalate") {
     const floor = Math.max(source.y, target.y) + 95;
     return `M${source.x} ${source.y} V${floor} H${target.x} V${target.y}`;
@@ -703,6 +708,11 @@ function workflowEdgeLabelPosition(edge, positions) {
   const source = positions.get(edge.source);
   const target = positions.get(edge.target);
   if (edge.source === "fit") return { x: 765, y: 300 };
+  if (edge.source === "result" && positions.has("escalate")
+      && ["hold", "escalate"].includes(edge.target)) {
+    const branchX = source.x + (edge.target === "hold" ? -15 : 15);
+    return { x: (branchX + target.x) / 2, y: target.y - 10 };
+  }
   if (edge.kind === "loop" && edge.source === "escalate") {
     const floor = Math.max(source.y, target.y) + 95;
     return { x: (source.x + target.x) / 2, y: floor - 9 };
@@ -719,7 +729,7 @@ function workflowEdgeLabelPosition(edge, positions) {
     return { x: (source.x + target.x) / 2, y: source.y - 10 };
   }
   if (source.x === target.x) {
-    return { x: source.x + 12, y: (source.y + target.y) / 2 };
+    return { x: source.x + 38, y: (source.y + target.y) / 2 };
   }
   return { x: (source.x + target.x) / 2, y: target.y - 10 };
 }
@@ -821,17 +831,19 @@ function workflowFrameStates(workflow, frame) {
   const selectedPairs = route.slice(0, -1).map((source, index) => [source, route[index + 1]]);
   const edgeStates = {};
   (workflow.edges || []).forEach((edge) => {
-    const selectedIndex = selectedPairs.findIndex(
-      ([source, target]) => source === edge.source && target === edge.target
+    const selectedIndexes = selectedPairs.flatMap(
+      ([source, target], index) => (
+        source === edge.source && target === edge.target ? [index] : []
+      )
     );
-    if (selectedIndex >= 0) {
-      edgeStates[edge.id] = selectedIndex < cursor
-        ? cursor === Number(frame.target_cursor)
-          && frame.target_state === "active"
-          && selectedIndex === cursor - 1
-            ? "active"
-            : "done"
-        : "pending";
+    if (selectedIndexes.length) {
+      edgeStates[edge.id] = cursor === Number(frame.target_cursor)
+        && frame.target_state === "active"
+        && selectedIndexes.includes(cursor - 1)
+        ? "active"
+        : selectedIndexes.some((index) => index < cursor)
+          ? "done"
+          : "pending";
     } else {
       edgeStates[edge.id] = crossedSources.has(edge.source) ? "skipped" : "pending";
     }
