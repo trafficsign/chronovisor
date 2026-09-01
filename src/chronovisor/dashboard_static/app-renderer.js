@@ -607,10 +607,10 @@ function updateDecisionPlanSelection(projection) {
   const contextNode = contextOptions[contextIndex] || contextOptions[1];
   contextNode?.setAttribute("data-workflow-node", "context_choice");
   contextNode?.classList.toggle("selected", Boolean(projection?.context?.selected_tokens));
-  harness.querySelectorAll("[data-context-path]").forEach((path) => {
+  harness.querySelectorAll("[data-context-slot]").forEach((path) => {
     path.classList.toggle(
       "selected",
-      path.dataset.contextPath === contextNode?.dataset.contextTokens,
+      path.dataset.contextSlot === String(contextIndex),
     );
   });
   const contextLabel = harness.querySelector('[data-plan-value="context-selection"]');
@@ -651,7 +651,7 @@ function workflowNodePositions(nodes) {
     ["packet", { x: 96, y: 20 }],
     ["preflight", { x: 298, y: 20 }],
     ["execution_plan", { x: 492, y: 56 }],
-    ["context_choice", { x: 442, y: 150 }],
+    ["context_choice", { x: 612, y: 106 }],
     ["headroom", { x: 812, y: 164 }],
     ["reasoning_choice", { x: 912, y: 106 }],
     ["fit", { x: 1330, y: 164 }],

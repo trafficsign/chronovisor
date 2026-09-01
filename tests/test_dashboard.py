@@ -3216,6 +3216,25 @@ def test_decision_trace_dom_contract_has_one_dynamic_fixed_rail() -> None:
     )
 
 
+def test_decision_trace_context_options_flow_left_to_right() -> None:
+    page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+
+    option_positions = re.findall(
+        r'data-context-tokens="\d+"[^>]+transform="translate\((\d+) (\d+)\)"',
+        page,
+    )
+    context_paths = re.findall(r'data-context-slot="(\d+)" d="([^"]+)"', page)
+
+    assert option_positions == [("612", y) for y in ("48", "106", "164", "222")]
+    assert len(context_paths) == 8
+    assert [slot for slot, _path in context_paths] == ["0", "1", "2", "3"] * 2
+    assert all(path.startswith("M492 56") and path.endswith("H612") for _slot, path in context_paths[:4])
+    assert all(path.startswith("M612") and path.endswith("H812") for _slot, path in context_paths[4:])
+    assert "projectedContext.findIndex((option) => option.selected)" in renderer
+    assert "path.dataset.contextSlot === String(contextIndex)" in renderer
+
+
 def test_decision_trace_routes_are_created_from_one_backend_topology() -> None:
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
 
