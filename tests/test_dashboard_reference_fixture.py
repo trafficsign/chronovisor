@@ -2893,44 +2893,12 @@ addEventListener("DOMContentLoaded", () => {
             "tabCount": 6,
             "panelRole": "tabpanel",
             "ingestVisible": pipeline == "ingest",
-            "processingVisible": pipeline != "ingest",
-            "processingLane": None if pipeline == "ingest" else pipeline,
-            "processingCurrent": (
-                None
-                if pipeline == "ingest"
-                else processing_steps[pipeline][len(processing_steps[pipeline]) // 2][
-                    "key"
-                ]
-            ),
-            "processingSteps": (
-                []
-                if pipeline == "ingest"
-                else [step["label"] for step in processing_steps[pipeline]]
-            ),
-            "processingStates": (
-                []
-                if pipeline == "ingest"
-                else [
-                    "done"
-                    if index < len(processing_steps[pipeline]) // 2
-                    else "active"
-                    if index == len(processing_steps[pipeline]) // 2
-                    else "pending"
-                    for index, _step in enumerate(processing_steps[pipeline])
-                ]
-            ),
-            "processingPathStates": (
-                []
-                if pipeline == "ingest"
-                else [
-                    "done"
-                    if index < len(processing_steps[pipeline]) // 2 - 1
-                    else "active"
-                    if index == len(processing_steps[pipeline]) // 2 - 1
-                    else "pending"
-                    for index in range(len(processing_steps[pipeline]) - 1)
-                ]
-            ),
+            "processingVisible": False,
+            "processingLane": None,
+            "processingCurrent": None,
+            "processingSteps": [],
+            "processingStates": [],
+            "processingPathStates": [],
             "disconnectedPathEnds": [],
         }
         for pipeline in (

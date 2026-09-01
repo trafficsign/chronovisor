@@ -570,56 +570,6 @@ function updateIngestJobTrace(processing, visible) {
   });
 }
 
-function updateProcessingJobTrace(processing, visible) {
-  const harness = els.decisionTraceHarness;
-  if (!harness) return;
-  if (!visible || !processing) {
-    delete harness.dataset.processingJobLane;
-    delete harness.dataset.processingJobStep;
-    delete harness.dataset.processingJobLayout;
-    return;
-  }
-
-  const steps = (Array.isArray(processing.nodes) ? processing.nodes : []).slice(0, 5);
-  const layoutSize = steps.length <= 2 ? 2 : steps.length <= 3 ? 3 : 5;
-  harness.dataset.processingJobLane = fmt(processing.pipeline, "waiting");
-  harness.dataset.processingJobStep = fmt(processing.current, "waiting");
-  harness.dataset.processingJobLayout = String(layoutSize);
-  const flow = harness.querySelector("[data-processing-job-flow]");
-  flow?.setAttribute("aria-label", `${fmt(processing.pipeline, "Selected")} workflow`);
-  const title = flow?.querySelector("[data-processing-job-title]");
-  if (title) title.textContent = `${fmt(processing.pipeline, "Selected")} workflow`;
-  const layouts = [...(flow?.querySelectorAll("[data-processing-job-layout]") || [])];
-  const layout = layouts.find(
-    (node) => node.dataset.processingJobLayout === String(layoutSize)
-  );
-  if (!layout) return;
-
-  const entry = layout.querySelector("[data-processing-job-entry]");
-  if (entry && steps.length) {
-    entry.dataset.processingJobEntry = fmt(steps[0].id, "waiting");
-    setDecisionSvgState(entry, fmt(steps[0].state, "pending"));
-  }
-
-  layout.querySelectorAll("[data-processing-job-step-slot]").forEach((node, index) => {
-    const step = steps[index];
-    node.style.display = step ? "" : "none";
-    if (!step) return;
-    node.dataset.processingJobStep = fmt(step.id, `step-${index}`);
-    const label = node.querySelector("text");
-    if (label) label.textContent = fmt(step.label, step.id);
-    setDecisionSvgState(node, fmt(step.state, "pending"));
-  });
-
-  layout.querySelectorAll("[data-processing-job-path-slot]").forEach((path, index) => {
-    const edge = processing.edges?.[index];
-    path.style.display = edge ? "" : "none";
-    if (!edge) return;
-    path.dataset.processingJobTo = fmt(edge.target, `step-${index + 1}`);
-    setDecisionSvgState(path, fmt(edge.state, "pending"));
-  });
-}
-
 function updateSingleAuthorityMeta(trace, projection) {
   if (typeof document === "undefined") return;
   const panel = document.getElementById("decision-single-authority");
@@ -658,13 +608,10 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
   const single = projection?.single_model === true;
   const processing = projection?.processing || null;
   const ingestJob = single && processing?.kind === "ingest";
-  const processingJob = single && processing?.kind === "linear";
   harness.classList.toggle("single-model", single);
   harness.classList.toggle("ingest-job", ingestJob);
-  harness.classList.toggle("processing-job", processingJob);
   harness.dataset.authorityKind = single ? SINGLE_MODEL_AUTHORITY_KIND : "";
   updateIngestJobTrace(processing, ingestJob);
-  updateProcessingJobTrace(processing, processingJob);
   updateSingleAuthorityMeta(trace, projection);
   if (!projection) {
     harness.querySelectorAll(
@@ -702,8 +649,6 @@ function updateDecisionSvgHarness(trace, focusEvent = null) {
     "#decision-trace-svg-description",
     ingestJob
       ? "Current model call detail continues into the remaining ingest job, including apply, no-op, retry and hold outcomes."
-      : processingJob
-      ? `Current model call detail continues through the selected ${fmt(projection.pipeline, "processing")} workflow.`
       : single
       ? "Packet, execution planning, one single authority lane, validated output and decision. Structured repair is separate from voting."
       : "Packet, execution planning, fixed primary, challenger and tie-break lanes, then one shared artifact and decision. Unsafe quorum branches to hold before the artifact; only a seal failure branches from the artifact."

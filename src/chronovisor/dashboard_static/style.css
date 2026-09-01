@@ -3174,24 +3174,6 @@ canvas {
   display: none;
 }
 
-.decision-trace-harness .trace-processing-job {
-  display: none;
-}
-
-.decision-trace-harness .trace-processing-job [data-processing-job-layout] {
-  display: none;
-}
-
-.decision-trace-harness.single-model.processing-job:not(.ingest-job) .trace-processing-job {
-  display: block;
-}
-
-.decision-trace-harness[data-processing-job-layout="2"] [data-processing-job-layout="2"],
-.decision-trace-harness[data-processing-job-layout="3"] [data-processing-job-layout="3"],
-.decision-trace-harness[data-processing-job-layout="5"] [data-processing-job-layout="5"] {
-  display: block;
-}
-
 .decision-trace-harness.single-model.ingest-job .trace-ingest-job {
   display: block;
 }

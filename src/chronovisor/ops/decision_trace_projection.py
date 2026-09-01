@@ -411,51 +411,6 @@ def _ingest_processing_projection(
     }
 
 
-def _linear_processing_projection(
-    pipeline: str, lane: Mapping[str, Any]
-) -> dict[str, Any]:
-    rows = lane.get("steps")
-    steps = (
-        [row for row in rows if isinstance(row, Mapping)]
-        if isinstance(rows, list)
-        else []
-    )
-    nodes = [
-        {
-            "id": str(row.get("key") or f"step-{index}"),
-            "label": str(row.get("label") or row.get("key") or f"Step {index + 1}"),
-            "state": _state(row.get("status")),
-            "type": "milestone",
-        }
-        for index, row in enumerate(steps[:5])
-    ]
-    edges = []
-    for source, target in zip(nodes, nodes[1:], strict=False):
-        target_state = target["state"]
-        state = target_state if source["state"] == "done" else "pending"
-        edges.append(
-            {
-                "id": f"{source['id']}-{target['id']}",
-                "source": source["id"],
-                "target": target["id"],
-                "label": None,
-                "state": state,
-            }
-        )
-    return {
-        "kind": "linear",
-        "pipeline": pipeline,
-        "graph_id": f"processing:{pipeline}:v2",
-        "current": str(lane.get("current_step") or "") or None,
-        "selected_branch": None,
-        "entry": nodes[0]["id"] if nodes else None,
-        "nodes": nodes,
-        "edges": edges,
-        "states": {node["id"]: node["state"] for node in nodes},
-        "paths": {edge["id"]: edge["state"] for edge in edges},
-    }
-
-
 def project_processing_trace(
     pipeline: str | None,
     lane: Mapping[str, Any] | None = None,
@@ -468,9 +423,9 @@ def project_processing_trace(
         return None
     lane = lane or {}
     trace = trace or {}
-    if pipeline == "ingest":
-        return _ingest_processing_projection(runtime_status or {}, trace, lane)
-    return _linear_processing_projection(pipeline, lane)
+    if pipeline != "ingest":
+        return None
+    return _ingest_processing_projection(runtime_status or {}, trace, lane)
 
 
 def project_decision_trace(

@@ -3222,16 +3222,8 @@ def test_single_model_decision_trace_dom_contract_is_fixed_in_markup() -> None:
         assert f'transform="{transform}"' in page
     assert "trace-single-only" in page
     assert "trace-quorum-only" in page
-    assert page.count('data-processing-job-layout="') == 3
-    for layout, boundary, geometry in (
-        ("2", '<g data-processing-job-layout="3">', 'transform="translate(520 570)"'),
-        ("3", '<g data-processing-job-layout="5">', 'transform="translate(750 570)"'),
-        ("5", '<g class="trace-ingest-job"', 'transform="translate(750 570)"'),
-    ):
-        layout_markup = page.split(
-            f'<g data-processing-job-layout="{layout}">', 1
-        )[1].split(boundary, 1)[0]
-        assert geometry in layout_markup
+    assert "data-processing-job-flow" not in page
+    assert "updateProcessingJobTrace" not in renderer
     assert not re.search(
         r'setAttribute\(\s*["\'](?:d|transform|viewBox|height)["\']', harness
     )

@@ -199,42 +199,43 @@ def test_ingest_processing_projection_covers_runtime_branches(
     assert result["graph_id"] == "processing:ingest:v2"
 
 
-def test_processing_projection_has_connected_truthful_topology_for_all_lanes() -> None:
-    definitions = {
-        "ingest": ["target", "generate", "authority", "route", "mutation"],
-        "recall": ["search", "rerank", "primary", "challenger", "tie_break"],
-        "audit": ["inspect", "consensus"],
-        "improve": ["generate", "verify"],
-        "repair": ["local_fix", "verify", "escalate"],
-        "typed_graph": ["extract", "verify"],
-    }
-    for pipeline, keys in definitions.items():
-        lane = {
-            "current_step": keys[0],
+def test_ingest_processing_projection_has_connected_truthful_topology() -> None:
+    result = projection.project_processing_trace("ingest", {}, {}, {})
+
+    assert result is not None
+    node_ids = {node["id"] for node in result["nodes"]}
+    assert all(
+        edge["source"] in node_ids and edge["target"] in node_ids
+        for edge in result["edges"]
+    )
+    exits: dict[str, int] = {}
+    for edge in result["edges"]:
+        exits[edge["source"]] = exits.get(edge["source"], 0) + 1
+    for node in result["nodes"]:
+        if node["type"] == "decision":
+            assert exits.get(node["id"], 0) >= 2
+
+
+@pytest.mark.parametrize(
+    "pipeline",
+    ["recall", "audit", "improve", "repair", "typed_graph"],
+)
+def test_decision_trace_does_not_append_a_lane_summary_as_a_continuation(
+    pipeline: str,
+) -> None:
+    result = projection.project_decision_trace(
+        _trace(),
+        pipeline=pipeline,
+        processing_lane={
+            "current_step": "generate",
             "steps": [
-                {
-                    "key": key,
-                    "label": key.replace("_", " ").title(),
-                    "status": "pending",
-                }
-                for key in keys
+                {"key": "generate", "label": "Generate", "status": "active"},
+                {"key": "verify", "label": "Verify", "status": "pending"},
             ],
-        }
-        result = projection.project_processing_trace(pipeline, lane, {}, {})
-        assert result is not None
-        node_ids = {node["id"] for node in result["nodes"]}
-        assert all(
-            edge["source"] in node_ids and edge["target"] in node_ids
-            for edge in result["edges"]
-        )
-        exits: dict[str, int] = {}
-        for edge in result["edges"]:
-            exits[edge["source"]] = exits.get(edge["source"], 0) + 1
-        for node in result["nodes"]:
-            if node["type"] == "decision":
-                assert exits.get(node["id"], 0) >= 2
-        if pipeline != "ingest":
-            assert all(node["type"] == "milestone" for node in result["nodes"])
+        },
+    )
+
+    assert "processing" not in result
 
 
 def test_renderer_has_no_second_state_machine_or_runtime_geometry_mutation() -> None:
