@@ -258,9 +258,9 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
                     positions[node["id"]] = tuple(
                         map(float, raw.replace(",", " ").split())
                     )
-            assert positions[main[0]] == (1330.0, 420.0)
+            assert positions[main[0]] == (1328.0, 416.0)
             dispatch = next(path for path in paths if path["source"] == "fit")
-            assert dispatch["d"] == "M1330 164 V420"
+            assert dispatch["d"] == "M1328 160 V416"
             for row_index, start in enumerate(range(0, len(main), 5)):
                 row = main[start : start + 5]
                 xs = [positions[node][0] for node in row]

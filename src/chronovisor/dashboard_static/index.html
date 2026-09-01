@@ -132,58 +132,58 @@
             </defs>
 
             <g class="trace-plan" aria-label="Execution plan">
-              <g class="workflow-edge" data-workflow-edge="packet-preflight-main" data-source="packet" data-target="preflight"><path class="trace-path" d="M96 20 H298" marker-end="url(#trace-arrow)"></path></g>
-              <g class="workflow-edge" data-workflow-edge="preflight-execution_plan-main" data-source="preflight" data-target="execution_plan"><path class="trace-path" d="M298 20 H492 V56" marker-end="url(#trace-arrow)"></path></g>
-              <g class="trace-node trace-node-plan" data-workflow-node="packet" transform="translate(96 20)"><circle r="10"></circle><text y="32">Packet</text></g>
-              <g class="trace-node trace-node-plan" data-workflow-node="preflight" transform="translate(298 20)"><circle r="10"></circle><text y="32">Preflight</text></g>
-              <g class="trace-node trace-node-plan" data-workflow-node="execution_plan" transform="translate(492 56)"><circle r="10"></circle><text y="32" text-anchor="middle">Execution Plan</text></g>
+              <g class="workflow-edge" data-workflow-edge="packet-preflight-main" data-source="packet" data-target="preflight"><path class="trace-path" d="M96 160 H272" marker-end="url(#trace-arrow)"></path></g>
+              <g class="workflow-edge" data-workflow-edge="preflight-execution_plan-main" data-source="preflight" data-target="execution_plan"><path class="trace-path" d="M272 160 H448" marker-end="url(#trace-arrow)"></path></g>
+              <g class="trace-node trace-node-plan" data-workflow-node="packet" transform="translate(96 160)"><circle r="10"></circle><text y="32" text-anchor="middle">Packet</text></g>
+              <g class="trace-node trace-node-plan" data-workflow-node="preflight" transform="translate(272 160)"><circle r="10"></circle><text y="32" text-anchor="middle">Preflight</text></g>
+              <g class="trace-node trace-node-plan" data-workflow-node="execution_plan" transform="translate(448 160)"><circle r="10"></circle><text y="32" text-anchor="middle">Execution Plan</text></g>
 
-              <text class="trace-section-title" x="38" y="94">EXECUTION PLAN</text>
-              <path class="trace-context-guide" d="M492 56 H552 M552 48 V222 M552 48 H612 M552 106 H612 M552 164 H612 M552 222 H612 M612 48 H734 M612 106 H734 M612 164 H734 M612 222 H734 M734 48 V222 M734 164 H812"></path>
+              <text class="trace-section-title" x="48" y="88">EXECUTION PLAN</text>
+              <path class="trace-context-guide" d="M448 160 H536 M536 48 V216 M536 48 H624 M536 104 H624 M536 160 H624 M536 216 H624 M624 48 H712 M624 104 H712 M624 160 H712 M624 216 H712 M712 48 V216 M712 160 H800"></path>
               <g class="workflow-edge" data-workflow-edge="execution_plan-context_choice-main" data-source="execution_plan" data-target="context_choice">
-                <path class="trace-path trace-choice-path" data-context-slot="0" d="M492 56 H522 V48 H612" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-choice-path selected" data-context-slot="1" d="M492 56 H552 V106 H612" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-choice-path" data-context-slot="2" d="M492 56 H552 V164 H612" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-choice-path" data-context-slot="3" d="M492 56 H552 V222 H612" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path" data-context-slot="0" d="M448 160 H536 V48 H624" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path selected" data-context-slot="1" d="M448 160 H536 V104 H624" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path" data-context-slot="2" d="M448 160 H624" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path" data-context-slot="3" d="M448 160 H536 V216 H624" marker-end="url(#trace-arrow)"></path>
               </g>
               <g class="workflow-edge" data-workflow-edge="context_choice-headroom-main" data-source="context_choice" data-target="headroom">
-                <path class="trace-path trace-choice-path" data-context-slot="0" d="M612 48 H734 V164 H812" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-choice-path selected" data-context-slot="1" d="M612 106 H734 V164 H812" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-choice-path" data-context-slot="2" d="M612 164 H812" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-choice-path" data-context-slot="3" d="M612 222 H734 V164 H812" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path" data-context-slot="0" d="M624 48 H712 V160 H800" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path selected" data-context-slot="1" d="M624 104 H712 V160 H800" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path" data-context-slot="2" d="M624 160 H800" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path" data-context-slot="3" d="M624 216 H712 V160 H800" marker-end="url(#trace-arrow)"></path>
               </g>
-              <text class="trace-kicker" x="556" y="34">CONTEXT WINDOW</text>
-              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="32768" transform="translate(612 48)"><circle r="10"></circle><circle class="trace-selected-core" r="3"></circle><text data-context-label="true" y="26" text-anchor="middle">32K</text></g>
-              <g class="trace-node trace-context-option selected" data-context-option="true" data-context-tokens="65536" data-workflow-node="context_choice" transform="translate(612 106)"><circle r="10"></circle><circle class="trace-selected-core" r="3"></circle><text data-context-label="true" y="26" text-anchor="middle">65K</text></g>
-              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="98304" transform="translate(612 164)"><circle r="10"></circle><circle class="trace-selected-core" r="3"></circle><text data-context-label="true" y="26" text-anchor="middle">98K</text></g>
-              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="131072" transform="translate(612 222)"><circle r="10"></circle><circle class="trace-selected-core" r="3"></circle><text data-context-label="true" y="26" text-anchor="middle">131K</text></g>
-              <rect class="trace-label-backdrop" x="486" y="270" width="332" height="20" rx="3"></rect>
-              <text class="trace-value" data-plan-value="context-selection" x="652" y="283" text-anchor="middle">required — → selected —</text>
+              <text class="trace-kicker" x="536" y="24">CONTEXT WINDOW</text>
+              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="32768" transform="translate(624 48)"><circle r="10"></circle><circle class="trace-selected-core" r="3"></circle><text data-context-label="true" y="26" text-anchor="middle">32K</text></g>
+              <g class="trace-node trace-context-option selected" data-context-option="true" data-context-tokens="65536" data-workflow-node="context_choice" transform="translate(624 104)"><circle r="10"></circle><circle class="trace-selected-core" r="3"></circle><text data-context-label="true" y="26" text-anchor="middle">65K</text></g>
+              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="98304" transform="translate(624 160)"><circle r="10"></circle><circle class="trace-selected-core" r="3"></circle><text data-context-label="true" y="26" text-anchor="middle">98K</text></g>
+              <g class="trace-node trace-context-option" data-context-option="true" data-context-tokens="131072" transform="translate(624 216)"><circle r="10"></circle><circle class="trace-selected-core" r="3"></circle><text data-context-label="true" y="26" text-anchor="middle">131K</text></g>
+              <rect class="trace-label-backdrop" x="458" y="256" width="332" height="20" rx="3"></rect>
+              <text class="trace-value" data-plan-value="context-selection" x="624" y="269" text-anchor="middle">required — → selected —</text>
 
-              <g class="trace-diamond trace-node-plan" data-workflow-node="headroom"><path d="M812 118 858 164 812 210 766 164Z"></path><text x="812" y="160">Task +</text><text x="812" y="174">headroom</text></g>
-              <text class="trace-kicker" x="856" y="34">REASONING BUDGET</text>
-              <path class="trace-reasoning-guide" d="M812 164 H892 M892 48 V222 M892 48 H912 M892 106 H912 M892 164 H912 M892 222 H912 M912 48 H1255 M912 106 H1255 M912 164 H1255 M912 222 H1255 M1255 48 V222 M1255 164 H1330"></path>
+              <g class="trace-diamond trace-node-plan" data-workflow-node="headroom"><path d="M800 112 848 160 800 208 752 160Z"></path><text x="800" y="156">Task +</text><text x="800" y="170">headroom</text></g>
+              <text class="trace-kicker" x="856" y="24">REASONING BUDGET</text>
+              <path class="trace-reasoning-guide" d="M800 160 H888 M888 48 V216 M888 48 H912 M888 104 H912 M888 160 H912 M888 216 H912 M912 48 H1256 M912 104 H1256 M912 160 H1256 M912 216 H1256 M1256 48 V216 M1256 160 H1328"></path>
               <g class="workflow-edge" data-workflow-edge="headroom-reasoning_choice-main" data-source="headroom" data-target="reasoning_choice">
-                <path class="trace-path trace-choice-path" data-reasoning-path="off" d="M812 164 H842 V48 H912" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-choice-path selected" data-reasoning-path="low" d="M812 164 H892 V106 H912" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-choice-path" data-reasoning-path="medium" d="M812 164 H912" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-choice-path" data-reasoning-path="high" d="M812 164 H892 V222 H912" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path" data-reasoning-path="off" d="M800 160 H888 V48 H912" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path selected" data-reasoning-path="low" d="M800 160 H888 V104 H912" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path" data-reasoning-path="medium" d="M800 160 H912" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path" data-reasoning-path="high" d="M800 160 H888 V216 H912" marker-end="url(#trace-arrow)"></path>
               </g>
               <g class="workflow-edge" data-workflow-edge="reasoning_choice-fit-main" data-source="reasoning_choice" data-target="fit">
-                <path class="trace-path trace-choice-path" data-reasoning-path="off" d="M912 48 H1330 V164" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-choice-path selected" data-reasoning-path="low" d="M912 106 H1255 V164 H1330" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-choice-path" data-reasoning-path="medium" d="M912 164 H1330" marker-end="url(#trace-arrow)"></path>
-                <path class="trace-path trace-choice-path" data-reasoning-path="high" d="M912 222 H1255 V164 H1330" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path" data-reasoning-path="off" d="M912 48 H1256 V160 H1328" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path selected" data-reasoning-path="low" d="M912 104 H1256 V160 H1328" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path" data-reasoning-path="medium" d="M912 160 H1328" marker-end="url(#trace-arrow)"></path>
+                <path class="trace-path trace-choice-path" data-reasoning-path="high" d="M912 216 H1256 V160 H1328" marker-end="url(#trace-arrow)"></path>
               </g>
               <g class="trace-reasoning" data-reasoning-key="off" transform="translate(912 48)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text data-reasoning-label="true" x="18" y="4">OFF</text><text class="trace-reasoning-detail" x="18" y="22">bypass · no reasoning</text></g>
-              <g class="trace-reasoning selected" data-reasoning-key="low" data-workflow-node="reasoning_choice" transform="translate(912 106)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text data-reasoning-label="true" x="18" y="4">LOW</text><text class="trace-reasoning-detail" x="18" y="22">simple · repair · tight</text></g>
-              <g class="trace-reasoning" data-reasoning-key="medium" transform="translate(912 164)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text data-reasoning-label="true" x="18" y="4">MEDIUM</text><text class="trace-reasoning-detail" x="18" y="22">normal semantic · default</text></g>
-              <g class="trace-reasoning" data-reasoning-key="high" transform="translate(912 222)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text data-reasoning-label="true" x="18" y="4">HIGH</text><text class="trace-reasoning-detail" x="18" y="22">tie-break · high impact · ample</text></g>
+              <g class="trace-reasoning selected" data-reasoning-key="low" data-workflow-node="reasoning_choice" transform="translate(912 104)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text data-reasoning-label="true" x="18" y="4">LOW</text><text class="trace-reasoning-detail" x="18" y="22">simple · repair · tight</text></g>
+              <g class="trace-reasoning" data-reasoning-key="medium" transform="translate(912 160)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text data-reasoning-label="true" x="18" y="4">MEDIUM</text><text class="trace-reasoning-detail" x="18" y="22">normal semantic · default</text></g>
+              <g class="trace-reasoning" data-reasoning-key="high" transform="translate(912 216)"><circle r="9"></circle><circle class="trace-selected-core" r="3"></circle><text data-reasoning-label="true" x="18" y="4">HIGH</text><text class="trace-reasoning-detail" x="18" y="22">tie-break · high impact · ample</text></g>
 
-              <g class="trace-diamond trace-node-plan" data-workflow-node="fit"><path d="M1330 118 1380 164 1330 210 1280 164Z"></path><text x="1330" y="150">FIT GATE</text><text data-plan-value="fit" x="1330" y="178">WAITING</text></g>
+              <g class="trace-diamond trace-node-plan" data-workflow-node="fit"><path d="M1328 112 1376 160 1328 208 1280 160Z"></path><text x="1328" y="146">FIT GATE</text><text data-plan-value="fit" x="1328" y="174">WAITING</text></g>
             </g>
 
-            <text class="trace-section-title" x="48" y="350" data-workflow-title>WORKFLOW</text>
+            <text class="trace-section-title" x="48" y="336" data-workflow-title>WORKFLOW</text>
             <g data-workflow-edges aria-hidden="true"></g>
             <g data-workflow-nodes></g>
           </svg>

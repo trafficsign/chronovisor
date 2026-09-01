@@ -3226,13 +3226,30 @@ def test_decision_trace_context_options_flow_left_to_right() -> None:
     )
     context_paths = re.findall(r'data-context-slot="(\d+)" d="([^"]+)"', page)
 
-    assert option_positions == [("612", y) for y in ("48", "106", "164", "222")]
+    assert option_positions == [("624", y) for y in ("48", "104", "160", "216")]
     assert len(context_paths) == 8
     assert [slot for slot, _path in context_paths] == ["0", "1", "2", "3"] * 2
-    assert all(path.startswith("M492 56") and path.endswith("H612") for _slot, path in context_paths[:4])
-    assert all(path.startswith("M612") and path.endswith("H812") for _slot, path in context_paths[4:])
+    assert all(path.startswith("M448 160") and path.endswith("H624") for _slot, path in context_paths[:4])
+    assert all(path.startswith("M624") and path.endswith("H800") for _slot, path in context_paths[4:])
     assert "projectedContext.findIndex((option) => option.selected)" in renderer
     assert "path.dataset.contextSlot === String(contextIndex)" in renderer
+
+
+def test_decision_trace_plan_nodes_share_an_eight_pixel_grid() -> None:
+    page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    plan_positions = re.findall(
+        r'data-workflow-node="(?:packet|preflight|execution_plan)"[^>]+transform="translate\((\d+) (\d+)\)"',
+        page,
+    )
+    reasoning_positions = re.findall(
+        r'data-reasoning-key="[^"]+"[^>]+transform="translate\((\d+) (\d+)\)"',
+        page,
+    )
+
+    assert plan_positions == [("96", "160"), ("272", "160"), ("448", "160")]
+    assert reasoning_positions == [("912", y) for y in ("48", "104", "160", "216")]
+    assert all(int(value) % 8 == 0 for position in plan_positions + reasoning_positions for value in position)
 
 
 def test_decision_trace_routes_are_created_from_one_backend_topology() -> None:

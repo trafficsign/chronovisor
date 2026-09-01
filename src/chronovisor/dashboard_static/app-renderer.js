@@ -648,27 +648,27 @@ function workflowNodePositions(nodes) {
     (node) => !DECISION_PLAN_NODE_IDS.has(node.id) && !branches.has(node.id),
   );
   const positions = new Map([
-    ["packet", { x: 96, y: 20 }],
-    ["preflight", { x: 298, y: 20 }],
-    ["execution_plan", { x: 492, y: 56 }],
-    ["context_choice", { x: 612, y: 106 }],
-    ["headroom", { x: 812, y: 164 }],
-    ["reasoning_choice", { x: 912, y: 106 }],
-    ["fit", { x: 1330, y: 164 }],
+    ["packet", { x: 96, y: 160 }],
+    ["preflight", { x: 272, y: 160 }],
+    ["execution_plan", { x: 448, y: 160 }],
+    ["context_choice", { x: 624, y: 104 }],
+    ["headroom", { x: 800, y: 160 }],
+    ["reasoning_choice", { x: 912, y: 104 }],
+    ["fit", { x: 1328, y: 160 }],
   ]);
   main.forEach((node, index) => {
     const row = Math.floor(index / 5);
     const column = index % 5;
     const visualColumn = row % 2 ? column : 4 - column;
-    positions.set(node.id, { x: 110 + visualColumn * 305, y: 420 + row * 160 });
+    positions.set(node.id, { x: 112 + visualColumn * 304, y: 416 + row * 160 });
   });
   const result = positions.get("result") || positions.get(main.at(-1)?.id) || { x: 750, y: 100 };
   const hasEscalate = nodes.some((node) => node.id === "escalate");
-  if (hasEscalate) positions.set("escalate", { x: result.x + 175, y: result.y + 105 });
+  if (hasEscalate) positions.set("escalate", { x: result.x + 176, y: result.y + 104 });
   if (nodes.some((node) => node.id === "hold")) {
     positions.set("hold", {
-      x: result.x + (hasEscalate ? -175 : result.x > 1180 ? -175 : 175),
-      y: result.y + 105,
+      x: result.x + (hasEscalate ? -176 : result.x > 1180 ? -176 : 176),
+      y: result.y + 104,
     });
   }
   return positions;
