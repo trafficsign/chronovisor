@@ -648,13 +648,13 @@ function workflowNodePositions(nodes) {
     (node) => !DECISION_PLAN_NODE_IDS.has(node.id) && !branches.has(node.id),
   );
   const positions = new Map([
-    ["packet", { x: 96, y: 160 }],
-    ["preflight", { x: 272, y: 160 }],
-    ["execution_plan", { x: 448, y: 160 }],
+    ["packet", { x: 96, y: 132 }],
+    ["preflight", { x: 272, y: 132 }],
+    ["execution_plan", { x: 448, y: 132 }],
     ["context_choice", { x: 624, y: 104 }],
-    ["headroom", { x: 800, y: 160 }],
+    ["headroom", { x: 800, y: 132 }],
     ["reasoning_choice", { x: 960, y: 104 }],
-    ["fit", { x: 1328, y: 160 }],
+    ["fit", { x: 1328, y: 132 }],
   ]);
   main.forEach((node, index) => {
     const row = Math.floor(index / 5);

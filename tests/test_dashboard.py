@@ -3229,13 +3229,13 @@ def test_decision_trace_context_options_flow_left_to_right() -> None:
     assert option_positions == [("624", y) for y in ("48", "104", "160", "216")]
     assert len(context_paths) == 8
     assert [slot for slot, _path in context_paths] == ["0", "1", "2", "3"] * 2
-    assert all(path.startswith("M448 160") and path.endswith("H624") for _slot, path in context_paths[:4])
+    assert all(path.startswith("M448 132") and path.endswith("H624") for _slot, path in context_paths[:4])
     assert all(path.startswith("M624") and path.endswith("H800") for _slot, path in context_paths[4:])
     assert "projectedContext.findIndex((option) => option.selected)" in renderer
     assert "path.dataset.contextSlot === String(contextIndex)" in renderer
 
 
-def test_decision_trace_plan_nodes_share_an_eight_pixel_grid() -> None:
+def test_decision_trace_plan_nodes_center_four_way_branches() -> None:
     page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
     plan_positions = re.findall(
@@ -3247,9 +3247,12 @@ def test_decision_trace_plan_nodes_share_an_eight_pixel_grid() -> None:
         page,
     )
 
-    assert plan_positions == [("96", "160"), ("272", "160"), ("448", "160")]
+    assert plan_positions == [("96", "132"), ("272", "132"), ("448", "132")]
     assert reasoning_positions == [("960", y) for y in ("48", "104", "160", "216")]
-    assert all(int(value) % 8 == 0 for position in plan_positions + reasoning_positions for value in position)
+    assert {int(y) for _x, y in plan_positions} == {
+        (int(reasoning_positions[0][1]) + int(reasoning_positions[-1][1])) // 2
+    }
+    assert all(int(x) % 8 == 0 for x, _y in plan_positions + reasoning_positions)
 
 
 def test_decision_trace_routes_are_created_from_one_backend_topology() -> None:
