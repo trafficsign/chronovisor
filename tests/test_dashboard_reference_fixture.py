@@ -215,6 +215,7 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
     assert len(browser_results) == len(expected_frames), stderr[-4000:]
 
     geometry_by_pipeline: dict[str, str] = {}
+    layout_checked: set[str] = set()
     overlaps: list[tuple[str, object]] = []
     for result, (scenario, frame) in zip(
         browser_results,
@@ -239,6 +240,36 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
             (path["source"], path["target"]): path["state"] for path in paths
         }
         nodes = {node["id"]: node["state"] for node in result["nodes"]}
+        if scenario["pipeline"] not in layout_checked:
+            workflow = TRACE_WORKFLOWS[scenario["pipeline"]]
+            main = [
+                node["id"]
+                for node in workflow["nodes"]
+                if node["type"] != "plan" and node["id"] not in {"hold", "escalate"}
+            ]
+            positions = {}
+            for node in result["nodes"]:
+                if node["transform"]:
+                    raw = (
+                        str(node["transform"])
+                        .removeprefix("translate(")
+                        .removesuffix(")")
+                    )
+                    positions[node["id"]] = tuple(
+                        map(float, raw.replace(",", " ").split())
+                    )
+            assert positions[main[0]] == (1330.0, 420.0)
+            dispatch = next(path for path in paths if path["source"] == "fit")
+            assert dispatch["d"] == "M1330 164 V420"
+            for row_index, start in enumerate(range(0, len(main), 5)):
+                row = main[start : start + 5]
+                xs = [positions[node][0] for node in row]
+                assert len({positions[node][1] for node in row}) == 1
+                assert xs == sorted(xs, reverse=row_index % 2 == 0)
+                if start:
+                    assert positions[main[start - 1]][0] == positions[row[0]][0]
+                    assert positions[main[start - 1]][1] < positions[row[0]][1]
+            layout_checked.add(scenario["pipeline"])
         assert all(path["d"] for path in paths)
         assert result["pathLabelCollisions"] == []
         assert result["pathIntersections"] == []

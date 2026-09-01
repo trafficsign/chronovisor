@@ -659,8 +659,8 @@ function workflowNodePositions(nodes) {
   main.forEach((node, index) => {
     const row = Math.floor(index / 5);
     const column = index % 5;
-    const visualColumn = row % 2 ? 4 - column : column;
-    positions.set(node.id, { x: 110 + visualColumn * 290, y: 420 + row * 160 });
+    const visualColumn = row % 2 ? column : 4 - column;
+    positions.set(node.id, { x: 110 + visualColumn * 305, y: 420 + row * 160 });
   });
   const result = positions.get("result") || positions.get(main.at(-1)?.id) || { x: 750, y: 100 };
   const hasEscalate = nodes.some((node) => node.id === "escalate");
@@ -678,9 +678,6 @@ function workflowPath(edge, positions) {
   const source = positions.get(edge.source);
   const target = positions.get(edge.target);
   if (!source || !target) return "";
-  if (edge.source === "fit") {
-    return `M${source.x} ${source.y} H1450 V310 H80 V${target.y} H${target.x}`;
-  }
   if (edge.source === "result" && positions.has("escalate")
       && ["hold", "escalate"].includes(edge.target)) {
     const branchX = source.x + (edge.target === "hold" ? -15 : 15);
@@ -692,7 +689,7 @@ function workflowPath(edge, positions) {
   }
   if (edge.kind === "loop") {
     const ceiling = Math.max(32, Math.min(source.y, target.y) - 62);
-    const outside = 1420;
+    const outside = source.x < target.x ? 60 : 1420;
     return `M${source.x} ${source.y} H${outside} V${ceiling} H${target.x} V${target.y}`;
   }
   if (edge.label === "NOOP" && source.y === target.y) {
@@ -707,7 +704,6 @@ function workflowPath(edge, positions) {
 function workflowEdgeLabelPosition(edge, positions) {
   const source = positions.get(edge.source);
   const target = positions.get(edge.target);
-  if (edge.source === "fit") return { x: 765, y: 300 };
   if (edge.source === "result" && positions.has("escalate")
       && ["hold", "escalate"].includes(edge.target)) {
     const branchX = source.x + (edge.target === "hold" ? -15 : 15);
@@ -719,7 +715,7 @@ function workflowEdgeLabelPosition(edge, positions) {
   }
   if (edge.kind === "loop") {
     const ceiling = Math.max(32, Math.min(source.y, target.y) - 62);
-    const outside = 1420;
+    const outside = source.x < target.x ? 60 : 1420;
     return { x: (outside + target.x) / 2, y: ceiling - 9 };
   }
   if (edge.label === "NOOP" && source.y === target.y) {
