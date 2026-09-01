@@ -3119,589 +3119,140 @@ canvas {
   white-space: nowrap;
 }
 
-.decision-trace-harness .trace-single-only,
-.decision-trace-harness .trace-context-route {
-  display: none;
-}
-
-.decision-trace-harness.single-model .trace-quorum-only {
-  display: none;
-}
-
-.decision-trace-harness.single-model .trace-single-only,
-.decision-trace-harness[data-context-route="32768"] [data-context-path="32768"],
-.decision-trace-harness[data-context-route="65536"] [data-context-path="65536"],
-.decision-trace-harness[data-context-route="98304"] [data-context-path="98304"],
-.decision-trace-harness[data-context-route="131072"] [data-context-path="131072"] {
-  display: block;
-}
-
-.decision-trace-harness.single-model .decision-lane[data-decision-lane="challenger"],
-.decision-trace-harness.single-model .decision-lane[data-decision-lane="tie_break"],
-.decision-trace-harness.single-model [data-model-routes-label],
-.decision-trace-harness.single-model .trace-divider,
-.decision-trace-harness.single-model [data-model-key],
-.decision-trace-harness.single-model [data-decision-lane-step="vote"],
-.decision-trace-harness.single-model [data-lane-path="validate-vote"],
-.decision-trace-harness.single-model [data-path-key="primary-challenger"],
-.decision-trace-harness.single-model [data-path-key="challenger-agree"],
-.decision-trace-harness.single-model [data-path-key="pair-artifact-join"],
-.decision-trace-harness.single-model [data-path-key="pair-tie_break"],
-.decision-trace-harness.single-model [data-path-key="tie_break-quorum"],
-.decision-trace-harness.single-model [data-path-key="quorum-artifact-join"],
-.decision-trace-harness.single-model [data-path-key="quorum-hold"],
-.decision-trace-harness.single-model [data-trace-key="agree"],
-.decision-trace-harness.single-model [data-trace-key="quorum"],
-.decision-trace-harness.single-model .trace-next-voter,
-.decision-trace-harness.single-model .trace-next-voter-label,
-.decision-trace-harness.single-model [data-pair-yes-label],
-.decision-trace-harness.single-model [data-pair-no-label],
-.decision-trace-harness.single-model [data-quorum-yes-label],
-.decision-trace-harness.single-model [data-quorum-no-label] {
-  display: none;
-}
-
-.decision-trace-harness.single-model .decision-lane[data-decision-lane="primary"] {
-  transform: translate(0, 404px) !important;
-}
-
-.decision-trace-harness.single-model [data-decision-label] {
-  text-anchor: start;
-  transform: translate(18px, 26px);
-}
-
-.decision-trace-harness .trace-ingest-job {
-  display: none;
-}
-
-.decision-trace-harness.single-model.ingest-job .trace-ingest-job {
-  display: block;
-}
-
-.decision-trace-harness .trace-ingest-retry-label {
-  fill: #7d8992;
-  opacity: 0.18;
-}
-
-.decision-trace-harness .trace-ingest-retry-label.active {
-  fill: #ffb340;
-  opacity: 1;
-}
-
-.decision-trace-panel:has(.decision-single-authority:not([hidden])) .decision-facts [data-decision-fact="quorum"] {
-  display: none;
-}
-
 .decision-trace-scroll {
   width: 100%;
-  overflow-x: hidden;
-  height: auto;
-  overflow-y: hidden;
+  min-height: 452px;
+  overflow-x: auto;
+  overflow-y: visible;
   outline: none;
-  scrollbar-gutter: auto;
 }
 
 .decision-trace-scroll:focus-visible {
-  box-shadow: inset 0 0 0 1px #858aff;
+  box-shadow: inset 0 0 0 1px rgba(142, 145, 255, 0.72);
 }
 
 .decision-trace-harness {
   display: block;
   width: 100%;
-  max-width: none;
+  min-width: 960px;
   height: auto;
-  color: #62717d;
-  font-family: var(--font-mono);
-  font-size: 10px;
+  overflow: visible;
 }
 
 .decision-trace-harness text {
-  fill: #8c98a3;
-  font-weight: 430;
-}
-
-.decision-trace-harness .trace-path,
-.decision-trace-harness .trace-divider {
-  fill: none;
-  stroke: #566470;
-  stroke-width: 1.15;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  transition: opacity 160ms var(--ease), stroke 160ms var(--ease);
-}
-
-.decision-trace-harness .trace-path {
-  stroke: #7d8992;
-  stroke-dasharray: 3 7;
-  opacity: 0.66;
-}
-
-.decision-trace-harness .trace-ingest-job .trace-path {
-  transition: none;
-}
-
-.decision-trace-harness .skipped.trace-path,
-.decision-trace-harness .trace-path.skipped {
-  stroke-dasharray: 3 7;
-  opacity: 0.28;
-  filter: none;
-}
-
-.decision-trace-harness .trace-branch-label.skipped {
-  opacity: 0.18;
-}
-
-.decision-trace-harness .trace-divider {
-  opacity: 0.56;
-}
-
-.decision-trace-harness .trace-node circle,
-.decision-trace-harness .decision-lane-step circle,
-.decision-trace-harness .trace-model-route circle,
-.decision-trace-harness .trace-reasoning circle {
-  fill: #061724;
-  stroke: #667783;
-  stroke-width: 1.2;
-  transition: fill 160ms var(--ease), stroke 160ms var(--ease), opacity 160ms var(--ease);
-}
-
-.decision-trace-harness .trace-node text,
-.decision-trace-harness .decision-lane-step text {
-  text-anchor: middle;
-}
-
-.decision-trace-harness .trace-overall .trace-branch-node-label {
-  text-anchor: start;
-}
-
-.decision-trace-harness .trace-node .trace-artifact-label {
-  text-anchor: end;
+  fill: #7d8992;
+  font-family: var(--mono);
+  font-size: 11px;
 }
 
 .decision-trace-harness .trace-section-title {
-  fill: #999bff;
-  font-size: 11px;
-  letter-spacing: 0.04em;
-}
-
-.decision-trace-harness .trace-kicker {
-  fill: #697783;
-  font-size: 9px;
-  letter-spacing: 0.04em;
-}
-
-.decision-trace-harness .trace-reasoning-detail {
-  fill: #65737e;
-  font-size: 8px;
-}
-
-.decision-trace-harness .trace-value {
-  fill: #74828d;
-  font-size: 9px;
-}
-
-.decision-trace-harness .trace-label-backdrop {
-  fill: #031522;
-  stroke: none;
-  pointer-events: none;
-}
-
-.decision-trace-harness .trace-diamond path {
-  fill: #061724;
-  stroke: #687681;
-  stroke-width: 1.1;
-}
-
-.decision-trace-harness .trace-diamond text {
-  font-size: 8px;
-  text-anchor: middle;
-}
-
-.decision-trace-harness .trace-diamond.done path,
-.decision-trace-harness .trace-diamond.active path {
-  stroke: #9296ff;
-  filter: drop-shadow(0 0 3px rgba(142, 145, 255, 0.28));
-}
-
-.decision-trace-harness .trace-diamond.error path {
-  stroke: #ff3948;
-}
-
-.decision-trace-harness .trace-reasoning-path.pending {
-  stroke-dasharray: 4 5;
-  opacity: 0;
-}
-
-.decision-trace-harness .trace-context-guide,
-.decision-trace-harness .trace-reasoning-guide {
-  fill: none;
-  stroke: #7d8992;
-  stroke-width: 1.05;
-  stroke-dasharray: 4 5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 0.66;
-}
-
-.decision-trace-harness [data-context-label] {
-  text-anchor: start;
-}
-
-.decision-trace-harness .trace-context-option.selected [data-context-label] {
-  fill: #ffb340;
-}
-
-.decision-trace-harness .decision-lane {
-  display: block;
-  height: auto;
-  border: 0;
-  background: transparent;
-}
-
-.decision-trace-harness .decision-role {
-  display: block;
-  fill: #e0e5e9;
+  fill: #a3a7ff;
   font-size: 12px;
+  letter-spacing: 0.06em;
 }
 
-.decision-trace-harness .decision-model,
-.decision-trace-harness .decision-sublabel,
-.decision-trace-harness .decision-think,
-.decision-trace-harness .decision-lane-result {
-  display: block;
-  fill: #687784;
+.decision-trace-harness .trace-path {
+  fill: none;
+  stroke: #536671;
+  stroke-width: 1.35;
+  stroke-dasharray: 5 6;
+  opacity: 0.7;
+  vector-effect: non-scaling-stroke;
+}
+
+.decision-trace-harness .trace-node > circle,
+.decision-trace-harness .trace-node > path {
+  fill: #061724;
+  stroke: #617683;
+  stroke-width: 1.4;
+  vector-effect: non-scaling-stroke;
+}
+
+.decision-trace-harness .trace-node text {
+  fill: #84939c;
+  font-size: 11px;
+}
+
+.decision-trace-harness .trace-branch-label {
+  fill: #667681;
   font-size: 8px;
+  letter-spacing: 0.05em;
 }
 
-.decision-trace-harness .decision-sublabel {
-  letter-spacing: 0.04em;
-}
-
-.decision-trace-harness .decision-lane-result {
-  fill: #8d9aa4;
-  font-size: 9px;
-}
-
-.decision-trace-harness .decision-lane-steps {
-  display: block;
-}
-
-.decision-trace-harness .decision-lane-step {
-  display: block;
-  height: auto;
-}
-
-.decision-trace-harness .decision-lane-step text {
-  display: block;
-  fill: #778590;
-  font-size: 8.5px;
-}
-
-.decision-trace-harness .done.trace-path,
 .decision-trace-harness .trace-path.done {
   stroke: #8e91ff;
   stroke-dasharray: none;
   opacity: 1;
 }
 
-.decision-trace-harness .done.trace-node circle,
-.decision-trace-harness .done.decision-lane-step circle,
-.decision-trace-harness .done.trace-model-route circle,
-.decision-trace-harness .done.trace-reasoning circle,
-.decision-trace-harness .trace-node.done circle,
-.decision-trace-harness .decision-lane-step.done circle {
-  fill: #8589ff;
-  stroke: #afb1ff;
+.decision-trace-harness .trace-node.done > circle,
+.decision-trace-harness .trace-node.done > path {
+  fill: url(#trace-active-core);
+  stroke: #a5a8ff;
+  stroke-width: 2;
   filter: url(#trace-glow-violet);
 }
 
-.decision-trace-harness .trace-overall .trace-node.done circle,
-.decision-trace-harness .done.decision-lane-step circle,
-.decision-trace-harness .decision-lane-step.done circle {
-  fill: url(#trace-active-core);
-  stroke: #9296ff;
-  stroke-width: 2.1;
+.decision-trace-harness .trace-node.done text {
+  fill: #c4cad0;
 }
 
-.decision-trace-harness .done.trace-shared-node circle,
-.decision-trace-harness .trace-shared-node.done circle {
-  fill: url(#trace-active-core);
-  stroke: #9296ff;
-  stroke-width: 2.1;
-  filter: url(#trace-glow-violet);
-}
-
-.decision-trace-harness .trace-context-option.done circle,
-.decision-trace-harness .trace-reasoning.done circle {
-  fill: #061724;
-  stroke: #9296ff;
-  stroke-width: 2.1;
-}
-
-.decision-trace-harness .active.trace-path,
 .decision-trace-harness .trace-path.active {
-  stroke: #9396ff;
+  stroke: #ff9400;
   stroke-dasharray: none;
   opacity: 1;
-  filter: drop-shadow(0 0 3px rgba(147, 150, 255, 0.42));
+  filter: drop-shadow(0 0 3px rgba(255, 148, 0, 0.68));
 }
 
-.decision-trace-harness .active.trace-node circle,
-.decision-trace-harness .active.decision-lane-step circle,
-.decision-trace-harness .active.trace-model-route circle,
-.decision-trace-harness .active.trace-reasoning circle,
-.decision-trace-harness .trace-node.active circle,
-.decision-trace-harness .decision-lane-step.active circle {
-  fill: url(#trace-active-core);
-  stroke: #9296ff;
-  stroke-width: 2.2;
-  filter: url(#trace-glow-violet);
-}
-
-.decision-trace-harness .active.trace-node circle,
-.decision-trace-harness .active.decision-lane-step circle,
-.decision-trace-harness .active.trace-reasoning circle {
-  paint-order: stroke fill;
-}
-
-.decision-trace-harness .trace-context-option .trace-selected-core,
-.decision-trace-harness .trace-reasoning .trace-selected-core {
-  fill: #8e91ff;
-  stroke: none;
-  opacity: 0;
-  filter: none;
-  pointer-events: none;
-  transition: none;
-}
-
-.decision-trace-harness .trace-context-option.active .trace-selected-core,
-.decision-trace-harness .trace-context-option.done .trace-selected-core,
-.decision-trace-harness .trace-reasoning.active .trace-selected-core,
-.decision-trace-harness .trace-reasoning.done .trace-selected-core {
-  fill: #8e91ff;
-  stroke: none;
-  opacity: 1;
-  filter: none;
-}
-
-.decision-trace-harness .trace-reasoning.selected [data-reasoning-label] {
-  fill: #ffb340;
-}
-
-.decision-trace-harness .active.trace-node text,
-.decision-trace-harness .active.decision-lane-step text,
-.decision-trace-harness .active.trace-reasoning text,
-.decision-trace-harness .active.trace-model-route text {
-  fill: #d8dcff;
-}
-
-.decision-trace-harness .decision-lane-step.active circle {
+.decision-trace-harness .trace-node.active > circle,
+.decision-trace-harness .trace-node.active > path {
   fill: url(#trace-processing-core);
   stroke: #ff9d00;
+  stroke-width: 2.2;
   filter: url(#trace-glow-orange);
   animation: trace-processing-pulse 0.9s ease-in-out infinite alternate;
 }
 
-.decision-trace-harness .decision-lane-step.active text {
+.decision-trace-harness .trace-node.active text,
+.decision-trace-harness .trace-branch-label.active {
   fill: #ffb340;
 }
 
-.decision-trace-harness .trace-lane-rail.active {
-  stroke: #ff8a00;
-  filter: drop-shadow(0 0 3px rgba(255, 138, 0, 0.68));
-  animation: trace-processing-pulse 0.9s ease-in-out infinite alternate;
-}
-
-.decision-trace-harness .trace-ingest-job .trace-path.active {
-  stroke: #ff8a00;
+.decision-trace-harness .trace-path.error {
+  stroke: #ff3948;
   stroke-dasharray: none;
   opacity: 1;
-  filter: drop-shadow(0 0 3px rgba(255, 138, 0, 0.68));
-  animation: trace-processing-pulse 0.9s ease-in-out infinite alternate;
+}
+
+.decision-trace-harness .trace-node.error > circle,
+.decision-trace-harness .trace-node.error > path {
+  stroke: #ff3948;
+  filter: drop-shadow(0 0 4px rgba(255, 57, 72, 0.48));
+}
+
+.decision-trace-harness .trace-node.error text,
+.decision-trace-harness .trace-branch-label.error {
+  fill: #ff5966;
+}
+
+.decision-trace-harness .trace-path.skipped,
+.decision-trace-harness .trace-node.skipped,
+.decision-trace-harness .trace-branch-label.skipped {
+  opacity: 0.24;
+}
+
+.decision-trace-harness .trace-node-terminal.done > circle {
+  stroke: #74d84f;
+}
+
+.decision-trace-harness .trace-node-terminal.done text {
+  fill: #74d84f;
 }
 
 @keyframes trace-processing-pulse {
   from { opacity: 0.72; }
   to { opacity: 1; }
 }
-
-.decision-trace-harness .error.trace-path,
-.decision-trace-harness .trace-path.error {
-  stroke: #ff3948;
-  stroke-dasharray: none;
-  opacity: 1;
-  filter: drop-shadow(0 0 3px rgba(255, 57, 72, 0.42));
-}
-
-.decision-trace-harness .error.trace-node circle,
-.decision-trace-harness .error.decision-lane-step circle,
-.decision-trace-harness .trace-node.error circle,
-.decision-trace-harness .decision-lane-step.error circle {
-  fill: #071825;
-  stroke: #ff3948;
-  filter: drop-shadow(0 0 4px rgba(255, 57, 72, 0.48));
-}
-
-.decision-trace-harness .skipped.trace-node circle,
-.decision-trace-harness .skipped.decision-lane-step circle {
-  stroke-dasharray: 4 4;
-  opacity: 0.36;
-}
-
-.decision-trace-harness .trace-repair-loop,
-.decision-trace-harness .trace-repair-count,
-.decision-trace-harness .trace-repair-badge,
-.decision-trace-harness .trace-repair-number {
-  opacity: 0;
-}
-
-.decision-trace-harness .trace-repair-loop.active {
-  stroke: #ff8a00;
-  stroke-dasharray: none;
-  opacity: 1;
-  filter: url(#trace-glow-orange);
-}
-
-.decision-trace-harness .trace-repair-loop.done {
-  stroke: #8e91ff;
-  stroke-dasharray: none;
-  opacity: 1;
-  filter: drop-shadow(0 0 3px rgba(142, 145, 255, 0.42));
-}
-
-.decision-trace-harness .trace-repair-loop.pending {
-  stroke: #7d8992;
-  stroke-dasharray: 4 5;
-  opacity: 0.66;
-  filter: none;
-}
-
-.decision-trace-harness .decision-lane:has(.trace-repair-loop.active) .trace-repair-count,
-.decision-trace-harness .decision-lane:has(.trace-repair-loop.done) .trace-repair-count,
-.decision-trace-harness .decision-lane:has(.trace-repair-loop.active) .trace-repair-number,
-.decision-trace-harness .decision-lane:has(.trace-repair-loop.done) .trace-repair-number {
-  fill: #ff9d00;
-  opacity: 1;
-}
-
-.decision-trace-harness .decision-lane:has(.trace-repair-loop.active) .trace-repair-badge,
-.decision-trace-harness .decision-lane:has(.trace-repair-loop.done) .trace-repair-badge {
-  opacity: 1;
-}
-
-.decision-trace-harness .trace-repair-badge {
-  fill: #061724;
-  stroke: #ff8a00;
-  stroke-width: 1.2;
-}
-
-.decision-trace-harness .trace-repair-number {
-  fill: #ff9d00;
-  font-size: 9px;
-  text-anchor: middle;
-}
-
-.decision-trace-harness .trace-path-label,
-.decision-trace-harness .trace-branch-label {
-  font-size: 8px;
-  letter-spacing: 0.04em;
-}
-
-.decision-trace-harness .trace-path-label {
-  fill: #999bff;
-}
-
-.decision-trace-harness .trace-yes-label,
-.decision-trace-harness .trace-no-label {
-  fill: #7d8992;
-  opacity: 0.18;
-}
-
-.decision-trace-harness .trace-yes-label.active {
-  fill: #ffb340;
-  opacity: 1;
-}
-
-.decision-trace-harness .trace-yes-label.done {
-  fill: #74d84f;
-  opacity: 1;
-}
-
-.decision-trace-harness .trace-no-label.active,
-.decision-trace-harness .trace-no-label.done,
-.decision-trace-harness .trace-no-label.error {
-  fill: #ff3948;
-  opacity: 1;
-}
-
-.decision-trace-harness .trace-seal-label {
-  fill: #ff3948;
-}
-
-.decision-trace-harness .trace-seal-label.pending {
-  opacity: 0.18;
-}
-
-.decision-trace-harness .trace-seal-label {
-  text-anchor: end;
-}
-
-.decision-trace-harness .trace-seal-label.error {
-  opacity: 1;
-}
-
-.decision-trace-harness .trace-seal-branch.pending {
-  opacity: 0.18;
-}
-
-.decision-trace-harness .trace-yes-path.done {
-  stroke: #74d84f;
-  filter: drop-shadow(0 0 3px rgba(116, 216, 79, 0.4));
-}
-
-.decision-trace-harness .trace-no-path.active,
-.decision-trace-harness .trace-no-path.done,
-.decision-trace-harness .trace-no-path.error {
-  stroke: #ff3948;
-  filter: drop-shadow(0 0 3px rgba(255, 57, 72, 0.34));
-}
-
-.decision-trace-harness .trace-diamond .trace-pass {
-  fill: #74d84f;
-  opacity: 0;
-}
-
-.decision-trace-harness .trace-diamond [data-plan-value="fit"],
-.decision-trace-harness .trace-diamond .trace-pass {
-  font-size: 6.5px;
-  text-anchor: middle;
-}
-
-.decision-trace-harness .trace-diamond .trace-pass.visible {
-  opacity: 1;
-}
-
-.decision-trace-harness .trace-hold-node.error text {
-  fill: #ff3948;
-}
-
-.decision-trace-harness .trace-hold-title {
-  font-size: 12px;
-}
-
-.decision-trace-harness .trace-hold-reason {
-  font-size: 9px;
-  text-anchor: end;
-}
-
-.decision-trace-harness .trace-focus circle {
-  filter: url(#trace-glow-violet);
-}
-
-.decision-trace-harness .decision-lane.event-focus .decision-role {
-  fill: #b7b9ff;
-}
-
 .decision-transition-bar {
   position: relative;
   display: grid;
@@ -4101,7 +3652,7 @@ canvas {
   }
 
   .decision-trace-scroll {
-    height: 607px;
+    height: 486px;
     overflow-x: auto;
     scrollbar-gutter: stable;
   }
@@ -4114,12 +3665,7 @@ canvas {
   .decision-trace-harness {
     width: 1400px;
     max-width: none;
-    height: 607px;
-  }
-
-  .decision-trace-scroll:has(.decision-trace-harness.ingest-job),
-  .decision-trace-harness.ingest-job {
-    height: 700px;
+    height: 486px;
   }
 
   .decision-transition-bar {
@@ -4205,8 +3751,8 @@ canvas {
   .processing-step.active::before,
   .work-overview.running .work-dot,
   .decision-trace-panel:has(.work-overview.running) .work-dot,
-  .decision-trace-harness .decision-lane-step.active circle,
-  .decision-trace-harness .trace-lane-rail.active,
+  .decision-trace-harness .trace-node.active > circle,
+  .decision-trace-harness .trace-node.active > path,
   .decision-model-stream pre::after {
     animation: none;
   }

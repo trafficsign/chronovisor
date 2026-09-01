@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -10,711 +12,515 @@ from chronovisor.ops import decision_trace_projection as projection
 
 ROOT = Path(__file__).resolve().parents[1]
 
+EXPECTED_WORKFLOW_MILESTONES = {
+    "ingest": (
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result",
+        "change",
+        "apply",
+        "publish",
+        "readback",
+        "complete",
+        "hold",
+    ),
+    "recall": (
+        "search",
+        "rerank",
+        "authority",
+        "result",
+        "commit",
+        "readback",
+        "complete",
+        "hold",
+    ),
+    "audit": ("select", "inspect", "consensus", "result", "report", "complete", "hold"),
+    "improve": (
+        "discover",
+        "generate",
+        "verify",
+        "result",
+        "apply",
+        "readback",
+        "complete",
+        "hold",
+    ),
+    "repair": (
+        "detect",
+        "local_fix",
+        "verify",
+        "result",
+        "escalate",
+        "readback",
+        "complete",
+        "hold",
+    ),
+    "typed_graph": (
+        "discover",
+        "extract",
+        "verify",
+        "consolidate",
+        "evaluate",
+        "result",
+        "promote",
+        "readback",
+        "complete",
+        "hold",
+    ),
+}
 
-def _steps(state: str = "done") -> list[dict[str, str]]:
-    return [{"key": phase, "status": state} for phase in projection.TRACE_PHASES]
 
-
-def _lane(
-    key: str,
-    state: str = "pending",
-    *,
-    phase: str | None = None,
-    think: object = None,
-    requested: object = None,
-    context: object = None,
-    required: object = None,
-    repair_turns: object = 0,
-    steps: object = None,
-) -> dict[str, Any]:
+def _trace(**extra: Any) -> dict[str, Any]:
     return {
-        "key": key,
-        "state": state,
-        "phase": phase,
-        "think": think,
-        "requested_context_tokens": requested,
-        "context_tokens": context,
-        "required_context_tokens": required,
-        "repair_turns": repair_turns,
-        "steps": _steps() if steps is None and state == "done" else steps or [],
-    }
-
-
-def _trace(
-    *,
-    state: str = "active",
-    packet: str = "done",
-    dispatch: str = "done",
-    quorum: str = "pending",
-    artifact: str = "pending",
-    decision: str = "pending",
-    lanes: list[dict[str, Any]] | None = None,
-    **extra: Any,
-) -> dict[str, Any]:
-    return {
-        "state": state,
-        "overall": [
-            {"key": "packet", "status": packet},
-            {"key": "dispatch", "status": dispatch},
-            {"key": "quorum", "status": quorum},
-            {"key": "artifact", "status": artifact},
-            {"key": "decision", "status": decision},
+        "state": "active",
+        "active": True,
+        "request_sha256": "child-request",
+        "task_role": "ingest_triage",
+        "event_count": 4,
+        "lanes": [
+            {
+                "key": "primary",
+                "state": "active",
+                "phase": "generate",
+                "think": "low",
+                "model": "Qwen",
+                "context_tokens": 65_536,
+            }
         ],
-        "lanes": lanes or [_lane("primary"), _lane("challenger"), _lane("tie_break")],
         **extra,
     }
 
 
-def test_projection_topology_matches_the_svg_contract() -> None:
-    page = (ROOT / "src/chronovisor/dashboard_static/index.html").read_text(
-        encoding="utf-8"
-    )
-    assert set(re.findall(r'data-path-key="([^"]+)"', page)) == set(
-        projection.TRACE_PATH_KEYS
-    )
-    assert {
-        "pending",
-        "active",
-        "done",
-        "skipped",
-        "error",
-    } == projection.TRACE_STATES
-    assert projection.TRACE_ROLES == ("primary", "challenger", "tie_break")
+def test_six_workflow_patterns_inventory_every_milestone() -> None:
+    assert set(projection.TRACE_WORKFLOWS) == set(EXPECTED_WORKFLOW_MILESTONES)
+    for pipeline, expected in EXPECTED_WORKFLOW_MILESTONES.items():
+        workflow = projection.TRACE_WORKFLOWS[pipeline]
+        assert tuple(node["id"] for node in workflow["nodes"]) == expected
+        node_ids = set(expected)
+        assert len(node_ids) == len(expected)
+        assert all(
+            edge["source"] in node_ids and edge["target"] in node_ids
+            for edge in workflow["edges"]
+        )
+        exits: dict[str, int] = {}
+        for edge in workflow["edges"]:
+            exits[edge["source"]] = exits.get(edge["source"], 0) + 1
+        assert all(
+            exits[node["id"]] >= 2
+            for node in workflow["nodes"]
+            if node["type"] == "decision"
+        )
+        assert all(
+            route[0] != "hold" and route[-1] in {"complete", "hold"}
+            for route in workflow["routes"].values()
+        )
 
 
 @pytest.mark.parametrize(
-    ("status", "trace", "lane", "current", "branch"),
+    ("pipeline", "current_step", "expected"),
     [
-        (
-            {
-                "state": "running",
-                "stage": "target-resolution",
-                "current_job_id": "job-1",
-                "host_phase": {"name": "target-resolution", "state": "complete"},
-            },
-            {"task_role": "ingest_triage", "state": "ready"},
-            {},
-            "generate",
-            None,
-        ),
-        (
-            {
-                "state": "running",
-                "stage": "generate",
-                "current_job_id": "job-1",
-                "llm": {"active": False, "event": "done"},
-            },
-            {"task_role": "ingest_recall_metadata", "state": "ready"},
-            {},
-            "authority",
-            None,
-        ),
-        (
-            {
-                "state": "running",
-                "stage": "local-regenerate",
-                "current_job_id": "job-1",
-            },
-            {"task_role": "ingest_reconciliation:authority", "state": "ready"},
-            {},
-            "generate",
-            "retry",
-        ),
-        (
-            {
-                "state": "running",
-                "stage": "apply",
-                "current_job_id": "job-1",
-                "ingest_disposition": "apply_available",
-                "host_phase": {"name": "apply", "state": "active"},
-            },
-            {"task_role": "ingest_reconciliation:authority", "state": "ready"},
-            {},
-            "apply",
-            "apply",
-        ),
-        (
-            {
-                "state": "running",
-                "stage": "read-back",
-                "current_job_id": "job-2",
-                "ingest_disposition": "confirmed_noop",
-                "host_phase": {"name": "read-back", "state": "active"},
-            },
-            {"task_role": "ingest_reconciliation:authority", "state": "ready"},
-            {},
-            "readback",
-            "noop",
-        ),
-        (
-            {
-                "state": "idle",
-                "stage": "idle",
-                "last_success": {"local_consensus_status": "apply_available"},
-            },
-            {"task_role": "ingest_reconciliation:authority", "state": "ready"},
-            {},
-            "complete",
-            "apply",
-        ),
-        (
-            {
-                "state": "idle",
-                "stage": "idle",
-                "last_success": {"local_consensus_status": "confirmed_noop"},
-            },
-            {"task_role": "ingest_reconciliation:authority", "state": "ready"},
-            {},
-            "complete",
-            "noop",
-        ),
-        (
-            {"state": "error", "stage": "failed", "current_job_id": "job-3"},
-            {"task_role": "ingest_reconciliation:authority", "state": "ready"},
-            {},
-            "hold",
-            "hold",
-        ),
-        (
-            {"state": "running", "stage": "triage", "current_job_id": "job-5"},
-            {"task_role": "ingest_triage", "state": "active"},
-            {"state": "active", "current_step": "generate"},
-            "generate",
-            None,
-        ),
+        ("recall", "primary", "authority"),
+        ("audit", "inspect", "inspect"),
+        ("improve", "verify", "verify"),
+        ("repair", "local_fix", "local_fix"),
+        ("typed_graph", "extract", "extract"),
     ],
 )
-def test_ingest_processing_projection_covers_runtime_branches(
-    status: dict[str, Any],
-    trace: dict[str, Any],
-    lane: dict[str, Any],
-    current: str,
-    branch: str | None,
+def test_each_pipeline_projects_its_observed_stage(
+    pipeline: str,
+    current_step: str,
+    expected: str,
 ) -> None:
-    result = projection.project_processing_trace("ingest", lane, status, trace)
-
-    assert result is not None
-    assert result["current"] == current
-    assert result["selected_branch"] == branch
-    assert result["graph_id"] == "processing:ingest:v2"
-
-
-def test_ingest_processing_projection_has_connected_truthful_topology() -> None:
-    result = projection.project_processing_trace("ingest", {}, {}, {})
-
-    assert result is not None
-    node_ids = {node["id"] for node in result["nodes"]}
-    assert all(
-        edge["source"] in node_ids and edge["target"] in node_ids
-        for edge in result["edges"]
+    result = projection.project_decision_trace(
+        _trace(task_role=pipeline),
+        pipeline=pipeline,
+        processing_lane={"work_item": f"{pipeline}-job", "current_step": current_step},
     )
-    exits: dict[str, int] = {}
-    for edge in result["edges"]:
-        exits[edge["source"]] = exits.get(edge["source"], 0) + 1
-    for node in result["nodes"]:
-        if node["type"] == "decision":
-            assert exits.get(node["id"], 0) >= 2
+
+    assert result["graph_id"] == f"workflow:{pipeline}:v1"
+    assert result["execution_id"] == f"{pipeline}-job"
+    assert result["workflow"]["target_node"] == expected
+    assert (
+        result["workflow"]["route_node_ids"][result["workflow"]["target_cursor"]]
+        == expected
+    )
+    assert "processing" not in result
+    assert "paths" not in result
+    assert "lanes" not in result
 
 
 @pytest.mark.parametrize(
-    "pipeline",
-    ["recall", "audit", "improve", "repair", "typed_graph"],
+    ("stage", "target", "route"),
+    [
+        ("triage", "triage", "success"),
+        ("target-resolution", "target", "success"),
+        ("generate", "generate", "success"),
+        ("authorization", "authority", "success"),
+        ("local-regenerate", "generate", "retry"),
+        ("apply", "apply", "success"),
+        ("semantic-publish", "publish", "success"),
+        ("read-back", "readback", "success"),
+        ("complete", "complete", "success"),
+        ("semantic-noop", "complete", "noop"),
+        ("failed", "hold", "hold"),
+    ],
 )
-def test_decision_trace_does_not_append_a_lane_summary_as_a_continuation(
-    pipeline: str,
+def test_ingest_runtime_stage_maps_to_one_workflow_arrival(
+    stage: str,
+    target: str,
+    route: str,
 ) -> None:
     result = projection.project_decision_trace(
         _trace(),
-        pipeline=pipeline,
-        processing_lane={
-            "current_step": "generate",
-            "steps": [
-                {"key": "generate", "label": "Generate", "status": "active"},
-                {"key": "verify", "label": "Verify", "status": "pending"},
-            ],
+        pipeline="ingest",
+        processing_lane={"work_item": "child"},
+        runtime_status={
+            "current_job_id": "parent-job",
+            "stage": stage,
+            "state": "error" if stage == "failed" else "running",
         },
     )
 
-    assert "processing" not in result
-
-
-def test_renderer_has_no_second_state_machine_or_runtime_geometry_mutation() -> None:
-    renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
-        encoding="utf-8"
-    )
-    harness = renderer.split("function updateDecisionSvgHarness", 1)[1].split(
-        "function decisionEventText", 1
-    )[0]
-
-    assert "ingestJobTraceState" not in renderer
-    assert "latestRenderedStatus" not in harness
-    assert "latestProcessingLanes" not in harness
-    assert "trace.lanes" not in harness
-    assert not re.search(
-        r'setAttribute\(\s*["\'](?:d|transform|viewBox|height)["\']', harness
+    assert result["execution_id"] == "parent-job"
+    assert result["workflow"]["target_node"] == target
+    assert result["workflow"]["route"] == route
+    assert result["workflow"]["target_state"] == (
+        "error" if stage == "failed" else "done" if target == "complete" else "active"
     )
 
 
-def test_projection_normalizes_helper_inputs() -> None:
-    assert projection._state("active") == "active"
-    assert projection._state("unknown", "skipped") == "skipped"
-    assert projection._positive_int(1) == 1
-    assert all(projection._positive_int(value) is None for value in (True, 0, -1, "1"))
-    assert projection._rows_by_key(None) == {}
-    assert projection._rows_by_key(
-        [
-            {"key": "valid", "value": 1},
-            {"key": 2},
-            {"value": 3},
-            "not-a-row",
-        ]
-    ) == {"valid": {"key": "valid", "value": 1}}
-    assert projection._context_label(None) == "—"
-    assert projection._selected_path("pending", selected=False) == "pending"
-    assert projection._selected_path("pending", selected=True) == "active"
-    assert projection._selected_path("done", selected=True) == "done"
-    assert projection._context_label(32_768) == "32K"
-    assert [row["tokens"] for row in projection._context_options(None, "done")] == [
-        32_768,
-        65_536,
-        98_304,
-        131_072,
-    ]
-    custom = projection._context_options(100_000, "active")
-    assert [(row["tokens"], row["state"]) for row in custom] == [
-        (32_768, "pending"),
-        (65_536, "pending"),
-        (100_000, "active"),
-        (131_072, "pending"),
-    ]
-
-
-def test_idle_projection_is_a_complete_pending_snapshot() -> None:
-    result = projection.project_decision_trace({})
-
-    assert result["schema"] == projection.TRACE_PROJECTION_SCHEMA
-    assert set(result["paths"]) == set(projection.TRACE_PATH_KEYS)
-    assert set(result["paths"].values()) == {"pending"}
-    assert set(result["nodes"].values()) == {"pending"}
-    assert result["model_routes"] == {
-        "primary": "pending",
-        "challenger": "pending",
-        "tie_break": "pending",
-    }
-    assert result["context"]["selected_tokens"] is None
-    assert result["reasoning"]["selected"] is None
-    assert result["labels"] == {
-        "fit": "WAITING",
-        "fit_pass": False,
-        "hold": "No safe quorum",
-    }
-
-
-def test_active_repair_projects_custom_context_and_reasoning_bypass() -> None:
+def test_running_ingest_is_authoritative_over_a_terminal_child_decision() -> None:
     result = projection.project_decision_trace(
-        _trace(
-            dispatch="active",
-            lanes=[
-                _lane(
-                    "primary",
-                    "active",
-                    phase="repair",
-                    think="off",
-                    requested=100_000,
-                    context=98_304,
-                    required=90_000,
-                    repair_turns=True,
-                    steps=[
-                        {"key": "trigger", "status": "done"},
-                        {"key": "load", "status": "active"},
-                        {"key": "context", "status": "unknown"},
-                    ],
-                ),
-                _lane("challenger"),
-                _lane("tie_break"),
-            ],
-            events=[
-                "invalid",
-                {"lane": "challenger", "phase": "repair", "attempt": 4},
-                {"lane": "primary", "phase": "generate", "attempt": 3},
-                {"lane": "primary", "phase": "repair", "attempt": 0},
-            ],
-        )
+        _trace(state="quarantined", active=False),
+        pipeline="ingest",
+        runtime_status={
+            "current_job_id": "parent-job",
+            "stage": "local-regenerate",
+            "state": "running",
+        },
     )
 
-    assert result["context"]["selected_tokens"] == 100_000
-    assert [row for row in result["context"]["options"] if row["selected"]] == [
-        {
-            "tokens": 100_000,
-            "label": "100K",
-            "selected": True,
-            "state": "active",
-        }
-    ]
-    assert result["context"]["label"] == "required 90K → selected 100K"
-    assert result["reasoning"]["selected"] == "off"
-    assert result["paths"]["reasoning-off"] == "active"
-    assert result["paths"]["plan-fit"] == "pending"
-    assert result["labels"]["fit"] == "BYPASS"
-    assert result["lanes"]["primary"]["repair"] == "active"
-    assert result["lanes"]["primary"]["repair_attempt"] == 1
-    assert result["lanes"]["primary"]["steps"]["context"] == "pending"
-
-
-def test_pair_agreement_projects_successful_seal_without_tie_break() -> None:
-    result = projection.project_decision_trace(
-        _trace(
-            state="agreed",
-            artifact="done",
-            decision="done",
-            lanes=[
-                _lane(
-                    "primary", "done", think="medium", context=32_768, repair_turns=2
-                ),
-                _lane("challenger", "done", think="medium", context=32_768),
-                _lane("tie_break", "skipped"),
-            ],
-            pair_agreement=True,
-            quorum_attempted=True,
-        )
-    )
-
-    assert result["paths"]["pair-artifact-join"] == "done"
-    assert result["paths"]["pair-tie_break"] == "pending"
-    assert result["paths"]["artifact-seal"] == "done"
-    assert result["paths"]["seal-decision"] == "done"
-    assert result["nodes"]["agree"] == "done"
-    assert result["nodes"]["seal"] == "done"
-    assert result["labels"] == {
-        "fit": "headroom OK",
-        "fit_pass": True,
-        "hold": "No safe quorum",
-    }
-    assert result["lanes"]["primary"]["repair"] == "done"
-    assert result["lanes"]["primary"]["repair_attempt"] == 2
-
-
-def test_tie_break_active_and_completed_paths() -> None:
-    active = projection.project_decision_trace(
-        _trace(
-            lanes=[
-                _lane("primary", "done", think="medium", context=32_768),
-                _lane("challenger", "done", think="medium", context=32_768),
-                _lane("tie_break", "active", think="high", context=65_536),
-            ],
-            pair_agreement=False,
-            quorum_attempted=True,
-        )
-    )
-    completed = projection.project_decision_trace(
-        _trace(
-            state="agreed",
-            quorum="done",
-            artifact="done",
-            decision="done",
-            lanes=[
-                _lane("primary", "done", think="medium", context=32_768),
-                _lane("challenger", "done", think="medium", context=32_768),
-                _lane("tie_break", "done", think="high", context=65_536),
-            ],
-            pair_agreement=False,
-            tie_break_used=True,
-            quorum_attempted=True,
-        )
-    )
-
-    assert active["paths"]["pair-tie_break"] == "active"
-    assert active["nodes"]["agree"] == "active"
-    assert active["labels"]["fit"] == "headroom OK"
-    assert completed["paths"]["pair-tie_break"] == "done"
-    assert completed["paths"]["tie_break-quorum"] == "done"
-    assert completed["paths"]["quorum-artifact-join"] == "done"
-    assert completed["nodes"]["quorum"] == "done"
-
-
-def test_tie_break_completion_and_agreement_keep_the_selected_route_connected() -> None:
-    lanes = [
-        _lane("primary", "done", think="medium", context=32_768),
-        _lane("challenger", "done", think="medium", context=32_768),
-        _lane("tie_break", "done", think="high", context=65_536),
-    ]
-    evaluating = projection.project_decision_trace(
-        _trace(
-            state="idle",
-            quorum="active",
-            lanes=lanes,
-            pair_agreement=False,
-            quorum_attempted=True,
-        )
-    )
-    agreed = projection.project_decision_trace(
-        _trace(
-            state="agreed",
-            quorum="done",
-            lanes=lanes,
-            pair_agreement=False,
-            tie_break_used=True,
-            quorum_attempted=True,
-        )
-    )
-
-    assert evaluating["paths"]["tie_break-quorum"] == "active"
-    assert evaluating["nodes"]["quorum"] == "active"
-    assert agreed["paths"]["tie_break-quorum"] == "done"
-    assert agreed["paths"]["quorum-artifact-join"] == "active"
-    assert agreed["nodes"]["quorum"] == "done"
-    assert agreed["nodes"]["artifact"] == "pending"
-    assert agreed["nodes"]["seal"] == "pending"
-    assert agreed["nodes"]["decision"] == "pending"
-    assert agreed["paths"]["artifact-seal"] == "pending"
-    assert agreed["paths"]["seal-decision"] == "pending"
-
-
-def test_pair_agreement_waits_for_the_artifact_before_lighting_the_seal() -> None:
-    result = projection.project_decision_trace(
-        _trace(
-            state="agreed",
-            quorum="done",
-            lanes=[
-                _lane("primary", "done", think="medium", context=32_768),
-                _lane("challenger", "done", think="medium", context=32_768),
-                _lane("tie_break", "skipped"),
-            ],
-            pair_agreement=True,
-            quorum_attempted=True,
-        )
-    )
-
-    assert result["paths"]["pair-artifact-join"] == "active"
-    assert result["nodes"]["artifact"] == "pending"
-    assert result["nodes"]["seal"] == "pending"
-    assert result["paths"]["artifact-seal"] == "pending"
-    assert result["paths"]["seal-decision"] == "pending"
-
-
-def test_no_safe_quorum_stops_before_artifact_and_decision() -> None:
-    result = projection.project_decision_trace(
-        _trace(
-            state="quarantined",
-            quorum="error",
-            artifact="skipped",
-            decision="skipped",
-            lanes=[
-                _lane("primary", "done", think="medium", context=32_768),
-                _lane("challenger", "done", think="medium", context=32_768),
-                _lane("tie_break", "done", think="medium", context=65_536),
-            ],
-            pair_agreement=False,
-            tie_break_used=True,
-            quorum_attempted=True,
-            summary="No safe quorum · quarantined",
-        )
-    )
-
-    assert result["paths"]["tie_break-quorum"] == "error"
-    assert result["paths"]["quorum-hold"] == "error"
-    assert result["paths"]["artifact-seal"] == "pending"
-    assert result["paths"]["seal-decision"] == "pending"
-    assert {
-        key: result["nodes"][key]
-        for key in ("agree", "quorum", "artifact", "decision", "hold")
-    } == {
-        "agree": "error",
-        "quorum": "error",
-        "artifact": "skipped",
-        "decision": "skipped",
-        "hold": "error",
-    }
+    assert result["trace_state"] == "active"
+    assert result["workflow"]["route"] == "retry"
+    assert result["workflow"]["target_node"] == "generate"
+    assert result["workflow"]["target_state"] == "active"
 
 
 @pytest.mark.parametrize(
-    ("overall_artifact", "outcome"),
-    [
-        ("error", {}),
-        ("pending", {"code": "canonical_seal_failure"}),
-        ("pending", {"reason": "SEAL unavailable"}),
-    ],
+    "pipeline", ["recall", "audit", "improve", "repair", "typed_graph"]
 )
-def test_seal_failure_projects_the_operational_hold(
-    overall_artifact: str, outcome: dict[str, str]
+def test_terminal_non_ingest_decision_reaches_the_workflow_terminal(
+    pipeline: str,
 ) -> None:
     result = projection.project_decision_trace(
-        _trace(
-            state="quarantined",
-            artifact=overall_artifact,
-            decision="skipped",
-            lanes=[
-                _lane("primary", "done", think="medium", context=32_768),
-                _lane("challenger", "done", think="medium", context=32_768),
-                _lane("tie_break", "skipped"),
-            ],
-            pair_agreement=True,
-            quorum_attempted=True,
-            outcome=outcome,
-        )
+        _trace(state="agreed", active=False, task_role=pipeline),
+        pipeline=pipeline,
+        processing_lane={"work_item": f"{pipeline}-job"},
     )
 
-    assert result["paths"]["artifact-seal"] in {"error", "pending"}
-    assert result["paths"]["seal-hold"] == "error"
-    assert result["nodes"]["artifact"] == "error"
-    assert result["nodes"]["seal"] == "error"
-    assert result["nodes"]["hold"] == "error"
-    assert result["labels"]["hold"] == "Seal failed"
+    assert result["workflow"]["target_node"] == "complete"
+    assert result["workflow"]["target_state"] == "done"
 
 
-def test_single_model_and_explicitly_unattempted_quorum_paths() -> None:
-    standalone = projection.project_decision_trace(
-        _trace(
-            state="ready",
-            artifact="done",
-            decision="done",
-            lanes=[
-                _lane("primary", "done", think="low", context=32_768),
-                _lane("challenger", "skipped"),
-                _lane("tie_break", "skipped"),
-            ],
-            quorum_flow=False,
-        )
-    )
-    held_without_quorum = projection.project_decision_trace(
-        _trace(
-            state="quarantined",
-            artifact="skipped",
-            decision="skipped",
-            lanes=[
-                _lane("primary", "broken", think="unknown", context=True),
-                _lane("challenger", "done", think="unknown", context=0),
-                _lane("tie_break", "skipped"),
-                {"key": 1},
-                "invalid",
-            ],
-            quorum_attempted=False,
-            context_tokens=65_536,
-            outcome=[],
-            summary="Custom hold · details",
-            events="not-a-list",
-        )
+def test_repair_escalation_uses_the_observed_lane_branch() -> None:
+    result = projection.project_decision_trace(
+        _trace(task_role="repair"),
+        pipeline="repair",
+        processing_lane={
+            "work_item": "repair-job",
+            "current_step": "escalate",
+            "phase": "pending_frontier_review",
+        },
     )
 
-    assert standalone["paths"]["single-artifact"] == "done"
-    assert standalone["single_model"] is False
-    assert list(standalone["lanes"]) == ["primary", "challenger", "tie_break"]
-    assert standalone["paths"]["quorum-artifact-join"] == "pending"
-    assert standalone["nodes"]["seal"] == "done"
-    assert held_without_quorum["context"]["selected_tokens"] == 65_536
-    assert held_without_quorum["reasoning"]["selected"] is None
-    assert held_without_quorum["nodes"]["agree"] == "active"
-    assert held_without_quorum["nodes"]["hold"] == "pending"
-    assert held_without_quorum["labels"]["hold"] == "Custom hold"
+    assert result["workflow"]["route"] == "escalate"
+    assert result["workflow"]["target_node"] == "escalate"
 
 
-def test_single_model_authority_projects_one_lane_and_binds_identity() -> None:
+def test_single_authority_metadata_survives_without_becoming_a_second_graph() -> None:
     result = projection.project_decision_trace(
         _trace(
-            state="ready",
-            artifact="done",
-            decision="done",
+            authority_kind="single_model_v1",
+            task_role="recall_authority",
             lanes=[
                 {
-                    **_lane("primary", "done", think="low", context=32_768),
-                    "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
-                    "revision": "a" * 64,
-                },
-                _lane("challenger", "skipped"),
-                _lane("tie_break", "skipped"),
+                    "key": "primary",
+                    "state": "active",
+                    "phase": "validate",
+                    "model": "Qwen",
+                    "revision": "abc",
+                }
             ],
-            authority_kind="single_model_v1",
-            quorum_flow=False,
-        )
+        ),
+        pipeline="recall",
+        processing_lane={"current_step": "primary"},
     )
 
     assert result["single_model"] is True
-    assert result["mode"] == "single"
-    assert result["authority_kind"] == "single_model_v1"
     assert result["authority"] == {
         "kind": "single_model_v1",
         "label": "Single Authority",
-        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
-        "revision": "a" * 64,
+        "model": "Qwen",
+        "revision": "abc",
         "target": 1,
-        "validated": True,
+        "validated": False,
         "repair_is_vote": False,
     }
-    assert list(result["lanes"]) == ["primary"]
-    assert result["lanes"]["primary"]["label"] == "Single Authority"
-    assert result["model_routes"] == {"primary": "done"}
-    assert result["paths"]["single-artifact"] == "done"
-    assert result["labels"]["authority"] == "Single Authority"
-    assert result["labels"]["validation"] == "Validated"
-    assert result["labels"]["target"] == "1"
-    assert result["labels"]["repair"] == "REPAIR ≠ VOTE"
-    assert result["labels"]["hold"] == "Validation failed"
-
-
-@pytest.mark.parametrize(
-    ("phase", "label"),
-    [
-        ("trigger", "Starting"),
-        ("load", "Loading"),
-        ("context", "Building context"),
-        ("generate", "Generating"),
-        ("repair", "Repairing"),
-        ("validate", "Validating"),
-        ("vote", "Finalizing"),
-    ],
-)
-def test_single_model_status_tracks_the_active_lane_phase(
-    phase: str, label: str
-) -> None:
-    result = projection.project_decision_trace(
-        _trace(
-            lanes=[
-                _lane("primary", "active", phase=phase),
-                _lane("challenger", "skipped"),
-                _lane("tie_break", "skipped"),
-            ],
-            authority_kind="single_model_v1",
-            quorum_flow=False,
-        )
-    )
-
-    assert result["lanes"]["primary"]["phase"] == phase
-    assert result["labels"]["validation"] == label
-
-
-def test_single_model_completed_lane_is_validated_while_artifact_is_pending() -> None:
-    result = projection.project_decision_trace(
-        _trace(
-            state="ready",
-            lanes=[
-                _lane("primary", "done"),
-                _lane("challenger", "skipped"),
-                _lane("tie_break", "skipped"),
-            ],
-            authority_kind="single_model_v1",
-            quorum_flow=False,
-        )
-    )
-
-    assert result["authority"]["validated"] is False
-    assert result["labels"]["validation"] == "Validated"
-
-
-def test_active_reasoning_fit_is_checking() -> None:
-    result = projection.project_decision_trace(
-        _trace(
-            dispatch="active",
-            lanes=[
-                _lane("primary", "active", think="low", context=32_768),
-                _lane("challenger"),
-                _lane("tie_break"),
-            ],
-        )
-    )
-
-    assert result["labels"] == {
-        "fit": "CHECKING",
-        "fit_pass": False,
-        "hold": "No safe quorum",
+    assert set(result["workflow"]) == {
+        "nodes",
+        "edges",
+        "route",
+        "route_node_ids",
+        "target_cursor",
+        "target_node",
+        "target_state",
     }
-    assert result["paths"]["plan-fit"] == "active"
+
+
+def test_renderer_owns_geometry_only_when_mounting_a_graph() -> None:
+    renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
+        encoding="utf-8"
+    )
+    update = renderer.split("function updateDecisionSvgHarness", 1)[1].split(
+        "function decisionEventText", 1
+    )[0]
+
+    assert "updateIngestJobTrace" not in renderer
+    assert "projection.processing" not in renderer
+    assert "function advanceDecisionTraceOneStep" in renderer
+    assert "DECISION_PROGRESS_INTERVAL_MS = 500" in renderer
+    assert not re.search(
+        r'setAttribute\(\s*["\'](?:d|transform|viewBox|height)["\']',
+        update,
+    )
+
+
+def test_browser_stepper_advances_exactly_one_and_ignores_a_lower_target() -> None:
+    renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
+        encoding="utf-8"
+    )
+    helper = (
+        "function synchronizeDecisionTraceTarget"
+        + renderer.split("function synchronizeDecisionTraceTarget", 1)[1].split(
+            "function renderDecisionTraceNow", 1
+        )[0]
+    )
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{ fmt: (value, fallback) => value ?? fallback }};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(helper)}, sandbox);
+const playback = {{ frame: null }};
+const projection = {{ workflow: {{
+  route: "success",
+  route_node_ids: ["a", "b", "c", "d"],
+  target_cursor: 3,
+  target_state: "active",
+}} }};
+const cursors = [];
+while (sandbox.advanceDecisionTraceOneStep(playback, projection)) {{
+  cursors.push(playback.frame.cursor);
+}}
+projection.workflow.target_cursor = 1;
+const changed = sandbox.advanceDecisionTraceOneStep(playback, projection);
+process.stdout.write(JSON.stringify({{ cursors, changed, cursor: playback.frame.cursor }}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "cursors": [0, 1, 2, 3],
+        "changed": False,
+        "cursor": 3,
+    }
+
+
+def test_browser_stepper_drains_one_milestone_every_half_second() -> None:
+    renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
+        encoding="utf-8"
+    )
+    pacing = (
+        "const DECISION_PROGRESS_INTERVAL_MS"
+        + renderer.split("const DECISION_PROGRESS_INTERVAL_MS", 1)[1].split(
+            "window.__chronovisorDashboardTest", 1
+        )[0]
+    ).replace(
+        """function renderDecisionTraceNow(trace) {
+  renderDecisionTraceFrame(trace, null, decisionTracePlayback.frame);
+  renderDecisionTransitionFeed(trace);
+  setDecisionTransitionState(trace);
+}""",
+        """function renderDecisionTraceNow(_trace) {
+  frames.push(decisionTracePlayback.frame.cursor);
+}""",
+    )
+    scenario = f"""
+const vm = require("node:vm");
+const scheduled = [];
+const frames = [];
+const delays = [];
+let clock = 0;
+const sandbox = {{
+  Date: {{ now: () => clock, parse: Date.parse }},
+  document: {{ visibilityState: "visible" }},
+  frames,
+  window: {{
+    matchMedia: () => ({{ matches: false }}),
+    clearTimeout: () => {{}},
+    setTimeout: (callback, delay) => {{
+      scheduled.push({{ callback, delay }});
+      return scheduled.length;
+    }},
+  }},
+}};
+vm.createContext(sandbox);
+vm.runInContext(
+  `function fmt(value, fallback) {{ return value ?? fallback; }}
+   function decisionTraceProjection(trace) {{ return trace?.projection || null; }}
+   {pacing}
+   this.__test = {{ renderDecisionTrace }};`,
+  sandbox,
+);
+const workflow = {{
+  nodes: [], edges: [], route: "success",
+  route_node_ids: ["a", "b", "c", "d"],
+  target_cursor: 3, target_node: "d", target_state: "active",
+}};
+sandbox.__test.renderDecisionTrace({{ decision_trace: {{
+  active: true,
+  request_sha256: "execution",
+  events: [],
+  projection: {{
+    schema: "chronovisor.decision-trace-projection.v3",
+    execution_id: "execution",
+    graph_id: "workflow:test:v1",
+    revision: "3",
+    workflow,
+  }},
+}} }});
+while (scheduled.length) {{
+  const task = scheduled.shift();
+  delays.push(task.delay);
+  clock += task.delay;
+  task.callback();
+}}
+process.stdout.write(JSON.stringify({{ frames, delays }}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "frames": [0, 1, 2, 3],
+        "delays": [500, 500, 500],
+    }
+
+
+def test_browser_stepper_keeps_a_selected_retry_rail_after_backend_route_settles() -> (
+    None
+):
+    renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
+        encoding="utf-8"
+    )
+    helper = (
+        "function synchronizeDecisionTraceTarget"
+        + renderer.split("function synchronizeDecisionTraceTarget", 1)[1].split(
+            "function renderDecisionTraceNow", 1
+        )[0]
+    )
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{ fmt: (value, fallback) => value ?? fallback }};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(helper)}, sandbox);
+const success = ["raw", "triage", "target", "generate", "authority", "result", "change", "apply", "publish", "readback", "complete"];
+const retry = ["raw", "triage", "target", "generate", "authority", "result", "generate", "authority", "result", "change", "apply", "publish", "readback", "complete"];
+const playback = {{ frame: null }};
+const projection = {{ workflow: {{ route: "success", route_node_ids: success, target_cursor: 5, target_state: "active" }} }};
+while (sandbox.advanceDecisionTraceOneStep(playback, projection)) {{}}
+projection.workflow = {{ route: "retry", route_node_ids: retry, target_cursor: 6, target_state: "active" }};
+sandbox.advanceDecisionTraceOneStep(playback, projection);
+projection.workflow = {{ route: "success", route_node_ids: success, target_cursor: 7, target_state: "active" }};
+const observed = [];
+while (sandbox.advanceDecisionTraceOneStep(playback, projection)) {{
+  observed.push(playback.frame.route_node_ids[playback.frame.cursor]);
+}}
+process.stdout.write(JSON.stringify({{ route: playback.frame.route, observed }}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "route": "retry",
+        "observed": ["authority", "result", "change", "apply"],
+    }
+
+
+def test_browser_stepper_selects_noop_before_the_branch_is_crossed() -> None:
+    renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
+        encoding="utf-8"
+    )
+    helper = (
+        "function synchronizeDecisionTraceTarget"
+        + renderer.split("function synchronizeDecisionTraceTarget", 1)[1].split(
+            "function renderDecisionTraceNow", 1
+        )[0]
+    )
+    scenario = f"""
+const vm = require("node:vm");
+const sandbox = {{ fmt: (value, fallback) => value ?? fallback }};
+vm.createContext(sandbox);
+vm.runInContext({json.dumps(helper)}, sandbox);
+const success = ["raw", "triage", "target", "generate", "authority", "result", "change", "apply", "publish", "readback", "complete"];
+const noop = ["raw", "triage", "target", "generate", "authority", "result", "change", "readback", "complete"];
+const playback = {{ frame: null }};
+const projection = {{ workflow: {{ route: "success", route_node_ids: success, target_cursor: 4, target_state: "active" }} }};
+while (sandbox.advanceDecisionTraceOneStep(playback, projection)) {{}}
+projection.workflow = {{ route: "noop", route_node_ids: noop, target_cursor: 8, target_state: "done" }};
+const observed = [];
+while (sandbox.advanceDecisionTraceOneStep(playback, projection)) {{
+  observed.push(playback.frame.route_node_ids[playback.frame.cursor]);
+}}
+process.stdout.write(JSON.stringify({{ route: playback.frame.route, observed }}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", scenario],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "route": "noop",
+        "observed": ["result", "change", "readback", "complete"],
+    }
+
+
+def test_markup_contains_only_the_dynamic_workflow_mount() -> None:
+    page = (ROOT / "src/chronovisor/dashboard_static/index.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="decision-trace-harness" viewBox="0 0 1500 520"' in page
+    assert page.count("data-workflow-edges") == 1
+    assert page.count("data-workflow-nodes") == 1
+    assert "data-ingest-job-step" not in page
+    assert "data-decision-lane-step" not in page

@@ -1,0 +1,2763 @@
+{
+  "viewport": {
+    "width": 2048,
+    "height": 1200
+  },
+  "checks": {
+    "pathLabelCollisions": 0,
+    "pathIntersections": 0,
+    "textOverlaps": 0,
+    "maxEndpointError": 3.4123935376371944e-05
+  },
+  "frames": [
+    {
+      "scenario": "ingest-success",
+      "pipeline": "ingest",
+      "step": 0,
+      "milestone": "raw",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-success-00-raw.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "raw"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "ingest-success",
+      "pipeline": "ingest",
+      "step": 1,
+      "milestone": "triage",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-success-01-triage.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "triage"
+      ],
+      "done": [
+        "raw"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main"
+      ]
+    },
+    {
+      "scenario": "ingest-success",
+      "pipeline": "ingest",
+      "step": 2,
+      "milestone": "target",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-success-02-target.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "target"
+      ],
+      "done": [
+        "raw",
+        "triage"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main"
+      ]
+    },
+    {
+      "scenario": "ingest-success",
+      "pipeline": "ingest",
+      "step": 3,
+      "milestone": "generate",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-success-03-generate.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "generate"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main"
+      ]
+    },
+    {
+      "scenario": "ingest-success",
+      "pipeline": "ingest",
+      "step": 4,
+      "milestone": "authority",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-success-04-authority.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "authority"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main"
+      ]
+    },
+    {
+      "scenario": "ingest-success",
+      "pipeline": "ingest",
+      "step": 5,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-success-05-result.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 5,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main"
+      ]
+    },
+    {
+      "scenario": "ingest-success",
+      "pipeline": "ingest",
+      "step": 6,
+      "milestone": "change",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-success-06-change.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 6,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "change"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-change-accepted"
+      ]
+    },
+    {
+      "scenario": "ingest-success",
+      "pipeline": "ingest",
+      "step": 7,
+      "milestone": "apply",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-success-07-apply.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 7,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "apply"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result",
+        "change"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-change-accepted",
+        "change-apply-apply"
+      ]
+    },
+    {
+      "scenario": "ingest-success",
+      "pipeline": "ingest",
+      "step": 8,
+      "milestone": "publish",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-success-08-publish.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 8,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "publish"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result",
+        "change",
+        "apply"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-change-accepted",
+        "change-apply-apply",
+        "apply-publish-main"
+      ]
+    },
+    {
+      "scenario": "ingest-success",
+      "pipeline": "ingest",
+      "step": 9,
+      "milestone": "readback",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-success-09-readback.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 9,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "readback"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result",
+        "change",
+        "apply",
+        "publish"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-change-accepted",
+        "change-apply-apply",
+        "apply-publish-main",
+        "publish-readback-main"
+      ]
+    },
+    {
+      "scenario": "ingest-success",
+      "pipeline": "ingest",
+      "step": 10,
+      "milestone": "complete",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-success-10-complete.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 10,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result",
+        "change",
+        "apply",
+        "publish",
+        "readback",
+        "complete"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-change-accepted",
+        "change-apply-apply",
+        "apply-publish-main",
+        "publish-readback-main",
+        "readback-complete-main"
+      ]
+    },
+    {
+      "scenario": "ingest-noop",
+      "pipeline": "ingest",
+      "step": 0,
+      "milestone": "raw",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-noop-00-raw.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "raw"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "ingest-noop",
+      "pipeline": "ingest",
+      "step": 1,
+      "milestone": "triage",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-noop-01-triage.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "triage"
+      ],
+      "done": [
+        "raw"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main"
+      ]
+    },
+    {
+      "scenario": "ingest-noop",
+      "pipeline": "ingest",
+      "step": 2,
+      "milestone": "target",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-noop-02-target.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "target"
+      ],
+      "done": [
+        "raw",
+        "triage"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main"
+      ]
+    },
+    {
+      "scenario": "ingest-noop",
+      "pipeline": "ingest",
+      "step": 3,
+      "milestone": "generate",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-noop-03-generate.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "generate"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main"
+      ]
+    },
+    {
+      "scenario": "ingest-noop",
+      "pipeline": "ingest",
+      "step": 4,
+      "milestone": "authority",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-noop-04-authority.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "authority"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main"
+      ]
+    },
+    {
+      "scenario": "ingest-noop",
+      "pipeline": "ingest",
+      "step": 5,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-noop-05-result.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 5,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main"
+      ]
+    },
+    {
+      "scenario": "ingest-noop",
+      "pipeline": "ingest",
+      "step": 6,
+      "milestone": "change",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-noop-06-change.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 6,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "change"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-change-accepted"
+      ]
+    },
+    {
+      "scenario": "ingest-noop",
+      "pipeline": "ingest",
+      "step": 7,
+      "milestone": "readback",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-noop-07-readback.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 7,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "readback"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result",
+        "change"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-change-accepted",
+        "change-readback-noop"
+      ]
+    },
+    {
+      "scenario": "ingest-noop",
+      "pipeline": "ingest",
+      "step": 8,
+      "milestone": "complete",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-noop-08-complete.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 8,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result",
+        "change",
+        "readback",
+        "complete"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-change-accepted",
+        "change-readback-noop",
+        "readback-complete-main"
+      ]
+    },
+    {
+      "scenario": "ingest-hold",
+      "pipeline": "ingest",
+      "step": 0,
+      "milestone": "raw",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-hold-00-raw.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "raw"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "ingest-hold",
+      "pipeline": "ingest",
+      "step": 1,
+      "milestone": "triage",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-hold-01-triage.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "triage"
+      ],
+      "done": [
+        "raw"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main"
+      ]
+    },
+    {
+      "scenario": "ingest-hold",
+      "pipeline": "ingest",
+      "step": 2,
+      "milestone": "target",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-hold-02-target.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "target"
+      ],
+      "done": [
+        "raw",
+        "triage"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main"
+      ]
+    },
+    {
+      "scenario": "ingest-hold",
+      "pipeline": "ingest",
+      "step": 3,
+      "milestone": "generate",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-hold-03-generate.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "generate"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main"
+      ]
+    },
+    {
+      "scenario": "ingest-hold",
+      "pipeline": "ingest",
+      "step": 4,
+      "milestone": "authority",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-hold-04-authority.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "authority"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main"
+      ]
+    },
+    {
+      "scenario": "ingest-hold",
+      "pipeline": "ingest",
+      "step": 5,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-hold-05-result.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 5,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main"
+      ]
+    },
+    {
+      "scenario": "ingest-hold",
+      "pipeline": "ingest",
+      "step": 6,
+      "milestone": "hold",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-hold-06-hold.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 6,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result"
+      ],
+      "error": [
+        "hold"
+      ],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-hold-hold"
+      ]
+    },
+    {
+      "scenario": "ingest-retry",
+      "pipeline": "ingest",
+      "step": 0,
+      "milestone": "raw",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-retry-00-raw.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "raw"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "ingest-retry",
+      "pipeline": "ingest",
+      "step": 1,
+      "milestone": "triage",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-retry-01-triage.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "triage"
+      ],
+      "done": [
+        "raw"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main"
+      ]
+    },
+    {
+      "scenario": "ingest-retry",
+      "pipeline": "ingest",
+      "step": 2,
+      "milestone": "target",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-retry-02-target.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "target"
+      ],
+      "done": [
+        "raw",
+        "triage"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main"
+      ]
+    },
+    {
+      "scenario": "ingest-retry",
+      "pipeline": "ingest",
+      "step": 3,
+      "milestone": "generate",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-retry-03-generate.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "generate"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main"
+      ]
+    },
+    {
+      "scenario": "ingest-retry",
+      "pipeline": "ingest",
+      "step": 4,
+      "milestone": "authority",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-retry-04-authority.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "authority"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main"
+      ]
+    },
+    {
+      "scenario": "ingest-retry",
+      "pipeline": "ingest",
+      "step": 5,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-retry-05-result.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 5,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main"
+      ]
+    },
+    {
+      "scenario": "ingest-retry",
+      "pipeline": "ingest",
+      "step": 6,
+      "milestone": "generate",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-retry-06-generate.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 6,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "generate"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "authority",
+        "result"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-generate-retry"
+      ]
+    },
+    {
+      "scenario": "ingest-retry",
+      "pipeline": "ingest",
+      "step": 7,
+      "milestone": "authority",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-retry-07-authority.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 7,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "authority"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "result"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-generate-retry"
+      ]
+    },
+    {
+      "scenario": "ingest-retry",
+      "pipeline": "ingest",
+      "step": 8,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-retry-08-result.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 8,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-generate-retry"
+      ]
+    },
+    {
+      "scenario": "ingest-retry",
+      "pipeline": "ingest",
+      "step": 9,
+      "milestone": "change",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-retry-09-change.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 9,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "change"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-generate-retry",
+        "result-change-accepted"
+      ]
+    },
+    {
+      "scenario": "ingest-retry",
+      "pipeline": "ingest",
+      "step": 10,
+      "milestone": "apply",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-retry-10-apply.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 10,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "apply"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result",
+        "change"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-generate-retry",
+        "result-change-accepted",
+        "change-apply-apply"
+      ]
+    },
+    {
+      "scenario": "ingest-retry",
+      "pipeline": "ingest",
+      "step": 11,
+      "milestone": "publish",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-retry-11-publish.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 11,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "publish"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result",
+        "change",
+        "apply"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-generate-retry",
+        "result-change-accepted",
+        "change-apply-apply",
+        "apply-publish-main"
+      ]
+    },
+    {
+      "scenario": "ingest-retry",
+      "pipeline": "ingest",
+      "step": 12,
+      "milestone": "readback",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-retry-12-readback.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 12,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [
+        "readback"
+      ],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result",
+        "change",
+        "apply",
+        "publish"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-generate-retry",
+        "result-change-accepted",
+        "change-apply-apply",
+        "apply-publish-main",
+        "publish-readback-main"
+      ]
+    },
+    {
+      "scenario": "ingest-retry",
+      "pipeline": "ingest",
+      "step": 13,
+      "milestone": "complete",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/ingest-retry-13-complete.png",
+      "graphId": "workflow:ingest:v1",
+      "visibleCursor": 13,
+      "geometrySha256": "c9177327ac285c57bf8b8953681b7cc15ed7892a0a6278de898e5a6857596b5a",
+      "active": [],
+      "done": [
+        "raw",
+        "triage",
+        "target",
+        "generate",
+        "authority",
+        "result",
+        "change",
+        "apply",
+        "publish",
+        "readback",
+        "complete"
+      ],
+      "error": [],
+      "solidEdges": [
+        "raw-triage-main",
+        "triage-target-main",
+        "target-generate-main",
+        "generate-authority-main",
+        "authority-result-main",
+        "result-generate-retry",
+        "result-change-accepted",
+        "change-apply-apply",
+        "apply-publish-main",
+        "publish-readback-main",
+        "readback-complete-main"
+      ]
+    },
+    {
+      "scenario": "recall-success",
+      "pipeline": "recall",
+      "step": 0,
+      "milestone": "search",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/recall-success-00-search.png",
+      "graphId": "workflow:recall:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "89b497a6a324cc7905925849a9e9910891c76c79634949956a4f70a3df98a0d7",
+      "active": [
+        "search"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "recall-success",
+      "pipeline": "recall",
+      "step": 1,
+      "milestone": "rerank",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/recall-success-01-rerank.png",
+      "graphId": "workflow:recall:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "89b497a6a324cc7905925849a9e9910891c76c79634949956a4f70a3df98a0d7",
+      "active": [
+        "rerank"
+      ],
+      "done": [
+        "search"
+      ],
+      "error": [],
+      "solidEdges": [
+        "search-rerank-main"
+      ]
+    },
+    {
+      "scenario": "recall-success",
+      "pipeline": "recall",
+      "step": 2,
+      "milestone": "authority",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/recall-success-02-authority.png",
+      "graphId": "workflow:recall:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "89b497a6a324cc7905925849a9e9910891c76c79634949956a4f70a3df98a0d7",
+      "active": [
+        "authority"
+      ],
+      "done": [
+        "search",
+        "rerank"
+      ],
+      "error": [],
+      "solidEdges": [
+        "search-rerank-main",
+        "rerank-authority-main"
+      ]
+    },
+    {
+      "scenario": "recall-success",
+      "pipeline": "recall",
+      "step": 3,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/recall-success-03-result.png",
+      "graphId": "workflow:recall:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "89b497a6a324cc7905925849a9e9910891c76c79634949956a4f70a3df98a0d7",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "search",
+        "rerank",
+        "authority"
+      ],
+      "error": [],
+      "solidEdges": [
+        "search-rerank-main",
+        "rerank-authority-main",
+        "authority-result-main"
+      ]
+    },
+    {
+      "scenario": "recall-success",
+      "pipeline": "recall",
+      "step": 4,
+      "milestone": "commit",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/recall-success-04-commit.png",
+      "graphId": "workflow:recall:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "89b497a6a324cc7905925849a9e9910891c76c79634949956a4f70a3df98a0d7",
+      "active": [
+        "commit"
+      ],
+      "done": [
+        "search",
+        "rerank",
+        "authority",
+        "result"
+      ],
+      "error": [],
+      "solidEdges": [
+        "search-rerank-main",
+        "rerank-authority-main",
+        "authority-result-main",
+        "result-commit-accepted"
+      ]
+    },
+    {
+      "scenario": "recall-success",
+      "pipeline": "recall",
+      "step": 5,
+      "milestone": "readback",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/recall-success-05-readback.png",
+      "graphId": "workflow:recall:v1",
+      "visibleCursor": 5,
+      "geometrySha256": "89b497a6a324cc7905925849a9e9910891c76c79634949956a4f70a3df98a0d7",
+      "active": [
+        "readback"
+      ],
+      "done": [
+        "search",
+        "rerank",
+        "authority",
+        "result",
+        "commit"
+      ],
+      "error": [],
+      "solidEdges": [
+        "search-rerank-main",
+        "rerank-authority-main",
+        "authority-result-main",
+        "result-commit-accepted",
+        "commit-readback-main"
+      ]
+    },
+    {
+      "scenario": "recall-success",
+      "pipeline": "recall",
+      "step": 6,
+      "milestone": "complete",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/recall-success-06-complete.png",
+      "graphId": "workflow:recall:v1",
+      "visibleCursor": 6,
+      "geometrySha256": "89b497a6a324cc7905925849a9e9910891c76c79634949956a4f70a3df98a0d7",
+      "active": [],
+      "done": [
+        "search",
+        "rerank",
+        "authority",
+        "result",
+        "commit",
+        "readback",
+        "complete"
+      ],
+      "error": [],
+      "solidEdges": [
+        "search-rerank-main",
+        "rerank-authority-main",
+        "authority-result-main",
+        "result-commit-accepted",
+        "commit-readback-main",
+        "readback-complete-main"
+      ]
+    },
+    {
+      "scenario": "recall-hold",
+      "pipeline": "recall",
+      "step": 0,
+      "milestone": "search",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/recall-hold-00-search.png",
+      "graphId": "workflow:recall:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "89b497a6a324cc7905925849a9e9910891c76c79634949956a4f70a3df98a0d7",
+      "active": [
+        "search"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "recall-hold",
+      "pipeline": "recall",
+      "step": 1,
+      "milestone": "rerank",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/recall-hold-01-rerank.png",
+      "graphId": "workflow:recall:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "89b497a6a324cc7905925849a9e9910891c76c79634949956a4f70a3df98a0d7",
+      "active": [
+        "rerank"
+      ],
+      "done": [
+        "search"
+      ],
+      "error": [],
+      "solidEdges": [
+        "search-rerank-main"
+      ]
+    },
+    {
+      "scenario": "recall-hold",
+      "pipeline": "recall",
+      "step": 2,
+      "milestone": "authority",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/recall-hold-02-authority.png",
+      "graphId": "workflow:recall:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "89b497a6a324cc7905925849a9e9910891c76c79634949956a4f70a3df98a0d7",
+      "active": [
+        "authority"
+      ],
+      "done": [
+        "search",
+        "rerank"
+      ],
+      "error": [],
+      "solidEdges": [
+        "search-rerank-main",
+        "rerank-authority-main"
+      ]
+    },
+    {
+      "scenario": "recall-hold",
+      "pipeline": "recall",
+      "step": 3,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/recall-hold-03-result.png",
+      "graphId": "workflow:recall:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "89b497a6a324cc7905925849a9e9910891c76c79634949956a4f70a3df98a0d7",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "search",
+        "rerank",
+        "authority"
+      ],
+      "error": [],
+      "solidEdges": [
+        "search-rerank-main",
+        "rerank-authority-main",
+        "authority-result-main"
+      ]
+    },
+    {
+      "scenario": "recall-hold",
+      "pipeline": "recall",
+      "step": 4,
+      "milestone": "hold",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/recall-hold-04-hold.png",
+      "graphId": "workflow:recall:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "89b497a6a324cc7905925849a9e9910891c76c79634949956a4f70a3df98a0d7",
+      "active": [],
+      "done": [
+        "search",
+        "rerank",
+        "authority",
+        "result"
+      ],
+      "error": [
+        "hold"
+      ],
+      "solidEdges": [
+        "search-rerank-main",
+        "rerank-authority-main",
+        "authority-result-main",
+        "result-hold-hold"
+      ]
+    },
+    {
+      "scenario": "audit-success",
+      "pipeline": "audit",
+      "step": 0,
+      "milestone": "select",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/audit-success-00-select.png",
+      "graphId": "workflow:audit:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "543322176b54b032b4b17089d7d7e73874fb5b7ae5f534a5199a6aa30475c07f",
+      "active": [
+        "select"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "audit-success",
+      "pipeline": "audit",
+      "step": 1,
+      "milestone": "inspect",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/audit-success-01-inspect.png",
+      "graphId": "workflow:audit:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "543322176b54b032b4b17089d7d7e73874fb5b7ae5f534a5199a6aa30475c07f",
+      "active": [
+        "inspect"
+      ],
+      "done": [
+        "select"
+      ],
+      "error": [],
+      "solidEdges": [
+        "select-inspect-main"
+      ]
+    },
+    {
+      "scenario": "audit-success",
+      "pipeline": "audit",
+      "step": 2,
+      "milestone": "consensus",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/audit-success-02-consensus.png",
+      "graphId": "workflow:audit:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "543322176b54b032b4b17089d7d7e73874fb5b7ae5f534a5199a6aa30475c07f",
+      "active": [
+        "consensus"
+      ],
+      "done": [
+        "select",
+        "inspect"
+      ],
+      "error": [],
+      "solidEdges": [
+        "select-inspect-main",
+        "inspect-consensus-main"
+      ]
+    },
+    {
+      "scenario": "audit-success",
+      "pipeline": "audit",
+      "step": 3,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/audit-success-03-result.png",
+      "graphId": "workflow:audit:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "543322176b54b032b4b17089d7d7e73874fb5b7ae5f534a5199a6aa30475c07f",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "select",
+        "inspect",
+        "consensus"
+      ],
+      "error": [],
+      "solidEdges": [
+        "select-inspect-main",
+        "inspect-consensus-main",
+        "consensus-result-main"
+      ]
+    },
+    {
+      "scenario": "audit-success",
+      "pipeline": "audit",
+      "step": 4,
+      "milestone": "report",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/audit-success-04-report.png",
+      "graphId": "workflow:audit:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "543322176b54b032b4b17089d7d7e73874fb5b7ae5f534a5199a6aa30475c07f",
+      "active": [
+        "report"
+      ],
+      "done": [
+        "select",
+        "inspect",
+        "consensus",
+        "result"
+      ],
+      "error": [],
+      "solidEdges": [
+        "select-inspect-main",
+        "inspect-consensus-main",
+        "consensus-result-main",
+        "result-report-accepted"
+      ]
+    },
+    {
+      "scenario": "audit-success",
+      "pipeline": "audit",
+      "step": 5,
+      "milestone": "complete",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/audit-success-05-complete.png",
+      "graphId": "workflow:audit:v1",
+      "visibleCursor": 5,
+      "geometrySha256": "543322176b54b032b4b17089d7d7e73874fb5b7ae5f534a5199a6aa30475c07f",
+      "active": [],
+      "done": [
+        "select",
+        "inspect",
+        "consensus",
+        "result",
+        "report",
+        "complete"
+      ],
+      "error": [],
+      "solidEdges": [
+        "select-inspect-main",
+        "inspect-consensus-main",
+        "consensus-result-main",
+        "result-report-accepted",
+        "report-complete-main"
+      ]
+    },
+    {
+      "scenario": "audit-hold",
+      "pipeline": "audit",
+      "step": 0,
+      "milestone": "select",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/audit-hold-00-select.png",
+      "graphId": "workflow:audit:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "543322176b54b032b4b17089d7d7e73874fb5b7ae5f534a5199a6aa30475c07f",
+      "active": [
+        "select"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "audit-hold",
+      "pipeline": "audit",
+      "step": 1,
+      "milestone": "inspect",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/audit-hold-01-inspect.png",
+      "graphId": "workflow:audit:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "543322176b54b032b4b17089d7d7e73874fb5b7ae5f534a5199a6aa30475c07f",
+      "active": [
+        "inspect"
+      ],
+      "done": [
+        "select"
+      ],
+      "error": [],
+      "solidEdges": [
+        "select-inspect-main"
+      ]
+    },
+    {
+      "scenario": "audit-hold",
+      "pipeline": "audit",
+      "step": 2,
+      "milestone": "consensus",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/audit-hold-02-consensus.png",
+      "graphId": "workflow:audit:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "543322176b54b032b4b17089d7d7e73874fb5b7ae5f534a5199a6aa30475c07f",
+      "active": [
+        "consensus"
+      ],
+      "done": [
+        "select",
+        "inspect"
+      ],
+      "error": [],
+      "solidEdges": [
+        "select-inspect-main",
+        "inspect-consensus-main"
+      ]
+    },
+    {
+      "scenario": "audit-hold",
+      "pipeline": "audit",
+      "step": 3,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/audit-hold-03-result.png",
+      "graphId": "workflow:audit:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "543322176b54b032b4b17089d7d7e73874fb5b7ae5f534a5199a6aa30475c07f",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "select",
+        "inspect",
+        "consensus"
+      ],
+      "error": [],
+      "solidEdges": [
+        "select-inspect-main",
+        "inspect-consensus-main",
+        "consensus-result-main"
+      ]
+    },
+    {
+      "scenario": "audit-hold",
+      "pipeline": "audit",
+      "step": 4,
+      "milestone": "hold",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/audit-hold-04-hold.png",
+      "graphId": "workflow:audit:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "543322176b54b032b4b17089d7d7e73874fb5b7ae5f534a5199a6aa30475c07f",
+      "active": [],
+      "done": [
+        "select",
+        "inspect",
+        "consensus",
+        "result"
+      ],
+      "error": [
+        "hold"
+      ],
+      "solidEdges": [
+        "select-inspect-main",
+        "inspect-consensus-main",
+        "consensus-result-main",
+        "result-hold-hold"
+      ]
+    },
+    {
+      "scenario": "improve-success",
+      "pipeline": "improve",
+      "step": 0,
+      "milestone": "discover",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/improve-success-00-discover.png",
+      "graphId": "workflow:improve:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "55d7f7a97240e805dfee4e26c5b3009a23c7a5af539c7bc72e27f6e0947f4c78",
+      "active": [
+        "discover"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "improve-success",
+      "pipeline": "improve",
+      "step": 1,
+      "milestone": "generate",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/improve-success-01-generate.png",
+      "graphId": "workflow:improve:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "55d7f7a97240e805dfee4e26c5b3009a23c7a5af539c7bc72e27f6e0947f4c78",
+      "active": [
+        "generate"
+      ],
+      "done": [
+        "discover"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-generate-main"
+      ]
+    },
+    {
+      "scenario": "improve-success",
+      "pipeline": "improve",
+      "step": 2,
+      "milestone": "verify",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/improve-success-02-verify.png",
+      "graphId": "workflow:improve:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "55d7f7a97240e805dfee4e26c5b3009a23c7a5af539c7bc72e27f6e0947f4c78",
+      "active": [
+        "verify"
+      ],
+      "done": [
+        "discover",
+        "generate"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-generate-main",
+        "generate-verify-main"
+      ]
+    },
+    {
+      "scenario": "improve-success",
+      "pipeline": "improve",
+      "step": 3,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/improve-success-03-result.png",
+      "graphId": "workflow:improve:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "55d7f7a97240e805dfee4e26c5b3009a23c7a5af539c7bc72e27f6e0947f4c78",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "discover",
+        "generate",
+        "verify"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-generate-main",
+        "generate-verify-main",
+        "verify-result-main"
+      ]
+    },
+    {
+      "scenario": "improve-success",
+      "pipeline": "improve",
+      "step": 4,
+      "milestone": "apply",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/improve-success-04-apply.png",
+      "graphId": "workflow:improve:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "55d7f7a97240e805dfee4e26c5b3009a23c7a5af539c7bc72e27f6e0947f4c78",
+      "active": [
+        "apply"
+      ],
+      "done": [
+        "discover",
+        "generate",
+        "verify",
+        "result"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-generate-main",
+        "generate-verify-main",
+        "verify-result-main",
+        "result-apply-accepted"
+      ]
+    },
+    {
+      "scenario": "improve-success",
+      "pipeline": "improve",
+      "step": 5,
+      "milestone": "readback",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/improve-success-05-readback.png",
+      "graphId": "workflow:improve:v1",
+      "visibleCursor": 5,
+      "geometrySha256": "55d7f7a97240e805dfee4e26c5b3009a23c7a5af539c7bc72e27f6e0947f4c78",
+      "active": [
+        "readback"
+      ],
+      "done": [
+        "discover",
+        "generate",
+        "verify",
+        "result",
+        "apply"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-generate-main",
+        "generate-verify-main",
+        "verify-result-main",
+        "result-apply-accepted",
+        "apply-readback-main"
+      ]
+    },
+    {
+      "scenario": "improve-success",
+      "pipeline": "improve",
+      "step": 6,
+      "milestone": "complete",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/improve-success-06-complete.png",
+      "graphId": "workflow:improve:v1",
+      "visibleCursor": 6,
+      "geometrySha256": "55d7f7a97240e805dfee4e26c5b3009a23c7a5af539c7bc72e27f6e0947f4c78",
+      "active": [],
+      "done": [
+        "discover",
+        "generate",
+        "verify",
+        "result",
+        "apply",
+        "readback",
+        "complete"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-generate-main",
+        "generate-verify-main",
+        "verify-result-main",
+        "result-apply-accepted",
+        "apply-readback-main",
+        "readback-complete-main"
+      ]
+    },
+    {
+      "scenario": "improve-hold",
+      "pipeline": "improve",
+      "step": 0,
+      "milestone": "discover",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/improve-hold-00-discover.png",
+      "graphId": "workflow:improve:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "55d7f7a97240e805dfee4e26c5b3009a23c7a5af539c7bc72e27f6e0947f4c78",
+      "active": [
+        "discover"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "improve-hold",
+      "pipeline": "improve",
+      "step": 1,
+      "milestone": "generate",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/improve-hold-01-generate.png",
+      "graphId": "workflow:improve:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "55d7f7a97240e805dfee4e26c5b3009a23c7a5af539c7bc72e27f6e0947f4c78",
+      "active": [
+        "generate"
+      ],
+      "done": [
+        "discover"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-generate-main"
+      ]
+    },
+    {
+      "scenario": "improve-hold",
+      "pipeline": "improve",
+      "step": 2,
+      "milestone": "verify",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/improve-hold-02-verify.png",
+      "graphId": "workflow:improve:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "55d7f7a97240e805dfee4e26c5b3009a23c7a5af539c7bc72e27f6e0947f4c78",
+      "active": [
+        "verify"
+      ],
+      "done": [
+        "discover",
+        "generate"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-generate-main",
+        "generate-verify-main"
+      ]
+    },
+    {
+      "scenario": "improve-hold",
+      "pipeline": "improve",
+      "step": 3,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/improve-hold-03-result.png",
+      "graphId": "workflow:improve:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "55d7f7a97240e805dfee4e26c5b3009a23c7a5af539c7bc72e27f6e0947f4c78",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "discover",
+        "generate",
+        "verify"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-generate-main",
+        "generate-verify-main",
+        "verify-result-main"
+      ]
+    },
+    {
+      "scenario": "improve-hold",
+      "pipeline": "improve",
+      "step": 4,
+      "milestone": "hold",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/improve-hold-04-hold.png",
+      "graphId": "workflow:improve:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "55d7f7a97240e805dfee4e26c5b3009a23c7a5af539c7bc72e27f6e0947f4c78",
+      "active": [],
+      "done": [
+        "discover",
+        "generate",
+        "verify",
+        "result"
+      ],
+      "error": [
+        "hold"
+      ],
+      "solidEdges": [
+        "discover-generate-main",
+        "generate-verify-main",
+        "verify-result-main",
+        "result-hold-hold"
+      ]
+    },
+    {
+      "scenario": "repair-success",
+      "pipeline": "repair",
+      "step": 0,
+      "milestone": "detect",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-success-00-detect.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "detect"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "repair-success",
+      "pipeline": "repair",
+      "step": 1,
+      "milestone": "local_fix",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-success-01-local_fix.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "local_fix"
+      ],
+      "done": [
+        "detect"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main"
+      ]
+    },
+    {
+      "scenario": "repair-success",
+      "pipeline": "repair",
+      "step": 2,
+      "milestone": "verify",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-success-02-verify.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "verify"
+      ],
+      "done": [
+        "detect",
+        "local_fix"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main",
+        "local_fix-verify-main"
+      ]
+    },
+    {
+      "scenario": "repair-success",
+      "pipeline": "repair",
+      "step": 3,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-success-03-result.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "detect",
+        "local_fix",
+        "verify"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main",
+        "local_fix-verify-main",
+        "verify-result-main"
+      ]
+    },
+    {
+      "scenario": "repair-success",
+      "pipeline": "repair",
+      "step": 4,
+      "milestone": "readback",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-success-04-readback.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "readback"
+      ],
+      "done": [
+        "detect",
+        "local_fix",
+        "verify",
+        "result"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main",
+        "local_fix-verify-main",
+        "verify-result-main",
+        "result-readback-accepted"
+      ]
+    },
+    {
+      "scenario": "repair-success",
+      "pipeline": "repair",
+      "step": 5,
+      "milestone": "complete",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-success-05-complete.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 5,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [],
+      "done": [
+        "detect",
+        "local_fix",
+        "verify",
+        "result",
+        "readback",
+        "complete"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main",
+        "local_fix-verify-main",
+        "verify-result-main",
+        "result-readback-accepted",
+        "readback-complete-main"
+      ]
+    },
+    {
+      "scenario": "repair-hold",
+      "pipeline": "repair",
+      "step": 0,
+      "milestone": "detect",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-hold-00-detect.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "detect"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "repair-hold",
+      "pipeline": "repair",
+      "step": 1,
+      "milestone": "local_fix",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-hold-01-local_fix.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "local_fix"
+      ],
+      "done": [
+        "detect"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main"
+      ]
+    },
+    {
+      "scenario": "repair-hold",
+      "pipeline": "repair",
+      "step": 2,
+      "milestone": "verify",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-hold-02-verify.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "verify"
+      ],
+      "done": [
+        "detect",
+        "local_fix"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main",
+        "local_fix-verify-main"
+      ]
+    },
+    {
+      "scenario": "repair-hold",
+      "pipeline": "repair",
+      "step": 3,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-hold-03-result.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "detect",
+        "local_fix",
+        "verify"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main",
+        "local_fix-verify-main",
+        "verify-result-main"
+      ]
+    },
+    {
+      "scenario": "repair-hold",
+      "pipeline": "repair",
+      "step": 4,
+      "milestone": "hold",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-hold-04-hold.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [],
+      "done": [
+        "detect",
+        "local_fix",
+        "verify",
+        "result"
+      ],
+      "error": [
+        "hold"
+      ],
+      "solidEdges": [
+        "detect-local_fix-main",
+        "local_fix-verify-main",
+        "verify-result-main",
+        "result-hold-hold"
+      ]
+    },
+    {
+      "scenario": "repair-escalate",
+      "pipeline": "repair",
+      "step": 0,
+      "milestone": "detect",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-escalate-00-detect.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "detect"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "repair-escalate",
+      "pipeline": "repair",
+      "step": 1,
+      "milestone": "local_fix",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-escalate-01-local_fix.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "local_fix"
+      ],
+      "done": [
+        "detect"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main"
+      ]
+    },
+    {
+      "scenario": "repair-escalate",
+      "pipeline": "repair",
+      "step": 2,
+      "milestone": "verify",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-escalate-02-verify.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "verify"
+      ],
+      "done": [
+        "detect",
+        "local_fix"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main",
+        "local_fix-verify-main"
+      ]
+    },
+    {
+      "scenario": "repair-escalate",
+      "pipeline": "repair",
+      "step": 3,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-escalate-03-result.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "detect",
+        "local_fix",
+        "verify"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main",
+        "local_fix-verify-main",
+        "verify-result-main"
+      ]
+    },
+    {
+      "scenario": "repair-escalate",
+      "pipeline": "repair",
+      "step": 4,
+      "milestone": "escalate",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-escalate-04-escalate.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "escalate"
+      ],
+      "done": [
+        "detect",
+        "local_fix",
+        "verify",
+        "result"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main",
+        "local_fix-verify-main",
+        "verify-result-main",
+        "result-escalate-escalate"
+      ]
+    },
+    {
+      "scenario": "repair-escalate",
+      "pipeline": "repair",
+      "step": 5,
+      "milestone": "verify",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-escalate-05-verify.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 5,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "verify"
+      ],
+      "done": [
+        "detect",
+        "local_fix",
+        "result",
+        "escalate"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main",
+        "local_fix-verify-main",
+        "verify-result-main",
+        "result-escalate-escalate",
+        "escalate-verify-retry"
+      ]
+    },
+    {
+      "scenario": "repair-escalate",
+      "pipeline": "repair",
+      "step": 6,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-escalate-06-result.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 6,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "detect",
+        "local_fix",
+        "verify",
+        "escalate"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main",
+        "local_fix-verify-main",
+        "verify-result-main",
+        "result-escalate-escalate",
+        "escalate-verify-retry"
+      ]
+    },
+    {
+      "scenario": "repair-escalate",
+      "pipeline": "repair",
+      "step": 7,
+      "milestone": "readback",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-escalate-07-readback.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 7,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [
+        "readback"
+      ],
+      "done": [
+        "detect",
+        "local_fix",
+        "verify",
+        "result",
+        "escalate"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main",
+        "local_fix-verify-main",
+        "verify-result-main",
+        "result-readback-accepted",
+        "result-escalate-escalate",
+        "escalate-verify-retry"
+      ]
+    },
+    {
+      "scenario": "repair-escalate",
+      "pipeline": "repair",
+      "step": 8,
+      "milestone": "complete",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/repair-escalate-08-complete.png",
+      "graphId": "workflow:repair:v1",
+      "visibleCursor": 8,
+      "geometrySha256": "450c0ad6807840be79ae98f2e0cb08421a560c672bdc9b17bed91789c40bc943",
+      "active": [],
+      "done": [
+        "detect",
+        "local_fix",
+        "verify",
+        "result",
+        "escalate",
+        "readback",
+        "complete"
+      ],
+      "error": [],
+      "solidEdges": [
+        "detect-local_fix-main",
+        "local_fix-verify-main",
+        "verify-result-main",
+        "result-readback-accepted",
+        "readback-complete-main",
+        "result-escalate-escalate",
+        "escalate-verify-retry"
+      ]
+    },
+    {
+      "scenario": "typed_graph-success",
+      "pipeline": "typed_graph",
+      "step": 0,
+      "milestone": "discover",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-success-00-discover.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [
+        "discover"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "typed_graph-success",
+      "pipeline": "typed_graph",
+      "step": 1,
+      "milestone": "extract",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-success-01-extract.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [
+        "extract"
+      ],
+      "done": [
+        "discover"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-extract-main"
+      ]
+    },
+    {
+      "scenario": "typed_graph-success",
+      "pipeline": "typed_graph",
+      "step": 2,
+      "milestone": "verify",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-success-02-verify.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [
+        "verify"
+      ],
+      "done": [
+        "discover",
+        "extract"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-extract-main",
+        "extract-verify-main"
+      ]
+    },
+    {
+      "scenario": "typed_graph-success",
+      "pipeline": "typed_graph",
+      "step": 3,
+      "milestone": "consolidate",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-success-03-consolidate.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [
+        "consolidate"
+      ],
+      "done": [
+        "discover",
+        "extract",
+        "verify"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-extract-main",
+        "extract-verify-main",
+        "verify-consolidate-main"
+      ]
+    },
+    {
+      "scenario": "typed_graph-success",
+      "pipeline": "typed_graph",
+      "step": 4,
+      "milestone": "evaluate",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-success-04-evaluate.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [
+        "evaluate"
+      ],
+      "done": [
+        "discover",
+        "extract",
+        "verify",
+        "consolidate"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-extract-main",
+        "extract-verify-main",
+        "verify-consolidate-main",
+        "consolidate-evaluate-main"
+      ]
+    },
+    {
+      "scenario": "typed_graph-success",
+      "pipeline": "typed_graph",
+      "step": 5,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-success-05-result.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 5,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "discover",
+        "extract",
+        "verify",
+        "consolidate",
+        "evaluate"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-extract-main",
+        "extract-verify-main",
+        "verify-consolidate-main",
+        "consolidate-evaluate-main",
+        "evaluate-result-main"
+      ]
+    },
+    {
+      "scenario": "typed_graph-success",
+      "pipeline": "typed_graph",
+      "step": 6,
+      "milestone": "promote",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-success-06-promote.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 6,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [
+        "promote"
+      ],
+      "done": [
+        "discover",
+        "extract",
+        "verify",
+        "consolidate",
+        "evaluate",
+        "result"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-extract-main",
+        "extract-verify-main",
+        "verify-consolidate-main",
+        "consolidate-evaluate-main",
+        "evaluate-result-main",
+        "result-promote-accepted"
+      ]
+    },
+    {
+      "scenario": "typed_graph-success",
+      "pipeline": "typed_graph",
+      "step": 7,
+      "milestone": "readback",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-success-07-readback.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 7,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [
+        "readback"
+      ],
+      "done": [
+        "discover",
+        "extract",
+        "verify",
+        "consolidate",
+        "evaluate",
+        "result",
+        "promote"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-extract-main",
+        "extract-verify-main",
+        "verify-consolidate-main",
+        "consolidate-evaluate-main",
+        "evaluate-result-main",
+        "result-promote-accepted",
+        "promote-readback-main"
+      ]
+    },
+    {
+      "scenario": "typed_graph-success",
+      "pipeline": "typed_graph",
+      "step": 8,
+      "milestone": "complete",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-success-08-complete.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 8,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [],
+      "done": [
+        "discover",
+        "extract",
+        "verify",
+        "consolidate",
+        "evaluate",
+        "result",
+        "promote",
+        "readback",
+        "complete"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-extract-main",
+        "extract-verify-main",
+        "verify-consolidate-main",
+        "consolidate-evaluate-main",
+        "evaluate-result-main",
+        "result-promote-accepted",
+        "promote-readback-main",
+        "readback-complete-main"
+      ]
+    },
+    {
+      "scenario": "typed_graph-hold",
+      "pipeline": "typed_graph",
+      "step": 0,
+      "milestone": "discover",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-hold-00-discover.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 0,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [
+        "discover"
+      ],
+      "done": [],
+      "error": [],
+      "solidEdges": []
+    },
+    {
+      "scenario": "typed_graph-hold",
+      "pipeline": "typed_graph",
+      "step": 1,
+      "milestone": "extract",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-hold-01-extract.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 1,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [
+        "extract"
+      ],
+      "done": [
+        "discover"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-extract-main"
+      ]
+    },
+    {
+      "scenario": "typed_graph-hold",
+      "pipeline": "typed_graph",
+      "step": 2,
+      "milestone": "verify",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-hold-02-verify.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 2,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [
+        "verify"
+      ],
+      "done": [
+        "discover",
+        "extract"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-extract-main",
+        "extract-verify-main"
+      ]
+    },
+    {
+      "scenario": "typed_graph-hold",
+      "pipeline": "typed_graph",
+      "step": 3,
+      "milestone": "consolidate",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-hold-03-consolidate.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 3,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [
+        "consolidate"
+      ],
+      "done": [
+        "discover",
+        "extract",
+        "verify"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-extract-main",
+        "extract-verify-main",
+        "verify-consolidate-main"
+      ]
+    },
+    {
+      "scenario": "typed_graph-hold",
+      "pipeline": "typed_graph",
+      "step": 4,
+      "milestone": "evaluate",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-hold-04-evaluate.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 4,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [
+        "evaluate"
+      ],
+      "done": [
+        "discover",
+        "extract",
+        "verify",
+        "consolidate"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-extract-main",
+        "extract-verify-main",
+        "verify-consolidate-main",
+        "consolidate-evaluate-main"
+      ]
+    },
+    {
+      "scenario": "typed_graph-hold",
+      "pipeline": "typed_graph",
+      "step": 5,
+      "milestone": "result",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-hold-05-result.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 5,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [
+        "result"
+      ],
+      "done": [
+        "discover",
+        "extract",
+        "verify",
+        "consolidate",
+        "evaluate"
+      ],
+      "error": [],
+      "solidEdges": [
+        "discover-extract-main",
+        "extract-verify-main",
+        "verify-consolidate-main",
+        "consolidate-evaluate-main",
+        "evaluate-result-main"
+      ]
+    },
+    {
+      "scenario": "typed_graph-hold",
+      "pipeline": "typed_graph",
+      "step": 6,
+      "milestone": "hold",
+      "file": "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-01-decision-trace-zero-base/screenshots/typed_graph-hold-06-hold.png",
+      "graphId": "workflow:typed_graph:v1",
+      "visibleCursor": 6,
+      "geometrySha256": "93397dfd53e8cba3dfa26ec5514d14c630ed6a50b82922646c9a1fdf11665536",
+      "active": [],
+      "done": [
+        "discover",
+        "extract",
+        "verify",
+        "consolidate",
+        "evaluate",
+        "result"
+      ],
+      "error": [
+        "hold"
+      ],
+      "solidEdges": [
+        "discover-extract-main",
+        "extract-verify-main",
+        "verify-consolidate-main",
+        "consolidate-evaluate-main",
+        "evaluate-result-main",
+        "result-hold-hold"
+      ]
+    }
+  ]
+}

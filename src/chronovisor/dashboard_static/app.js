@@ -49,7 +49,6 @@ const els = {
   decisionStreamThinkingState: document.getElementById("decision-stream-thinking-state"),
   decisionStreamOutput: document.getElementById("decision-stream-output"),
   decisionStreamOutputState: document.getElementById("decision-stream-output-state"),
-  decisionLanes: document.querySelectorAll("[data-decision-lane]"),
   currentRaw: document.getElementById("current-raw"),
   currentOp: document.getElementById("current-op"),
   llmSignal: document.getElementById("llm-signal"),

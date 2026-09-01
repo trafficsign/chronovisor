@@ -1210,14 +1210,11 @@ def test_decision_trace_projects_live_phase_and_completed_vote(monkeypatch) -> N
     ]
     assert trace["overall"][2]["status"] == "done"
     assert trace["overall"][3]["status"] == "active"
-    assert trace["projection"]["schema"] == "chronovisor.decision-trace-projection.v2"
-    assert trace["projection"]["context"]["selected_tokens"] == 32_768
-    assert trace["projection"]["reasoning"]["selected"] == "high"
-    assert trace["projection"]["model_routes"] == {
-        "primary": "done",
-        "challenger": "active",
-        "tie_break": "pending",
-    }
+    assert trace["projection"]["schema"] == "chronovisor.decision-trace-projection.v3"
+    assert trace["projection"]["graph_id"] == "workflow:ingest:v1"
+    assert trace["projection"]["workflow"]["target_node"] == "authority"
+    assert trace["projection"]["detail"]["context_tokens"] == 32_768
+    assert trace["projection"]["detail"]["think"] == "high"
     repair_steps = dashboard._decision_trace_steps("active", phase="repair")
     assert repair_steps[3]["status"] == "done"
     assert repair_steps[4]["status"] == "active"
@@ -1783,10 +1780,10 @@ def test_decision_trace_terminal_single_authority_keeps_session_plan() -> None:
 
     assert trace["context_tokens"] == 65_536
     assert trace["lanes"][0]["think"] == "off"
-    assert trace["projection"]["context"]["selected_tokens"] == 65_536
-    assert trace["projection"]["reasoning"]["selected"] == "off"
-    assert trace["projection"]["nodes"]["fit"] == "done"
-    assert trace["projection"]["paths"]["reasoning-off"] == "done"
+    assert trace["projection"]["detail"]["context_tokens"] == 65_536
+    assert trace["projection"]["detail"]["think"] == "off"
+    assert trace["projection"]["workflow"]["target_node"] == "complete"
+    assert trace["projection"]["workflow"]["target_state"] == "done"
 
 
 def test_decision_trace_excludes_previous_execution_with_same_request_hash(
@@ -2441,8 +2438,8 @@ def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> N
     assert trace["overall"][4]["status"] == "done"
     assert trace["overall"][5]["status"] == "done"
     assert trace["overall"][6]["status"] == "done"
-    assert trace["projection"]["nodes"]["artifact"] == "done"
-    assert trace["projection"]["paths"]["pair-artifact-join"] == "done"
+    assert trace["projection"]["workflow"]["target_node"] == "complete"
+    assert trace["projection"]["workflow"]["target_state"] == "done"
 
     held = {
         **decision,
@@ -2455,8 +2452,9 @@ def test_decision_trace_marks_pair_quorum_and_unused_tie_break(monkeypatch) -> N
     held_trace = dashboard._decision_trace_snapshot([], [held], held)
     assert held_trace["lanes"][2]["state"] == "skipped"
     assert held_trace["lanes"][2]["detail"] == "Decision held without tie-break"
-    assert held_trace["projection"]["nodes"]["hold"] == "error"
-    assert held_trace["projection"]["paths"]["quorum-hold"] == "error"
+    assert held_trace["projection"]["workflow"]["route"] == "hold"
+    assert held_trace["projection"]["workflow"]["target_node"] == "hold"
+    assert held_trace["projection"]["workflow"]["target_state"] == "error"
 
 
 def test_decision_trace_hides_legacy_and_artifact_replay_reasoning(
@@ -2613,7 +2611,8 @@ def test_decision_trace_marks_only_artifact_publish_failure_after_artifact() -> 
     assert trace["outcome"]["reason"] == "Decision artifact seal failed"
     assert trace["outcome"]["code"] == "canonical_decision_artifact_publish_failed"
     assert all(lane["context_tokens"] is None for lane in trace["lanes"])
-    assert trace["projection"]["nodes"]["seal"] == "error"
+    assert trace["projection"]["workflow"]["route"] == "hold"
+    assert trace["projection"]["workflow"]["target_node"] == "hold"
 
     no_quorum_decision = {
         **decision,
@@ -2630,7 +2629,8 @@ def test_decision_trace_marks_only_artifact_publish_failure_after_artifact() -> 
     )
     assert no_quorum["overall"][-2]["status"] == "skipped"
     assert no_quorum["overall"][-1]["status"] == "skipped"
-    assert no_quorum["projection"]["paths"]["quorum-hold"] == "error"
+    assert no_quorum["projection"]["workflow"]["route"] == "hold"
+    assert no_quorum["projection"]["workflow"]["target_state"] == "error"
 
 
 def test_decision_trace_folds_canonical_artifact_failure_event() -> None:
@@ -2990,13 +2990,10 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert 'id="decision-trace-panel"' in page
     assert 'id="decision-single-authority"' in page
     assert 'data-decision-fact="target"' in page
-    assert 'data-decision-lane="primary"' in page
-    assert 'data-decision-lane="challenger"' in page
-    assert 'data-decision-lane="tie_break"' in page
-    assert "data-ingest-job-flow" in page
-    assert 'data-ingest-job-step="authority"' in page
-    assert 'data-ingest-job-step="complete"' in page
-    assert 'data-ingest-job-to="generate"' in page
+    assert page.count("data-workflow-edges") == 1
+    assert page.count("data-workflow-nodes") == 1
+    assert "data-decision-lane" not in page
+    assert "data-ingest-job" not in page
     assert 'id="decision-outcome-reason"' in page
     assert 'id="decision-outcome-data"' in page
     assert 'id="decision-outcome-next"' in page
@@ -3022,12 +3019,13 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "${pageChanges} changes" in app
     assert "${pages} pages" not in app
     assert 'class="decision-trace-scroll" id="decision-trace-scroll"' in page
-    assert 'id="decision-trace-harness" viewBox="0 0 1500 750"' in page
-    assert ".decision-trace-scroll {\n  width: 100%;\n  overflow-x: hidden;" in style
+    assert 'id="decision-trace-harness" viewBox="0 0 1500 520"' in page
+    assert ".decision-trace-scroll {" in style
+    assert "overflow-x: auto;" in style
     assert ".decision-trace-harness {\n  display: block;\n  width: 100%;" in style
     assert (
         "@media (max-width: 980px) {" in style
-        and ".decision-trace-scroll {\n    height: 607px;\n    overflow-x: auto;"
+        and ".decision-trace-scroll {\n    height: 486px;\n    overflow-x: auto;"
         in style
         and ".decision-trace-harness {\n    width: 1400px;" in style
     )
@@ -3065,14 +3063,13 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "els.held.textContent = fmt(held);" in app
     assert "${semanticDeferred} semantic · ${operationalDeferred} operational" in app
     assert "grid-template-columns: repeat(5, minmax(0, 1fr));" in style
-    assert "projection.paths" in app
-    assert "projection.model_routes" in app
+    assert "projection?.workflow" in app
+    assert "function advanceDecisionTraceOneStep" in app
+    assert "const DECISION_PROGRESS_INTERVAL_MS = 500" in app
     assert ".decision-trace-panel" in style
-    assert ".decision-trace-harness.single-model" in style
-    assert ".decision-trace-harness.single-model.ingest-job" in style
-    assert '[data-decision-lane="challenger"]' in style
-    assert '[data-decision-lane-step="vote"]' in style
-    assert '[data-trace-key="quorum"]' in style
+    assert ".decision-trace-harness .trace-path.done" in style
+    assert ".decision-trace-harness .trace-node.active" in style
+    assert ".decision-trace-harness .trace-node-terminal.done" in style
     assert ".processing-lane.active" in style
     assert "processing-electric-pulse" in style
     assert "grid-template-columns: repeat(4, minmax(0, 1fr));" in style
@@ -3197,89 +3194,37 @@ process.stdout.write(JSON.stringify({{
     }
 
 
-def test_single_model_decision_trace_dom_contract_is_fixed_in_markup() -> None:
+def test_decision_trace_dom_contract_has_one_dynamic_fixed_rail() -> None:
     page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
     renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
-    harness = renderer.split("function updateDecisionSvgHarness", 1)[1].split(
+    update = renderer.split("function updateDecisionSvgHarness", 1)[1].split(
         "function decisionEventText", 1
     )[0]
 
-    assert 'id="decision-trace-harness" viewBox="0 0 1500 750"' in page
-    assert 'width="1400" height="700"' in page
-    for geometry in (
-        "M1380 164 H1466 Q1476 164 1476 174 V297 Q1476 307 1466 307 H190 Q180 307 180 317 V394 Q180 404 190 404 H220",
-        "M920 404 H1039",
-        "M1061 404 H1156",
-        "M1190 438 V483",
-        "M1224 404 H1318",
-    ):
-        assert f'd="{geometry}"' in page
-    for transform in (
-        "translate(1050 404)",
-        "translate(1190 494)",
-        "translate(1330 404)",
-    ):
-        assert f'transform="{transform}"' in page
-    assert "trace-single-only" in page
-    assert "trace-quorum-only" in page
-    assert "data-processing-job-flow" not in page
-    assert "updateProcessingJobTrace" not in renderer
+    assert 'id="decision-trace-harness" viewBox="0 0 1500 520"' in page
+    assert 'width="1400" height="486"' in page
+    assert page.count("data-workflow-edges") == 1
+    assert page.count("data-workflow-nodes") == 1
+    assert "data-decision-lane-step" not in page
+    assert "data-ingest-job-step" not in page
+    assert "function mountDecisionWorkflow" in renderer
+    assert "function advanceDecisionTraceOneStep" in renderer
+    assert "updateIngestJobTrace" not in renderer
     assert not re.search(
-        r'setAttribute\(\s*["\'](?:d|transform|viewBox|height)["\']', harness
+        r'setAttribute\(\s*["\'](?:d|transform|viewBox|height)["\']',
+        update,
     )
 
 
-def test_decision_trace_lane_rails_start_at_source_node_edges() -> None:
-    page = (dashboard.STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    for key in (
-        "pair-artifact-join",
-        "tie_break-quorum",
-        "quorum-artifact-join",
-        "quorum-hold",
-    ):
-        assert f'data-path-key="{key}"' in page
-    for key in (
-        "pair-artifact",
-        "tie_break-artifact",
-        "pair-hold",
-        "tie_break-hold",
-        "pair-quorum",
-        "quorum-artifact",
-        "quorum-artifact-trunk",
-        "artifact-input",
-    ):
-        assert f'data-path-key="{key}"' not in page
-    assert 'data-trace-key="quorum"' in page
-    common_rails = {
-        "trigger-load": "M240 0 H374",
-        "load-context": "M394 0 H555",
-        "context-generate": "M575 0 H733",
-        "generate-validate": "M753 0 H900",
-    }
+def test_decision_trace_routes_are_created_from_one_backend_topology() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
 
-    for lane in ("primary", "challenger", "tie_break"):
-        rails = {
-            **common_rails,
-            "validate-vote": (
-                "M920 0 H1086 Q1096 0 1096 10 V25"
-                if lane == "primary"
-                else "M920 0 H1086"
-            ),
-        }
-        lane_markup = page.split(f'data-decision-lane="{lane}"', 1)[1].split(
-            '<g class="decision-lane-steps"', 1
-        )[0]
-        assert lane_markup.count("trace-lane-rail") == len(rails)
-        for key, geometry in rails.items():
-            assert f'data-lane-path="{key}" d="{geometry}"' in lane_markup
-
-    primary_markup = page.split('data-decision-lane="primary"', 1)[1].split(
-        'data-decision-lane="challenger"', 1
-    )[0]
-    assert (
-        'data-decision-lane-step="vote" transform="translate(1096 35)"><circle r="10"></circle><text x="-25" y="-17">Vote</text>'
-        in primary_markup
-    )
+    assert "const targetRoute = [...target.route_node_ids];" in renderer
+    assert "playback.frame.cursor += 1;" in renderer
+    assert "projection.processing" not in renderer
+    assert "processing.current" not in renderer
+    assert "processing.selected_branch" not in renderer
+    assert "decisionTracePlayback.queue" not in renderer
 
 
 def test_dashboard_reuses_decision_trace_poll_for_live_consensus_status() -> None:
@@ -3648,7 +3593,7 @@ vm.runInContext(
 const projected = sandbox.__test.processingLaneForTrace({{
   task_role: "ingest_review",
   projection: {{
-    schema: "chronovisor.decision-trace-projection.v2",
+    schema: "chronovisor.decision-trace-projection.v3",
     pipeline: "repair",
   }},
 }});
@@ -3720,11 +3665,10 @@ def test_dashboard_static_layout_aligns_peer_panels_and_contains_event_badges() 
         "text-overflow: ellipsis;\n  text-transform: uppercase;\n  white-space: nowrap;"
         in style
     )
-    assert ".decision-trace-harness .decision-role {" in style
-    assert "fill: #e0e5e9;\n  font-size: 12px;" in style
-    assert ".decision-trace-harness .decision-model," in style
-    assert ".decision-trace-harness .decision-think," in style
-    assert "fill: #687784;\n  font-size: 8px;" in style
+    assert ".decision-trace-harness .trace-node > circle," in style
+    assert ".decision-trace-harness .trace-node.active > path" in style
+    assert ".decision-trace-harness .trace-node-terminal.done > circle" in style
+    assert "stroke: #74d84f;" in style
 
 
 def test_decision_console_formats_observed_runtime_facts() -> None:
@@ -3790,7 +3734,7 @@ const trace = {{
   active: false,
   state: "ready",
   projection: {{
-    schema: "chronovisor.decision-trace-projection.v2",
+    schema: "chronovisor.decision-trace-projection.v3",
     mode: "single",
     single_model: true,
   }},
