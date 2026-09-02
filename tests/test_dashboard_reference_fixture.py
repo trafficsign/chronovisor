@@ -74,6 +74,7 @@ def test_dashboard_keeps_one_fixed_plan_and_one_dynamic_pipeline_mount() -> None
     assert 'class="trace-diamond trace-node-plan" data-workflow-node="fit"' not in page
     assert 'class="trace-node trace-node-plan" data-workflow-node="fit"' in page
     assert 'class="trace-branch-label trace-fit-outcome"' in page
+    assert 'class="trace-context-guide" d="M458 132 H536' in page
 
 
 def test_dashboard_css_has_one_state_system_for_nodes_and_edges() -> None:
@@ -269,7 +270,7 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
                     )
             assert positions[main[0]] == (1328.0, 416.0)
             dispatch = next(path for path in paths if path["source"] == "fit")
-            assert dispatch["d"] == "M1328 142 V416"
+            assert dispatch["d"] == "M1328 142 V406"
             for row_index, start in enumerate(range(0, len(main), 5)):
                 row = main[start : start + 5]
                 xs = [positions[node][0] for node in row]

@@ -234,7 +234,7 @@ function captureFrame(scenario, frame) {
             vertex,
             vertices[(index + 1) % vertices.length],
           )))
-        : Math.min(centerDistance, Math.abs(centerDistance - rect.width / 2));
+        : Math.abs(centerDistance - rect.width / 2);
       endpointErrors.push({
         edge: group.dataset.workflowEdge,
         end,
@@ -417,6 +417,7 @@ function captureFrame(scenario, frame) {
 }
 
 addEventListener("DOMContentLoaded", async () => {
+  await document.fonts.ready;
   if (selectedId) {
     const scenario = scenarios.find((item) => item.id === selectedId);
     const frame = scenario?.frames[Math.min(selectedStep, scenario.frames.length - 1)];

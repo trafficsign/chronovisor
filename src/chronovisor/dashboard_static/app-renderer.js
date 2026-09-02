@@ -668,11 +668,14 @@ function workflowNodePositions(nodes) {
   });
   const result = positions.get("result") || positions.get(main.at(-1)?.id) || { x: 750, y: 100 };
   const hasEscalate = nodes.some((node) => node.id === "escalate");
-  if (hasEscalate) positions.set("escalate", { x: result.x + 176, y: result.y + 104 });
+  if (hasEscalate) positions.set("escalate", {
+    x: result.x + 176, y: result.y + 104, type: "step",
+  });
   if (nodes.some((node) => node.id === "hold")) {
     positions.set("hold", {
       x: result.x + (hasEscalate ? -176 : result.x > 1180 ? -176 : 176),
       y: result.y + 104,
+      type: "terminal",
     });
   }
   return positions;
@@ -703,8 +706,9 @@ function workflowRoutePoints(edge, positions) {
     points = [source, { x: source.x, y: target.y }, target];
   }
   const nodePort = (position, toward) => {
-    const radius = position.radius || (position.type === "decision" ? 30 : 0);
-    if (!radius) return position;
+    const radius = position.radius || (
+      position.type === "decision" ? 30 : position.type === "terminal" ? 12 : 10
+    );
     const dx = toward.x - position.x;
     const dy = toward.y - position.y;
     const distance = position.type === "decision"
