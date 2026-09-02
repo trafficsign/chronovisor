@@ -55,6 +55,11 @@ def _managed_label(suffix: str) -> str:
     return f"{_legacy_label(suffix)}.managed-v{MANAGED_LABEL_VERSION}"
 
 
+def _legacy_labels(suffix: str) -> tuple[str, str]:
+    label = _legacy_label(suffix)
+    return label, f"{label}.managed"
+
+
 def _source_plist(home: Path, installed_app: Path, suffix: str) -> Path:
     name = _plist_name(suffix)
     candidates = (
@@ -313,37 +318,45 @@ def _service_is_registered(app: Path, plist_name: str) -> bool:
 
 
 def _retire_legacy_service(home: Path, suffix: str) -> None:
-    label = _legacy_label(suffix)
-    target = f"gui/{os.getuid()}/{label}"
-    bootout = subprocess.run(
-        ["/bin/launchctl", "bootout", target],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    registered = subprocess.run(
-        ["/bin/launchctl", "print", target],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if registered.returncode == 0:
-        raise RuntimeError(
-            bootout.stderr.strip() or f"legacy service remains registered: {label}"
+    failures: list[str] = []
+    for label in _legacy_labels(suffix):
+        target = f"gui/{os.getuid()}/{label}"
+        bootout = subprocess.run(
+            ["/bin/launchctl", "bootout", target],
+            check=False,
+            capture_output=True,
+            text=True,
         )
-    (home / "Library" / "LaunchAgents" / f"{label}.plist").unlink(missing_ok=True)
+        registered = subprocess.run(
+            ["/bin/launchctl", "print", target],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if registered.returncode == 0:
+            failures.append(
+                bootout.stderr.strip() or f"legacy service remains registered: {label}"
+            )
+    if failures:
+        raise RuntimeError("; ".join(failures))
+    for label in _legacy_labels(suffix):
+        (home / "Library" / "LaunchAgents" / f"{label}.plist").unlink(
+            missing_ok=True
+        )
 
 
 def _verify_managed_service(home: Path, suffix: str, managed_label: str) -> None:
-    legacy_target = f"gui/{os.getuid()}/{_legacy_label(suffix)}"
-    legacy = subprocess.run(
-        ["/bin/launchctl", "print", legacy_target],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    legacy_plist = home / "Library" / "LaunchAgents" / f"{_legacy_label(suffix)}.plist"
-    if legacy.returncode != 0 and not legacy_plist.exists():
+    legacy_present = False
+    for label in _legacy_labels(suffix):
+        legacy = subprocess.run(
+            ["/bin/launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        legacy_plist = home / "Library" / "LaunchAgents" / f"{label}.plist"
+        legacy_present = legacy_present or legacy.returncode == 0 or legacy_plist.exists()
+    if not legacy_present:
         return
     target = f"gui/{os.getuid()}/{managed_label}"
     kickstart = subprocess.run(

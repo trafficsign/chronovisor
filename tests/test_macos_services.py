@@ -202,6 +202,8 @@ def test_refresh_retires_standalone_legacy_service_after_managed_registration(
     )
     legacy.parent.mkdir(parents=True)
     legacy.write_text("legacy", encoding="utf-8")
+    legacy_v1 = legacy.with_name("com.trafficsign.chronovisor-dashboard.managed.plist")
+    legacy_v1.write_text("legacy-v1", encoding="utf-8")
     launchctl_commands: list[list[str]] = []
 
     monkeypatch.setattr(
@@ -221,15 +223,17 @@ def test_refresh_retires_standalone_legacy_service_after_managed_registration(
     monkeypatch.setattr(module, "build_app", lambda *_args: {})
     monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
 
-    legacy_registered = True
+    legacy_registered = {
+        "com.trafficsign.chronovisor-dashboard",
+        "com.trafficsign.chronovisor-dashboard.managed",
+    }
 
     def run(command, **_kwargs):
-        nonlocal legacy_registered
         launchctl_commands.append(command)
         if command[1] == "kickstart":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if command[1] == "bootout":
-            legacy_registered = False
+            legacy_registered.discard(command[-1].rsplit("/", 1)[-1])
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if command[-1].endswith(".managed-v2"):
             return SimpleNamespace(
@@ -238,8 +242,12 @@ def test_refresh_retires_standalone_legacy_service_after_managed_registration(
                 stderr="",
             )
         return SimpleNamespace(
-            returncode=0 if legacy_registered else 113,
-            stdout="state = not running\n" if legacy_registered else "",
+            returncode=0 if command[-1].rsplit("/", 1)[-1] in legacy_registered else 113,
+            stdout=(
+                "state = not running\n"
+                if command[-1].rsplit("/", 1)[-1] in legacy_registered
+                else ""
+            ),
             stderr="",
         )
 
@@ -248,9 +256,11 @@ def test_refresh_retires_standalone_legacy_service_after_managed_registration(
     result = module.refresh_service(tmp_path, app, "dashboard")
 
     target = f"gui/{module.os.getuid()}/com.trafficsign.chronovisor-dashboard"
+    target_v1 = f"{target}.managed"
     assert result["status"] == "ok"
     assert launchctl_commands == [
         ["/bin/launchctl", "print", target],
+        ["/bin/launchctl", "print", target_v1],
         [
             "/bin/launchctl",
             "kickstart",
@@ -265,8 +275,11 @@ def test_refresh_retires_standalone_legacy_service_after_managed_registration(
         ],
         ["/bin/launchctl", "bootout", target],
         ["/bin/launchctl", "print", target],
+        ["/bin/launchctl", "bootout", target_v1],
+        ["/bin/launchctl", "print", target_v1],
     ]
     assert not legacy.exists()
+    assert not legacy_v1.exists()
 
 
 def test_refresh_keeps_legacy_service_when_managed_launch_fails(
