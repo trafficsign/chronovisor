@@ -1,3 +1,6 @@
+import sys
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -58,3 +61,41 @@ def test_nemotron_backend_selects_query_or_document_without_eager_loading() -> N
 
     with pytest.raises(SafeBackendError, match="route_configuration_invalid"):
         backend.embed(EmbeddingRequest(("d",), source), model="other-model")
+
+
+def test_nemotron_mps_backend_flushes_cache_after_success_and_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    releases: list[bool] = []
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(
+            backends=SimpleNamespace(
+                mps=SimpleNamespace(is_available=lambda: True),
+            ),
+            mps=SimpleNamespace(empty_cache=lambda: releases.append(True)),
+        ),
+    )
+
+    class Model:
+        def encode_query(self, _texts: list[str], **_kwargs: object) -> object:
+            return [[3.0, 4.0]]
+
+        def encode_document(self, _texts: list[str], **_kwargs: object) -> object:
+            raise RuntimeError("encode failed")
+
+    backend = NemotronEmbeddingBackend(
+        SearchEmbeddingConfig(dimensions=2), model="test-model", device="mps"
+    )
+    backend._model = Model()
+    source = SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL)
+
+    backend.embed(
+        EmbeddingRequest(("q",), source, purpose=EmbeddingPurpose.QUERY),
+        model="test-model",
+    )
+    with pytest.raises(RuntimeError, match="encode failed"):
+        backend.embed(EmbeddingRequest(("d",), source), model="test-model")
+
+    assert releases == [True, True]

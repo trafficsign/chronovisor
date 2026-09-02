@@ -133,45 +133,53 @@ class NemotronEmbeddingBackend:
             raise SafeBackendError("route_configuration_invalid")
         if not request.texts:
             return EmbeddingResult((), self.provider, model)
-        encoder = self._load()
-        batch_size = (
-            self.config.foreground_max_batch
-            if request.purpose is EmbeddingPurpose.QUERY
-            else (
-                self.config.incremental_max_batch
-                if self.incremental
-                else self.config.maintenance_max_batch
+        try:
+            encoder = self._load()
+            batch_size = (
+                self.config.foreground_max_batch
+                if request.purpose is EmbeddingPurpose.QUERY
+                else (
+                    self.config.incremental_max_batch
+                    if self.incremental
+                    else self.config.maintenance_max_batch
+                )
             )
-        )
-        options = {
-            "batch_size": max(1, batch_size),
-            "convert_to_numpy": True,
-            "show_progress_bar": False,
-            "normalize_embeddings": True,
-        }
-        encoded = (
-            encoder.encode_query(list(request.texts), **options)
-            if request.purpose is EmbeddingPurpose.QUERY
-            else encoder.encode_document(list(request.texts), **options)
-        )
-        vectors = normalize_embeddings(
-            encoded,
-            self.config.dimensions,
-        )
-        return EmbeddingResult(
-            tuple(tuple(float(value) for value in vector) for vector in vectors),
-            self.provider,
-            model,
-        )
+            options = {
+                "batch_size": max(1, batch_size),
+                "convert_to_numpy": True,
+                "show_progress_bar": False,
+                "normalize_embeddings": True,
+            }
+            encoded = (
+                encoder.encode_query(list(request.texts), **options)
+                if request.purpose is EmbeddingPurpose.QUERY
+                else encoder.encode_document(list(request.texts), **options)
+            )
+            vectors = normalize_embeddings(
+                encoded,
+                self.config.dimensions,
+            )
+            return EmbeddingResult(
+                tuple(tuple(float(value) for value in vector) for vector in vectors),
+                self.provider,
+                model,
+            )
+        finally:
+            self._empty_mps_cache()
+
+    def _empty_mps_cache(self) -> None:
+        if self.device != "mps":
+            return
+        try:
+            import torch  # type: ignore[import-not-found, unused-ignore]
+
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+        except Exception:
+            pass
 
     def close(self) -> None:
         with self._load_lock:
             self._model = None
         gc.collect()
-        try:
-            import torch  # type: ignore[import-not-found, unused-ignore]
-
-            if self.device == "mps" and torch.backends.mps.is_available():
-                torch.mps.empty_cache()
-        except Exception:
-            pass
+        self._empty_mps_cache()
