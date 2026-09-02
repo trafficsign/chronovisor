@@ -281,6 +281,11 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
                     assert positions[main[start - 1]][1] < positions[row[0]][1]
             layout_checked.add(scenario["pipeline"])
         assert all(path["d"] for path in paths)
+        assert result["sharpCorners"] == [], (
+            scenario["id"],
+            frame["cursor"],
+            result["sharpCorners"],
+        )
         assert result["pathLabelCollisions"] == []
         assert result["pathIntersections"] == []
         assert result["guideOverlaps"] == []

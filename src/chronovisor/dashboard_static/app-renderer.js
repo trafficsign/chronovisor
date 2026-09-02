@@ -726,13 +726,33 @@ function workflowRoutePoints(edge, positions) {
 
 function workflowPath(edge, positions) {
   const route = workflowRoutePoints(edge, positions);
-  return route.map((point, index) => {
-    if (!index) return `M${point.x} ${point.y}`;
-    const previous = route[index - 1];
-    if (previous.y === point.y) return `H${point.x}`;
-    if (previous.x === point.x) return `V${point.y}`;
-    return `L${point.x} ${point.y}`;
-  }).join(" ");
+  if (!route.length) return "";
+  const lineTo = (from, to) => {
+    if (from.y === to.y) return `H${to.x}`;
+    if (from.x === to.x) return `V${to.y}`;
+    return `L${to.x} ${to.y}`;
+  };
+  const commands = [`M${route[0].x} ${route[0].y}`];
+  let cursor = route[0];
+  route.slice(1, -1).forEach((corner, index) => {
+    const before = route[index];
+    const after = route[index + 2];
+    const incoming = Math.hypot(corner.x - before.x, corner.y - before.y);
+    const outgoing = Math.hypot(after.x - corner.x, after.y - corner.y);
+    const radius = Math.min(10, incoming / 2, outgoing / 2);
+    const entry = {
+      x: corner.x + (before.x - corner.x) * radius / incoming,
+      y: corner.y + (before.y - corner.y) * radius / incoming,
+    };
+    const exit = {
+      x: corner.x + (after.x - corner.x) * radius / outgoing,
+      y: corner.y + (after.y - corner.y) * radius / outgoing,
+    };
+    commands.push(lineTo(cursor, entry), `Q${corner.x} ${corner.y} ${exit.x} ${exit.y}`);
+    cursor = exit;
+  });
+  commands.push(lineTo(cursor, route.at(-1)));
+  return commands.join(" ");
 }
 
 function workflowEdgeLabelPosition(edge, positions) {

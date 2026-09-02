@@ -169,6 +169,11 @@ function captureFrame(scenario, frame) {
     state: group.dataset.state,
     d: group.querySelector("path").getAttribute("d"),
   }));
+  const sharpCorners = [...harness.querySelectorAll(".trace-path")].flatMap((path) => {
+    const d = path.getAttribute("d") || "";
+    const commands = d.match(/[LHVQ]/g) || [];
+    return commands.length > 1 && !commands.includes("Q") ? [d] : [];
+  });
   const nodes = [...harness.querySelectorAll("[data-workflow-node]")].map((node) => ({
     id: node.dataset.workflowNode,
     state: node.dataset.state,
@@ -249,13 +254,13 @@ function captureFrame(scenario, frame) {
     }
   }
   const segments = (d) => {
-    const tokens = d.match(/[MLHV]|-?\d+(?:\.\d+)?/g) || [];
+    const tokens = d.match(/[MLHVQ]|-?\d+(?:\.\d+)?/g) || [];
     const rows = [];
     let command = "";
     let x = 0;
     let y = 0;
     for (let index = 0; index < tokens.length;) {
-      if (/^[MLHV]$/.test(tokens[index])) command = tokens[index++];
+      if (/^[MLHVQ]$/.test(tokens[index])) command = tokens[index++];
       if (command === "M") {
         x = Number(tokens[index++]);
         y = Number(tokens[index++]);
@@ -273,6 +278,13 @@ function captureFrame(scenario, frame) {
       } else if (command === "V") {
         const nextY = Number(tokens[index++]);
         rows.push({ x1: x, y1: y, x2: x, y2: nextY });
+        y = nextY;
+      } else if (command === "Q") {
+        index += 2;
+        const nextX = Number(tokens[index++]);
+        const nextY = Number(tokens[index++]);
+        rows.push({ x1: x, y1: y, x2: nextX, y2: nextY });
+        x = nextX;
         y = nextY;
       }
     }
@@ -413,6 +425,7 @@ function captureFrame(scenario, frame) {
       nodes: nodes.map(({ id, transform }) => [id, transform]),
     }),
     paths,
+    sharpCorners,
     nodes,
     pathLabelCollisions: [...new Set(pathLabelCollisions.map(JSON.stringify))].map(JSON.parse),
     pathIntersections,
