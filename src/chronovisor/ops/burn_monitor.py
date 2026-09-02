@@ -53,12 +53,12 @@ EXPECTED_COMMIT = os.environ.get("CHRONOVISOR_EXPECTED_COMMIT", "").strip()
 MAX_RELATED_RSS_BYTES = 80 * 1024**3
 
 SERVICE_LABELS = {
-    "dashboard": f"{runtime_service_label('dashboard')}.managed",
-    "sleep": f"{runtime_service_label('sleep')}.managed",
-    "watchdog": f"{runtime_service_label('watchdog')}.managed",
-    "converge": f"{runtime_service_label('converge')}.managed",
-    "ingest": f"{runtime_service_label('ingest-drain')}.managed",
-    "observer": f"{runtime_service_label('deadman-observer')}.managed",
+    "dashboard": f"{runtime_service_label('dashboard')}.managed-v2",
+    "sleep": f"{runtime_service_label('sleep')}.managed-v2",
+    "watchdog": f"{runtime_service_label('watchdog')}.managed-v2",
+    "converge": f"{runtime_service_label('converge')}.managed-v2",
+    "ingest": f"{runtime_service_label('ingest-drain')}.managed-v2",
+    "observer": f"{runtime_service_label('deadman-observer')}.managed-v2",
 }
 
 TRACKED_FILES = {

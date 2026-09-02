@@ -117,9 +117,9 @@ _RUNTIME_KEYS = frozenset(
 _SERVICE_LABELS = {
     # Do not derive formal labels from ambient environment/configuration.  A
     # launchd prefix is a deployment constant, not caller evidence.
-    "dashboard": f"{DEFAULT_LAUNCHD_LABEL_PREFIX}dashboard.managed",
-    "ingest": f"{DEFAULT_LAUNCHD_LABEL_PREFIX}ingest-drain.managed",
-    "lan-dashboard": f"{DEFAULT_LAUNCHD_LABEL_PREFIX}lan-dashboard.managed",
+    "dashboard": f"{DEFAULT_LAUNCHD_LABEL_PREFIX}dashboard.managed-v2",
+    "ingest": f"{DEFAULT_LAUNCHD_LABEL_PREFIX}ingest-drain.managed-v2",
+    "lan-dashboard": f"{DEFAULT_LAUNCHD_LABEL_PREFIX}lan-dashboard.managed-v2",
     "library-evidence": f"{DEFAULT_LAUNCHD_LABEL_PREFIX}library-evidence.managed",
 }
 _LAUNCHCTL_FIELDS = frozenset(

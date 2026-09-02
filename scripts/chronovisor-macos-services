@@ -17,12 +17,16 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MANAGER_SOURCE = PROJECT_ROOT / "macos" / "ChronovisorServiceManager.swift"
+RUNNER_SOURCE = PROJECT_ROOT / "macos" / "ChronovisorServiceRunner.swift"
 ICON_SOURCE = PROJECT_ROOT / "macos" / "Chronovisor.icns"
 APP_NAME = "Chronovisor.app"
 APP_IDENTIFIER = "com.trafficsign.chronovisor"
 DEFAULT_SIGNING_IDENTITY = "Chronovisor Local Code Signing"
 SIGNING_IDENTITY_ENV = "CHRONOVISOR_CODESIGN_IDENTITY"
-BUNDLE_PROGRAM = "Contents/MacOS/Chronovisor"
+MANAGER_PROGRAM = "Contents/MacOS/Chronovisor"
+BUNDLE_PROGRAM = "Contents/Helpers/ChronovisorServiceRunner"
+# ponytail: bump this only when the runner changes; local signing pins its CDHash.
+MANAGED_LABEL_VERSION = 2
 SERVICE_SUFFIXES = (
     "converge",
     "dashboard",
@@ -43,6 +47,14 @@ def _plist_name(suffix: str) -> str:
     return f"com.trafficsign.chronovisor-{suffix}.plist"
 
 
+def _legacy_label(suffix: str) -> str:
+    return f"com.trafficsign.chronovisor-{suffix}"
+
+
+def _managed_label(suffix: str) -> str:
+    return f"{_legacy_label(suffix)}.managed-v{MANAGED_LABEL_VERSION}"
+
+
 def _source_plist(home: Path, installed_app: Path, suffix: str) -> Path:
     name = _plist_name(suffix)
     candidates = (
@@ -59,25 +71,25 @@ def _source_plist(home: Path, installed_app: Path, suffix: str) -> Path:
             label = plistlib.loads(candidate.read_bytes()).get("Label")
         except (OSError, plistlib.InvalidFileException):
             continue
-        if isinstance(label, str) and label.removesuffix(".managed").endswith(
-            f"-{suffix}"
-        ):
+        if label in {
+            f"{_legacy_label(suffix)}.managed",
+            _managed_label(suffix),
+        }:
             return candidate
     raise FileNotFoundError(f"missing source LaunchAgent: {name}")
 
 
 def bundled_plist(payload: dict[str, Any], suffix: str) -> dict[str, Any]:
     label = payload.get("Label")
-    if (
-        not isinstance(label, str)
-        or not label.removesuffix(".managed").endswith(f"-{suffix}")
-    ):
+    base_label = _legacy_label(suffix)
+    if label not in {base_label, f"{base_label}.managed", _managed_label(suffix)}:
         raise ValueError(f"unexpected LaunchAgent label for {suffix}: {label!r}")
     arguments = payload.get("ProgramArguments")
+    wrapper = payload.get("BundleProgram")
     if (
-        payload.get("BundleProgram") == BUNDLE_PROGRAM
+        wrapper in {MANAGER_PROGRAM, BUNDLE_PROGRAM}
         and isinstance(arguments, list)
-        and arguments[:2] == [BUNDLE_PROGRAM, "run"]
+        and arguments[:2] == [wrapper, "run"]
     ):
         arguments = arguments[2:]
     if not isinstance(arguments, list) or not arguments:
@@ -93,7 +105,7 @@ def bundled_plist(payload: dict[str, Any], suffix: str) -> dict[str, Any]:
     ):
         raise ValueError(f"service executable is unavailable: {executable}")
     bundled = dict(payload)
-    bundled["Label"] = f"{label.removesuffix('.managed')}.managed"
+    bundled["Label"] = _managed_label(suffix)
     bundled.pop("Program", None)
     bundled["BundleProgram"] = BUNDLE_PROGRAM
     bundled["ProgramArguments"] = [BUNDLE_PROGRAM, "run", *arguments]
@@ -103,13 +115,16 @@ def bundled_plist(payload: dict[str, Any], suffix: str) -> dict[str, Any]:
 
 def _managed_service(app: Path, suffix: str) -> tuple[str, str]:
     agents = app / "Contents" / "Library" / "LaunchAgents"
-    for path in agents.glob("*.plist"):
+    fallback: tuple[str, str] | None = None
+    for path in sorted(agents.glob("*.plist")):
         payload = plistlib.loads(path.read_bytes())
         label = payload.get("Label")
-        if isinstance(label, str) and label.removesuffix(".managed").endswith(
-            f"-{suffix}"
-        ):
+        if label == _managed_label(suffix):
             return path.name, label
+        if label == f"{_legacy_label(suffix)}.managed":
+            fallback = (path.name, label)
+    if fallback is not None:
+        return fallback
     raise FileNotFoundError(f"managed LaunchAgent not found for {suffix}")
 
 
@@ -170,10 +185,12 @@ def build_app(
         prefix="chronovisor-app-", dir=destination.parent
     ) as temporary:
         app = Path(temporary) / APP_NAME
-        executable = app / "Contents" / "MacOS" / "Chronovisor"
+        executable = app / MANAGER_PROGRAM
+        runner = app / BUNDLE_PROGRAM
         agents = app / "Contents" / "Library" / "LaunchAgents"
         resources = app / "Contents" / "Resources"
         executable.parent.mkdir(parents=True)
+        runner.parent.mkdir(parents=True)
         agents.mkdir(parents=True)
         resources.mkdir(parents=True)
         _write_info_plist(app)
@@ -212,10 +229,25 @@ def build_app(
             check=True,
         )
         subprocess.run(
+            [*compiler, "-O", str(RUNNER_SOURCE), "-o", str(runner)],
+            check=True,
+        )
+        subprocess.run(
             [
                 codesign,
                 "--force",
-                "--deep",
+                "--sign",
+                identity,
+                "--identifier",
+                f"{APP_IDENTIFIER}.service-runner",
+                str(runner),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            [
+                codesign,
+                "--force",
                 "--sign",
                 identity,
                 "--identifier",
@@ -256,7 +288,7 @@ def build_app(
 def _manager(
     app: Path, command: str, *arguments: str
 ) -> subprocess.CompletedProcess[str]:
-    executable = app / "Contents" / "MacOS" / "Chronovisor"
+    executable = app / MANAGER_PROGRAM
     return subprocess.run(
         [str(executable), command, *arguments],
         check=False,
@@ -278,6 +310,72 @@ def _service_is_registered(app: Path, plist_name: str) -> bool:
     if not isinstance(status, str):
         raise RuntimeError(f"invalid service status for {plist_name}")
     return status not in {"not_registered", "not_found"}
+
+
+def _retire_legacy_service(home: Path, suffix: str) -> None:
+    label = _legacy_label(suffix)
+    target = f"gui/{os.getuid()}/{label}"
+    bootout = subprocess.run(
+        ["/bin/launchctl", "bootout", target],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    registered = subprocess.run(
+        ["/bin/launchctl", "print", target],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if registered.returncode == 0:
+        raise RuntimeError(
+            bootout.stderr.strip() or f"legacy service remains registered: {label}"
+        )
+    (home / "Library" / "LaunchAgents" / f"{label}.plist").unlink(missing_ok=True)
+
+
+def _verify_managed_service(home: Path, suffix: str, managed_label: str) -> None:
+    legacy_target = f"gui/{os.getuid()}/{_legacy_label(suffix)}"
+    legacy = subprocess.run(
+        ["/bin/launchctl", "print", legacy_target],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    legacy_plist = home / "Library" / "LaunchAgents" / f"{_legacy_label(suffix)}.plist"
+    if legacy.returncode != 0 and not legacy_plist.exists():
+        return
+    target = f"gui/{os.getuid()}/{managed_label}"
+    kickstart = subprocess.run(
+        ["/bin/launchctl", "kickstart", target],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if kickstart.returncode != 0:
+        raise RuntimeError(kickstart.stderr.strip() or "managed kickstart failed")
+    time.sleep(2)
+    status = subprocess.run(
+        ["/bin/launchctl", "print", target],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    lines = {line.strip() for line in status.stdout.splitlines()}
+    launch_failed = (
+        "job state = spawn failed" in lines
+        or "last exit reason = OS_REASON_CODESIGNING" in lines
+    )
+    if (
+        status.returncode != 0
+        or launch_failed
+        or not ("state = running" in lines or "last exit code = 0" in lines)
+    ):
+        raise RuntimeError(
+            status.stderr.strip()
+            or status.stdout.strip()
+            or "managed service did not start successfully"
+        )
 
 
 def refresh_service(
@@ -348,6 +446,24 @@ def refresh_service(
                 "phase": "reenroll-register",
                 "detail": register.stdout.strip() or register.stderr.strip(),
             }
+    try:
+        _verify_managed_service(home, suffix, label)
+    except RuntimeError as exc:
+        return {
+            "status": "error",
+            "service": suffix,
+            "phase": "verify-managed",
+            "detail": str(exc),
+        }
+    try:
+        _retire_legacy_service(home, suffix)
+    except RuntimeError as exc:
+        return {
+            "status": "error",
+            "service": suffix,
+            "phase": "retire-legacy",
+            "detail": str(exc),
+        }
     return {
         "status": "ok",
         "service": suffix,

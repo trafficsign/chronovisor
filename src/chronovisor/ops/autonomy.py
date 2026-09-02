@@ -4529,14 +4529,14 @@ def uninstall_launchd(*, dry_run: bool = False, unload: bool = False) -> dict[st
         if manager.is_file():
             for label in reversed(labels):
                 proc = subprocess.run(
-                    [str(manager), "unregister-one", f"{label}.managed.plist"],
+                    [str(manager), "unregister-one", f"{label}.managed-v2.plist"],
                     text=True,
                     capture_output=True,
                     check=False,
                 )
                 unloads.append(
                     {
-                        "path": f"{label}.managed.plist",
+                        "path": f"{label}.managed-v2.plist",
                         "returncode": proc.returncode,
                         "stderr": proc.stderr.strip(),
                     }

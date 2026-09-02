@@ -23,12 +23,12 @@ from chronovisor.ops.autonomy import runtime_service_label
 
 RUNBOOK_VERSION = 1
 SERVICE_LABELS = {
-    "dashboard": f"{runtime_service_label('dashboard')}.managed",
-    "ingest": f"{runtime_service_label('ingest-drain')}.managed",
-    "sleep": f"{runtime_service_label('sleep')}.managed",
-    "watchdog": f"{runtime_service_label('watchdog')}.managed",
-    "observer": f"{runtime_service_label('deadman-observer')}.managed",
-    "converge": f"{runtime_service_label('converge')}.managed",
+    "dashboard": f"{runtime_service_label('dashboard')}.managed-v2",
+    "ingest": f"{runtime_service_label('ingest-drain')}.managed-v2",
+    "sleep": f"{runtime_service_label('sleep')}.managed-v2",
+    "watchdog": f"{runtime_service_label('watchdog')}.managed-v2",
+    "observer": f"{runtime_service_label('deadman-observer')}.managed-v2",
+    "converge": f"{runtime_service_label('converge')}.managed-v2",
 }
 SERVICE_TEMPLATES = {
     "dashboard": "com.trafficsign.chronovisor-dashboard.plist",
@@ -50,7 +50,7 @@ def _service_plist(service: str) -> Path:
     label = SERVICE_LABELS[service]
     if service in KEEPALIVE_SERVICES:
         return runtime_repo_root() / "launchd" / SERVICE_TEMPLATES[service]
-    source_label = label.removesuffix(".managed")
+    source_label = label.removesuffix(".managed-v2")
     return (
         CHRONOVISOR_ROOT
         / "runtime"

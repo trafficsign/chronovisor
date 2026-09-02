@@ -13,7 +13,7 @@ mkdir -p "$HOME/.chronovisor/logs" "${LAUNCH_AGENT:h}"
   "$LAUNCH_AGENT" \
   --project-root "$PROJECT_ROOT" \
   --home "$HOME"
-readonly LABEL="$(/usr/libexec/PlistBuddy -c 'Print :Label' "$LAUNCH_AGENT").managed"
+readonly LABEL="$(/usr/libexec/PlistBuddy -c 'Print :Label' "$LAUNCH_AGENT").managed-v2"
 "$SERVICE_MANAGER" refresh reranker
 
 status_matches_launchd() {
