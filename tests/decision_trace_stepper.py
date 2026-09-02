@@ -169,7 +169,11 @@ function captureFrame(scenario, frame) {
     state: group.dataset.state,
     d: group.querySelector("path").getAttribute("d"),
   }));
-  const sharpCorners = [...harness.querySelectorAll(".trace-path")].flatMap((path) => {
+  const guides = [...harness.querySelectorAll(".trace-context-guide, .trace-reasoning-guide")].map((guide) => ({
+    className: guide.getAttribute("class"),
+    d: guide.getAttribute("d"),
+  }));
+  const sharpCorners = [...harness.querySelectorAll(".trace-path, .trace-context-guide, .trace-reasoning-guide")].flatMap((path) => {
     const d = path.getAttribute("d") || "";
     const commands = d.match(/[LHVQ]/g) || [];
     return commands.length > 1 && !commands.includes("Q") ? [d] : [];
@@ -353,11 +357,11 @@ function captureFrame(scenario, frame) {
     }
   }));
   const guideOverlaps = [];
-  for (const guide of harness.querySelectorAll(".trace-context-guide, .trace-reasoning-guide")) {
-    const guideSegments = segments(guide.getAttribute("d"));
+  for (const guide of guides) {
+    const guideSegments = segments(guide.d);
     guideSegments.forEach((left, index) => guideSegments.slice(index + 1).forEach((right) => {
       const overlap = overlapLength(left, right);
-      if (overlap > 0.5) guideOverlaps.push([guide.getAttribute("class"), overlap]);
+      if (overlap > 0.5) guideOverlaps.push([guide.className, overlap]);
     }));
   }
   const textOverlaps = [];
@@ -422,9 +426,11 @@ function captureFrame(scenario, frame) {
     visibleCursor: Number(harness.dataset.visibleCursor),
     geometry: JSON.stringify({
       paths: paths.map(({ id, d }) => [id, d]),
+      guides,
       nodes: nodes.map(({ id, transform }) => [id, transform]),
     }),
     paths,
+    guides,
     sharpCorners,
     nodes,
     pathLabelCollisions: [...new Set(pathLabelCollisions.map(JSON.stringify))].map(JSON.parse),

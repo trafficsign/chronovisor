@@ -75,6 +75,9 @@ def test_dashboard_keeps_one_fixed_plan_and_one_dynamic_pipeline_mount() -> None
     assert 'class="trace-node trace-node-plan" data-workflow-node="fit"' in page
     assert 'class="trace-branch-label trace-fit-outcome"' in page
     assert 'class="trace-context-guide" d="M458 132 H536' in page
+    for guide_class in ("trace-context-guide", "trace-reasoning-guide"):
+        guide_path = page.split(f'class="{guide_class}" d="', 1)[1].split('"', 1)[0]
+        assert guide_path.count("Q") == 4
 
 
 def test_dashboard_css_has_one_state_system_for_nodes_and_edges() -> None:
@@ -281,6 +284,7 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
                     assert positions[main[start - 1]][1] < positions[row[0]][1]
             layout_checked.add(scenario["pipeline"])
         assert all(path["d"] for path in paths)
+        assert all(guide["d"].count("Q") == 4 for guide in result["guides"])
         assert result["sharpCorners"] == [], (
             scenario["id"],
             frame["cursor"],
