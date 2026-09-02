@@ -300,6 +300,14 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
             result["decisionQuestions"],
         )
         assert all(
+            question["fill"] == "rgb(6, 23, 36)"
+            for question in result["decisionQuestions"]
+        ), (
+            scenario["id"],
+            frame["cursor"],
+            result["decisionQuestions"],
+        )
+        assert all(
             branch["labelState"] == branch["state"]
             and branch["distance"] <= 48
             for branch in result["decisionBranchLabels"]

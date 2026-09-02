@@ -3262,10 +3262,13 @@ canvas {
 
 .decision-trace-harness .trace-node.done > circle,
 .decision-trace-harness .trace-node.done > path {
-  fill: url(#trace-active-core);
   stroke: #a5a8ff;
   stroke-width: 2;
   filter: url(#trace-glow-violet);
+}
+
+.decision-trace-harness .trace-node.done > circle {
+  fill: url(#trace-active-core);
 }
 
 .decision-trace-harness .trace-diamond.done path,
@@ -3293,11 +3296,14 @@ canvas {
 
 .decision-trace-harness .trace-node.active > circle,
 .decision-trace-harness .trace-node.active > path {
-  fill: url(#trace-processing-core);
   stroke: #ff9d00;
   stroke-width: 2.2;
   filter: url(#trace-glow-orange);
   animation: trace-processing-pulse 0.9s ease-in-out infinite alternate;
+}
+
+.decision-trace-harness .trace-node.active > circle {
+  fill: url(#trace-processing-core);
 }
 
 .decision-trace-harness .trace-diamond.active path,

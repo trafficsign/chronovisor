@@ -366,11 +366,13 @@ function captureFrame(scenario, frame) {
   const decisionQuestions = [...harness.querySelectorAll(
     "[data-workflow-nodes] .trace-node-decision",
   )].map((node) => {
-    const shapeRect = node.querySelector(":scope > path").getBoundingClientRect();
+    const shape = node.querySelector(":scope > path");
+    const shapeRect = shape.getBoundingClientRect();
     const question = node.querySelector(":scope > text");
     const questionRect = question.getBoundingClientRect();
     return {
       id: node.dataset.workflowNode,
+      fill: getComputedStyle(shape).fill,
       text: question.textContent,
       inside: questionRect.left >= shapeRect.left
         && questionRect.right <= shapeRect.right
