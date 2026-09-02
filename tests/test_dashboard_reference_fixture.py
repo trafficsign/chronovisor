@@ -312,6 +312,16 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
             frame["cursor"],
             result["sharpCorners"],
         )
+        bad_corner_radii = [
+            radius
+            for radius in result["cornerRadii"]
+            if any(abs(radius[side] - 10) >= 0.01 for side in ("incoming", "outgoing"))
+        ]
+        assert bad_corner_radii == [], (
+            scenario["id"],
+            frame["cursor"],
+            bad_corner_radii,
+        )
         assert result["milestoneTurns"] == [], (
             scenario["id"],
             frame["cursor"],

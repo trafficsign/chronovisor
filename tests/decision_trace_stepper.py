@@ -182,6 +182,38 @@ function captureFrame(scenario, frame) {
     const commands = d.match(/[LHVQ]/g) || [];
     return commands.length > 1 && !commands.includes("Q") ? [d] : [];
   });
+  const cornerRadii = paths.flatMap((path) => {
+    const tokens = path.d.match(/[MLHVQ]|-?\d+(?:\.\d+)?/g) || [];
+    const radii = [];
+    let command = "";
+    let x = 0;
+    let y = 0;
+    for (let index = 0; index < tokens.length;) {
+      if (/^[MLHVQ]$/.test(tokens[index])) command = tokens[index++];
+      if (command === "M" || command === "L") {
+        x = Number(tokens[index++]);
+        y = Number(tokens[index++]);
+      } else if (command === "H") {
+        x = Number(tokens[index++]);
+      } else if (command === "V") {
+        y = Number(tokens[index++]);
+      } else if (command === "Q") {
+        const controlX = Number(tokens[index++]);
+        const controlY = Number(tokens[index++]);
+        const nextX = Number(tokens[index++]);
+        const nextY = Number(tokens[index++]);
+        radii.push({
+          edge: path.id,
+          incoming: Math.hypot(controlX - x, controlY - y),
+          outgoing: Math.hypot(controlX - nextX, controlY - nextY),
+        });
+        x = nextX;
+        y = nextY;
+      }
+      command = "";
+    }
+    return radii;
+  });
   const nodes = [...harness.querySelectorAll("[data-workflow-node]")].map((node) => ({
     id: node.dataset.workflowNode,
     state: node.dataset.state,
@@ -481,6 +513,7 @@ function captureFrame(scenario, frame) {
     paths,
     guides,
     sharpCorners,
+    cornerRadii,
     milestoneTurns,
     nodes,
     pathLabelCollisions: [...new Set(pathLabelCollisions.map(JSON.stringify))].map(JSON.parse),

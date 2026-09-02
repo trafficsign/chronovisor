@@ -782,13 +782,7 @@ function workflowPath(edge, positions) {
     const after = route[index + 2];
     const incoming = Math.hypot(corner.x - before.x, corner.y - before.y);
     const outgoing = Math.hypot(after.x - corner.x, after.y - corner.y);
-    const joinsRail = index === route.length - 3
-      && (edge.kind === "loop" || edge.label === "NOOP");
-    const radius = Math.min(
-      joinsRail ? outgoing : 10,
-      incoming / 2,
-      joinsRail ? outgoing : outgoing / 2,
-    );
+    const radius = Math.min(10, incoming / 2, outgoing / 2);
     const entry = {
       x: corner.x + (before.x - corner.x) * radius / incoming,
       y: corner.y + (before.y - corner.y) * radius / incoming,
