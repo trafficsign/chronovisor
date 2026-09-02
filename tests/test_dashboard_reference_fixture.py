@@ -260,7 +260,7 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
                     )
             assert positions[main[0]] == (1328.0, 416.0)
             dispatch = next(path for path in paths if path["source"] == "fit")
-            assert dispatch["d"] == "M1328 132 V416"
+            assert dispatch["d"] == "M1328 180 V416"
             for row_index, start in enumerate(range(0, len(main), 5)):
                 row = main[start : start + 5]
                 xs = [positions[node][0] for node in row]
@@ -275,7 +275,16 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         assert result["pathIntersections"] == []
         assert result["guideOverlaps"] == []
         assert result["textOverlaps"] == []
-        assert max(error["distance"] for error in result["endpointErrors"]) < 0.75
+        assert result["decisionCenterEndpoints"] == []
+        worst_endpoint = max(
+            result["endpointErrors"],
+            key=lambda error: error["distance"],
+        )
+        assert worst_endpoint["distance"] < 0.75, (
+            scenario["id"],
+            frame["cursor"],
+            worst_endpoint,
+        )
         final = frame["cursor"] == len(scenario["frames"]) - 1
         expected_state = (
             "error"

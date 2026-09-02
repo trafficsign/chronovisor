@@ -183,6 +183,7 @@ function captureFrame(scenario, frame) {
   });
   const pathLabelCollisions = [];
   const endpointErrors = [];
+  const decisionCenterEndpoints = [];
   for (const group of harness.querySelectorAll("[data-workflow-edge]")) {
     const path = group.querySelector("path.selected") || group.querySelector("path");
     const matrix = path.getScreenCTM();
@@ -207,11 +208,43 @@ function captureFrame(scenario, frame) {
       const point = new DOMPoint(rawPoint.x, rawPoint.y).matrixTransform(matrix);
       const shape = harness.querySelector(`[data-workflow-node="${nodeId}"] > circle, [data-workflow-node="${nodeId}"] > path`);
       const rect = shape.getBoundingClientRect();
+      const center = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      const vertices = [
+        { x: center.x, y: rect.top },
+        { x: rect.right, y: center.y },
+        { x: center.x, y: rect.bottom },
+        { x: rect.left, y: center.y },
+      ];
+      const distanceToSegment = (candidate, first, second) => {
+        const dx = second.x - first.x;
+        const dy = second.y - first.y;
+        const lengthSquared = dx * dx + dy * dy;
+        const ratio = Math.max(0, Math.min(1,
+          ((candidate.x - first.x) * dx + (candidate.y - first.y) * dy) / lengthSquared,
+        ));
+        return Math.hypot(
+          candidate.x - (first.x + ratio * dx),
+          candidate.y - (first.y + ratio * dy),
+        );
+      };
+      const endpointDistance = shape.tagName.toLowerCase() === "path"
+        ? Math.min(...vertices.map((vertex, index) => distanceToSegment(
+            point,
+            vertex,
+            vertices[(index + 1) % vertices.length],
+          )))
+        : Math.hypot(point.x - center.x, point.y - center.y);
       endpointErrors.push({
         edge: group.dataset.workflowEdge,
         end,
-        distance: Math.hypot(point.x - (rect.left + rect.width / 2), point.y - (rect.top + rect.height / 2)),
+        distance: endpointDistance,
       });
+      if (
+        shape.tagName.toLowerCase() === "path"
+        && Math.hypot(point.x - center.x, point.y - center.y) < 0.75
+      ) {
+        decisionCenterEndpoints.push({ edge: group.dataset.workflowEdge, end, node: nodeId });
+      }
     }
   }
   const segments = (d) => {
@@ -340,6 +373,7 @@ function captureFrame(scenario, frame) {
     pathOverlaps,
     guideOverlaps,
     endpointErrors,
+    decisionCenterEndpoints,
     textOverlaps,
   };
 }

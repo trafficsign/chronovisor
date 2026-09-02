@@ -652,15 +652,19 @@ function workflowNodePositions(nodes) {
     ["preflight", { x: 272, y: 132 }],
     ["execution_plan", { x: 448, y: 132 }],
     ["context_choice", { x: 624, y: 104 }],
-    ["headroom", { x: 800, y: 132 }],
+    ["headroom", { x: 800, y: 132, type: "decision", radius: 48 }],
     ["reasoning_choice", { x: 960, y: 104 }],
-    ["fit", { x: 1328, y: 132 }],
+    ["fit", { x: 1328, y: 132, type: "decision", radius: 48 }],
   ]);
   main.forEach((node, index) => {
     const row = Math.floor(index / 5);
     const column = index % 5;
     const visualColumn = row % 2 ? column : 4 - column;
-    positions.set(node.id, { x: 112 + visualColumn * 304, y: 416 + row * 160 });
+    positions.set(node.id, {
+      x: 112 + visualColumn * 304,
+      y: 416 + row * 160,
+      type: node.type,
+    });
   });
   const result = positions.get("result") || positions.get(main.at(-1)?.id) || { x: 750, y: 100 };
   const hasEscalate = nodes.some((node) => node.id === "escalate");
@@ -678,27 +682,45 @@ function workflowPath(edge, positions) {
   const source = positions.get(edge.source);
   const target = positions.get(edge.target);
   if (!source || !target) return "";
+  let points;
   if (edge.source === "result" && positions.has("escalate")
       && ["hold", "escalate"].includes(edge.target)) {
     const branchX = source.x + (edge.target === "hold" ? -15 : 15);
-    return `M${source.x} ${source.y} L${branchX} ${source.y + 15} V${target.y} H${target.x}`;
-  }
-  if (edge.kind === "loop" && edge.source === "escalate") {
+    points = [source, { x: branchX, y: source.y + 15 }, { x: branchX, y: target.y }, target];
+  } else if (edge.kind === "loop" && edge.source === "escalate") {
     const floor = Math.max(source.y, target.y) + 95;
-    return `M${source.x} ${source.y} V${floor} H${target.x} V${target.y}`;
-  }
-  if (edge.kind === "loop") {
+    points = [source, { x: source.x, y: floor }, { x: target.x, y: floor }, target];
+  } else if (edge.kind === "loop") {
     const ceiling = Math.max(32, Math.min(source.y, target.y) - 62);
     const outside = source.x < target.x ? 60 : 1420;
-    return `M${source.x} ${source.y} H${outside} V${ceiling} H${target.x} V${target.y}`;
-  }
-  if (edge.label === "NOOP" && source.y === target.y) {
+    points = [source, { x: outside, y: source.y }, { x: outside, y: ceiling }, { x: target.x, y: ceiling }, target];
+  } else if (edge.label === "NOOP" && source.y === target.y) {
     const bypass = source.y - 54;
-    return `M${source.x} ${source.y} V${bypass} H${target.x} V${target.y}`;
+    points = [source, { x: source.x, y: bypass }, { x: target.x, y: bypass }, target];
+  } else if (source.y === target.y || source.x === target.x) {
+    points = [source, target];
+  } else {
+    points = [source, { x: source.x, y: target.y }, target];
   }
-  if (source.y === target.y) return `M${source.x} ${source.y} H${target.x}`;
-  if (source.x === target.x) return `M${source.x} ${source.y} V${target.y}`;
-  return `M${source.x} ${source.y} V${target.y} H${target.x}`;
+  const decisionPort = (position, toward) => {
+    if (position.type !== "decision") return position;
+    const dx = toward.x - position.x;
+    const dy = toward.y - position.y;
+    const scale = (position.radius || 30) / (Math.abs(dx) + Math.abs(dy));
+    return { x: position.x + dx * scale, y: position.y + dy * scale };
+  };
+  points[0] = decisionPort(points[0], points[1]);
+  points[points.length - 1] = decisionPort(points.at(-1), points.at(-2));
+  const route = points.filter((point, index) => (
+    !index || point.x !== points[index - 1].x || point.y !== points[index - 1].y
+  ));
+  return route.map((point, index) => {
+    if (!index) return `M${point.x} ${point.y}`;
+    const previous = route[index - 1];
+    if (previous.y === point.y) return `H${point.x}`;
+    if (previous.x === point.x) return `V${point.y}`;
+    return `L${point.x} ${point.y}`;
+  }).join(" ");
 }
 
 function workflowEdgeLabelPosition(edge, positions) {

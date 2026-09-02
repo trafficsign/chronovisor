@@ -3230,7 +3230,7 @@ def test_decision_trace_context_options_flow_left_to_right() -> None:
     assert len(context_paths) == 8
     assert [slot for slot, _path in context_paths] == ["0", "1", "2", "3"] * 2
     assert all(path.startswith("M448 132") and path.endswith("H624") for _slot, path in context_paths[:4])
-    assert all(path.startswith("M624") and path.endswith("H800") for _slot, path in context_paths[4:])
+    assert all(path.startswith("M624") and path.endswith("H752") for _slot, path in context_paths[4:])
     assert "projectedContext.findIndex((option) => option.selected)" in renderer
     assert "path.dataset.contextSlot === String(contextIndex)" in renderer
 
