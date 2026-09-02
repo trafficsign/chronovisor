@@ -227,13 +227,14 @@ function captureFrame(scenario, frame) {
           candidate.y - (first.y + ratio * dy),
         );
       };
+      const centerDistance = Math.hypot(point.x - center.x, point.y - center.y);
       const endpointDistance = shape.tagName.toLowerCase() === "path"
         ? Math.min(...vertices.map((vertex, index) => distanceToSegment(
             point,
             vertex,
             vertices[(index + 1) % vertices.length],
           )))
-        : Math.hypot(point.x - center.x, point.y - center.y);
+        : Math.min(centerDistance, Math.abs(centerDistance - rect.width / 2));
       endpointErrors.push({
         edge: group.dataset.workflowEdge,
         end,
@@ -354,6 +355,41 @@ function captureFrame(scenario, frame) {
       && left.rect.top < right.rect.bottom && left.rect.bottom > right.rect.top
     ) textOverlaps.push([left.text, right.text]);
   }));
+  const decisionQuestions = [...harness.querySelectorAll(
+    "[data-workflow-nodes] .trace-node-decision",
+  )].map((node) => {
+    const shapeRect = node.querySelector(":scope > path").getBoundingClientRect();
+    const question = node.querySelector(":scope > text");
+    const questionRect = question.getBoundingClientRect();
+    return {
+      id: node.dataset.workflowNode,
+      text: question.textContent,
+      inside: questionRect.left >= shapeRect.left
+        && questionRect.right <= shapeRect.right
+        && questionRect.top >= shapeRect.top
+        && questionRect.bottom <= shapeRect.bottom,
+    };
+  });
+  const decisionBranchLabels = [...harness.querySelectorAll(
+    "[data-workflow-edge]",
+  )].flatMap((group) => {
+    const source = harness.querySelector(
+      `[data-workflow-node="${group.dataset.source}"]`,
+    );
+    const label = group.querySelector(".trace-branch-label");
+    if (!source?.classList.contains("trace-node-decision") || !label) return [];
+    const shapeRect = source.querySelector(":scope > path").getBoundingClientRect();
+    const labelRect = label.getBoundingClientRect();
+    const dx = Math.max(shapeRect.left - labelRect.right, 0, labelRect.left - shapeRect.right);
+    const dy = Math.max(shapeRect.top - labelRect.bottom, 0, labelRect.top - shapeRect.bottom);
+    return [{
+      id: group.dataset.workflowEdge,
+      text: label.textContent,
+      state: group.dataset.state,
+      labelState: label.dataset.state,
+      distance: Math.hypot(dx, dy),
+    }];
+  });
   return {
     scenario: scenario.id,
     pipeline: scenario.pipeline,
@@ -375,6 +411,8 @@ function captureFrame(scenario, frame) {
     endpointErrors,
     decisionCenterEndpoints,
     textOverlaps,
+    decisionQuestions,
+    decisionBranchLabels,
   };
 }
 

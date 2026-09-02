@@ -3275,6 +3275,11 @@ canvas {
   fill: #c4cad0;
 }
 
+.decision-trace-harness .trace-branch-label.done {
+  fill: #a5a8ff;
+  filter: drop-shadow(0 0 3px rgba(142, 145, 255, 0.55));
+}
+
 .decision-trace-harness .trace-path.active {
   stroke: #ff9400;
   stroke-dasharray: none;
@@ -3302,6 +3307,7 @@ canvas {
 .decision-trace-harness .trace-node.active text,
 .decision-trace-harness .trace-branch-label.active {
   fill: #ffb340;
+  filter: drop-shadow(0 0 3px rgba(255, 148, 0, 0.62));
 }
 
 .decision-trace-harness .trace-path.error {

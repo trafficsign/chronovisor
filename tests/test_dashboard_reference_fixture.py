@@ -71,6 +71,9 @@ def test_dashboard_keeps_one_fixed_plan_and_one_dynamic_pipeline_mount() -> None
     assert "function advanceDecisionTraceOneStep" in renderer
     assert "updateIngestJobTrace" not in renderer
     assert "project_processing_trace" not in renderer
+    assert 'class="trace-diamond trace-node-plan" data-workflow-node="fit"' not in page
+    assert 'class="trace-node trace-node-plan" data-workflow-node="fit"' in page
+    assert 'class="trace-branch-label trace-fit-outcome"' in page
 
 
 def test_dashboard_css_has_one_state_system_for_nodes_and_edges() -> None:
@@ -105,6 +108,13 @@ def _capture_stepper_visuals(
                 screenshot = visual_dir / (
                     f"{scenario['id']}-{frame['cursor']:02d}-{frame['milestone']}.png"
                 )
+                if (
+                    screenshot.is_file()
+                    and screenshot.stat().st_size > 0
+                    and screenshot.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+                ):
+                    image_index += 1
+                    continue
                 process = subprocess.Popen(
                     [
                         _chrome(),
@@ -128,8 +138,7 @@ def _capture_stepper_visuals(
                         ),
                     ],
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
+                    stderr=subprocess.DEVNULL,
                 )
                 deadline = time.monotonic() + 15
                 while not screenshot.is_file() and time.monotonic() < deadline:
@@ -139,12 +148,12 @@ def _capture_stepper_visuals(
                 if process.poll() is None:
                     process.terminate()
                 try:
-                    _, stderr = process.communicate(timeout=3)
+                    process.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     process.kill()
-                    _, stderr = process.communicate(timeout=3)
+                    process.wait(timeout=10)
                 assert screenshot.is_file() and screenshot.stat().st_size > 0
-                assert process.returncode in {0, -signal.SIGTERM}, stderr[-2000:]
+                assert process.returncode in {0, -signal.SIGTERM, -signal.SIGKILL}
                 assert screenshot.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
                 image_index += 1
     finally:
@@ -260,7 +269,7 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
                     )
             assert positions[main[0]] == (1328.0, 416.0)
             dispatch = next(path for path in paths if path["source"] == "fit")
-            assert dispatch["d"] == "M1328 180 V416"
+            assert dispatch["d"] == "M1328 142 V416"
             for row_index, start in enumerate(range(0, len(main), 5)):
                 row = main[start : start + 5]
                 xs = [positions[node][0] for node in row]
@@ -276,6 +285,20 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         assert result["guideOverlaps"] == []
         assert result["textOverlaps"] == []
         assert result["decisionCenterEndpoints"] == []
+        assert all(question["inside"] for question in result["decisionQuestions"]), (
+            scenario["id"],
+            frame["cursor"],
+            result["decisionQuestions"],
+        )
+        assert all(
+            branch["labelState"] == branch["state"]
+            and branch["distance"] <= 48
+            for branch in result["decisionBranchLabels"]
+        ), (
+            scenario["id"],
+            frame["cursor"],
+            result["decisionBranchLabels"],
+        )
         worst_endpoint = max(
             result["endpointErrors"],
             key=lambda error: error["distance"],

@@ -654,7 +654,7 @@ function workflowNodePositions(nodes) {
     ["context_choice", { x: 624, y: 104 }],
     ["headroom", { x: 800, y: 132, type: "decision", radius: 48 }],
     ["reasoning_choice", { x: 960, y: 104 }],
-    ["fit", { x: 1328, y: 132, type: "decision", radius: 48 }],
+    ["fit", { x: 1328, y: 132, type: "circle", radius: 10 }],
   ]);
   main.forEach((node, index) => {
     const row = Math.floor(index / 5);
@@ -678,10 +678,10 @@ function workflowNodePositions(nodes) {
   return positions;
 }
 
-function workflowPath(edge, positions) {
+function workflowRoutePoints(edge, positions) {
   const source = positions.get(edge.source);
   const target = positions.get(edge.target);
-  if (!source || !target) return "";
+  if (!source || !target) return [];
   let points;
   if (edge.source === "result" && positions.has("escalate")
       && ["hold", "escalate"].includes(edge.target)) {
@@ -702,18 +702,26 @@ function workflowPath(edge, positions) {
   } else {
     points = [source, { x: source.x, y: target.y }, target];
   }
-  const decisionPort = (position, toward) => {
-    if (position.type !== "decision") return position;
+  const nodePort = (position, toward) => {
+    const radius = position.radius || (position.type === "decision" ? 30 : 0);
+    if (!radius) return position;
     const dx = toward.x - position.x;
     const dy = toward.y - position.y;
-    const scale = (position.radius || 30) / (Math.abs(dx) + Math.abs(dy));
+    const distance = position.type === "decision"
+      ? Math.abs(dx) + Math.abs(dy)
+      : Math.hypot(dx, dy);
+    const scale = radius / distance;
     return { x: position.x + dx * scale, y: position.y + dy * scale };
   };
-  points[0] = decisionPort(points[0], points[1]);
-  points[points.length - 1] = decisionPort(points.at(-1), points.at(-2));
-  const route = points.filter((point, index) => (
+  points[0] = nodePort(points[0], points[1]);
+  points[points.length - 1] = nodePort(points.at(-1), points.at(-2));
+  return points.filter((point, index) => (
     !index || point.x !== points[index - 1].x || point.y !== points[index - 1].y
   ));
+}
+
+function workflowPath(edge, positions) {
+  const route = workflowRoutePoints(edge, positions);
   return route.map((point, index) => {
     if (!index) return `M${point.x} ${point.y}`;
     const previous = route[index - 1];
@@ -726,6 +734,26 @@ function workflowPath(edge, positions) {
 function workflowEdgeLabelPosition(edge, positions) {
   const source = positions.get(edge.source);
   const target = positions.get(edge.target);
+  const route = workflowRoutePoints(edge, positions);
+  if (source?.type === "decision" && route.length > 1) {
+    const start = route[0];
+    const next = route[1];
+    const dx = next.x - start.x;
+    const dy = next.y - start.y;
+    if (Math.abs(dx) >= Math.abs(dy)) {
+      return {
+        x: start.x + Math.sign(dx || 1) * Math.min(8, Math.abs(dx) / 3),
+        y: start.y - 28,
+        textAnchor: "middle",
+      };
+    }
+    const side = Math.sign(target.x - source.x) || 1;
+    return {
+      x: start.x + side * 36,
+      y: start.y + Math.sign(dy || 1) * Math.min(10, Math.abs(dy) / 2),
+      textAnchor: side < 0 ? "end" : "start",
+    };
+  }
   if (edge.source === "result" && positions.has("escalate")
       && ["hold", "escalate"].includes(edge.target)) {
     const branchX = source.x + (edge.target === "hold" ? -15 : 15);
@@ -794,7 +822,7 @@ function mountDecisionWorkflow(projection) {
       const label = svgElement("text", {
         x: position.x,
         y: position.y,
-        "text-anchor": "middle",
+        "text-anchor": position.textAnchor || "middle",
       });
       label.classList.add("trace-branch-label");
       label.textContent = edge.label;
@@ -817,17 +845,35 @@ function mountDecisionWorkflow(projection) {
     } else {
       group.append(svgElement("circle", { r: item.type === "terminal" ? 12 : 10 }));
     }
-    const sideLabel = (workflow.edges || []).some(
+    const sideLabel = item.type !== "decision" && (workflow.edges || []).some(
       (edge) => (
         edge.target === item.id && workflowEdgeEntersVertically(edge, positions)
       ) || (
         edge.source === item.id && edge.label === "NOOP"
       )
     );
-    const label = svgElement("text", sideLabel
-      ? { x: 16, y: -14, "text-anchor": "start" }
-      : { y: -23, "text-anchor": "middle" });
-    label.textContent = item.label;
+    const label = svgElement("text", item.type === "decision"
+      ? { "text-anchor": "middle" }
+      : sideLabel
+        ? { x: 16, y: -14, "text-anchor": "start" }
+        : { y: -23, "text-anchor": "middle" });
+    if (item.type === "decision") {
+      const words = item.label.split(/\s+/);
+      const split = Math.ceil(words.length / 2);
+      const lines = words.length > 1
+        ? [words.slice(0, split).join(" "), words.slice(split).join(" ")]
+        : words;
+      lines.forEach((line, index) => {
+        const row = svgElement("tspan", {
+          x: 0,
+          y: lines.length === 1 ? 4 : -3 + index * 13,
+        });
+        row.textContent = line;
+        label.append(row);
+      });
+    } else {
+      label.textContent = item.label;
+    }
     group.append(label);
     nodeLayer.append(group);
   });
@@ -900,6 +946,10 @@ function updateDecisionSvgHarness(trace, _focusEvent = null, visibleFrame = null
   harness.querySelectorAll("[data-workflow-node]").forEach((node) => {
     setDecisionSvgState(node, states[node.dataset.workflowNode]);
   });
+  setDecisionSvgState(
+    harness.querySelector('[data-plan-value="fit"]'),
+    states.fit,
+  );
   harness.querySelectorAll("[data-workflow-edge]").forEach((group) => {
     const state = edgeStates[group.dataset.workflowEdge];
     setDecisionSvgState(group, state);

@@ -23,6 +23,8 @@ _PLAN_ROUTE: Final = (
 
 
 def _node(key: str, label: str, kind: str = "step") -> dict[str, str]:
+    if kind == "decision" and not label.endswith("?"):
+        label = f"{label}?"
     return {"id": key, "label": label, "type": kind}
 
 
@@ -94,7 +96,7 @@ def _with_execution_plan(workflow: dict[str, Any]) -> None:
             _edge(source, target)
             for source, target in zip(_PLAN_ROUTE, _PLAN_ROUTE[1:], strict=False)
         ),
-        _edge("fit", first, "DISPATCH"),
+        _edge("fit", first),
         *workflow["edges"],
     ]
     workflow["routes"] = {

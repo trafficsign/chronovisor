@@ -125,6 +125,19 @@ def test_six_workflow_patterns_inventory_every_milestone() -> None:
             if node["type"] == "decision"
         )
         assert all(
+            node["label"].endswith("?")
+            for node in workflow["nodes"]
+            if node["type"] == "decision"
+        )
+        decision_ids = {
+            node["id"] for node in workflow["nodes"] if node["type"] == "decision"
+        }
+        assert all(
+            edge.get("label")
+            for edge in workflow["edges"]
+            if edge["source"] in decision_ids
+        )
+        assert all(
             tuple(route[: len(COMMON_PLAN_MILESTONES)]) == COMMON_PLAN_MILESTONES
             and route[-1] in {"complete", "hold"}
             for route in workflow["routes"].values()
