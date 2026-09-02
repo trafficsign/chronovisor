@@ -355,6 +355,14 @@ function captureFrame(scenario, frame) {
       && left.rect.top < right.rect.bottom && left.rect.bottom > right.rect.top
     ) textOverlaps.push([left.text, right.text]);
   }));
+  const reasoningLabelClearances = [...harness.querySelectorAll(".trace-reasoning")].map((group) => {
+    const circleRect = group.querySelector("circle").getBoundingClientRect();
+    const labelRect = group.querySelector("[data-reasoning-label]").getBoundingClientRect();
+    return {
+      key: group.dataset.reasoningKey,
+      clearance: labelRect.top - (circleRect.top + circleRect.height / 2),
+    };
+  });
   const decisionQuestions = [...harness.querySelectorAll(
     "[data-workflow-nodes] .trace-node-decision",
   )].map((node) => {
@@ -411,6 +419,7 @@ function captureFrame(scenario, frame) {
     endpointErrors,
     decisionCenterEndpoints,
     textOverlaps,
+    reasoningLabelClearances,
     decisionQuestions,
     decisionBranchLabels,
   };

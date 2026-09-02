@@ -3196,6 +3196,10 @@ canvas {
   fill: #65737e;
 }
 
+.decision-trace-harness .trace-reasoning text {
+  transform: translateY(10px);
+}
+
 .decision-trace-harness .trace-label-backdrop {
   fill: #031522;
   stroke: none;

@@ -285,6 +285,14 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         assert result["pathIntersections"] == []
         assert result["guideOverlaps"] == []
         assert result["textOverlaps"] == []
+        assert all(
+            item["clearance"] > 1.5
+            for item in result["reasoningLabelClearances"]
+        ), (
+            scenario["id"],
+            frame["cursor"],
+            result["reasoningLabelClearances"],
+        )
         assert result["decisionCenterEndpoints"] == []
         assert all(question["inside"] for question in result["decisionQuestions"]), (
             scenario["id"],
