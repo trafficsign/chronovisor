@@ -1337,8 +1337,9 @@ function renderDecisionTraceFrame(trace, focusEvent = null, workflowFrame = null
   const traceState = String(trace.state || "idle");
   const single = isSingleModelTrace(trace);
   const request = String(trace.request_sha256 || "");
+  const executionId = String(decisionTraceProjection(trace)?.execution_id || request);
   const active = trace.active === true;
-  els.decisionTraceCaption.textContent = request ? `Job ${request.slice(0, 8)}` : "Job --";
+  els.decisionTraceCaption.textContent = executionId ? `Job ${executionId.slice(0, 8)}` : "Job --";
   els.decisionElapsed.textContent = trace.started_at
     ? `Elapsed ${compactDuration(Math.max(0, (Date.now() - parseMs(trace.started_at)) / 1000))}`
     : "Elapsed --";
@@ -1455,15 +1456,11 @@ function setDecisionTransitionState(trace) {
   }
 }
 
-const DECISION_PROGRESS_INTERVAL_MS = 500;
 const decisionTracePlayback = {
   executionId: "",
   graphId: "",
   revision: 0,
-  trace: null,
   frame: null,
-  lastRenderedAt: 0,
-  timer: null,
 };
 
 function decisionTraceRevision(projection) {
@@ -1474,15 +1471,11 @@ function decisionTraceRevision(projection) {
 }
 
 function resetDecisionTracePlayback(projection) {
-  if (decisionTracePlayback.timer !== null) window.clearTimeout(decisionTracePlayback.timer);
   Object.assign(decisionTracePlayback, {
     executionId: fmt(projection?.execution_id, "idle"),
     graphId: fmt(projection?.graph_id, "idle"),
     revision: 0,
-    trace: null,
     frame: null,
-    lastRenderedAt: 0,
-    timer: null,
   });
 }
 
@@ -1537,32 +1530,6 @@ function renderDecisionTraceNow(trace) {
   setDecisionTransitionState(trace);
 }
 
-function scheduleDecisionTraceDrain() {
-  const frame = decisionTracePlayback.frame;
-  if (
-    decisionTracePlayback.timer !== null
-    || !frame
-    || frame.cursor >= frame.target_cursor
-  ) return;
-  decisionTracePlayback.timer = window.setTimeout(
-    drainDecisionTracePlayback,
-    Math.max(
-      0,
-      DECISION_PROGRESS_INTERVAL_MS - (Date.now() - decisionTracePlayback.lastRenderedAt),
-    ),
-  );
-}
-
-function drainDecisionTracePlayback() {
-  decisionTracePlayback.timer = null;
-  const projection = decisionTraceProjection(decisionTracePlayback.trace);
-  if (advanceDecisionTraceOneStep(decisionTracePlayback, projection)) {
-    renderDecisionTraceNow(decisionTracePlayback.trace);
-    decisionTracePlayback.lastRenderedAt = Date.now();
-  }
-  scheduleDecisionTraceDrain();
-}
-
 function renderDecisionTrace(consensus) {
   const trace = consensus?.decision_trace || {};
   const projection = decisionTraceProjection(trace);
@@ -1582,22 +1549,9 @@ function renderDecisionTrace(consensus) {
   } else if (revision && revision < decisionTracePlayback.revision) {
     return false;
   }
-  decisionTracePlayback.trace = trace;
   decisionTracePlayback.revision = Math.max(decisionTracePlayback.revision, revision);
-  const skipPacing = document.visibilityState === "hidden"
-    || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-
-  if (!decisionTracePlayback.frame) {
-    advanceDecisionTraceOneStep(decisionTracePlayback, projection);
-  } else {
-    synchronizeDecisionTraceTarget(decisionTracePlayback, projection);
-  }
-  if (skipPacing) {
-    while (advanceDecisionTraceOneStep(decisionTracePlayback, projection)) {}
-  }
+  while (advanceDecisionTraceOneStep(decisionTracePlayback, projection)) {}
   renderDecisionTraceNow(trace);
-  decisionTracePlayback.lastRenderedAt = Date.now();
-  scheduleDecisionTraceDrain();
   return true;
 }
 window.__chronovisorDashboardTest = Object.assign(window.__chronovisorDashboardTest || {}, {

@@ -351,7 +351,8 @@ def test_renderer_owns_geometry_only_when_mounting_a_graph() -> None:
     assert "updateIngestJobTrace" not in renderer
     assert "projection.processing" not in renderer
     assert "function advanceDecisionTraceOneStep" in renderer
-    assert "DECISION_PROGRESS_INTERVAL_MS = 500" in renderer
+    assert "DECISION_PROGRESS_INTERVAL_MS" not in renderer
+    assert "decisionTraceProjection(trace)?.execution_id || request" in renderer
     assert 'setAttribute("d"' not in renderer
     assert not re.search(
         r'setAttribute\(\s*["\'](?:d|transform|viewBox|height)["\']',
@@ -404,33 +405,15 @@ process.stdout.write(JSON.stringify({{ cursors, changed, cursor: playback.frame.
     }
 
 
-def test_browser_stepper_drains_one_milestone_every_half_second() -> None:
+def test_browser_applies_every_observed_milestone_in_the_same_frame() -> None:
     renderer = (ROOT / "src/chronovisor/dashboard_static/app-renderer.js").read_text(
         encoding="utf-8"
     )
-    pacing = (
-        "const DECISION_PROGRESS_INTERVAL_MS"
-        + renderer.split("const DECISION_PROGRESS_INTERVAL_MS", 1)[1].split(
-            "window.__chronovisorDashboardTest", 1
-        )[0]
-    ).replace(
-        """function renderDecisionTraceNow(trace) {
-  renderDecisionTraceFrame(trace, null, decisionTracePlayback.frame);
-  renderDecisionTransitionFeed(trace);
-  setDecisionTransitionState(trace);
-}""",
-        """function renderDecisionTraceNow(_trace) {
-  frames.push(decisionTracePlayback.frame.cursor);
-}""",
-    )
     scenario = f"""
 const vm = require("node:vm");
-const scheduled = [];
 const frames = [];
-const delays = [];
-let clock = 0;
+const scheduled = [];
 const sandbox = {{
-  Date: {{ now: () => clock, parse: Date.parse }},
   document: {{ visibilityState: "visible" }},
   frames,
   window: {{
@@ -444,36 +427,37 @@ const sandbox = {{
 }};
 vm.createContext(sandbox);
 vm.runInContext(
-  `function fmt(value, fallback) {{ return value ?? fallback; }}
-   function decisionTraceProjection(trace) {{ return trace?.projection || null; }}
-   {pacing}
-   this.__test = {{ renderDecisionTrace }};`,
+  {json.dumps(renderer)}
+    + `
+renderDecisionTraceFrame = (_trace, _event, frame) => frames.push(frame.cursor);
+renderDecisionTransitionFeed = () => {{}};
+setDecisionTransitionState = () => {{}};
+this.__test = {{ renderDecisionTrace, decisionTracePlayback }};`,
   sandbox,
 );
-const workflow = {{
-  nodes: [], edges: [], route: "success",
-  route_node_ids: ["a", "b", "c", "d"],
-  target_cursor: 3, target_node: "d", target_state: "active",
-}};
-sandbox.__test.renderDecisionTrace({{ decision_trace: {{
-  active: true,
-  request_sha256: "execution",
+const traceAt = (executionId, cursor) => ({{ decision_trace: {{
+  request_sha256: executionId,
   events: [],
   projection: {{
     schema: "chronovisor.decision-trace-projection.v3",
-    execution_id: "execution",
-    graph_id: "workflow:test:v1",
-    revision: "3",
-    workflow,
+    execution_id: executionId,
+    graph_id: "workflow:ingest:v2",
+    revision: String(cursor),
+    workflow: {{
+      nodes: [], edges: [], route: "success",
+      route_node_ids: ["raw", "triage", "target", "generate", "authority"],
+      target_cursor: cursor, target_node: "authority", target_state: "active",
+    }},
   }},
 }} }});
-while (scheduled.length) {{
-  const task = scheduled.shift();
-  delays.push(task.delay);
-  clock += task.delay;
-  task.callback();
-}}
-process.stdout.write(JSON.stringify({{ frames, delays }}));
+sandbox.__test.renderDecisionTrace(traceAt("first-raw", 4));
+sandbox.__test.renderDecisionTrace(traceAt("second-raw", 2));
+process.stdout.write(JSON.stringify({{
+  executionId: sandbox.__test.decisionTracePlayback.executionId,
+  cursor: sandbox.__test.decisionTracePlayback.frame.cursor,
+  frames,
+  scheduled: scheduled.length,
+}}));
 """
     completed = subprocess.run(
         ["node", "-e", scenario],
@@ -484,8 +468,10 @@ process.stdout.write(JSON.stringify({{ frames, delays }}));
     )
 
     assert json.loads(completed.stdout) == {
-        "frames": [0, 1, 2, 3],
-        "delays": [500, 500, 500],
+        "executionId": "second-raw",
+        "cursor": 2,
+        "frames": [4, 2],
+        "scheduled": 0,
     }
 
 

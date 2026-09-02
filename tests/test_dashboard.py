@@ -3065,7 +3065,7 @@ def test_dashboard_static_labels_routine_review_as_local_consensus() -> None:
     assert "grid-template-columns: repeat(5, minmax(0, 1fr));" in style
     assert "projection?.workflow" in app
     assert "function advanceDecisionTraceOneStep" in app
-    assert "const DECISION_PROGRESS_INTERVAL_MS = 500" in app
+    assert "DECISION_PROGRESS_INTERVAL_MS" not in app
     assert ".decision-trace-panel" in style
     assert ".decision-trace-harness .trace-path.done" in style
     assert ".decision-trace-harness .trace-node.active" in style
@@ -3684,7 +3684,7 @@ process.stdout.write(JSON.stringify(sandbox.__test.frames));
         {"request": "same", "events": ["generate"]},
     ]
     assert "mergeDecisionTraceSnapshot" not in renderer
-    assert "const DECISION_PROGRESS_INTERVAL_MS = 500;" in renderer
+    assert "DECISION_PROGRESS_INTERVAL_MS" not in renderer
     assert "const decisionTracePlayback =" in renderer
 
 
