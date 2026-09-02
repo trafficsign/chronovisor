@@ -162,13 +162,17 @@ function renderFrame(scenario, frame) {
 
 function captureFrame(scenario, frame) {
   const harness = document.getElementById("decision-trace-harness");
-  const paths = [...harness.querySelectorAll("[data-workflow-edge]")].map((group) => ({
-    id: group.dataset.workflowEdge,
-    source: group.dataset.source,
-    target: group.dataset.target,
-    state: group.dataset.state,
-    d: group.querySelector("path").getAttribute("d"),
-  }));
+  const paths = [...harness.querySelectorAll("[data-workflow-edge]")].map((group) => {
+    const path = group.querySelector("path.selected") || group.querySelector("path");
+    return {
+      id: group.dataset.workflowEdge,
+      source: group.dataset.source,
+      target: group.dataset.target,
+      kind: group.dataset.kind,
+      state: group.dataset.state,
+      d: path.getAttribute("d"),
+    };
+  });
   const guides = [...harness.querySelectorAll(".trace-context-guide, .trace-reasoning-guide")].map((guide) => ({
     className: guide.getAttribute("class"),
     d: guide.getAttribute("d"),
@@ -182,6 +186,7 @@ function captureFrame(scenario, frame) {
     id: node.dataset.workflowNode,
     state: node.dataset.state,
     transform: node.getAttribute("transform"),
+    shape: node.querySelector(":scope > path") ? "decision" : "circle",
   }));
   const labels = [...harness.querySelectorAll(".trace-node text, .trace-branch-label")].map((label) => {
     const rect = label.getBoundingClientRect();
@@ -294,6 +299,50 @@ function captureFrame(scenario, frame) {
     }
     return rows;
   };
+  const milestoneTurns = [];
+  const route = frame.trace.projection.workflow.route_node_ids;
+  route.slice(1, -1).forEach((nodeId, index) => {
+    const node = nodes.find((item) => item.id === nodeId);
+    if (node?.shape !== "circle") return;
+    const previousId = route[index];
+    const nextId = route[index + 2];
+    const incoming = paths.find((path) => (
+      path.source === previousId && path.target === nodeId
+    ));
+    const outgoing = paths.find((path) => (
+      path.source === nodeId && path.target === nextId
+    ));
+    if (incoming?.kind !== "main" || outgoing?.kind !== "main") return;
+    const tangent = (edge, atEnd) => {
+      if (!edge) return null;
+      const group = harness.querySelector(`[data-workflow-edge="${edge.id}"]`);
+      const path = group?.querySelector("path.selected") || group?.querySelector("path");
+      const length = path?.getTotalLength() || 0;
+      if (!length) return null;
+      const first = path.getPointAtLength(atEnd ? Math.max(0, length - 1) : 0);
+      const second = path.getPointAtLength(atEnd ? length : Math.min(1, length));
+      const dx = second.x - first.x;
+      const dy = second.y - first.y;
+      return Math.abs(dx) >= Math.abs(dy)
+        ? [Math.sign(dx), 0]
+        : [0, Math.sign(dy)];
+    };
+    const incomingDirection = tangent(incoming, true);
+    const outgoingDirection = tangent(outgoing, false);
+    if (
+      incomingDirection && outgoingDirection
+      && (incomingDirection[0] !== outgoingDirection[0]
+        || incomingDirection[1] !== outgoingDirection[1])
+    ) {
+      milestoneTurns.push({
+        node: nodeId,
+        incoming: incoming.id,
+        outgoing: outgoing.id,
+        incomingDirection,
+        outgoingDirection,
+      });
+    }
+  });
   const between = (value, first, second) =>
     value >= Math.min(first, second) && value <= Math.max(first, second);
   const intersects = (left, right) => {
@@ -432,6 +481,7 @@ function captureFrame(scenario, frame) {
     paths,
     guides,
     sharpCorners,
+    milestoneTurns,
     nodes,
     pathLabelCollisions: [...new Set(pathLabelCollisions.map(JSON.stringify))].map(JSON.parse),
     pathIntersections,

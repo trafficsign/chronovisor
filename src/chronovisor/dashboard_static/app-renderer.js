@@ -656,24 +656,38 @@ function workflowNodePositions(nodes) {
     ["reasoning_choice", { x: 960, y: 104 }],
     ["fit", { x: 1328, y: 132, type: "circle", radius: 10 }],
   ]);
-  main.forEach((node, index) => {
-    const row = Math.floor(index / 5);
-    const column = index % 5;
-    const visualColumn = row % 2 ? column : 4 - column;
+  const resultIndex = main.findIndex((node) => node.id === "result");
+  const firstRow = resultIndex >= 0 ? main.slice(0, resultIndex + 1) : main;
+  const secondRow = resultIndex >= 0 ? main.slice(resultIndex + 1) : [];
+  const firstGap = firstRow.length > 1
+    ? Math.min(230, 1020 / (firstRow.length - 1))
+    : 0;
+  firstRow.forEach((node, index) => {
     positions.set(node.id, {
-      x: 112 + visualColumn * 304,
-      y: 416 + row * 160,
+      x: 1260 - index * firstGap,
+      y: 416,
       type: node.type,
     });
   });
   const result = positions.get("result") || positions.get(main.at(-1)?.id) || { x: 750, y: 100 };
+  const secondStart = result.x + (secondRow[0]?.type === "decision" ? 0 : 80);
+  const secondGap = secondRow.length > 1
+    ? Math.min(230, (1260 - secondStart) / (secondRow.length - 1))
+    : 0;
+  secondRow.forEach((node, index) => {
+    positions.set(node.id, {
+      x: secondStart + index * secondGap,
+      y: 576,
+      type: node.type,
+    });
+  });
   const hasEscalate = nodes.some((node) => node.id === "escalate");
   if (hasEscalate) positions.set("escalate", {
     x: result.x + 176, y: result.y + 104, type: "step",
   });
   if (nodes.some((node) => node.id === "hold")) {
     positions.set("hold", {
-      x: result.x + (hasEscalate ? -176 : result.x > 1180 ? -176 : 176),
+      x: Math.max(80, result.x - 176),
       y: result.y + 104,
       type: "terminal",
     });
@@ -686,20 +700,49 @@ function workflowRoutePoints(edge, positions) {
   const target = positions.get(edge.target);
   if (!source || !target) return [];
   let points;
-  if (edge.source === "result" && positions.has("escalate")
-      && ["hold", "escalate"].includes(edge.target)) {
-    const branchX = source.x + (edge.target === "hold" ? -15 : 15);
-    points = [source, { x: branchX, y: source.y + 15 }, { x: branchX, y: target.y }, target];
+  if (edge.source === "fit") {
+    points = [source, { x: 1368, y: source.y }, { x: 1368, y: target.y }, target];
+  } else if (edge.source === "result" && edge.target === "hold") {
+    points = [source, { x: target.x, y: source.y }, target];
+  } else if (edge.source === "result" && edge.label === "ACCEPTED"
+      && positions.has("escalate")) {
+    points = [source, { x: source.x - 45, y: target.y }, target];
+  } else if (edge.source === "result" && edge.target === "escalate") {
+    points = [source, { x: source.x + 45, y: target.y }, target];
   } else if (edge.kind === "loop" && edge.source === "escalate") {
-    const floor = Math.max(source.y, target.y) + 95;
-    points = [source, { x: source.x, y: floor }, { x: target.x, y: floor }, target];
+    points = [source, { x: target.x, y: source.y }, target];
   } else if (edge.kind === "loop") {
     const ceiling = Math.max(32, Math.min(source.y, target.y) - 62);
-    const outside = source.x < target.x ? 60 : 1420;
-    points = [source, { x: outside, y: source.y }, { x: outside, y: ceiling }, { x: target.x, y: ceiling }, target];
+    points = [
+      source,
+      { x: source.x, y: ceiling },
+      { x: target.x, y: ceiling },
+      target,
+    ];
   } else if (edge.label === "NOOP" && source.y === target.y) {
-    const bypass = source.y - 54;
-    points = [source, { x: source.x, y: bypass }, { x: target.x, y: bypass }, target];
+    const bypass = source.y + 62;
+    points = [
+      source,
+      { x: source.x, y: bypass },
+      { x: target.x, y: bypass },
+      target,
+    ];
+  } else if (source.x === target.x && source.type !== "decision") {
+    const turnX = source.x + (source.x < 720 ? -40 : 40);
+    points = target.type === "decision"
+      ? [
+          source,
+          { x: turnX, y: source.y },
+          { x: turnX, y: target.y - 40 },
+          { x: target.x, y: target.y - 40 },
+          target,
+        ]
+      : [
+          source,
+          { x: turnX, y: source.y },
+          { x: turnX, y: target.y },
+          target,
+        ];
   } else if (source.y === target.y || source.x === target.x) {
     points = [source, target];
   } else {
@@ -739,7 +782,13 @@ function workflowPath(edge, positions) {
     const after = route[index + 2];
     const incoming = Math.hypot(corner.x - before.x, corner.y - before.y);
     const outgoing = Math.hypot(after.x - corner.x, after.y - corner.y);
-    const radius = Math.min(10, incoming / 2, outgoing / 2);
+    const joinsRail = index === route.length - 3
+      && (edge.kind === "loop" || edge.label === "NOOP");
+    const radius = Math.min(
+      joinsRail ? outgoing : 10,
+      incoming / 2,
+      joinsRail ? outgoing : outgoing / 2,
+    );
     const entry = {
       x: corner.x + (before.x - corner.x) * radius / incoming,
       y: corner.y + (before.y - corner.y) * radius / incoming,
@@ -751,7 +800,9 @@ function workflowPath(edge, positions) {
     commands.push(lineTo(cursor, entry), `Q${corner.x} ${corner.y} ${exit.x} ${exit.y}`);
     cursor = exit;
   });
-  commands.push(lineTo(cursor, route.at(-1)));
+  if (cursor.x !== route.at(-1).x || cursor.y !== route.at(-1).y) {
+    commands.push(lineTo(cursor, route.at(-1)));
+  }
   return commands.join(" ");
 }
 
@@ -759,6 +810,27 @@ function workflowEdgeLabelPosition(edge, positions) {
   const source = positions.get(edge.source);
   const target = positions.get(edge.target);
   const route = workflowRoutePoints(edge, positions);
+  if (edge.kind === "loop" && edge.source !== "escalate") {
+    return {
+      x: source.x + 52,
+      y: source.y - 35,
+    };
+  }
+  if (edge.source === "result" && edge.label === "ACCEPTED"
+      && positions.has("escalate")) {
+    return {
+      x: source.x - 34,
+      y: source.y + 36,
+      textAnchor: "end",
+    };
+  }
+  if (edge.source === "result" && edge.target === "escalate") {
+    return {
+      x: source.x + 34,
+      y: source.y + 36,
+      textAnchor: "start",
+    };
+  }
   if (source?.type === "decision" && route.length > 1) {
     const start = route[0];
     const next = route[1];
@@ -778,22 +850,11 @@ function workflowEdgeLabelPosition(edge, positions) {
       textAnchor: side < 0 ? "end" : "start",
     };
   }
-  if (edge.source === "result" && positions.has("escalate")
-      && ["hold", "escalate"].includes(edge.target)) {
-    const branchX = source.x + (edge.target === "hold" ? -15 : 15);
-    return { x: (branchX + target.x) / 2, y: target.y - 10 };
-  }
   if (edge.kind === "loop" && edge.source === "escalate") {
-    const floor = Math.max(source.y, target.y) + 95;
-    return { x: (source.x + target.x) / 2, y: floor - 9 };
-  }
-  if (edge.kind === "loop") {
-    const ceiling = Math.max(32, Math.min(source.y, target.y) - 62);
-    const outside = source.x < target.x ? 60 : 1420;
-    return { x: (outside + target.x) / 2, y: ceiling - 9 };
+    return { x: (source.x + target.x) / 2, y: source.y + 22 };
   }
   if (edge.label === "NOOP" && source.y === target.y) {
-    return { x: (source.x + target.x) / 2, y: source.y - 63 };
+    return { x: (source.x + target.x) / 2, y: source.y + 80 };
   }
   if (source.y === target.y) {
     return { x: (source.x + target.x) / 2, y: source.y - 10 };
@@ -805,12 +866,8 @@ function workflowEdgeLabelPosition(edge, positions) {
 }
 
 function workflowEdgeEntersVertically(edge, positions) {
-  const source = positions.get(edge.source);
-  const target = positions.get(edge.target);
-  if (!source || !target) return false;
-  return edge.kind === "loop"
-    || source.x === target.x
-    || (edge.label === "NOOP" && source.y === target.y);
+  const route = workflowRoutePoints(edge, positions);
+  return route.length > 1 && route.at(-2).x === route.at(-1).x;
 }
 
 function mountDecisionWorkflow(projection) {
@@ -833,6 +890,7 @@ function mountDecisionWorkflow(projection) {
       "data-workflow-edge": edge.id,
       "data-source": edge.source,
       "data-target": edge.target,
+      "data-kind": edge.kind,
     });
     group.classList.add("workflow-edge");
     const path = svgElement("path", {

@@ -271,17 +271,39 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
                     positions[node["id"]] = tuple(
                         map(float, raw.replace(",", " ").split())
                     )
-            assert positions[main[0]] == (1328.0, 416.0)
+            result_index = main.index("result")
+            first_row = main[: result_index + 1]
+            second_row = main[result_index + 1 :]
+            assert positions.get(first_row[0]) == (1260.0, 416.0), (
+                scenario["id"],
+                first_row[0],
+                positions,
+            )
             dispatch = next(path for path in paths if path["source"] == "fit")
-            assert dispatch["d"] == "M1328 142 V406"
-            for row_index, start in enumerate(range(0, len(main), 5)):
-                row = main[start : start + 5]
-                xs = [positions[node][0] for node in row]
-                assert len({positions[node][1] for node in row}) == 1
-                assert xs == sorted(xs, reverse=row_index % 2 == 0)
-                if start:
-                    assert positions[main[start - 1]][0] == positions[row[0]][0]
-                    assert positions[main[start - 1]][1] < positions[row[0]][1]
+            assert dispatch["d"] == (
+                "M1338 132 H1358 Q1368 132 1368 142 "
+                "V406 Q1368 416 1358 416 H1270"
+            )
+            first_xs = [positions[node][0] for node in first_row]
+            assert {positions[node][1] for node in first_row} == {416.0}
+            assert first_xs == sorted(first_xs, reverse=True)
+            assert all(
+                0 < left - right <= 230
+                for left, right in zip(first_xs, first_xs[1:], strict=False)
+            )
+            if second_row:
+                second_xs = [positions[node][0] for node in second_row]
+                assert {positions[node][1] for node in second_row} == {576.0}
+                assert second_xs == sorted(second_xs)
+                assert all(
+                    0 < right - left <= 230
+                    for left, right in zip(second_xs, second_xs[1:], strict=False)
+                )
+                first_after_result = next(
+                    node for node in workflow["nodes"] if node["id"] == second_row[0]
+                )
+                expected_offset = 0 if first_after_result["type"] == "decision" else 80
+                assert positions[second_row[0]][0] - positions["result"][0] == expected_offset
             layout_checked.add(scenario["pipeline"])
         assert all(path["d"] for path in paths)
         assert all(guide["d"].count("Q") == 4 for guide in result["guides"])
@@ -290,10 +312,23 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
             frame["cursor"],
             result["sharpCorners"],
         )
-        assert result["pathLabelCollisions"] == []
+        assert result["milestoneTurns"] == [], (
+            scenario["id"],
+            frame["cursor"],
+            result["milestoneTurns"],
+        )
+        assert result["pathLabelCollisions"] == [], (
+            scenario["id"],
+            frame["cursor"],
+            result["pathLabelCollisions"],
+        )
         assert result["pathIntersections"] == []
         assert result["guideOverlaps"] == []
-        assert result["textOverlaps"] == []
+        assert result["textOverlaps"] == [], (
+            scenario["id"],
+            frame["cursor"],
+            result["textOverlaps"],
+        )
         assert all(
             item["clearance"] > 1.5
             for item in result["reasoningLabelClearances"]
