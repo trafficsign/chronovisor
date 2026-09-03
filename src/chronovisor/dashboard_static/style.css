@@ -3211,6 +3211,7 @@ canvas {
   stroke: #7d8992;
   stroke-width: 1.05;
   stroke-dasharray: 4 5;
+  opacity: 0.5;
   vector-effect: non-scaling-stroke;
 }
 
@@ -3334,12 +3335,6 @@ canvas {
 .decision-trace-harness .trace-node.error text,
 .decision-trace-harness .trace-branch-label.error {
   fill: #ff5966;
-}
-
-.decision-trace-harness .trace-path.skipped,
-.decision-trace-harness .trace-node.skipped,
-.decision-trace-harness .trace-branch-label.skipped {
-  opacity: 0.24;
 }
 
 .decision-trace-harness .trace-node-terminal.done > circle {

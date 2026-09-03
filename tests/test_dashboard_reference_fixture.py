@@ -87,7 +87,6 @@ def test_dashboard_css_has_one_state_system_for_nodes_and_edges() -> None:
         ".decision-trace-harness .trace-path.done",
         ".decision-trace-harness .trace-path.active",
         ".decision-trace-harness .trace-path.error",
-        ".decision-trace-harness .trace-path.skipped",
         ".decision-trace-harness .trace-node.done > circle",
         ".decision-trace-harness .trace-node.active > circle",
         ".decision-trace-harness .trace-node.error > circle",
@@ -96,6 +95,9 @@ def test_dashboard_css_has_one_state_system_for_nodes_and_edges() -> None:
     assert ".trace-ingest-job" not in style
     assert ".decision-lane-step" not in style
     assert ".trace-repair-loop" not in style
+    assert ".decision-trace-harness .trace-path.skipped" not in style
+    assert ".decision-trace-harness .trace-node.skipped" not in style
+    assert ".decision-trace-harness .trace-branch-label.skipped" not in style
 
 
 def _capture_stepper_visuals(
@@ -325,7 +327,7 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
             }
             assert style == {
                 "display": "inline",
-                "opacity": "1",
+                "opacity": "0.5",
                 "stroke": "rgb(125, 137, 146)",
                 "strokeDasharray": "4px, 5px",
                 "strokeWidth": "1.05px",
@@ -338,10 +340,14 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
                 style,
             )
         skipped_elements_seen += len(result["skippedElements"])
-        assert all(
-            element["opacity"] == "0.24"
-            for element in result["skippedElements"]
-        ), (scenario["id"], frame["cursor"], result["skippedElements"])
+        for element in result["skippedElements"]:
+            classes = str(element["className"]).split()
+            expected_opacity = "0.7" if "trace-path" in classes else "1"
+            assert element["opacity"] == expected_opacity, (
+                scenario["id"],
+                frame["cursor"],
+                element,
+            )
         assert result["sharpCorners"] == [], (
             scenario["id"],
             frame["cursor"],
