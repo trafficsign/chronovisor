@@ -3151,7 +3151,9 @@ canvas {
   letter-spacing: 0.06em;
 }
 
-.decision-trace-harness .trace-path {
+.decision-trace-harness .trace-path,
+.decision-trace-harness .trace-context-guide,
+.decision-trace-harness .trace-reasoning-guide {
   fill: none;
   stroke: #536671;
   stroke-width: 1.35;
@@ -3203,16 +3205,6 @@ canvas {
 .decision-trace-harness .trace-label-backdrop {
   fill: #031522;
   stroke: none;
-}
-
-.decision-trace-harness .trace-context-guide,
-.decision-trace-harness .trace-reasoning-guide {
-  fill: none;
-  stroke: #7d8992;
-  stroke-width: 1.05;
-  stroke-dasharray: 4 5;
-  opacity: 0.5;
-  vector-effect: non-scaling-stroke;
 }
 
 .decision-trace-harness .trace-choice-path {

@@ -319,14 +319,16 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
                     "opacity",
                     "stroke",
                     "strokeDasharray",
+                    "strokeWidth",
                     "visibility",
                 )
             }
             assert style == {
                 "display": "inline",
-                "opacity": "0.5",
-                "stroke": "rgb(125, 137, 146)",
-                "strokeDasharray": "4px, 5px",
+                "opacity": "0.7",
+                "stroke": "rgb(83, 102, 113)",
+                "strokeDasharray": "5px, 6px",
+                "strokeWidth": "1.35px",
                 "visibility": "visible",
             }, (scenario["id"], frame["cursor"], class_name, style)
             assert style == plan_guide_styles.setdefault(class_name, style), (

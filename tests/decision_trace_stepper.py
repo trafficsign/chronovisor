@@ -182,6 +182,7 @@ function captureFrame(scenario, frame) {
       opacity: style.opacity,
       stroke: style.stroke,
       strokeDasharray: style.strokeDasharray,
+      strokeWidth: style.strokeWidth,
       visibility: style.visibility,
     };
   });
