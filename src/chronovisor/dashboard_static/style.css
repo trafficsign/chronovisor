@@ -3236,7 +3236,8 @@ canvas {
 }
 
 .decision-trace-harness .trace-context-option.selected [data-context-label],
-.decision-trace-harness .trace-reasoning.selected [data-reasoning-label] {
+.decision-trace-harness .trace-reasoning.selected [data-reasoning-label],
+.decision-trace-harness .trace-branch-label.done {
   fill: #ffb340;
 }
 
@@ -3278,13 +3279,8 @@ canvas {
   filter: url(#trace-glow-violet);
 }
 
-.decision-trace-harness .trace-node.done text {
+.decision-trace-harness .trace-node.done text:not(.trace-branch-label) {
   fill: #c4cad0;
-}
-
-.decision-trace-harness .trace-branch-label.done {
-  fill: #a5a8ff;
-  filter: drop-shadow(0 0 3px rgba(142, 145, 255, 0.55));
 }
 
 .decision-trace-harness .trace-path.active {

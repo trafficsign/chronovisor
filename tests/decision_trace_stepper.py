@@ -492,6 +492,13 @@ function captureFrame(scenario, frame) {
         && questionRect.bottom <= shapeRect.bottom,
     };
   });
+  const branchLabelStyles = [...harness.querySelectorAll(
+    ".trace-branch-label",
+  )].map((label) => ({
+    text: label.textContent,
+    state: label.dataset.state,
+    fill: getComputedStyle(label).fill,
+  }));
   const decisionBranchLabels = [...harness.querySelectorAll(
     "[data-workflow-edge]",
   )].flatMap((group) => {
@@ -541,6 +548,7 @@ function captureFrame(scenario, frame) {
     textOverlaps,
     reasoningLabelClearances,
     decisionQuestions,
+    branchLabelStyles,
     decisionBranchLabels,
   };
 }

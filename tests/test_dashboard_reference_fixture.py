@@ -411,6 +411,13 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
             frame["cursor"],
             result["decisionBranchLabels"],
         )
+        for branch in result["branchLabelStyles"]:
+            if branch["state"] in {"done", "active"}:
+                assert branch["fill"] == "rgb(255, 179, 64)", (
+                    scenario["id"],
+                    frame["cursor"],
+                    branch,
+                )
         worst_endpoint = max(
             result["endpointErrors"],
             key=lambda error: error["distance"],
