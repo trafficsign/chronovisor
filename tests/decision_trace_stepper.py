@@ -173,9 +173,23 @@ function captureFrame(scenario, frame) {
       d: path.getAttribute("d"),
     };
   });
-  const guides = [...harness.querySelectorAll(".trace-context-guide, .trace-reasoning-guide")].map((guide) => ({
-    className: guide.getAttribute("class"),
-    d: guide.getAttribute("d"),
+  const guides = [...harness.querySelectorAll(".trace-context-guide, .trace-reasoning-guide")].map((guide) => {
+    const style = getComputedStyle(guide);
+    return {
+      className: guide.getAttribute("class"),
+      d: guide.getAttribute("d"),
+      display: style.display,
+      opacity: style.opacity,
+      stroke: style.stroke,
+      strokeDasharray: style.strokeDasharray,
+      visibility: style.visibility,
+    };
+  });
+  const skippedElements = [...harness.querySelectorAll(
+    ".trace-path.skipped, .trace-node.skipped, .trace-branch-label.skipped",
+  )].map((element) => ({
+    className: element.getAttribute("class"),
+    opacity: getComputedStyle(element).opacity,
   }));
   const sharpCorners = [...harness.querySelectorAll(".trace-path, .trace-context-guide, .trace-reasoning-guide")].flatMap((path) => {
     const d = path.getAttribute("d") || "";
@@ -507,10 +521,11 @@ function captureFrame(scenario, frame) {
     visibleCursor: Number(harness.dataset.visibleCursor),
     geometry: JSON.stringify({
       paths: paths.map(({ id, d }) => [id, d]),
-      guides,
+      guides: guides.map(({ className, d }) => [className, d]),
       nodes: nodes.map(({ id, transform }) => [id, transform]),
     }),
     paths,
+    skippedElements,
     guides,
     sharpCorners,
     cornerRadii,

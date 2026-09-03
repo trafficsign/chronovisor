@@ -228,6 +228,8 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
     assert len(browser_results) == len(expected_frames), stderr[-4000:]
 
     geometry_by_pipeline: dict[str, str] = {}
+    plan_guide_styles: dict[str, dict[str, object]] = {}
+    skipped_elements_seen = 0
     layout_checked: set[str] = set()
     overlaps: list[tuple[str, object]] = []
     for result, (scenario, frame) in zip(
@@ -306,7 +308,38 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
                 assert positions[second_row[0]][0] - positions["result"][0] == expected_offset
             layout_checked.add(scenario["pipeline"])
         assert all(path["d"] for path in paths)
-        assert all(guide["d"].count("Q") == 4 for guide in result["guides"])
+        guides = result["guides"]
+        assert all(guide["d"].count("Q") == 4 for guide in guides)
+        for guide in guides:
+            class_name = str(guide["className"])
+            style = {
+                key: guide[key]
+                for key in (
+                    "display",
+                    "opacity",
+                    "stroke",
+                    "strokeDasharray",
+                    "visibility",
+                )
+            }
+            assert style == {
+                "display": "inline",
+                "opacity": "0.5",
+                "stroke": "rgb(125, 137, 146)",
+                "strokeDasharray": "4px, 5px",
+                "visibility": "visible",
+            }, (scenario["id"], frame["cursor"], class_name, style)
+            assert style == plan_guide_styles.setdefault(class_name, style), (
+                scenario["id"],
+                frame["cursor"],
+                class_name,
+                style,
+            )
+        skipped_elements_seen += len(result["skippedElements"])
+        assert all(
+            element["opacity"] == "0.24"
+            for element in result["skippedElements"]
+        ), (scenario["id"], frame["cursor"], result["skippedElements"])
         assert result["sharpCorners"] == [], (
             scenario["id"],
             frame["cursor"],
@@ -403,6 +436,7 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
             overlaps.append((scenario["id"], result["pathOverlaps"]))
 
     assert overlaps == []
+    assert skipped_elements_seen > 0
     if visual_dir := os.environ.get("CHRONOVISOR_DASHBOARD_VISUAL_DIR"):
         _capture_stepper_visuals(scenarios, Path(visual_dir), tmp_path)
 
