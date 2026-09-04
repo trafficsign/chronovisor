@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chronovisor — モデル固定・品質維持の最適化と再設計 統合計画</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + label{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+body{max-width:1080px}
+header{position:static}
+h3{font-size:1rem;margin:1.25rem 0 .4rem}
+a{color:var(--accent);overflow-wrap:anywhere}
+code{overflow-wrap:anywhere}
+.lead{font-size:1.08rem}
+.note{padding:.8rem 1rem;background:#eef3f8;border-left:3px solid var(--accent);border-radius:4px}
+.future{background:#f6f1e7;border-left-color:#9a7127}
+.table-wrap{overflow-x:auto;margin:.8rem 0}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+th,td{border:1px solid var(--rule);padding:.6rem .7rem;text-align:left;vertical-align:top}
+th{background:#f0f0e9}
+nav{display:flex;flex-wrap:wrap;gap:.5rem 1rem;margin-top:1rem;font-size:.9rem}
+.small{font-size:.86rem;color:var(--muted)}
+.phase{padding:.7rem 1rem;margin:1rem 0;background:#fff;border:1px solid var(--rule);border-radius:6px}
+.phase h3{margin-top:0}
+.flow{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.75rem;padding:0;list-style:none}
+.flow li{padding:.8rem;border:1px solid var(--rule);border-radius:5px;background:#fff}
+pre{padding:1rem;overflow:auto;background:var(--code-bg);font-size:.8rem;line-height:1.5}
+pre code{padding:0;white-space:pre;overflow-wrap:normal}
+details{margin:.8rem 0}
+summary{cursor:pointer;color:var(--accent);font-weight:600}
+@media(max-width:650px){body{padding:0 1rem}h1{font-size:1.3rem}.flow{grid-template-columns:1fr}ol.log li{display:block}}
+@media print{.phase{break-inside:avoid}nav{display:none}a{color:inherit}}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_8869798eb4f84ff3819fcf81f895b814","created_at":"2026-09-05T07:42:59+09:00","状態":"draft","slug":"chronovisor-fixed-model-optimization-roadmap","title":"Chronovisor — モデル固定・品質維持の最適化と再設計 統合計画","project_root":"/Users/trafficsign/projects/personal/chronovisor","baseline_commit":"4ead53c5a42da8e61c2319ccdb2b581f7a656e22","current_request_scope":"plan_only","implementation_started":false,"main_scope":"A0-A7: behavior-preserving optimization","future_scope":"F1-F9: retained design options, not automatically executable","deployment_scope":"explicit push and runtime-reflection request required"}
+</script>
+
+<header>
+<h1><span id="plan-title">Chronovisor — モデル固定・品質維持の最適化と再設計 統合計画</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="draft">draft · 実装未着手</span>
+<span><code data-bind="task_id">plan_8869798eb4f84ff3819fcf81f895b814</code></span>
+<span data-bind="created_at">2026-09-05T07:42:59+09:00</span>
+<span>作成対象：計画書のみ</span>
+</div>
+<nav aria-label="計画書の目次"><a href="#purpose">目的と制約</a><a href="#evidence">実測値</a><a href="#main-plan">主計画</a><a href="#validation">受入・検証</a><a href="#future-plan">中長期の案</a><a href="#release">反映と切り戻し</a><a href="#handoff">引継ぎ</a></nav>
+</header>
+
+<section id="purpose" data-section="目的">
+<h2>目的</h2>
+<p class="lead"><strong>現在のモデル、推論設定、機能、品質条件を維持したまま、コードの重複処理・全量走査・不要な一時コピーを減らし、待ち時間とメモリ負荷を改善する。</strong></p>
+<p>2026-09-05の設計相談で出たゼロベース再設計案と、その後の「モデルを変えず、今のスペックを保つ」という条件を統合する。直近の主計画はA0–A7の挙動を保つ最適化とする。仕様や正本を変える案はF1–F9に保存し、主計画の完了後に自動で実装しない。</p>
+<p class="note"><strong>今回承認されているのは、この計画書の作成・検証・保存。</strong>アプリ実装、モデル呼出し、設定変更、本番データ移行、push、サービス再起動は、この作成作業には含まれない。計画書の完成と、以下の実行項目の完了を区別する。</p>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>固定する仕様と作業境界</h2>
+<ul>
+<li>モデルの種類・revision・量子化・role mapping・provider・endpoint、推論runtimeと依存バージョン、サンプラー、thinking、context上限、出力上限、プロンプト、出力schemaを維持する。実行開始時に有効値を確認し、secretを除いた比較用manifestを記録する。</li>
+<li>検索件数・順位の意味・フィルタ・再ランキング・証拠条件、Recallの注入契約、既存のtimeout・fallback・priority・residency方針を維持する。処理省略や条件の緩和を高速化として扱わない。</li>
+<li>Rawの原文バイト、論理ID、範囲・digest・receipt、fsyncとcursorの順序、CAS、原子的な公開、idempotency、訂正・監査・quorum・veto・adoption・fail-closedの保証を維持する。ハッシュ検証・durability処理を削らない。</li>
+<li>古い状態を許すTTLキャッシュ、無制限キャッシュ、LLM出力の新しい再利用方針、数値精度の低下、top-k削減、暗黙の別モデルfallbackを主計画へ入れない。</li>
+<li>既存の作業中ファイルを混ぜてcommitしない。モデルのunload、常駐設定変更、サービス停止、OSキャッシュ消去をベンチマークの準備として行わない。</li>
+<li>検証失敗や入力の変化を「同等」と扱わない。調査済み・候補発見・局所ベンチマーク成功だけでは、実装済み・本番反映済みとしない。</li>
+</ul>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定</h2>
+<ul>
+<li>コードの観測基準は<code>4ead53c5a42da8e61c2319ccdb2b581f7a656e22</code>。これはcheckoutのHEADであり、稼働runtimeとの一致は今回測定していない。実装時は再確認する。</li>
+<li>主な参照ソースはgraph Tier 2で検索・確認し、2026-09-04T22:43:10Z世代のcoverageはmetadata一致・記録された欠落なし。完全性の証明ではなく、変更後は必要な範囲を再確認する。</li>
+<li>モデルの重みそのものの占有量を減らす計画ではない。Python側の解析、I/O、重複したデータ表現、待ち時間を減らす。全体の改善幅は、モデル推論と周辺処理の時間・メモリの割合による。</li>
+<li>RawStore、検索索引の差分検知、共通JSONL reader、LLMRuntime、優先制御、EvidencePacket、回答評価は既存。既存実装を確認して再利用し、同じ目的の基盤を増設しない。</li>
+</ul>
+</section>
+
+<section id="evidence" data-section="実測と候補">
+<h2>確認済みの実測値と、未測定の候補</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>対象</th><th>本セッションで確認した値・実装</th><th>判断と限界</th></tr></thead>
+<tbody>
+<tr><td>Recallログ末尾500物理行</td><td>81.92MiB、5回の交互比較。現行の前方全走査：中央値139.720ms。既存の末尾reader＋逆順化：22.297ms。500レコードの内容・順序が全5組で一致。ファイルidentityは測定前後で一致。</td><td>局所処理は約6.3倍、時間は約84%減。ファイルキャッシュが温まった条件での観測。アプリ全体の改善率、cold時、同時追記・破損時の同等性は未検証。</td></tr>
+<tr><td>Convergence状態JSON</td><td>59,226,739 bytes（約56.5MiB）、17,909 items。単独プロセスでread＋JSON decodeを1回行い312.47ms。プロセス最大RSS386.69MiB。入力identityは前後一致。</td><td>再解析を減らす候補。RSSは測定プロセス全体の最大値で、JSONだけの使用量でも、削減可能量でもない。改善版との比較は未実施。</td></tr>
+<tr><td>索引更新</td><td>IndexStoreは変更ページだけを再解析する一方、変更時にはcanonical entries、backlinks、associationsの再構築へ進む。</td><td>一部更新での再構築範囲削減を検討。削除・同名衝突・順序・依存関係の同等性が必要。効果未測定。</td></tr>
+<tr><td>データのコピー・再変換</td><td>全ページmetadata生成、JSON文字列・dict・PageEntryの表現、複数段階の同一情報参照が調査対象。</td><td>プロファイル上位だけを扱う。Rawは既にstream/range検証を持つため、全量コピーがあると決めつけない。</td></tr>
+<tr><td>責任の分離</td><td>DecisionRouterの合議処理は、判断・監査に加えて常駐計画とモデル退避を扱う。LLMRuntimeとforeground制御は既存。</td><td>同じ実行順・設定のまま責任を移す候補。モジュール分割自体を速度改善の証拠にしない。</td></tr>
+</tbody></table></div>
+<p class="small">上記は本セッションのread-only測定を転記した観測値。入力snapshot本体、content digest、実行環境manifestを一式保存した正式な採用証拠ではないため、A0で再現可能なbaselineを作る。稼働データは増えるので、後日の現在値として流用しない。</p>
+<details><summary>初回測定のサンプルと再現条件</summary>
+<pre><code>現行 [ms]   = [150.631, 139.720, 138.760, 140.717, 136.762]
+末尾reader  = [21.307, 23.609, 22.847, 21.887, 22.297]
+physical_line_limit = 500
+returned_records = 500
+ordered_record_equality_all_pairs = true
+file_identity_unchanged = true
+
+tail比較：対象関数だけをASTで取り出し、アプリ全体はimportしない。
+旧 read_jsonl_tail(path, 500) と
+list(reversed(list(core.jsonl.iter_jsonl(path, limit=500)))) を交互実行。
+state測定：json.loads(path.read_text(encoding="utf-8")) の時間を計測。
+RSS：macOSのresource.getrusage(RUSAGE_SELF).ru_maxrssをMiBへ換算。
+いずれもモデル呼出し・ファイル書込・サービス再起動なし。</code></pre>
+</details>
+</section>
+
+<section id="main-plan" data-section="実行手順">
+<h2>主計画 A — モデル固定・仕様維持の最適化</h2>
+<p>依存順序は<strong>A0 → A1 → A2 → A3/A4 → A5 → A6 → A7</strong>。A3/A4は独立したファイル所有範囲なら並列調査できる。実装は一件ずつ同等性と効果を確認する。候補に効果がない場合は変更を入れず、測定根拠付きの不採用判定を記録する。</p>
+
+<div class="phase"><h3>A0 · 基準と比較方法を固定する</h3><ol class="checklist">
+<li><input id="a0-1" type="checkbox"><label for="a0-1">checkout・runtime SHA、dirty差分、実行環境、モデルと有効設定、採用中の品質契約を確認し、secretを含まないbaseline manifestを保存する。</label></li>
+<li><input id="a0-2" type="checkbox"><label for="a0-2">同一の読取専用snapshotと代表ワークロードを用意する。通常・大きいログ・空/破損・更新競合・timeout/縮退を区別し、入力と期待結果を先に固定する。</label></li>
+<li><input id="a0-3" type="checkbox"><label for="a0-3">I/O、JSON解析、検索、lock/queue、prefill、decode、CPU RSS/peak、モデル側メモリ、swap増分を分けて測定する。各候補の性能目標と許容ばらつきを、変更前の反復測定から確定する。</label></li>
+</ol><p class="small">完了条件：比較対象・固定条件・測定方法・入力identityが揃い、コード処理とモデル計算を混同しないbaselineがある。</p></div>
+
+<div class="phase"><h3>A1 · JSONL尾部読込を共通化する — 最初の実装候補</h3><ol class="checklist">
+<li><input id="a1-1" type="checkbox"><label for="a1-1">recall_auditor.read_jsonl_tailとmatching_pull_events、およびcontent_correction.source_recall_record（limit=5000）など実callerを確認する。返却順、物理行limit、0/負数、LF/CRLF/Unicode、不正UTF-8、不完全末尾、I/Oエラー、追記・rotation・truncate、prompt/host/session/time照合の現行契約を固定する。</label></li>
+<li><input id="a1-2" type="checkbox"><label for="a1-2">既存core.jsonl.iter_jsonlを再利用できる最小差分へまとめる。新旧readerのエラー・snapshot・limitの差を無視した単純置換はしない。必要な適合処理だけを加え、共通helperの他callerを壊さない。</label></li>
+<li><input id="a1-3" type="checkbox"><label for="a1-3">境界条件・順序・取得内容を比較し、大きいsnapshotで反復測定する。旧reader全走査に対する局所改善と、実callerの改善を別々に報告する。候補readerはファイル全長をmmapするため、速度改善から省メモリを推定せず、RSS・仮想メモリ・page faultを別測定し、他の固定予算を超えないことを確認する。</label></li>
+</ol><p class="small">完了条件：固定した正常・異常系の契約を満たし、対象callerで有意な時間短縮がある。初回6.3倍は参考値であり、再現必須の保証値にはしない。</p></div>
+
+<div class="phase"><h3>A2 · 状態JSONの反復読込・解析を減らす</h3><ol class="checklist">
+<li><input id="a2-1" type="checkbox"><label for="a2-1">ConvergenceStore.get/list_items/loadとループ内callerについて、1ジョブ当たりのread/decode回数と最大同時保持量を数える。状態参照の用途を表示・候補選別・実際のmutationに分ける。</label></li>
+<li><input id="a2-2" type="checkbox"><label for="a2-2">同じ確定snapshotを使える範囲でまとめて参照する。要求/バッチ内の再利用を優先し、更新・差替え・自分の書込みを必ず検知する。mutation直前のlock内最新状態検査とCASは保持する。</label></li>
+<li><input id="a2-3" type="checkbox"><label for="a2-3">他writerの更新、atomic replace、削除/破損、lease期限、再試行、再起動、同一バッチの状態変化を検証する。再解析回数・時間・peak/定常メモリを測り、保持が増えるキャッシュ案は採用しない。</label></li>
+</ol><p class="small">完了条件：staleな状態で処理を進めず、同じmutation結果・terminal state・retry条件を保ち、対象ワークロードの再解析コストが減る。</p></div>
+
+<div class="phase"><h3>A3 · 索引の更新範囲を必要な部分に絞る</h3><ol class="checklist">
+<li><input id="a3-1" type="checkbox"><label for="a3-1">IndexStoreの既存差分検知を基準に、backlinks/associations/canonical entriesの全再構築コストを測る。小さい更新で有意な負荷がある場合だけ、影響範囲の更新へ変更する。</label></li>
+<li><input id="a3-2" type="checkbox"><label for="a3-2">追加・削除・rename・status変更・リンク変更・重複ID・同順位を含む更新列で、全再構築版と結果を比較する。検索順、フィルタ、schema、generation、永続化失敗時の回復を保つ。</label></li>
+</ol><p class="small">完了条件：索引・関連・順位の決定論的な結果が一致し、更新時間が改善する。無根拠に走査や競合検知を省略しない。</p></div>
+
+<div class="phase"><h3>A4 · 一時コピーと繰り返し変換を減らす</h3><ol class="checklist">
+<li><input id="a4-1" type="checkbox"><label for="a4-1">実プロファイルで上位に出る全量list化、JSON再解析、同一pageの再読込、metadata全件生成、配列・文字列コピーを特定する。既存iterator、page_count、索引snapshot、Rawのrange readerを先に確認する。</label></li>
+<li><input id="a4-2" type="checkbox"><label for="a4-2">必要な範囲の読取・stream処理・同一入力の再利用へ最小変更する。全件検証が必要な処理は全件を検証し、コピーで保証していた所有権・可変性・順序を保つ。dtypeや精度は変えない。</label></li>
+</ol><p class="small">完了条件：同じ入力と結果でpeak/定常メモリの少なくとも対象指標が改善し、処理時間が許容範囲内。単なるキャッシュへの移し替えを省メモリと呼ばない。</p></div>
+
+<div class="phase"><h3>A5 · 判断と実行資源の責任を整理する</h3><ol class="checklist">
+<li><input id="a5-1" type="checkbox"><label for="a5-1">DecisionRouter、LLMRuntime、既存scheduler/leaseの責任とcallerを確認する。重複制御や不要な準備が測定で確認できる箇所だけ、既存interfaceへ集める。</label></li>
+<li><input id="a5-2" type="checkbox"><label for="a5-2">Routerの判断・quorum・監査と、実行側の資源処理を整理する。同じrole、request、モデル呼出順、priority、residency判断、lock保証を保ち、取消・例外・低メモリ・競合時の回帰を検証する。</label></li>
+</ol><p class="small">完了条件：責任の重複が減り、元の動作契約を維持する。構造改善だけの場合は速度改善と別に報告する。新しい制御daemon・プロセス構成・常駐方針への移行はF6へ送る。</p></div>
+
+<div class="phase"><h3>A6 · 全体で同等性と改善を確認する</h3><ol class="checklist">
+<li><input id="a6-1" type="checkbox"><label for="a6-1">採用候補の差分を統合し、Recall/保存/検索/訂正/合議の関連回帰、architecture/lint/type検査、必要な統合テストを通す。外部効果とモデル要求の差分を確認する。</label></li>
+<li><input id="a6-2" type="checkbox"><label for="a6-2">同一snapshot・同一モデル設定で、旧版/新版を交互比較する。局所とend-to-end、warmとprocess-start、通常と競合を分け、p50/p95、CPU、peak/定常メモリ、swap増分を記録する。</label></li>
+<li><input id="a6-3" type="checkbox"><label for="a6-3">既存の品質・adoption契約に従って、検索・根拠・訂正・棄却/保留・回答品質の非劣化を確認する。未通過項目を残したまま本番適用可と判定しない。</label></li>
+</ol><p class="small">完了条件：同じ仕様・品質条件を保ったことと、改善した対象・幅・限界が同じreportから確認できる。</p></div>
+
+<div class="phase"><h3>A7 · 変更単位を確定し、成果と残件を記録する</h3><ol class="checklist">
+<li><input id="a7-1" type="checkbox"><label for="a7-1">各採用変更の対象差分・検証・測定をrootが確認し、意味のある単位でcommitする。無関係なdirty差分を含めず、計画のcheckboxと時刻付きログを更新する。</label></li>
+<li><input id="a7-2" type="checkbox"><label for="a7-2">採用/不採用/未測定、固定条件、品質検証、局所/全体の性能、切り戻し先、未反映のruntimeを明記する。将来案F1–F9は各案の採用状況を別に保持する。</label></li>
+</ol><p class="small">主計画の完了はコード・検証の完了を指す。本番反映は、下記の条件付き手順が実行・確認されるまで別の状態として報告する。</p></div>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>主計画の状態は<code>plan-meta</code>の<code>状態</code>と<code>.badge[data-state]</code>を一致させる。計画書作成時は<code>draft</code>・全実行項目未完了。実装開始前の待機を、障害による<code>blocked</code>と混同しない。</li>
+<li>続行不能の外部権限や結果を左右する未決定事項がある場合だけ、該当範囲・必要な判断・保持した成果を記録する。検証失敗は原因と修正作業を記録し、成功扱いしない。</li>
+<li>独立した調査・レビューは既定routingのLunaへ委譲できる。writerは非重複scopeのsingle writerとし、rootが最終差分と検証を確認する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<ul>
+<li><strong>今回の計画書：</strong>全提案の扱い、最新制約、実測と推測、実行順・依存関係、受入基準、切り戻しが一つの文書にあり、HTML/metadataが有効で、指定先へ保存・対象のみcommitされている。</li>
+<li><strong>主計画A：</strong>A0–A7の各項目が検証済み、または測定に基づく不採用判断として完結している。実装した変更のモデル・仕様・品質の固定条件を満たし、少なくとも一つの有用な対象で再現可能な速度またはメモリ改善がある。改善ゼロの場合は「調査完了・改善未達」と報告する。</li>
+<li><strong>本番：</strong>pushと反映の依頼がある場合に限り、対象runtimeのSHA/health/機能/性能を確認して反映完了とする。checkoutのcommitだけでは本番完了にしない。</li>
+<li><strong>将来案F：</strong>保存された設計選択肢であり、主計画の自動実行対象・達成済みの機能には数えない。採用する場合は、この文書に仕様差分と受入項目を追記する。</li>
+</ul>
+</section>
+
+<section id="validation" data-section="検証手順">
+<h2>同等性・性能・品質の受入方法</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>軸</th><th>検証</th><th>採用条件</th></tr></thead>
+<tbody>
+<tr><td>決定論的な結果</td><td>同じ入力snapshotで、レコード・順序・候補・索引・例外・状態遷移・出力schemaを比較。署名/Raw/receiptは必要な単位でバイト一致を確認。</td><td>意味のある差分ゼロ。timestamp、計測時間など変動が不可避な項目だけ、事前定義した比較規則を使う。</td></tr>
+<tr><td>更新と回復</td><td>同時writer、append/rotate/truncate、CAS失敗、torn tail、空/壊れたファイル、lease切れ、保存途中の失敗・再起動を再現。</td><td>staleな許可、二重適用、取りこぼし、原文破損がない。旧来のerror/retry/hold境界を維持する。</td></tr>
+<tr><td>モデル入力と品質</td><td>effective role/model/request/options/schemaを比較する。モデル出力は乱数・実行環境に依存し得るため、単発の文字列一致で品質を判定しない。既存の固定gold/holdout/adoption検査を利用。</td><td>設定と入力契約が維持され、既存の品質基準を下回らない。used件数だけを改善の証明にしない。</td></tr>
+<tr><td>速度</td><td>microbenchmarkはウォームアップ後に原則30組以上を交互実行し、必要に応じばらつきが収束するまで追加。end-to-endは代表ケースと利用頻度を別に記録。モデル計算とqueue/I/Oを分解。</td><td>A0で固定した目標・ノイズ幅に対して改善が再現する。局所6.3倍を全体6.3倍と表現しない。</td></tr>
+<tr><td>メモリ</td><td>旧版/新版を独立プロセスで測定し、最大RSSと定常保持量を区別。Python allocation、モデル/統合メモリ、OS圧迫・swap増分も別に記録。OS/モデルのcacheは勝手に消さない。</td><td>対象指標が改善し、他の固定予算を超えない。RSS・共有メモリ・モデル重みを無条件に足し合わせない。</td></tr>
+</tbody></table></div>
+<p>既存の<code>tests/test_recall_auditor.py</code>、<code>tests/test_content_correction.py</code>、<code>tests/test_utility_modules.py</code>、<code>tests/test_index_store.py</code>、<code>tests/test_convergence.py</code>を起点に、実callerと失敗条件を覆う最小の回帰を追加する。全処理をmockした速度比較は採用証拠にしない。チェックの実コマンドと結果は実装時の差分に合わせて記録し、未実行のtest数を計画書へ成功実績として書かない。</p>
+<p class="note">破損UTF-8や同時追記のように新旧readerで観測範囲が異なるケースは、最初から同値と仮定しない。既存契約を維持できない最適化は主計画から外し、仕様変更として明示する。</p>
+</section>
+
+<section id="future-plan" data-section="中長期再設計">
+<h2>中長期の再設計 F — これまでの案を保存する</h2>
+<p class="note future"><strong>F1–F9は検討案。今回の「モデル固定・現在の仕様維持」だけでは実行しない。</strong>性能改善のために必須と決めつけず、既存機能の到達点を再確認してから必要性を判断する。モデル変更はこれらの案にも含めない。Aの完了から自動で移行しない。</p>
+<ol class="flow" aria-label="将来設計の依存関係"><li><strong>1. 原資料と変更履歴</strong><br>会話・文書・実行結果に、採用・訂正・撤回の根拠を結びつける。</li><li><strong>2. 再生成できる表現</strong><br>現在状態、索引、生成Wikiを同じ根拠から作る。</li><li><strong>3. 問いに必要な根拠</strong><br>時点・範囲・予算に応じ、証拠・反証・不足を返す。</li></ol>
+<div class="table-wrap"><table>
+<thead><tr><th>ID・提案</th><th>既存資産と変更点</th><th>採用前に確認すること</th></tr></thead>
+<tbody>
+<tr><td>F1 · 原資料と判断履歴を中心にする</td><td>RawStore/保存receipt/EvidenceAtomを再利用。発話、提案、合意、実行結果、採用・却下・訂正を出典付きの履歴として扱う。ページ由来Claimsは互換索引へ移す方向を検討。</td><td>原資料の存在と内容の正しさを区別。モデルの発言を自動で事実に昇格させない。既存Raw ID・byte range・authority receiptを維持する。</td></tr>
+<tr><td>F2 · 時点・適用範囲・矛盾を表す</td><td>EvidenceLedgerのsupports/contradicts/supersedes/as_ofを利用。状態が有効だった時刻と、それを知った時刻を区別し、プロジェクト/対象/発話者/仮説と決定を保持。</td><td>「当時知っていたこと」「現在の訂正を反映した過去」「現在有効」の質問を分ける。根拠のない却下理由や因果関係を生成しない。物語や手順を無理に三つ組へ分割しない。</td></tr>
+<tr><td>F3 · 根拠付きresolveを標準入口にする</td><td>既存RetrievalProgram → EvidenceLedger → EvidencePacketを活用。問い・scope・as_of・予算を受け、証拠、矛盾、不足、調査範囲を返す。現在状態/索引から始め、gapだけRawへ戻る。</td><td>現行L2/L3/L4、既存provider/rollout、host互換、sensitivityを調査。packetを返せない理由を隠さず、曖昧/不足/期限切れ/超過を区別。検索scoreと証拠充足を混同しない。</td></tr>
+<tr><td>F4 · 小さい自動Recallと必要時の深い取得</td><td>取り忘れを防ぐため自動Recallは残し、作業中の決定事項・未解決事項・関連候補を少量返す。重い収集・推論を明示resolveや非同期workerへ配置する案。</td><td>Hookの出力と実行経路が変わるためAの仕様維持に含めない。既存4秒契約を勝手に短縮しない。自動経路p95 200msは先の設計目標であり、実績・達成保証ではない。</td></tr>
+<tr><td>F5 · 生成Wikiを再生成可能な表示にする</td><td>採用済みの解釈や生成結果の版も保存し、現在状態・索引・生成ページを共通根拠に結びつける。手書きMarkdownは原資料として保持。安定page ID、リンク、注釈を維持。</td><td>自由編集を注釈/訂正としてどう扱うか、旧ページとの併存、digest失効、再生成・rollbackを設計。RawだけでLLMを再実行せず元の自由文章を完全復元できるとは仮定しない。</td></tr>
+<tr><td>F6 · 制御状態をSQLiteへ集める</td><td>原資料ファイルは保持し、履歴・現在状態・job予約を短いtransactionで扱う案。制御を集約し、推論は少数workerでtransactionの外に置く。</td><td>A2の小さい最適化で不足すると測定された場合に検討。1台/単一writer、WAL/同期/backup、raw receiptとDBの回復、二重writer排除、legacy queueと全consumerの移行が必要。mmap/iteratorの改善だけで足りるなら導入しない。</td></tr>
+<tr><td>F7 · 安全性を根拠・解釈・実行権限に分ける</td><td>原文一致は決定論的検証、意味解釈は出典・反証・既存review、実行はCAS/効果/権限で管理。訂正による古い索引・cacheの復活を防ぐ。意味保留でも保存と根拠参照を継続できる形を目指す。</td><td>現行quorum/veto/adoptionとmutationの保証を弱めない。記憶の文面から実行権限を作らない。既存の未検証/暫定参照経路との違いを確認する。</td></tr>
+<tr><td>F8 · 回答・作業の改善で学習を評価する</td><td>既存のsealed paired evaluation/holdoutを再利用し、作業再開、却下理由、訂正反映、過去時点、根拠不足の回答を評価。Fieldや蒸留の採用案も残すが、新しい重みの採用はモデル固定条件の対象外として保留する。</td><td>returned/read/injected/usedと回答改善を区別。既存R5/R6・教師生成・promotionの契約を上書きせず、現在の作業と入力を共有して漏洩させない。train/holdout/locked-testを分離。</td></tr>
+<tr><td>F9 · Dashboardで価値の到達点を辿れるようにする</td><td>Decision Traceを保ち、保存→参照可能→根拠返却→回答改善を辿る表示を検討。時点、訂正、欠けた根拠と待ち時間の内訳を示す。</td><td>既存の戻り値や計測で表せる部分を先に利用。新しい指標や表示契約が必要なら別の受入を定義し、見栄えを品質改善の証拠にしない。</td></tr>
+</tbody></table></div>
+<p><strong>将来案を試す最小単位：</strong>「採用方針・却下理由・訂正履歴」を返す一本のresolveを、既存RawとEvidenceの経路から構成する。同じ履歴・同じ問いで既存Recallと比較し、根拠の正確さ、古い情報の誤用、待ち時間を測る。次に時間/訂正モデルとpage viewの移行を検討する。旧経路の削除やSQLiteへの移行から着手しない。</p>
+<p>既存の<a href="2026-08-09_chronovisor-next-phase.html">次フェーズ計画</a>にはCampaign W/X/Yの実装・受入履歴がある。この文書はそれらを未実装に戻すものではなく、新しい条件下での優先順位を示す。現在の設定・本番authority・shadow/canary状態は、着手時のコードとruntimeで再確認する。</p>
+</section>
+
+<section id="release" data-section="反映と切り戻し">
+<h2>本番反映と切り戻し — 明示依頼がある場合</h2>
+<ol>
+<li>採用差分・比較report・関連検証・戻すcommitを確定する。モデル設定のsecretを含まないfingerprintと、既存runtimeのSHAを保存する。</li>
+<li>ユーザーからpushと本番反映が依頼された場合だけ、<strong>push → 必要なサービスだけ再起動 → runtime archive SHA → health → 対象機能と性能のlive確認</strong>を行う。未pushのcheckoutを本番コードとして読み替えない。</li>
+<li>モデル・設定・schemaの意図しない差、品質ゲート失敗、Raw/receipt/CAS異常、stale状態、既定予算を超えるメモリ/遅延回帰が出たら、採用を止めて記録した版へ切り戻す。モデル変更で辻褄を合わせない。</li>
+<li>設定変更・永続schema移行を含まないAの変更では、旧runtimeへ戻した後もデータを読めることを確認する。Fの移行では事前に別の移行・復元受入をこの計画へ追加する。</li>
+</ol>
+<p class="small">現在の反映状態：未実行。今回の計画書作成は、push・サービス再起動・本番ベンチマークの依頼ではない。</p>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>計画書作成のブロッカーなし。保存先はユーザーがChronovisorの<code>_handoff</code>を指定済み。実装・将来案の採用・本番反映は今回の依頼範囲外であり、障害とは扱わない。</li></ul>
+</section>
+
+<section id="handoff" data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul>
+<li>作成時の無関係なdirty差分：<code>scripts/recall_r6_harness.py</code>、<code>tests/test_recall_r6_harness.py</code>。未追跡：<code>_handoff/2026-09-01_ornith-15-9b-omlx-optimization-research.md</code>、<code>_handoff/2026-09-01_qwen38-reap-mtp-public-model-search.md</code>、<code>_handoff/evidence/2026-08-29-recall-teacher-salvage/</code>。削除・上書き・一括stageをしない。着手時には再確認する。</li>
+<li>最初の対象はA0/A1。A2以降も、その時点のprofileと既存helperを確認してから変更する。大きい関数やファイルであることだけを最適化理由にしない。</li>
+<li>benchmark証拠にはコマンド、入力digest/size、code/runtime/config identity、反復数、samples、結果比較、RSSの測定対象を含める。会話本文・credentialをreportや公開commitに含めない。</li>
+<li>次担当はこの文書の状態を読み、plan-onlyの記録を実装承認と取り違えない。ユーザーから実行依頼があれば、Aの範囲を受入条件まで進める。Fへ自動拡大しない。</li>
+</ul>
+</section>
+
+<section data-section="参照">
+<h2>根拠となる実装と資料</h2>
+<ul>
+<li>A1：<a href="../src/chronovisor/recall/recall_auditor.py">recall_auditor.py:485 / 830</a>、<a href="../src/chronovisor/core/jsonl.py">core/jsonl.py:41</a>、<a href="../src/chronovisor/recall/content_correction.py">content_correction.py:644 / 653</a>。</li>
+<li>A2：<a href="../src/chronovisor/ingest/convergence.py">convergence.py:509 / 580</a>、<a href="../src/chronovisor/ops/lint_repair.py">lint_repair.py:1371</a>。</li>
+<li>A3/A4：<a href="../src/chronovisor/core/index_store.py">index_store.py:622 / 976 / 1173</a>、<a href="../src/chronovisor/core/raw_store.py">raw_store.py:120</a>。</li>
+<li>A5：<a href="../src/chronovisor/decision/decision_router.py">decision_router.py:4480</a>、<a href="../src/chronovisor/core/research_scheduler.py">research_scheduler.py:207</a>、<a href="../src/chronovisor/core/llm_runtime.py">llm_runtime.py:450</a>。</li>
+<li>F：<a href="../src/chronovisor/core/claims.py">claims.py:285</a>、<a href="../src/chronovisor/research/evidence_reconstruction.py">evidence_reconstruction.py:347 / 991</a>、<a href="../src/chronovisor/research/evidence_runtime.py">evidence_runtime.py:337 / 679</a>、<a href="../src/chronovisor/recall/recall_runtime.py">recall_runtime.py:2142</a>、<a href="../src/chronovisor/recall/recall_compiler.py">recall_compiler.py:90</a>。</li>
+<li>評価と既存契約：<a href="../docs/recall-orchestration.md">Recall orchestration</a>、<a href="../docs/architecture.md">Architecture</a>、<a href="../docs/architecture/adr/0001-layering-dependency-and-compatibility.md">Layering ADR</a>、<a href="../docs/architecture/adr/0002-mcp-tool-structure-effects.md">MCP tool contract ADR</a>。</li>
+<li>将来案の一般的な根拠：<a href="https://sqlite.org/wal.html">SQLite WAL公式資料</a>（同時writer制約・同期・回復）、<a href="https://arxiv.org/abs/2410.10813">LongMemEval</a>（時間推論・知識更新・回答保留の評価）。これらはChronovisorの改善を実証する資料ではない。</li>
+</ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log">
+<li><time datetime="2026-09-05T07:42:59+09:00">2026-09-05 作成</time><span>ユーザーの依頼により、これまでの改善案を統合。保存先はChronovisorの_handoffを指定。canonical generatorでHTMLを生成し、モデル固定の主計画Aと、仕様変更を伴う検討案Fを整理した。初回read-only測定の数値と限界を記録。アプリ実装・モデル呼出し・設定変更・push・再起動は未実施。</span></li>
+<li><time datetime="2026-09-05T07:57:27+09:00">2026-09-05 07:57 検証</time><span>独立レビューを反映し、訂正処理のcaller・回帰対象と、mmapの速度/メモリ測定の区別を追記。HTML構造、metadataとbadgeのdraft一致、20項目が全て未完了、内部リンクと参照ファイルの存在を検証。ブラウザのlocal file URL制約により描画確認は未実施。アプリの実装テストは今回の文書作成では実行していない。</span></li>
+</ol>
+</section>
+
+</body>
+</html>
