@@ -1,0 +1,75 @@
+{
+  "kind": "read_only_runtime_observation_before_deployment",
+  "observed_around": "2026-09-05T08:40:00+09:00",
+  "model_calls_started_for_observation": 0,
+  "not_available": [
+    "prefill_seconds",
+    "decode_seconds",
+    "queue_lock_wait_seconds"
+  ],
+  "generation_example": {
+    "artifact": "runtime/local-consensus/audit.jsonl",
+    "timestamp": "2026-09-04T23:39:45.674393Z",
+    "role": "ingest_triage",
+    "output_tokens": 612,
+    "tokens_per_second": 35.44,
+    "count": 1
+  },
+  "decision_example": {
+    "timestamp": "2026-09-04T23:39:56.215923Z",
+    "role": "orphan_link",
+    "latency_seconds": 45.055022,
+    "vote_count": 1,
+    "repair_turns": 0,
+    "count": 1
+  },
+  "recall_example": {
+    "artifact": "recall/recall-log.jsonl",
+    "timestamp": "2026-09-04T23:02:38+00:00",
+    "latency_seconds": 4.387,
+    "scheduler_seconds": 0,
+    "resource_wait_seconds": 0,
+    "evidence_search_seconds": 2.99,
+    "teacher_seconds": 2.985,
+    "count": 1
+  },
+  "host_phase_elapsed_seconds": {
+    "apply": 0.52499,
+    "semantic_publish": 5.891936,
+    "claim_publish": 0.008754,
+    "state_register": 0.104768,
+    "read_back": 1.553401
+  },
+  "scheduler_example": {
+    "start": "2026-09-04T23:20:04.258+00:00",
+    "finish": "2026-09-04T23:20:04.428+00:00",
+    "duration_seconds": 0.17,
+    "resource_wait_seconds": 0.001,
+    "count": 1
+  },
+  "service_observation": {
+    "semantic": {
+      "timestamp": "2026-09-05T08:39:44.769597+09:00",
+      "p50_seconds": 0.25257,
+      "p95_seconds": 0.618261,
+      "max_seconds": 3.98776,
+      "count": 2000,
+      "errors": 125
+    },
+    "reranker": {
+      "timestamp": "2026-09-05T07:41:37.264746+09:00",
+      "p50_seconds": 1.109608,
+      "p95_seconds": 1.848592,
+      "max_seconds": 2.488047,
+      "count": 42,
+      "errors": 0
+    }
+  },
+  "limitations": [
+    "Existing live workload observations are not a paired end-to-end benchmark.",
+    "Output throughput is not a substitute for prefill/decode timing.",
+    "scheduler/resource_wait values are stage observations, not explicit lock timing.",
+    "Service error counters existed before deployment; this optimization does not change fallback/model policy.",
+    "No request text, record IDs, output text, or credentials are retained."
+  ]
+}

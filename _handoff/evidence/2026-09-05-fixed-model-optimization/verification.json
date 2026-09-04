@@ -1,0 +1,175 @@
+{
+  "status": "validated_with_pre_existing_gate_failures",
+  "updated_at": "2026-09-05T08:45:56.733625+09:00",
+  "baseline_commit": "7b872fa64cf08edeaf86be4078077f60862c7dba",
+  "checks": {
+    "ruff": {
+      "passed": true,
+      "command": ".venv/bin/ruff check --no-cache src scripts tests"
+    },
+    "mypy": {
+      "passed": true,
+      "source_files": 91
+    },
+    "import_linter": {
+      "passed": true,
+      "kept": 1,
+      "broken": 0,
+      "dependencies": 1996
+    },
+    "model_runtime_contracts": {
+      "passed": 399,
+      "failed": 0,
+      "seconds": 80.35
+    },
+    "full_pytest": {
+      "passed": 6364,
+      "failed": 8,
+      "skipped": 1,
+      "warnings": 2,
+      "seconds": 906.65,
+      "junit": "/tmp/chronovisor-fixed-model-full.xml",
+      "failed_nodes": [
+        "tests.test_architecture_baseline::test_current_architecture_does_not_weaken_baseline",
+        "tests.test_architecture_baseline::test_architecture_fitness_allows_and_reports_package_edge_removal",
+        "tests.test_architecture_baseline::test_current_exception_ledger_seed_and_schema_inventory_are_exact",
+        "tests.test_architecture_baseline::test_existing_edge_replacement_site_can_be_seeded_with_exact_ledger_match",
+        "tests.test_architecture_baseline::test_site_gate_rejects_unrecorded_stale_duplicate_identity_content_and_count",
+        "tests.test_architecture_baseline::test_site_deletion_retires_monotonically_and_reintroduction_is_rejected",
+        "tests.test_architecture_baseline::test_exception_artifacts_are_fresh_and_head_independent",
+        "tests.test_large_function_policy::test_large_function_policy_covers_every_current_large_function"
+      ],
+      "source_state": "integration run during final A1 refinement; frozen final source additionally verified by 253 focused tests",
+      "existing_unrelated_dirty_files_preserved": [
+        "scripts/recall_r6_harness.py",
+        "tests/test_recall_r6_harness.py"
+      ],
+      "new_failures_from_this_change": 0,
+      "all_failures_reproduced_on_baseline": true
+    },
+    "architecture_baseline": {
+      "passed": false,
+      "classification": "pre-existing failure, reproduced on clean 7b872fa",
+      "recorded_cross_domain_sites": 1488,
+      "detected_cross_domain_sites": 1491,
+      "existing_edges": [
+        "ops.dashboard -> core.live_model_stream",
+        "ingest.ingest_transport -> core.live_model_stream",
+        "ingest.ingest_transport -> core.store"
+      ],
+      "new_sites_from_this_change": 0,
+      "baseline_reproduction_root": "/tmp/chronovisor-arch-old.dDpqVa",
+      "baseline_or_ledger_modified": false,
+      "baseline_unit_tests": {
+        "passed": 22,
+        "failed": 7,
+        "failed_nodes": [
+          "tests.test_architecture_baseline::test_current_architecture_does_not_weaken_baseline",
+          "tests.test_architecture_baseline::test_architecture_fitness_allows_and_reports_package_edge_removal",
+          "tests.test_architecture_baseline::test_current_exception_ledger_seed_and_schema_inventory_are_exact",
+          "tests.test_architecture_baseline::test_existing_edge_replacement_site_can_be_seeded_with_exact_ledger_match",
+          "tests.test_architecture_baseline::test_site_gate_rejects_unrecorded_stale_duplicate_identity_content_and_count",
+          "tests.test_architecture_baseline::test_site_deletion_retires_monotonically_and_reintroduction_is_rejected",
+          "tests.test_architecture_baseline::test_exception_artifacts_are_fresh_and_head_independent"
+        ],
+        "exact_failure_set_matches_current": true,
+        "clean_clone": "/tmp/chronovisor-arch-old.dDpqVa/repo",
+        "junit": "/tmp/chronovisor-arch-baseline-7b872fa.xml"
+      }
+    },
+    "autonomy_runtime_source_test": {
+      "passed": false,
+      "classification": "pre-existing failure, reproduced on 7b872fa",
+      "test": "tests/test_autonomy.py::test_install_launchd_dry_run_builds_sleep_and_watchdog_plists",
+      "baseline_reproduction_root": "/tmp/chronovisor-baseline-sMw3Pf",
+      "reason": "test expects git+ssh runtime URL; generated command does not include that expectation",
+      "production_code_or_test_modified": false
+    },
+    "tail_boundary_property_check": {
+      "passed": true,
+      "cases": 6000,
+      "baseline": "7b872fa",
+      "limits": [
+        0,
+        1,
+        2,
+        8,
+        -1
+      ],
+      "chunk_bytes": [
+        1,
+        2,
+        3,
+        7,
+        64
+      ],
+      "fixtures": "seeded synthetic LF/CR/CRLF, Unicode, malformed UTF8/JSON; no private text"
+    },
+    "final_focused": {
+      "passed": 253,
+      "failed": 0,
+      "seconds": 2.13,
+      "junit": "/tmp/chronovisor-fixed-model-final-focused.xml"
+    },
+    "compileall": {
+      "passed": true,
+      "paths": [
+        "src",
+        "scripts"
+      ]
+    },
+    "large_function_policy": {
+      "passed": false,
+      "classification": "pre-existing failures reproduced on clean 7b872fa",
+      "over_budget": [
+        {
+          "path": "src/chronovisor/ingest/ingest_review_apply.py",
+          "function": "review_and_apply_ingest_operations",
+          "current_lines": 687,
+          "limit": 686
+        },
+        {
+          "path": "src/chronovisor/ops/dashboard.py",
+          "function": "_decision_trace_snapshot",
+          "current_lines": 316,
+          "limit": 309
+        }
+      ],
+      "unrecorded_large_functions": [],
+      "new_violation_from_this_change": false,
+      "policy_modified": false
+    },
+    "html": {
+      "metadata_badge_consistent": true,
+      "checklist_count": 20,
+      "relative_links_verified": true,
+      "json_payload_validation": true,
+      "visual_render_checked": false,
+      "visual_render_limit": "local file URL policy restriction; no alternate route attempted"
+    }
+  },
+  "scope": {
+    "models_prompts_inference_parameters": "unchanged",
+    "runtime_dependencies": "must remain equal to baseline after deployment",
+    "quality_evidence": "deterministic data/state equivalence and existing request/authority/search/recall contracts",
+    "not_claimed": [
+      "end-to-end model latency reduction",
+      "model weight memory reduction",
+      "new model quality improvement"
+    ],
+    "benchmark_environment": "same host, warm OS caches, no cache purge; services remain running; host noise and concurrent validation may affect timings",
+    "provisional_threshold_interpretation": "primary workloads target >=10 percent median improvement; unchanged paths must avoid material regression. A2 redundant-read deletion is also a code simplification with an exact read-count reduction, and is not advertised as a >=10 percent speedup."
+  },
+  "implementation_files": {
+    "src/chronovisor/core/index_store.py": "aa50b0671aa7a37ec4f7d5e0d228a9886f4e7ef0cb8aa474a30f2bc78fac7ba1",
+    "src/chronovisor/ingest/convergence.py": "8ea4e2d0369478b4742a91645c3e36cd558ce1b8b0231435532e48b295f93bc5",
+    "src/chronovisor/ops/lint_repair.py": "a776d2aec440efd44537ec99d3ed02701c9dd99afc67642f0930e3df202a16be",
+    "src/chronovisor/recall/recall_auditor.py": "21246c19675cbddff2c998cd1a75b894d838d3ff8fd1b8c2373bdb75b4d56174"
+  },
+  "graph_verification": {
+    "tier": 2,
+    "generation": "2026-09-04T23:37:31Z",
+    "changed_source_and_tests": "metadata_match, no recorded gap; direct source diff reviewed",
+    "partial_source_fallback": "scripts/chronovisor-runtime-env line 7 read directly"
+  }
+}

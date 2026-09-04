@@ -429,6 +429,31 @@ class PageEntry:
         )
 
 
+def _derived_indexes_changed(
+    previous: PageEntry | None,
+    current: PageEntry | None,
+) -> bool:
+    """Return whether a changed entry requires rebuilding derived indexes."""
+
+    if previous is None or current is None:
+        return True
+    return (
+        previous.page_id != current.page_id
+        or previous.is_system != current.is_system
+        or previous.relative_path != current.relative_path
+        or previous.status != current.status
+        or previous.outlinks != current.outlinks
+        or previous.tags != current.tags
+        or previous.entities != current.entities
+    )
+
+
+def _canonical_page_key(entry: PageEntry) -> str:
+    namespace = "system" if entry.is_system else "pages"
+    relative_path = PurePosixPath(entry.relative_path).with_suffix("").as_posix()
+    return f"{namespace}/{relative_path}"
+
+
 class DuplicatePageIdError(RuntimeError):
     """Raised when two files claim the same page_id stem.
 
@@ -648,9 +673,12 @@ class IndexStore:
             removed = old_ids - new_ids
 
             changed = False
+            derived_changed = False
+            metadata_updates: list[PageEntry] = []
             for pid in removed:
                 del self._entries[pid]
                 changed = True
+                derived_changed = True
 
             for pid, (path, is_system, mtime_ns, size) in seen_ids.items():
                 existing = self._entries.get(pid)
@@ -668,6 +696,7 @@ class IndexStore:
                     if entry is not None:
                         self._entries[pid] = entry
                         changed = True
+                        derived_changed = True
                     continue
                 # Re-parse if any of (mtime_ns, size, path, is_system) differs.
                 if (
@@ -688,19 +717,30 @@ class IndexStore:
                     if entry is not None:
                         self._entries[pid] = entry
                         changed = True
+                        if _derived_indexes_changed(existing, entry):
+                            derived_changed = True
+                        else:
+                            metadata_updates.append(entry)
                     else:
                         del self._entries[pid]
                         changed = True
+                        derived_changed = True
 
             new_order = [pid for pid, *_ in current if pid in self._entries]
             if self._page_order != new_order:
                 self._page_order = new_order
                 changed = True
+                derived_changed = True
 
             if changed:
-                self._rebuild_canonical_entries()
-                self._rebuild_backlinks()
-                self._rebuild_associations()
+                if derived_changed:
+                    self._rebuild_canonical_entries()
+                    self._rebuild_backlinks()
+                    self._rebuild_associations()
+                elif metadata_updates:
+                    self._canonical_entries = self._canonical_entries.copy()
+                    for entry in metadata_updates:
+                        self._canonical_entries[_canonical_page_key(entry)] = entry
                 self._persistence_dirty = True
             if (
                 self._persistence_dirty
@@ -829,14 +869,22 @@ class IndexStore:
             )
             next_entries = dict(self._entries)
             changed = False
+            derived_changed = False
+            metadata_updates: list[PageEntry] = []
             for page_id in removed:
-                if next_entries.pop(page_id, None) is not None:
+                previous = next_entries.pop(page_id, None)
+                if previous is not None:
                     changed = True
+                    derived_changed = True
             for page_id, entry in updates.items():
                 existing = next_entries.get(page_id)
                 if existing != entry:
                     next_entries[page_id] = entry
                     changed = True
+                    if _derived_indexes_changed(existing, entry):
+                        derived_changed = True
+                    elif existing is not None:
+                        metadata_updates.append(entry)
 
             try:
                 if changed:
@@ -845,10 +893,20 @@ class IndexStore:
                         self._entries.values(),
                         key=lambda entry: (entry.is_system, entry.path),
                     )
-                    self._page_order = [entry.page_id for entry in ordered]
-                    self._rebuild_canonical_entries()
-                    self._rebuild_backlinks()
-                    self._rebuild_associations()
+                    new_order = [entry.page_id for entry in ordered]
+                    if self._page_order != new_order:
+                        self._page_order = new_order
+                        derived_changed = True
+                    if derived_changed:
+                        self._rebuild_canonical_entries()
+                        self._rebuild_backlinks()
+                        self._rebuild_associations()
+                    elif metadata_updates:
+                        self._canonical_entries = self._canonical_entries.copy()
+                        for updated_entry in metadata_updates:
+                            self._canonical_entries[
+                                _canonical_page_key(updated_entry)
+                            ] = updated_entry
                     self._persistence_dirty = True
                 if (
                     self._persistence_dirty

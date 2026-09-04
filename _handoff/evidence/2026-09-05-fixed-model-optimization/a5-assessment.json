@@ -1,0 +1,31 @@
+{
+  "decision": "do not refactor resource scheduling in this optimization",
+  "current_authority": {
+    "kind": "single_model_v1",
+    "provider": "omlx",
+    "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+    "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+    "protocol": "omlx-native"
+  },
+  "reason": "Ollama-specific Router residency planner is inactive for the current authority. Its probes and nested leases enforce existing safety contracts on other routes. Code motion does not save work in the active route.",
+  "observations": {
+    "omlx_dflash_exclusive_lease": "retained",
+    "ollama_nested_lease": "same-thread depth reuse; not a second file lock",
+    "llm_runtime": "exact role resolution, one backend request, contract validation, no fallback added"
+  },
+  "exploratory_model_free_measurements": {
+    "source": "independent worker report; synthetic injected planner/transport, not production latency",
+    "ingest_config_load_ms_per_call": 1.3105,
+    "residency_plan_ms_per_call": 1.36808,
+    "planner_overhead_without_config_or_routes_ms_per_call": 0.00669,
+    "quorum_pair_decide_median_ms": 46.89,
+    "quorum_pair_decisions": 25,
+    "planner_calls_per_decision": 2,
+    "planner_calls_explanation": "initial probe and post-decision pressure probe"
+  },
+  "validation": {
+    "command": "CHRONOVISOR_ROOT=<temporary-root> .venv/bin/python -m pytest -q tests/test_adaptive_residency.py",
+    "result": "47 passed"
+  },
+  "scope": "No model, configuration, resource-policy or application code changes for A5."
+}

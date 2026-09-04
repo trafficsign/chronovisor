@@ -179,6 +179,99 @@ timeout_ms = 2500
     assert policy.timeout_ms == 2500
 
 
+def test_read_jsonl_tail_preserves_universal_newlines_and_newest_first(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "tail-universal.jsonl"
+    path.write_bytes(
+        b'{"id":"lf"}\n'
+        b'{"id":"crlf"}\r\n'
+        b'{"id":"cr"}\r'
+        b'{"text":"before\xe2\x80\xa8after"}\n'
+        b"torn\n"
+        b'{"id":"tail"}'
+    )
+
+    assert recall_auditor.read_jsonl_tail(path, limit=4) == [
+        {"id": "tail"},
+        {"text": "before\u2028after"},
+        {"id": "cr"},
+    ]
+
+
+def test_read_jsonl_tail_keeps_strict_utf8_and_limit_contract(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "tail-invalid.jsonl"
+    path.write_bytes(b'\xff\n{"id":"valid"}\n')
+
+    with pytest.raises(UnicodeDecodeError):
+        recall_auditor.read_jsonl_tail(path, limit=1)
+    with pytest.raises(UnicodeDecodeError):
+        recall_auditor.read_jsonl_tail(path, limit=0)
+
+    path.write_bytes(b'{"id":"valid"}\n')
+    assert recall_auditor.read_jsonl_tail(path, limit=0) == []
+    with pytest.raises(ValueError, match="maxlen must be non-negative"):
+        recall_auditor.read_jsonl_tail(path, limit=-1)
+
+
+def test_read_jsonl_tail_observes_append_truncate_and_rotation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "tail-rotation.jsonl"
+    path.write_bytes(b'{"id":"first"}\n')
+    assert recall_auditor.read_jsonl_tail(path, limit=1) == [{"id": "first"}]
+
+    with path.open("ab") as handle:
+        handle.write(b'{"id":"second"}\n')
+    assert recall_auditor.read_jsonl_tail(path, limit=1) == [{"id": "second"}]
+
+    with path.open("r+b") as handle:
+        handle.truncate(0)
+        handle.write(b'{"id":"truncated"}\n')
+    assert recall_auditor.read_jsonl_tail(path, limit=1) == [{"id": "truncated"}]
+
+    rotated = tmp_path / "tail-rotation.next"
+    rotated.write_bytes(b'{"id":"replacement"}\n')
+    rotated.replace(path)
+    assert recall_auditor.read_jsonl_tail(path, limit=1) == [{"id": "replacement"}]
+
+
+def test_read_jsonl_tail_handles_chunk_boundaries_and_cr_only_lines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunk = 1 << 16
+    start = b'{"text":"'
+    suffix = b'"}'
+    filler = b"a" * (chunk - 1 - len(start))
+    boundary_line = start + filler + "あ".encode() + suffix
+    path = tmp_path / "tail-boundary.jsonl"
+    path.write_bytes(boundary_line + b"\r\n{" + b'"id":"next"}\n')
+
+    assert recall_auditor.read_jsonl_tail(path, limit=2) == [
+        {"id": "next"},
+        {"text": "a" * len(filler) + "あ"},
+    ]
+
+    cr_only = tmp_path / "tail-cr-only.jsonl"
+    cr_only.write_bytes(b'{"id":0}\r' * 5000)
+    assert recall_auditor.read_jsonl_tail(cr_only, limit=2) == [
+        {"id": 0},
+        {"id": 0},
+    ]
+
+    monkeypatch.setattr(recall_auditor, "_JSONL_READ_CHUNK_BYTES", 8)
+    crlf_boundary = tmp_path / "tail-crlf-boundary.jsonl"
+    crlf_boundary.write_bytes(b'{"i":1}\r\n{"i":2}\r{"i":3}\n')
+    assert recall_auditor.read_jsonl_tail(crlf_boundary, limit=3) == [
+        {"i": 3},
+        {"i": 2},
+        {"i": 1},
+    ]
+
+
 def test_remote_auditor_records_actual_route_and_raw_high_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

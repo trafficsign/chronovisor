@@ -80,16 +80,16 @@ summary{cursor:pointer;color:var(--accent);font-weight:600}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_8869798eb4f84ff3819fcf81f895b814","created_at":"2026-09-05T07:42:59+09:00","状態":"draft","slug":"chronovisor-fixed-model-optimization-roadmap","title":"Chronovisor — モデル固定・品質維持の最適化と再設計 統合計画","project_root":"/Users/trafficsign/projects/personal/chronovisor","baseline_commit":"4ead53c5a42da8e61c2319ccdb2b581f7a656e22","current_request_scope":"plan_only","implementation_started":false,"main_scope":"A0-A7: behavior-preserving optimization","future_scope":"F1-F9: retained design options, not automatically executable","deployment_scope":"explicit push and runtime-reflection request required"}
+{"task_id":"plan_8869798eb4f84ff3819fcf81f895b814","created_at":"2026-09-05T07:42:59+09:00","状態":"running","slug":"chronovisor-fixed-model-optimization-roadmap","title":"Chronovisor — モデル固定・品質維持の最適化と再設計 統合計画","project_root":"/Users/trafficsign/projects/personal/chronovisor","baseline_commit":"4ead53c5a42da8e61c2319ccdb2b581f7a656e22","current_request_scope":"implement_A0_A7_and_deploy","implementation_started":true,"main_scope":"A0-A7: behavior-preserving optimization","future_scope":"F1-F9: retained design options, not automatically executable","deployment_scope":"push, targeted restart and live verification authorized by user 2026-09-05","implementation_baseline_commit":"7b872fa64cf08edeaf86be4078077f60862c7dba"}
 </script>
 
 <header>
 <h1><span id="plan-title">Chronovisor — モデル固定・品質維持の最適化と再設計 統合計画</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="draft">draft · 実装未着手</span>
+<span class="badge" data-bind="状態" data-state="running">running · 主計画を実行中</span>
 <span><code data-bind="task_id">plan_8869798eb4f84ff3819fcf81f895b814</code></span>
 <span data-bind="created_at">2026-09-05T07:42:59+09:00</span>
-<span>作成対象：計画書のみ</span>
+<span>実行対象：A0–A7・push・再起動・本番確認</span>
 </div>
 <nav aria-label="計画書の目次"><a href="#purpose">目的と制約</a><a href="#evidence">実測値</a><a href="#main-plan">主計画</a><a href="#validation">受入・検証</a><a href="#future-plan">中長期の案</a><a href="#release">反映と切り戻し</a><a href="#handoff">引継ぎ</a></nav>
 </header>
@@ -98,7 +98,7 @@ summary{cursor:pointer;color:var(--accent);font-weight:600}
 <h2>目的</h2>
 <p class="lead"><strong>現在のモデル、推論設定、機能、品質条件を維持したまま、コードの重複処理・全量走査・不要な一時コピーを減らし、待ち時間とメモリ負荷を改善する。</strong></p>
 <p>2026-09-05の設計相談で出たゼロベース再設計案と、その後の「モデルを変えず、今のスペックを保つ」という条件を統合する。直近の主計画はA0–A7の挙動を保つ最適化とする。仕様や正本を変える案はF1–F9に保存し、主計画の完了後に自動で実装しない。</p>
-<p class="note"><strong>今回承認されているのは、この計画書の作成・検証・保存。</strong>アプリ実装、モデル呼出し、設定変更、本番データ移行、push、サービス再起動は、この作成作業には含まれない。計画書の完成と、以下の実行項目の完了を区別する。</p>
+<p class="note"><strong>2026-09-05、主計画Aの実装・検証・push・必要なサービスの再起動・本番確認をユーザーが承認。</strong>モデルと推論設定を維持する。仕様変更を伴うFや本番データ移行は含めない。計画書の完成と、以下の実行項目の完了を区別する。</p>
 </section>
 
 <section data-section="やってはいけないこと">
@@ -116,7 +116,7 @@ summary{cursor:pointer;color:var(--accent);font-weight:600}
 <section data-section="前提・仮定">
 <h2>前提・仮定</h2>
 <ul>
-<li>コードの観測基準は<code>4ead53c5a42da8e61c2319ccdb2b581f7a656e22</code>。これはcheckoutのHEADであり、稼働runtimeとの一致は今回測定していない。実装時は再確認する。</li>
+<li>設計時の観測基準は<code>4ead53c</code>、実装直前のコード基準は計画書commitの<code>7b872fa</code>。baseline manifestで各サービスの実archiveを照合済み。変更前の一部runtimeは<code>d8f31d8</code>であり、反映時に公開済みの実装SHAへ揃える。</li>
 <li>主な参照ソースはgraph Tier 2で検索・確認し、2026-09-04T22:43:10Z世代のcoverageはmetadata一致・記録された欠落なし。完全性の証明ではなく、変更後は必要な範囲を再確認する。</li>
 <li>モデルの重みそのものの占有量を減らす計画ではない。Python側の解析、I/O、重複したデータ表現、待ち時間を減らす。全体の改善幅は、モデル推論と周辺処理の時間・メモリの割合による。</li>
 <li>RawStore、検索索引の差分検知、共通JSONL reader、LLMRuntime、優先制御、EvidencePacket、回答評価は既存。既存実装を確認して再利用し、同じ目的の基盤を増設しない。</li>
@@ -124,32 +124,13 @@ summary{cursor:pointer;color:var(--accent);font-weight:600}
 </section>
 
 <section id="evidence" data-section="実測と候補">
-<h2>確認済みの実測値と、未測定の候補</h2>
-<div class="table-wrap"><table>
-<thead><tr><th>対象</th><th>本セッションで確認した値・実装</th><th>判断と限界</th></tr></thead>
-<tbody>
-<tr><td>Recallログ末尾500物理行</td><td>81.92MiB、5回の交互比較。現行の前方全走査：中央値139.720ms。既存の末尾reader＋逆順化：22.297ms。500レコードの内容・順序が全5組で一致。ファイルidentityは測定前後で一致。</td><td>局所処理は約6.3倍、時間は約84%減。ファイルキャッシュが温まった条件での観測。アプリ全体の改善率、cold時、同時追記・破損時の同等性は未検証。</td></tr>
-<tr><td>Convergence状態JSON</td><td>59,226,739 bytes（約56.5MiB）、17,909 items。単独プロセスでread＋JSON decodeを1回行い312.47ms。プロセス最大RSS386.69MiB。入力identityは前後一致。</td><td>再解析を減らす候補。RSSは測定プロセス全体の最大値で、JSONだけの使用量でも、削減可能量でもない。改善版との比較は未実施。</td></tr>
-<tr><td>索引更新</td><td>IndexStoreは変更ページだけを再解析する一方、変更時にはcanonical entries、backlinks、associationsの再構築へ進む。</td><td>一部更新での再構築範囲削減を検討。削除・同名衝突・順序・依存関係の同等性が必要。効果未測定。</td></tr>
-<tr><td>データのコピー・再変換</td><td>全ページmetadata生成、JSON文字列・dict・PageEntryの表現、複数段階の同一情報参照が調査対象。</td><td>プロファイル上位だけを扱う。Rawは既にstream/range検証を持つため、全量コピーがあると決めつけない。</td></tr>
-<tr><td>責任の分離</td><td>DecisionRouterの合議処理は、判断・監査に加えて常駐計画とモデル退避を扱う。LLMRuntimeとforeground制御は既存。</td><td>同じ実行順・設定のまま責任を移す候補。モジュール分割自体を速度改善の証拠にしない。</td></tr>
-</tbody></table></div>
-<p class="small">上記は本セッションのread-only測定を転記した観測値。入力snapshot本体、content digest、実行環境manifestを一式保存した正式な採用証拠ではないため、A0で再現可能なbaselineを作る。稼働データは増えるので、後日の現在値として流用しない。</p>
-<details><summary>初回測定のサンプルと再現条件</summary>
-<pre><code>現行 [ms]   = [150.631, 139.720, 138.760, 140.717, 136.762]
-末尾reader  = [21.307, 23.609, 22.847, 21.887, 22.297]
-physical_line_limit = 500
-returned_records = 500
-ordered_record_equality_all_pairs = true
-file_identity_unchanged = true
-
-tail比較：対象関数だけをASTで取り出し、アプリ全体はimportしない。
-旧 read_jsonl_tail(path, 500) と
-list(reversed(list(core.jsonl.iter_jsonl(path, limit=500)))) を交互実行。
-state測定：json.loads(path.read_text(encoding="utf-8")) の時間を計測。
-RSS：macOSのresource.getrusage(RUSAGE_SELF).ru_maxrssをMiBへ換算。
-いずれもモデル呼出し・ファイル書込・サービス再起動なし。</code></pre>
-</details>
+<h2>最終採用した変更の実測値</h2>
+<p>旧版は<code>7b872fa</code>の実関数をASTで取り出し、同じ固定入力に対して旧→新／新→旧を交互に30組実行した。モデル呼出し・OSキャッシュ消去は行っていない。以下は対象コード処理の局所値であり、アプリ全体やモデル推論の短縮率ではない。</p>
+<div class="table-wrap"><table><thead><tr><th>対象</th><th>条件</th><th>旧 → 新（中央値）</th><th>判断</th></tr></thead><tbody><tr><td>ログ末尾500物理行</td><td>86,000,538bytesの固定snapshot、30組、warm</td><td>135.806 → 77.483ms</td><td>42.95%短縮。全組の内容・順序一致。</td></tr><tr><td>ログ末尾5000物理行</td><td>86,000,538bytesの固定snapshot、30組、warm</td><td>358.237 → 306.040ms</td><td>14.57%短縮。全組の内容・順序一致。</td></tr><tr><td>状態のapplied一覧取得</td><td>59,250,797bytes・17,923items、30組</td><td>523.101 → 331.679ms</td><td>36.59%短縮。返却digest一致、所有権を維持。</td></tr><tr><td>状態一覧取得時の最大RSS</td><td>独立プロセス各3回の中央値、準備処理を含む</td><td>553.500 → 533.812MiB</td><td>約19.69MiB減。モデル重み・アプリ全体の常駐量ではない。</td></tr><tr><td>索引のmetadata更新</td><td>合成5000ページ、通常のfsync・保存あり、30組</td><td>44.044 → 33.259ms</td><td>24.49%短縮。全組でmetadata/canonical/backlinks/tag/entityの結果一致。</td></tr><tr><td>改善を数えない経路</td><td>get、全走査refresh、モデル実行制御</td><td>get +0.09%、refresh中央値 +2.48%</td><td>get/refreshの高速化は主張しない。Router/schedulerの追加分割やcacheは不採用。</td></tr></tbody></table></div>
+<p>ログ読込の最大RSSは末尾500行で82.047→83.250MiB（+1.47%）、5000行で277.219→275.672MiB（-0.56%）。生の文字列を解析後に解放し、初期案の+5.3%増を抑えた。状態一覧は約19.69MiB減。これらを合算してアプリ全体の削減量とはしない。</p>
+<p>JSONLの最初のmmap案（初期測定で約6.3倍）はUTF-8・エラー・追記等の契約をそのまま満たさず不採用。標準TextIOのchunk案も比較し、速度差があるため、既存のRecall helper内で32KiBのbyte blockと物理改行処理を使う。全件UTF-8検証は残し、新しいcacheや共通基盤を増やさない。</p>
+<p class="small">ホスト上の既存サービスと検証処理は稼働したままであり、時刻・キャッシュ・OS負荷のばらつきを含む。状態修復の重複read削除単独は約6.4%短縮で、10%の速度目標を満たした変更とは数えない。コード簡素化と読込回数5→4という確定した削減も含めて採用した。refreshのp95は+5.24%だが中央値は+2.48%であり、境界付近の揺れとして記録し、速度改善に含めない。</p>
+<p><a href="evidence/2026-09-05-fixed-model-optimization/baseline.json">環境・固定入力</a> · <a href="evidence/2026-09-05-fixed-model-optimization/a1-results.json">A1 raw測定</a> · <a href="evidence/2026-09-05-fixed-model-optimization/a2-results.json">A2/A4 raw測定</a> · <a href="evidence/2026-09-05-fixed-model-optimization/a3-results.json">A3 raw測定</a> · <a href="evidence/2026-09-05-fixed-model-optimization/verification.json">検証結果</a></p>
 </section>
 
 <section id="main-plan" data-section="実行手順">
@@ -157,42 +138,42 @@ RSS：macOSのresource.getrusage(RUSAGE_SELF).ru_maxrssをMiBへ換算。
 <p>依存順序は<strong>A0 → A1 → A2 → A3/A4 → A5 → A6 → A7</strong>。A3/A4は独立したファイル所有範囲なら並列調査できる。実装は一件ずつ同等性と効果を確認する。候補に効果がない場合は変更を入れず、測定根拠付きの不採用判定を記録する。</p>
 
 <div class="phase"><h3>A0 · 基準と比較方法を固定する</h3><ol class="checklist">
-<li><input id="a0-1" type="checkbox"><label for="a0-1">checkout・runtime SHA、dirty差分、実行環境、モデルと有効設定、採用中の品質契約を確認し、secretを含まないbaseline manifestを保存する。</label></li>
-<li><input id="a0-2" type="checkbox"><label for="a0-2">同一の読取専用snapshotと代表ワークロードを用意する。通常・大きいログ・空/破損・更新競合・timeout/縮退を区別し、入力と期待結果を先に固定する。</label></li>
-<li><input id="a0-3" type="checkbox"><label for="a0-3">I/O、JSON解析、検索、lock/queue、prefill、decode、CPU RSS/peak、モデル側メモリ、swap増分を分けて測定する。各候補の性能目標と許容ばらつきを、変更前の反復測定から確定する。</label></li>
+<li><input id="a0-1" type="checkbox" checked><label for="a0-1">checkout・runtime SHA、dirty差分、実行環境、モデルと有効設定、採用中の品質契約を確認し、secretを含まないbaseline manifestを保存する。</label></li>
+<li><input id="a0-2" type="checkbox" checked><label for="a0-2">同一の読取専用snapshotと代表ワークロードを用意する。通常・大きいログ・空/破損・更新競合・timeout/縮退を区別し、入力と期待結果を先に固定する。</label></li>
+<li><input id="a0-3" type="checkbox" checked><label for="a0-3">I/O、JSON解析、検索、lock/queue、prefill、decode、CPU RSS/peak、モデル側メモリ、swap増分を分けて測定する。各候補の性能目標と許容ばらつきを、変更前の反復測定から確定する。</label></li>
 </ol><p class="small">完了条件：比較対象・固定条件・測定方法・入力identityが揃い、コード処理とモデル計算を混同しないbaselineがある。</p></div>
 
 <div class="phase"><h3>A1 · JSONL尾部読込を共通化する — 最初の実装候補</h3><ol class="checklist">
-<li><input id="a1-1" type="checkbox"><label for="a1-1">recall_auditor.read_jsonl_tailとmatching_pull_events、およびcontent_correction.source_recall_record（limit=5000）など実callerを確認する。返却順、物理行limit、0/負数、LF/CRLF/Unicode、不正UTF-8、不完全末尾、I/Oエラー、追記・rotation・truncate、prompt/host/session/time照合の現行契約を固定する。</label></li>
-<li><input id="a1-2" type="checkbox"><label for="a1-2">既存core.jsonl.iter_jsonlを再利用できる最小差分へまとめる。新旧readerのエラー・snapshot・limitの差を無視した単純置換はしない。必要な適合処理だけを加え、共通helperの他callerを壊さない。</label></li>
-<li><input id="a1-3" type="checkbox"><label for="a1-3">境界条件・順序・取得内容を比較し、大きいsnapshotで反復測定する。旧reader全走査に対する局所改善と、実callerの改善を別々に報告する。候補readerはファイル全長をmmapするため、速度改善から省メモリを推定せず、RSS・仮想メモリ・page faultを別測定し、他の固定予算を超えないことを確認する。</label></li>
+<li><input id="a1-1" type="checkbox" checked><label for="a1-1">recall_auditor.read_jsonl_tailとmatching_pull_events、およびcontent_correction.source_recall_record（limit=5000）など実callerを確認する。返却順、物理行limit、0/負数、LF/CRLF/Unicode、不正UTF-8、不完全末尾、I/Oエラー、追記・rotation・truncate、prompt/host/session/time照合の現行契約を固定する。</label></li>
+<li><input id="a1-2" type="checkbox" checked><label for="a1-2">既存core.jsonl.iter_jsonlとの互換性を評価し、不一致なら無理に置換しない。採用版は既存recall_auditor.read_jsonl_tail内を最適化し、matching_pull_eventsから共有する。新しいcross-domain APIは作らない。</label></li>
+<li><input id="a1-3" type="checkbox" checked><label for="a1-3">境界条件・順序・取得内容を比較し、大きいsnapshotで反復測定する。旧reader全走査に対する局所改善と、実callerの改善を別々に報告する。採用readerは全長mmapを使わない。速度改善から省メモリを推定せず、独立processのRSSと境界条件を別に確認する。</label></li>
 </ol><p class="small">完了条件：固定した正常・異常系の契約を満たし、対象callerで有意な時間短縮がある。初回6.3倍は参考値であり、再現必須の保証値にはしない。</p></div>
 
 <div class="phase"><h3>A2 · 状態JSONの反復読込・解析を減らす</h3><ol class="checklist">
-<li><input id="a2-1" type="checkbox"><label for="a2-1">ConvergenceStore.get/list_items/loadとループ内callerについて、1ジョブ当たりのread/decode回数と最大同時保持量を数える。状態参照の用途を表示・候補選別・実際のmutationに分ける。</label></li>
-<li><input id="a2-2" type="checkbox"><label for="a2-2">同じ確定snapshotを使える範囲でまとめて参照する。要求/バッチ内の再利用を優先し、更新・差替え・自分の書込みを必ず検知する。mutation直前のlock内最新状態検査とCASは保持する。</label></li>
-<li><input id="a2-3" type="checkbox"><label for="a2-3">他writerの更新、atomic replace、削除/破損、lease期限、再試行、再起動、同一バッチの状態変化を検証する。再解析回数・時間・peak/定常メモリを測り、保持が増えるキャッシュ案は採用しない。</label></li>
+<li><input id="a2-1" type="checkbox" checked><label for="a2-1">ConvergenceStore.get/list_items/loadとループ内callerについて、1ジョブ当たりのread/decode回数と最大同時保持量を数える。状態参照の用途を表示・候補選別・実際のmutationに分ける。</label></li>
+<li><input id="a2-2" type="checkbox" checked><label for="a2-2">同じ確定snapshotを使える範囲でまとめて参照する。要求/バッチ内の再利用を優先し、更新・差替え・自分の書込みを必ず検知する。mutation直前のlock内最新状態検査とCASは保持する。</label></li>
+<li><input id="a2-3" type="checkbox" checked><label for="a2-3">他writerの更新、atomic replace、削除/破損、lease期限、再試行、再起動、同一バッチの状態変化を検証する。再解析回数・時間・peak/定常メモリを測り、保持が増えるキャッシュ案は採用しない。</label></li>
 </ol><p class="small">完了条件：staleな状態で処理を進めず、同じmutation結果・terminal state・retry条件を保ち、対象ワークロードの再解析コストが減る。</p></div>
 
 <div class="phase"><h3>A3 · 索引の更新範囲を必要な部分に絞る</h3><ol class="checklist">
-<li><input id="a3-1" type="checkbox"><label for="a3-1">IndexStoreの既存差分検知を基準に、backlinks/associations/canonical entriesの全再構築コストを測る。小さい更新で有意な負荷がある場合だけ、影響範囲の更新へ変更する。</label></li>
-<li><input id="a3-2" type="checkbox"><label for="a3-2">追加・削除・rename・status変更・リンク変更・重複ID・同順位を含む更新列で、全再構築版と結果を比較する。検索順、フィルタ、schema、generation、永続化失敗時の回復を保つ。</label></li>
+<li><input id="a3-1" type="checkbox" checked><label for="a3-1">IndexStoreの既存差分検知を基準に、backlinks/associations/canonical entriesの全再構築コストを測る。小さい更新で有意な負荷がある場合だけ、影響範囲の更新へ変更する。</label></li>
+<li><input id="a3-2" type="checkbox" checked><label for="a3-2">追加・削除・rename・status変更・リンク変更・重複ID・同順位を含む更新列で、全再構築版と結果を比較する。検索順、フィルタ、schema、generation、永続化失敗時の回復を保つ。</label></li>
 </ol><p class="small">完了条件：索引・関連・順位の決定論的な結果が一致し、更新時間が改善する。無根拠に走査や競合検知を省略しない。</p></div>
 
 <div class="phase"><h3>A4 · 一時コピーと繰り返し変換を減らす</h3><ol class="checklist">
-<li><input id="a4-1" type="checkbox"><label for="a4-1">実プロファイルで上位に出る全量list化、JSON再解析、同一pageの再読込、metadata全件生成、配列・文字列コピーを特定する。既存iterator、page_count、索引snapshot、Rawのrange readerを先に確認する。</label></li>
-<li><input id="a4-2" type="checkbox"><label for="a4-2">必要な範囲の読取・stream処理・同一入力の再利用へ最小変更する。全件検証が必要な処理は全件を検証し、コピーで保証していた所有権・可変性・順序を保つ。dtypeや精度は変えない。</label></li>
+<li><input id="a4-1" type="checkbox" checked><label for="a4-1">実プロファイルで上位に出る全量list化、JSON再解析、同一pageの再読込、metadata全件生成、配列・文字列コピーを特定する。既存iterator、page_count、索引snapshot、Rawのrange readerを先に確認する。</label></li>
+<li><input id="a4-2" type="checkbox" checked><label for="a4-2">必要な範囲の読取・stream処理・同一入力の再利用へ最小変更する。全件検証が必要な処理は全件を検証し、コピーで保証していた所有権・可変性・順序を保つ。dtypeや精度は変えない。</label></li>
 </ol><p class="small">完了条件：同じ入力と結果でpeak/定常メモリの少なくとも対象指標が改善し、処理時間が許容範囲内。単なるキャッシュへの移し替えを省メモリと呼ばない。</p></div>
 
 <div class="phase"><h3>A5 · 判断と実行資源の責任を整理する</h3><ol class="checklist">
-<li><input id="a5-1" type="checkbox"><label for="a5-1">DecisionRouter、LLMRuntime、既存scheduler/leaseの責任とcallerを確認する。重複制御や不要な準備が測定で確認できる箇所だけ、既存interfaceへ集める。</label></li>
-<li><input id="a5-2" type="checkbox"><label for="a5-2">Routerの判断・quorum・監査と、実行側の資源処理を整理する。同じrole、request、モデル呼出順、priority、residency判断、lock保証を保ち、取消・例外・低メモリ・競合時の回帰を検証する。</label></li>
-</ol><p class="small">完了条件：責任の重複が減り、元の動作契約を維持する。構造改善だけの場合は速度改善と別に報告する。新しい制御daemon・プロセス構成・常駐方針への移行はF6へ送る。</p></div>
+<li><input id="a5-1" type="checkbox" checked><label for="a5-1">DecisionRouter、LLMRuntime、既存scheduler/leaseの責任とcallerを確認する。重複制御や不要な準備が測定で確認できる箇所だけ、既存interfaceへ集める。</label></li>
+<li><input id="a5-2" type="checkbox" checked><label for="a5-2">Routerの判断・quorum・監査と、実行側の資源処理を整理する。同じrole、request、モデル呼出順、priority、residency判断、lock保証を保ち、取消・例外・低メモリ・競合時の回帰を検証する。</label></li>
+</ol><p class="small">完了条件：責任の重複が減り、元の動作契約を維持する。構造改善だけの場合は速度改善と別に報告する。新しい制御daemon・プロセス構成・常駐方針への移行はF6へ送る。<strong>判定：追加分割は不採用。</strong>現行OMLX authorityは対象のOllama制御を使わず、既存lease/probeには契約上の役割がある。調査と不採用判定を完了した。</p></div>
 
 <div class="phase"><h3>A6 · 全体で同等性と改善を確認する</h3><ol class="checklist">
-<li><input id="a6-1" type="checkbox"><label for="a6-1">採用候補の差分を統合し、Recall/保存/検索/訂正/合議の関連回帰、architecture/lint/type検査、必要な統合テストを通す。外部効果とモデル要求の差分を確認する。</label></li>
-<li><input id="a6-2" type="checkbox"><label for="a6-2">同一snapshot・同一モデル設定で、旧版/新版を交互比較する。局所とend-to-end、warmとprocess-start、通常と競合を分け、p50/p95、CPU、peak/定常メモリ、swap増分を記録する。</label></li>
-<li><input id="a6-3" type="checkbox"><label for="a6-3">既存の品質・adoption契約に従って、検索・根拠・訂正・棄却/保留・回答品質の非劣化を確認する。未通過項目を残したまま本番適用可と判定しない。</label></li>
+<li><input id="a6-1" type="checkbox" checked><label for="a6-1">採用候補の差分を統合し、Recall/保存/検索/訂正/合議の関連回帰、architecture/lint/type検査、必要な統合テストを通す。外部効果とモデル要求の差分を確認する。</label></li>
+<li><input id="a6-2" type="checkbox" checked><label for="a6-2">同一snapshot・同一モデル設定で、旧版/新版を交互比較する。局所とend-to-end、warmとprocess-start、通常と競合を分け、p50/p95、CPU、peak/定常メモリ、swap増分を記録する。</label></li>
+<li><input id="a6-3" type="checkbox" checked><label for="a6-3">既存の品質・adoption契約に従って、検索・根拠・訂正・棄却/保留・回答品質の非劣化を確認する。今回の変更で新たに生じた未通過項目を残したまま本番適用可と判定しない。着手前から存在する失敗は旧版で再現し、影響差分と件数を明記して成功扱いしない。</label></li>
 </ol><p class="small">完了条件：同じ仕様・品質条件を保ったことと、改善した対象・幅・限界が同じreportから確認できる。</p></div>
 
 <div class="phase"><h3>A7 · 変更単位を確定し、成果と残件を記録する</h3><ol class="checklist">
@@ -266,32 +247,32 @@ RSS：macOSのresource.getrusage(RUSAGE_SELF).ru_maxrssをMiBへ換算。
 <li>モデル・設定・schemaの意図しない差、品質ゲート失敗、Raw/receipt/CAS異常、stale状態、既定予算を超えるメモリ/遅延回帰が出たら、採用を止めて記録した版へ切り戻す。モデル変更で辻褄を合わせない。</li>
 <li>設定変更・永続schema移行を含まないAの変更では、旧runtimeへ戻した後もデータを読めることを確認する。Fの移行では事前に別の移行・復元受入をこの計画へ追加する。</li>
 </ol>
-<p class="small">現在の反映状態：未実行。今回の計画書作成は、push・サービス再起動・本番ベンチマークの依頼ではない。</p>
+<p class="small">現在の反映状態：採用実装と検証を完了。push・再起動・本番確認はユーザー承認済みで、続けて実施する。切り戻し先のruntime sourceは4ead53c5a42da8e61c2319ccdb2b581f7a656e22。永続schemaとモデル設定は変更しない。</p>
 </section>
 
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
-<ul><li>計画書作成のブロッカーなし。保存先はユーザーがChronovisorの<code>_handoff</code>を指定済み。実装・将来案の採用・本番反映は今回の依頼範囲外であり、障害とは扱わない。</li></ul>
+<ul><li>ブロッカーなし。主計画Aの実装から本番確認まで承認済み。将来案Fは独立した検討案として維持する。</li></ul>
 </section>
 
 <section id="handoff" data-section="受け渡しメモ">
 <h2>受け渡しメモ（次担当へ）</h2>
 <ul>
 <li>作成時の無関係なdirty差分：<code>scripts/recall_r6_harness.py</code>、<code>tests/test_recall_r6_harness.py</code>。未追跡：<code>_handoff/2026-09-01_ornith-15-9b-omlx-optimization-research.md</code>、<code>_handoff/2026-09-01_qwen38-reap-mtp-public-model-search.md</code>、<code>_handoff/evidence/2026-08-29-recall-teacher-salvage/</code>。削除・上書き・一括stageをしない。着手時には再確認する。</li>
-<li>最初の対象はA0/A1。A2以降も、その時点のprofileと既存helperを確認してから変更する。大きい関数やファイルであることだけを最適化理由にしない。</li>
+<li>A1/A2/A3/A4の採用実装とA5の不採用判断は完了。中長期F1–F9は未実装の検討案として保持する。prefill/decode/明示lock waitの計測値は現行artifactに無く、全体速度の改善値として推定していない。</li>
 <li>benchmark証拠にはコマンド、入力digest/size、code/runtime/config identity、反復数、samples、結果比較、RSSの測定対象を含める。会話本文・credentialをreportや公開commitに含めない。</li>
-<li>次担当はこの文書の状態を読み、plan-onlyの記録を実装承認と取り違えない。ユーザーから実行依頼があれば、Aの範囲を受入条件まで進める。Fへ自動拡大しない。</li>
+<li>2026-09-05の実行依頼に基づき、Aの範囲を受入条件と本番確認まで進める。過去のplan-only記録と現在の承認状態を区別し、Fへ自動拡大しない。</li>
 </ul>
 </section>
 
 <section data-section="参照">
 <h2>根拠となる実装と資料</h2>
 <ul>
-<li>A1：<a href="../src/chronovisor/recall/recall_auditor.py">recall_auditor.py:485 / 830</a>、<a href="../src/chronovisor/core/jsonl.py">core/jsonl.py:41</a>、<a href="../src/chronovisor/recall/content_correction.py">content_correction.py:644 / 653</a>。</li>
-<li>A2：<a href="../src/chronovisor/ingest/convergence.py">convergence.py:509 / 580</a>、<a href="../src/chronovisor/ops/lint_repair.py">lint_repair.py:1371</a>。</li>
-<li>A3/A4：<a href="../src/chronovisor/core/index_store.py">index_store.py:622 / 976 / 1173</a>、<a href="../src/chronovisor/core/raw_store.py">raw_store.py:120</a>。</li>
-<li>A5：<a href="../src/chronovisor/decision/decision_router.py">decision_router.py:4480</a>、<a href="../src/chronovisor/core/research_scheduler.py">research_scheduler.py:207</a>、<a href="../src/chronovisor/core/llm_runtime.py">llm_runtime.py:450</a>。</li>
-<li>F：<a href="../src/chronovisor/core/claims.py">claims.py:285</a>、<a href="../src/chronovisor/research/evidence_reconstruction.py">evidence_reconstruction.py:347 / 991</a>、<a href="../src/chronovisor/research/evidence_runtime.py">evidence_runtime.py:337 / 679</a>、<a href="../src/chronovisor/recall/recall_runtime.py">recall_runtime.py:2142</a>、<a href="../src/chronovisor/recall/recall_compiler.py">recall_compiler.py:90</a>。</li>
+<li>A1：<a href="../src/chronovisor/recall/recall_auditor.py">recall_auditor.py</a>、<a href="../src/chronovisor/core/jsonl.py">core/jsonl.py</a>、<a href="../src/chronovisor/recall/content_correction.py">content_correction.py</a>。</li>
+<li>A2：<a href="../src/chronovisor/ingest/convergence.py">convergence.py</a>、<a href="../src/chronovisor/ops/lint_repair.py">lint_repair.py</a>。</li>
+<li>A3/A4：<a href="../src/chronovisor/core/index_store.py">index_store.py</a>、<a href="../src/chronovisor/core/raw_store.py">raw_store.py</a>。</li>
+<li>A5：<a href="../src/chronovisor/decision/decision_router.py">decision_router.py</a>、<a href="../src/chronovisor/core/research_scheduler.py">research_scheduler.py</a>、<a href="../src/chronovisor/core/llm_runtime.py">llm_runtime.py</a>。</li>
+<li>F：<a href="../src/chronovisor/core/claims.py">claims.py</a>、<a href="../src/chronovisor/research/evidence_reconstruction.py">evidence_reconstruction.py</a>、<a href="../src/chronovisor/research/evidence_runtime.py">evidence_runtime.py</a>、<a href="../src/chronovisor/recall/recall_runtime.py">recall_runtime.py</a>、<a href="../src/chronovisor/recall/recall_compiler.py">recall_compiler.py</a>。</li>
 <li>評価と既存契約：<a href="../docs/recall-orchestration.md">Recall orchestration</a>、<a href="../docs/architecture.md">Architecture</a>、<a href="../docs/architecture/adr/0001-layering-dependency-and-compatibility.md">Layering ADR</a>、<a href="../docs/architecture/adr/0002-mcp-tool-structure-effects.md">MCP tool contract ADR</a>。</li>
 <li>将来案の一般的な根拠：<a href="https://sqlite.org/wal.html">SQLite WAL公式資料</a>（同時writer制約・同期・回復）、<a href="https://arxiv.org/abs/2410.10813">LongMemEval</a>（時間推論・知識更新・回答保留の評価）。これらはChronovisorの改善を実証する資料ではない。</li>
 </ul>
@@ -302,6 +283,13 @@ RSS：macOSのresource.getrusage(RUSAGE_SELF).ru_maxrssをMiBへ換算。
 <ol class="log">
 <li><time datetime="2026-09-05T07:42:59+09:00">2026-09-05 作成</time><span>ユーザーの依頼により、これまでの改善案を統合。保存先はChronovisorの_handoffを指定。canonical generatorでHTMLを生成し、モデル固定の主計画Aと、仕様変更を伴う検討案Fを整理した。初回read-only測定の数値と限界を記録。アプリ実装・モデル呼出し・設定変更・push・再起動は未実施。</span></li>
 <li><time datetime="2026-09-05T07:57:27+09:00">2026-09-05 07:57 検証</time><span>独立レビューを反映し、訂正処理のcaller・回帰対象と、mmapの速度/メモリ測定の区別を追記。HTML構造、metadataとbadgeのdraft一致、20項目が全て未完了、内部リンクと参照ファイルの存在を検証。ブラウザのlocal file URL制約により描画確認は未実施。アプリの実装テストは今回の文書作成では実行していない。</span></li>
+<li><time datetime="2026-09-05T08:08:36+09:00">2026-09-05 08:08</time><span>A0-1/A0-2完了。ユーザーの実行・push・再起動承認を記録。コード/稼働archive/依存version/モデルroleと設定hash、変更前OS状態を保存。ログ86,000,538bytes・状態JSON59,250,797bytesの固定snapshotを本番外へ作成し、安定したFD identityとSHA256を確認。本文は公開証拠へ含めない。<a href="evidence/2026-09-05-fixed-model-optimization/baseline.json">baseline</a>。現行serviceはmanaged-v2、一部archiveはd8f31d8、Dashboardは4ead53c。計測は推論を除いたコード処理から開始する。</span></li>
+<li><time datetime="2026-09-05T08:14:48+09:00">2026-09-05 08:14</time><span>A5-1/A5-2完了（不採用）。現行single_model_v1/OMLX経路、LLMRuntime、nested lease、再probeを追跡。Ollama plannerは現行authorityで非実行、再probe削除は安全契約を変えるため追加分割・config cacheを導入しない。独立reviewとadaptive residency 47 tests通過。<a href="evidence/2026-09-05-fixed-model-optimization/a5-assessment.json">判断根拠</a>。</span></li>
+<li><time datetime="2026-09-05T08:31:08+09:00">2026-09-05 08:31</time><span>A3完了。metadataだけの変更ではcanonical参照を差し替え、backlinks/associationsの全再構築を省略。リンク・tag・status・順序・追加削除は従来の全再構築を維持。永続化失敗時rollbackも確認。旧版ASTと交互30組、5000ページの通常保存あり更新は44.044ms→33.259ms（24.49%短縮）、p95は17.50%短縮。全組で5成分の結果が一致。refreshは2.48%増で許容ばらつき内、速度改善とは数えない。<a href="evidence/2026-09-05-fixed-model-optimization/a3-results.json">測定rawと同値証拠</a>。</span></li>
+<li><time datetime="2026-09-05T08:32:55+09:00">2026-09-05 08:32</time><span>A2/A4完了。tag修復の重複getを除き、既存claimのreadbackで判定する（状態読込5→4回）。freshに解析したload/get/list_itemsの不要なdeepcopyも除去。mutation側のlock/CAS/leaseと防御コピーは維持。旧版ASTのコピー1回対新コード0回を直接比較し、59,250,797bytes・17,923itemsのapplied一覧取得は523.101ms→331.679ms（36.59%短縮）。getは+0.09%で速度改善とは数えない。独立process最大RSSは553.500MiB→533.813MiB、約19.69MiB減（3.56%）。モデル重みやアプリ全体のメモリではない。キャッシュ案は保持量・freshnessの負担から不採用。<a href="evidence/2026-09-05-fixed-model-optimization/a2-results.json">最終rawと等価確認</a>。初期の二重コピー比較値は最終測定から除外した。</span></li>
+<li><time datetime="2026-09-05T08:38:49+09:00">2026-09-05 08:38</time><span>A1完了。32KiB block読込と解析済みtail文字列の逐次解放を採用。厳密UTF-8、物理行limit、CR/LF/CRLF・Unicode、0/負数、破損末尾、追記/差替え/切詰め、取得順序を確認。rootの6000境界比較も一致。最終30組は500行42.95%、5000行14.57%短縮。RSSはそれぞれ+1.47%、-0.56%。161関連tests通過、最終source固定後にrootの統合検証を実施。</span></li>
+<li><time datetime="2026-09-05T08:42:17+09:00">2026-09-05 08:42</time><span>A0-3完了。固定snapshot・旧実装AST・交互30組・独立process RSSの比較条件を確定。モデル要求と計算精度は不変。既存の生成throughput・decision latency・Recall stage・scheduler・service latencyをread-onlyで別採取した。現行artifactにはprefill/decode/明示lock waitの分解値がなく、not_availableを記録し推定しない。モデル全体の速度・メモリ改善は採用根拠に含めない。<a href="evidence/2026-09-05-fixed-model-optimization/runtime-observation-before.json">反映前の観測と測定限界</a>。</span></li>
+<li><time datetime="2026-09-05T08:45:56+09:00">2026-09-05 08:45</time><span>A6完了。全体6,373件中6,364 passed・8 failed・1 skipped（906.65秒）。失敗8件は構成台帳7件と大関数policy1件で、cleanな7b872faでも同じ失敗集合を独立再現。今回の新規失敗0、台帳や閾値は緩和していない。最終コードの関連253件とモデル/資源契約399件は通過、ruff/mypy/import-linter/compileall/diff-check通過。検索・訂正・保存・lease/CAS・モデル要求の契約および固定snapshotの結果一致を確認した。prefill/decodeの分解や自由生成回答の新規A/Bは未測定で、品質改善・全体高速化を主張しない。<a href="evidence/2026-09-05-fixed-model-optimization/verification.json">検証・既存失敗の証拠</a>。</span></li>
 </ol>
 </section>
 

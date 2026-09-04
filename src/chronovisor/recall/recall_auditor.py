@@ -9,6 +9,7 @@ missed useful memory. It never changes runtime recall decisions.
 from __future__ import annotations
 
 import argparse
+import codecs
 import fcntl
 import hashlib
 import json
@@ -43,6 +44,9 @@ DEFAULT_LOCK_FILE = RECALL_DIR / "audit.lock"
 DEFAULT_PULL_CONSUMED_FILE = RECALL_DIR / "pull-consumed.jsonl"
 HOOK_ENABLE_ENV = "CHRONOVISOR_RECALL_AUDIT_ENABLED"
 AUDITOR_RUNTIME_ROLE = "recall.auditor"
+
+_JSONL_NEWLINE_BYTES = re.compile(rb"[\r\n]")
+_JSONL_READ_CHUNK_BYTES = 1 << 15
 
 AUTO_ACTIONS = frozenset({"alias", "query_hint", "page_tag"})
 REVIEW_ACTIONS = frozenset({"few_shot", "threshold"})
@@ -483,20 +487,76 @@ def release_audit_lock(handle: Any | None) -> None:
 
 
 def read_jsonl_tail(path: Path, limit: int) -> list[dict[str, Any]]:
+    """Read the newest physical lines in reverse order with strict UTF-8.
+
+    The original reader used ``TextIOWrapper`` with universal newlines and
+    therefore validated the complete file while retaining only a bounded tail.
+    Read bytes in blocks so the same file descriptor can observe appends and
+    rotations without retaining the prefix or one unbroken CR-only log line.
+    """
+
     try:
-        with path.open(encoding="utf-8") as f:
-            lines = deque(f, maxlen=limit)
+        with path.open("rb") as handle:
+            lines: deque[str] = deque(maxlen=limit)
+            if limit == 0:
+                decoder = codecs.getincrementaldecoder("utf-8")("strict")
+                while block := handle.read(_JSONL_READ_CHUNK_BYTES):
+                    decoder.decode(block)
+                decoder.decode(b"", final=True)
+                return []
+
+            pending: list[bytes] = []
+            pending_cr = False
+            while block := handle.read(_JSONL_READ_CHUNK_BYTES):
+                if pending_cr:
+                    if block.startswith(b"\n"):
+                        block = block[1:]
+                    pending_cr = False
+                if b"\r" not in block:
+                    pieces = block.split(b"\n")
+                    for piece in pieces[:-1]:
+                        pending.append(piece)
+                        lines.append(b"".join(pending).decode("utf-8"))
+                        pending = []
+                    if pieces[-1]:
+                        pending.append(pieces[-1])
+                    continue
+
+                cursor = 0
+                for match in _JSONL_NEWLINE_BYTES.finditer(block):
+                    index = match.start()
+                    if (
+                        index > 0
+                        and block[index : index + 1] == b"\n"
+                        and block[index - 1 : index] == b"\r"
+                    ):
+                        cursor = index + 1
+                        continue
+                    segment = block[cursor:index]
+                    if pending:
+                        segment = b"".join((*pending, segment))
+                        pending = []
+                    lines.append(segment.decode("utf-8"))
+                    cursor = index + 1
+                if cursor < len(block):
+                    pending.append(block[cursor:])
+                elif block.endswith(b"\r"):
+                    pending_cr = True
+            if pending:
+                lines.append(b"".join(pending).decode("utf-8"))
+
+            records: list[dict[str, Any]] = []
+            while lines:
+                line = lines.pop()
+                try:
+                    parsed = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    records.append(parsed)
+            return records
     except OSError:
         return []
-    records: list[dict[str, Any]] = []
-    for line in reversed(lines):
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            records.append(parsed)
-    return records
 
 
 def find_matching_recall_log(turn: TurnContext, *, host: str = "", limit: int = 500) -> dict[str, Any] | None:
@@ -844,22 +904,12 @@ def matching_pull_events(
     recall_time = _normalized_time(recall_ts)
     if recall_time is None:
         return []
-    try:
-        with RECALL_PULL_LOG_FILE.open(encoding="utf-8") as f:
-            lines = deque(f, maxlen=limit)
-    except OSError:
-        return []
+    records = read_jsonl_tail(RECALL_PULL_LOG_FILE, limit)
     injected = set((recall_snapshot or {}).get("pages", []) or [])
     consumed = _consumed_pull_keys(consumed_file) | _feedback_pull_keys(feedback_file)
     turn_end = _next_recall_time(turn.session_id, recall_time)
     out: list[dict[str, Any]] = []
-    for line in reversed(lines):
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
+    for record in records:
         record_decision_id = str(record.get("decision_id") or "")
         record_session_id = str(record.get("session_id") or "")
         if record_decision_id:

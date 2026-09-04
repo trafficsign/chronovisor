@@ -507,6 +507,13 @@ class ConvergenceStore:
         return {"schema_version": SCHEMA_VERSION, "items": {}}
 
     def _load_unlocked(self) -> dict[str, Any]:
+        """Parse and validate one fresh state tree from disk.
+
+        Every successful call creates a new object graph.  Read helpers can
+        therefore return their selected objects directly without a second
+        defensive deepcopy; the persisted file remains untouched until an
+        explicit transition acquires the exclusive lock and saves it.
+        """
         if not self.state_file.exists():
             return self._empty_state()
         try:
@@ -583,13 +590,13 @@ class ConvergenceStore:
         }
 
     def load(self) -> dict[str, Any]:
-        """Return a defensive copy without creating files."""
+        """Return a fresh parsed state snapshot without creating files."""
 
-        return copy.deepcopy(self._load_unlocked())
+        return self._load_unlocked()
 
     def get(self, key: str) -> dict[str, Any] | None:
         item = self._load_unlocked()["items"].get(key)
-        return copy.deepcopy(item) if isinstance(item, dict) else None
+        return item if isinstance(item, dict) else None
 
     def list_items(
         self,
@@ -606,7 +613,7 @@ class ConvergenceStore:
                 continue
             if allowed is not None and item.get("status") not in allowed:
                 continue
-            items.append(copy.deepcopy(item))
+            items.append(item)
         return sorted(
             items, key=lambda item: (str(item.get("lane")), str(item.get("key")))
         )

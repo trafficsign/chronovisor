@@ -1166,27 +1166,11 @@ def _process_tag_candidate(
             "state": item,
         }
 
-    current = store.get(key) or {}
-    status = str(current.get("status") or "")
-    if status in FRONTIER_STATUSES:
-        local_proposal = _load_local_proposal_artifact(
-            store,
-            key,
-            page_text=page_text,
-        )
-        return _run_frontier_tag_review(
-            row=row,
-            path=path,
-            page_text=page_text,
-            store=store,
-            budget=budget,
-            key=key,
-            reviewer=frontier_reviewer,
-            now=now,
-            local_proposal=local_proposal,
-            injected_reviewer=injected_reviewer,
-        )
-
+    # The local claim is the authoritative read for both stages.  A separate
+    # ``store.get`` here used to parse the full convergence JSON before the
+    # claim parsed it again under its lock.  Asking the local claim first keeps
+    # that lock/freshness check in one place; a frontier item is routed using
+    # the claim's readback without spending a local attempt.
     claim = store.claim_attempt(key, "local", budget=budget, now=now)
     if not claim["claimed"]:
         next_item = claim.get("item") if isinstance(claim.get("item"), dict) else {}

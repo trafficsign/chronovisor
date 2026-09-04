@@ -679,6 +679,24 @@ def test_dry_run_does_not_create_or_change_any_files(tmp_path: Path) -> None:
     assert store.events_file.read_bytes() == events_before_failure
 
 
+def test_read_helpers_return_call_owned_fresh_state_snapshots(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    item = _merge(store)
+    key = item["key"]
+
+    loaded = store.load()
+    loaded["items"][key]["metadata"]["mutated"] = True
+    selected = store.get(key)
+    assert selected is not None
+    selected["metadata"]["mutated"] = True
+    listed = store.list_items()[0]
+    listed["metadata"]["mutated"] = True
+
+    assert "mutated" not in store.load()["items"][key]["metadata"]
+    assert "mutated" not in store.get(key)["metadata"]
+    assert "mutated" not in store.list_items()[0]["metadata"]
+
+
 def test_corrupt_state_fails_closed_without_overwrite(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.state_file.parent.mkdir(parents=True)

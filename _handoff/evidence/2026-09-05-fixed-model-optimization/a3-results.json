@@ -1,0 +1,293 @@
+{
+  "baseline_reference": "7b872fa:src/chronovisor/core/index_store.py",
+  "environment": {
+    "python": "3.14.7",
+    "models_or_services": "none",
+    "corpus": "synthetic canonical pages only"
+  },
+  "comparisons": [
+    {
+      "command": ".venv/bin/python _handoff/evidence/2026-09-05-fixed-model-optimization/a3-benchmark.py --pages 1000 --updates 30",
+      "operation": "refresh",
+      "persistence": "disabled",
+      "page_count": 1000,
+      "updates": 30,
+      "paired_order": "old,new then new,old alternating per update",
+      "raw_update_ms": {
+        "legacy": [
+          51.888208,
+          53.842291,
+          53.603959,
+          49.412291,
+          50.705584,
+          47.351042,
+          50.583083,
+          48.779041,
+          48.287625,
+          49.907875,
+          49.106125,
+          48.577958,
+          51.073667,
+          48.875792,
+          52.773333,
+          53.100167,
+          51.805292,
+          48.592542,
+          49.032291,
+          48.179875,
+          52.982584,
+          51.398167,
+          48.548834,
+          49.786917,
+          48.300917,
+          48.073208,
+          50.855875,
+          49.690375,
+          49.095583,
+          50.960583
+        ],
+        "optimized": [
+          51.61925,
+          55.881292,
+          52.011125,
+          49.612458,
+          50.37225,
+          53.007625,
+          52.562458,
+          50.9535,
+          48.495375,
+          51.324584,
+          50.637292,
+          50.165459,
+          51.855417,
+          49.873041,
+          56.800333,
+          50.989917,
+          50.422417,
+          53.799792,
+          49.5095,
+          50.028,
+          53.731208,
+          57.237875,
+          49.404792,
+          50.537875,
+          49.731167,
+          50.355333,
+          52.92275,
+          51.668125,
+          50.900334,
+          52.305
+        ]
+      },
+      "summary_ms": {
+        "legacy_median": 49.738646,
+        "optimized_median": 50.9717085,
+        "median_change_percent": 2.48,
+        "legacy_p95": 53.100167,
+        "optimized_p95": 55.881292,
+        "p95_change_percent": 5.24
+      },
+      "derived_rebuild_calls": {
+        "legacy": {
+          "_rebuild_canonical_entries": 30,
+          "_rebuild_backlinks": 30,
+          "_rebuild_associations": 30
+        },
+        "optimized": {
+          "_rebuild_canonical_entries": 0,
+          "_rebuild_backlinks": 0,
+          "_rebuild_associations": 0
+        }
+      },
+      "output_comparison": {
+        "pairs_checked": 30,
+        "all_pairs": true,
+        "components": {
+          "all_pages_meta": true,
+          "canonical_keys": true,
+          "backlinks": true,
+          "tag_pages": true,
+          "entity_pages": true
+        },
+        "component_sha256": {
+          "legacy": {
+            "all_pages_meta": "28327a1dd6a1290678afd25b5a8c5f15a60d08a8d8406597737cde0d89944466",
+            "canonical_keys": "15b8f0119b59e0b62e29bd0737d14623974e3a5b6f708f393b32362e9b84b3aa",
+            "backlinks": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "tag_pages": "70375a21dc3c82590f1180e51f55320173cfe9e6a82e8ad178c404a2e2cc8e35",
+            "entity_pages": "80b7fb4633c25e359c75f64b9b6d644c21881eb6cc5824fef92805364c7ba055"
+          },
+          "optimized": {
+            "all_pages_meta": "28327a1dd6a1290678afd25b5a8c5f15a60d08a8d8406597737cde0d89944466",
+            "canonical_keys": "15b8f0119b59e0b62e29bd0737d14623974e3a5b6f708f393b32362e9b84b3aa",
+            "backlinks": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "tag_pages": "70375a21dc3c82590f1180e51f55320173cfe9e6a82e8ad178c404a2e2cc8e35",
+            "entity_pages": "80b7fb4633c25e359c75f64b9b6d644c21881eb6cc5824fef92805364c7ba055"
+          }
+        },
+        "counts": {
+          "all_pages_meta": 1000,
+          "canonical_keys": 1000,
+          "backlinks": 0,
+          "tag_pages": 10,
+          "entity_pages": 20
+        },
+        "sample": {
+          "updated_page": {
+            "page_id": "00001",
+            "title": "Changed 29",
+            "status": "stable",
+            "entities": ["entity-1"]
+          },
+          "canonical_keys": ["pages/00000", "pages/00001", "pages/00998", "pages/00999"],
+          "tag_pages": ["tag-0", "tag-1"],
+          "entity_pages": ["entity-0", "entity-1"]
+        }
+      }
+    },
+    {
+      "command": ".venv/bin/python _handoff/evidence/2026-09-05-fixed-model-optimization/a3-benchmark.py --operation apply_changes --persist --pages 5000 --updates 30",
+      "operation": "apply_changes",
+      "persistence": "enabled",
+      "page_count": 5000,
+      "updates": 30,
+      "paired_order": "old,new then new,old alternating per update",
+      "raw_update_ms": {
+        "legacy": [
+          75.992167,
+          42.201041,
+          46.694083,
+          58.005792,
+          42.955583,
+          44.349417,
+          41.640375,
+          41.237709,
+          40.792791,
+          41.663875,
+          48.54725,
+          44.169875,
+          47.092209,
+          41.619791,
+          53.642042,
+          46.078292,
+          44.792625,
+          57.241333,
+          44.973875,
+          44.60925,
+          43.949,
+          44.139833,
+          43.211584,
+          42.59625,
+          42.659541,
+          42.2295,
+          42.806208,
+          41.393334,
+          54.838583,
+          40.501208
+        ],
+        "optimized": [
+          43.919208,
+          32.742542,
+          37.79175,
+          37.653166,
+          36.211791,
+          34.417459,
+          32.03275,
+          56.895875,
+          33.743667,
+          33.840833,
+          47.222833,
+          33.402125,
+          31.487333,
+          31.607083,
+          29.906625,
+          32.484791,
+          31.321,
+          32.690916,
+          31.152333,
+          30.759375,
+          31.675417,
+          38.682792,
+          32.565791,
+          32.13375,
+          49.028375,
+          33.234042,
+          33.913583,
+          33.28425,
+          32.604667,
+          34.496916
+        ]
+      },
+      "summary_ms": {
+        "legacy_median": 44.0444165,
+        "optimized_median": 33.259146,
+        "median_change_percent": -24.49,
+        "legacy_p95": 57.241333,
+        "optimized_p95": 47.222833,
+        "p95_change_percent": -17.5
+      },
+      "derived_rebuild_calls": {
+        "legacy": {
+          "_rebuild_canonical_entries": 30,
+          "_rebuild_backlinks": 30,
+          "_rebuild_associations": 30
+        },
+        "optimized": {
+          "_rebuild_canonical_entries": 0,
+          "_rebuild_backlinks": 0,
+          "_rebuild_associations": 0
+        }
+      },
+      "output_comparison": {
+        "pairs_checked": 30,
+        "all_pairs": true,
+        "components": {
+          "all_pages_meta": true,
+          "canonical_keys": true,
+          "backlinks": true,
+          "tag_pages": true,
+          "entity_pages": true
+        },
+        "component_sha256": {
+          "legacy": {
+            "all_pages_meta": "ee83f6f31497fb1cb47a9e2f3e6663ef5ef0a0b80b9a219359579de838e80d79",
+            "canonical_keys": "93dcf762d0bf8aa0f7b57d04c6910735d2161baef053b834ea8e004300f64923",
+            "backlinks": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "tag_pages": "752ccd844067e4d91481571baef7b789ffdeaf57ade3ef533f8e7d114afc4605",
+            "entity_pages": "97c69275f184f008354eed3a8774ac3af0162ae3162431a4e4bc6920606d6786"
+          },
+          "optimized": {
+            "all_pages_meta": "ee83f6f31497fb1cb47a9e2f3e6663ef5ef0a0b80b9a219359579de838e80d79",
+            "canonical_keys": "93dcf762d0bf8aa0f7b57d04c6910735d2161baef053b834ea8e004300f64923",
+            "backlinks": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "tag_pages": "752ccd844067e4d91481571baef7b789ffdeaf57ade3ef533f8e7d114afc4605",
+            "entity_pages": "97c69275f184f008354eed3a8774ac3af0162ae3162431a4e4bc6920606d6786"
+          }
+        },
+        "counts": {
+          "all_pages_meta": 5000,
+          "canonical_keys": 5000,
+          "backlinks": 0,
+          "tag_pages": 10,
+          "entity_pages": 20
+        },
+        "sample": {
+          "updated_page": {
+            "page_id": "00001",
+            "title": "Changed 29",
+            "status": "stable",
+            "entities": ["entity-1"]
+          },
+          "canonical_keys": ["pages/00000", "pages/00001", "pages/04998", "pages/04999"],
+          "tag_pages": ["tag-0", "tag-1"],
+          "entity_pages": ["entity-0", "entity-1"]
+        }
+      }
+    }
+  ],
+  "limitations": [
+    "Legacy run binds _refresh_locked and apply_changes extracted from git show 7b872fa; rebuild helpers and runtime globals come from the current module.",
+    "Each comparison creates two copies of one synthetic corpus, writes the same metadata update to both, alternates old/new call order, and checks all five output components after every pair.",
+    "Refresh scan/frontmatter parsing dominates its local timing; persisted apply_changes is the relevant targeted-update measurement. Production-shaped link, status, rename, duplicate-stem, and failure-recovery cases remain covered by tests and require separate measurements."
+  ]
+}

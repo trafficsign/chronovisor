@@ -1,0 +1,263 @@
+{
+  "baseline_reference": "7b872fa:src/chronovisor/recall/recall_auditor.py:read_jsonl_tail",
+  "python": "3.14.7",
+  "snapshot_bytes": 86000538,
+  "snapshot_sha256": "0eb54f61d0efb332dac47b2eb334fda0b80c8153f4454d98206a602ce55dcb9c",
+  "snapshot_identity_same": true,
+  "comparisons": [
+    {
+      "limit": 500,
+      "pairs": 30,
+      "legacy_ms": [
+        153.395084,
+        138.625,
+        134.932084,
+        134.7415,
+        137.105459,
+        135.023417,
+        137.621792,
+        135.543041,
+        136.229875,
+        137.472584,
+        135.504084,
+        135.321708,
+        132.217084,
+        132.547083,
+        137.022208,
+        133.481709,
+        135.196,
+        133.745791,
+        139.92925,
+        136.982042,
+        136.739708,
+        133.258792,
+        136.635875,
+        150.589792,
+        139.665834,
+        134.58475,
+        135.954625,
+        132.338875,
+        135.657458,
+        137.889042
+      ],
+      "optimized_ms": [
+        82.016541,
+        77.656542,
+        76.715167,
+        78.541541,
+        77.15625,
+        78.236208,
+        76.670125,
+        78.544541,
+        78.3955,
+        77.580875,
+        84.158042,
+        76.028292,
+        77.384417,
+        75.83725,
+        76.51475,
+        78.247875,
+        77.098584,
+        77.188958,
+        76.792875,
+        77.315959,
+        78.367875,
+        76.852708,
+        83.981833,
+        78.558959,
+        76.362375,
+        78.38525,
+        75.690917,
+        79.954,
+        75.602542,
+        80.223792
+      ],
+      "legacy_median_ms": 135.8060415,
+      "optimized_median_ms": 77.482646,
+      "legacy_p95_ms": 139.92925,
+      "optimized_p95_ms": 82.016541,
+      "median_change_percent": -42.94609787297276,
+      "records": 500,
+      "result_equivalence": true
+    },
+    {
+      "limit": 5000,
+      "pairs": 30,
+      "legacy_ms": [
+        325.784625,
+        379.0455,
+        315.304167,
+        320.677125,
+        358.759,
+        387.115125,
+        374.446958,
+        413.463625,
+        311.096375,
+        306.036166,
+        350.68425,
+        393.449458,
+        363.232791,
+        397.031792,
+        301.598458,
+        315.158791,
+        351.306709,
+        384.357125,
+        372.452292,
+        390.154875,
+        314.949417,
+        305.3215,
+        357.715041,
+        380.02275,
+        365.002666,
+        407.15225,
+        302.013042,
+        306.648125,
+        355.207833,
+        374.128709
+      ],
+      "optimized_ms": [
+        248.286834,
+        283.059791,
+        314.512834,
+        322.009875,
+        346.578709,
+        251.741292,
+        247.737917,
+        308.892041,
+        351.437041,
+        303.013458,
+        331.849167,
+        249.135292,
+        263.098,
+        301.426,
+        333.2285,
+        324.446292,
+        339.745041,
+        242.533709,
+        247.53075,
+        303.188333,
+        334.166083,
+        313.362125,
+        339.608542,
+        243.682333,
+        245.481459,
+        296.043416,
+        327.902416,
+        313.721542,
+        340.701875,
+        245.848542
+      ],
+      "legacy_median_ms": 358.23702049999997,
+      "optimized_median_ms": 306.040187,
+      "legacy_p95_ms": 397.031792,
+      "optimized_p95_ms": 340.701875,
+      "median_change_percent": -14.570474438165991,
+      "records": 5000,
+      "result_equivalence": true
+    }
+  ],
+  "snapshot_rss": [
+    {
+      "limit": 500,
+      "modes": {
+        "legacy": {
+          "rss_mib_samples": [
+            81.9375,
+            82.046875,
+            82.1875
+          ],
+          "rss_mib_median": 82.046875,
+          "records": 500
+        },
+        "optimized": {
+          "rss_mib_samples": [
+            83.015625,
+            83.25,
+            85.1875
+          ],
+          "rss_mib_median": 83.25,
+          "records": 500
+        }
+      }
+    },
+    {
+      "limit": 5000,
+      "modes": {
+        "legacy": {
+          "rss_mib_samples": [
+            286.09375,
+            277.21875,
+            277.203125
+          ],
+          "rss_mib_median": 277.21875,
+          "records": 5000
+        },
+        "optimized": {
+          "rss_mib_samples": [
+            275.421875,
+            276.890625,
+            275.671875
+          ],
+          "rss_mib_median": 275.671875,
+          "records": 5000
+        }
+      }
+    }
+  ],
+  "cr_only_rss": [
+    {
+      "lines": 50000,
+      "bytes": 450000,
+      "modes": {
+        "legacy": {
+          "rss_mib_samples": [
+            31.0,
+            30.765625,
+            30.84375
+          ],
+          "rss_mib_median": 30.84375,
+          "records": 3
+        },
+        "optimized": {
+          "rss_mib_samples": [
+            31.0,
+            31.375,
+            31.171875
+          ],
+          "rss_mib_median": 31.171875,
+          "records": 3
+        }
+      }
+    },
+    {
+      "lines": 500000,
+      "bytes": 4500000,
+      "modes": {
+        "legacy": {
+          "rss_mib_samples": [
+            31.3125,
+            31.328125,
+            31.109375
+          ],
+          "rss_mib_median": 31.3125,
+          "records": 3
+        },
+        "optimized": {
+          "rss_mib_samples": [
+            31.21875,
+            31.390625,
+            31.1875
+          ],
+          "rss_mib_median": 31.21875,
+          "records": 3
+        }
+      }
+    }
+  ],
+  "models_or_services": "none",
+  "limitations": [
+    "Timings use a read-only warm filesystem snapshot and isolate only the tail reader; they are not end-to-end application latency.",
+    "RSS workers include Python startup and helper extraction; CR-only inputs are synthetic and bound temporary buffers, not a promise about all workloads.",
+    "Contract equivalence covers the paired snapshot plus focused tests for strict UTF-8, newline forms, torn lines, append, truncate, rotation, and chunk boundaries."
+  ]
+}

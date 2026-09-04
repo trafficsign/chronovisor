@@ -1214,6 +1214,104 @@ def test_existing_valid_tags_finish_without_calling_a_model(
     assert page_path.read_text(encoding="utf-8") == original
 
 
+def test_tag_candidate_uses_claim_readback_without_reloading_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page_id = "claim-readback"
+    page_path = tmp_path / "pages" / f"{page_id}.md"
+    page_text = _page(page_path)
+    row = _row(page_id)
+    monkeypatch.setattr(
+        lint_repair.chronovisor_store,
+        "find_page",
+        lambda _page_id: page_path,
+    )
+    store = _store(tmp_path)
+    source_id, input_data = lint_repair._candidate_identity(row, page_text)
+    key = store.merge_item(
+        lane="lint_repair",
+        source_id=source_id,
+        input_data=input_data,
+        resolver_version=lint_repair.REPAIR_RESOLVER_VERSION,
+        metadata=row,
+        now=NOW,
+    )["item"]["key"]
+
+    def fail_get(_key: str):
+        raise AssertionError("tag candidate should use claim readback")
+
+    def unavailable_reviewer(_prompt, _schema):
+        raise RuntimeError("local reviewer unavailable")
+
+    monkeypatch.setattr(store, "get", fail_get)
+    result = lint_repair._process_tag_candidate(
+        row=row,
+        path=page_path,
+        page_text=page_text,
+        store=store,
+        budget=_budget(),
+        key=key,
+        local_reviewer=unavailable_reviewer,
+        frontier_reviewer=_never,
+        injected_reviewer=False,
+        now=NOW,
+    )
+
+    assert result["status"] == "local_error"
+    assert result["state"]["status"] == "local_retry"
+
+
+def test_frontier_candidate_still_runs_when_local_budget_is_exhausted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page_id = "frontier-budget"
+    page_path = tmp_path / "pages" / f"{page_id}.md"
+    page_text = _page(page_path)
+    row = _row(page_id)
+    monkeypatch.setattr(
+        lint_repair.chronovisor_store,
+        "find_page",
+        lambda _page_id: page_path,
+    )
+    store = _store(tmp_path)
+    source_id, input_data = lint_repair._candidate_identity(row, page_text)
+    key = store.merge_item(
+        lane="lint_repair",
+        source_id=source_id,
+        input_data=input_data,
+        resolver_version=lint_repair.REPAIR_RESOLVER_VERSION,
+        metadata=row,
+        now=NOW,
+    )["item"]["key"]
+    store.escalate(key, reason="local review deferred", now=NOW)
+
+    def unavailable_frontier(_prompt, _schema):
+        raise RuntimeError("frontier reviewer unavailable")
+
+    result = lint_repair._process_tag_candidate(
+        row=row,
+        path=page_path,
+        page_text=page_text,
+        store=store,
+        budget=CycleBudget(
+            max_local_calls=0,
+            max_frontier_calls=1,
+            max_mutations=1,
+            max_elapsed_seconds=60,
+        ),
+        key=key,
+        local_reviewer=_never,
+        frontier_reviewer=unavailable_frontier,
+        injected_reviewer=True,
+        now=NOW,
+    )
+
+    assert result["status"] == "frontier_error"
+    assert result["state"]["status"] == "frontier_retry"
+
+
 def test_exact_already_applied_recovery_only_finalizes_bookkeeping(
     tmp_path: Path,
     monkeypatch,

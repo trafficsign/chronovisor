@@ -402,6 +402,180 @@ class TestRefreshWindow:
         assert store.meta("p")["title"] == "After"
 
 
+class TestDerivedRefreshScope:
+    def test_metadata_only_refresh_updates_entry_without_rebuilding_indexes(
+        self, isolated_index: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed(
+            isolated_index,
+            "target.md",
+            "---\ntitle: Target\nupdated: 2026-01-01\ntags: [target]\n"
+            "entities: [Chronovisor]\n---\nbody\n",
+        )
+        source = _seed(
+            isolated_index,
+            "source.md",
+            "---\ntitle: Source\nupdated: 2026-01-01\ntags: [source]\n"
+            "entities: [Chronovisor]\n---\n[Target](target.md)\n",
+        )
+        store = IndexStore()
+        store.refresh()
+        before_backlinks = store.backlinks("target")
+        before_tags = store.pages_for_tag("source")
+        before_entities = store.pages_for_entity("chronovisor")
+
+        calls: list[str] = []
+        for name in (
+            "_rebuild_canonical_entries",
+            "_rebuild_backlinks",
+            "_rebuild_associations",
+        ):
+            original = getattr(store, name)
+
+            def track(*args: object, _name=name, _original=original, **kwargs: object):
+                calls.append(_name)
+                return _original(*args, **kwargs)
+
+            monkeypatch.setattr(store, name, track)
+
+        source.write_text(
+            "---\ntitle: Renamed in metadata\nupdated: 2026-01-01\n"
+            "status: stable\ntype: knowledge\n"
+            "tags: [source]\nentities: [Chronovisor]\n---\n[Target](target.md)\n",
+            encoding="utf-8",
+        )
+        store.refresh()
+
+        assert store.meta("source")["title"] == "Renamed in metadata"
+        assert store.backlinks("target") == before_backlinks
+        assert store.pages_for_tag("source") == before_tags
+        assert store.pages_for_entity("chronovisor") == before_entities
+        assert calls == []
+
+    def test_targeted_metadata_update_updates_canonical_map_without_rebuild(
+        self, isolated_index: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed(
+            isolated_index,
+            "target.md",
+            "---\ntitle: Target\nupdated: 2026-01-01\n---\nbody\n",
+        )
+        source = _seed(
+            isolated_index,
+            "source.md",
+            "---\ntitle: Source\nupdated: 2026-01-01\n---\n[Target](target.md)\n",
+        )
+        store = IndexStore()
+        store.refresh()
+        calls: list[str] = []
+        for name in (
+            "_rebuild_canonical_entries",
+            "_rebuild_backlinks",
+            "_rebuild_associations",
+        ):
+            original = getattr(store, name)
+
+            def track(*args: object, _name=name, _original=original, **kwargs: object):
+                calls.append(_name)
+                return _original(*args, **kwargs)
+
+            monkeypatch.setattr(store, name, track)
+
+        source.write_text(
+            "---\ntitle: Targeted metadata\nupdated: 2026-01-01\n"
+            "status: stable\ntype: knowledge\n---\n"
+            "[Target](target.md)\n",
+            encoding="utf-8",
+        )
+        store.apply_changes([source])
+
+        assert store.meta("source")["title"] == "Targeted metadata"
+        assert store.outlinks("source") == ["target"]
+        assert store.backlinks("target") == ["source"]
+        assert calls == []
+
+    def test_refresh_preserves_derived_results_when_entry_links_change(
+        self, isolated_index: Path
+    ) -> None:
+        for page_id in ("target", "other"):
+            _seed(
+                isolated_index,
+                f"{page_id}.md",
+                f"---\ntitle: {page_id}\nupdated: 2026-01-01\n---\nbody\n",
+            )
+        other = isolated_index / "pages" / "other.md"
+        source = _seed(
+            isolated_index,
+            "source.md",
+            "---\ntitle: Source\nupdated: 2026-01-01\ntags: [old]\n"
+            "entities: [Source]\n---\n[Target](target.md)\n",
+        )
+        store = IndexStore()
+        store.refresh()
+
+        source.write_text(
+            "---\ntitle: Source\nupdated: 2026-01-01\nstatus: stable\n"
+            "type: knowledge\ntags: [new]\nentities: [Source]\n---\n"
+            "[Target](target.md)\n",
+            encoding="utf-8",
+        )
+        store.refresh()
+        assert store.backlinks("target") == ["source"]
+        assert store.pages_for_tag("new") == ["source"]
+
+        source.write_text(
+            "---\ntitle: Source\nupdated: 2026-01-01\nstatus: stable\n"
+            "type: knowledge\ntags: [new]\nentities: [Source]\n---\n"
+            "[Other](other.md)\n",
+            encoding="utf-8",
+        )
+        store.refresh()
+        assert store.backlinks("target") == []
+        assert store.backlinks("other") == ["source"]
+
+        other.write_text(
+            "---\ntitle: other\nupdated: 2026-01-01\nstatus: draft\n"
+            "type: knowledge\n---\nbody\n",
+            encoding="utf-8",
+        )
+        store.refresh()
+        assert store.backlinks("other") == []
+        assert store.outlinks("source") == []
+
+    def test_targeted_metadata_update_rollback_restores_canonical_entry(
+        self, isolated_index: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _seed(
+            isolated_index,
+            "target.md",
+            "---\ntitle: Target\nupdated: 2026-01-01\n---\nbody\n",
+        )
+        source = _seed(
+            isolated_index,
+            "source.md",
+            "---\ntitle: Source\nupdated: 2026-01-01\n---\n[Target](target.md)\n",
+        )
+        store = IndexStore()
+        store.refresh()
+        monkeypatch.setattr(
+            store,
+            "_persist",
+            lambda _generation: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        source.write_text(
+            "---\ntitle: Changed\nupdated: 2026-01-01\n"
+            "status: stable\ntype: knowledge\n---\n[Target](target.md)\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(OSError, match="disk full"):
+            store.apply_changes([source])
+
+        assert store.meta("source")["title"] == "Source"
+        assert store.outlinks("source") == ["target"]
+        assert store.backlinks("target") == ["source"]
+
+
 class TestTargetedChanges:
     def test_created_page_is_visible_without_a_second_full_scan(
         self,

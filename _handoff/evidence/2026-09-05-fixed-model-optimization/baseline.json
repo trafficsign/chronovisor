@@ -1,0 +1,948 @@
+{
+  "timestamp": "2026-09-05T08:06:33+0900",
+  "checkout": "7b872fa64cf08edeaf86be4078077f60862c7dba",
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "python": "Python 3.14.7",
+  "runtime": {
+    "source": "git+ssh://git@github.com/trafficsign/chronovisor@4ead53c5a42da8e61c2319ccdb2b581f7a656e22"
+  },
+  "config_without_runtime_sha256": "93e339b239fd9977fbcabb89750953a6a3a73de5675e0ae22392b261d8cf8ded",
+  "files": {
+    "/Users/trafficsign/projects/personal/chronovisor/uv.lock": {
+      "sha256": "18b5b1aeff895315d0842d39c385c0e11eecb18cce9da061bd6a85ea835dd00a",
+      "bytes": 815539
+    },
+    "/Users/trafficsign/projects/personal/chronovisor/pyproject.toml": {
+      "sha256": "c81672bef2c966da766c0ad4e25f0f706ca71be4d4cb87da78bd0652389102c6",
+      "bytes": 5684
+    },
+    "/Users/trafficsign/.chronovisor/config.toml": {
+      "sha256": "f401a1d3e76b934d09ab14ff4d0048d5d2f738a82cf4205e017fe55cdabd4160",
+      "bytes": 16614
+    },
+    "/Users/trafficsign/.omlx/model_settings.json": {
+      "sha256": "0efc633b89bf0ccf282a03a9bf0df35ab912db48f57a1e39f41569da43b8f96f",
+      "bytes": 6480
+    },
+    "/Users/trafficsign/.omlx/settings.json": {
+      "sha256": "99ef9327f5e59162981c6968e318b481eca05c0b7c4bbfcb9487c14d2c2ccea0",
+      "bytes": 3307
+    }
+  },
+  "inputs": {
+    "recall": {
+      "source": "/Users/trafficsign/.chronovisor/recall/recall-log.jsonl",
+      "snapshot": "/var/folders/9x/qdg4yvh503d3bfnbcv1cnbgw0000gn/T/chronovisor-fixed-model-8tjsi0p2/recall-log.jsonl",
+      "bytes": 86000538,
+      "sha256": "0eb54f61d0efb332dac47b2eb334fda0b80c8153f4454d98206a602ce55dcb9c",
+      "stable_fd_identity": true,
+      "source_identity": [
+        16777233,
+        69311303,
+        86000538,
+        1788562958498758957,
+        1788562958498758957
+      ]
+    },
+    "convergence": {
+      "source": "/Users/trafficsign/.chronovisor/runtime/convergence/state.json",
+      "snapshot": "/var/folders/9x/qdg4yvh503d3bfnbcv1cnbgw0000gn/T/chronovisor-fixed-model-8tjsi0p2/state.json",
+      "bytes": 59250797,
+      "sha256": "2dfb30bb46877834a3b005a958b9ae03a08cc987999a5688b8d3479e970aea3c",
+      "stable_fd_identity": true,
+      "source_identity": [
+        16777233,
+        179045015,
+        59250797,
+        1788563041284245550,
+        1788563041284569431
+      ]
+    }
+  },
+  "services": [
+    {
+      "label": "com.trafficsign.chronovisor-converge.managed-v2",
+      "loaded": true,
+      "path": "(submitted by smd.336)",
+      "state": "active",
+      "runs": "59",
+      "pid": "74046",
+      "last exit code": "0"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-dashboard.managed-v2",
+      "loaded": true,
+      "path": "(submitted by smd.336)",
+      "state": "active",
+      "runs": "6",
+      "pid": "26760",
+      "last exit code": "143"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+      "loaded": true,
+      "path": "(submitted by smd.336)",
+      "state": "active",
+      "runs": "1",
+      "pid": "763",
+      "last exit code": "(never exited)"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+      "loaded": true,
+      "path": "(submitted by smd.336)",
+      "state": "active",
+      "runs": "6",
+      "pid": "26761",
+      "last exit code": "143"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-reranker.managed-v2",
+      "loaded": true,
+      "path": "(submitted by smd.336)",
+      "state": "active",
+      "runs": "2",
+      "pid": "1300",
+      "last exit code": "1"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-semantic.managed-v2",
+      "loaded": true,
+      "path": "(submitted by smd.336)",
+      "state": "active",
+      "runs": "1",
+      "pid": "752",
+      "last exit code": "(never exited)"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-sleep.managed-v2",
+      "loaded": true,
+      "path": "(submitted by smd.336)",
+      "state": "active",
+      "runs": "4",
+      "last exit code": "0"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-watchdog.managed-v2",
+      "loaded": true,
+      "path": "(submitted by smd.336)",
+      "state": "active",
+      "runs": "220",
+      "last exit code": "0"
+    }
+  ],
+  "limits": {
+    "microbenchmark_pairs": 30,
+    "adopt_min_median_improvement_pct": 10,
+    "regression_budget_pct": 5,
+    "quality": "same deterministic outputs and model request contract; existing quality gates unchanged",
+    "scope": "model-free code overhead; live model calls and prefill/decode not synthesized"
+  },
+  "swap": "vm.swapusage: total = 7168.00M  used = 6343.94M  free = 824.06M  (encrypted)",
+  "vm_stat": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                    11340.\nPages active:                                 947687.\nPages inactive:                               962568.\nPages speculative:                             22683.\nPages throttled:                                   0.\nPages wired down:                            5596192.\nPages purgeable:                               34220.\n\"Translation faults\":                     7453841225.\nPages copy-on-write:                       444235108.\nPages zero filled:                       11996007066.\nPages reactivated:                        1699122266.\nPages purged:                              102726392.\nFile-backed pages:                            582647.\nAnonymous pages:                             1350291.\nPages stored in compressor:                  2365624.\nPages occupied by compressor:                 797115.\nDecompressions:                           1066736844.\nCompressions:                             1388505233.\nPageins:                                   444939454.\nPageouts:                                     627714.\nSwapins:                                      404962.\nSwapouts:                                     952120.",
+  "llm": {
+    "providers": {
+      "omlx": {
+        "kind": "omlx",
+        "endpoint": "http://127.0.0.1:18125/v1"
+      },
+      "local_reranker": {
+        "kind": "local-transformers",
+        "backend": "transformers",
+        "batch_size": 10,
+        "max_length": 384,
+        "dtype": "float16"
+      },
+      "semantic_foreground": {
+        "kind": "nemotron",
+        "device": "mps"
+      },
+      "semantic_incremental": {
+        "kind": "nemotron",
+        "device": "cpu"
+      }
+    },
+    "roles": {
+      "knowledge.embedding": {
+        "capability": "embedding",
+        "provider": "omlx",
+        "model": "bge-m3-mlx-fp16"
+      },
+      "knowledge.relation_extraction": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "knowledge.community_summary": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "classification.embedding": {
+        "capability": "embedding",
+        "provider": "omlx",
+        "model": "bge-m3-mlx-fp16"
+      },
+      "search.rerank": {
+        "capability": "rerank",
+        "provider": "local_reranker",
+        "model": "BAAI/bge-reranker-v2-m3"
+      },
+      "search.semantic.foreground": {
+        "capability": "embedding",
+        "provider": "semantic_foreground",
+        "model": "nvidia/Nemotron-3-Embed-1B-BF16"
+      },
+      "search.semantic.incremental": {
+        "capability": "embedding",
+        "provider": "semantic_incremental",
+        "model": "nvidia/Nemotron-3-Embed-1B-BF16"
+      },
+      "librarian.review": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "librarian.review.challenger": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "recall.answer.runner": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "recall.answer.scorer": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "recall.certificate_judge.primary": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Ornith-1.5-9B-MLX-4bit"
+      },
+      "recall.certificate_judge.escalation": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "ingest.generation": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "lint.tag_repair": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "lint.orphan_link": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "recall.content_correction.proposer": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "recall.auditor": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "recall.gate": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Ornith-1.5-9B-MLX-4bit"
+      },
+      "recall.query_rewriter": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Ornith-1.5-9B-MLX-4bit"
+      },
+      "recall.policy_proposer.primary": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+        "required_capabilities": [
+          "structured_output"
+        ]
+      },
+      "recall.policy_proposer.challenger": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+        "required_capabilities": [
+          "structured_output"
+        ]
+      },
+      "recall.rubric.variant": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+        "required_capabilities": [
+          "structured_output"
+        ]
+      },
+      "research.planner": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+        "required_capabilities": [
+          "structured_output"
+        ]
+      },
+      "research.challenge": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+        "required_capabilities": [
+          "structured_output"
+        ]
+      },
+      "research.tie_break": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+        "required_capabilities": [
+          "structured_output"
+        ]
+      },
+      "research.deep_retrieval_requery": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+        "required_capabilities": [
+          "structured_output"
+        ]
+      },
+      "classification.authority": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "classification.primary": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "classification.challenger": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "classification.tie_break": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "classification.anchor_set": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "classification.decision": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "classification.direct_decision": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "classification.hierarchy": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "classification.query": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "classification.query_v2": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "classification.anchor": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "classification.anchor.primary": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "classification.anchor.challenger": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+      },
+      "recall.distill.teacher.a": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+        "required_capabilities": [
+          "structured_output"
+        ]
+      },
+      "recall.distill.teacher.b": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+        "required_capabilities": [
+          "structured_output"
+        ]
+      },
+      "recall.distill.teacher.c": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+        "required_capabilities": [
+          "structured_output"
+        ]
+      },
+      "recall.distill.answer_generator": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+        "required_capabilities": [
+          "structured_output"
+        ]
+      },
+      "recall.distill.utility_judge": {
+        "capability": "generation",
+        "provider": "omlx",
+        "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "revision": "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+        "required_capabilities": [
+          "structured_output"
+        ]
+      }
+    }
+  },
+  "decision_router": {
+    "authority_kind": "single_model_v1",
+    "single_runtime_role": "classification.authority",
+    "authority_keep_alive": "0",
+    "num_ctx": 114688,
+    "min_num_ctx": 16384,
+    "num_predict": 3072,
+    "read_timeout_ms": 660000,
+    "max_input_chars": 93000,
+    "max_output_chars": 4000,
+    "max_feedback_chars": 2000,
+    "adaptive_residency": true,
+    "residency_policy_version": 2,
+    "memory_reserve_gib": 16,
+    "max_resident_models": 1,
+    "adoption_artifact": ""
+  },
+  "process_archives": [
+    {
+      "pid": 990,
+      "ppid": 752,
+      "command": "chronovisor-semantic-service",
+      "archive": "/Users/trafficsign/.cache/uv/archive-v0/wbZ3LAtlkskhuk4EbOeSa",
+      "commit": "d8f31d8345980366cb29ee1346d7ea76512b01ae"
+    },
+    {
+      "pid": 1156,
+      "ppid": 763,
+      "command": "chronovisor-ingest-drain",
+      "archive": "/Users/trafficsign/.cache/uv/archive-v0/H8L4ebyF64OLB45Mu6ZQe",
+      "commit": "d8f31d8345980366cb29ee1346d7ea76512b01ae"
+    },
+    {
+      "pid": 1320,
+      "ppid": 1300,
+      "command": "chronovisor-reranker-service",
+      "archive": "/Users/trafficsign/.cache/uv/archive-v0/eUyq62EptTi58-tErqotP",
+      "commit": "d8f31d8345980366cb29ee1346d7ea76512b01ae"
+    },
+    {
+      "pid": 26730,
+      "ppid": 26728,
+      "command": "chronovisor-mcp",
+      "archive": "/Users/trafficsign/.cache/uv/archive-v0/yhONttCpehnPF_0FEJxy5",
+      "commit": "4ead53c5a42da8e61c2319ccdb2b581f7a656e22"
+    },
+    {
+      "pid": 26905,
+      "ppid": 26761,
+      "command": "chronovisor-dashboard",
+      "archive": "/Users/trafficsign/.cache/uv/archive-v0/t-VOBVHTKvM0sSgwxr2iW",
+      "commit": "4ead53c5a42da8e61c2319ccdb2b581f7a656e22"
+    },
+    {
+      "pid": 26906,
+      "ppid": 26760,
+      "command": "chronovisor-dashboard",
+      "archive": "/Users/trafficsign/.cache/uv/archive-v0/E3ZDtD3gMKFBOX-ktC1D5",
+      "commit": "4ead53c5a42da8e61c2319ccdb2b581f7a656e22"
+    },
+    {
+      "pid": 74055,
+      "ppid": 74046,
+      "command": "chronovisor-converge",
+      "archive": "/Users/trafficsign/.cache/uv/archive-v0/wyIZjD6u3QhcoHB-ZVyXB",
+      "commit": "d8f31d8345980366cb29ee1346d7ea76512b01ae"
+    }
+  ],
+  "http_health": {
+    "status": "ok",
+    "stale": true,
+    "refreshing": false
+  },
+  "archive_dependencies": {
+    "/Users/trafficsign/.cache/uv/archive-v0/wbZ3LAtlkskhuk4EbOeSa": {
+      "versions": {
+        "shellingham": "1.5.4",
+        "threadpoolctl": "3.6.0",
+        "cloudpickle": "3.1.2",
+        "rpds-py": "2026.6.3",
+        "jaraco.classes": "3.4.0",
+        "click": "8.5.0",
+        "packaging": "26.3",
+        "joblib": "1.6.0",
+        "jaraco.context": "6.1.2",
+        "Pygments": "2.21.0",
+        "jsonschema-specifications": "2025.9.1",
+        "numkong": "7.8.2",
+        "hf-xet": "1.6.0",
+        "rich": "15.0.0",
+        "networkx": "3.6.1",
+        "PyJWT": "2.13.0",
+        "scikit-learn": "1.9.0",
+        "jsonschema": "4.26.0",
+        "transformers": "5.14.1",
+        "numpy": "2.5.2",
+        "pydantic_core": "2.46.5",
+        "zstandard": "0.25.0",
+        "mcp": "1.29.1",
+        "jaraco.functools": "4.6.0",
+        "httpcore": "1.0.9",
+        "starlette": "1.6.0",
+        "sympy": "1.14.0",
+        "fsspec": "2026.7.0",
+        "narwhals": "2.25.0",
+        "safetensors": "0.8.0",
+        "anyio": "4.14.2",
+        "setuptools": "84.0.0",
+        "h11": "0.16.0",
+        "pydantic": "2.13.5",
+        "pydantic-settings": "2.15.0",
+        "pycparser": "3.0",
+        "sse-starlette": "3.4.8",
+        "mdurl": "0.1.2",
+        "python-multipart": "0.0.32",
+        "mpmath": "1.3.0",
+        "PyYAML": "6.0.3",
+        "sentence-transformers": "5.6.1",
+        "idna": "3.19",
+        "cffi": "2.1.1",
+        "certifi": "2026.7.22",
+        "torch": "2.13.0",
+        "Jinja2": "3.1.6",
+        "annotated-types": "0.8.0",
+        "referencing": "0.37.0",
+        "markdown-it-py": "4.2.0",
+        "usearch": "2.26.2",
+        "annotated-doc": "0.0.5",
+        "MarkupSafe": "3.0.3",
+        "huggingface_hub": "1.29.0",
+        "cryptography": "50.0.1",
+        "typing-inspection": "0.4.4",
+        "tqdm": "4.70.0",
+        "regex": "2026.9.3",
+        "attrs": "26.1.0",
+        "python-dotenv": "1.2.3",
+        "httpx": "0.28.1",
+        "typing_extensions": "4.16.0",
+        "filelock": "3.32.5",
+        "tokenizers": "0.22.2",
+        "typer": "0.27.2",
+        "uvicorn": "0.52.4",
+        "keyring": "25.7.0",
+        "httpx-sse": "0.4.3",
+        "scipy": "1.18.1",
+        "more-itertools": "11.1.0",
+        "chronovisor": "0.2.0"
+      },
+      "sha256": "e5e95943cf7fb59a983a6ad1b8371805368408da3c74c14e497632fdc536c0e1"
+    },
+    "/Users/trafficsign/.cache/uv/archive-v0/H8L4ebyF64OLB45Mu6ZQe": {
+      "versions": {
+        "rpds-py": "2026.6.3",
+        "jaraco.classes": "3.4.0",
+        "click": "8.5.0",
+        "jaraco.context": "6.1.2",
+        "jsonschema-specifications": "2025.9.1",
+        "PyJWT": "2.13.0",
+        "jsonschema": "4.26.0",
+        "numpy": "2.5.2",
+        "pydantic_core": "2.46.5",
+        "zstandard": "0.25.0",
+        "mcp": "1.29.1",
+        "jaraco.functools": "4.6.0",
+        "httpcore": "1.0.9",
+        "starlette": "1.6.0",
+        "anyio": "4.14.2",
+        "h11": "0.16.0",
+        "pydantic": "2.13.5",
+        "pydantic-settings": "2.15.0",
+        "pycparser": "3.0",
+        "sse-starlette": "3.4.8",
+        "python-multipart": "0.0.32",
+        "PyYAML": "6.0.3",
+        "idna": "3.19",
+        "cffi": "2.1.1",
+        "certifi": "2026.7.22",
+        "annotated-types": "0.8.0",
+        "referencing": "0.37.0",
+        "cryptography": "50.0.1",
+        "typing-inspection": "0.4.4",
+        "attrs": "26.1.0",
+        "python-dotenv": "1.2.3",
+        "httpx": "0.28.1",
+        "typing_extensions": "4.16.0",
+        "uvicorn": "0.52.4",
+        "keyring": "25.7.0",
+        "httpx-sse": "0.4.3",
+        "more-itertools": "11.1.0",
+        "chronovisor": "0.2.0"
+      },
+      "sha256": "92825c60f6919732f5539c805d8bf281a3eac590933c40d3cd719e8668b983b1"
+    },
+    "/Users/trafficsign/.cache/uv/archive-v0/eUyq62EptTi58-tErqotP": {
+      "versions": {
+        "shellingham": "1.5.4",
+        "threadpoolctl": "3.6.0",
+        "cloudpickle": "3.1.2",
+        "rpds-py": "2026.6.3",
+        "jaraco.classes": "3.4.0",
+        "click": "8.5.0",
+        "packaging": "26.3",
+        "joblib": "1.6.0",
+        "jaraco.context": "6.1.2",
+        "Pygments": "2.21.0",
+        "jsonschema-specifications": "2025.9.1",
+        "hf-xet": "1.6.0",
+        "rich": "15.0.0",
+        "networkx": "3.6.1",
+        "PyJWT": "2.13.0",
+        "scikit-learn": "1.9.0",
+        "jsonschema": "4.26.0",
+        "transformers": "5.14.1",
+        "numpy": "2.5.2",
+        "pydantic_core": "2.46.5",
+        "zstandard": "0.25.0",
+        "mcp": "1.29.1",
+        "jaraco.functools": "4.6.0",
+        "httpcore": "1.0.9",
+        "starlette": "1.6.0",
+        "sympy": "1.14.0",
+        "fsspec": "2026.7.0",
+        "narwhals": "2.25.0",
+        "safetensors": "0.8.0",
+        "anyio": "4.14.2",
+        "setuptools": "84.0.0",
+        "h11": "0.16.0",
+        "pydantic": "2.13.5",
+        "pydantic-settings": "2.15.0",
+        "pycparser": "3.0",
+        "sse-starlette": "3.4.8",
+        "mdurl": "0.1.2",
+        "python-multipart": "0.0.32",
+        "mpmath": "1.3.0",
+        "PyYAML": "6.0.3",
+        "sentence-transformers": "5.6.1",
+        "idna": "3.19",
+        "cffi": "2.1.1",
+        "certifi": "2026.7.22",
+        "torch": "2.13.0",
+        "Jinja2": "3.1.6",
+        "annotated-types": "0.8.0",
+        "referencing": "0.37.0",
+        "markdown-it-py": "4.2.0",
+        "annotated-doc": "0.0.5",
+        "MarkupSafe": "3.0.3",
+        "huggingface_hub": "1.29.0",
+        "cryptography": "50.0.1",
+        "typing-inspection": "0.4.4",
+        "tqdm": "4.70.0",
+        "regex": "2026.9.3",
+        "attrs": "26.1.0",
+        "python-dotenv": "1.2.3",
+        "httpx": "0.28.1",
+        "typing_extensions": "4.16.0",
+        "filelock": "3.32.5",
+        "tokenizers": "0.22.2",
+        "typer": "0.27.2",
+        "uvicorn": "0.52.4",
+        "keyring": "25.7.0",
+        "httpx-sse": "0.4.3",
+        "scipy": "1.18.1",
+        "more-itertools": "11.1.0",
+        "chronovisor": "0.2.0"
+      },
+      "sha256": "c8c448f8563e99ab82bedd21245fb8c7c8ee3232b3d523e77bf2ef198fa1212b"
+    },
+    "/Users/trafficsign/.cache/uv/archive-v0/yhONttCpehnPF_0FEJxy5": {
+      "versions": {
+        "shellingham": "1.5.4",
+        "rpds-py": "2026.6.3",
+        "jaraco.classes": "3.4.0",
+        "click": "8.5.0",
+        "packaging": "26.3",
+        "jaraco.context": "6.1.2",
+        "Pygments": "2.21.0",
+        "jsonschema-specifications": "2025.9.1",
+        "hf-xet": "1.6.0",
+        "rich": "15.0.0",
+        "networkx": "3.6.1",
+        "PyJWT": "2.13.0",
+        "jsonschema": "4.26.0",
+        "numpy": "2.5.2",
+        "pydantic_core": "2.46.5",
+        "sse-starlette": "3.4.10",
+        "torch": "2.14.0",
+        "zstandard": "0.25.0",
+        "tokenizers": "0.23.2",
+        "mcp": "1.29.1",
+        "jaraco.functools": "4.6.0",
+        "httpcore": "1.0.9",
+        "starlette": "1.6.0",
+        "sympy": "1.14.0",
+        "fsspec": "2026.7.0",
+        "transformers": "5.16.1",
+        "huggingface_hub": "1.30.0",
+        "safetensors": "0.8.0",
+        "setuptools": "84.0.0",
+        "h11": "0.16.0",
+        "pydantic": "2.13.5",
+        "pydantic-settings": "2.15.0",
+        "pycparser": "3.0",
+        "mdurl": "0.1.2",
+        "python-multipart": "0.0.32",
+        "mpmath": "1.3.0",
+        "PyYAML": "6.0.3",
+        "idna": "3.19",
+        "cffi": "2.1.1",
+        "certifi": "2026.7.22",
+        "Jinja2": "3.1.6",
+        "annotated-types": "0.8.0",
+        "anyio": "4.15.0",
+        "referencing": "0.37.0",
+        "markdown-it-py": "4.2.0",
+        "annotated-doc": "0.0.5",
+        "MarkupSafe": "3.0.3",
+        "cryptography": "50.0.1",
+        "typing-inspection": "0.4.4",
+        "tqdm": "4.70.0",
+        "regex": "2026.9.3",
+        "attrs": "26.1.0",
+        "python-dotenv": "1.2.3",
+        "httpx": "0.28.1",
+        "typing_extensions": "4.16.0",
+        "filelock": "3.32.5",
+        "typer": "0.27.2",
+        "uvicorn": "0.52.4",
+        "keyring": "25.7.0",
+        "httpx-sse": "0.4.3",
+        "more-itertools": "11.1.0",
+        "chronovisor": "0.2.0"
+      },
+      "sha256": "f49173de9cc19ef6a4ee52169e0d95cbcd07a25fde3e3153c9ac0b9ad2325be1"
+    },
+    "/Users/trafficsign/.cache/uv/archive-v0/t-VOBVHTKvM0sSgwxr2iW": {
+      "versions": {
+        "rpds-py": "2026.6.3",
+        "jaraco.classes": "3.4.0",
+        "click": "8.5.0",
+        "jaraco.context": "6.1.2",
+        "jsonschema-specifications": "2025.9.1",
+        "PyJWT": "2.13.0",
+        "jsonschema": "4.26.0",
+        "numpy": "2.5.2",
+        "pydantic_core": "2.46.5",
+        "sse-starlette": "3.4.10",
+        "zstandard": "0.25.0",
+        "mcp": "1.29.1",
+        "jaraco.functools": "4.6.0",
+        "httpcore": "1.0.9",
+        "starlette": "1.6.0",
+        "h11": "0.16.0",
+        "pydantic": "2.13.5",
+        "pydantic-settings": "2.15.0",
+        "pycparser": "3.0",
+        "python-multipart": "0.0.32",
+        "PyYAML": "6.0.3",
+        "idna": "3.19",
+        "cffi": "2.1.1",
+        "certifi": "2026.7.22",
+        "annotated-types": "0.8.0",
+        "anyio": "4.15.0",
+        "referencing": "0.37.0",
+        "cryptography": "50.0.1",
+        "typing-inspection": "0.4.4",
+        "attrs": "26.1.0",
+        "python-dotenv": "1.2.3",
+        "httpx": "0.28.1",
+        "typing_extensions": "4.16.0",
+        "uvicorn": "0.52.4",
+        "keyring": "25.7.0",
+        "httpx-sse": "0.4.3",
+        "more-itertools": "11.1.0",
+        "chronovisor": "0.2.0"
+      },
+      "sha256": "bd8af2e6053f17b676eb148042934246c7089810982f92a06b1ba28dcf661d03"
+    },
+    "/Users/trafficsign/.cache/uv/archive-v0/E3ZDtD3gMKFBOX-ktC1D5": {
+      "versions": {
+        "rpds-py": "2026.6.3",
+        "jaraco.classes": "3.4.0",
+        "click": "8.5.0",
+        "jaraco.context": "6.1.2",
+        "jsonschema-specifications": "2025.9.1",
+        "PyJWT": "2.13.0",
+        "jsonschema": "4.26.0",
+        "numpy": "2.5.2",
+        "pydantic_core": "2.46.5",
+        "sse-starlette": "3.4.10",
+        "zstandard": "0.25.0",
+        "mcp": "1.29.1",
+        "jaraco.functools": "4.6.0",
+        "httpcore": "1.0.9",
+        "starlette": "1.6.0",
+        "h11": "0.16.0",
+        "pydantic": "2.13.5",
+        "pydantic-settings": "2.15.0",
+        "pycparser": "3.0",
+        "python-multipart": "0.0.32",
+        "PyYAML": "6.0.3",
+        "idna": "3.19",
+        "cffi": "2.1.1",
+        "certifi": "2026.7.22",
+        "annotated-types": "0.8.0",
+        "anyio": "4.15.0",
+        "referencing": "0.37.0",
+        "cryptography": "50.0.1",
+        "typing-inspection": "0.4.4",
+        "attrs": "26.1.0",
+        "python-dotenv": "1.2.3",
+        "httpx": "0.28.1",
+        "typing_extensions": "4.16.0",
+        "uvicorn": "0.52.4",
+        "keyring": "25.7.0",
+        "httpx-sse": "0.4.3",
+        "more-itertools": "11.1.0",
+        "chronovisor": "0.2.0"
+      },
+      "sha256": "bd8af2e6053f17b676eb148042934246c7089810982f92a06b1ba28dcf661d03"
+    },
+    "/Users/trafficsign/.cache/uv/archive-v0/wyIZjD6u3QhcoHB-ZVyXB": {
+      "versions": {
+        "rpds-py": "2026.6.3",
+        "jaraco.classes": "3.4.0",
+        "click": "8.5.0",
+        "jaraco.context": "6.1.2",
+        "jsonschema-specifications": "2025.9.1",
+        "PyJWT": "2.13.0",
+        "jsonschema": "4.26.0",
+        "numpy": "2.5.2",
+        "pydantic_core": "2.46.5",
+        "sse-starlette": "3.4.10",
+        "zstandard": "0.25.0",
+        "mcp": "1.29.1",
+        "jaraco.functools": "4.6.0",
+        "httpcore": "1.0.9",
+        "starlette": "1.6.0",
+        "h11": "0.16.0",
+        "pydantic": "2.13.5",
+        "pydantic-settings": "2.15.0",
+        "pycparser": "3.0",
+        "python-multipart": "0.0.32",
+        "PyYAML": "6.0.3",
+        "idna": "3.19",
+        "cffi": "2.1.1",
+        "certifi": "2026.7.22",
+        "annotated-types": "0.8.0",
+        "anyio": "4.15.0",
+        "referencing": "0.37.0",
+        "cryptography": "50.0.1",
+        "typing-inspection": "0.4.4",
+        "attrs": "26.1.0",
+        "python-dotenv": "1.2.3",
+        "httpx": "0.28.1",
+        "typing_extensions": "4.16.0",
+        "uvicorn": "0.52.4",
+        "keyring": "25.7.0",
+        "httpx-sse": "0.4.3",
+        "more-itertools": "11.1.0",
+        "chronovisor": "0.2.0"
+      },
+      "sha256": "bd8af2e6053f17b676eb148042934246c7089810982f92a06b1ba28dcf661d03"
+    }
+  },
+  "validation_before_final": {
+    "model_runtime_contract_tests": {
+      "passed": 399,
+      "duration_seconds": 80.35,
+      "junit_local_path": "/tmp/chronovisor-fixed-model-contracts.xml"
+    },
+    "import_linter": {
+      "passed": true,
+      "contracts_kept": 1,
+      "contracts_broken": 0
+    }
+  },
+  "model_endpoint_probe": {
+    "endpoint": "http://127.0.0.1:18125/v1/models",
+    "http_status": 401,
+    "authenticated": false,
+    "catalog_verified": false
+  }
+}
