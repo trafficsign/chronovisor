@@ -80,7 +80,7 @@ summary{cursor:pointer;color:var(--accent);font-weight:600}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_8869798eb4f84ff3819fcf81f895b814","created_at":"2026-09-05T07:42:59+09:00","状態":"running","slug":"chronovisor-fixed-model-optimization-roadmap","title":"Chronovisor — モデル固定・品質維持の最適化と再設計 統合計画","project_root":"/Users/trafficsign/projects/personal/chronovisor","baseline_commit":"4ead53c5a42da8e61c2319ccdb2b581f7a656e22","current_request_scope":"implement_A0_A7_and_deploy","implementation_started":true,"main_scope":"A0-A7: behavior-preserving optimization","future_scope":"F1-F9: retained design options, not automatically executable","deployment_scope":"push, targeted restart and live verification authorized by user 2026-09-05","implementation_baseline_commit":"7b872fa64cf08edeaf86be4078077f60862c7dba"}
+{"task_id":"plan_8869798eb4f84ff3819fcf81f895b814","created_at":"2026-09-05T07:42:59+09:00","状態":"running","slug":"chronovisor-fixed-model-optimization-roadmap","title":"Chronovisor — モデル固定・品質維持の最適化と再設計 統合計画","project_root":"/Users/trafficsign/projects/personal/chronovisor","baseline_commit":"4ead53c5a42da8e61c2319ccdb2b581f7a656e22","current_request_scope":"implement_A0_A7_and_deploy","implementation_started":true,"main_scope":"A0-A7: behavior-preserving optimization","future_scope":"F1-F9: retained design options, not automatically executable","deployment_scope":"push, targeted restart and live verification authorized by user 2026-09-05","implementation_baseline_commit":"7b872fa64cf08edeaf86be4078077f60862c7dba","implementation_commit":"2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6"}
 </script>
 
 <header>
@@ -177,7 +177,7 @@ summary{cursor:pointer;color:var(--accent);font-weight:600}
 </ol><p class="small">完了条件：同じ仕様・品質条件を保ったことと、改善した対象・幅・限界が同じreportから確認できる。</p></div>
 
 <div class="phase"><h3>A7 · 変更単位を確定し、成果と残件を記録する</h3><ol class="checklist">
-<li><input id="a7-1" type="checkbox"><label for="a7-1">各採用変更の対象差分・検証・測定をrootが確認し、意味のある単位でcommitする。無関係なdirty差分を含めず、計画のcheckboxと時刻付きログを更新する。</label></li>
+<li><input id="a7-1" type="checkbox" checked><label for="a7-1">各採用変更の対象差分・検証・測定をrootが確認し、意味のある単位でcommitする。無関係なdirty差分を含めず、計画のcheckboxと時刻付きログを更新する。</label></li>
 <li><input id="a7-2" type="checkbox"><label for="a7-2">採用/不採用/未測定、固定条件、品質検証、局所/全体の性能、切り戻し先、未反映のruntimeを明記する。将来案F1–F9は各案の採用状況を別に保持する。</label></li>
 </ol><p class="small">主計画の完了はコード・検証の完了を指す。本番反映は、下記の条件付き手順が実行・確認されるまで別の状態として報告する。</p></div>
 </section>
@@ -247,7 +247,7 @@ summary{cursor:pointer;color:var(--accent);font-weight:600}
 <li>モデル・設定・schemaの意図しない差、品質ゲート失敗、Raw/receipt/CAS異常、stale状態、既定予算を超えるメモリ/遅延回帰が出たら、採用を止めて記録した版へ切り戻す。モデル変更で辻褄を合わせない。</li>
 <li>設定変更・永続schema移行を含まないAの変更では、旧runtimeへ戻した後もデータを読めることを確認する。Fの移行では事前に別の移行・復元受入をこの計画へ追加する。</li>
 </ol>
-<p class="small">現在の反映状態：採用実装と検証を完了。push・再起動・本番確認はユーザー承認済みで、続けて実施する。切り戻し先のruntime sourceは4ead53c5a42da8e61c2319ccdb2b581f7a656e22。永続schemaとモデル設定は変更しない。</p>
+<p class="small">現在の反映状態：採用実装はpush済み。初回再起動で依存version driftとConverge旧SHAを検出し、共通起動処理と局所wrapperを修正中。再反映後の全service照合まで完了扱いしない。切り戻し先のruntime sourceは4ead53c5a42da8e61c2319ccdb2b581f7a656e22。永続schemaとモデル設定は変更しない。</p>
 </section>
 
 <section class="blockers" data-section="ブロッカー">
@@ -290,6 +290,8 @@ summary{cursor:pointer;color:var(--accent);font-weight:600}
 <li><time datetime="2026-09-05T08:38:49+09:00">2026-09-05 08:38</time><span>A1完了。32KiB block読込と解析済みtail文字列の逐次解放を採用。厳密UTF-8、物理行limit、CR/LF/CRLF・Unicode、0/負数、破損末尾、追記/差替え/切詰め、取得順序を確認。rootの6000境界比較も一致。最終30組は500行42.95%、5000行14.57%短縮。RSSはそれぞれ+1.47%、-0.56%。161関連tests通過、最終source固定後にrootの統合検証を実施。</span></li>
 <li><time datetime="2026-09-05T08:42:17+09:00">2026-09-05 08:42</time><span>A0-3完了。固定snapshot・旧実装AST・交互30組・独立process RSSの比較条件を確定。モデル要求と計算精度は不変。既存の生成throughput・decision latency・Recall stage・scheduler・service latencyをread-onlyで別採取した。現行artifactにはprefill/decode/明示lock waitの分解値がなく、not_availableを記録し推定しない。モデル全体の速度・メモリ改善は採用根拠に含めない。<a href="evidence/2026-09-05-fixed-model-optimization/runtime-observation-before.json">反映前の観測と測定限界</a>。</span></li>
 <li><time datetime="2026-09-05T08:45:56+09:00">2026-09-05 08:45</time><span>A6完了。全体6,373件中6,364 passed・8 failed・1 skipped（906.65秒）。失敗8件は構成台帳7件と大関数policy1件で、cleanな7b872faでも同じ失敗集合を独立再現。今回の新規失敗0、台帳や閾値は緩和していない。最終コードの関連253件とモデル/資源契約399件は通過、ruff/mypy/import-linter/compileall/diff-check通過。検索・訂正・保存・lease/CAS・モデル要求の契約および固定snapshotの結果一致を確認した。prefill/decodeの分解や自由生成回答の新規A/Bは未測定で、品質改善・全体高速化を主張しない。<a href="evidence/2026-09-05-fixed-model-optimization/verification.json">検証・既存失敗の証拠</a>。</span></li>
+<li><time datetime="2026-09-05T08:46:35+09:00">2026-09-05 08:46</time><span>A7-1完了。rootが採用コード・最終テスト・実測rawを確認し、<code>2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6</code>へcommit。無関係なR6 harness差分と既存の未追跡資料を含めていない。続けてpushと本番反映を行う。</span></li>
+<li><time datetime="2026-09-05T08:58:05+09:00">2026-09-05 08:58</time><span>初回push/restartの照合でuvxによる一部依存更新とConverge生成wrapperの旧SHA固定を検出。Rerankerは起動時accelerator lease競合後に自動復旧した。固定条件を満たすため、共通wrapperへ役割別の依存制約fileを渡す最小修正を追加し、Convergeは同じruntime source解決へ接続する。Python/モデル/timeout/ジョブ上限は変更しない。起動wrapper関連24 tests、shell構文、ruff、diff検査を通過。<a href="evidence/2026-09-05-fixed-model-optimization/deployment-first.json">初回照合</a>と<a href="evidence/2026-09-05-fixed-model-optimization/runtime-constraints.json">依存制約manifest</a>を保存。A7-2は再反映とlive検証まで未完了。</span></li>
 </ol>
 </section>
 

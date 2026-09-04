@@ -8,7 +8,7 @@ def test_periodic_review_uses_one_autonomous_full_sweep() -> None:
         / "chronovisor-librarian-review"
     ).read_text(encoding="utf-8")
 
-    assert wrapper.count('"$CHRONOVISOR_UVX"') == 1
+    assert wrapper.count("chronovisor_exec_uvx") == 1
     assert "--full-sweep \\\n  --json \\\n  >/dev/null" in wrapper
     assert "--review-collection-queue" not in wrapper
     assert "--review-model" not in wrapper

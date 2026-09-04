@@ -1,0 +1,169 @@
+{
+  "timestamp": "2026-09-05T08:47:42.247289+09:00",
+  "expected_commit": "2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6",
+  "runtime_source": "git+ssh://git@github.com/trafficsign/chronovisor@2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6",
+  "config_without_runtime_unchanged": true,
+  "file_checks": {
+    "/Users/trafficsign/projects/personal/chronovisor/uv.lock": true,
+    "/Users/trafficsign/projects/personal/chronovisor/pyproject.toml": true,
+    "/Users/trafficsign/.omlx/model_settings.json": true,
+    "/Users/trafficsign/.omlx/settings.json": true
+  },
+  "services": [
+    {
+      "label": "com.trafficsign.chronovisor-dashboard.managed-v2",
+      "loaded": true,
+      "pid": 60353,
+      "archives": [
+        {
+          "pid": 60539,
+          "path": "/Users/trafficsign/.cache/uv/archive-v0/UZtPBNnlseo_PyWVCiSud",
+          "commit": "2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6",
+          "commit_matches": true,
+          "dependency_changes": {},
+          "source_equal": {
+            "core/index_store.py": true,
+            "ingest/convergence.py": true,
+            "ops/lint_repair.py": true,
+            "recall/recall_auditor.py": true
+          }
+        }
+      ]
+    },
+    {
+      "label": "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+      "loaded": true,
+      "pid": 60371,
+      "archives": [
+        {
+          "pid": 60536,
+          "path": "/Users/trafficsign/.cache/uv/archive-v0/j6VrNP6wCRCypFoBt-3Q3",
+          "commit": "2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6",
+          "commit_matches": true,
+          "dependency_changes": {},
+          "source_equal": {
+            "core/index_store.py": true,
+            "ingest/convergence.py": true,
+            "ops/lint_repair.py": true,
+            "recall/recall_auditor.py": true
+          }
+        }
+      ]
+    },
+    {
+      "label": "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+      "loaded": true,
+      "pid": 60341,
+      "archives": [
+        {
+          "pid": 60540,
+          "path": "/Users/trafficsign/.cache/uv/archive-v0/5I1du2ps5rdaK4Nq7gQj_",
+          "commit": "2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6",
+          "commit_matches": true,
+          "dependency_changes": {
+            "anyio": {
+              "before": "4.14.2",
+              "after": "4.15.0"
+            },
+            "sse-starlette": {
+              "before": "3.4.8",
+              "after": "3.4.10"
+            }
+          },
+          "source_equal": {
+            "core/index_store.py": true,
+            "ingest/convergence.py": true,
+            "ops/lint_repair.py": true,
+            "recall/recall_auditor.py": true
+          }
+        }
+      ]
+    },
+    {
+      "label": "com.trafficsign.chronovisor-semantic.managed-v2",
+      "loaded": true,
+      "pid": 60306,
+      "archives": [
+        {
+          "pid": 60534,
+          "path": "/Users/trafficsign/.cache/uv/archive-v0/f5wRsWc9bhxKPalu_zsj2",
+          "commit": "2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6",
+          "commit_matches": true,
+          "dependency_changes": {
+            "anyio": {
+              "before": "4.14.2",
+              "after": "4.15.0"
+            },
+            "huggingface_hub": {
+              "before": "1.29.0",
+              "after": "1.30.0"
+            },
+            "sse-starlette": {
+              "before": "3.4.8",
+              "after": "3.4.10"
+            }
+          },
+          "source_equal": {
+            "core/index_store.py": true,
+            "ingest/convergence.py": true,
+            "ops/lint_repair.py": true,
+            "recall/recall_auditor.py": true
+          }
+        }
+      ]
+    },
+    {
+      "label": "com.trafficsign.chronovisor-reranker.managed-v2",
+      "loaded": true,
+      "pid": null,
+      "archives": []
+    },
+    {
+      "label": "com.trafficsign.chronovisor-converge.managed-v2",
+      "loaded": true,
+      "pid": 60385,
+      "archives": [
+        {
+          "pid": 60467,
+          "path": "/Users/trafficsign/.cache/uv/archive-v0/wyIZjD6u3QhcoHB-ZVyXB",
+          "commit": "d8f31d8345980366cb29ee1346d7ea76512b01ae",
+          "commit_matches": false,
+          "dependency_changes": {},
+          "source_equal": {
+            "core/index_store.py": false,
+            "ingest/convergence.py": false,
+            "ops/lint_repair.py": false,
+            "recall/recall_auditor.py": false
+          }
+        }
+      ]
+    }
+  ],
+  "health": {
+    "error_type": "TimeoutError"
+  },
+  "lan_boundary": {
+    "http_status": 401
+  },
+  "artifacts": {
+    "semantic-service-status.json": {
+      "ready": true,
+      "status": "ok",
+      "pid": 990,
+      "self_test": {},
+      "query_path_self_test": {},
+      "model": "nvidia/Nemotron-3-Embed-1B-BF16"
+    },
+    "reranker-service-status.json": {
+      "ready": true,
+      "status": "ok",
+      "pid": 1320
+    },
+    "ingest-liveness.json": {
+      "status": "ready",
+      "authority_available": true
+    }
+  },
+  "swap": "vm.swapusage: total = 7168.00M  used = 5971.81M  free = 1196.19M  (encrypted)",
+  "vm_stat": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                   255191.\nPages active:                                3406619.\nPages inactive:                              3390461.\nPages speculative:                             71499.\nPages throttled:                                   0.\nPages wired down:                             466510.\nPages purgeable:                               18288.\n\"Translation faults\":                     7610016095.\nPages copy-on-write:                       453469134.\nPages zero filled:                       12192422572.\nPages reactivated:                        1735861438.\nPages purged:                              105690926.\nFile-backed pages:                           1140975.\nAnonymous pages:                             5727604.\nPages stored in compressor:                  2249252.\nPages occupied by compressor:                 747459.\nDecompressions:                           1107977967.\nCompressions:                             1436241210.\nPageins:                                   453842145.\nPageouts:                                     651514.\nSwapins:                                      433089.\nSwapouts:                                     955952.\n"
+}

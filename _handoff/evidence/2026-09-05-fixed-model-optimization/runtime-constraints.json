@@ -1,0 +1,32 @@
+[
+  {
+    "command": "chronovisor-dashboard",
+    "path": "/Users/trafficsign/.chronovisor/runtime/dependency-constraints/chronovisor-dashboard.txt",
+    "dependencies": 37,
+    "sha256": "11189794ed7366e95a41fe8dcb56d18d541f9dabed449103487005bb524366ff"
+  },
+  {
+    "command": "chronovisor-ingest-drain",
+    "path": "/Users/trafficsign/.chronovisor/runtime/dependency-constraints/chronovisor-ingest-drain.txt",
+    "dependencies": 37,
+    "sha256": "f094b6ed22cd9b12bf655523b965ad4824b1edf2a6cbb16289a230b912ba094c"
+  },
+  {
+    "command": "chronovisor-semantic-service",
+    "path": "/Users/trafficsign/.chronovisor/runtime/dependency-constraints/chronovisor-semantic-service.txt",
+    "dependencies": 70,
+    "sha256": "4817b5cc17f58dc26cff5b6e79737f1dd31db45d6e47958523204951a951306f"
+  },
+  {
+    "command": "chronovisor-reranker-service",
+    "path": "/Users/trafficsign/.chronovisor/runtime/dependency-constraints/chronovisor-reranker-service.txt",
+    "dependencies": 68,
+    "sha256": "f43a0f123bbe0408c821bcdfc3fb44386ece9d8801c45c9a6cb22a16ea85f958"
+  },
+  {
+    "command": "chronovisor-converge",
+    "path": "/Users/trafficsign/.chronovisor/runtime/dependency-constraints/chronovisor-converge.txt",
+    "dependencies": 37,
+    "sha256": "11189794ed7366e95a41fe8dcb56d18d541f9dabed449103487005bb524366ff"
+  }
+]

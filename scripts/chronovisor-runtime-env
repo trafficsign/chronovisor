@@ -46,6 +46,14 @@ print(source)
 PY
 }
 
+chronovisor_exec_uvx() {
+  chronovisor_constraints="$CHRONOVISOR_ROOT/runtime/dependency-constraints/${0##*/}.txt"
+  if [ -z "${UV_CONSTRAINT:-}" ] && [ -f "$chronovisor_constraints" ]; then
+    exec "$CHRONOVISOR_UVX" --constraints "$chronovisor_constraints" "$@"
+  fi
+  exec "$CHRONOVISOR_UVX" "$@"
+}
+
 : "${HOME:?HOME is required}"
 CHRONOVISOR_WRAPPER_DIR=${CHRONOVISOR_WRAPPER_DIR:-$(CDPATH= cd "$(dirname "$0")" && pwd -P)}
 CHRONOVISOR_REPO_ROOT=${CHRONOVISOR_REPO_ROOT:-$(dirname "$CHRONOVISOR_WRAPPER_DIR")}

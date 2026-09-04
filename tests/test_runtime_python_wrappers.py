@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import stat
 import subprocess
 import sys
@@ -7,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-RUNTIME_COMMAND = '"$CHRONOVISOR_UVX" --python "$CHRONOVISOR_PYTHON"'
+RUNTIME_COMMAND = 'chronovisor_exec_uvx --python "$CHRONOVISOR_PYTHON"'
 UVX_WRAPPERS = (
     "chronovisor-dashboard",
     "chronovisor-ingest-drain",
@@ -69,7 +70,7 @@ def test_shared_runtime_resolver_uses_safe_portable_defaults() -> None:
 
 def test_shared_runtime_resolver_reads_configured_source(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    root = home / ".chronovisor"
+    root = home / ".chronovisor with spaces"
     root.mkdir(parents=True)
     (root / "config.toml").write_text(
         '[runtime]\nsource = "git+https://github.com/example/fork.git"\n',
@@ -77,27 +78,42 @@ def test_shared_runtime_resolver_reads_configured_source(tmp_path: Path) -> None
     )
     uvx = tmp_path / "uvx"
     uvx.write_text(
-        f"#!{sys.executable}\nimport sys\nprint(' '.join(sys.argv[1:]))\n",
+        f"#!{sys.executable}\nimport json, os, sys\n"
+        "print(json.dumps({'args': sys.argv[1:], 'constraints': os.getenv('UV_CONSTRAINT')}))\n",
         encoding="utf-8",
     )
     uvx.chmod(0o755)
-
-    completed = subprocess.run(
-        [str(SCRIPTS / "chronovisor-dashboard")],
-        check=True,
-        capture_output=True,
-        text=True,
-        env={
+    constraints = root / "runtime/dependency-constraints/chronovisor-dashboard.txt"
+    for use_constraints, override in ((False, None), (True, None), (True, "custom.txt")):
+        if use_constraints:
+            constraints.parent.mkdir(parents=True, exist_ok=True)
+            constraints.write_text("anyio==4.14.2\n", encoding="utf-8")
+        environment = {
             "HOME": str(home),
             "PATH": "/usr/bin:/bin",
             "CHRONOVISOR_REPO_ROOT": str(ROOT),
             "CHRONOVISOR_ROOT": str(root),
             "CHRONOVISOR_UVX": str(uvx),
             "CHRONOVISOR_PYTHON": sys.executable,
-        },
-    )
-
-    assert "--from git+https://github.com/example/fork.git" in completed.stdout
+        }
+        if override is not None:
+            environment["UV_CONSTRAINT"] = override
+        completed = subprocess.run(
+            [str(SCRIPTS / "chronovisor-dashboard")],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        result = json.loads(completed.stdout)
+        args = result["args"]
+        assert args[args.index("--from") + 1] == "git+https://github.com/example/fork.git"
+        assert args[args.index("--python") + 1] == sys.executable
+        if use_constraints and override is None:
+            assert args[args.index("--constraints") + 1] == str(constraints)
+        else:
+            assert "--constraints" not in args
+        assert result["constraints"] == override
 
 
 def test_library_evidence_invokes_canonical_module_directly() -> None:

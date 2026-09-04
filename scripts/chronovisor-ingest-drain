@@ -4,4 +4,4 @@ set -eu
 CHRONOVISOR_WRAPPER_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
 . "$CHRONOVISOR_WRAPPER_DIR/chronovisor-runtime-env"
 
-exec "$CHRONOVISOR_UVX" --python "$CHRONOVISOR_PYTHON" --refresh-package chronovisor --from "$RUNTIME_SOURCE" chronovisor-ingest-drain "$@"
+chronovisor_exec_uvx --python "$CHRONOVISOR_PYTHON" --refresh-package chronovisor --from "$RUNTIME_SOURCE" chronovisor-ingest-drain "$@"

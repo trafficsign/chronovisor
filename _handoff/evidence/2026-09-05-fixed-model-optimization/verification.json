@@ -146,6 +146,21 @@
       "json_payload_validation": true,
       "visual_render_checked": false,
       "visual_render_limit": "local file URL policy restriction; no alternate route attempted"
+    },
+    "runtime_wrapper_regression": {
+      "passed": 24,
+      "failed": 0,
+      "seconds": 2.53,
+      "junit": "/tmp/chronovisor-fixed-model-wrapper-tests.xml",
+      "cases": [
+        "unchanged invocation when constraints absent",
+        "per-wrapper dependency constraints passed as a single CLI argument",
+        "explicit UV_CONSTRAINT preserved",
+        "runtime source and Python resolution unchanged"
+      ],
+      "shell_syntax_passed": true,
+      "ruff_passed": true,
+      "diff_check_passed": true
     }
   },
   "scope": {
@@ -171,5 +186,20 @@
     "generation": "2026-09-04T23:37:31Z",
     "changed_source_and_tests": "metadata_match, no recorded gap; direct source diff reviewed",
     "partial_source_fallback": "scripts/chronovisor-runtime-env line 7 read directly"
+  },
+  "deployment": {
+    "status": "repairing_after_first_restart",
+    "optimization_commit": "2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6",
+    "first_restart_findings": [
+      "uvx resolved newer transitive dependencies for some services",
+      "generated Converge wrapper still pinned d8f31d8",
+      "Reranker warmup accelerator lease contention recovered automatically"
+    ],
+    "correction": [
+      "per-service CLI constraints from exact pre-deployment archive versions",
+      "Converge wrapper to use shared runtime source resolution with unchanged Python and flags",
+      "staged restart without model or lease-timeout changes"
+    ],
+    "constraint_manifest": "runtime-constraints.json"
   }
 }
