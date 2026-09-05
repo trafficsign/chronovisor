@@ -40,6 +40,7 @@ def fallback_probe() -> dict:
     item = ContextItem(candidate.page_id, candidate.title, "", candidate.score)
     with (
         patch("chronovisor.recall.recall_runtime.search_existing_bm25", return_value=[candidate]),
+        patch("chronovisor.recall.recall_runtime.search_existing_lexical", return_value=([candidate], [candidate])),
         patch("chronovisor.recall.recall_runtime.context_item_from_page_id", return_value=item),
         patch("chronovisor.recall.recall_runtime.state_context_for_request", return_value=""),
         patch("chronovisor.recall.recall_runtime._capture_legacy_distillation_observation"),

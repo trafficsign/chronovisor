@@ -10,6 +10,7 @@ import re
 import threading
 from collections import deque
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -128,6 +129,14 @@ def _meta_sensitivity(meta: dict[str, Any], *, folder: str = "") -> str:
 def _refresh_store_for_search(store: object) -> None:
     """Share a short read snapshot while preserving injected-store compatibility."""
 
+    if getattr(_GRAPH_QUERY, "read_only_snapshot", False):
+        load_existing = getattr(store, "load_existing", None)
+        if callable(load_existing):
+            if not load_existing():
+                from chronovisor.core.semantic_client import SemanticServiceUnavailable
+
+                raise SemanticServiceUnavailable("metadata snapshot unavailable")
+            return
     refresh_if_stale = getattr(store, "refresh_if_stale", None)
     if callable(refresh_if_stale):
         refresh_if_stale()
@@ -201,10 +210,15 @@ def search_existing_lexical(
     """Return read-only ``(anchor, BM25)`` candidates from one projection."""
 
     index = get_bm25()
-    return (
-        apply_filters(index.anchor_query_existing(query, top_n=top_n)),
-        apply_filters(index.query_existing(query, top_n=top_n)),
-    )
+    anchors = apply_filters(index.anchor_query_existing(query, top_n=top_n))
+    generation = getattr(index, "snapshot_generation", None)
+    lexical = apply_filters(index.query_existing(query, top_n=top_n))
+    consistent = generation == getattr(index, "snapshot_generation", None) and getattr(index, "snapshot_available", True)
+    _SEARCH_TRACE.value = {
+        "snapshot_generation": str(getattr(index, "snapshot_generation", "") or ""),
+        "snapshot_error": str(getattr(index, "snapshot_error", "") or ("" if consistent else "snapshot_generation_changed")),
+    }
+    return (anchors, lexical) if consistent else ([], [])
 
 
 # Semantic document projection shared by the immutable service index.
@@ -599,19 +613,7 @@ def fuse_results(
     fused = []
     for pid, score in scores.items():
         p = meta[pid]
-        fused.append(
-            ScoredPage(
-                page_id=p.page_id,
-                title=p.title,
-                folder=p.folder,
-                updated=p.updated,
-                score=score,
-                status=p.status,
-                superseded_by=p.superseded_by,
-                page_type=p.page_type,
-                sensitivity=p.sensitivity,
-            )
-        )
+        fused.append(replace(p, score=score, snippet=""))
 
     fused.sort(key=lambda x: x.score, reverse=True)
     return fused
@@ -993,6 +995,7 @@ def search(
     fusion_weights: dict[str, float] | None = None,
     semantic_timeout_ms: int | None = None,
     rollout_key: str = "",
+    read_only_snapshot: bool = False,
 ) -> tuple[list[ScoredPage], str]:
     """Run search and return (results, search_mode)."""
     weights = (
@@ -1019,6 +1022,7 @@ def search(
                 }
             )
     _GRAPH_QUERY.value = query
+    _GRAPH_QUERY.read_only_snapshot = read_only_snapshot
     _GRAPH_ROLLOUT.value = rollout_key
     stage_timings_ms: dict[str, int] = {}
     _SEARCH_TRACE.value = {"stage_timings_ms": stage_timings_ms}
@@ -1035,6 +1039,7 @@ def search(
                 fusion_weights=weights,
                 include_reference=folder is not None,
                 semantic_timeout_ms=semantic_timeout_ms,
+                read_only_snapshot=read_only_snapshot,
             ),
             deps=_pipeline_dependencies(),
             stage_timings_ms=stage_timings_ms,
@@ -1044,6 +1049,7 @@ def search(
         raise
     finally:
         _GRAPH_QUERY.value = ""
+        _GRAPH_QUERY.read_only_snapshot = False
         _GRAPH_ROLLOUT.value = ""
     graph_ids = {page.page_id for page in result.graph_results}
     semantic_ids = {page.page_id for page in result.semantic_results}
@@ -1068,5 +1074,6 @@ def search(
         "paths": graph_expansion_trace(),
         "query_plan": getattr(_GRAPH_TRACE, "query_plan", "direct"),
         "stage_timings_ms": dict(result.stage_timings_ms or {}),
+        "snapshot_generation": result.snapshot_generation,
     }
     return result.results, result.search_mode

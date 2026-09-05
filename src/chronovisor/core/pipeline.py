@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from chronovisor.core.runtime_config import NegativeFeedbackConfig, RerankerConfig
@@ -35,6 +35,7 @@ class PipelineConfig:
     anchor_seed: bool = True
     context_seed: bool = True
     verify_graph: bool = True
+    read_only_snapshot: bool = False
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class PipelineResult:
     usage_results: list[ScoredPage]
     negative_feedback: dict[str, Any]
     stage_timings_ms: dict[str, int] = field(default_factory=dict)
+    snapshot_generation: str = ""
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,7 @@ def production_pipeline_config(
     fusion_weights: dict[str, float] | None = None,
     include_reference: bool = False,
     semantic_timeout_ms: int | None = None,
+    read_only_snapshot: bool = False,
 ) -> PipelineConfig:
     return PipelineConfig(
         top_n=top_n,
@@ -99,6 +102,7 @@ def production_pipeline_config(
         usage_strategy="production",
         include_reference=include_reference,
         semantic_timeout_ms=semantic_timeout_ms,
+        read_only_snapshot=read_only_snapshot,
     )
 
 
@@ -122,19 +126,7 @@ def plain_rrf(
     fused: list[ScoredPage] = []
     for page_id, score in scores.items():
         page = meta[page_id]
-        fused.append(
-            ScoredPage(
-                page_id=page.page_id,
-                title=page.title,
-                folder=page.folder,
-                updated=page.updated,
-                score=score,
-                status=page.status,
-                superseded_by=page.superseded_by,
-                page_type=page.page_type,
-                sensitivity=page.sensitivity,
-            )
-        )
+        fused.append(replace(page, score=score, snippet=""))
     return sorted(fused, key=lambda page: page.score, reverse=True)
 
 
@@ -322,10 +314,17 @@ def run_search_pipeline(
             timings[name] = timings.get(name, 0) + elapsed_ms
 
     bm25 = timed("bm25_load", deps.get_bm25)
-    timed("bm25_build", bm25.build)
+    if config.read_only_snapshot and callable(getattr(bm25, "load_existing", None)):
+        from chronovisor.core.semantic_client import SemanticServiceUnavailable
+
+        if not timed("bm25_snapshot", bm25.load_existing):
+            raise SemanticServiceUnavailable("lexical snapshot unavailable")
+    else:
+        timed("bm25_build", bm25.build)
+    snapshot_generation = getattr(bm25, "snapshot_generation", None)
     anchor_results: list[ScoredPage] = []
     if config.anchor_seed:
-        anchor_query = getattr(bm25, "anchor_query", None)
+        anchor_query = getattr(bm25, "anchor_query_existing" if config.read_only_snapshot else "anchor_query", None)
         if callable(anchor_query):
             try:
                 anchor_results = timed(
@@ -341,10 +340,11 @@ def run_search_pipeline(
                     "bm25_anchor",
                     lambda: anchor_query(query, top_n=min(fetch_n, 20)),
                 )
+    lexical_query = getattr(bm25, "query_existing", bm25.query) if config.read_only_snapshot else bm25.query
     try:
         bm25_results = timed(
             "bm25_query",
-            lambda: bm25.query(
+            lambda: lexical_query(
                 query,
                 top_n=fetch_n,
                 include_reference=config.include_reference,
@@ -352,9 +352,16 @@ def run_search_pipeline(
         )
     except TypeError:
         bm25_results = timed(
-            "bm25_query", lambda: bm25.query(query, top_n=fetch_n)
+            "bm25_query", lambda: lexical_query(query, top_n=fetch_n)
         )
 
+    if config.read_only_snapshot and (
+        snapshot_generation != getattr(bm25, "snapshot_generation", None)
+        or not getattr(bm25, "snapshot_available", True)
+    ):
+        from chronovisor.core.semantic_client import SemanticServiceUnavailable
+
+        raise SemanticServiceUnavailable("lexical snapshot changed during search")
     context_results: list[ScoredPage] = []
     if config.context_seed:
         context_results = timed(
@@ -363,22 +370,39 @@ def run_search_pipeline(
 
     search_mode = "bm25"
     sem_results: list[ScoredPage] = []
+    def preserve_partial(exc: BaseException, channel: str) -> None:
+        # Keep source scores and identity in-process only. The caller must
+        # still classify the exception and apply degraded admission.
+        exc.__dict__["_partial_search"] = [{
+            "query": query,
+            "failed_channel": channel,
+            "snapshot_generation": str(snapshot_generation or ""),
+            "channels": {
+                "anchor": list(anchor_results), "bm25": list(bm25_results),
+                **({"semantic": list(sem_results)} if channel == "verify" else {}),
+            },
+        }]
+
     if config.semantic:
         try:
-            sem_results = timed(
-                "semantic",
-                lambda: deps.semantic_search(
-                    query,
-                    top_n=fetch_n,
-                    include_reference=config.include_reference,
-                    timeout_ms=config.semantic_timeout_ms,
-                ),
-            )
-        except TypeError:
-            sem_results = timed(
-                "semantic",
-                lambda: deps.semantic_search(query, top_n=fetch_n),
-            )
+            try:
+                sem_results = timed(
+                    "semantic",
+                    lambda: deps.semantic_search(
+                        query,
+                        top_n=fetch_n,
+                        include_reference=config.include_reference,
+                        timeout_ms=config.semantic_timeout_ms,
+                    ),
+                )
+            except TypeError:
+                sem_results = timed(
+                    "semantic",
+                    lambda: deps.semantic_search(query, top_n=fetch_n),
+                )
+        except BaseException as exc:
+            preserve_partial(exc, "semantic")
+            raise
         if sem_results:
             search_mode = "hybrid"
 
@@ -396,21 +420,25 @@ def run_search_pipeline(
     )
     if config.verify_graph and sem_results and graph_results:
         try:
-            verified = timed(
-                "verify",
-                lambda: deps.semantic_verify(
-                    query,
-                    [page.page_id for page in graph_results],
-                    timeout_ms=config.semantic_timeout_ms,
-                ),
-            )
-        except TypeError:
-            verified = timed(
-                "verify",
-                lambda: deps.semantic_verify(
-                    query, [page.page_id for page in graph_results]
-                ),
-            )
+            try:
+                verified = timed(
+                    "verify",
+                    lambda: deps.semantic_verify(
+                        query,
+                        [page.page_id for page in graph_results],
+                        timeout_ms=config.semantic_timeout_ms,
+                    ),
+                )
+            except TypeError:
+                verified = timed(
+                    "verify",
+                    lambda: deps.semantic_verify(
+                        query, [page.page_id for page in graph_results]
+                    ),
+                )
+        except BaseException as exc:
+            preserve_partial(exc, "verify")
+            raise
         semantic_by_page = {page.page_id: page for page in sem_results}
         for page in verified:
             current = semantic_by_page.get(page.page_id)
@@ -479,4 +507,5 @@ def run_search_pipeline(
         usage_results=usage_results,
         negative_feedback=negative_meta,
         stage_timings_ms=timings,
+        snapshot_generation=str(snapshot_generation or ""),
     )

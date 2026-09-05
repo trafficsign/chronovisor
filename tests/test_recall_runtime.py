@@ -66,10 +66,287 @@ from chronovisor.recall.recall_runtime import (
 )
 
 
+@pytest.fixture
+def fallback_projection(monkeypatch, tmp_path):
+    """Small canonical corpus; score order deliberately favors the distractor."""
+    pages = recall_runtime.CHRONOVISOR_ROOT / "pages"
+    pages.mkdir()
+    candidates = []
+    for page_id, title in (
+        ("cooking", "Cooking sourdough recipe"),
+        ("recall-timeout", "Chronovisor Recall timeout recovery"),
+        ("other-project", "Aster TLS recovery"),
+    ):
+        text = (
+            f"---\nuid: {page_id}-uid\ntitle: {title}\n"
+            "type: knowledge\nstatus: stable\nupdated: 2026-09-05\n---\n"
+            f"{title}\n"
+        )
+        path = pages / f"{page_id}.md"
+        path.write_text(text)
+        candidates.append(
+            ScoredPage(
+                page_id,
+                title,
+                "",
+                "2026-09-05",
+                22.0,
+                content_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                uid=f"{page_id}-uid",
+            )
+        )
+    monkeypatch.setattr(
+        recall_runtime, "search_existing_bm25", lambda *_a, **_k: candidates
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_existing_lexical",
+        lambda *_a, **_k: (candidates, candidates),
+    )
+    monkeypatch.setattr(
+        recall_runtime, "state_context_for_request", lambda *_a: "core memory"
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "_capture_legacy_distillation_observation",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "chronovisor.recall.recall_session.SESSIONS_DIR", tmp_path / "sessions"
+    )
+    monkeypatch.setattr(
+        recall_runtime, "RECALL_LOG_FILE", tmp_path / "recall" / "recall-log.jsonl"
+    )
+    return candidates, pages
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected"),
+    [
+        ("実装して。", []),
+        ("前回の続き", []),
+        ("前回のChronovisor Recall timeout手順", ["recall-timeout"]),
+        ("前回のAster TLS recovery", ["other-project"]),
+    ],
+)
+def test_fallback_relevance_gold(fallback_projection, prompt, expected):
+    result = recall_runtime.run_deterministic_fallback(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt=prompt,
+            cwd="/projects/personal/chronovisor",
+        ),
+        RecallPolicy(calibration_enabled=False),
+    )
+    assert [item.page_id for item in result.context_items] == expected
+    assert result.status == "degraded"
+    assert result.evidence_features["degraded"] is True
+    assert result.state_context == "core memory"
+
+
+@pytest.mark.parametrize(
+    "change", ["modified", "deleted", "uid", "missing_digest", "symlink_escape"]
+)
+def test_fallback_rejects_projection_identity(fallback_projection, change):
+    candidates, pages = fallback_projection
+    target = pages / "recall-timeout.md"
+    if change == "modified":
+        target.write_text(target.read_text() + "changed\n")
+    elif change == "deleted":
+        target.unlink()
+    elif change == "uid":
+        candidates[1].uid = "replaced-identity"
+    elif change == "symlink_escape":
+        outside = pages.parent.parent / "outside.md"
+        outside.write_bytes(target.read_bytes())
+        target.unlink()
+        target.symlink_to(outside)
+    else:
+        candidates[1].content_sha256 = ""
+    result = recall_runtime.run_deterministic_fallback(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="前回のChronovisor Recall timeout手順",
+        ),
+        RecallPolicy(calibration_enabled=False),
+    )
+    assert result.context_items == []
+    assert result.decision == "none"
+
+
+@pytest.mark.parametrize(
+    ("prompt", "previous", "age", "expected"),
+    [
+        (
+            "ちょっとそこを徹底調査して、改善計画を練ってくれ。",
+            "CronoBisāに改善の余地はないよな。",
+            0,
+            "chronovisor ちょっとそこを徹底調査して、改善計画を練ってくれ。",
+        ),
+        (
+            "実装して。",
+            "Chronovisor Recall timeout を調査",
+            0,
+            "chronovisor 実装して。",
+        ),
+        ("そこを調べて", "Chronovisor と Codex の比較", 0, "そこを調べて"),
+        ("そこを調べて", "Chronovisor Recall timeout", 10_000_000, "そこを調べて"),
+        ("前回のQwenを調べて", "Chronovisor Recall timeout", 0, "前回のQwenを調べて"),
+        ("前回のAsterを調べて", "Chronovisor Recall timeout", 0, "前回のAsterを調べて"),
+        (
+            "そこからAsterに移して",
+            "Chronovisor Recall timeout",
+            0,
+            "そこからAsterに移して",
+        ),
+    ],
+)
+def test_bounded_followup_query(prompt, previous, age, expected):
+    from chronovisor.recall.recall_session import RecallSessionState
+
+    request = RecallRequest(
+        host="codex", event="UserPromptSubmit", prompt=prompt, session_id="same"
+    )
+    policy = RecallPolicy()
+    state = RecallSessionState(
+        session_id="same", recent_queries=[previous], last_seen=time.time() - age
+    )
+    _, _, matched = evaluate_heuristic(request, policy)
+    assert build_queries(request, matched, [], policy, session_state=state) == [
+        expected
+    ]
+
+
+def test_fallback_conversation_preserves_only_latest_intent(fallback_projection):
+    from chronovisor.recall.recall_session import load_session_state
+
+    ui_reply = (
+        "<send_user_message_question_reply>"
+        + json.dumps(
+            [
+                {
+                    "questionItemId": "transport-id",
+                    "question": "改善計画の渡し方はどちらがよいですか？",
+                    "answer": "既存と同じ _handoff にHTMLでも保存する",
+                }
+            ],
+            ensure_ascii=False,
+        )
+        + "</send_user_message_question_reply>"
+    )
+    policy = RecallPolicy(calibration_enabled=False)
+    for prompt in (
+        "CronoBisāに改善の余地はないよな。",
+        "ちょっとそこを徹底調査して、改善計画を練ってくれ。",
+        ui_reply,
+        "実装して。",
+    ):
+        request = RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt=prompt,
+            session_id="conversation",
+            cwd="/personal/chronovisor",
+        )
+        result = recall_runtime.run_deterministic_fallback(request, policy)
+        assert len(result.queries) == 1
+        assert "chronovisor" in result.queries[0].lower()
+        assert "transport-id" not in result.queries[0]
+        assert "cooking" not in [item.page_id for item in result.context_items]
+        recall_runtime.append_recall_log(request, result)
+    state = load_session_state("conversation")
+    assert state.recent_queries[-1] == "chronovisor 実装して。"
+    assert state.injected_pages == {}
+    request.cwd = "/work/another"
+    result = recall_runtime.run_deterministic_fallback(request, policy)
+    assert result.queries == ["実装して。"]
+
+
+@pytest.mark.parametrize("budget", [0, -1])
+def test_fallback_expired_budget_does_not_search(
+    fallback_projection, monkeypatch, budget
+):
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_existing_lexical",
+        lambda *_a, **_k: pytest.fail("expired search"),
+    )
+    result = recall_runtime.run_deterministic_fallback(
+        RecallRequest(
+            host="codex", event="UserPromptSubmit", prompt="前回のChronovisor"
+        ),
+        RecallPolicy(),
+        timeout_ms=budget,
+    )
+    assert result.context == ""
+    assert result.context_items == []
+
+
+def test_partial_lexical_evidence_is_reused_without_restarting_search(
+    fallback_projection, monkeypatch
+):
+    candidates, _ = fallback_projection
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_existing_lexical",
+        lambda *_a, **_k: pytest.fail("second search"),
+    )
+    query = "前回のChronovisor Recall timeout手順"
+    result = recall_runtime.run_deterministic_fallback(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt=query),
+        RecallPolicy(),
+        _partial_search=[
+            {
+                "query": query,
+                "failed_channel": "semantic",
+                "channels": {"bm25": candidates},
+            }
+        ],
+    )
+    assert [item.page_id for item in result.context_items] == ["recall-timeout"]
+    assert result.evidence_features["partial_search_reused"] is True
+    assert result.evidence_features["learning_eligible"] is False
+    assert result.evidence_features["teacher_evaluated"] is False
+
+
+def test_active_serving_uses_shared_followup_resolution_and_post_hook_intent(
+    fallback_projection, monkeypatch
+):
+    seen = []
+    monkeypatch.setattr(
+        recall_runtime, "_load_active_distillation_policy", lambda _r: object()
+    )
+
+    def serve(**kwargs):
+        seen.append(kwargs["active_request"].prompt)
+        return RecallResult(
+            status="ok",
+            decision="none",
+            confidence=0,
+            queries=[],
+            reasons=[],
+            matched_terms={},
+            search_mode="readonly_anchor_bm25",
+        )
+
+    monkeypatch.setattr(recall_runtime, "_run_distilled_fast_path", serve)
+    for prompt in ("CronoBisāのRecall", "実装して。"):
+        recall_runtime._run_recall_impl(
+            RecallRequest(
+                host="codex",
+                event="UserPromptSubmit",
+                prompt=prompt,
+                session_id="active",
+            ),
+            RecallPolicy(log_decisions=True),
+        )
+    assert seen == ["chronovisorのRecall", "chronovisor 実装して。"]
+
+
 @pytest.fixture(autouse=True)
-def disable_live_recall_policy(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def disable_live_recall_policy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     root = tmp_path / "wiki"
     root.mkdir()
     for name in ("index.md", "log.md", "schema.md"):
@@ -3470,8 +3747,8 @@ def test_deterministic_fallback_uses_direct_read_only_path(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         recall_runtime,
-        "search_existing_bm25",
-        lambda *_a, **_k: [ScoredPage("page", "Page", "", "", 1.0)],
+        "search_existing_lexical",
+        lambda *_a, **_k: ([], [ScoredPage("page", "Page", "", "", 1.0)]),
     )
     monkeypatch.setattr(
         recall_runtime,
@@ -3484,7 +3761,7 @@ def test_deterministic_fallback_uses_direct_read_only_path(monkeypatch) -> None:
         lambda **_kwargs: pytest.fail("fallback must reuse the active foreground lane"),
     )
     result = recall_runtime.run_deterministic_fallback(
-        RecallRequest(host="codex", event="UserPromptSubmit", prompt="前回の続き"),
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="前回のPage"),
         RecallPolicy(),
         timeout_ms=500,
     )
@@ -3501,15 +3778,15 @@ def test_cache_hit_fallback_reuses_filters_dedupe_and_whole_block_renderer(
     from chronovisor.core import search as core_search
 
     candidates = [
-        ScoredPage("stable", "Stable", "", "", 2.0),
-        ScoredPage("stable", "Stable duplicate", "", "", 1.9),
-        ScoredPage("draft", "Draft", "", "", 1.8, status="draft"),
-        ScoredPage("sensitive", "Sensitive", "", "", 1.7, sensitivity="high"),
+        ScoredPage("stable", "Recall plan Stable", "", "", 2.0),
+        ScoredPage("stable", "Recall plan Stable duplicate", "", "", 1.9),
+        ScoredPage("draft", "Recall plan Draft", "", "", 1.8, status="draft"),
+        ScoredPage("sensitive", "Recall plan Sensitive", "", "", 1.7, sensitivity="high"),
     ]
     monkeypatch.setattr(
         core_search,
         "get_bm25",
-        lambda: SimpleNamespace(query_existing=lambda *_a, **_k: candidates),
+        lambda: SimpleNamespace(query_existing=lambda *_a, **_k: candidates, anchor_query_existing=lambda *_a, **_k: []),
     )
     monkeypatch.setattr(
         recall_runtime,
@@ -3539,7 +3816,7 @@ def test_cache_hit_fallback_reuses_filters_dedupe_and_whole_block_renderer(
     request = RecallRequest(
         host="codex",
         event="UserPromptSubmit",
-        prompt="前回の続き",
+        prompt="前回のRecall plan",
         cwd="/projects/work/private",
         decision_id="fixed",
     )
@@ -3567,8 +3844,8 @@ def test_cache_hit_fallback_starts_no_heavy_or_write_lane(monkeypatch) -> None:
 
     monkeypatch.setattr(
         recall_runtime,
-        "search_existing_bm25",
-        lambda *_a, **_k: [ScoredPage("page", "Page", "", "", 1.0)],
+        "search_existing_lexical",
+        lambda *_a, **_k: ([], [ScoredPage("page", "Page", "", "", 1.0)]),
     )
     monkeypatch.setattr(
         recall_runtime,
@@ -3595,7 +3872,7 @@ def test_cache_hit_fallback_starts_no_heavy_or_write_lane(monkeypatch) -> None:
         monkeypatch.setattr(owner, name, forbidden)
 
     result = recall_runtime.run_deterministic_fallback(
-        RecallRequest(host="codex", event="UserPromptSubmit", prompt="前回の続き"),
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="前回のPage"),
         RecallPolicy(),
     )
 
@@ -3617,7 +3894,7 @@ def test_deterministic_fallback_is_l1_only_when_projection_unavailable(
         "observe_processor_shadow",
     ):
         monkeypatch.setattr(recall_runtime, name, forbidden)
-    monkeypatch.setattr(recall_runtime, "search_existing_bm25", lambda *_a, **_k: [])
+    monkeypatch.setattr(recall_runtime, "search_existing_lexical", lambda *_a, **_k: ([], []))
     monkeypatch.setattr(
         recall_runtime,
         "state_context_for_request",
@@ -3640,7 +3917,7 @@ def test_deterministic_fallback_is_l1_only_when_projection_unavailable(
 def test_deterministic_fallback_caps_requested_budget_at_reserve(monkeypatch) -> None:
     monkeypatch.setattr(
         recall_runtime,
-        "search_existing_bm25",
+        "search_existing_lexical",
         lambda *_a, **_k: time.sleep(2),
     )
     monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_a: "")
@@ -3659,7 +3936,7 @@ def test_deterministic_fallback_caps_requested_budget_at_reserve(monkeypatch) ->
 def test_deterministic_fallback_hard_caps_policy_reserve_at_600ms(monkeypatch) -> None:
     monkeypatch.setattr(
         recall_runtime,
-        "search_existing_bm25",
+        "search_existing_lexical",
         lambda *_a, **_k: time.sleep(2),
     )
     monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_a: "")
@@ -3678,7 +3955,7 @@ def test_deterministic_fallback_hard_caps_policy_reserve_at_600ms(monkeypatch) -
 def test_non_main_fallback_never_starts_bm25(monkeypatch) -> None:
     monkeypatch.setattr(
         recall_runtime,
-        "search_existing_bm25",
+        "search_existing_lexical",
         lambda *_a, **_k: pytest.fail("non-main fallback started BM25"),
     )
     monkeypatch.setattr(
@@ -3962,24 +4239,26 @@ def test_evidence_search_error_preserves_failed_stage_timing(monkeypatch) -> Non
         "_run_evidence_search",
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("search failed")),
     )
-    monkeypatch.setattr(recall_runtime, "collect_context", lambda *_a, **_k: [])
+    monkeypatch.setattr(recall_runtime, "collect_context", lambda *_a, **_k: pytest.fail("unknown failure retried search"))
     monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_a: "")
     telemetry: dict[str, object] = {}
 
     result = recall_runtime._run_recall_impl(
-        RecallRequest(host="codex", event="UserPromptSubmit", prompt="private"),
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="昨日Chronovisorのフック直したやつ、Claude Codeにも入れられる?"),
         RecallPolicy(judge_mode="off", rewrite_enabled=False, log_decisions=False),
         _telemetry=telemetry,
     )
 
     assert result.search_mode == "error"
+    assert result.status == "error"
+    assert result.decision == "none"
     assert "evidence_search" in result.evidence_features["stage_timings_ms"]
 
 
 def test_semantic_service_unavailable_uses_deterministic_fallback(monkeypatch) -> None:
     candidates = [
-        ScoredPage("safe", "Safe", "", "", 1.0),
-        ScoredPage("sensitive", "Sensitive", "", "", 0.9, sensitivity="high"),
+        ScoredPage("safe", "Chronovisor Safe", "", "", 1.0),
+        ScoredPage("sensitive", "Chronovisor Sensitive", "", "", 0.9, sensitivity="high"),
     ]
 
     def unavailable(**_kwargs):
@@ -3990,7 +4269,7 @@ def test_semantic_service_unavailable_uses_deterministic_fallback(monkeypatch) -
 
     monkeypatch.setattr(recall_runtime, "_run_evidence_search", unavailable)
     monkeypatch.setattr(
-        recall_runtime, "search_existing_bm25", lambda *_args, **_kwargs: candidates
+        recall_runtime, "search_existing_lexical", lambda *_args, **_kwargs: ([], candidates)
     )
     monkeypatch.setattr(
         recall_runtime,
@@ -4993,9 +5272,10 @@ def test_distilled_fast_path_bypasses_mutable_recall_lanes(monkeypatch, tmp_path
     pages = {}
     for page_id in ("anchor", "bm25", "third"):
         path = tmp_path / f"{page_id}.md"
-        path.write_text(page_id, encoding="utf-8")
+        path.write_text(f"---\nuid: {page_id}-uid\ntitle: {page_id}\nstatus: stable\n---\n{page_id}", encoding="utf-8")
         pages[page_id] = path
     for candidate in (anchor, bm25, third):
+        candidate.uid = f"{candidate.page_id}-uid"
         candidate.content_sha256 = hashlib.sha256(
             pages[candidate.page_id].read_bytes()
         ).hexdigest()
@@ -5650,7 +5930,8 @@ def test_shadow_policy_observation_never_mutates_fast_result(
     pages = {}
     for candidate in (one, two):
         page = tmp_path / f"{candidate.page_id}.md"
-        page.write_text(candidate.page_id, encoding="utf-8")
+        candidate.uid = f"{candidate.page_id}-uid"
+        page.write_text(f"---\nuid: {candidate.uid}\ntitle: {candidate.title}\nstatus: stable\n---\n{candidate.page_id}", encoding="utf-8")
         candidate.content_sha256 = hashlib.sha256(page.read_bytes()).hexdigest()
         pages[candidate.page_id] = page
     monkeypatch.setattr(
@@ -6142,7 +6423,7 @@ def test_capture_only_records_timeout_and_degraded_fallback(monkeypatch) -> None
 
     monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
     monkeypatch.setattr(recall_runtime, "search_existing_lexical", lambda *_args, **_kwargs: ([], []))
-    monkeypatch.setattr(recall_runtime, "search_existing_bm25", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(recall_runtime, "search_existing_lexical", lambda *_args, **_kwargs: ([], []))
     monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_args: "")
     request = RecallRequest(
         host="codex",

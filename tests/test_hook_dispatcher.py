@@ -167,6 +167,7 @@ def test_user_prompt_dispatches_to_recall_runtime(monkeypatch, capsys) -> None:
 
 def test_user_prompt_logs_degraded_result_after_render(monkeypatch, capsys) -> None:
     events: list[str] = []
+    recorded: list[recall_runtime.RecallResult] = []
     monkeypatch.setattr(
         recall_runtime,
         "load_policy",
@@ -194,7 +195,7 @@ def test_user_prompt_logs_degraded_result_after_render(monkeypatch, capsys) -> N
     monkeypatch.setattr(
         recall_runtime,
         "append_recall_log",
-        lambda _request, result: events.append(f"log:{result.status}"),
+        lambda _request, result: (recorded.append(result), events.append(f"log:{result.status}")),
     )
     monkeypatch.setattr("sys.stdin", io.StringIO('{"prompt":"remember"}'))
 
@@ -203,6 +204,23 @@ def test_user_prompt_logs_degraded_result_after_render(monkeypatch, capsys) -> N
     ) == 0
     assert capsys.readouterr().out == "{}\n"
     assert events == ["render", "log:degraded"]
+    features = recorded[0].evidence_features
+    assert features["host"] == "codex"
+    assert features["policy_enabled"] is True
+    assert features["semantic_configured"] is True
+    assert features["perform_search"] is True
+    assert features["semantic_eligible_before_breaker"] is True
+    assert features["breaker_open"] is False
+    assert features["normalized_prompt_hash"] == recall_runtime.stable_prompt_hash(
+        "remember"
+    )
+    assert features["normalized_prompt_chars"] == len("remember")
+    assert features["dispatcher_wall_ms"] >= 0
+    assert (
+        features["dispatcher_wall_scope"]
+        == "run_user_prompt_start_to_render_flush_excluding_uvx_process_startup"
+    )
+    assert "remember" not in json.dumps(features)
 
 
 @pytest.mark.parametrize("status", ["ok", "degraded"])
@@ -434,12 +452,24 @@ def test_user_prompt_outer_timeout_logs_anonymous_stage_telemetry(
     assert capsys.readouterr().out.strip() == "{}"
     assert recorded[0].evidence_features == {
         "host": "codex",
+        "policy_enabled": True,
+        "semantic_configured": True,
+        "perform_search": True,
+        "semantic_eligible_before_breaker": True,
+        "breaker_open": False,
+        "normalized_prompt_hash": recall_runtime.stable_prompt_hash(
+            "private prompt"
+        ),
+        "normalized_prompt_chars": len("private prompt"),
         "scheduler_wait_ms": 240,
         "last_stage_started": "context",
         "last_stage_completed": "judge",
         "remaining_ms": 75,
         "fallback_started": False,
+        "dispatcher_wall_ms": recorded[0].evidence_features["dispatcher_wall_ms"],
+        "dispatcher_wall_scope": "run_user_prompt_start_to_render_flush_excluding_uvx_process_startup",
     }
+    assert recorded[0].evidence_features["dispatcher_wall_ms"] >= 0
     assert recorded[0].latency_ms == 4_000
     assert "private prompt" not in json.dumps(recorded[0].evidence_features)
 
@@ -588,6 +618,63 @@ def test_user_prompt_open_breaker_uses_bm25_only_policy(monkeypatch, capsys) -> 
         "rewrite_enabled": False,
         "perform_search": True,
     }
+
+
+def test_user_prompt_open_breaker_keeps_semantic_denominator_and_anonymous_metadata(
+    monkeypatch, capsys
+) -> None:
+    recorded: list[recall_runtime.RecallResult] = []
+    monkeypatch.setattr(hook_dispatcher, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(recall_breaker, "is_open", lambda: True)
+    monkeypatch.setattr(
+        recall_runtime,
+        "load_policy",
+        lambda _path: recall_runtime.RecallPolicy(log_decisions=True, semantic=True),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "run_recall",
+        lambda *_args, **_kwargs: recall_runtime.RecallResult(
+            status="ok",
+            decision="none",
+            confidence=0.0,
+            queries=[],
+            reasons=[],
+            search_mode="bm25",
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime, "render_output", lambda *_args, **_kwargs: "{}"
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "append_recall_log",
+        lambda _request, result: recorded.append(result),
+    )
+
+    assert hook_dispatcher.main(
+        [
+            "--host",
+            "codex",
+            "--event",
+            "UserPromptSubmit",
+            "--prompt",
+            "  remember\n  this  ",
+        ]
+    ) == 0
+    assert capsys.readouterr().out == "{}\n"
+
+    features = recorded[0].evidence_features
+    assert features["policy_enabled"] is True
+    assert features["semantic_configured"] is True
+    assert features["perform_search"] is True
+    assert features["semantic_eligible_before_breaker"] is True
+    assert features["breaker_open"] is True
+    assert features["normalized_prompt_hash"] == recall_runtime.stable_prompt_hash(
+        "  remember\n  this  "
+    )
+    assert features["normalized_prompt_chars"] == len("remember this")
+    assert "remember" not in json.dumps(features)
 
 
 def test_user_prompt_policy_failure_is_still_exit_zero_fail_open(

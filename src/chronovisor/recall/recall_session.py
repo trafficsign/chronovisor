@@ -28,6 +28,7 @@ class RecallSessionState:
     recent_topics: list[str] = field(default_factory=list)
     injected_pages: dict[str, dict[str, Any]] = field(default_factory=dict)
     last_seen: float = field(default_factory=time.time)
+    cwd: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +38,7 @@ class RecallSessionState:
             "recent_topics": list(self.recent_topics[-40:]),
             "injected_pages": self.injected_pages,
             "last_seen": self.last_seen,
+            "cwd": self.cwd,
         }
 
     @classmethod
@@ -58,6 +60,7 @@ class RecallSessionState:
             recent_topics=recent_topics,
             injected_pages=injected_pages,
             last_seen=float(last_seen) if isinstance(last_seen, int | float) else time.time(),
+            cwd=data.get("cwd", "") if isinstance(data.get("cwd", ""), str) else "",
         )
 
 
@@ -100,10 +103,15 @@ def update_session_after_recall(
     queries: list[str],
     page_ids: list[str],
     page_updated: dict[str, str] | None = None,
+    cwd: str = "",
 ) -> None:
     if state is None:
         return
     state.last_seen = time.time()
+    if state.cwd and cwd and state.cwd != cwd:
+        state.recent_queries = []
+        state.recent_topics = []
+    state.cwd = cwd
     state.recent_queries = _normalize_queries(state.recent_queries)
     for query in _normalize_queries(queries):
         q = re.sub(r"\s+", " ", query).strip()
@@ -111,7 +119,9 @@ def update_session_after_recall(
         # Canonicalize it so a migration does not duplicate otherwise equal
         # recall queries forever.
         q = re.sub(r"\bllm\s+wiki\b", "Chronovisor", q, flags=re.IGNORECASE)
-        if q and q not in state.recent_queries:
+        if q:
+            if q in state.recent_queries:
+                state.recent_queries.remove(q)
             state.recent_queries.append(q)
     state.recent_queries = state.recent_queries[-12:]
 

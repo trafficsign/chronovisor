@@ -60,6 +60,11 @@ def test_update_session_persists_bounded_unique_state(
     }
     assert recall_session.should_skip_page(state, "page-a", "2026-07-17") is True
     assert recall_session.should_skip_page(state, "page-a", "newer") is False
+    recall_session.update_session_after_recall(
+        state, queries=["Chronovisor recall"], page_ids=[], cwd="/personal/chronovisor"
+    )
+    assert state.recent_queries == ["検索精度 改善", "Chronovisor recall"]
+    assert recall_session.load_session_state("session-a").cwd == "/personal/chronovisor"
 
 
 def test_load_session_repairs_host_transport_query_and_topic_pollution(

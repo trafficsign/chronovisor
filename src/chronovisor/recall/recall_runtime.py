@@ -38,10 +38,11 @@ from chronovisor.core.jsonl_write import append_jsonl_durable
 from chronovisor.core.recall_runtime_paths import RECALL_DIR
 from chronovisor.core.search import (
     last_search_trace,
-    search_existing_bm25,
     search_existing_lexical,
 )
 from chronovisor.core.search import search as run_search
+from chronovisor.core.search import search_existing_bm25 as search_existing_bm25
+from chronovisor.core.search_types import tokenize
 from chronovisor.core.semantic_client import SemanticServiceUnavailable
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
@@ -113,6 +114,7 @@ PAST_REFERENCE_TERMS = [
 ]
 
 AMBIGUITY_TERMS = [
+    "そこ",
     "あれ",
     "それ",
     "これ",
@@ -246,6 +248,7 @@ class RecallRequest:
     recent_context: str = ""
     session_id: str = ""
     decision_id: str = ""
+    is_question_reply: bool = False
 
 
 @dataclass
@@ -594,7 +597,7 @@ def evaluate_heuristic(
     request: RecallRequest, policy: RecallPolicy
 ) -> tuple[float, list[str], dict[str, list[str]]]:
     prompt = request.prompt.strip()
-    prompt_lower = prompt.lower()
+    prompt_lower = _canonical_query_subject(prompt)[0].lower()
     cwd_lower = request.cwd.lower()
 
     matched = {
@@ -863,6 +866,33 @@ def normalize_judge_confidence(
     return max(confidence, policy.read_threshold)
 
 
+def _canonical_query_subject(text: str) -> tuple[str, list[str]]:
+    """Use the existing entity registry, without changing page-id aliases."""
+    from chronovisor.decision.entity_backfill_contract import (
+        DEFAULT_ALIASES,
+        load_registry,
+    )
+
+    registry = load_registry(CHRONOVISOR_ROOT / "entities" / "registry.json")
+    subjects = []
+    for entity, aliases in registry.items():
+        for alias in dict.fromkeys(
+            [entity, *DEFAULT_ALIASES.get(entity, []), *aliases]
+        ):
+            pattern = re.compile(
+                r"(?<![a-z0-9_])" + re.escape(alias) + r"(?![a-z0-9_])", re.IGNORECASE
+            )
+            if not alias or not pattern.search(text):
+                continue
+            if entity not in subjects:
+                subjects.append(entity)
+            # Preserve searchable native names; normalize registry-backed
+            # Latin spellings that the ASCII tokenizer would truncate.
+            if not alias.isascii() and re.search(r"[A-Za-z]", alias):
+                text = pattern.sub(entity, text)
+    return text, subjects
+
+
 def build_queries(
     request: RecallRequest,
     matched: dict[str, list[str]],
@@ -873,17 +903,48 @@ def build_queries(
 ) -> list[str]:
     # The current prompt is authoritative. Prior turns are episode context for
     # rewriting ambiguous prompts, never independent retrieval entrances.
-    candidates: list[str] = [_compact_query(request.prompt)]
-    ambiguous = bool(matched.get("ambiguity") or matched.get("past_reference"))
+    prompt, subjects = _canonical_query_subject(request.prompt)
+    candidates: list[str] = [_compact_query(prompt)]
+    short_followup = bool(
+        re.fullmatch(
+            r"\s*(?:実装|修正|続行|調査)(?:して|を進めて)(?:くれ|ください)?[。.!！]*\s*",
+            prompt,
+        )
+    )
+    resolves_prior = bool(
+        matched.get("ambiguity") or short_followup or request.is_question_reply
+    )
+    ambiguous = resolves_prior or bool(matched.get("past_reference"))
+    explicit_identifier = (
+        bool(re.search(r"[A-Za-z][A-Za-z0-9_+-]{2,}", prompt))
+        and not request.is_question_reply
+    )
+    if (
+        resolves_prior
+        and not subjects
+        and not matched.get("project")
+        and not explicit_identifier
+    ):
+        previous = ""
+        if session_state is not None and (
+            getattr(session_state, "session_id", "") == request.session_id
+            and 0
+            <= time.time() - getattr(session_state, "last_seen", 0)
+            <= policy.session_ttl_seconds
+            and getattr(session_state, "cwd", request.cwd) in {"", request.cwd}
+        ):
+            recent = getattr(session_state, "recent_queries", [])
+            previous = recent[-1] if recent else ""
+        if not previous and request.session_id and len(request.recent_context) <= 900:
+            previous, _ = strip_non_user_blocks(request.recent_context)
+        _, prior_subjects = _canonical_query_subject(previous)
+        if len(prior_subjects) == 1:
+            return _dedupe_queries(
+                [f"{prior_subjects[0]} {_compact_query(prompt, limit=140)}"], limit=1
+            )
     if ambiguous:
         candidates.extend(rewrite_queries or [])
         candidates.extend(judge_queries)
-    if session_state is not None and ambiguous:
-        recent_topics = getattr(session_state, "recent_topics", [])[-8:]
-        if recent_topics:
-            candidates.append(
-                " ".join(recent_topics + [_compact_query(request.prompt, limit=80)])
-            )
 
     return _dedupe_queries(candidates, limit=policy.max_queries)
 
@@ -1224,6 +1285,7 @@ def search_candidates(
     deadline_at: float | None = None,
     stage_timings_ms: dict[str, int] | None = None,
     diagnostic_rows: list[dict[str, Any]] | None = None,
+    partial_search: list[dict[str, Any]] | None = None,
 ) -> tuple[list[Any], str]:
     if not queries:
         return [], ""
@@ -1329,6 +1391,7 @@ def search_candidates(
         }
         if remaining_ms is not None:
             search_kwargs["semantic_timeout_ms"] = remaining_ms
+            search_kwargs["read_only_snapshot"] = True
         if request is not None and request.session_id:
             search_kwargs["rollout_key"] = request.session_id
         try:
@@ -1344,6 +1407,14 @@ def search_candidates(
                         )
             raise
         actual_trace = last_search_trace()
+        if partial_search is not None:
+            partial_search.append({
+                "query": query,
+                "channels": {"completed_search": list(results)},
+                "completed_channels": list(actual_trace.get("channels") or {}),
+                "failed_channel": "",
+                "snapshot_generation": str(actual_trace.get("snapshot_generation") or ""),
+            })
         actual_paths = actual_trace.get("paths")
         rows = trace_rows(
             query,
@@ -1372,26 +1443,36 @@ def search_candidates(
     # Recall rewrites produce up to three independent entrances. Offline
     # callers may run them together so the semantic service can micro-batch;
     # deadline-bound hooks keep them on the main thread for hard interruption.
-    if deadline_at is not None:
-        # Keep deadline-bound work on the main thread: executor shutdown would
-        # otherwise wait for a timed-out worker and defeat the absolute budget.
-        try:
+    searched = []
+    try:
+        if deadline_at is not None:
+            # Keep timed work on the main thread so shutdown cannot extend it.
             with recall_wall_clock_deadline(
                 _require_remaining_budget(deadline_at, "search") or 0
             ):
-                searched = [search_one(query) for query in queries]
-        except RecallWallClockTimeout as exc:
-            raise RecallBudgetExhausted("recall search budget exhausted") from exc
-    elif len(queries) == 1:
-        searched = [search_one(queries[0])]
-    else:
-        with ThreadPoolExecutor(
-            max_workers=min(len(queries), policy.max_queries),
-            thread_name_prefix="recall-search",
-        ) as executor:
-            searched = list(executor.map(search_one, queries))
-
-    _require_remaining_budget(deadline_at, "search merge")
+                for query in queries:
+                    searched.append(search_one(query))
+        elif len(queries) == 1:
+            searched.append(search_one(queries[0]))
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(len(queries), policy.max_queries),
+                thread_name_prefix="recall-search",
+            ) as executor:
+                for value in executor.map(search_one, queries):
+                    searched.append(value)
+        _require_remaining_budget(deadline_at, "search merge")
+    except BaseException as exc:
+        partial = [
+            {"query": query, "failed_channel": "", "channels": {"completed_search": values[0]}}
+            for query, values in zip(queries, searched, strict=False)
+        ] + list(getattr(exc, "_partial_search", []))
+        if isinstance(exc, RecallWallClockTimeout):
+            timeout = RecallBudgetExhausted("recall search budget exhausted")
+            timeout._partial_search = partial
+            raise timeout from exc
+        exc.__dict__["_partial_search"] = partial
+        raise
     merged: dict[str, Any] = {}
     mode = "bm25"
     typed_trace_rows: list[dict[str, Any]] = []
@@ -1689,7 +1770,13 @@ def prefetch_page_ids_for_request(
 
 
 def context_item_from_page_id(
-    page_id: str, queries: list[str], decision: str, *, score: float
+    page_id: str,
+    queries: list[str],
+    decision: str,
+    *,
+    score: float,
+    expected_content_sha256: str | None = None,
+    expected_uid: str | None = None,
 ) -> ContextItem | None:
     path = find_readable_page(page_id)
     if not path or not path.exists():
@@ -1701,7 +1788,18 @@ def context_item_from_page_id(
     try:
         from chronovisor.core.frontmatter import parse as parse_frontmatter
 
-        meta, _body = parse_frontmatter(path.read_text(encoding="utf-8"))
+        data = path.read_bytes()
+        if expected_content_sha256 is not None and (
+            not re.fullmatch(r"[0-9a-f]{64}", expected_content_sha256)
+            or hashlib.sha256(data).hexdigest() != expected_content_sha256
+        ):
+            return None
+        meta, _body = parse_frontmatter(data.decode("utf-8"))
+        if expected_uid is not None and (
+            (meta.get("uid") if meta.get("uid") is not None else "") != expected_uid
+            or (not expected_uid and expected_content_sha256 is None)
+        ):
+            return None
         if isinstance(meta.get("title"), str):
             title = meta["title"]
         if meta.get("updated") is not None:
@@ -1715,9 +1813,22 @@ def context_item_from_page_id(
     except OSError:
         return None
     except Exception:
+        if expected_content_sha256 is not None or expected_uid is not None:
+            return None
         pass
     snippets: list[str] = []
-    if decision == "read":
+    if expected_content_sha256 is not None:
+        # Render from the very bytes whose digest was checked, including
+        # search cards; publication must not re-read a replaced page.
+        snippets = [
+            (
+                _summary_from_page(meta, _body)
+                if decision == "search"
+                else _trim_text(_body.strip(), 650)
+            )
+            or title
+        ]
+    elif decision == "read":
         snippet = excerpt_page(page_id, queries, max_chars=650)
         if snippet:
             snippets = [snippet]
@@ -1768,15 +1879,20 @@ def page_summary_with_content_hash(page_id: str) -> tuple[str, str]:
         meta, body = parse_frontmatter(data.decode("utf-8"))
     except Exception:
         return "", ""
-    content_sha256 = hashlib.sha256(data).hexdigest()
+    return _summary_from_page(meta, body), hashlib.sha256(data).hexdigest()
+
+
+def _summary_from_page(meta: Mapping[str, Any], body: str) -> str:
+    """Use the same summary for ordinary and identity-checked search cards."""
+
     summary = meta.get("summary")
     if isinstance(summary, str) and summary.strip():
-        return summary.strip(), content_sha256
+        return summary.strip()
     for line in body.splitlines():
         line = line.strip(" #-\t")
         if line:
-            return _one_line(line, limit=220), content_sha256
-    return "", content_sha256
+            return _one_line(line, limit=220)
+    return ""
 
 
 def page_summary(page_id: str) -> str:
@@ -2064,6 +2180,7 @@ def _fail_open_recall_budget(
             _started_at=started,
             _final_deadline_at=final_deadline_at,
             _telemetry=telemetry,
+            _partial_search=(telemetry or {}).get("_partial_search"),
         )
         if telemetry is not None:
             telemetry["fallback_completed"] = True
@@ -2106,6 +2223,11 @@ def _fail_open_for_known_recall_failure(
     fallback_reserve_ms: int | None = None,
 ) -> RecallResult | None:
     """Fail open only for exhausted budgets and typed capacity failures."""
+
+    partial = getattr(exc, "_partial_search", None)
+    if partial is not None:
+        telemetry = telemetry if telemetry is not None else {}
+        telemetry["_partial_search"] = partial
 
     if isinstance(exc, RecallBudgetExhausted):
         return _fail_open_recall_budget(
@@ -2264,6 +2386,7 @@ def _finalize_recall_result(
                 page_updated={
                     item.page_id: item.updated for item in result.context_items
                 },
+                cwd=active_request.cwd,
             )
         except Exception:
             pass
@@ -2400,6 +2523,18 @@ def _merge_telemetry(
 ) -> None:
     if telemetry is None:
         return
+    if "_partial_search" in telemetry:
+        evidence_features["query_provenance"] = [
+            {
+                "query_sha256": hashlib.sha256(part["query"].encode()).hexdigest(),
+                "completed_channels": list(
+                    part.get("completed_channels") or part["channels"]
+                ),
+                "failed_channel": part["failed_channel"],
+                "snapshot_generation": str(part.get("snapshot_generation") or ""),
+            }
+            for part in telemetry["_partial_search"]
+        ]
     timings = telemetry.get("stage_timings_ms")
     evidence_features.update(
         {
@@ -2502,17 +2637,22 @@ def _run_evidence_search(
     )
     search_stage_timings: dict[str, int] = {}
     deferred_diagnostic_rows: list[dict[str, Any]] = []
+    completed_searches: list[dict[str, Any]] = []
+    if _telemetry is not None:
+        _telemetry["_partial_search"] = completed_searches
     _stage_started(_telemetry, "teacher", deadline_at)
 
-    def teacher_search() -> tuple[list[Any], str]:
+    def teacher_search(search_queries: list[str] | None = None) -> tuple[list[Any], str]:
+        completed_searches.clear()
         try:
             return search_candidates(
-                initial_queries,
+                initial_queries if search_queries is None else search_queries,
                 policy,
                 request=active_request,
                 deadline_at=deadline_at,
                 stage_timings_ms=search_stage_timings,
                 diagnostic_rows=deferred_diagnostic_rows,
+                partial_search=completed_searches,
             )
         except BaseException:
             if _telemetry is not None:
@@ -2603,21 +2743,7 @@ def _run_evidence_search(
             _stage_started(_telemetry, "teacher", deadline_at)
 
             def rewritten_teacher_search() -> tuple[list[Any], str]:
-                try:
-                    return search_candidates(
-                        queries_for_search,
-                        policy,
-                        request=active_request,
-                        deadline_at=deadline_at,
-                        stage_timings_ms=search_stage_timings,
-                        diagnostic_rows=deferred_diagnostic_rows,
-                    )
-                except BaseException:
-                    if _telemetry is not None:
-                        partial = _telemetry.setdefault("stage_timings_ms", {})
-                        for name, elapsed_ms in search_stage_timings.items():
-                            partial[name] = partial.get(name, 0) + elapsed_ms
-                    raise
+                return teacher_search(queries_for_search)
 
             if field_authority_path:
                 pre_results, search_mode, candidate_metadata = run_candidate_teacher_pair(
@@ -3821,22 +3947,16 @@ def _run_distilled_fast_path(
         with recall_wall_clock_deadline(remaining_ms or _DISTILLED_FAST_PATH_MAX_MS):
             items = []
             for score, page in selected:
-                # The only page-body access on this path is this selected-card
-                # read. Reuse its actual byte digest for the exact E_t binding.
-                summary, content_sha256 = page_summary_with_content_hash(page.page_id)
-                if not re.fullmatch(r"[0-9a-f]{64}", content_sha256):
-                    raise OSError("selected page content is unavailable")
-                selected_content_hashes[page.page_id] = content_sha256
-                items.append(
-                    ContextItem(
-                        page_id=page.page_id,
-                        title=page.title,
-                        updated=page.updated,
-                        score=round(score, 4),
-                        snippets=[summary or page.title],
-                        sensitivity=page.sensitivity,
-                    )
+                item = context_item_from_page_id(
+                    page.page_id, [active_request.prompt], "search",
+                    score=round(score, 4),
+                    expected_content_sha256=str(getattr(page, "content_sha256", "")),
+                    expected_uid=str(getattr(page, "uid", "")),
                 )
+                if item is None or should_filter_sensitive_result(item, active_request):
+                    raise OSError("selected page identity is unavailable or stale")
+                selected_content_hashes[page.page_id] = page.content_sha256
+                items.append(item)
     except (RecallBudgetExhausted, RecallWallClockTimeout):
         trace.update(status="abstained", fallback="deadline", candidate_count=len(scored))
         return finish(RecallResult(
@@ -3950,7 +4070,9 @@ def _prepare_recall_request(
         return None, stripped_reasons, result
 
     active_request = (
-        replace(request, prompt=cleaned_prompt) if stripped_reasons else request
+        replace(request, prompt=cleaned_prompt,
+                is_question_reply=request.is_question_reply or "extracted question reply envelope" in stripped_reasons)
+        if stripped_reasons else request
     )
     skip_reason = classify_non_user_prompt(
         active_request.prompt,
@@ -4035,6 +4157,14 @@ def _run_active_distillation_recall(
     _stage_completed(telemetry, "prepare", deadline_at)
     score, reasons, matched = evaluate_heuristic(active_request, policy)
     del score, reasons, stripped_reasons
+    from chronovisor.recall.recall_session import load_session_state
+
+    resolved = build_queries(
+        active_request, matched, [], policy,
+        session_state=load_session_state(active_request.session_id),
+    )
+    if resolved and resolved[0] != _compact_query(active_request.prompt):
+        active_request = replace(active_request, prompt=resolved[0])
     result = _run_distilled_fast_path(
         active_request=active_request,
         policy=policy,
@@ -4044,6 +4174,8 @@ def _run_active_distillation_recall(
         final_deadline_at=final_deadline_at,
         telemetry=telemetry,
     )
+    if not result.queries:
+        result.queries = [active_request.prompt]
     _merge_telemetry(result.evidence_features, telemetry)
     if policy.log_decisions:
         append_recall_log(request, result)
@@ -4161,6 +4293,7 @@ def _run_recall_impl(
     _telemetry: dict[str, Any] | None = None,
 ) -> RecallResult:
     started = _started_at if _started_at is not None else time.monotonic()
+    _telemetry = _telemetry if _telemetry is not None else {}
     if not request.decision_id:
         request = replace(request, decision_id=new_decision_id())
     policy = policy or load_policy()
@@ -4270,8 +4403,9 @@ def _run_recall_impl(
             pre_results = []
             search_mode = "error"
             error = f"{exc.__class__.__name__}: {_one_line(str(exc), limit=220)}"
+            score = 0.0
 
-    if not processor_authority and should_run_judge(score, policy, evidence_features):
+    if not error and not processor_authority and should_run_judge(score, policy, evidence_features):
         try:
             _stage_started(_telemetry, "judge", deadline_at)
             judge_timeout_ms = _require_remaining_budget(deadline_at, "judge")
@@ -4496,6 +4630,34 @@ def run_recall(
     return result
 
 
+def _fallback_query_matches(query: str, candidate: Any) -> bool:
+    """Require explicit subject overlap; raw BM25 scores are never confidence."""
+
+    generic = set(
+        tokenize(
+            " ".join(
+                [
+                    *PAST_REFERENCE_TERMS,
+                    *AMBIGUITY_TERMS,
+                    *DECISION_TERMS,
+                    "の と を に で は が です ます した して する してくれ 手順 方法",
+                    "the a an is are was were of to for in on and or how what why can",
+                    "please show tell explain me my it this that implement fix previous steps",
+                ]
+            )
+        )
+    )
+    terms = set(tokenize(query)) - generic
+    subject = set(tokenize(f"{candidate.title} {candidate.snippet}"))
+    identifiers = {term for term in terms if re.fullmatch(r"[a-z0-9_]+", term)}
+    if identifiers:
+        return identifiers <= subject
+    overlap = terms & subject
+    # ponytail: lexical fallback abstains on paraphrases; a sealed relevance
+    # calibrator can replace this guard when it preserves positive coverage.
+    return len(overlap) >= 2 and len(overlap) / max(1, len(terms)) >= 0.6
+
+
 def run_deterministic_fallback(
     request: RecallRequest,
     policy: RecallPolicy,
@@ -4506,8 +4668,9 @@ def run_deterministic_fallback(
     _started_at: float | None = None,
     _final_deadline_at: float | None = None,
     _telemetry: dict[str, Any] | None = None,
+    _partial_search: list[dict[str, Any]] | None = None,
 ) -> RecallResult:
-    """Return L1 plus the existing BM25 projection without normal-path work."""
+    """Return L1 and only relevant, identity-checked existing lexical evidence."""
 
     requested_ms = (
         int(timeout_ms)
@@ -4515,7 +4678,7 @@ def run_deterministic_fallback(
         else policy.deterministic_fallback_reserve_ms
     )
     budget_ms = max(
-        1,
+        0,
         min(600, policy.deterministic_fallback_reserve_ms, requested_ms),
     )
     entered_at = time.monotonic()
@@ -4527,50 +4690,151 @@ def run_deterministic_fallback(
         entered_at + (budget_ms / 1000.0),
     )
     cleaned_prompt, stripped_reasons = strip_non_user_blocks(request.prompt)
-    active_request = replace(request, prompt=cleaned_prompt or request.prompt)
+    active_request = replace(
+        request,
+        prompt=cleaned_prompt,
+        is_question_reply=request.is_question_reply
+        or "extracted question reply envelope" in stripped_reasons,
+    )
     score, heuristic_reasons, matched = evaluate_heuristic(active_request, policy)
     decision = decision_from_score(score, policy)
-    queries = [active_request.prompt] if active_request.prompt.strip() else []
+    queries: list[str] = []
     context_items: list[ContextItem] = []
+    admission: list[dict[str, Any]] = []
+    provenance = [
+        {
+            "query_sha256": hashlib.sha256(part["query"].encode()).hexdigest(),
+            "completed_channels": list(part["channels"]),
+            "failed_channel": part["failed_channel"],
+            "snapshot_generation": str(part.get("snapshot_generation") or ""),
+        }
+        for part in (_partial_search or [])
+    ]
+    content_hashes: dict[str, str] = {}
     seen_page_ids: set[str] = set()
     is_main_thread = threading.current_thread() is threading.main_thread()
     try:
         remaining_ms = _require_remaining_budget(final_deadline_at, "fallback")
         with recall_wall_clock_deadline(remaining_ms or budget_ms):
-            results = (
-                search_existing_bm25(
-                    active_request.prompt,
-                    top_n=max(policy.max_pages * 3, 8),
+            if is_main_thread and active_request.prompt and policy.enabled:
+                from chronovisor.recall.recall_session import load_session_state
+
+                queries = (
+                    _dedupe_queries(
+                        [part["query"] for part in _partial_search], policy.max_queries
+                    )
+                    if _partial_search is not None
+                    else build_queries(
+                        active_request,
+                        matched,
+                        [],
+                        policy,
+                        session_state=load_session_state(active_request.session_id),
+                    )
                 )
-                if perform_search
-                and queries
-                and is_main_thread
-                else []
-            )
-            for candidate in results:
+                if len(queries) == 1 and queries[0] != active_request.prompt:
+                    resolved_score, _, _ = evaluate_heuristic(
+                        replace(active_request, prompt=queries[0]), policy
+                    )
+                    score = max(score, resolved_score)
+                    decision = decision_from_score(score, policy)
+            sources = []
+            if perform_search and queries and is_main_thread and decision != "none":
+                if _partial_search is not None:
+                    for part in _partial_search:
+                        for channel, values in part["channels"].items():
+                            sources.extend(
+                                (part["query"], channel, rank, page)
+                                for rank, page in enumerate(values, 1)
+                            )
+                else:
+                    for query in queries:
+                        anchors, lexical = search_existing_lexical(
+                            query, top_n=max(policy.max_pages * 3, 8)
+                        )
+                        snapshot = last_search_trace()
+                        provenance.append(
+                            {
+                                "query_sha256": hashlib.sha256(
+                                    query.encode()
+                                ).hexdigest(),
+                                "completed_channels": ["anchor", "bm25"],
+                                "failed_channel": "",
+                                "snapshot_generation": str(
+                                    snapshot.get("snapshot_generation") or ""
+                                ),
+                                "snapshot_error": str(
+                                    snapshot.get("snapshot_error") or ""
+                                ),
+                            }
+                        )
+                        sources.extend(
+                            (query, channel, rank, page)
+                            for channel, values in (
+                                ("anchor", anchors),
+                                ("bm25", lexical),
+                            )
+                            for rank, page in enumerate(values, 1)
+                        )
+            for query, source, rank, candidate in sources:
                 if len(context_items) >= policy.max_pages:
                     break
                 if candidate.page_id in seen_page_ids:
                     continue
-                seen_page_ids.add(str(candidate.page_id))
-                if should_filter_sensitive_result(candidate, active_request):
+                candidate_trace = {
+                    "page_sha256": hashlib.sha256(
+                        str(candidate.page_id).encode()
+                    ).hexdigest(),
+                    "source": source,
+                    "query_sha256": hashlib.sha256(query.encode()).hexdigest(),
+                    "rank": rank,
+                    "raw_score": float(candidate.score)
+                    if math.isfinite(float(candidate.score))
+                    else None,
+                    "admitted": False,
+                    "reason": "unrelated_subject",
+                }
+                admission.append(candidate_trace)
+                if candidate_trace["raw_score"] is None:
+                    candidate_trace["reason"] = "invalid_score"
                     continue
+                if not _fallback_query_matches(query, candidate):
+                    continue
+                if candidate.superseded_by or candidate.status != "stable":
+                    candidate_trace["reason"] = "not_stable"
+                    continue
+                if should_filter_sensitive_result(candidate, active_request):
+                    candidate_trace["reason"] = "sensitivity"
+                    continue
+                candidate_trace["reason"] = "identity_unavailable_or_stale"
                 item = context_item_from_page_id(
                     str(candidate.page_id),
                     queries,
-                    decision if decision != "none" else "search",
+                    decision,
                     score=round(float(candidate.score), 4),
+                    expected_content_sha256=str(
+                        getattr(candidate, "content_sha256", "")
+                    ),
+                    expected_uid=str(getattr(candidate, "uid", "")),
                 )
                 if item is not None and not should_filter_sensitive_result(
                     item, active_request
                 ):
                     context_items.append(item)
-    except (RecallBudgetExhausted, RecallWallClockTimeout):
+                    seen_page_ids.add(str(candidate.page_id))
+                    content_hashes[item.page_id] = candidate.content_sha256
+                    candidate_trace.update(
+                        admitted=True,
+                        reason="verified_lexical_subject",
+                        identity_binding="uid+sha256"
+                        if candidate.uid
+                        else "canonical_page_id+sha256",
+                    )
+    except RecallBudgetExhausted, RecallWallClockTimeout:
         context_items = []
-    effective_decision = decision if decision != "none" else "search"
     result = RecallResult(
         status="degraded",
-        decision=(effective_decision if context_items else "none"),
+        decision=(decision if context_items else "none"),
         confidence=round(score, 3),
         queries=queries,
         reasons=[
@@ -4581,20 +4845,24 @@ def run_deterministic_fallback(
         matched_terms=matched,
         session_id=active_request.session_id,
         context_items=context_items,
-        evidence_features={"authority": "teacher", "degraded": True},
+        evidence_features={
+            "authority": "teacher",
+            "degraded": True,
+            "fallback_admission": admission,
+            "teacher_evaluated": False,
+            "learning_eligible": False,
+            "partial_search_reused": _partial_search is not None,
+            "query_provenance": provenance,
+        },
         search_mode="bm25-fallback",
         context_style=policy.context_style,
         error=reason,
         decision_id=active_request.decision_id or new_decision_id(),
     )
+    result.page_content_hashes = content_hashes
     if not is_main_thread:
         result.latency_ms = _elapsed_ms(started)
         _merge_telemetry(result.evidence_features, _telemetry)
-        _capture_legacy_distillation_observation(
-            result,
-            request=active_request,
-            deadline_at=final_deadline_at,
-        )
         return result
     try:
         remaining_ms = _require_remaining_budget(final_deadline_at, "fallback render")
@@ -4606,7 +4874,7 @@ def run_deterministic_fallback(
                 recall_block,
                 max_chars=policy.max_total_context_chars,
             )
-    except (RecallBudgetExhausted, RecallWallClockTimeout):
+    except RecallBudgetExhausted, RecallWallClockTimeout:
         result.context_items = []
         result.state_context = ""
         result.context = ""
@@ -4619,15 +4887,12 @@ def run_deterministic_fallback(
     result.context_items = [
         item for item in result.context_items if item.page_id in retained
     ]
+    if not result.context_items:
+        result.decision = "none"
     if result.state_context:
         result.reasons.extend(["core memory injected", "state register injected"])
     result.latency_ms = _elapsed_ms(started)
     _merge_telemetry(result.evidence_features, _telemetry)
-    _capture_legacy_distillation_observation(
-        result,
-        request=active_request,
-        deadline_at=final_deadline_at,
-    )
     return result
 
 
@@ -4643,7 +4908,9 @@ def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
         if not content_sha:
             path = find_readable_page(item.page_id)
             try:
-                content_sha = hashlib.sha256(path.read_bytes()).hexdigest() if path else ""
+                content_sha = (
+                    hashlib.sha256(path.read_bytes()).hexdigest() if path else ""
+                )
             except OSError:
                 content_sha = ""
         page_bindings.append(
@@ -4697,9 +4964,7 @@ def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
         "judge_confidence": result.judge_confidence,
         "judge_reason": result.judge_reason,
         "evidence_features": result.evidence_features,
-        "stage_timings_ms": (
-            result.evidence_features.get("stage_timings_ms") or {}
-        ),
+        "stage_timings_ms": (result.evidence_features.get("stage_timings_ms") or {}),
         "search_mode": result.search_mode,
         "context_style": result.context_style,
         "latency_ms": result.latency_ms,
@@ -4707,6 +4972,28 @@ def append_recall_log(request: RecallRequest, result: RecallResult) -> None:
         "error": result.error,
     }
     append_jsonl(RECALL_LOG_FILE, record)
+    if (
+        (result.status == "degraded" or result.search_mode == "readonly_anchor_bm25")
+        and request.session_id
+        and result.queries
+        and os.environ.get("CHRONOVISOR_READ_ONLY") != "1"
+    ):
+        # This runs in the existing post-render receipt path, never inside
+        # fallback. Preserve query intent without teaching from injected cards.
+        try:
+            from chronovisor.recall.recall_session import (
+                load_session_state,
+                update_session_after_recall,
+            )
+
+            update_session_after_recall(
+                load_session_state(request.session_id),
+                queries=result.queries,
+                page_ids=[],
+                cwd=request.cwd,
+            )
+        except OSError, ValueError:
+            pass
     try:
         from chronovisor.recall.recall_policy_store import append_live_episode
 

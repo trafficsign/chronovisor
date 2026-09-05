@@ -42,11 +42,65 @@ def disabled_negative_feedback() -> NegativeFeedbackConfig:
     return NegativeFeedbackConfig(enabled=False)
 
 
+def test_semantic_failure_keeps_raw_lexical_candidates_without_promoting_them(monkeypatch):
+    from chronovisor.core.semantic_client import SemanticServiceUnavailable
+
+    candidate = page("lexical", 22.0)
+    failure = SemanticServiceUnavailable("timed out")
+    monkeypatch.setattr(search, "get_bm25", lambda: FakeBM25([candidate]))
+    monkeypatch.setattr(search, "context_seed_results", lambda *_a, **_k: [])
+    monkeypatch.setattr(search, "semantic_search", lambda *_a, **_k: (_ for _ in ()).throw(failure))
+    monkeypatch.setattr(search, "load_active_fusion_weights", lambda: dict(search.DEFAULT_FUSION_WEIGHTS))
+    with pytest.raises(SemanticServiceUnavailable) as raised:
+        search.search("explicit query", semantic=True)
+    assert raised.value is failure
+    partial = raised.value._partial_search
+    assert partial[0]["query"] == "explicit query"
+    assert partial[0]["failed_channel"] == "semantic"
+    assert partial[0]["channels"] == {"anchor": [], "bm25": [candidate]}
+    assert candidate.score == 22.0
+
+
 @pytest.fixture()
 def isolated_selection_index(monkeypatch) -> None:
     from chronovisor.recall import contextual_suppression
 
     monkeypatch.setattr(contextual_suppression, "ranking_components", lambda *_args: {})
+
+
+@pytest.fixture(autouse=True)
+def isolated_context_seeds(monkeypatch) -> None:
+    monkeypatch.setattr(search, "context_seed_results", lambda *_a, **_k: [])
+    monkeypatch.setattr(search_eval, "context_seed_results", lambda *_a, **_k: [])
+
+
+@pytest.mark.parametrize("entrypoint", ["pipeline", "fallback_projection"])
+def test_lexical_generation_switch_does_not_mix_candidates(monkeypatch, entrypoint):
+    from chronovisor.core.semantic_client import SemanticServiceUnavailable
+
+    class ReplacedProjection(FakeBM25):
+        snapshot_generation = 1
+        snapshot_available = True
+        snapshot_error = ""
+
+        def load_existing(self):
+            return True
+
+        def anchor_query_existing(self, *_a, **_k):
+            return [page("old", 22)]
+
+        def query_existing(self, *_a, **_k):
+            self.snapshot_generation = 2
+            return [page("new", 22)]
+
+    monkeypatch.setattr(search, "get_bm25", lambda: projection)
+    projection = ReplacedProjection([])
+    if entrypoint == "pipeline":
+        with pytest.raises(SemanticServiceUnavailable, match="snapshot changed"):
+            search.search("query", semantic=False, read_only_snapshot=True)
+    else:
+        assert search.search_existing_lexical("query") == ([], [])
+        assert search.last_search_trace()["snapshot_error"] == "snapshot_generation_changed"
 
 
 def test_pipeline_module_does_not_import_upper_layers() -> None:

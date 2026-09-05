@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -97,7 +98,7 @@ def read_hook_payload(stdin_text: str) -> dict[str, Any]:
 
 def _print_host_noop(host: str) -> None:
     if host == "codex":
-        print("{}")
+        print("{}", flush=True)
 
 
 def recall_enabled() -> bool:
@@ -155,6 +156,7 @@ def recall_improve_enabled(explicit_config: Path | None = None) -> bool:
 
 
 def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
+    dispatcher_started_at = time.perf_counter()
     evidence_composition.bind_recall_provider()
     host = normalize_host(args.host)
     if env_flag("CHRONOVISOR_INTERNAL_FRONTIER") is True:
@@ -189,6 +191,11 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
     from chronovisor.recall import recall_breaker
 
     breaker_was_open = recall_breaker.is_open()
+    perform_search = not bool(getattr(args, "no_search", False))
+    normalized_prompt, _ = recall_runtime.strip_non_user_blocks(request.prompt)
+    normalized_prompt = " ".join(normalized_prompt.split()).lower()
+    policy_enabled = bool(getattr(policy, "enabled", True))
+    semantic_configured = bool(getattr(policy, "semantic", False))
     effective_policy = replace(
         policy,
         total_timeout_ms=recall_inner_budget_ms(policy),
@@ -201,13 +208,29 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
             judge_mode="off",
             rewrite_enabled=False,
         )
-    telemetry: dict[str, Any] = {"host": host}
+    telemetry: dict[str, Any] = {
+        "host": host,
+        "policy_enabled": policy_enabled,
+        "semantic_configured": semantic_configured,
+        "perform_search": perform_search,
+        # Denominator is fixed before breaker suppression: an enabled policy,
+        # semantic rollout, requested search, and a non-empty user prompt.
+        "semantic_eligible_before_breaker": (
+            policy_enabled and semantic_configured and perform_search
+            and bool(normalized_prompt)
+        ),
+        "breaker_open": breaker_was_open,
+        "normalized_prompt_hash": recall_runtime.stable_prompt_hash(
+            normalized_prompt
+        ),
+        "normalized_prompt_chars": len(normalized_prompt),
+    }
     try:
         with recall_wall_clock_deadline(recall_outer_deadline_ms(policy)):
             result = recall_runtime.run_recall(
                 request,
                 effective_policy,
-                perform_search=not args.no_search,
+                perform_search=perform_search,
                 _telemetry=telemetry,
             )
     except RecallWallClockTimeout as exc:
@@ -220,6 +243,8 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
         # inside this total deadline. Reaching the outer timer means a lower
         # layer ignored its own timeout, so starting any second pass here would
         # violate the host's four-second contract.
+        _print_host_noop(host)
+        _record_dispatcher_wall_time(telemetry, dispatcher_started_at)
         _record_recall_fail_open(
             request,
             policy,
@@ -227,7 +252,6 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
             error=str(exc),
             telemetry=telemetry,
         )
-        _print_host_noop(host)
         return 0
     except Exception as exc:
         error = f"{exc.__class__.__name__}: {exc}"
@@ -236,6 +260,8 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
             threshold=policy.circuit_breaker_failures,
             cooldown_seconds=policy.circuit_breaker_cooldown_seconds,
         )
+        _print_host_noop(host)
+        _record_dispatcher_wall_time(telemetry, dispatcher_started_at)
         _record_recall_fail_open(
             request,
             policy,
@@ -243,7 +269,6 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
             error=error,
             telemetry=telemetry,
         )
-        _print_host_noop(host)
         return 0
 
     if result.status in {"timeout", "degraded"}:
@@ -256,15 +281,43 @@ def run_user_prompt(args: argparse.Namespace, stdin_text: str) -> int:
         recall_breaker.record_success()
     if breaker_was_open:
         result.reasons.append("circuit breaker open; expensive recall stages disabled")
+    _merge_dispatcher_telemetry(result, telemetry)
     output = recall_runtime.render_output(
         result, args.format or host_output_format(host)
     )
     if output:
         print(output, flush=True)
+    _record_dispatcher_wall_time(telemetry, dispatcher_started_at)
+    _merge_dispatcher_telemetry(result, telemetry)
     if policy.log_decisions:
         with suppress(Exception):
             recall_runtime.append_recall_log(request, result)
     return 0
+
+
+def _record_dispatcher_wall_time(
+    telemetry: dict[str, Any], started_at: float
+) -> None:
+    """Record hook dispatch through render/flush, excluding uvx/process startup."""
+
+    telemetry["dispatcher_wall_ms"] = round(
+        max(0.0, time.perf_counter() - started_at) * 1_000, 3
+    )
+    telemetry[
+        "dispatcher_wall_scope"
+    ] = "run_user_prompt_start_to_render_flush_excluding_uvx_process_startup"
+
+
+def _merge_dispatcher_telemetry(
+    result: recall_runtime.RecallResult, telemetry: dict[str, Any]
+) -> None:
+    result.evidence_features.update(
+        {
+            key: value
+            for key, value in telemetry.items()
+            if key != "stage_timings_ms" and not key.startswith("_")
+        }
+    )
 
 
 def _record_recall_fail_open(

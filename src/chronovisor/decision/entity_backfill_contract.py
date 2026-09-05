@@ -26,6 +26,7 @@ DEFAULT_ALIASES: dict[str, list[str]] = {
     "chronovisor": [
         "Chronovisor",
         "クロノバイザー",
+        "CronoBisā",
         "ウィキ",
     ],
     "codex": ["Codex", "コードエクス", "コーデックス"],
