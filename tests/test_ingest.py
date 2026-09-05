@@ -1534,6 +1534,8 @@ class TestApplyOperations:
         assert created == ["receipt-page"]
         assert updated == []
         assert store.meta("receipt-page")["title"] == "Receipt page"
+        assert store.meta("receipt-page")["description"] == "body"
+        assert store.meta("receipt-page")["summary"] == "body"
 
     def test_index_receipt_failure_rolls_back_page_write(
         self,

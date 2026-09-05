@@ -3007,8 +3007,24 @@ def _ensure_recall_metadata_frontmatter(
     meta, body = parse(text)
     title = meta.get("title", page_id)
     title_text = title if isinstance(title, str) else page_id
+
+    def nonempty_text(value: object) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
     if force_deterministic_rebuild:
-        return patch(text, _fallback_recall_metadata(title_text, body, page_id))
+        # Rebuild metadata from the corrected body; refresh an existing legacy
+        # key too, while keeping fresh pages canonical.
+        rebuilt = _fallback_recall_metadata(title_text, body, page_id)
+        rebuild_updates = {
+            "description": rebuilt["summary"],
+            "recall_questions": rebuilt["recall_questions"],
+        }
+        if "summary" in meta:
+            rebuild_updates["summary"] = rebuilt["summary"]
+        return patch(
+            text,
+            rebuild_updates,
+        )
 
     def generate_metadata() -> dict[str, Any]:
         if allow_local_model:
@@ -3017,14 +3033,22 @@ def _ensure_recall_metadata_frontmatter(
 
     updates: dict[str, Any] = {}
     generated: dict[str, Any] | None = None
-    if not isinstance(meta.get("summary"), str) or not str(meta.get("summary")).strip():
-        generated = generated or generate_metadata()
-        updates["summary"] = generated["summary"]
+    description = meta.get("description")
+    legacy_summary = meta.get("summary")
+    has_description = nonempty_text(description)
+    has_legacy_summary = nonempty_text(legacy_summary)
+    if not has_description:
+        if has_legacy_summary:
+            # Promote the existing value without a model call and preserve the
+            # legacy key.
+            updates["description"] = legacy_summary
+        else:
+            generated = generated or generate_metadata()
+            updates["description"] = generated["summary"]
     questions = meta.get("recall_questions")
     if not isinstance(questions, list) or not questions:
         generated = generated or generate_metadata()
         updates["recall_questions"] = generated["recall_questions"]
-        updates.setdefault("summary", generated["summary"])
     if not updates:
         return text
     return patch(text, updates)

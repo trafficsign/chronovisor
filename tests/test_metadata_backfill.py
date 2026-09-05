@@ -44,7 +44,7 @@ def test_cached_rejection_does_not_pin_later_metadata_candidates(tmp_path: Path,
 
     def propose(text, _page_id, parse, patch):
         meta, _body = parse(text)
-        return patch(text, {"summary": f"{meta['title']} summary", "recall_questions": [f"What is {meta['title']}?"]})
+        return patch(text, {"description": f"{meta['title']} summary", "recall_questions": [f"What is {meta['title']}?"]})
 
     monkeypatch.setattr(metadata_backfill, "ensure_recall_metadata_frontmatter", propose)
     calls: list[str] = []
@@ -78,6 +78,61 @@ def test_local_metadata_proposal_is_stable_for_exact_preimage(tmp_path: Path, mo
     assert first == second == "proposal one"
 
 
+def test_backfill_selects_missing_canonical_description(tmp_path: Path, monkeypatch) -> None:
+    legacy = tmp_path / "legacy.md"
+    canonical = tmp_path / "canonical.md"
+    legacy.write_text(
+        "---\ntitle: Legacy\ntype: Concept\nstatus: stable\n"
+        "summary: Existing summary\nrecall_questions: ['What is this?']\n---\nBody.\n",
+        encoding="utf-8",
+    )
+    canonical.write_text(
+        "---\ntitle: Canonical\ntype: Concept\nstatus: stable\n"
+        "description: Existing description\nrecall_questions: ['What is this?']\n---\nBody.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(metadata_backfill, "all_pages", lambda: [legacy, canonical])
+
+    result = metadata_backfill.backfill_metadata(limit=0, dry_run=True)
+
+    assert result["candidates"] == 1
+    assert result["pages"] == ["legacy"]
+    assert "description:" not in legacy.read_text(encoding="utf-8")
+
+
+def test_backfill_promotes_existing_summary_through_review(tmp_path: Path, monkeypatch) -> None:
+    from chronovisor.core import frontmatter
+    from chronovisor.ingest import ingest
+
+    page = tmp_path / "legacy.md"
+    original = (
+        "---\ntitle: Legacy\ntype: Concept\nstatus: stable\n"
+        "summary: 'Existing: exact summary'\n"
+        "recall_questions: ['What is this?']\ncustom: {keep: true}\n---\nBody.\n"
+    )
+    page.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(metadata_backfill, "all_pages", lambda: [page])
+    monkeypatch.setattr(metadata_backfill, "REVIEW_DIR", tmp_path / "reviews")
+    monkeypatch.setattr(
+        ingest, "_generate_recall_metadata",
+        lambda *_args: pytest.fail("Existing summary must not be regenerated"),
+    )
+    calls = []
+
+    def reviewer(prompt, _schema):
+        calls.append(prompt)
+        return _decision("approved")
+
+    result = metadata_backfill.backfill_metadata(reviewer=reviewer)
+
+    assert result["updated"] == 1
+    assert result["frontier_calls"] == len(calls) == 1
+    meta, body = frontmatter.parse(page.read_text(encoding="utf-8"))
+    before, original_body = frontmatter.parse(original)
+    assert meta == {**before, "description": before["summary"]}
+    assert body == original_body
+
+
 def test_typed_yaml_generated_frontmatter_has_stable_proposal_and_prompt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -107,7 +162,7 @@ def test_typed_yaml_generated_frontmatter_has_stable_proposal_and_prompt(
         return patch(
             text,
             {
-                "summary": "Typed metadata summary.",
+                "description": "Typed metadata summary.",
                 "recall_questions": ["What is typed metadata?"],
             },
         )
@@ -136,15 +191,15 @@ def test_typed_yaml_generated_frontmatter_has_stable_proposal_and_prompt(
     assert isinstance(proposal, dict)
     assert proposal["details"]["generated_frontmatter"] == {
         "kind": "canonical_yaml",
-        "utf8_bytes": 209,
-        "sha256": "abfc0893cec8e4ad01233b2a8658773835e8ebe9ed392b66722ff436edda0890",
+        "utf8_bytes": 213,
+        "sha256": "c93e0cbef75d2beac16a5e99cd2449517565bbb7f542408773c2d6bd3bc9f700",
     }
     prompt = build_safe_fix_prompt(proposal, expected_text=original)
     assert canonical_hash(proposal) == (
-        "e5c88cc907e086f2f5184afe640485b8305cf8483e27680151f047b59b7a64cb"
+        "302459718ae246736b3b51b2079dd9e97c2c6a03bc9ed9084db5714e9a184fe8"
     )
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == (
-        "68e9c7622bad4f9f6b993e7e78cd35f776404983728da475cc07b09186807f86"
+        "dff2f4da9bfd2ef12833a769434ba37df9568dffe991ff54cda8efc26175279d"
     )
     json.dumps(proposal, ensure_ascii=False, allow_nan=False)
     assert result["retry"] == 1

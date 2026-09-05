@@ -27,7 +27,7 @@ from chronovisor.ingest.lint import (
 )
 
 REVIEW_DIR = CHRONOVISOR_ROOT / "runtime" / "metadata-backfill"
-PROPOSAL_VERSION = 2
+PROPOSAL_VERSION = 3
 
 
 def _reviewer(prompt: str, schema: dict[str, Any]) -> Mapping[str, Any] | str:
@@ -155,13 +155,13 @@ def _backfill_metadata_locked(
         meta, _body = frontmatter.parse(original)
         if meta.get("type") == "reference":
             continue
-        summary_missing = (
-            not isinstance(meta.get("summary"), str)
-            or not str(meta.get("summary") or "").strip()
+        description_missing = (
+            not isinstance(meta.get("description"), str)
+            or not str(meta.get("description") or "").strip()
         )
         questions = meta.get("recall_questions")
         questions_missing = not isinstance(questions, list) or not questions
-        if not (summary_missing or questions_missing):
+        if not (description_missing or questions_missing):
             continue
         page_id = page_id_from_path(path)
         if dry_run:
@@ -182,7 +182,7 @@ def _backfill_metadata_locked(
             updated_text=proposed,
             details={
                 "proposal_generator_version": PROPOSAL_VERSION,
-                "summary_missing": summary_missing,
+                "description_missing": description_missing,
                 "questions_missing": questions_missing,
                 "generated_frontmatter": frontmatter.review_value(
                     frontmatter.parse(proposed)[0]
