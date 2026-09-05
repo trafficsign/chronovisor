@@ -1,0 +1,483 @@
+{
+  "created_at": "2026-09-05T14:30:23.649974+09:00",
+  "operation": "macOS /usr/bin/trash; no permanent deletion",
+  "state": "complete",
+  "restore_instructions_ja": "各trash_pathのフォルダをoriginal_pathへ戻す。元の場所に同名フォルダがある場合は上書きしない。chronovisor_reference_dashboardを戻した後はworktree.restore_after_moveのコマンドを実行する。ゴミ箱は空にしていない。",
+  "audit": {
+    "target_count": 18,
+    "process_refs": [],
+    "open_file_refs": [],
+    "lsof_exit_code": 0,
+    "lsof_stderr": "",
+    "config_files_checked": 39,
+    "config_refs": [],
+    "config_read_errors": [],
+    "targets": [
+      "/Users/trafficsign/projects/personal/chronovisor_r4_fault.1rkkOI",
+      "/Users/trafficsign/projects/personal/chronovisor_r4_fault.8z4UZG",
+      "/Users/trafficsign/projects/personal/chronovisor_r4_fault.DzaWNM",
+      "/Users/trafficsign/projects/personal/chronovisor_r4_fault.Hub6Vi",
+      "/Users/trafficsign/projects/personal/chronovisor_r4_fault.TRF24h",
+      "/Users/trafficsign/projects/personal/chronovisor_r4_fault.WkFqLV",
+      "/Users/trafficsign/projects/personal/chronovisor_r4_fault.f78jo0",
+      "/Users/trafficsign/projects/personal/chronovisor_r4_fault.spXCkn",
+      "/Users/trafficsign/projects/personal/chronovisor_reference_dashboard",
+      "/Users/trafficsign/projects/personal/r2diag.EKqy",
+      "/Users/trafficsign/projects/personal/r2diag.JvzC",
+      "/Users/trafficsign/projects/personal/r2diag.UAju",
+      "/Users/trafficsign/projects/personal/r2diag.UAju-clean",
+      "/Users/trafficsign/projects/personal/r2diag.UAju-tail",
+      "/Users/trafficsign/projects/personal/r2diag.VJxq",
+      "/Users/trafficsign/projects/personal/r2diag.VJxq-clean",
+      "/Users/trafficsign/projects/personal/r2diag.VJxq-tail",
+      "/Users/trafficsign/projects/personal/r2diag.cjnY"
+    ]
+  },
+  "additional_audit": {
+    "files_checked": 12,
+    "references": [],
+    "errors": [],
+    "trash": {
+      "readable": true,
+      "existing_cleanup_name_collisions": []
+    }
+  },
+  "classification": {
+    "chronovisor_r4_fault": "8 isolated test_only fault-scenario directories; no Git or symlinks",
+    "r2diag": "9 diagnostic fixture/snapshot directories; no Git or symlinks",
+    "chronovisor_reference_dashboard": "clean linked Git worktree; HEAD is an ancestor of main and origin/main, no unique commits"
+  },
+  "retained": [
+    "chronovisor",
+    "backbone",
+    "job_change",
+    "spotlight-wallpaper",
+    "interview-prep-toyota-industries-0629.md"
+  ],
+  "main_git_status_before": "M scripts/recall_r6_harness.py\n M tests/test_recall_r6_harness.py\n?? _handoff/2026-09-01_ornith-15-9b-omlx-optimization-research.md\n?? _handoff/2026-09-01_qwen38-reap-mtp-public-model-search.md\n?? _handoff/evidence/2026-08-29-recall-teacher-salvage/",
+  "protected_sha256": {
+    "scripts/recall_r6_harness.py": "f24c8f1eaef6f7efde9e884e78ba52723464b2794d7e2e65b8f9b658bfe6aead",
+    "tests/test_recall_r6_harness.py": "a81f14afd9b75b521af81c0d9d2c8204478e7ea4d8c707be8e9b0ffd22c9972e",
+    "_handoff/evidence/2026-08-29-recall-teacher-salvage/teacher-data.jsonl": "2064ccceaa46c883e3430087c859a2606cd744095a9b2cd375707552f534926b"
+  },
+  "worktree": {
+    "original_path": "/Users/trafficsign/projects/personal/chronovisor_reference_dashboard",
+    "head": "74b66535c91a7880edee2b8428bffa6dee204026",
+    "branch": "refs/heads/codex/recall-l2-timeout-hardening",
+    "status_porcelain": "",
+    "git_pointer": "gitdir: /Users/trafficsign/projects/personal/chronovisor/.git/worktrees/chronovisor_reference_dashboard",
+    "restore_after_move": "git -C /Users/trafficsign/projects/personal/chronovisor worktree repair /Users/trafficsign/projects/personal/chronovisor_reference_dashboard",
+    "trash_path": "/Users/trafficsign/.Trash/chronovisor_reference_dashboard",
+    "repair_output": "repair: gitdir incorrect: /Users/trafficsign/projects/personal/chronovisor/.git/worktrees/chronovisor_reference_dashboard/gitdir",
+    "verified_after_repair": true
+  },
+  "entries": [
+    {
+      "original_path": "/Users/trafficsign/projects/personal/chronovisor_r4_fault.1rkkOI",
+      "device": 16777233,
+      "inode": 135993615,
+      "before": {
+        "files": 9,
+        "bytes": 12442,
+        "symlinks": 0,
+        "tree_sha256": "12536b2afc8fe141e3cb9883f3c74f3d22e254f911950160e6e290c2772ae51d"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/chronovisor_r4_fault.1rkkOI\" to \"/Users/trafficsign/.Trash/chronovisor_r4_fault.1rkkOI\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/chronovisor_r4_fault.1rkkOI",
+      "after": {
+        "files": 9,
+        "bytes": 12442,
+        "symlinks": 0,
+        "tree_sha256": "12536b2afc8fe141e3cb9883f3c74f3d22e254f911950160e6e290c2772ae51d"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/chronovisor_r4_fault.8z4UZG",
+      "device": 16777233,
+      "inode": 136091449,
+      "before": {
+        "files": 9,
+        "bytes": 12890,
+        "symlinks": 0,
+        "tree_sha256": "86dc005dd7b2c28b6e72de5dc91f191000afa6707d2adf6a207e542a432be3d4"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/chronovisor_r4_fault.8z4UZG\" to \"/Users/trafficsign/.Trash/chronovisor_r4_fault.8z4UZG\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/chronovisor_r4_fault.8z4UZG",
+      "after": {
+        "files": 9,
+        "bytes": 12890,
+        "symlinks": 0,
+        "tree_sha256": "86dc005dd7b2c28b6e72de5dc91f191000afa6707d2adf6a207e542a432be3d4"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/chronovisor_r4_fault.DzaWNM",
+      "device": 16777233,
+      "inode": 135953066,
+      "before": {
+        "files": 0,
+        "bytes": 0,
+        "symlinks": 0,
+        "tree_sha256": "74c2cf66c2efd6501f4922a7d84b6e8e73156f36eaded70ef25fbb1ad3217938"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/chronovisor_r4_fault.DzaWNM\" to \"/Users/trafficsign/.Trash/chronovisor_r4_fault.DzaWNM\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/chronovisor_r4_fault.DzaWNM",
+      "after": {
+        "files": 0,
+        "bytes": 0,
+        "symlinks": 0,
+        "tree_sha256": "74c2cf66c2efd6501f4922a7d84b6e8e73156f36eaded70ef25fbb1ad3217938"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/chronovisor_r4_fault.Hub6Vi",
+      "device": 16777233,
+      "inode": 136805228,
+      "before": {
+        "files": 9,
+        "bytes": 12954,
+        "symlinks": 0,
+        "tree_sha256": "dbf7e274aa833d5341f74652ebdb4c1f1d85698ee4051951cf4ac34e3d685346"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/chronovisor_r4_fault.Hub6Vi\" to \"/Users/trafficsign/.Trash/chronovisor_r4_fault.Hub6Vi\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/chronovisor_r4_fault.Hub6Vi",
+      "after": {
+        "files": 9,
+        "bytes": 12954,
+        "symlinks": 0,
+        "tree_sha256": "dbf7e274aa833d5341f74652ebdb4c1f1d85698ee4051951cf4ac34e3d685346"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/chronovisor_r4_fault.TRF24h",
+      "device": 16777233,
+      "inode": 136082859,
+      "before": {
+        "files": 5,
+        "bytes": 7202,
+        "symlinks": 0,
+        "tree_sha256": "6a21f59aa2d5f847f26576db1965c31e623cf26da3ad726eb3e0fcdb355960af"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/chronovisor_r4_fault.TRF24h\" to \"/Users/trafficsign/.Trash/chronovisor_r4_fault.TRF24h\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/chronovisor_r4_fault.TRF24h",
+      "after": {
+        "files": 5,
+        "bytes": 7202,
+        "symlinks": 0,
+        "tree_sha256": "6a21f59aa2d5f847f26576db1965c31e623cf26da3ad726eb3e0fcdb355960af"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/chronovisor_r4_fault.WkFqLV",
+      "device": 16777233,
+      "inode": 136739706,
+      "before": {
+        "files": 9,
+        "bytes": 12954,
+        "symlinks": 0,
+        "tree_sha256": "c42c054d12111a34222ab30d3ce5dfd2cbf85e02f33f83e7be01b0d4e9f2da17"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/chronovisor_r4_fault.WkFqLV\" to \"/Users/trafficsign/.Trash/chronovisor_r4_fault.WkFqLV\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/chronovisor_r4_fault.WkFqLV",
+      "after": {
+        "files": 9,
+        "bytes": 12954,
+        "symlinks": 0,
+        "tree_sha256": "c42c054d12111a34222ab30d3ce5dfd2cbf85e02f33f83e7be01b0d4e9f2da17"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/chronovisor_r4_fault.f78jo0",
+      "device": 16777233,
+      "inode": 136803529,
+      "before": {
+        "files": 9,
+        "bytes": 12954,
+        "symlinks": 0,
+        "tree_sha256": "472a14fe1f11a8fd513918df58415279225117de073ef2e369ce93bc1bf6c607"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/chronovisor_r4_fault.f78jo0\" to \"/Users/trafficsign/.Trash/chronovisor_r4_fault.f78jo0\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/chronovisor_r4_fault.f78jo0",
+      "after": {
+        "files": 9,
+        "bytes": 12954,
+        "symlinks": 0,
+        "tree_sha256": "472a14fe1f11a8fd513918df58415279225117de073ef2e369ce93bc1bf6c607"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/chronovisor_r4_fault.spXCkn",
+      "device": 16777233,
+      "inode": 136620677,
+      "before": {
+        "files": 9,
+        "bytes": 12890,
+        "symlinks": 0,
+        "tree_sha256": "e0244b07b19371449b2e732675a519630e2bdb682e9f8ab8b4cec54b45f586d8"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/chronovisor_r4_fault.spXCkn\" to \"/Users/trafficsign/.Trash/chronovisor_r4_fault.spXCkn\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/chronovisor_r4_fault.spXCkn",
+      "after": {
+        "files": 9,
+        "bytes": 12890,
+        "symlinks": 0,
+        "tree_sha256": "e0244b07b19371449b2e732675a519630e2bdb682e9f8ab8b4cec54b45f586d8"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/chronovisor_reference_dashboard",
+      "device": 16777233,
+      "inode": 105326354,
+      "before": {
+        "files": 6483,
+        "bytes": 228609456,
+        "symlinks": 4,
+        "tree_sha256": "dd2a6ff4d37af7d707957d41f7f6940ae0b10a41b12ee9009df57b4220c04c41"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/chronovisor_reference_dashboard\" to \"/Users/trafficsign/.Trash/chronovisor_reference_dashboard\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/chronovisor_reference_dashboard",
+      "after": {
+        "files": 6483,
+        "bytes": 228609456,
+        "symlinks": 4,
+        "tree_sha256": "dd2a6ff4d37af7d707957d41f7f6940ae0b10a41b12ee9009df57b4220c04c41"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/r2diag.EKqy",
+      "device": 16777233,
+      "inode": 129264880,
+      "before": {
+        "files": 0,
+        "bytes": 0,
+        "symlinks": 0,
+        "tree_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/r2diag.EKqy\" to \"/Users/trafficsign/.Trash/r2diag.EKqy\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/r2diag.EKqy",
+      "after": {
+        "files": 0,
+        "bytes": 0,
+        "symlinks": 0,
+        "tree_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/r2diag.JvzC",
+      "device": 16777233,
+      "inode": 129264384,
+      "before": {
+        "files": 52,
+        "bytes": 249713,
+        "symlinks": 0,
+        "tree_sha256": "e47546b8b11247f258d9e38f1701a12b6b27d72aff774b8931ff3aa4e4c565dd"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/r2diag.JvzC\" to \"/Users/trafficsign/.Trash/r2diag.JvzC\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/r2diag.JvzC",
+      "after": {
+        "files": 52,
+        "bytes": 249713,
+        "symlinks": 0,
+        "tree_sha256": "e47546b8b11247f258d9e38f1701a12b6b27d72aff774b8931ff3aa4e4c565dd"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/r2diag.UAju",
+      "device": 16777233,
+      "inode": 129264161,
+      "before": {
+        "files": 24,
+        "bytes": 115858,
+        "symlinks": 0,
+        "tree_sha256": "aaa7d9b07ea31cf5cd2485a6c618fce95ea90be09bba71a6973e3c4609c6d7bb"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/r2diag.UAju\" to \"/Users/trafficsign/.Trash/r2diag.UAju\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/r2diag.UAju",
+      "after": {
+        "files": 24,
+        "bytes": 115858,
+        "symlinks": 0,
+        "tree_sha256": "aaa7d9b07ea31cf5cd2485a6c618fce95ea90be09bba71a6973e3c4609c6d7bb"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/r2diag.UAju-clean",
+      "device": 16777233,
+      "inode": 129264247,
+      "before": {
+        "files": 24,
+        "bytes": 115858,
+        "symlinks": 0,
+        "tree_sha256": "2a52fdffc12d8e132510290928be9bd140a6620e1d3f434c950d677477cc0bb2"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/r2diag.UAju-clean\" to \"/Users/trafficsign/.Trash/r2diag.UAju-clean\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/r2diag.UAju-clean",
+      "after": {
+        "files": 24,
+        "bytes": 115858,
+        "symlinks": 0,
+        "tree_sha256": "2a52fdffc12d8e132510290928be9bd140a6620e1d3f434c950d677477cc0bb2"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/r2diag.UAju-tail",
+      "device": 16777233,
+      "inode": 129264213,
+      "before": {
+        "files": 26,
+        "bytes": 124845,
+        "symlinks": 0,
+        "tree_sha256": "0fd06cf2142f2148d7af606e0edb398eb529b3f9aaf791a26c851eaafe512346"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/r2diag.UAju-tail\" to \"/Users/trafficsign/.Trash/r2diag.UAju-tail\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/r2diag.UAju-tail",
+      "after": {
+        "files": 26,
+        "bytes": 124845,
+        "symlinks": 0,
+        "tree_sha256": "0fd06cf2142f2148d7af606e0edb398eb529b3f9aaf791a26c851eaafe512346"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/r2diag.VJxq",
+      "device": 16777233,
+      "inode": 129265036,
+      "before": {
+        "files": 24,
+        "bytes": 115858,
+        "symlinks": 0,
+        "tree_sha256": "3a91b039b89a06f98386c201915ee8b12c9bbfd1bbb1c30395d4dc34fa4025ad"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/r2diag.VJxq\" to \"/Users/trafficsign/.Trash/r2diag.VJxq\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/r2diag.VJxq",
+      "after": {
+        "files": 24,
+        "bytes": 115858,
+        "symlinks": 0,
+        "tree_sha256": "3a91b039b89a06f98386c201915ee8b12c9bbfd1bbb1c30395d4dc34fa4025ad"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/r2diag.VJxq-clean",
+      "device": 16777233,
+      "inode": 129265123,
+      "before": {
+        "files": 28,
+        "bytes": 124756,
+        "symlinks": 0,
+        "tree_sha256": "9e8d026f9b91242ea3caf2d5e4606edcc72b53aedc098f4eda264662ed0a2a53"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/r2diag.VJxq-clean\" to \"/Users/trafficsign/.Trash/r2diag.VJxq-clean\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/r2diag.VJxq-clean",
+      "after": {
+        "files": 28,
+        "bytes": 124756,
+        "symlinks": 0,
+        "tree_sha256": "9e8d026f9b91242ea3caf2d5e4606edcc72b53aedc098f4eda264662ed0a2a53"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/r2diag.VJxq-tail",
+      "device": 16777233,
+      "inode": 129265089,
+      "before": {
+        "files": 28,
+        "bytes": 124756,
+        "symlinks": 0,
+        "tree_sha256": "b8e402af3245d2c1ef2109c4b550c77598ad86ac25c37b7ebd07e98fc0d15c8f"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/r2diag.VJxq-tail\" to \"/Users/trafficsign/.Trash/r2diag.VJxq-tail\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/r2diag.VJxq-tail",
+      "after": {
+        "files": 28,
+        "bytes": 124756,
+        "symlinks": 0,
+        "tree_sha256": "b8e402af3245d2c1ef2109c4b550c77598ad86ac25c37b7ebd07e98fc0d15c8f"
+      }
+    },
+    {
+      "original_path": "/Users/trafficsign/projects/personal/r2diag.cjnY",
+      "device": 16777233,
+      "inode": 129264082,
+      "before": {
+        "files": 13,
+        "bytes": 2815,
+        "symlinks": 0,
+        "tree_sha256": "63555aa52aaf8026f536260d20b567f6a07e79d1e22b62a3dff836fbf07d076a"
+      },
+      "state": "trashed_and_content_verified",
+      "trash_exit_code": 0,
+      "trash_output": "# Moved \"/Users/trafficsign/projects/personal/r2diag.cjnY\" to \"/Users/trafficsign/.Trash/r2diag.cjnY\"",
+      "trash_error": "",
+      "trash_path": "/Users/trafficsign/.Trash/r2diag.cjnY",
+      "after": {
+        "files": 13,
+        "bytes": 2815,
+        "symlinks": 0,
+        "tree_sha256": "63555aa52aaf8026f536260d20b567f6a07e79d1e22b62a3dff836fbf07d076a"
+      }
+    }
+  ],
+  "completed_at": "2026-09-05T14:30:24.833162+09:00",
+  "total_bytes_moved": 229668201,
+  "total_files_moved": 6761,
+  "remaining_personal_entries": [
+    "backbone",
+    "chronovisor",
+    "interview-prep-toyota-industries-0629.md",
+    "job_change",
+    "spotlight-wallpaper"
+  ],
+  "protected_files_verified": true
+}
