@@ -744,6 +744,7 @@ class SemanticServiceState:
             ["Chronovisorの検索インデックス"],
             EmbeddingPurpose.QUERY,
             source=QUERY_SOURCE,
+            timeout_ms=self.config.interactive_timeout_ms,
         )[0]
         documents = self._embed_foreground(
             [
@@ -752,6 +753,7 @@ class SemanticServiceState:
             ],
             EmbeddingPurpose.DOCUMENT,
             source=DOCUMENT_SOURCE,
+            timeout_ms=self.config.interactive_timeout_ms,
         )
         scores = documents @ query
         if not float(scores[0]) > float(scores[1]):
@@ -775,7 +777,11 @@ class SemanticServiceState:
             "関連ページを思い出す",
             "semantic recall warmup",
         ]
-        vectors = self._encode_queries(queries, len(queries))
+        vectors = self._encode_queries(
+            queries,
+            len(queries),
+            deadline_at=_deadline_for(None, self.config.interactive_timeout_ms),
+        )
         hits = sum(bool(self._search_vector(vector, 1)) for vector in vectors)
         if hits != len(queries):
             raise ServiceBusy("semantic query-path warmup returned no result")

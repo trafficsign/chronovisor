@@ -733,6 +733,52 @@ def test_embed_foreground_rechecks_deadline_after_accelerator_lease(
     assert backend.requests == []
 
 
+@pytest.mark.parametrize("startup_step", ["self_test", "warmup"])
+def test_startup_embedding_allows_cold_work_beyond_query_timeout(
+    monkeypatch: pytest.MonkeyPatch, startup_step: str
+) -> None:
+    clock = [100.0]
+
+    class ColdBackend(FakeEmbeddingBackend):
+        def embed(self, request: EmbeddingRequest, *, model: str) -> EmbeddingResult:
+            self.requests.append(request)
+            clock[0] += 0.5
+            vectors = tuple(
+                (0.0, 1.0) if "夕食" in text else (1.0, 0.0) for text in request.texts
+            )
+            return EmbeddingResult(vectors, self.provider, model)
+
+    backend = ColdBackend()
+    state = _state(
+        LLMRuntime(
+            embedding={
+                FOREGROUND_ROLE: EmbeddingRoute(backend, "model"),
+                INCREMENTAL_ROLE: EmbeddingRoute(backend, "model"),
+            }
+        )
+    )
+    monkeypatch.setattr(semantic_service.time, "monotonic", lambda: clock[0])
+    for control in ("accelerator_lease", "model_activity"):
+        monkeypatch.setattr(
+            semantic_service,
+            control,
+            lambda **_kwargs: semantic_service.contextlib.nullcontext(),
+        )
+    if startup_step == "self_test":
+        result = state._self_test_foreground()
+        assert result["positive_score"] > result["negative_score"]
+    else:
+        state._query_cache_lock = threading.Lock()
+        state._query_vector_cache = OrderedDict()
+        monkeypatch.setattr(state, "_search_vector", lambda *_args: [("page", 1.0)])
+        result = state._warm_query_path()
+        assert result["hits"] == result["queries"] == 3
+    assert all(
+        request.timeout_ms == state.config.interactive_timeout_ms
+        for request in backend.requests
+    )
+
+
 def test_query_batcher_rejects_when_generation_is_unavailable() -> None:
     batcher = QueryBatcher(
         encode=lambda texts, _batch: np.zeros((len(texts), 2)),
@@ -888,9 +934,10 @@ def test_worker_persists_only_safe_job_failure_category(
 
 def test_query_path_warmup_exercises_three_queries_and_ann_search() -> None:
     state = object.__new__(SemanticServiceState)
+    state.config = SearchEmbeddingConfig()
     encoded: list[list[str]] = []
     searched: list[np.ndarray] = []
-    state._encode_queries = lambda queries, _batch: (
+    state._encode_queries = lambda queries, _batch, **_kwargs: (
         encoded.append(list(queries))
         or np.asarray([[1.0, float(index)] for index in range(len(queries))])
     )
