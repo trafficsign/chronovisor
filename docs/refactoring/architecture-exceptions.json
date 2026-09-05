@@ -1,14 +1,14 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "906f30b79c64fea75679f522d3ab957e7fd3fa8467c776c79d3ce105ef6df79e",
+  "baseline_sha256": "1a40eb5875d4ec66dc009acbef70d132acaf918ed005c7edaaae32f141d94832",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 44,
     "by_category": {
       "cross_domain_edge": 44
     },
-    "cross_domain_sites": 1488,
+    "cross_domain_sites": 1487,
     "production_to_lab_edges": 0,
     "production_to_lab_static_sites": 0,
     "production_to_lab_dynamic_sites": 0,
@@ -10653,25 +10653,18 @@
           "line": 29
         },
         {
-          "semantic_id": "arch:08adfba42cd5dc7ac391ed2a58a25c1fb5f1782be8139b1465357a0121f26975",
-          "source_module": "chronovisor.raw.codex_record",
+          "semantic_id": "arch:08580b7762bd19c3ff52076b971e8bce9ccdc8aaf5412a03342c62f16b137482",
+          "source_module": "chronovisor.raw.record_transaction",
           "scope_kind": "module",
           "scope": "<module>",
           "statement_kind": "from",
-          "target_module": "chronovisor.core.save_transaction",
+          "target_module": "chronovisor.core.raw_segment",
           "symbols": [
-            "SaveTransaction",
-            "attach_save_transaction_marker",
-            "find_published_save_transaction",
-            "make_save_transaction",
-            "publish_oversized_shadow",
-            "publish_transcript_capture",
-            "save_transaction_lock",
-            "validate_published_save_receipt"
+            "copy_source_interval"
           ],
-          "content_sha256": "85d64cb45d4fb70a4068c68ee49aecb181a87f36300d9a8429178d7bda4a221f",
+          "content_sha256": "2125c71af2de0727bed0294ec5b5e904f1676298c0a8dc8350466dbc0b25ff74",
           "occurrence": 1,
-          "line": 27
+          "line": 13
         },
         {
           "semantic_id": "arch:0b35afcc1c85fa07973252f3aeda941543bc0674d3ad4afc87c25bad06264f4d",
@@ -10707,6 +10700,25 @@
           "line": 631
         },
         {
+          "semantic_id": "arch:0e57f2f67a730224bd3c7ff18501e9e64029125d34067d1a1a6b3e093868af04",
+          "source_module": "chronovisor.raw.claude_code_record",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.save_transaction",
+          "symbols": [
+            "SaveTransaction",
+            "attach_save_transaction_marker",
+            "make_save_transaction",
+            "publish_oversized_shadow",
+            "save_transaction_lock",
+            "validate_published_save_receipt"
+          ],
+          "content_sha256": "ff289e00378499a01ee1d23ac4eb2a6594e3979712f1f4e9acaa1924f36579ab",
+          "occurrence": 1,
+          "line": 27
+        },
+        {
           "semantic_id": "arch:16b7bd60b2b4a1986d7a3543c785bc39433c7600a2e69e8dddd1fb0ba8a3ebcb",
           "source_module": "chronovisor.raw.raw_archive",
           "scope_kind": "module",
@@ -10721,79 +10733,52 @@
           "line": 14
         },
         {
-          "semantic_id": "arch:2b92ae72b690bff2efe5d814961adf06d26646ba76b216e3c6750945c0eff7df",
-          "source_module": "chronovisor.raw.pi_record",
+          "semantic_id": "arch:1dcc2028b90164f1e1807e03c566090102f7885db9ee126bfe82ccb4703ef83a",
+          "source_module": "chronovisor.raw.record_transaction",
           "scope_kind": "module",
           "scope": "<module>",
           "statement_kind": "from",
-          "target_module": "chronovisor.core.save_transaction",
+          "target_module": "chronovisor.core.store",
           "symbols": [
-            "SaveTransaction",
-            "attach_save_transaction_marker",
-            "find_published_save_transaction",
-            "make_save_transaction",
-            "publish_oversized_shadow",
-            "publish_transcript_capture",
-            "save_transaction_lock",
-            "validate_published_save_receipt"
+            "RAW_DIR",
+            "RuntimeContext",
+            "init_chronovisor"
           ],
-          "content_sha256": "85d64cb45d4fb70a4068c68ee49aecb181a87f36300d9a8429178d7bda4a221f",
+          "content_sha256": "eef10da37146131e045b99abb68ed7a46bb7883c97ccef37b3786429d39be502",
           "occurrence": 1,
-          "line": 30
+          "line": 21
         },
         {
-          "semantic_id": "arch:2e80ae592d309010683f0716733e21c9b1586cf666e8cfe8a1562d06cfd69217",
+          "semantic_id": "arch:320215cebd461fa561a0011c43c882f8c01db0dd3e241fef2e258efae65e30b2",
           "source_module": "chronovisor.raw.codex_record",
           "scope_kind": "module",
           "scope": "<module>",
           "statement_kind": "from",
-          "target_module": "chronovisor.core.raw_segment",
-          "symbols": [
-            "copy_source_interval"
-          ],
-          "content_sha256": "2125c71af2de0727bed0294ec5b5e904f1676298c0a8dc8350466dbc0b25ff74",
-          "occurrence": 1,
-          "line": 25
-        },
-        {
-          "semantic_id": "arch:3aed9d1e917ed1d8f88e82ae38f341f0d9d44ffedf742efd06dcbdae95038ff7",
-          "source_module": "chronovisor.raw.pi_record",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
           "target_module": "chronovisor.core.store",
           "symbols": [
             "CHRONOVISOR_ROOT",
             "DEFAULT_CONTEXT",
-            "RAW_DIR",
             "RuntimeContext",
-            "init_chronovisor",
             "okf_runtime_operation",
             "okf_startup_status"
           ],
-          "content_sha256": "d375e6432d886fb0143dae6f1c67ed45a1ed1118b322af995d33cdd05c1d8429",
+          "content_sha256": "3ffdfe68ed900847e0d36ba499c72abbd9614caebccca311408f6cd45fa18e43",
           "occurrence": 1,
-          "line": 40
+          "line": 33
         },
         {
-          "semantic_id": "arch:470172900d5c21cd313aeab18e74fc76deee2d38521d782447b3a42ab22549dc",
-          "source_module": "chronovisor.raw.claude_code_record",
+          "semantic_id": "arch:386497973eb4f60c4d7d2d04c0b267ee0d65e964c44f349bdf841ba8cbea82ce",
+          "source_module": "chronovisor.raw.record_transaction",
           "scope_kind": "module",
           "scope": "<module>",
           "statement_kind": "from",
-          "target_module": "chronovisor.core.store",
+          "target_module": "chronovisor.core.raw_store",
           "symbols": [
-            "CHRONOVISOR_ROOT",
-            "DEFAULT_CONTEXT",
-            "RAW_DIR",
-            "RuntimeContext",
-            "init_chronovisor",
-            "okf_runtime_operation",
-            "okf_startup_status"
+            "raw_layout_mode"
           ],
-          "content_sha256": "d375e6432d886fb0143dae6f1c67ed45a1ed1118b322af995d33cdd05c1d8429",
+          "content_sha256": "4546c1637b3f55ffff8d489fc7d3268a0da2b6174aa79944335d87e61f6aba7b",
           "occurrence": 1,
-          "line": 40
+          "line": 14
         },
         {
           "semantic_id": "arch:48efe92e2b8815692ea605e317c562b79f1be9780c1408761c8792904afafd4e",
@@ -10811,8 +10796,8 @@
           "line": 21
         },
         {
-          "semantic_id": "arch:4946fee614072103f54235200dc4731ecb2136677e6108f15f4a0a76edf77ef4",
-          "source_module": "chronovisor.raw.claude_code_record",
+          "semantic_id": "arch:4c94c984c75c2940d4f9ffb90f6b50afccbf80e3e97fa9aced2b1ea11db76882",
+          "source_module": "chronovisor.raw.codex_record",
           "scope_kind": "module",
           "scope": "<module>",
           "statement_kind": "from",
@@ -10820,16 +10805,14 @@
           "symbols": [
             "SaveTransaction",
             "attach_save_transaction_marker",
-            "find_published_save_transaction",
             "make_save_transaction",
             "publish_oversized_shadow",
-            "publish_transcript_capture",
             "save_transaction_lock",
             "validate_published_save_receipt"
           ],
-          "content_sha256": "85d64cb45d4fb70a4068c68ee49aecb181a87f36300d9a8429178d7bda4a221f",
+          "content_sha256": "ff289e00378499a01ee1d23ac4eb2a6594e3979712f1f4e9acaa1924f36579ab",
           "occurrence": 1,
-          "line": 30
+          "line": 25
         },
         {
           "semantic_id": "arch:4d87a418a8f1f17130f010760fc465583152ab4dfc171fdf10bf7031f12d4edf",
@@ -10858,26 +10841,6 @@
           "content_sha256": "a5bd2a28328ed57fce92ca1d76c97e8c2fa50cb3746b71ac128bade990322df0",
           "occurrence": 1,
           "line": 12
-        },
-        {
-          "semantic_id": "arch:596f978c3466894362066273a6661f54a539717016189220cb8afb37cb293d5c",
-          "source_module": "chronovisor.raw.codex_record",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core.store",
-          "symbols": [
-            "CHRONOVISOR_ROOT",
-            "DEFAULT_CONTEXT",
-            "RAW_DIR",
-            "RuntimeContext",
-            "init_chronovisor",
-            "okf_runtime_operation",
-            "okf_startup_status"
-          ],
-          "content_sha256": "d375e6432d886fb0143dae6f1c67ed45a1ed1118b322af995d33cdd05c1d8429",
-          "occurrence": 1,
-          "line": 37
         },
         {
           "semantic_id": "arch:5f668370bf32234b5c2ae4cff625d61e96fdcf4056a3ed84a6ed78442b0c5182",
@@ -10982,18 +10945,21 @@
           "line": 14
         },
         {
-          "semantic_id": "arch:8ced70b4b49290744aebf956402b87a5bee21f36201e08a1fe5eabdff1f286d6",
-          "source_module": "chronovisor.raw.pi_record",
+          "semantic_id": "arch:8ceb4fba263acdab6fcf034dc82a3226a2099473867a0ff7d7b5075c373eb3d8",
+          "source_module": "chronovisor.raw.record_transaction",
           "scope_kind": "module",
           "scope": "<module>",
           "statement_kind": "from",
-          "target_module": "chronovisor.core.raw_store",
+          "target_module": "chronovisor.core.save_transaction",
           "symbols": [
-            "raw_layout_mode"
+            "find_published_save_transaction",
+            "make_save_transaction",
+            "publish_transcript_capture",
+            "validate_published_save_receipt"
           ],
-          "content_sha256": "4546c1637b3f55ffff8d489fc7d3268a0da2b6174aa79944335d87e61f6aba7b",
+          "content_sha256": "3093d556fb163f7bcb2dcab8ac2af22c93171d5103504ed906a1138f9f715c58",
           "occurrence": 1,
-          "line": 29
+          "line": 15
         },
         {
           "semantic_id": "arch:94e1e2ae0aec8f38821cd5ab61969e2b23b8ab9d9c59e0614a08464b00be4b4f",
@@ -11011,18 +10977,23 @@
           "line": 16
         },
         {
-          "semantic_id": "arch:959dae3d4bc495cd95ba411e3f6da46ef8c79871240431601656150726b7714f",
-          "source_module": "chronovisor.raw.codex_record",
+          "semantic_id": "arch:981f2621d2f061f142de4efee36042d91e23c406c59917d5121a5ebe1357c4af",
+          "source_module": "chronovisor.raw.pi_record",
           "scope_kind": "module",
           "scope": "<module>",
           "statement_kind": "from",
-          "target_module": "chronovisor.core.raw_store",
+          "target_module": "chronovisor.core.save_transaction",
           "symbols": [
-            "raw_layout_mode"
+            "SaveTransaction",
+            "attach_save_transaction_marker",
+            "make_save_transaction",
+            "publish_oversized_shadow",
+            "save_transaction_lock",
+            "validate_published_save_receipt"
           ],
-          "content_sha256": "4546c1637b3f55ffff8d489fc7d3268a0da2b6174aa79944335d87e61f6aba7b",
+          "content_sha256": "ff289e00378499a01ee1d23ac4eb2a6594e3979712f1f4e9acaa1924f36579ab",
           "occurrence": 1,
-          "line": 26
+          "line": 27
         },
         {
           "semantic_id": "arch:9c494b7a9293424424e0ea90a3f90c937e7acf119ae06231a94189847428c8b4",
@@ -11041,18 +11012,22 @@
           "line": 7
         },
         {
-          "semantic_id": "arch:a02b61317c926a06601af07c9edd569d7d03b5dedf961ce8bac05e2d491b32ab",
+          "semantic_id": "arch:a194f12d85f3f72c536dbd1885a0a3822c7604c4b847b4ddeeeca00e902e648b",
           "source_module": "chronovisor.raw.claude_code_record",
           "scope_kind": "module",
           "scope": "<module>",
           "statement_kind": "from",
-          "target_module": "chronovisor.core.raw_store",
+          "target_module": "chronovisor.core.store",
           "symbols": [
-            "raw_layout_mode"
+            "CHRONOVISOR_ROOT",
+            "DEFAULT_CONTEXT",
+            "RuntimeContext",
+            "okf_runtime_operation",
+            "okf_startup_status"
           ],
-          "content_sha256": "4546c1637b3f55ffff8d489fc7d3268a0da2b6174aa79944335d87e61f6aba7b",
+          "content_sha256": "3ffdfe68ed900847e0d36ba499c72abbd9614caebccca311408f6cd45fa18e43",
           "occurrence": 1,
-          "line": 29
+          "line": 35
         },
         {
           "semantic_id": "arch:a32105db8d354463aaad83035e6f577f67252a8d40b9129c79c00f397cd5879a",
@@ -11191,6 +11166,24 @@
           "line": 12
         },
         {
+          "semantic_id": "arch:e1a564126fb7e72e38f785c44f988e23b1f938b27983609ec002c915972e62b7",
+          "source_module": "chronovisor.raw.pi_record",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.store",
+          "symbols": [
+            "CHRONOVISOR_ROOT",
+            "DEFAULT_CONTEXT",
+            "RuntimeContext",
+            "okf_runtime_operation",
+            "okf_startup_status"
+          ],
+          "content_sha256": "3ffdfe68ed900847e0d36ba499c72abbd9614caebccca311408f6cd45fa18e43",
+          "occurrence": 1,
+          "line": 35
+        },
+        {
           "semantic_id": "arch:ee002872213ac5aefefbaef030207fb1d8eb3de3fdfe4686ce596fe0ef5cfebf",
           "source_module": "chronovisor.raw.pi_record",
           "scope_kind": "module",
@@ -11204,20 +11197,6 @@
           "content_sha256": "6320263b3dd5230e887f437d3b1121625fad1f666a719d12c39ccaec02fd0351",
           "occurrence": 1,
           "line": 24
-        },
-        {
-          "semantic_id": "arch:f2a014337abfcac293d5a56b556fc2c7954a22c3012b46d2aa15c724454eff57",
-          "source_module": "chronovisor.raw.claude_code_record",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core.raw_segment",
-          "symbols": [
-            "copy_source_interval"
-          ],
-          "content_sha256": "2125c71af2de0727bed0294ec5b5e904f1676298c0a8dc8350466dbc0b25ff74",
-          "occurrence": 1,
-          "line": 28
         },
         {
           "semantic_id": "arch:f50ebb4db4f8a6c6b826c964febb760ecf372ada46abad5025ced46eb8c3475a",
@@ -11247,20 +11226,6 @@
           "content_sha256": "f0c518916fdfdd39383fb3ebb9f52bfd8a39d1626b7611405b704caf71fe125c",
           "occurrence": 1,
           "line": 903
-        },
-        {
-          "semantic_id": "arch:fb96a4eea1cd5fe849e58fccf883ad4e90e902291e5f991d90b7b65cb632a7d1",
-          "source_module": "chronovisor.raw.pi_record",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core.raw_segment",
-          "symbols": [
-            "copy_source_interval"
-          ],
-          "content_sha256": "2125c71af2de0727bed0294ec5b5e904f1676298c0a8dc8350466dbc0b25ff74",
-          "occurrence": 1,
-          "line": 28
         }
       ],
       "semantic_id": "arch:4871cdf1345bba0d7a4a07b671f87978dbec179608386af45da7287a91898fd8",
@@ -15745,6 +15710,20 @@
           "line": 18
         },
         {
+          "semantic_id": "arch:ec980524fc19903f2587853ff47b7bb4d468a95fbf68fe8a9b84433024097be6",
+          "source_module": "chronovisor.ingest.ingest_transport",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.live_model_stream",
+          "symbols": [
+            "publish_model_stream"
+          ],
+          "content_sha256": "74237f9a94b17e337a2b092b7de707cb3a02cd9575444b4a8b00ab1b5209a4af",
+          "occurrence": 1,
+          "line": 10
+        },
+        {
           "semantic_id": "arch:ed29d8c7776962cde906cfbc181b6f56375df9e6a0e5686c733f5788a0e02220",
           "source_module": "chronovisor.ingest.raw_semantic_projection",
           "scope_kind": "function",
@@ -15787,6 +15766,20 @@
           "content_sha256": "907f77870cde14efcc87af6777ab37fa75ec0ccbf9e470150cc1c049ec43966c",
           "occurrence": 1,
           "line": 29
+        },
+        {
+          "semantic_id": "arch:f0bcdf5d2ae7a739ef313610f44aed35bc4a5d8f81b8880182da9e26b64c93ca",
+          "source_module": "chronovisor.ingest.ingest_transport",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.store",
+          "symbols": [
+            "CHRONOVISOR_ROOT"
+          ],
+          "content_sha256": "23af258fa9a7936b5ca592c62f163eefca7f648e9f84381e9d1c5fc70a3a5f80",
+          "occurrence": 1,
+          "line": 12
         },
         {
           "semantic_id": "arch:f1c955d5cf748fbeb1f5672fb35417d0101a550cc1cdb40ba1cc8781e3345844",
@@ -16937,6 +16930,21 @@
           "content_sha256": "a1d00bda938b7fd9a45bd4b63ee9a473de91902b02dc937dcf9a6ac3954ba42c",
           "occurrence": 1,
           "line": 11
+        },
+        {
+          "semantic_id": "arch:4dd07bc6f87a75415b5b401991833b3c9b8719e5ba112be7de176788356fd6f5",
+          "source_module": "chronovisor.ops.dashboard",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core.live_model_stream",
+          "symbols": [
+            "LiveModelStreamReceiver",
+            "empty_model_stream_snapshot"
+          ],
+          "content_sha256": "f05dd49a2f54218d119f68bfc25ef46271107ca834314cf0fd3aefae7fae7cad",
+          "occurrence": 1,
+          "line": 37
         },
         {
           "semantic_id": "arch:4fa7d2b3e5efc675f0e347f24ac22f1db016f74066944047f21f00fd6cf386ef",
@@ -21428,8 +21436,8 @@
       "target_package": "decision",
       "sites": [
         {
-          "semantic_id": "arch:39ca0df0e4c44abad16821f392d8ec0b341c11176bf73da354fef76fe4a397e3",
-          "source_module": "chronovisor.raw.pi_record",
+          "semantic_id": "arch:49f1b7de914ab3b4e933fe70296192da0c09dcca8aedc5a7161aac968b1b38d4",
+          "source_module": "chronovisor.raw.record_transaction",
           "scope_kind": "module",
           "scope": "<module>",
           "statement_kind": "from",
@@ -21439,35 +21447,7 @@
           ],
           "content_sha256": "ebc360146a94ad056280bbf6d98d9f6e641566b09c2abd83a7011ad036aa2239",
           "occurrence": 1,
-          "line": 49
-        },
-        {
-          "semantic_id": "arch:3f87ec5bd6f008a624236e51c1efb16166e0905b28c9deb51aa1848639b96975",
-          "source_module": "chronovisor.raw.codex_record",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.decision_policy",
-          "symbols": [
-            "resolve_decision_policy"
-          ],
-          "content_sha256": "ebc360146a94ad056280bbf6d98d9f6e641566b09c2abd83a7011ad036aa2239",
-          "occurrence": 1,
-          "line": 46
-        },
-        {
-          "semantic_id": "arch:c0c7c3f2258ba451ac98e8a1f874c55d2d375ee408c96ca7d3df9edc13320194",
-          "source_module": "chronovisor.raw.claude_code_record",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.decision.decision_policy",
-          "symbols": [
-            "resolve_decision_policy"
-          ],
-          "content_sha256": "ebc360146a94ad056280bbf6d98d9f6e641566b09c2abd83a7011ad036aa2239",
-          "occurrence": 1,
-          "line": 49
+          "line": 22
         }
       ],
       "semantic_id": "arch:d4ec15db8b9b02ccd08fb8a8590bd1951fce307614b4cda36cab1b2a86a92286",

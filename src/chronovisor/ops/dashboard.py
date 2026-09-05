@@ -25,6 +25,7 @@ from datetime import UTC, date, datetime, timedelta
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from itertools import chain
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlparse
@@ -4050,25 +4051,7 @@ def _decision_trace_snapshot(
 
     for row in activities:
         observe(row, ("updated_at", "started_at"), 0)
-    for row in history:
-        kind = row.get("kind")
-        if kind in {
-            "session",
-            "decision",
-            "decision_artifact_replay",
-            "decision_artifact",
-            "machine_consensus_receipt",
-        }:
-            observe(
-                row,
-                ("timestamp",),
-                1
-                if kind == "session"
-                else 3
-                if kind in {"decision_artifact", "machine_consensus_receipt"}
-                else 2,
-            )
-    for row in trace_events or []:
+    for row in chain(history, trace_events or []):
         kind = row.get("kind")
         if kind in {
             "session",

@@ -14,6 +14,7 @@ from chronovisor.core.jsonl import read_jsonl
 from chronovisor.hosts import codex_record
 from chronovisor.ingest import recall_hints
 from chronovisor.ops import background_jobs, session_sweeper
+from chronovisor.raw.agent_save_base import should_process
 
 
 @pytest.fixture(autouse=True)
@@ -93,7 +94,7 @@ def test_codex_detects_unified_exec_apply_patch(tmp_path: Path) -> None:
     result = codex_record.extract_transcript_slice(session)
 
     assert result.has_file_changes is True
-    assert codex_record.should_process(result, {}) == (True, "file_changes")
+    assert should_process(result, {}) == (True, "file_changes")
 
 
 def test_session_sweeper_excludes_internal_codex_sessions(tmp_path: Path) -> None:

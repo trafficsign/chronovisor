@@ -429,9 +429,6 @@ def review_and_apply_ingest_operations(
     )
     artifact_review = artifact_state.review
     artifact_authority = artifact_state.authority
-    exact_postimages_already_applied = (
-        artifact_state.exact_postimages_already_applied
-    )
     if (
         artifact_review is not None
         and artifact_authority is not None
@@ -443,7 +440,7 @@ def review_and_apply_ingest_operations(
                 proposal,
                 artifact_authority,
             )
-            if exact_postimages_already_applied
+            if artifact_state.exact_postimages_already_applied
             else _ingest_sharded_review_reuse_error(
                 artifact_review,
                 proposal,
@@ -479,7 +476,7 @@ def review_and_apply_ingest_operations(
         and artifact_authority is not None
         and _ingest_review_authority_shape_error(artifact_authority) is None
         and _ingest_review_authority_error(artifact_review, artifact_authority) is None
-        and exact_postimages_already_applied
+        and artifact_state.exact_postimages_already_applied
     ):
         runtime_status.safe_write_status(ingest_disposition="apply_available")
         with _host_phase("apply"):

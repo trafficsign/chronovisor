@@ -213,9 +213,9 @@ tests = ["tests/test_dashboard.py"]
 path = "src/chronovisor/ops/dashboard.py"
 qualname = "_decision_trace_snapshot"
 baseline_lines = 309
-disposition = "retained"
-max_lines = 309
-rationale = "One canonical Decision Trace fold owns event ordering, lane projection, hold topology, and summary construction for a single selected request."
+disposition = "decomposed"
+max_lines = 298
+rationale = "Consolidated identical history and trace-event observation loops into one ordered iterator; chronological precedence, event ordering, and the complete snapshot contract are unchanged."
 tests = ["tests/test_dashboard.py", "tests/test_dashboard_reference_fixture.py"]
 
 [[functions]]

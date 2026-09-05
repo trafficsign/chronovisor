@@ -18,7 +18,7 @@ from chronovisor.core.store import RuntimeContext, init_chronovisor
 from chronovisor.core.transcript import ClaudeCodeSaveError
 from chronovisor.hosts import claude_code_record
 from chronovisor.ingest.raw_semantic_projection import project_parent_raw
-from chronovisor.raw import claude_code_capture_delta
+from chronovisor.raw import claude_code_capture_delta, record_transaction
 
 
 @pytest.fixture(autouse=True)
@@ -507,7 +507,7 @@ def test_save_mode_updates_state_and_prevents_duplicate(tmp_path: Path, monkeypa
     sample_session(session)
     calls: list[dict] = []
 
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         claude_code_record,
         "run_memory_writer",
@@ -533,9 +533,9 @@ def test_save_mode_updates_state_and_prevents_duplicate(tmp_path: Path, monkeypa
         )
         return {"saved": "raw.md"}
 
-    monkeypatch.setattr(claude_code_record, "save_raw", fake_save_raw)
+    monkeypatch.setattr(record_transaction, "save_raw", fake_save_raw)
     monkeypatch.setattr(
-        claude_code_record, "validate_published_save_receipt", lambda **_kwargs: None
+        record_transaction, "validate_published_save_receipt", lambda **_kwargs: None
     )
 
     first_args = args_for(session, state, ignore_state=True)
@@ -567,10 +567,10 @@ def test_v2_save_preserves_source_lines_without_legacy_markdown(
     sample_session(session)
     source_bytes = session.read_bytes()
     monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
-    monkeypatch.setattr(claude_code_record, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
-        claude_code_record,
+        record_transaction,
         "save_raw",
         lambda *_args, **_kwargs: pytest.fail("v2 must not publish legacy Markdown"),
     )
@@ -612,8 +612,8 @@ def test_v2_save_accepts_one_oversized_native_record(
         ],
     )
     monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
-    monkeypatch.setattr(claude_code_record, "RAW_DIR", raw_dir)
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
     args = args_for(session, state, ignore_state=True)
     args.max_chars = 128
 
@@ -640,7 +640,7 @@ def test_runtime_context_keeps_v2_stop_capture_under_supplied_root(
     forbidden_default = tmp_path / "global-default"
     sample_session(session)
     monkeypatch.setenv("CHRONOVISOR_RAW_LAYOUT", "v2")
-    monkeypatch.setattr(claude_code_record, "RAW_DIR", forbidden_default / "raw")
+    monkeypatch.setattr(record_transaction, "RAW_DIR", forbidden_default / "raw")
     monkeypatch.setattr(
         claude_code_record,
         "DEFAULT_STATE_FILE",
@@ -696,13 +696,13 @@ def test_runtime_context_rejects_legacy_layout_before_global_publish(
         '[decision_policies]\nraw_capture = "enabled"\n[raw]\nlayout = "legacy"\n'
     )
     monkeypatch.setattr(
-        claude_code_record,
+        record_transaction,
         "init_chronovisor",
         lambda *, context=None: None,
     )
     monkeypatch.delenv("CHRONOVISOR_RAW_LAYOUT", raising=False)
     monkeypatch.delenv("CHRONOVISOR_DECISION_POLICY_RAW_CAPTURE", raising=False)
-    monkeypatch.setattr(claude_code_record, "RAW_DIR", forbidden_default / "raw")
+    monkeypatch.setattr(record_transaction, "RAW_DIR", forbidden_default / "raw")
     monkeypatch.setattr(
         claude_code_record,
         "DEFAULT_STATE_FILE",
@@ -714,7 +714,7 @@ def test_runtime_context_rejects_legacy_layout_before_global_publish(
         calls.append(None)
         pytest.fail("RuntimeContext must not call the global legacy writer")
 
-    monkeypatch.setattr(claude_code_record, "save_raw", fail_global_publish)
+    monkeypatch.setattr(record_transaction, "save_raw", fail_global_publish)
     args = args_for(session, claude_code_record.DEFAULT_STATE_FILE, ignore_state=True)
     args.state_file = None
 
@@ -735,15 +735,15 @@ def test_one_stop_drains_every_bounded_transcript_chunk(
     state = tmp_path / "state.json"
     sample_session(session)
     calls: list[str] = []
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
-        claude_code_record,
+        record_transaction,
         "save_raw",
         lambda content, **_kwargs: calls.append(content)
         or {"saved": f"raw-{len(calls)}.md"},
     )
     monkeypatch.setattr(
-        claude_code_record,
+        record_transaction,
         "validate_published_save_receipt",
         lambda **_kwargs: None,
     )
@@ -786,7 +786,7 @@ def test_oversized_first_record_is_reassemblable_and_commits_after_all_fragments
         ],
     )
     calls: list[dict] = []
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         claude_code_record,
         "save_raw",
@@ -830,7 +830,7 @@ def test_oversized_fragment_failure_never_advances_cursor(
             }
         ],
     )
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
     attempts = 0
 
     def fail_second_fragment(_content: str, **_kwargs):
@@ -864,10 +864,10 @@ def test_raw_capture_policy_fail_closed_without_cursor_or_model(
     original_state = state.read_bytes()
     monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RAW_CAPTURE", mode)
     monkeypatch.setattr(
-        claude_code_record, "init_chronovisor", lambda: pytest.fail("policy gate must precede init")
+        record_transaction, "init_chronovisor", lambda: pytest.fail("policy gate must precede init")
     )
     monkeypatch.setattr(
-        claude_code_record,
+        record_transaction,
         "save_raw",
         lambda *_args, **_kwargs: pytest.fail("must not publish"),
     )
@@ -932,8 +932,8 @@ def test_retry_recovers_raw_published_before_state_commit(
     )
     save_calls: list[str] = []
 
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
-    monkeypatch.setattr(claude_code_record, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "RAW_DIR", raw_dir)
 
     def durable_fake_save(content: str, *, idempotency_key: str, **_kwargs):
         save_calls.append(idempotency_key)
@@ -956,8 +956,8 @@ def test_retry_recovers_raw_published_before_state_commit(
         "run_memory_writer",
         lambda *args, **kwargs: pytest.fail("recovery must not start a writer"),
     )
-    monkeypatch.setattr(claude_code_record, "save_raw", durable_fake_save)
-    monkeypatch.setattr(claude_code_record, "write_state", fail_first_state_commit)
+    monkeypatch.setattr(record_transaction, "save_raw", durable_fake_save)
+    monkeypatch.setattr(record_transaction, "write_state", fail_first_state_commit)
 
     with pytest.raises(OSError, match="injected crash"):
         claude_code_record.run(args_for(session, state))
@@ -981,8 +981,8 @@ def test_corrupt_publisher_receipt_does_not_advance_cursor(
     raw_dir = tmp_path / "wiki" / "raw"
     raw_dir.mkdir()
     sample_session(session)
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
-    monkeypatch.setattr(claude_code_record, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "RAW_DIR", raw_dir)
     monkeypatch.setattr(
         claude_code_record,
         "run_memory_writer",
@@ -997,7 +997,7 @@ def test_corrupt_publisher_receipt_does_not_advance_cursor(
         )
         return {"saved": path.name, "path": str(path)}
 
-    monkeypatch.setattr(claude_code_record, "save_raw", corrupt_save)
+    monkeypatch.setattr(record_transaction, "save_raw", corrupt_save)
 
     with pytest.raises(
         claude_code_record.ClaudeCodeSaveError,
@@ -1015,7 +1015,7 @@ def test_save_captures_user_and_assistant_text_without_writer(
     session = tmp_path / "session.jsonl"
     state = tmp_path / "state.json"
     sample_session(session)
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         claude_code_record,
         "run_memory_writer",
@@ -1023,12 +1023,12 @@ def test_save_captures_user_and_assistant_text_without_writer(
     )
     saved: list[str] = []
     monkeypatch.setattr(
-        claude_code_record,
+        record_transaction,
         "save_raw",
         lambda content, **kwargs: saved.append(content) or {"saved": "raw.md"},
     )
     monkeypatch.setattr(
-        claude_code_record, "validate_published_save_receipt", lambda **_kwargs: None
+        record_transaction, "validate_published_save_receipt", lambda **_kwargs: None
     )
 
     result = claude_code_record.run(args_for(session, state, ignore_state=True))
@@ -1047,7 +1047,7 @@ def test_hook_mode_disabled_without_env(tmp_path: Path, monkeypatch) -> None:
     args = args_for(session, state)
     args.hook = True
     monkeypatch.delenv(claude_code_record.HOOK_ENABLE_ENV, raising=False)
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
 
     result = claude_code_record.run(args, stdin_text="{}")
 
@@ -1132,19 +1132,19 @@ def test_short_tail_is_captured_without_frontier_disposition(tmp_path: Path, mon
     state_file = tmp_path / "state.json"
     session_with_edits(session, user_turns=3, include_edit=False)
 
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         claude_code_record,
         "run_memory_writer",
         lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
     )
     monkeypatch.setattr(
-        claude_code_record,
+        record_transaction,
         "save_raw",
         lambda *args, **kwargs: {"saved": "raw.md"},
     )
     monkeypatch.setattr(
-        claude_code_record, "validate_published_save_receipt", lambda **_kwargs: None
+        record_transaction, "validate_published_save_receipt", lambda **_kwargs: None
     )
     args = args_for(session, state_file)
     result = claude_code_record.run(args)
@@ -1160,7 +1160,7 @@ def test_timing_triggers_on_edit(tmp_path: Path, monkeypatch) -> None:
     state_file = tmp_path / "state.json"
     session_with_edits(session, user_turns=2, include_edit=True)
 
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         claude_code_record,
         "run_memory_writer",
@@ -1170,12 +1170,12 @@ def test_timing_triggers_on_edit(tmp_path: Path, monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        claude_code_record,
+        record_transaction,
         "save_raw",
         lambda *a, **kw: {"saved": "raw.md"},
     )
     monkeypatch.setattr(
-        claude_code_record, "validate_published_save_receipt", lambda **_kwargs: None
+        record_transaction, "validate_published_save_receipt", lambda **_kwargs: None
     )
     args = args_for(session, state_file)
     result = claude_code_record.run(args)
@@ -1192,7 +1192,7 @@ def test_concurrent_stop_workers_publish_delta_exactly_once(
     state_file = tmp_path / "state.json"
     session_with_edits(session, user_turns=2, include_edit=True)
 
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
     first_save_entered = threading.Event()
     release_first_save = threading.Event()
     duplicate_save_entered = threading.Event()
@@ -1230,9 +1230,9 @@ def test_concurrent_stop_workers_publish_delta_exactly_once(
         "run_memory_writer",
         lambda *args, **kwargs: pytest.fail("normal capture must not start a writer"),
     )
-    monkeypatch.setattr(claude_code_record, "save_raw", fake_save)
+    monkeypatch.setattr(record_transaction, "save_raw", fake_save)
     monkeypatch.setattr(
-        claude_code_record, "validate_published_save_receipt", lambda **_kwargs: None
+        record_transaction, "validate_published_save_receipt", lambda **_kwargs: None
     )
     monkeypatch.setattr(
         claude_code_record,
@@ -1268,7 +1268,7 @@ def test_timing_triggers_on_turn_interval(tmp_path: Path, monkeypatch) -> None:
     state_file = tmp_path / "state.json"
     session_with_edits(session, user_turns=10, include_edit=False)
 
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         claude_code_record,
         "run_memory_writer",
@@ -1278,12 +1278,12 @@ def test_timing_triggers_on_turn_interval(tmp_path: Path, monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        claude_code_record,
+        record_transaction,
         "save_raw",
         lambda *a, **kw: {"saved": "raw.md"},
     )
     monkeypatch.setattr(
-        claude_code_record, "validate_published_save_receipt", lambda **_kwargs: None
+        record_transaction, "validate_published_save_receipt", lambda **_kwargs: None
     )
     args = args_for(session, state_file)
     result = claude_code_record.run(args)
@@ -1314,7 +1314,7 @@ def test_recent_save_does_not_strand_new_tail(tmp_path: Path, monkeypatch) -> No
     }
     state_file.write_text(json.dumps(state))
 
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         claude_code_record,
         "run_memory_writer",
@@ -1323,8 +1323,8 @@ def test_recent_save_does_not_strand_new_tail(tmp_path: Path, monkeypatch) -> No
             rejected_keywords=[], evidence_quotes=["User message 0"],
         ),
     )
-    monkeypatch.setattr(claude_code_record, "save_raw", lambda *a, **kw: {"saved": "raw.md"})
-    monkeypatch.setattr(claude_code_record, "validate_published_save_receipt", lambda **_kwargs: None)
+    monkeypatch.setattr(record_transaction, "save_raw", lambda *a, **kw: {"saved": "raw.md"})
+    monkeypatch.setattr(record_transaction, "validate_published_save_receipt", lambda **_kwargs: None)
     args = args_for(session, state_file)
     result = claude_code_record.run(args)
 
@@ -1337,7 +1337,7 @@ def test_timing_bypass_with_ignore_state(tmp_path: Path, monkeypatch) -> None:
     state_file = tmp_path / "state.json"
     session_with_edits(session, user_turns=1, include_edit=False)
 
-    monkeypatch.setattr(claude_code_record, "init_chronovisor", lambda: None)
+    monkeypatch.setattr(record_transaction, "init_chronovisor", lambda: None)
     monkeypatch.setattr(
         claude_code_record,
         "run_memory_writer",
@@ -1347,12 +1347,12 @@ def test_timing_bypass_with_ignore_state(tmp_path: Path, monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(
-        claude_code_record,
+        record_transaction,
         "save_raw",
         lambda *a, **kw: {"saved": "raw.md"},
     )
     monkeypatch.setattr(
-        claude_code_record, "validate_published_save_receipt", lambda **_kwargs: None
+        record_transaction, "validate_published_save_receipt", lambda **_kwargs: None
     )
     args = args_for(session, state_file)
     args.ignore_state = True

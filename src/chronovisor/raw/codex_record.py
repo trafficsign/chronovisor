@@ -22,36 +22,27 @@ from chronovisor.core.evidence_grounding import (
     ProtectedLiteralGroundingError,
     validate_protected_literals,
 )
-from chronovisor.core.raw_segment import copy_source_interval
-from chronovisor.core.raw_store import raw_layout_mode
 from chronovisor.core.save_transaction import (
     SaveTransaction,
     attach_save_transaction_marker,
-    find_published_save_transaction,
     make_save_transaction,
     publish_oversized_shadow,
-    publish_transcript_capture,
     save_transaction_lock,
     validate_published_save_receipt,
 )
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     DEFAULT_CONTEXT,
-    RAW_DIR,
     RuntimeContext,
-    init_chronovisor,
     okf_runtime_operation,
     okf_startup_status,
 )
-from chronovisor.decision.decision_policy import resolve_decision_policy
 from chronovisor.raw.agent_save_base import (
     extract_json_object,
-    load_state,
-    read_hook_payload,
+    load_state,  # noqa: F401 - re-exported for session sweeper callers
     sanitize_keywords,
     save_raw,
-    saved_line_for,
-    should_process,
+    saved_line_for,  # noqa: F401 - re-exported for session sweeper callers
     trim_middle,
     update_state,
     write_state,
@@ -65,6 +56,10 @@ from chronovisor.raw.codex_capture_delta import (
 )
 from chronovisor.raw.codex_capture_delta import (
     serialized_records_bytes as _serialized_records_bytes,
+)
+from chronovisor.raw.record_transaction import (
+    RecordTransactionSpec,
+    run_save_transaction,
 )
 
 FILE_CHANGE_TOOLS = _codex_transcript.FILE_CHANGE_TOOLS
@@ -546,258 +541,37 @@ def resolve_session_file(args: argparse.Namespace, hints: dict[str, str]) -> Pat
     )
 
 
+def _transaction_spec() -> RecordTransactionSpec:
+    return RecordTransactionSpec(
+        host="codex",
+        hook_enable_env=HOOK_ENABLE_ENV,
+        keywords=("Codex", "transcript-delta"),
+        error_type=CodexSaveError,
+        resolve_session_file=resolve_session_file,
+        resolve_state_file=_resolve_state_file,
+        hook_hints=hook_hints,
+        extract_transcript_slice=extract_transcript_slice,
+        bounded_transcript_slice_for_layout=bounded_transcript_slice_for_layout,
+        serialized_records_bytes=_serialized_records_bytes,
+        serialize_transcript_records=serialize_transcript_records,
+        build_raw_content=build_raw_content,
+        raw_session_id=raw_session_id,
+        capture_oversized_record=_capture_oversized_record,
+    )
+
+
 def _run_save_transaction(
     args: argparse.Namespace,
     *,
     stdin_text: str | None = None,
     context: RuntimeContext | None = None,
 ) -> dict[str, Any]:
-    if args.hook and os.environ.get(HOOK_ENABLE_ENV) != "1":
-        return {
-            "status": "disabled",
-            "reason": f"{HOOK_ENABLE_ENV}=1 is required for hook execution",
-        }
-
-    if context is None:
-        policy, policy_mode, policy_error = resolve_decision_policy("raw_capture")
-    else:
-        policy, policy_mode, policy_error = resolve_decision_policy(
-            "raw_capture", config_path=context.config_file
-        )
-    policy_kind = policy.kind if policy is not None else None
-    policy_result = {
-        "lane": "raw_capture",
-        "kind": policy_kind,
-        "mode": policy_mode,
-        "error": policy_error,
-    }
-    if (
-        policy_error is not None
-        or policy_kind != "validated_local"
-        or policy_mode != "enabled"
-    ):
-        return {
-            "status": "deferred",
-            "reason": policy_error
-            or (
-                "raw_capture_policy_kind_invalid"
-                if policy_kind != "validated_local"
-                else f"raw_capture_policy_not_enabled:{policy_mode}"
-            ),
-            "decision_policy": policy_result,
-            "model_calls": 0,
-        }
-
-    if context is None:
-        init_chronovisor()
-    else:
-        init_chronovisor(context=context)
-
-    raw_dir = RAW_DIR if context is None else context.raw_dir
-
-    hints = hook_hints(read_hook_payload(stdin_text)) if args.hook else {}
-    session_file = resolve_session_file(args, hints)
-    if not session_file.exists():
-        raise CodexSaveError(f"session file does not exist: {session_file}")
-
-    state_file = _resolve_state_file(args, context=context)
-    state = load_state(state_file)
-    committed_line = saved_line_for(state, session_file)
-    after_line = 0 if args.ignore_state else committed_line
-    transcript_slice = extract_transcript_slice(session_file, after_line=after_line)
-
-    # A process may die after the raw becomes visible but before the cursor
-    # state replace. The raw itself is the receipt, so recover it before
-    # considering a wider new delta.
-    recovery_probe = (
-        transcript_slice
-        if after_line == committed_line
-        else extract_transcript_slice(session_file, after_line=committed_line)
+    return run_save_transaction(
+        args,
+        spec=_transaction_spec(),
+        stdin_text=stdin_text,
+        context=context,
     )
-    recovered = find_published_save_transaction(
-        raw_dir=raw_dir,
-        host="codex",
-        session_file=session_file,
-        session_id=recovery_probe.session_id,
-        after_line=committed_line,
-    )
-    if (
-        recovered is not None
-        and recovered.transaction.until_line > recovery_probe.scanned_until_line
-    ):
-        raise CodexSaveError(
-            "published save receipt extends beyond the current transcript; "
-            "refusing to publish an overlapping replacement"
-        )
-    if (
-        recovered is not None
-        and recovered.transaction.until_line <= recovery_probe.scanned_until_line
-    ):
-        recovered_slice = TranscriptSlice(
-            session_file=session_file,
-            scanned_until_line=recovered.transaction.until_line,
-            records=[],
-            session_id=recovery_probe.session_id,
-            cwd=recovery_probe.cwd,
-            originator=recovery_probe.originator,
-            cli_version=recovery_probe.cli_version,
-            source=recovery_probe.source,
-            model_provider=recovery_probe.model_provider,
-            after_line=committed_line,
-        )
-        update_state(
-            state,
-            session_file=session_file,
-            transcript_slice=recovered_slice,
-            status="saved",
-        )
-        write_state(state_file, state)
-        after_line = recovered.transaction.until_line
-        transcript_slice = extract_transcript_slice(session_file, after_line=after_line)
-
-    base_result: dict[str, Any] = {
-        "session_file": str(session_file),
-        "session_id": transcript_slice.session_id,
-        "cwd": transcript_slice.cwd,
-        "after_line": after_line,
-        "scanned_until_line": transcript_slice.scanned_until_line,
-        "record_count": len(transcript_slice.records),
-    }
-    if recovered is not None and after_line == recovered.transaction.until_line:
-        base_result["recovered_save"] = {
-            "path": str(recovered.path),
-            "idempotency_key": recovered.transaction.idempotency_key,
-            "until_line": recovered.transaction.until_line,
-        }
-
-    if not transcript_slice.records:
-        if "recovered_save" in base_result:
-            return {
-                **base_result,
-                "status": "recovered",
-                "reason": "published raw recovered before state cursor commit",
-            }
-        return {**base_result, "status": "skipped", "reason": "no new transcript records"}
-
-    if not args.ignore_state:
-        proceed, trigger_reason = should_process(transcript_slice, state)
-        if not proceed:
-            return {
-                **base_result,
-                "status": "skipped",
-                "reason": trigger_reason,
-                "has_file_changes": transcript_slice.has_file_changes,
-                "user_turn_count": transcript_slice.user_turn_count,
-            }
-        base_result["trigger"] = trigger_reason
-
-    if args.max_chars < 1:
-        raise CodexSaveError("max_chars must be a positive byte limit")
-    layout = raw_layout_mode(chronovisor_root=raw_dir.parent)
-    if context is not None and layout != "v2":
-        raise CodexSaveError("RuntimeContext capture requires raw layout v2")
-    if (
-        layout != "v2"
-        and len(_serialized_records_bytes([transcript_slice.records[0]]))
-        > args.max_chars
-    ):
-        return _capture_oversized_record(
-            args=args,
-            transcript_slice=transcript_slice,
-            state=state,
-            state_file=state_file,
-            raw_dir=raw_dir,
-            base_result={**base_result, "decision_policy": policy_result},
-        )
-
-    transcript_slice = bounded_transcript_slice_for_layout(
-        transcript_slice,
-        max_chars=args.max_chars,
-        layout=layout,
-    )
-    base_result["scanned_until_line"] = transcript_slice.scanned_until_line
-    base_result["record_count"] = len(transcript_slice.records)
-    transcript_json = serialize_transcript_records(transcript_slice.records)
-    transcript_bytes = transcript_json.encode("utf-8")
-    if args.extract_only:
-        return {
-            **base_result,
-            "status": "extracted",
-            "capture_mode": "deterministic-lossless",
-            "transcript_bytes": len(transcript_bytes),
-            "transcript_sha256": hashlib.sha256(transcript_bytes).hexdigest(),
-            "decision_policy": policy_result,
-        }
-
-    capture_result = {
-        "capture_mode": "deterministic-lossless",
-        "keywords": ["Codex", "transcript-delta"],
-    }
-
-    transaction = make_save_transaction(
-        host="codex",
-        session_file=session_file,
-        session_id=transcript_slice.session_id,
-        after_line=transcript_slice.after_line,
-        until_line=transcript_slice.scanned_until_line,
-    )
-    raw_content = build_raw_content(
-        transcript_slice,
-        transaction=transaction,
-    )
-    source_bytes = copy_source_interval(
-        session_file,
-        after_line=transaction.after_line,
-        until_line=transaction.until_line,
-    )
-    if args.dry_run or not args.save:
-        raw_bytes = (
-            source_bytes if layout == "v2" else raw_content.encode("utf-8")
-        )
-        return {
-            **base_result,
-            **capture_result,
-            "status": "dry_run",
-            "raw_content_bytes": len(raw_bytes),
-            "raw_content_sha256": hashlib.sha256(raw_bytes).hexdigest(),
-            "raw_layout": layout,
-            "decision_policy": policy_result,
-        }
-
-    save_result = publish_transcript_capture(
-        raw_dir=raw_dir,
-        host="codex",
-        session_key=transaction.session_key,
-        session_id=transcript_slice.session_id,
-        session_file=session_file,
-        after_line=transaction.after_line,
-        until_line=transaction.until_line,
-        idempotency_key=transaction.idempotency_key,
-        source_bytes=source_bytes,
-        record_count=len(transcript_slice.records),
-        legacy_content=raw_content,
-        legacy_session_id=raw_session_id(transcript_slice),
-        keywords=capture_result["keywords"],
-        trigger_ingest=False,
-        legacy_publisher=save_raw,
-    )
-    try:
-        validate_published_save_receipt(
-            raw_dir=raw_dir,
-            save_result=save_result,
-            expected=transaction,
-        )
-    except ValueError as exc:
-        raise CodexSaveError(f"raw save receipt validation failed: {exc}") from exc
-    update_state(state, session_file=session_file, transcript_slice=transcript_slice, status="saved")
-    write_state(state_file, state)
-    return {
-        **base_result,
-        **capture_result,
-        "status": "saved",
-        "save_result": save_result,
-        "decision_policy": policy_result,
-    }
 
 
 def _resolve_state_file(
