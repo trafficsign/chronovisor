@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Measure the Recall R1 append/checkpoint/index hot paths on an APFS clone."""
 
 from __future__ import annotations

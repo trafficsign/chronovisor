@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Dry-run orphan link suggestion (plan-2).
 
 Generates ``~/.chronovisor/system/orphan-link-suggestions-{date}.md`` listing,

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """ゴミページのクリーンアップ。
 
 GitHub テンプレ由来や generic なプロジェクト管理ファイルが

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Fail-closed, payload-free formal dataset gate for Recall R5.
 
 This is deliberately a verifier, not a backfill runner: it makes no network or

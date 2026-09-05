@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Capture and compare privacy-safe Recall parity receipts."""
 
 from __future__ import annotations

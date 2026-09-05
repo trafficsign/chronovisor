@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Obsolete tag-backfill retry reader (semantic writes disabled).
 
 Reads ``~/.chronovisor/.tag-backfill-progress.jsonl``, finds entries that failed

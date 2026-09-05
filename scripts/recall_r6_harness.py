@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Fail-closed R6/P5 harness using only the official clone worker.
 
 It has exactly two outcomes: an R5 read-only decline, or evidence from

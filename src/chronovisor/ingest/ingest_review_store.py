@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 from chronovisor.core.canonical_json import canonical_json_sha256_stringifying_strict
 from chronovisor.decision import decision_authority
@@ -17,7 +17,6 @@ from chronovisor.ingest.ingest_schemas import (
 
 AuthorityValidator = Callable[[dict[str, Any], dict[str, Any]], str | None]
 AuthorityShapeValidator = Callable[[dict[str, Any]], str | None]
-PreparedT = TypeVar("PreparedT")
 
 
 def ingest_artifact_root(pages_dir: Path) -> Path:
@@ -62,7 +61,7 @@ def write_ingest_artifact(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
-def load_ingest_proposal(
+def load_ingest_proposal[PreparedT](
     path: Path,
     *,
     source_key: str,

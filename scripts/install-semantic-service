@@ -24,7 +24,7 @@ status_matches_launchd() {
   )"
   [[ "$pid" == <-> ]] || return 1
   /bin/kill -0 "$pid" 2>/dev/null || return 1
-  /usr/bin/python3 - "$HOME/.chronovisor/runtime/semantic-service-status.json" "$pid" <<'PY'
+  "${CHRONOVISOR_PYTHON:-python3.14}" - "$HOME/.chronovisor/runtime/semantic-service-status.json" "$pid" <<'PY'
 import json
 import os
 import subprocess

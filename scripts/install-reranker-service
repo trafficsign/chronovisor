@@ -24,7 +24,7 @@ status_matches_launchd() {
   )"
   [[ "$pid" == <-> ]] || return 1
   /bin/kill -0 "$pid" 2>/dev/null || return 1
-  /usr/bin/python3 - "$HOME/.chronovisor/runtime/reranker-service-status.json" "$pid" "$HOME/.chronovisor/runtime/reranker.sock" <<'PY'
+  "${CHRONOVISOR_PYTHON:-python3.14}" - "$HOME/.chronovisor/runtime/reranker-service-status.json" "$pid" "$HOME/.chronovisor/runtime/reranker.sock" <<'PY'
 import json
 import os
 import socket

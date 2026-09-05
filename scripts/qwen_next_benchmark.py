@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Small, dependency-free benchmark for an OpenAI-compatible local model."""
 
 from __future__ import annotations

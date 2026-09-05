@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """One-shot, fail-closed R4 Workset archive/cutover utility.
 
 The normal distillation worker continues to use ``ox-workset.sqlite3``.  This

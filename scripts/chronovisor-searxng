@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly RUNTIME_ROOT="${CHRONOVISOR_SEARXNG_ROOT:-$HOME/.local/share/chronovisor/searxng}"
-readonly VENV="$RUNTIME_ROOT/.venv"
+readonly VENV="$RUNTIME_ROOT/.venv-3.14"
 readonly CONFIG_ROOT="$HOME/.chronovisor/runtime/searxng"
 readonly SETTINGS="$CONFIG_ROOT/settings.yml"
 readonly SECRET_FILE="$CONFIG_ROOT/secret"

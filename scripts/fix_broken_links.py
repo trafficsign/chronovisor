@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """broken_link の修復。
 
 lint が検出した broken_link について、以下を試行:

@@ -13,12 +13,10 @@ import time
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any, Generic, Literal, TypeVar, cast
+from typing import Any, Literal, cast
 
 from chronovisor.core.llm_runtime import safe_metadata_identifier
 
-T = TypeVar("T")
-R = TypeVar("R")
 Status = Literal["ok", "failed", "stopped", "deferred"]
 
 _RAMP = (1, 2, 5, 10)
@@ -91,7 +89,7 @@ class DispatchGuardDenied(DispatchStopped):
 
 
 @dataclass(frozen=True)
-class DispatchResult(Generic[T, R]):
+class DispatchResult[T, R]:
     """One ordered result returned to the caller's single-writer boundary."""
 
     work: T
@@ -104,7 +102,7 @@ class DispatchResult(Generic[T, R]):
 
 
 @dataclass(frozen=True)
-class _Attempt(Generic[T, R]):
+class _Attempt[T, R]:
     result: DispatchResult[T, R]
 
 
@@ -195,7 +193,7 @@ def _result_failure(value: object) -> tuple[str, str | None, str | None] | None:
     )
 
 
-class SingleTeacherDispatcher(Generic[T, R]):
+class SingleTeacherDispatcher[T, R]:
     """Run claimed work with bounded parallelism and a conservative ramp."""
 
     def __init__(
@@ -564,7 +562,7 @@ class SingleTeacherDispatcher(Generic[T, R]):
         return min(current_cap, self.max_inflight)
 
 
-def dispatch_claimed_work(
+def dispatch_claimed_work[T, R](
     claimed_work: Sequence[T],
     evaluate: Callable[[T], R],
     *,

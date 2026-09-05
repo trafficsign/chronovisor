@@ -415,11 +415,10 @@ class RerankRoute:
     model: str
 
 
-Route = TypeVar("Route")
 Result = TypeVar("Result")
 
 
-def _resolve(routes: Mapping[str, Route], role: str, capability: str) -> Route:
+def _resolve[Route](routes: Mapping[str, Route], role: str, capability: str) -> Route:
     route = routes.get(role)
     if route is None:
         raise CapabilityUnavailableError(role, capability)

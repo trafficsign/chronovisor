@@ -34,7 +34,7 @@ auditable.
 
 ## Quick start
 
-Prerequisites: Python 3.11+, [uv](https://docs.astral.sh/uv/), and
+Prerequisites: standard CPython 3.14, [uv](https://docs.astral.sh/uv/), and
 [Ollama](https://ollama.com/) for local model inference.
 
 ```sh

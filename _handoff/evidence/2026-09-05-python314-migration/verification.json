@@ -1,0 +1,62 @@
+{
+  "updated_at": "2026-09-05T09:48:40.755072+09:00",
+  "status": "validated_with_eight_pre_existing_architecture_failures",
+  "full_suite_before_final_fixes": {
+    "tests": 6375,
+    "failures": 10,
+    "errors": 0,
+    "skipped": 1,
+    "seconds": 885.87,
+    "failed_nodes": [
+      "tests.test_architecture_baseline::test_current_architecture_does_not_weaken_baseline",
+      "tests.test_architecture_baseline::test_architecture_fitness_allows_and_reports_package_edge_removal",
+      "tests.test_architecture_baseline::test_current_exception_ledger_seed_and_schema_inventory_are_exact",
+      "tests.test_architecture_baseline::test_existing_edge_replacement_site_can_be_seeded_with_exact_ledger_match",
+      "tests.test_architecture_baseline::test_site_gate_rejects_unrecorded_stale_duplicate_identity_content_and_count",
+      "tests.test_architecture_baseline::test_site_deletion_retires_monotonically_and_reintroduction_is_rejected",
+      "tests.test_architecture_baseline::test_exception_artifacts_are_fresh_and_head_independent",
+      "tests.test_architecture_migrations::test_p2_plan_validates_fixed_h0_and_gate_history",
+      "tests.test_large_function_policy::test_large_function_policy_covers_every_current_large_function",
+      "tests.test_quality_baseline::test_quality_tools_are_scoped_to_the_staged_baseline"
+    ]
+  },
+  "final_focused_suite": {
+    "tests": 100,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 76.936,
+    "failed_nodes": []
+  },
+  "resolved_failures": [
+    "tests.test_architecture_migrations::test_p2_plan_validates_fixed_h0_and_gate_history",
+    "tests.test_quality_baseline::test_quality_tools_are_scoped_to_the_staged_baseline"
+  ],
+  "resolutions": {
+    "immutable_verifier": "Preserved original file bytes; invoke through uv run on Python 3.14.7. No history checks were weakened.",
+    "quality_baseline": "Updated the existing expected Ruff target from py311 to py314."
+  },
+  "remaining_known_failures": [
+    "tests.test_architecture_baseline::test_current_architecture_does_not_weaken_baseline",
+    "tests.test_architecture_baseline::test_architecture_fitness_allows_and_reports_package_edge_removal",
+    "tests.test_architecture_baseline::test_current_exception_ledger_seed_and_schema_inventory_are_exact",
+    "tests.test_architecture_baseline::test_existing_edge_replacement_site_can_be_seeded_with_exact_ledger_match",
+    "tests.test_architecture_baseline::test_site_gate_rejects_unrecorded_stale_duplicate_identity_content_and_count",
+    "tests.test_architecture_baseline::test_site_deletion_retires_monotonically_and_reintroduction_is_rejected",
+    "tests.test_architecture_baseline::test_exception_artifacts_are_fresh_and_head_independent",
+    "tests.test_large_function_policy::test_large_function_policy_covers_every_current_large_function"
+  ],
+  "new_unresolved_failures": [],
+  "static_checks": {
+    "ruff": "passed",
+    "mypy": "91 source files passed",
+    "import_linter": "1 kept, 0 broken",
+    "compileall": "passed",
+    "frozen_lock": "passed"
+  },
+  "development_dependencies": "uv sync --frozen; no third-party package changes",
+  "model_settings": "unchanged; final deployment verification also checks hashes",
+  "searxng": "43 identical package versions; Python 3.14.7; healthz/index HTTP 200; previously inactive service kept inactive",
+  "annif": "Isolated migration research only; live configuration remains 3.13. See annif-research.md.",
+  "omlx": "Embedded Python 3.11 and model settings preserved."
+}

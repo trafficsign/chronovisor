@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Ollama (Gemma 4 26B MoE) でリンクバックフィル。
 
 backfill_links.py の Sonnet 版と同じ機能をローカル LLM で実行。

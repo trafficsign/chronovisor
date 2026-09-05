@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Read-only duration-configurable burn/soak monitor for Chronovisor services.
 
 Importing this module has no side effects.  Running it explicitly creates one

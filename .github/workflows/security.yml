@@ -58,7 +58,7 @@ jobs:
         with:
           version: "0.12.3"
           enable-cache: false
-          python-version: "3.13"
+          python-version: "3.14.7"
       - name: Build release artifacts
         run: uv build --no-sources --out-dir "${{ runner.temp }}/chronovisor-dist"
       - name: Scan release artifacts and nested archives
@@ -93,7 +93,7 @@ jobs:
         with:
           version: "0.12.3"
           enable-cache: false
-          python-version: "3.13"
+          python-version: "3.14.7"
       - name: Export the frozen dependency graph
         shell: bash
         run: |

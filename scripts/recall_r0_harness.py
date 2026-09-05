@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Capture the Recall R0 baseline without mutating the live root."""
 
 from __future__ import annotations

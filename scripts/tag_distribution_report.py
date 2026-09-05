@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Tag distribution report (plan-3).
 
 Read-only sweep: samples 200 pages (100 proportional + 100 minority

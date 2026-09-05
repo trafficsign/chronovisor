@@ -68,6 +68,10 @@ esac
 
 CHRONOVISOR_UVX=$(chronovisor_resolve_executable "${CHRONOVISOR_UVX:-}" uvx)
 CHRONOVISOR_PYTHON=$(chronovisor_resolve_executable "${CHRONOVISOR_PYTHON:-}" python3.14)
+"$CHRONOVISOR_PYTHON" -c 'import sys; raise SystemExit(not (sys.version_info[:2] == (3, 14) and getattr(sys, "_is_gil_enabled", lambda: False)()))' || {
+  echo "standard GIL Python 3.14 executable required" >&2
+  exit 64
+}
 CHRONOVISOR_ROOT=${CHRONOVISOR_ROOT:-$HOME/.chronovisor}
 RUNTIME_SOURCE=${CHRONOVISOR_RUNTIME_SOURCE:-$(chronovisor_runtime_source)}
 export CHRONOVISOR_REPO_ROOT CHRONOVISOR_ROOT CHRONOVISOR_UVX CHRONOVISOR_PYTHON

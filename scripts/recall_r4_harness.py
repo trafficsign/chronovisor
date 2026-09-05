@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Fail-closed, source-bound evidence harness for Recall R4.
 
 The harness validates receipts; it does not run a teacher or make a provider

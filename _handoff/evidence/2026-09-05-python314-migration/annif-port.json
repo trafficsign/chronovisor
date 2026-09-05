@@ -1,0 +1,1032 @@
+{
+  "schema": "chronovisor.annif-python314-port-probe.v1",
+  "fixture": {
+    "file_count": 7,
+    "sha256": "b62025a326bfa6d138156e10f5017641c3d48806d552294e68c2f9d343133d46",
+    "train_documents": 16,
+    "vocabulary_subjects": 4
+  },
+  "config_contract": {
+    "annif_version": "1.4.1",
+    "project_ids": [
+      "udc-tfidf-ja",
+      "udc-fasttext-ja",
+      "udc-ensemble-ja"
+    ],
+    "language": "ja",
+    "fasttext_jobs": 8,
+    "fasttext_config_thread": 8,
+    "fasttext_seed_requested": false
+  },
+  "runtimes": {
+    "3.13.12_current": {
+      "python": "3.13.12",
+      "packages": {
+        "annif": "1.4.1",
+        "numpy": "2.2.6",
+        "scipy": "1.15.3",
+        "scikit-learn": "1.7.2",
+        "fasttext-numpy2": "0.10.4"
+      },
+      "suggestions": {
+        "tfidf/alpha": [
+          {
+            "uri": "http://example.org/topic/alpha",
+            "label": "Alpha",
+            "notation": "A",
+            "score": 0.8625
+          }
+        ],
+        "tfidf/beta": [
+          {
+            "uri": "http://example.org/topic/beta",
+            "label": "Beta",
+            "notation": "B",
+            "score": 0.9345
+          }
+        ],
+        "tfidf/gamma": [
+          {
+            "uri": "http://example.org/topic/gamma",
+            "label": "Gamma",
+            "notation": "C",
+            "score": 0.8765
+          },
+          {
+            "uri": "http://example.org/topic/alpha",
+            "label": "Alpha",
+            "notation": "A",
+            "score": 0.0444
+          }
+        ],
+        "tfidf/delta": [
+          {
+            "uri": "http://example.org/topic/delta",
+            "label": "Delta",
+            "notation": "D",
+            "score": 0.8715
+          }
+        ],
+        "fasttext/alpha": [
+          {
+            "uri": "http://example.org/topic/alpha",
+            "label": "Alpha",
+            "notation": "A",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/beta",
+            "label": "Beta",
+            "notation": "B",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/delta",
+            "label": "Delta",
+            "notation": "D",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/gamma",
+            "label": "Gamma",
+            "notation": "C",
+            "score": 0.25
+          }
+        ],
+        "fasttext/beta": [
+          {
+            "uri": "http://example.org/topic/beta",
+            "label": "Beta",
+            "notation": "B",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/alpha",
+            "label": "Alpha",
+            "notation": "A",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/gamma",
+            "label": "Gamma",
+            "notation": "C",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/delta",
+            "label": "Delta",
+            "notation": "D",
+            "score": 0.25
+          }
+        ],
+        "fasttext/gamma": [
+          {
+            "uri": "http://example.org/topic/gamma",
+            "label": "Gamma",
+            "notation": "C",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/delta",
+            "label": "Delta",
+            "notation": "D",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/beta",
+            "label": "Beta",
+            "notation": "B",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/alpha",
+            "label": "Alpha",
+            "notation": "A",
+            "score": 0.25
+          }
+        ],
+        "fasttext/delta": [
+          {
+            "uri": "http://example.org/topic/delta",
+            "label": "Delta",
+            "notation": "D",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/gamma",
+            "label": "Gamma",
+            "notation": "C",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/alpha",
+            "label": "Alpha",
+            "notation": "A",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/beta",
+            "label": "Beta",
+            "notation": "B",
+            "score": 0.25
+          }
+        ]
+      },
+      "suggest_latency_ms": {
+        "tfidf/alpha": {
+          "samples": [
+            1142.615,
+            717.891,
+            638.253
+          ],
+          "median": 717.891
+        },
+        "tfidf/beta": {
+          "samples": [
+            627.117,
+            625.152,
+            627.858
+          ],
+          "median": 627.117
+        },
+        "tfidf/gamma": {
+          "samples": [
+            623.484,
+            614.71,
+            631.946
+          ],
+          "median": 623.484
+        },
+        "tfidf/delta": {
+          "samples": [
+            624.452,
+            630.782,
+            639.393
+          ],
+          "median": 630.782
+        },
+        "fasttext/alpha": {
+          "samples": [
+            953.35,
+            929.646,
+            933.018
+          ],
+          "median": 933.018
+        },
+        "fasttext/beta": {
+          "samples": [
+            1715.32,
+            1340.051,
+            1077.826
+          ],
+          "median": 1340.051
+        },
+        "fasttext/gamma": {
+          "samples": [
+            1120.086,
+            1017.484,
+            943.126
+          ],
+          "median": 1017.484
+        },
+        "fasttext/delta": {
+          "samples": [
+            962.692,
+            991.949,
+            1130.675
+          ],
+          "median": 991.949
+        }
+      },
+      "suggest_returncodes": {
+        "tfidf/alpha": [
+          0,
+          0,
+          0
+        ],
+        "tfidf/beta": [
+          0,
+          0,
+          0
+        ],
+        "tfidf/gamma": [
+          0,
+          0,
+          0
+        ],
+        "tfidf/delta": [
+          0,
+          0,
+          0
+        ],
+        "fasttext/alpha": [
+          0,
+          0,
+          0
+        ],
+        "fasttext/beta": [
+          0,
+          0,
+          0
+        ],
+        "fasttext/gamma": [
+          0,
+          0,
+          0
+        ],
+        "fasttext/delta": [
+          0,
+          0,
+          0
+        ]
+      },
+      "artifact_sizes": {
+        "udc-fasttext-ja/fasttext-model": 1024020180,
+        "udc-fasttext-ja/fasttext-train.txt": 674,
+        "udc-tfidf-ja/tfidf-matrix.npz": 1182,
+        "udc-tfidf-ja/vectorizer": 1415
+      }
+    },
+    "3.14.7_metadata_patch": {
+      "python": "3.14.7",
+      "packages": {
+        "annif": "1.4.1",
+        "numpy": "2.3.5",
+        "scipy": "1.16.3",
+        "scikit-learn": "1.7.2",
+        "fasttext-numpy2": "0.10.4"
+      },
+      "suggestions": {
+        "tfidf/alpha": [
+          {
+            "uri": "http://example.org/topic/alpha",
+            "label": "Alpha",
+            "notation": "A",
+            "score": 0.8625
+          }
+        ],
+        "tfidf/beta": [
+          {
+            "uri": "http://example.org/topic/beta",
+            "label": "Beta",
+            "notation": "B",
+            "score": 0.9345
+          }
+        ],
+        "tfidf/gamma": [
+          {
+            "uri": "http://example.org/topic/gamma",
+            "label": "Gamma",
+            "notation": "C",
+            "score": 0.8765
+          },
+          {
+            "uri": "http://example.org/topic/alpha",
+            "label": "Alpha",
+            "notation": "A",
+            "score": 0.0444
+          }
+        ],
+        "tfidf/delta": [
+          {
+            "uri": "http://example.org/topic/delta",
+            "label": "Delta",
+            "notation": "D",
+            "score": 0.8715
+          }
+        ],
+        "fasttext/alpha": [
+          {
+            "uri": "http://example.org/topic/alpha",
+            "label": "Alpha",
+            "notation": "A",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/beta",
+            "label": "Beta",
+            "notation": "B",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/delta",
+            "label": "Delta",
+            "notation": "D",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/gamma",
+            "label": "Gamma",
+            "notation": "C",
+            "score": 0.25
+          }
+        ],
+        "fasttext/beta": [
+          {
+            "uri": "http://example.org/topic/beta",
+            "label": "Beta",
+            "notation": "B",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/alpha",
+            "label": "Alpha",
+            "notation": "A",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/gamma",
+            "label": "Gamma",
+            "notation": "C",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/delta",
+            "label": "Delta",
+            "notation": "D",
+            "score": 0.25
+          }
+        ],
+        "fasttext/gamma": [
+          {
+            "uri": "http://example.org/topic/gamma",
+            "label": "Gamma",
+            "notation": "C",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/delta",
+            "label": "Delta",
+            "notation": "D",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/beta",
+            "label": "Beta",
+            "notation": "B",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/alpha",
+            "label": "Alpha",
+            "notation": "A",
+            "score": 0.25
+          }
+        ],
+        "fasttext/delta": [
+          {
+            "uri": "http://example.org/topic/delta",
+            "label": "Delta",
+            "notation": "D",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/gamma",
+            "label": "Gamma",
+            "notation": "C",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/alpha",
+            "label": "Alpha",
+            "notation": "A",
+            "score": 0.25
+          },
+          {
+            "uri": "http://example.org/topic/beta",
+            "label": "Beta",
+            "notation": "B",
+            "score": 0.25
+          }
+        ]
+      },
+      "suggest_latency_ms": {
+        "tfidf/alpha": {
+          "samples": [
+            1372.109,
+            858.517,
+            848.532
+          ],
+          "median": 858.517
+        },
+        "tfidf/beta": {
+          "samples": [
+            809.29,
+            840.701,
+            799.612
+          ],
+          "median": 809.29
+        },
+        "tfidf/gamma": {
+          "samples": [
+            805.711,
+            799.379,
+            796.043
+          ],
+          "median": 799.379
+        },
+        "tfidf/delta": {
+          "samples": [
+            799.503,
+            814.484,
+            838.495
+          ],
+          "median": 814.484
+        },
+        "fasttext/alpha": {
+          "samples": [
+            1220.495,
+            1249.949,
+            1432.11
+          ],
+          "median": 1249.949
+        },
+        "fasttext/beta": {
+          "samples": [
+            1235.781,
+            1175.049,
+            1116.589
+          ],
+          "median": 1175.049
+        },
+        "fasttext/gamma": {
+          "samples": [
+            1147.07,
+            1137.389,
+            1246.807
+          ],
+          "median": 1147.07
+        },
+        "fasttext/delta": {
+          "samples": [
+            1218.841,
+            1209.061,
+            1182.462
+          ],
+          "median": 1209.061
+        }
+      },
+      "suggest_returncodes": {
+        "tfidf/alpha": [
+          0,
+          0,
+          0
+        ],
+        "tfidf/beta": [
+          0,
+          0,
+          0
+        ],
+        "tfidf/gamma": [
+          0,
+          0,
+          0
+        ],
+        "tfidf/delta": [
+          0,
+          0,
+          0
+        ],
+        "fasttext/alpha": [
+          0,
+          0,
+          0
+        ],
+        "fasttext/beta": [
+          0,
+          0,
+          0
+        ],
+        "fasttext/gamma": [
+          0,
+          0,
+          0
+        ],
+        "fasttext/delta": [
+          0,
+          0,
+          0
+        ]
+      },
+      "artifact_sizes": {
+        "udc-fasttext-ja/fasttext-model": 1024020180,
+        "udc-fasttext-ja/fasttext-train.txt": 674,
+        "udc-tfidf-ja/tfidf-matrix.npz": 1182,
+        "udc-tfidf-ja/vectorizer": 1415
+      }
+    }
+  },
+  "crossload_3_13_artifacts_in_3_14": {
+    "python": "3.14.7-crossload",
+    "packages": {
+      "annif": "1.4.1",
+      "numpy": "2.3.5",
+      "scipy": "1.16.3",
+      "scikit-learn": "1.7.2",
+      "fasttext-numpy2": "0.10.4"
+    },
+    "suggestions": {
+      "tfidf/alpha": [
+        {
+          "uri": "http://example.org/topic/alpha",
+          "label": "Alpha",
+          "notation": "A",
+          "score": 0.8625
+        }
+      ],
+      "tfidf/beta": [
+        {
+          "uri": "http://example.org/topic/beta",
+          "label": "Beta",
+          "notation": "B",
+          "score": 0.9345
+        }
+      ],
+      "tfidf/gamma": [
+        {
+          "uri": "http://example.org/topic/gamma",
+          "label": "Gamma",
+          "notation": "C",
+          "score": 0.8765
+        },
+        {
+          "uri": "http://example.org/topic/alpha",
+          "label": "Alpha",
+          "notation": "A",
+          "score": 0.0444
+        }
+      ],
+      "tfidf/delta": [
+        {
+          "uri": "http://example.org/topic/delta",
+          "label": "Delta",
+          "notation": "D",
+          "score": 0.8715
+        }
+      ],
+      "fasttext/alpha": [
+        {
+          "uri": "http://example.org/topic/alpha",
+          "label": "Alpha",
+          "notation": "A",
+          "score": 0.25
+        },
+        {
+          "uri": "http://example.org/topic/beta",
+          "label": "Beta",
+          "notation": "B",
+          "score": 0.25
+        },
+        {
+          "uri": "http://example.org/topic/delta",
+          "label": "Delta",
+          "notation": "D",
+          "score": 0.25
+        },
+        {
+          "uri": "http://example.org/topic/gamma",
+          "label": "Gamma",
+          "notation": "C",
+          "score": 0.25
+        }
+      ],
+      "fasttext/beta": [
+        {
+          "uri": "http://example.org/topic/beta",
+          "label": "Beta",
+          "notation": "B",
+          "score": 0.25
+        },
+        {
+          "uri": "http://example.org/topic/alpha",
+          "label": "Alpha",
+          "notation": "A",
+          "score": 0.25
+        },
+        {
+          "uri": "http://example.org/topic/gamma",
+          "label": "Gamma",
+          "notation": "C",
+          "score": 0.25
+        },
+        {
+          "uri": "http://example.org/topic/delta",
+          "label": "Delta",
+          "notation": "D",
+          "score": 0.25
+        }
+      ],
+      "fasttext/gamma": [
+        {
+          "uri": "http://example.org/topic/gamma",
+          "label": "Gamma",
+          "notation": "C",
+          "score": 0.25
+        },
+        {
+          "uri": "http://example.org/topic/delta",
+          "label": "Delta",
+          "notation": "D",
+          "score": 0.25
+        },
+        {
+          "uri": "http://example.org/topic/beta",
+          "label": "Beta",
+          "notation": "B",
+          "score": 0.25
+        },
+        {
+          "uri": "http://example.org/topic/alpha",
+          "label": "Alpha",
+          "notation": "A",
+          "score": 0.25
+        }
+      ],
+      "fasttext/delta": [
+        {
+          "uri": "http://example.org/topic/delta",
+          "label": "Delta",
+          "notation": "D",
+          "score": 0.25
+        },
+        {
+          "uri": "http://example.org/topic/gamma",
+          "label": "Gamma",
+          "notation": "C",
+          "score": 0.25
+        },
+        {
+          "uri": "http://example.org/topic/alpha",
+          "label": "Alpha",
+          "notation": "A",
+          "score": 0.25
+        },
+        {
+          "uri": "http://example.org/topic/beta",
+          "label": "Beta",
+          "notation": "B",
+          "score": 0.25
+        }
+      ]
+    },
+    "suggest_latency_ms": {
+      "tfidf/alpha": {
+        "samples": [
+          909.586,
+          891.666,
+          897.986
+        ],
+        "median": 897.986
+      },
+      "tfidf/beta": {
+        "samples": [
+          861.445,
+          870.373,
+          842.299
+        ],
+        "median": 861.445
+      },
+      "tfidf/gamma": {
+        "samples": [
+          798.976,
+          792.978,
+          804.015
+        ],
+        "median": 798.976
+      },
+      "tfidf/delta": {
+        "samples": [
+          782.037,
+          795.599,
+          794.643
+        ],
+        "median": 794.643
+      },
+      "fasttext/alpha": {
+        "samples": [
+          1069.782,
+          1169.423,
+          1652.933
+        ],
+        "median": 1169.423
+      },
+      "fasttext/beta": {
+        "samples": [
+          1237.932,
+          1309.35,
+          1493.459
+        ],
+        "median": 1309.35
+      },
+      "fasttext/gamma": {
+        "samples": [
+          1168.785,
+          1060.667,
+          1081.927
+        ],
+        "median": 1081.927
+      },
+      "fasttext/delta": {
+        "samples": [
+          1169.511,
+          1198.442,
+          1204.9
+        ],
+        "median": 1198.442
+      }
+    },
+    "suggest_returncodes": {
+      "tfidf/alpha": [
+        0,
+        0,
+        0
+      ],
+      "tfidf/beta": [
+        0,
+        0,
+        0
+      ],
+      "tfidf/gamma": [
+        0,
+        0,
+        0
+      ],
+      "tfidf/delta": [
+        0,
+        0,
+        0
+      ],
+      "fasttext/alpha": [
+        0,
+        0,
+        0
+      ],
+      "fasttext/beta": [
+        0,
+        0,
+        0
+      ],
+      "fasttext/gamma": [
+        0,
+        0,
+        0
+      ],
+      "fasttext/delta": [
+        0,
+        0,
+        0
+      ]
+    },
+    "artifact_sizes": {
+      "udc-fasttext-ja/fasttext-model": 1024020180,
+      "udc-fasttext-ja/fasttext-train.txt": 674,
+      "udc-tfidf-ja/tfidf-matrix.npz": 1182,
+      "udc-tfidf-ja/vectorizer": 1415
+    }
+  },
+  "comparisons": {
+    "fasttext/alpha": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 4,
+      "right_count": 4
+    },
+    "fasttext/beta": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 4,
+      "right_count": 4
+    },
+    "fasttext/delta": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 4,
+      "right_count": 4
+    },
+    "fasttext/gamma": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 4,
+      "right_count": 4
+    },
+    "tfidf/alpha": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 1,
+      "right_count": 1
+    },
+    "tfidf/beta": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 1,
+      "right_count": 1
+    },
+    "tfidf/delta": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 1,
+      "right_count": 1
+    },
+    "tfidf/gamma": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 2,
+      "right_count": 2
+    }
+  },
+  "seed_threads": {
+    "annif_fasttext_accepts_seed_config": false,
+    "binding_train_supervised_has_kwargs": true,
+    "threads_unified_by_cli_jobs": true,
+    "annif_source_seed_parameter": false,
+    "note": "Annif v1.4.1 filters FASTTEXT_PARAMS and does not expose seed; the binding accepts seed, so deterministic fastText requires a source patch and is not part of the candidate metadata-only patch.",
+    "binding_seed_call_rc": 0
+  },
+  "official_status": {
+    "issue_931": "open: upstream Python 3.14 support, no linked branch or pull request",
+    "issue_url": "https://github.com/NatLibFi/Annif/issues/931",
+    "python313_pr_url": "https://github.com/NatLibFi/Annif/pull/869",
+    "dependency_update_pr_url": "https://github.com/NatLibFi/Annif/pull/871",
+    "tfidf_pr_url": "https://github.com/NatLibFi/Annif/pull/878",
+    "fasttext_pr_url": "https://github.com/NatLibFi/Annif/pull/890"
+  },
+  "patch_candidate": {
+    "source_version": "v1.4.1",
+    "changed_files": [
+      "pyproject.toml"
+    ],
+    "changed_fields": {
+      "requires_python": ">=3.10,<3.15",
+      "numpy": ">=2.3.3,<2.4.0",
+      "scipy": ">=1.16.1,<1.17.0"
+    },
+    "source_code_changes": false,
+    "production_adoption": false,
+    "reason": "upstream 1.4.1 and current 1.4.2 still declare Python <3.14; patch is measurement-only"
+  },
+  "exact_unpatched_3_14": {
+    "uvx_rc": 1,
+    "failure_stage": "scipy==1.15.3 source build",
+    "failure_detail": "no cp314 wheel and no Fortran compiler in isolated build",
+    "pip_requires_python_rejection": true
+  },
+  "crossload_comparisons": {
+    "fasttext/alpha": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 4,
+      "right_count": 4
+    },
+    "fasttext/beta": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 4,
+      "right_count": 4
+    },
+    "fasttext/delta": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 4,
+      "right_count": 4
+    },
+    "fasttext/gamma": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 4,
+      "right_count": 4
+    },
+    "tfidf/alpha": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 1,
+      "right_count": 1
+    },
+    "tfidf/beta": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 1,
+      "right_count": 1
+    },
+    "tfidf/delta": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 1,
+      "right_count": 1
+    },
+    "tfidf/gamma": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "left_count": 2,
+      "right_count": 2
+    }
+  },
+  "aggregate": {
+    "new_train_candidate_rows_equal": true,
+    "new_train_top1_equal": true,
+    "new_train_max_score_abs_delta": 0.0,
+    "crossload_candidate_rows_equal": true,
+    "crossload_top1_equal": true,
+    "crossload_max_score_abs_delta": 0.0
+  },
+  "training_probe": {
+    "same_fixture_and_projects_cfg": true,
+    "cli_jobs": 8,
+    "commands": [
+      "annif load-vocab udc udc.csv --force -p projects.cfg",
+      "annif train udc-tfidf-ja train.jsonl --jobs 8 -p projects.cfg",
+      "annif train udc-fasttext-ja train.jsonl --jobs 8 -p projects.cfg"
+    ],
+    "runs": [
+      {
+        "runtime": "3.13.12",
+        "backend": "tfidf",
+        "returncode": 0,
+        "elapsed_ms": 2109.362
+      },
+      {
+        "runtime": "3.13.12",
+        "backend": "fasttext",
+        "returncode": 0,
+        "elapsed_ms": 1587.972
+      },
+      {
+        "runtime": "3.14.7",
+        "backend": "tfidf",
+        "returncode": 0,
+        "elapsed_ms": 2124.695
+      },
+      {
+        "runtime": "3.14.7",
+        "backend": "fasttext",
+        "returncode": 0,
+        "elapsed_ms": 1678.905
+      }
+    ],
+    "measurement_note": "single repeat per backend after warm local caches; suggestion section retains 3 repeats per query; times are comparative smoke evidence, not production capacity claims"
+  },
+  "reproducible_commands": {
+    "benchmark_script": "/tmp/chronovisor-annif-port-benchmark.py",
+    "train_timing_script": "/tmp/chronovisor-annif-train-timing.py",
+    "runtime_interpreters": {
+      "3.13": "/Users/trafficsign/.local/share/uv/python/cpython-3.13-macos-aarch64-none/bin/python3.13",
+      "3.14": "/opt/homebrew/bin/python3.14"
+    },
+    "gil_setting": "PY_GIL_DISABLED=0"
+  }
+}

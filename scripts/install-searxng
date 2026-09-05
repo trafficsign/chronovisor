@@ -3,9 +3,11 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="${0:A:h}"
 readonly PROJECT_ROOT="${SCRIPT_DIR:h}"
+CHRONOVISOR_WRAPPER_DIR="$SCRIPT_DIR"
+. "$SCRIPT_DIR/chronovisor-runtime-env"
 readonly RUNTIME_ROOT="${CHRONOVISOR_SEARXNG_ROOT:-$HOME/.local/share/chronovisor/searxng}"
 readonly SOURCE_ROOT="$RUNTIME_ROOT/source"
-readonly VENV="$RUNTIME_ROOT/.venv"
+readonly VENV="$RUNTIME_ROOT/.venv-3.14"
 readonly CONFIG_ROOT="$HOME/.chronovisor/runtime/searxng"
 readonly LAUNCH_AGENT="$HOME/.chronovisor/runtime/launchd-sources/com.trafficsign.chronovisor-searxng.plist"
 readonly REVISION="ef8f6470e0473a1548f175217aaa7b9346ce6973"
@@ -27,12 +29,18 @@ fi
 /usr/bin/git -C "$SOURCE_ROOT" checkout --detach "$REVISION"
 
 if [[ ! -x "$VENV/bin/python" ]]; then
-  "$UV" venv --python 3.13 "$VENV"
+  "$UV" venv --python "$CHRONOVISOR_PYTHON" "$VENV"
+fi
+constraint_args=()
+if [[ -z "${UV_CONSTRAINT:-}" && -f "$CHRONOVISOR_ROOT/runtime/dependency-constraints/chronovisor-searxng.txt" ]]; then
+  constraint_args=(--constraints "$CHRONOVISOR_ROOT/runtime/dependency-constraints/chronovisor-searxng.txt")
 fi
 "$UV" pip install \
+  "${constraint_args[@]}" \
   --python "$VENV/bin/python" \
   setuptools pyyaml msgspec typing-extensions pybind11 granian
 "$UV" pip install \
+  "${constraint_args[@]}" \
   --python "$VENV/bin/python" \
   --no-build-isolation \
   --editable "$SOURCE_ROOT"

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Backfill summary/recall_questions frontmatter for existing wiki pages."""
 
 from __future__ import annotations

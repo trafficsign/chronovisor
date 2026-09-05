@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Generate a deterministic repository-refactor inventory.
 
 The report intentionally records candidates instead of declaring helpers or

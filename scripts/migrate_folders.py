@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Diagnose legacy folder assignments; semantic moves are disabled."""
 
 import json

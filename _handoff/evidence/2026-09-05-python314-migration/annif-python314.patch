@@ -1,0 +1,11 @@
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -7 +7 @@
+-requires-python = ">=3.10,<3.14"
++requires-python = ">=3.10,<3.15"
+@@ -41 +41 @@
+-    "numpy~=2.2.6",
++    "numpy>=2.3.3,<2.4.0",
+@@ -46 +46 @@
+-    "scipy~=1.15.3",
++    "scipy>=1.16.1,<1.17.0",

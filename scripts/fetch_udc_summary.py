@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Build a complete, licensed UDC Summary package from the official website.
 
 The legacy UDC Summary linked-data endpoint is temporarily unavailable, but the

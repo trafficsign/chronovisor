@@ -123,6 +123,34 @@ def test_library_evidence_invokes_canonical_module_directly() -> None:
     assert "chronovisor-lab classification-library-pilot" not in wrapper
 
 
+def test_shared_runtime_rejects_other_versions_and_disabled_gil(tmp_path: Path) -> None:
+    python = tmp_path / "python"
+    for version, gil_enabled in (((3, 13), True), ((3, 14), False)):
+        python.write_text(
+            f"#!{sys.executable}\nimport sys\n"
+            f"sys.version_info = {version!r}\n"
+            f"sys._is_gil_enabled = lambda: {gil_enabled!r}\n"
+            "exec(sys.argv[2])\n",
+            encoding="utf-8",
+        )
+        python.chmod(0o755)
+        result = subprocess.run(
+            [str(SCRIPTS / "chronovisor-dashboard")],
+            capture_output=True,
+            text=True,
+            env={
+                "HOME": str(tmp_path),
+                "PATH": "/usr/bin:/bin",
+                "CHRONOVISOR_REPO_ROOT": str(ROOT),
+                "CHRONOVISOR_UVX": sys.executable,
+                "CHRONOVISOR_PYTHON": str(python),
+                "CHRONOVISOR_RUNTIME_SOURCE": "unused",
+            },
+        )
+        assert result.returncode == 64
+        assert "standard GIL Python 3.14 executable required" in result.stderr
+
+
 def test_uvx_wrappers_remain_executable() -> None:
     executable_bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
 
@@ -130,10 +158,15 @@ def test_uvx_wrappers_remain_executable() -> None:
         assert (SCRIPTS / name).stat().st_mode & executable_bits == executable_bits
 
 
-def test_searxng_and_annif_remain_on_their_intentional_python_313_paths() -> None:
+def test_searxng_uses_resolved_python_314_and_annif_keeps_supported_runtime() -> None:
     assert "chronovisor-searxng" not in UVX_WRAPPERS
     assert RUNTIME_COMMAND not in _text("chronovisor-searxng")
-    assert '--python 3.13 "$VENV"' in _text("install-searxng")
+    installer = _text("install-searxng")
+    assert '. "$SCRIPT_DIR/chronovisor-runtime-env"' in installer
+    assert '--python "$CHRONOVISOR_PYTHON" "$VENV"' in installer
+    assert 'readonly VENV="$RUNTIME_ROOT/.venv-3.14"' in installer
+    assert 'readonly VENV="$RUNTIME_ROOT/.venv-3.14"' in _text("chronovisor-searxng")
+    assert "dependency-constraints/chronovisor-searxng.txt" in installer
 
     annif = (ROOT / "src/chronovisor/lab/classification_annif.py").read_text(
         encoding="utf-8"

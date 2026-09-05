@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Capture and compare search-pipeline characterization snapshots.
 
 The snapshot intentionally excludes latency and timestamps. It records exact

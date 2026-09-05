@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Run the offline Recall R3 workset durability/performance gate.
 
 The default path takes a production root, creates the existing forced APFS

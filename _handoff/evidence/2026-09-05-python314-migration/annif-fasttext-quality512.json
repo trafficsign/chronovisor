@@ -1,0 +1,354 @@
+{
+  "schema": "chronovisor.annif-fasttext-existing-artifact-crossload.v1",
+  "runtime": {
+    "training": "CPython 3.13.12",
+    "crossload": "CPython 3.14.7",
+    "py_gil_disabled": "0",
+    "annif": "1.4.1",
+    "fasttext_binding": "fasttext-numpy2 0.10.4",
+    "numpy_313": "2.2.6",
+    "scipy_313": "1.15.3",
+    "numpy_314": "2.3.5",
+    "scipy_314": "1.16.3"
+  },
+  "fixture": {
+    "documents": 512,
+    "categories": 4,
+    "documents_per_category": 128,
+    "train_sha256": "c605b94b3284cccaa30af07d6c83fd838d8cabe183243f880e89eadfd44dc2bd",
+    "config": "Chronovisor write_projects equivalent; dim=128 lr=0.25 epoch=15 loss=hs minn=2 maxn=6 minCount=1 wordNgrams=2 thread=8 chunksize=24 limit=20",
+    "jobs": 8
+  },
+  "training": {
+    "runtime": "3.13.12",
+    "project": "udc-fasttext-ja",
+    "returncode": 0,
+    "new_3_14_training": false,
+    "artifact_sizes": {
+      "fasttext_model_bytes": 1024046075,
+      "fasttext_train_bytes": 226988
+    }
+  },
+  "existing_artifact_copy": {
+    "source_runtime": "3.13.12",
+    "target_runtime": "3.14.7",
+    "source_model_sha256": "6c6855f3da87b5adb657ee48b9a5b2f01cd57e002b10a96c069d5e781fa5d8e8",
+    "copied_model_sha256": "6c6855f3da87b5adb657ee48b9a5b2f01cd57e002b10a96c069d5e781fa5d8e8",
+    "byte_identical": true
+  },
+  "baseline_3_13": {
+    "alpha": [
+      {
+        "rank": 1,
+        "uri": "http://example.org/topic/alpha",
+        "label": "Alpha",
+        "notation": "A",
+        "score": 0.962
+      },
+      {
+        "rank": 2,
+        "uri": "http://example.org/topic/beta",
+        "label": "Beta",
+        "notation": "B",
+        "score": 0.035
+      },
+      {
+        "rank": 3,
+        "uri": "http://example.org/topic/gamma",
+        "label": "Gamma",
+        "notation": "C",
+        "score": 0.0016
+      },
+      {
+        "rank": 4,
+        "uri": "http://example.org/topic/delta",
+        "label": "Delta",
+        "notation": "D",
+        "score": 0.0014
+      }
+    ],
+    "beta": [
+      {
+        "rank": 1,
+        "uri": "http://example.org/topic/beta",
+        "label": "Beta",
+        "notation": "B",
+        "score": 0.9401
+      },
+      {
+        "rank": 2,
+        "uri": "http://example.org/topic/alpha",
+        "label": "Alpha",
+        "notation": "A",
+        "score": 0.0461
+      },
+      {
+        "rank": 3,
+        "uri": "http://example.org/topic/gamma",
+        "label": "Gamma",
+        "notation": "C",
+        "score": 0.009
+      },
+      {
+        "rank": 4,
+        "uri": "http://example.org/topic/delta",
+        "label": "Delta",
+        "notation": "D",
+        "score": 0.0049
+      }
+    ],
+    "gamma": [
+      {
+        "rank": 1,
+        "uri": "http://example.org/topic/gamma",
+        "label": "Gamma",
+        "notation": "C",
+        "score": 0.9433
+      },
+      {
+        "rank": 2,
+        "uri": "http://example.org/topic/delta",
+        "label": "Delta",
+        "notation": "D",
+        "score": 0.0531
+      },
+      {
+        "rank": 3,
+        "uri": "http://example.org/topic/beta",
+        "label": "Beta",
+        "notation": "B",
+        "score": 0.0026
+      },
+      {
+        "rank": 4,
+        "uri": "http://example.org/topic/alpha",
+        "label": "Alpha",
+        "notation": "A",
+        "score": 0.0011
+      }
+    ],
+    "delta": [
+      {
+        "rank": 1,
+        "uri": "http://example.org/topic/delta",
+        "label": "Delta",
+        "notation": "D",
+        "score": 0.9271
+      },
+      {
+        "rank": 2,
+        "uri": "http://example.org/topic/gamma",
+        "label": "Gamma",
+        "notation": "C",
+        "score": 0.0384
+      },
+      {
+        "rank": 3,
+        "uri": "http://example.org/topic/beta",
+        "label": "Beta",
+        "notation": "B",
+        "score": 0.0225
+      },
+      {
+        "rank": 4,
+        "uri": "http://example.org/topic/alpha",
+        "label": "Alpha",
+        "notation": "A",
+        "score": 0.0119
+      }
+    ]
+  },
+  "crossload_3_14": {
+    "alpha": [
+      {
+        "rank": 1,
+        "uri": "http://example.org/topic/alpha",
+        "label": "Alpha",
+        "notation": "A",
+        "score": 0.962
+      },
+      {
+        "rank": 2,
+        "uri": "http://example.org/topic/beta",
+        "label": "Beta",
+        "notation": "B",
+        "score": 0.035
+      },
+      {
+        "rank": 3,
+        "uri": "http://example.org/topic/gamma",
+        "label": "Gamma",
+        "notation": "C",
+        "score": 0.0016
+      },
+      {
+        "rank": 4,
+        "uri": "http://example.org/topic/delta",
+        "label": "Delta",
+        "notation": "D",
+        "score": 0.0014
+      }
+    ],
+    "beta": [
+      {
+        "rank": 1,
+        "uri": "http://example.org/topic/beta",
+        "label": "Beta",
+        "notation": "B",
+        "score": 0.9401
+      },
+      {
+        "rank": 2,
+        "uri": "http://example.org/topic/alpha",
+        "label": "Alpha",
+        "notation": "A",
+        "score": 0.0461
+      },
+      {
+        "rank": 3,
+        "uri": "http://example.org/topic/gamma",
+        "label": "Gamma",
+        "notation": "C",
+        "score": 0.009
+      },
+      {
+        "rank": 4,
+        "uri": "http://example.org/topic/delta",
+        "label": "Delta",
+        "notation": "D",
+        "score": 0.0049
+      }
+    ],
+    "gamma": [
+      {
+        "rank": 1,
+        "uri": "http://example.org/topic/gamma",
+        "label": "Gamma",
+        "notation": "C",
+        "score": 0.9433
+      },
+      {
+        "rank": 2,
+        "uri": "http://example.org/topic/delta",
+        "label": "Delta",
+        "notation": "D",
+        "score": 0.0531
+      },
+      {
+        "rank": 3,
+        "uri": "http://example.org/topic/beta",
+        "label": "Beta",
+        "notation": "B",
+        "score": 0.0026
+      },
+      {
+        "rank": 4,
+        "uri": "http://example.org/topic/alpha",
+        "label": "Alpha",
+        "notation": "A",
+        "score": 0.0011
+      }
+    ],
+    "delta": [
+      {
+        "rank": 1,
+        "uri": "http://example.org/topic/delta",
+        "label": "Delta",
+        "notation": "D",
+        "score": 0.9271
+      },
+      {
+        "rank": 2,
+        "uri": "http://example.org/topic/gamma",
+        "label": "Gamma",
+        "notation": "C",
+        "score": 0.0384
+      },
+      {
+        "rank": 3,
+        "uri": "http://example.org/topic/beta",
+        "label": "Beta",
+        "notation": "B",
+        "score": 0.0225
+      },
+      {
+        "rank": 4,
+        "uri": "http://example.org/topic/alpha",
+        "label": "Alpha",
+        "notation": "A",
+        "score": 0.0119
+      }
+    ]
+  },
+  "comparisons": {
+    "alpha": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "baseline_top1_correct": true,
+      "crossload_top1_correct": true,
+      "baseline_top1_score_gt_0_5": true,
+      "crossload_top1_score_gt_0_5": true
+    },
+    "beta": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "baseline_top1_correct": true,
+      "crossload_top1_correct": true,
+      "baseline_top1_score_gt_0_5": true,
+      "crossload_top1_score_gt_0_5": true
+    },
+    "gamma": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "baseline_top1_correct": true,
+      "crossload_top1_correct": true,
+      "baseline_top1_score_gt_0_5": true,
+      "crossload_top1_score_gt_0_5": true
+    },
+    "delta": {
+      "candidate_rows_equal": true,
+      "top1_equal": true,
+      "score_max_abs_delta": 0.0,
+      "baseline_top1_correct": true,
+      "crossload_top1_correct": true,
+      "baseline_top1_score_gt_0_5": true,
+      "crossload_top1_score_gt_0_5": true
+    }
+  },
+  "returncodes": {
+    "alpha": {
+      "baseline_rc": 0,
+      "crossload_rc": 0
+    },
+    "beta": {
+      "baseline_rc": 0,
+      "crossload_rc": 0
+    },
+    "gamma": {
+      "baseline_rc": 0,
+      "crossload_rc": 0
+    },
+    "delta": {
+      "baseline_rc": 0,
+      "crossload_rc": 0
+    }
+  },
+  "aggregate": {
+    "all_baseline_top1_correct": true,
+    "all_crossload_top1_correct": true,
+    "all_baseline_top1_score_gt_0_5": true,
+    "all_crossload_top1_score_gt_0_5": true,
+    "all_candidate_rows_equal": true,
+    "all_top1_equal": true,
+    "max_score_abs_delta": 0.0
+  },
+  "limitations": [
+    "Synthetic 512-document/4-category corpus only; no real UDC quality claim.",
+    "Annif v1.4.1 does not expose fastText seed; jobs=8 was fixed but training reproducibility is not guaranteed in general.",
+    "Only 3.13 training -> 3.14 load/suggest was exercised; no 3.14 retraining in this focused probe.",
+    "No production files, settings, or existing Annif artifacts were changed."
+  ]
+}

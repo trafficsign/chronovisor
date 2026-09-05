@@ -36,7 +36,7 @@ def test_every_console_entry_point_has_a_docstring() -> None:
 def test_quality_tools_are_scoped_to_the_staged_baseline() -> None:
     project = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())
 
-    assert project["tool"]["ruff"]["target-version"] == "py311"
+    assert project["tool"]["ruff"]["target-version"] == "py314"
     assert project["tool"]["ruff"]["lint"]["select"] == [
         "E4",
         "E7",

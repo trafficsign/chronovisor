@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Run real local models through representative production workflow seams."""
 
 from __future__ import annotations

@@ -20,7 +20,7 @@ jobs:
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
-          python-version: "3.14"
+          python-version: "3.14.7"
       - name: Set isolated Chronovisor root
         shell: bash
         run: printf 'CHRONOVISOR_ROOT=%s\n' "$RUNNER_TEMP/chronovisor-python314-test-root" >> "$GITHUB_ENV"

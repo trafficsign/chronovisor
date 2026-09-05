@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Chronovisor に既存ページのリンクをバックフィル。
 
 古いシステムから取り込んだ orphan ページに対して機械的に「## 関連」セクションを追加する。

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Provider-free, fail-closed readiness evidence for Recall R8/P9.
 
 This program only observes a source checkout and a bounded, read-only

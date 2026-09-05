@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3.14
 """Package-independent observer for the Chronovisor autonomy watchdog.
 
 This file intentionally imports only the Python standard library.  The
@@ -19,7 +19,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -570,7 +570,7 @@ def inspect(
         observed = datetime.fromisoformat(wall_time.replace("Z", "+00:00"))
     except ValueError:
         return {"status": "invalid", "error": "heartbeat wall time is invalid"}
-    age = (_utc(now) - observed.astimezone(timezone.utc)).total_seconds()
+    age = (_utc(now) - observed.astimezone(UTC)).total_seconds()
     if age < -300:
         status = "clock_regression"
     elif age > max_age_seconds:
@@ -627,10 +627,10 @@ def append_incident(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _utc(value: datetime | None = None) -> datetime:
-    current = value or datetime.now(timezone.utc)
+    current = value or datetime.now(UTC)
     if current.tzinfo is None:
-        return current.replace(tzinfo=timezone.utc)
-    return current.astimezone(timezone.utc)
+        return current.replace(tzinfo=UTC)
+    return current.astimezone(UTC)
 
 
 def _threshold_transition(

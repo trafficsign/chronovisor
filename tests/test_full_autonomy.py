@@ -424,8 +424,7 @@ def test_independent_observer_has_no_package_import_and_cross_checks_main(
     source = observer_path.read_text(encoding="utf-8")
     assert "import chronovisor" not in source
     assert "from chronovisor" not in source
-    assert "from datetime import UTC" not in source
-    assert "timezone.utc" in source
+    assert source.startswith("#!/usr/bin/env python3.14\n")
     spec = importlib.util.spec_from_file_location(
         "deadman_observer_test", observer_path
     )

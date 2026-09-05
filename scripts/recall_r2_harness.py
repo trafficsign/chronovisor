@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Measure the production-scale Recall R2 incremental catalog contract.
 
 The harness is deliberately clone-only.  It never writes the production root,

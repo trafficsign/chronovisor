@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Obsolete local-model tag backfill (semantic writes disabled).
 
 Walks every untagged page in ``~/.chronovisor/pages/``, asks the LLM for tags

@@ -20,7 +20,7 @@ jobs:
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
-          python-version: "3.13"
+          python-version: "3.14.7"
       - name: Set isolated Chronovisor root
         shell: bash
         run: printf 'CHRONOVISOR_ROOT=%s\n' "$RUNNER_TEMP/chronovisor-test-root" >> "$GITHUB_ENV"
@@ -74,7 +74,7 @@ jobs:
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
-          python-version: "3.13"
+          python-version: "3.14.7"
       - name: Set isolated Chronovisor root
         shell: bash
         run: printf 'CHRONOVISOR_ROOT=%s\n' "$RUNNER_TEMP/chronovisor-hnsw-test-root" >> "$GITHUB_ENV"
@@ -91,13 +91,9 @@ jobs:
           tests/test_semantic_index.py::test_hnsw_generation_proposes_then_full_vector_rescores
 
   semantic-python-smoke:
-    name: Semantic smoke (Python ${{ matrix.python-version }})
+    name: Semantic smoke (Python 3.14)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12"]
     env:
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
@@ -105,10 +101,10 @@ jobs:
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.14.7"
       - name: Set isolated Chronovisor root
         shell: bash
-        run: printf 'CHRONOVISOR_ROOT=%s\n' "$RUNNER_TEMP/chronovisor-semantic-${{ matrix.python-version }}-test-root" >> "$GITHUB_ENV"
+        run: printf 'CHRONOVISOR_ROOT=%s\n' "$RUNNER_TEMP/chronovisor-semantic-314-test-root" >> "$GITHUB_ENV"
       - run: uv sync --frozen
       - name: Install usearch for complete semantic smoke
         run: >-

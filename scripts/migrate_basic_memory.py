@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Obsolete Basic Memory migration converter (direct writes disabled).
 
 Converts frontmatter from Basic Memory format to Wiki format:

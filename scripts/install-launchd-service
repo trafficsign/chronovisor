@@ -14,7 +14,7 @@ SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd -P)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 LAUNCH_AGENT="$HOME/.chronovisor/runtime/launchd-sources/com.trafficsign.chronovisor-$SERVICE.plist"
 SERVICE_MANAGER="${CHRONOVISOR_SERVICE_MANAGER:-$PROJECT_ROOT/scripts/chronovisor-macos-services}"
-PYTHON="${CHRONOVISOR_PYTHON:-python3}"
+PYTHON="${CHRONOVISOR_PYTHON:-python3.14}"
 readonly SERVICE SCRIPT_DIR PROJECT_ROOT LAUNCH_AGENT SERVICE_MANAGER PYTHON
 
 mkdir -p \

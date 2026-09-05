@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Generate and verify repository architecture baselines and exception ledgers."""
 
 from __future__ import annotations

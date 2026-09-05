@@ -3936,7 +3936,7 @@ def _run_ingest_sharded_review(
     source_key: str,
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
     authority: dict[str, Any],
-    frontier_budget: "_FrontierCallBudget | None" = None,
+    frontier_budget: _FrontierCallBudget | None = None,
 ) -> dict[str, Any]:
     return _run_ingest_sharded_review_core(
         plan,
@@ -4279,7 +4279,7 @@ def _review_and_apply_ingest_operations(
     local_disposition: str = "operations_available",
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     force_frontier_review: bool = False,
-    frontier_budget: "_FrontierCallBudget | None" = None,
+    frontier_budget: _FrontierCallBudget | None = None,
     shard_continuation: _IngestReviewShardContinuation | None = None,
     allow_empty_shard_continuation: bool = False,
     continuation_reseed_from_sha256: str | None = None,
@@ -4775,7 +4775,7 @@ def _review_exact_ingest_repair_once(
     raw_keywords: list[str] | None,
     source_raw: str | None,
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
-    frontier_budget: "_FrontierCallBudget | None",
+    frontier_budget: _FrontierCallBudget | None,
     triage_plan: list[dict] | None = None,
     failed_operation_specs: list[dict] | None = None,
     local_disposition: str = "operations_available",
@@ -5007,7 +5007,7 @@ def _complete_ingest_run(
     frontier_result: dict[str, Any],
     failed_op_specs: list[dict],
     failed_ops: list[str],
-    on_complete: "callable | None",
+    on_complete: Callable[[], Any] | None,
     frontier_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
 ) -> None:
     """Persist one authorized terminal result and publish derived status."""
@@ -5154,7 +5154,7 @@ def _review_generated_operations(
     failed_operation_specs: list[dict],
     reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
     frontier_feedback: str | None,
-    frontier_budget: "_FrontierCallBudget",
+    frontier_budget: _FrontierCallBudget,
     convergence_attempt: int,
 ) -> tuple[dict[str, Any] | None, str, str | None]:
     local_disposition = (
@@ -5200,8 +5200,8 @@ def _review_generated_operations(
 def run_ingest(
     content: str,
     job_id: str,
-    on_complete: "callable | None" = None,
-    on_finally: "callable | None" = None,
+    on_complete: Callable[[], Any] | None = None,
+    on_finally: Callable[..., Any] | None = None,
     *,
     metadata: dict | None = None,
     frontier_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
@@ -5689,8 +5689,8 @@ def run_ingest(
 
 def start_ingest(
     content: str,
-    on_complete: "callable | None" = None,
-    on_finally: "callable | None" = None,
+    on_complete: Callable[[], Any] | None = None,
+    on_finally: Callable[..., Any] | None = None,
     *,
     metadata: dict | None = None,
 ) -> str:

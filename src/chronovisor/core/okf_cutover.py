@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Literal, TypeVar
+from typing import Literal
 
 from chronovisor.core.canonical_json import canonical_json_line_bytes_strict
 from chronovisor.core.durable_state import (
@@ -52,7 +52,6 @@ _RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _MANIFEST_MAX_BYTES = 64 * 1024 * 1024
 _MISSING = object()
-_Value = TypeVar("_Value")
 _MOVE_NAMES = (
     "backup-pages",
     "backup-system",
@@ -3581,7 +3580,7 @@ def _relative(value: object) -> str:
     return path.as_posix()
 
 
-def _put(target: dict[str, _Value], key: str, value: _Value) -> None:
+def _put[Value](target: dict[str, Value], key: str, value: Value) -> None:
     if key in target:
         raise ValueError(f"duplicate migration manifest path: {key}")
     target[key] = value

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Fail-closed, receipt-only formal validator for a real Recall R7/P8 rollout.
 
 It never calls a provider/service/browser or changes rollout state. A passing

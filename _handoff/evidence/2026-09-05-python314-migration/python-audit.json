@@ -1,0 +1,85 @@
+{
+  "baseline_commit": "f794b1dcfedc6bc796f6d18af69f4b9f47b2095d",
+  "services_before": [
+    {
+      "label": "com.trafficsign.chronovisor-dashboard.managed-v2",
+      "version": "3.14.7",
+      "executable": "/Users/trafficsign/.cache/uv/archive-v0/b75Ow2vGRyoU6Ls3D4Xg9/bin/python",
+      "base_executable": "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+      "gil_enabled": true,
+      "free_threaded_build": false
+    },
+    {
+      "label": "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+      "version": "3.14.7",
+      "executable": "/Users/trafficsign/.cache/uv/archive-v0/WiQNWRZe7GNHH8oKk8zFC/bin/python",
+      "base_executable": "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+      "gil_enabled": true,
+      "free_threaded_build": false
+    },
+    {
+      "label": "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+      "version": "3.14.7",
+      "executable": "/Users/trafficsign/.cache/uv/archive-v0/xW74QZWl3sF7xLlZWlqFM/bin/python",
+      "base_executable": "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+      "gil_enabled": true,
+      "free_threaded_build": false
+    },
+    {
+      "label": "com.trafficsign.chronovisor-semantic.managed-v2",
+      "version": "3.14.7",
+      "executable": "/Users/trafficsign/.cache/uv/archive-v0/CcrSJt3ATtZ9BanEheHnE/bin/python",
+      "base_executable": "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+      "gil_enabled": true,
+      "free_threaded_build": false
+    },
+    {
+      "label": "com.trafficsign.chronovisor-reranker.managed-v2",
+      "version": "3.14.7",
+      "executable": "/Users/trafficsign/.cache/uv/archive-v0/k_VObmrGbyOy16iOmrCci/bin/python",
+      "base_executable": "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+      "gil_enabled": true,
+      "free_threaded_build": false
+    },
+    {
+      "label": "com.trafficsign.chronovisor-converge.managed-v2",
+      "version": "3.14.7",
+      "executable": "/Users/trafficsign/.cache/uv/archive-v0/b75Ow2vGRyoU6Ls3D4Xg9/bin/python",
+      "base_executable": "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+      "gil_enabled": true,
+      "free_threaded_build": false
+    }
+  ],
+  "development": {
+    "version": "3.14.7",
+    "executable": "/Users/trafficsign/projects/personal/chronovisor/.venv/bin/python",
+    "base_executable": "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+    "gil_enabled": true,
+    "free_threaded_build": false
+  },
+  "deadman_before": {
+    "shebang": "#!/usr/bin/python3",
+    "python": "Python 3.9.6"
+  },
+  "ci_before": [
+    "3.11",
+    "3.12",
+    "3.13",
+    "3.14"
+  ],
+  "ci_after": [
+    "3.14.7"
+  ],
+  "annif_before": "3.13",
+  "annif_migration": "isolated metadata patch and existing-model cross-load verified; production remains 3.13",
+  "omlx_bundled_python": "3.11",
+  "omlx_modified": false,
+  "ci_distribution": "https://github.com/astral-sh/python-build-standalone/releases/tag/20260901",
+  "immutable_history_verifier": {
+    "path": "scripts/architecture_migrations.py",
+    "bytes_unchanged": true,
+    "invocation": "uv run --frozen python scripts/architecture_migrations.py",
+    "python": "3.14.7",
+    "reason": "The migration receipt requires the complete original verifier bytes, including its shebang."
+  }
+}
