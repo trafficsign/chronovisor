@@ -27,7 +27,7 @@ from chronovisor.core.canonical_document import (
 from chronovisor.core.search_types import ScoredPage, tokenize
 from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR, page_id_from_path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 VALID_PAGE_TYPES = {
     "knowledge",
     "reference",
@@ -114,6 +114,10 @@ class LexicalIndex:
         self._persistent = False
         self._last_scan = 0.0
         self._lock = threading.RLock()
+        self._snapshot_generation: int | None = None
+        self._snapshot_available = False
+        self._snapshot_error: str | None = None
+        self._snapshot_signature: tuple[int, ...] | None = None
 
     def _open(self) -> sqlite3.Connection:
         read_only = os.environ.get("CHRONOVISOR_READ_ONLY") == "1"
@@ -173,7 +177,21 @@ class LexicalIndex:
                 """
             ).fetchone()
         )
-        if current not in (0, SCHEMA_VERSION):
+        managed_projection = bool(
+            connection.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table'
+                  AND name IN ('pages', 'anchors', 'terms', 'postings', 'projection_meta')
+                LIMIT 1
+                """
+            ).fetchone()
+        )
+        if current == 0 and managed_projection:
+            # An unversioned legacy ``pages`` table can have a shape that is
+            # incompatible with the current projection.  Treat it as a
+            # disposable cache and rebuild from canonical pages instead of
+            # leaving user_version=8 on a half-migrated schema.
             connection.executescript(
                 """
                 DROP TABLE IF EXISTS documents;
@@ -182,6 +200,19 @@ class LexicalIndex:
                 DROP TABLE IF EXISTS term_stats;
                 DROP TABLE IF EXISTS terms;
                 DROP TABLE IF EXISTS pages;
+                DROP TABLE IF EXISTS projection_meta;
+                """
+            )
+        elif current not in (0, SCHEMA_VERSION):
+            connection.executescript(
+                """
+                DROP TABLE IF EXISTS documents;
+                DROP TABLE IF EXISTS anchors;
+                DROP TABLE IF EXISTS postings;
+                DROP TABLE IF EXISTS term_stats;
+                DROP TABLE IF EXISTS terms;
+                DROP TABLE IF EXISTS pages;
+                DROP TABLE IF EXISTS projection_meta;
                 """
             )
         else:
@@ -231,6 +262,10 @@ class LexicalIndex:
                 PRIMARY KEY (term_id, page_ordinal)
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS postings_page_idx ON postings(page_ordinal);
+            CREATE TABLE IF NOT EXISTS projection_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             PRAGMA user_version={SCHEMA_VERSION};
             """
         )
@@ -238,11 +273,276 @@ class LexicalIndex:
         if legacy_projection:
             connection.execute("VACUUM")
 
+    def _writer_snapshot(
+        self,
+    ) -> tuple[bool, int | None, dict[str, tuple[int, int, str, str, str]] | None]:
+        """Read and validate sibling metadata without scanning canonical pages.
+
+        Production projections live under ``<root>/.index`` and must have a
+        coherent :class:`IndexStore` snapshot.  The direct ``lexical.sqlite``
+        paths used by legacy unit fixtures remain standalone projections with
+        no sibling metadata, so they retain the old generation-less contract.
+        """
+
+        index_dir = self.path.parent
+        if index_dir.name != ".index":
+            return True, None, None
+        try:
+            from chronovisor.core.index_store import IndexStore, get_store
+            from chronovisor.core.store import CHRONOVISOR_ROOT
+
+            if index_dir == Path(CHRONOVISOR_ROOT) / ".index":
+                # Search normally refreshes the process-wide store first;
+                # reuse its validated snapshot instead of parsing both JSON
+                # files a second time in the same process.
+                metadata = get_store()
+            else:
+                metadata = IndexStore(root=index_dir.parent, _index_dir=index_dir)
+            if not metadata.load_existing():
+                return False, None, None
+            generation = metadata.snapshot_generation
+            if generation is None:
+                return False, None, None
+            stable_entries = {
+                page_id: (
+                    entry.mtime_ns,
+                    entry.size,
+                    entry.uid,
+                    entry.status,
+                    entry.superseded_by,
+                )
+                for page_id, entry in metadata._entries.items()
+                if entry.status == "stable"
+            }
+        except (OSError, RuntimeError, ValueError):
+            return False, None, None
+        return True, generation, stable_entries
+
+    def _writer_generation(self) -> tuple[bool, int | None]:
+        ok, generation, _page_ids = self._writer_snapshot()
+        return ok, generation
+
+    def _snapshot_files_signature(self) -> tuple[int, ...] | None:
+        """Return cheap stamps for the projection and optional writer files."""
+
+        paths = [
+            self.path,
+            Path(f"{self.path}-wal"),
+            Path(f"{self.path}-shm"),
+            self.path.parent / "pages.json",
+            self.path.parent / "backlinks.json",
+        ]
+        values: list[int] = []
+        try:
+            for path in paths:
+                try:
+                    stat = path.stat()
+                except FileNotFoundError:
+                    values.extend((0, 0))
+                else:
+                    # SQLite may touch the WAL/SHM mtime while a read-only
+                    # connection is open.  Their sizes still detect a writer
+                    # publication without making every query reject itself.
+                    if path.name in {
+                        f"{self.path.name}-wal",
+                        f"{self.path.name}-shm",
+                    }:
+                        values.extend((0, stat.st_size))
+                    else:
+                        values.extend((stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            return None
+        return tuple(values)
+
+    @staticmethod
+    def _projection_generation_state(
+        connection: sqlite3.Connection,
+    ) -> tuple[bool, int | None]:
+        try:
+            row = connection.execute(
+                "SELECT value FROM projection_meta WHERE key = 'generation'"
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return False, None
+        if not row:
+            return False, None
+        if row[0] in (None, ""):
+            return True, None
+        value = row[0]
+        if isinstance(value, bool):
+            return False, None
+        try:
+            generation = int(str(value))
+        except (TypeError, ValueError):
+            return False, None
+        return (True, generation) if generation > 0 else (False, None)
+
+    @classmethod
+    def _projection_generation(cls, connection: sqlite3.Connection) -> int | None:
+        valid, generation = cls._projection_generation_state(connection)
+        return generation if valid else None
+
+    def load_existing(self, *, expected_generation: int | None = None) -> bool:
+        """Validate an existing immutable projection without scanning or writing."""
+
+        with self._lock:
+            signature = self._snapshot_files_signature()
+            if (
+                self._snapshot_available
+                and signature is not None
+                and signature == self._snapshot_signature
+                and (
+                    expected_generation is None
+                    or expected_generation == self._snapshot_generation
+                )
+            ):
+                return True
+            if not self.path.is_file():
+                self._snapshot_available = False
+                self._snapshot_error = "snapshot_missing_or_invalid"
+                self._snapshot_generation = None
+                self._snapshot_signature = signature
+                return False
+            writer_ok, writer_generation, writer_page_ids = self._writer_snapshot()
+            if not writer_ok:
+                self._snapshot_available = False
+                self._snapshot_error = "snapshot_missing_or_invalid"
+                self._snapshot_generation = None
+                self._snapshot_signature = signature
+                return False
+            if expected_generation is not None and writer_generation != expected_generation:
+                self._snapshot_available = False
+                self._snapshot_error = "snapshot_generation_mismatch"
+                self._snapshot_generation = None
+                self._snapshot_signature = signature
+                return False
+            try:
+                with sqlite3.connect(
+                    f"file:{self.path}?mode=ro",
+                    uri=True,
+                    check_same_thread=False,
+                    timeout=0.05,
+                ) as connection:
+                    if int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
+                        raise sqlite3.DatabaseError("schema mismatch")
+                    quick_check = connection.execute("PRAGMA quick_check").fetchone()
+                    if not quick_check or quick_check[0] != "ok":
+                        raise sqlite3.DatabaseError("integrity check failed")
+                    for table in (
+                        "pages",
+                        "anchors",
+                        "terms",
+                        "postings",
+                        "projection_meta",
+                    ):
+                        if (
+                            connection.execute(
+                                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                                (table,),
+                            ).fetchone()
+                            is None
+                        ):
+                            raise sqlite3.DatabaseError("projection table missing")
+                    projection_valid, projection_generation = (
+                        self._projection_generation_state(connection)
+                    )
+                    if not projection_valid:
+                        raise sqlite3.DatabaseError("projection generation missing")
+                    if writer_generation is not None and projection_generation != writer_generation:
+                        raise sqlite3.DatabaseError("generation mismatch")
+                    if expected_generation is not None and projection_generation != expected_generation:
+                        raise sqlite3.DatabaseError("generation mismatch")
+                    page_rows = connection.execute(
+                        "SELECT page_id, mtime_ns, size, content_sha256, page_uid, "
+                        "status, superseded_by FROM pages"
+                    ).fetchall()
+                    if writer_page_ids is not None and {
+                        str(row[0]) for row in page_rows
+                    } != set(writer_page_ids):
+                        raise sqlite3.DatabaseError("page identity mismatch")
+                    for (
+                        page_id,
+                        mtime_ns,
+                        size,
+                        digest,
+                        page_uid,
+                        status,
+                        superseded_by,
+                    ) in page_rows:
+                        if (
+                            not isinstance(page_id, str)
+                            or not page_id
+                            or isinstance(mtime_ns, bool)
+                            or not isinstance(mtime_ns, int)
+                            or mtime_ns < 0
+                            or isinstance(size, bool)
+                            or not isinstance(size, int)
+                            or size < 0
+                            or not isinstance(digest, str)
+                            or len(digest) != 64
+                            or any(char not in "0123456789abcdef" for char in digest)
+                            or not isinstance(page_uid, str)
+                            or not isinstance(status, str)
+                            or not isinstance(superseded_by, str)
+                        ):
+                            raise sqlite3.DatabaseError("invalid page metadata")
+                        if writer_page_ids is not None:
+                            expected = writer_page_ids.get(
+                                page_id,
+                                (-1, -1, "", "", ""),
+                            )
+                            if (
+                                mtime_ns,
+                                size,
+                                page_uid,
+                                status,
+                                superseded_by,
+                            ) != expected:
+                                raise sqlite3.DatabaseError(
+                                    "projection metadata mismatch"
+                                )
+            except (OSError, sqlite3.DatabaseError):
+                self._snapshot_available = False
+                self._snapshot_error = "snapshot_missing_or_invalid"
+                self._snapshot_generation = None
+                self._snapshot_signature = signature
+                return False
+            self._snapshot_available = True
+            self._snapshot_error = None
+            self._snapshot_generation = projection_generation or writer_generation
+            self._snapshot_signature = signature
+            return True
+
+    @property
+    def snapshot_generation(self) -> int | None:
+        with self._lock:
+            return self._snapshot_generation
+
+    @property
+    def snapshot_available(self) -> bool:
+        with self._lock:
+            return self._snapshot_available
+
+    @property
+    def snapshot_error(self) -> str | None:
+        with self._lock:
+            return self._snapshot_error
+
     def build(self, *, force: bool = False) -> None:
         with self._lock:
             connection = self._open()
-            if not self._persistent and self.path.exists():
+            if not self._persistent:
                 return
+            writer_ok, writer_generation = self._writer_generation()
+            if not writer_ok and os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
+                self._snapshot_available = False
+                self._snapshot_error = "snapshot_missing_or_invalid"
+                return
+            if not writer_ok:
+                # Normal maintenance remains the recovery path.  It may
+                # rebuild from canonical pages while metadata is repaired by
+                # the owning writer; read-only callers above fail closed.
+                writer_generation = None
             now = time.monotonic()
             if (
                 not force
@@ -281,6 +581,20 @@ class LexicalIndex:
                 if force or indexed.get(page_id) != (row[1], row[2])
             ]
             if not removed and not changed:
+                projection_generation = self._projection_generation(connection)
+                if projection_generation == writer_generation:
+                    self._snapshot_generation = projection_generation
+                    self._snapshot_available = True
+                    self._snapshot_error = None
+                    return
+                with connection:
+                    connection.execute(
+                        "INSERT OR REPLACE INTO projection_meta(key, value) VALUES (?, ?)",
+                        ("generation", str(writer_generation or "")),
+                    )
+                self._snapshot_generation = writer_generation
+                self._snapshot_available = True
+                self._snapshot_error = None
                 return
             prepared_pages: list[tuple[object, ...]] = []
             prepared_anchors: list[tuple[str, str, float]] = []
@@ -487,6 +801,13 @@ class LexicalIndex:
                             connection.execute(
                                 "DELETE FROM terms WHERE term_id = ?", (term_id,)
                             )
+                connection.execute(
+                    "INSERT OR REPLACE INTO projection_meta(key, value) VALUES (?, ?)",
+                    ("generation", str(writer_generation or "")),
+                )
+            self._snapshot_generation = writer_generation
+            self._snapshot_available = True
+            self._snapshot_error = None
 
     @staticmethod
     def _row_to_page(row: tuple[object, ...], score: float) -> ScoredPage:
@@ -505,6 +826,9 @@ class LexicalIndex:
             # Computed while the projection refresh already has the canonical
             # page bytes in memory; readonly Recall never re-reads the page.
             page.content_sha256 = str(row[8])
+        if len(row) >= 10:
+            # UID is persisted alongside the digest for identity rebinding.
+            page.uid = str(row[9])
         return page
 
     def query(
@@ -529,11 +853,14 @@ class LexicalIndex:
         top_n: int = 20,
         *,
         include_reference: bool = False,
+        expected_generation: int | None = None,
     ) -> list[ScoredPage]:
         """Query only an already-built valid projection without mutating it."""
 
-        if not self.path.is_file():
+        if not self.load_existing(expected_generation=expected_generation):
             return []
+        with self._lock:
+            validated_signature = self._snapshot_signature
         try:
             with sqlite3.connect(
                 f"file:{self.path}?mode=ro",
@@ -543,7 +870,7 @@ class LexicalIndex:
             ) as connection:
                 if int(connection.execute("PRAGMA user_version").fetchone()[0]) != SCHEMA_VERSION:
                     return []
-                return self._query_connection(
+                rows = self._query_connection(
                     connection,
                     query_text,
                     top_n=top_n,
@@ -551,6 +878,12 @@ class LexicalIndex:
                 )
         except (OSError, sqlite3.DatabaseError):
             return []
+        # A writer may publish a new metadata generation between the
+        # validation above and this short-lived SQLite read.  Do not return
+        # rows whose projection no longer belongs to the validated snapshot.
+        if self._snapshot_files_signature() != validated_signature:
+            return []
+        return rows
 
     @staticmethod
     def _query_connection(
@@ -578,7 +911,7 @@ class LexicalIndex:
                 f"""
                 SELECT s.term, p.page_id, p.title, p.folder, p.updated,
                        p.status, p.superseded_by, p.page_type, p.sensitivity,
-                       p.content_sha256, x.tf, p.doc_len, s.df, p.ordinal
+                       p.content_sha256, p.page_uid, x.tf, p.doc_len, s.df, p.ordinal
                 FROM postings x
                 JOIN terms s ON s.term_id = x.term_id
                 JOIN pages p ON p.ordinal = x.page_ordinal
@@ -596,16 +929,16 @@ class LexicalIndex:
         for row in rows:
             term = str(row[0])
             page_id = str(row[1])
-            tf = int(row[10])
-            doc_len = int(row[11])
-            df = int(row[12])
+            tf = int(row[11])
+            doc_len = int(row[12])
+            df = int(row[13])
             idf = math.log((n - df + 0.5) / (df + 0.5) + 1)
             tf_norm = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / avgdl))
             scores[page_id] = scores.get(page_id, 0.0) + (
                 query_counts[term] * idf * tf_norm
             )
-            page_rows[page_id] = row[1:10]
-            page_ordinals[page_id] = int(row[13])
+            page_rows[page_id] = row[1:11]
+            page_ordinals[page_id] = int(row[14])
         ranked = sorted(
             scores.items(),
             key=lambda item: (-item[1], page_ordinals[item[0]]),
@@ -637,7 +970,7 @@ class LexicalIndex:
                 f"""
                 SELECT p.page_id, p.title, p.folder, p.updated, p.status,
                        p.superseded_by, p.page_type, p.sensitivity,
-                       p.content_sha256, SUM(a.weight) AS score
+                       p.content_sha256, p.page_uid, SUM(a.weight) AS score
                 FROM anchors a
                 JOIN pages p ON p.page_id = a.page_id
                 WHERE a.term IN ({placeholders}) {reference_clause}
@@ -647,7 +980,7 @@ class LexicalIndex:
                 """,
                 (*terms, max(1, top_n)),
             ).fetchall()
-        return [self._row_to_page(row, float(row[9])) for row in rows]
+        return [self._row_to_page(row, float(row[10])) for row in rows]
 
     def anchor_query_existing(
         self,
@@ -655,6 +988,7 @@ class LexicalIndex:
         top_n: int = 20,
         *,
         include_reference: bool = False,
+        expected_generation: int | None = None,
     ) -> list[ScoredPage]:
         """Read anchor matches from an already-built projection only.
 
@@ -664,8 +998,10 @@ class LexicalIndex:
         read-only path.
         """
 
-        if not self.path.is_file():
+        if not self.load_existing(expected_generation=expected_generation):
             return []
+        with self._lock:
+            validated_signature = self._snapshot_signature
         terms = list(dict.fromkeys(tokenize(query_text)))
         normalized = query_text.strip().lower()
         if normalized and " " not in normalized and len(normalized) >= 2:
@@ -688,7 +1024,7 @@ class LexicalIndex:
                     f"""
                     SELECT p.page_id, p.title, p.folder, p.updated, p.status,
                            p.superseded_by, p.page_type, p.sensitivity,
-                           p.content_sha256, SUM(a.weight) AS score
+                           p.content_sha256, p.page_uid, SUM(a.weight) AS score
                     FROM anchors a
                     JOIN pages p ON p.page_id = a.page_id
                     WHERE a.term IN ({placeholders}) {reference_clause}
@@ -700,7 +1036,9 @@ class LexicalIndex:
                 ).fetchall()
         except (OSError, sqlite3.DatabaseError):
             return []
-        return [self._row_to_page(row, float(row[9])) for row in rows]
+        if self._snapshot_files_signature() != validated_signature:
+            return []
+        return [self._row_to_page(row, float(row[10])) for row in rows]
 
     def stats(self) -> dict[str, object]:
         with self._lock:

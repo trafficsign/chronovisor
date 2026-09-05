@@ -22,6 +22,7 @@ class ScoredPage:
     page_type: str = "knowledge"
     sensitivity: str = "normal"
     content_sha256: str = ""
+    uid: str = ""
 
 
 _CJK_RANGES = (

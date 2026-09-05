@@ -503,6 +503,9 @@ class IndexStore:
         self._persistence_dirty = False
         self._last_refresh_monotonic = 0.0
         self._cache_signature: tuple[int, int, int, int] | None = None
+        self._snapshot_generation: int | None = None
+        self._snapshot_available = False
+        self._snapshot_error: str | None = None
 
     # -- persistence ------------------------------------------------------
 
@@ -519,14 +522,24 @@ class IndexStore:
             backlinks_stat.st_size,
         )
 
+    @staticmethod
+    def _valid_generation(value: object) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return None
+        return value
+
     def _load_from_disk(self) -> bool:
         signature = self._cache_files_signature()
         if signature is None:
             return False
         try:
-            pages_doc = json.loads(self._pages_index_file.read_text())
-            backlinks_doc = json.loads(self._backlinks_index_file.read_text())
-        except (OSError, json.JSONDecodeError):
+            # ``json.loads`` accepts bytes and avoids a separate Python-level
+            # UTF-8 decode for these multi-megabyte snapshots.
+            pages_doc = json.loads(self._pages_index_file.read_bytes())
+            backlinks_doc = json.loads(self._backlinks_index_file.read_bytes())
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(pages_doc, dict) or not isinstance(backlinks_doc, dict):
             return False
         if pages_doc.get("schema_version") != SCHEMA_VERSION:
             return False
@@ -534,18 +547,123 @@ class IndexStore:
             return False
         # Cross-file integrity: matching generation IDs.
         # Mismatch => one file is stale; rebuild from scratch on next refresh.
-        if pages_doc.get("generation") != backlinks_doc.get("generation"):
+        generation = self._valid_generation(pages_doc.get("generation"))
+        if generation is None or generation != self._valid_generation(
+            backlinks_doc.get("generation")
+        ):
             return False
         try:
-            entries = {
-                pid: PageEntry.from_dict(d)
-                for pid, d in pages_doc.get("entries", {}).items()
-            }
-            order = list(pages_doc.get("page_order", []))
-            backlinks = {
-                pid: list(refs) for pid, refs in backlinks_doc.get("edges", {}).items()
-            }
-        except (KeyError, TypeError, ValueError):
+            raw_entries = pages_doc.get("entries")
+            raw_order = pages_doc.get("page_order")
+            raw_edges = backlinks_doc.get("edges")
+            if not isinstance(raw_entries, dict):
+                return False
+            if not isinstance(raw_order, list) or not all(
+                isinstance(pid, str) for pid in raw_order
+            ):
+                return False
+            if not isinstance(raw_edges, dict):
+                return False
+            if len(raw_order) != len(set(raw_order)):
+                return False
+            # Resolve each namespace root once.  Per-entry ``Path.resolve``
+            # made the read-only bootstrap perform thousands of filesystem
+            # lookups; canonical writers already emit normalized paths.
+            namespace_roots: dict[bool, Path] = {}
+            for is_system, root in (
+                (False, self._pages_dir),
+                (True, self._system_dir),
+            ):
+                try:
+                    if root.is_symlink():
+                        return False
+                    root_resolved = root.resolve(strict=False)
+                except OSError:
+                    return False
+                namespace_roots[is_system] = root_resolved
+            entries: dict[str, PageEntry] = {}
+            for pid, raw_entry in raw_entries.items():
+                if not isinstance(pid, str) or not isinstance(raw_entry, dict):
+                    return False
+                if not isinstance(raw_entry.get("is_system"), bool):
+                    return False
+                for field in ("mtime_ns", "size"):
+                    value = raw_entry.get(field)
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, int)
+                        or value < 0
+                    ):
+                        return False
+                for field in (
+                    "page_id",
+                    "path",
+                    "title",
+                    "updated",
+                    "relative_path",
+                    "uid",
+                    "classification_primary",
+                    "classification_notation",
+                    "classification_status",
+                    "status",
+                    "superseded_by",
+                    "page_type",
+                    "sensitivity",
+                ):
+                    if field in raw_entry and not isinstance(raw_entry[field], str):
+                        return False
+                for field in (
+                    "outlinks",
+                    "raw_keywords",
+                    "tags",
+                    "recall_questions",
+                    "entities",
+                ):
+                    value = raw_entry.get(field, [])
+                    if not isinstance(value, list) or not all(
+                        isinstance(item, str) for item in value
+                    ):
+                        return False
+                entry = PageEntry.from_dict(raw_entry)
+                relative_text = entry.relative_path
+                relative_parts = relative_text.split("/")
+                if (
+                    not pid
+                    or entry.page_id != pid
+                    or not entry.path.startswith("/")
+                    or not relative_text
+                    or relative_text.startswith("/")
+                    or any(part in {"", ".", ".."} for part in relative_parts)
+                    or not relative_text.endswith(".md")
+                    or relative_parts[-1][:-3] != pid
+                ):
+                    return False
+                root_resolved = namespace_roots[entry.is_system]
+                # Compare canonical strings directly; the namespace root was
+                # resolved once above and no per-entry filesystem lookup is
+                # needed for this metadata-only identity check.
+                expected_path = f"{root_resolved}/{relative_text}"
+                if entry.path != expected_path:
+                    return False
+                entries[pid] = entry
+            order = list(raw_order)
+            if set(order) != set(entries):
+                return False
+            backlinks: dict[str, list[str]] = {}
+            for target, refs in raw_edges.items():
+                if not isinstance(target, str) or not isinstance(refs, list):
+                    return False
+                if not all(isinstance(source, str) for source in refs):
+                    return False
+                if len(refs) != len(set(refs)):
+                    return False
+                if any(
+                    source not in entries or entries[source].status != "stable"
+                    for source in refs
+                ):
+                    return False
+                backlinks[target] = list(refs)
+        except (KeyError, TypeError, ValueError, AttributeError):
             return False
         self._entries = entries
         self._rebuild_canonical_entries()
@@ -553,7 +671,77 @@ class IndexStore:
         self._backlinks = backlinks
         self._rebuild_associations()
         self._cache_signature = signature
+        self._snapshot_generation = generation
+        self._snapshot_available = True
+        self._snapshot_error = None
         return True
+
+    def _mark_snapshot_unavailable(self, reason: str) -> None:
+        """Drop stale in-memory data so read-only callers fail closed."""
+
+        # Treat the in-memory state as unbootstrapped as well.  A later normal
+        # writer call can therefore recover by scanning and persisting a new
+        # snapshot, while read-only callers continue to receive unavailable.
+        self._loaded = False
+        self._persistence_dirty = True
+        self._entries = {}
+        self._canonical_entries = {}
+        self._page_order = []
+        self._backlinks = {}
+        self._tag_pages = {}
+        self._entity_pages = {}
+        self._cache_signature = None
+        self._snapshot_generation = None
+        self._snapshot_available = False
+        self._snapshot_error = reason
+
+    def load_existing(self) -> bool:
+        """Load a coherent writer snapshot without scanning or rebuilding.
+
+        This is the read-only bootstrap used by latency-sensitive callers.
+        A missing, malformed, or cross-file-inconsistent snapshot is an
+        explicit unavailable result; :meth:`refresh` remains the writer and
+        recovery path that performs a full reconcile.
+        """
+
+        with self._lock:
+            signature = self._cache_files_signature()
+            if (
+                self._loaded
+                and self._snapshot_available
+                and signature is not None
+                and signature == self._cache_signature
+            ):
+                return True
+            if self._load_from_disk():
+                self._loaded = True
+                self._last_refresh_monotonic = time.monotonic()
+                return True
+            self._loaded = True
+            self._mark_snapshot_unavailable("snapshot_missing_or_invalid")
+            self._last_refresh_monotonic = time.monotonic()
+            return False
+
+    @property
+    def snapshot_generation(self) -> int | None:
+        """Generation of the currently loaded writer snapshot, if any."""
+
+        with self._lock:
+            return self._snapshot_generation
+
+    @property
+    def snapshot_available(self) -> bool:
+        """Whether read-only callers may use the loaded metadata snapshot."""
+
+        with self._lock:
+            return self._snapshot_available
+
+    @property
+    def snapshot_error(self) -> str | None:
+        """Stable, non-content error class for an unavailable snapshot."""
+
+        with self._lock:
+            return self._snapshot_error
 
     def _persist(self, generation: int) -> None:
         self._index_dir.mkdir(parents=True, exist_ok=True)
@@ -580,6 +768,9 @@ class IndexStore:
             json.dumps(backlinks_doc, ensure_ascii=False),
         )
         self._cache_signature = self._cache_files_signature()
+        self._snapshot_generation = generation
+        self._snapshot_available = True
+        self._snapshot_error = None
 
     # -- refresh ----------------------------------------------------------
 
@@ -647,8 +838,15 @@ class IndexStore:
     def _refresh_locked(self) -> None:
         with self._lock:
             if not self._loaded:
-                self._load_from_disk()
+                loaded_from_disk = self._load_from_disk()
                 self._loaded = True
+                if not loaded_from_disk and (
+                    self._pages_index_file.exists()
+                    or self._backlinks_index_file.exists()
+                ):
+                    # A writer refresh repairs a malformed/partial pair even
+                    # when the canonical corpus is currently empty.
+                    self._persistence_dirty = True
 
             current = self._scan_disk()
             seen_ids: dict[str, tuple[Path, bool, int, int]] = {}
@@ -756,6 +954,10 @@ class IndexStore:
                     pass
                 else:
                     self._persistence_dirty = False
+            # Explicit refresh is also the supported recovery path when no
+            # persisted snapshot exists (for example the first writer run).
+            self._snapshot_available = True
+            self._snapshot_error = None
             self._last_refresh_monotonic = time.monotonic()
 
     def refresh_if_stale(self, max_age_seconds: float = 2.0) -> None:
@@ -769,6 +971,20 @@ class IndexStore:
 
         with self._lock:
             if not self._loaded:
+                if os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
+                    # Read-only bootstrap: never turn an unavailable snapshot
+                    # into a corpus-wide synchronous rebuild.
+                    self.load_existing()
+                    return
+                needs_bootstrap = True
+            elif not self._snapshot_available:
+                if os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
+                    if self._load_from_disk():
+                        self._last_refresh_monotonic = time.monotonic()
+                        return
+                    self._mark_snapshot_unavailable("snapshot_missing_or_invalid")
+                    self._last_refresh_monotonic = time.monotonic()
+                    return
                 needs_bootstrap = True
             elif (
                 self._last_refresh_monotonic
@@ -777,13 +993,23 @@ class IndexStore:
             ):
                 return
             else:
-                needs_bootstrap = False
                 signature = self._cache_files_signature()
-                if signature is not None and signature != self._cache_signature:
-                    self._load_from_disk()
-                self._last_refresh_monotonic = time.monotonic()
+                needs_bootstrap = False
+                if signature is None:
+                    needs_bootstrap = True
+                elif signature != self._cache_signature:
+                    needs_bootstrap = not self._load_from_disk()
+                if needs_bootstrap and os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
+                    self._mark_snapshot_unavailable("snapshot_missing_or_invalid")
+                    self._last_refresh_monotonic = time.monotonic()
+                    return
+                if not needs_bootstrap:
+                    self._last_refresh_monotonic = time.monotonic()
+                    return
+                self._mark_snapshot_unavailable("snapshot_missing_or_invalid")
         if needs_bootstrap:
             self.refresh()
+        return
 
     def ensure_loaded(self) -> None:
         """Build the corpus snapshot once, then reuse it until a writer updates it."""
@@ -866,6 +1092,9 @@ class IndexStore:
                 self._persistence_dirty,
                 self._cache_signature,
                 self._last_refresh_monotonic,
+                self._snapshot_generation,
+                self._snapshot_available,
+                self._snapshot_error,
             )
             next_entries = dict(self._entries)
             changed = False
@@ -926,6 +1155,9 @@ class IndexStore:
                     self._persistence_dirty,
                     self._cache_signature,
                     self._last_refresh_monotonic,
+                    self._snapshot_generation,
+                    self._snapshot_available,
+                    self._snapshot_error,
                 ) = previous_state
                 raise
 

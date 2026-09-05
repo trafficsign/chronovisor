@@ -682,6 +682,182 @@ class TestTargetedChanges:
 
         assert reader.meta("created")["title"] == "Created"
 
+    def test_cold_process_loads_existing_snapshot_without_a_full_scan(
+        self,
+        isolated_index: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        existing = _seed(
+            isolated_index,
+            "existing.md",
+            "---\ntitle: Existing\nupdated: 2026-01-01\n---\nbody\n",
+        )
+        writer = IndexStore()
+        writer.refresh()
+        reader = IndexStore()
+        monkeypatch.setenv("CHRONOVISOR_READ_ONLY", "1")
+        monkeypatch.setattr(
+            reader,
+            "_scan_disk",
+            lambda: pytest.fail("cold snapshot load performed a full disk scan"),
+        )
+
+        reader.refresh_if_stale(max_age_seconds=0)
+        assert reader.meta("existing")["path"] == str(existing.resolve())
+        assert reader.snapshot_generation == writer.snapshot_generation
+        assert reader.snapshot_available is True
+
+    def test_invalid_generation_fails_closed_without_rebuilding(
+        self,
+        isolated_index: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _seed(
+            isolated_index,
+            "existing.md",
+            "---\ntitle: Existing\nupdated: 2026-01-01\n---\nbody\n",
+        )
+        writer = IndexStore()
+        writer.refresh()
+        backlinks = json.loads(index_store_mod.BACKLINKS_INDEX_FILE.read_text())
+        backlinks["generation"] += 1
+        index_store_mod.BACKLINKS_INDEX_FILE.write_text(json.dumps(backlinks))
+
+        reader = IndexStore()
+        monkeypatch.setenv("CHRONOVISOR_READ_ONLY", "1")
+        monkeypatch.setattr(
+            reader,
+            "_scan_disk",
+            lambda: pytest.fail("invalid snapshot triggered a full disk scan"),
+        )
+
+        reader.refresh_if_stale(max_age_seconds=0)
+        assert reader.snapshot_available is False
+        assert reader.snapshot_error == "snapshot_missing_or_invalid"
+        assert reader.all_page_ids(include_system=True) == set()
+
+    def test_load_existing_rejects_metadata_symlink_escape(
+        self, isolated_index: Path, tmp_path: Path
+    ) -> None:
+        link = _seed(
+            isolated_index,
+            "link.md",
+            "---\ntitle: Link\nupdated: 2026-01-01\n---\nbody\n",
+        )
+        writer = IndexStore()
+        writer.refresh()
+        outside = tmp_path / "outside.md"
+        outside.write_text(
+            "---\ntitle: Outside\nstatus: stable\n---\noutside\n",
+            encoding="utf-8",
+        )
+        link.unlink()
+        link.symlink_to(outside)
+        pages = json.loads(index_store_mod.PAGES_INDEX_FILE.read_text())
+        pages["entries"]["link"]["path"] = str(outside.resolve())
+        index_store_mod.PAGES_INDEX_FILE.write_text(json.dumps(pages))
+
+        reader = IndexStore()
+
+        assert reader.load_existing() is False
+        assert reader.snapshot_available is False
+        assert reader.snapshot_error == "snapshot_missing_or_invalid"
+        assert reader.meta("link") is None
+
+    def test_writer_refresh_if_stale_repairs_corrupt_snapshot(
+        self,
+        isolated_index: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _seed(
+            isolated_index,
+            "existing.md",
+            "---\ntitle: Existing\nupdated: 2026-01-01\n---\nbody\n",
+        )
+        writer = IndexStore()
+        writer.refresh()
+        reader = IndexStore()
+        reader.refresh()
+        backlinks = json.loads(index_store_mod.BACKLINKS_INDEX_FILE.read_text())
+        backlinks["generation"] += 1
+        index_store_mod.BACKLINKS_INDEX_FILE.write_text(json.dumps(backlinks))
+        scans = 0
+        original_scan = reader._scan_disk
+
+        def observed_scan() -> list[tuple[str, Path, bool, int, int]]:
+            nonlocal scans
+            scans += 1
+            return original_scan()
+
+        monkeypatch.setattr(reader, "_scan_disk", observed_scan)
+        monkeypatch.delenv("CHRONOVISOR_READ_ONLY", raising=False)
+
+        reader.refresh_if_stale(max_age_seconds=0)
+
+        assert scans >= 1
+        assert reader.snapshot_available is True
+        assert reader.snapshot_error is None
+        pages = json.loads(index_store_mod.PAGES_INDEX_FILE.read_text())
+        repaired_backlinks = json.loads(
+            index_store_mod.BACKLINKS_INDEX_FILE.read_text()
+        )
+        assert pages["generation"] == repaired_backlinks["generation"]
+        assert reader.meta("existing") is not None
+
+    def test_cold_reader_tracks_writer_lifecycle_changes_without_scanning(
+        self,
+        isolated_index: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        old = _seed(
+            isolated_index,
+            "old.md",
+            "---\ntitle: Old\nupdated: 2026-01-01\n---\nold body\n",
+        )
+        writer = IndexStore()
+        writer.refresh()
+        reader = IndexStore()
+        monkeypatch.setenv("CHRONOVISOR_READ_ONLY", "1")
+        monkeypatch.setattr(
+            reader,
+            "_scan_disk",
+            lambda: pytest.fail("lifecycle snapshot load performed a full scan"),
+        )
+
+        reader.load_existing()
+        assert reader.meta("old") is not None
+
+        old.unlink()
+        renamed = _seed(
+            isolated_index,
+            "renamed.md",
+            "---\ntitle: Renamed\nupdated: 2026-02-01\nuid: renamed-uid\n---\nbody\n",
+        )
+        monkeypatch.delenv("CHRONOVISOR_READ_ONLY")
+        writer.refresh()
+        monkeypatch.setenv("CHRONOVISOR_READ_ONLY", "1")
+        reader.load_existing()
+        assert reader.meta("old") is None
+        assert reader.meta("renamed")["path"] == str(renamed.resolve())
+
+        renamed.write_text(
+            "---\ntitle: Renamed\nupdated: 2026-03-01\nstatus: deprecated\n"
+            "type: knowledge\nsuperseded_by: replacement\n---\nbody\n",
+            encoding="utf-8",
+        )
+        _seed(
+            isolated_index,
+            "replacement.md",
+            "---\ntitle: Replacement\nupdated: 2026-03-01\n---\nnew body\n",
+        )
+        monkeypatch.delenv("CHRONOVISOR_READ_ONLY")
+        writer.refresh()
+        monkeypatch.setenv("CHRONOVISOR_READ_ONLY", "1")
+        reader.load_existing()
+        assert reader.meta("renamed")["status"] == "deprecated"
+        assert reader.meta("renamed")["superseded_by"] == "replacement"
+        assert reader.meta("replacement")["status"] == "stable"
+
     def test_persist_failure_restores_previous_in_memory_snapshot(
         self,
         isolated_index: Path,
