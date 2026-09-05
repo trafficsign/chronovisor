@@ -742,7 +742,7 @@ def test_startup_embedding_allows_cold_work_beyond_query_timeout(
     class ColdBackend(FakeEmbeddingBackend):
         def embed(self, request: EmbeddingRequest, *, model: str) -> EmbeddingResult:
             self.requests.append(request)
-            clock[0] += 0.5
+            clock[0] += 6.0
             vectors = tuple(
                 (0.0, 1.0) if "夕食" in text else (1.0, 0.0) for text in request.texts
             )
@@ -774,7 +774,7 @@ def test_startup_embedding_allows_cold_work_beyond_query_timeout(
         result = state._warm_query_path()
         assert result["hits"] == result["queries"] == 3
     assert all(
-        request.timeout_ms == state.config.interactive_timeout_ms
+        request.timeout_ms == state.config.query_timeout_ms
         for request in backend.requests
     )
 
@@ -934,10 +934,9 @@ def test_worker_persists_only_safe_job_failure_category(
 
 def test_query_path_warmup_exercises_three_queries_and_ann_search() -> None:
     state = object.__new__(SemanticServiceState)
-    state.config = SearchEmbeddingConfig()
     encoded: list[list[str]] = []
     searched: list[np.ndarray] = []
-    state._encode_queries = lambda queries, _batch, **_kwargs: (
+    state._encode_queries = lambda queries, _batch: (
         encoded.append(list(queries))
         or np.asarray([[1.0, float(index)] for index in range(len(queries))])
     )

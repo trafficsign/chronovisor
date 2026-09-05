@@ -637,20 +637,24 @@ class SemanticServiceState:
         context_deadline = _CURRENT_QUERY_DEADLINE.get()
         if deadline_at is None:
             deadline_at = context_deadline
-        if deadline_at is None:
+        if deadline_at is None and timeout_ms is not None:
             deadline_at = _deadline_for(timeout_ms, self.config.query_timeout_ms)
         elif timeout_ms is not None:
             local_deadline = _deadline_for(timeout_ms, self.config.query_timeout_ms)
             deadline_at = min(deadline_at, local_deadline)
-        _ensure_deadline(deadline_at)
-        lock_timeout = _remaining_seconds(deadline_at)
-        acquired = self._model_lock.acquire(timeout=lock_timeout)
+
+        def remaining_ms() -> int:
+            # Startup has no caller deadline; native model loading may be cold.
+            if deadline_at is None:
+                return self.config.query_timeout_ms
+            return max(1, math.ceil(_remaining_seconds(deadline_at) * 1_000))
+
+        acquired = self._model_lock.acquire(timeout=remaining_ms() / 1_000)
         if not acquired:
             raise TimeoutError("semantic query deadline exhausted")
         try:
-            remaining_ms = max(1, math.ceil(_remaining_seconds(deadline_at) * 1_000))
             resources = (
-                accelerator_lease(timeout_ms=remaining_ms)
+                accelerator_lease(timeout_ms=remaining_ms())
                 if self._uses_local_controls(self._foreground_route)
                 else contextlib.nullcontext()
             )
@@ -664,23 +668,17 @@ class SemanticServiceState:
                 else contextlib.nullcontext()
             )
             with resources:
-                _ensure_deadline(deadline_at)
-                remaining_ms = max(
-                    1, math.ceil(_remaining_seconds(deadline_at) * 1_000)
-                )
+                remaining_ms()
                 with activity:
-                    _ensure_deadline(deadline_at)
-                    remaining_ms = max(
-                        1, math.ceil(_remaining_seconds(deadline_at) * 1_000)
-                    )
                     result = self._runtime_vectors(
                         FOREGROUND_ROLE,
                         texts,
                         purpose,
                         source=source,
-                        timeout_ms=remaining_ms,
+                        timeout_ms=remaining_ms(),
                     )
-            _ensure_deadline(deadline_at)
+            if deadline_at is not None:
+                _ensure_deadline(deadline_at)
             return result
         finally:
             self._model_lock.release()
@@ -744,7 +742,6 @@ class SemanticServiceState:
             ["Chronovisorの検索インデックス"],
             EmbeddingPurpose.QUERY,
             source=QUERY_SOURCE,
-            timeout_ms=self.config.interactive_timeout_ms,
         )[0]
         documents = self._embed_foreground(
             [
@@ -753,7 +750,6 @@ class SemanticServiceState:
             ],
             EmbeddingPurpose.DOCUMENT,
             source=DOCUMENT_SOURCE,
-            timeout_ms=self.config.interactive_timeout_ms,
         )
         scores = documents @ query
         if not float(scores[0]) > float(scores[1]):
@@ -777,11 +773,7 @@ class SemanticServiceState:
             "関連ページを思い出す",
             "semantic recall warmup",
         ]
-        vectors = self._encode_queries(
-            queries,
-            len(queries),
-            deadline_at=_deadline_for(None, self.config.interactive_timeout_ms),
-        )
+        vectors = self._encode_queries(queries, len(queries))
         hits = sum(bool(self._search_vector(vector, 1)) for vector in vectors)
         if hits != len(queries):
             raise ServiceBusy("semantic query-path warmup returned no result")
