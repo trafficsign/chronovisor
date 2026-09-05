@@ -1,0 +1,650 @@
+{
+  "suite": "qwen-next-quant-v1-26",
+  "model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+  "started_at": 1788650179.749252,
+  "runs": 3,
+  "quality": {
+    "passed": 24,
+    "total": 26,
+    "rate": 0.9230769230769231,
+    "cases": [
+      {
+        "id": "mul_sub",
+        "passed": true,
+        "expected": "1757",
+        "observed": "1757",
+        "usage": {
+          "prompt_tokens": 30,
+          "completion_tokens": 4,
+          "total_tokens": 34,
+          "input_tokens": 30,
+          "output_tokens": 4,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.55
+        },
+        "wall_seconds": 0.5515159579808824
+      },
+      {
+        "id": "percent",
+        "passed": true,
+        "expected": "714",
+        "observed": "714",
+        "usage": {
+          "prompt_tokens": 35,
+          "completion_tokens": 3,
+          "total_tokens": 38,
+          "input_tokens": 35,
+          "output_tokens": 3,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.51
+        },
+        "wall_seconds": 0.5187916670111008
+      },
+      {
+        "id": "algebra",
+        "passed": true,
+        "expected": "12",
+        "observed": "12",
+        "usage": {
+          "prompt_tokens": 30,
+          "completion_tokens": 2,
+          "total_tokens": 32,
+          "input_tokens": 30,
+          "output_tokens": 2,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.46
+        },
+        "wall_seconds": 0.46471824997570366
+      },
+      {
+        "id": "sequence",
+        "passed": true,
+        "expected": "42",
+        "observed": "42",
+        "usage": {
+          "prompt_tokens": 39,
+          "completion_tokens": 2,
+          "total_tokens": 41,
+          "input_tokens": 39,
+          "output_tokens": 2,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.52
+        },
+        "wall_seconds": 0.519106958003249
+      },
+      {
+        "id": "remainder",
+        "passed": false,
+        "expected": "19",
+        "observed": "To find the remainder when $98765$ is divided by $97$, we can perform long division or break down the number using modular arithmetic properties.\n\n**Method 1: Long Division**\n\n1.  Consider the first three digits: $987$.\n    $987 \\div 97$:\n    $97 \\times 10 = 970$\n    $987 - 970 = 17$\n    So, $987 = 97 \\times 10 + 17$.\n\n2.",
+        "usage": {
+          "prompt_tokens": 30,
+          "completion_tokens": 128,
+          "total_tokens": 158,
+          "input_tokens": 30,
+          "output_tokens": 128,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 2.97
+        },
+        "wall_seconds": 2.9719446660019457
+      },
+      {
+        "id": "work",
+        "passed": true,
+        "expected": "120",
+        "observed": "120",
+        "usage": {
+          "prompt_tokens": 46,
+          "completion_tokens": 3,
+          "total_tokens": 49,
+          "input_tokens": 46,
+          "output_tokens": 3,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.55
+        },
+        "wall_seconds": 0.5503925830125809
+      },
+      {
+        "id": "ordering",
+        "passed": true,
+        "expected": "Sora",
+        "observed": "Sora",
+        "usage": {
+          "prompt_tokens": 34,
+          "completion_tokens": 2,
+          "total_tokens": 36,
+          "input_tokens": 34,
+          "output_tokens": 2,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.5
+        },
+        "wall_seconds": 0.5052646250114776
+      },
+      {
+        "id": "syllogism",
+        "passed": true,
+        "expected": "NO",
+        "observed": "NO",
+        "usage": {
+          "prompt_tokens": 39,
+          "completion_tokens": 1,
+          "total_tokens": 40,
+          "input_tokens": 39,
+          "output_tokens": 1,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.46
+        },
+        "wall_seconds": 0.4635559999733232
+      },
+      {
+        "id": "truth",
+        "passed": true,
+        "expected": "A",
+        "observed": "A",
+        "usage": {
+          "prompt_tokens": 45,
+          "completion_tokens": 1,
+          "total_tokens": 46,
+          "input_tokens": 45,
+          "output_tokens": 1,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.5
+        },
+        "wall_seconds": 0.5029690000228584
+      },
+      {
+        "id": "set",
+        "passed": true,
+        "expected": "2,5,8",
+        "observed": "2,5,8",
+        "usage": {
+          "prompt_tokens": 45,
+          "completion_tokens": 5,
+          "total_tokens": 50,
+          "input_tokens": 45,
+          "output_tokens": 5,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.54
+        },
+        "wall_seconds": 0.5405861670151353
+      },
+      {
+        "id": "units",
+        "passed": true,
+        "expected": "225",
+        "observed": "225",
+        "usage": {
+          "prompt_tokens": 27,
+          "completion_tokens": 3,
+          "total_tokens": 30,
+          "input_tokens": 27,
+          "output_tokens": 3,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.41
+        },
+        "wall_seconds": 0.4175604580086656
+      },
+      {
+        "id": "code",
+        "passed": true,
+        "expected": "30",
+        "observed": "30",
+        "usage": {
+          "prompt_tokens": 34,
+          "completion_tokens": 2,
+          "total_tokens": 36,
+          "input_tokens": 34,
+          "output_tokens": 2,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.48
+        },
+        "wall_seconds": 0.48478812497342005
+      },
+      {
+        "id": "precedence",
+        "passed": false,
+        "expected": "53",
+        "observed": "14",
+        "usage": {
+          "prompt_tokens": 39,
+          "completion_tokens": 2,
+          "total_tokens": 41,
+          "input_tokens": 39,
+          "output_tokens": 2,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.48
+        },
+        "wall_seconds": 0.4788706249673851
+      },
+      {
+        "id": "instruction",
+        "passed": true,
+        "expected": "ORANGE",
+        "observed": "ORANGE",
+        "usage": {
+          "prompt_tokens": 31,
+          "completion_tokens": 2,
+          "total_tokens": 33,
+          "input_tokens": 31,
+          "output_tokens": 2,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.47
+        },
+        "wall_seconds": 0.47695199999725446
+      },
+      {
+        "id": "extract",
+        "passed": true,
+        "expected": "held",
+        "observed": "held",
+        "usage": {
+          "prompt_tokens": 34,
+          "completion_tokens": 1,
+          "total_tokens": 35,
+          "input_tokens": 34,
+          "output_tokens": 1,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.43
+        },
+        "wall_seconds": 0.43635999999241903
+      },
+      {
+        "id": "jp_math",
+        "passed": true,
+        "expected": "6",
+        "observed": "6",
+        "usage": {
+          "prompt_tokens": 38,
+          "completion_tokens": 1,
+          "total_tokens": 39,
+          "input_tokens": 38,
+          "output_tokens": 1,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.46
+        },
+        "wall_seconds": 0.46427845797734335
+      },
+      {
+        "id": "jp_order",
+        "passed": true,
+        "expected": "乙",
+        "observed": "乙",
+        "usage": {
+          "prompt_tokens": 35,
+          "completion_tokens": 1,
+          "total_tokens": 36,
+          "input_tokens": 35,
+          "output_tokens": 1,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.43
+        },
+        "wall_seconds": 0.4329374170047231
+      },
+      {
+        "id": "jp_extract",
+        "passed": true,
+        "expected": "ZX-204",
+        "observed": "ZX-204",
+        "usage": {
+          "prompt_tokens": 37,
+          "completion_tokens": 5,
+          "total_tokens": 42,
+          "input_tokens": 37,
+          "output_tokens": 5,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.49
+        },
+        "wall_seconds": 0.4913726659724489
+      },
+      {
+        "id": "negation",
+        "passed": true,
+        "expected": "REJECT",
+        "observed": "REJECT",
+        "usage": {
+          "prompt_tokens": 36,
+          "completion_tokens": 2,
+          "total_tokens": 38,
+          "input_tokens": 36,
+          "output_tokens": 2,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.52
+        },
+        "wall_seconds": 0.5186006670119241
+      },
+      {
+        "id": "count",
+        "passed": true,
+        "expected": "11",
+        "observed": "11",
+        "usage": {
+          "prompt_tokens": 29,
+          "completion_tokens": 2,
+          "total_tokens": 31,
+          "input_tokens": 29,
+          "output_tokens": 2,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 0.43
+        },
+        "wall_seconds": 0.43205470801331103
+      },
+      {
+        "id": "json_extract",
+        "passed": true,
+        "expected": {
+          "ticket": "T-91",
+          "owner": "Aya",
+          "state": "blocked"
+        },
+        "observed": "{\"ticket\": \"T-91\", \"owner\": \"Aya\", \"state\": \"blocked\"}",
+        "usage": {
+          "prompt_tokens": 30,
+          "completion_tokens": 31,
+          "total_tokens": 61,
+          "input_tokens": 30,
+          "output_tokens": 31,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 1.7
+        },
+        "wall_seconds": 1.7181356669752859
+      },
+      {
+        "id": "json_decision",
+        "passed": true,
+        "expected": {
+          "decision": "reject",
+          "score": 83,
+          "flagged": true
+        },
+        "observed": "{\"decision\": \"reject\", \"score\": 83, \"flagged\": true}",
+        "usage": {
+          "prompt_tokens": 39,
+          "completion_tokens": 27,
+          "total_tokens": 66,
+          "input_tokens": 39,
+          "output_tokens": 27,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 1.56
+        },
+        "wall_seconds": 1.56946633401094
+      },
+      {
+        "id": "json_math",
+        "passed": true,
+        "expected": {
+          "sum": 46,
+          "product": 493,
+          "larger": 29
+        },
+        "observed": "{\"sum\": 46, \"product\": 493, \"larger\": 29}",
+        "usage": {
+          "prompt_tokens": 32,
+          "completion_tokens": 31,
+          "total_tokens": 63,
+          "input_tokens": 32,
+          "output_tokens": 31,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 1.64
+        },
+        "wall_seconds": 1.6481338330195285
+      },
+      {
+        "id": "json_jp",
+        "passed": true,
+        "expected": {
+          "担当": "佐藤",
+          "件数": 7,
+          "完了": false
+        },
+        "observed": "{\"\\u62c5\\u5f53\": \"\\u4f50\\u85e4\", \"\\u4ef6\\u6570\": 7, \"\\u5b8c\\u4e86\": false}",
+        "usage": {
+          "prompt_tokens": 33,
+          "completion_tokens": 27,
+          "total_tokens": 60,
+          "input_tokens": 33,
+          "output_tokens": 27,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 1.5
+        },
+        "wall_seconds": 1.509273374977056
+      },
+      {
+        "id": "json_risk",
+        "passed": true,
+        "expected": {
+          "impact": 9,
+          "likelihood": 4,
+          "risk": "high"
+        },
+        "observed": "{\"impact\": 9, \"likelihood\": 4, \"risk\": \"high\"}",
+        "usage": {
+          "prompt_tokens": 43,
+          "completion_tokens": 27,
+          "total_tokens": 70,
+          "input_tokens": 43,
+          "output_tokens": 27,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 1.57
+        },
+        "wall_seconds": 1.5771902080159634
+      },
+      {
+        "id": "json_sort",
+        "passed": true,
+        "expected": {
+          "sorted": [
+            2,
+            2,
+            5,
+            9,
+            11
+          ],
+          "distinct": 4
+        },
+        "observed": "{\"sorted\": [2, 2, 5, 9, 11], \"distinct\": 4}",
+        "usage": {
+          "prompt_tokens": 38,
+          "completion_tokens": 29,
+          "total_tokens": 67,
+          "input_tokens": 38,
+          "output_tokens": 29,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_time": 1.59
+        },
+        "wall_seconds": 1.5922541249892674
+      }
+    ]
+  },
+  "performance": {
+    "context_summary": {
+      "4096": {
+        "needle_pass_rate": 1.0,
+        "median_prompt_tokens": 4037,
+        "median_seconds": 6.9,
+        "median_effective_prompt_tokens_per_second": 585.0724637681159
+      },
+      "16384": {
+        "needle_pass_rate": 1.0,
+        "median_prompt_tokens": 16326,
+        "median_seconds": 26.18,
+        "median_effective_prompt_tokens_per_second": 623.6058059587472
+      },
+      "32768": {
+        "needle_pass_rate": 1.0,
+        "median_prompt_tokens": 32710,
+        "median_seconds": 33.86,
+        "median_effective_prompt_tokens_per_second": 966.0366213821619
+      }
+    },
+    "needle_runs": [
+      {
+        "target_tokens": 4096,
+        "run": 1,
+        "passed": true,
+        "observed": "KAPPA-4096-1",
+        "prompt_tokens": 4037,
+        "completion_tokens": 10,
+        "seconds": 7.08,
+        "effective_prompt_tokens_per_second": 570.1977401129943
+      },
+      {
+        "target_tokens": 4096,
+        "run": 2,
+        "passed": true,
+        "observed": "KAPPA-4096-2",
+        "prompt_tokens": 4037,
+        "completion_tokens": 10,
+        "seconds": 6.9,
+        "effective_prompt_tokens_per_second": 585.0724637681159
+      },
+      {
+        "target_tokens": 4096,
+        "run": 3,
+        "passed": true,
+        "observed": "KAPPA-4096-3",
+        "prompt_tokens": 4037,
+        "completion_tokens": 10,
+        "seconds": 6.86,
+        "effective_prompt_tokens_per_second": 588.4839650145773
+      },
+      {
+        "target_tokens": 16384,
+        "run": 1,
+        "passed": true,
+        "observed": "KAPPA-16384-1",
+        "prompt_tokens": 16326,
+        "completion_tokens": 11,
+        "seconds": 26.18,
+        "effective_prompt_tokens_per_second": 623.6058059587472
+      },
+      {
+        "target_tokens": 16384,
+        "run": 2,
+        "passed": true,
+        "observed": "KAPPA-16384-2",
+        "prompt_tokens": 16326,
+        "completion_tokens": 11,
+        "seconds": 26.99,
+        "effective_prompt_tokens_per_second": 604.8907002593553
+      },
+      {
+        "target_tokens": 16384,
+        "run": 3,
+        "passed": true,
+        "observed": "KAPPA-16384-3",
+        "prompt_tokens": 16326,
+        "completion_tokens": 11,
+        "seconds": 20.23,
+        "effective_prompt_tokens_per_second": 807.0192782995551
+      },
+      {
+        "target_tokens": 32768,
+        "run": 1,
+        "passed": true,
+        "observed": "KAPPA-32768-1",
+        "prompt_tokens": 32710,
+        "completion_tokens": 11,
+        "seconds": 53.44,
+        "effective_prompt_tokens_per_second": 612.0883233532934
+      },
+      {
+        "target_tokens": 32768,
+        "run": 2,
+        "passed": true,
+        "observed": "KAPPA-32768-2",
+        "prompt_tokens": 32710,
+        "completion_tokens": 11,
+        "seconds": 33.86,
+        "effective_prompt_tokens_per_second": 966.0366213821619
+      },
+      {
+        "target_tokens": 32768,
+        "run": 3,
+        "passed": true,
+        "observed": "KAPPA-32768-3",
+        "prompt_tokens": 32710,
+        "completion_tokens": 11,
+        "seconds": 31.49,
+        "effective_prompt_tokens_per_second": 1038.7424579231504
+      }
+    ],
+    "generation_summary": {
+      "median_tokens_per_second": 62.43902439024391,
+      "median_seconds": 4.1
+    },
+    "generation_runs": [
+      {
+        "run": 1,
+        "completion_tokens": 256,
+        "seconds": 4.39,
+        "tokens_per_second": 58.31435079726652
+      },
+      {
+        "run": 2,
+        "completion_tokens": 256,
+        "seconds": 4.1,
+        "tokens_per_second": 62.43902439024391
+      },
+      {
+        "run": 3,
+        "completion_tokens": 256,
+        "seconds": 3.94,
+        "tokens_per_second": 64.9746192893401
+      }
+    ]
+  },
+  "elapsed_seconds": 251.50531101226807,
+  "peak_rss_bytes": 17076158464
+}

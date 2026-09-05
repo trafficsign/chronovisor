@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Plan</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_36a34504b3fd4042a9392cc5e9b50d44","created_at":"2026-09-06T07:54:15+09:00","状態":"done","slug":"qwen38-flash-next-jang4s-benchmark"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">Qwen3.8 Flash Next JANG_4S 実機ベンチマーク</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="done">done</span>
+<span><code data-bind="task_id">plan_36a34504b3fd4042a9392cc5e9b50d44</code></span>
+<span data-bind="created_at">2026-09-06T07:54:15+09:00</span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<ul>
+<li>現行 <code>Jundot/Qwen3.8-Flash-Next-oQ4e-mtp</code>（oMLX）と候補 <code>JANGQ-AI/Qwen3.8-Flash-Next-JANG_4S</code>（vMLX）を同一 Mac・同一プロンプトで比較し、Chronovisor の主モデルとして実用になるか判定する。</li>
+<li>品質、構造化出力、実データ再生、短・中・長文脈の速度、常駐/ピークメモリを分離して測る。</li>
+</ul>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<ul>
+<li>本番設定やモデル割当を変更しない。</li>
+<li>ユーザーの無関係な dirty worktree を変更・commit しない。</li>
+<li>認証情報をログ・成果物へ書き出さない。</li>
+<li>計測後に、停止前に動いていた Chronovisor / 推論サービスを戻さないまま終えない。</li>
+</ul>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定</h2>
+<ul>
+<li>候補は vMLX 向けの JANG_4S とし、現行は現在の実運用 oQ4e-mtp/oMLX を基準にする。</li>
+<li>候補の gated repository へ現在の Hugging Face 認証でアクセスできることを前提とする。</li>
+<li>既存の汎用ベンチマークと Chronovisor の replay corpus を再利用し、新しい評価基盤は作らない。</li>
+</ul>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist">
+<li><input type="checkbox" checked><span>停止前の Git・ディスク・メモリ・プロセス・launchd・モデル状態を記録する。</span></li>
+<li><input type="checkbox" checked><span>JANG_4S の取得可否とファイル実体を確認し、隔離した vMLX 実行環境を準備する。</span></li>
+<li><input type="checkbox" checked><span>既存ハーネスと Chronovisor replay corpus から同一評価セットを確定する。</span></li>
+<li><input type="checkbox" checked><span>Chronovisor の関連サービスを停止し、メモリが落ち着いたクリーン状態を確認する。</span></li>
+<li><input type="checkbox" checked><span>現行 oQ4e-mtp/oMLX を品質・文脈長・速度・メモリで計測する。</span></li>
+<li><input type="checkbox" checked><span>候補 JANG_4S/vMLX を同条件で計測する。</span></li>
+<li><input type="checkbox" checked><span>結果を照合し、Chronovisor 採用可否と犠牲になる項目を判定する。</span></li>
+<li><input type="checkbox" checked><span>停止前のサービス状態を復元し、API・モデル・プロセスを確認する。</span></li>
+<li><input type="checkbox" checked><span>証跡と結論を保存し、計画書を検証して完了状態にする。</span></li>
+</ol>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<ul>
+<li>両モデルの同一ケース結果、文脈別レイテンシ/スループット、ロード後/ピーク RSS、失敗内容が保存されている。</li>
+<li>JANG_4S が現行比でどの品質・速度・メモリを得失するか、Chronovisor の用途に即して結論が出ている。</li>
+<li>停止前に稼働していたサービスが復元され、現行モデルの応答を確認できている。</li>
+</ul>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<ul>
+<li>ベンチ JSON をスキーマ・ケース数・エラー数について機械確認する。</li>
+<li>候補の API health、構造化 JSON、長文脈、MTP 動作をログと応答の両方で確認する。</li>
+<li>復元後に launchd/process、oMLX health、Chronovisor health を停止前スナップショットと照合する。</li>
+</ul>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>なし</li></ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul><li>候補を本番設定へ切り替える作業は、この評価の対象外。</li></ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log">
+<li><time>2026-09-06 07:57</time><span>計画を具体化し、状態を running に変更。既存ハーネス再利用と完全復元を境界として実行開始。</span></li>
+<li><time>2026-09-06 08:02</time><span>停止前スナップショット完了。HEAD 136ab8b、既存 dirty 作業を確認、空き約 1.2 TiB、swap 8.33 GiB。稼働中の managed-v2 六サービスと oMLX/current model を復元対象として固定。</span></li>
+<li><time>2026-09-06 08:09</time><span>評価セット確定。既存 26 ケース汎用ハーネスに加え、lane-contract-v28 の canonical 100 ケース（19 lanes、全 production schema/effect coverage）を生成・検証。HTTP adapter の self-check も通過。</span></li>
+<li><time>2026-09-06 08:14</time><span>候補準備完了。Hub SHA d705ae2 を全 77,507,379,188 bytes 取得し、隔離 vMLX 1.6.53 で bundle-check status=ok（20 shards、3317 tensors、warning/repair なし）。</span></li>
+<li><time>2026-09-06 08:16</time><span>クリーン計測状態へ移行。登録済み Chronovisor managed-v2 九サービスを公式 manager で停止し、プロセス/8765/8766 消滅を確認。oMLX を再起動して Ornith を退避し、現行 Qwen のみ常駐（actual 78,678,154,328 bytes）。</span></li>
+<li><time>2026-09-06 08:25</time><span>現行基準を完走。汎用品質 24/26、needle 4K/16K/32K 全成功、decode 中央値 62.44 tok/s。Chronovisor 19/19 schema valid、18/19 effect match、中央値 8.73 s、最大 45.06 s。</span></li>
+<li><time>2026-09-06 08:40</time><span>候補計測を完走。汎用品質 22/26、needle 全成功、decode 71.85 tok/s。Chronovisor は 19/19 schema valid、18/19 effect match、中央値 6.32 s、最大 48.81 s。vMLX native MTP D3 の実動と peak 60,306 MiB を確認。</span></li>
+<li><time>2026-09-06 08:42</time><span>比較判定完了。候補は Chronovisor 品質同率、中央値 27.7%短縮、clean-load resident 25.3%削減。一方で汎用品質 -7.7 pp、32K latency +77.8%。結論を「メモリ優先の条件付き採用、全100件 canary 後に切替」とした。</span></li>
+<li><time>2026-09-06 08:47</time><span>原状復元完了。候補 vMLX/18135 を正常終了し、oMLX/18125 は Qwen + Ornith の loaded_count=2、health=200。managed-v2 九サービスを再登録し、Dashboard=200、LAN TLS auth boundary=401、Semantic/Reranker ready=true を確認。</span></li>
+<li><time>2026-09-06 08:49</time><span>証跡検証完了。汎用2ファイル、Chronovisor2ファイル、canonical corpus 100件/19 lanes、adapter self-check、secret scan、diff check、SHA-256を確認し、計画を done に更新。</span></li>
+</ol>
+</section>
+
+</body>
+</html>
