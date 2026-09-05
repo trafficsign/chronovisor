@@ -145,7 +145,8 @@
       "relative_links_verified": true,
       "json_payload_validation": true,
       "visual_render_checked": false,
-      "visual_render_limit": "local file URL policy restriction; no alternate route attempted"
+      "visual_render_limit": "local file URL policy restriction; no alternate route attempted",
+      "checked_count": 20
     },
     "runtime_wrapper_regression": {
       "passed": 24,
@@ -161,11 +162,18 @@
       "shell_syntax_passed": true,
       "ruff_passed": true,
       "diff_check_passed": true
+    },
+    "deployed_archive_smoke": {
+      "passed": 3,
+      "failed": 0,
+      "report": "runtime-smoke-results.json",
+      "script": "runtime-smoke.py",
+      "data": "isolated synthetic files; no production data mutation or model inference"
     }
   },
   "scope": {
     "models_prompts_inference_parameters": "unchanged",
-    "runtime_dependencies": "must remain equal to baseline after deployment",
+    "runtime_dependencies": "six restarted services equal to their exact pre-deployment archive versions",
     "quality_evidence": "deterministic data/state equivalence and existing request/authority/search/recall contracts",
     "not_claimed": [
       "end-to-end model latency reduction",
@@ -173,7 +181,12 @@
       "new model quality improvement"
     ],
     "benchmark_environment": "same host, warm OS caches, no cache purge; services remain running; host noise and concurrent validation may affect timings",
-    "provisional_threshold_interpretation": "primary workloads target >=10 percent median improvement; unchanged paths must avoid material regression. A2 redundant-read deletion is also a code simplification with an exact read-count reduction, and is not advertised as a >=10 percent speedup."
+    "provisional_threshold_interpretation": "primary workloads target >=10 percent median improvement; unchanged paths must avoid material regression. A2 redundant-read deletion is also a code simplification with an exact read-count reduction, and is not advertised as a >=10 percent speedup.",
+    "remaining_limits": [
+      "whole-model end-to-end latency, prefill/decode timings and model-quality uplift not measured",
+      "health aggregate cache may be stale while background data changes; current runtime and liveness checked separately",
+      "existing MCP connection remains old until reconnect"
+    ]
   },
   "implementation_files": {
     "src/chronovisor/core/index_store.py": "aa50b0671aa7a37ec4f7d5e0d228a9886f4e7ef0cb8aa474a30f2bc78fac7ba1",
@@ -188,18 +201,14 @@
     "partial_source_fallback": "scripts/chronovisor-runtime-env line 7 read directly"
   },
   "deployment": {
-    "status": "repairing_after_first_restart",
+    "status": "verified",
     "optimization_commit": "2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6",
-    "first_restart_findings": [
-      "uvx resolved newer transitive dependencies for some services",
-      "generated Converge wrapper still pinned d8f31d8",
-      "Reranker warmup accelerator lease contention recovered automatically"
-    ],
-    "correction": [
-      "per-service CLI constraints from exact pre-deployment archive versions",
-      "Converge wrapper to use shared runtime source resolution with unchanged Python and flags",
-      "staged restart without model or lease-timeout changes"
-    ],
-    "constraint_manifest": "runtime-constraints.json"
-  }
+    "runtime_launcher_commit": "a56febb99b9466f14c264440664f19f02a969e8c",
+    "verified_service_count": 6,
+    "all_dependencies_equal_to_baseline": true,
+    "model_and_inference_settings_unchanged": true,
+    "report": "deployment.json",
+    "remaining_runtime": "existing active-task MCP session at 4ead53c; next connection refresh required"
+  },
+  "timestamp": "2026-09-05T09:04:45.354803+09:00"
 }

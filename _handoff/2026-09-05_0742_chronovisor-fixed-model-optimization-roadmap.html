@@ -80,13 +80,13 @@ summary{cursor:pointer;color:var(--accent);font-weight:600}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_8869798eb4f84ff3819fcf81f895b814","created_at":"2026-09-05T07:42:59+09:00","状態":"running","slug":"chronovisor-fixed-model-optimization-roadmap","title":"Chronovisor — モデル固定・品質維持の最適化と再設計 統合計画","project_root":"/Users/trafficsign/projects/personal/chronovisor","baseline_commit":"4ead53c5a42da8e61c2319ccdb2b581f7a656e22","current_request_scope":"implement_A0_A7_and_deploy","implementation_started":true,"main_scope":"A0-A7: behavior-preserving optimization","future_scope":"F1-F9: retained design options, not automatically executable","deployment_scope":"push, targeted restart and live verification authorized by user 2026-09-05","implementation_baseline_commit":"7b872fa64cf08edeaf86be4078077f60862c7dba","implementation_commit":"2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6"}
+{"task_id":"plan_8869798eb4f84ff3819fcf81f895b814","created_at":"2026-09-05T07:42:59+09:00","状態":"done","slug":"chronovisor-fixed-model-optimization-roadmap","title":"Chronovisor — モデル固定・品質維持の最適化と再設計 統合計画","project_root":"/Users/trafficsign/projects/personal/chronovisor","baseline_commit":"4ead53c5a42da8e61c2319ccdb2b581f7a656e22","current_request_scope":"implement_A0_A7_and_deploy","implementation_started":true,"main_scope":"A0-A7: behavior-preserving optimization","future_scope":"F1-F9: retained design options, not automatically executable","deployment_scope":"push, targeted restart and live verification authorized by user 2026-09-05","implementation_baseline_commit":"7b872fa64cf08edeaf86be4078077f60862c7dba","implementation_commit":"2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6","completed_at":"2026-09-05T09:04:45+09:00","validated_runtime_commit":"a56febb99b9466f14c264440664f19f02a969e8c","unreflected_runtime":"active-task MCP session; next connection refresh required"}
 </script>
 
 <header>
 <h1><span id="plan-title">Chronovisor — モデル固定・品質維持の最適化と再設計 統合計画</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="running">running · 主計画を実行中</span>
+<span class="badge" data-bind="状態" data-state="done">done · 主計画・本番反映を検証済み</span>
 <span><code data-bind="task_id">plan_8869798eb4f84ff3819fcf81f895b814</code></span>
 <span data-bind="created_at">2026-09-05T07:42:59+09:00</span>
 <span>実行対象：A0–A7・push・再起動・本番確認</span>
@@ -178,7 +178,7 @@ summary{cursor:pointer;color:var(--accent);font-weight:600}
 
 <div class="phase"><h3>A7 · 変更単位を確定し、成果と残件を記録する</h3><ol class="checklist">
 <li><input id="a7-1" type="checkbox" checked><label for="a7-1">各採用変更の対象差分・検証・測定をrootが確認し、意味のある単位でcommitする。無関係なdirty差分を含めず、計画のcheckboxと時刻付きログを更新する。</label></li>
-<li><input id="a7-2" type="checkbox"><label for="a7-2">採用/不採用/未測定、固定条件、品質検証、局所/全体の性能、切り戻し先、未反映のruntimeを明記する。将来案F1–F9は各案の採用状況を別に保持する。</label></li>
+<li><input id="a7-2" type="checkbox" checked><label for="a7-2">採用/不採用/未測定、固定条件、品質検証、局所/全体の性能、切り戻し先、未反映のruntimeを明記する。将来案F1–F9は各案の採用状況を別に保持する。</label></li>
 </ol><p class="small">主計画の完了はコード・検証の完了を指す。本番反映は、下記の条件付き手順が実行・確認されるまで別の状態として報告する。</p></div>
 </section>
 
@@ -247,7 +247,7 @@ summary{cursor:pointer;color:var(--accent);font-weight:600}
 <li>モデル・設定・schemaの意図しない差、品質ゲート失敗、Raw/receipt/CAS異常、stale状態、既定予算を超えるメモリ/遅延回帰が出たら、採用を止めて記録した版へ切り戻す。モデル変更で辻褄を合わせない。</li>
 <li>設定変更・永続schema移行を含まないAの変更では、旧runtimeへ戻した後もデータを読めることを確認する。Fの移行では事前に別の移行・復元受入をこの計画へ追加する。</li>
 </ol>
-<p class="small">現在の反映状態：採用実装はpush済み。初回再起動で依存version driftとConverge旧SHAを検出し、共通起動処理と局所wrapperを修正中。再反映後の全service照合まで完了扱いしない。切り戻し先のruntime sourceは4ead53c5a42da8e61c2319ccdb2b581f7a656e22。永続schemaとモデル設定は変更しない。</p>
+<p class="small">現在の反映状態：実装2aa90b8と起動修正a56febbをpushし、Dashboard/LAN/Ingest/Semantic/Reranker/Convergeの6サービスを再起動・検証済み。全archive SHA・対象コードhash・変更前の依存versionが一致し、モデル/推論設定も不変。HTTP health=200/status=ok/drift=false、LAN=401、Semantic/Reranker ready・PID一致、Ingest authority_available=true。最終証拠の文書専用commitもpush後に同じコードで再照合する。接続中のMCPのみ旧4ead53cを保持しており、次の接続で更新・確認が必要。切り戻し先のruntime sourceは4ead53c5a42da8e61c2319ccdb2b581f7a656e22。永続schemaとモデル設定は変更しない。</p>
 </section>
 
 <section class="blockers" data-section="ブロッカー">
@@ -292,6 +292,7 @@ summary{cursor:pointer;color:var(--accent);font-weight:600}
 <li><time datetime="2026-09-05T08:45:56+09:00">2026-09-05 08:45</time><span>A6完了。全体6,373件中6,364 passed・8 failed・1 skipped（906.65秒）。失敗8件は構成台帳7件と大関数policy1件で、cleanな7b872faでも同じ失敗集合を独立再現。今回の新規失敗0、台帳や閾値は緩和していない。最終コードの関連253件とモデル/資源契約399件は通過、ruff/mypy/import-linter/compileall/diff-check通過。検索・訂正・保存・lease/CAS・モデル要求の契約および固定snapshotの結果一致を確認した。prefill/decodeの分解や自由生成回答の新規A/Bは未測定で、品質改善・全体高速化を主張しない。<a href="evidence/2026-09-05-fixed-model-optimization/verification.json">検証・既存失敗の証拠</a>。</span></li>
 <li><time datetime="2026-09-05T08:46:35+09:00">2026-09-05 08:46</time><span>A7-1完了。rootが採用コード・最終テスト・実測rawを確認し、<code>2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6</code>へcommit。無関係なR6 harness差分と既存の未追跡資料を含めていない。続けてpushと本番反映を行う。</span></li>
 <li><time datetime="2026-09-05T08:58:05+09:00">2026-09-05 08:58</time><span>初回push/restartの照合でuvxによる一部依存更新とConverge生成wrapperの旧SHA固定を検出。Rerankerは起動時accelerator lease競合後に自動復旧した。固定条件を満たすため、共通wrapperへ役割別の依存制約fileを渡す最小修正を追加し、Convergeは同じruntime source解決へ接続する。Python/モデル/timeout/ジョブ上限は変更しない。起動wrapper関連24 tests、shell構文、ruff、diff検査を通過。<a href="evidence/2026-09-05-fixed-model-optimization/deployment-first.json">初回照合</a>と<a href="evidence/2026-09-05-fixed-model-optimization/runtime-constraints.json">依存制約manifest</a>を保存。A7-2は再反映とlive検証まで未完了。</span></li>
+<li><time datetime="2026-09-05T09:04:45+09:00">2026-09-05 09:04</time><span>A7-2完了。依存制約を反映し、Semantic ready→Reranker ready→Ingest/Convergeの順に起動。6サービスのarchiveはa56febb、全依存versionは着手前と一致。モデル設定・uv.lock・pyproject・oMLX設定hashも維持。<a href="evidence/2026-09-05-fixed-model-optimization/deployment.json">本番照合</a>。配布済みarchiveのPythonで、JSONL改行/順序、Convergence返却値の所有権、Index更新/保存/reloadの3つの合成smokeに成功（<a href="evidence/2026-09-05-fixed-model-optimization/runtime-smoke-results.json">結果</a>、<a href="evidence/2026-09-05-fixed-model-optimization/runtime-smoke.py">再実行script</a>）。起動直後のhealth timeoutは解消。集計cacheのstale=trueは稼働中データのfingerprint変化などの鮮度表示で、runtimeのdrift=falseと現在のlivenessを別に確認した。全体pytestの既存失敗8件、全体推論の速度/品質向上を未測定である点、接続中MCPの旧版残存を明記。F1–F9は将来案のまま。無関係なdirty作業を保持。</span></li>
 </ol>
 </section>
 

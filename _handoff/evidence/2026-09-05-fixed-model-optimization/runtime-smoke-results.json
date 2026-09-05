@@ -1,0 +1,16 @@
+{
+  "timestamp": "2026-09-05T09:02:30.216238+09:00",
+  "runtime_commit": "a56febb99b9466f14c264440664f19f02a969e8c",
+  "archive": "/Users/trafficsign/.cache/uv/archive-v0/E2GdO75-csuaB2BiHGALP",
+  "python": "/Users/trafficsign/.cache/uv/archive-v0/E2GdO75-csuaB2BiHGALP/bin/python",
+  "imported_module": "/Users/trafficsign/.cache/uv/archive-v0/E2GdO75-csuaB2BiHGALP/lib/python3.14/site-packages/chronovisor/__init__.py",
+  "script_sha256": "0c6a8cd004d0771b2d761f1af203854c43e5238ceee9e1ce07abf0ea2d7a1ecb",
+  "isolated_synthetic_data_only": true,
+  "model_inference_invoked": false,
+  "checks": [
+    "read_jsonl_tail_mixed_newline_order",
+    "convergence_read_helpers_are_copy_safe",
+    "index_metadata_update_persist_reload_and_derived_results"
+  ],
+  "status": "ok"
+}

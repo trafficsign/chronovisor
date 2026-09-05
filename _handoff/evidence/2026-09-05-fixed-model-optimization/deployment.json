@@ -1,0 +1,269 @@
+{
+  "timestamp": "2026-09-05T09:04:06.603247+09:00",
+  "expected_commit": "a56febb99b9466f14c264440664f19f02a969e8c",
+  "runtime_source": "git+ssh://git@github.com/trafficsign/chronovisor@a56febb99b9466f14c264440664f19f02a969e8c",
+  "config_without_runtime_unchanged": true,
+  "file_checks": {
+    "/Users/trafficsign/projects/personal/chronovisor/uv.lock": true,
+    "/Users/trafficsign/projects/personal/chronovisor/pyproject.toml": true,
+    "/Users/trafficsign/.omlx/model_settings.json": true,
+    "/Users/trafficsign/.omlx/settings.json": true
+  },
+  "services": [
+    {
+      "label": "com.trafficsign.chronovisor-dashboard.managed-v2",
+      "loaded": true,
+      "pid": 70041,
+      "archives": [
+        {
+          "pid": 70092,
+          "path": "/Users/trafficsign/.cache/uv/archive-v0/E2GdO75-csuaB2BiHGALP",
+          "commit": "a56febb99b9466f14c264440664f19f02a969e8c",
+          "commit_matches": true,
+          "dependency_changes": {},
+          "source_equal": {
+            "core/index_store.py": true,
+            "ingest/convergence.py": true,
+            "ops/lint_repair.py": true,
+            "recall/recall_auditor.py": true
+          }
+        }
+      ],
+      "state": "running",
+      "runs": "8",
+      "last exit code": "143"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+      "loaded": true,
+      "pid": 70043,
+      "archives": [
+        {
+          "pid": 70089,
+          "path": "/Users/trafficsign/.cache/uv/archive-v0/PUWjecAz49flev2GY2rsv",
+          "commit": "a56febb99b9466f14c264440664f19f02a969e8c",
+          "commit_matches": true,
+          "dependency_changes": {},
+          "source_equal": {
+            "core/index_store.py": true,
+            "ingest/convergence.py": true,
+            "ops/lint_repair.py": true,
+            "recall/recall_auditor.py": true
+          }
+        }
+      ],
+      "state": "running",
+      "runs": "8",
+      "last exit code": "143"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+      "loaded": true,
+      "pid": 72063,
+      "archives": [
+        {
+          "pid": 72093,
+          "path": "/Users/trafficsign/.cache/uv/archive-v0/yNJuj0pyGNBcDTl4Qo8fx",
+          "commit": "a56febb99b9466f14c264440664f19f02a969e8c",
+          "commit_matches": true,
+          "dependency_changes": {},
+          "source_equal": {
+            "core/index_store.py": true,
+            "ingest/convergence.py": true,
+            "ops/lint_repair.py": true,
+            "recall/recall_auditor.py": true
+          }
+        }
+      ],
+      "state": "running",
+      "runs": "3",
+      "last exit code": "143"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-semantic.managed-v2",
+      "loaded": true,
+      "pid": 69710,
+      "archives": [
+        {
+          "pid": 69896,
+          "path": "/Users/trafficsign/.cache/uv/archive-v0/FVjASbsVnJYk9NxpsP08d",
+          "commit": "a56febb99b9466f14c264440664f19f02a969e8c",
+          "commit_matches": true,
+          "dependency_changes": {},
+          "source_equal": {
+            "core/index_store.py": true,
+            "ingest/convergence.py": true,
+            "ops/lint_repair.py": true,
+            "recall/recall_auditor.py": true
+          }
+        }
+      ],
+      "state": "running",
+      "runs": "3",
+      "last exit code": "0"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-reranker.managed-v2",
+      "loaded": true,
+      "pid": 71215,
+      "archives": [
+        {
+          "pid": 71308,
+          "path": "/Users/trafficsign/.cache/uv/archive-v0/GORRk_u9Eobrjf2Ubfm3G",
+          "commit": "a56febb99b9466f14c264440664f19f02a969e8c",
+          "commit_matches": true,
+          "dependency_changes": {},
+          "source_equal": {
+            "core/index_store.py": true,
+            "ingest/convergence.py": true,
+            "ops/lint_repair.py": true,
+            "recall/recall_auditor.py": true
+          }
+        }
+      ],
+      "state": "running",
+      "runs": "6",
+      "last exit code": "0"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-converge.managed-v2",
+      "loaded": true,
+      "pid": 72076,
+      "archives": [
+        {
+          "pid": 72109,
+          "path": "/Users/trafficsign/.cache/uv/archive-v0/E2GdO75-csuaB2BiHGALP",
+          "commit": "a56febb99b9466f14c264440664f19f02a969e8c",
+          "commit_matches": true,
+          "dependency_changes": {},
+          "source_equal": {
+            "core/index_store.py": true,
+            "ingest/convergence.py": true,
+            "ops/lint_repair.py": true,
+            "recall/recall_auditor.py": true
+          }
+        }
+      ],
+      "state": "running",
+      "runs": "62",
+      "last exit code": "143"
+    }
+  ],
+  "health": {
+    "http_status": 200,
+    "status": "ok",
+    "stale": true,
+    "refreshing": false,
+    "runtime": {
+      "expected_commit": "a56febb99b9466f14c264440664f19f02a969e8c",
+      "drift": false
+    }
+  },
+  "lan_boundary": {
+    "http_status": 401
+  },
+  "artifacts": {
+    "semantic-service-status.json": {
+      "ready": true,
+      "status": "ok",
+      "pid": 69896,
+      "self_test": {
+        "dimensions": 2048,
+        "negative_score": 0.11382941901683807,
+        "positive_score": 0.4881315231323242
+      },
+      "query_path_self_test": {
+        "hits": 3,
+        "latency_ms": 207.17,
+        "queries": 3
+      },
+      "model": "nvidia/Nemotron-3-Embed-1B-BF16",
+      "revision": "a5e0f804b9e90a1ca6784ecbf6e41595774fc834",
+      "observed_at_epoch": 1788566644.254133,
+      "file_mtime_epoch": 1788566644.2550182
+    },
+    "reranker-service-status.json": {
+      "ready": true,
+      "status": "ok",
+      "pid": 71308,
+      "observed_at_epoch": 1788566484.898798,
+      "file_mtime_epoch": 1788566484.8991218
+    },
+    "ingest-liveness.json": {
+      "status": "ready",
+      "authority_available": true,
+      "observed_at": "2026-09-05T09:03:54",
+      "file_mtime_epoch": 1788566634.4198081
+    }
+  },
+  "swap": "vm.swapusage: total = 7168.00M  used = 5879.06M  free = 1288.94M  (encrypted)",
+  "vm_stat": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                   147590.\nPages active:                                 769261.\nPages inactive:                               763045.\nPages speculative:                              5205.\nPages throttled:                                   0.\nPages wired down:                            5395392.\nPages purgeable:                               23702.\n\"Translation faults\":                     7644517846.\nPages copy-on-write:                       455692870.\nPages zero filled:                       12260100644.\nPages reactivated:                        1744330434.\nPages purged:                              106323447.\nFile-backed pages:                            558582.\nAnonymous pages:                              978929.\nPages stored in compressor:                  2764200.\nPages occupied by compressor:                1256525.\nDecompressions:                           1121751787.\nCompressions:                             1452316800.\nPageins:                                   458433089.\nPageouts:                                     657321.\nSwapins:                                      439307.\nSwapouts:                                     957184.\n",
+  "status": "verified",
+  "runtime_repair": {
+    "expected_commit": "a56febb99b9466f14c264440664f19f02a969e8c",
+    "config_without_runtime_unchanged": true,
+    "converge_wrapper": {
+      "path": "/Users/trafficsign/.chronovisor/bin/chronovisor-converge",
+      "before_sha256": "96669fa6b6a98f55dc7a27f221b1cb11948bb99f6c8fce7c5ecf011af1809a24",
+      "after_sha256": "950814f0528fbf381a2cf8f372ef0b120fa2bf29a441b6669e151ab7a9a24ede",
+      "python_unchanged": "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14",
+      "application_arguments_unchanged": [
+        "chronovisor-converge",
+        "--session-limit",
+        "8",
+        "--job-limit",
+        "8",
+        "--lint-limit",
+        "50",
+        "--orphan-limit",
+        "8",
+        "--maintenance-max-elapsed-seconds",
+        "900",
+        "--no-sleep"
+      ],
+      "uses_shared_runtime_source": true,
+      "uses_per_service_constraints": true,
+      "syntax_passed": true
+    }
+  },
+  "staged_restarts": [
+    {
+      "service": "dashboard",
+      "timestamp": "2026-09-05T08:59:31.862647+09:00",
+      "exit_code": 0
+    },
+    {
+      "service": "lan-dashboard",
+      "timestamp": "2026-09-05T08:59:31.884934+09:00",
+      "exit_code": 0
+    },
+    {
+      "service": "reranker",
+      "timestamp": "2026-09-05T09:00:50.182240+09:00",
+      "exit_code": 0,
+      "semantic_ready_pid_before_restart": 69896
+    },
+    {
+      "service": "ingest-drain",
+      "timestamp": "2026-09-05T09:01:47.027999+09:00",
+      "exit_code": 0
+    },
+    {
+      "service": "converge",
+      "timestamp": "2026-09-05T09:01:47.159222+09:00",
+      "exit_code": 0
+    }
+  ],
+  "restart_order": "semantic ready -> reranker ready -> ingest/converge; Dashboard/LAN restarted during semantic startup",
+  "health_cache_note": "HTTP 200/status ok and runtime drift false are current. stale=true refers to the materialized aggregate cache: 60-second age/fingerprint and live liveness freshness checks; active background writes can invalidate its fingerprint. No cache policy changed.",
+  "remaining_runtime": [
+    {
+      "command": "chronovisor-mcp",
+      "pid": 26730,
+      "commit": "4ead53c5a42da8e61c2319ccdb2b581f7a656e22",
+      "reason": "existing connection belongs to this active task; no MCP reconnect tool exposed",
+      "action": "refresh on a subsequent MCP connection and verify the loaded archive; not force-terminated during this task"
+    }
+  ],
+  "final_document_commit_policy": "The final evidence commit changes documentation only. Its pushed SHA is to be pinned and checked again, with identical implementation files, after saving this report."
+}
