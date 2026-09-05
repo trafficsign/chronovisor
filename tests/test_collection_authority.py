@@ -1403,13 +1403,19 @@ def test_local_consensus_moves_and_disagreement_preserves_without_host(
 
 
 @pytest.mark.parametrize(
-    "decision",
-    ["no_issue", "insufficient_evidence", "review_recommended"],
+    ("decision", "with_challenger"),
+    [
+        ("no_issue", False),
+        ("insufficient_evidence", False),
+        ("review_recommended", False),
+        ("review_recommended", True),
+    ],
 )
 def test_collection_same_route_completed_primary_preserves_without_move(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     decision: str,
+    with_challenger: bool,
 ) -> None:
     move_uid, ai_uid = _uids(2, start=530)
     _page(tmp_path / "pages" / "misc" / "move.md", move_uid)
@@ -1434,7 +1440,7 @@ def test_collection_same_route_completed_primary_preserves_without_move(
         decision=decision,
         suggested="ai" if decision == "review_recommended" else "",
     )
-    if decision == "review_recommended":
+    if with_challenger:
         row["challenger_review"] = _bound_review(
             tmp_path,
             row,
