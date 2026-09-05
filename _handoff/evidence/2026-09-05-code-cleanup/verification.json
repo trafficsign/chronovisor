@@ -1,0 +1,236 @@
+{
+  "baseline": "b1c14319d607aaca64b4ef1a2b49e17377013af1",
+  "production_line_delta": -385,
+  "production_scope": [
+    "src/chronovisor/raw/record_transaction.py",
+    "src/chronovisor/raw/claude_code_record.py",
+    "src/chronovisor/raw/codex_record.py",
+    "src/chronovisor/raw/pi_record.py",
+    "src/chronovisor/ops/dashboard.py",
+    "src/chronovisor/ingest/ingest_review_apply.py"
+  ],
+  "architecture": {
+    "edges_before": 44,
+    "edges_after": 44,
+    "sites_before": 1488,
+    "sites_after": 1487,
+    "sites_added": 14,
+    "sites_removed": 15,
+    "retirement_history_unchanged": true,
+    "compatibility_contracts_unchanged": true
+  },
+  "trace_parity": {
+    "baseline": "b1c1431",
+    "mixed_request_history_cases": 600,
+    "all_snapshots_equal": true,
+    "ordering": "history followed by trace_events; same priority and stable tie ordering"
+  },
+  "protected_files": {
+    "count": 10,
+    "all_unchanged": true
+  },
+  "validation": {
+    "recorder_and_sweeper_passed": 82,
+    "okf_entrypoint_passed": 21,
+    "structural_passed": 36,
+    "ruff": "passed",
+    "mypy_files": 91,
+    "mypy_shared_helper_files": 1,
+    "import_contracts_kept": 1,
+    "full_suite": {
+      "passed": 6374,
+      "failed": 1,
+      "skipped": 1,
+      "seconds": 869.89
+    },
+    "follow_up": {
+      "passed": 114,
+      "failed": 0,
+      "changed_only_test_import": true
+    },
+    "latest_case_results": {
+      "passed": 6375,
+      "failed": 0,
+      "skipped": 1
+    },
+    "production_unchanged_after_full_suite": true,
+    "resolved_failure": "test_codex_detects_unified_exec_apply_patch: import should_process from its defining shared module"
+  },
+  "recall_decision": "Policy extraction was reverted because the existing R4 v1 anchor binds exactly four source modules. All four remain byte-identical to baseline.",
+  "code_commit": "30c461addd8e350cd141ba49d95e8c2f2fb1217f",
+  "verified_at": "2026-09-05T11:06:03.079534+09:00",
+  "deployment": {
+    "verified": true,
+    "health": {
+      "status": "ok",
+      "commit": "30c461addd8e350cd141ba49d95e8c2f2fb1217f",
+      "expected_commit": "30c461addd8e350cd141ba49d95e8c2f2fb1217f",
+      "drift": false,
+      "stale": true,
+      "aggregate_age_seconds": 572.1051442623138,
+      "refreshing": false
+    },
+    "health_cache_note": "stale denotes the derived aggregate cache (fingerprint change, refresh in flight, or audit age); its refresh minimum is preserved. Acceptance uses current runtime metadata, six runtime archive checks, direct Semantic/Reranker health, fresh ingest liveness, and live Decision Trace separately.",
+    "lan_auth_status": 401,
+    "ingest_liveness": {
+      "status": "ready",
+      "observed_at": "2026-09-05T11:06:04",
+      "authority_available": true,
+      "ingest_runtime_available": true
+    },
+    "decision_trace": {
+      "state": "ready",
+      "event_count": 7,
+      "projection_present": true
+    },
+    "models_unchanged": true,
+    "configuration_only_runtime_source_changed": true,
+    "r4_critical_modules_unchanged": true,
+    "record_smoke": {
+      "claude_code": {
+        "exact_source": true,
+        "no_duplicate": true,
+        "receipt": true,
+        "save_result": {
+          "status": "saved",
+          "storage": "segment_open"
+        },
+        "state_cursor": true
+      },
+      "codex": {
+        "exact_source": true,
+        "no_duplicate": true,
+        "receipt": true,
+        "save_result": {
+          "status": "saved",
+          "storage": "segment_open"
+        },
+        "state_cursor": true
+      },
+      "pi": {
+        "exact_source": true,
+        "no_duplicate": true,
+        "receipt": true,
+        "save_result": {
+          "status": "saved",
+          "storage": "segment_open"
+        },
+        "state_cursor": true
+      }
+    },
+    "services": [
+      {
+        "label": "com.trafficsign.chronovisor-dashboard.managed-v2",
+        "state": "running",
+        "runtime": [
+          {
+            "commit": "30c461addd8e350cd141ba49d95e8c2f2fb1217f",
+            "python": "3.14.7",
+            "gil": true,
+            "dependencies_equal": true,
+            "source_equal": true
+          }
+        ]
+      },
+      {
+        "label": "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+        "state": "running",
+        "runtime": [
+          {
+            "commit": "30c461addd8e350cd141ba49d95e8c2f2fb1217f",
+            "python": "3.14.7",
+            "gil": true,
+            "dependencies_equal": true,
+            "source_equal": true
+          }
+        ]
+      },
+      {
+        "label": "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+        "state": "running",
+        "runtime": [
+          {
+            "commit": "30c461addd8e350cd141ba49d95e8c2f2fb1217f",
+            "python": "3.14.7",
+            "gil": true,
+            "dependencies_equal": true,
+            "source_equal": true
+          }
+        ]
+      },
+      {
+        "label": "com.trafficsign.chronovisor-semantic.managed-v2",
+        "state": "running",
+        "runtime": [
+          {
+            "commit": "30c461addd8e350cd141ba49d95e8c2f2fb1217f",
+            "python": "3.14.7",
+            "gil": true,
+            "dependencies_equal": true,
+            "source_equal": true
+          }
+        ]
+      },
+      {
+        "label": "com.trafficsign.chronovisor-reranker.managed-v2",
+        "state": "running",
+        "runtime": [
+          {
+            "commit": "30c461addd8e350cd141ba49d95e8c2f2fb1217f",
+            "python": "3.14.7",
+            "gil": true,
+            "dependencies_equal": true,
+            "source_equal": true
+          }
+        ]
+      },
+      {
+        "label": "com.trafficsign.chronovisor-converge.managed-v2",
+        "state": "running",
+        "runtime": [
+          {
+            "commit": "30c461addd8e350cd141ba49d95e8c2f2fb1217f",
+            "python": "3.14.7",
+            "gil": true,
+            "dependencies_equal": true,
+            "source_equal": true
+          }
+        ]
+      }
+    ]
+  },
+  "ci_as_of_recording": [
+    {
+      "conclusion": "",
+      "databaseId": 33937804122,
+      "headSha": "30c461addd8e350cd141ba49d95e8c2f2fb1217f",
+      "name": "Python 3.14 compatibility",
+      "status": "in_progress",
+      "url": "https://github.com/trafficsign/chronovisor/actions/runs/33937804122"
+    },
+    {
+      "conclusion": "",
+      "databaseId": 33937804082,
+      "headSha": "30c461addd8e350cd141ba49d95e8c2f2fb1217f",
+      "name": "quality",
+      "status": "in_progress",
+      "url": "https://github.com/trafficsign/chronovisor/actions/runs/33937804082"
+    },
+    {
+      "conclusion": "failure",
+      "databaseId": 33937804041,
+      "headSha": "30c461addd8e350cd141ba49d95e8c2f2fb1217f",
+      "name": "Security",
+      "status": "completed",
+      "url": "https://github.com/trafficsign/chronovisor/actions/runs/33937804041"
+    }
+  ],
+  "preexisting_security_ci": {
+    "baseline_run": 33934288715,
+    "cleanup_run": 33937804041,
+    "dependency_audit": "GitPython 3.1.58: four advisories fixed in 3.1.59",
+    "git_history_secret_scan": "four findings in existing history",
+    "changed_by_cleanup": false,
+    "resolution": "Dependency upgrades and Git history rewriting were not included in this behavior-preserving cleanup."
+  }
+}
