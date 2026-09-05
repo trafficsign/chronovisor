@@ -488,6 +488,30 @@ def _review_routes(monkeypatch: pytest.MonkeyPatch):
     return routes
 
 
+def _duplicate_review_routes(monkeypatch: pytest.MonkeyPatch):
+    from chronovisor.core import ollama
+
+    routes = (
+        ollama.RuntimeGenerationRoute(
+            "librarian.review", "remote-test", "same-model", "remote", True
+        ),
+        ollama.RuntimeGenerationRoute(
+            "librarian.review.challenger",
+            "remote-test",
+            "same-model",
+            "remote",
+            True,
+        ),
+    )
+    monkeypatch.setattr(ollama, "runtime_generation_routes", lambda _roles: routes)
+    monkeypatch.setattr(
+        ollama,
+        "model_digests",
+        lambda _models: pytest.fail("remote duplicate route queried local digests"),
+    )
+    return routes
+
+
 def _bound_review(
     root: Path,
     row: dict,
@@ -860,7 +884,50 @@ def test_collection_review_rejects_duplicate_routes_before_model_controls(
     )
 
     with pytest.raises(CollectionAuthorityError, match="not independent"):
-        collection_authority.review_collection_queue(tmp_path)
+        collection_authority.review_collection_queue(tmp_path, role="challenger")
+
+
+def test_collection_primary_review_allows_duplicate_routes_without_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page_uid = _uids(1, start=88)[0]
+    _page(tmp_path / "pages" / "misc" / "note.md", page_uid)
+    CollectionRegistry(tmp_path).sync_from_pages()
+    collection_authority.refresh_review_queue(tmp_path)
+    routes = _duplicate_review_routes(monkeypatch)
+    monkeypatch.setattr(
+        collection_authority,
+        "research_lane",
+        lambda *_args, **_kwargs: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "run_cancellable_command",
+        lambda _command, stdin, *_args, **_kwargs: _review_worker_result(
+            stdin,
+            route=routes[0],
+            digest=None,
+        ),
+    )
+
+    result = collection_authority.review_collection_queue(
+        tmp_path,
+        limit=1,
+        role="primary",
+    )
+    queue = read_sealed_json(
+        tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
+    )
+    item = next(iter(queue["items"].values()))
+
+    assert result["role"] == "primary"
+    assert result["reviewer_calls"] == 1
+    assert result["independent_routes"] is False
+    assert item["status"] == "dismissed"
+    assert item["resolution"] == "model_no_issue_preserve_original_order"
+    assert queue["assignment_mutations"] == 0
+    assert queue["page_mutations"] == 0
 
 
 def test_review_model_is_only_a_resolved_model_assertion(
@@ -1332,6 +1399,323 @@ def test_local_consensus_moves_and_disagreement_preserves_without_host(
     assert preserve_row["status"] == "dismissed"
     assert preserve_row["resolution"] == (
         "autonomous_fail_closed_preserve_original_order"
+    )
+
+
+@pytest.mark.parametrize(
+    "decision",
+    ["no_issue", "insufficient_evidence", "review_recommended"],
+)
+def test_collection_same_route_completed_primary_preserves_without_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    decision: str,
+) -> None:
+    move_uid, ai_uid = _uids(2, start=530)
+    _page(tmp_path / "pages" / "misc" / "move.md", move_uid)
+    _page(tmp_path / "pages" / "ai" / "reference.md", ai_uid)
+    registry = CollectionRegistry(tmp_path)
+    registry.sync_from_pages()
+    queue = collection_authority.refresh_review_queue(tmp_path)
+    routes = _duplicate_review_routes(monkeypatch)
+    row = next(
+        value
+        for value in queue["items"].values()
+        if value["page_uid"] == move_uid
+    )
+    row["status"] = (
+        "review_recommended" if decision == "review_recommended" else "queued"
+    )
+    row["model_review"] = _bound_review(
+        tmp_path,
+        row,
+        routes[0],
+        None,
+        decision=decision,
+        suggested="ai" if decision == "review_recommended" else "",
+    )
+    if decision == "review_recommended":
+        row["challenger_review"] = _bound_review(
+            tmp_path,
+            row,
+            routes[1],
+            None,
+            decision="review_recommended",
+            suggested="ai",
+        )
+    queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
+    write_sealed_json(queue_path, queue, backup=True)
+
+    result = autonomously_finalize_collection_queue(tmp_path)
+
+    persisted = read_sealed_json(queue_path)
+    persisted_row = persisted["items"][row["candidate_id"]]
+    final_state = registry.load()
+    assert result["moves"] == 0
+    assert result["terminal_preserves"] == 1
+    assert result["queue_open"] == 0
+    assert persisted_row["status"] == "dismissed"
+    assert persisted_row["resolution"] == (
+        "autonomous_fail_closed_preserve_original_order"
+    )
+    assert persisted_row["autonomous_decision"]["authority"] == "model_review"
+    assert persisted_row["autonomous_decision"]["reason"] == (
+        "independent_review_unavailable"
+    )
+    assert (
+        final_state["assignments"][move_uid]["collection_uid"]
+        == final_state["slug_index"]["misc"]
+    )
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_collection_same_route_missing_or_stale_primary_stays_queued(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stale: bool,
+) -> None:
+    page_uid, ai_uid = _uids(2, start=535)
+    _page(tmp_path / "pages" / "misc" / "note.md", page_uid)
+    _page(tmp_path / "pages" / "ai" / "reference.md", ai_uid)
+    registry = CollectionRegistry(tmp_path)
+    registry.sync_from_pages()
+    queue = collection_authority.refresh_review_queue(tmp_path)
+    routes = _duplicate_review_routes(monkeypatch)
+    row = next(
+        value
+        for value in queue["items"].values()
+        if value["page_uid"] == page_uid
+    )
+    row["status"] = "review_recommended"
+    if stale:
+        row["model_review"] = _bound_review(
+            tmp_path,
+            row,
+            routes[0],
+            None,
+            decision="review_recommended",
+            suggested="ai",
+        )
+        row["model_review"]["review_input_sha256"] = "sha256:stale"
+    queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
+    write_sealed_json(queue_path, queue, backup=True)
+
+    result = autonomously_finalize_collection_queue(tmp_path)
+
+    persisted = read_sealed_json(queue_path)
+    persisted_row = persisted["items"][row["candidate_id"]]
+    final_state = registry.load()
+    assert result["moves"] == 0
+    assert result["terminal_preserves"] == 0
+    assert result["queue_open"] == 1
+    assert persisted_row["status"] == "queued"
+    assert persisted_row["stale_review_reason"] == "primary_evidence_not_current"
+    assert (
+        final_state["assignments"][page_uid]["collection_uid"]
+        == final_state["slug_index"]["misc"]
+    )
+
+
+def test_collection_adjudication_rejects_same_route_autonomous_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page_uid, ai_uid = _uids(2, start=545)
+    _page(tmp_path / "pages" / "misc" / "note.md", page_uid)
+    _page(tmp_path / "pages" / "ai" / "reference.md", ai_uid)
+    registry = CollectionRegistry(tmp_path)
+    registry.sync_from_pages()
+    queue = collection_authority.refresh_review_queue(tmp_path)
+    _duplicate_review_routes(monkeypatch)
+    row = next(
+        value
+        for value in queue["items"].values()
+        if value["page_uid"] == page_uid
+    )
+    manifest = {
+        "schema": collection_authority.COLLECTION_DECISION_SCHEMA,
+        "status": "approved",
+        "approved_at": "2026-09-05T00:00:00+00:00",
+        "decision_authority": collection_authority.AUTONOMOUS_DECISION_AUTHORITY,
+        "expected_registry_generation": int(registry.load()["generation"]),
+        "preserve_remaining_reasons": [],
+        "decisions": [
+            {
+                "candidate_id": row["candidate_id"],
+                "action": "move",
+                "target_collection_slug": "ai",
+                "rationale": "forged same-route consensus",
+            }
+        ],
+    }
+
+    with pytest.raises(CollectionAuthorityError, match="not independent"):
+        adjudicate_collection_review_queue(tmp_path, manifest)
+
+    final_state = registry.load()
+    assert (
+        final_state["assignments"][page_uid]["collection_uid"]
+        == final_state["slug_index"]["misc"]
+    )
+
+
+def test_collection_runner_skips_redundant_challenger_for_same_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.recall.collection_authority import run_collection_librarian
+
+    page_uid = _uids(1, start=550)[0]
+    _page(tmp_path / "pages" / "misc" / "note.md", page_uid)
+    CollectionRegistry(tmp_path).sync_from_pages()
+    _duplicate_review_routes(monkeypatch)
+    monkeypatch.setattr(
+        collection_authority,
+        "ensure_autonomous_crosswalk",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "changed": False,
+            "model_calls": 0,
+            "frontier_calls": 0,
+            "path": "",
+        },
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "build_uid_link_index",
+        lambda *_args, **_kwargs: {
+            "schema": "chronovisor.uid-link-index.v1",
+            "edge_count": 0,
+            "unresolved_count": 0,
+        },
+    )
+    queue_results = iter(
+        [
+            {"candidate_count": 1, "open": 1, "added": 0},
+            {"candidate_count": 1, "open": 1, "added": 0},
+            {"candidate_count": 1, "open": 0, "added": 0},
+        ]
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "refresh_review_queue",
+        lambda *_args, **_kwargs: next(queue_results),
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "autonomously_finalize_collection_queue",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "moves": 0,
+            "terminal_preserves": 0,
+            "queue_open": 1,
+        },
+    )
+    review_roles: list[str] = []
+
+    def review(_root: Path, *, role: str = "primary", **_kwargs):
+        review_roles.append(role)
+        return {"reviewer_calls": 0, "independent_routes": False}
+
+    monkeypatch.setattr(collection_authority, "review_collection_queue", review)
+    monkeypatch.setattr(
+        collection_authority,
+        "collection_quality_snapshot",
+        lambda *_args, **_kwargs: {
+            "schema": collection_authority.COLLECTION_QUALITY_SCHEMA,
+            "status": "passed",
+            "metrics": {"assignment_coverage": 1.0},
+            "warnings": [],
+            "hard_failures": [],
+        },
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "collection_authority_status",
+        lambda *_args, **_kwargs: {"active": True},
+    )
+
+    result = run_collection_librarian(tmp_path, autonomous=True)
+
+    assert result["status"] == "ok"
+    assert review_roles == ["primary"]
+
+
+def test_collection_affinity_preserve_does_not_spawn_model_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    misc_uid, ai_uid, career_a, career_b, career_c = _uids(5, start=555)
+    _page(tmp_path / "pages" / "misc" / "orphan.md", misc_uid)
+    _page(
+        tmp_path / "pages" / "ai" / "misplaced.md",
+        ai_uid,
+        links=("career-a", "career-b", "career-c"),
+    )
+    _page(tmp_path / "pages" / "career" / "career-a.md", career_a)
+    _page(tmp_path / "pages" / "career" / "career-b.md", career_b)
+    _page(tmp_path / "pages" / "career" / "career-c.md", career_c)
+    registry = CollectionRegistry(tmp_path)
+    state = registry.sync_from_pages()["registry"]
+    index_path = tmp_path / ".index" / "pages.json"
+    index_path.parent.mkdir(parents=True)
+    index_path.write_text(
+        json.dumps(
+            {
+                "entries": {
+                    "orphan": {"outlinks": []},
+                    "misplaced": {
+                        "outlinks": ["career-a", "career-b", "career-c"]
+                    },
+                    "career-a": {"outlinks": []},
+                    "career-b": {"outlinks": []},
+                    "career-c": {"outlinks": []},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    queue = collection_authority.refresh_review_queue(tmp_path, state=state)
+    affinity = next(
+        row
+        for row in queue["items"].values()
+        if row["reason"] == "cross_collection_link_affinity"
+    )
+    queue["items"] = {affinity["candidate_id"]: affinity}
+    queue["candidate_count"] = 1
+    queue["open"] = 1
+    queue_path = tmp_path / "runtime" / "librarian" / "collection-review-queue.json"
+    write_sealed_json(queue_path, queue, backup=True)
+    _duplicate_review_routes(monkeypatch)
+    monkeypatch.setattr(
+        collection_authority,
+        "run_cancellable_command",
+        lambda *_args, **_kwargs: pytest.fail(
+            "deterministic affinity preserve spawned a model worker"
+        ),
+    )
+    monkeypatch.setattr(
+        collection_authority,
+        "refresh_review_queue",
+        lambda *_args, **_kwargs: {
+            "candidate_count": 1,
+            "open": 0,
+            "added": 0,
+        },
+    )
+
+    result = autonomously_finalize_collection_queue(tmp_path)
+
+    persisted = read_sealed_json(queue_path)
+    persisted_row = persisted["items"][affinity["candidate_id"]]
+    final_state = registry.load()
+    assert result["moves"] == 0
+    assert result["terminal_preserves"] == 1
+    assert result["queue_open"] == 0
+    assert persisted_row["resolution"] == "autonomous_preserve_original_order"
+    assert (
+        final_state["assignments"][ai_uid]["collection_uid"]
+        == final_state["slug_index"]["ai"]
     )
 
 

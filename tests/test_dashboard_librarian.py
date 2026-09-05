@@ -225,7 +225,7 @@ def test_collection_review_required_is_terminal_with_visible_hold(
 
     def isolated_review(*_args, role: str = "primary", **_kwargs):
         review_roles.append(role)
-        return {"reviewer_calls": 0}
+        return {"reviewer_calls": 0, "independent_routes": True}
 
     monkeypatch.setattr(
         collection_authority,

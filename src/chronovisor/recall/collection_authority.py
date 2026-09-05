@@ -1520,10 +1520,18 @@ def _current_review_input(
     )
 
 
+def _review_routes_are_independent(identities: Mapping[str, Mapping[str, str]]) -> bool:
+    return len({
+        (identity["provider"], identity["model"], identity["location"])
+        for identity in identities.values()
+    }) == len(identities)
+
+
 def _resolved_review_routes(
     *,
     asserted_model: str | None = None,
     asserted_role: str = "primary",
+    require_independent: bool = True,
 ) -> tuple[dict[str, dict[str, str]], dict[str, str | None]]:
     from chronovisor.recall import classification
     from chronovisor.recall.collection_anomaly_worker import route_identity
@@ -1545,11 +1553,7 @@ def _resolved_review_routes(
         role: route_identity(by_role[runtime_role])
         for role, runtime_role in _ANOMALY_RUNTIME_ROLES.items()
     }
-    independent = {
-        (identity["provider"], identity["model"], identity["location"])
-        for identity in identities.values()
-    }
-    if len(independent) != len(identities):
+    if require_independent and not _review_routes_are_independent(identities):
         raise CollectionAuthorityError("collection review routes are not independent")
     if asserted_role not in identities:
         raise CollectionAuthorityError(
@@ -1656,6 +1660,7 @@ def review_collection_queue(
     route_identities, digests = _resolved_review_routes(
         asserted_model=model,
         asserted_role=role,
+        require_independent=role == "challenger",
     )
     selected_route = route_identities[role]
     digest = digests[role]
@@ -1838,6 +1843,7 @@ def review_collection_queue(
         "role": role,
         "model": selected_route["model"],
         "route_identity": selected_route,
+        "independent_routes": _review_routes_are_independent(route_identities),
         "model_digest": digest,
         "reconciled": reconciled,
         "reviewed": reviewed,
@@ -1888,7 +1894,8 @@ def autonomously_finalize_collection_queue(root: Path) -> dict[str, Any]:
     )
     from chronovisor.recall.collection_anomaly_worker import PROMPT_SHA256
 
-    route_identities, digests = _resolved_review_routes()
+    route_identities, digests = _resolved_review_routes(require_independent=False)
+    independent_routes = _review_routes_are_independent(route_identities)
     active_slugs = {
         str(row.get("slug") or "")
         for row in state["collections"].values()
@@ -1959,14 +1966,19 @@ def autonomously_finalize_collection_queue(root: Path) -> dict[str, Any]:
                 source_sensitivity,
             ),
         )
-        if primary.get("decision") == "review_recommended" and not challenger_current:
+        if (
+            independent_routes
+            and primary.get("decision") == "review_recommended"
+            and not challenger_current
+        ):
             row["status"] = "review_recommended"
             row["stale_review_reason"] = "challenger_evidence_not_current"
             queue["items"][candidate_id] = row
             continue
         challenger_row = challenger if isinstance(challenger, Mapping) else {}
         if (
-            primary.get("decision") == "review_recommended"
+            independent_routes
+            and primary.get("decision") == "review_recommended"
             and challenger_row.get("decision") == "review_recommended"
             and primary.get("suggested_collection_slug")
             == challenger_row.get("suggested_collection_slug")
@@ -1993,16 +2005,25 @@ def autonomously_finalize_collection_queue(root: Path) -> dict[str, Any]:
         review_finished = primary.get("decision") in {
             "no_issue",
             "insufficient_evidence",
-        } or (primary.get("decision") == "review_recommended" and challenger_current)
+        } or (
+            primary.get("decision") == "review_recommended"
+            and (challenger_current or not independent_routes)
+        )
         if review_finished:
             row["status"] = "dismissed"
             row["resolved_at"] = _now()
             row["resolution"] = "autonomous_fail_closed_preserve_original_order"
             row["autonomous_decision"] = {
                 "action": "preserve",
-                "authority": AUTONOMOUS_DECISION_AUTHORITY,
+                "authority": (
+                    AUTONOMOUS_DECISION_AUTHORITY if independent_routes else "model_review"
+                ),
                 "decided_at": _now(),
-                "reason": "no_two_model_move_consensus",
+                "reason": (
+                    "no_two_model_move_consensus"
+                    if independent_routes
+                    else "independent_review_unavailable"
+                ),
             }
             queue["items"][candidate_id] = row
             terminalized.append(str(candidate_id))
@@ -2811,12 +2832,13 @@ def run_collection_librarian(
         if int(queue.get("open") or 0):
             primary = review_collection_queue(root, limit=review_limit, role="primary")
             model_calls += int(primary.get("reviewer_calls") or 0)
-            challenger = review_collection_queue(
-                root,
-                limit=review_limit,
-                role="challenger",
-            )
-            model_calls += int(challenger.get("reviewer_calls") or 0)
+            if primary["independent_routes"]:
+                challenger = review_collection_queue(
+                    root,
+                    limit=review_limit,
+                    role="challenger",
+                )
+                model_calls += int(challenger.get("reviewer_calls") or 0)
             automation = autonomously_finalize_collection_queue(root)
             queue = refresh_review_queue(root, state=registry.load())
         else:
