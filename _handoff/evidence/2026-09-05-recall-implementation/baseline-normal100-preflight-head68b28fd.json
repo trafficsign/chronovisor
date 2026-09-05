@@ -1,0 +1,42 @@
+{
+  "captured_at": "2026-09-05T03:21:54+00:00",
+  "existing_baseline": {
+    "candidate_count": 100,
+    "head_commit": "b0484f37bfdb45f543071452d097448dab2385b4",
+    "path": "_handoff/2026-08-13_1446_recall-baseline.json",
+    "sha256": "e8adaf099246832af68497ca7c2557942c16e7e6ebad21e03f87d468664d0f3a",
+    "usable_for_current_head": false
+  },
+  "historical_scope": "Initial bounded-agent preflight only. Later root-authorized evaluation is recorded in the linked artifact; initial execution limits are not a current user-approval requirement.",
+  "later_execution_artifact": "baseline-normal100-drift-head68b28fd.json",
+  "log": {
+    "bytes": 86123870,
+    "case_ids_sha256": "0ce60aed64324b0b842ef0ab0e4a5b051ac4fb667aa8168fe6ee9d766ccd56bf",
+    "eligible_rows": 1439,
+    "input_cohort_sha256": "4af98775981238bbff8b28091290519d458211d86a29e33704dadd45f27279e7",
+    "lines": 16046,
+    "path": "~/.chronovisor/recall/recall-log.jsonl",
+    "selected_cohort": 100,
+    "sha256": "1bcea07abaa53a419e07a445fa43ad53645d1f2edefb6eb660d82f767e476be0"
+  },
+  "parity_capture": {
+    "reason": "full capture invokes semantic_client.health/reranker_client.health and replays 100 current requests; service/model calls are prohibited for this read-only baseline task",
+    "required_command_after_approval": "PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/recall_parity.py capture --log ~/.chronovisor/recall/recall-log.jsonl --source-root <clean-worktree-at-HEAD> --source-commit <full-sha> --output <baseline.json>",
+    "safe_preflight": "passed",
+    "status": "not_captured"
+  },
+  "schema": "chronovisor-recall-implementation-baseline-preflight-v1",
+  "source": {
+    "commit": "68b28fde47e5680b0ac801747eda40a5b846337d",
+    "runtime_module_sha256": "f75759d126e603a47affb91a76f741c9a761bbcc10085e9c71e94733432e1bc9",
+    "shared_worktree_used": false,
+    "tree": "1ea96dbd2cdead95b0eaed064075b30d9a59e8b1"
+  },
+  "verification": {
+    "eligible_cohort_check": "passed (1439 eligible, first 100 selected)",
+    "production_persistence_written": false,
+    "service_or_model_called": false,
+    "source_identity_check": "passed",
+    "tests_test_recall_baseline": "13 passed in 0.30s"
+  }
+}

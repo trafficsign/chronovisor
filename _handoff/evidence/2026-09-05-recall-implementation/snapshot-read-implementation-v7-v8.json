@@ -1,0 +1,164 @@
+{
+  "bm25_parity": {
+    "baseline_schema": 7,
+    "candidate_schema": 8,
+    "content_digest_mismatch_queries": 0,
+    "max_abs_score_delta": 0.0,
+    "order_mismatch_queries": 0,
+    "query_count": 20,
+    "query_sha256_only": [
+      "2a8ba6f0d01f9accf1a3d8c9d0789550ca6b1eb3f65d8db414c473128e610984",
+      "9e05f42cd40086832116c62aa8188096a605c65d930c3a2c4b35acc2a94fd71e",
+      "7dfd0e941e7c3f77eac43cb3124bd43ae3799022e08511364a879a6180023694",
+      "1b35079a2e40a980298f26b3d0d72c88d1e0e49bd987edc2e4eb533f778e6361",
+      "835ef1057a85376cf72a1f860da6b38e1d374ef71d6b2a53e908ae1bad62a11a",
+      "71edd4ca8f764686c9912a873e8915a17ec7f19c7b3759ff694910f47bf8cd65",
+      "d2f3f19e21205f15e70ff4aa9e11c9537b6ecce14bdd1158a92001606e282194",
+      "7f59bf4f0d9936ee44afaf4a1b37bb6f2abfdfceed108ad2e4fe589ecc7c5d70",
+      "da9b5b4d47bb4de3d54343665335032fc6e42330dae5fd878cb26037fbfd9961",
+      "a98db80709ac32c442242813a87209071da69194b209902267d978f3116753fc",
+      "77109e4f3ee2b344852d5de5a59de0f649f049ccca8b1b0f2317cd2c60c48dcf",
+      "35955e5084986f253d89e840a5a49060a09f314d3f087c3c4c274ca72db3a9cf",
+      "f5b560395ecff7279a9579ce25692cf8afb4491f0ff7ffd0912f14cb61b30334",
+      "5a6872e5cbae2a9432f47e321144f777bb75ef2296eebd312fc0a5e5acecd06c",
+      "8c4a38991f0c662901369682a60642298e71b9c01c69bcfd9652f4dc5caaac40",
+      "8a870ff82318777b47bc52fba2af4610aa966a3ab0acd940fc50693b4dc198c9",
+      "28338b92b7d0162b59eff675fd8cb8b9b18f28716cab37155a36a6af17ef3803",
+      "5ad51232862aad4f4b37a659bc3601c5ae624d4649a76a7160680f909d264fac",
+      "4b9b057b69af663ae070fc2c26ab9ff2f96d99c6a0537558bd346f618e218e06",
+      "950eb264d8851a8cff5495e01192998354d98a597af7dacb2938d31b37761042"
+    ],
+    "result_count_mismatch_queries": 0,
+    "score_mismatch_rows_gt_1e-12": 0,
+    "top_n": 20
+  },
+  "cold_readonly_load": {
+    "canonical_page_scan_attempted": false,
+    "integrity_check_note": "First lexical cold load includes SQLite PRAGMA quick_check; repeated query_existing calls reuse file-stat signature in-process.",
+    "interim_metadata_target_met": true,
+    "interim_metadata_target_ms": 150,
+    "lexical_load_ms_p95_observed": 1405.173666,
+    "metadata_load_ms_p95_observed": 131.991083,
+    "next_limiter": "First lexical SQLite quick_check remains the dominant synchronous cost; metadata-only cold reads stayed below the 150 ms interim target in this three-process sample.",
+    "runs": [
+      {
+        "error": null,
+        "generation": 1788580191963063000,
+        "lexical_available": true,
+        "lexical_generation": 1788580191963063000,
+        "lexical_load_ms": 1405.173666,
+        "lexical_loaded": true,
+        "metadata_available": true,
+        "metadata_load_ms": 119.545417,
+        "metadata_loaded": true,
+        "run": 1
+      },
+      {
+        "error": null,
+        "generation": 1788580191963063000,
+        "lexical_available": true,
+        "lexical_generation": 1788580191963063000,
+        "lexical_load_ms": 459.266375,
+        "lexical_loaded": true,
+        "metadata_available": true,
+        "metadata_load_ms": 124.493333,
+        "metadata_loaded": true,
+        "run": 2
+      },
+      {
+        "error": null,
+        "generation": 1788580191963063000,
+        "lexical_available": true,
+        "lexical_generation": 1788580191963063000,
+        "lexical_load_ms": 495.640708,
+        "lexical_loaded": true,
+        "metadata_available": true,
+        "metadata_load_ms": 131.991083,
+        "metadata_loaded": true,
+        "run": 3
+      }
+    ],
+    "same_process_stamp_reuse": true
+  },
+  "component_breakdown": {
+    "canonical_scan_attempted": false,
+    "full_lexical_load_ms_sample": 478.777416,
+    "json_parse_ms_sample": 52.775000000000006,
+    "metadata_load_ms_sample": 136.063,
+    "namespace_root_resolve_count": 2,
+    "namespace_root_resolve_ms_sample": 0.061625,
+    "page_entry_from_dict_ms_sample": 31.283636,
+    "sqlite_quick_check_ms_sample": 1386.969542,
+    "writer_snapshot_ms_sample": 141.789375
+  },
+  "freeze_integrity": {
+    "compared_against_pre_candidate_apfs_clone": true,
+    "files_compared": [
+      ".index/pages.json",
+      ".index/backlinks.json",
+      ".index/lexical.sqlite"
+    ],
+    "freeze_bytes_equal_pre_candidate_clone": true,
+    "freeze_modified_by_run": false
+  },
+  "generation_integrity": {
+    "candidate_backlinks_generation": 1788580191963063000,
+    "candidate_generations_match": true,
+    "candidate_lexical_page_count": 7216,
+    "candidate_metadata_generation": 1788580191963063000,
+    "candidate_projection_generation": 1788580191963063000,
+    "candidate_snapshot_inventory_equal_v7": true,
+    "candidate_stable_uid_empty": 7216,
+    "candidate_stable_uid_present": 0,
+    "digest_inventory_sha256_v7": "abe752e5ad4ebbf61cfd0d7d65eddd917c1091f27a0feb8ba55e36bda643fbc8",
+    "digest_inventory_sha256_v8": "abe752e5ad4ebbf61cfd0d7d65eddd917c1091f27a0feb8ba55e36bda643fbc8",
+    "frozen_stable_uid_empty": 7216,
+    "frozen_stable_uid_present": 0,
+    "stable_uid_identity_equal_v7": true,
+    "uid_inventory_sha256_v7": "48f8291175a66382d2a04bd049eadc1204b962792eda3aa1ce579faa2508afce",
+    "uid_inventory_sha256_v8": "48f8291175a66382d2a04bd049eadc1204b962792eda3aa1ce579faa2508afce",
+    "v7_lexical_page_count": 7216
+  },
+  "limitations": [
+    "Parity covers raw BM25 query order/score/content digest over the fixed 20-query set; no semantic/model/service calls were made.",
+    "v7 baseline lacks projection_meta, so only candidate v8 projection generation is stamped; writer metadata generations are compared across pages/backlinks/projection.",
+    "Projection content digests are shape-validated; canonical bytes are not rehashed during cold load. Injection-time digest/UID rebinding remains the final identity check.",
+    "All page identifiers are represented only by aggregate hashes; no canonical body text is stored.",
+    "Empty index UID fields describe frontmatter-derived metadata only; PageRegistry may hold separate durable UIDs. Selected injection validates the available snapshot identity and current canonical bytes."
+  ],
+  "read_hardening": {
+    "post_sql_snapshot_signature_fence": true,
+    "projection_rows_compare_mtime_size_uid_status_superseded_by": true,
+    "root_bound_requires_pages_and_backlinks_metadata": true,
+    "sqlite_wal_shm_signature_uses_size_to_avoid_read_side_mtime_churn": true
+  },
+  "roots": {
+    "baseline_data_clone_sha256": "7dd45a553ba345726f31",
+    "candidate_clone_retained_for_followup": true,
+    "candidate_root_sha256": "2c88ba8a291e27fcd518",
+    "input_freeze_root_sha256": "d694706ef247e5382c2d"
+  },
+  "schema_version": "snapshot_read_verification_v1",
+  "source": {
+    "baseline_git_head": "68b28fde47e5680b0ac801747eda40a5b846337d",
+    "candidate_files_sha256": {
+      "src/chronovisor/core/index_store.py": "0a352bf04742e4d55ffd36624cf099e5f2619395e6eb8e494ded910a11f6cb9e",
+      "src/chronovisor/core/lexical_index.py": "79a90283887f011dff73f12364ddf82a89b67e32adb118f898c63dcbbf6a3fd2"
+    },
+    "capture_had_uncommitted_changes": true,
+    "capture_parent_git_head": "68b28fde47e5680b0ac801747eda40a5b846337d",
+    "models_or_services_invoked": false,
+    "snapshot_implementation_commit": "2c64dc3ca319ee13f6bb480cfd8ecb575ffd45af",
+    "verified_candidate_commit": "f89748e4d4cdad87f56bf98c7c02cd52f5f8d206"
+  },
+  "writer_transition": {
+    "lexical_build_method": "LexicalIndex.build(force=True)",
+    "lexical_pages_after": 7216,
+    "lexical_schema_after": 8,
+    "lexical_schema_before": 7,
+    "metadata_entries": 7222,
+    "metadata_refresh_method": "IndexStore._refresh_locked (isolated clone writer)",
+    "metadata_schema": 12,
+    "metadata_stable_entries": 7216
+  }
+}

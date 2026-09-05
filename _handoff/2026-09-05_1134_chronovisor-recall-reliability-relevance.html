@@ -57,17 +57,35 @@ body{max-width:1120px}header{position:static}.lead{font-size:1.15rem;font-weight
 </style></head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_4e8984d5ebd9405eb1eafe5def5fee2b","created_at":"2026-09-05T11:34:58+09:00","状態":"ready","slug":"chronovisor-recall-reliability-relevance","investigation_state":"complete","implementation_state":"not_started","updated_at":"2026-09-05T12:04:10+09:00","independent_review":"complete"}
+{"task_id":"plan_4e8984d5ebd9405eb1eafe5def5fee2b","created_at":"2026-09-05T11:34:58+09:00","状態":"ready","slug":"chronovisor-recall-reliability-relevance","investigation_state":"complete","implementation_state":"complete","updated_at":"2026-09-05T13:50:27+09:00","independent_review":"complete","validation_state":"local_passed_full_acceptance_pending","rollout_state":"pending","implementation_commit":"f89748e4d4cdad87f56bf98c7c02cd52f5f8d206"}
 </script>
 
 <header>
 <h1>Chronovisor Recall：信頼性・関連度の改善計画</h1>
-<div class="meta-bar"><span class="badge" data-bind="状態" data-state="ready">ready · 実装未着手</span><span>調査完了：2026-09-05</span><span><code>HEAD 9b4b88b5</code></span></div>
-<p class="lead">検索が期限切れになると、関連度を十分に判定しないBM25経路に切り替わる。この接続部分を最優先で修正する。</p>
-<p>対象は自動Recall（L2）のタイムアウトと不適切なカード注入。ログ集計、稼働中サービスへの少数の読み取り専用要求、現行コードの呼出し経路、既存テスト、独立した3件のコード調査を照合した。今回の成果物は調査と計画であり、実装・設定・モデル・サービスの変更は行っていない。</p>
+<div class="meta-bar"><span class="badge" data-bind="状態" data-state="ready">ready · ローカル検証済み／本番未適用</span><span>調査完了：2026-09-05</span><span><code>実装 f89748e</code> · 調査元 <code>9b4b88b5</code></span></div>
+<p class="lead">縮退時の誤注入、期限切れqueue、初回snapshot読込み、追従文の処理を実装し、関連485テストを通した。</p>
+<p>ユーザーの実装指示に基づき、調査で確定した接続部分を修正した。コードは3件のscoped commitへ保存済み。以下では実装結果と、変更前の固定観測を分けて記録する。本番indexの移行、push、サービス再起動、P5のlive受入は未実施。モデル・policyの権限昇格は行っていない。</p>
 </header>
 
-<div class="kpis" aria-label="調査結果の主要指標">
+<section id="implementation" data-section="実装結果"><h2>実装結果 · 2026-09-05</h2>
+<p class="note"><strong>コード実装とローカル検証は完了。本番採用の判定は未完了。</strong>正常100件の厳密なsnapshot評価は、終了時のSemantic health取得失敗で無効になった。成功した件だけを選び直したり、sealを緩めたりして合格扱いにはしていない。</p>
+<div class="table-wrap"><table><thead><tr><th>変更</th><th>現在の動作</th><th>根拠</th></tr></thead><tbody>
+<tr><td>P1 · 縮退とidentity</td><td>候補の存在だけで注入を許可しない。明示した主題と一致する候補を、現在の本文SHA-256・取得できるUID・sensitivityへ再照合。成功済みchannelとquery由来を再利用し、degradedをteacher評価・学習許可へ昇格させない。</td><td>無関係カード0。合成goldは必要記憶2/2、negative 2件の注入0。削除・本文変更・UID不一致・digest欠損・同じ本文のroot外symlinkを棄却。</td></tr>
+<tr><td>P2 · 共有deadline</td><td>client socket、queue、model/cache lock、generation、accelerator、search/verifyへ同じ絶対期限を渡す。失効pendingをencode直前にも除外し、同batchの有効要求を継続する。</td><td>決定的診断とmixed batch回帰がpass。期限切れpending encode 0、後続要求完了。実行中のnative処理は強制停止せず、late workを別計数。</td></tr>
+<tr><td>P3 · snapshot reader</td><td>同期Recallでは全corpus scan・再構築をせず、pages/backlinks/projectionの世代とmetadataを検証。修復・schema移行は既存writerに残す。</td><td>7,216安定ページのcloneでschema 7→8移行。固定20 queryのraw BM25順序・スコア・digest・件数は不一致0。</td></tr>
+<tr><td>P4 · 会話の継続</td><td>CronoBisāを既存entity aliasで解決。同一session/cwd・TTL内で主題が1つのときだけ追従文を補完。既知UI envelopeはschema検証後に質問と回答を残し、transport IDを除去する。</td><td>今回の4ターン会話、別topic・cwd切替・期限切れ・複数主題・偽envelope・ユーザー記述XML/JSONを回帰検証。post-hookではquery意図だけを継承。</td></tr>
+</tbody></table></div>
+<p><strong>計測：</strong>新process 3回のmetadata読込みは119.5 / 124.5 / 132.0ms（この標本のp95観測値132.0ms）。旧観測の中央値約513msに対して初回負荷は減ったが、統計的な速度保証ではない。lexical初回検証は1,405 / 459 / 496msで、SQLite <code>quick_check</code>が残る律速。整合性検査を外して速度目標を達成した扱いにはしない。</p>
+<p><strong>UIDの補足：</strong>cloneの7,216件はindex内のfrontmatter由来UID欄が空だった。別管理のPageRegistry UIDが無いという意味ではない。snapshot UIDがあればUID＋本文SHA-256、空ならcanonical page ID＋本文SHA-256と現在もfrontmatter UIDが空であることを検証する。後から参照したPageRegistry UIDを「旧snapshotと照合済み」とは記録しない。</p>
+<p><strong>検証：</strong>最終関連テスト485件pass。さらにcommitted sourceだけのclean worktreeで既存R6・parity・pipeline・architectureの125件がpassし、保護した別作業のdirty R6変更へ依存しないことを確認。Ruff全体、mypy対象91 source、import境界、architecture/large-function、compileall、diff whitespaceがpass。先行の全体実行は6,447 pass・1 skip・1 failure。失敗はテスト内一時Git repositoryの安定読取りチェックで、同一コードの単独再実行と最終関連実行でpassした。最終ソースで全体テストを再実行したという主張はしない。</p>
+<p><strong>manual-94の比較：</strong>baseline schema 7と移行済みschema 8を、同一の94行（80 unique query）・正解ラベルで比較し、順位・スコア・結果数の不一致0、非latency品質指標は全て一致した。recall@5=0.22535、recall@20=0.54930、MRR@10=0.16251、negative@20=0.17143。これは既存BM25品質を維持したという結果であり、品質向上の証明ではない。汎用run_reportのp50/p95/maxはbaseline 57/137/9,827ms、candidate 63.5/133/33,175ms。deadline付きhookの速度試験ではなく、cold条件も統制したpaired性能試験ではないため、latency合格には使わない。<a href="evidence/2026-09-05-recall-implementation/manual94-bm25-p3-comparison.json">94件のquery単位比較証跡</a>を保存した。</p>
+<p><strong>評価の範囲：</strong>4件の合成goldはpositive controlを含む回帰fixtureで、blind holdoutや一般の関連度推定ではない。manual-94の既存ラベルは品質観測に再利用できるが、現存manifestはschema 1、現行authority契約はschema 2＋review ledgerのため権限昇格の合格証にはならない。full hybrid normal100も未受入。</p>
+<p class="sources">commit: <code>2c64dc3</code>（P3） → <code>2145df0</code>（P2） → <code>f89748e</code>（P1/P4・共通query契約）。<a href="evidence/2026-09-05-recall-implementation/implementation-results.json">実装・検証結果とsource hash</a> / <a href="evidence/2026-09-05-recall-implementation/snapshot-read-implementation-v7-v8.json">snapshot移行・速度・20 query parity</a> / <a href="evidence/2026-09-05-recall-implementation/baseline-normal100-drift-head68b28fd.json">100件評価の失敗理由</a> / <a href="evidence/2026-09-05-recall-implementation/baseline-manual94-bm25-head68b28fd.json">manual-94 baseline品質観測</a></p>
+</section>
+
+
+<h2>変更前の固定観測（改善後の値ではない）</h2>
+<div class="kpis" aria-label="変更前の固定した調査結果">
 <div class="kpi"><strong>80 / 100</strong><small>直近100回がBM25縮退動作</small></div>
 <div class="kpi"><strong>63 / 100</strong><small>意味検索のsocket timeout</small></div>
 <div class="kpi"><strong>2 / 2</strong><small>新しい診断で問題を再現</small></div>
@@ -90,7 +108,7 @@ body{max-width:1120px}header{position:static}.lead{font-size:1.15rem;font-weight
 <p class="muted">直近100回の残りの失敗は、SemanticServiceUnavailableの別理由3件とsearch budget exhausted 14件。stageは入れ子で重複するため、各stageの時間を足して総時間と比較しない。timeout率は取得品質そのものではなく、注入率も有用性の正解ラベルではない。古いtimezone無しのログは期間集計に使っていない。</p>
 </section>
 
-<section data-section="確定事項"><h2>確定した問題と根拠</h2>
+<section data-section="確定事項"><h2>調査時点で確定した問題と根拠</h2><p class="muted">以下の挙動・行番号は変更前commit 9b4b88b5に対する記録。修正後の判定は上の実装結果を参照。</p>
 <article class="finding"><h3><span class="tag">F1 · 実処理で再現</span>縮退時に「候補がある」だけで注入が成立する</h3>
 <p><code>run_deterministic_fallback</code>はヒューリスティック判定後も現在の発話だけをBM25へ渡し、候補が残ると<code>none → search</code>に変換する。正常経路のevidence判定・query生成・fusionを通らない。今回の2発話はconfidence 0.3で、search閾値0.35を下回るが、どちらも関連の薄いカード3件が注入された。</p>
 <p>実indexで「CronoBisāに改善の余地はないよな。」「ちょっとそこを徹底調査して、改善計画を練ってくれ。」を再実行すると、上位8件にChronovisorをpage-idへ含むものは0件。明示した「Chronovisor Recall 意味検索 タイムアウト 改善」では6/8件だった。page-idの文字列照合はこの2例の診断補助であり、本番の関連度判定や正解ラベルには採用しない。</p>
@@ -136,29 +154,29 @@ body{max-width:1120px}header{position:static}.lead{font-size:1.15rem;font-weight
 <ol class="checklist"><li><input type="checkbox" checked disabled><span>P0の事前調査：現行ログ・archive・2つの再現・関連既存テストを保存した。</span></li></ol>
 
 <div class="phase"><h3>P0 · 再現と計測を実装の受入条件へ移す</h3>
-<ol class="checklist"><li><input type="checkbox" disabled><span>診断2件を既存pytest fixtureへ組み込み、現行版でfailすることを確認する。</span></li><li><input type="checkbox" disabled><span>観測対象を正常／semantic timeout／search budget／breaker-open／UI応答／追従文に分ける。既存normal匿名100件と、今回の失敗例を含むgold評価を固定する。host・fallback理由・cache状態・index世代別に分母を残し、case selection後に入力／候補snapshot／goldをsealする。</span></li></ol>
+<ol class="checklist"><li><input type="checkbox" checked disabled><span>診断2件を既存pytest fixtureへ組み込み、現行版でfailすることを確認する。</span></li><li><input type="checkbox" disabled><span>観測対象を正常／semantic timeout／search budget／breaker-open／UI応答／追従文に分ける。既存normal匿名100件と、今回の失敗例を含むgold評価を固定する。host・fallback理由・cache状態・index世代別に分母を残し、case selection後に入力／候補snapshot／goldをsealする。</span></li></ol>
 <p><strong>計測：</strong>request開始からの総時刻、corpus/index/code版、query数・由来・hash、queue待ち、lock/lease待ち、embed、ANN、metadata再読込み、残り時間、fallback理由、candidate admission理由を記録。query本文や機密カードは標準telemetryへ複製しない。今回の集計は運用率であり、誤注入率の母集団推定ではない。</p>
 <p><strong>完了条件：</strong>同じdeadlineがどの段階で消費されたかを再構成でき、raw query/個人情報を出さずnormalとdegradedの共通分母を計算できる。</p>
 <p class="sources">主な変更先：tests/test_recall_runtime.py、tests/test_semantic_service.py、tests/test_semantic_client.py、semantic_service.py、semantic_client.py、recall_runtime.pyの既存trace</p></div>
 
 <div class="phase"><h3>P1 · 縮退時の誤注入を止める（最優先）</h3>
-<ol class="checklist"><li><input type="checkbox" disabled><span>BM25候補の存在だけによるnone→search昇格を廃止する。判定がnoneで十分な根拠がなければL2を棄却し、許可されたL1のみを維持する。</span></li><li><input type="checkbox" disabled><span>強い明示query・過去参照・既存anchorがある場合の有用なfallbackを残す。既存の読み取り専用anchor/BM25機能と、安全性・重複除去・identity処理を再利用する。</span></li><li><input type="checkbox" disabled><span>primaryで取得済みの候補とquery由来を、typed availability failureで捨てない。fallbackから探索・model・writeを再起動しない。部分結果はstatus=degraded、failure_class、元のquery由来、成功／失敗channel、snapshot generationを保持し、normal成功やteacher評価完了へ読み替えない。</span></li></ol>
+<ol class="checklist"><li><input type="checkbox" checked disabled><span>BM25候補の存在だけによるnone→search昇格を廃止する。判定がnoneで十分な根拠がなければL2を棄却し、許可されたL1のみを維持する。</span></li><li><input type="checkbox" checked disabled><span>強い明示query・過去参照・既存anchorがある場合の有用なfallbackを残す。既存の読み取り専用anchor/BM25機能と、安全性・重複除去・identity処理を再利用する。</span></li><li><input type="checkbox" checked disabled><span>primaryで取得済みの候補とquery由来を、typed availability failureで捨てない。fallbackから探索・model・writeを再起動しない。部分結果はstatus=degraded、failure_class、元のquery由来、成功／失敗channel、snapshot generationを保持し、normal成功やteacher評価完了へ読み替えない。</span></li></ol>
 <p><strong>完了条件：</strong>無関係料理メモの診断がpass。既知2発話は適切な根拠を返すかL2を棄却。strong-anchorの必要な記憶、sensitivityフィルタ、L1、600ms、unknown exception可視化は維持する。source別raw score/rankとadmission理由をgoldへ結び付け、positive controlも必須にする。候補のUID/content digestを現在のpageへ再bindし、削除・置換・snapshot世代不一致や必要証拠の不足があればL2を棄却する。raw BM25スコアへ0.35/0.65を直適用せず、固定score floorで一律に解決しない。共通判定は既存evidence_scoreへraw BM25をそのまま渡す意味ではない。source種別を維持して入力特徴を校正し、heuristic none＋未検証candidateがスコア変換だけで昇格する経路も禁止する。診断スクリプトの合格だけでは採用せず、all-abstainでも失敗する有用な取得のgold条件を同時に満たす。</p>
 <p class="sources">主な変更先：recall_runtime.py:1934–2139、1303–1437、4499–4631 / core/search.py:186–207 / 再利用：search_existing_lexical、既存candidate metadata。cwdは関連度の手掛かりであり、全般的なproject禁止リストにはしない。</p></div>
 
 <div class="phase"><h3>P2 · 期限切れ要求を残さず、searchとverifyの時間契約を揃える</h3>
-<ol class="checklist"><li><input type="checkbox" disabled><span>QueryBatcherへ絶対deadlineを渡し、待機期限切れを失効扱いにする。workerがencode前・search前・結果設定前に失効を確認し、有効な同batchの要求を継続する。</span></li><li><input type="checkbox" disabled><span>search/verify/client socket/postprocessingで残り時間を同じ起点から計算する。0・負値・期限超過を待ち時間の既定値へ戻さない。</span></li><li><input type="checkbox" disabled><span>cold/unique/top100、index更新中、共有accelerator待ちを測り、250msの配分を決める。client上限だけを拡大してqueue滞留を隠さない。</span></li></ol>
+<ol class="checklist"><li><input type="checkbox" checked disabled><span>QueryBatcherへ絶対deadlineを渡し、待機期限切れを失効扱いにする。workerがencode前・search前・結果設定前に失効を確認し、有効な同batchの要求を継続する。</span></li><li><input type="checkbox" checked disabled><span>search/verify/client socket/postprocessingで残り時間を同じ起点から計算する。0・負値・期限超過を待ち時間の既定値へ戻さない。</span></li><li><input type="checkbox" disabled><span>cold/unique/top100、index更新中、共有accelerator待ちを測り、250msの配分を決める。client上限だけを拡大してqueue滞留を隠さない。</span></li></ol>
 <p><strong>完了条件：</strong>失効したpending要求のencodeが0、後続有効要求が完了し、cancel競合で同batchを巻き込まない。max_batch=1の診断に加え、max_batch&gt;1でexpired/liveが混在する回帰も必須にする。searchとverifyの期限が一貫し、clientが帰った後の余分な作業を計数できる。4秒総枠と600ms reserveを維持する。</p>
 <p><strong>限界：</strong>既に開始した同期Nemotron計算をthreadから強制中断できるとは仮定しない。pendingを止めても残る実行中の仕事を計測し、予算内に有用な検索が維持できない場合だけ隔離やadmission変更を検討する。新しいモデル・常駐workerの追加は最初の変更に含めない。</p>
 <p class="sources">主な変更先：semantic_service.py:149–191、626–688 / semantic_client.py:51–208 / 必要箇所だけruntime deadline・model lock境界を接続</p></div>
 
 <div class="phase"><h3>P3 · 初回の全件照合を検索の前から外す</h3>
-<ol class="checklist"><li><input type="checkbox" disabled><span>既存pages/backlinks/lexical snapshotのgenerationと整合性を検証し、有効なwriter snapshotを新processから直接読む。無効・欠損時は軽量な棄却／縮退と明確な修復理由へ進める。</span></li><li><input type="checkbox" disabled><span>全件scan・再構築は既存writer/maintenance側の責務として維持し、同期hookごとの再実行を避ける。書込みreceiptからの既存apply_changesを再利用する。</span></li></ol>
+<ol class="checklist"><li><input type="checkbox" checked disabled><span>既存pages/backlinks/lexical snapshotのgenerationと整合性を検証し、有効なwriter snapshotを新processから直接読む。無効・欠損時は軽量な棄却／縮退と明確な修復理由へ進める。</span></li><li><input type="checkbox" checked disabled><span>全件scan・再構築は既存writer/maintenance側の責務として維持し、同期hookごとの再実行を避ける。書込みreceiptからの既存apply_changesを再利用する。</span></li></ol>
 <p><strong>完了条件：</strong>新processでの初回読込みも含めて測定し、削除・rename・superseded・新規page・破損snapshot・generation不一致を回帰検証する。正常candidate順序／score／identityを保つ。初回metadata p95 ≤150msを暫定目標とし、未達なら実測分布で次の律速を決める。これは既存のwriter整合性を弱めて達成しない。</p>
 <p class="sources">主な変更先：core/index_store.py:522–558、761–798 / core/lexical_index.py:241–288 / core/pipeline.py:324–375。新しいキャッシュサービスは作らない。</p></div>
 
 <div class="phase"><h3>P4 · 強い文脈がある追従文と、既知のUI応答を解決する</h3>
-<ol class="checklist"><li><input type="checkbox" disabled><span>既知hostの質問回答envelopeをschemaで検証し、質問ID・回答内容・直前の意図を取り出す。任意のユーザー記述XML/JSONは保持する。</span></li><li><input type="checkbox" disabled><span>「そこ／この件／続き」は、同じsessionの確かな直前entity/topicがある場合だけ1本のbounded queryへ解決する。話題転換・曖昧な複数候補・期限切れsessionなら推測で補わない。</span></li><li><input type="checkbox" disabled><span>canonical entity、既存anchor/query_hintを使って表記揺れを補う。自然言語aliasをASCII page-id alias storeへ追加しない。</span></li><li><input type="checkbox" disabled><span>fallback後も次ターンの文脈が失われないよう、候補を正解扱いせずquery由来・topic identityだけを既存receipt／session経路へ残す。同期fallback内の新規書込みは禁止し、post-hook処理または既存durable receiptを利用する。</span></li></ol>
+<ol class="checklist"><li><input type="checkbox" checked disabled><span>既知hostの質問回答envelopeをschemaで検証し、transport IDを除去し、質問・回答内容・直前の意図を取り出す。任意のユーザー記述XML/JSONは保持する。</span></li><li><input type="checkbox" checked disabled><span>「そこ／この件／続き」は、同じsessionの確かな直前entity/topicがある場合だけ1本のbounded queryへ解決する。話題転換・曖昧な複数候補・期限切れsessionなら推測で補わない。</span></li><li><input type="checkbox" checked disabled><span>canonical entity、既存anchor/query_hintを使って表記揺れを補う。自然言語aliasをASCII page-id alias storeへ追加しない。</span></li><li><input type="checkbox" checked disabled><span>fallback後も次ターンの文脈が失われないよう、候補を正解扱いせずquery由来・topic identityだけを既存receipt／session経路へ残す。同期fallback内の新規書込みは禁止し、post-hook処理または既存durable receiptを利用する。</span></li></ol>
 <p><strong>完了条件：</strong>今回の2発話→調査依頼→HTML保存先回答を、一連の会話fixtureで検証する。一般語・cross-projectの正しい参照・personal/work・表記揺れ・話題転換・UI-only応答を、source別score/rankとsealed goldで比較する。新規の別話題へ過去queryを毎回混ぜず、prompt injection用の偽envelopeやuser-authored JSONも回帰に含める。relevance goldで取得率・誤注入・棄却の3指標が合格する。</p>
 <p class="sources">主な変更先：hosts/hook_dispatcher.py、recall/recall_prompt.py、recall_runtime.py:553–590、866–905、recall_session.py。必要になった場合だけentity/query_hint producerを変更する。</p></div>
 
@@ -184,7 +202,7 @@ body{max-width:1120px}header{position:static}.lead{font-size:1.15rem;font-weight
 </section>
 
 <section data-section="検証手順"><h2>実行済みの検証と、再利用する検証</h2>
-<details open><summary>今回実行した診断：2件とも現行コードで失敗</summary>
+<details open><summary>変更前のred：調査元9b4b88b5で2件とも失敗</summary>
 <pre>PYTHONDONTWRITEBYTECODE=1 .venv/bin/python \
   _handoff/evidence/2026-09-05-recall-investigation/regression_probes.py
 
@@ -192,9 +210,9 @@ unrelated_fallback_admission: confidence=0.3, decision=search,
   unrelated_cards=1, passes=false
 expired_pending_request: caller_timed_out=true,
   expired_request_encoded=true, following_request_completed=true, passes=false
-exit code: 1（調査対象の問題を検出）</pre>
+exit code: 1（調査対象の問題を検出）</pre><p><strong>実装後f89748eで再実行：</strong>両方pass、exit 0。unrelated_cards=0、expired_request_encoded=false、following_request_completed=true。</p>
 <p>合成した候補とin-memory batcherだけを使う。モデル・サービスへ接続せず、productionへの書込みをmockで止める。このnegative診断だけでは取得率・実BM25順位・sensitivity・総合品質は検証しない。実indexを使った2発話の再現とは別に、再実行可能な失敗条件を残している。</p></details>
-<details><summary>今回passした既存9テスト</summary>
+<details><summary>調査時点でpassした既存9テスト</summary>
 <pre>PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -p no:cacheprovider -q \
   tests/test_recall_runtime.py tests/test_semantic_service.py tests/test_semantic_client.py \
   -k 'deterministic_fallback or semantic_service_unavailable or unknown_semantic_error or query_batcher or caches_query or selected_for_rollout'
@@ -205,7 +223,7 @@ exit code: 1（調査対象の問題を検出）</pre>
 </section>
 
 <section data-section="やってはいけないこと"><h2>変更境界とrollback</h2>
-<ul><li>Raw完全保存、CAS、readback、authority/quorum、sealed評価、既存sensitivity境界を弱めない。</li><li>fallback内へモデル・全文corpus再構築・新しい同期書込みを追加しない。</li><li>全queryを前のtopicへ寄せない。cwdのhard allowlist、BM25の未校正固定score floor、自然言語aliasのpage-id store流用をしない。</li><li>今回の調査だけを根拠にモデルを交換せず、大きなframework・新しい常駐サービス・新評価基盤を追加しない。</li><li>各phaseを独立commitにする。time budget/config変更とranking変更を別々に戻せるようにする。意図しないnormal parity差、sensitivity/identity異常、host timeout増、同batchへのcancel影響があれば当該変更を戻す。</li><li>無関係な<code>scripts/recall_r6_harness.py</code>、<code>tests/test_recall_r6_harness.py</code>、既存untracked調査物を変更・commitしない。</li></ul>
+<ul><li>Raw完全保存、CAS、readback、authority/quorum、sealed評価、既存sensitivity境界を弱めない。</li><li>fallback内へモデル・全文corpus再構築・新しい同期書込みを追加しない。</li><li>全queryを前のtopicへ寄せない。cwdのhard allowlist、BM25の未校正固定score floor、自然言語aliasのpage-id store流用をしない。</li><li>今回の調査だけを根拠にモデルを交換せず、大きなframework・新しい常駐サービス・新評価基盤を追加しない。</li><li>P3 snapshot、P2 deadline、P1/P4の共通query・関連度契約を3つのcommitへ分離した。P1とP4は同じruntimeのquery契約を共有するため一緒に保存した。schema 8から旧readerへ戻す際は既存writerによるprojection再構築も必要。意図しないnormal parity差、sensitivity/identity異常、host timeout増、同batchへのcancel影響があれば当該変更を戻す。</li><li>無関係な<code>scripts/recall_r6_harness.py</code>、<code>tests/test_recall_r6_harness.py</code>、既存untracked調査物を変更・commitしない。</li></ul>
 </section>
 
 <section data-section="既存計画との関係"><h2>既存成果の再利用</h2>
@@ -215,12 +233,12 @@ exit code: 1（調査対象の問題を検出）</pre>
 </section>
 
 <section data-section="受け渡しメモ"><h2>成果物と限界</h2>
-<ul><li><a href="evidence/2026-09-05-recall-investigation/evidence.json">集計・設定・再現結果のJSON</a>：個人の記憶本文・機密情報・無関係なpage-idを含めていない。</li><li><a href="evidence/2026-09-05-recall-investigation/regression_probes.py">最小の失敗診断</a>：現行コードではexit 1が期待値。改修後は両方passを確認する。</li><li>全corpusの関連度採点や本番高負荷試験は未実施。少数のlive probeはSLOや改善率の証明ではない。</li><li>graph Tier 2と正確なsourceを併用し、引用したコードのcoverageを確認。graphの無欠損表示を網羅性の証明とは扱っていない。</li></ul>
+<ul><li><a href="evidence/2026-09-05-recall-investigation/evidence.json">集計・設定・再現結果のJSON</a>：個人の記憶本文・機密情報・無関係なpage-idを含めていない。</li><li><a href="evidence/2026-09-05-recall-investigation/regression_probes.py">最小の失敗診断</a>：調査元ではexit 1、実装後f89748eでは両方pass・exit 0を確認済み。</li><li>全corpusの関連度採点や本番高負荷試験は未実施。少数のlive probeはSLOや改善率の証明ではない。</li><li>graph Tier 2と正確なsourceを併用し、引用したコードのcoverageを確認。graphの無欠損表示を網羅性の証明とは扱っていない。</li></ul>
 </section>
 
-<section class="blockers" data-section="ブロッカー"><h2>未解決事項</h2><p>計画作成を妨げるblockerはない。実装前にP0で決める事項は、各timeoutの実時間内訳、host全体wall timeの採取方法、fallback品質goldの固定、snapshot鮮度の契約。実装・push・restartは今回の調査依頼には含まれない。</p></section>
+<section class="blockers" data-section="ブロッカー"><h2>本番導入前に残る受入</h2><ul><li><strong>P0/P5 normal100：</strong>固定した100 caseと入力7,269ファイルを保持。ファイルhashの変化0件でも、評価前後でSemantic healthが正常identityから<code>SemanticServiceUnavailable</code>へ変わり、厳密なcaptureが失敗した。依存serviceが安定した条件で同一cohortを再取得し、candidateと比較する。成功例だけの再選択は禁止。</li><li><strong>P2の実環境配分：</strong>cold/unique/top100、index更新中、共有accelerator待ちの評価と250msの配分確定は未完了。総枠4,000ms・fallback最大600ms・client cap250msを変更していない。</li><li><strong>index移行：</strong>既存writerによるschema 7→8移行を対象rootで行い、pages/backlinks/projection generation一致を確認してから新readerを導入する。現行production rootには適用していない。metadata単独の高速化を、lexicalを含む600ms内の取得成功保証と取り違えない。</li><li><strong>P5 live：</strong>pushを明示された段階でpush → 対象service restart → runtime archive/health照合 → 1 host canary → 24時間かつ100 eligible exposures以上の順で実施する。本番受入未完了のため、このPlan全体はdoneにしない。</li></ul></section>
 
 <section class="rules" data-section="実行中更新ルール"><h2>計画の更新</h2><ul><li>phaseの受入条件を満たした時だけcheckboxを更新し、検証結果を実行ログへ記録する。</li><li>状態を変更する時は<code>script#plan-meta</code>と<code>.badge[data-state]</code>を一致させる。</li><li>仮説が反証された場合は候補から外し、新しい計測値で優先順位を更新する。</li></ul></section>
-<section data-section="実行ログ"><h2>実行ログ</h2><ol class="log"><li><time>2026-09-05 11:34 JST</time><span>canonical generatorでHTML Planを生成。ユーザーが_handoffへのHTML保存を指定。</span></li><li><time>2026-09-05 調査</time><span>固定cohort 821回・直近100回、current config/archive、実index/semanticの少数probe、metadata初回読込み、独立3調査を照合。</span></li><li><time>2026-09-05 検証</time><span>既存関連9テストpass。診断2件は現行問題を検出してexit 1。調査完了、実装未着手としてready。</span></li><li><time>2026-09-05 独立レビュー</time><span>部分結果のdegraded/provenance、snapshot identity、positive-control gold、既存authorityゲートの適用範囲を明記。実装未着手を維持。</span></li></ol></section>
+<section data-section="実行ログ"><h2>実行ログ</h2><ol class="log"><li><time>2026-09-05 11:34 JST</time><span>canonical generatorでHTML Planを生成。ユーザーが_handoffへのHTML保存を指定。</span></li><li><time>2026-09-05 調査</time><span>固定cohort 821回・直近100回、current config/archive、実index/semanticの少数probe、metadata初回読込み、独立3調査を照合。</span></li><li><time>2026-09-05 検証</time><span>既存関連9テストpass。診断2件は現行問題を検出してexit 1。調査完了、実装未着手としてready。</span></li><li><time>2026-09-05 独立レビュー</time><span>部分結果のdegraded/provenance、snapshot identity、positive-control gold、既存authorityゲートの適用範囲を明記。実装未着手を維持。</span></li><li><time>2026-09-05 実装開始</time><span>ユーザーが実装を承認。再現2件のredを再確認し、P1/P4 runtime、P2 deadline、P3 snapshot、UI envelopeを非重複scopeで実装開始。</span></li><li><time>2026-09-05 13:44 JST</time><span>実装3 commitsを保存。関連485テスト、Ruff/mypy/import/architecture/compileallがpass。固定20 queryのraw BM25不一致0、metadata新process 3回119.5–132.0ms。manual-94 BM25も94行のorder/score/件数不一致0、clean source互換性125テストpass。full normal100はSemantic health identity不安定で未受入。ローカル検証済み・本番未適用としてreadyへ更新。</span></li></ol></section>
 
 </body></html>

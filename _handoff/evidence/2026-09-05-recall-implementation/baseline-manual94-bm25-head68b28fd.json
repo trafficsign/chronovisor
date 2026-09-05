@@ -1,0 +1,85 @@
+{
+  "dataset": {
+    "examples": 94,
+    "kinds": {
+      "injection_ignored": 10,
+      "missed_candidate": 22,
+      "question": 11,
+      "short": 2,
+      "statement": 49
+    },
+    "languages": {
+      "en": 1,
+      "ja": 64,
+      "mixed": 29
+    },
+    "limit": 94,
+    "reviewed": 94,
+    "source_filter": "manual",
+    "sources": {
+      "auditor": 22,
+      "auditor_precision": 10,
+      "manual-curated-from-feedback": 62
+    },
+    "splits": {
+      "dev": 16,
+      "locked-test": 22,
+      "train": 56
+    }
+  },
+  "manifest_note": "Live manual manifest remains schema-v1 while current source sealed-manifest contract is schema-v2; metrics are read-only characterisation only.",
+  "metrics": {
+    "examples": 94,
+    "latency_ms": {
+      "max": 41123.0,
+      "p50": 58.5,
+      "p95": 131.0
+    },
+    "mrr_at_10": 0.16251397272524032,
+    "ndcg_at_10": 0.1683048136261927,
+    "negative_hit_rate_at_20": 0.17142857142857143,
+    "negative_label_examples": 35,
+    "positives": 71,
+    "processor": {
+      "abstention_rate": 0.0,
+      "evaluated_examples": 94,
+      "evidence_kind": {
+        "pointer": {
+          "false_positive": 1,
+          "labeled": 13,
+          "precision": 0.9230769230769231,
+          "selected": 376,
+          "true_positive": 12
+        },
+        "rich": {
+          "false_positive": 0,
+          "labeled": 9,
+          "precision": 1.0,
+          "selected": 188,
+          "true_positive": 9
+        }
+      },
+      "false_positive_pages": 1,
+      "host_used_observations": 0,
+      "labeled_selected_pages": 22,
+      "precision": 0.9545454545454546,
+      "related_recall": 0.28169014084507044,
+      "selected_pages": 564,
+      "true_positive_pages": 21
+    },
+    "recall_at_20": 0.5492957746478874,
+    "recall_at_5": 0.22535211267605634,
+    "stale_hit_rate_at_20": 0.0,
+    "stale_label_examples": 3
+  },
+  "schema": "chronovisor.manual94-quality-characterization.v1",
+  "scope_note": "Manual-94 BM25 quality characterisation over 94 reviewed examples; no authority manifest reseal or Field authority change. This is not a full semantic/normal pipeline baseline.",
+  "source": {
+    "commit": "68b28fde47e5680b0ac801747eda40a5b846337d",
+    "input": "frozen clone (path omitted)",
+    "read_only": true,
+    "tree": "1ea96dbd2cdead95b0eaed064075b30d9a59e8b1"
+  },
+  "top_n": 20,
+  "variant": "bm25"
+}

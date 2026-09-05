@@ -1,0 +1,76 @@
+{
+  "bm25_smoke": {
+    "authority_cases": 0,
+    "limit": 5,
+    "metrics": {
+      "examples": 5,
+      "latency_ms": {
+        "max": 793.0,
+        "p50": 72.0,
+        "p95": 793.0
+      },
+      "mrr_at_10": 0.03333333333333333,
+      "negative_hit_rate_at_20": 0.0,
+      "recall_at_20": 0.6,
+      "recall_at_5": 0.0
+    },
+    "purpose": "command smoke only; not manual-94 authority evidence",
+    "source_filter": "manual",
+    "status": "ok",
+    "top_n": 20,
+    "variants": [
+      "bm25"
+    ]
+  },
+  "captured_at": "2026-09-05T03:22:17+00:00",
+  "full_manual94_run": {
+    "reason": "94-case BM25 run exceeded the read-only short-command window; no model/service calls were attempted",
+    "required_command_after_approval": "CHRONOVISOR_READ_ONLY=1 CHRONOVISOR_ROOT=~/.chronovisor PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m chronovisor.search.search_eval --golden-file ~/.chronovisor/recall/search-golden.jsonl --source-filter manual --variants bm25 --limit 94 --top-n 20 --report --json",
+    "status": "not_run"
+  },
+  "historical_scope": "Initial bounded-agent preflight only. Later root-authorized evaluation is recorded in the linked artifact; initial execution limits are not a current user-approval requirement.",
+  "later_execution_artifact": "baseline-manual94-bm25-head68b28fd.json",
+  "locked_artifact": {
+    "examples": 94,
+    "file_sha256": "c5e60ca7bf914bd983238a545af10de6e9e4882e85993f50be3d173620468c0b",
+    "gates": {
+      "latency": true,
+      "negative_hit_rate": true,
+      "pointer_precision": true,
+      "processor_precision": true,
+      "processor_related_recall": true,
+      "rerank_recall_at_5": true,
+      "rich_precision": true,
+      "sealed_manual_94": true
+    },
+    "path": "~/.chronovisor/runtime/search-eval/recall-field-locked-e2e.json",
+    "schema_version": 1,
+    "status": "passed"
+  },
+  "manifest": {
+    "artifact_schema_version": 1,
+    "current_authority_reusable": false,
+    "entries": 94,
+    "entry_sha256_unique": 94,
+    "examples": 94,
+    "file_sha256": "2c15ac6e590ef5d06489403e6f16f5a1b530f4b82976c5320cd75f750bdff915",
+    "has_review_ledger": false,
+    "manifest_sha256_valid": true,
+    "path": "~/.chronovisor/runtime/search-eval/manual-94-manifest.json",
+    "reviewed_true": 94,
+    "source_expected_schema_version": 2,
+    "split_counts": {
+      "dev": 16,
+      "locked-test": 22,
+      "train": 56
+    }
+  },
+  "next_step": "Regenerate schema-2 manifest with a sealed review ledger, then run the applicable locked/full evaluation only when service/model execution is approved.",
+  "safe_preflight": "passed; no model/service calls and no production writes",
+  "schema": "chronovisor-manual94-baseline-preflight-v1",
+  "scope_note": "manual-94 is a Field/Processor promotion authority gate; it is not a prerequisite for ordinary Recall bug-fix parity unless the change alters authority or learning.",
+  "source": {
+    "commit": "68b28fde47e5680b0ac801747eda40a5b846337d",
+    "tree": "1ea96dbd2cdead95b0eaed064075b30d9a59e8b1"
+  }
+}

@@ -1,0 +1,261 @@
+{
+  "artifact_sha256": {
+    "baseline-manual94-bm25-head68b28fd.json": "0b8b2d2291a2edd5c31e684c96d0c45c1e73c1bc355043739ebd93b82951cfe6",
+    "baseline-manual94-status-head68b28fd.json": "cdbca3f756705d9644de443f512f938040aba642286ccef0f6cde1bf310d394b",
+    "baseline-normal100-cases-head68b28fd.json": "c6e122255a937b599ed0becbc8e7165d070eb700540552ea970226951e473202",
+    "baseline-normal100-drift-head68b28fd.json": "7862fa0657f4fcee9fbfc14c82b7041f210de4c065c95cf81f85d026825cae72",
+    "baseline-normal100-preflight-head68b28fd.json": "d54adf72a264d64cc3be6090ae9f350f7060c7f99443ebf4079d38b2c56b4bb1",
+    "baseline-normal100-unbounded-abort-head68b28fd.json": "19a3ff5559453ab4ed1fb88de3bfaff5254f40aa61932d3acfa7d2067f1fbcbd",
+    "baseline-search-pipeline-head68b28fd-lexical.json": "7f68868fb2786143e730a14d8b585a9dd72495dcd5b6fbee9a9e95b114403816",
+    "manual94-bm25-p3-comparison.json": "e922a7ab7401195ef4e43533e3c7da9a5ac49bd02383cd8470b36fac82bbb957",
+    "snapshot-read-implementation-v7-v8.json": "37c9aa5ba24491b1c0265ff42984ee4877ee46d96d05559f3b7ab41598eeb7a1"
+  },
+  "captured_at": "2026-09-05T13:50:27+09:00",
+  "contracts": {
+    "fallback_learning_eligible": false,
+    "fallback_reserve_max_ms": 600,
+    "fallback_teacher_evaluated": false,
+    "host_wall_scope": "run_user_prompt entry through output flush; excludes process/uvx startup",
+    "identity_with_snapshot_uid": "current canonical bytes SHA-256 plus matching frontmatter UID",
+    "identity_without_snapshot_uid": "canonical page ID and current bytes SHA-256; current frontmatter must also omit UID. Separate PageRegistry UID is returned when available but is not claimed to be bound by the old snapshot.",
+    "partial_results_start_second_search": false,
+    "semantic_client_timeout_cap_ms": 250,
+    "snapshot_lexical_schema_after": 8,
+    "snapshot_lexical_schema_before": 7,
+    "total_timeout_ms": 4000,
+    "writer_migration_required_before_rollout": true
+  },
+  "graph": {
+    "checked_source_and_test_paths": 23,
+    "coverage": "metadata_match/no_recorded_issue for all checked paths; best-effort, not proof of completeness",
+    "generation": "2026-09-05T04:37:03Z",
+    "project": "Users-trafficsign-projects-personal-chronovisor",
+    "tier": 2
+  },
+  "limits": [
+    "Raw BM25 parity and synthetic regression controls do not establish full hybrid normal-100 acceptance.",
+    "Manual-94 manifest is schema 1 while the current authority contract requires schema 2 and a review ledger. No reseal, policy or learning promotion was performed.",
+    "Cold metadata timing is a three-process observation, not a production latency percentile guarantee.",
+    "Cold lexical SQLite quick_check remained 459-1405 ms in the three-process sample; pending-request cancellation does not interrupt already-running native computation.",
+    "Production migration, host canary and 24-hour plus 100-eligible-exposure acceptance are not performed."
+  ],
+  "manual94_bm25_comparison": {
+    "artifact": "manual94-bm25-p3-comparison.json",
+    "comparison": {
+      "cohort_match": true,
+      "dataset_match": true,
+      "duplicate_query_rows": 14,
+      "expected_label_mismatch": 0,
+      "latency_metrics": {
+        "baseline": {
+          "max": 9827.0,
+          "p50": 57.0,
+          "p95": 137.0
+        },
+        "candidate": {
+          "max": 33175.0,
+          "p50": 63.5,
+          "p95": 133.0
+        }
+      },
+      "missing_rows": 0,
+      "non_latency_metrics_match": true,
+      "order_mismatch": 0,
+      "query_rows": 94,
+      "result_count_mismatch": 0,
+      "score_mismatch": 0,
+      "unique_query_sha256": 80
+    },
+    "scope": "Read-only BM25 quality/parity characterisation across baseline lexical schema7 and P3 migrated schema8. This is not full hybrid semantic normal100 or authority acceptance; no manual authority reseal or Field authority change."
+  },
+  "regression_probes": {
+    "exit_code": 0,
+    "results": [
+      {
+        "confidence": 0.54,
+        "decision": "none",
+        "passes": true,
+        "probe": "unrelated_fallback_admission",
+        "unrelated_cards": 0
+      },
+      {
+        "caller_timed_out": true,
+        "expired_request_encoded": false,
+        "following_request_completed": true,
+        "passes": true,
+        "probe": "expired_pending_request"
+      }
+    ]
+  },
+  "relevance_regression_gold": {
+    "all_abstain_would_fail": true,
+    "cases": 4,
+    "corpus_pages": 3,
+    "cross_project_positive_included": true,
+    "fixture_file_sha256": "83cb9dbc1557f557418a4eeea12cdde53f7cf919aa2dcc30f6983e3ca634984c",
+    "negative_cases": 2,
+    "negative_injected_cards": 0,
+    "positive_cases": 2,
+    "positive_required_page_coverage": "2/2",
+    "scope": "Synthetic regression controls, authored with the fix; not a held-out general relevance estimate or manual-94 authority seal.",
+    "seal": "candidate commit and exact test source hash",
+    "test": "tests/test_recall_runtime.py::test_fallback_relevance_gold"
+  },
+  "schema": "chronovisor-recall-implementation-result-v1",
+  "source": {
+    "baseline_commit": "68b28fde47e5680b0ac801747eda40a5b846337d",
+    "candidate_commit": "f89748e4d4cdad87f56bf98c7c02cd52f5f8d206",
+    "commits": [
+      {
+        "commit": "2c64dc3ca319ee13f6bb480cfd8ecb575ffd45af",
+        "message": "fix: validate and reuse recall index snapshots",
+        "paths": [
+          "src/chronovisor/core/index_store.py",
+          "src/chronovisor/core/lexical_index.py",
+          "src/chronovisor/core/search_types.py",
+          "tests/test_index_store.py",
+          "tests/test_lexical_index.py"
+        ]
+      },
+      {
+        "commit": "2145df043f6270dbb56abf941417a058fe1d21a7",
+        "message": "fix: expire semantic requests across shared deadlines",
+        "paths": [
+          "src/chronovisor/core/semantic_client.py",
+          "src/chronovisor/search/semantic_service.py",
+          "tests/test_semantic_client.py",
+          "tests/test_semantic_service.py"
+        ]
+      },
+      {
+        "commit": "f89748e4d4cdad87f56bf98c7c02cd52f5f8d206",
+        "message": "fix: bind recall fallback to relevant current evidence",
+        "paths": [
+          "src/chronovisor/core/pipeline.py",
+          "src/chronovisor/core/search.py",
+          "src/chronovisor/decision/entity_backfill_contract.py",
+          "src/chronovisor/hosts/hook_dispatcher.py",
+          "src/chronovisor/recall/recall_prompt.py",
+          "src/chronovisor/recall/recall_runtime.py",
+          "src/chronovisor/recall/recall_session.py",
+          "tests/test_architecture_baseline.py",
+          "tests/test_hook_dispatcher.py",
+          "tests/test_recall_runtime.py",
+          "tests/test_recall_session.py",
+          "tests/test_search_pipeline_characterization.py",
+          "tests/test_recall_prompt.py",
+          "tests/test_recall_snapshot_identity.py",
+          "docs/refactoring/architecture-exception-baseline.json",
+          "docs/refactoring/architecture-exceptions.json",
+          "_handoff/evidence/2026-09-05-recall-investigation/regression_probes.py"
+        ]
+      }
+    ],
+    "file_sha256": {
+      "_handoff/evidence/2026-09-05-recall-investigation/regression_probes.py": "c3d315d94c921b1532630b809058ca01b3a4e58135a7c2cc36b3047fdc3fdf42",
+      "src/chronovisor/core/index_store.py": "0a352bf04742e4d55ffd36624cf099e5f2619395e6eb8e494ded910a11f6cb9e",
+      "src/chronovisor/core/lexical_index.py": "79a90283887f011dff73f12364ddf82a89b67e32adb118f898c63dcbbf6a3fd2",
+      "src/chronovisor/core/pipeline.py": "a6d66bd3547f030579d71bc3775588c55b2870cf501890f6ad9c23e4e1681d62",
+      "src/chronovisor/core/search.py": "d6b9fd49dd0742f258042b55c1547ed2a5388ba797ab3f1fe8ee85912b678c30",
+      "src/chronovisor/core/search_types.py": "df17ed9f0472f2210612a81f6ff23e2ff6d2be6217e915792b82ad6bcce7fe7b",
+      "src/chronovisor/core/semantic_client.py": "d6e5fb933021045152c5539295f37652dec604d077c4f5f665f434bf7ff2a989",
+      "src/chronovisor/decision/entity_backfill_contract.py": "5d3548d3918e8d8b4f98da3b625cb63dea0d8265907df1ecd41f5a1ca090763c",
+      "src/chronovisor/hosts/hook_dispatcher.py": "2c4053dd2d829e659fd482ef5057983662aeb56f4564fe5278010fe3869bb9c8",
+      "src/chronovisor/recall/recall_prompt.py": "2ccaac7c2bedb193eeb898e411d96aedf3a06851309f9a0550e6384699cf4b7d",
+      "src/chronovisor/recall/recall_runtime.py": "ae67fc3bd2323c17b3a36befc75cb111ce5a93d3129be6a76bfc7d07fcc19043",
+      "src/chronovisor/recall/recall_session.py": "55b1a14e682ca6efa121772376561293caa10d4b43433df642f525df48db2085",
+      "src/chronovisor/search/semantic_service.py": "9e76b7fee1e1c1d8a9f01b32d6f18bb4d18f3dee2ef0d053c7b7567f2056deb3",
+      "tests/test_architecture_baseline.py": "f1245d93796154da8ee81fdbbb493776cca0e1b91259b852e8362feeae960b1c",
+      "tests/test_hook_dispatcher.py": "68f73c8bdad6368eeaab30fd026d4e2e662014b53fd25495d29f94399ce2c527",
+      "tests/test_index_store.py": "340e01ec2bba0886a609abbf14c68222fb0b5a9b6dcdce63503fb8eb1760d2ad",
+      "tests/test_lexical_index.py": "c5be8c4e8200c8dc69aa6a08f79a45299754010c9c38208fec51344d62f99655",
+      "tests/test_recall_prompt.py": "eaa71690440b61a5784c064b17ad8241f3407d1921277f605b134d480a19de2d",
+      "tests/test_recall_runtime.py": "83cb9dbc1557f557418a4eeea12cdde53f7cf919aa2dcc30f6983e3ca634984c",
+      "tests/test_recall_session.py": "5427e74135ba49f2dbc97b00a17c50b833d7271ba4b5683188c07a6af1a11f0a",
+      "tests/test_recall_snapshot_identity.py": "2ce142659ada6337bddb0beb6fc5061d9c5cc9acea610dc1827d82d6643d1bea",
+      "tests/test_search_pipeline_characterization.py": "ee4067d89b5fb6fdbbe0c1fcd5d2da9452ea8c97ade803c26a3cff321c52ea68",
+      "tests/test_semantic_client.py": "c199674e125ce3fa1a547ae777e425ed7a79a119a6049181a12d95d9e549a8e9",
+      "tests/test_semantic_service.py": "e46785b821a05177965caa4165a809ac2f115560f4d51c317332729f94fbc1e7"
+    },
+    "investigated_commit": "9b4b88b5ac0481117d2e5d1893ef7836a4e85ad5"
+  },
+  "state": {
+    "authority_promotion": "not_requested_or_changed",
+    "implementation": "complete",
+    "local_validation": "passed",
+    "normal100_acceptance": "not_accepted_health_identity_drift",
+    "production_rollout": "pending",
+    "push": false,
+    "service_restart": false
+  },
+  "tests": {
+    "clean_candidate_compatibility": {
+      "failures": 0,
+      "junit_sha256": "d9136be61e862ffc6c71e52742d796eb933e9185d4282b19295c5f75821040b9",
+      "log_sha256": "1bde5df8a9e3813b4b393d9ffd94413014d18f9357adf91083c9b4adeb1c1c0b",
+      "passed": 125,
+      "reason": "Confirm the committed tree with the original R6 files, separate from preserved unrelated shared-worktree edits.",
+      "scope": [
+        "test_recall_r6_harness.py",
+        "test_recall_baseline.py",
+        "test_search_pipeline_characterization.py",
+        "test_architecture_baseline.py"
+      ],
+      "seconds": 25.867,
+      "source_commit": "f89748e4d4cdad87f56bf98c7c02cd52f5f8d206"
+    },
+    "final_related_run": {
+      "errors": 0,
+      "failures": 0,
+      "junit_sha256": "03c965c3bb2bb0eac93e85a8341e035baefd444038714383f56a016d0fca329b",
+      "log_sha256": "050e3ba3c1a6a986f3e29f87721691c739ce803deb739dc79bd35230339d2675",
+      "passed": 485,
+      "seconds": 32.266,
+      "skipped": 0,
+      "tests": 485
+    },
+    "full_suite_first_run": {
+      "errors": 0,
+      "failures": 1,
+      "junit_sha256": "1b48ef1c9a3a5501f5c69dc51a15ecd84e5cb242c8634a3bfedcee3908f8c56b",
+      "log_sha256": "ade69028e16d12bb46d6cc9c5ffe0f7e8c90ee80d7af3aade3a58ca3626930cc",
+      "passed": 6447,
+      "seconds": 926.64,
+      "skipped": 1,
+      "tests": 6449
+    },
+    "full_suite_initial_failure": {
+      "code_change_for_failure": false,
+      "included_in_final_related_run": true,
+      "isolated_rerun": "1 passed in 3.84s",
+      "reason": "git dir child changed during read",
+      "test": "tests/test_recall_r7_evidence.py::test_test_rollback_receipt_rechecks_post_state_and_rejects_forgery"
+    },
+    "quality_checks": {
+      "architecture": {
+        "exit_code": 0,
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "compileall": {
+        "exit_code": 0,
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "imports": {
+        "exit_code": 0,
+        "log_sha256": "4b000794a2f63b37a41385a461823e5f2eb5b09ce7982e1b2e8f831a6748a2b8"
+      },
+      "mypy": {
+        "exit_code": 0,
+        "log_sha256": "fe0ce6e3b1983c3e150c09b415036599a0bee120f2cad38e219412ce21d84a67"
+      },
+      "ruff": {
+        "exit_code": 0,
+        "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+      },
+      "whitespace": {
+        "exit_code": 0,
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  }
+}

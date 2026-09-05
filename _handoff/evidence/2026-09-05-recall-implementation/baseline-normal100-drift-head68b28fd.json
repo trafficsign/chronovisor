@@ -1,0 +1,66 @@
+{
+  "changed_fields": [
+    "semantic_service",
+    "semantic.device",
+    "semantic.error",
+    "semantic.generation_id",
+    "semantic.index",
+    "semantic.model",
+    "semantic.ready",
+    "semantic.revision",
+    "semantic.routes",
+    "semantic.status"
+  ],
+  "cohort_case_ids_sha256": "0ce60aed64324b0b842ef0ab0e4a5b051ac4fb667aa8168fe6ee9d766ccd56bf",
+  "cohort_count": 100,
+  "interpretation": "No local input-file hash changed; canonical snapshot changed because semantic health transitioned from selected identity to SemanticServiceUnavailable between before/after. Stage attribution unknown; do not infer index delta or cause.",
+  "local_input_files": {
+    "after_count": 7269,
+    "before_count": 7269,
+    "changed_count": 0
+  },
+  "next": "Keep contract strict; acquire baseline only when semantic and reranker health identity remains available for both snapshot calls, or use an existing approved offline deterministic response snapshot if parity implementation provides one.",
+  "replay": {
+    "failure": "replay input snapshot changed during capture",
+    "mode": "fixed_cases",
+    "output_written": false,
+    "status": "failed_contract"
+  },
+  "schema": "chronovisor.recall-parity-snapshot-drift.v1",
+  "service_after": {
+    "reranker": {
+      "ready": true,
+      "runtime_commit_sha256": "46688ff1fc82",
+      "status": "ok"
+    },
+    "semantic": {
+      "error": "SemanticServiceUnavailable"
+    }
+  },
+  "service_before": {
+    "reranker": {
+      "ready": true,
+      "runtime_commit_sha256": "46688ff1fc82",
+      "status": "ok"
+    },
+    "semantic": {
+      "device": "aafd6a4c6438",
+      "generation_id": "f9d61560488c",
+      "index": "present",
+      "model": "90015f319a49",
+      "ready": "present",
+      "revision": "1fc2d13924eb",
+      "routes": "present",
+      "status": "present"
+    }
+  },
+  "snapshot_after": {
+    "file_count": 7269,
+    "sha256": "97591b0741805d94fd30652b67939b63ab5f55fef16fae4d93313b81fd784ce3"
+  },
+  "snapshot_before": {
+    "file_count": 7269,
+    "sha256": "ea3dc51e5551835c1e75ec5a4415b4b7b6c943543e3479aefb19531123ad302b"
+  },
+  "source_commit": "68b28fde47e5680b0ac801747eda40a5b846337d"
+}

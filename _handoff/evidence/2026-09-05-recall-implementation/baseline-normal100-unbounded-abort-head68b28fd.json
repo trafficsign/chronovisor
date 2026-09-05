@@ -1,0 +1,30 @@
+{
+  "capture": {
+    "mode": "unbounded favorable-case collection (cases omitted)",
+    "output_written": false,
+    "process": "recall_parity.py capture",
+    "started_at": "2026-09-05T12:42:58+09:00",
+    "stopped_at": "2026-09-05T13:19:00+09:00",
+    "termination": "SIGTERM to capture process only"
+  },
+  "captured_at": "2026-09-05T13:19:00+09:00",
+  "next": "rerun with baseline-normal100-cases-head68b28fd.json --cases; retain degraded/empty receipts",
+  "observations": {
+    "reranker_requests_at_stop": 102,
+    "semantic_health_errors_at_stop": 171,
+    "semantic_health_queries_at_stop": 917,
+    "snapshot_drift_during_clone": "not observed",
+    "stage_attribution": "unknown"
+  },
+  "reason": {
+    "detail": "capture() accepts a row only when runner receipt status=ok and decision=read; current semantic timeout/fallback returns status=degraded, so the loop can scan all eligible rows (1,442 observed) before reaching 100 accepted cases. Process was stopped to rerun with explicit fixed cases; no config/timeout/policy change.",
+    "kind": "boundedness_failure",
+    "source_lines": "scripts/recall_parity.py:676-699; src/chronovisor/recall/recall_runtime.py:4499-4631"
+  },
+  "schema": "chronovisor.recall-parity-capture-observation.v1",
+  "source": {
+    "commit": "68b28fde47e5680b0ac801747eda40a5b846337d",
+    "input_root": "frozen clone (path intentionally omitted)",
+    "worktree": "clean detached source worktree (path intentionally omitted)"
+  }
+}
