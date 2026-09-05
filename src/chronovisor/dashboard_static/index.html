@@ -80,6 +80,55 @@
       </article>
     </section>
 
+    <section class="daily-flow" id="daily-flow" aria-labelledby="daily-flow-title" data-direction="unknown">
+      <div class="daily-flow-header">
+        <div class="daily-flow-heading">
+          <h2 id="daily-flow-title">Intake &amp; processing</h2>
+          <p id="daily-flow-date">Source raws · waiting for history</p>
+        </div>
+        <div class="segmented-control compact-control" role="group" aria-label="History period">
+          <button type="button" data-flow-days="7" aria-pressed="true" class="active">7 days</button>
+          <button type="button" data-flow-days="30" aria-pressed="false">1 month</button>
+        </div>
+      </div>
+      <div class="daily-flow-overview">
+        <dl class="daily-flow-counts">
+          <div>
+            <dt>Saved in period</dt>
+            <dd id="daily-flow-added">--</dd>
+          </div>
+          <div>
+            <dt>Completed in period</dt>
+            <dd id="daily-flow-completed">--</dd>
+          </div>
+          <div class="daily-flow-net">
+            <dt>Completed − saved</dt>
+            <dd id="daily-flow-net">--</dd>
+          </div>
+        </dl>
+        <div class="daily-flow-summary">
+          <p id="daily-flow-status" role="status">Waiting for history</p>
+          <small id="daily-flow-note">Whole source raws; completed includes earlier saves.</small>
+        </div>
+      </div>
+      <div class="daily-flow-legend" aria-hidden="true">
+        <span><i class="flow-saved-key"></i>Saved per day</span>
+        <span><i class="flow-completed-key"></i>Completed per day</span>
+        <span><i class="flow-net-key"></i>Cumulative completed − saved</span>
+      </div>
+      <svg id="daily-flow-chart" viewBox="0 0 960 320" role="img" aria-labelledby="daily-flow-chart-title">
+        <title id="daily-flow-chart-title">Daily intake, completions, and cumulative balance</title>
+      </svg>
+      <p id="daily-flow-today" class="daily-flow-today">Today: waiting for totals</p>
+      <details class="daily-flow-detail">
+        <summary>Daily counts</summary>
+        <table>
+          <thead><tr><th scope="col">Date</th><th scope="col">Saved</th><th scope="col">Completed</th><th scope="col">Completed − saved</th></tr></thead>
+          <tbody id="daily-flow-rows"></tbody>
+        </table>
+      </details>
+    </section>
+
     <section class="processing-panel" id="processing-panel" aria-label="Live processing lanes">
       <div class="processing-lanes-card">
         <div class="processing-head">

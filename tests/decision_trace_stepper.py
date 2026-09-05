@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from chronovisor.ops import dashboard
 from chronovisor.ops.decision_trace_projection import (
@@ -111,21 +113,75 @@ def decision_trace_step_scenarios() -> list[dict[str, Any]]:
     return scenarios
 
 
+def daily_flow_scenarios() -> list[dict[str, Any]]:
+    today = datetime.now(ZoneInfo("Asia/Tokyo")).date()
+    base = {
+        "date": today.isoformat(),
+        "timezone": "Asia/Tokyo",
+        "unit": "source_raw",
+        "status": "ok",
+    }
+    scenarios = [
+        {"id": name, "flow": base | values}
+        for name, values in (
+            ("ahead", {"added": 120, "completed": 185, "net": 65, "direction": "processing_ahead"}),
+            ("behind", {"added": 120, "completed": 80, "net": -40, "direction": "intake_ahead"}),
+            ("even", {"added": 120, "completed": 120, "net": 0, "direction": "even"}),
+            ("idle", {"added": 0, "completed": 0, "net": 0, "direction": "even"}),
+            ("partial", {"added": 120, "completed": 80, "net": None, "direction": "unknown", "status": "partial"}),
+            ("partial_ahead", {"added": 120, "completed": 185, "net": None, "direction": "unknown", "status": "partial"}),
+            ("unavailable", {"added": None, "completed": None, "net": None, "direction": "unknown", "status": "unavailable"}),
+            ("stale", {"date": (today - timedelta(days=1)).isoformat(), "added": 120, "completed": 185, "net": 65, "direction": "processing_ahead"}),
+            ("large", {"added": 12345678, "completed": 23456789, "net": 11111111, "direction": "processing_ahead"}),
+        )
+    ]
+    for scenario in scenarios:
+        values = scenario["flow"]
+        end = datetime.fromisoformat(values["date"]).date()
+        rows = []
+        for index in range(30):
+            row = {"date": (end - timedelta(days=29-index)).isoformat(), "status": values["status"]}
+            for key in ("added", "completed"):
+                total = values[key]
+                if total is None:
+                    row[key] = None
+                elif index < 23:
+                    row[key] = (10 + index % 5 if key == "added" else 6 + index % 4) if total else 0
+                else:
+                    weights = [1, 2, 1, 3, 2, 1, 2] if key == "added" else [1, 1, 2, 3, 4, 3, 3]
+                    offset = index - 23
+                    row[key] = total * sum(weights[:offset+1]) // sum(weights) - total * sum(weights[:offset]) // sum(weights)
+            row["net"] = row["completed"] - row["added"] if row["status"] == "ok" and row["added"] is not None and row["completed"] is not None else None
+            rows.append(row)
+        scenario["history"] = {"today_flow": values, "flow": {
+            "unit": "source_raw", "timezone": "Asia/Tokyo", "days": rows,
+        }}
+    scenarios.append({**scenarios[0], "id": "month", "window_days": 30})
+    incomplete = json.loads(json.dumps(scenarios[0]))
+    incomplete["id"] = "missing_day"
+    del incomplete["history"]["flow"]["days"][-3]
+    scenarios.append(incomplete)
+    return scenarios
+
+
 _STEPPER_HARNESS = r"""
 const scenarios = __SCENARIOS__;
+const dailyFlows = __DAILY_FLOWS__;
 const api = window.__chronovisorDashboardTest;
 const query = new URLSearchParams(location.search);
 const selectedId = query.get("scenario");
 const selectedStep = Number(query.get("step") || 0);
 const selectedContext = Number(query.get("context") || 0);
 const selectedReasoning = query.get("reasoning");
+const selectedDailyFlow = query.get("daily_flow");
 
-document.documentElement.dataset.traceStepper = "true";
+document.documentElement.dataset.traceStepper = selectedDailyFlow ? "false" : "true";
 document.head.insertAdjacentHTML("beforeend", `<style>
   html[data-trace-stepper="true"] body { padding: 0; }
   html[data-trace-stepper="true"] .activity-bar,
   html[data-trace-stepper="true"] .topbar,
   html[data-trace-stepper="true"] .metrics-grid,
+  html[data-trace-stepper="true"] .daily-flow,
   html[data-trace-stepper="true"] .processing-lanes-card,
   html[data-trace-stepper="true"] .decision-summary,
   html[data-trace-stepper="true"] .trace-legacy-data,
@@ -555,6 +611,42 @@ function captureFrame(scenario, frame) {
 
 addEventListener("DOMContentLoaded", async () => {
   await document.fonts.ready;
+  if (selectedDailyFlow) {
+    const results = [];
+    for (const scenario of dailyFlows.filter((item) => selectedDailyFlow === "audit" || item.id === selectedDailyFlow)) {
+      render({status: {pending: 124, source_raw_pending: 83}, save_history: scenario.history});
+      document.querySelector(`[data-flow-days="${scenario.window_days || 7}"]`).click();
+      await nextPaint();
+      const panel = document.getElementById("daily-flow");
+      const bounds = panel.getBoundingClientRect();
+      results.push({
+        scenario: scenario.id,
+        added: document.getElementById("daily-flow-added").textContent,
+        completed: document.getElementById("daily-flow-completed").textContent,
+        net: document.getElementById("daily-flow-net").textContent,
+        status: document.getElementById("daily-flow-status").textContent,
+        direction: panel.dataset.direction,
+        color: getComputedStyle(document.getElementById("daily-flow-net")).color,
+        days: panel.querySelectorAll("[data-flow-date]").length,
+        balance: panel.querySelector(".flow-balance")?.dataset.net ?? null,
+        minimumBalance: Boolean(panel.querySelector(".flow-minimum")),
+        activePeriod: panel.querySelector("[data-flow-days][aria-pressed=true]")?.dataset.flowDays,
+        tableRows: panel.querySelectorAll("tbody tr").length,
+        invalidChartNumbers: /NaN|Infinity/.test(document.getElementById("daily-flow-chart").innerHTML),
+        singleLineCounts: [...panel.querySelectorAll("dd")].every((node) =>
+          node.getBoundingClientRect().height <= parseFloat(getComputedStyle(node).lineHeight) + 1),
+        clipped: [...panel.querySelectorAll("h2, p, dt, dd, small")].filter((node) => {
+          const box = node.getBoundingClientRect();
+          return box.left < bounds.left || box.right > bounds.right || node.scrollWidth > node.clientWidth + 1;
+        }).map((node) => node.id || node.tagName),
+        insideViewport: bounds.left >= 0 && bounds.right <= innerWidth,
+        clearOfMetrics: bounds.top >= document.querySelector(".metrics-grid").getBoundingClientRect().bottom,
+        clearOfLanes: bounds.bottom <= document.getElementById("processing-panel").getBoundingClientRect().top,
+      });
+    }
+    await fetch("/trace-stepper-result", {method: "POST", body: JSON.stringify(results)});
+    return;
+  }
   if (selectedId) {
     const scenario = scenarios.find((item) => item.id === selectedId);
     const frame = scenario?.frames[Math.min(selectedStep, scenario.frames.length - 1)];
@@ -584,7 +676,7 @@ addEventListener("DOMContentLoaded", async () => {
 def stepper_harness(scenarios: list[dict[str, Any]]) -> str:
     return _STEPPER_HARNESS.replace(
         "__SCENARIOS__", json.dumps(scenarios, ensure_ascii=False)
-    )
+    ).replace("__DAILY_FLOWS__", json.dumps(daily_flow_scenarios(), ensure_ascii=False))
 
 
 def stepper_page() -> str:

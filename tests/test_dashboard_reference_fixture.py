@@ -10,9 +10,12 @@ import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
+
 from chronovisor.ops import dashboard
 from chronovisor.ops.decision_trace_projection import TRACE_WORKFLOWS
 from tests.decision_trace_stepper import (
+    daily_flow_scenarios,
     decision_trace_step_scenarios,
     stepper_handler,
 )
@@ -461,3 +464,108 @@ def test_stepper_scenarios_are_json_serializable() -> None:
 
     assert '"pipeline": "ingest"' in payload
     assert '"pipeline": "typed_graph"' in payload
+
+
+@pytest.mark.parametrize("width", [1280, 760])
+def test_daily_flow_counts_states_and_layout(tmp_path: Path, width: int) -> None:
+    results: list[dict[str, object]] = []
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0), stepper_handler(decision_trace_step_scenarios(), results)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    scenarios = daily_flow_scenarios()
+    visual_dir = os.environ.get("CHRONOVISOR_DASHBOARD_VISUAL_DIR")
+    selections = [item["id"] for item in scenarios] if visual_dir else ["audit"]
+    try:
+        for index, selection in enumerate(selections):
+            command = [
+                _chrome(), "--headless=new", "--no-sandbox", "--disable-gpu",
+                "--disable-background-networking", "--no-first-run",
+                "--force-prefers-reduced-motion=reduce", "--hide-scrollbars",
+                "--virtual-time-budget=2000", f"--window-size={width},1800",
+                f"--user-data-dir={tmp_path / f'flow-{index}'}",
+            ]
+            screenshot = None
+            if visual_dir:
+                screenshot = Path(visual_dir) / f"daily-flow-{width}-{selection}.png"
+                screenshot.parent.mkdir(parents=True, exist_ok=True)
+                screenshot.unlink(missing_ok=True)
+                command.append(f"--screenshot={screenshot}")
+            command.append(
+                f"http://127.0.0.1:{server.server_port}/?daily_flow={selection}"
+            )
+            process = subprocess.Popen(
+                command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+            )
+            try:
+                expected = index + 1 if visual_dir else len(scenarios)
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
+                    if len(results) >= expected and (
+                        screenshot is None or screenshot.exists()
+                    ):
+                        break
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                try:
+                    _, stderr = process.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    _, stderr = process.communicate(timeout=3)
+            assert len(results) >= expected, stderr[-4000:]
+            if screenshot:
+                assert screenshot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+    observed = {row["scenario"]: row for row in results}
+    assert set(observed) == {item["id"] for item in scenarios}
+    for row in results:
+        assert row["clipped"] == [], row
+        assert row["singleLineCounts"], row
+        assert not row["invalidChartNumbers"], row
+        assert row["insideViewport"] and row["clearOfMetrics"] and row["clearOfLanes"], row
+    assert observed["ahead"]["added"] == "120"
+    assert observed["ahead"]["completed"] == "185"
+    assert observed["ahead"]["net"] == "+65"
+    assert observed["ahead"]["status"] == "Processing outpaced saves"
+    assert observed["ahead"]["days"] == 7
+    assert observed["ahead"]["balance"] == "65"
+    assert observed["ahead"]["activePeriod"] == "7"
+    assert observed["ahead"]["color"] == "rgb(61, 214, 140)"
+    assert observed["behind"]["net"] == "−40"
+    assert observed["behind"]["status"] == "More saved than completed"
+    assert observed["even"]["net"] == "0"
+    assert observed["even"]["status"] == "Keeping pace"
+    assert observed["idle"]["completed"] == "0"
+    assert observed["idle"]["status"] == "No saves or completions in this period"
+    assert observed["partial"]["added"] == "120"
+    assert observed["partial"]["completed"] == "≥80"
+    assert observed["partial"]["net"] == "≥−40"
+    assert observed["partial"]["balance"] == "-40"
+    assert observed["partial"]["direction"] == "unknown"
+    assert observed["partial"]["minimumBalance"]
+    assert observed["partial_ahead"]["net"] == "≥+65"
+    assert observed["partial_ahead"]["direction"] == "processing_ahead"
+    assert observed["partial_ahead"]["minimumBalance"]
+    for state in ("unavailable", "stale"):
+        assert observed[state]["net"] == "--"
+        assert observed[state]["direction"] == "unknown"
+    for state in ("unavailable", "stale"):
+        assert observed[state]["completed"] == "--"
+    assert observed["stale"]["added"] == "--"
+    assert observed["month"]["days"] == 30
+    assert observed["month"]["tableRows"] == 30
+    assert observed["month"]["activePeriod"] == "30"
+    assert observed["month"]["direction"] == "intake_ahead"
+    assert observed["month"]["net"] != observed["ahead"]["net"]
+    for state in ("unavailable", "stale", "missing_day"):
+        assert observed[state]["balance"] is None
+    assert observed["missing_day"]["net"] == "--"

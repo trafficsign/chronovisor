@@ -336,6 +336,153 @@ h2 {
   -webkit-line-clamp: 2;
 }
 
+/* ---------- intake and completion history ---------- */
+
+.daily-flow {
+  margin-bottom: 12px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.daily-flow-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.daily-flow-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(180px, 1fr);
+  align-items: center;
+  gap: 32px;
+  margin-bottom: 20px;
+}
+
+.daily-flow h2,
+.daily-flow p,
+.daily-flow dl,
+.daily-flow dd {
+  margin: 0;
+}
+
+.daily-flow h2,
+.daily-flow dt {
+  font: 480 10.5px var(--font-mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.daily-flow h2 {
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.daily-flow-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 24px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.daily-flow-legend i {
+  display: inline-block;
+  width: 12px;
+  height: 7px;
+  border-radius: 2px;
+  margin-right: 6px;
+}
+
+.flow-saved-key { background: var(--accent); }
+.flow-completed-key { background: var(--green); }
+.flow-net-key { background: var(--text); }
+
+#daily-flow-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 330px;
+  overflow: visible;
+}
+
+#daily-flow-chart text {
+  font: 11px var(--font-mono);
+  fill: var(--muted);
+}
+
+#daily-flow-chart .flow-saved { fill: var(--accent); }
+#daily-flow-chart .flow-completed { fill: var(--green); }
+#daily-flow-chart .flow-partial { opacity: 0.45; }
+#daily-flow-chart .flow-grid { stroke: var(--line); }
+#daily-flow-chart .flow-balance { fill: none; stroke: var(--text); stroke-width: 2; }
+#daily-flow-chart .flow-minimum { stroke-dasharray: 6 4; }
+#daily-flow-chart .flow-zero { stroke: var(--muted); stroke-dasharray: 4 4; }
+
+.daily-flow-today,
+.daily-flow-detail {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.daily-flow-detail { margin-top: 6px; }
+.daily-flow-detail summary { cursor: pointer; width: fit-content; }
+.daily-flow-detail table { width: 100%; margin-top: 12px; text-align: right; }
+.daily-flow-detail th:first-child,
+.daily-flow-detail td:first-child { text-align: left; }
+
+.daily-flow-heading p,
+.daily-flow small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.daily-flow-counts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.daily-flow dt {
+  color: var(--muted);
+  min-height: 28px;
+}
+
+.daily-flow dd {
+  font: 480 clamp(18px, 2vw, 26px) / 1.2 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.daily-flow-summary p {
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+
+.daily-flow[data-direction="processing_ahead"] .daily-flow-net,
+.daily-flow[data-direction="processing_ahead"] .daily-flow-summary p {
+  color: var(--green);
+}
+
+.daily-flow[data-direction="intake_ahead"] .daily-flow-net,
+.daily-flow[data-direction="intake_ahead"] .daily-flow-summary p {
+  color: var(--amber);
+}
+
+@media (max-width: 980px) {
+  .daily-flow-overview {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+}
+
 /* ---------- live processing lanes ---------- */
 
 .processing-panel {

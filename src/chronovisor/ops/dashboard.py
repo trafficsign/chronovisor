@@ -44,6 +44,7 @@ from chronovisor.core.ollama import (
     runtime_generation_routes,
 )
 from chronovisor.core.omlx_adapter import OMLX_API_KEY, OMLX_BASE_URL
+from chronovisor.core.raw_segment import CAPTURE_TIMEZONE
 from chronovisor.core.runtime_config import (
     load_reranker_config,
     load_search_embedding_config,
@@ -84,6 +85,7 @@ from chronovisor.recall.recall_auditor import load_audit_policy
 from chronovisor.recall.recall_improvement import PROPOSER_RUNTIME_ROLES
 
 RAW_DATE_RE = re.compile(r"(?:^|[^0-9])(?P<stamp>20\d{6})(?:[^0-9]|$)")
+DASHBOARD_TIMEZONE = CAPTURE_TIMEZONE
 SEMANTIC_PROJECTION_CHILD_RE = re.compile(
     r"^semantic-(?P<projection>[0-9a-f]{64})-child-[0-9]{8}-[0-9a-f]{64}\.md$"
 )
@@ -1227,12 +1229,8 @@ def _int_value(value: object) -> int:
 
 
 def _date_from_value(value: object) -> date | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
-    except ValueError:
-        return None
+    parsed = _dashboard_local_datetime(value)
+    return parsed.date() if parsed is not None else None
 
 
 def _raw_file_date(path: Path) -> date | None:
@@ -1416,6 +1414,7 @@ def _projection_parent_name(
     *,
     raw_store: Any | None = None,
     verified_archives: set[Path] | None = None,
+    verified_raw_digests: dict[str, str | None] | None = None,
 ) -> str | None:
     """Resolve one manifest parent without trusting its path-like fields."""
 
@@ -1458,7 +1457,13 @@ def _projection_parent_name(
         unit = raw_store.resolve(parent_name)
         if unit is None:
             return None
-        if unit.storage == "legacy_archive" and unit.sha256 is not None:
+        if (
+            unit.storage in {"segment_open", "segment_sealed"}
+            and verified_raw_digests is not None
+            and parent_name in verified_raw_digests
+        ):
+            observed_sha256 = verified_raw_digests[parent_name]
+        elif unit.storage == "legacy_archive" and unit.sha256 is not None:
             # Verify the compressed archive object once, then use the member
             # digest bound into that verified manifest. Reopening each member
             # separately repeatedly decompressed the same tar stream.
@@ -1611,6 +1616,674 @@ def _projection_save_states(
     return semantic_deferred_saves, pending_saves
 
 
+def _dashboard_local_datetime(value: object) -> datetime | None:
+    """Parse one timestamp in the dashboard's capture timezone."""
+
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=DASHBOARD_TIMEZONE)
+    return parsed.astimezone(DASHBOARD_TIMEZONE)
+
+
+def _today_flow_as_of(day: date, explicit_day: bool) -> str:
+    if explicit_day:
+        value = datetime.combine(
+            day,
+            datetime.max.time().replace(microsecond=0),
+            tzinfo=DASHBOARD_TIMEZONE,
+        )
+    else:
+        value = datetime.now(DASHBOARD_TIMEZONE).replace(microsecond=0)
+    return value.isoformat()
+
+
+def _flow_root_key(
+    source_names: list[str] | tuple[str, ...],
+    parents_by_child: dict[str, set[str]],
+) -> tuple[str, ...] | None:
+    roots: set[str] = set()
+    for source_name in source_names:
+        if not isinstance(source_name, str) or not source_name:
+            return None
+        if Path(source_name).name != source_name:
+            return None
+        if SEMANTIC_PROJECTION_CHILD_RE.fullmatch(source_name) is not None:
+            parents = parents_by_child.get(source_name)
+            if not parents:
+                return None
+            roots.update(parents)
+        else:
+            roots.add(source_name)
+    return tuple(sorted(roots)) or None
+
+
+def _flow_raw_groups(
+    raw_files: dict[str, dict[str, Any]],
+    raw_paths: list[Path],
+) -> dict[tuple[str, ...], str | None]:
+    """Collapse oversized capture fragments into one source-root unit."""
+
+    from chronovisor.ingest.raw_capture_fragments import parse_capture_fragment
+
+    paths_by_name = {path.name: path for path in raw_paths}
+    fragment_groups: dict[object, list[str]] = {}
+    for name in raw_files:
+        path = paths_by_name.get(name)
+        if path is None:
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                if "Oversized Transcript Record Fragment" not in stream.read(512):
+                    continue
+        except OSError:
+            continue
+        try:
+            fragment = parse_capture_fragment(path)
+        except Exception:
+            continue
+        if fragment is not None:
+            fragment_groups.setdefault(fragment.identity, []).append(name)
+
+    groups: dict[tuple[str, ...], str | None] = {}
+    fragment_names = {
+        name for names in fragment_groups.values() for name in names
+    }
+    for names in fragment_groups.values():
+        key = tuple(sorted(set(names)))
+        dates = {str(raw_files[name].get("date")) for name in key}
+        groups[key] = dates.pop() if len(dates) == 1 else None
+    for name, meta in raw_files.items():
+        if name not in fragment_names:
+            groups[(name,)] = str(meta.get("date")) or None
+    return groups
+
+
+def _flow_fragment_source_set_complete(
+    source_names: tuple[str, ...], paths_by_name: dict[str, Path]
+) -> bool:
+    """Reject a completion ACK that omits a sibling transport fragment."""
+
+    from chronovisor.ingest.raw_capture_fragments import parse_capture_fragment
+
+    grouped: dict[object, list[str]] = {}
+    expected_counts: dict[object, int] = {}
+    for name in source_names:
+        path = paths_by_name.get(name)
+        if path is None:
+            return False
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                if "Oversized Transcript Record Fragment" not in stream.read(512):
+                    continue
+            fragment = parse_capture_fragment(path)
+        except Exception:
+            return False
+        if fragment is None:
+            continue
+        grouped.setdefault(fragment.identity, []).append(name)
+        expected_counts[fragment.identity] = fragment.identity.fragment_count
+    return all(
+        len(set(names)) == expected_counts[identity]
+        for identity, names in grouped.items()
+    )
+
+
+def _flow_segment_digests(raw_store: Any, raw_names: set[str]) -> dict[str, str | None]:
+    """Validate source ranges in one forward pass per compressed segment."""
+
+    import zstandard as zstd
+
+    from chronovisor.core.raw_segment import MAX_ZSTD_WINDOW_BYTES
+
+    segments: dict[Path, list[Any]] = {}
+    for unit in raw_store.iter_segment_units():
+        if unit.raw_id in raw_names:
+            segments.setdefault(unit.path, []).append(unit)
+    digests: dict[str, str | None] = {}
+    for path, units in segments.items():
+        digests.update(dict.fromkeys(unit.raw_id for unit in units))
+        try:
+            with contextlib.ExitStack() as stack:
+                source = stack.enter_context(path.open("rb"))
+                reader = (
+                    stack.enter_context(zstd.ZstdDecompressor(
+                        max_window_size=MAX_ZSTD_WINDOW_BYTES
+                    ).stream_reader(source))
+                    if units[0].storage == "segment_sealed" else source
+                )
+                position = 0
+                for unit in sorted(units, key=lambda item: item.offset):
+                    while position < unit.offset:
+                        chunk = reader.read(min(1024 * 1024, unit.offset - position))
+                        if not chunk:
+                            raise ValueError("truncated source segment")
+                        position += len(chunk)
+                    if position != unit.offset:
+                        raise ValueError("overlapping source ranges")
+                    remaining = unit.length
+                    digest = hashlib.sha256()
+                    while remaining:
+                        chunk = reader.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            raise ValueError("truncated source range")
+                        digest.update(chunk)
+                        position += len(chunk)
+                        remaining -= len(chunk)
+                    if digest.hexdigest() == unit.sha256:
+                        digests[unit.raw_id] = unit.sha256
+        except (OSError, ValueError, zstd.ZstdError):
+            continue
+    return digests
+
+
+def _projection_completion_requirements(
+    raw_dir: Path,
+) -> tuple[dict[str, set[str]], int, set[str], set[str]]:
+    """Return verified delegated roots and projection identities to ignore.
+
+    A manifest from an older projection policy is not evidence for the current
+    queue contract.  Keep its parent/child names out of the ordinary Raw path
+    so a parent ACK or an individual child ACK cannot be counted as a complete
+    source root by accident.
+    """
+
+    from chronovisor.core.raw_store import RawStore
+    from chronovisor.ingest.raw_semantic_projection import (
+        PROJECTION_POLICY_VERSION,
+        verify_projection_bundle,
+    )
+
+    artifact_dir = raw_dir.parent / "runtime" / "raw-projections" / "artifacts"
+    manifest_paths = sorted(
+        {
+            *raw_dir.glob("semantic-*.manifest.json"),
+            *artifact_dir.glob("semantic-*.manifest.json"),
+        }
+    )
+    requirements: dict[str, set[str]] = {}
+    unresolved = 0
+    excluded_parents: set[str] = set()
+    excluded_children: set[str] = set()
+    raw_store = RawStore(raw_dir)
+    verified_archives: set[Path] = set()
+    manifests = [(path, _read_json_file(path)) for path in manifest_paths]
+    source_names: set[str] = set()
+    candidates_by_manifest: dict[Path, set[str]] = {}
+    for path, payload in manifests:
+        candidates: set[str] = set()
+        source = payload.get("source") if isinstance(payload, dict) else None
+        parents = source.get("parents") if isinstance(source, dict) else None
+        for parent in parents if isinstance(parents, list) else []:
+            receipt = parent.get("receipt") if isinstance(parent, dict) else None
+            key = receipt.get("idempotency_key") if isinstance(receipt, dict) else None
+            if isinstance(key, str) and Path(key).name == key:
+                candidates.add(f"save-{key}.md")
+        candidates_by_manifest[path] = candidates
+        source_names.update(candidates)
+    verified_raw_digests = _flow_segment_digests(raw_store, source_names)
+    for manifest_path, manifest_payload in manifests:
+        observed_policy = (
+            manifest_payload.get("projection_policy_version")
+            if isinstance(manifest_payload, dict)
+            else None
+        )
+        if (
+            isinstance(manifest_payload, dict)
+            and observed_policy is not None
+            and observed_policy != PROJECTION_POLICY_VERSION
+        ):
+            children = manifest_payload.get("children")
+            if isinstance(children, list):
+                excluded_children.update(
+                    row.get("filename")
+                    for row in children
+                    if isinstance(row, dict)
+                    and isinstance(row.get("filename"), str)
+                    and SEMANTIC_PROJECTION_CHILD_RE.fullmatch(row["filename"])
+                )
+            excluded_parents.update(candidates_by_manifest[manifest_path])
+            # ``projection_bundle_state_for_parent`` deliberately ignores old
+            # policy versions during a safe upgrade.  Mirror that contract here.
+            continue
+        try:
+            manifest = verify_projection_bundle(manifest_path)
+            if manifest.get("status") not in {"delegated", "noop"}:
+                continue
+            children = {
+                row.get("filename")
+                for row in manifest.get("children", [])
+                if isinstance(row, dict)
+                and isinstance(row.get("filename"), str)
+            }
+            source = manifest.get("source")
+            source_parents = source.get("parents") if isinstance(source, dict) else None
+            if (
+                (not children and manifest["status"] == "delegated")
+                or not isinstance(source_parents, list)
+                or not source_parents
+            ):
+                raise ValueError("incomplete projection source")
+            parents: set[str] = set()
+            for source_parent in source_parents:
+                if not isinstance(source_parent, dict):
+                    raise ValueError("invalid projection parent")
+                parent = _projection_parent_name(
+                    raw_dir,
+                    source_parent,
+                    raw_store=raw_store,
+                    verified_archives=verified_archives,
+                    verified_raw_digests=verified_raw_digests,
+                )
+                if parent is None:
+                    raise ValueError("unverified projection parent")
+                parents.add(parent)
+            for parent in parents:
+                requirements.setdefault(parent, set()).update(children)
+        except Exception:
+            unresolved += 1
+            # An invalid current manifest must not let its parent/child ACKs
+            # fall through as independent source roots.
+            payload = manifest_payload
+            excluded_parents.update(candidates_by_manifest[manifest_path])
+            if isinstance(payload, dict):
+                children = payload.get("children")
+                if isinstance(children, list):
+                    excluded_children.update(
+                        row.get("filename")
+                        for row in children
+                        if isinstance(row, dict)
+                        and isinstance(row.get("filename"), str)
+                        and SEMANTIC_PROJECTION_CHILD_RE.fullmatch(row["filename"])
+                    )
+    return requirements, unresolved, excluded_parents, excluded_children
+
+
+def _flow_parents_by_child(
+    requirements: dict[str, set[str]],
+) -> dict[str, set[str]]:
+    parents_by_child: dict[str, set[str]] = {}
+    for parent, children in requirements.items():
+        for child in children:
+            parents_by_child.setdefault(child, set()).add(parent)
+    return parents_by_child
+
+
+def _completion_receipts(
+    raw_dir: Path,
+    raw_paths: list[Path],
+    *,
+    requirements: dict[str, set[str]] | None = None,
+    manifest_unresolved: int | None = None,
+    excluded_parents: set[str] | None = None,
+    excluded_children: set[str] | None = None,
+) -> tuple[dict[tuple[str, ...], datetime], set[str], dict[str, int], bool]:
+    """Read durable completion ACKs and return root completion timestamps."""
+
+    from chronovisor.ingest.raw_completion_ack import (
+        RawCompletionReceiptInvalid,
+        load_valid_receipt,
+        receipt_path,
+    )
+
+    ack_dir = CHRONOVISOR_ROOT / "runtime" / "raw-completion-acks"
+    if requirements is None:
+        (
+            requirements,
+            manifest_unresolved,
+            excluded_parents,
+            excluded_children,
+        ) = _projection_completion_requirements(raw_dir)
+    if manifest_unresolved is None:
+        manifest_unresolved = 0
+    excluded_parents = excluded_parents or set()
+    excluded_children = excluded_children or set()
+    stats = {
+        "scanned": 0,
+        "valid": 0,
+        "invalid": 0,
+        "unresolved": 0,
+        "incomplete": 0,
+        "excluded": 0,
+        "manifest_unresolved": manifest_unresolved,
+    }
+    if not ack_dir.is_dir():
+        return {}, set(), stats, False
+
+    paths_by_name = {path.name: path for path in raw_paths}
+    all_source_names: set[str] = set()
+    parsed_rows: list[tuple[tuple[str, ...], datetime, bool]] = []
+    for path in sorted(ack_dir.glob("*.json")):
+        stats["scanned"] += 1
+        try:
+            payload = _read_json_file(path)
+            if not isinstance(payload, dict):
+                raise ValueError("payload")
+            sources = payload.get("sources")
+            if not isinstance(sources, list) or not sources:
+                raise ValueError("payload")
+            source_names_list = [
+                row.get("filename") if isinstance(row, dict) else None
+                for row in sources
+            ]
+            if not all(
+                isinstance(name, str) and Path(name).name == name and name
+                for name in source_names_list
+            ) or len(set(source_names_list)) != len(source_names_list):
+                raise ValueError("sources")
+            source_names = tuple(sorted(source_names_list))
+            source_paths = [
+                paths_by_name[name] for name in source_names if name in paths_by_name
+            ]
+            if len(source_paths) != len(source_names):
+                stats["unresolved"] += 1
+                continue
+            if receipt_path(source_paths) != path:
+                raise ValueError("receipt_path")
+            # Even a corrupt canonical ACK must not be replaced by an older
+            # success-only log for the same source.
+            all_source_names.update(source_names)
+            verified = load_valid_receipt(
+                source_paths,
+                verify_current_postimages=False,
+            )
+            if verified is None:
+                raise ValueError("receipt_missing")
+            verified_sources = verified.get("sources")
+            verified_names = tuple(
+                sorted(
+                    row.get("filename")
+                    for row in verified_sources
+                    if isinstance(row, dict)
+                    and isinstance(row.get("filename"), str)
+                )
+            )
+            if verified_names != source_names:
+                raise ValueError("source_identity")
+            outcome = verified.get("outcome")
+            completed_at = _dashboard_local_datetime(
+                outcome.get("completed_at") if isinstance(outcome, dict) else None
+            )
+            if completed_at is None:
+                raise ValueError("completed_at")
+        except (RawCompletionReceiptInvalid, OSError, TypeError, ValueError):
+            stats["invalid"] += 1
+            continue
+        stats["valid"] += 1
+        parsed_rows.append((
+            source_names, completed_at,
+            outcome.get("processor") == "deterministic-projection",
+        ))
+        all_source_names.update(source_names)
+
+    stats["manifest_unresolved"] = manifest_unresolved
+    raw_names = set(paths_by_name)
+    parents_by_child = _flow_parents_by_child(requirements)
+    source_completion_times: dict[str, datetime] = {}
+    for source_names, completed_at, _is_projection in parsed_rows:
+        for source_name in source_names:
+            previous = source_completion_times.get(source_name)
+            if previous is None or completed_at > previous:
+                source_completion_times[source_name] = completed_at
+    root_times: dict[tuple[str, ...], datetime] = {}
+    for source_names, completed_at, is_projection in parsed_rows:
+        if set(source_names) & (excluded_parents | excluded_children):
+            stats["excluded"] += 1
+            continue
+        if not _flow_fragment_source_set_complete(source_names, paths_by_name):
+            stats["unresolved"] += 1
+            continue
+        root_key = _flow_root_key(source_names, parents_by_child)
+        if root_key is None or any(name not in raw_names for name in root_key):
+            stats["unresolved"] += 1
+            continue
+        if set(root_key) & excluded_parents:
+            stats["excluded"] += 1
+            continue
+        if is_projection and any(parent not in requirements for parent in root_key):
+            # A projection ACK proves delegation, or a verified noop. Missing
+            # manifests cannot turn that ACK into an ordinary completion.
+            stats["unresolved"] += 1
+            continue
+        required_children = {
+            child
+            for parent in root_key
+            for child in requirements.get(parent, set())
+        }
+        if required_children:
+            if not (set(root_key) | required_children) <= source_completion_times.keys():
+                # A current, verified bundle with an ACK still pending for one
+                # child is known intake backlog, not missing evidence.
+                stats["incomplete"] += 1
+                continue
+            completed_at = max(
+                source_completion_times[child] for child in required_children
+            )
+        previous = root_times.get(root_key)
+        if previous is None or completed_at > previous:
+            root_times[root_key] = completed_at
+    return root_times, all_source_names, stats, True
+
+
+def _flow_series_snapshot(
+    *,
+    start_day: date,
+    end_day: date,
+    raw_files: dict[str, dict[str, Any]],
+    raw_paths: list[Path],
+    completion_log_events: list[tuple[object, tuple[str, ...]]],
+    completion_log_invalid_timestamps: int,
+    completion_log_records: int,
+    processed_raw_names: set[str],
+    explicit_day: bool,
+) -> dict[str, Any]:
+    raw_groups = _flow_raw_groups(raw_files, raw_paths)
+    paths_by_name = {path.name: path for path in raw_paths}
+    added_by_day: dict[date, int] = {}
+    for raw_date in raw_groups.values():
+        try:
+            parsed_date = date.fromisoformat(raw_date) if raw_date else None
+        except ValueError:
+            parsed_date = None
+        if parsed_date is not None and start_day <= parsed_date <= end_day:
+            added_by_day[parsed_date] = added_by_day.get(parsed_date, 0) + 1
+
+    (
+        requirements,
+        manifest_unresolved,
+        excluded_parents,
+        excluded_children,
+    ) = _projection_completion_requirements(CHRONOVISOR_ROOT / "raw")
+    parents_by_child = _flow_parents_by_child(requirements)
+
+    (
+        receipt_roots,
+        receipt_source_names,
+        receipt_stats,
+        receipt_store_available,
+    ) = _completion_receipts(
+        CHRONOVISOR_ROOT / "raw",
+        raw_paths,
+        requirements=requirements,
+        manifest_unresolved=manifest_unresolved,
+        excluded_parents=excluded_parents,
+        excluded_children=excluded_children,
+    )
+    log_source_times: dict[str, datetime] = {}
+    for timestamp, source_names in completion_log_events:
+        parsed = _dashboard_local_datetime(timestamp)
+        if parsed is None:
+            continue
+        for source_name in source_names:
+            previous = log_source_times.get(source_name)
+            if previous is None or parsed > previous:
+                log_source_times[source_name] = parsed
+    log_roots: dict[tuple[str, ...], datetime] = {}
+    unresolved_logs = 0
+    incomplete_logs = 0
+    excluded_logs = 0
+    for timestamp, source_names in completion_log_events:
+        parsed = _dashboard_local_datetime(timestamp)
+        if parsed is None or not start_day <= parsed.date() <= end_day:
+            continue
+        if set(source_names) & (excluded_parents | excluded_children):
+            excluded_logs += 1
+            continue
+        if not _flow_fragment_source_set_complete(source_names, paths_by_name):
+            unresolved_logs += 1
+            continue
+        root_key = _flow_root_key(source_names, parents_by_child)
+        if root_key is None:
+            unresolved_logs += 1
+            continue
+        if set(root_key) & excluded_parents:
+            excluded_logs += 1
+            continue
+        # ponytail: legacy success logs cannot disambiguate a lost delegation;
+        # keep them out until its projection metadata is verifiable again.
+        if manifest_unresolved and any(parent not in requirements for parent in root_key):
+            unresolved_logs += 1
+            continue
+        required_children = {
+            child
+            for parent in root_key
+            for child in requirements.get(parent, set())
+        }
+        if required_children:
+            if not (set(root_key) | required_children) <= log_source_times.keys():
+                incomplete_logs += 1
+                continue
+            parsed = max(log_source_times[child] for child in required_children)
+        previous = log_roots.get(root_key)
+        if previous is None or parsed > previous:
+            log_roots[root_key] = parsed
+
+    # Receipts are canonical. Logs only fill roots absent from the receipt
+    # store, so a duplicate event cannot move a completion into another day.
+    root_times = dict(receipt_roots)
+    log_fallback_roots: set[tuple[str, ...]] = set()
+    for root_key, parsed in log_roots.items():
+        if root_key not in root_times and not set(root_key) & receipt_source_names:
+            root_times[root_key] = parsed
+            log_fallback_roots.add(root_key)
+    log_source_names = {
+        name for _timestamp, source_names in completion_log_events for name in source_names
+    }
+    processed_without_evidence = {
+        name
+        for name in processed_raw_names
+        if name not in receipt_source_names and name not in log_source_names
+    }
+    used_log_fallback = bool(log_fallback_roots)
+    log_events_in_range = any(
+        (
+            (parsed := _dashboard_local_datetime(timestamp)) is not None
+            and start_day <= parsed.date() <= end_day
+        )
+        for timestamp, _source_names in completion_log_events
+    )
+    evidence_missing = not log_events_in_range and (
+        not receipt_store_available
+        or receipt_stats["scanned"] == 0
+        or (
+            receipt_stats["valid"] == 0
+            and receipt_stats["invalid"] > 0
+        )
+    )
+    partial = bool(
+        used_log_fallback
+        or not receipt_store_available
+        or receipt_stats["invalid"]
+        or receipt_stats["unresolved"]
+        or receipt_stats["manifest_unresolved"]
+        or receipt_stats["excluded"]
+        or unresolved_logs
+        or excluded_logs
+        or completion_log_invalid_timestamps
+        or processed_without_evidence
+    )
+    completed_by_day: dict[date, int] = {}
+    for completed_at in root_times.values():
+        completed_date = completed_at.date()
+        if start_day <= completed_date <= end_day:
+            completed_by_day[completed_date] = (
+                completed_by_day.get(completed_date, 0) + 1
+            )
+
+    coverage = {
+        "raw_units": len(raw_groups),
+        "completion_receipts_scanned": receipt_stats["scanned"],
+        "completion_receipts_valid": receipt_stats["valid"],
+        "completion_log_records": completion_log_records,
+        "completion_log_events": len(completion_log_events),
+        "missing_completion_timestamps": completion_log_invalid_timestamps,
+        "unresolved_completion_roots": receipt_stats["unresolved"]
+        + unresolved_logs
+        + len(processed_without_evidence),
+        "unresolved_projection_manifests": manifest_unresolved,
+        "incomplete_completion_roots": receipt_stats["incomplete"]
+        + incomplete_logs,
+        "excluded_projection_roots": receipt_stats["excluded"] + excluded_logs,
+    }
+    observed_completed = (
+        "validated raw-completion-ack outcome.completed_at"
+        if receipt_store_available
+        else "ingest-drain logs (partial coverage)"
+    )
+    days: list[dict[str, Any]] = []
+    for offset in range((end_day - start_day).days + 1):
+        flow_day = start_day + timedelta(days=offset)
+        added = added_by_day.get(flow_day, 0)
+        completed = completed_by_day.get(flow_day, 0)
+        unavailable_for_day = evidence_missing
+        day_completed: int | None = None if unavailable_for_day else completed
+        day_status = (
+            "unavailable"
+            if day_completed is None
+            else "partial"
+            if partial
+            else "ok"
+        )
+        net = day_completed - added if day_status == "ok" else None
+        direction = (
+            "processing_ahead"
+            if net is not None and net > 0
+            else "intake_ahead"
+            if net is not None and net < 0
+            else "even"
+            if net == 0
+            else "unknown"
+        )
+        days.append(
+            {
+                "date": flow_day.isoformat(),
+                "timezone": str(DASHBOARD_TIMEZONE),
+                "as_of": _today_flow_as_of(flow_day, explicit_day),
+                "unit": "source_raw",
+                "added": added,
+                "completed": day_completed,
+                "net": net,
+                "direction": direction,
+                "status": day_status,
+                "observed": {
+                    "added": "RawStore captured_at/filename",
+                    "completed": observed_completed,
+                },
+                "coverage": coverage,
+            }
+        )
+    return {
+        "unit": "source_raw",
+        "timezone": str(DASHBOARD_TIMEZONE),
+        "as_of": _today_flow_as_of(end_day, explicit_day),
+        "days": days,
+    }
+
+
 def _save_history_snapshot(
     days: int = 371,
     today: date | None = None,
@@ -1618,8 +2291,10 @@ def _save_history_snapshot(
     raw_paths: list[Path] | None = None,
     deferred_statuses: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    end = today or datetime.now().date()
+    explicit_day = today is not None
+    end = today or datetime.now(DASHBOARD_TIMEZONE).date()
     start = end - timedelta(days=max(1, days) - 1)
+    flow_start = end - timedelta(days=29)
     rows = {
         (start + timedelta(days=offset)).isoformat(): _new_save_day(
             start + timedelta(days=offset)
@@ -1629,15 +2304,41 @@ def _save_history_snapshot(
 
     raw_dir = CHRONOVISOR_ROOT / "raw"
     raw_files: dict[str, dict[str, Any]] = {}
+    flow_raw_files: dict[str, dict[str, Any]] = {}
     raw_status: dict[str, str] = {}
     raw_entries: list[tuple[Path, str, int, date | None]] = []
     effective_raw_paths: list[Path] = []
     if raw_paths is not None:
         effective_raw_paths = list(raw_paths)
-        raw_entries = [
-            (path, path.name, path.stat().st_size, _raw_file_date(path))
-            for path in effective_raw_paths
-        ]
+        units_by_name: dict[str, Any] = {}
+        if raw_dir.exists():
+            try:
+                from chronovisor.core.raw_store import RawStore
+
+                units_by_name = {
+                    unit.raw_id: unit for unit in RawStore(raw_dir).iter_units()
+                }
+            except Exception:
+                units_by_name = {}
+        for path in effective_raw_paths:
+            unit = units_by_name.get(path.name)
+            captured = (
+                _dashboard_local_datetime(unit.captured_at)
+                if unit is not None and unit.captured_at
+                else None
+            )
+            try:
+                raw_bytes = int(unit.length) if unit is not None else path.stat().st_size
+            except OSError:
+                continue
+            raw_entries.append(
+                (
+                    path,
+                    path.name,
+                    raw_bytes,
+                    captured.date() if captured is not None else _raw_file_date(path),
+                )
+            )
     elif raw_dir.exists():
         from chronovisor.core.raw_store import RawStore
 
@@ -1652,10 +2353,8 @@ def _save_history_snapshot(
             effective_raw_paths.append(logical_path)
             captured = None
             if unit.captured_at:
-                try:
-                    captured = datetime.fromisoformat(unit.captured_at).date()
-                except ValueError:
-                    captured = None
+                captured = _dashboard_local_datetime(unit.captured_at)
+                captured = captured.date() if captured is not None else None
             raw_entries.append(
                 (
                     logical_path,
@@ -1676,6 +2375,8 @@ def _save_history_snapshot(
             # remains visible through the canonical pending counter.
             if SEMANTIC_PROJECTION_CHILD_RE.fullmatch(raw_name.lower()):
                 continue
+            if raw_date is not None and flow_start <= raw_date <= end:
+                flow_raw_files[raw_name] = {"date": raw_date.isoformat()}
             if raw_date is None or raw_date < start or raw_date > end:
                 continue
             source = _raw_source_label(raw_name)
@@ -1690,14 +2391,22 @@ def _save_history_snapshot(
             row["sources"][source] = row["sources"].get(source, 0) + 1
             _add_sample(row, "raw_samples", path.name)
 
+    completion_log_events: list[tuple[object, tuple[str, ...]]] = []
+    completion_log_invalid_timestamps = 0
+    completion_log_records = 0
     logs_dir = CHRONOVISOR_ROOT / "logs"
     if logs_dir.exists():
         for path in sorted(logs_dir.glob("ingest-drain-*.jsonl")):
             for record in _read_jsonl_file(path, limit=50_000):
+                completion_log_records += 1
                 record_date = _date_from_value(record.get("timestamp"))
-                if record_date is None or record_date < start or record_date > end:
+                if record_date is None or record_date < min(start, flow_start) or record_date > end:
+                    if record.get("timestamp") and _dashboard_local_datetime(
+                        record.get("timestamp")
+                    ) is None:
+                        completion_log_invalid_timestamps += 1
                     continue
-                row = rows[record_date.isoformat()]
+                row = rows.get(record_date.isoformat()) or _new_save_day(record_date)
                 result = (
                     record.get("result")
                     if isinstance(record.get("result"), dict)
@@ -1736,7 +2445,14 @@ def _save_history_snapshot(
                     succeeded = sum(
                         1
                         for item in per_raw
-                        if isinstance(item, dict) and item.get("succeeded") is True
+                        if isinstance(item, dict)
+                        and item.get("succeeded") is True
+                        and item.get("deferred") is not True
+                        and item.get("continued") is not True
+                        and not (
+                            isinstance(item.get("supervision"), dict)
+                            and item["supervision"].get("terminal_deferred") is True
+                        )
                     )
                     attempted = len(per_raw)
                     deferred = sum(
@@ -1805,7 +2521,11 @@ def _save_history_snapshot(
                             and item["supervision"].get("terminal_deferred") is True
                         )
                         item_continued = item.get("continued") is True
-                        if item.get("succeeded") is True:
+                        if (
+                            item.get("succeeded") is True
+                            and not item_deferred
+                            and not item_continued
+                        ):
                             for status_filename in status_filenames:
                                 raw_status[status_filename] = "processed"
                         elif item_deferred:
@@ -1848,6 +2568,37 @@ def _save_history_snapshot(
                             and raw_status.get(filename) != "processed"
                         ):
                             raw_status[filename] = "failed"
+                if per_raw:
+                    for item in per_raw:
+                        if not isinstance(item, dict):
+                            continue
+                        item_deferred = item.get("deferred") is True or (
+                            isinstance(item.get("supervision"), dict)
+                            and item["supervision"].get("terminal_deferred") is True
+                        )
+                        item_continued = item.get("continued") is True
+                        if (
+                            item.get("succeeded") is not True
+                            or item_deferred
+                            or item_continued
+                        ):
+                            continue
+                        names = item.get("source_files")
+                        if not isinstance(names, list):
+                            names = [item.get("filename")]
+                        source_names = tuple(
+                            name for name in names if isinstance(name, str)
+                        )
+                        if source_names:
+                            completion_log_events.append(
+                                (record.get("timestamp"), source_names)
+                            )
+                else:
+                    for filename in processed_files:
+                        if isinstance(filename, str):
+                            completion_log_events.append(
+                                (record.get("timestamp"), (filename,))
+                            )
                 for filename in processed_files[:3]:
                     if isinstance(filename, str):
                         _add_sample(row, "raw_samples", filename)
@@ -1996,6 +2747,17 @@ def _save_history_snapshot(
         or row["pages_created"]
         or row["pages_updated"]
     ][-14:]
+    flow = _flow_series_snapshot(
+        start_day=flow_start,
+        end_day=end,
+        raw_files=flow_raw_files,
+        raw_paths=effective_raw_paths,
+        completion_log_events=completion_log_events,
+        completion_log_invalid_timestamps=completion_log_invalid_timestamps,
+        completion_log_records=completion_log_records,
+        processed_raw_names=processed_raw_names,
+        explicit_day=explicit_day,
+    )
     return {
         "range": {
             "start": start.isoformat(),
@@ -2016,6 +2778,8 @@ def _save_history_snapshot(
             "drain_logs": str(logs_dir),
             "log_file": str(ACTIVITY_FILE),
         },
+        "flow": flow,
+        "today_flow": flow["days"][-1],
     }
 
 
@@ -5452,13 +6216,20 @@ def _save_history_materialization_fingerprint(raw_paths: list[Path]) -> str:
                 / "raw-projections"
                 / "artifacts"
                 / "semantic-*.manifest.json",
+                CHRONOVISOR_ROOT
+                / "runtime"
+                / "raw-completion-acks"
+                / "*.json",
             ]
         )
     )
     return _component_source_fingerprint(
         "save-history",
         paths,
-        identities=[path.name for path in raw_paths],
+        identities=[
+            *[path.name for path in raw_paths],
+            f"today:{datetime.now(DASHBOARD_TIMEZONE).date().isoformat()}",
+        ],
     )
 
 

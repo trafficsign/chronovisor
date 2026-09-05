@@ -3433,7 +3433,7 @@ this.__test = { renderLiveModelStatus, render, seen };
 """
     scenario = f"""
 const vm = require("node:vm");
-const element = () => ({{ textContent: "", title: "" }});
+const element = () => ({{ textContent: "", title: "", dataset: {{}}, innerHTML: "", clientWidth: 960, setAttribute: () => {{}}, classList: {{ toggle: () => {{}} }} }});
 const els = new Proxy({{}}, {{
   get(target, key) {{
     if (!(key in target)) target[key] = element();
@@ -3442,7 +3442,7 @@ const els = new Proxy({{}}, {{
 }});
 const sandbox = {{
   window: {{ matchMedia: () => ({{ matches: false }}) }},
-  document: {{ visibilityState: "visible" }},
+  document: {{ visibilityState: "visible", querySelectorAll: () => [] }},
   els,
   latestRenderedStatus: null,
   STAGE_METRIC_LABELS: {{}},
@@ -3545,7 +3545,7 @@ renderDecisionTrace = (consensus) => {
 """
     scenario = f"""
 const vm = require("node:vm");
-const element = () => ({{ textContent: "", title: "" }});
+const element = () => ({{ textContent: "", title: "", dataset: {{}}, innerHTML: "", clientWidth: 960, setAttribute: () => {{}}, classList: {{ toggle: () => {{}} }} }});
 const els = new Proxy({{}}, {{
   get(target, key) {{
     if (!(key in target)) target[key] = element();
@@ -3554,7 +3554,7 @@ const els = new Proxy({{}}, {{
 }});
 const sandbox = {{
   window: {{ matchMedia: () => ({{ matches: false }}) }},
-  document: {{ visibilityState: "visible" }},
+  document: {{ visibilityState: "visible", querySelectorAll: () => [] }},
   els,
   latestRenderedStatus: {{ state: "running", local_consensus: {{}} }},
   STAGE_METRIC_LABELS: {{}},
@@ -3651,7 +3651,7 @@ def test_decision_trace_renderer_applies_each_authoritative_snapshot_directly() 
 const vm = require("node:vm");
 const sandbox = {{
   window: {{ matchMedia: () => ({{ matches: true }}) }},
-  document: {{ visibilityState: "visible" }},
+  document: {{ visibilityState: "visible", querySelectorAll: () => [] }},
   frames: [],
 }};
 vm.createContext(sandbox);
@@ -7755,6 +7755,413 @@ def test_save_history_snapshot_empty_wiki(tmp_path: Path, monkeypatch) -> None:
     assert history["totals"]["raw_bytes"] == 0
     assert history["totals"]["pending_bytes"] == 0
     assert history["days"][0]["raw_segments"] == []
+
+
+def test_flow_segment_digests_read_each_archive_once_and_reject_bad_ranges(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import hashlib
+
+    import zstandard as zstd
+
+    from chronovisor.core.raw_store import RawUnit
+
+    path = tmp_path / "segment.jsonl.zst"
+    first, second = b"first record\n", b"second record\n"
+    path.write_bytes(zstd.ZstdCompressor().compress(first + b"gap\n" + second))
+    units = [
+        RawUnit("first", "segment_sealed", path, 0, len(first), hashlib.sha256(first).hexdigest(), None),
+        RawUnit("second", "segment_sealed", path, len(first) + 4, len(second), hashlib.sha256(second).hexdigest(), None),
+        RawUnit("truncated", "segment_sealed", path, len(first) + 4 + len(second), 10, "a" * 64, None),
+    ]
+    opened = []
+    real_open = Path.open
+
+    def count_open(self, *args, **kwargs):
+        opened.append(self)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", count_open)
+    store = SimpleNamespace(iter_segment_units=lambda: iter(reversed(units)))
+    digests = dashboard._flow_segment_digests(store, {unit.raw_id for unit in units})
+
+    assert opened == [path]
+    assert digests == {"first": units[0].sha256, "second": units[1].sha256, "truncated": None}
+
+
+def test_flow_segment_digest_cannot_override_a_selected_legacy_raw(tmp_path: Path) -> None:
+    import hashlib
+
+    key = f"codex-{'a' * 24}-from0-to2"
+    digest = hashlib.sha256(b"segment").hexdigest()
+    source = {"raw_sha256": digest, "receipt": {
+        "host": "codex", "session_key": "a" * 24, "after_line": 0,
+        "until_line": 2, "idempotency_key": key,
+    }}
+    store = SimpleNamespace(
+        resolve=lambda _name: SimpleNamespace(storage="legacy_file"),
+        read_bytes=lambda _unit: b"different legacy raw",
+    )
+    assert dashboard._projection_parent_name(
+        tmp_path, source, raw_store=store,
+        verified_raw_digests={f"save-{key}.md": digest},
+    ) is None
+
+
+@pytest.mark.parametrize("calendar_days", [1, 30])
+def test_save_history_today_flow_uses_root_receipts_and_local_day(
+    tmp_path: Path, monkeypatch, calendar_days: int
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
+    ack_dir = chronovisor_root / "runtime" / "raw-completion-acks"
+    raw_dir.mkdir(parents=True)
+    ack_dir.mkdir(parents=True)
+    today_names = [
+        "20260704-010000-codex-flow-a-aaaaaaaa.md",
+        "20260704-020000-codex-flow-b-bbbbbbbb.md",
+    ]
+    old_name = "20260703-230000-codex-flow-old-cccccccc.md"
+    for name in [*today_names, old_name]:
+        (raw_dir / name).write_text(name, encoding="utf-8")
+
+    from chronovisor.core import store as core_store
+    from chronovisor.ingest import raw_completion_ack
+
+    monkeypatch.setattr(core_store, "CHRONOVISOR_ROOT", chronovisor_root)
+
+    def write_ack(name: str, completed_at: str) -> None:
+        job = SimpleNamespace(
+            status=SimpleNamespace(value="completed"),
+            job_id=f"job-{name}",
+            processor="test",
+            completed_at=completed_at,
+            pages_created=[],
+            pages_updated=[],
+            result={},
+        )
+        raw_completion_ack.publish_receipt([raw_dir / name], job)
+
+    # 15:30Z is 00:30 on July 4 in the dashboard's capture timezone.
+    write_ack(today_names[0], "2026-07-03T15:30:00+00:00")
+    write_ack(old_name, "2026-07-03T15:31:00+00:00")
+
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
+    monkeypatch.setattr(
+        dashboard, "_operational_deferred_raw_statuses", lambda _paths: {}
+    )
+
+    history = dashboard._save_history_snapshot(days=calendar_days, today=date(2026, 7, 4))
+    flow = history["today_flow"]
+
+    assert flow["date"] == "2026-07-04"
+    assert flow["timezone"] == "Asia/Tokyo"
+    assert flow["added"] == 2
+    assert flow["completed"] == 2
+    assert flow["net"] == 0
+    assert flow["direction"] == "even"
+    assert flow["status"] == "ok"
+    assert len(history["flow"]["days"]) == 30
+    assert history["flow"]["days"][-1] == flow
+    by_date = {row["date"]: row for row in history["flow"]["days"]}
+    assert by_date["2026-07-03"]["added"] == 1
+    assert by_date["2026-07-03"]["completed"] == 0
+    assert by_date["2026-07-04"]["completed"] == 2
+
+
+def test_save_history_today_flow_does_not_call_missing_ack_success(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
+    ack_dir = chronovisor_root / "runtime" / "raw-completion-acks"
+    raw_dir.mkdir(parents=True)
+    ack_dir.mkdir(parents=True)
+    name = "20260704-010000-codex-flow-missing-aaaaaaaa.md"
+    (raw_dir / name).write_text("raw", encoding="utf-8")
+    (chronovisor_root / ".orchestrator_state.json").write_text(
+        json.dumps({"processed_raw_files": [name]}), encoding="utf-8"
+    )
+
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
+    monkeypatch.setattr(
+        dashboard, "_operational_deferred_raw_statuses", lambda _paths: {}
+    )
+
+    flow = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))["today_flow"]
+
+    assert flow["added"] == 1
+    assert flow["completed"] is None
+    assert flow["net"] is None
+    assert flow["direction"] == "unknown"
+    assert flow["status"] == "unavailable"
+    assert flow["coverage"]["unresolved_completion_roots"] == 1
+
+
+def test_save_history_today_flow_rejects_changed_source_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
+    ack_dir = chronovisor_root / "runtime" / "raw-completion-acks"
+    raw_dir.mkdir(parents=True)
+    ack_dir.mkdir(parents=True)
+    name = "20260704-010000-codex-flow-forged-aaaaaaaa.md"
+    path = raw_dir / name
+    path.write_text("raw", encoding="utf-8")
+
+    from chronovisor.core import store as core_store
+    from chronovisor.ingest import raw_completion_ack
+
+    monkeypatch.setattr(core_store, "CHRONOVISOR_ROOT", chronovisor_root)
+    job = SimpleNamespace(
+        status=SimpleNamespace(value="completed"),
+        job_id="job-forged",
+        processor="test",
+        completed_at="2026-07-04T01:00:00+09:00",
+        pages_created=[],
+        pages_updated=[],
+        result={},
+    )
+    raw_completion_ack.publish_receipt([path], job)
+    path.write_text("changed after ACK", encoding="utf-8")
+
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
+    monkeypatch.setattr(
+        dashboard, "_operational_deferred_raw_statuses", lambda _paths: {}
+    )
+
+    flow = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))[
+        "today_flow"
+    ]
+    assert flow["completed"] is None
+    assert flow["net"] is None
+    assert flow["status"] == "unavailable"
+    assert flow["coverage"]["completion_receipts_valid"] == 0
+    assert flow["coverage"]["unresolved_completion_roots"] == 0
+
+
+def test_save_history_today_flow_log_fallback_is_partial_and_deduped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
+    logs_dir = chronovisor_root / "logs"
+    raw_dir.mkdir(parents=True)
+    logs_dir.mkdir()
+    name = "20260704-010000-codex-flow-log-aaaaaaaa.md"
+    (raw_dir / name).write_text("raw", encoding="utf-8")
+    records = [
+        {
+            "timestamp": "2026-07-04T01:00:00+09:00",
+            "result": {
+                "files_processed": [name],
+                "per_raw": [{"filename": name, "succeeded": True}],
+            },
+        },
+        {
+            "timestamp": "2026-07-04T01:01:00+09:00",
+            "result": {
+                "files_processed": [name],
+                "per_raw": [{"filename": name, "succeeded": True}],
+            },
+        },
+        {
+            "timestamp": "2026-07-04T01:02:00+09:00",
+            "result": {
+                "files_processed": [name],
+                "per_raw": [{"filename": name, "succeeded": True, "continued": True}],
+            },
+        },
+    ]
+    (logs_dir / "ingest-drain-20260704.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+    )
+
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
+    monkeypatch.setattr(
+        dashboard, "_operational_deferred_raw_statuses", lambda _paths: {}
+    )
+
+    flow = dashboard._save_history_snapshot(days=1, today=date(2026, 7, 4))["today_flow"]
+
+    assert flow["added"] == 1
+    assert flow["completed"] == 1
+    assert flow["net"] is None
+    assert flow["direction"] == "unknown"
+    assert flow["status"] == "partial"
+    assert flow["coverage"]["completion_log_events"] == 2
+
+
+def test_save_history_today_flow_requires_every_projection_child_ack(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from chronovisor.core import store as core_store
+    from chronovisor.core.save_transaction import (
+        attach_save_transaction_marker,
+        make_save_transaction,
+    )
+    from chronovisor.ingest import raw_completion_ack, raw_semantic_projection
+
+    chronovisor_root = tmp_path / "wiki"
+    raw_dir = chronovisor_root / "raw"
+    artifact_dir = chronovisor_root / "runtime" / "raw-projections" / "artifacts"
+    raw_dir.mkdir(parents=True)
+    artifact_dir.mkdir(parents=True)
+    monkeypatch.setattr(core_store, "CHRONOVISOR_ROOT", chronovisor_root)
+
+    transaction = make_save_transaction(
+        host="codex",
+        session_file=tmp_path / "session.jsonl",
+        session_id="projection-flow",
+        after_line=0,
+        until_line=2,
+    )
+    records = [
+        {"line": 1, "role": "user", "text": "u" * 500},
+        {"line": 2, "role": "assistant", "text": "a" * 500},
+    ]
+    body = (
+        "# Codex Session Transcript Delta\n\n"
+        "## Transcript Delta\n\n```json\n"
+        + json.dumps(records)
+        + "\n```\n"
+    )
+    parent_path = raw_dir / f"save-{transaction.idempotency_key}.md"
+    parent_path.write_text(attach_save_transaction_marker(transaction, body))
+    capture_epoch = datetime(
+        2026, 7, 4, tzinfo=dashboard.DASHBOARD_TIMEZONE
+    ).timestamp()
+    os.utime(parent_path, (capture_epoch, capture_epoch))
+    projection = raw_semantic_projection.project_parent_raw(
+        parent_path,
+        output_dir=artifact_dir,
+        max_child_bytes=1600,
+    )
+    assert projection.child_count == 2
+
+    def write_ack(paths: list[Path], completed_at: str) -> None:
+        job = SimpleNamespace(
+            status=SimpleNamespace(value="completed"),
+            job_id=f"job-{paths[0].name}",
+            processor="deterministic-projection" if paths == [parent_path] else "test",
+            completed_at=completed_at,
+            pages_created=[],
+            pages_updated=[],
+            result={},
+        )
+        raw_completion_ack.publish_receipt(paths, job)
+
+    write_ack([parent_path], "2026-07-03T23:50:00+09:00")
+    write_ack([projection.child_paths[0]], "2026-07-03T23:55:00+09:00")
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(
+        dashboard,
+        "ACTIVITY_FILE",
+        chronovisor_root / "runtime" / "activity.jsonl",
+    )
+    monkeypatch.setattr(
+        dashboard, "_operational_deferred_raw_statuses", lambda _paths: {}
+    )
+
+    first = dashboard._save_history_snapshot(days=2, today=date(2026, 7, 4))[
+        "today_flow"
+    ]
+    assert first["added"] == 1
+    assert first["completed"] == 0
+    assert first["net"] == -1
+    assert first["direction"] == "intake_ahead"
+    assert first["status"] == "ok"
+    assert first["coverage"]["incomplete_completion_roots"] == 2
+
+    write_ack([projection.child_paths[1]], "2026-07-04T00:20:00+09:00")
+    second = dashboard._save_history_snapshot(days=2, today=date(2026, 7, 4))[
+        "today_flow"
+    ]
+    assert second["added"] == 1
+    assert second["completed"] == 1
+    assert second["net"] == 0
+    assert second["direction"] == "even"
+    assert second["status"] == "ok"
+
+    # Prior projection policy bundles are deliberately excluded from the
+    # current source-root completion contract.
+    manifest_path = projection.manifest_path
+    assert manifest_path is not None
+    old_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    old_manifest["projection_policy_version"] = 1
+    manifest_path.write_text(json.dumps(old_manifest), encoding="utf-8")
+    excluded = dashboard._save_history_snapshot(days=2, today=date(2026, 7, 4))[
+        "today_flow"
+    ]
+    assert excluded["completed"] == 0
+    assert excluded["net"] is None
+    assert excluded["status"] == "partial"
+    assert excluded["coverage"]["excluded_projection_roots"] >= 1
+
+    # A corrupt manifest must not turn a delegation ACK into a completion,
+    # even when an older drain log says that its parent succeeded.
+    logs_dir = chronovisor_root / "logs"
+    logs_dir.mkdir()
+    (logs_dir / "ingest-drain-20260704.jsonl").write_text(json.dumps({
+        "timestamp": "2026-07-04T00:30:00+09:00",
+        "result": {"files_processed": [parent_path.name]},
+    }) + "\n")
+    manifest_path.write_text("{malformed", encoding="utf-8")
+    malformed = dashboard._save_history_snapshot(days=2, today=date(2026, 7, 4))[
+        "today_flow"
+    ]
+    assert malformed["completed"] == 0
+    assert malformed["status"] == "partial"
+    assert malformed["coverage"]["unresolved_projection_manifests"] == 1
+
+    parent_path.write_text("changed source", encoding="utf-8")
+    corrupted_ack = dashboard._save_history_snapshot(days=2, today=date(2026, 7, 4))[
+        "today_flow"
+    ]
+    assert corrupted_ack["completed"] == 0
+    assert corrupted_ack["status"] == "partial"
+
+    # A verified deterministic noop is itself a complete source, with no
+    # child ACK required.
+    transaction = make_save_transaction(
+        host="codex", session_file=tmp_path / "noop-session.jsonl",
+        session_id="projection-noop", after_line=0, until_line=2,
+    )
+    parent_path = raw_dir / f"save-{transaction.idempotency_key}.md"
+    body = body.replace(json.dumps(records), json.dumps([
+        {"line": 1, "role": "tool", "text": "result"},
+        {"line": 2, "role": "assistant", "text": " "},
+    ]))
+    parent_path.write_text(attach_save_transaction_marker(transaction, body))
+    os.utime(parent_path, (capture_epoch, capture_epoch))
+    noop_projection = raw_semantic_projection.project_parent_raw(
+        parent_path, output_dir=artifact_dir, max_child_bytes=1600,
+    )
+    assert noop_projection.kind == "noop"
+    write_ack([parent_path], "2026-07-04T00:40:00+09:00")
+    noop = dashboard._save_history_snapshot(days=2, today=date(2026, 7, 4))["today_flow"]
+    assert noop["completed"] == 1
 
 
 def test_save_history_only_includes_segment_detail_for_recent_chart_window(

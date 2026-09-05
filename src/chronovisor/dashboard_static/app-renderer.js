@@ -3680,6 +3680,129 @@ function newestDashboardStatus(previous, candidate) {
     : candidate;
 }
 
+let flowWindowDays = 7;
+
+function renderDailyFlow(history) {
+  if (!els.dailyFlow) return;
+  const flow = history?.flow;
+  let currentDate = "";
+  if (flow?.timezone) {
+    try {
+      currentDate = new Intl.DateTimeFormat("en-CA", {
+        timeZone: flow.timezone, year: "numeric", month: "2-digit", day: "2-digit",
+      }).format(new Date());
+    } catch {
+      // Invalid timezone means the reporting day cannot be verified.
+    }
+  }
+  const count = (value) => Number.isSafeInteger(value) && value >= 0;
+  const source = flow?.unit === "source_raw" && Array.isArray(flow.days) ? flow.days : [];
+  const current = currentDate && source.at(-1)?.date === currentDate;
+  const byDate = new Map(source.map((row) => [row.date, row]));
+  const rows = current ? Array.from({length: flowWindowDays}, (_, index) => {
+    const date = new Date(`${currentDate}T00:00:00Z`);
+    date.setUTCDate(date.getUTCDate() - flowWindowDays + index + 1);
+    const key = date.toISOString().slice(0, 10);
+    const row = byDate.get(key);
+    return {date: key, added: count(row?.added) ? row.added : null,
+      completed: count(row?.completed) ? row.completed : null, status: row?.status};
+  }) : [];
+  const added = rows.length && rows.every((row) => row.added !== null)
+    ? rows.reduce((sum, row) => sum + row.added, 0) : null;
+  const completed = rows.some((row) => row.completed !== null)
+    ? rows.reduce((sum, row) => sum + (row.completed ?? 0), 0) : null;
+  const comparable = rows.length && rows.every((row) =>
+    row.status === "ok" && row.added !== null && row.completed !== null);
+  const net = added !== null && completed !== null ? completed - added : null;
+  const direction = net > 0 ? "processing_ahead"
+    : comparable ? net < 0 ? "intake_ahead" : "even" : "unknown";
+  const signed = (value) => `${value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(value).toLocaleString()}`;
+  els.dailyFlow.dataset.direction = direction;
+  els.dailyFlowAdded.textContent = added === null ? "--" : added.toLocaleString();
+  els.dailyFlowCompleted.textContent = completed === null ? "--"
+    : `${comparable ? "" : "≥"}${completed.toLocaleString()}`;
+  els.dailyFlowNet.textContent = net === null ? "--" : `${comparable ? "" : "≥"}${signed(net)}`;
+  els.dailyFlowDate.textContent = current
+    ? `${rows[0].date} – ${currentDate} · ${flow.timezone} · source raws`
+    : "Source raws · waiting for current history";
+  els.dailyFlowNote.textContent = "Whole source raws; completed includes earlier saves.";
+  if (!flow || !current) {
+    els.dailyFlowStatus.textContent = flow ? "Refreshing history" : "Waiting for history";
+  } else if (!comparable) {
+    els.dailyFlowStatus.textContent = net > 0 ? "Processing ahead by at least this much" : "Only confirmed completions shown";
+    els.dailyFlowNote.textContent = completed === null
+      ? "Completion records are incomplete; no balance is inferred."
+      : "History has gaps; confirmed completions are minimums.";
+  } else if (direction === "processing_ahead") {
+    els.dailyFlowStatus.textContent = "Processing outpaced saves";
+  } else if (direction === "intake_ahead") {
+    els.dailyFlowStatus.textContent = "More saved than completed";
+  } else {
+    els.dailyFlowStatus.textContent = added === 0 && completed === 0
+      ? "No saves or completions in this period" : "Keeping pace";
+  }
+  const today = rows.at(-1);
+  els.dailyFlowToday.textContent = today
+    ? `Today: ${today.added ?? "--"} saved · ${today.completed === null ? "--" : `${today.status === "ok" ? "" : "≥"}${today.completed}`} completed`
+    : "Today: waiting for totals";
+  els.dailyFlowRows.innerHTML = rows.map((row) => `<tr><td>${row.date}</td><td>${row.added ?? "--"}</td><td>${row.completed === null ? "--" : `${row.status === "ok" ? "" : "≥"}${row.completed}`}</td><td>${row.status === "ok" && row.completed !== null && row.added !== null ? signed(row.completed - row.added) : "--"}</td></tr>`).join("");
+  document.querySelectorAll("[data-flow-days]").forEach((button) => {
+    const active = Number(button.dataset.flowDays) === flowWindowDays;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+    button.onclick = () => { flowWindowDays = Number(button.dataset.flowDays); renderDailyFlow(history); };
+  });
+  drawDailyFlowChart(rows, comparable, net !== null);
+}
+
+function drawDailyFlowChart(rows, comparable, hasBalance) {
+  const chart = els.dailyFlowChart;
+  const width = chart.clientWidth || 960;
+  chart.setAttribute("viewBox", `0 0 ${width} 320`);
+  const parts = ['<title id="daily-flow-chart-title">Daily saved and completed source raws, with cumulative completed minus saved below. Positive balance means processing outpaced saves.</title>'];
+  if (!rows.length) {
+    chart.innerHTML = `${parts[0]}<text x="48" y="130">Waiting for daily history</text>`;
+    return;
+  }
+  const left = 52, right = width - 16, slot = (right - left) / rows.length;
+  const peak = Math.max(1, ...rows.flatMap((row) => [row.added ?? 0, row.completed ?? 0]));
+  [...new Set([0, Math.floor(peak / 2), peak])].forEach((value) => {
+    const y = 150 - value / peak * 120;
+    parts.push(`<line class="flow-grid" x1="${left}" x2="${right}" y1="${y}" y2="${y}"/><text x="${left - 8}" y="${y + 4}" text-anchor="end">${value.toLocaleString("en", {notation: "compact", maximumFractionDigits: 1})}</text>`);
+  });
+  rows.forEach((row, index) => {
+    const x = left + slot * (index + 0.5), barWidth = Math.min(18, slot * 0.34);
+    const label = `${row.date}: ${row.added ?? "unknown"} saved, ${row.completed !== null && row.status !== "ok" ? "at least " : ""}${row.completed ?? "unknown"} completed`;
+    parts.push(`<g data-flow-date="${row.date}"><title>${label}</title>`);
+    ["added", "completed"].forEach((key, side) => {
+      if (row[key] === null) {
+        parts.push(`<text x="${x + (side ? barWidth / 2 + 1 : -barWidth / 2 - 1)}" y="148" text-anchor="middle">?</text>`);
+        return;
+      }
+      const height = row[key] / peak * 120;
+      parts.push(`<rect class="flow-${side ? "completed" : "saved"}${side && row.status !== "ok" ? " flow-partial" : ""}" x="${x + (side ? 1 : -barWidth - 1)}" y="${150 - height}" width="${barWidth}" height="${height}" rx="1"/>`);
+    });
+    parts.push("</g>");
+    const every = Math.max(1, Math.ceil(rows.length / (width < 650 ? 5 : 8)));
+    if (index === 0 || index === rows.length - 1 || every === 1 || index % every === 0 && index < rows.length - 2) {
+      parts.push(`<text x="${x}" y="173" text-anchor="middle">${dateKeyLabel(row.date)}</text>`);
+    }
+  });
+  parts.push(`<text x="52" y="208">${hasBalance && !comparable ? "Minimum cumulative balance · dashed = incomplete history" : "Cumulative completed − saved · positive = processing ahead"}</text>`);
+  if (hasBalance) {
+    let total = 0;
+    const balance = [0, ...rows.map((row) => (total += (row.completed ?? 0) - row.added))];
+    const low = Math.min(0, ...balance), high = Math.max(1, ...balance);
+    const y = (value) => 302 - (value - low) / (high - low) * 76;
+    parts.push(`<line class="flow-zero" x1="${left}" x2="${right}" y1="${y(0)}" y2="${y(0)}"/><text x="${left - 8}" y="${y(0) + 4}" text-anchor="end">0</text>`);
+    const path = balance.map((value, index) => `${index ? "L" : "M"}${left + slot * (index ? index - 0.5 : 0)},${y(value)}`).join(" ");
+    parts.push(`<path class="flow-balance${comparable ? "" : " flow-minimum"}" d="${path}" data-net="${total}"/><text x="${right}" y="${y(total) - 8}" text-anchor="end">${comparable ? "" : "≥"}${total > 0 ? "+" : ""}${total.toLocaleString()}</text>`);
+  } else {
+    parts.push('<text x="52" y="257">Incomplete completion history · balance unavailable</text>');
+  }
+  chart.innerHTML = parts.join("");
+}
+
 function render(snapshot) {
   const snapshotStatus = snapshot.status || {};
   const snapshotConsensus = snapshot.local_consensus || snapshotStatus.local_consensus || {};
@@ -3706,6 +3829,7 @@ function render(snapshot) {
   els.pendingSub.textContent = numeric(status.source_raw_pending)
     ? `${intValue(status.source_raw_pending)} source raws · ${held} held`
     : `${ready} work units ready`;
+  renderDailyFlow(snapshot.save_history);
   els.held.textContent = fmt(held);
   els.heldSub.textContent = `${semanticDeferred} semantic · ${operationalDeferred} operational`;
   const stageValue = fmt(status.stage, "idle");
