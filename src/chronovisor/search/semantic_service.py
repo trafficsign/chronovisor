@@ -12,6 +12,7 @@ import contextlib
 import ctypes
 import fcntl
 import json
+import math
 import os
 import queue
 import signal
@@ -21,6 +22,8 @@ import time
 from collections import OrderedDict, deque
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -95,10 +98,79 @@ QUERY_SOURCE = SourceDataClassification(SourceDataClass.RAW, SourceSensitivity.N
 DOCUMENT_SOURCE = SourceDataClassification(
     SourceDataClass.PAGE, SourceSensitivity.NORMAL
 )
+_CURRENT_QUERY_DEADLINE: ContextVar[float | None] = ContextVar(
+    "semantic_query_deadline", default=None
+)
 
 
 class ServiceBusy(RuntimeError):
     pass
+
+
+def _deadline_for(
+    timeout_ms: int | float | None,
+    default_ms: int | float,
+    *,
+    deadline_at: float | None = None,
+) -> float:
+    """Resolve one absolute deadline without reviving expired budgets."""
+
+    now = time.monotonic()
+    if deadline_at is not None:
+        try:
+            deadline = float(deadline_at)
+        except (TypeError, ValueError) as exc:
+            raise TimeoutError("semantic query deadline exhausted") from exc
+        if not math.isfinite(deadline) or deadline <= now:
+            raise TimeoutError("semantic query deadline exhausted")
+        if timeout_ms is not None:
+            try:
+                budget = float(timeout_ms)
+            except (TypeError, ValueError) as exc:
+                raise TimeoutError("semantic query deadline exhausted") from exc
+            if not math.isfinite(budget) or budget <= 0:
+                raise TimeoutError("semantic query deadline exhausted")
+            deadline = min(deadline, now + budget / 1_000)
+        return deadline
+    raw = default_ms if timeout_ms is None else timeout_ms
+    try:
+        budget = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise TimeoutError("semantic query deadline exhausted") from exc
+    if not math.isfinite(budget) or budget <= 0:
+        raise TimeoutError("semantic query deadline exhausted")
+    return now + budget / 1_000
+
+
+def _ensure_deadline(deadline_at: float) -> None:
+    if deadline_at <= time.monotonic():
+        raise TimeoutError("semantic query deadline exhausted")
+
+
+def _remaining_seconds(deadline_at: float) -> float:
+    remaining = deadline_at - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("semantic query deadline exhausted")
+    return remaining
+
+
+@contextlib.contextmanager
+def _query_deadline_scope(deadline_at: float) -> Any:
+    token = _CURRENT_QUERY_DEADLINE.set(deadline_at)
+    try:
+        yield
+    finally:
+        _CURRENT_QUERY_DEADLINE.reset(token)
+
+
+@dataclass
+class _QueryItem:
+    query: str
+    top_n: int
+    future: Future[list[tuple[str, float]]]
+    deadline_at: float
+    enqueued_at: float
+    expired_recorded: bool = False
 
 
 def _safe_service_error(exc: BaseException) -> str:
@@ -137,26 +209,168 @@ class QueryBatcher:
         self._window_seconds = max(0, window_ms) / 1_000
         self._max_batch = max(1, max_batch)
         self._available = available
-        self._queue: queue.Queue[tuple[str, int, Future[list[tuple[str, float]]]]] = (
-            queue.Queue(maxsize=64)
-        )
+        self._queue: queue.Queue[_QueryItem] = queue.Queue(maxsize=64)
+        self._metrics_lock = threading.Lock()
+        self._queue_wait_ms: deque[float] = deque(maxlen=2_000)
+        self._submitted = 0
+        self._completed = 0
+        self._expired = 0
+        self._cancelled = 0
+        self._queue_full = 0
+        self._active_batch_size = 0
+        self._close_lock = threading.Lock()
+        self._closed = threading.Event()
         self._stopped = threading.Event()
         self._thread = threading.Thread(
             target=self._run, name="semantic-query-batcher", daemon=True
         )
         self._thread.start()
 
-    def submit(self, query: str, top_n: int, timeout: float) -> list[tuple[str, float]]:
-        future: Future[list[tuple[str, float]]] = Future()
+    def submit(
+        self,
+        query: str,
+        top_n: int,
+        timeout: float | None = None,
+        *,
+        deadline_at: float | None = None,
+    ) -> list[tuple[str, float]]:
+        with self._close_lock:
+            if self._closed.is_set():
+                raise ServiceBusy("semantic foreground queue is closed")
+            started = time.monotonic()
+            if deadline_at is None:
+                try:
+                    budget_seconds = 5.0 if timeout is None else float(timeout)
+                except (TypeError, ValueError) as exc:
+                    raise TimeoutError(
+                        "semantic query deadline exhausted"
+                    ) from exc
+                if not math.isfinite(budget_seconds) or budget_seconds <= 0:
+                    raise TimeoutError("semantic query deadline exhausted")
+                deadline = started + budget_seconds
+            else:
+                deadline = _deadline_for(None, 5_000, deadline_at=deadline_at)
+                if timeout is not None:
+                    try:
+                        budget_seconds = float(timeout)
+                    except (TypeError, ValueError) as exc:
+                        raise TimeoutError(
+                            "semantic query deadline exhausted"
+                    ) from exc
+                    if not math.isfinite(budget_seconds) or budget_seconds <= 0:
+                        raise TimeoutError("semantic query deadline exhausted")
+                    deadline = min(deadline, started + budget_seconds)
+            future: Future[list[tuple[str, float]]] = Future()
+            item = _QueryItem(query, top_n, future, deadline, started)
+            with self._metrics_lock:
+                self._submitted += 1
+            try:
+                self._queue.put_nowait(item)
+            except queue.Full as exc:
+                with self._metrics_lock:
+                    self._queue_full += 1
+                raise ServiceBusy("semantic foreground queue is full") from exc
         try:
-            self._queue.put_nowait((query, top_n, future))
-        except queue.Full as exc:
-            raise ServiceBusy("semantic foreground queue is full") from exc
-        return future.result(timeout=timeout)
+            return future.result(timeout=_remaining_seconds(deadline))
+        except TimeoutError:
+            if future.done():
+                raise
+            cancelled = future.cancel()
+            self._record_expired(item, cancelled=cancelled)
+            raise TimeoutError("semantic query deadline exhausted") from None
 
     def close(self) -> None:
-        self._stopped.set()
+        with self._close_lock:
+            if not self._closed.is_set():
+                self._closed.set()
+                self._stopped.set()
+                while True:
+                    try:
+                        item = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    self._set_expired(item)
+                    self._queue.task_done()
         self._thread.join(timeout=2)
+
+    def metrics(self) -> dict[str, Any]:
+        with self._metrics_lock:
+            waits = list(self._queue_wait_ms)
+            submitted = self._submitted
+            completed = self._completed
+            expired = self._expired
+            cancelled = self._cancelled
+            queue_full = self._queue_full
+            active_batch_size = self._active_batch_size
+        p50 = float(np.percentile(waits, 50)) if waits else 0.0
+        p95 = float(np.percentile(waits, 95)) if waits else 0.0
+        return {
+            "queue_depth": self._queue.qsize(),
+            "active_batch_size": active_batch_size,
+            "queue_wait_samples": len(waits),
+            "queue_wait_p50_ms": round(p50, 3),
+            "queue_wait_p95_ms": round(p95, 3),
+            "submitted": submitted,
+            "completed": completed,
+            "expired": expired,
+            "cancelled": cancelled,
+            "queue_full": queue_full,
+        }
+
+    def _record_expired(self, item: _QueryItem, *, cancelled: bool) -> None:
+        with self._metrics_lock:
+            if item.expired_recorded:
+                return
+            item.expired_recorded = True
+            self._expired += 1
+            if cancelled:
+                self._cancelled += 1
+
+    def _record_queue_wait(self, item: _QueryItem) -> None:
+        wait_ms = max(0.0, (time.monotonic() - item.enqueued_at) * 1_000)
+        with self._metrics_lock:
+            self._queue_wait_ms.append(wait_ms)
+
+    @staticmethod
+    def _expired_or_cancelled(item: _QueryItem) -> bool:
+        if item.future.cancelled():
+            return True
+        return item.deadline_at <= time.monotonic()
+
+    def _set_expired(self, item: _QueryItem) -> None:
+        self._record_expired(item, cancelled=item.future.cancelled())
+        if not item.future.done():
+            with contextlib.suppress(Exception):
+                item.future.set_exception(
+                    TimeoutError("semantic query deadline exhausted")
+                )
+
+    def _set_failure(self, item: _QueryItem, exc: BaseException) -> None:
+        if item.future.done():
+            if item.future.cancelled():
+                self._record_expired(item, cancelled=True)
+            return
+        with contextlib.suppress(Exception):
+            item.future.set_exception(exc)
+
+    def _set_result(
+        self, item: _QueryItem, result: list[tuple[str, float]]
+    ) -> None:
+        if self._expired_or_cancelled(item):
+            self._set_expired(item)
+            return
+        if item.future.done():
+            if item.future.cancelled():
+                self._record_expired(item, cancelled=True)
+            return
+        try:
+            item.future.set_result(result)
+        except Exception:
+            if item.future.cancelled():
+                self._record_expired(item, cancelled=True)
+            return
+        with self._metrics_lock:
+            self._completed += 1
 
     def _run(self) -> None:
         while not self._stopped.is_set():
@@ -174,21 +388,80 @@ class QueryBatcher:
                     batch.append(self._queue.get(timeout=remaining))
                 except queue.Empty:
                     break
-            if not self._available():
-                error = ServiceBusy("semantic generation unavailable or rebuilding")
-                for _query, _top_n, future in batch:
-                    future.set_exception(error)
-                continue
+            runnable: list[_QueryItem] = []
             try:
-                vectors = self._encode([item[0] for item in batch], self._max_batch)
-                for vector, (_query, top_n, future) in zip(
-                    vectors, batch, strict=False
-                ):
-                    future.set_result(self._search(vector, top_n))
+                if self._stopped.is_set():
+                    for item in batch:
+                        self._set_expired(item)
+                    continue
+                for item in batch:
+                    self._record_queue_wait(item)
+                for item in batch:
+                    if self._expired_or_cancelled(item):
+                        self._set_expired(item)
+                        continue
+                    if not item.future.set_running_or_notify_cancel():
+                        self._set_expired(item)
+                        continue
+                    if self._expired_or_cancelled(item):
+                        self._set_expired(item)
+                        continue
+                    runnable.append(item)
+                if not runnable:
+                    continue
+                if not self._available():
+                    error = ServiceBusy("semantic generation unavailable or rebuilding")
+                    for item in runnable:
+                        if self._expired_or_cancelled(item):
+                            self._set_expired(item)
+                        else:
+                            self._set_failure(item, error)
+                    continue
+                live_runnable: list[_QueryItem] = []
+                for item in runnable:
+                    if self._stopped.is_set() or self._expired_or_cancelled(item):
+                        self._set_expired(item)
+                        continue
+                    live_runnable.append(item)
+                runnable = live_runnable
+                if not runnable:
+                    continue
+                if self._stopped.is_set():
+                    for item in runnable:
+                        self._set_expired(item)
+                    continue
+                with self._metrics_lock:
+                    self._active_batch_size = len(runnable)
+                encode_deadline = max(item.deadline_at for item in runnable)
+                with _query_deadline_scope(encode_deadline):
+                    vectors = self._encode(
+                        [item.query for item in runnable], self._max_batch
+                    )
+                for vector, item in zip(vectors, runnable, strict=False):
+                    if self._expired_or_cancelled(item):
+                        self._set_expired(item)
+                        continue
+                    try:
+                        with _query_deadline_scope(item.deadline_at):
+                            result = self._search(vector, item.top_n)
+                        self._set_result(item, result)
+                    except TimeoutError as exc:
+                        self._set_expired(item)
+                        self._set_failure(item, exc)
+                    except BaseException as exc:
+                        self._set_failure(item, exc)
+            except TimeoutError as exc:
+                for item in runnable:
+                    self._set_expired(item)
+                    self._set_failure(item, exc)
             except BaseException as exc:
-                for _query, _top_n, future in batch:
-                    if not future.done():
-                        future.set_exception(exc)
+                for item in runnable:
+                    self._set_failure(item, exc)
+            finally:
+                with self._metrics_lock:
+                    self._active_batch_size = 0
+                for _item in batch:
+                    self._queue.task_done()
 
 
 def _ingest_is_active() -> bool:
@@ -259,6 +532,12 @@ class SemanticServiceState:
         )
         self._query_latencies_ms: deque[float] = deque(maxlen=2_000)
         self._query_errors = 0
+        self._query_attempts = 0
+        self._query_successes = 0
+        self._query_timeouts = 0
+        self._query_failures = 0
+        self._late_reload_count = 0
+        self._late_reload_ms = 0.0
         self._active_signature: tuple[int, int] | None = None
         self._status_lock = threading.Lock()
         self._last_status_publish = 0.0
@@ -352,14 +631,26 @@ class SemanticServiceState:
         purpose: EmbeddingPurpose,
         *,
         source: SourceDataClassification,
-        timeout_ms: int | None = None,
+        timeout_ms: int | float | None = None,
+        deadline_at: float | None = None,
     ) -> np.ndarray:
-        effective_timeout_ms = (
-            self.config.query_timeout_ms if timeout_ms is None else timeout_ms
-        )
-        with self._model_lock:
+        context_deadline = _CURRENT_QUERY_DEADLINE.get()
+        if deadline_at is None:
+            deadline_at = context_deadline
+        if deadline_at is None:
+            deadline_at = _deadline_for(timeout_ms, self.config.query_timeout_ms)
+        elif timeout_ms is not None:
+            local_deadline = _deadline_for(timeout_ms, self.config.query_timeout_ms)
+            deadline_at = min(deadline_at, local_deadline)
+        _ensure_deadline(deadline_at)
+        lock_timeout = _remaining_seconds(deadline_at)
+        acquired = self._model_lock.acquire(timeout=lock_timeout)
+        if not acquired:
+            raise TimeoutError("semantic query deadline exhausted")
+        try:
+            remaining_ms = max(1, math.ceil(_remaining_seconds(deadline_at) * 1_000))
             resources = (
-                accelerator_lease(timeout_ms=effective_timeout_ms)
+                accelerator_lease(timeout_ms=remaining_ms)
                 if self._uses_local_controls(self._foreground_route)
                 else contextlib.nullcontext()
             )
@@ -372,14 +663,27 @@ class SemanticServiceState:
                 if self._uses_local_controls(self._foreground_route)
                 else contextlib.nullcontext()
             )
-            with resources, activity:
-                return self._runtime_vectors(
-                    FOREGROUND_ROLE,
-                    texts,
-                    purpose,
-                    source=source,
-                    timeout_ms=effective_timeout_ms,
+            with resources:
+                _ensure_deadline(deadline_at)
+                remaining_ms = max(
+                    1, math.ceil(_remaining_seconds(deadline_at) * 1_000)
                 )
+                with activity:
+                    _ensure_deadline(deadline_at)
+                    remaining_ms = max(
+                        1, math.ceil(_remaining_seconds(deadline_at) * 1_000)
+                    )
+                    result = self._runtime_vectors(
+                        FOREGROUND_ROLE,
+                        texts,
+                        purpose,
+                        source=source,
+                        timeout_ms=remaining_ms,
+                    )
+            _ensure_deadline(deadline_at)
+            return result
+        finally:
+            self._model_lock.release()
 
     def _embed_foreground_documents(
         self,
@@ -481,7 +785,16 @@ class SemanticServiceState:
             "latency_ms": round((time.monotonic() - started) * 1_000, 3),
         }
 
-    def reload(self, *, verify_checksums: bool = True) -> dict[str, Any]:
+    def reload(
+        self,
+        *,
+        verify_checksums: bool = True,
+        deadline_at: float | None = None,
+    ) -> dict[str, Any]:
+        if deadline_at is None:
+            deadline_at = _CURRENT_QUERY_DEADLINE.get()
+        if deadline_at is not None:
+            _ensure_deadline(deadline_at)
         try:
             self._validate_runtime_routes()
             generation = load_active_generation(
@@ -497,22 +810,51 @@ class SemanticServiceState:
                 raise SemanticIndexError(
                     "active generation does not match the configured model profile"
                 )
-            with self._generation_lock:
-                self._generation = generation
+            if deadline_at is None:
+                with self._generation_lock:
+                    self._generation = generation
+            elif self._generation_lock.acquire(
+                timeout=_remaining_seconds(deadline_at)
+            ):
+                try:
+                    self._generation = generation
+                finally:
+                    self._generation_lock.release()
+            else:
+                raise TimeoutError("semantic query deadline exhausted")
             self._last_error = ""
         except (SemanticIndexError, SemanticModelError, LLMRuntimeError) as exc:
-            with self._generation_lock:
-                self._generation = None
+            if deadline_at is None:
+                with self._generation_lock:
+                    self._generation = None
+            elif self._generation_lock.acquire(
+                timeout=_remaining_seconds(deadline_at)
+            ):
+                try:
+                    self._generation = None
+                finally:
+                    self._generation_lock.release()
+            else:
+                raise TimeoutError("semantic query deadline exhausted") from exc
             self._last_error = _safe_service_error(exc)
+        if deadline_at is not None:
+            _ensure_deadline(deadline_at)
         active_path = self.root / "active.json"
         try:
             stat = active_path.stat()
             self._active_signature = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             self._active_signature = None
-        return self.health()
+        result = self.health()
+        if deadline_at is not None:
+            _ensure_deadline(deadline_at)
+        return result
 
-    def _reload_if_pointer_changed(self) -> None:
+    def _reload_if_pointer_changed(self, *, deadline_at: float | None = None) -> None:
+        if deadline_at is None:
+            deadline_at = _CURRENT_QUERY_DEADLINE.get()
+        if deadline_at is not None:
+            _ensure_deadline(deadline_at)
         active_path = self.root / "active.json"
         try:
             stat = active_path.stat()
@@ -520,13 +862,50 @@ class SemanticServiceState:
         except OSError:
             signature = None
         if signature != self._active_signature:
-            self.reload()
+            if deadline_at is not None:
+                _ensure_deadline(deadline_at)
+            try:
+                if deadline_at is not None:
+                    with _query_deadline_scope(deadline_at):
+                        self.reload()
+                else:
+                    self.reload()
+            finally:
+                if deadline_at is not None:
+                    late_ms = max(0.0, (time.monotonic() - deadline_at) * 1_000)
+                    if late_ms > 0:
+                        self._record_late_reload(late_ms)
+            if deadline_at is not None:
+                _ensure_deadline(deadline_at)
 
     def health(self) -> dict[str, Any]:
         generation = self._generation
         with self._metrics_lock:
             latencies = list(self._query_latencies_ms)
             errors = self._query_errors
+            attempts = getattr(self, "_query_attempts", 0)
+            successes = getattr(self, "_query_successes", 0)
+            timeouts = getattr(self, "_query_timeouts", 0)
+            failures = getattr(self, "_query_failures", 0)
+            late_reload_count = getattr(self, "_late_reload_count", 0)
+            late_reload_ms = getattr(self, "_late_reload_ms", 0.0)
+        batcher = getattr(self, "_batcher", None)
+        batcher_metrics = (
+            batcher.metrics()
+            if batcher is not None
+            else {
+                "queue_depth": 0,
+                "active_batch_size": 0,
+                "queue_wait_samples": 0,
+                "queue_wait_p50_ms": 0.0,
+                "queue_wait_p95_ms": 0.0,
+                "submitted": 0,
+                "completed": 0,
+                "expired": 0,
+                "cancelled": 0,
+                "queue_full": 0,
+            }
+        )
         p50 = float(np.percentile(latencies, 50)) if latencies else 0.0
         p95 = float(np.percentile(latencies, 95)) if latencies else 0.0
         return {
@@ -553,9 +932,16 @@ class SemanticServiceState:
             ),
             "jobs": job_status(),
             "last_error": self._last_error,
+            "batcher": batcher_metrics,
             "queries": {
                 "samples": len(latencies),
                 "errors": errors,
+                "attempts": attempts,
+                "successes": successes,
+                "timeouts": timeouts,
+                "failures": failures,
+                "late_reload_count": late_reload_count,
+                "late_reload_ms": round(late_reload_ms, 3),
                 "p50_ms": round(p50, 3),
                 "p95_ms": round(p95, 3),
                 "max_ms": round(max(latencies), 3) if latencies else 0.0,
@@ -585,12 +971,42 @@ class SemanticServiceState:
         with self._metrics_lock:
             self._query_errors += 1
 
-    def _encode_queries(self, queries: list[str], _batch_size: int) -> np.ndarray:
+    def _bump_query_metric(self, name: str) -> None:
+        with self._metrics_lock:
+            setattr(self, name, getattr(self, name, 0) + 1)
+
+    def _record_late_reload(self, late_ms: float) -> None:
+        with self._metrics_lock:
+            self._late_reload_count = getattr(self, "_late_reload_count", 0) + 1
+            self._late_reload_ms = getattr(self, "_late_reload_ms", 0.0) + late_ms
+
+    def _encode_queries(
+        self,
+        queries: list[str],
+        _batch_size: int,
+        *,
+        deadline_at: float | None = None,
+    ) -> np.ndarray:
+        if deadline_at is None:
+            deadline_at = _CURRENT_QUERY_DEADLINE.get()
+        if deadline_at is not None:
+            _ensure_deadline(deadline_at)
         vectors = self._embed_foreground(
-            queries, EmbeddingPurpose.QUERY, source=QUERY_SOURCE
+            queries,
+            EmbeddingPurpose.QUERY,
+            source=QUERY_SOURCE,
+            deadline_at=deadline_at,
         )
+        if deadline_at is not None:
+            _ensure_deadline(deadline_at)
         now = time.monotonic()
-        with self._query_cache_lock:
+        if deadline_at is None:
+            self._query_cache_lock.acquire()
+        elif not self._query_cache_lock.acquire(
+            timeout=_remaining_seconds(deadline_at)
+        ):
+            raise TimeoutError("semantic query deadline exhausted")
+        try:
             for query, vector in zip(queries, vectors, strict=False):
                 key = self._query_cache_key(query)
                 self._query_vector_cache[key] = (
@@ -600,92 +1016,192 @@ class SemanticServiceState:
                 self._query_vector_cache.move_to_end(key)
             while len(self._query_vector_cache) > 64:
                 self._query_vector_cache.popitem(last=False)
+        finally:
+            self._query_cache_lock.release()
         return vectors
 
-    def _query_vector_from_cache(self, query: str) -> np.ndarray | None:
+    def _query_vector_from_cache(
+        self, query: str, *, deadline_at: float | None = None
+    ) -> np.ndarray | None:
+        if deadline_at is None:
+            deadline_at = _CURRENT_QUERY_DEADLINE.get()
         now = time.monotonic()
         key = self._query_cache_key(query)
-        with self._query_cache_lock:
+        if deadline_at is None:
+            self._query_cache_lock.acquire()
+        elif not self._query_cache_lock.acquire(
+            timeout=_remaining_seconds(deadline_at)
+        ):
+            raise TimeoutError("semantic query deadline exhausted")
+        try:
             cached = self._query_vector_cache.get(key)
             if cached is not None and now - cached[0] <= QUERY_CACHE_TTL_SECONDS:
                 self._query_vector_cache.move_to_end(key)
                 return cached[1]
             if cached is not None:
                 self._query_vector_cache.pop(key, None)
+        finally:
+            self._query_cache_lock.release()
         return None
 
     def _query_cache_key(self, query: str) -> str:
         return f"{self._query_cache_seal}\0{query}"
 
-    def _cached_query_vector(self, query: str) -> tuple[np.ndarray, bool]:
+    def _cached_query_vector(
+        self, query: str, *, deadline_at: float | None = None
+    ) -> tuple[np.ndarray, bool]:
+        inherited_deadline = deadline_at is None
+        if inherited_deadline:
+            deadline_at = _CURRENT_QUERY_DEADLINE.get()
         cached = self._query_vector_from_cache(query)
         if cached is not None:
+            if deadline_at is not None:
+                _ensure_deadline(deadline_at)
             return cached, True
-        return self._encode_queries([query], 1)[0], False
+        if inherited_deadline:
+            return self._encode_queries([query], 1)[0], False
+        return self._encode_queries([query], 1, deadline_at=deadline_at)[0], False
 
-    def _search_vector(self, vector: np.ndarray, top_n: int) -> list[tuple[str, float]]:
-        with self._generation_lock:
+    def _search_vector(
+        self,
+        vector: np.ndarray,
+        top_n: int,
+        *,
+        deadline_at: float | None = None,
+    ) -> list[tuple[str, float]]:
+        if deadline_at is None:
+            deadline_at = _CURRENT_QUERY_DEADLINE.get()
+        if deadline_at is not None:
+            _ensure_deadline(deadline_at)
+        if deadline_at is None:
+            self._generation_lock.acquire()
+        else:
+            if not self._generation_lock.acquire(
+                timeout=_remaining_seconds(deadline_at)
+            ):
+                raise TimeoutError("semantic query deadline exhausted")
+        try:
             generation = self._generation
-            if generation is None:
-                raise ServiceBusy("no active semantic generation")
-            return generation.search(cast(Sequence[float], vector), top_n=top_n)
+        finally:
+            self._generation_lock.release()
+        if generation is None:
+            raise ServiceBusy("no active semantic generation")
+        result = generation.search(cast(Sequence[float], vector), top_n=top_n)
+        if deadline_at is not None:
+            _ensure_deadline(deadline_at)
+        return result
 
     def search(
-        self, query: str, top_n: int, *, timeout_ms: int | None = None
+        self,
+        query: str,
+        top_n: int,
+        *,
+        timeout_ms: int | float | None = None,
+        deadline_at: float | None = None,
     ) -> dict[str, Any]:
-        self._reload_if_pointer_changed()
+        self._bump_query_metric("_query_attempts")
         started = time.monotonic()
-        bounded_top_n = max(1, min(100, top_n))
-        cached = self._query_vector_from_cache(query)
-        cache_hit = cached is not None
-        if cached is None:
-            results = self._batcher.submit(
-                query,
-                bounded_top_n,
-                max(
-                    0.025,
-                    float(timeout_ms or self.config.interactive_timeout_ms) / 1_000,
-                ),
+        try:
+            deadline = _deadline_for(
+                timeout_ms,
+                self.config.interactive_timeout_ms,
+                deadline_at=deadline_at,
             )
-        else:
-            results = self._search_vector(cached, bounded_top_n)
-        generation = self._generation
-        latency_ms = (time.monotonic() - started) * 1_000
-        with self._metrics_lock:
-            self._query_latencies_ms.append(latency_ms)
-        return {
-            "status": "ok",
-            "generation_id": (
-                generation.manifest.generation_id if generation is not None else ""
-            ),
-            "cache_hit": cache_hit,
-            "latency_ms": round(latency_ms, 3),
-            "results": [
-                {"page_id": page_id, "score": score} for page_id, score in results
-            ],
-        }
+            with _query_deadline_scope(deadline):
+                self._reload_if_pointer_changed()
+            _ensure_deadline(deadline)
+            bounded_top_n = max(1, min(100, top_n))
+            with _query_deadline_scope(deadline):
+                cached = self._query_vector_from_cache(query)
+            cache_hit = cached is not None
+            if cached is None:
+                results = self._batcher.submit(
+                    query,
+                    bounded_top_n,
+                    _remaining_seconds(deadline),
+                    deadline_at=deadline,
+                )
+            else:
+                with _query_deadline_scope(deadline):
+                    results = self._search_vector(cached, bounded_top_n)
+            _ensure_deadline(deadline)
+            generation = self._generation
+            latency_ms = (time.monotonic() - started) * 1_000
+            with self._metrics_lock:
+                self._query_latencies_ms.append(latency_ms)
+            self._bump_query_metric("_query_successes")
+            return {
+                "status": "ok",
+                "generation_id": (
+                    generation.manifest.generation_id if generation is not None else ""
+                ),
+                "cache_hit": cache_hit,
+                "latency_ms": round(latency_ms, 3),
+                "results": [
+                    {"page_id": page_id, "score": score} for page_id, score in results
+                ],
+            }
+        except TimeoutError:
+            self._bump_query_metric("_query_timeouts")
+            raise
+        except BaseException:
+            self._bump_query_metric("_query_failures")
+            raise
 
-    def verify(self, query: str, page_ids: list[str]) -> dict[str, Any]:
+    def verify(
+        self,
+        query: str,
+        page_ids: list[str],
+        *,
+        timeout_ms: int | float | None = None,
+        deadline_at: float | None = None,
+    ) -> dict[str, Any]:
         """Exactly verify graph candidates without a second model inference."""
 
-        self._reload_if_pointer_changed()
-        unique = list(dict.fromkeys(page_id for page_id in page_ids if page_id))[:100]
-        if not unique:
-            return {"status": "ok", "cache_hit": False, "results": []}
-        vector, cache_hit = self._cached_query_vector(query)
-        with self._generation_lock:
-            generation = self._generation
-            if generation is None:
-                raise ServiceBusy("no active semantic generation")
-            rows = generation.score_pages(cast(Sequence[float], vector), unique)
-        return {
-            "status": "ok",
-            "generation_id": generation.manifest.generation_id,
-            "cache_hit": cache_hit,
-            "results": [
-                {"page_id": page_id, "score": score} for page_id, score in rows
-            ],
-        }
+        self._bump_query_metric("_query_attempts")
+        try:
+            deadline = _deadline_for(
+                timeout_ms,
+                self.config.interactive_timeout_ms,
+                deadline_at=deadline_at,
+            )
+            with _query_deadline_scope(deadline):
+                self._reload_if_pointer_changed()
+            _ensure_deadline(deadline)
+            unique = list(dict.fromkeys(page_id for page_id in page_ids if page_id))[:100]
+            if not unique:
+                self._bump_query_metric("_query_successes")
+                return {"status": "ok", "cache_hit": False, "results": []}
+            with _query_deadline_scope(deadline):
+                vector, cache_hit = self._cached_query_vector(query)
+                if not self._generation_lock.acquire(
+                    timeout=_remaining_seconds(deadline)
+                ):
+                    raise TimeoutError("semantic query deadline exhausted")
+                try:
+                    generation = self._generation
+                finally:
+                    self._generation_lock.release()
+                if generation is None:
+                    raise ServiceBusy("no active semantic generation")
+                _ensure_deadline(deadline)
+                rows = generation.score_pages(cast(Sequence[float], vector), unique)
+            _ensure_deadline(deadline)
+            self._bump_query_metric("_query_successes")
+            return {
+                "status": "ok",
+                "generation_id": generation.manifest.generation_id,
+                "cache_hit": cache_hit,
+                "results": [
+                    {"page_id": page_id, "score": score} for page_id, score in rows
+                ],
+            }
+        except TimeoutError:
+            self._bump_query_metric("_query_timeouts")
+            raise
+        except BaseException:
+            self._bump_query_metric("_query_failures")
+            raise
 
     def enqueue_rebuild(self) -> dict[str, Any]:
         return {"status": "ok", "job_id": enqueue_rebuild()}
@@ -918,10 +1434,15 @@ class SemanticServiceState:
             query = str(payload.get("query") or "").strip()
             if not query:
                 raise ValueError("query is required")
+            raw_timeout = payload.get("timeout_ms")
+            timeout_ms = None if raw_timeout is None else int(raw_timeout)
+            raw_deadline = payload.get("deadline_at")
+            deadline_at = None if raw_deadline is None else float(raw_deadline)
             return self.search(
                 query,
                 int(payload.get("top_n") or 20),
-                timeout_ms=int(payload.get("timeout_ms") or 0) or None,
+                timeout_ms=timeout_ms,
+                deadline_at=deadline_at,
             )
         if method == "verify":
             query = str(payload.get("query") or "").strip()
@@ -930,7 +1451,16 @@ class SemanticServiceState:
                 raise ValueError("query is required")
             if not isinstance(raw_ids, list):
                 raise ValueError("page_ids must be a list")
-            return self.verify(query, [str(item) for item in raw_ids])
+            raw_timeout = payload.get("timeout_ms")
+            timeout_ms = None if raw_timeout is None else int(raw_timeout)
+            raw_deadline = payload.get("deadline_at")
+            deadline_at = None if raw_deadline is None else float(raw_deadline)
+            return self.verify(
+                query,
+                [str(item) for item in raw_ids],
+                timeout_ms=timeout_ms,
+                deadline_at=deadline_at,
+            )
         if method == "reload":
             return self.reload()
         if method == "rebuild":

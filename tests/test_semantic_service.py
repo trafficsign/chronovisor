@@ -439,6 +439,300 @@ def test_query_batcher_combines_concurrent_requests() -> None:
         batcher.close()
 
 
+def test_query_batcher_expires_pending_request_without_encoding() -> None:
+    calls: list[tuple[str, ...]] = []
+    first_started = threading.Event()
+    release = threading.Event()
+    first_result: list[list[tuple[str, float]]] = []
+    first_error: list[BaseException] = []
+
+    def encode(texts: list[str], _batch_size: int) -> np.ndarray:
+        calls.append(tuple(texts))
+        if texts == ["first"]:
+            first_started.set()
+            assert release.wait(timeout=2)
+        return np.zeros((len(texts), 2), dtype=np.float32)
+
+    batcher = QueryBatcher(
+        encode=encode,
+        search=lambda _vector, _top_n: [("page", 1.0)],
+        window_ms=0,
+        max_batch=1,
+        available=lambda: True,
+    )
+
+    def submit_first() -> None:
+        try:
+            first_result.append(batcher.submit("first", 1, 1.0))
+        except BaseException as exc:
+            first_error.append(exc)
+
+    thread = threading.Thread(target=submit_first)
+    thread.start()
+    try:
+        assert first_started.wait(timeout=1)
+        with pytest.raises(TimeoutError):
+            batcher.submit("second", 1, 0.03)
+        release.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert first_error == []
+        assert first_result
+        assert batcher.submit("third", 1, 1.0) == [("page", 1.0)]
+        assert ("second",) not in calls
+    finally:
+        release.set()
+        thread.join(timeout=2)
+        batcher.close()
+
+
+def test_query_batcher_keeps_live_request_when_expired_request_shares_batch() -> None:
+    calls: list[tuple[str, ...]] = []
+    expired_finished = threading.Event()
+    expired_error: list[BaseException] = []
+
+    def encode(texts: list[str], _batch_size: int) -> np.ndarray:
+        calls.append(tuple(texts))
+        return np.zeros((len(texts), 2), dtype=np.float32)
+
+    batcher = QueryBatcher(
+        encode=encode,
+        search=lambda _vector, _top_n: [("page", 1.0)],
+        window_ms=50,
+        max_batch=2,
+        available=lambda: True,
+    )
+
+    def submit_expired() -> None:
+        try:
+            batcher.submit("expired", 1, 0.01)
+        except BaseException as exc:
+            expired_error.append(exc)
+        finally:
+            expired_finished.set()
+
+    thread = threading.Thread(target=submit_expired)
+    thread.start()
+    try:
+        assert expired_finished.wait(timeout=1)
+        assert expired_error and isinstance(expired_error[0], TimeoutError)
+        assert batcher.submit("live", 1, 1.0) == [("page", 1.0)]
+        assert all("expired" not in call for call in calls)
+    finally:
+        thread.join(timeout=2)
+        batcher.close()
+
+
+def test_query_batcher_close_releases_pending_and_rejects_new_requests() -> None:
+    calls: list[tuple[str, ...]] = []
+    first_started = threading.Event()
+    release = threading.Event()
+    pending_finished = threading.Event()
+    first_result: list[list[tuple[str, float]]] = []
+    first_error: list[BaseException] = []
+    pending_error: list[BaseException] = []
+
+    def encode(texts: list[str], _batch_size: int) -> np.ndarray:
+        calls.append(tuple(texts))
+        if texts == ["first"]:
+            first_started.set()
+            assert release.wait(timeout=5)
+        return np.zeros((len(texts), 2), dtype=np.float32)
+
+    batcher = QueryBatcher(
+        encode=encode,
+        search=lambda _vector, _top_n: [("page", 1.0)],
+        window_ms=0,
+        max_batch=1,
+        available=lambda: True,
+    )
+
+    def submit_first() -> None:
+        try:
+            first_result.append(batcher.submit("first", 1, 30.0))
+        except BaseException as exc:
+            first_error.append(exc)
+
+    def submit_pending() -> None:
+        try:
+            batcher.submit("pending", 1, 30.0)
+        except BaseException as exc:
+            pending_error.append(exc)
+        finally:
+            pending_finished.set()
+
+    first_thread = threading.Thread(target=submit_first)
+    pending_thread = threading.Thread(target=submit_pending)
+    first_thread.start()
+    assert first_started.wait(timeout=1)
+    pending_thread.start()
+    try:
+        deadline = time.monotonic() + 1
+        while batcher._queue.qsize() == 0 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        close_thread = threading.Thread(target=batcher.close)
+        close_thread.start()
+        assert pending_finished.wait(timeout=1)
+        assert pending_error and isinstance(pending_error[0], TimeoutError)
+        with pytest.raises(ServiceBusy, match="closed"):
+            batcher.submit("after-close", 1, 1.0)
+        release.set()
+        close_thread.join(timeout=2)
+        first_thread.join(timeout=2)
+        assert not close_thread.is_alive()
+        assert not first_thread.is_alive()
+        assert first_error == []
+        assert first_result
+        assert ("pending",) not in calls
+    finally:
+        release.set()
+        pending_thread.join(timeout=2)
+        first_thread.join(timeout=2)
+        batcher.close()
+
+
+def test_query_batcher_rechecks_deadline_after_availability_gate() -> None:
+    calls: list[tuple[str, ...]] = []
+    available_called = threading.Event()
+    release_available = threading.Event()
+    errors: dict[str, BaseException] = {}
+
+    def encode(texts: list[str], _batch_size: int) -> np.ndarray:
+        calls.append(tuple(texts))
+        return np.zeros((len(texts), 2), dtype=np.float32)
+
+    def available() -> bool:
+        available_called.set()
+        assert release_available.wait(timeout=2)
+        return True
+
+    batcher = QueryBatcher(
+        encode=encode,
+        search=lambda _vector, _top_n: [("page", 1.0)],
+        window_ms=20,
+        max_batch=2,
+        available=available,
+    )
+
+    def submit_short() -> None:
+        try:
+            batcher.submit("short", 1, 0.03)
+        except BaseException as exc:
+            errors["short"] = exc
+
+    def submit_live() -> None:
+        try:
+            assert batcher.submit("live", 1, 1.0) == [("page", 1.0)]
+        except BaseException as exc:
+            errors["live"] = exc
+
+    short_thread = threading.Thread(target=submit_short)
+    live_thread = threading.Thread(target=submit_live)
+    short_thread.start()
+    live_thread.start()
+    try:
+        assert available_called.wait(timeout=1)
+        time.sleep(0.05)
+        release_available.set()
+        short_thread.join(timeout=2)
+        live_thread.join(timeout=2)
+        assert not short_thread.is_alive()
+        assert not live_thread.is_alive()
+        assert isinstance(errors.get("short"), TimeoutError)
+        assert "live" not in errors
+        assert calls == [("live",)]
+    finally:
+        release_available.set()
+        short_thread.join(timeout=2)
+        live_thread.join(timeout=2)
+        batcher.close()
+
+
+def test_pointer_reload_propagates_deadline_and_records_late_work(tmp_path) -> None:
+    active_path = tmp_path / "active.json"
+    active_path.write_text("{}")
+    state = object.__new__(SemanticServiceState)
+    state.root = tmp_path
+    state._active_signature = None
+    state._metrics_lock = threading.Lock()
+    state._late_reload_count = 0
+    state._late_reload_ms = 0.0
+    reloaded: list[bool] = []
+    def reload() -> None:
+        time.sleep(0.05)
+        reloaded.append(True)
+
+    state.reload = reload  # type: ignore[method-assign]
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        state._reload_if_pointer_changed(deadline_at=started + 0.01)
+
+    assert reloaded == [True]
+    assert time.monotonic() - started >= 0.05
+    assert state._late_reload_count == 1
+    assert state._late_reload_ms >= 40
+
+
+def test_search_vector_honors_generation_lock_deadline() -> None:
+    state = object.__new__(SemanticServiceState)
+    state._generation_lock = threading.Lock()
+    state._generation = SimpleNamespace(search=lambda *_args, **_kwargs: [])
+    state._generation_lock.acquire()
+    try:
+        with pytest.raises(TimeoutError):
+            state._search_vector(
+                np.asarray([1.0, 0.0], dtype=np.float32),
+                1,
+                deadline_at=time.monotonic() + 0.01,
+            )
+    finally:
+        state._generation_lock.release()
+
+
+def test_embed_foreground_rechecks_deadline_after_accelerator_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeEmbeddingBackend()
+    state = _state(
+        LLMRuntime(
+            embedding={
+                FOREGROUND_ROLE: EmbeddingRoute(backend, "model"),
+                INCREMENTAL_ROLE: EmbeddingRoute(backend, "model"),
+            }
+        )
+    )
+
+    class SlowLease:
+        def __enter__(self) -> float:
+            time.sleep(0.05)
+            return 0.0
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+    monkeypatch.setattr(
+        semantic_service,
+        "accelerator_lease",
+        lambda **_kwargs: SlowLease(),
+    )
+    monkeypatch.setattr(
+        semantic_service,
+        "model_activity",
+        lambda **_kwargs: semantic_service.contextlib.nullcontext(),
+    )
+
+    with pytest.raises(TimeoutError):
+        state._embed_foreground(
+            ["query"],
+            EmbeddingPurpose.QUERY,
+            source=QUERY_SOURCE,
+            timeout_ms=10,
+        )
+
+    assert backend.requests == []
+
+
 def test_query_batcher_rejects_when_generation_is_unavailable() -> None:
     batcher = QueryBatcher(
         encode=lambda texts, _batch: np.zeros((len(texts), 2)),
