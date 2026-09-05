@@ -1,0 +1,912 @@
+{
+  "generated_at": "2026-09-05T02:51:11.578338+00:00",
+  "scope": "Read-only diagnosis and improvement plan; no production changes",
+  "head": "9b4b88b5ac0481117d2e5d1893ef7836a4e85ad5",
+  "log_snapshot": {
+    "path": "/Users/trafficsign/.chronovisor/recall/recall-log.jsonl",
+    "prefix_bytes": 86100843,
+    "prefix_lines": 16043,
+    "prefix_sha256": "4d0b880e754e9ff5efe00338b71b612c8c702b089ad0d861e5aab4d4572099ec",
+    "invalid_json": 0,
+    "timezone_naive_rows_excluded_from_time_cohorts": 11849
+  },
+  "last100": {
+    "n": 100,
+    "line_start": 15944,
+    "line_end": 16043,
+    "first_ts": "2026-09-04T09:38:43+00:00",
+    "last_ts": "2026-09-05T02:32:19+00:00",
+    "status_counts": {
+      "degraded": 80,
+      "ok": 18,
+      "skipped": 2
+    },
+    "search_modes": {
+      "bm25-fallback": 80,
+      "bm25+graph": 14,
+      "hybrid": 4,
+      "": 2
+    },
+    "semantic_socket_timeouts": 63,
+    "semantic_unavailable_total": 66,
+    "search_budget_exhausted": 14,
+    "judge_used": 0,
+    "has_injected_page_ids": 94,
+    "latency_ms": {
+      "p50": 1610,
+      "p95": 3532,
+      "p99": 4050,
+      "over_4000": 2
+    },
+    "stages": {
+      "prepare": {
+        "p50": 121,
+        "p95": 151
+      },
+      "bm25_build": {
+        "p50": 657,
+        "p95": 920
+      },
+      "bm25_query": {
+        "p50": 50,
+        "p95": 115
+      },
+      "semantic": {
+        "p50": 252,
+        "p95": 253
+      },
+      "evidence_search": {
+        "p50": 993,
+        "p95": 3015
+      },
+      "teacher": {
+        "p50": 988,
+        "p95": 3010
+      },
+      "scheduler": {
+        "p50": 0,
+        "p95": 0
+      }
+    },
+    "structured_reply_envelopes": 4
+  },
+  "last7days": {
+    "n": 821,
+    "line_start": 15223,
+    "line_end": 16043,
+    "first_ts": "2026-08-29T02:38:25+00:00",
+    "last_ts": "2026-09-05T02:32:19+00:00",
+    "status_counts": {
+      "degraded": 639,
+      "skipped": 26,
+      "ok": 152,
+      "timeout": 4
+    },
+    "search_modes": {
+      "bm25-fallback": 639,
+      "": 29,
+      "hybrid": 45,
+      "bm25+graph": 107,
+      "error": 1
+    },
+    "semantic_socket_timeouts": 446,
+    "semantic_unavailable_total": 518,
+    "search_budget_exhausted": 123,
+    "judge_used": 0,
+    "has_injected_page_ids": 752,
+    "latency_ms": {
+      "p50": 1509,
+      "p95": 3509,
+      "p99": 4000,
+      "over_4000": 8
+    },
+    "stages": {
+      "prepare": {
+        "p50": 120,
+        "p95": 144
+      },
+      "bm25_build": {
+        "p50": 550,
+        "p95": 922
+      },
+      "bm25_query": {
+        "p50": 44,
+        "p95": 116
+      },
+      "semantic": {
+        "p50": 252,
+        "p95": 253
+      },
+      "evidence_search": {
+        "p50": 899,
+        "p95": 3010
+      },
+      "teacher": {
+        "p50": 892,
+        "p95": 3005
+      },
+      "scheduler": {
+        "p50": 0,
+        "p95": 0
+      }
+    },
+    "structured_reply_envelopes": 4
+  },
+  "by_host": {
+    "claude-code": {
+      "n": 439,
+      "line_start": 15228,
+      "line_end": 16028,
+      "first_ts": "2026-08-29T02:41:41+00:00",
+      "last_ts": "2026-09-04T23:00:34+00:00",
+      "status_counts": {
+        "degraded": 330,
+        "skipped": 2,
+        "ok": 103,
+        "timeout": 4
+      },
+      "search_modes": {
+        "bm25-fallback": 330,
+        "": 6,
+        "hybrid": 19,
+        "bm25+graph": 84
+      },
+      "semantic_socket_timeouts": 233,
+      "semantic_unavailable_total": 267,
+      "search_budget_exhausted": 65,
+      "judge_used": 0,
+      "has_injected_page_ids": 426,
+      "latency_ms": {
+        "p50": 1518,
+        "p95": 3478,
+        "p99": 3834,
+        "over_4000": 2
+      },
+      "stages": {
+        "prepare": {
+          "p50": 120,
+          "p95": 143
+        },
+        "bm25_build": {
+          "p50": 545,
+          "p95": 1021
+        },
+        "bm25_query": {
+          "p50": 41,
+          "p95": 118
+        },
+        "semantic": {
+          "p50": 252,
+          "p95": 253
+        },
+        "evidence_search": {
+          "p50": 884,
+          "p95": 3010
+        },
+        "teacher": {
+          "p50": 879,
+          "p95": 3005
+        },
+        "scheduler": {
+          "p50": 0,
+          "p95": 0
+        }
+      },
+      "structured_reply_envelopes": 0
+    },
+    "codex": {
+      "n": 382,
+      "line_start": 15223,
+      "line_end": 16043,
+      "first_ts": "2026-08-29T02:38:25+00:00",
+      "last_ts": "2026-09-05T02:32:19+00:00",
+      "status_counts": {
+        "degraded": 309,
+        "ok": 49,
+        "skipped": 24
+      },
+      "search_modes": {
+        "bm25-fallback": 309,
+        "bm25+graph": 23,
+        "": 23,
+        "hybrid": 26,
+        "error": 1
+      },
+      "semantic_socket_timeouts": 213,
+      "semantic_unavailable_total": 251,
+      "search_budget_exhausted": 58,
+      "judge_used": 0,
+      "has_injected_page_ids": 326,
+      "latency_ms": {
+        "p50": 1499,
+        "p95": 3587,
+        "p99": 4193,
+        "over_4000": 6
+      },
+      "stages": {
+        "prepare": {
+          "p50": 121,
+          "p95": 145
+        },
+        "bm25_build": {
+          "p50": 555,
+          "p95": 866
+        },
+        "bm25_query": {
+          "p50": 46,
+          "p95": 116
+        },
+        "semantic": {
+          "p50": 252,
+          "p95": 253
+        },
+        "evidence_search": {
+          "p50": 918,
+          "p95": 3012
+        },
+        "teacher": {
+          "p50": 913,
+          "p95": 3006
+        },
+        "scheduler": {
+          "p50": 0,
+          "p95": 0
+        }
+      },
+      "structured_reply_envelopes": 4
+    }
+  },
+  "by_jst_day": {
+    "2026-08-29": {
+      "n": 88,
+      "line_start": 15223,
+      "line_end": 15310,
+      "first_ts": "2026-08-29T02:38:25+00:00",
+      "last_ts": "2026-08-29T14:10:09+00:00",
+      "status_counts": {
+        "degraded": 73,
+        "skipped": 4,
+        "ok": 11
+      },
+      "search_modes": {
+        "bm25-fallback": 73,
+        "": 4,
+        "hybrid": 5,
+        "bm25+graph": 6
+      },
+      "semantic_socket_timeouts": 3,
+      "semantic_unavailable_total": 60,
+      "search_budget_exhausted": 13,
+      "judge_used": 0,
+      "has_injected_page_ids": 80,
+      "latency_ms": {
+        "p50": 891,
+        "p95": 3546,
+        "p99": 3664,
+        "over_4000": 0
+      },
+      "stages": {
+        "prepare": {
+          "p50": 106,
+          "p95": 123
+        },
+        "bm25_build": {
+          "p50": 391,
+          "p95": 489
+        },
+        "bm25_query": {
+          "p50": 27,
+          "p95": 88
+        },
+        "semantic": {
+          "p50": 1,
+          "p95": 242
+        },
+        "evidence_search": {
+          "p50": 478,
+          "p95": 3097
+        },
+        "teacher": {
+          "p50": 471,
+          "p95": 3094
+        },
+        "scheduler": {
+          "p50": 0,
+          "p95": 0
+        }
+      },
+      "structured_reply_envelopes": 0
+    },
+    "2026-08-30": {
+      "n": 150,
+      "line_start": 15311,
+      "line_end": 15460,
+      "first_ts": "2026-08-29T19:50:13+00:00",
+      "last_ts": "2026-08-30T14:04:28+00:00",
+      "status_counts": {
+        "degraded": 117,
+        "skipped": 5,
+        "ok": 27,
+        "timeout": 1
+      },
+      "search_modes": {
+        "bm25-fallback": 117,
+        "": 5,
+        "bm25+graph": 11,
+        "hybrid": 16,
+        "error": 1
+      },
+      "semantic_socket_timeouts": 86,
+      "semantic_unavailable_total": 91,
+      "search_budget_exhausted": 26,
+      "judge_used": 0,
+      "has_injected_page_ids": 135,
+      "latency_ms": {
+        "p50": 1451,
+        "p95": 3552,
+        "p99": 3868,
+        "over_4000": 0
+      },
+      "stages": {
+        "prepare": {
+          "p50": 121,
+          "p95": 139
+        },
+        "bm25_build": {
+          "p50": 493,
+          "p95": 1199
+        },
+        "bm25_query": {
+          "p50": 39,
+          "p95": 123
+        },
+        "semantic": {
+          "p50": 252,
+          "p95": 253
+        },
+        "evidence_search": {
+          "p50": 849,
+          "p95": 3010
+        },
+        "teacher": {
+          "p50": 843,
+          "p95": 3004
+        },
+        "scheduler": {
+          "p50": 0,
+          "p95": 0
+        }
+      },
+      "structured_reply_envelopes": 0
+    },
+    "2026-08-31": {
+      "n": 110,
+      "line_start": 15461,
+      "line_end": 15570,
+      "first_ts": "2026-08-30T20:48:12+00:00",
+      "last_ts": "2026-08-31T13:55:59+00:00",
+      "status_counts": {
+        "degraded": 87,
+        "skipped": 3,
+        "ok": 19,
+        "timeout": 1
+      },
+      "search_modes": {
+        "bm25-fallback": 87,
+        "": 4,
+        "bm25+graph": 18,
+        "hybrid": 1
+      },
+      "semantic_socket_timeouts": 70,
+      "semantic_unavailable_total": 73,
+      "search_budget_exhausted": 15,
+      "judge_used": 0,
+      "has_injected_page_ids": 101,
+      "latency_ms": {
+        "p50": 1396,
+        "p95": 3472,
+        "p99": 3892,
+        "over_4000": 1
+      },
+      "stages": {
+        "prepare": {
+          "p50": 120,
+          "p95": 137
+        },
+        "bm25_build": {
+          "p50": 511,
+          "p95": 1729
+        },
+        "bm25_query": {
+          "p50": 42,
+          "p95": 126
+        },
+        "semantic": {
+          "p50": 252,
+          "p95": 253
+        },
+        "evidence_search": {
+          "p50": 863,
+          "p95": 3011
+        },
+        "teacher": {
+          "p50": 858,
+          "p95": 3006
+        },
+        "scheduler": {
+          "p50": 0,
+          "p95": 0
+        }
+      },
+      "structured_reply_envelopes": 0
+    },
+    "2026-09-01": {
+      "n": 156,
+      "line_start": 15571,
+      "line_end": 15726,
+      "first_ts": "2026-08-31T20:21:18+00:00",
+      "last_ts": "2026-09-01T13:46:28+00:00",
+      "status_counts": {
+        "degraded": 118,
+        "skipped": 3,
+        "ok": 34,
+        "timeout": 1
+      },
+      "search_modes": {
+        "bm25-fallback": 118,
+        "": 4,
+        "bm25+graph": 27,
+        "hybrid": 7
+      },
+      "semantic_socket_timeouts": 94,
+      "semantic_unavailable_total": 96,
+      "search_budget_exhausted": 22,
+      "judge_used": 0,
+      "has_injected_page_ids": 146,
+      "latency_ms": {
+        "p50": 1512,
+        "p95": 3470,
+        "p99": 4000,
+        "over_4000": 1
+      },
+      "stages": {
+        "prepare": {
+          "p50": 120,
+          "p95": 156
+        },
+        "bm25_build": {
+          "p50": 542,
+          "p95": 1018
+        },
+        "bm25_query": {
+          "p50": 50,
+          "p95": 103
+        },
+        "semantic": {
+          "p50": 252,
+          "p95": 252
+        },
+        "evidence_search": {
+          "p50": 883,
+          "p95": 3006
+        },
+        "teacher": {
+          "p50": 878,
+          "p95": 3001
+        },
+        "scheduler": {
+          "p50": 0,
+          "p95": 1
+        }
+      },
+      "structured_reply_envelopes": 0
+    },
+    "2026-09-02": {
+      "n": 98,
+      "line_start": 15727,
+      "line_end": 15824,
+      "first_ts": "2026-09-01T22:16:39+00:00",
+      "last_ts": "2026-09-02T14:07:04+00:00",
+      "status_counts": {
+        "skipped": 4,
+        "degraded": 77,
+        "ok": 16,
+        "timeout": 1
+      },
+      "search_modes": {
+        "": 5,
+        "bm25-fallback": 77,
+        "bm25+graph": 14,
+        "hybrid": 2
+      },
+      "semantic_socket_timeouts": 63,
+      "semantic_unavailable_total": 64,
+      "search_budget_exhausted": 14,
+      "judge_used": 0,
+      "has_injected_page_ids": 87,
+      "latency_ms": {
+        "p50": 1569,
+        "p95": 3471,
+        "p99": 5903,
+        "over_4000": 2
+      },
+      "stages": {
+        "prepare": {
+          "p50": 121,
+          "p95": 153
+        },
+        "bm25_build": {
+          "p50": 574,
+          "p95": 1065
+        },
+        "bm25_query": {
+          "p50": 47,
+          "p95": 131
+        },
+        "semantic": {
+          "p50": 252,
+          "p95": 253
+        },
+        "evidence_search": {
+          "p50": 911,
+          "p95": 3007
+        },
+        "teacher": {
+          "p50": 907,
+          "p95": 3002
+        },
+        "scheduler": {
+          "p50": 0,
+          "p95": 1
+        }
+      },
+      "structured_reply_envelopes": 0
+    },
+    "2026-09-03": {
+      "n": 76,
+      "line_start": 15825,
+      "line_end": 15900,
+      "first_ts": "2026-09-02T22:19:43+00:00",
+      "last_ts": "2026-09-03T13:20:46+00:00",
+      "status_counts": {
+        "skipped": 3,
+        "degraded": 57,
+        "ok": 16
+      },
+      "search_modes": {
+        "": 3,
+        "bm25-fallback": 57,
+        "hybrid": 8,
+        "bm25+graph": 8
+      },
+      "semantic_socket_timeouts": 42,
+      "semantic_unavailable_total": 43,
+      "search_budget_exhausted": 14,
+      "judge_used": 0,
+      "has_injected_page_ids": 70,
+      "latency_ms": {
+        "p50": 1673,
+        "p95": 3547,
+        "p99": 4193,
+        "over_4000": 1
+      },
+      "stages": {
+        "prepare": {
+          "p50": 120,
+          "p95": 134
+        },
+        "bm25_build": {
+          "p50": 612,
+          "p95": 798
+        },
+        "bm25_query": {
+          "p50": 34,
+          "p95": 90
+        },
+        "semantic": {
+          "p50": 252,
+          "p95": 252
+        },
+        "evidence_search": {
+          "p50": 966,
+          "p95": 3007
+        },
+        "teacher": {
+          "p50": 959,
+          "p95": 3002
+        },
+        "scheduler": {
+          "p50": 0,
+          "p95": 0
+        }
+      },
+      "structured_reply_envelopes": 0
+    },
+    "2026-09-04": {
+      "n": 100,
+      "line_start": 15901,
+      "line_end": 16000,
+      "first_ts": "2026-09-03T20:56:57+00:00",
+      "last_ts": "2026-09-04T14:47:24+00:00",
+      "status_counts": {
+        "degraded": 74,
+        "ok": 23,
+        "skipped": 3
+      },
+      "search_modes": {
+        "bm25-fallback": 74,
+        "bm25+graph": 20,
+        "": 3,
+        "hybrid": 3
+      },
+      "semantic_socket_timeouts": 63,
+      "semantic_unavailable_total": 64,
+      "search_budget_exhausted": 10,
+      "judge_used": 0,
+      "has_injected_page_ids": 94,
+      "latency_ms": {
+        "p50": 1586,
+        "p95": 3492,
+        "p99": 3834,
+        "over_4000": 1
+      },
+      "stages": {
+        "prepare": {
+          "p50": 121,
+          "p95": 151
+        },
+        "bm25_build": {
+          "p50": 636,
+          "p95": 785
+        },
+        "bm25_query": {
+          "p50": 49,
+          "p95": 115
+        },
+        "semantic": {
+          "p50": 252,
+          "p95": 253
+        },
+        "evidence_search": {
+          "p50": 978,
+          "p95": 3003
+        },
+        "teacher": {
+          "p50": 971,
+          "p95": 2997
+        },
+        "scheduler": {
+          "p50": 0,
+          "p95": 0
+        }
+      },
+      "structured_reply_envelopes": 0
+    },
+    "2026-09-05": {
+      "n": 43,
+      "line_start": 16001,
+      "line_end": 16043,
+      "first_ts": "2026-09-04T21:53:17+00:00",
+      "last_ts": "2026-09-05T02:32:19+00:00",
+      "status_counts": {
+        "skipped": 1,
+        "degraded": 36,
+        "ok": 6
+      },
+      "search_modes": {
+        "": 1,
+        "bm25-fallback": 36,
+        "bm25+graph": 3,
+        "hybrid": 3
+      },
+      "semantic_socket_timeouts": 25,
+      "semantic_unavailable_total": 27,
+      "search_budget_exhausted": 9,
+      "judge_used": 0,
+      "has_injected_page_ids": 39,
+      "latency_ms": {
+        "p50": 1685,
+        "p95": 3697,
+        "p99": 4387,
+        "over_4000": 2
+      },
+      "stages": {
+        "prepare": {
+          "p50": 121,
+          "p95": 141
+        },
+        "bm25_build": {
+          "p50": 682,
+          "p95": 1231
+        },
+        "bm25_query": {
+          "p50": 51,
+          "p95": 162
+        },
+        "semantic": {
+          "p50": 252,
+          "p95": 253
+        },
+        "evidence_search": {
+          "p50": 1062,
+          "p95": 3003
+        },
+        "teacher": {
+          "p50": 1055,
+          "p95": 3000
+        },
+        "scheduler": {
+          "p50": 0,
+          "p95": 0
+        }
+      },
+      "structured_reply_envelopes": 4
+    }
+  },
+  "config_observed": {
+    "runtime_source": "git+ssh://git@github.com/trafficsign/chronovisor@9b4b88b5ac0481117d2e5d1893ef7836a4e85ad5",
+    "query_timeout_ms": 250,
+    "interactive_timeout_ms": 5000,
+    "sync_recall": true,
+    "recall_semantic_config": false,
+    "effective_recall_semantic": true,
+    "gate_mode": "evidence",
+    "rewrite_enabled": false,
+    "total_timeout_ms": 4000,
+    "fallback_reserve_ms": 600
+  },
+  "regression_probe_results": [
+    {
+      "probe": "unrelated_fallback_admission",
+      "confidence": 0.3,
+      "decision": "search",
+      "unrelated_cards": 1,
+      "passes": false
+    },
+    {
+      "probe": "expired_pending_request",
+      "caller_timed_out": true,
+      "expired_request_encoded": true,
+      "following_request_completed": true,
+      "passes": false
+    }
+  ],
+  "regression_probe_exit": 1,
+  "existing_tests": {
+    "command": "PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -p no:cacheprovider -q tests/test_recall_runtime.py tests/test_semantic_service.py tests/test_semantic_client.py -k 'deterministic_fallback or semantic_service_unavailable or unknown_semantic_error or query_batcher or caches_query or selected_for_rollout'",
+    "passed": 9,
+    "deselected": 215,
+    "seconds": 2.16
+  },
+  "read_only_live_probes": {
+    "lexical": [
+      {
+        "case": "alias",
+        "ms": 58.42,
+        "top3_project_matches": 0,
+        "top8_project_matches": 0
+      },
+      {
+        "case": "followup",
+        "ms": 24.3,
+        "top3_project_matches": 0,
+        "top8_project_matches": 0
+      },
+      {
+        "case": "explicit_chronovisor_recall",
+        "ms": 29.16,
+        "top3_project_matches": 2,
+        "top8_project_matches": 6
+      }
+    ],
+    "actual_fallback": [
+      {
+        "case": "alias",
+        "confidence": 0.3,
+        "injected": 3,
+        "off_project_proxy": 3,
+        "high_sensitivity": 1,
+        "ms": 347
+      },
+      {
+        "case": "followup",
+        "confidence": 0.3,
+        "injected": 3,
+        "off_project_proxy": 3,
+        "high_sensitivity": 1,
+        "ms": 304
+      }
+    ],
+    "semantic_unique_top8_ms": [
+      213.21,
+      138.51,
+      126.82,
+      135.06,
+      116.13,
+      109.68
+    ],
+    "semantic_repeated_top8_ms": [
+      13.16,
+      11.76,
+      12.37,
+      11.96,
+      14.64,
+      12.47
+    ],
+    "semantic_top100_followup": [
+      {
+        "timeout_ms": 250,
+        "wall_ms": 251.15,
+        "result": "socket_timeout"
+      },
+      {
+        "timeout_ms": 1500,
+        "wall_ms": 36.96,
+        "cache_hit": true,
+        "result": "ok"
+      },
+      {
+        "timeout_ms": 250,
+        "wall_ms": 16.64,
+        "cache_hit": true,
+        "result": "ok"
+      }
+    ],
+    "metadata_initialization_ms": [
+      513.44,
+      506.3,
+      513.3
+    ],
+    "metadata_same_process_reuse_ms": [
+      0.004,
+      0.005,
+      0.002
+    ],
+    "metadata_entry_count": 7214,
+    "metadata_probe_persistence": "IndexStore._persist mocked out; no writes",
+    "limitations": [
+      "Small sequential live probe; not an SLO/quality benchmark.",
+      "Different timeouts were tested only in diagnostic request payload/socket; config was not changed.",
+      "cache_hit refers to query vector; vector search still runs.",
+      "page_id substring matches are case-specific diagnostic proxies, not production relevance labels.",
+      "Personal-project high-sensitivity cards are not by themselves evidence of a privacy-policy violation.",
+      "Metadata refresh benchmark is a cold component measurement, not an end-to-end speedup.",
+      "Stage spans overlap; do not sum them.",
+      "No exact executable receipt exists for each historical hook."
+    ]
+  },
+  "cohort_note": "The initial approximately seven-day cohort is frozen at log lines 15223-16043; later wall-clock time must not shift the denominator.",
+  "runtime_provenance": {
+    "semantic_archive": "Q5Qnc6oEaPzYP3LSO7eSO",
+    "semantic_commit": "9b4b88b5ac0481117d2e5d1893ef7836a4e85ad5",
+    "latest_unpinned_archive": "gzPie_ca6_RDIBqK9VTDm",
+    "latest_unpinned_commit": "9b4b88b5ac0481117d2e5d1893ef7836a4e85ad5",
+    "verified_equal_source_files": [
+      "core/search.py",
+      "recall/recall_runtime.py",
+      "core/pipeline.py",
+      "search/semantic_service.py"
+    ],
+    "hook_source": "unpinned git+ssh; exact historical executable not recorded",
+    "post_latest_unpinned_archive_observation": {
+      "n": 3,
+      "degraded": 3,
+      "semantic_timeout": 3
+    }
+  },
+  "initial_semantic_health_snapshot": {
+    "observed_at_epoch": 1788575751.211197,
+    "pid": 27839,
+    "ready": true,
+    "status": "ok",
+    "query_success_samples": 280,
+    "success_p50_ms": 188.78,
+    "success_p95_ms": 526.624,
+    "success_max_ms": 1745.328,
+    "handler_errors_cumulative": 3,
+    "generation_id": "20260811T043448Z-f94f352690dd-46626a",
+    "delta_pages": 3422,
+    "covered_pages": 7202,
+    "warning": "success latency window and all-handler error count do not form a common denominator; not an availability SLO"
+  }
+}

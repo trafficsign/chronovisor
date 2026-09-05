@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Chronovisor Recall 改善計画</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+
+body{max-width:1120px}header{position:static}.lead{font-size:1.15rem;font-weight:600}.muted{color:var(--muted)}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:22px 0}.kpi{padding:16px;background:#fff;border:1px solid var(--rule);border-radius:8px}.kpi strong{display:block;font-size:1.65rem;color:var(--accent)}.kpi small{display:block;color:var(--muted)}
+.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:.92rem;margin:12px 0}th,td{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid var(--rule)}th{background:#f0f1ed}.finding{padding:14px 18px;margin:14px 0;background:#fff;border:1px solid var(--rule);border-radius:7px}.finding h3{font-size:1rem;margin:0 0 8px}.tag{display:inline-block;font-size:.78rem;padding:1px 7px;border-radius:4px;background:#e7efeb;color:#286c45;margin-right:7px}.tag.hypothesis{background:#fff0d8;color:#926113}.sources{font-size:.82rem;color:var(--muted);overflow-wrap:anywhere}.phase{border-left:3px solid var(--accent);padding:2px 18px 8px;margin:20px 0}.phase h3{margin:8px 0}.flow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:18px 0}.flow span{padding:8px 12px;border:1px solid var(--rule);border-radius:6px;background:#fff}.flow b{color:var(--accent)}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eee;padding:12px;border-radius:5px;font-size:.82rem}a{color:#2258a4}details{margin:10px 0}summary{cursor:pointer;font-weight:600}code{overflow-wrap:anywhere}.note{padding:12px 16px;background:#f2f5ef;border-left:3px solid #608249}li{margin:.45rem 0}input{accent-color:var(--accent)}
+@media(max-width:700px){body{padding:0 16px;font-size:14px}.kpis{grid-template-columns:repeat(2,1fr)}th,td{padding:7px}header h1{font-size:1.35rem}}
+</style></head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_4e8984d5ebd9405eb1eafe5def5fee2b","created_at":"2026-09-05T11:34:58+09:00","状態":"ready","slug":"chronovisor-recall-reliability-relevance","investigation_state":"complete","implementation_state":"not_started","updated_at":"2026-09-05T12:04:10+09:00","independent_review":"complete"}
+</script>
+
+<header>
+<h1>Chronovisor Recall：信頼性・関連度の改善計画</h1>
+<div class="meta-bar"><span class="badge" data-bind="状態" data-state="ready">ready · 実装未着手</span><span>調査完了：2026-09-05</span><span><code>HEAD 9b4b88b5</code></span></div>
+<p class="lead">検索が期限切れになると、関連度を十分に判定しないBM25経路に切り替わる。この接続部分を最優先で修正する。</p>
+<p>対象は自動Recall（L2）のタイムアウトと不適切なカード注入。ログ集計、稼働中サービスへの少数の読み取り専用要求、現行コードの呼出し経路、既存テスト、独立した3件のコード調査を照合した。今回の成果物は調査と計画であり、実装・設定・モデル・サービスの変更は行っていない。</p>
+</header>
+
+<div class="kpis" aria-label="調査結果の主要指標">
+<div class="kpi"><strong>80 / 100</strong><small>直近100回がBM25縮退動作</small></div>
+<div class="kpi"><strong>63 / 100</strong><small>意味検索のsocket timeout</small></div>
+<div class="kpi"><strong>2 / 2</strong><small>新しい診断で問題を再現</small></div>
+<div class="kpi"><strong>約513 ms</strong><small>初回メタデータ初期化の中央値</small></div>
+</div>
+
+<section data-section="目的"><h2>目的と成功の定義</h2>
+<p>必要な記憶を時間内に返し、確証の薄い候補は注入しない。停止・例外の抑制だけを成功とせず、正常経路と縮退経路を別々に評価する。</p>
+<ul><li>関連度：正解に必要な記憶の取得率と、不要な記憶を混ぜない精度を両立する。単に全件を棄却して精度だけを上げない。</li><li>応答時間：4,000msの同期契約と最大600msの縮退枠を維持する。</li><li>継続性：「そこ」「この件」といった発話で、確かな直前文脈を限定的に使える。</li><li>追跡可能性：query生成理由、timeoutが起きた段階、注入の根拠、実行コードとindexの版を一つのdecisionに結び付ける。</li></ul>
+</section>
+
+<section data-section="調査範囲"><h2>固定した観測範囲</h2>
+<p>ログの分母が時間経過で変わらないよう、初回集計時点の行範囲を固定した。約7日の集計は8/29 11:38〜9/5 11:32 JST、行15223–16043。直近100回は行15944–16043。元ログのbyte長・SHA-256と集計値は<a href="evidence/2026-09-05-recall-investigation/evidence.json">evidence.json</a>に保存した。</p>
+<div class="table-wrap"><table><thead><tr><th>対象</th><th>件数</th><th>縮退</th><th>意味検索timeout</th><th>p50 / p95</th><th>4秒超</th></tr></thead><tbody>
+<tr><td>直近100回</td><td>100</td><td>80（80.0%）</td><td>63（63.0%）</td><td>1,610 / 3,532ms</td><td>2</td></tr>
+<tr><td>約7日・全host</td><td>821</td><td>639（77.8%）</td><td>446（54.3%）</td><td>1,509 / 3,509ms</td><td>8</td></tr>
+<tr><td>約7日・Codex</td><td>382</td><td>309（80.9%）</td><td>213（55.8%）</td><td>1,499 / 3,587ms</td><td>6</td></tr>
+<tr><td>約7日・Claude Code</td><td>439</td><td>330（75.2%）</td><td>233（53.1%）</td><td>1,518 / 3,478ms</td><td>2</td></tr>
+</tbody></table></div>
+<p class="muted">直近100回の残りの失敗は、SemanticServiceUnavailableの別理由3件とsearch budget exhausted 14件。stageは入れ子で重複するため、各stageの時間を足して総時間と比較しない。timeout率は取得品質そのものではなく、注入率も有用性の正解ラベルではない。古いtimezone無しのログは期間集計に使っていない。</p>
+</section>
+
+<section data-section="確定事項"><h2>確定した問題と根拠</h2>
+<article class="finding"><h3><span class="tag">F1 · 実処理で再現</span>縮退時に「候補がある」だけで注入が成立する</h3>
+<p><code>run_deterministic_fallback</code>はヒューリスティック判定後も現在の発話だけをBM25へ渡し、候補が残ると<code>none → search</code>に変換する。正常経路のevidence判定・query生成・fusionを通らない。今回の2発話はconfidence 0.3で、search閾値0.35を下回るが、どちらも関連の薄いカード3件が注入された。</p>
+<p>実indexで「CronoBisāに改善の余地はないよな。」「ちょっとそこを徹底調査して、改善計画を練ってくれ。」を再実行すると、上位8件にChronovisorをpage-idへ含むものは0件。明示した「Chronovisor Recall 意味検索 タイムアウト 改善」では6/8件だった。page-idの文字列照合はこの2例の診断補助であり、本番の関連度判定や正解ラベルには採用しない。</p>
+<p>合成した無関係な料理メモ1件でも注入が成立する診断を追加し、現行コードで失敗することを確認した。個人project内でhigh-sensitivity候補が出ること自体を既存のprivacy契約違反とは断定しない。</p>
+<p class="sources">src/chronovisor/recall/recall_runtime.py:4499–4631、2023–2072、4230–4267 / src/chronovisor/core/search.py:186–189、919–943</p></article>
+
+<article class="finding"><h3><span class="tag">F2 · 決定的に再現</span>期限切れの待機要求が後からencodeされる</h3>
+<p><code>QueryBatcher.submit()</code>は<code>Future.result(timeout)</code>で呼出し元の待機を終えるが、queue内の要求を失効させない。1件目のencodeをEventで止め、待機中の2件目を30msでtimeoutさせて解放すると、2件目も後でencodeされた。後続の有効な3件目も完了させる診断なので、queueが滞留したまま偶然「未実行」に見える判定ではない。</p>
+<p>この無駄な処理が実際の446件のtimeoutへ何割寄与したかは未計測。既に実行中の同期モデル計算を停止する問題と、まだ待機中の要求をskipする問題は分ける。</p>
+<p class="sources">src/chronovisor/search/semantic_service.py:149–191 / <a href="evidence/2026-09-05-recall-investigation/regression_probes.py">実行可能な診断</a></p></article>
+
+<article class="finding"><h3><span class="tag">F3 · 設定・実測</span>250msで早く諦める一方、内側の計算は総期限を共有していない</h3>
+<p>同期Recallは残り時間を渡してもclientで<code>min(remaining_ms, 250)</code>に制限される。socket timeoutはconnect/send/recv等の操作単位で、要求全体の絶対deadlineではない。サーバーのmodel lock、同期encode、ANN検索、pointer reloadは同じ総期限を共有していない。verifyはtimeoutをpayloadに載せず、batcherも通らない。</p>
+<p>読み取り専用の少数試験では、候補8件の新規query 6本は110–213ms、同じqueryの再利用は12–15ms。本番と同じ候補100件では追従文が251msでsocket timeoutし、直後は37ms、次は17msで成功した。query-vector cache hitでもANN検索は残る。これだけで適切な新timeout値やSLOは決められない。</p>
+<p class="sources">src/chronovisor/core/semantic_client.py:51–95、114–137、185–208 / src/chronovisor/search/semantic_service.py:349–382、626–688、951–970 / src/chronovisor/core/semantic_index.py:746–824</p></article>
+
+<article class="finding"><h3><span class="tag">F4 · 成分測定</span>初回メタデータ初期化がhookごとに重くなる経路がある</h3>
+<p>直近100回の<code>bm25_build</code>はp50 657ms / p95 920ms。<code>IndexStore.refresh_if_stale()</code>は未ロード時にcorpus全体の<code>refresh()</code>へ進む。永続書込みをmockで止めた現物の初期化3回は506–513ms、同一process内の再利用は0.002–0.005msだった。<code>LexicalIndex.build()</code>も新processではscanの状態を持たず、検索前にpage群を照合する。</p>
+<p>既存の読み取り専用BM25検索は24–58msだったが、検索前の鮮度確認を省く異なる経路なので、その差をそのままend-to-end高速化率と主張しない。正常起動を軽くするには、既存writer snapshotの版・整合性を検証して再利用する必要がある。</p>
+<p class="sources">src/chronovisor/core/pipeline.py:324–375 / src/chronovisor/core/index_store.py:522–558、761–798 / src/chronovisor/core/lexical_index.py:241–288</p></article>
+
+<article class="finding"><h3><span class="tag">F5 · ログと実装</span>追従文・表記揺れ・UI応答の検索意図が失われる</h3>
+<p>曖昧語一覧に「そこ」がなく、rewriteは無効。fallbackはsessionをload/updateせず、現在の発話だけを検索する。<code>recent_context</code>も対象の経路では検索語の生成に使われていない。tokenizerは<code>CronoBisā</code>を<code>cronobis</code>として扱い、canonical entityへ補正しない。</p>
+<p>今回のHTML保存先へのUI回答も、<code>&lt;send_user_message_question_reply&gt;</code>内のquestion/answer/IDを含む全文がqueryになったことをログ行16043で確認した。任意のXML/JSONを削除する修正は不適切。既知hostの応答形式だけを検証して、回答本文・直前の質問との関係を取り出す必要がある。</p>
+<p class="sources">src/chronovisor/recall/recall_runtime.py:97–125、553–590、866–905、4499–4631 / src/chronovisor/recall/recall_prompt.py:65–122 / src/chronovisor/recall/recall_session.py:97–154 / src/chronovisor/core/search_types.py:39–62</p></article>
+
+<article class="finding"><h3><span class="tag">F6 · 観測契約</span>healthと既存テストだけでは今回の問題を検出できない</h3>
+<p>serviceのhealthはready=trueだった。初回観測の成功query群はp50 189ms / p95 527msだが、latencyは成功要求だけの履歴で、queue深さ・待ち時間・失効要求・model lock・socket timeoutとの共通分母がない。reloadは一部のlatency計測より前に実行される。readyは要求が指定期限内に完了する保証ではない。</p>
+<p>関連する既存テスト9件はpass。新しい2診断は失敗した。既存のbatchテストは結合・unavailable、fallbackテストは軽量性・600ms・機密フィルタ等をmockで確認しており、無関係な実候補の注入や待機要求の失効を保証していない。</p>
+<p class="sources">src/chronovisor/search/semantic_service.py:525–563、633–638 / tests/test_semantic_service.py:414–485 / tests/test_recall_runtime.py:3463–3715、3979–4115 / tests/test_semantic_client.py:1–27</p></article>
+</section>
+
+<section data-section="前提・仮定"><h2>原因として断定しなかったもの</h2>
+<ul><li><strong>judgeモデルの遅さ：</strong>全821回が<code>used_judge=false</code>。現在はevidence gate経路なので、この値だけを故障ともモデルの速度問題とも解釈しない。</li><li><strong>recall.semanticの設定漏れ：</strong>ファイル上はfalseでも、<code>search.embedding.rollout.sync_recall=true</code>が最終policyをtrueにする。実際の有効値もtrueと確認した。</li><li><strong>古いコードだけが原因：</strong>稼働Semantic archiveと最新unpinned hook cacheはHEAD <code>9b4b88b5</code>に一致し、関連4ファイルもbyte一致。ただし過去のhookごとの実行ファイルはreceiptに無く、最新cacheの存在だけでは全要求の版を証明できない。</li><li><strong>全timeoutの具体的内訳：</strong>cold ANN/page-in、pointer reload、queue、model lock、encode、共有accelerator待ちの寄与は未分離。現行モデルを交換する根拠はまだない。</li><li><strong>保存データの消失：</strong>今回確認したのは検索・注入経路。記憶が検索できないことを保存失敗と同一視しない。</li><li><strong>normal prefetchの誤注入：</strong>別の品質cohortで測る候補。今回の2例の確定原因には含めない。</li></ul>
+</section>
+
+<section><h2>改修する接続部分</h2>
+<div class="flow" aria-label="目標のRecall経路"><span>host入力の検証</span><b>→</b><span>限定的な文脈解決</span><b>→</b><span>既存snapshotから候補取得</span><b>→</b><span>残り時間内の意味検索</span><b>→</b><span>共通の関連度・安全判定</span><b>→</b><span>カード注入 または 棄却</span></div>
+<p>意味検索が失敗しても、すでに得たlexical/anchor候補・query provenanceを保持して同じ判定へ送る。機能停止時だけ候補の存在を正解扱いする分岐をなくす。未完了のrerank／evidence packetを完了扱いせず、部分結果やauthority=teacherというtelemetry値を学習ラベル／昇格根拠にしない。未処理のpageやRawへの重い探索は同期fallbackへ追加しない。</p>
+</section>
+
+<section data-section="実行手順"><h2>実装計画：小さな変更単位で進める</h2>
+<ol class="checklist"><li><input type="checkbox" checked disabled><span>P0の事前調査：現行ログ・archive・2つの再現・関連既存テストを保存した。</span></li></ol>
+
+<div class="phase"><h3>P0 · 再現と計測を実装の受入条件へ移す</h3>
+<ol class="checklist"><li><input type="checkbox" disabled><span>診断2件を既存pytest fixtureへ組み込み、現行版でfailすることを確認する。</span></li><li><input type="checkbox" disabled><span>観測対象を正常／semantic timeout／search budget／breaker-open／UI応答／追従文に分ける。既存normal匿名100件と、今回の失敗例を含むgold評価を固定する。host・fallback理由・cache状態・index世代別に分母を残し、case selection後に入力／候補snapshot／goldをsealする。</span></li></ol>
+<p><strong>計測：</strong>request開始からの総時刻、corpus/index/code版、query数・由来・hash、queue待ち、lock/lease待ち、embed、ANN、metadata再読込み、残り時間、fallback理由、candidate admission理由を記録。query本文や機密カードは標準telemetryへ複製しない。今回の集計は運用率であり、誤注入率の母集団推定ではない。</p>
+<p><strong>完了条件：</strong>同じdeadlineがどの段階で消費されたかを再構成でき、raw query/個人情報を出さずnormalとdegradedの共通分母を計算できる。</p>
+<p class="sources">主な変更先：tests/test_recall_runtime.py、tests/test_semantic_service.py、tests/test_semantic_client.py、semantic_service.py、semantic_client.py、recall_runtime.pyの既存trace</p></div>
+
+<div class="phase"><h3>P1 · 縮退時の誤注入を止める（最優先）</h3>
+<ol class="checklist"><li><input type="checkbox" disabled><span>BM25候補の存在だけによるnone→search昇格を廃止する。判定がnoneで十分な根拠がなければL2を棄却し、許可されたL1のみを維持する。</span></li><li><input type="checkbox" disabled><span>強い明示query・過去参照・既存anchorがある場合の有用なfallbackを残す。既存の読み取り専用anchor/BM25機能と、安全性・重複除去・identity処理を再利用する。</span></li><li><input type="checkbox" disabled><span>primaryで取得済みの候補とquery由来を、typed availability failureで捨てない。fallbackから探索・model・writeを再起動しない。部分結果はstatus=degraded、failure_class、元のquery由来、成功／失敗channel、snapshot generationを保持し、normal成功やteacher評価完了へ読み替えない。</span></li></ol>
+<p><strong>完了条件：</strong>無関係料理メモの診断がpass。既知2発話は適切な根拠を返すかL2を棄却。strong-anchorの必要な記憶、sensitivityフィルタ、L1、600ms、unknown exception可視化は維持する。source別raw score/rankとadmission理由をgoldへ結び付け、positive controlも必須にする。候補のUID/content digestを現在のpageへ再bindし、削除・置換・snapshot世代不一致や必要証拠の不足があればL2を棄却する。raw BM25スコアへ0.35/0.65を直適用せず、固定score floorで一律に解決しない。共通判定は既存evidence_scoreへraw BM25をそのまま渡す意味ではない。source種別を維持して入力特徴を校正し、heuristic none＋未検証candidateがスコア変換だけで昇格する経路も禁止する。診断スクリプトの合格だけでは採用せず、all-abstainでも失敗する有用な取得のgold条件を同時に満たす。</p>
+<p class="sources">主な変更先：recall_runtime.py:1934–2139、1303–1437、4499–4631 / core/search.py:186–207 / 再利用：search_existing_lexical、既存candidate metadata。cwdは関連度の手掛かりであり、全般的なproject禁止リストにはしない。</p></div>
+
+<div class="phase"><h3>P2 · 期限切れ要求を残さず、searchとverifyの時間契約を揃える</h3>
+<ol class="checklist"><li><input type="checkbox" disabled><span>QueryBatcherへ絶対deadlineを渡し、待機期限切れを失効扱いにする。workerがencode前・search前・結果設定前に失効を確認し、有効な同batchの要求を継続する。</span></li><li><input type="checkbox" disabled><span>search/verify/client socket/postprocessingで残り時間を同じ起点から計算する。0・負値・期限超過を待ち時間の既定値へ戻さない。</span></li><li><input type="checkbox" disabled><span>cold/unique/top100、index更新中、共有accelerator待ちを測り、250msの配分を決める。client上限だけを拡大してqueue滞留を隠さない。</span></li></ol>
+<p><strong>完了条件：</strong>失効したpending要求のencodeが0、後続有効要求が完了し、cancel競合で同batchを巻き込まない。max_batch=1の診断に加え、max_batch&gt;1でexpired/liveが混在する回帰も必須にする。searchとverifyの期限が一貫し、clientが帰った後の余分な作業を計数できる。4秒総枠と600ms reserveを維持する。</p>
+<p><strong>限界：</strong>既に開始した同期Nemotron計算をthreadから強制中断できるとは仮定しない。pendingを止めても残る実行中の仕事を計測し、予算内に有用な検索が維持できない場合だけ隔離やadmission変更を検討する。新しいモデル・常駐workerの追加は最初の変更に含めない。</p>
+<p class="sources">主な変更先：semantic_service.py:149–191、626–688 / semantic_client.py:51–208 / 必要箇所だけruntime deadline・model lock境界を接続</p></div>
+
+<div class="phase"><h3>P3 · 初回の全件照合を検索の前から外す</h3>
+<ol class="checklist"><li><input type="checkbox" disabled><span>既存pages/backlinks/lexical snapshotのgenerationと整合性を検証し、有効なwriter snapshotを新processから直接読む。無効・欠損時は軽量な棄却／縮退と明確な修復理由へ進める。</span></li><li><input type="checkbox" disabled><span>全件scan・再構築は既存writer/maintenance側の責務として維持し、同期hookごとの再実行を避ける。書込みreceiptからの既存apply_changesを再利用する。</span></li></ol>
+<p><strong>完了条件：</strong>新processでの初回読込みも含めて測定し、削除・rename・superseded・新規page・破損snapshot・generation不一致を回帰検証する。正常candidate順序／score／identityを保つ。初回metadata p95 ≤150msを暫定目標とし、未達なら実測分布で次の律速を決める。これは既存のwriter整合性を弱めて達成しない。</p>
+<p class="sources">主な変更先：core/index_store.py:522–558、761–798 / core/lexical_index.py:241–288 / core/pipeline.py:324–375。新しいキャッシュサービスは作らない。</p></div>
+
+<div class="phase"><h3>P4 · 強い文脈がある追従文と、既知のUI応答を解決する</h3>
+<ol class="checklist"><li><input type="checkbox" disabled><span>既知hostの質問回答envelopeをschemaで検証し、質問ID・回答内容・直前の意図を取り出す。任意のユーザー記述XML/JSONは保持する。</span></li><li><input type="checkbox" disabled><span>「そこ／この件／続き」は、同じsessionの確かな直前entity/topicがある場合だけ1本のbounded queryへ解決する。話題転換・曖昧な複数候補・期限切れsessionなら推測で補わない。</span></li><li><input type="checkbox" disabled><span>canonical entity、既存anchor/query_hintを使って表記揺れを補う。自然言語aliasをASCII page-id alias storeへ追加しない。</span></li><li><input type="checkbox" disabled><span>fallback後も次ターンの文脈が失われないよう、候補を正解扱いせずquery由来・topic identityだけを既存receipt／session経路へ残す。同期fallback内の新規書込みは禁止し、post-hook処理または既存durable receiptを利用する。</span></li></ol>
+<p><strong>完了条件：</strong>今回の2発話→調査依頼→HTML保存先回答を、一連の会話fixtureで検証する。一般語・cross-projectの正しい参照・personal/work・表記揺れ・話題転換・UI-only応答を、source別score/rankとsealed goldで比較する。新規の別話題へ過去queryを毎回混ぜず、prompt injection用の偽envelopeやuser-authored JSONも回帰に含める。relevance goldで取得率・誤注入・棄却の3指標が合格する。</p>
+<p class="sources">主な変更先：hosts/hook_dispatcher.py、recall/recall_prompt.py、recall_runtime.py:553–590、866–905、recall_session.py。必要になった場合だけentity/query_hint producerを変更する。</p></div>
+
+<div class="phase"><h3>P5 · 正常／縮退の品質と本番hostで受入する</h3>
+<ol class="checklist"><li><input type="checkbox" disabled><span>既存normal匿名100件のsnapshot parity、manual-94、変更するauthorityに必要なlocked answer gateを再利用し、新しい失敗cohortを別評価する。</span></li><li><input type="checkbox" disabled><span>1 hostの限定canaryから開始し、idle／index更新中／通常のモデル同居環境で、host別24時間かつ100 eligible exposures以上を観測する。</span></li><li><input type="checkbox" disabled><span>コード・設定・index・artifact identityを記録してlive結果を確認し、受入後に残るhostへ展開する。</span></li></ol>
+<p><strong>authorityの境界：</strong>P1〜P4の修正自体でField／Processorの権限やpositive learningを昇格させない。現行teacher-owned／candidate-shadowの境界を維持する。学習・policy promotion・Field/Processor authority変更を含む段階では、既存のmanual-94、locked built-in field-e2e、exact cross-split、事前scorer calibration、connected-cluster下限、candidate/Processor coverage・precision下限、UID/content digest再bind、freshness/adoptionの<strong>該当する全ゲート</strong>を通す。欠落・不一致はfail-closedとし、部分検索結果やinjected/usedから迂回しない。単なる不具合修正に、権限昇格を新たな依存作業として追加する意図ではない。</p>
+<p><strong>将来のdeploy順：</strong>実装・検証・scoped commit → pushが明示承認された段階でpush → 対象serviceだけrestart → archive SHA／effective config → health → 実際のhost会話で確認。今回はpush／restartしない。</p>
+</div>
+</section>
+
+<section data-section="完了条件"><h2>採用・棄却の基準</h2>
+<div class="table-wrap"><table><thead><tr><th>軸</th><th>最低条件</th><th>判定上の注意</th></tr></thead><tbody>
+<tr><td>明白な誤注入</td><td>既知negative／UI-only／話題転換fixtureで不要カード0件</td><td>一般化したgold評価を併用。page-id文字列やcwdだけを正解にしない。</td></tr>
+<tr><td>有用な取得</td><td>既存manual-94を合格し、paired goldの必要記憶coverageを低下させない</td><td>train／holdoutを分け、単なる全棄却で達成させない。finite cohortの合格を全入力への保証にしない。</td></tr>
+<tr><td>正常経路</td><td>挙動を変えないphaseは既存snapshot order／score／identity 100%一致</td><td>意図したquery変更は別goldで評価し、「同一出力」と「品質改善」を混ぜない。</td></tr>
+<tr><td>同期期限</td><td>4,000ms total、fallback ≤600ms、host-wrapper timeout=0</td><td>inner receiptのlatencyとhost全体のwall timeを別に記録。既存live gateのdeadline pass ≥99%も満たす。</td></tr>
+<tr><td>live可用性</td><td>基準policyで意味検索対象のrequestについて、期限・容量・依存障害による縮退率 &lt;1%を目標、normal p95 ≤3,000ms / p99 ≤3,400ms</td><td>分母はbreaker適用前のpolicy／rolloutで対象となる正規化済みuser request。分子はsocket timeout・search budget・ServiceBusy/Unavailableと、それらによるbreaker抑止を含む。UI-only/既定のno-recall除外は別計数する。障害時の安全な棄却とrelevance/coverageを同時評価し、disabledや分母除外による改善を認めない。</td></tr>
+<tr><td>queue</td><td>期限切れpending requestのencode 0、後続live requestへのpoisoning 0</td><td>実行中の処理は別計数。成功queryだけからerror率を作らない。</td></tr>
+<tr><td>部分結果・snapshot</td><td>degraded／failure／query由来／channel完了状態を維持し、UID・digest・generation不一致はL2棄却</td><td>正常検索成功・teacher評価済み・学習許可へ昇格しない。候補上限内のidentity確認で実現し、全corpus scanをfallbackへ入れない。</td></tr>
+<tr><td>安全性</td><td>既存sensitivity/Raw/CAS/readback/UID・digest・decision/session identityを維持</td><td>unknown exceptionをavailability fallbackへ隠さない。injected/usedを正の学習ラベルにしない。</td></tr>
+</tbody></table></div>
+<p class="note">暫定の速度目標はP0で確定する。品質を保って目標に届かない変更は採用せず、計測した律速と未達理由を記録する。</p>
+</section>
+
+<section data-section="検証手順"><h2>実行済みの検証と、再利用する検証</h2>
+<details open><summary>今回実行した診断：2件とも現行コードで失敗</summary>
+<pre>PYTHONDONTWRITEBYTECODE=1 .venv/bin/python \
+  _handoff/evidence/2026-09-05-recall-investigation/regression_probes.py
+
+unrelated_fallback_admission: confidence=0.3, decision=search,
+  unrelated_cards=1, passes=false
+expired_pending_request: caller_timed_out=true,
+  expired_request_encoded=true, following_request_completed=true, passes=false
+exit code: 1（調査対象の問題を検出）</pre>
+<p>合成した候補とin-memory batcherだけを使う。モデル・サービスへ接続せず、productionへの書込みをmockで止める。このnegative診断だけでは取得率・実BM25順位・sensitivity・総合品質は検証しない。実indexを使った2発話の再現とは別に、再実行可能な失敗条件を残している。</p></details>
+<details><summary>今回passした既存9テスト</summary>
+<pre>PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -p no:cacheprovider -q \
+  tests/test_recall_runtime.py tests/test_semantic_service.py tests/test_semantic_client.py \
+  -k 'deterministic_fallback or semantic_service_unavailable or unknown_semantic_error or query_batcher or caches_query or selected_for_rollout'
+
+9 passed, 215 deselected in 2.16s</pre></details>
+<details><summary>将来の改修で再利用する評価</summary>
+<ul><li><code>tests/test_recall_baseline.py</code> と <code>scripts/recall_parity.py capture / compare</code>：匿名100件、同一snapshot、receipt比較。</li><li><code>scripts/search_pipeline_snapshot.py --compare</code>：既存20 queryのorder／score。latencyは別測定。</li><li><code>scripts/benchmark-sync-recall --cohort idle|cpu-indexing|qwen-27b --pairs 200</code>：実装後に環境・起動するモデルを確認して使う。現行モデル構成へ無条件に古いcohort名を適用しない。</li><li><code>manual-94-manifest.json</code>／既存locked answer artifacts：対象の変更に適用されるseal・split・authority契約を守る。</li><li>fixture追加：期限切れ要求とlive要求が同batch、search/verify deadline、0/負値deadline、socket切断、unknown error、破損snapshot、fallback→followup、別topic、既知UI応答とユーザー記述XML。</li></ul></details>
+</section>
+
+<section data-section="やってはいけないこと"><h2>変更境界とrollback</h2>
+<ul><li>Raw完全保存、CAS、readback、authority/quorum、sealed評価、既存sensitivity境界を弱めない。</li><li>fallback内へモデル・全文corpus再構築・新しい同期書込みを追加しない。</li><li>全queryを前のtopicへ寄せない。cwdのhard allowlist、BM25の未校正固定score floor、自然言語aliasのpage-id store流用をしない。</li><li>今回の調査だけを根拠にモデルを交換せず、大きなframework・新しい常駐サービス・新評価基盤を追加しない。</li><li>各phaseを独立commitにする。time budget/config変更とranking変更を別々に戻せるようにする。意図しないnormal parity差、sensitivity/identity異常、host timeout増、同batchへのcancel影響があれば当該変更を戻す。</li><li>無関係な<code>scripts/recall_r6_harness.py</code>、<code>tests/test_recall_r6_harness.py</code>、既存untracked調査物を変更・commitしない。</li></ul>
+</section>
+
+<section data-section="既存計画との関係"><h2>既存成果の再利用</h2>
+<p>9/5の固定モデル最適化計画の採用済みI/O変更、8/13の正常系100件parity、8/23のhost別live cohort契約を再利用する。今回の計画は「縮退時の品質」「期限切れqueue」「新processの初回読込み」「追従文とUI応答」を追加対象とする。</p>
+<p>旧Planにある大規模テスト結果・未完了checkbox・性能値を、今回の実装状態や受入完了の証拠へ読み替えない。現在のcode/runtimeとの一致を別途確認してから各gateを再利用する。</p>
+<ul><li><a href="2026-09-05_0742_chronovisor-fixed-model-optimization-roadmap.html">固定モデル最適化計画</a></li><li><a href="2026-08-13_1431_recall-precision-preserving-latency.html">Recall精度を維持した遅延改善</a></li><li><a href="2026-08-23_1944_chronovisor-integrity-recall-operational-truth.html">Integrity / Recall / Operational Truth</a></li></ul>
+</section>
+
+<section data-section="受け渡しメモ"><h2>成果物と限界</h2>
+<ul><li><a href="evidence/2026-09-05-recall-investigation/evidence.json">集計・設定・再現結果のJSON</a>：個人の記憶本文・機密情報・無関係なpage-idを含めていない。</li><li><a href="evidence/2026-09-05-recall-investigation/regression_probes.py">最小の失敗診断</a>：現行コードではexit 1が期待値。改修後は両方passを確認する。</li><li>全corpusの関連度採点や本番高負荷試験は未実施。少数のlive probeはSLOや改善率の証明ではない。</li><li>graph Tier 2と正確なsourceを併用し、引用したコードのcoverageを確認。graphの無欠損表示を網羅性の証明とは扱っていない。</li></ul>
+</section>
+
+<section class="blockers" data-section="ブロッカー"><h2>未解決事項</h2><p>計画作成を妨げるblockerはない。実装前にP0で決める事項は、各timeoutの実時間内訳、host全体wall timeの採取方法、fallback品質goldの固定、snapshot鮮度の契約。実装・push・restartは今回の調査依頼には含まれない。</p></section>
+
+<section class="rules" data-section="実行中更新ルール"><h2>計画の更新</h2><ul><li>phaseの受入条件を満たした時だけcheckboxを更新し、検証結果を実行ログへ記録する。</li><li>状態を変更する時は<code>script#plan-meta</code>と<code>.badge[data-state]</code>を一致させる。</li><li>仮説が反証された場合は候補から外し、新しい計測値で優先順位を更新する。</li></ul></section>
+<section data-section="実行ログ"><h2>実行ログ</h2><ol class="log"><li><time>2026-09-05 11:34 JST</time><span>canonical generatorでHTML Planを生成。ユーザーが_handoffへのHTML保存を指定。</span></li><li><time>2026-09-05 調査</time><span>固定cohort 821回・直近100回、current config/archive、実index/semanticの少数probe、metadata初回読込み、独立3調査を照合。</span></li><li><time>2026-09-05 検証</time><span>既存関連9テストpass。診断2件は現行問題を検出してexit 1。調査完了、実装未着手としてready。</span></li><li><time>2026-09-05 独立レビュー</time><span>部分結果のdegraded/provenance、snapshot identity、positive-control gold、既存authorityゲートの適用範囲を明記。実装未着手を維持。</span></li></ol></section>
+
+</body></html>
