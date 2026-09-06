@@ -18,7 +18,8 @@ import sawfwair_quant_benchmark as bench
 from vq32_benchmark import prompt_schema
 
 WORK = Path("/Users/trafficsign/.omlx/experiments/ds4-qwen38-q4")
-ENGINE = Path("/Users/trafficsign/projects/sandbox/ds4-qwen38-benchmark-20260906")
+ENGINE = Path("/Users/trafficsign/.local/share/dwarfstar/runtime")
+MODEL_DIR = Path("/Users/trafficsign/.local/share/dwarfstar/models")
 OUT = bench.ROOT / "_handoff/evidence/2026-09-06-ds4-qwen38-benchmark"
 MANAGER = "/Users/trafficsign/Applications/Chronovisor.app/Contents/MacOS/Chronovisor"
 PROTECTED = [
@@ -194,15 +195,15 @@ def server_command(arm):
             "2GB",
         ]
     for name, size in SIZES.items():
-        path = WORK / "model" / name
+        path = MODEL_DIR / name
         if not path.is_file() or path.stat().st_size != size:
             raise RuntimeError(f"incomplete download: {name}")
     command = [
         str(ENGINE / "ds4-server"),
         "-m",
-        str(WORK / "model" / MODEL),
+        str(MODEL_DIR / MODEL),
         "--ple",
-        str(WORK / "model" / PLE),
+        str(MODEL_DIR / PLE),
         "--metal",
         "--host",
         "127.0.0.1",
