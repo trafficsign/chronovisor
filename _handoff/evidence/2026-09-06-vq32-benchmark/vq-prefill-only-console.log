@@ -1,0 +1,14 @@
+vqlab serve: patch self-check passed
+no --sidecar: serving without MTP drafting
+/Users/trafficsign/.omlx/experiments/vq32/venv/lib/python3.12/site-packages/mlx_lm/server.py:1692: UserWarning: mlx_lm.server is not recommended for production as it only implements basic security checks.
+  warnings.warn(
+2026-09-06 12:30:01,823 - INFO - Starting httpd at 127.0.0.1 on port 18136...
+127.0.0.1 - - [06/Sep/2026 12:30:02] "GET /health HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2026 12:30:09] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-06 12:30:09,593 - INFO - Prompt Cache: 0 sequences, 0.00 GB
+2026-09-06 12:30:09,593 - INFO - - assistant: 0 sequences, 0.00 GB
+2026-09-06 12:30:09,593 - INFO - - user: 0 sequences, 0.00 GB
+2026-09-06 12:30:09,593 - INFO - - system: 0 sequences, 0.00 GB
+2026-09-06 12:30:09,705 - INFO - Prompt processing progress: 0/16
+2026-09-06 12:30:15,010 - INFO - Prompt processing progress: 15/16
+2026-09-06 12:30:15,281 - INFO - Prompt processing progress: 16/16

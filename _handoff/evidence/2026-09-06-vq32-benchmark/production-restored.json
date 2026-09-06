@@ -1,0 +1,133 @@
+{
+  "hashes_before": {
+    "/Users/trafficsign/.chronovisor/config.toml": "d3f3e80ad02db43d6c27bac35254475c15947e312930e2f78e291ce3f40bbb94",
+    "/Users/trafficsign/.omlx/settings.json": "99ef9327f5e59162981c6968e318b481eca05c0b7c4bbfcb9487c14d2c2ccea0",
+    "/Users/trafficsign/.omlx/model_settings.json": "51e1ab5a4e24a8fa4011c00908327357258edb24b3e7295fc9243286d74a4b1c"
+  },
+  "hashes_after": {
+    "/Users/trafficsign/.chronovisor/config.toml": "d3f3e80ad02db43d6c27bac35254475c15947e312930e2f78e291ce3f40bbb94",
+    "/Users/trafficsign/.omlx/settings.json": "99ef9327f5e59162981c6968e318b481eca05c0b7c4bbfcb9487c14d2c2ccea0",
+    "/Users/trafficsign/.omlx/model_settings.json": "51e1ab5a4e24a8fa4011c00908327357258edb24b3e7295fc9243286d74a4b1c"
+  },
+  "config_unchanged": true,
+  "health": {
+    "status": "healthy",
+    "default_model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+    "engine_pool": {
+      "model_count": 3,
+      "loaded_count": 2,
+      "final_ceiling": 111669149696,
+      "current_model_memory": 83299305817
+    },
+    "mcp": null
+  },
+  "response": "RESTORED",
+  "services": {
+    "services": [
+      {
+        "plist": "com.trafficsign.chronovisor-converge.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-dashboard.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-deadman-observer.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-ingest-drain.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-lan-dashboard.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-librarian-review.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-reranker.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-searxng.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-semantic.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-sleep.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-watchdog.managed-v2.plist",
+        "status": "enabled"
+      }
+    ]
+  },
+  "dashboard_http": 200,
+  "statuses": {
+    "semantic": {
+      "ok": null,
+      "ready": true,
+      "status": "ok",
+      "pid": 37786
+    },
+    "reranker": {
+      "ok": null,
+      "ready": true,
+      "status": "ok",
+      "pid": 37374
+    },
+    "ingest": {
+      "status": "ready",
+      "authority_available": true,
+      "ingest_runtime_available": true,
+      "authority_preflight": {
+        "ok": true,
+        "status": "ready",
+        "blocked_by": null,
+        "retryable": false,
+        "error": null,
+        "artifact_sha256": null
+      }
+    }
+  },
+  "experimental_port_closed": true,
+  "memory": {
+    "time": 1788666980.598516,
+    "page_size": 16384,
+    "pages": {
+      "Pages free": 265514,
+      "Pages active": 1081490,
+      "Pages inactive": 1070666,
+      "Pages speculative": 21011,
+      "Pages throttled": 0,
+      "Pages wired down": 5424725,
+      "Pages purgeable": 6431,
+      "\"Translation faults\"": 11609250077,
+      "Pages copy-on-write": 708330250,
+      "Pages zero filled": 19416933530,
+      "Pages reactivated": 2483618911,
+      "Pages purged": 177593916,
+      "File-backed pages": 759797,
+      "Anonymous pages": 1413370,
+      "Pages stored in compressor": 2463081,
+      "Pages occupied by compressor": 474010,
+      "Decompressions": 1729720342,
+      "Compressions": 2215567390,
+      "Pageins": 888941089,
+      "Pageouts": 1237786,
+      "Swapins": 5398124,
+      "Swapouts": 6814232
+    },
+    "swap_used_mib": 11756.75,
+    "os_active_wired_compressor_bytes": 114364006400,
+    "os_including_inactive_bytes": 131905798144
+  }
+}

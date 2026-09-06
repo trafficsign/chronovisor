@@ -1,0 +1,28 @@
+{
+  "baseline": {
+    "decode_median": 40.26017287134449,
+    "prefill_medians": {
+      "4096": 6.294185707985889,
+      "16384": 23.496578291000333,
+      "32768": 46.70916141697671
+    },
+    "os_released_gib": 76.76744079589844,
+    "swapouts_increase_bytes": 0
+  },
+  "vq-compatible": {
+    "decode_median": 30.922650133516512,
+    "prefill_medians": {
+      "4096": 11.65152912499616,
+      "16384": 44.20147537498269,
+      "32768": 96.5526373750181
+    },
+    "os_released_gib": 73.08804321289062,
+    "swapouts_increase_bytes": 0
+  },
+  "vq-compatible-no-mtp": {
+    "decode_median": 19.50566433286294,
+    "prefill_one_run": 96.65702729101758,
+    "os_released_gib": 70.322509765625,
+    "swapouts_increase_bytes": 0
+  }
+}

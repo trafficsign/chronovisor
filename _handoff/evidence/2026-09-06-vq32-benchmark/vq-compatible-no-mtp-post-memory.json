@@ -1,0 +1,32 @@
+{
+  "time": 1788666749.407843,
+  "page_size": 16384,
+  "pages": {
+    "Pages free": 520477,
+    "Pages active": 1306573,
+    "Pages inactive": 1292350,
+    "Pages speculative": 13767,
+    "Pages throttled": 0,
+    "Pages wired down": 5031855,
+    "Pages purgeable": 44643,
+    "\"Translation faults\"": 11599582274,
+    "Pages copy-on-write": 707877849,
+    "Pages zero filled": 19403920688,
+    "Pages reactivated": 2483197905,
+    "Pages purged": 177490584,
+    "File-backed pages": 1411495,
+    "Anonymous pages": 1201195,
+    "Pages stored in compressor": 1993906,
+    "Pages occupied by compressor": 172039,
+    "Decompressions": 1726863996,
+    "Compressions": 2212081401,
+    "Pageins": 883529541,
+    "Pageouts": 1237002,
+    "Swapins": 5397342,
+    "Swapouts": 6814232
+  },
+  "swap_used_mib": 11772.75,
+  "os_active_wired_compressor_bytes": 106667491328,
+  "os_including_inactive_bytes": 127841353728,
+  "rss_bytes": 34912567296
+}

@@ -227,15 +227,19 @@ JP_CASES = [
 ]
 
 
-def benchmark(arm):
-    base = prepare(arm)
+def benchmark(arm, server_command=None, smoke_only=False):
+    base = prepare(arm) if server_command is None else WORK
     rows = []
     stop = threading.Event()
     samples = []
     save(f"{arm}-no-model.json", memory())
-    log = (base / "console.log").open("w")
+    log_path = base / (
+        "console.log" if server_command is None else f"{arm}-console.log"
+    )
+    log = log_path.open("w")
     proc = subprocess.Popen(
-        [
+        server_command
+        or [
             CLI,
             "serve",
             "--base-path",
@@ -273,12 +277,10 @@ def benchmark(arm):
     try:
         for _ in range(600):
             if proc.poll() is not None:
-                raise RuntimeError(
-                    f"server exited {proc.returncode}; see {base}/console.log"
-                )
+                raise RuntimeError(f"server exited {proc.returncode}; see {log_path}")
             try:
                 with urllib.request.urlopen(URL + "/health", timeout=2) as response:
-                    if json.load(response).get("status") == "healthy":
+                    if json.load(response).get("status") in {"healthy", "ok"}:
                         break
             except Exception:
                 pass
@@ -292,7 +294,11 @@ def benchmark(arm):
         (OUT / f"{arm}-loaded-vmmap.txt").write_text(
             command("vmmap", "-summary", str(proc.pid))
         )
-        if arm == "candidate-no-mtp":
+        if generic._normalized(generic._content(warm)) != "ready":
+            raise RuntimeError("warm-up response was not READY; full benchmark refused")
+        if smoke_only:
+            return
+        if arm.endswith("no-mtp"):
             diagnostic = []
             for ident, prompt, expected in generic.EXACT_CASES:
                 if ident not in {"work", "code", "jp_order", "mul_sub"}:
@@ -310,6 +316,13 @@ def benchmark(arm):
                 )
                 save(f"{arm}-diagnostic.json", diagnostic)
             print(arm, "diagnostic:", diagnostic, flush=True)
+            prompt, secret = generic._needle_prompt(32768, 1)
+            prefill = stream("Independent test 32768/1.\n" + prompt, arm, 16)
+            prefill["passed"] = generic._normalized(
+                prefill["content"]
+            ) == generic._normalized(secret)
+            save(f"{arm}-prefill-supplement.json", prefill)
+            print(arm, "prefill supplement", prefill["wall_seconds"], flush=True)
             generation = []
             for run in range(1, 4):
                 prompt = f"試行{run}。日本語で、議事録から事実と推測を区別して要約する方法を具体例付きで詳しく説明してください。少なくとも800文字書いてください。"
@@ -320,6 +333,10 @@ def benchmark(arm):
                 print(
                     arm, "decode", run, result["decode_tokens_per_second"], flush=True
                 )
+            save(f"{arm}-post-memory.json", memory(proc.pid))
+            (OUT / f"{arm}-post-vmmap.txt").write_text(
+                command("vmmap", "-summary", str(proc.pid))
+            )
             return
         quality = generic._quality(URL, arm, 660)
         save(f"{arm}-generic-quality.json", quality)

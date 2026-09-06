@@ -1,0 +1,22 @@
+{
+  "arm": "vq-normfix",
+  "command": [
+    "/Users/trafficsign/.omlx/experiments/vq32/venv/bin/python",
+    "-u",
+    "/Users/trafficsign/projects/personal/chronovisor/scripts/vq32_serve.py",
+    "--model",
+    "/Users/trafficsign/.omlx/experiments/vq32/model",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "18136",
+    "--prompt-cache-size",
+    "0",
+    "--decode-concurrency",
+    "1",
+    "--sidecar",
+    "/Users/trafficsign/.omlx/experiments/vq32/model/mtp-head-q6.safetensors"
+  ],
+  "schema_mode": "identical explicit prompt; response_format removed for paired quality tests",
+  "prefix_cache": false
+}

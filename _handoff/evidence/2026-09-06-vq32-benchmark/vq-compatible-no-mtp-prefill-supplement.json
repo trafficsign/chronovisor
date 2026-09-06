@@ -1,0 +1,16 @@
+{
+  "ttft_seconds": 96.0088625830249,
+  "wall_seconds": 96.65702729101758,
+  "decode_tokens_per_second": 16.970994971426354,
+  "usage": {
+    "prompt_tokens": 32722,
+    "completion_tokens": 12,
+    "total_tokens": 32734,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "content": "KAPPA-32768-1",
+  "prompt_sha256": "022011f0c74fa259f40f3a1525c9184e2fcf7676ba50384f3d69bf771f4a59c8",
+  "passed": true
+}

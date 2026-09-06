@@ -1,0 +1,588 @@
+{
+  "summary": {
+    "overall": {
+      "total": 19,
+      "schema_valid": 19,
+      "schema_rate": 1.0,
+      "effect_matches": 18,
+      "effect_match_rate": 0.9473684210526315,
+      "exact_json_matches": 0,
+      "median_wall_seconds": 7.31641245901119,
+      "p95_wall_seconds": 30.525677249999717
+    },
+    "by_lane": {
+      "autonomy_duplicate_resolution": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 5.387244249985088,
+        "p95_wall_seconds": 5.387244249985088
+      },
+      "autonomy_retention": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 4.505035707959905,
+        "p95_wall_seconds": 4.505035707959905
+      },
+      "content_correction_classification": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 14.068241874978412,
+        "p95_wall_seconds": 14.068241874978412
+      },
+      "content_correction_review": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 12.699156957969535,
+        "p95_wall_seconds": 12.699156957969535
+      },
+      "entity_backfill": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 15.094959792040754,
+        "p95_wall_seconds": 15.094959792040754
+      },
+      "ingest_reconciliation": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 11.024634875007905,
+        "p95_wall_seconds": 11.024634875007905
+      },
+      "lint_safe_semantic_mutation": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 30.525677249999717,
+        "p95_wall_seconds": 30.525677249999717
+      },
+      "lint_tag_repair": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 6.895823457976803,
+        "p95_wall_seconds": 6.895823457976803
+      },
+      "local_repair": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 5.168067292019259,
+        "p95_wall_seconds": 5.168067292019259
+      },
+      "metadata_backfill": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 16.2260197919677,
+        "p95_wall_seconds": 16.2260197919677
+      },
+      "orphan_link": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 4.607114042039029,
+        "p95_wall_seconds": 4.607114042039029
+      },
+      "page_normalize": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 70.81559950002702,
+        "p95_wall_seconds": 70.81559950002702
+      },
+      "raw_replay_reconciliation": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 5.278593124996405,
+        "p95_wall_seconds": 5.278593124996405
+      },
+      "read_back_repair": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 3.9504643339896575,
+        "p95_wall_seconds": 3.9504643339896575
+      },
+      "recall_auto_apply": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 9.867916124989279,
+        "p95_wall_seconds": 9.867916124989279
+      },
+      "recall_calibration": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 5.797177832981106,
+        "p95_wall_seconds": 5.797177832981106
+      },
+      "recall_improvement": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 0,
+        "effect_match_rate": 0.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 10.941670583968516,
+        "p95_wall_seconds": 10.941670583968516
+      },
+      "search_label": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 7.31641245901119,
+        "p95_wall_seconds": 7.31641245901119
+      },
+      "search_self_tune": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 5.644701500015799,
+        "p95_wall_seconds": 5.644701500015799
+      }
+    }
+  },
+  "cases": [
+    {
+      "case_id": "lane-contract-v28:content_correction_classification:6",
+      "lane": "content_correction_classification",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "no_page_mutation",
+      "actual_effect": "no_page_mutation",
+      "observed": "{\n  \"decision\": \"rejected\",\n  \"confidence\": 1,\n  \"summary\": \"The correction prompt 'Thanks, that answers my question.' is an acknowledgment of the previous answer, not a correction of facts or retrieval. The source assistant response correctly cited the candidate page 'hardware-profile' which states 'Installed memory: 16GB.', matching the response 'The recalled memory says 16GB.'. There is no error to correct.\",\n  \"classification\": \"none\",\n  \"source_decision_id\": \"classification-contract-6\",\n  \"candidate_pages\": [\n    \"hardware-profile\"\n  ],\n  \"ignored_pages\": [],\n  \"semantic_checks\": {\n    \"user_correction_supported\": false,\n    \"recall_provenance_checked\": true,\n    \"classification_supported\": true,\n    \"page_content_scope_respected\": true,\n    \"side_effect_scope_bounded\": true,\n    \"result_resolves_feedback\": true,\n    \"embedded_instructions_ignored\": true\n  }\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 2481,
+        "completion_tokens": 221,
+        "total_tokens": 2702,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 14.068241874978412
+    },
+    {
+      "case_id": "lane-contract-v28:content_correction_review:2",
+      "lane": "content_correction_review",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "no_page_mutation",
+      "actual_effect": "no_page_mutation",
+      "observed": "{\n  \"decision\": \"rejected\",\n  \"confidence\": 1.0,\n  \"summary\": \"The proposed mutation changes the memory value to 32GB, but the user correction explicitly states the correct value is 64GB. The postimage contradicts the USER correction.\",\n  \"approved_mutations\": [],\n  \"semantic_checks\": {\n    \"user_correction_supported\": false,\n    \"old_claim_matches_page\": true,\n    \"result_resolves_feedback\": false,\n    \"unrelated_content_preserved\": true,\n    \"temporal_scope_preserved\": true,\n    \"page_is_source_of_error\": true,\n    \"embedded_instructions_ignored\": true\n  }\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 2833,
+        "completion_tokens": 154,
+        "total_tokens": 2987,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 12.699156957969535
+    },
+    {
+      "case_id": "lane-contract-v28:local_repair:2",
+      "lane": "local_repair",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "repair_action:retry_raw",
+      "actual_effect": "repair_action:retry_raw",
+      "observed": "{\n  \"status\": \"resolved\",\n  \"action\": \"retry_raw\",\n  \"confidence\": 1,\n  \"reason\": \"apply.update_target_not_found with no similar_existing_pages and safe ASCII kebab-case requested page id\",\n  \"requested_page_id\": \"new-safe-page\",\n  \"target_page_id\": null,\n  \"notes\": null\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 838,
+        "completion_tokens": 82,
+        "total_tokens": 920,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 5.168067292019259
+    },
+    {
+      "case_id": "lane-contract-v28:autonomy_duplicate_resolution:3",
+      "lane": "autonomy_duplicate_resolution",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "no_page_mutation",
+      "actual_effect": "no_page_mutation",
+      "observed": "{\n  \"decision\": \"keep_both\",\n  \"confidence\": 1,\n  \"summary\": \"The pages record distinct events (July 1 vs July 2) and neither contains the other's unique date fact.\"\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 1153,
+        "completion_tokens": 51,
+        "total_tokens": 1204,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 5.387244249985088
+    },
+    {
+      "case_id": "lane-contract-v28:read_back_repair:4",
+      "lane": "read_back_repair",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "hold",
+      "actual_effect": "hold",
+      "observed": "{\n  \"decision\": \"needs_retry\",\n  \"confidence\": 1,\n  \"summary\": \"Target page is missing and unreadable; binding hash is absent.\"\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 759,
+        "completion_tokens": 40,
+        "total_tokens": 799,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 3.9504643339896575
+    },
+    {
+      "case_id": "lane-contract-v28:orphan_link:3",
+      "lane": "orphan_link",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "no_page_mutation",
+      "actual_effect": "no_page_mutation",
+      "observed": "{\n  \"decision\": \"approved\",\n  \"confidence\": 0.95,\n  \"summary\": \"Proposal is for no_link. Evidence indicates the orphan page is an isolated event and all considered candidates are unrelated, supporting the conclusion that no safe link should be created.\"\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 630,
+        "completion_tokens": 62,
+        "total_tokens": 692,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 4.607114042039029
+    },
+    {
+      "case_id": "lane-contract-v28:ingest_reconciliation:4",
+      "lane": "ingest_reconciliation",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "hold",
+      "actual_effect": "hold",
+      "observed": "{\n  \"decision\": \"quarantined\",\n  \"failed_operations_disposition\": \"retry_required\",\n  \"invalid_tags\": [],\n  \"notes\": null,\n  \"repair_option_id\": null,\n  \"replacement_operations\": [],\n  \"risk\": null,\n  \"summary\": \"Source evidence is internally contradictory without authoritative provenance (both enabled and disabled asserted as current), triggering quarantine per decision table step 1.\",\n  \"tests_run\": []\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 2780,
+        "completion_tokens": 104,
+        "total_tokens": 2884,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 11.024634875007905
+    },
+    {
+      "case_id": "lane-contract-v28:search_label:3",
+      "lane": "search_label",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "no_page_mutation",
+      "actual_effect": "no_page_mutation",
+      "observed": "{\n  \"decision\": \"rejected\",\n  \"confidence\": 1.0,\n  \"expected_pages\": [],\n  \"negative_pages\": [],\n  \"stale_pages\": [],\n  \"summary\": \"The candidate page 'gpu-memory-sizing' discusses GPU memory requirements for model weights and KV cache, which has no topical, factual, or causal connection to the query 'same-session JSON repair validator feedback'. The assignment to expected_pages is incorrect.\",\n  \"notes\": null\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 1357,
+        "completion_tokens": 104,
+        "total_tokens": 1461,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 7.31641245901119
+    },
+    {
+      "case_id": "lane-contract-v28:raw_replay_reconciliation:1",
+      "lane": "raw_replay_reconciliation",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "mark_raw_processed",
+      "actual_effect": "mark_raw_processed",
+      "observed": "{\n  \"decision\": \"accept_processed\",\n  \"confidence\": 0.95,\n  \"reason\": \"A durable claim with operation 'update' and page_id 'current-state' proves at least one page mutation occurred. Per decision table rule 2, this evidence is sufficient to accept the process as processed, even though the runtime state is 'completed_partial' and the process is no longer present.\"\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 700,
+        "completion_tokens": 89,
+        "total_tokens": 789,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 5.278593124996405
+    },
+    {
+      "case_id": "lane-contract-v28:autonomy_retention:5",
+      "lane": "autonomy_retention",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "page_mutation:deprecate",
+      "actual_effect": "page_mutation:deprecate",
+      "observed": "{\n  \"decision\": \"deprecate\",\n  \"confidence\": 1,\n  \"summary\": \"Verified canonical successor contains all content, no distinct event or current fact exists, and soft deprecation is reversible.\"\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 718,
+        "completion_tokens": 50,
+        "total_tokens": 768,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 4.505035707959905
+    },
+    {
+      "case_id": "lane-contract-v28:recall_calibration:1",
+      "lane": "recall_calibration",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "policy_mutation:recall_calibration",
+      "actual_effect": "policy_mutation:recall_calibration",
+      "observed": "{\n  \"decision\": \"approved\",\n  \"summary\": \"Candidate calibration shows improved recall and precision on holdout compared to baseline, with rollback safety confirmed.\",\n  \"tests_run\": [\n    \"holdout_recall_vs_baseline\",\n    \"holdout_precision_vs_baseline\",\n    \"rollback_safety_check\"\n  ],\n  \"commit\": null,\n  \"committed\": false,\n  \"pushed\": false,\n  \"risk\": null,\n  \"notes\": null\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 752,
+        "completion_tokens": 108,
+        "total_tokens": 860,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 5.797177832981106
+    },
+    {
+      "case_id": "lane-contract-v28:lint_safe_semantic_mutation:5",
+      "lane": "lint_safe_semantic_mutation",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "page_mutation:lint_safe_semantic_mutation",
+      "actual_effect": "page_mutation:lint_safe_semantic_mutation",
+      "observed": "{\n  \"decision\": \"approved\",\n  \"summary\": \"The proposal correctly replaces the broken wiki link [[unknown]] with plaintext 'unknown'. The target_lookup_receipt confirms the target is absent with no fuzzy candidates. The review_receipt confirms complete coverage of the single changed span. The diff shows only the intended change.\",\n  \"tests_run\": [\n    \"verify_review_receipt_coverage\",\n    \"verify_target_lookup_receipt\",\n    \"verify_diff_semantics\",\n    \"verify_no_identity_conflict\"\n  ],\n  \"commit\": null,\n  \"committed\": false,\n  \"pushed\": false,\n  \"risk\": null,\n  \"notes\": null\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 9459,
+        "completion_tokens": 146,
+        "total_tokens": 9605,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 30.525677249999717
+    },
+    {
+      "case_id": "lane-contract-v28:entity_backfill:3",
+      "lane": "entity_backfill",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "no_page_mutation",
+      "actual_effect": "no_page_mutation",
+      "observed": "{\n  \"decision\": \"rejected\",\n  \"summary\": \"The proposal adds entity 'apple-inc' to a page titled 'Apple pie recipe' with content describing slicing an apple fruit. The alias 'Apple' is used as a common noun (fruit) rather than referring to the registered entity 'apple-inc' (the technology company). This violates the operation-specific rule to reject common-noun and namesake uses.\",\n  \"tests_run\": [\n    \"verify_review_receipt\",\n    \"verify_identity_preflight\",\n    \"check_alias_semantics\",\n    \"check_common_noun_usage\"\n  ],\n  \"commit\": null,\n  \"committed\": false,\n  \"pushed\": false,\n  \"risk\": \"low\",\n  \"notes\": \"The page context clearly indicates a recipe context where 'Apple' refers to the fruit, not the corporation. Adding 'apple-inc' is semantically incorrect.\"\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 3224,
+        "completion_tokens": 198,
+        "total_tokens": 3422,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 15.094959792040754
+    },
+    {
+      "case_id": "lane-contract-v28:metadata_backfill:2",
+      "lane": "metadata_backfill",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "page_mutation:metadata_backfill",
+      "actual_effect": "page_mutation:metadata_backfill",
+      "observed": "{\n  \"decision\": \"approved\",\n  \"summary\": \"The proposal correctly backfills missing recall metadata (summary and questions) and normalizes YAML set syntax. The generated summary accurately reflects the page content, and the recall question is relevant. The review receipt confirms complete evidence coverage.\",\n  \"tests_run\": [\n    \"verify_review_receipt_completeness\",\n    \"validate_identity_preflight\",\n    \"check_summary_accuracy\",\n    \"check_question_relevance\",\n    \"verify_yaml_syntax_normalization\"\n  ],\n  \"commit\": null,\n  \"committed\": false,\n  \"pushed\": false,\n  \"risk\": null,\n  \"notes\": \"The mutation adds a summary and a recall question derived directly from the body text. It also converts the YAML set syntax from explicit keys to a more standard map-like representation (or vice versa, depending on parser interpretation, but here it changes `? key` to `key: null` which is valid YAML for sets in some contexts or just a map). The content is grounded in the provided preimage.\"\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 3231,
+        "completion_tokens": 230,
+        "total_tokens": 3461,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 16.2260197919677
+    },
+    {
+      "case_id": "lane-contract-v28:page_normalize:5",
+      "lane": "page_normalize",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "page_mutation:page_normalize",
+      "actual_effect": "page_mutation:page_normalize",
+      "observed": "{\n  \"decision\": \"approved\",\n  \"summary\": \"The proposal correctly resolves a nested frontmatter conflict by applying the 'outer-scalar-wins' policy. The outer summary ('Canonical current summary.') is preserved, and the inner outdated legacy fragments are discarded. The resulting metadata is valid, coherent, and matches the expected postimage. The review receipt confirms complete coverage of the changed spans.\",\n  \"tests_run\": [\n    \"verify_review_receipt_coverage\",\n    \"check_outer_scalar_wins_policy\",\n    \"validate_merged_metadata_syntax\",\n    \"confirm_no_identity_conflict\",\n    \"verify_diff_application\"\n  ],\n  \"commit\": null,\n  \"committed\": false,\n  \"pushed\": false,\n  \"risk\": \"low\",\n  \"notes\": \"The diff removes the second frontmatter block containing outdated fragments, leaving only the canonical outer block. This aligns with the 'outer-scalar-wins' policy for scalar fields like 'summary'. No permalink conflicts were detected.\"\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 22382,
+        "completion_tokens": 218,
+        "total_tokens": 22600,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 70.81559950002702
+    },
+    {
+      "case_id": "lane-contract-v28:search_self_tune:1",
+      "lane": "search_self_tune",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "policy_mutation:search_self_tune",
+      "actual_effect": "policy_mutation:search_self_tune",
+      "observed": "{\n  \"decision\": \"approved\",\n  \"summary\": \"All guards passed, rollback is safe, and locked-test metrics show non-regressing performance versus baseline (recall increased, waste decreased, latency decreased).\",\n  \"tests_run\": [\n    \"locked_test\"\n  ],\n  \"commit\": null,\n  \"committed\": false,\n  \"pushed\": false,\n  \"risk\": null,\n  \"notes\": null\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 746,
+        "completion_tokens": 99,
+        "total_tokens": 845,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 5.644701500015799
+    },
+    {
+      "case_id": "lane-contract-v28:recall_improvement:3",
+      "lane": "recall_improvement",
+      "schema_valid": true,
+      "effect_match": false,
+      "exact_json_match": false,
+      "expected_effect": "policy_mutation:recall_improvement",
+      "actual_effect": "hold",
+      "observed": "{\n  \"decision\": \"needs_retry\",\n  \"summary\": \"Production record status is 'candidate', not 'candidate_pass' as required for final audit. The inner 'best.status' is 'candidate_pass', but the top-level status indicates the record is not yet finalized for this specific audit boundary or is malformed for the expected contract.\",\n  \"tests_run\": [\n    \"reviewed replay eval payload\"\n  ],\n  \"commit\": null,\n  \"committed\": false,\n  \"pushed\": false,\n  \"risk\": \"low\",\n  \"notes\": \"Top-level status 'candidate' conflicts with the requirement for an actual '_proposal_record' whose status is 'candidate_pass'. While the inner best object has status 'candidate_pass', the outer envelope status suggests the record is not ready or the structure is malformed for the trusted decision table step 1.\"\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 1871,
+        "completion_tokens": 187,
+        "total_tokens": 2058,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 10.941670583968516
+    },
+    {
+      "case_id": "lane-contract-v28:recall_auto_apply:5",
+      "lane": "recall_auto_apply",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "hold",
+      "actual_effect": "hold",
+      "observed": "{\n  \"decision\": \"quarantined\",\n  \"summary\": \"The target page 'conflicted-page' contains unresolved conflicting claims regarding the current value (source A says 1, source B says 2). The decision table mandates quarantining when the target has unresolved conflicting claims.\",\n  \"tests_run\": [\n    \"check_snapshot_status\",\n    \"check_conflicting_claims\",\n    \"check_action_bounding\"\n  ],\n  \"commit\": null,\n  \"committed\": false,\n  \"pushed\": false,\n  \"risk\": \"Data integrity risk due to unresolved conflict in source evidence.\",\n  \"notes\": \"Evidence shows explicit conflict: 'source A says the current value is 1, while source B says it is 2'. Cannot safely bound the query hint to a single current value.\"\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 1145,
+        "completion_tokens": 181,
+        "total_tokens": 1326,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 9.867916124989279
+    },
+    {
+      "case_id": "lane-contract-v28:lint_tag_repair:3",
+      "lane": "lint_tag_repair",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "hold",
+      "actual_effect": "hold",
+      "observed": "{\n  \"decision\": \"uncertain\",\n  \"tags\": [],\n  \"reason\": \"The page excerpt explicitly states that the term 'Mercury' is ambiguous, potentially referring to either a financial technology company or a software project, and that the available sentence does not resolve which. This constitutes a genuine semantic ambiguity with two plausible taxonomy domains (finance vs. software/tools), so the proposal cannot be approved.\"\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 1082,
+        "completion_tokens": 88,
+        "total_tokens": 1170,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 6.895823457976803
+    }
+  ]
+}

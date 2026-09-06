@@ -1,0 +1,6 @@
+{
+  "packages": "annotated-doc==0.0.5\nanyio==4.15.1\ncertifi==2026.7.22\nclick==8.5.0\nfilelock==3.32.5\nfsspec==2026.7.0\nh11==0.16.0\nhf-xet==1.6.0\nhttpcore==1.0.9\nhttpx==0.28.1\nhuggingface-hub==1.30.0\nidna==3.19\njinja2==3.1.6\nmarkdown-it-py==4.2.0\nmarkupsafe==3.0.3\nmdurl==0.1.2\nmlx==0.32.2\nmlx-lm @ git+https://github.com/ml-explore/mlx-lm.git@8a36d1ece51b34a2e76d9f7064a7f090334f39c4\nmlx-metal==0.32.2\nnumpy==2.5.2\npackaging==26.3\nprotobuf==7.36.1\npygments==2.21.0\npyyaml==6.0.3\nregex==2026.9.3\nrich==15.0.0\nsafetensors==0.8.0\nsentencepiece==0.2.2\nshellingham==1.5.4\ntokenizers==0.23.2\ntqdm==4.70.0\ntransformers==5.16.1\ntyper==0.27.2\ntyping-extensions==4.16.0\nvqlab @ file:///Users/trafficsign/.omlx/experiments/vq32/VQLab\n",
+  "compatibility_strategy": "Pinned pre-RMSNorm-fold mlx-lm8a36d1e; stock VQLab with no local shim",
+  "base_commit": "8a36d1ece51b34a2e76d9f7064a7f090334f39c4",
+  "mtp_enabled": true
+}

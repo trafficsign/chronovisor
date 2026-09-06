@@ -1,0 +1,26 @@
+{
+  "id": "chatcmpl-965b96de-6794-41fa-89ef-5e420acea608",
+  "system_fingerprint": "0.32.0-0.32.2-macOS-26.6.2-arm64-arm-64bit-applegpu_g16s",
+  "object": "chat.completion",
+  "model": "default_model",
+  "created": 1788665705,
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "READY"
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 16,
+    "completion_tokens": 2,
+    "total_tokens": 18,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "wall_seconds": 18.062046959006693
+}

@@ -1,0 +1,211 @@
+{
+  "quality": 21,
+  "japanese": 12,
+  "corpus": {
+    "overall": {
+      "total": 19,
+      "schema_valid": 19,
+      "schema_rate": 1.0,
+      "effect_matches": 18,
+      "effect_match_rate": 0.9473684210526315,
+      "exact_json_matches": 0,
+      "median_wall_seconds": 7.31641245901119,
+      "p95_wall_seconds": 30.525677249999717
+    },
+    "by_lane": {
+      "autonomy_duplicate_resolution": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 5.387244249985088,
+        "p95_wall_seconds": 5.387244249985088
+      },
+      "autonomy_retention": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 4.505035707959905,
+        "p95_wall_seconds": 4.505035707959905
+      },
+      "content_correction_classification": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 14.068241874978412,
+        "p95_wall_seconds": 14.068241874978412
+      },
+      "content_correction_review": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 12.699156957969535,
+        "p95_wall_seconds": 12.699156957969535
+      },
+      "entity_backfill": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 15.094959792040754,
+        "p95_wall_seconds": 15.094959792040754
+      },
+      "ingest_reconciliation": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 11.024634875007905,
+        "p95_wall_seconds": 11.024634875007905
+      },
+      "lint_safe_semantic_mutation": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 30.525677249999717,
+        "p95_wall_seconds": 30.525677249999717
+      },
+      "lint_tag_repair": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 6.895823457976803,
+        "p95_wall_seconds": 6.895823457976803
+      },
+      "local_repair": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 5.168067292019259,
+        "p95_wall_seconds": 5.168067292019259
+      },
+      "metadata_backfill": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 16.2260197919677,
+        "p95_wall_seconds": 16.2260197919677
+      },
+      "orphan_link": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 4.607114042039029,
+        "p95_wall_seconds": 4.607114042039029
+      },
+      "page_normalize": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 70.81559950002702,
+        "p95_wall_seconds": 70.81559950002702
+      },
+      "raw_replay_reconciliation": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 5.278593124996405,
+        "p95_wall_seconds": 5.278593124996405
+      },
+      "read_back_repair": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 3.9504643339896575,
+        "p95_wall_seconds": 3.9504643339896575
+      },
+      "recall_auto_apply": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 9.867916124989279,
+        "p95_wall_seconds": 9.867916124989279
+      },
+      "recall_calibration": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 5.797177832981106,
+        "p95_wall_seconds": 5.797177832981106
+      },
+      "recall_improvement": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 0,
+        "effect_match_rate": 0.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 10.941670583968516,
+        "p95_wall_seconds": 10.941670583968516
+      },
+      "search_label": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 7.31641245901119,
+        "p95_wall_seconds": 7.31641245901119
+      },
+      "search_self_tune": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 5.644701500015799,
+        "p95_wall_seconds": 5.644701500015799
+      }
+    }
+  },
+  "sample_count": 788,
+  "peak_os_including_inactive_bytes": 136529756160,
+  "peak_swap_used_mib": 12172.75
+}

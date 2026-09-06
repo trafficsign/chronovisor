@@ -1,0 +1,6 @@
+{
+  "arm": "baseline",
+  "command": null,
+  "schema_mode": "identical explicit prompt; response_format removed for paired quality tests",
+  "prefix_cache": false
+}

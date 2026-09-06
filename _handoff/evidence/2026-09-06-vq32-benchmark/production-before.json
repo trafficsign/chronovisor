@@ -1,0 +1,86 @@
+{
+  "hashes": {
+    "/Users/trafficsign/.chronovisor/config.toml": "d3f3e80ad02db43d6c27bac35254475c15947e312930e2f78e291ce3f40bbb94",
+    "/Users/trafficsign/.omlx/settings.json": "99ef9327f5e59162981c6968e318b481eca05c0b7c4bbfcb9487c14d2c2ccea0",
+    "/Users/trafficsign/.omlx/model_settings.json": "51e1ab5a4e24a8fa4011c00908327357258edb24b3e7295fc9243286d74a4b1c"
+  },
+  "services": {
+    "services": [
+      {
+        "plist": "com.trafficsign.chronovisor-converge.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-dashboard.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-deadman-observer.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-ingest-drain.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-lan-dashboard.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-librarian-review.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-reranker.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-searxng.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-semantic.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-sleep.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-watchdog.managed-v2.plist",
+        "status": "enabled"
+      }
+    ]
+  },
+  "memory": {
+    "time": 1788663796.532068,
+    "page_size": 16384,
+    "pages": {
+      "Pages free": 249077,
+      "Pages active": 1044138,
+      "Pages inactive": 971615,
+      "Pages speculative": 131887,
+      "Pages throttled": 0,
+      "Pages wired down": 5350249,
+      "Pages purgeable": 14116,
+      "\"Translation faults\"": 11506123272,
+      "Pages copy-on-write": 702923163,
+      "Pages zero filled": 18857864309,
+      "Pages reactivated": 2482162141,
+      "Pages purged": 176986420,
+      "File-backed pages": 804282,
+      "Anonymous pages": 1343358,
+      "Pages stored in compressor": 2827492,
+      "Pages occupied by compressor": 590351,
+      "Decompressions": 1710530274,
+      "Compressions": 2196181205,
+      "Pageins": 851544443,
+      "Pageouts": 1231325,
+      "Swapins": 5312395,
+      "Swapouts": 6787004
+    },
+    "swap_used_mib": 12799.69,
+    "os_active_wired_compressor_bytes": 114437947392,
+    "os_including_inactive_bytes": 130356887552
+  }
+}

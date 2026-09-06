@@ -1,0 +1,9 @@
+{
+  "baseline": "complete; explicit schema prompt, grammar off",
+  "vq-mtp": "invalid: PR-head normalization incompatibility, corrupted warm-up; interrupted",
+  "candidate-no-mtp": "invalid: same warm-up failure without MTP",
+  "vq-prefill-only": "invalid: same warm-up failure bypassing fused kernel",
+  "vq-normfix": "diagnostic only: trunk148norms patched, MTP norms unpatched; interrupted, not used as full benchmark",
+  "vq-compatible": "complete; stock VQLab, pinned pre-fold mlx-lm, MTP enabled",
+  "vq-compatible-no-mtp": "complete supplemental:4exact cases,1x32K,3xdecode; not full quality rerun"
+}

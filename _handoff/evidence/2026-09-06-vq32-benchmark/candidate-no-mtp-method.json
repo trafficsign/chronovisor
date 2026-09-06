@@ -1,0 +1,22 @@
+{
+  "arm": "candidate-no-mtp",
+  "command": [
+    "/Users/trafficsign/.omlx/experiments/vq32/venv/bin/python",
+    "-u",
+    "-m",
+    "vqlab.cli",
+    "serve",
+    "--model",
+    "/Users/trafficsign/.omlx/experiments/vq32/model",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "18136",
+    "--prompt-cache-size",
+    "0",
+    "--decode-concurrency",
+    "1"
+  ],
+  "schema_mode": "identical explicit prompt; response_format removed for paired quality tests",
+  "prefix_cache": false
+}

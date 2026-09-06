@@ -1,0 +1,224 @@
+[
+  {
+    "ttft_seconds": 11.208157083019614,
+    "wall_seconds": 11.65152912499616,
+    "decode_tokens_per_second": 22.554421689333793,
+    "usage": {
+      "prompt_tokens": 4048,
+      "completion_tokens": 11,
+      "total_tokens": 4059,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "content": "KAPPA-4096-1",
+    "prompt_sha256": "19ca6552631eba554a3a0d946d0ff9e97b83a09beaf1650c9b90de9a8ab309f6",
+    "kind": "needle",
+    "target": 4096,
+    "run": 1,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 11.229764999996405,
+    "wall_seconds": 11.57940654194681,
+    "decode_tokens_per_second": 28.600720452772922,
+    "usage": {
+      "prompt_tokens": 4048,
+      "completion_tokens": 11,
+      "total_tokens": 4059,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "content": "KAPPA-4096-2",
+    "prompt_sha256": "a942de15dbeb68e769ea8dcf8d54ac692df090e36fc8983bc1833a7f74a86cbb",
+    "kind": "needle",
+    "target": 4096,
+    "run": 2,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 11.36628237500554,
+    "wall_seconds": 11.666917334019672,
+    "decode_tokens_per_second": 33.26293133969795,
+    "usage": {
+      "prompt_tokens": 4048,
+      "completion_tokens": 11,
+      "total_tokens": 4059,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "content": "KAPPA-4096-3",
+    "prompt_sha256": "bb78e7e0bd25bc8be414b03b915bce46b46ef1768e76ccaf221863ed3985385a",
+    "kind": "needle",
+    "target": 4096,
+    "run": 3,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 43.8914015829796,
+    "wall_seconds": 44.20147537498269,
+    "decode_tokens_per_second": 35.47542644265207,
+    "usage": {
+      "prompt_tokens": 16338,
+      "completion_tokens": 12,
+      "total_tokens": 16350,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "content": "KAPPA-16384-1",
+    "prompt_sha256": "e44056407f19d0eafcf4161a20b3ffa77ced4e7aec07958df8158a4ec5dce1e5",
+    "kind": "needle",
+    "target": 16384,
+    "run": 1,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 44.30444404197624,
+    "wall_seconds": 44.61259295797208,
+    "decode_tokens_per_second": 35.69702643428532,
+    "usage": {
+      "prompt_tokens": 16338,
+      "completion_tokens": 12,
+      "total_tokens": 16350,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "content": "KAPPA-16384-2",
+    "prompt_sha256": "cce3900c46a3c186d0b6c2fab587326f8d5f78b37716e3604eba4d1919645856",
+    "kind": "needle",
+    "target": 16384,
+    "run": 2,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 43.615495416976046,
+    "wall_seconds": 43.93194300000323,
+    "decode_tokens_per_second": 34.76089118700919,
+    "usage": {
+      "prompt_tokens": 16338,
+      "completion_tokens": 12,
+      "total_tokens": 16350,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "content": "KAPPA-16384-3",
+    "prompt_sha256": "57ba4d95d35595a6270592897aa3d6c5c72cbdad377ef98bcfc5df5821ac65b1",
+    "kind": "needle",
+    "target": 16384,
+    "run": 3,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 96.23642045800807,
+    "wall_seconds": 96.5526373750181,
+    "decode_tokens_per_second": 34.78624769354543,
+    "usage": {
+      "prompt_tokens": 32722,
+      "completion_tokens": 12,
+      "total_tokens": 32734,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "content": "KAPPA-32768-1",
+    "prompt_sha256": "022011f0c74fa259f40f3a1525c9184e2fcf7676ba50384f3d69bf771f4a59c8",
+    "kind": "needle",
+    "target": 32768,
+    "run": 1,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 96.91825941600837,
+    "wall_seconds": 97.23042354104109,
+    "decode_tokens_per_second": 35.23787366292303,
+    "usage": {
+      "prompt_tokens": 32722,
+      "completion_tokens": 12,
+      "total_tokens": 32734,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "content": "KAPPA-32768-2",
+    "prompt_sha256": "c8c6c2ad675c8de35e0efaf997f81d21a86d5b2d2750986e6071ada9a8b9ce18",
+    "kind": "needle",
+    "target": 32768,
+    "run": 2,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 96.14414308301639,
+    "wall_seconds": 96.48245758301346,
+    "decode_tokens_per_second": 32.514125170796184,
+    "usage": {
+      "prompt_tokens": 32722,
+      "completion_tokens": 12,
+      "total_tokens": 32734,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "content": "KAPPA-32768-3",
+    "prompt_sha256": "3e1ff4db76ec316c342f12f23541a487a031e78c845326c27ba85c449652a7a6",
+    "kind": "needle",
+    "target": 32768,
+    "run": 3,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 0.5702527919784188,
+    "wall_seconds": 12.401723249990027,
+    "decode_tokens_per_second": 32.371293269016604,
+    "usage": {
+      "prompt_tokens": 51,
+      "completion_tokens": 384,
+      "total_tokens": 435,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "content": "議事録（議事録）から事実と推測を区別し、要約することは、組織の意思決定の透明性を高め、後の監査や責任追及を明確にするために極めて重要な業務です。事実とは、実際に発言された内容、決定事項、または客観的に確認できる行動を指し、推測とは、記録者の主観的な解釈、意図の推定、または未確認の背景を指します。これらを混同すると、議事録の信頼性が損なわれ、誤解を招くおそれがあります。\n\n以下に、具体的な例を挙げて、その区別と要約の方法を詳しく説明します。\n\n**【具体的な例】**\n会議中の発言：\n「A課長が『このプロジェクトの予算は、来月の決算報告が出るまで確定できない。もし来月15日までに報告が間に合わなければ、スケジュールを再検討せざるを得ない』と述べた。」\n\n**1. 事実と推測の区別**\n\n*   **事実（Fact）**：\n    *   A課長が「予算確定は来月の決算報告待ち」と発言した。\n    *   A課長が「報告が15日までに間に合わなければ、スケジュール再検討が必要」と条件付きで発言した。\n    *   これらは、発言者の言葉そのもの、またはその論理構造をそのまま反映したものであり、第三者が検証可能な客観的情報です。\n\n*   **推測（Inference/Speculation）**：\n    *   「A課長は予算の遅延を懸念している」\n    *   「A課長は財務部を信頼していない」\n    *   「プロジェクトは遅延する可能性が高い」\n    *   これらは、発言者の心理状態、他部門への",
+    "prompt_sha256": "a0076080fa26257aaa03d545c3d20adf102a16b97160ed50541ebe9938183346",
+    "kind": "decode",
+    "run": 1
+  },
+  {
+    "ttft_seconds": 0.5653271669871174,
+    "wall_seconds": 12.95107025001198,
+    "decode_tokens_per_second": 30.922650133516512,
+    "usage": {
+      "prompt_tokens": 51,
+      "completion_tokens": 384,
+      "total_tokens": 435,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "content": "議事録（議事録）の要約において、最も重要かつ困難な課題は「事実（Fact）」と「推測（Inference/Opinion）」を明確に区別することです。議事録は単なる記録ではなく、意思決定の根拠や組織の方向性を示す文書であるため、記録者の主観が混入すると、後の検証や責任の所在が不明確になります。以下に、この区別を正確に行い、要約する方法を具体的な例を挙げて詳述します。\n\nまず、両者の定義を明確にします。「事実」とは、客観的に観察可能で、誰が、いつ、どこで、何を言ったり行ったりしたかという、検証可能な事象を指します。一方、「推測」とは、発言者の意図、感情、または記録者自身の解釈、因果関係の推定、将来への予測など、主観的な判断が含まれる内容を指します。要約の際、これらを混同すると、読者は「何が実際に起きたか」と「それが何を意味するか」を区別できず、誤解を招きます。\n\n具体的な例を挙げて説明します。ある会議で、A課長が「このプロジェクトの進捗は遅れている。理由はB課のデータ提供が遅いからだ」と発言したとします。\n\n**誤った要約（事実と推測の混同）：**\n「A課長は、B課の怠慢によりプロジェクトが遅延していることを指摘した。」\nこの要約には問題があります。「怠慢」という語はA課長の発言には含まれておらず、記録者の主観的な評価（推測）です。また、「遅延している」という状態も、単なる事実（進捗が遅い）と、原因（B課の遅延）を因果",
+    "prompt_sha256": "eaee9450697ceb4bb7db8f4bce3f84687414fa7d261488ad5bb903b1a57e2e90",
+    "kind": "decode",
+    "run": 2
+  },
+  {
+    "ttft_seconds": 0.5692854169756174,
+    "wall_seconds": 13.290521666989662,
+    "decode_tokens_per_second": 30.107136796518276,
+    "usage": {
+      "prompt_tokens": 51,
+      "completion_tokens": 384,
+      "total_tokens": 435,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "content": "議事録（議事録）の要約において、最も重要かつ難しい課題は「事実（Fact）」と「推測（Inference/Opinion）」を明確に区別することです。議事録は単なる記録ではなく、意思決定の根拠や議論の経緯を後世に伝えるための文書であるため、記録者の主観が混入すると、その信頼性が損なわれます。以下に、この区別と要約の具体的手法を、例文を交えて詳述します。\n\nまず、両者の定義を明確にします。「事実」とは、誰が、いつ、どこで、何を発言したか、あるいはどのようなデータが提示されたかという、検証可能な客観的事象を指します。対して「推測」とは、発言者の意図、感情、あるいは記録者による因果関係の解釈、将来への予測、価値判断など、主観的要素を含んだ記述を指します。要約の際には、事実を骨格とし、推測を肉付けとして明確に分離する姿勢が求められます。\n\n具体的な手法として、第一に「発言の直接引用と要約の分離」が挙げられます。例えば、ある会議でA氏が「この新製品は市場で失敗するだろう」と発言したとします。これを要約する際、単に「A氏は新製品の失敗を予言した」と記述するのは、事実と推測が混濁しています。正しき要約は、「A氏は『新製品は市場で失敗するだろう』と発言した（事実）」と記述し、もしその背景にある理由を補足するならば、「A氏は、競合他社の類似製品が既に飽和状態にあることを根拠として、この見解を述べた（事実としての根拠）」と記述すべきです",
+    "prompt_sha256": "82a03af24efe40b5ce6b0bc3d5b4aa5d49b5dd3e0f66ef574af00312849bc988",
+    "kind": "decode",
+    "run": 3
+  }
+]

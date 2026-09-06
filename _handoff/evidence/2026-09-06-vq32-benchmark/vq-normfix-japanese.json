@@ -1,0 +1,86 @@
+[
+  {
+    "id": "negation",
+    "expected": "不可",
+    "observed": "不可",
+    "passed": true,
+    "wall_seconds": 0.5784784999559633
+  },
+  {
+    "id": "revision",
+    "expected": "鈴木",
+    "observed": "鈴木",
+    "passed": true,
+    "wall_seconds": 0.5680073749972507
+  },
+  {
+    "id": "unknown",
+    "expected": "未定",
+    "observed": "未定",
+    "passed": true,
+    "wall_seconds": 0.6410599999944679
+  },
+  {
+    "id": "quote",
+    "expected": "審査中",
+    "observed": "審査中",
+    "passed": true,
+    "wall_seconds": 0.6499611249892041
+  },
+  {
+    "id": "scope",
+    "expected": "C",
+    "observed": "C",
+    "passed": true,
+    "wall_seconds": 0.5394321669591591
+  },
+  {
+    "id": "conditional",
+    "expected": "合議",
+    "observed": "合議",
+    "passed": true,
+    "wall_seconds": 0.7300379170337692
+  },
+  {
+    "id": "ownership",
+    "expected": "田中",
+    "observed": "田中",
+    "passed": true,
+    "wall_seconds": 0.6126496660290286
+  },
+  {
+    "id": "fact",
+    "expected": "B",
+    "observed": "B",
+    "passed": true,
+    "wall_seconds": 0.6866300000110641
+  },
+  {
+    "id": "units",
+    "expected": "超える",
+    "observed": "超える",
+    "passed": true,
+    "wall_seconds": 0.6959982079570182
+  },
+  {
+    "id": "exceptions",
+    "expected": "火曜",
+    "observed": "火曜",
+    "passed": true,
+    "wall_seconds": 0.6828732910216786
+  },
+  {
+    "id": "order",
+    "expected": "承認",
+    "observed": "承認",
+    "passed": true,
+    "wall_seconds": 0.9489165419945493
+  },
+  {
+    "id": "noninference",
+    "expected": "できない",
+    "observed": "できない",
+    "passed": true,
+    "wall_seconds": 0.8785071659949608
+  }
+]

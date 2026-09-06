@@ -1,0 +1,5 @@
+{
+  "returncode": 0,
+  "stdout": "module under test: /var/folders/9x/qdg4yvh503d3bfnbcv1cnbgw0000gn/T/vqlab_bundle_87zvjmew/_bundled_vq_switch.py\nhas devcb kernels: True True\nhas cap guard: True\n  E4 OUT512  IN2048  K256    ref 3.0e-04  BIT-IDENTICAL\n  E4 OUT512  IN2048  K2048   ref 2.7e-04  BIT-IDENTICAL\n  E4 OUT512  IN2048  K4096   ref 3.1e-04  n/a (over cap)\n  E4 OUT512  IN2048  K8192   ref 2.8e-04  n/a (over cap)\n  E2 OUT256  IN1024  K256    ref 2.5e-04  BIT-IDENTICAL\n  E2 OUT256  IN1024  K2048   ref 3.5e-04  BIT-IDENTICAL\n  E2 OUT256  IN1024  K4096   ref 3.8e-04  n/a (over cap)\n  E2 OUT256  IN1024  K8192   ref 3.6e-04  n/a (over cap)\n  UNALIGNED d8 NSUB80   K4096   bits12  ref 3.0e-04  OK\n  UNALIGNED d4 NSUB176  K2048   bits11  ref 3.4e-04  OK\nBUNDLED-COPY ACCEPTANCE: PASS\n",
+  "stderr": ""
+}

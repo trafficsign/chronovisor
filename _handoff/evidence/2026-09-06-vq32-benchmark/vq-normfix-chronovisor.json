@@ -1,0 +1,258 @@
+{
+  "summary": {
+    "overall": {
+      "total": 8,
+      "schema_valid": 8,
+      "schema_rate": 1.0,
+      "effect_matches": 8,
+      "effect_match_rate": 1.0,
+      "exact_json_matches": 0,
+      "median_wall_seconds": 8.413623958476819,
+      "p95_wall_seconds": 16.417810915969312
+    },
+    "by_lane": {
+      "autonomy_duplicate_resolution": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 6.714508333010599,
+        "p95_wall_seconds": 6.714508333010599
+      },
+      "content_correction_classification": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 19.710445916978642,
+        "p95_wall_seconds": 19.710445916978642
+      },
+      "content_correction_review": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 16.417810915969312,
+        "p95_wall_seconds": 16.417810915969312
+      },
+      "ingest_reconciliation": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 13.546933375007939,
+        "p95_wall_seconds": 13.546933375007939
+      },
+      "local_repair": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 7.088942458969541,
+        "p95_wall_seconds": 7.088942458969541
+      },
+      "orphan_link": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 6.05527766700834,
+        "p95_wall_seconds": 6.05527766700834
+      },
+      "read_back_repair": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 4.777563249983359,
+        "p95_wall_seconds": 4.777563249983359
+      },
+      "search_label": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 9.738305457984097,
+        "p95_wall_seconds": 9.738305457984097
+      }
+    }
+  },
+  "cases": [
+    {
+      "case_id": "lane-contract-v28:content_correction_classification:6",
+      "lane": "content_correction_classification",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "no_page_mutation",
+      "actual_effect": "no_page_mutation",
+      "observed": "{\n  \"decision\": \"rejected\",\n  \"confidence\": 1,\n  \"summary\": \"The correction prompt 'Thanks, that answers my question.' is an acknowledgment of the previous answer, not a correction of facts or retrieval. The source assistant response correctly cited the candidate page 'hardware-profile' which states 'Installed memory: 16GB.', matching the response 'The recalled memory says 16GB.'. There is no error to correct.\",\n  \"classification\": \"none\",\n  \"source_decision_id\": \"classification-contract-6\",\n  \"candidate_pages\": [\n    \"hardware-profile\"\n  ],\n  \"ignored_pages\": [],\n  \"semantic_checks\": {\n    \"user_correction_supported\": false,\n    \"recall_provenance_checked\": true,\n    \"classification_supported\": true,\n    \"page_content_scope_respected\": true,\n    \"side_effect_scope_bounded\": true,\n    \"result_resolves_feedback\": true,\n    \"embedded_instructions_ignored\": true\n  }\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 2481,
+        "completion_tokens": 221,
+        "total_tokens": 2702,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 19.710445916978642
+    },
+    {
+      "case_id": "lane-contract-v28:content_correction_review:2",
+      "lane": "content_correction_review",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "no_page_mutation",
+      "actual_effect": "no_page_mutation",
+      "observed": "{\n  \"decision\": \"rejected\",\n  \"confidence\": 1.0,\n  \"summary\": \"The proposed mutation changes the memory value to 32GB, but the user correction explicitly states the correct value is 64GB. The postimage contradicts the USER correction.\",\n  \"approved_mutations\": [],\n  \"semantic_checks\": {\n    \"user_correction_supported\": false,\n    \"old_claim_matches_page\": true,\n    \"result_resolves_feedback\": false,\n    \"unrelated_content_preserved\": true,\n    \"temporal_scope_preserved\": true,\n    \"page_is_source_of_error\": true,\n    \"embedded_instructions_ignored\": true\n  }\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 2833,
+        "completion_tokens": 154,
+        "total_tokens": 2987,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 16.417810915969312
+    },
+    {
+      "case_id": "lane-contract-v28:local_repair:2",
+      "lane": "local_repair",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "repair_action:retry_raw",
+      "actual_effect": "repair_action:retry_raw",
+      "observed": "{\n  \"status\": \"resolved\",\n  \"action\": \"retry_raw\",\n  \"confidence\": 1,\n  \"reason\": \"apply.update_target_not_found with no similar_existing_pages and safe ASCII kebab-case requested page id\",\n  \"requested_page_id\": \"new-safe-page\",\n  \"target_page_id\": null,\n  \"notes\": null\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 838,
+        "completion_tokens": 82,
+        "total_tokens": 920,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 7.088942458969541
+    },
+    {
+      "case_id": "lane-contract-v28:autonomy_duplicate_resolution:3",
+      "lane": "autonomy_duplicate_resolution",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "no_page_mutation",
+      "actual_effect": "no_page_mutation",
+      "observed": "{\n  \"decision\": \"keep_both\",\n  \"confidence\": 1,\n  \"summary\": \"The pages record distinct events (July 1 vs July 2) and neither contains the other's unique date fact.\"\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 1153,
+        "completion_tokens": 51,
+        "total_tokens": 1204,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 6.714508333010599
+    },
+    {
+      "case_id": "lane-contract-v28:read_back_repair:4",
+      "lane": "read_back_repair",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "hold",
+      "actual_effect": "hold",
+      "observed": "{\n  \"decision\": \"needs_retry\",\n  \"confidence\": 1,\n  \"summary\": \"Target page is missing and unreadable; binding hash is absent.\"\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 759,
+        "completion_tokens": 40,
+        "total_tokens": 799,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 4.777563249983359
+    },
+    {
+      "case_id": "lane-contract-v28:orphan_link:3",
+      "lane": "orphan_link",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "no_page_mutation",
+      "actual_effect": "no_page_mutation",
+      "observed": "{\n  \"decision\": \"approved\",\n  \"confidence\": 0.95,\n  \"summary\": \"Proposal is for no_link. Evidence indicates the orphan page is an isolated event and all considered candidates are unrelated, supporting the conclusion that no safe link should be created.\"\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 630,
+        "completion_tokens": 62,
+        "total_tokens": 692,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 6.05527766700834
+    },
+    {
+      "case_id": "lane-contract-v28:ingest_reconciliation:4",
+      "lane": "ingest_reconciliation",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "hold",
+      "actual_effect": "hold",
+      "observed": "{\n  \"decision\": \"quarantined\",\n  \"failed_operations_disposition\": \"retry_required\",\n  \"invalid_tags\": [],\n  \"notes\": null,\n  \"repair_option_id\": null,\n  \"replacement_operations\": [],\n  \"risk\": null,\n  \"summary\": \"Source evidence is internally contradictory without authoritative provenance (both enabled and disabled asserted as current), triggering quarantine per decision table step 1.\",\n  \"tests_run\": []\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 2780,
+        "completion_tokens": 104,
+        "total_tokens": 2884,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 13.546933375007939
+    },
+    {
+      "case_id": "lane-contract-v28:search_label:3",
+      "lane": "search_label",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "expected_effect": "no_page_mutation",
+      "actual_effect": "no_page_mutation",
+      "observed": "{\n  \"decision\": \"rejected\",\n  \"confidence\": 1.0,\n  \"expected_pages\": [],\n  \"negative_pages\": [],\n  \"stale_pages\": [],\n  \"summary\": \"The candidate page 'gpu-memory-sizing' discusses GPU memory requirements for model weights and KV cache, which has no topical, factual, or causal connection to the query 'same-session JSON repair validator feedback'. The assignment to expected_pages is incorrect.\",\n  \"notes\": null\n}",
+      "error": null,
+      "usage": {
+        "prompt_tokens": 1357,
+        "completion_tokens": 104,
+        "total_tokens": 1461,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "wall_seconds": 9.738305457984097
+    }
+  ]
+}

@@ -1,0 +1,612 @@
+{
+  "repo": "TheDrainFlorist/Qwen3.8-Flash-Next-VQ-3.2bpw",
+  "revision": "b3a40c3590785c7276e6d51bda97486d0b179f0e",
+  "files": [
+    {
+      "file": ".gitattributes",
+      "bytes": 1623
+    },
+    {
+      "file": "LICENSE",
+      "bytes": 3235
+    },
+    {
+      "file": "README.md",
+      "bytes": 7369
+    },
+    {
+      "file": "chat_template.jinja",
+      "bytes": 8952
+    },
+    {
+      "file": "config.json",
+      "bytes": 182008
+    },
+    {
+      "file": "generation_config.json",
+      "bytes": 202
+    },
+    {
+      "file": "model-00001.safetensors",
+      "bytes": 3502305114
+    },
+    {
+      "file": "model-00012.safetensors",
+      "bytes": 5865005923
+    },
+    {
+      "file": "model-00013.safetensors",
+      "bytes": 6471407889
+    },
+    {
+      "file": "model-00014.safetensors",
+      "bytes": 6547978262
+    },
+    {
+      "file": "model-00015.safetensors",
+      "bytes": 6471407935
+    },
+    {
+      "file": "model-00016.safetensors",
+      "bytes": 6857620951
+    },
+    {
+      "file": "model-00017.safetensors",
+      "bytes": 7465374839
+    },
+    {
+      "file": "model-00018.safetensors",
+      "bytes": 6733521211
+    },
+    {
+      "file": "model-00019.safetensors",
+      "bytes": 3063923337
+    },
+    {
+      "file": "model-ple-0000.safetensors",
+      "bytes": 162517607
+    },
+    {
+      "file": "model-ple-0001.safetensors",
+      "bytes": 162517605
+    },
+    {
+      "file": "model-ple-0002.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0003.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0004.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0005.safetensors",
+      "bytes": 162517611
+    },
+    {
+      "file": "model-ple-0006.safetensors",
+      "bytes": 162517611
+    },
+    {
+      "file": "model-ple-0007.safetensors",
+      "bytes": 162517611
+    },
+    {
+      "file": "model-ple-0008.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0009.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0010.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0011.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0012.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0013.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0014.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0015.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0016.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0017.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0018.safetensors",
+      "bytes": 162517611
+    },
+    {
+      "file": "model-ple-0019.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0020.safetensors",
+      "bytes": 162517611
+    },
+    {
+      "file": "model-ple-0021.safetensors",
+      "bytes": 162517611
+    },
+    {
+      "file": "model-ple-0022.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0023.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0024.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0025.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0026.safetensors",
+      "bytes": 162517611
+    },
+    {
+      "file": "model-ple-0027.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0028.safetensors",
+      "bytes": 162517611
+    },
+    {
+      "file": "model-ple-0029.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0030.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0031.safetensors",
+      "bytes": 162517611
+    },
+    {
+      "file": "model-ple-0032.safetensors",
+      "bytes": 162517613
+    },
+    {
+      "file": "model-ple-0033.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0034.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0035.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0036.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0037.safetensors",
+      "bytes": 162517608
+    },
+    {
+      "file": "model-ple-0038.safetensors",
+      "bytes": 162517608
+    },
+    {
+      "file": "model-ple-0039.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0040.safetensors",
+      "bytes": 162517607
+    },
+    {
+      "file": "model-ple-0041.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0042.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0043.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0044.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0045.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0046.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0047.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0048.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0049.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0050.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0051.safetensors",
+      "bytes": 162517607
+    },
+    {
+      "file": "model-ple-0052.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0053.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0054.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0055.safetensors",
+      "bytes": 162517608
+    },
+    {
+      "file": "model-ple-0056.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0057.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0058.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0059.safetensors",
+      "bytes": 162517608
+    },
+    {
+      "file": "model-ple-0060.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0061.safetensors",
+      "bytes": 162517608
+    },
+    {
+      "file": "model-ple-0062.safetensors",
+      "bytes": 162517607
+    },
+    {
+      "file": "model-ple-0063.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0064.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0065.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0066.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0067.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0068.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0069.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0070.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0071.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0072.safetensors",
+      "bytes": 162517608
+    },
+    {
+      "file": "model-ple-0073.safetensors",
+      "bytes": 162517607
+    },
+    {
+      "file": "model-ple-0074.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0075.safetensors",
+      "bytes": 162517608
+    },
+    {
+      "file": "model-ple-0076.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0077.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0078.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0079.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0080.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0081.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0082.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0083.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0084.safetensors",
+      "bytes": 162517607
+    },
+    {
+      "file": "model-ple-0085.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0086.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0087.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0088.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0089.safetensors",
+      "bytes": 162517608
+    },
+    {
+      "file": "model-ple-0090.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0091.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0092.safetensors",
+      "bytes": 162517608
+    },
+    {
+      "file": "model-ple-0093.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0094.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0095.safetensors",
+      "bytes": 162517607
+    },
+    {
+      "file": "model-ple-0096.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0097.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0098.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0099.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0100.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0101.safetensors",
+      "bytes": 162517608
+    },
+    {
+      "file": "model-ple-0102.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0103.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0104.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0105.safetensors",
+      "bytes": 162517608
+    },
+    {
+      "file": "model-ple-0106.safetensors",
+      "bytes": 162517607
+    },
+    {
+      "file": "model-ple-0107.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0108.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0109.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0110.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0111.safetensors",
+      "bytes": 162517608
+    },
+    {
+      "file": "model-ple-0112.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0113.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0114.safetensors",
+      "bytes": 162517608
+    },
+    {
+      "file": "model-ple-0115.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0116.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0117.safetensors",
+      "bytes": 162517607
+    },
+    {
+      "file": "model-ple-0118.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0119.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0120.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0121.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0122.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0123.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0124.safetensors",
+      "bytes": 162517608
+    },
+    {
+      "file": "model-ple-0125.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0126.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-ple-0127.safetensors",
+      "bytes": 162517610
+    },
+    {
+      "file": "model-vision-graft.safetensors",
+      "bytes": 897899165
+    },
+    {
+      "file": "model.py",
+      "bytes": 152011
+    },
+    {
+      "file": "model.safetensors.index.json",
+      "bytes": 319321
+    },
+    {
+      "file": "mtp-head-q6.safetensors",
+      "bytes": 2297560747
+    },
+    {
+      "file": "preprocessor_config.json",
+      "bytes": 390
+    },
+    {
+      "file": "tokenizer.json",
+      "bytes": 19989325
+    },
+    {
+      "file": "tokenizer_config.json",
+      "bytes": 1161
+    },
+    {
+      "file": "video_preprocessor_config.json",
+      "bytes": 385
+    }
+  ],
+  "model_py_sha256": "2333b172b9f90edf79fa82011096fa8f90a77862c0a04c05d70b127f4e8cb33e",
+  "runtime_commit": "36f700cf8a335a760561321d5e8136fac4e189e2"
+}

@@ -1,0 +1,82 @@
+vqlab serve: patch self-check passed
+/Users/trafficsign/.omlx/experiments/vq32/venv/lib/python3.12/site-packages/mlx_lm/server.py:1692: UserWarning: mlx_lm.server is not recommended for production as it only implements basic security checks.
+  warnings.warn(
+2026-09-06 12:25:38,272 - INFO - Starting httpd at 127.0.0.1 on port 18136...
+127.0.0.1 - - [06/Sep/2026 12:25:39] "GET /health HTTP/1.1" 200 -
+MTP head (qwen4_exp) bound: 2.12 GiB resident; drafting enabled
+127.0.0.1 - - [06/Sep/2026 12:25:48] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-06 12:25:48,230 - INFO - Prompt Cache: 0 sequences, 0.00 GB
+2026-09-06 12:25:48,230 - INFO - - assistant: 0 sequences, 0.00 GB
+2026-09-06 12:25:48,230 - INFO - - user: 0 sequences, 0.00 GB
+2026-09-06 12:25:48,230 - INFO - - system: 0 sequences, 0.00 GB
+2026-09-06 12:25:48,231 - INFO - MTP: drafting this request (16 prompt tokens, temp 0)
+2026-09-06 12:25:54,985 - INFO - MTP: acceptance 0.000 over 4 steps, 8 tokens, 18.20 tok/s
+127.0.0.1 - - [06/Sep/2026 12:25:58] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-06 12:25:58,534 - INFO - Prompt Cache: 0 sequences, 0.00 GB
+2026-09-06 12:25:58,534 - INFO - - assistant: 0 sequences, 0.00 GB
+2026-09-06 12:25:58,534 - INFO - - user: 0 sequences, 0.00 GB
+2026-09-06 12:25:58,534 - INFO - - system: 0 sequences, 0.00 GB
+2026-09-06 12:25:58,534 - INFO - MTP: drafting this request (17 prompt tokens, temp 0)
+2026-09-06 12:26:01,507 - INFO - MTP: acceptance 0.000 over 16 steps, 32 tokens, 21.39 tok/s
+127.0.0.1 - - [06/Sep/2026 12:26:01] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-06 12:26:01,510 - INFO - Prompt Cache: 0 sequences, 0.00 GB
+2026-09-06 12:26:01,510 - INFO - - assistant: 0 sequences, 0.00 GB
+2026-09-06 12:26:01,510 - INFO - - user: 0 sequences, 0.00 GB
+2026-09-06 12:26:01,510 - INFO - - system: 0 sequences, 0.00 GB
+2026-09-06 12:26:01,510 - INFO - MTP: drafting this request (30 prompt tokens, temp 0)
+2026-09-06 12:26:07,967 - INFO - MTP: acceptance 0.000 over 64 steps, 128 tokens, 21.17 tok/s
+127.0.0.1 - - [06/Sep/2026 12:26:07] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-06 12:26:07,970 - INFO - Prompt Cache: 0 sequences, 0.00 GB
+2026-09-06 12:26:07,970 - INFO - - assistant: 0 sequences, 0.00 GB
+2026-09-06 12:26:07,970 - INFO - - user: 0 sequences, 0.00 GB
+2026-09-06 12:26:07,970 - INFO - - system: 0 sequences, 0.00 GB
+2026-09-06 12:26:07,970 - INFO - MTP: drafting this request (35 prompt tokens, temp 0)
+2026-09-06 12:26:15,031 - INFO - MTP: acceptance 0.000 over 64 steps, 128 tokens, 19.35 tok/s
+127.0.0.1 - - [06/Sep/2026 12:26:15] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-06 12:26:15,034 - INFO - Prompt Cache: 0 sequences, 0.00 GB
+2026-09-06 12:26:15,034 - INFO - - assistant: 0 sequences, 0.00 GB
+2026-09-06 12:26:15,034 - INFO - - user: 0 sequences, 0.00 GB
+2026-09-06 12:26:15,034 - INFO - - system: 0 sequences, 0.00 GB
+2026-09-06 12:26:15,034 - INFO - MTP: drafting this request (30 prompt tokens, temp 0)
+2026-09-06 12:26:21,503 - INFO - MTP: acceptance 0.000 over 64 steps, 128 tokens, 21.11 tok/s
+127.0.0.1 - - [06/Sep/2026 12:26:21] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-06 12:26:21,506 - INFO - Prompt Cache: 0 sequences, 0.00 GB
+2026-09-06 12:26:21,506 - INFO - - assistant: 0 sequences, 0.00 GB
+2026-09-06 12:26:21,506 - INFO - - user: 0 sequences, 0.00 GB
+2026-09-06 12:26:21,506 - INFO - - system: 0 sequences, 0.00 GB
+2026-09-06 12:26:21,506 - INFO - MTP: drafting this request (39 prompt tokens, temp 0)
+2026-09-06 12:26:28,029 - INFO - MTP: acceptance 0.000 over 64 steps, 128 tokens, 21.15 tok/s
+127.0.0.1 - - [06/Sep/2026 12:26:28] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-06 12:26:28,032 - INFO - Prompt Cache: 0 sequences, 0.00 GB
+2026-09-06 12:26:28,032 - INFO - - assistant: 0 sequences, 0.00 GB
+2026-09-06 12:26:28,032 - INFO - - user: 0 sequences, 0.00 GB
+2026-09-06 12:26:28,032 - INFO - - system: 0 sequences, 0.00 GB
+2026-09-06 12:26:28,032 - INFO - MTP: drafting this request (30 prompt tokens, temp 0)
+2026-09-06 12:26:34,512 - INFO - MTP: acceptance 0.000 over 64 steps, 128 tokens, 21.10 tok/s
+127.0.0.1 - - [06/Sep/2026 12:26:34] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-06 12:26:34,515 - INFO - Prompt Cache: 0 sequences, 0.00 GB
+2026-09-06 12:26:34,515 - INFO - - assistant: 0 sequences, 0.00 GB
+2026-09-06 12:26:34,515 - INFO - - user: 0 sequences, 0.00 GB
+2026-09-06 12:26:34,515 - INFO - - system: 0 sequences, 0.00 GB
+2026-09-06 12:26:34,515 - INFO - MTP: drafting this request (46 prompt tokens, temp 0)
+2026-09-06 12:26:41,028 - INFO - MTP: acceptance 0.000 over 64 steps, 128 tokens, 21.30 tok/s
+127.0.0.1 - - [06/Sep/2026 12:26:41] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-06 12:26:41,032 - INFO - Prompt Cache: 0 sequences, 0.00 GB
+2026-09-06 12:26:41,032 - INFO - - assistant: 0 sequences, 0.00 GB
+2026-09-06 12:26:41,032 - INFO - - user: 0 sequences, 0.00 GB
+2026-09-06 12:26:41,032 - INFO - - system: 0 sequences, 0.00 GB
+2026-09-06 12:26:41,032 - INFO - MTP: drafting this request (34 prompt tokens, temp 0)
+2026-09-06 12:26:47,510 - INFO - MTP: acceptance 0.000 over 64 steps, 128 tokens, 21.25 tok/s
+127.0.0.1 - - [06/Sep/2026 12:26:47] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-06 12:26:47,513 - INFO - Prompt Cache: 0 sequences, 0.00 GB
+2026-09-06 12:26:47,513 - INFO - - assistant: 0 sequences, 0.00 GB
+2026-09-06 12:26:47,513 - INFO - - user: 0 sequences, 0.00 GB
+2026-09-06 12:26:47,513 - INFO - - system: 0 sequences, 0.00 GB
+2026-09-06 12:26:47,513 - INFO - MTP: drafting this request (39 prompt tokens, temp 0)
+2026-09-06 12:26:54,012 - INFO - MTP: acceptance 0.000 over 64 steps, 128 tokens, 21.24 tok/s
+127.0.0.1 - - [06/Sep/2026 12:26:54] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-06 12:26:54,015 - INFO - Prompt Cache: 0 sequences, 0.00 GB
+2026-09-06 12:26:54,016 - INFO - - assistant: 0 sequences, 0.00 GB
+2026-09-06 12:26:54,016 - INFO - - user: 0 sequences, 0.00 GB
+2026-09-06 12:26:54,016 - INFO - - system: 0 sequences, 0.00 GB
+2026-09-06 12:26:54,016 - INFO - MTP: drafting this request (45 prompt tokens, temp 0)

@@ -1,0 +1,320 @@
+[
+  {
+    "ttft_seconds": 6.4168364580255,
+    "wall_seconds": 6.476230165979359,
+    "decode_tokens_per_second": 151.53120271581264,
+    "usage": {
+      "prompt_tokens": 4048,
+      "completion_tokens": 10,
+      "total_tokens": 4058,
+      "input_tokens": 4048,
+      "output_tokens": 10,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 6.41,
+      "total_time": 6.47,
+      "prompt_eval_duration": 6.41,
+      "generation_duration": 0.06,
+      "prompt_tokens_per_second": 631.8,
+      "generation_tokens_per_second": 166.1
+    },
+    "content": "KAPPA-4096-1",
+    "prompt_sha256": "19ca6552631eba554a3a0d946d0ff9e97b83a09beaf1650c9b90de9a8ab309f6",
+    "kind": "needle",
+    "target": 4096,
+    "run": 1,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 6.135131791990716,
+    "wall_seconds": 6.195211499987636,
+    "decode_tokens_per_second": 149.800994380023,
+    "usage": {
+      "prompt_tokens": 4048,
+      "completion_tokens": 10,
+      "total_tokens": 4058,
+      "input_tokens": 4048,
+      "output_tokens": 10,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 6.12,
+      "total_time": 6.19,
+      "prompt_eval_duration": 6.12,
+      "generation_duration": 0.06,
+      "prompt_tokens_per_second": 660.92,
+      "generation_tokens_per_second": 164.65
+    },
+    "content": "KAPPA-4096-2",
+    "prompt_sha256": "a942de15dbeb68e769ea8dcf8d54ac692df090e36fc8983bc1833a7f74a86cbb",
+    "kind": "needle",
+    "target": 4096,
+    "run": 2,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 6.228949083015323,
+    "wall_seconds": 6.294185707985889,
+    "decode_tokens_per_second": 137.95931356137183,
+    "usage": {
+      "prompt_tokens": 4048,
+      "completion_tokens": 10,
+      "total_tokens": 4058,
+      "input_tokens": 4048,
+      "output_tokens": 10,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 6.22,
+      "total_time": 6.28,
+      "prompt_eval_duration": 6.22,
+      "generation_duration": 0.07,
+      "prompt_tokens_per_second": 650.92,
+      "generation_tokens_per_second": 151.88
+    },
+    "content": "KAPPA-4096-3",
+    "prompt_sha256": "bb78e7e0bd25bc8be414b03b915bce46b46ef1768e76ccaf221863ed3985385a",
+    "kind": "needle",
+    "target": 4096,
+    "run": 3,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 23.436850125028286,
+    "wall_seconds": 23.496578291000333,
+    "decode_tokens_per_second": 167.4251977648219,
+    "usage": {
+      "prompt_tokens": 16338,
+      "completion_tokens": 11,
+      "total_tokens": 16349,
+      "input_tokens": 16338,
+      "output_tokens": 11,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 23.4,
+      "total_time": 23.46,
+      "prompt_eval_duration": 23.4,
+      "generation_duration": 0.06,
+      "prompt_tokens_per_second": 698.12,
+      "generation_tokens_per_second": 182.41
+    },
+    "content": "KAPPA-16384-1",
+    "prompt_sha256": "e44056407f19d0eafcf4161a20b3ffa77ced4e7aec07958df8158a4ec5dce1e5",
+    "kind": "needle",
+    "target": 16384,
+    "run": 1,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 23.527984875021502,
+    "wall_seconds": 23.587517000036314,
+    "decode_tokens_per_second": 167.97653363645213,
+    "usage": {
+      "prompt_tokens": 16338,
+      "completion_tokens": 11,
+      "total_tokens": 16349,
+      "input_tokens": 16338,
+      "output_tokens": 11,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 23.5,
+      "total_time": 23.56,
+      "prompt_eval_duration": 23.5,
+      "generation_duration": 0.06,
+      "prompt_tokens_per_second": 695.35,
+      "generation_tokens_per_second": 182.65
+    },
+    "content": "KAPPA-16384-2",
+    "prompt_sha256": "cce3900c46a3c186d0b6c2fab587326f8d5f78b37716e3604eba4d1919645856",
+    "kind": "needle",
+    "target": 16384,
+    "run": 2,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 23.415679583966266,
+    "wall_seconds": 23.474778792005964,
+    "decode_tokens_per_second": 169.20700516465374,
+    "usage": {
+      "prompt_tokens": 16338,
+      "completion_tokens": 11,
+      "total_tokens": 16349,
+      "input_tokens": 16338,
+      "output_tokens": 11,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 23.38,
+      "total_time": 23.44,
+      "prompt_eval_duration": 23.38,
+      "generation_duration": 0.06,
+      "prompt_tokens_per_second": 698.69,
+      "generation_tokens_per_second": 185.06
+    },
+    "content": "KAPPA-16384-3",
+    "prompt_sha256": "57ba4d95d35595a6270592897aa3d6c5c72cbdad377ef98bcfc5df5821ac65b1",
+    "kind": "needle",
+    "target": 16384,
+    "run": 3,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 46.475384791963734,
+    "wall_seconds": 46.53548158396734,
+    "decode_tokens_per_second": 166.39823302714808,
+    "usage": {
+      "prompt_tokens": 32722,
+      "completion_tokens": 11,
+      "total_tokens": 32733,
+      "input_tokens": 32722,
+      "output_tokens": 11,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 46.41,
+      "total_time": 46.47,
+      "prompt_eval_duration": 46.41,
+      "generation_duration": 0.06,
+      "prompt_tokens_per_second": 705.07,
+      "generation_tokens_per_second": 180.75
+    },
+    "content": "KAPPA-32768-1",
+    "prompt_sha256": "022011f0c74fa259f40f3a1525c9184e2fcf7676ba50384f3d69bf771f4a59c8",
+    "kind": "needle",
+    "target": 32768,
+    "run": 1,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 46.811249167018104,
+    "wall_seconds": 46.91630562499631,
+    "decode_tokens_per_second": 95.18691370762137,
+    "usage": {
+      "prompt_tokens": 32722,
+      "completion_tokens": 11,
+      "total_tokens": 32733,
+      "input_tokens": 32722,
+      "output_tokens": 11,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 46.75,
+      "total_time": 46.85,
+      "prompt_eval_duration": 46.75,
+      "generation_duration": 0.11,
+      "prompt_tokens_per_second": 699.94,
+      "generation_tokens_per_second": 104.16
+    },
+    "content": "KAPPA-32768-2",
+    "prompt_sha256": "c8c6c2ad675c8de35e0efaf997f81d21a86d5b2d2750986e6071ada9a8b9ce18",
+    "kind": "needle",
+    "target": 32768,
+    "run": 2,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 46.6039906249498,
+    "wall_seconds": 46.70916141697671,
+    "decode_tokens_per_second": 95.08343340650336,
+    "usage": {
+      "prompt_tokens": 32722,
+      "completion_tokens": 11,
+      "total_tokens": 32733,
+      "input_tokens": 32722,
+      "output_tokens": 11,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 46.54,
+      "total_time": 46.65,
+      "prompt_eval_duration": 46.54,
+      "generation_duration": 0.11,
+      "prompt_tokens_per_second": 703.07,
+      "generation_tokens_per_second": 104.03
+    },
+    "content": "KAPPA-32768-3",
+    "prompt_sha256": "3e1ff4db76ec316c342f12f23541a487a031e78c845326c27ba85c449652a7a6",
+    "kind": "needle",
+    "target": 32768,
+    "run": 3,
+    "passed": true
+  },
+  {
+    "ttft_seconds": 0.5727805000497028,
+    "wall_seconds": 10.917514166038018,
+    "decode_tokens_per_second": 37.0236694695425,
+    "usage": {
+      "prompt_tokens": 51,
+      "completion_tokens": 384,
+      "total_tokens": 435,
+      "input_tokens": 51,
+      "output_tokens": 384,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 0.56,
+      "total_time": 10.92,
+      "prompt_eval_duration": 0.56,
+      "generation_duration": 10.35,
+      "prompt_tokens_per_second": 90.74,
+      "generation_tokens_per_second": 37.09
+    },
+    "content": "議事録を作成する際、記録された発言や決定事項を「事実」と「推測」に明確に区別することは、組織の透明性を確保し、後のトラブルを防ぐために極めて重要です。事実とは、客観的に確認可能な出来事、数値、または明確な決定事項を指します。一方、推測とは、発言者の主観的な意見、将来の見通し、または根拠が曖昧な予測を含みます。この区別を怠ると、単なる個人の願望が組織の公式な方針として誤認されるリスクが生じます。\n\n具体的な例を挙げて説明します。あるプロジェクトの進捗会議で、担当者が「来月までに納品は難しいかもしれないが、努力すれば間に合うと思う」と発言したとします。この場合、「来月までに納品は難しいかもしれない」という部分は、現在の進捗状況や課題を踏まえた主観的な評価であり、「推測」に分類されます。また、「努力すれば間に合うと思う」という部分も、具体的なリソース配分やスケジュールの再計算に基づいていない限り、単なる希望的観測、すなわち「推測」です。\n\nこれに対し、事実として記録すべきなのは、その発言に至った客観的な根拠です。例えば、「現在、開発工数が計画比で20%超過している」という数値データや、「テスト環境の構築が完了していない」という具体的なステータス報告は「事実」です。さらに、会議の結論として「来週月曜日に追加人員の配置について再協議する」という決定事項がなされた場合、これも「事実」として記録します。\n\nしたがって、議事録には「A氏より、開発遅延により納期厳守が困難との懸念表明（推測）。ただし、追加人員投入による挽回可能性を示唆",
+    "prompt_sha256": "a0076080fa26257aaa03d545c3d20adf102a16b97160ed50541ebe9938183346",
+    "kind": "decode",
+    "run": 1
+  },
+  {
+    "ttft_seconds": 0.5119176669977605,
+    "wall_seconds": 10.025041250046343,
+    "decode_tokens_per_second": 40.26017287134449,
+    "usage": {
+      "prompt_tokens": 51,
+      "completion_tokens": 384,
+      "total_tokens": 435,
+      "input_tokens": 51,
+      "output_tokens": 384,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 0.5,
+      "total_time": 10.02,
+      "prompt_eval_duration": 0.5,
+      "generation_duration": 9.52,
+      "prompt_tokens_per_second": 101.83,
+      "generation_tokens_per_second": 40.33
+    },
+    "content": "議事録を作成する際、客観的な「事実」と主観的な「推測・解釈」を明確に区別することは、記録の信頼性を担保し、後の意思決定や責任所在を明確にする上で極めて重要です。混同が生じると、誤った情報に基づいた行動や、意図しない誤解を招くリスクが高まります。以下に、その区別方法と具体例を詳しく解説します。\n\nまず、「事実」とは、誰が、いつ、どこで、何を発言したか、または決定したかという、検証可能な客観的情報を指します。これには、発言者の名前、具体的な数値、日時、決定事項の文言などが含まれます。一方、「推測」や「解釈」は、発言者の意図、感情、背景事情、あるいは記録者による要約時の補足説明など、検証が困難な主観的な要素です。議事録では、これらを混在させず、構造的に分離して記述することが推奨されます。\n\n具体的な手法として、発言内容を「事実欄」と「補足・解釈欄」に分けるか、文中で「～と発言した（事実）」と「～と解釈される（推測）」といった表現を使い分けます。\n\n【具体例】\n会議中に、A部長が「このプロジェクトの進捗は遅れている。来週までに改善策を提示してほしい」と発言した場合を考えます。\n\n× 混同した記述（NG）\n「A部長はプロジェクトの遅れに激怒しており、来週までに改善策を提示するよう強く指示した。」\n→ 「激怒しており」は感情の推測であり、「強く指示した」も事実の程度を主観的に補強しています。\n\n○ 区別した記述（OK）\n【事実】\n・発言者",
+    "prompt_sha256": "eaee9450697ceb4bb7db8f4bce3f84687414fa7d261488ad5bb903b1a57e2e90",
+    "kind": "decode",
+    "run": 2
+  },
+  {
+    "ttft_seconds": 0.4937838339828886,
+    "wall_seconds": 9.379930208961014,
+    "decode_tokens_per_second": 43.100798010537254,
+    "usage": {
+      "prompt_tokens": 51,
+      "completion_tokens": 384,
+      "total_tokens": 435,
+      "input_tokens": 51,
+      "output_tokens": 384,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 0.49,
+      "total_time": 9.38,
+      "prompt_eval_duration": 0.49,
+      "generation_duration": 8.89,
+      "prompt_tokens_per_second": 103.83,
+      "generation_tokens_per_second": 43.21
+    },
+    "content": "議事録を作成する際、客観的な「事実」と主観的な「推測・解釈」を明確に区別することは、記録の信頼性を担保し、後の意思決定や責任所在を明確にする上で極めて重要です。混同が生じると、誤った情報に基づいた行動や、意図しない誤解を招くリスクが高まります。以下に、その区別方法と具体例を詳しく解説します。\n\nまず、「事実」とは、誰が、いつ、どこで、何を発言したか、または決定したかという、検証可能な客観的情報を指します。これには、発言者の名前、具体的な数値、日時、決定事項の文言などが含まれます。一方、「推測」や「解釈」は、発言者の意図、感情、背景にある仮説、あるいは記録者自身の分析が含まれる部分です。これらは検証が困難であり、主観が入り込む余地があるため、事実とは分離して記述する必要があります。\n\n具体的な例を挙げて説明します。会議中にA部長が「このプロジェクトの進捗は遅れている。市場の反応が冷たいからだ」と発言したとします。この発言をそのまま記録すると、事実と推測が混在してしまいます。\n\n【誤った記録例】\n「A部長は、市場の反応が冷たいため、プロジェクトの進捗が遅れていると指摘した。」\n→ この文では、「市場の反応が冷たい」というA部長の推測（解釈）が、あたかも客観的事実であるかのように記述されています。しかし、本当に市場の反応が冷たいのか、それともA部長の個人的な印象なのかは不明です。\n\n【正しい記録例】\n「A部長は、プロジェクトの進捗が遅れている現状について言及した。その原因として、A部長は『市場の",
+    "prompt_sha256": "82a03af24efe40b5ce6b0bc3d5b4aa5d49b5dd3e0f66ef574af00312849bc988",
+    "kind": "decode",
+    "run": 3
+  }
+]

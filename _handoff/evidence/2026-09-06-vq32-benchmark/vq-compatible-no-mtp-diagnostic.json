@@ -1,0 +1,26 @@
+[
+  {
+    "id": "mul_sub",
+    "expected": "1757",
+    "observed": "1757",
+    "passed": true
+  },
+  {
+    "id": "work",
+    "expected": "120",
+    "observed": "150",
+    "passed": false
+  },
+  {
+    "id": "code",
+    "expected": "30",
+    "observed": "30",
+    "passed": true
+  },
+  {
+    "id": "jp_order",
+    "expected": "乙",
+    "observed": "甲",
+    "passed": false
+  }
+]

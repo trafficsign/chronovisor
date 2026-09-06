@@ -1,0 +1,122 @@
+[
+  {
+    "arm": "vq",
+    "key": "model.layers.0.attn_hyper_connection.hc_norm.weight",
+    "dtype": "BF16",
+    "mean": -0.06354683637619019,
+    "min": -5.9375,
+    "max": 6.625,
+    "first": [
+      0.138671875,
+      -0.5390625,
+      0.0079345703125,
+      0.055419921875,
+      0.01214599609375
+    ]
+  },
+  {
+    "arm": "vq",
+    "key": "model.layers.0.linear_attn.norm.weight",
+    "dtype": "BF16",
+    "mean": 0.966766357421875,
+    "min": 0.875,
+    "max": 1.0234375,
+    "first": [
+      1.015625,
+      0.96875,
+      0.9765625,
+      1.015625,
+      0.9609375
+    ]
+  },
+  {
+    "arm": "vq",
+    "key": "model.layers.1.ple.norm_key.weight",
+    "dtype": "BF16",
+    "mean": -0.106692835688591,
+    "min": -0.326171875,
+    "max": 0.86328125,
+    "first": [
+      -0.173828125,
+      -0.2236328125,
+      -0.1796875,
+      -0.197265625,
+      -0.11279296875
+    ]
+  },
+  {
+    "arm": "vq",
+    "key": "model.hyper_connection_mixer.hc_norm.weight",
+    "dtype": "BF16",
+    "mean": 2.7497222423553467,
+    "min": -0.3671875,
+    "max": 12.375,
+    "first": [
+      1.0546875,
+      1.265625,
+      2.140625,
+      1.28125,
+      1.5546875
+    ]
+  },
+  {
+    "arm": "baseline",
+    "key": "language_model.model.layers.0.attn_hyper_connection.hc_norm.weight",
+    "dtype": "BF16",
+    "mean": -0.06354683637619019,
+    "min": -5.9375,
+    "max": 6.625,
+    "first": [
+      0.138671875,
+      -0.5390625,
+      0.0079345703125,
+      0.055419921875,
+      0.01214599609375
+    ]
+  },
+  {
+    "arm": "baseline",
+    "key": "language_model.model.layers.0.linear_attn.norm.weight",
+    "dtype": "BF16",
+    "mean": 0.966766357421875,
+    "min": 0.875,
+    "max": 1.0234375,
+    "first": [
+      1.015625,
+      0.96875,
+      0.9765625,
+      1.015625,
+      0.9609375
+    ]
+  },
+  {
+    "arm": "baseline",
+    "key": "language_model.model.layers.1.ple.norm_key.weight",
+    "dtype": "BF16",
+    "mean": -0.106692835688591,
+    "min": -0.326171875,
+    "max": 0.86328125,
+    "first": [
+      -0.173828125,
+      -0.2236328125,
+      -0.1796875,
+      -0.197265625,
+      -0.11279296875
+    ]
+  },
+  {
+    "arm": "baseline",
+    "key": "language_model.model.hyper_connection_mixer.hc_norm.weight",
+    "dtype": "BF16",
+    "mean": 2.7497222423553467,
+    "min": -0.3671875,
+    "max": 12.375,
+    "first": [
+      1.0546875,
+      1.265625,
+      2.140625,
+      1.28125,
+      1.5546875
+    ]
+  }
+]

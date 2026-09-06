@@ -1,0 +1,26 @@
+{
+  "id": "chatcmpl-ef1af95f-ab59-46b4-8885-fb39289c53b5",
+  "system_fingerprint": "0.32.0-0.32.2-macOS-26.6.2-arm64-arm-64bit-applegpu_g16s",
+  "object": "chat.completion",
+  "model": "default_model",
+  "created": 1788665726,
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "length",
+      "message": {
+        "role": "assistant",
+        "content": "{\n  \"status\": \"success\",\n  \"message\": \"JSON object returned as requested.\",\n  \"timestamp\": \"2023-"
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 17,
+    "completion_tokens": 32,
+    "total_tokens": 49,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "wall_seconds": 1.8260683750268072
+}
