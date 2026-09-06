@@ -59,13 +59,22 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 </script>
 
 <header>
-<h1>Plan: <span id="plan-title">Qwen3.8 Flash Next JANG_4S 本番切替</span></h1>
+<h1>Plan: <span id="plan-title">Qwen3.8 Flash Next JANG_4S 本番切替（撤回・ロールバック済み）</span></h1>
 <div class="meta-bar">
 <span class="badge" data-bind="状態" data-state="done">done</span>
 <span><code data-bind="task_id">plan_20444dc168cc415f83675573d11fd559</code></span>
 <span data-bind="created_at">2026-09-06T08:55:46+09:00</span>
 </div>
 </header>
+
+<section class="rules" data-section="判定訂正">
+<h2>判定訂正（2026-09-06）</h2>
+<ul>
+<li>runtime内部値から算出した約18.36 GiBの削減は、互換性のない指標の比較であり、macOS全体のRAM削減量ではなかった。</li>
+<li>同一boot・no-model基準のOS実測差は約0.38 GiBに留まり、品質と32K prefill性能の低下を正当化できないため採用を撤回した。</li>
+<li>本番は <code>Jundot/Qwen3.8-Flash-Next-oQ4e-mtp</code> / oMLXへ復旧し、JANG_4S/vMLXのライブ構成を撤去した。</li>
+</ul>
+</section>
 
 <section data-section="目的">
 <h2>目的</h2>
@@ -160,6 +169,7 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 <li><time>2026-09-06 09:37</time><span>open fileとlive参照が0であることを確認後、旧oQ4eモデル99Gとベンチ用venv 1.4Gを完全削除。未配置REAP登録も除去し、oMLXを再起動してOrnith+bgeの2モデルのみ、default/pinned=Ornith、loaded=1、5.29GBを確認。vMLX mainはhealthy、active 58.30GB、native MTP D3を維持した。</span></li>
 <li><time>2026-09-06 09:44</time><span>vMLX launchdをbootout/bootstrapし、旧PID消滅、約68秒で新PID 47546へ復帰。同一bundle SHA、MTP D3、再起動後strict JSONを確認。Ornith生成YES、bge 1024次元embedding、実ingest job d6878019成功、authority ready、reranker/semantic ready、LAN未認証401、memory free 43%を確認した。Dashboard総合alertは既存semantic coverage 62.6%と古いmaterialized snapshot由来で、main/authority active failureはない。</span></li>
 <li><time>2026-09-06 09:47</time><span>関連テスト367件pass（live config依存の既存1件のみ除外）、ruff check、diff check、codebase index coverage確認を完了。source commit=2f12ed0、wheel SHA-256=596d8d43a3e4b7ddf095d0f63bf2a0909f8276a9790e76ac0354c15e4abe9002。無関係dirty差分を保持し、Planをdoneとした。</span></li>
+<li><time>2026-09-06 10:50</time><span>同一boot・no-model基準で旧oQ4e約69.39 GiB、JANG_4S約69.01 GiBとなり、実RAM差が約0.38 GiBしかないと確定。採用を撤回し、旧モデル33/33 files・21/21 shards・106,318,234,757 bytesを再取得してoMLXへ復旧した。全37 main routeとruntime sourceを旧正本へ戻し、commit c9e409cを作成。11 managed-v2 serviceはorigin/main 136ab8bで復帰し、strict JSON、実Ingest、returned_model、read-back、Dashboard 200、LAN 401、Semantic/Reranker readyを確認。vMLX/JANG実体74GB、LaunchAgent、切替wheel、作業用backupはライブパスからゴミ箱へ退避した。</span></li>
 </ol>
 </section>
 

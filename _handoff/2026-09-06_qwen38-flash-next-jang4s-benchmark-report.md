@@ -4,16 +4,22 @@
 
 マシン: Mac Studio / Apple M4 Max (40-core GPU) / 128 GB unified memory
 
-## 結論
+## 重要な訂正（2026-09-06 10:50 JST）
 
-`JANGQ-AI/Qwen3.8-Flash-Next-JANG_4S` は、**Chronovisor の主モデル候補として使える**。ただし判定は「メモリ優先の条件付き採用（canary 推奨）」であり、現行を無条件に廃止する判定ではない。
+当初の「約18.36 GiBのメモリ削減」は、oMLXとvMLXが返す互換性のない内部指標を比較したもので、macOS全体のRAM削減量ではなかった。同一boot・no-model基準のOS実測では、旧oQ4eが約69.39 GiB、JANG_4Sが約69.01 GiBを消費し、差は約0.38 GiBに留まった。JANG_4S側では、内部指標に入らないclean mapped weights約11.7 GiBとretained cache約4.5 GiBが主な未計上分だった。
+
+したがってメモリ優位の採用判定を撤回する。JANG_4Sは汎用品質が7.7 percentage points低下し、32K prefillも77.8%遅い一方、期待した実RAM削減が得られなかったため、本番は `Jundot/Qwen3.8-Flash-Next-oQ4e-mtp` / oMLXへロールバックした。以下は当初の比較結果を、誤判定の経緯が分かるよう履歴として残す。
+
+## 当初の結論（撤回済み）
+
+当初は `JANGQ-AI/Qwen3.8-Flash-Next-JANG_4S` を「メモリ優先の条件付き採用」と判定したが、この判定は上記のOS実測により撤回した。
 
 - Chronovisor 実コーパスでは、構造妥当性 19/19、意味的効果 18/19 で現行と同率。中央値は 8.73 秒から 6.32 秒へ 27.7%短縮、全体も 14.1%短縮した。
-- clean load 時の常駐量は現行約 72.65 GiBに対し候補約 54.29 GiBで、約 18.36 GiB（25.3%）小さい。候補は全試験後も約 55.79 GiB、runtime peak は約 58.89 GiBだった。
+- runtime内部のclean-load指標は現行約72.65 GiB、候補約54.29 GiBだったが、定義が異なるためRAM使用量として比較できなかった。同一bootのOS実測差は約0.38 GiBだった。
 - 256-token decode は 62.44 から 71.85 tok/sへ 15.1%向上。4K は 12.7%高速、16K は同等。
 - 犠牲は汎用推論と超長文。汎用 exact score は 24/26 から 22/26へ 7.7 percentage points低下し、32K prefill は 33.86 秒から 60.21 秒へ 77.8%悪化した。
 
-Chronovisor の典型的な structured decision を主用途にし、32K超や高リスク推論を現行側へ逃がせるなら、メモリ逼迫を解消する価値が品質リスクを上回る。まず既定を切り替える前に、同じ replay corpus 全100件で paired canary を通すのが安全な採用境界となる。
+速度差は参考値として残るが、実RAM削減がほぼなく品質・長文性能の低下だけが残るため、Chronovisor本番へ採用する根拠にはならない。
 
 ## 比較結果
 
@@ -30,10 +36,11 @@ Chronovisor の典型的な structured decision を主用途にし、32K超や�
 | 16K needle | 26.18 s / 100% | 26.27 s / 100% | +0.3% |
 | 32K needle | 33.86 s / 100% | 60.21 s / 100% | +77.8% |
 | 256-token decode | 62.44 tok/s | 71.85 tok/s | +15.1% |
-| clean-load resident | 約72.65 GiB | 約54.29 GiB | -18.36 GiB / -25.3% |
+| runtime内部のclean-load指標（非比較可能） | 約72.65 GiB | 約54.29 GiB | 見かけ上 -18.36 GiB |
+| 同一boot・no-model基準のOS消費量 | 約69.39 GiB | 約69.01 GiB | 約 -0.38 GiB |
 | 候補 post-run / peak | — | 55.79 / 58.89 GiB | — |
 
-メモリは runtime ごとに公開する計測値の定義が完全には同一でないため、補助的に macOS `footprint` も確認した。候補は全試験後 57 GB（うち IOAccelerator 56 GB）だった。oMLX の `actual_size` は 78,678,154,328 bytes（73.27 GiB）。
+当初はruntimeごとの公開値に加えて候補の `footprint` だけを確認したが、両者を同じno-model基準で差分測定していなかった。再測定で候補はclean mapped weights約11.7 GiBを別に保持しており、runtime内部値だけではプロセス全体もOS全体も表せないと確定した。
 
 ## 品質差
 
