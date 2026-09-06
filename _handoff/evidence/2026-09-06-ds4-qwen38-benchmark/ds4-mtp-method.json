@@ -1,0 +1,27 @@
+{
+  "command": [
+    "/Users/trafficsign/projects/sandbox/ds4-qwen38-benchmark-20260906/ds4-server",
+    "-m",
+    "/Users/trafficsign/.omlx/experiments/ds4-qwen38-q4/model/Qwen3.8-Flash-Next-Q4KImatrixExperts-MXFP4Down-BF16Emb-BF16Control-Q8GDN-Q8QSA-Q8Shared-Q8Out-MTP.gguf",
+    "--ple",
+    "/Users/trafficsign/.omlx/experiments/ds4-qwen38-q4/model/Qwen3.8-Flash-Next-PLE-Q4_1.gguf",
+    "--metal",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "18136",
+    "--ctx",
+    "65536",
+    "--power",
+    "100",
+    "--trace",
+    "/Users/trafficsign/projects/personal/chronovisor/_handoff/evidence/2026-09-06-ds4-qwen38-benchmark/ds4-mtp-trace.log",
+    "--mtp",
+    "--mtp-exact-sampling"
+  ],
+  "runtime": "DwarfStar",
+  "candidate_engine_commit": "236cb2a549d05ea1941a19bd4f154e0abc858661",
+  "candidate_artifact_revision": "59a55fb819c82be7b162948282b50bd1a1e290b7",
+  "cold": "request-specific prefix before shared body; resident model; cached_tokens must be zero",
+  "warm": "full conversation follow-up with identical history; observe actual cache behavior"
+}

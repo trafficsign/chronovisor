@@ -1,0 +1,25 @@
+{
+  "ttft_seconds": 0.9998902910156175,
+  "wall_seconds": 0.9999829159933142,
+  "output_tokens_per_second": 1.000017084298554,
+  "decode_tokens_per_second": null,
+  "usage": {
+    "prompt_tokens": 16,
+    "completion_tokens": 1,
+    "total_tokens": 17,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "cache_write_tokens": 16
+    }
+  },
+  "content": "READY",
+  "reasoning": "",
+  "finish_reason": "stop",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Return only READY."
+    }
+  ],
+  "prompt_sha256": "0efb679a45315c240de53b7319b637f8805cfe47efc8c3d7127887ef99f8e066"
+}

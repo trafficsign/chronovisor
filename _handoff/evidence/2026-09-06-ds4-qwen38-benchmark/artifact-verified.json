@@ -1,0 +1,11 @@
+{
+  "repo": "ivanfioravanti/Qwen3.8-Flash-Next-DS4-Q4",
+  "revision": "59a55fb819c82be7b162948282b50bd1a1e290b7",
+  "runtime_commit": "236cb2a549d05ea1941a19bd4f154e0abc858661",
+  "files": [
+    {"name": "Qwen3.8-Flash-Next-PLE-Q4_1.gguf", "bytes": 32000157440, "sha256": "66db3ab390f4dd5063ecc89cc180f4713898577682347001bf64ab8e328527a1", "matches_hub": true},
+    {"name": "Qwen3.8-Flash-Next-Q4KImatrixExperts-MXFP4Down-BF16Emb-BF16Control-Q8GDN-Q8QSA-Q8Shared-Q8Out-MTP.gguf", "bytes": 74879771648, "sha256": "36144db35ef663555b1838896748288d096b67d145e25e3b5ece3826491d69a8", "matches_hub": true}
+  ],
+  "host": "Apple M4 Max, 128 GiB RAM",
+  "baseline_runtime": "oMLX 0.6.4"
+}

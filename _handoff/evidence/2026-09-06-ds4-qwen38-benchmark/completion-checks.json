@@ -1,0 +1,26 @@
+{
+  "completed_arms": ["baseline", "ds4", "ds4-mtp"],
+  "performance_rows_per_arm": 15,
+  "performance_messages_and_input_output_token_counts_match": true,
+  "all_cold_cached_tokens_zero": true,
+  "needle_and_followup_passed_per_arm": 12,
+  "quality_passed_per_arm": 30,
+  "quality_total_per_arm": 32,
+  "protected_config_hashes_unchanged_all_arms": true,
+  "chronovisor_enabled_services_after": 11,
+  "production_health": "healthy",
+  "production_default_model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+  "experimental_port_18136_closed": true,
+  "validation": ["ruff format --check", "ruff check", "runner self-check", "cross-arm JSON assertions"],
+  "cleanup": {
+    "removed": "/Users/trafficsign/.omlx/experiments/ds4-qwen38-q4/baseline",
+    "approx_removed_gib": 4.9,
+    "production_and_launchagent_reference_matches": 0,
+    "open_files_before_removal": 0,
+    "original_model_symlink_target_preserved": true,
+    "candidate_weights_retained_for_decision": true,
+    "candidate_weight_bytes": 106879929088,
+    "runtime_clone_retained": true
+  },
+  "not_evaluated": ["production cutover", "representative sustained RAM savings", "Chronovisor end-to-end structured output", "concurrency", "262K context"]
+}
