@@ -1,0 +1,68 @@
+[
+  {
+    "plist": "com.trafficsign.chronovisor-converge.managed-v2.plist",
+    "returncode": 0,
+    "output": "{\n  \"services\" : [\n    {\n      \"plist\" : \"com.trafficsign.chronovisor-converge.managed-v2.plist\",\n      \"status\" : \"enabled\"\n    }\n  ]\n}\n",
+    "error": ""
+  },
+  {
+    "plist": "com.trafficsign.chronovisor-dashboard.managed-v2.plist",
+    "returncode": 0,
+    "output": "{\n  \"services\" : [\n    {\n      \"plist\" : \"com.trafficsign.chronovisor-dashboard.managed-v2.plist\",\n      \"status\" : \"enabled\"\n    }\n  ]\n}\n",
+    "error": ""
+  },
+  {
+    "plist": "com.trafficsign.chronovisor-deadman-observer.managed-v2.plist",
+    "returncode": 0,
+    "output": "{\n  \"services\" : [\n    {\n      \"plist\" : \"com.trafficsign.chronovisor-deadman-observer.managed-v2.plist\",\n      \"status\" : \"enabled\"\n    }\n  ]\n}\n",
+    "error": ""
+  },
+  {
+    "plist": "com.trafficsign.chronovisor-ingest-drain.managed-v2.plist",
+    "returncode": 0,
+    "output": "{\n  \"services\" : [\n    {\n      \"plist\" : \"com.trafficsign.chronovisor-ingest-drain.managed-v2.plist\",\n      \"status\" : \"enabled\"\n    }\n  ]\n}\n",
+    "error": ""
+  },
+  {
+    "plist": "com.trafficsign.chronovisor-lan-dashboard.managed-v2.plist",
+    "returncode": 0,
+    "output": "{\n  \"services\" : [\n    {\n      \"plist\" : \"com.trafficsign.chronovisor-lan-dashboard.managed-v2.plist\",\n      \"status\" : \"enabled\"\n    }\n  ]\n}\n",
+    "error": ""
+  },
+  {
+    "plist": "com.trafficsign.chronovisor-librarian-review.managed-v2.plist",
+    "returncode": 0,
+    "output": "{\n  \"services\" : [\n    {\n      \"plist\" : \"com.trafficsign.chronovisor-librarian-review.managed-v2.plist\",\n      \"status\" : \"enabled\"\n    }\n  ]\n}\n",
+    "error": ""
+  },
+  {
+    "plist": "com.trafficsign.chronovisor-reranker.managed-v2.plist",
+    "returncode": 0,
+    "output": "{\n  \"services\" : [\n    {\n      \"plist\" : \"com.trafficsign.chronovisor-reranker.managed-v2.plist\",\n      \"status\" : \"enabled\"\n    }\n  ]\n}\n",
+    "error": ""
+  },
+  {
+    "plist": "com.trafficsign.chronovisor-searxng.managed-v2.plist",
+    "returncode": 0,
+    "output": "{\n  \"services\" : [\n    {\n      \"plist\" : \"com.trafficsign.chronovisor-searxng.managed-v2.plist\",\n      \"status\" : \"enabled\"\n    }\n  ]\n}\n",
+    "error": ""
+  },
+  {
+    "plist": "com.trafficsign.chronovisor-semantic.managed-v2.plist",
+    "returncode": 0,
+    "output": "{\n  \"services\" : [\n    {\n      \"plist\" : \"com.trafficsign.chronovisor-semantic.managed-v2.plist\",\n      \"status\" : \"enabled\"\n    }\n  ]\n}\n",
+    "error": ""
+  },
+  {
+    "plist": "com.trafficsign.chronovisor-sleep.managed-v2.plist",
+    "returncode": 0,
+    "output": "{\n  \"services\" : [\n    {\n      \"plist\" : \"com.trafficsign.chronovisor-sleep.managed-v2.plist\",\n      \"status\" : \"enabled\"\n    }\n  ]\n}\n",
+    "error": ""
+  },
+  {
+    "plist": "com.trafficsign.chronovisor-watchdog.managed-v2.plist",
+    "returncode": 0,
+    "output": "{\n  \"services\" : [\n    {\n      \"plist\" : \"com.trafficsign.chronovisor-watchdog.managed-v2.plist\",\n      \"status\" : \"enabled\"\n    }\n  ]\n}\n",
+    "error": ""
+  }
+]

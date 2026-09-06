@@ -1,0 +1,28 @@
+{
+  "id": "chatcmpl-e802b642",
+  "object": "chat.completion",
+  "created": 1788660564,
+  "model": "baseline",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "READY"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 16,
+    "completion_tokens": 1,
+    "total_tokens": 17,
+    "input_tokens": 16,
+    "output_tokens": 1,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "total_time": 2.88
+  },
+  "wall_seconds": 3.3234402089728974
+}

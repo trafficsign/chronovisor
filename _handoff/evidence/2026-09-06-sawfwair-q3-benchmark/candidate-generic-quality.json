@@ -1,0 +1,504 @@
+{
+  "passed": 21,
+  "total": 26,
+  "rate": 0.8076923076923077,
+  "cases": [
+    {
+      "id": "mul_sub",
+      "passed": true,
+      "expected": "1757",
+      "observed": "1757",
+      "usage": {
+        "prompt_tokens": 30,
+        "completion_tokens": 4,
+        "total_tokens": 34,
+        "input_tokens": 30,
+        "output_tokens": 4,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 1.38
+      },
+      "wall_seconds": 1.3840803329949267
+    },
+    {
+      "id": "percent",
+      "passed": true,
+      "expected": "714",
+      "observed": "714",
+      "usage": {
+        "prompt_tokens": 35,
+        "completion_tokens": 3,
+        "total_tokens": 38,
+        "input_tokens": 35,
+        "output_tokens": 3,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.63
+      },
+      "wall_seconds": 0.6383345840149559
+    },
+    {
+      "id": "algebra",
+      "passed": true,
+      "expected": "12",
+      "observed": "12",
+      "usage": {
+        "prompt_tokens": 30,
+        "completion_tokens": 2,
+        "total_tokens": 32,
+        "input_tokens": 30,
+        "output_tokens": 2,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.5
+      },
+      "wall_seconds": 0.5003205829998478
+    },
+    {
+      "id": "sequence",
+      "passed": true,
+      "expected": "42",
+      "observed": "42",
+      "usage": {
+        "prompt_tokens": 39,
+        "completion_tokens": 2,
+        "total_tokens": 41,
+        "input_tokens": 39,
+        "output_tokens": 2,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.56
+      },
+      "wall_seconds": 0.5669222500291653
+    },
+    {
+      "id": "remainder",
+      "passed": false,
+      "expected": "19",
+      "observed": "To find the remainder when 98765 is divided by 97, we can perform the division or use modular arithmetic properties.\n\n**Method 1: Direct Division**\n\n1.  Divide 98765 by 97.\n    $$ 98765 \\div 97 \\approx 1018.1958 $$\n2.  Find the integer part of the quotient:\n    $$ \\lfloor 98765 / 97 \\rfloor = 1018 $$\n3.  Multiply the integer quotient by",
+      "usage": {
+        "prompt_tokens": 30,
+        "completion_tokens": 128,
+        "total_tokens": 158,
+        "input_tokens": 30,
+        "output_tokens": 128,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 5.41
+      },
+      "wall_seconds": 5.415708874992561
+    },
+    {
+      "id": "work",
+      "passed": false,
+      "expected": "120",
+      "observed": "To solve this problem, we need to determine the rate of production per machine per hour.\n\n**Step 1: Find the total rate of production for the 5 machines.**\n5 machines make 350 parts in 7 hours.\nTotal parts = 350\nTotal time = 7 hours\n\nThe combined rate of the 5 machines is:\n$$ \\frac{350 \\text{ parts}}{7 \\text{ hours}} = 50 \\text{ parts per hour} $$\n\n**Step 2: Find the rate of production for a single machine.**\nSince all machines",
+      "usage": {
+        "prompt_tokens": 46,
+        "completion_tokens": 128,
+        "total_tokens": 174,
+        "input_tokens": 46,
+        "output_tokens": 128,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 5.51
+      },
+      "wall_seconds": 5.511040874989703
+    },
+    {
+      "id": "ordering",
+      "passed": true,
+      "expected": "Sora",
+      "observed": "Sora",
+      "usage": {
+        "prompt_tokens": 34,
+        "completion_tokens": 2,
+        "total_tokens": 36,
+        "input_tokens": 34,
+        "output_tokens": 2,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.53
+      },
+      "wall_seconds": 0.5313737919786945
+    },
+    {
+      "id": "syllogism",
+      "passed": true,
+      "expected": "NO",
+      "observed": "NO",
+      "usage": {
+        "prompt_tokens": 39,
+        "completion_tokens": 1,
+        "total_tokens": 40,
+        "input_tokens": 39,
+        "output_tokens": 1,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.5
+      },
+      "wall_seconds": 0.5013573750038631
+    },
+    {
+      "id": "truth",
+      "passed": true,
+      "expected": "A",
+      "observed": "A",
+      "usage": {
+        "prompt_tokens": 45,
+        "completion_tokens": 1,
+        "total_tokens": 46,
+        "input_tokens": 45,
+        "output_tokens": 1,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.62
+      },
+      "wall_seconds": 0.6287047090008855
+    },
+    {
+      "id": "set",
+      "passed": true,
+      "expected": "2,5,8",
+      "observed": "2,5,8",
+      "usage": {
+        "prompt_tokens": 45,
+        "completion_tokens": 5,
+        "total_tokens": 50,
+        "input_tokens": 45,
+        "output_tokens": 5,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.78
+      },
+      "wall_seconds": 0.7867012089700438
+    },
+    {
+      "id": "units",
+      "passed": true,
+      "expected": "225",
+      "observed": "225",
+      "usage": {
+        "prompt_tokens": 27,
+        "completion_tokens": 3,
+        "total_tokens": 30,
+        "input_tokens": 27,
+        "output_tokens": 3,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.52
+      },
+      "wall_seconds": 0.5278361670207232
+    },
+    {
+      "id": "code",
+      "passed": false,
+      "expected": "30",
+      "observed": "55",
+      "usage": {
+        "prompt_tokens": 34,
+        "completion_tokens": 2,
+        "total_tokens": 36,
+        "input_tokens": 34,
+        "output_tokens": 2,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.53
+      },
+      "wall_seconds": 0.5367902919533662
+    },
+    {
+      "id": "precedence",
+      "passed": false,
+      "expected": "53",
+      "observed": "12",
+      "usage": {
+        "prompt_tokens": 39,
+        "completion_tokens": 2,
+        "total_tokens": 41,
+        "input_tokens": 39,
+        "output_tokens": 2,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.5
+      },
+      "wall_seconds": 0.5066054580383934
+    },
+    {
+      "id": "instruction",
+      "passed": true,
+      "expected": "ORANGE",
+      "observed": "ORANGE",
+      "usage": {
+        "prompt_tokens": 31,
+        "completion_tokens": 2,
+        "total_tokens": 33,
+        "input_tokens": 31,
+        "output_tokens": 2,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.49
+      },
+      "wall_seconds": 0.49015004199463874
+    },
+    {
+      "id": "extract",
+      "passed": true,
+      "expected": "held",
+      "observed": "held",
+      "usage": {
+        "prompt_tokens": 34,
+        "completion_tokens": 1,
+        "total_tokens": 35,
+        "input_tokens": 34,
+        "output_tokens": 1,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.43
+      },
+      "wall_seconds": 0.4363802919979207
+    },
+    {
+      "id": "jp_math",
+      "passed": true,
+      "expected": "6",
+      "observed": "6",
+      "usage": {
+        "prompt_tokens": 38,
+        "completion_tokens": 1,
+        "total_tokens": 39,
+        "input_tokens": 38,
+        "output_tokens": 1,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.5
+      },
+      "wall_seconds": 0.49974775000009686
+    },
+    {
+      "id": "jp_order",
+      "passed": false,
+      "expected": "乙",
+      "observed": "甲",
+      "usage": {
+        "prompt_tokens": 35,
+        "completion_tokens": 1,
+        "total_tokens": 36,
+        "input_tokens": 35,
+        "output_tokens": 1,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.45
+      },
+      "wall_seconds": 0.45878916699439287
+    },
+    {
+      "id": "jp_extract",
+      "passed": true,
+      "expected": "ZX-204",
+      "observed": "ZX-204",
+      "usage": {
+        "prompt_tokens": 37,
+        "completion_tokens": 5,
+        "total_tokens": 42,
+        "input_tokens": 37,
+        "output_tokens": 5,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.68
+      },
+      "wall_seconds": 0.6795264160027727
+    },
+    {
+      "id": "negation",
+      "passed": true,
+      "expected": "REJECT",
+      "observed": "REJECT",
+      "usage": {
+        "prompt_tokens": 36,
+        "completion_tokens": 2,
+        "total_tokens": 38,
+        "input_tokens": 36,
+        "output_tokens": 2,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.53
+      },
+      "wall_seconds": 0.5343325420399196
+    },
+    {
+      "id": "count",
+      "passed": true,
+      "expected": "11",
+      "observed": "11",
+      "usage": {
+        "prompt_tokens": 29,
+        "completion_tokens": 2,
+        "total_tokens": 31,
+        "input_tokens": 29,
+        "output_tokens": 2,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 0.44
+      },
+      "wall_seconds": 0.44413174997316673
+    },
+    {
+      "id": "json_extract",
+      "passed": true,
+      "expected": {
+        "ticket": "T-91",
+        "owner": "Aya",
+        "state": "blocked"
+      },
+      "observed": "{\"ticket\": \"T-91\", \"owner\": \"Aya\", \"state\": \"blocked\"}",
+      "usage": {
+        "prompt_tokens": 30,
+        "completion_tokens": 31,
+        "total_tokens": 61,
+        "input_tokens": 30,
+        "output_tokens": 31,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 1.67
+      },
+      "wall_seconds": 1.6903720420086756
+    },
+    {
+      "id": "json_decision",
+      "passed": true,
+      "expected": {
+        "decision": "reject",
+        "score": 83,
+        "flagged": true
+      },
+      "observed": "{\"decision\": \"reject\", \"score\": 83, \"flagged\": true}",
+      "usage": {
+        "prompt_tokens": 39,
+        "completion_tokens": 27,
+        "total_tokens": 66,
+        "input_tokens": 39,
+        "output_tokens": 27,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 1.48
+      },
+      "wall_seconds": 1.4868098339647986
+    },
+    {
+      "id": "json_math",
+      "passed": true,
+      "expected": {
+        "sum": 46,
+        "product": 493,
+        "larger": 29
+      },
+      "observed": "{\"sum\": 46, \"product\": 493, \"larger\": 29}",
+      "usage": {
+        "prompt_tokens": 32,
+        "completion_tokens": 31,
+        "total_tokens": 63,
+        "input_tokens": 32,
+        "output_tokens": 31,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 1.57
+      },
+      "wall_seconds": 1.5777020410168916
+    },
+    {
+      "id": "json_jp",
+      "passed": true,
+      "expected": {
+        "担当": "佐藤",
+        "件数": 7,
+        "完了": false
+      },
+      "observed": "{\"\\u62c5\\u5f53\": \"\\u4f50\\u85e4\", \"\\u4ef6\\u6570\": 7, \"\\u5b8c\\u4e86\": false}",
+      "usage": {
+        "prompt_tokens": 33,
+        "completion_tokens": 27,
+        "total_tokens": 60,
+        "input_tokens": 33,
+        "output_tokens": 27,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 1.44
+      },
+      "wall_seconds": 1.4445982499746606
+    },
+    {
+      "id": "json_risk",
+      "passed": true,
+      "expected": {
+        "impact": 9,
+        "likelihood": 4,
+        "risk": "high"
+      },
+      "observed": "{\"impact\": 9, \"likelihood\": 4, \"risk\": \"high\"}",
+      "usage": {
+        "prompt_tokens": 43,
+        "completion_tokens": 27,
+        "total_tokens": 70,
+        "input_tokens": 43,
+        "output_tokens": 27,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 1.53
+      },
+      "wall_seconds": 1.5392454999964684
+    },
+    {
+      "id": "json_sort",
+      "passed": true,
+      "expected": {
+        "sorted": [
+          2,
+          2,
+          5,
+          9,
+          11
+        ],
+        "distinct": 4
+      },
+      "observed": "{\"sorted\": [2, 2, 5, 9, 11], \"distinct\": 4}",
+      "usage": {
+        "prompt_tokens": 38,
+        "completion_tokens": 31,
+        "total_tokens": 69,
+        "input_tokens": 38,
+        "output_tokens": 31,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 1.57
+      },
+      "wall_seconds": 1.5786702089826576
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "mul_sub",
+    "expected": "1757",
+    "observed": "1757",
+    "passed": true
+  },
+  {
+    "id": "work",
+    "expected": "120",
+    "observed": "To solve this problem, we need to determine the rate at which a single machine produces parts and then apply that rate to the new scenario.\n\n**Step 1: Find the rate of one machine.**\nWe know that 5 machines make 350 parts in 7 hours.\nFirst, let's find out how many parts **one** machine makes in 7 hours.\n$$ \\text{Parts per machine in 7 hours} = \\frac{350 \\text{ parts}}{5 \\text{ machines}} = 70 \\text{ parts} $$\n\nNext, let's find out",
+    "passed": false
+  },
+  {
+    "id": "code",
+    "expected": "30",
+    "observed": "55",
+    "passed": false
+  },
+  {
+    "id": "jp_order",
+    "expected": "乙",
+    "observed": "甲",
+    "passed": false
+  }
+]

@@ -1,0 +1,607 @@
+{
+  "revision": "1cee9301c745836e0abb8933e89cf27a38b98125",
+  "files": [
+    {
+      "file": ".gitattributes",
+      "bytes": 1570
+    },
+    {
+      "file": ".mererun-conversion-state.json",
+      "bytes": 709034
+    },
+    {
+      "file": "LICENSE",
+      "bytes": 3235
+    },
+    {
+      "file": "MERERUN_CONVERSION.json",
+      "bytes": 120423
+    },
+    {
+      "file": "MERERUN_PLE_PACK.json",
+      "bytes": 719
+    },
+    {
+      "file": "MERERUN_PLE_STORE.json",
+      "bytes": 6344
+    },
+    {
+      "file": "MERERUN_QUALIFICATION.json",
+      "bytes": 3414
+    },
+    {
+      "file": "README.md",
+      "bytes": 5211
+    },
+    {
+      "file": "README.upstream.md",
+      "bytes": 64796
+    },
+    {
+      "file": "chat_template.jinja",
+      "bytes": 8952
+    },
+    {
+      "file": "config.json",
+      "bytes": 82864
+    },
+    {
+      "file": "generation_config.json",
+      "bytes": 202
+    },
+    {
+      "file": "merges.txt",
+      "bytes": 3353259
+    },
+    {
+      "file": "model-00001-of-00131.safetensors",
+      "bytes": 488251308
+    },
+    {
+      "file": "model-00002-of-00131.safetensors",
+      "bytes": 734004166
+    },
+    {
+      "file": "model-00003-of-00131.safetensors",
+      "bytes": 412521190
+    },
+    {
+      "file": "model-00004-of-00131.safetensors",
+      "bytes": 734004164
+    },
+    {
+      "file": "model-00005-of-00131.safetensors",
+      "bytes": 890937704
+    },
+    {
+      "file": "model-00006-of-00131.safetensors",
+      "bytes": 1000006799
+    },
+    {
+      "file": "model-00007-of-00131.safetensors",
+      "bytes": 1000006795
+    },
+    {
+      "file": "model-00008-of-00131.safetensors",
+      "bytes": 1000006811
+    },
+    {
+      "file": "model-00009-of-00131.safetensors",
+      "bytes": 1000006809
+    },
+    {
+      "file": "model-00010-of-00131.safetensors",
+      "bytes": 1000006807
+    },
+    {
+      "file": "model-00011-of-00131.safetensors",
+      "bytes": 1000006807
+    },
+    {
+      "file": "model-00012-of-00131.safetensors",
+      "bytes": 1000006813
+    },
+    {
+      "file": "model-00013-of-00131.safetensors",
+      "bytes": 1000006811
+    },
+    {
+      "file": "model-00014-of-00131.safetensors",
+      "bytes": 1000006807
+    },
+    {
+      "file": "model-00015-of-00131.safetensors",
+      "bytes": 1000006809
+    },
+    {
+      "file": "model-00016-of-00131.safetensors",
+      "bytes": 1000006809
+    },
+    {
+      "file": "model-00017-of-00131.safetensors",
+      "bytes": 1000006809
+    },
+    {
+      "file": "model-00018-of-00131.safetensors",
+      "bytes": 1000006809
+    },
+    {
+      "file": "model-00019-of-00131.safetensors",
+      "bytes": 1000006807
+    },
+    {
+      "file": "model-00020-of-00131.safetensors",
+      "bytes": 1000006813
+    },
+    {
+      "file": "model-00021-of-00131.safetensors",
+      "bytes": 1000006807
+    },
+    {
+      "file": "model-00022-of-00131.safetensors",
+      "bytes": 1000006811
+    },
+    {
+      "file": "model-00023-of-00131.safetensors",
+      "bytes": 1000006811
+    },
+    {
+      "file": "model-00024-of-00131.safetensors",
+      "bytes": 1000006809
+    },
+    {
+      "file": "model-00025-of-00131.safetensors",
+      "bytes": 1000006807
+    },
+    {
+      "file": "model-00026-of-00131.safetensors",
+      "bytes": 1000006813
+    },
+    {
+      "file": "model-00027-of-00131.safetensors",
+      "bytes": 1000006809
+    },
+    {
+      "file": "model-00028-of-00131.safetensors",
+      "bytes": 1000006813
+    },
+    {
+      "file": "model-00029-of-00131.safetensors",
+      "bytes": 1000006807
+    },
+    {
+      "file": "model-00030-of-00131.safetensors",
+      "bytes": 1000006817
+    },
+    {
+      "file": "model-00031-of-00131.safetensors",
+      "bytes": 1000006819
+    },
+    {
+      "file": "model-00032-of-00131.safetensors",
+      "bytes": 1000006823
+    },
+    {
+      "file": "model-00033-of-00131.safetensors",
+      "bytes": 1000006823
+    },
+    {
+      "file": "model-00034-of-00131.safetensors",
+      "bytes": 1000006823
+    },
+    {
+      "file": "model-00035-of-00131.safetensors",
+      "bytes": 1000006821
+    },
+    {
+      "file": "model-00036-of-00131.safetensors",
+      "bytes": 1000006821
+    },
+    {
+      "file": "model-00037-of-00131.safetensors",
+      "bytes": 540188242
+    },
+    {
+      "file": "model-00038-of-00131.safetensors",
+      "bytes": 734004168
+    },
+    {
+      "file": "model-00039-of-00131.safetensors",
+      "bytes": 379857845
+    },
+    {
+      "file": "model-00040-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00041-of-00131.safetensors",
+      "bytes": 443307127
+    },
+    {
+      "file": "model-00042-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00043-of-00131.safetensors",
+      "bytes": 414364799
+    },
+    {
+      "file": "model-00044-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00045-of-00131.safetensors",
+      "bytes": 412521259
+    },
+    {
+      "file": "model-00046-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00047-of-00131.safetensors",
+      "bytes": 379881249
+    },
+    {
+      "file": "model-00048-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00049-of-00131.safetensors",
+      "bytes": 441484123
+    },
+    {
+      "file": "model-00050-of-00131.safetensors",
+      "bytes": 734004174
+    },
+    {
+      "file": "model-00051-of-00131.safetensors",
+      "bytes": 412521257
+    },
+    {
+      "file": "model-00052-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00053-of-00131.safetensors",
+      "bytes": 414364889
+    },
+    {
+      "file": "model-00054-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00055-of-00131.safetensors",
+      "bytes": 379857853
+    },
+    {
+      "file": "model-00056-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00057-of-00131.safetensors",
+      "bytes": 443307120
+    },
+    {
+      "file": "model-00058-of-00131.safetensors",
+      "bytes": 734004164
+    },
+    {
+      "file": "model-00059-of-00131.safetensors",
+      "bytes": 379858031
+    },
+    {
+      "file": "model-00060-of-00131.safetensors",
+      "bytes": 976382472
+    },
+    {
+      "file": "model-00061-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00062-of-00131.safetensors",
+      "bytes": 884380835
+    },
+    {
+      "file": "model-00063-of-00131.safetensors",
+      "bytes": 734004172
+    },
+    {
+      "file": "model-00064-of-00131.safetensors",
+      "bytes": 412521263
+    },
+    {
+      "file": "model-00065-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00066-of-00131.safetensors",
+      "bytes": 382479411
+    },
+    {
+      "file": "model-00067-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00068-of-00131.safetensors",
+      "bytes": 441463513
+    },
+    {
+      "file": "model-00069-of-00131.safetensors",
+      "bytes": 734004168
+    },
+    {
+      "file": "model-00070-of-00131.safetensors",
+      "bytes": 412526485
+    },
+    {
+      "file": "model-00071-of-00131.safetensors",
+      "bytes": 734004172
+    },
+    {
+      "file": "model-00072-of-00131.safetensors",
+      "bytes": 414365143
+    },
+    {
+      "file": "model-00073-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00074-of-00131.safetensors",
+      "bytes": 379857859
+    },
+    {
+      "file": "model-00075-of-00131.safetensors",
+      "bytes": 734004168
+    },
+    {
+      "file": "model-00076-of-00131.safetensors",
+      "bytes": 442385492
+    },
+    {
+      "file": "model-00077-of-00131.safetensors",
+      "bytes": 734004168
+    },
+    {
+      "file": "model-00078-of-00131.safetensors",
+      "bytes": 412544668
+    },
+    {
+      "file": "model-00079-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00080-of-00131.safetensors",
+      "bytes": 379857873
+    },
+    {
+      "file": "model-00081-of-00131.safetensors",
+      "bytes": 734004164
+    },
+    {
+      "file": "model-00082-of-00131.safetensors",
+      "bytes": 441484053
+    },
+    {
+      "file": "model-00083-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00084-of-00131.safetensors",
+      "bytes": 379857823
+    },
+    {
+      "file": "model-00085-of-00131.safetensors",
+      "bytes": 734004168
+    },
+    {
+      "file": "model-00086-of-00131.safetensors",
+      "bytes": 443307154
+    },
+    {
+      "file": "model-00087-of-00131.safetensors",
+      "bytes": 734004174
+    },
+    {
+      "file": "model-00088-of-00131.safetensors",
+      "bytes": 414364850
+    },
+    {
+      "file": "model-00089-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00090-of-00131.safetensors",
+      "bytes": 413443204
+    },
+    {
+      "file": "model-00091-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00092-of-00131.safetensors",
+      "bytes": 379857849
+    },
+    {
+      "file": "model-00093-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00094-of-00131.safetensors",
+      "bytes": 441463929
+    },
+    {
+      "file": "model-00095-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00096-of-00131.safetensors",
+      "bytes": 412521255
+    },
+    {
+      "file": "model-00097-of-00131.safetensors",
+      "bytes": 734004172
+    },
+    {
+      "file": "model-00098-of-00131.safetensors",
+      "bytes": 412521257
+    },
+    {
+      "file": "model-00099-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00100-of-00131.safetensors",
+      "bytes": 379858227
+    },
+    {
+      "file": "model-00101-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00102-of-00131.safetensors",
+      "bytes": 441464145
+    },
+    {
+      "file": "model-00103-of-00131.safetensors",
+      "bytes": 734004164
+    },
+    {
+      "file": "model-00104-of-00131.safetensors",
+      "bytes": 412521223
+    },
+    {
+      "file": "model-00105-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00106-of-00131.safetensors",
+      "bytes": 421368980
+    },
+    {
+      "file": "model-00107-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00108-of-00131.safetensors",
+      "bytes": 431691533
+    },
+    {
+      "file": "model-00109-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00110-of-00131.safetensors",
+      "bytes": 379857833
+    },
+    {
+      "file": "model-00111-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00112-of-00131.safetensors",
+      "bytes": 441464202
+    },
+    {
+      "file": "model-00113-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00114-of-00131.safetensors",
+      "bytes": 412526463
+    },
+    {
+      "file": "model-00115-of-00131.safetensors",
+      "bytes": 734004172
+    },
+    {
+      "file": "model-00116-of-00131.safetensors",
+      "bytes": 412521247
+    },
+    {
+      "file": "model-00117-of-00131.safetensors",
+      "bytes": 734004170
+    },
+    {
+      "file": "model-00118-of-00131.safetensors",
+      "bytes": 379878427
+    },
+    {
+      "file": "model-00119-of-00131.safetensors",
+      "bytes": 734004172
+    },
+    {
+      "file": "model-00120-of-00131.safetensors",
+      "bytes": 445150228
+    },
+    {
+      "file": "model-00121-of-00131.safetensors",
+      "bytes": 734004164
+    },
+    {
+      "file": "model-00122-of-00131.safetensors",
+      "bytes": 412521210
+    },
+    {
+      "file": "model-00123-of-00131.safetensors",
+      "bytes": 734004166
+    },
+    {
+      "file": "model-00124-of-00131.safetensors",
+      "bytes": 383544484
+    },
+    {
+      "file": "model-00125-of-00131.safetensors",
+      "bytes": 734004164
+    },
+    {
+      "file": "model-00126-of-00131.safetensors",
+      "bytes": 441463425
+    },
+    {
+      "file": "model-00127-of-00131.safetensors",
+      "bytes": 734004168
+    },
+    {
+      "file": "model-00128-of-00131.safetensors",
+      "bytes": 412521242
+    },
+    {
+      "file": "model-00129-of-00131.safetensors",
+      "bytes": 734004166
+    },
+    {
+      "file": "model-00130-of-00131.safetensors",
+      "bytes": 733707532
+    },
+    {
+      "file": "model-00131-of-00131.safetensors",
+      "bytes": 357581254
+    },
+    {
+      "file": "model.safetensors.index.json",
+      "bytes": 408686
+    },
+    {
+      "file": "preprocessor_config.json",
+      "bytes": 390
+    },
+    {
+      "file": "tokenizer.json",
+      "bytes": 12809320
+    },
+    {
+      "file": "tokenizer_config.json",
+      "bytes": 17928
+    },
+    {
+      "file": "video_preprocessor_config.json",
+      "bytes": 385
+    },
+    {
+      "file": "vocab.json",
+      "bytes": 6722759
+    }
+  ],
+  "tensor_count": 3817,
+  "config_sha256": "77d9956271d61be65cc118d060be5e9b1bcd735cf78a84447f565bbf3320083e"
+}

@@ -1,0 +1,28 @@
+{
+  "id": "chatcmpl-bfcfa094",
+  "object": "chat.completion",
+  "created": 1788663099,
+  "model": "candidate-no-mtp",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "READY"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 16,
+    "completion_tokens": 1,
+    "total_tokens": 17,
+    "input_tokens": 16,
+    "output_tokens": 1,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "total_time": 1.28
+  },
+  "wall_seconds": 1.707980833016336
+}

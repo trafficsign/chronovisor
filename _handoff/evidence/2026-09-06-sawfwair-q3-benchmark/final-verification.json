@@ -1,0 +1,21 @@
+{
+  "date": "2026-09-06",
+  "production_model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+  "omlx_health": "healthy",
+  "api_generation": "RESTORED",
+  "chronovisor_enabled_services": 11,
+  "dashboard_http_status": 200,
+  "semantic_ready": true,
+  "reranker_ready": true,
+  "ingest_status": "ready",
+  "authority_preflight": "ready",
+  "experiment_port_18136_listening": false,
+  "production_config_hashes_unchanged": true,
+  "config_sha256": "d3f3e80ad02db43d6c27bac35254475c15947e312930e2f78e291ce3f40bbb94",
+  "omlx_settings_sha256": "99ef9327f5e59162981c6968e318b481eca05c0b7c4bbfcb9487c14d2c2ccea0",
+  "model_settings_sha256": "51e1ab5a4e24a8fa4011c00908327357258edb24b3e7295fc9243286d74a4b1c",
+  "final_swap_used_mib": 13303.94,
+  "memory_pressure_free_percent": 31,
+  "invalid_overlap_trial_excluded": true,
+  "no_mtp_trial_rerun_without_production_listener": true
+}
