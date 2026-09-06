@@ -1,11 +1,10 @@
 #!/usr/bin/env python3.14
-"""Drive the Chronovisor oMLX cutover profile through ``build_llm_runtime``.
+"""Drive the split vMLX/oMLX production profile through ``build_llm_runtime``.
 
-The harness intentionally targets the dedicated loopback service on port
-18125.  It builds an in-memory config, so the production
+The harness targets main generation on vMLX port 18135 and auxiliary oMLX
+roles on port 18125.  It builds an in-memory config, so the production
 ``~/.chronovisor/config.toml`` is never read or written.  Model names remain
-CLI overrides for fixture tests, while the defaults match the one-model
-Qwen3.8 Flash Next deployment.
+CLI overrides, while the defaults match the production deployment.
 """
 
 from __future__ import annotations
@@ -28,9 +27,8 @@ from chronovisor.core.llm_runtime import (
 NORMAL_PAGE = SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL)
 
 DEFAULT_OMLX_ENDPOINT = "http://127.0.0.1:18125/v1"
-# oMLX discovers the child directory name as the API model ID.  The stable
-# layout is ~/.omlx/models/Jundot/Qwen3.8-Flash-Next-oQ4e-mtp.
-DEFAULT_GENERATION_MODEL = "Qwen3.8-Flash-Next-oQ4e-mtp"
+DEFAULT_GENERATION_ENDPOINT = "http://127.0.0.1:18135/v1"
+DEFAULT_GENERATION_MODEL = "Qwen3.8-Flash-Next-JANG_4S"
 
 GENERATION_ROLES = (
     "ingest.generation",
@@ -44,29 +42,45 @@ EMBEDDING_ROLES = ("classification.embedding",)
 
 
 def build_config(args: argparse.Namespace) -> dict[str, object]:
-    endpoint = getattr(args, "endpoint", DEFAULT_OMLX_ENDPOINT)
+    generation_endpoint = getattr(
+        args, "generation_endpoint", DEFAULT_GENERATION_ENDPOINT
+    )
+    omlx_endpoint = getattr(args, "omlx_endpoint", DEFAULT_OMLX_ENDPOINT)
     roles = {
-        role: ("generation", args.generation_model) for role in GENERATION_ROLES
+        role: ("generation", "vmlx_main", args.generation_model)
+        for role in GENERATION_ROLES
     }
-    roles["classification.challenger"] = ("generation", args.challenger_model)
-    roles["classification.tie_break"] = ("generation", args.tie_break_model)
-    roles["recall.gate"] = ("generation", args.gate_model)
-    roles["recall.processor.judge"] = ("generation", args.gate_model)
+    roles["classification.challenger"] = (
+        "generation",
+        "vmlx_main",
+        args.challenger_model,
+    )
+    roles["classification.tie_break"] = (
+        "generation",
+        "vmlx_main",
+        args.tie_break_model,
+    )
+    roles["recall.gate"] = ("generation", "omlx", args.gate_model)
+    roles["recall.processor.judge"] = ("generation", "omlx", args.gate_model)
     for role in EMBEDDING_ROLES:
-        roles[role] = ("embedding", args.embedding_model)
+        roles[role] = ("embedding", "omlx", args.embedding_model)
     role_tables = "\n".join(
         (
             f'[llm.roles.{json.dumps(role)}]\n'
             f"capability = {json.dumps(capability)}\n"
-            f'provider = "omlx"\n'
+            f"provider = {json.dumps(provider)}\n"
             f"model = {json.dumps(model)}\n"
         )
-        for role, (capability, model) in roles.items()
+        for role, (capability, provider, model) in roles.items()
     )
     payload = f"""\
 [llm.providers.omlx]
 kind = "omlx"
-endpoint = {json.dumps(endpoint)}
+endpoint = {json.dumps(omlx_endpoint)}
+
+[llm.providers.vmlx_main]
+kind = "omlx"
+endpoint = {json.dumps(generation_endpoint)}
 
 {role_tables}
 """
@@ -75,7 +89,8 @@ endpoint = {json.dumps(endpoint)}
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--endpoint", default=DEFAULT_OMLX_ENDPOINT)
+    parser.add_argument("--generation-endpoint", default=DEFAULT_GENERATION_ENDPOINT)
+    parser.add_argument("--omlx-endpoint", default=DEFAULT_OMLX_ENDPOINT)
     parser.add_argument("--generation-model", default=DEFAULT_GENERATION_MODEL)
     parser.add_argument("--gate-model", default="Ornith-1.5-9B-MLX-4bit")
     parser.add_argument("--challenger-model", default=DEFAULT_GENERATION_MODEL)

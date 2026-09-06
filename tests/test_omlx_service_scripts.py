@@ -11,7 +11,7 @@ RUNTIME_ENV = ROOT / "scripts" / "omlx-runtime-env"
 START = ROOT / "scripts" / "start-omlx-service"
 STOP = ROOT / "scripts" / "stop-omlx-service"
 APP_CLI = Path("/Applications/oMLX.app/Contents/MacOS/omlx-cli")
-MODEL_ID = "Qwen3.8-Flash-Next-oQ4e-mtp"
+MODEL_ID = "Ornith-1.5-9B-MLX-4bit"
 
 
 def _install_env(home: Path) -> dict[str, str]:
@@ -92,6 +92,8 @@ def test_examples_use_model_id_discovered_from_stable_nested_layout() -> None:
     )
     assert MODEL_ID in config_text
     assert MODEL_ID in model_settings["models"]
+    assert "Qwen3.8-Flash-Next-JANG_4S" not in model_settings["models"]
+    assert "Qwen3.8-Flash-Next-oQ4e-mtp" not in model_settings["models"]
     assert "Jundot/Qwen3.8-Flash-Next-oQ4e-mtp" not in config_text
 
 
