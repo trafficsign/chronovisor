@@ -28,11 +28,11 @@ DEFAULT_DECISION_TIE_BREAK_MODEL = "gemma4:26b-optiq4"
 SINGLE_MODEL_AUTHORITY_KIND = "single_model_v1"
 QUORUM_AUTHORITY_KIND = "quorum_v1"
 DEFAULT_DECISION_SINGLE_RUNTIME_ROLE = "classification.authority"
-# Immutable production route identity for the Jundot Qwen cutover.  The
+# Immutable production route identity for the DwarfStar DS4 cutover.  The
 # model name remains a runtime-role concern; these constants are shared by the
 # route/proof validators and structured-session compatibility table.
-SINGLE_MODEL_RUNTIME_MODEL = "Qwen3.8-Flash-Next-oQ4e-mtp"
-SINGLE_MODEL_RUNTIME_REVISION = "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+SINGLE_MODEL_RUNTIME_MODEL = "qwen3.8-flash-next-chat"
+SINGLE_MODEL_RUNTIME_REVISION = "59a55fb819c82be7b162948282b50bd1a1e290b7"
 SINGLE_MODEL_RUNTIME_MODEL_TYPE = "qwen4_exp"
 SINGLE_MODEL_RUNTIME_ARCHITECTURE = "Qwen4ExpForConditionalGeneration"
 DEFAULT_HEAVY_NUM_CTX = 32_768

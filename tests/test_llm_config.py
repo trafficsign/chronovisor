@@ -36,11 +36,13 @@ from chronovisor.core.llm_security import (
     SecretValue,
 )
 from chronovisor.core.nemotron_adapter import NemotronEmbeddingBackend
+from chronovisor.core.ollama import RuntimeGenerationRoute
 from chronovisor.core.ollama_adapter import OllamaAdapter
 from chronovisor.core.openai_compatible_adapter import OpenAICompatibleAdapter
 from chronovisor.core.provider_profiles import CURATED_PROFILE_IDS, ProviderProfile
 from chronovisor.core.reranker import LocalRerankBackend
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
+from chronovisor.decision.decision_router import _single_runtime_route_identity_error
 
 
 def test_default_runtime_loader_caches_one_process_runtime(
@@ -898,12 +900,13 @@ def test_repository_example_has_representative_local_role_map() -> None:
     }
     text = example.read_text(encoding="utf-8")
     parsed = tomllib.loads(text)
-    qwen_model = "Qwen3.8-Flash-Next-oQ4e-mtp"
+    qwen_model = "qwen3.8-flash-next-chat"
+    qwen_revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
     ornith_model = "Ornith-1.5-9B-MLX-4bit"
     authority = config.roles["classification.authority"]
-    assert authority.provider_id == "omlx"
+    assert authority.provider_id == "dwarfstar"
     assert authority.model == qwen_model
-    assert authority.revision == "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+    assert authority.revision == qwen_revision
     assert parsed["decision_router"]["authority_kind"] == "single_model_v1"
     assert parsed["decision_router"]["single_runtime_role"] == (
         "classification.authority"
@@ -911,16 +914,26 @@ def test_repository_example_has_representative_local_role_map() -> None:
     assert parsed["llm"]["providers"]["omlx"]["endpoint"] == (
         "http://127.0.0.1:18125/v1"
     )
+    assert parsed["llm"]["providers"]["dwarfstar"]["kind"] == "omlx"
+    assert parsed["llm"]["providers"]["dwarfstar"]["endpoint"] == (
+        "http://127.0.0.1:18136/v1"
+    )
+    runtime = build_llm_runtime(config)
+    authority_route = runtime.resolve_generation("classification.authority")
+    assert authority_route.provider == "omlx"
+    assert authority_route.protocol == "omlx-native"
+    assert authority_route.model == qwen_model
+    assert authority_route.revision == qwen_revision
     active_generation_roles = {
         role
         for role, route in config.roles.items()
-        if route.provider_id == "omlx" and route.model == qwen_model
+        if route.provider_id == "dwarfstar" and route.model == qwen_model
     }
     active_generation_roles.remove("classification.authority")
     assert len(active_generation_roles) == 36
     assert all(config.roles[role].model == qwen_model for role in active_generation_roles)
     assert all(
-        config.roles[role].revision == "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8"
+        config.roles[role].revision == qwen_revision
         for role in active_generation_roles | {"classification.authority"}
     )
     auxiliary_roles = {
@@ -941,12 +954,16 @@ def test_repository_example_has_representative_local_role_map() -> None:
     }
     assert config.roles["knowledge.embedding"].model == "bge-m3-mlx-fp16"
     assert config.roles["classification.embedding"].model == "bge-m3-mlx-fp16"
+    assert parsed["ingest"]["num_ctx"] == parsed["ingest"]["max_num_ctx"] == 65_536
+    assert parsed["decision_router"]["num_ctx"] == 65_536
     stale_refs = (
         "qwen3.8:27b-axq4",
         "muse-glimmer:30b-q4k-dynamic",
         "gemma4:26b-optiq4",
         "gpt-oss:20b",
         "ornith:9b-q4_K_M",
+        "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
         'provider = "local"',
     )
     assert all(stale not in text for stale in stale_refs)
@@ -974,7 +991,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
     for role in proposer_roles:
         assert f'# role = "{role}"\n# data_class = "raw"' in text
     rubric_variant = config.roles["recall.rubric.variant"]
-    assert rubric_variant.provider_id == "omlx"
+    assert rubric_variant.provider_id == "dwarfstar"
     assert rubric_variant.model == qwen_model
     assert rubric_variant.required_capabilities == ("structured_output",)
     assert (
@@ -988,7 +1005,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "recall.distill.utility_judge",
     )
     distill_routes = [config.roles[role] for role in distill_roles]
-    assert [route.provider_id for route in distill_routes] == ["omlx"] * 5
+    assert [route.provider_id for route in distill_routes] == ["dwarfstar"] * 5
     assert all(
         route.required_capabilities == ("structured_output",)
         for route in distill_routes
@@ -1017,7 +1034,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
         for role in ("research.planner", "research.challenge", "research.tie_break")
     )
     deep_retrieval_requery = config.roles["research.deep_retrieval_requery"]
-    assert deep_retrieval_requery.provider_id == "omlx"
+    assert deep_retrieval_requery.provider_id == "dwarfstar"
     assert deep_retrieval_requery.model == qwen_model
     assert deep_retrieval_requery.required_capabilities == ("structured_output",)
     assert (
@@ -1025,7 +1042,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
         in text
     )
     ingest_generation = config.roles["ingest.generation"]
-    assert ingest_generation.provider_id == "omlx"
+    assert ingest_generation.provider_id == "dwarfstar"
     assert ingest_generation.model == qwen_model
     assert config.roles["lint.tag_repair"].model == ingest_generation.model
     assert config.roles["lint.orphan_link"].model == ingest_generation.model
@@ -1035,3 +1052,39 @@ def test_repository_example_has_representative_local_role_map() -> None:
         config.roles["recall.content_correction.proposer"].model
         == ingest_generation.model
     )
+
+
+@pytest.mark.parametrize(
+    ("model", "revision", "expected"),
+    [
+        (
+            "qwen3.8-flash-next-chat",
+            "59a55fb819c82be7b162948282b50bd1a1e290b7",
+            None,
+        ),
+        (
+            "Qwen3.8-Flash-Next-oQ4e-mtp",
+            "59a55fb819c82be7b162948282b50bd1a1e290b7",
+            "single-model runtime route identity is invalid",
+        ),
+        (
+            "qwen3.8-flash-next-chat",
+            "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+            "single-model runtime route identity is invalid",
+        ),
+    ],
+)
+def test_single_runtime_identity_accepts_current_and_rejects_stale_routes(
+    model: str, revision: str, expected: str | None
+) -> None:
+    route = RuntimeGenerationRoute(
+        role="classification.authority",
+        provider="omlx",
+        model=model,
+        location="local",
+        structured_output=True,
+        protocol="omlx-native",
+        revision=revision,
+    )
+
+    assert _single_runtime_route_identity_error(route) == expected
