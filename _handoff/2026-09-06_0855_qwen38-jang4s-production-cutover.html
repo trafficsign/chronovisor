@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Plan</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_20444dc168cc415f83675573d11fd559","created_at":"2026-09-06T08:55:46+09:00","状態":"done","slug":"qwen38-jang4s-production-cutover"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">Qwen3.8 Flash Next JANG_4S 本番切替</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="done">done</span>
+<span><code data-bind="task_id">plan_20444dc168cc415f83675573d11fd559</code></span>
+<span data-bind="created_at">2026-09-06T08:55:46+09:00</span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<ul>
+<li>Chronovisor の main 推論を <code>JANGQ-AI/Qwen3.8-Flash-Next-JANG_4S</code> / vMLX へ恒久切替する。</li>
+<li>現行 <code>Jundot/Qwen3.8-Flash-Next-oQ4e-mtp</code> を fallback・常駐・モデル登録から除き、不要な実体を回収する。</li>
+<li>Recall 用 Ornith など main 以外の既存役割を維持し、再起動後の実処理とメモリ改善を確認する。</li>
+</ul>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<ul>
+<li>無関係な dirty worktree、他モデル、Chronovisor データを変更・削除しない。</li>
+<li>新 main の live acceptance 前に現行Qwenのモデル実体を削除しない。</li>
+<li>認証情報を成果物、ログ、commitへ含めない。</li>
+<li>一時的な手動プロセスだけで完了扱いせず、ログイン後も再現する管理サービスにする。</li>
+</ul>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定</h2>
+<ul>
+<li>前段ベンチ <code>fd724f9</code> により、JANG_4S は Chronovisor 19 lanesで現行と同じsemantic score、clean-load resident 25.3%削減を確認済み。</li>
+<li>oMLX は Ornith の実行基盤として残し、現行Qwenだけを外す。</li>
+<li>production config・service contract・全consumerを確認してから最小差分を決める。</li>
+</ul>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist">
+<li><input type="checkbox" checked><span>Git、設定、モデル登録、サービス、ディスク、プロセス、swapの切替前状態を固定する。</span></li>
+<li><input type="checkbox" checked><span>main model設定のproducer/reader/consumerと既存service管理経路を確認し、変更範囲を確定する。</span></li>
+<li><input type="checkbox" checked><span>JANG_4S/vMLXを恒久パスと管理サービスへ昇格し、起動・停止・自己診断を実装・検証する。</span></li>
+<li><input type="checkbox" checked><span>Chronovisorのmain routingをJANG_4Sへ変更し、現行Qwen fallbackを設定から除く。</span></li>
+<li><input type="checkbox" checked><span>関連サービスを安全に切り替え、health・structured decision・実consumerをlive検証する。</span></li>
+<li><input type="checkbox" checked><span>現行Qwenの登録・常駐・モデル実体と不要な一時環境を削除し、ディスクとメモリを確認する。</span></li>
+<li><input type="checkbox" checked><span>再起動耐性、Chronovisor各サービス、oMLX Ornith、設定read-backを最終確認する。</span></li>
+<li><input type="checkbox" checked><span>証跡とPlanを完了し、対象差分だけcommitする。</span></li>
+</ol>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<ul>
+<li>Chronovisor mainの実効endpoint/modelがvMLX/JANG_4Sで、旧Qwenへのfallback参照がない。</li>
+<li>JANG_4S serviceが管理下で自動起動し、API healthとstructured outputが成功する。</li>
+<li>旧QwenはoMLXで未登録・未ロード、モデル実体も削除済み。Ornithは引き続き利用可能。</li>
+<li>Dashboard、LAN、Semantic、Reranker、Ingest等が健全で、メモリ改善を観測できる。</li>
+</ul>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<ul>
+<li>設定の静的検証、既存関連tests、service lifecycle self-checkを通す。</li>
+<li>新serviceのhealth/models/chat、Chronovisor schema decision、実consumer receiptを確認する。</li>
+<li>stop/start後も同一endpoint/modelへ復帰し、旧モデル参照・process・open fileが残らないことを確認する。</li>
+<li>最終のresident/footprint/swap、Dashboard 200、LAN TLS 401、Semantic/Reranker readyを保存する。</li>
+</ul>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>なし</li></ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul><li>production設定の正本、変更ファイル、外部設定を明示し、rollbackはモデル再ダウンロードが必要な状態として記録する。</li></ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log">
+<li><time>2026-09-06 08:55</time><span>ユーザー承認により切替開始。JANG_4Sを単独mainとし、現行Qwenはfallbackを含め撤去、Ornithなど別役割は維持する境界を固定。</span></li>
+<li><time>2026-09-06 09:02</time><span>切替前状態を固定。repo HEAD=fd724f9、origin/main=136ab8b、旧Qwen実体99G、候補実体72G、oMLX loaded=Qwen+Ornith、swap約9.45GiB。無関係dirty差分も再確認した。</span></li>
+<li><time>2026-09-06 09:02</time><span>設定経路を確定。正本は ~/.chronovisor/config.toml、load_default_llm_runtime→LLMRuntime→OMLXAdapterを89 consumerが共有する。生成用vmlx_main providerを追加し、embedding/Ornith用oMLXは分離維持する最小構成とした。</span></li>
+<li><time>2026-09-06 09:11</time><span>恒久環境を ~/.local/share/vmlx-main に作成し、vMLX 1.6.53 / MLX 0.32.2と72GのJANG_4Sを配置。launchd com.trafficsign.vmlx-mainで自動起動し、bundle-check、health、models、native MTP D3、structured JSONを確認した。</span></li>
+<li><time>2026-09-06 09:11</time><span>~/.chronovisor/config.tomlにvmlx_main/18135を追加し、旧Qwenを使っていた全37 generation routeをJANG_4S revision d705ae25...へ切替。旧モデル名・revision参照は0件、Ornith/embeddingはoMLX/18125に維持し、load_llm_config read-backを通した。</span></li>
+<li><time>2026-09-06 09:35</time><span>旧production identity定数によるauthority拒否を赤い実経路と回帰テストで再現し、JANG_4Sへ更新。commit 2f12ed0から不変wheelを作って11サービスを再登録し、Dashboard HTTP 200、ingest authority_preflight ready、wheel経由structured decision accept/returned_model=JANG_4Sを確認した。</span></li>
+<li><time>2026-09-06 09:37</time><span>open fileとlive参照が0であることを確認後、旧oQ4eモデル99Gとベンチ用venv 1.4Gを完全削除。未配置REAP登録も除去し、oMLXを再起動してOrnith+bgeの2モデルのみ、default/pinned=Ornith、loaded=1、5.29GBを確認。vMLX mainはhealthy、active 58.30GB、native MTP D3を維持した。</span></li>
+<li><time>2026-09-06 09:44</time><span>vMLX launchdをbootout/bootstrapし、旧PID消滅、約68秒で新PID 47546へ復帰。同一bundle SHA、MTP D3、再起動後strict JSONを確認。Ornith生成YES、bge 1024次元embedding、実ingest job d6878019成功、authority ready、reranker/semantic ready、LAN未認証401、memory free 43%を確認した。Dashboard総合alertは既存semantic coverage 62.6%と古いmaterialized snapshot由来で、main/authority active failureはない。</span></li>
+<li><time>2026-09-06 09:47</time><span>関連テスト367件pass（live config依存の既存1件のみ除外）、ruff check、diff check、codebase index coverage確認を完了。source commit=2f12ed0、wheel SHA-256=596d8d43a3e4b7ddf095d0f63bf2a0909f8276a9790e76ac0354c15e4abe9002。無関係dirty差分を保持し、Planをdoneとした。</span></li>
+</ol>
+</section>
+
+</body>
+</html>
