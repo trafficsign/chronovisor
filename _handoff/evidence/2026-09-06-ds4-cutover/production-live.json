@@ -1,0 +1,120 @@
+{
+  "captured_at": "2026-09-06T13:01:58.205380+00:00",
+  "runtime_source": "git+ssh://git@github.com/trafficsign/chronovisor@cd526bbe6c37e2e88e694c2521d7a0c97940fcb7",
+  "ds4_roles": 37,
+  "ds4_models": [
+    "qwen3.8-flash-next",
+    "qwen3.8-flash-next-chat",
+    "qwen3.8-flash-next-reasoner"
+  ],
+  "omlx_health": {
+    "status": "healthy",
+    "default_model": "Ornith-1.5-9B-MLX-4bit",
+    "engine_pool": {
+      "model_count": 3,
+      "loaded_count": 2,
+      "final_ceiling": 111669149696,
+      "current_model_memory": 6482401140
+    },
+    "mcp": null
+  },
+  "services": {
+    "services": [
+      {
+        "plist": "com.trafficsign.chronovisor-converge.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-dashboard.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-deadman-observer.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-ingest-drain.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-lan-dashboard.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-librarian-review.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-reranker.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-searxng.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-semantic.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-sleep.managed-v2.plist",
+        "status": "enabled"
+      },
+      {
+        "plist": "com.trafficsign.chronovisor-watchdog.managed-v2.plist",
+        "status": "enabled"
+      }
+    ]
+  },
+  "ingest_liveness": {
+    "schema_version": 2,
+    "status": "ready",
+    "observed_at": "2026-09-06T22:01:28",
+    "pending_raws": 329,
+    "ingest_runtime_available": true,
+    "authority_available": true,
+    "alert": false,
+    "retryable": false,
+    "consecutive_unavailable_checks": 0,
+    "unavailable_since": null,
+    "last_recovered_at": "2026-09-06T09:26:53",
+    "error": "",
+    "authority_preflight": {
+      "ok": true,
+      "status": "ready",
+      "blocked_by": null,
+      "retryable": false,
+      "error": null,
+      "artifact_sha256": null
+    },
+    "transitioned": false
+  },
+  "live_authority_results": [
+    {
+      "timestamp": "2026-09-06T13:00:19.241847Z",
+      "role": "local_repair",
+      "status": "agreed",
+      "validation_status": "validated",
+      "authority_model": "qwen3.8-flash-next-chat",
+      "authority_revision": "59a55fb819c82be7b162948282b50bd1a1e290b7",
+      "authority_route": {
+        "endpoint_sha256": "207563d352c15fd0e2f10c0d06e8b8537fb48820410574346a0aa0a864fa6ebc",
+        "location": "local",
+        "model": "qwen3.8-flash-next-chat",
+        "protocol": "omlx-native",
+        "provider": "omlx",
+        "revision": "59a55fb819c82be7b162948282b50bd1a1e290b7",
+        "role": "classification.authority",
+        "structured_output": true
+      },
+      "failure_class": null,
+      "repair_turns": 0,
+      "latency_seconds": 38.14414066699101
+    }
+  ],
+  "activity_monitor": {
+    "used_memory_display_GB": 119.18,
+    "swap_display_GB": 10.75,
+    "note": "All services resumed; changing workload, not a controlled savings measurement."
+  }
+}
