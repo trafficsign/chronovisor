@@ -1,5 +1,17 @@
 # DwarfStar production cutover
 
+## Rejected and rolled back at user request
+
+The user reported that production processing was failing after cutover. The earlier single `local_repair` success was insufficient evidence of end-to-end Ingest compatibility. The historical cutover notes below are not a current adoption recommendation.
+
+On 2026-09-06 around 22:14 JST, production `config.toml` and oMLX `model_settings.json` were restored byte-for-byte from the pre-cutover backups. All 37 generation roles again use `Qwen3.8-Flash-Next-oQ4e-mtp`, revision `2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8`, through oMLX on port 18125. Context settings and the published runtime pin `136ab8b4e5ebd91cef2137edb67e63a0a8f49eb3` were also restored. All 11 managed services were re-registered. DwarfStar was booted out and persistently disabled in launchd; port 18136 has no listener. Weights and failure evidence were retained, not deleted.
+
+oMLX returned healthy with the original Qwen as default. At `2026-09-06T13:15:19.257644Z`, actual production `ingest_triage` recorded the original model/revision, `ok=true`, `first_pass_valid=true`, zero repairs and no failure class. It generated 1277 tokens at 43.38 tokens/s. This is a successful post-rollback operation, not a claim that every previously failed input has been recovered.
+
+The scoped local source/config/test identity change was also reversed; all 52 original configuration tests pass. The runtime is pinned to the already-published pre-cutover commit; this rollback does not rewrite GitHub history or push unrelated local history. The remote cutover commit remains in history and is not the active production pin.
+
+## Historical cutover record
+
 2026-09-06, M4 Max / 128 GiB. User explicitly approved switching the main model.
 
 ## Installed local state
