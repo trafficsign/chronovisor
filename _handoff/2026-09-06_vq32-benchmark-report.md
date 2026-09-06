@@ -106,3 +106,9 @@ VQLab側のAPIは`response_format.json_schema`を扱わない。専用キー`pro
 - Chronovisorの11サービスがenabled、DashboardはHTTP 200、Semantic/Rerankerはstatus=okかつready=true、Ingestとauthority preflightはready。
 - 実験port 18136は閉鎖。設定3ファイル（Chronovisor config、oMLX settings/model_settings）のSHA256は開始前と完全一致。
 - VQを本番に登録・切替していない。隔離venvと約72GiBのモデルは実験用として保持。pushはしていない。
+
+## ベンチ後の片付け（2026-09-06追記）
+
+- 上記の保持状態は測定終了時点の記録。ユーザー指示により、使用中プロセスと本番設定からの参照がないことを確認し、`/Users/trafficsign/.omlx/experiments/vq32/`（モデル、隔離venv、VQLab checkout、実験設定）を削除した。
+- コンソールログは証跡内のコピーとの一致を確認してから削除。レポート、証跡、測定スクリプトは保持。再測定には記載revisionのモデル再取得と互換runtimeの再構築が必要。
+- Sawfwair実験環境と合わせ、削除前のディスク使用量は約155.6GiB。`df`の空き容量は約155.3GiB増加した（他プロセスの書き込みによる変動を含む）。現行oQ4eのoMLXは削除後もhealthyで、停止・設定変更はしていない。

@@ -85,3 +85,9 @@ OSページ使用量は `page_size × (active + inactive + wired + compressor)` 
 - `~/.chronovisor/config.toml`、`~/.omlx/settings.json`、`~/.omlx/model_settings.json`は開始前とSHA256が完全一致。
 - 最終確認時swap usedは13,303.94MiB、memory_pressureのfree表示は31%。重複試行中の約54GBからは戻っている。
 - 候補の約84GiBのファイルは実験用ディレクトリに保持。本番への切替、モデルの恒常的な追加登録、pushは行っていない。
+
+## ベンチ後の片付け（2026-09-06追記）
+
+- 上記の保持状態は測定終了時点の記録。ユーザー指示により、使用中プロセスと本番設定からの参照がないことを確認し、`/Users/trafficsign/.omlx/experiments/sawfwair-q3-native-ple/`（モデルと実験設定）を削除した。
+- レポート、証跡、測定スクリプトは保持。再測定には記載revisionのモデル再取得と実験設定の再作成が必要。
+- VQ実験環境と合わせ、`df`の空き容量は約155.3GiB増加。現行oQ4eのoMLXは削除後もhealthyで、停止・設定変更はしていない。
