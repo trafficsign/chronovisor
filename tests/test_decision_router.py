@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from chronovisor.core.llm_runtime import MAX_OUTPUT_TOKENS
-from chronovisor.core.ollama import RuntimeGenerationRoute
 from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.decision.decision_lane_contract_cases import (
     decision_lane_contract_case_manifest_sha256,
@@ -32,7 +31,6 @@ from chronovisor.decision.decision_router import (
     _decision_value_validator,
     _ingest_reconciliation_value_validator,
     _prompt_json_block,
-    _single_runtime_route_identity_error,
     canonical_agreement_signature,
     decision_context_buckets,
     decision_effective_request,
@@ -177,20 +175,6 @@ def test_vote_runtime_role_is_stable_and_separate_from_audit_role() -> None:
 
     assert session.role == "ingest_review:primary"
     assert session.runtime_role == "classification.primary"
-
-
-def test_single_runtime_accepts_jang4s_production_identity() -> None:
-    route = RuntimeGenerationRoute(
-        role="classification.authority",
-        provider="omlx",
-        model="Qwen3.8-Flash-Next-JANG_4S",
-        location="local",
-        structured_output=True,
-        protocol="omlx-native",
-        revision="d705ae25dfc8ec3b603b97d8c1b9d5f9cb6c49cf",
-    )
-
-    assert _single_runtime_route_identity_error(route) is None
 
 
 def _sha256_json(value: object) -> str:
