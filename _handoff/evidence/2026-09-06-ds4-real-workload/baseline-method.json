@@ -1,0 +1,30 @@
+{
+  "command": [
+    "/Applications/oMLX.app/Contents/MacOS/omlx-cli",
+    "serve",
+    "--base-path",
+    "/Users/trafficsign/.omlx/experiments/ds4-qwen38-q4/baseline",
+    "--model-dir",
+    "/Users/trafficsign/.omlx/experiments/ds4-qwen38-q4/baseline/models",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "18136",
+    "--no-hf-cache",
+    "--max-concurrent-requests",
+    "1",
+    "--memory-guard-gb",
+    "104",
+    "--paged-ssd-cache-dir",
+    "/Users/trafficsign/.omlx/experiments/ds4-qwen38-q4/baseline/cache",
+    "--paged-ssd-cache-max-size",
+    "5GB",
+    "--hot-cache-max-size",
+    "2GB"
+  ],
+  "runtime": "oMLX 0.6.4",
+  "candidate_engine_commit": "236cb2a549d05ea1941a19bd4f154e0abc858661",
+  "candidate_artifact_revision": "59a55fb819c82be7b162948282b50bd1a1e290b7",
+  "cold": "caller-defined real-material workload; inspect per-request cached_tokens",
+  "warm": "repeat the largest material unchanged; inspect per-request cached_tokens"
+}

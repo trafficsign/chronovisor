@@ -1,0 +1,152 @@
+[
+  {
+    "ttft_seconds": 13.75634933297988,
+    "wall_seconds": 35.22899279196281,
+    "output_tokens_per_second": 28.101853659178698,
+    "decode_tokens_per_second": 46.058604842444716,
+    "usage": {
+      "prompt_tokens": 2435,
+      "completion_tokens": 990,
+      "total_tokens": 3425,
+      "input_tokens": 2435,
+      "output_tokens": 990,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 13.75,
+      "total_time": 35.22,
+      "prompt_eval_duration": 13.75,
+      "generation_duration": 21.47,
+      "prompt_tokens_per_second": 177.11,
+      "generation_tokens_per_second": 46.1
+    },
+    "finish_reason": "stop",
+    "prompt_sha256": "e6e6febcf5a30b4f00ece1dc6b4abece1439984140b899b8dfe9a9f9a071b0bd",
+    "case_id": "material-1",
+    "repeat": false,
+    "source_sha256": "895ace7247f4a9c347fd19fc3f9ea5336fbc8247284aa633ee2f5640143fc765",
+    "output_sha256": "e8084d47f662e75b81102a8323a9a93ae9e42cdc52edb173ab41d6fe44587636",
+    "page_valid": true,
+    "failure_class": null
+  },
+  {
+    "ttft_seconds": 21.86591158399824,
+    "wall_seconds": 66.91945966699859,
+    "output_tokens_per_second": 30.60395302339797,
+    "decode_tokens_per_second": 45.434823384584355,
+    "usage": {
+      "prompt_tokens": 5179,
+      "completion_tokens": 2048,
+      "total_tokens": 7227,
+      "input_tokens": 5179,
+      "output_tokens": 2048,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 21.85,
+      "total_time": 66.91,
+      "prompt_eval_duration": 21.85,
+      "generation_duration": 45.05,
+      "prompt_tokens_per_second": 236.99,
+      "generation_tokens_per_second": 45.46
+    },
+    "finish_reason": "length",
+    "prompt_sha256": "8b1cc2e4a2f2f88664f58e6b0203bebb2d35df476f44789037dbe03b32dfa4ac",
+    "case_id": "material-2",
+    "repeat": false,
+    "source_sha256": "d6b907b68d5a5b6d72c04ad78ca9ac40fdd74ecbbe9fcccf7ffcd030326b1fbf",
+    "output_sha256": "ae1975e7958148bef9d745dbe424c12e5af9d1952367a526f740f4c067a0d5df",
+    "page_valid": false,
+    "failure_class": "missing_end_marker"
+  },
+  {
+    "ttft_seconds": 36.97378562495578,
+    "wall_seconds": 71.18251958297333,
+    "output_tokens_per_second": 21.409750721503496,
+    "decode_tokens_per_second": 44.520794071744724,
+    "usage": {
+      "prompt_tokens": 10641,
+      "completion_tokens": 1524,
+      "total_tokens": 12165,
+      "input_tokens": 10641,
+      "output_tokens": 1524,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 36.95,
+      "total_time": 71.16,
+      "prompt_eval_duration": 36.95,
+      "generation_duration": 34.21,
+      "prompt_tokens_per_second": 287.95,
+      "generation_tokens_per_second": 44.55
+    },
+    "finish_reason": "stop",
+    "prompt_sha256": "4ceec0296fb8a84c370d4916b6eac39e2b6739f41ce7c3cf765cbc2443f7a954",
+    "case_id": "material-3",
+    "repeat": false,
+    "source_sha256": "e2b14974b983d8796f28291235df448c254142da0e6116d6eac83beb94b3aff9",
+    "output_sha256": "608b7ac17eb5375d5b3eb42879e6285fc0d3d644e31561a188d5fd740049ba51",
+    "page_valid": true,
+    "failure_class": null
+  },
+  {
+    "ttft_seconds": 59.68121541599976,
+    "wall_seconds": 106.88472429098329,
+    "output_tokens_per_second": 18.973712225509107,
+    "decode_tokens_per_second": 42.941722942004645,
+    "usage": {
+      "prompt_tokens": 20792,
+      "completion_tokens": 2028,
+      "total_tokens": 22820,
+      "input_tokens": 20792,
+      "output_tokens": 2028,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "time_to_first_token": 59.64,
+      "total_time": 106.85,
+      "prompt_eval_duration": 59.64,
+      "generation_duration": 47.2,
+      "prompt_tokens_per_second": 348.61,
+      "generation_tokens_per_second": 42.96
+    },
+    "finish_reason": "stop",
+    "prompt_sha256": "f21f45dbd3540e948bd74697661420aee4616c7d627c0c956170918b5024c5bd",
+    "case_id": "material-4",
+    "repeat": false,
+    "source_sha256": "7891666921786f4b09612aca36bb118ed3ad6cfac0b6ee25278f479df8ede1ac",
+    "output_sha256": "d88eda16316882bab24d7d3dca2b1991de5dfc94349103711a5c92cf3b827844",
+    "page_valid": true,
+    "failure_class": null
+  },
+  {
+    "ttft_seconds": 2.181506332999561,
+    "wall_seconds": 48.72267250000732,
+    "output_tokens_per_second": 42.033819060308986,
+    "decode_tokens_per_second": 43.98256787667438,
+    "usage": {
+      "prompt_tokens": 20792,
+      "completion_tokens": 2048,
+      "total_tokens": 22840,
+      "input_tokens": 20792,
+      "output_tokens": 2048,
+      "prompt_tokens_details": {
+        "cached_tokens": 20480
+      },
+      "time_to_first_token": 2.14,
+      "total_time": 48.69,
+      "prompt_eval_duration": 2.14,
+      "generation_duration": 46.55,
+      "prompt_tokens_per_second": 9710.88,
+      "generation_tokens_per_second": 44.0
+    },
+    "finish_reason": "length",
+    "prompt_sha256": "f21f45dbd3540e948bd74697661420aee4616c7d627c0c956170918b5024c5bd",
+    "case_id": "material-4",
+    "repeat": true,
+    "source_sha256": "7891666921786f4b09612aca36bb118ed3ad6cfac0b6ee25278f479df8ede1ac",
+    "output_sha256": "0b53e187ec666ba756439280ba793d08d96c01ebab8350e41e0cc0bc1fa4c0ea",
+    "page_valid": false,
+    "failure_class": "missing_end_marker"
+  }
+]

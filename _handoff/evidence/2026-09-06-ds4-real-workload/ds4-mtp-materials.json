@@ -1,0 +1,117 @@
+[
+  {
+    "ttft_seconds": 4.806558292009868,
+    "wall_seconds": 26.342886375030503,
+    "output_tokens_per_second": 45.28736840055625,
+    "decode_tokens_per_second": 55.34833957789581,
+    "usage": {
+      "prompt_tokens": 2435,
+      "completion_tokens": 1193,
+      "total_tokens": 3628,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 2435
+      }
+    },
+    "finish_reason": "stop",
+    "prompt_sha256": "e6e6febcf5a30b4f00ece1dc6b4abece1439984140b899b8dfe9a9f9a071b0bd",
+    "case_id": "material-1",
+    "repeat": false,
+    "source_sha256": "895ace7247f4a9c347fd19fc3f9ea5336fbc8247284aa633ee2f5640143fc765",
+    "output_sha256": "d70a8275fe5c28914dc509723929e05986a1b23bdb55a680ce926ccce6a7efd8",
+    "page_valid": true,
+    "failure_class": null
+  },
+  {
+    "ttft_seconds": 8.940993625030387,
+    "wall_seconds": 44.64186575001804,
+    "output_tokens_per_second": 45.8762187823472,
+    "decode_tokens_per_second": 57.33753486003132,
+    "usage": {
+      "prompt_tokens": 5179,
+      "completion_tokens": 2048,
+      "total_tokens": 7227,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 5179
+      }
+    },
+    "finish_reason": "length",
+    "prompt_sha256": "8b1cc2e4a2f2f88664f58e6b0203bebb2d35df476f44789037dbe03b32dfa4ac",
+    "case_id": "material-2",
+    "repeat": false,
+    "source_sha256": "d6b907b68d5a5b6d72c04ad78ca9ac40fdd74ecbbe9fcccf7ffcd030326b1fbf",
+    "output_sha256": "fc76cf1694d85cdff33c88f4fbda4dfc53794611ff11567f29b78106b45f1182",
+    "page_valid": false,
+    "failure_class": "missing_end_marker"
+  },
+  {
+    "ttft_seconds": 18.272679709014483,
+    "wall_seconds": 48.47544420900522,
+    "output_tokens_per_second": 35.66754319043055,
+    "decode_tokens_per_second": 57.21330575552215,
+    "usage": {
+      "prompt_tokens": 10641,
+      "completion_tokens": 1729,
+      "total_tokens": 12370,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 10641
+      }
+    },
+    "finish_reason": "stop",
+    "prompt_sha256": "4ceec0296fb8a84c370d4916b6eac39e2b6739f41ce7c3cf765cbc2443f7a954",
+    "case_id": "material-3",
+    "repeat": false,
+    "source_sha256": "e2b14974b983d8796f28291235df448c254142da0e6116d6eac83beb94b3aff9",
+    "output_sha256": "f5e6d6df2eabc6d20e74024af95565f05fe7a7ab8459cff89422253ba363b320",
+    "page_valid": true,
+    "failure_class": null
+  },
+  {
+    "ttft_seconds": 35.08219258399913,
+    "wall_seconds": 67.03123449999839,
+    "output_tokens_per_second": 26.435437348241624,
+    "decode_tokens_per_second": 55.43202217632475,
+    "usage": {
+      "prompt_tokens": 20792,
+      "completion_tokens": 1772,
+      "total_tokens": 22564,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 20792
+      }
+    },
+    "finish_reason": "stop",
+    "prompt_sha256": "f21f45dbd3540e948bd74697661420aee4616c7d627c0c956170918b5024c5bd",
+    "case_id": "material-4",
+    "repeat": false,
+    "source_sha256": "7891666921786f4b09612aca36bb118ed3ad6cfac0b6ee25278f479df8ede1ac",
+    "output_sha256": "f74a9014ee81485a94c9cea251380807b67182169bdf90351a8737b1bc71b446",
+    "page_valid": true,
+    "failure_class": null
+  },
+  {
+    "ttft_seconds": 31.329222749976907,
+    "wall_seconds": 62.93976612499682,
+    "output_tokens_per_second": 28.15390188264843,
+    "decode_tokens_per_second": 56.025610790339165,
+    "usage": {
+      "prompt_tokens": 20792,
+      "completion_tokens": 1772,
+      "total_tokens": 22564,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 20792
+      }
+    },
+    "finish_reason": "stop",
+    "prompt_sha256": "f21f45dbd3540e948bd74697661420aee4616c7d627c0c956170918b5024c5bd",
+    "case_id": "material-4",
+    "repeat": true,
+    "source_sha256": "7891666921786f4b09612aca36bb118ed3ad6cfac0b6ee25278f479df8ede1ac",
+    "output_sha256": "f74a9014ee81485a94c9cea251380807b67182169bdf90351a8737b1bc71b446",
+    "page_valid": true,
+    "failure_class": null
+  }
+]

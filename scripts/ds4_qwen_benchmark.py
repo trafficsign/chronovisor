@@ -284,8 +284,11 @@ def request(messages, model, max_tokens):
     }
 
 
-def run(arm, smoke):
+def run(arm, smoke, *, workload=None, trace=True):
     command = server_command(arm)
+    if not trace and "--trace" in command:
+        trace_index = command.index("--trace")
+        del command[trace_index : trace_index + 2]
     save(
         f"{arm}-method.json",
         {
@@ -295,8 +298,12 @@ def run(arm, smoke):
                 "git", "-C", str(ENGINE), "rev-parse", "HEAD"
             ).strip(),
             "candidate_artifact_revision": "59a55fb819c82be7b162948282b50bd1a1e290b7",
-            "cold": "request-specific prefix before shared body; resident model; cached_tokens must be zero",
-            "warm": "full conversation follow-up with identical history; observe actual cache behavior",
+            "cold": "caller-defined workload; inspect per-request cached_tokens"
+            if workload is not None
+            else "request-specific prefix before shared body; resident model; cached_tokens must be zero",
+            "warm": "caller-defined workload; inspect per-request cached_tokens"
+            if workload is not None
+            else "full conversation follow-up with identical history; observe actual cache behavior",
         },
     )
     save(f"{arm}-unloaded-before.json", bench.memory())
@@ -331,6 +338,13 @@ def run(arm, smoke):
             bench.command("vmmap", "-summary", str(proc.pid))
         )
         if smoke:
+            return
+        if workload is not None:
+            workload(arm, model, proc.pid)
+            save(f"{arm}-loaded-after.json", bench.memory(proc.pid))
+            (OUT / f"{arm}-post-vmmap.txt").write_text(
+                bench.command("vmmap", "-summary", str(proc.pid))
+            )
             return
         for target in (4096, 16384, 32768):
             for repeat in range(1, 4):

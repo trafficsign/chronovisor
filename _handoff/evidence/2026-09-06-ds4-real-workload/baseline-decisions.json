@@ -1,0 +1,569 @@
+{
+  "summary": {
+    "overall": {
+      "total": 19,
+      "schema_valid": 19,
+      "schema_rate": 1.0,
+      "effect_matches": 18,
+      "effect_match_rate": 0.9473684210526315,
+      "exact_json_matches": 0,
+      "median_wall_seconds": 8.284858624974731,
+      "p95_wall_seconds": 30.634699125017505
+    },
+    "by_lane": {
+      "autonomy_duplicate_resolution": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 5.49552770802984,
+        "p95_wall_seconds": 5.49552770802984
+      },
+      "autonomy_retention": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 4.0027859170222655,
+        "p95_wall_seconds": 4.0027859170222655
+      },
+      "content_correction_classification": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 15.328348459035624,
+        "p95_wall_seconds": 15.328348459035624
+      },
+      "content_correction_review": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 12.664643457974307,
+        "p95_wall_seconds": 12.664643457974307
+      },
+      "entity_backfill": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 14.401370042003691,
+        "p95_wall_seconds": 14.401370042003691
+      },
+      "ingest_reconciliation": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 13.52214495796943,
+        "p95_wall_seconds": 13.52214495796943
+      },
+      "lint_safe_semantic_mutation": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 30.634699125017505,
+        "p95_wall_seconds": 30.634699125017505
+      },
+      "lint_tag_repair": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 5.843555333034601,
+        "p95_wall_seconds": 5.843555333034601
+      },
+      "local_repair": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 5.222092458046973,
+        "p95_wall_seconds": 5.222092458046973
+      },
+      "metadata_backfill": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 13.533653250022326,
+        "p95_wall_seconds": 13.533653250022326
+      },
+      "orphan_link": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 4.668675292050466,
+        "p95_wall_seconds": 4.668675292050466
+      },
+      "page_normalize": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 42.87346366600832,
+        "p95_wall_seconds": 42.87346366600832
+      },
+      "raw_replay_reconciliation": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 17.368527540995274,
+        "p95_wall_seconds": 17.368527540995274
+      },
+      "read_back_repair": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 4.204900958982762,
+        "p95_wall_seconds": 4.204900958982762
+      },
+      "recall_auto_apply": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 8.209917999978643,
+        "p95_wall_seconds": 8.209917999978643
+      },
+      "recall_calibration": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 6.7330329160322435,
+        "p95_wall_seconds": 6.7330329160322435
+      },
+      "recall_improvement": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 0,
+        "effect_match_rate": 0.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 9.883456375042442,
+        "p95_wall_seconds": 9.883456375042442
+      },
+      "search_label": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 8.032061000005342,
+        "p95_wall_seconds": 8.032061000005342
+      },
+      "search_self_tune": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 8.284858624974731,
+        "p95_wall_seconds": 8.284858624974731
+      }
+    }
+  },
+  "cases": [
+    {
+      "case_id": "lane-contract-v28:content_correction_classification:6",
+      "lane": "content_correction_classification",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 2099,
+        "completion_tokens": 193,
+        "total_tokens": 2292,
+        "input_tokens": 2099,
+        "output_tokens": 193,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 15.3
+      },
+      "wall_seconds": 15.328348459035624
+    },
+    {
+      "case_id": "lane-contract-v28:content_correction_review:2",
+      "lane": "content_correction_review",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 2465,
+        "completion_tokens": 180,
+        "total_tokens": 2645,
+        "input_tokens": 2465,
+        "output_tokens": 180,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 12.65
+      },
+      "wall_seconds": 12.664643457974307
+    },
+    {
+      "case_id": "lane-contract-v28:local_repair:2",
+      "lane": "local_repair",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 641,
+        "completion_tokens": 85,
+        "total_tokens": 726,
+        "input_tokens": 641,
+        "output_tokens": 85,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 5.22
+      },
+      "wall_seconds": 5.222092458046973
+    },
+    {
+      "case_id": "lane-contract-v28:autonomy_duplicate_resolution:3",
+      "lane": "autonomy_duplicate_resolution",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 1037,
+        "completion_tokens": 73,
+        "total_tokens": 1110,
+        "input_tokens": 1037,
+        "output_tokens": 73,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 5.49
+      },
+      "wall_seconds": 5.49552770802984
+    },
+    {
+      "case_id": "lane-contract-v28:read_back_repair:4",
+      "lane": "read_back_repair",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 653,
+        "completion_tokens": 56,
+        "total_tokens": 709,
+        "input_tokens": 653,
+        "output_tokens": 56,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 4.2
+      },
+      "wall_seconds": 4.204900958982762
+    },
+    {
+      "case_id": "lane-contract-v28:orphan_link:3",
+      "lane": "orphan_link",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 524,
+        "completion_tokens": 86,
+        "total_tokens": 610,
+        "input_tokens": 524,
+        "output_tokens": 86,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 4.67
+      },
+      "wall_seconds": 4.668675292050466
+    },
+    {
+      "case_id": "lane-contract-v28:ingest_reconciliation:4",
+      "lane": "ingest_reconciliation",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 2477,
+        "completion_tokens": 160,
+        "total_tokens": 2637,
+        "input_tokens": 2477,
+        "output_tokens": 160,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 13.51
+      },
+      "wall_seconds": 13.52214495796943
+    },
+    {
+      "case_id": "lane-contract-v28:search_label:3",
+      "lane": "search_label",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 1160,
+        "completion_tokens": 133,
+        "total_tokens": 1293,
+        "input_tokens": 1160,
+        "output_tokens": 133,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 8.03
+      },
+      "wall_seconds": 8.032061000005342
+    },
+    {
+      "case_id": "lane-contract-v28:raw_replay_reconciliation:1",
+      "lane": "raw_replay_reconciliation",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 582,
+        "completion_tokens": 411,
+        "total_tokens": 993,
+        "input_tokens": 582,
+        "output_tokens": 411,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 17.36
+      },
+      "wall_seconds": 17.368527540995274
+    },
+    {
+      "case_id": "lane-contract-v28:autonomy_retention:5",
+      "lane": "autonomy_retention",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 608,
+        "completion_tokens": 65,
+        "total_tokens": 673,
+        "input_tokens": 608,
+        "output_tokens": 65,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 4.0
+      },
+      "wall_seconds": 4.0027859170222655
+    },
+    {
+      "case_id": "lane-contract-v28:recall_calibration:1",
+      "lane": "recall_calibration",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 567,
+        "completion_tokens": 141,
+        "total_tokens": 708,
+        "input_tokens": 567,
+        "output_tokens": 141,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 6.73
+      },
+      "wall_seconds": 6.7330329160322435
+    },
+    {
+      "case_id": "lane-contract-v28:lint_safe_semantic_mutation:5",
+      "lane": "lint_safe_semantic_mutation",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 9274,
+        "completion_tokens": 226,
+        "total_tokens": 9500,
+        "input_tokens": 9274,
+        "output_tokens": 226,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 30.61
+      },
+      "wall_seconds": 30.634699125017505
+    },
+    {
+      "case_id": "lane-contract-v28:entity_backfill:3",
+      "lane": "entity_backfill",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 3039,
+        "completion_tokens": 223,
+        "total_tokens": 3262,
+        "input_tokens": 3039,
+        "output_tokens": 223,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 14.39
+      },
+      "wall_seconds": 14.401370042003691
+    },
+    {
+      "case_id": "lane-contract-v28:metadata_backfill:2",
+      "lane": "metadata_backfill",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 3046,
+        "completion_tokens": 197,
+        "total_tokens": 3243,
+        "input_tokens": 3046,
+        "output_tokens": 197,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 13.53
+      },
+      "wall_seconds": 13.533653250022326
+    },
+    {
+      "case_id": "lane-contract-v28:page_normalize:5",
+      "lane": "page_normalize",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 22197,
+        "completion_tokens": 208,
+        "total_tokens": 22405,
+        "input_tokens": 22197,
+        "output_tokens": 208,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 42.84
+      },
+      "wall_seconds": 42.87346366600832
+    },
+    {
+      "case_id": "lane-contract-v28:search_self_tune:1",
+      "lane": "search_self_tune",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 561,
+        "completion_tokens": 173,
+        "total_tokens": 734,
+        "input_tokens": 561,
+        "output_tokens": 173,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 8.28
+      },
+      "wall_seconds": 8.284858624974731
+    },
+    {
+      "case_id": "lane-contract-v28:recall_improvement:3",
+      "lane": "recall_improvement",
+      "schema_valid": true,
+      "effect_match": false,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 1686,
+        "completion_tokens": 168,
+        "total_tokens": 1854,
+        "input_tokens": 1686,
+        "output_tokens": 168,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 9.88
+      },
+      "wall_seconds": 9.883456375042442
+    },
+    {
+      "case_id": "lane-contract-v28:recall_auto_apply:5",
+      "lane": "recall_auto_apply",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 960,
+        "completion_tokens": 161,
+        "total_tokens": 1121,
+        "input_tokens": 960,
+        "output_tokens": 161,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 8.2
+      },
+      "wall_seconds": 8.209917999978643
+    },
+    {
+      "case_id": "lane-contract-v28:lint_tag_repair:3",
+      "lane": "lint_tag_repair",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 956,
+        "completion_tokens": 92,
+        "total_tokens": 1048,
+        "input_tokens": 956,
+        "output_tokens": 92,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_time": 5.84
+      },
+      "wall_seconds": 5.843555333034601
+    }
+  ]
+}

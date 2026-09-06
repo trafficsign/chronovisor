@@ -1,0 +1,33 @@
+{
+  "ttft_seconds": 22.78737195796566,
+  "wall_seconds": 22.787756374978926,
+  "output_tokens_per_second": 0.043883214457128616,
+  "decode_tokens_per_second": null,
+  "usage": {
+    "prompt_tokens": 16,
+    "completion_tokens": 1,
+    "total_tokens": 17,
+    "input_tokens": 16,
+    "output_tokens": 1,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "model_load_duration": 19.9,
+    "time_to_first_token": 2.32,
+    "total_time": 2.32,
+    "prompt_eval_duration": 2.32,
+    "generation_duration": 0.0,
+    "prompt_tokens_per_second": 6.89,
+    "generation_tokens_per_second": 3087.21
+  },
+  "content": "READY",
+  "reasoning": "",
+  "finish_reason": "stop",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Return only READY."
+    }
+  ],
+  "prompt_sha256": "0efb679a45315c240de53b7319b637f8805cfe47efc8c3d7127887ef99f8e066"
+}

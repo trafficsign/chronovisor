@@ -1,0 +1,26 @@
+[
+  {
+    "id": "material-1",
+    "sha256": "895ace7247f4a9c347fd19fc3f9ea5336fbc8247284aa633ee2f5640143fc765",
+    "bytes": 6004,
+    "characters": 2748
+  },
+  {
+    "id": "material-2",
+    "sha256": "d6b907b68d5a5b6d72c04ad78ca9ac40fdd74ecbbe9fcccf7ffcd030326b1fbf",
+    "bytes": 18014,
+    "characters": 17981
+  },
+  {
+    "id": "material-3",
+    "sha256": "e2b14974b983d8796f28291235df448c254142da0e6116d6eac83beb94b3aff9",
+    "bytes": 40204,
+    "characters": 19846
+  },
+  {
+    "id": "material-4",
+    "sha256": "7891666921786f4b09612aca36bb118ed3ad6cfac0b6ee25278f479df8ede1ac",
+    "bytes": 80175,
+    "characters": 38684
+  }
+]

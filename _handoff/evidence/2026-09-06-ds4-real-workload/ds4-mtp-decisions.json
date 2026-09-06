@@ -1,0 +1,523 @@
+{
+  "summary": {
+    "overall": {
+      "total": 19,
+      "schema_valid": 18,
+      "schema_rate": 0.9473684210526315,
+      "effect_matches": 16,
+      "effect_match_rate": 0.8421052631578947,
+      "exact_json_matches": 0,
+      "median_wall_seconds": 4.0470972919720225,
+      "p95_wall_seconds": 18.924560082959943
+    },
+    "by_lane": {
+      "autonomy_duplicate_resolution": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 3.5235648750094697,
+        "p95_wall_seconds": 3.5235648750094697
+      },
+      "autonomy_retention": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 2.5871658750111237,
+        "p95_wall_seconds": 2.5871658750111237
+      },
+      "content_correction_classification": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 6.3074396250303835,
+        "p95_wall_seconds": 6.3074396250303835
+      },
+      "content_correction_review": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 7.118941624998115,
+        "p95_wall_seconds": 7.118941624998115
+      },
+      "entity_backfill": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 9.076761916046962,
+        "p95_wall_seconds": 9.076761916046962
+      },
+      "ingest_reconciliation": {
+        "total": 1,
+        "schema_valid": 0,
+        "schema_rate": 0.0,
+        "effect_matches": 0,
+        "effect_match_rate": 0.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 4.426458499976434,
+        "p95_wall_seconds": 4.426458499976434
+      },
+      "lint_safe_semantic_mutation": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 18.924560082959943,
+        "p95_wall_seconds": 18.924560082959943
+      },
+      "lint_tag_repair": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 3.3080417920136824,
+        "p95_wall_seconds": 3.3080417920136824
+      },
+      "local_repair": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 2.1005680829985067,
+        "p95_wall_seconds": 2.1005680829985067
+      },
+      "metadata_backfill": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 8.943666208011564,
+        "p95_wall_seconds": 8.943666208011564
+      },
+      "orphan_link": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 0,
+        "effect_match_rate": 0.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 2.7389266670215875,
+        "p95_wall_seconds": 2.7389266670215875
+      },
+      "page_normalize": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 36.63952133298153,
+        "p95_wall_seconds": 36.63952133298153
+      },
+      "raw_replay_reconciliation": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 1.480291583982762,
+        "p95_wall_seconds": 1.480291583982762
+      },
+      "read_back_repair": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 2.6090237500029616,
+        "p95_wall_seconds": 2.6090237500029616
+      },
+      "recall_auto_apply": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 4.0470972919720225,
+        "p95_wall_seconds": 4.0470972919720225
+      },
+      "recall_calibration": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 2.7829364589997567,
+        "p95_wall_seconds": 2.7829364589997567
+      },
+      "recall_improvement": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 0,
+        "effect_match_rate": 0.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 5.412728958996013,
+        "p95_wall_seconds": 5.412728958996013
+      },
+      "search_label": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 4.2418832090334035,
+        "p95_wall_seconds": 4.2418832090334035
+      },
+      "search_self_tune": {
+        "total": 1,
+        "schema_valid": 1,
+        "schema_rate": 1.0,
+        "effect_matches": 1,
+        "effect_match_rate": 1.0,
+        "exact_json_matches": 0,
+        "median_wall_seconds": 2.509492707962636,
+        "p95_wall_seconds": 2.509492707962636
+      }
+    }
+  },
+  "cases": [
+    {
+      "case_id": "lane-contract-v28:content_correction_classification:6",
+      "lane": "content_correction_classification",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 2099,
+        "completion_tokens": 117,
+        "total_tokens": 2216,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 2099
+        }
+      },
+      "wall_seconds": 6.3074396250303835
+    },
+    {
+      "case_id": "lane-contract-v28:content_correction_review:2",
+      "lane": "content_correction_review",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 2465,
+        "completion_tokens": 167,
+        "total_tokens": 2632,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 2465
+        }
+      },
+      "wall_seconds": 7.118941624998115
+    },
+    {
+      "case_id": "lane-contract-v28:local_repair:2",
+      "lane": "local_repair",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 641,
+        "completion_tokens": 44,
+        "total_tokens": 685,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 641
+        }
+      },
+      "wall_seconds": 2.1005680829985067
+    },
+    {
+      "case_id": "lane-contract-v28:autonomy_duplicate_resolution:3",
+      "lane": "autonomy_duplicate_resolution",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 1037,
+        "completion_tokens": 81,
+        "total_tokens": 1118,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 1037
+        }
+      },
+      "wall_seconds": 3.5235648750094697
+    },
+    {
+      "case_id": "lane-contract-v28:read_back_repair:4",
+      "lane": "read_back_repair",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 653,
+        "completion_tokens": 75,
+        "total_tokens": 728,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 653
+        }
+      },
+      "wall_seconds": 2.6090237500029616
+    },
+    {
+      "case_id": "lane-contract-v28:orphan_link:3",
+      "lane": "orphan_link",
+      "schema_valid": true,
+      "effect_match": false,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 524,
+        "completion_tokens": 92,
+        "total_tokens": 616,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 524
+        }
+      },
+      "wall_seconds": 2.7389266670215875
+    },
+    {
+      "case_id": "lane-contract-v28:ingest_reconciliation:4",
+      "lane": "ingest_reconciliation",
+      "schema_valid": false,
+      "effect_match": false,
+      "exact_json_match": false,
+      "usage": {},
+      "wall_seconds": 4.426458499976434
+    },
+    {
+      "case_id": "lane-contract-v28:search_label:3",
+      "lane": "search_label",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 1160,
+        "completion_tokens": 119,
+        "total_tokens": 1279,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 1160
+        }
+      },
+      "wall_seconds": 4.2418832090334035
+    },
+    {
+      "case_id": "lane-contract-v28:raw_replay_reconciliation:1",
+      "lane": "raw_replay_reconciliation",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 582,
+        "completion_tokens": 12,
+        "total_tokens": 594,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 582
+        }
+      },
+      "wall_seconds": 1.480291583982762
+    },
+    {
+      "case_id": "lane-contract-v28:autonomy_retention:5",
+      "lane": "autonomy_retention",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 608,
+        "completion_tokens": 81,
+        "total_tokens": 689,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 608
+        }
+      },
+      "wall_seconds": 2.5871658750111237
+    },
+    {
+      "case_id": "lane-contract-v28:recall_calibration:1",
+      "lane": "recall_calibration",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 567,
+        "completion_tokens": 95,
+        "total_tokens": 662,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 567
+        }
+      },
+      "wall_seconds": 2.7829364589997567
+    },
+    {
+      "case_id": "lane-contract-v28:lint_safe_semantic_mutation:5",
+      "lane": "lint_safe_semantic_mutation",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 9274,
+        "completion_tokens": 209,
+        "total_tokens": 9483,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 9274
+        }
+      },
+      "wall_seconds": 18.924560082959943
+    },
+    {
+      "case_id": "lane-contract-v28:entity_backfill:3",
+      "lane": "entity_backfill",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 3039,
+        "completion_tokens": 234,
+        "total_tokens": 3273,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 3039
+        }
+      },
+      "wall_seconds": 9.076761916046962
+    },
+    {
+      "case_id": "lane-contract-v28:metadata_backfill:2",
+      "lane": "metadata_backfill",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 3046,
+        "completion_tokens": 216,
+        "total_tokens": 3262,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 3046
+        }
+      },
+      "wall_seconds": 8.943666208011564
+    },
+    {
+      "case_id": "lane-contract-v28:page_normalize:5",
+      "lane": "page_normalize",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 22197,
+        "completion_tokens": 204,
+        "total_tokens": 22401,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 22197
+        }
+      },
+      "wall_seconds": 36.63952133298153
+    },
+    {
+      "case_id": "lane-contract-v28:search_self_tune:1",
+      "lane": "search_self_tune",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 561,
+        "completion_tokens": 79,
+        "total_tokens": 640,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 561
+        }
+      },
+      "wall_seconds": 2.509492707962636
+    },
+    {
+      "case_id": "lane-contract-v28:recall_improvement:3",
+      "lane": "recall_improvement",
+      "schema_valid": true,
+      "effect_match": false,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 1686,
+        "completion_tokens": 147,
+        "total_tokens": 1833,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 1686
+        }
+      },
+      "wall_seconds": 5.412728958996013
+    },
+    {
+      "case_id": "lane-contract-v28:recall_auto_apply:5",
+      "lane": "recall_auto_apply",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 960,
+        "completion_tokens": 125,
+        "total_tokens": 1085,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 960
+        }
+      },
+      "wall_seconds": 4.0470972919720225
+    },
+    {
+      "case_id": "lane-contract-v28:lint_tag_repair:3",
+      "lane": "lint_tag_repair",
+      "schema_valid": true,
+      "effect_match": true,
+      "exact_json_match": false,
+      "usage": {
+        "prompt_tokens": 956,
+        "completion_tokens": 93,
+        "total_tokens": 1049,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 956
+        }
+      },
+      "wall_seconds": 3.3080417920136824
+    }
+  ]
+}

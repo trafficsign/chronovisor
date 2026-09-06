@@ -65,6 +65,8 @@ follow-upの入力は全構成16369 tokensで同一履歴。現行oMLXは12288 t
 
 ## メモリ
 
+追記: 実資料リプレイと会話中のメモリ判定の訂正は[追加報告](2026-09-06_ds4-real-workload-report.md)を参照。wired単独ではActivity Monitorの「使用済みメモリ」の差を否定できない。下記のプロセスresident差も、そのまま全体のRAM削減量ではない。
+
 測定後のvmmap summaryによるスナップショット。単位はvmmapのG表示。
 
 | 指標 | 現行oMLX | DS4 MTPなし | DS4 MTPあり |
