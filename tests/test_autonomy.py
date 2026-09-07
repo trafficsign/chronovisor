@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2905,6 +2907,10 @@ def test_install_launchd_dry_run_builds_sleep_and_watchdog_plists(
     )
     python.chmod(0o755)
     monkeypatch.setenv("CHRONOVISOR_PYTHON", str(python))
+    monkeypatch.setenv(
+        "CHRONOVISOR_RUNTIME_SOURCE",
+        "git+ssh://git@github.com/trafficsign/chronovisor",
+    )
     monkeypatch.setenv("CHRONOVISOR_TEST_PROBE_LOG", str(probe_log))
     monkeypatch.setattr(autonomy, "_uvx_path", lambda: "/opt/homebrew/bin/uvx")
 
@@ -3030,6 +3036,10 @@ def test_install_then_uninstall_launchd_round_trip_in_fixture(
     python.write_text("#!/bin/sh\n", encoding="utf-8")
     python.chmod(0o755)
     monkeypatch.setenv("CHRONOVISOR_PYTHON", str(python))
+    monkeypatch.setenv(
+        "CHRONOVISOR_RUNTIME_SOURCE",
+        "file:///tmp/chronovisor-transient-runtime.whl",
+    )
     monkeypatch.setattr(
         autonomy,
         "runtime_identity",
@@ -3045,9 +3055,93 @@ def test_install_then_uninstall_launchd_round_trip_in_fixture(
     observer_source = Path(autonomy.__file__).parents[1] / "deadman_observer.py"
     assert observer.read_bytes() == observer_source.read_bytes()
     assert observer.stat().st_mode & 0o111
+    for name in ("chronovisor-sleep", "chronovisor-converge", "chronovisor-watchdog"):
+        wrapper = (wrappers / name).read_text(encoding="utf-8")
+        assert '. "$CHRONOVISOR_WRAPPER_DIR/chronovisor-runtime-env"' in wrapper
+        assert '--from "$RUNTIME_SOURCE"' in wrapper
+        assert "chronovisor-transient-runtime.whl" not in wrapper
 
     removed = autonomy.uninstall_launchd(dry_run=False, unload=False)
 
     assert removed["status"] == "ok"
     assert not list(launch_agents.glob("*.plist"))
     assert not any(Path(path).exists() for path in removed["wrappers"])
+
+
+def test_generated_runtime_wrapper_resolves_source_and_constraints_at_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / ".chronovisor"
+    launch_agents = tmp_path / "LaunchAgents"
+    wrappers = root / "bin"
+    config = root / "config.toml"
+    config.parent.mkdir(parents=True)
+    old_source = "git+https://example.invalid/chronovisor-old.git"
+    new_source = "git+https://example.invalid/chronovisor-new.git"
+    config.write_text(f'[runtime]\nsource = "{old_source}"\n', encoding="utf-8")
+    constraints = root / "runtime" / "dependency-constraints" / "chronovisor-watchdog.txt"
+    constraints.parent.mkdir(parents=True)
+    constraints.write_text("# wrapper regression\n", encoding="utf-8")
+
+    capture = tmp_path / "uvx-args"
+    uvx = tmp_path / "fake-uvx"
+    uvx.write_text(
+        "#!/bin/sh\n"
+        'set -eu\n'
+        ': "${CHRONOVISOR_TEST_CAPTURE:?}"\n'
+        'printf "%s\\n" "$@" > "$CHRONOVISOR_TEST_CAPTURE"\n'
+        'exit "${CHRONOVISOR_TEST_EXIT:-0}"\n',
+        encoding="utf-8",
+    )
+    uvx.chmod(0o755)
+
+    monkeypatch.setattr(autonomy, "CHRONOVISOR_ROOT", root)
+    monkeypatch.setattr(autonomy, "LAUNCH_AGENT_DIR", launch_agents)
+    monkeypatch.setattr(autonomy, "WRAPPER_DIR", wrappers)
+    monkeypatch.setattr(autonomy, "_uvx_path", lambda: str(uvx))
+    monkeypatch.setenv("CHRONOVISOR_PYTHON", sys.executable)
+    monkeypatch.setenv(
+        "CHRONOVISOR_RUNTIME_SOURCE",
+        "file:///tmp/chronovisor-transient-runtime.whl",
+    )
+
+    autonomy.install_launchd(dry_run=False, load=False)
+    monkeypatch.delenv("CHRONOVISOR_RUNTIME_SOURCE")
+    wrapper = wrappers / "chronovisor-watchdog"
+    env = os.environ.copy()
+    env.update(
+        {
+            "CHRONOVISOR_ROOT": str(root),
+            "CHRONOVISOR_TEST_CAPTURE": str(capture),
+            "CHRONOVISOR_TEST_EXIT": "75",
+        }
+    )
+    env.pop("CHRONOVISOR_RUNTIME_SOURCE", None)
+    first_run = subprocess.run(
+        [str(wrapper)], env=env, text=True, capture_output=True, check=False
+    )
+    first_args = capture.read_text(encoding="utf-8").splitlines()
+    assert first_run.returncode == 75
+
+    env["CHRONOVISOR_TEST_EXIT"] = "0"
+    config.write_text(f'[runtime]\nsource = "{new_source}"\n', encoding="utf-8")
+    second_run = subprocess.run(
+        [str(wrapper)], env=env, text=True, capture_output=True, check=False
+    )
+    second_args = capture.read_text(encoding="utf-8").splitlines()
+    assert second_run.returncode == 0
+
+    expected_python = str(Path(sys.executable).resolve())
+    for args, source in ((first_args, old_source), (second_args, new_source)):
+        assert args[:2] == ["--constraints", str(constraints)]
+        assert args[args.index("--python") + 1] == expected_python
+        assert args[args.index("--refresh-package") + 1] == "chronovisor"
+        assert args[args.index("--from") + 1] == source
+        assert "file:///tmp/chronovisor-transient-runtime.whl" not in args
+    assert first_args[-5:] == [
+        "chronovisor",
+        "autonomy",
+        "watchdog",
+        "--notify",
+        "--json",
+    ]
