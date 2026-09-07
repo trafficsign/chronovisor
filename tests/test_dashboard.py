@@ -6708,6 +6708,29 @@ def test_model_fleet_runtime_failure_renderer_uses_text_only() -> None:
     assert "W7 CANARY" not in page + app + renderer
 
 
+@pytest.mark.parametrize("label", ["Qwen3.8-Flash-Next-DS4-IQ2", "", " bad", "bad\nname", 42])
+def test_model_display_name_preserves_api_identity(monkeypatch, label) -> None:
+    model = "qwen3.8-flash-next-chat"
+    monkeypatch.setattr(
+        dashboard, "load_toml_file",
+        lambda _path: {"dashboard": {"model_display_names": {model: label}}},
+    )
+    monkeypatch.setattr(dashboard, "_configured_model_roles", lambda: {model: {"ingest"}})
+    runtime = {
+        "available": True,
+        "provider": "omlx",
+        "models": [{"name": model, "loaded": True, "provider": "dwarfstar"}],
+    }
+    row = dashboard._model_status_snapshot(runtime)["models"][0]
+    assert row["name"] == model
+    assert row["status"] == "loaded"
+    assert row["roles"] == ["ingest"]
+    if label == "Qwen3.8-Flash-Next-DS4-IQ2":
+        assert row["display_name"] == label
+    else:
+        assert "display_name" not in row
+
+
 def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
