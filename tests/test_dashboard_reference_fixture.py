@@ -57,6 +57,18 @@ def test_stepper_inventory_covers_all_six_workflows_and_every_route_step() -> No
             range(len(route))
         )
         assert [frame["milestone"] for frame in scenario["frames"]] == list(route)
+        context = scenario["frames"][0]["trace"]["projection"]["context"]
+        assert context["selected_tokens"] == 65_536
+        assert context["label"] == "required 55K → selected 65K"
+        assert [
+            (option["tokens"], option["label"], option["selected"])
+            for option in context["options"]
+        ] == [
+            (65_536, "65K以下", True),
+            (131_072, "131K以下", False),
+            (196_608, "197K以下", False),
+            (262_144, "262K以下", False),
+        ]
 
 
 def test_dashboard_keeps_one_fixed_plan_and_one_dynamic_pipeline_mount() -> None:

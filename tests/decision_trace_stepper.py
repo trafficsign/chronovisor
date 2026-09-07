@@ -48,10 +48,26 @@ def decision_trace_step_scenarios() -> list[dict[str, Any]]:
                     "context": {
                         "selected_tokens": 65_536,
                         "options": [
-                            {"tokens": 32_768, "label": "32K", "selected": False},
-                            {"tokens": 65_536, "label": "65K", "selected": True},
-                            {"tokens": 98_304, "label": "98K", "selected": False},
-                            {"tokens": 131_072, "label": "131K", "selected": False},
+                            {
+                                "tokens": 65_536,
+                                "label": "65K以下",
+                                "selected": True,
+                            },
+                            {
+                                "tokens": 131_072,
+                                "label": "131K以下",
+                                "selected": False,
+                            },
+                            {
+                                "tokens": 196_608,
+                                "label": "197K以下",
+                                "selected": False,
+                            },
+                            {
+                                "tokens": 262_144,
+                                "label": "262K以下",
+                                "selected": False,
+                            },
                         ],
                         "label": "required 55K → selected 65K",
                     },
@@ -196,11 +212,15 @@ function renderFrame(scenario, frame) {
   const trace = structuredClone(frame.trace);
   if (selectedContext) {
     trace.projection.context.selected_tokens = selectedContext;
+    const selectedOption = trace.projection.context.options.find(
+      (option) => selectedContext > 0 && selectedContext <= option.tokens,
+    );
     trace.projection.context.options.forEach((option) => {
-      option.selected = option.tokens === selectedContext;
+      option.selected = option.tokens === selectedOption?.tokens;
     });
-    const option = trace.projection.context.options.find((item) => item.selected);
-    trace.projection.context.label = `required 55K → selected ${option?.label || "—"}`;
+    trace.projection.context.label = (
+      `required 55K → selected ${Math.floor(selectedContext / 1000)}K`
+    );
   }
   if (selectedReasoning) trace.projection.reasoning.selected = selectedReasoning;
   const workflow = trace.projection.workflow;
