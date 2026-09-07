@@ -803,6 +803,7 @@ def run_local_judge(
         result = LocalStructuredSession(
             model=route.model,
             role="recall_judge",
+            reasoning_disabled=not policy.judge_think,
             runtime_role=RECALL_GATE_RUNTIME_ROLE,
             runtime_location=route.location,
             source_data_class="raw",
@@ -995,6 +996,7 @@ def run_query_rewriter(
         result = LocalStructuredSession(
             model=route.model,
             role="recall_query_rewriter",
+            reasoning_disabled=not policy.judge_think,
             runtime_role=RECALL_QUERY_REWRITER_RUNTIME_ROLE,
             runtime_location=route.location,
             source_data_class="raw",
@@ -1053,6 +1055,7 @@ def warm_recall_model(policy: RecallPolicy) -> dict[str, Any]:
             result = LocalStructuredSession(
                 model=route.model,
                 role="recall_warmup",
+                reasoning_disabled=not policy.judge_think,
                 runtime_role=role,
                 runtime_location=route.location,
                 source_data_class="raw",

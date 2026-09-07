@@ -42,6 +42,7 @@ from chronovisor.core.llm_security import (
     CredentialSecurityError,
     RequestSender,
 )
+from chronovisor.core.mtplx_adapter import MTPLX_BASE_URL, MTPLXAdapter
 from chronovisor.core.nemotron_adapter import NemotronEmbeddingBackend
 from chronovisor.core.ollama_adapter import OllamaAdapter
 from chronovisor.core.ollama_transport import OLLAMA_URL
@@ -305,9 +306,10 @@ def _provider(provider_id: str, value: object) -> ProviderDefinition:
                 generation=True, embedding=True, structured_output=True
             ),
         )
-    if kind == "omlx":
+    if kind in {"omlx", "mtplx"}:
         _exact_keys(table, {"kind", "endpoint"})
-        endpoint = _string(table.get("endpoint", OMLX_BASE_URL)).rstrip("/")
+        default_endpoint = MTPLX_BASE_URL if kind == "mtplx" else OMLX_BASE_URL
+        endpoint = _string(table.get("endpoint", default_endpoint)).rstrip("/")
         try:
             parsed = urlsplit(endpoint)
             port = parsed.port
@@ -329,7 +331,7 @@ def _provider(provider_id: str, value: object) -> ProviderDefinition:
             kind,
             BackendCapabilities(
                 generation=True,
-                embedding=True,
+                embedding=kind == "omlx",
                 structured_output=True,
                 streaming=True,
             ),
@@ -604,6 +606,10 @@ def build_llm_runtime(
             backends[provider_id] = OMLXAdapter(
                 base_url=provider.endpoint or OMLX_BASE_URL
             )
+        elif provider.kind == "mtplx":
+            backends[provider_id] = MTPLXAdapter(
+                base_url=provider.endpoint or MTPLX_BASE_URL
+            )
         elif provider.kind == "local-transformers":
             if provider.reranker_config is None:
                 raise _fail()
@@ -675,10 +681,13 @@ def build_llm_runtime(
             elif provider.kind == "ollama":
                 protocol = "ollama-native"
                 endpoint_sha256 = hashlib.sha256(OLLAMA_URL.encode("utf-8")).hexdigest()
-            elif provider.kind == "omlx":
-                protocol = "omlx-native"
+            elif provider.kind in {"omlx", "mtplx"}:
+                protocol = f"{provider.kind}-native"
+                default_endpoint = (
+                    MTPLX_BASE_URL if provider.kind == "mtplx" else OMLX_BASE_URL
+                )
                 endpoint_sha256 = hashlib.sha256(
-                    (provider.endpoint or OMLX_BASE_URL).encode("utf-8")
+                    (provider.endpoint or default_endpoint).encode("utf-8")
                 ).hexdigest()
             else:
                 protocol = provider.kind
