@@ -3271,7 +3271,7 @@ function renderModelStatus(modelStatus, runtimeFailures, activities = []) {
       state.append(stateDot, document.createTextNode(fmt(row.status, "unknown")));
       const name = document.createElement("strong");
       name.className = "model-name";
-      name.textContent = fmt(row.name);
+      name.textContent = fmt(row.display_name || row.name);
       name.title = fmt(row.name);
       main.append(state, name);
 
@@ -3293,6 +3293,7 @@ function renderModelStatus(modelStatus, runtimeFailures, activities = []) {
       });
 
       const metaPieces = [];
+      if (row.display_name && row.display_name !== row.name) metaPieces.push(`API ${row.name}`);
       if (row.size_bytes) metaPieces.push(`disk ${formatBytes(row.size_bytes)}`);
       else if (row.installed && row.size_bytes === null) metaPieces.push("disk unknown");
       if (row.loaded_size_bytes) metaPieces.push(`loaded ${formatBytes(row.loaded_size_bytes)}`);

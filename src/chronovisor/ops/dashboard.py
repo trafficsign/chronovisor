@@ -48,6 +48,7 @@ from chronovisor.core.raw_segment import CAPTURE_TIMEZONE
 from chronovisor.core.runtime_config import (
     load_reranker_config,
     load_search_embedding_config,
+    load_toml_file,
     runtime_identity,
 )
 from chronovisor.core.sealed_artifact_decoder import schema_matches
@@ -1069,6 +1070,13 @@ def _runtime_failure_snapshot(
 
 
 def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, Any]:
+    dashboard_config = load_toml_file(CHRONOVISOR_ROOT / "config.toml").get("dashboard")
+    display_names = (
+        dashboard_config.get("model_display_names")
+        if isinstance(dashboard_config, dict)
+        else None
+    )
+    display_names = display_names if isinstance(display_names, dict) else {}
     runtime_snapshot = runtime or _local_model_snapshot()
     provider = str(runtime_snapshot.get("provider") or "ollama")
     installed_snapshot = (
@@ -1211,6 +1219,16 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
                 "capabilities": capabilities,
             }
         )
+
+    for row in rows:
+        display_name = display_names.get(row["name"])
+        if (
+            isinstance(display_name, str)
+            and 0 < len(display_name) <= 200
+            and display_name == display_name.strip()
+            and not any(ord(char) < 32 or ord(char) == 127 for char in display_name)
+        ):
+            row["display_name"] = display_name
 
     status_order = {"loaded": 0, "missing": 1, "ready": 2, "external": 3, "unknown": 4}
     rows.sort(
