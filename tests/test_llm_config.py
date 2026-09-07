@@ -901,7 +901,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
     text = example.read_text(encoding="utf-8")
     parsed = tomllib.loads(text)
     qwen_model = "qwen3.8-flash-next-chat"
-    qwen_revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+    qwen_revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
     ornith_model = "Ornith-1.5-9B-MLX-4bit"
     authority = config.roles["classification.authority"]
     assert authority.provider_id == "dwarfstar"
@@ -954,8 +954,9 @@ def test_repository_example_has_representative_local_role_map() -> None:
     }
     assert config.roles["knowledge.embedding"].model == "bge-m3-mlx-fp16"
     assert config.roles["classification.embedding"].model == "bge-m3-mlx-fp16"
-    assert parsed["ingest"]["num_ctx"] == parsed["ingest"]["max_num_ctx"] == 65_536
-    assert parsed["decision_router"]["num_ctx"] == 65_536
+    assert parsed["ingest"]["num_ctx"] == 114_688
+    assert parsed["ingest"]["max_num_ctx"] == 262_144
+    assert parsed["decision_router"]["num_ctx"] == 114_688
     stale_refs = (
         "qwen3.8:27b-axq4",
         "muse-glimmer:30b-q4k-dynamic",
@@ -1059,17 +1060,22 @@ def test_repository_example_has_representative_local_role_map() -> None:
     [
         (
             "qwen3.8-flash-next-chat",
-            "59a55fb819c82be7b162948282b50bd1a1e290b7",
+            "672c52bbea7865352c8f0aa766c43939acf0f0d5",
             None,
         ),
         (
             "Qwen3.8-Flash-Next-oQ4e-mtp",
-            "59a55fb819c82be7b162948282b50bd1a1e290b7",
+            "672c52bbea7865352c8f0aa766c43939acf0f0d5",
             "single-model runtime route identity is invalid",
         ),
         (
             "qwen3.8-flash-next-chat",
             "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
+            "single-model runtime route identity is invalid",
+        ),
+        (
+            "qwen3.8-flash-next-chat",
+            "59a55fb819c82be7b162948282b50bd1a1e290b7",
             "single-model runtime route identity is invalid",
         ),
     ],

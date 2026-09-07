@@ -39,8 +39,8 @@ queue_size = 8
 # Numeric generation limits live here; the model is selected only by the
 # fixed llm.roles."ingest.generation" route below.
 keep_alive = "0"
-num_ctx = 65536
-max_num_ctx = 65536
+num_ctx = 114688
+max_num_ctx = 262144
 
 [decision_router]
 # The cutover uses one pinned DwarfStar DS4 resident model. The quorum field remains
@@ -48,7 +48,7 @@ max_num_ctx = 65536
 authority_kind = "single_model_v1"
 single_runtime_role = "classification.authority"
 authority_keep_alive = "0"
-num_ctx = 65536
+num_ctx = 114688
 max_resident_models = 1
 adaptive_residency = true
 residency_policy_version = 2
@@ -117,13 +117,13 @@ model = "bge-m3-mlx-fp16"
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."knowledge.community_summary"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."classification.embedding"]
 capability = "embedding"
@@ -149,25 +149,25 @@ model = "nvidia/Nemotron-3-Embed-1B-BF16"
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."librarian.review.challenger"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."recall.answer.runner"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."recall.answer.scorer"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."recall.certificate_judge.primary"]
 capability = "generation"
@@ -178,37 +178,37 @@ model = "Ornith-1.5-9B-MLX-4bit"
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."ingest.generation"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."lint.tag_repair"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."lint.orphan_link"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."recall.content_correction.proposer"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."recall.auditor"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."recall.gate"]
 capability = "generation"
@@ -224,21 +224,21 @@ model = "Ornith-1.5-9B-MLX-4bit"
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.policy_proposer.challenger"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.rubric.variant"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 required_capabilities = ["structured_output"]
 
 # Offline Recall distillation is local-only. These raw/high inputs must never
@@ -247,70 +247,70 @@ required_capabilities = ["structured_output"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.teacher.b"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.teacher.c"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.answer_generator"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.utility_judge"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.planner"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.challenge"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.tie_break"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.deep_retrieval_requery"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 required_capabilities = ["structured_output"]
 
 [llm.roles."classification.authority"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 # Legacy classification role names remain mapped to the same model for replay
 # compatibility; production authority resolves only the route above.
@@ -318,73 +318,73 @@ revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."classification.challenger"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."classification.tie_break"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."classification.anchor_set"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."classification.decision"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."classification.direct_decision"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."classification.hierarchy"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."classification.query"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."classification.query_v2"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."classification.anchor"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."classification.anchor.primary"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 [llm.roles."classification.anchor.challenger"]
 capability = "generation"
 provider = "dwarfstar"
 model = "qwen3.8-flash-next-chat"
-revision = "59a55fb819c82be7b162948282b50bd1a1e290b7"
+revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
 
 # Cloud-only alternative: one OpenAI credential/profile can serve both roles.
 # Store it with `chronovisor credentials set openai/default`; never put its
