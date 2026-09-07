@@ -600,13 +600,10 @@ function updateDecisionPlanSelection(projection) {
     node.classList.remove("selected");
     setDecisionSvgState(node, "pending");
   });
-  const contextIndex = Math.max(
-    0,
-    projectedContext.findIndex((option) => option.selected),
-  );
-  const contextNode = contextOptions[contextIndex] || contextOptions[1];
+  const contextIndex = projectedContext.findIndex((option) => option.selected);
+  const contextNode = contextOptions[contextIndex] || contextOptions[0];
   contextNode?.setAttribute("data-workflow-node", "context_choice");
-  contextNode?.classList.toggle("selected", Boolean(projection?.context?.selected_tokens));
+  contextNode?.classList.toggle("selected", contextIndex >= 0);
   harness.querySelectorAll("[data-context-slot]").forEach((path) => {
     path.classList.toggle(
       "selected",
@@ -1079,8 +1076,8 @@ function decisionConsoleText(event, trace) {
   if (event?.phase === "context") {
     const required = Number(event.required_context_tokens || 0);
     const selected = Number(event.context_tokens || event.requested_context_tokens || 0);
-    const requiredLabel = required ? `${Math.ceil(required / 1024)}K` : "auto";
-    const selectedLabel = selected ? `${Math.round(selected / 1024)}K` : "auto";
+    const requiredLabel = required ? `${Math.floor(required / 1000)}K` : "auto";
+    const selectedLabel = selected ? `${Math.floor(selected / 1000)}K` : "auto";
     return `context required ${requiredLabel} → selected ${selectedLabel}`;
   }
   if (event?.phase === "generate") {
@@ -1348,7 +1345,7 @@ function renderDecisionTraceFrame(trace, focusEvent = null, workflowFrame = null
     || [...traceLanes].reverse().find((lane) => lane.state === "done");
   const contextTokens = Number(contextLane?.context_tokens ?? trace.context_tokens ?? 0);
   els.decisionContext.textContent = contextTokens
-    ? `Context ${Math.round(contextTokens / 1024)}K`
+    ? `Context ${Math.floor(contextTokens / 1000)}K`
     : "Context --";
 
   const overall = decisionTimelineSteps(trace);
@@ -3239,8 +3236,11 @@ function renderModelStatus(modelStatus, runtimeFailures, activities = []) {
   els.modelLoaded.textContent = String(loaded);
   els.modelConfigured.textContent = String(configured);
   els.modelMissing.textContent = String(missing);
+  const loadedUnknown = intValue(summary.loaded_size_unknown);
+  const installedUnknown = intValue(summary.installed_size_unknown);
   els.modelCaption.textContent = data.available
-    ? `${formatBytes(summary.loaded_size_bytes)} loaded · ${formatBytes(summary.installed_size_bytes)} installed`
+    ? `${formatBytes(summary.loaded_size_bytes)} loaded${loadedUnknown ? ` + ${loadedUnknown} unknown` : ""} · ` +
+      `${formatBytes(summary.installed_size_bytes)} installed${installedUnknown ? ` + ${installedUnknown} unknown` : ""}`
     : shortName(data.error || "Local runtime offline");
   renderRuntimeFailures(runtimeFailures);
 
@@ -3294,13 +3294,16 @@ function renderModelStatus(modelStatus, runtimeFailures, activities = []) {
 
       const metaPieces = [];
       if (row.size_bytes) metaPieces.push(`disk ${formatBytes(row.size_bytes)}`);
+      else if (row.installed && row.size_bytes === null) metaPieces.push("disk unknown");
       if (row.loaded_size_bytes) metaPieces.push(`loaded ${formatBytes(row.loaded_size_bytes)}`);
+      else if (row.running && row.loaded_size_bytes === null) metaPieces.push("loaded size unknown");
       if (row.context_length !== null && row.context_length !== undefined && Number(row.context_length) > 0) {
         metaPieces.push(`${Number(row.context_length).toLocaleString()} ctx`);
       }
       if (details.parameter_size) metaPieces.push(details.parameter_size);
       if (details.quantization_level) metaPieces.push(details.quantization_level);
       if (details.format) metaPieces.push(details.format);
+      else if (row.provider) metaPieces.push(row.provider);
       if (row.expires_at) metaPieces.push(`until ${timeLabel(row.expires_at)}`);
       const meta = document.createElement("div");
       meta.className = "model-meta";

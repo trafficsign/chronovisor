@@ -3746,7 +3746,7 @@ process.stdout.write(JSON.stringify(events.map(
 
     assert result == [
         "dispatch primary → Qwen",
-        "context required 32K → selected 64K",
+        "context required 32K → selected 65K",
         "direct generation · reasoning bypassed",
         "primary · 384 tok · 42.5 tok/s · vote accepted",
         "challenger · session failed at generate",
@@ -7017,6 +7017,224 @@ def test_omlx_snapshot_reports_all_endpoint_failures(monkeypatch) -> None:
     runtime = dashboard._omlx_snapshot()
 
     assert observed == [f"{endpoint}/models/status" for endpoint in endpoints]
+    assert runtime["available"] is False
+    assert runtime["models"] == []
+    assert runtime["error"]
+
+
+def test_omlx_snapshot_uses_ds4_openai_models_fallback(monkeypatch) -> None:
+    endpoint = "http://127.0.0.1:18136/v1"
+    monkeypatch.setattr(
+        dashboard.llm_config,
+        "load_llm_config",
+        lambda: SimpleNamespace(
+            providers={
+                "dwarfstar": SimpleNamespace(kind="omlx", endpoint=endpoint),
+            }
+        ),
+    )
+    observed: list[tuple[str, dict[str, Any]]] = []
+
+    def get(url: str, **kwargs: Any):
+        observed.append((url, kwargs))
+        if url.endswith("/models/status"):
+            return dashboard.httpx.Response(
+                404,
+                request=dashboard.httpx.Request("GET", url),
+            )
+        return dashboard.httpx.Response(
+            200,
+            request=dashboard.httpx.Request("GET", url),
+            json={
+                "object": "list",
+                "data": [
+                    {
+                        "id": "qwen3.8-flash-next",
+                        "owned_by": "ds4.c",
+                        "context_length": 262144,
+                    },
+                    {
+                        "id": "qwen3.8-flash-next-chat",
+                        "owned_by": "ds4.c",
+                        "context_length": 262144,
+                    },
+                    {
+                        "id": "qwen3.8-flash-next-reasoner",
+                        "owned_by": "ds4.c",
+                        "context_length": 262144,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(dashboard.httpx, "get", get)
+
+    runtime = dashboard._omlx_snapshot()
+
+    assert [url for url, _kwargs in observed] == [
+        f"{endpoint}/models/status",
+        f"{endpoint}/models",
+    ]
+    assert all(
+        kwargs["headers"] == {"x-api-key": dashboard.OMLX_API_KEY}
+        for _url, kwargs in observed
+    )
+    assert runtime["available"] is True
+    assert "status" not in runtime
+    assert "error" not in runtime
+    assert "endpoint_status" not in runtime
+    assert {row["name"] for row in runtime["models"]} == {
+        "qwen3.8-flash-next",
+        "qwen3.8-flash-next-chat",
+        "qwen3.8-flash-next-reasoner",
+    }
+    assert all(row["loaded"] is True for row in runtime["models"])
+    assert all(row["provider"] == "dwarfstar" for row in runtime["models"])
+    assert all(row["protocol"] == "openai-compatible" for row in runtime["models"])
+    assert all(
+        row["_omlx_discovery"] == "openai-models" for row in runtime["models"]
+    )
+    assert all(
+        row["size"] is None and row["size_vram"] is None for row in runtime["models"]
+    )
+
+
+def test_model_status_snapshot_collapses_ds4_aliases_and_counts_unknown_sizes(
+    monkeypatch,
+) -> None:
+    model = "qwen3.8-flash-next-chat"
+    monkeypatch.setattr(
+        dashboard,
+        "_configured_model_roles",
+        lambda: {model: {"ingest"}},
+    )
+    runtime = {
+        "available": True,
+        "provider": "omlx",
+        "models": [
+            {
+                "id": alias,
+                "name": alias,
+                "model": alias,
+                "owned_by": "ds4.c",
+                "loaded": True,
+                "size": None,
+                "size_vram": None,
+                "context_length": 262144,
+                "provider": "dwarfstar",
+                "_omlx_discovery": "openai-models",
+                "_omlx_alias_group": "qwen3.8-flash-next",
+                "_omlx_owner": "ds4.c",
+            }
+            for alias in (
+                "qwen3.8-flash-next",
+                "qwen3.8-flash-next-chat",
+                "qwen3.8-flash-next-reasoner",
+            )
+        ],
+    }
+
+    snapshot = dashboard._model_status_snapshot(runtime)
+
+    assert [row["name"] for row in snapshot["models"]] == [model]
+    row = snapshot["models"][0]
+    assert row["status"] == "loaded"
+    assert row["provider"] == "dwarfstar"
+    assert row["size_bytes"] is None
+    assert row["loaded_size_bytes"] is None
+    assert snapshot["summary"] == {
+        "installed": 1,
+        "loaded": 1,
+        "configured": 1,
+        "missing": 0,
+        "external": 0,
+        "all_installed": 1,
+        "unused_installed": 0,
+        "installed_size_bytes": 0,
+        "loaded_size_bytes": 0,
+        "installed_size_unknown": 1,
+        "loaded_size_unknown": 1,
+    }
+
+
+def test_omlx_openai_models_listing_does_not_claim_generic_residency(
+    monkeypatch,
+) -> None:
+    endpoint = "http://127.0.0.1:18137/v1"
+    model = "generic-model"
+    monkeypatch.setattr(
+        dashboard.llm_config,
+        "load_llm_config",
+        lambda: SimpleNamespace(
+            providers={
+                "compat": SimpleNamespace(kind="omlx", endpoint=endpoint),
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_configured_model_roles",
+        lambda: {model: {"ingest"}},
+    )
+
+    def get(url: str, **_kwargs: Any):
+        if url.endswith("/models/status"):
+            return dashboard.httpx.Response(
+                404,
+                request=dashboard.httpx.Request("GET", url),
+            )
+        return dashboard.httpx.Response(
+            200,
+            request=dashboard.httpx.Request("GET", url),
+            json={
+                "object": "list",
+                "data": [
+                    {
+                        "id": model,
+                        "owned_by": "generic-openai-server",
+                        "loaded": True,
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(dashboard.httpx, "get", get)
+
+    runtime = dashboard._omlx_snapshot()
+    row = runtime["models"][0]
+    snapshot = dashboard._model_status_snapshot(runtime)
+
+    assert "loaded" not in row
+    assert row["size"] is None
+    assert row["size_vram"] is None
+    assert snapshot["summary"]["loaded"] == 0
+    assert snapshot["summary"]["installed"] == 1
+    assert snapshot["models"][0]["status"] == "ready"
+
+
+def test_omlx_snapshot_does_not_fallback_for_non_404_errors(monkeypatch) -> None:
+    endpoint = "http://127.0.0.1:18136/v1"
+    monkeypatch.setattr(
+        dashboard.llm_config,
+        "load_llm_config",
+        lambda: SimpleNamespace(
+            providers={"dwarfstar": SimpleNamespace(kind="omlx", endpoint=endpoint)}
+        ),
+    )
+    observed: list[str] = []
+
+    def get(url: str, **_kwargs: Any):
+        observed.append(url)
+        return dashboard.httpx.Response(
+            500,
+            request=dashboard.httpx.Request("GET", url),
+        )
+
+    monkeypatch.setattr(dashboard.httpx, "get", get)
+
+    runtime = dashboard._omlx_snapshot()
+
+    assert observed == [f"{endpoint}/models/status"]
     assert runtime["available"] is False
     assert runtime["models"] == []
     assert runtime["error"]
