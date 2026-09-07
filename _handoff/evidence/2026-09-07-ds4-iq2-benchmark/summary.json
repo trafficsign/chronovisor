@@ -1,0 +1,712 @@
+{
+  "provenance": {
+    "engine_commit": "c64bdffc1028b4c30f1b48a325b3b7f4243a8bde",
+    "iq2_revision": "672c52bbea7865352c8f0aa766c43939acf0f0d5",
+    "ple_revision": "59a55fb819c82be7b162948282b50bd1a1e290b7",
+    "context": 65536,
+    "prefill_chunk_ds4": 1024,
+    "baseline": "Qwen3.8-Flash-Next-oQ4e-mtp",
+    "production_hashes": {
+      "/Users/trafficsign/.chronovisor/config.toml": "d3f3e80ad02db43d6c27bac35254475c15947e312930e2f78e291ce3f40bbb94",
+      "/Users/trafficsign/.omlx/settings.json": "99ef9327f5e59162981c6968e318b481eca05c0b7c4bbfcb9487c14d2c2ccea0",
+      "/Users/trafficsign/.omlx/model_settings.json": "51e1ab5a4e24a8fa4011c00908327357258edb24b3e7295fc9243286d74a4b1c"
+    },
+    "memory_note": "vm_stat components are separate; Activity Monitor used-memory captured externally. No cache purge."
+  },
+  "effective_baseline_settings": {
+    "version": "1.0",
+    "models": {
+      "baseline": {
+        "max_context_window": 65536,
+        "force_sampling": false,
+        "qwen4_ple_ssd_offload": true,
+        "thinking_budget_enabled": false,
+        "guided_grammar_enabled": false,
+        "turboquant_kv_enabled": false,
+        "turboquant_kv_bits": 4,
+        "turboquant_skip_last": true,
+        "qwen35_ane_prefill_enabled": true,
+        "qwen35_ane_prefill_sequence_length": 2048,
+        "qwen35_ane_prefill_tail_padding_min_tokens": 1436,
+        "qwen35_ane_prefill_fraction": 0.6,
+        "qwen35_ane_prefill_fused_down": false,
+        "qwen35_ane_prefill_max_layers": 64,
+        "qwen35_ane_prefill_dual_ane": true,
+        "qwen35_ane_prefill_gdn": true,
+        "qwen35_ane_prefill_gdn_fraction": 0.375,
+        "qwen35_ane_prefill_gdn_max_layers": 48,
+        "qwen35_ane_prefill_cpu_enabled": false,
+        "qwen35_ane_prefill_cpu_fraction": 0,
+        "qwen35_ane_prefill_cpu_down_fraction": 0,
+        "qwen35_ane_prefill_cpu_gdn_fraction": 0,
+        "qwen35_ane_prefill_cpu_threads": 8,
+        "qwen35_ane_prefill_cpu_shared_resource": false,
+        "specprefill_enabled": false,
+        "dflash_enabled": false,
+        "dflash_in_memory_cache": true,
+        "dflash_in_memory_cache_max_entries": 4,
+        "dflash_in_memory_cache_max_bytes": 8589934592,
+        "dflash_ssd_cache": false,
+        "dflash_ssd_cache_max_bytes": 21474836480,
+        "dflash_draft_sink_size": 0,
+        "mtp_enabled": true,
+        "mtp_num_draft_tokens": 3,
+        "vlm_mtp_enabled": false,
+        "is_pinned": true,
+        "is_default": true,
+        "is_hidden": false,
+        "is_favorite": false,
+        "trust_remote_code": false
+      }
+    }
+  },
+  "performance": {
+    "baseline": [
+      {
+        "kind": "needle",
+        "target": 4096,
+        "repeat": null,
+        "ttft_seconds": 7.1410365420160815,
+        "wall_seconds": 7.201104375009891,
+        "decode_tokens_per_second": 149.83060902043164,
+        "usage": {
+          "prompt_tokens": 4045,
+          "completion_tokens": 10,
+          "total_tokens": 4055,
+          "input_tokens": 4045,
+          "output_tokens": 10,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "time_to_first_token": 7.13,
+          "total_time": 7.19,
+          "prompt_eval_duration": 7.13,
+          "generation_duration": 0.06,
+          "prompt_tokens_per_second": 567.29,
+          "generation_tokens_per_second": 164.83
+        },
+        "passed": true,
+        "prompt_sha256": "0c4a892ad957319c2aa24d82edebf1291e7a9ddfd055ea85f3935701c25f29c2"
+      },
+      {
+        "kind": "needle",
+        "target": 16384,
+        "repeat": null,
+        "ttft_seconds": 23.90075174998492,
+        "wall_seconds": 24.022402708011214,
+        "decode_tokens_per_second": 82.20239414669138,
+        "usage": {
+          "prompt_tokens": 16335,
+          "completion_tokens": 11,
+          "total_tokens": 16346,
+          "input_tokens": 16335,
+          "output_tokens": 11,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "time_to_first_token": 23.87,
+          "total_time": 23.99,
+          "prompt_eval_duration": 23.87,
+          "generation_duration": 0.12,
+          "prompt_tokens_per_second": 684.41,
+          "generation_tokens_per_second": 90.02
+        },
+        "passed": true,
+        "prompt_sha256": "8bc808a6261c0f6670e40fd602eee562b2c40446aa77aca7c68afeb667db78f3"
+      },
+      {
+        "kind": "needle",
+        "target": 32768,
+        "repeat": null,
+        "ttft_seconds": 47.52752408402739,
+        "wall_seconds": 47.65528524998808,
+        "decode_tokens_per_second": 78.27104523354686,
+        "usage": {
+          "prompt_tokens": 32719,
+          "completion_tokens": 11,
+          "total_tokens": 32730,
+          "input_tokens": 32719,
+          "output_tokens": 11,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "time_to_first_token": 47.45,
+          "total_time": 47.59,
+          "prompt_eval_duration": 47.45,
+          "generation_duration": 0.14,
+          "prompt_tokens_per_second": 689.6,
+          "generation_tokens_per_second": 78.98
+        },
+        "passed": true,
+        "prompt_sha256": "8a7799cffd12b504d43a2a82896c0be9cf78ae698170688a587b6df09feafb18"
+      },
+      {
+        "kind": "decode",
+        "target": null,
+        "repeat": 1,
+        "ttft_seconds": 0.87765074998606,
+        "wall_seconds": 12.225205333030317,
+        "decode_tokens_per_second": 33.75176538672802,
+        "usage": {
+          "prompt_tokens": 50,
+          "completion_tokens": 384,
+          "total_tokens": 434,
+          "input_tokens": 50,
+          "output_tokens": 384,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "time_to_first_token": 0.87,
+          "total_time": 12.22,
+          "prompt_eval_duration": 0.87,
+          "generation_duration": 11.35,
+          "prompt_tokens_per_second": 57.24,
+          "generation_tokens_per_second": 33.84
+        },
+        "passed": null,
+        "prompt_sha256": "0fd786510d38b155b54f93bd31a037b8f83746316454d302e064664d0ec52043"
+      },
+      {
+        "kind": "decode",
+        "target": null,
+        "repeat": 2,
+        "ttft_seconds": 0.5028064170037396,
+        "wall_seconds": 10.898541125003248,
+        "decode_tokens_per_second": 36.8420328873227,
+        "usage": {
+          "prompt_tokens": 50,
+          "completion_tokens": 384,
+          "total_tokens": 434,
+          "input_tokens": 50,
+          "output_tokens": 384,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "time_to_first_token": 0.49,
+          "total_time": 10.9,
+          "prompt_eval_duration": 0.49,
+          "generation_duration": 10.4,
+          "prompt_tokens_per_second": 101.77,
+          "generation_tokens_per_second": 36.91
+        },
+        "passed": null,
+        "prompt_sha256": "4ebe1e8d7081e7f71f0a36f04e6eb5d3dc31c5dd6a0af2d89b51c5db3366f8da"
+      }
+    ],
+    "iq2_mtp": [
+      {
+        "kind": "needle",
+        "target": 4096,
+        "repeat": null,
+        "ttft_seconds": 6.999483791994862,
+        "wall_seconds": 7.186273458995856,
+        "decode_tokens_per_second": 48.18253677786203,
+        "usage": {
+          "prompt_tokens": 4045,
+          "completion_tokens": 10,
+          "total_tokens": 4055,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 4045
+          }
+        },
+        "passed": true,
+        "prompt_sha256": "0c4a892ad957319c2aa24d82edebf1291e7a9ddfd055ea85f3935701c25f29c2"
+      },
+      {
+        "kind": "needle",
+        "target": 16384,
+        "repeat": null,
+        "ttft_seconds": 26.501030332990922,
+        "wall_seconds": 26.687228666967712,
+        "decode_tokens_per_second": 53.70617333905095,
+        "usage": {
+          "prompt_tokens": 16335,
+          "completion_tokens": 11,
+          "total_tokens": 16346,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 16335
+          }
+        },
+        "passed": true,
+        "prompt_sha256": "8bc808a6261c0f6670e40fd602eee562b2c40446aa77aca7c68afeb667db78f3"
+      },
+      {
+        "kind": "needle",
+        "target": 32768,
+        "repeat": null,
+        "ttft_seconds": 52.98526345798746,
+        "wall_seconds": 53.20142283302266,
+        "decode_tokens_per_second": 46.262161881118445,
+        "usage": {
+          "prompt_tokens": 32719,
+          "completion_tokens": 11,
+          "total_tokens": 32730,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 32719
+          }
+        },
+        "passed": true,
+        "prompt_sha256": "8a7799cffd12b504d43a2a82896c0be9cf78ae698170688a587b6df09feafb18"
+      },
+      {
+        "kind": "decode",
+        "target": null,
+        "repeat": 1,
+        "ttft_seconds": 0.3269000410218723,
+        "wall_seconds": 7.1712077500415035,
+        "decode_tokens_per_second": 55.958910131300975,
+        "usage": {
+          "prompt_tokens": 50,
+          "completion_tokens": 384,
+          "total_tokens": 434,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 50
+          }
+        },
+        "passed": null,
+        "prompt_sha256": "0fd786510d38b155b54f93bd31a037b8f83746316454d302e064664d0ec52043"
+      },
+      {
+        "kind": "decode",
+        "target": null,
+        "repeat": 2,
+        "ttft_seconds": 0.32580554101150483,
+        "wall_seconds": 7.817077749990858,
+        "decode_tokens_per_second": 51.12616246155361,
+        "usage": {
+          "prompt_tokens": 50,
+          "completion_tokens": 384,
+          "total_tokens": 434,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 50
+          }
+        },
+        "passed": null,
+        "prompt_sha256": "4ebe1e8d7081e7f71f0a36f04e6eb5d3dc31c5dd6a0af2d89b51c5db3366f8da"
+      }
+    ]
+  },
+  "quality": {
+    "baseline": {
+      "total": 32,
+      "passed": 30,
+      "failures": [
+        {
+          "id": "remainder",
+          "expected": "19",
+          "content": "To find the remainder when $98765$ is divided by $97$, we can perform long division or break down the number using modular arithmetic properties.\n\n**Method 1: Long Division**\n\n1.  Consider the first three digits: $987$.\n    $987 \\div 97$:\n    $97 \\times 10 = 970$\n    $987 - 970 = 17$\n    So, $987 = 97 \\times 10 + 17$.\n\n2. ",
+          "finish_reason": "length"
+        },
+        {
+          "id": "precedence",
+          "expected": "53",
+          "content": "14",
+          "finish_reason": "stop"
+        }
+      ]
+    },
+    "iq2_mtp": {
+      "total": 32,
+      "passed": 27,
+      "failures": [
+        {
+          "id": "percent",
+          "expected": "714",
+          "content": "1176",
+          "finish_reason": "stop"
+        },
+        {
+          "id": "remainder",
+          "expected": "19",
+          "content": "To find the remainder when 98765 is divided by 97, we perform the division:\n\n$$ 98765 \\div 97 $$\n\n1.  **Estimate the quotient:**\n    $97 \\times 1000 = 97000$\n    $98765 - 97000 = 1765$\n\n2.  **Divide the remainder (1765) by 97:**\n    $97 \\times 10 = 970$\n    $",
+          "finish_reason": "length"
+        },
+        {
+          "id": "set",
+          "expected": "2,5,8",
+          "content": "To find the intersection of sets $A$ and $B$ ($A \\cap B$), we identify the elements that are present in both sets.\n\n1.  **Set A**: $\\{1, 2, 3, 5, 8\\}$\n2.  **Set B**: $\\{2, 4, 5, 8\\}$\n\n**Step-by-step comparison:**\n*   $1$ is in $A$ but not in $B$.\n*   $2$ is in $A$ and in $B$. (Keep)\n*   $3$ is",
+          "finish_reason": "length"
+        },
+        {
+          "id": "precedence",
+          "expected": "53",
+          "content": "17",
+          "finish_reason": "stop"
+        },
+        {
+          "id": "jp_order",
+          "expected": "乙",
+          "content": "甲",
+          "finish_reason": "stop"
+        }
+      ]
+    }
+  },
+  "materials": {
+    "baseline": [
+      {
+        "case_id": "material-1",
+        "repeat": false,
+        "page_valid": true,
+        "failure_class": null,
+        "ttft_seconds": 11.87988470797427,
+        "wall_seconds": 33.71664470800897,
+        "decode_tokens_per_second": 47.44293567353186,
+        "usage": {
+          "prompt_tokens": 2435,
+          "completion_tokens": 1037,
+          "total_tokens": 3472,
+          "input_tokens": 2435,
+          "output_tokens": 1037,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "time_to_first_token": 11.87,
+          "total_time": 33.71,
+          "prompt_eval_duration": 11.87,
+          "generation_duration": 21.84,
+          "prompt_tokens_per_second": 205.09,
+          "generation_tokens_per_second": 47.49
+        },
+        "finish_reason": "stop",
+        "prompt_sha256": "e6e6febcf5a30b4f00ece1dc6b4abece1439984140b899b8dfe9a9f9a071b0bd"
+      },
+      {
+        "case_id": "material-4",
+        "repeat": false,
+        "page_valid": true,
+        "failure_class": null,
+        "ttft_seconds": 67.66694545798237,
+        "wall_seconds": 122.03285362501629,
+        "decode_tokens_per_second": 42.61862034717133,
+        "usage": {
+          "prompt_tokens": 20792,
+          "completion_tokens": 2318,
+          "total_tokens": 23110,
+          "input_tokens": 20792,
+          "output_tokens": 2318,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "time_to_first_token": 67.63,
+          "total_time": 121.99,
+          "prompt_eval_duration": 67.63,
+          "generation_duration": 54.37,
+          "prompt_tokens_per_second": 307.44,
+          "generation_tokens_per_second": 42.64
+        },
+        "finish_reason": "stop",
+        "prompt_sha256": "f21f45dbd3540e948bd74697661420aee4616c7d627c0c956170918b5024c5bd"
+      },
+      {
+        "case_id": "material-4",
+        "repeat": true,
+        "page_valid": true,
+        "failure_class": null,
+        "ttft_seconds": 2.17909570800839,
+        "wall_seconds": 52.96091979095945,
+        "decode_tokens_per_second": 44.602572690184765,
+        "usage": {
+          "prompt_tokens": 20792,
+          "completion_tokens": 2266,
+          "total_tokens": 23058,
+          "input_tokens": 20792,
+          "output_tokens": 2266,
+          "prompt_tokens_details": {
+            "cached_tokens": 20480
+          },
+          "time_to_first_token": 2.14,
+          "total_time": 52.93,
+          "prompt_eval_duration": 2.14,
+          "generation_duration": 50.79,
+          "prompt_tokens_per_second": 9725.03,
+          "generation_tokens_per_second": 44.61
+        },
+        "finish_reason": "stop",
+        "prompt_sha256": "f21f45dbd3540e948bd74697661420aee4616c7d627c0c956170918b5024c5bd"
+      }
+    ],
+    "iq2_mtp": [
+      {
+        "case_id": "material-1",
+        "repeat": false,
+        "page_valid": true,
+        "failure_class": null,
+        "ttft_seconds": 4.48212570801843,
+        "wall_seconds": 29.699339667044114,
+        "decode_tokens_per_second": 58.015925247617076,
+        "usage": {
+          "prompt_tokens": 2435,
+          "completion_tokens": 1464,
+          "total_tokens": 3899,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 2435
+          }
+        },
+        "finish_reason": "stop",
+        "prompt_sha256": "e6e6febcf5a30b4f00ece1dc6b4abece1439984140b899b8dfe9a9f9a071b0bd"
+      },
+      {
+        "case_id": "material-4",
+        "repeat": false,
+        "page_valid": true,
+        "failure_class": null,
+        "ttft_seconds": 37.406785124971066,
+        "wall_seconds": 73.14468133298215,
+        "decode_tokens_per_second": 57.19418927468408,
+        "usage": {
+          "prompt_tokens": 20792,
+          "completion_tokens": 2045,
+          "total_tokens": 22837,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 20792
+          }
+        },
+        "finish_reason": "stop",
+        "prompt_sha256": "f21f45dbd3540e948bd74697661420aee4616c7d627c0c956170918b5024c5bd"
+      },
+      {
+        "case_id": "material-4",
+        "repeat": true,
+        "page_valid": true,
+        "failure_class": null,
+        "ttft_seconds": 37.2971308749984,
+        "wall_seconds": 73.48062762495829,
+        "decode_tokens_per_second": 56.48984160167621,
+        "usage": {
+          "prompt_tokens": 20792,
+          "completion_tokens": 2045,
+          "total_tokens": 22837,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 20792
+          }
+        },
+        "finish_reason": "stop",
+        "prompt_sha256": "f21f45dbd3540e948bd74697661420aee4616c7d627c0c956170918b5024c5bd"
+      }
+    ]
+  },
+  "acceptance": {
+    "baseline": {
+      "counts": {
+        "total": 4,
+        "ok": 4,
+        "schema_valid": 4,
+        "effect_matches": 4
+      },
+      "cases": [
+        {
+          "lane": "ingest_triage",
+          "ok": true,
+          "schema_valid": true,
+          "effect_match": true,
+          "repair_turns": 0,
+          "elapsed_seconds": 4.026,
+          "failure_class": null
+        },
+        {
+          "lane": "ingest_reconciliation",
+          "ok": true,
+          "schema_valid": true,
+          "effect_match": true,
+          "repair_turns": 0,
+          "elapsed_seconds": 11.124,
+          "failure_class": null
+        },
+        {
+          "lane": "orphan_link",
+          "ok": true,
+          "schema_valid": true,
+          "effect_match": true,
+          "repair_turns": 0,
+          "elapsed_seconds": 4.653,
+          "failure_class": null
+        },
+        {
+          "lane": "local_repair",
+          "ok": true,
+          "schema_valid": true,
+          "effect_match": true,
+          "repair_turns": 0,
+          "elapsed_seconds": 4.814,
+          "failure_class": null
+        }
+      ]
+    },
+    "iq2_mtp": {
+      "counts": {
+        "total": 4,
+        "ok": 4,
+        "schema_valid": 4,
+        "effect_matches": 4
+      },
+      "cases": [
+        {
+          "lane": "ingest_triage",
+          "ok": true,
+          "schema_valid": true,
+          "effect_match": true,
+          "repair_turns": 0,
+          "elapsed_seconds": 2.082,
+          "failure_class": null
+        },
+        {
+          "lane": "ingest_reconciliation",
+          "ok": true,
+          "schema_valid": true,
+          "effect_match": true,
+          "repair_turns": 0,
+          "elapsed_seconds": 6.848,
+          "failure_class": null
+        },
+        {
+          "lane": "orphan_link",
+          "ok": true,
+          "schema_valid": true,
+          "effect_match": true,
+          "repair_turns": 0,
+          "elapsed_seconds": 6.725,
+          "failure_class": null
+        },
+        {
+          "lane": "local_repair",
+          "ok": true,
+          "schema_valid": true,
+          "effect_match": true,
+          "repair_turns": 0,
+          "elapsed_seconds": 6.383,
+          "failure_class": null
+        }
+      ]
+    }
+  },
+  "restoration": {
+    "services": [
+      {
+        "service": "omlx",
+        "returncode": 0
+      },
+      {
+        "service": "com.trafficsign.chronovisor-converge.managed-v2.plist",
+        "returncode": 0
+      },
+      {
+        "service": "com.trafficsign.chronovisor-dashboard.managed-v2.plist",
+        "returncode": 0
+      },
+      {
+        "service": "com.trafficsign.chronovisor-deadman-observer.managed-v2.plist",
+        "returncode": 0
+      },
+      {
+        "service": "com.trafficsign.chronovisor-ingest-drain.managed-v2.plist",
+        "returncode": 0
+      },
+      {
+        "service": "com.trafficsign.chronovisor-lan-dashboard.managed-v2.plist",
+        "returncode": 0
+      },
+      {
+        "service": "com.trafficsign.chronovisor-librarian-review.managed-v2.plist",
+        "returncode": 0
+      },
+      {
+        "service": "com.trafficsign.chronovisor-reranker.managed-v2.plist",
+        "returncode": 0
+      },
+      {
+        "service": "com.trafficsign.chronovisor-searxng.managed-v2.plist",
+        "returncode": 0
+      },
+      {
+        "service": "com.trafficsign.chronovisor-semantic.managed-v2.plist",
+        "returncode": 0
+      },
+      {
+        "service": "com.trafficsign.chronovisor-sleep.managed-v2.plist",
+        "returncode": 0
+      },
+      {
+        "service": "com.trafficsign.chronovisor-watchdog.managed-v2.plist",
+        "returncode": 0
+      }
+    ],
+    "hashes": {
+      "/Users/trafficsign/.chronovisor/config.toml": "d3f3e80ad02db43d6c27bac35254475c15947e312930e2f78e291ce3f40bbb94",
+      "/Users/trafficsign/.omlx/settings.json": "99ef9327f5e59162981c6968e318b481eca05c0b7c4bbfcb9487c14d2c2ccea0",
+      "/Users/trafficsign/.omlx/model_settings.json": "51e1ab5a4e24a8fa4011c00908327357258edb24b3e7295fc9243286d74a4b1c"
+    },
+    "unchanged": true,
+    "health": {
+      "status": "healthy",
+      "default_model": "Qwen3.8-Flash-Next-oQ4e-mtp",
+      "engine_pool": {
+        "model_count": 3,
+        "loaded_count": 2,
+        "final_ceiling": 111669149696,
+        "current_model_memory": 83299305817
+      },
+      "mcp": null
+    }
+  },
+  "activity_monitor": [
+    {
+      "stage": "baseline-no-model",
+      "used_display_GB": 24.11,
+      "cached_display_GB": 20.55,
+      "swap_display_GB": 15.22,
+      "source": "Activity Monitor accessibility text; physical memory displays128GB"
+    },
+    {
+      "stage": "baseline-loaded",
+      "used_display_GB": 97.19,
+      "cached_display_GB": 31.07,
+      "swap_display_GB": 15.03,
+      "process_display_GB": 72.85
+    },
+    {
+      "stage": "baseline-post-material-late",
+      "used_display_GB": 98.03,
+      "cached_display_GB": 21.22,
+      "swap_display_GB": 14.76,
+      "process_display_GB": 74.29,
+      "note": "UI50s pause elapsed; acceptance had begun; not same-stage comparison."
+    },
+    {
+      "stage": "baseline-post-checks",
+      "used_display_GB": 97.82,
+      "cached_display_GB": 21.81,
+      "swap_display_GB": 14.75,
+      "process_display_GB": 71.98
+    },
+    {
+      "stage": "ds4-mtp-no-model",
+      "used_display_GB": 25.64,
+      "cached_display_GB": 23.29,
+      "swap_display_GB": 14.73
+    },
+    {
+      "stage": "ds4-mtp-loaded",
+      "used_display_GB": 75.85,
+      "cached_display_GB": 51.94,
+      "swap_display_GB": 14.68,
+      "process_display_GB": 3.25
+    },
+    {
+      "stage": "ds4-mtp-post-material",
+      "used_display_GB": 77.3,
+      "cached_display_GB": 51.17,
+      "swap_display_GB": 14.3,
+      "process_display_GB": 3.34,
+      "note": "Read after materials; acceptance may already have started because UI pause expires. No post-checks IQ2 UI snapshot before unload."
+    }
+  ]
+}
