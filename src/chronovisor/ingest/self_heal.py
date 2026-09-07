@@ -590,6 +590,7 @@ def _verified_runtime_github_source(
     value: object,
     *,
     expected_repository: object,
+    expected_commit: str | None = None,
 ) -> str:
     """Return one canonical GitHub SSH repository or fail closed."""
 
@@ -602,6 +603,14 @@ def _verified_runtime_github_source(
         source = source[4:]
     parsed = urlsplit(source)
     repository = parsed.path.strip("/")
+    if "@" in repository:
+        repository, revision = repository.rsplit("@", 1)
+        if (
+            _FULL_GIT_SHA_RE.fullmatch(revision.casefold()) is None
+            or expected_commit is None
+            or revision.casefold() != expected_commit.casefold()
+        ):
+            raise ValueError("repair_runtime_source_revision_mismatch")
     if repository.endswith(".git"):
         repository = repository[:-4]
     if (
@@ -712,6 +721,7 @@ def _verified_local_repair_git_state(expected_commit: str) -> dict[str, Any]:
     runtime_source = _verified_runtime_github_source(
         identity.get("runtime_source"),
         expected_repository=expected_repository,
+        expected_commit=expected,
     )
     direct_url = identity.get("direct_url")
     if not isinstance(direct_url, dict):
@@ -719,6 +729,7 @@ def _verified_local_repair_git_state(expected_commit: str) -> dict[str, Any]:
     direct_source = _verified_runtime_github_source(
         direct_url.get("url"),
         expected_repository=expected_repository,
+        expected_commit=expected,
     )
     vcs_info = direct_url.get("vcs_info")
     if not isinstance(vcs_info, dict) or vcs_info.get("vcs") != "git":
