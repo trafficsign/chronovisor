@@ -159,6 +159,7 @@ class RerankerServiceState:
             "ready": self.ready,
             "pid": os.getpid(),
             "observed_at_epoch": time.time(),
+            "device": self.config.device,
             "route": {
                 "role": self._route.role,
                 "provider": self._route.provider,
@@ -330,6 +331,15 @@ class _Handler(socketserver.StreamRequestHandler):
 
 class _Server(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
+    _last_heartbeat = 0.0
+
+    def service_actions(self) -> None:
+        # The native server loop also runs while the resident model is idle.
+        now = time.monotonic()
+        if now - self._last_heartbeat >= 5:
+            with contextlib.suppress(OSError):
+                self.state._publish_status()  # type: ignore[attr-defined]
+            self._last_heartbeat = now
 
 
 def serve(config: RerankerConfig | None = None) -> None:

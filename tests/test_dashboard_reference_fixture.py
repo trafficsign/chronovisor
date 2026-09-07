@@ -7,8 +7,10 @@ import signal
 import subprocess
 import threading
 import time
+from http import HTTPStatus
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -21,6 +23,214 @@ from tests.decision_trace_stepper import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _model_fleet_scenarios() -> list[dict[str, object]]:
+    base_rows = [
+        {
+            "name": "nvidia/Nemotron-3-Embed-1B-BF16",
+            "provider": "nemotron",
+            "status": "loaded",
+            "installed": False,
+            "running": True,
+            "configured": True,
+            "roles": ["embed", "search-embed"],
+            "size_bytes": None,
+            "loaded_size_bytes": None,
+            "details": {
+                "format": "MLX",
+                "runtime_model": "mlx-community/Nemotron-3-Embed-1B-BF16",
+            },
+        },
+        {
+            "name": "BAAI/bge-reranker-v2-m3",
+            "provider": "local-reranker",
+            "status": "loaded",
+            "installed": False,
+            "running": True,
+            "configured": True,
+            "roles": ["rerank"],
+            "size_bytes": None,
+            "loaded_size_bytes": None,
+            "details": {"format": "service"},
+        },
+        {
+            "name": "qwen3.8-flash-next-chat",
+            "display_name": "Qwen3.8-Flash-Next-DS4-IQ2",
+            "provider": "dwarfstar",
+            "status": "loaded",
+            "installed": True,
+            "running": True,
+            "configured": True,
+            "roles": ["ingest", "decision-primary"],
+            "size_bytes": None,
+            "loaded_size_bytes": None,
+            "context_length": 262144,
+            "details": {"context_length": 262144},
+        },
+        {
+            "name": "Ornith-1.5-9B-MLX-4bit",
+            "provider": "omlx",
+            "status": "loaded",
+            "installed": True,
+            "running": True,
+            "configured": True,
+            "roles": ["gate"],
+            "size_bytes": 5_540_565_000,
+            "loaded_size_bytes": 5_540_565_000,
+            "context_length": 114688,
+            "details": {"format": "MLX", "context_length": 114688},
+        },
+    ]
+    loaded = {
+        "available": True,
+        "models": base_rows,
+        "summary": {
+            "installed": 2,
+            "loaded": 4,
+            "configured": 4,
+            "missing": 0,
+            "loaded_size_bytes": 5_540_565_000,
+            "installed_size_bytes": 5_540_565_000,
+            "loaded_size_unknown": 2,
+            "installed_size_unknown": 2,
+        },
+    }
+    unknown = json.loads(json.dumps(loaded))
+    unknown["summary"].update(
+        {
+            "loaded_size_bytes": 0,
+            "installed_size_bytes": 0,
+            "loaded_size_unknown": 4,
+            "installed_size_unknown": 4,
+        }
+    )
+    for row in unknown["models"]:
+        row["size_bytes"] = None
+        row["loaded_size_bytes"] = None
+    stale = json.loads(json.dumps(loaded))
+    stale["models"] = [
+        {
+            **row,
+            "status": "missing",
+            "installed": False,
+            "running": False,
+            "size_bytes": None,
+            "loaded_size_bytes": None,
+        }
+        if row["name"] in {
+            "nvidia/Nemotron-3-Embed-1B-BF16",
+            "BAAI/bge-reranker-v2-m3",
+        }
+        else row
+        for row in base_rows
+    ]
+    stale["summary"].update(
+        {
+            "installed": 2,
+            "loaded": 2,
+            "configured": 4,
+            "missing": 2,
+            "loaded_size_bytes": 5_540_565_000,
+            "installed_size_bytes": 5_540_565_000,
+            "loaded_size_unknown": 1,
+            "installed_size_unknown": 1,
+        }
+    )
+    return [
+        {"id": "service-loaded", "model_status": loaded},
+        {"id": "unknown-memory", "model_status": unknown},
+        {"id": "configured-stale", "model_status": stale},
+    ]
+
+
+def _model_fleet_page() -> str:
+    return (
+        (dashboard.STATIC_DIR / "index.html")
+        .read_text(encoding="utf-8")
+        .replace(
+            '<script src="/static/app-client.js"></script>',
+            '<script src="/model-fleet.js"></script>',
+        )
+        .replace(
+            "</head>",
+            """<style>
+              .shell > :not(.dashboard-grid),
+              .dashboard-grid > :not(#model-panel) { display: none !important; }
+            </style></head>""",
+        )
+    )
+
+
+def _model_fleet_handler(
+    scenario: dict[str, object], results: list[dict[str, object]]
+) -> type[dashboard.DashboardHandler]:
+    page = _model_fleet_page().encode()
+    harness = (
+        "const payload = "
+        + json.dumps(scenario["model_status"], ensure_ascii=False)
+        + ";"
+        + r"""
+renderModelStatus(payload, [], []);
+const emitResult = () => {
+const grid = document.getElementById("model-grid");
+const rows = [...grid.querySelectorAll(".model-row")].map((row) => ({
+  name: row.querySelector(".model-name")?.textContent || "",
+  overflow: row.scrollWidth > row.clientWidth + 1
+    || [...row.querySelectorAll("*")].some((node) => node.scrollWidth > node.clientWidth + 1),
+}));
+document.body.dataset.modelFleetReady = "true";
+const result = {
+    scenario: """ + json.dumps(scenario["id"]) + r""",
+    width: window.innerWidth,
+    height: window.innerHeight,
+    scrollY: window.scrollY,
+    panelRect: (() => {
+      const rect = document.getElementById("model-panel")?.getBoundingClientRect();
+      return rect ? {top: rect.top, bottom: rect.bottom, height: rect.height} : null;
+    })(),
+    rows,
+    pageOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+};
+const beacon = new Image();
+beacon.src = "/model-fleet-result?payload=" + encodeURIComponent(JSON.stringify(result));
+};
+requestAnimationFrame(() => requestAnimationFrame(emitResult));
+"""
+    ).encode()
+
+    class Handler(dashboard.DashboardHandler):
+        def do_GET(self) -> None:
+            request_path = self.path.split("?", 1)[0]
+            if request_path == "/":
+                if self._browser_boundary_allows():
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(page)))
+                    self.end_headers()
+                    self.wfile.write(page)
+                return
+            if request_path == "/model-fleet.js":
+                if self._browser_boundary_allows():
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "text/javascript; charset=utf-8")
+                    self.send_header("Content-Length", str(len(harness)))
+                    self.end_headers()
+                    self.wfile.write(harness)
+                return
+            if request_path == "/model-fleet-result":
+                query = parse_qs(urlsplit(self.path).query).get("payload", [])
+                if query:
+                    results.append(json.loads(query[0]))
+                self.send_response(HTTPStatus.NO_CONTENT)
+                self.end_headers()
+                return
+            super().do_GET()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    return Handler
 
 
 def _chrome() -> str:
@@ -587,6 +797,106 @@ def test_stepper_scenarios_are_json_serializable() -> None:
 
     assert '"pipeline": "ingest"' in payload
     assert '"pipeline": "typed_graph"' in payload
+
+
+def test_model_fleet_service_states_render_without_overflow(tmp_path: Path) -> None:
+    visual_dir = Path(
+        os.environ.get("CHRONOVISOR_DASHBOARD_VISUAL_DIR", str(tmp_path / "model-fleet"))
+    )
+    visual_dir.mkdir(parents=True, exist_ok=True)
+    browser_results: list[dict[str, object]] = []
+    scenarios = _model_fleet_scenarios()
+    for scenario_index, scenario in enumerate(scenarios):
+        for width in (1280, 760):
+            server = ThreadingHTTPServer(
+                ("127.0.0.1", 0), _model_fleet_handler(scenario, browser_results)
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            screenshot = visual_dir / f"model-fleet-{scenario['id']}-{width}.png"
+            screenshot.unlink(missing_ok=True)
+            before_results = len(browser_results)
+            process = subprocess.Popen(
+                [
+                    _chrome(),
+                    "--headless=new",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-background-networking",
+                    "--disable-component-update",
+                    "--no-first-run",
+                    "--force-prefers-reduced-motion=reduce",
+                    "--run-all-compositor-stages-before-draw",
+                    "--hide-scrollbars",
+                    "--virtual-time-budget=3000",
+                    f"--window-size={width},1200",
+                    f"--screenshot={screenshot}",
+                    f"--user-data-dir={tmp_path / f'model-fleet-{scenario_index}-{width}'}",
+                    f"http://127.0.0.1:{server.server_port}/?audit=1",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.monotonic() + 15
+                while (
+                    time.monotonic() < deadline
+                    and (
+                        not any(
+                            row.get("scenario") == scenario["id"]
+                            and row.get("width") == width
+                            for row in browser_results[before_results:]
+                        )
+                        or not screenshot.is_file()
+                    )
+                ):
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                if process.poll() is None:
+                    process.terminate()
+                stderr_text = ""
+                try:
+                    _stdout, stderr_text = process.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    _stdout, stderr_text = process.communicate(timeout=3)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=3)
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+            assert screenshot.is_file() and screenshot.read_bytes().startswith(
+                b"\x89PNG\r\n\x1a\n"
+            ), stderr_text[-4000:]
+
+    assert len(browser_results) == len(scenarios) * 2
+    assert {row["scenario"] for row in browser_results} == {
+        scenario["id"] for scenario in scenarios
+    }
+    assert all(
+        row["panelRect"]
+        and 0 <= row["panelRect"]["top"] < row["height"]
+        and row["panelRect"]["bottom"] > row["panelRect"]["top"]
+        for row in browser_results
+    )
+    assert all(row["scrollY"] == 0 for row in browser_results)
+    assert all(not row["pageOverflow"] for row in browser_results)
+    assert all(not model["overflow"] for row in browser_results for model in row["rows"])
+    assert all(
+        {model["name"] for model in row["rows"]}
+        == {
+            "nvidia/Nemotron-3-Embed-1B-BF16",
+            "BAAI/bge-reranker-v2-m3",
+            "Qwen3.8-Flash-Next-DS4-IQ2",
+            "Ornith-1.5-9B-MLX-4bit",
+        }
+        for row in browser_results
+    )
 
 
 @pytest.mark.parametrize("width", [1280, 760])

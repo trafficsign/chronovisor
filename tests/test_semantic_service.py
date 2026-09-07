@@ -136,7 +136,7 @@ def _state(runtime: LLMRuntime) -> SemanticServiceState:
     state = object.__new__(SemanticServiceState)
     state.config = SearchEmbeddingConfig(dimensions=2)
     state._runtime = runtime
-    state._model_lock = threading.Lock()
+    state._model_lock = semantic_service._ModelLock()
     state._validate_runtime_routes()
     return state
 
@@ -305,6 +305,7 @@ def test_incremental_model_is_released_when_lazy_self_test_fails() -> None:
         raise SemanticModelError("failed")
 
     state = object.__new__(SemanticServiceState)
+    state.config = SearchEmbeddingConfig()
     state._cpu_ready = False
     state._parity_text = "parity"
     state._runtime = SimpleNamespace(
@@ -774,7 +775,7 @@ def test_startup_embedding_allows_cold_work_beyond_query_timeout(
         result = state._warm_query_path()
         assert result["hits"] == result["queries"] == 3
     assert all(
-        request.timeout_ms == state.config.query_timeout_ms
+        request.timeout_ms is None
         for request in backend.requests
     )
 

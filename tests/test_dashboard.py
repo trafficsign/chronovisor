@@ -7048,6 +7048,229 @@ def test_model_status_snapshot_reads_five_configured_omlx_models(monkeypatch) ->
     assert by_name["bge-m3-mlx-fp16"]["context_length"] == 8_194
 
 
+def test_model_fleet_includes_semantic_and_reranker_service_models(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / "semantic-service-status.json").write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "ready": True,
+                "pid": os.getpid(),
+                "observed_at_epoch": time.time(),
+                "device": "mlx",
+                "model": "nvidia/Nemotron-3-Embed-1B-BF16",
+                "revision": "logical-revision",
+                "runtime_model": "mlx-community/Nemotron-3-Embed-1B-BF16",
+                "runtime_revision": "mlx-revision",
+                "routes": {
+                    "search.semantic.foreground": {
+                        "role": "search.semantic.foreground",
+                        "provider": "nemotron",
+                        "model": "nvidia/Nemotron-3-Embed-1B-BF16",
+                        "location": "local",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (runtime_dir / "reranker-service-status.json").write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "ready": True,
+                "pid": os.getpid(),
+                "observed_at_epoch": time.time(),
+                "route": {
+                    "role": "search.rerank",
+                    "provider": "local-reranker",
+                    "model": "BAAI/bge-reranker-v2-m3",
+                    "location": "local",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_omlx_snapshot",
+        lambda: {"available": True, "provider": "omlx", "models": []},
+    )
+    monkeypatch.setattr(
+        dashboard.llm_config,
+        "load_llm_config",
+        lambda: SimpleNamespace(
+            providers={"omlx": SimpleNamespace(kind="omlx")},
+            roles={"runtime": SimpleNamespace(provider_id="omlx")},
+        ),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_configured_model_roles",
+        lambda: {
+            "nvidia/Nemotron-3-Embed-1B-BF16": {"embed", "search-embed"},
+            "BAAI/bge-reranker-v2-m3": {"rerank"},
+        },
+    )
+
+    runtime = dashboard._local_model_snapshot()
+    snapshot = dashboard._model_status_snapshot(runtime)
+    rows = {row["name"]: row for row in snapshot["models"]}
+
+    assert set(rows) == {
+        "nvidia/Nemotron-3-Embed-1B-BF16",
+        "BAAI/bge-reranker-v2-m3",
+    }
+    assert rows["nvidia/Nemotron-3-Embed-1B-BF16"]["status"] == "loaded"
+    assert rows["nvidia/Nemotron-3-Embed-1B-BF16"]["installed"] is False
+    assert rows["nvidia/Nemotron-3-Embed-1B-BF16"]["running"] is True
+    assert rows["nvidia/Nemotron-3-Embed-1B-BF16"]["details"]["runtime_model"] == (
+        "mlx-community/Nemotron-3-Embed-1B-BF16"
+    )
+    assert rows["BAAI/bge-reranker-v2-m3"]["status"] == "loaded"
+    assert snapshot["summary"]["loaded"] == 2
+    assert snapshot["summary"]["installed"] == 0
+
+
+@pytest.mark.parametrize("provider", ["nemotron", "semantic-service", "local-reranker"])
+def test_model_fleet_accepts_local_service_routes(provider: str) -> None:
+    route = SimpleNamespace(provider=provider, location=SimpleNamespace(value="local"))
+    assert dashboard._is_local_model_route(route)
+
+
+def test_model_fleet_keeps_stale_service_identity_without_counting_it_loaded(
+    monkeypatch,
+) -> None:
+    name = "BAAI/bge-reranker-v2-m3"
+    monkeypatch.setattr(
+        dashboard,
+        "_configured_model_roles",
+        lambda: {name: {"rerank"}},
+    )
+
+    snapshot = dashboard._model_status_snapshot(
+        {
+            "available": True,
+            "provider": "omlx",
+            "models": [
+                {
+                    "name": name,
+                    "model": name,
+                    "provider": "local-reranker",
+                    "loaded": False,
+                    "processor": "mlx",
+                    "details": {"format": "service"},
+                    "capabilities": ["rerank"],
+                    "_service_only": True,
+                }
+            ],
+        }
+    )
+
+    row = snapshot["models"][0]
+    assert row["status"] == "missing"
+    assert row["provider"] == "local-reranker"
+    assert row["installed"] is False
+    assert row["running"] is False
+    assert row["details"] == {"format": "service"}
+    assert snapshot["summary"]["loaded"] == 0
+
+
+@pytest.mark.parametrize(
+    ("age_seconds", "pid_alive", "expected_loaded"),
+    [
+        (0, True, True),
+        (dashboard.SERVICE_STATUS_MAX_AGE_SECONDS + 1, True, False),
+        (0, False, False),
+    ],
+)
+def test_service_model_status_requires_fresh_live_process(
+    tmp_path: Path,
+    monkeypatch,
+    age_seconds: float,
+    pid_alive: bool,
+    expected_loaded: bool,
+) -> None:
+    pid = os.getpid() if pid_alive else os.getpid() + 100_000
+    path = tmp_path / "semantic-service-status.json"
+    path.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "ready": True,
+                "pid": pid,
+                "observed_at_epoch": time.time() - age_seconds,
+                "routes": {
+                    "search.semantic.foreground": {
+                        "model": "nvidia/Nemotron-3-Embed-1B-BF16",
+                        "provider": "nemotron",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        dashboard.runtime_status,
+        "_pid_is_alive",
+        lambda value: value == os.getpid(),
+    )
+
+    rows = dashboard._service_model_rows(path, capability="embedding")
+
+    assert len(rows) == 1
+    assert rows[0]["loaded"] is expected_loaded
+
+
+def test_service_model_status_rejects_invalid_time_and_uses_flat_model(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "semantic-service-status.json"
+    path.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "ready": True,
+                "pid": os.getpid(),
+                "observed_at_epoch": float("nan"),
+                "model": "nvidia/Nemotron-3-Embed-1B-BF16",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        dashboard.runtime_status,
+        "_pid_is_alive",
+        lambda value: value == os.getpid(),
+    )
+
+    rows = dashboard._service_model_rows(path, capability="embedding")
+
+    assert rows == [
+        {
+            "name": "nvidia/Nemotron-3-Embed-1B-BF16",
+            "model": "nvidia/Nemotron-3-Embed-1B-BF16",
+            "provider": "nemotron",
+            "loaded": False,
+            "size": None,
+            "size_vram": None,
+            "processor": "nemotron",
+            "details": {
+                "format": "service",
+                "revision": None,
+                "runtime_model": None,
+                "runtime_revision": None,
+            },
+            "capabilities": ["embedding"],
+            "_service_only": True,
+        }
+    ]
+
+
 def test_omlx_snapshot_falls_back_to_default_endpoint(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard.llm_config,
@@ -7385,7 +7608,7 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
         "route-selected-knowledge",
     }
     assert roles["route-selected-knowledge"] == {"embed"}
-    assert resolved == ["knowledge.embedding"]
+    assert resolved == ["knowledge.embedding", "classification.embedding"]
 
     resolved.clear()
     monkeypatch.setattr(
@@ -7403,7 +7626,7 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
                     provider="omlx",
                     model=(
                         "route-selected-knowledge"
-                        if role == "knowledge.embedding"
+                        if role in {"knowledge.embedding", "classification.embedding"}
                         else "route-selected-embedding"
                     ),
                     location=SimpleNamespace(value="local"),
@@ -7416,6 +7639,7 @@ def test_configured_model_roles_use_runtime_router_triplet(monkeypatch) -> None:
 
     assert resolved == [
         "knowledge.embedding",
+        "classification.embedding",
         "search.semantic.foreground",
         "search.semantic.incremental",
     ]

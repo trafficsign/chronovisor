@@ -1,6 +1,6 @@
 """Dedicated Nemotron semantic retrieval service.
 
-The service owns exactly one foreground MPS model, micro-batches concurrent
+The service owns one foreground model, micro-batches concurrent
 queries, and keeps indexing off the synchronous request path.  Every query
 uses one immutable base generation plus its generation-scoped delta.
 """
@@ -106,6 +106,46 @@ _CURRENT_QUERY_DEADLINE: ContextVar[float | None] = ContextVar(
 
 class ServiceBusy(RuntimeError):
     pass
+
+
+class _ModelLock:
+    """Let waiting foreground queries precede the next background document."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._busy = False
+        self._waiting = 0
+
+    def acquire(
+        self, *, timeout: float | None = None, background: bool = False
+    ) -> bool:
+        with self._condition:
+            if not background:
+                self._waiting += 1
+            try:
+                ready = self._condition.wait_for(
+                    lambda: not self._busy and (not background or not self._waiting),
+                    timeout=timeout,
+                )
+                if ready:
+                    self._busy = True
+                return ready
+            finally:
+                if not background:
+                    self._waiting -= 1
+                self._condition.notify_all()
+
+    def release(self) -> None:
+        with self._condition:
+            self._busy = False
+            self._condition.notify_all()
+
+    def __enter__(self) -> _ModelLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.release()
 
 
 def _deadline_for(
@@ -243,9 +283,7 @@ class QueryBatcher:
                 try:
                     budget_seconds = 5.0 if timeout is None else float(timeout)
                 except (TypeError, ValueError) as exc:
-                    raise TimeoutError(
-                        "semantic query deadline exhausted"
-                    ) from exc
+                    raise TimeoutError("semantic query deadline exhausted") from exc
                 if not math.isfinite(budget_seconds) or budget_seconds <= 0:
                     raise TimeoutError("semantic query deadline exhausted")
                 deadline = started + budget_seconds
@@ -255,9 +293,7 @@ class QueryBatcher:
                     try:
                         budget_seconds = float(timeout)
                     except (TypeError, ValueError) as exc:
-                        raise TimeoutError(
-                            "semantic query deadline exhausted"
-                    ) from exc
+                        raise TimeoutError("semantic query deadline exhausted") from exc
                     if not math.isfinite(budget_seconds) or budget_seconds <= 0:
                         raise TimeoutError("semantic query deadline exhausted")
                     deadline = min(deadline, started + budget_seconds)
@@ -354,9 +390,7 @@ class QueryBatcher:
         with contextlib.suppress(Exception):
             item.future.set_exception(exc)
 
-    def _set_result(
-        self, item: _QueryItem, result: list[tuple[str, float]]
-    ) -> None:
+    def _set_result(self, item: _QueryItem, result: list[tuple[str, float]]) -> None:
         if self._expired_or_cancelled(item):
             self._set_expired(item)
             return
@@ -511,7 +545,7 @@ class SemanticServiceState:
         self.root = root
         self._runtime = runtime or load_default_llm_runtime()
         self._validate_runtime_routes()
-        self._model_lock = threading.Lock()
+        self._model_lock = _ModelLock()
         self._generation_lock = threading.RLock()
         self._maintenance = threading.Event()
         self._stopped = threading.Event()
@@ -569,7 +603,11 @@ class SemanticServiceState:
         self._batcher.close()
         self._worker.join(timeout=2)
         self._status_thread.join(timeout=2)
-        if self._cpu_ready and self._uses_local_controls(self._incremental_route):
+        if (
+            self.config.incremental_device != "mlx"
+            and self._cpu_ready
+            and self._uses_local_controls(self._incremental_route)
+        ):
             self._runtime.release_embedding(INCREMENTAL_ROLE)
         if self._uses_local_controls(self._foreground_route):
             self._runtime.release_embedding(FOREGROUND_ROLE)
@@ -641,6 +679,7 @@ class SemanticServiceState:
         source: SourceDataClassification,
         timeout_ms: int | float | None = None,
         deadline_at: float | None = None,
+        background: bool = False,
     ) -> np.ndarray:
         context_deadline = _CURRENT_QUERY_DEADLINE.get()
         if deadline_at is None:
@@ -657,7 +696,11 @@ class SemanticServiceState:
                 return self.config.query_timeout_ms
             return max(1, math.ceil(_remaining_seconds(deadline_at) * 1_000))
 
-        acquired = self._model_lock.acquire(timeout=remaining_ms() / 1_000)
+        acquired = (
+            self._model_lock.acquire(timeout=remaining_ms() / 1_000, background=True)
+            if background
+            else self._model_lock.acquire(timeout=remaining_ms() / 1_000)
+        )
         if not acquired:
             raise TimeoutError("semantic query deadline exhausted")
         try:
@@ -683,7 +726,7 @@ class SemanticServiceState:
                         texts,
                         purpose,
                         source=source,
-                        timeout_ms=remaining_ms(),
+                        timeout_ms=remaining_ms() if deadline_at is not None else None,
                     )
             if deadline_at is not None:
                 _ensure_deadline(deadline_at)
@@ -710,6 +753,10 @@ class SemanticServiceState:
         *,
         source: SourceDataClassification = DOCUMENT_SOURCE,
     ) -> np.ndarray:
+        if self.config.incremental_device == "mlx":
+            return self._embed_background(
+                texts, EmbeddingPurpose.DOCUMENT, source=source
+            )
         activity = (
             model_activity(
                 model=self._incremental_route.model,
@@ -727,6 +774,31 @@ class SemanticServiceState:
                 source=source,
             )
 
+    def _embed_background(
+        self,
+        texts: list[str],
+        purpose: EmbeddingPurpose,
+        *,
+        source: SourceDataClassification,
+        deadline_at: float | None = None,
+    ) -> np.ndarray:
+        deadline = _deadline_for(None, 300_000, deadline_at=deadline_at)
+        rows = []
+        # One running document cannot be preempted; yield between documents.
+        for text in texts:
+            rows.append(
+                self._embed_foreground(
+                    [text],
+                    purpose,
+                    source=source,
+                    deadline_at=deadline,
+                    background=True,
+                )[0]
+            )
+        return np.asarray(rows, dtype=np.float32).reshape(
+            len(texts), self.config.dimensions
+        )
+
     @staticmethod
     def _document_source(
         documents: Sequence[SemanticDocument],
@@ -738,9 +810,7 @@ class SemanticServiceState:
         sensitivity = (
             SourceSensitivity.NORMAL
             if documents
-            and all(
-                document.source_sensitivity == "normal" for document in documents
-            )
+            and all(document.source_sensitivity == "normal" for document in documents)
             else SourceSensitivity.HIGH
         )
         return SourceDataClassification(SourceDataClass.PAGE, sensitivity)
@@ -842,9 +912,7 @@ class SemanticServiceState:
             if deadline_at is None:
                 with self._generation_lock:
                     self._generation = generation
-            elif self._generation_lock.acquire(
-                timeout=_remaining_seconds(deadline_at)
-            ):
+            elif self._generation_lock.acquire(timeout=_remaining_seconds(deadline_at)):
                 try:
                     self._generation = generation
                 finally:
@@ -856,9 +924,7 @@ class SemanticServiceState:
             if deadline_at is None:
                 with self._generation_lock:
                     self._generation = None
-            elif self._generation_lock.acquire(
-                timeout=_remaining_seconds(deadline_at)
-            ):
+            elif self._generation_lock.acquire(timeout=_remaining_seconds(deadline_at)):
                 try:
                     self._generation = None
                 finally:
@@ -908,6 +974,11 @@ class SemanticServiceState:
                 _ensure_deadline(deadline_at)
 
     def health(self) -> dict[str, Any]:
+        from chronovisor.core.nemotron_mlx import (
+            MLX_MODEL_REPOSITORY,
+            MLX_MODEL_REVISION,
+        )
+
         generation = self._generation
         with self._metrics_lock:
             latencies = list(self._query_latencies_ms)
@@ -953,6 +1024,12 @@ class SemanticServiceState:
             "revision": self.config.revision,
             "device": self.config.query_device,
             "self_test": self._self_test,
+            "runtime_model": MLX_MODEL_REPOSITORY
+            if self.config.query_device == "mlx"
+            else self._foreground_route.model,
+            "runtime_revision": MLX_MODEL_REVISION
+            if self.config.query_device == "mlx"
+            else self.config.revision,
             "query_path_self_test": self._query_path_self_test,
             "runtime_versions": semantic_runtime_versions(),
             "index": semantic_index_status(
@@ -1202,7 +1279,9 @@ class SemanticServiceState:
             with _query_deadline_scope(deadline):
                 self._reload_if_pointer_changed()
             _ensure_deadline(deadline)
-            unique = list(dict.fromkeys(page_id for page_id in page_ids if page_id))[:100]
+            unique = list(dict.fromkeys(page_id for page_id in page_ids if page_id))[
+                :100
+            ]
             if not unique:
                 self._bump_query_metric("_query_successes")
                 return {"status": "ok", "cache_hit": False, "results": []}
@@ -1272,6 +1351,8 @@ class SemanticServiceState:
         )
 
     def _ensure_cpu(self) -> None:
+        if self.config.incremental_device == "mlx":
+            return  # Both lanes use the already-validated resident encoder.
         if not self._cpu_ready:
             try:
                 cpu_vector = self._embed_incremental_documents([self._parity_text])[0]
@@ -1289,6 +1370,8 @@ class SemanticServiceState:
         self._cpu_last_used = time.monotonic()
 
     def _unload_idle_cpu(self) -> None:
+        if self.config.incremental_device == "mlx":
+            return
         if (
             self._cpu_ready
             and time.monotonic() - self._cpu_last_used
@@ -1461,6 +1544,33 @@ class SemanticServiceState:
 
     def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
         method = payload.get("method")
+        if method == "embed":
+            texts = payload.get("texts")
+            if (
+                payload.get("model") != self._foreground_route.model
+                or not isinstance(texts, list)
+                or not 1 <= len(texts) <= 16
+                or any(not isinstance(text, str) or not text.strip() for text in texts)
+                or sum(len(text.encode("utf-8")) for text in texts) > 512_000
+            ):
+                raise ValueError("invalid embedding request")
+            source = SourceDataClassification(
+                SourceDataClass(payload.get("source_data_class")),
+                SourceSensitivity(payload.get("source_sensitivity")),
+            )
+            purpose = EmbeddingPurpose(payload.get("purpose"))
+            deadline = _deadline_for(
+                None, 60_000, deadline_at=payload.get("deadline_at")
+            )
+            deadline = min(deadline, time.monotonic() + 300)
+            vectors = self._embed_background(
+                texts, purpose, source=source, deadline_at=deadline
+            )
+            return {
+                "status": "ok",
+                "model": self._foreground_route.model,
+                "vectors": vectors.tolist(),
+            }
         if method == "health":
             self._reload_if_pointer_changed()
             return self.health()
@@ -1591,6 +1701,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         return _main_locked(args)
     from chronovisor.core.okf_cutover import OKFStartupBlocked
+
     try:
         with okf_runtime_operation(CHRONOVISOR_ROOT):
             return _main_locked(args)
@@ -1601,9 +1712,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _main_locked(args: argparse.Namespace) -> int:
     if args.command != "status" and not okf_startup_status(CHRONOVISOR_ROOT).allowed:
-        print(
-            json.dumps({"status": "blocked", "category": "okf_startup_blocked"})
-        )
+        print(json.dumps({"status": "blocked", "category": "okf_startup_blocked"}))
         return 75
     config = load_search_embedding_config()
     if args.command == "serve":

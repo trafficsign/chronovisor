@@ -227,7 +227,7 @@ def _string_list(value: object) -> tuple[str, ...]:
 def _credential_ref(value: object, provider_id: str) -> CredentialRef:
     try:
         ref = CredentialRef.parse(_string(value))
-    except (CredentialSecurityError, LLMConfigError):
+    except CredentialSecurityError, LLMConfigError:
         pass
     else:
         if (
@@ -261,7 +261,7 @@ def _remote_profile(
                 _credential_ref(table.get("credential_ref"), provider_id),
                 auth_scheme=auth_scheme,
             )
-        except (CredentialSecurityError, ProviderAdapterError, LLMConfigError):
+        except CredentialSecurityError, ProviderAdapterError, LLMConfigError:
             pass
         else:
             return ProviderDefinition(
@@ -282,7 +282,7 @@ def _remote_profile(
             endpoint_override=endpoint,
         )
         profile = replace(base, profile_id=provider_id)
-    except (CredentialSecurityError, ProviderAdapterError, LLMConfigError):
+    except CredentialSecurityError, ProviderAdapterError, LLMConfigError:
         pass
     else:
         return ProviderDefinition(
@@ -370,10 +370,15 @@ def _provider(provider_id: str, value: object) -> ProviderDefinition:
             BackendCapabilities(generation=False, embedding=False, rerank=True),
             reranker_config=config,
         )
+    if kind == "semantic-service":
+        _exact_keys(table, {"kind"})
+        return ProviderDefinition(
+            provider_id, kind, BackendCapabilities(generation=False, embedding=True)
+        )
     if kind == "nemotron":
         _exact_keys(table, {"kind", "device"})
         device = _string(table.get("device"))
-        if device not in {"mps", "cpu"}:
+        if device not in {"mps", "cpu", "mlx"}:
             raise _fail()
         return ProviderDefinition(
             provider_id,
@@ -400,7 +405,7 @@ def _role(
     )
     try:
         capability = RoleCapability(_string(table.get("capability")))
-    except (ValueError, LLMConfigError):
+    except ValueError, LLMConfigError:
         raise _fail() from None
     provider_id = _string(table.get("provider"))
     provider = providers.get(provider_id)
@@ -442,7 +447,7 @@ def _egress_opt_ins(
             raise _fail()
         try:
             data_class = SourceDataClass(_string(table.get("data_class")))
-        except (ValueError, LLMConfigError):
+        except ValueError, LLMConfigError:
             raise _fail() from None
         pair = (role_name, data_class)
         if pair in result:
@@ -514,7 +519,7 @@ def load_llm_config(path: Path | str | None = None) -> LLMConfig:
             os.close(descriptor)
     try:
         payload = tomllib.loads(snapshot.decode("utf-8"))
-    except (UnicodeError, tomllib.TOMLDecodeError):
+    except UnicodeError, tomllib.TOMLDecodeError:
         pass
     else:
         if isinstance(payload, dict):
@@ -558,7 +563,7 @@ def build_llm_runtime(
     nemotron_provider_ids = {
         provider_id
         for provider_id in used_provider_ids
-        if config.providers[provider_id].kind == "nemotron"
+        if config.providers[provider_id].kind in {"nemotron", "semantic-service"}
     }
     if nemotron_provider_ids and search_embedding_config is None:
         search_embedding_config = load_search_embedding_config()
@@ -616,12 +621,35 @@ def build_llm_runtime(
             }
             if len(provider_models) != 1:
                 raise _fail()
-            backends[provider_id] = NemotronEmbeddingBackend(
-                search_embedding_config,
-                model=next(iter(provider_models)),
-                device=provider.embedding_device,
-                incremental=provider_id == incremental_provider_id,
-            )
+            model = next(iter(provider_models))
+            if provider.embedding_device == "mlx":
+                from chronovisor.core.nemotron_mlx import NemotronMLXBackend
+
+                # Both lanes share one resident encoder and its owning thread.
+                shared_mlx = next(
+                    (
+                        item
+                        for item in backends.values()
+                        if isinstance(item, NemotronMLXBackend) and item.model == model
+                    ),
+                    None,
+                )
+                backends[provider_id] = shared_mlx or NemotronMLXBackend(
+                    search_embedding_config, model=model
+                )
+            else:
+                backends[provider_id] = NemotronEmbeddingBackend(
+                    search_embedding_config,
+                    model=model,
+                    device=provider.embedding_device,
+                    incremental=provider_id == incremental_provider_id,
+                )
+        elif provider.kind == "semantic-service":
+            from chronovisor.core.semantic_client import SemanticEmbeddingBackend
+
+            if search_embedding_config is None:
+                raise _fail()
+            backends[provider_id] = SemanticEmbeddingBackend(search_embedding_config)
         elif provider.profile is not None:
             sender = (
                 sender_factory(provider.profile) if sender_factory is not None else None

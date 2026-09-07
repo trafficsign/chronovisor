@@ -105,12 +105,11 @@ def prepare_state(
         "resolve_rerank_candidate",
         lambda page_id, **_kwargs: (
             page_id,
-            SourceDataClassification(
-                SourceDataClass.PAGE, SourceSensitivity.NORMAL
-            ),
+            SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL),
             ("pages", page_id, 1, 1, page_id),
         ),
     )
+
     def lease(**_kwargs):
         controls["lease"] += 1
         return contextlib.nullcontext()
@@ -153,7 +152,9 @@ def test_service_state_returns_page_keyed_raw_scores(tmp_path, monkeypatch) -> N
     assert controls == {"lease": 1, "activity": 1}
 
 
-def test_idle_service_readiness_does_not_depend_on_status_age(tmp_path, monkeypatch) -> None:
+def test_idle_service_readiness_does_not_depend_on_status_age(
+    tmp_path, monkeypatch
+) -> None:
     cfg = config(tmp_path / "reranker.sock")
     state, status_file, _backend, _runtime, _controls = prepare_state(
         tmp_path, monkeypatch, cfg
@@ -187,9 +188,7 @@ def test_service_and_client_round_trip_preserves_raw_scores(
     monkeypatch.setattr(reranker_client, "_BREAKER_FAILURES", 0)
     monkeypatch.setattr(reranker_client, "_BREAKER_OPEN_UNTIL", 0.0)
     try:
-        outcome = reranker_client.rerank(
-            "query", [page("a"), page("b")], config=cfg
-        )
+        outcome = reranker_client.rerank("query", [page("a"), page("b")], config=cfg)
     finally:
         server.shutdown()
         server.server_close()
@@ -246,9 +245,7 @@ def test_service_rejects_duplicate_page_ids(tmp_path, monkeypatch) -> None:
     )
 
     with pytest.raises(ValueError, match="unique"):
-        state.handle(
-            {"method": "rerank", "query": "query", "page_ids": ["a", "a"]}
-        )
+        state.handle({"method": "rerank", "query": "query", "page_ids": ["a", "a"]})
 
 
 def test_remote_default_denial_has_no_backend_or_local_controls(
@@ -263,9 +260,7 @@ def test_remote_default_denial_has_no_backend_or_local_controls(
     )
 
     with pytest.raises(EgressDeniedError):
-        state.handle(
-            {"method": "rerank", "query": "private query", "page_ids": ["a"]}
-        )
+        state.handle({"method": "rerank", "query": "private query", "page_ids": ["a"]})
 
     assert backend.requests == []
     assert controls == {"lease": 0, "activity": 0}
@@ -442,3 +437,28 @@ def test_reranker_rollout_selection_is_stable(tmp_path) -> None:
     assert reranker_client.selected_for_rollout(
         "stable query", canary
     ) == reranker_client.selected_for_rollout("stable query", canary)
+
+
+def test_idle_server_publishes_bounded_heartbeat(monkeypatch):
+    from types import SimpleNamespace
+
+    from chronovisor.search import reranker_service
+
+    server = object.__new__(reranker_service._Server)
+    observed = []
+    server.state = SimpleNamespace(_publish_status=lambda: observed.append(True))
+    clock = [10.0]
+    monkeypatch.setattr(reranker_service.time, "monotonic", lambda: clock[0])
+    server.service_actions()
+    server.service_actions()
+    assert len(observed) == 1
+    clock[0] += 5
+    server.service_actions()
+    assert len(observed) == 2
+
+    def unavailable_disk():
+        raise OSError("status disk unavailable")
+
+    server.state._publish_status = unavailable_disk
+    clock[0] += 5
+    server.service_actions()  # Telemetry failure must not stop inference.

@@ -687,7 +687,7 @@ def load_search_embedding_config(
             service,
             "query_device",
             SearchEmbeddingConfig.query_device,
-            choices={"mps", "cpu"},
+            choices={"mps", "cpu", "mlx"},
         ),
         query_replicas=_bounded_int(
             service.get("query_replicas"),
@@ -711,7 +711,7 @@ def load_search_embedding_config(
             service,
             "incremental_device",
             SearchEmbeddingConfig.incremental_device,
-            choices={"cpu"},
+            choices={"cpu", "mlx"},
         ),
         incremental_enabled=(
             service["incremental_enabled"]

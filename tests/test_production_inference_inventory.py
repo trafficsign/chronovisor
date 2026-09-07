@@ -23,6 +23,10 @@ _MODEL_METHODS = frozenset(
 
 # These are the only production runtime boundaries allowed to touch providers.
 RUNTIME_BOUNDARIES = {
+    "src/chronovisor/core/nemotron_mlx.py": {
+        "model_class.AutoTokenizer": 1,
+        "model_method.from_pretrained": 1,
+    },
     "src/chronovisor/core/nemotron_adapter.py": {
         "model_class.SentenceTransformer": 2,
         "model_method.encode_document": 1,
@@ -87,6 +91,7 @@ _PROVIDER_EXECUTION_MODULES = frozenset(
     {
         "chronovisor.core.anthropic_adapter",
         "chronovisor.core.nemotron_adapter",
+        "chronovisor.core.nemotron_mlx",
         "chronovisor.core.ollama_adapter",
         "chronovisor.core.ollama_transport",
         "chronovisor.core.openai_compatible_adapter",
@@ -104,6 +109,7 @@ _PROVIDER_EXECUTION_CALLABLES = frozenset(
         "AnthropicMessagesAdapter",
         "AuthenticatedTransport",
         "NemotronEmbeddingBackend",
+        "NemotronMLXBackend",
         "OllamaAdapter",
         "OpenAICompatibleAdapter",
         "authenticated_transport",
@@ -118,6 +124,7 @@ _PROVIDER_EXECUTION_BOUNDARIES = frozenset(
         "src/chronovisor/core/anthropic_adapter.py",
         "src/chronovisor/core/llm_config.py",
         "src/chronovisor/core/nemotron_adapter.py",
+        "src/chronovisor/core/nemotron_mlx.py",
         "src/chronovisor/core/ollama.py",
         "src/chronovisor/core/ollama_adapter.py",
         "src/chronovisor/core/ollama_transport.py",
@@ -126,12 +133,18 @@ _PROVIDER_EXECUTION_BOUNDARIES = frozenset(
     }
 )
 _DIAGNOSTIC_PROVIDER_IMPORTS = {
+    "src/chronovisor/search/semantic_service.py": frozenset(
+        {
+            "chronovisor.core.nemotron_mlx.MLX_MODEL_REPOSITORY",
+            "chronovisor.core.nemotron_mlx.MLX_MODEL_REVISION",
+        }
+    ),
     "src/chronovisor/search/semantic_model.py": frozenset(
         {
             "chronovisor.core.nemotron_adapter.SemanticModelError",
             "chronovisor.core.nemotron_adapter.normalize_embeddings",
         }
-    )
+    ),
 }
 
 
