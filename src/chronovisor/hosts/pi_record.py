@@ -13,3 +13,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 sys.modules[__name__] = _pi_record
+
+if __name__ == "__main__":
+    raise SystemExit(main())
