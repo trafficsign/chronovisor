@@ -2661,6 +2661,7 @@ class LocalStructuredSession:
         decision_lane: str | None = None,
         task_impact: str = "normal",
         reasoning_authority: Mapping[str, Any] | None = None,
+        reasoning_disabled: bool = False,
     ) -> None:
         if model is None:
             if transport is not None:
@@ -2707,6 +2708,8 @@ class LocalStructuredSession:
             raise ValueError("resource_managed must be a boolean")
         if not isinstance(require_returned_model, bool):
             raise ValueError("require_returned_model must be a boolean")
+        if not isinstance(reasoning_disabled, bool):
+            raise ValueError("reasoning_disabled must be a boolean")
         if reasoning_authority is not None and not isinstance(
             reasoning_authority, Mapping
         ):
@@ -2784,6 +2787,7 @@ class LocalStructuredSession:
         self.resource_memory_reserve_gib = resource_memory_reserve_gib
         self.resource_lease_timeout_ms = resource_lease_timeout_ms
         self.require_returned_model = require_returned_model
+        self.reasoning_disabled = reasoning_disabled
         self.decision_lane = decision_lane
         self.task_impact = task_impact
         self.reasoning_authority = (
@@ -2878,6 +2882,8 @@ class LocalStructuredSession:
         )
 
     def _output_reservation(self) -> int:
+        if self.reasoning_disabled:
+            return self.num_predict
         if (
             _production_reasoning_profile(
                 self.model, self.runtime_role, self.reasoning_authority
@@ -2893,6 +2899,8 @@ class LocalStructuredSession:
         effective_num_ctx: int,
         required_num_ctx: int | None,
     ) -> tuple[bool | str, str]:
+        if self.reasoning_disabled:
+            return False, "caller_disabled_reasoning"
         profile = _production_reasoning_profile(
             self.model, self.runtime_role, self.reasoning_authority
         )

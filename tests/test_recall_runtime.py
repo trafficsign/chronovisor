@@ -2173,6 +2173,11 @@ def test_remote_recall_judge_and_rewriter_use_raw_high_without_ollama_controls(
         "remote-gate",
         "remote-rewriter",
     ]
+    assert all(request.think is False for request, _model in backend.requests)
+    assert [request.max_output_tokens for request, _model in backend.requests] == [
+        RecallPolicy().judge_num_predict,
+        96,
+    ]
     assert all(
         request.source.data_class is SourceDataClass.RAW
         and request.source.sensitivity is SourceSensitivity.HIGH
@@ -2302,6 +2307,7 @@ def test_local_judge_uses_gate_generation_options(monkeypatch) -> None:
     assert isinstance(session, dict)
     assert session["model"] == "qwen3.5:4b-mlx"
     assert session["role"] == "recall_judge"
+    assert session["reasoning_disabled"] is True
     assert session["runtime_role"] == recall_runtime.RECALL_GATE_RUNTIME_ROLE
     assert session["runtime_location"] == "local"
     assert session["source_data_class"] == "raw"
