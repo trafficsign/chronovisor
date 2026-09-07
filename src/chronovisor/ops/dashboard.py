@@ -546,7 +546,7 @@ def _omlx_snapshot() -> dict[str, Any]:
                         **row,
                         "name": model_id,
                         "model": model_id,
-                        "provider": provider_by_endpoint.get(endpoint),
+                        "provider": provider_by_endpoint.get(endpoint) or "omlx",
                         "protocol": "openai-compatible",
                         "size": None,
                         "size_vram": None,
