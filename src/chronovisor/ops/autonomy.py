@@ -4307,7 +4307,27 @@ def _write_plist(path: Path, data: dict[str, Any]) -> None:
 
 def _write_wrapper(path: Path, command: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    script = "#!/bin/sh\nexec " + shlex.join(command) + "\n"
+    python_index = command.index("--python")
+    from_index = command.index("--from")
+    python = command[python_index + 1]
+    runtime_args = command[1:from_index]
+    entrypoint_and_args = command[from_index + 2 :]
+    script = "\n".join(
+        (
+            "#!/bin/sh",
+            "set -eu",
+            f"CHRONOVISOR_REPO_ROOT={shlex.quote(str(PROJECT_ROOT))}",
+            'CHRONOVISOR_WRAPPER_DIR="$CHRONOVISOR_REPO_ROOT/scripts"',
+            f"CHRONOVISOR_UVX={shlex.quote(command[0])}",
+            f"CHRONOVISOR_PYTHON={shlex.quote(python)}",
+            '. "$CHRONOVISOR_WRAPPER_DIR/chronovisor-runtime-env"',
+            "chronovisor_exec_uvx "
+            + shlex.join(runtime_args)
+            + ' --from "$RUNTIME_SOURCE" '
+            + shlex.join(entrypoint_and_args),
+            "",
+        )
+    )
     path.write_text(script, encoding="utf-8")
     path.chmod(0o755)
 
