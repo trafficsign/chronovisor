@@ -932,6 +932,100 @@ def test_worker_persists_only_safe_job_failure_category(
     assert state._last_error == "semantic_failure"
 
 
+def test_status_heartbeat_publishes_while_index_job_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state = object.__new__(SemanticServiceState)
+    state._stopped = threading.Event()
+    state._status_lock = threading.Lock()
+    state._last_status_publish = 0.0
+    state.health = lambda: {"ready": True}  # type: ignore[method-assign]
+    status_path = tmp_path / "semantic-service-status.json"
+    monkeypatch.setattr(semantic_service, "SERVICE_STATUS_FILE", status_path)
+    monkeypatch.setattr(semantic_service, "SEMANTIC_STATUS_HEARTBEAT_SECONDS", 0.01)
+    index_started = threading.Event()
+    release_index = threading.Event()
+
+    def publish_status() -> None:
+        # Keep the five-second production rate limit out of this short test.
+        state._last_status_publish = 0.0
+        SemanticServiceState._publish_status(state)
+
+    def blocking_index(*_args: object, **_kwargs: object) -> None:
+        index_started.set()
+        release_index.wait()
+
+    state._publish_status = publish_status  # type: ignore[method-assign]
+    state._index_page = blocking_index  # type: ignore[method-assign]
+    index_thread = threading.Thread(
+        target=state._index_page,
+        args=("page",),
+        kwargs={"expected_hash": ""},
+        name="semantic-index-test",
+    )
+    heartbeat_thread = threading.Thread(
+        target=state._status_heartbeat,
+        name="semantic-status-heartbeat-test",
+    )
+    index_thread.start()
+    heartbeat_thread.start()
+    try:
+        assert index_started.wait(timeout=1)
+        deadline = time.monotonic() + 1
+        first_observed_at = None
+        while time.monotonic() < deadline:
+            try:
+                first_observed_at = json.loads(status_path.read_text())[
+                    "observed_at_epoch"
+                ]
+            except (FileNotFoundError, json.JSONDecodeError):
+                time.sleep(0.01)
+                continue
+            break
+        assert first_observed_at is not None
+
+        second_observed_at = first_observed_at
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                second_observed_at = json.loads(status_path.read_text())[
+                    "observed_at_epoch"
+                ]
+            except (FileNotFoundError, json.JSONDecodeError):
+                time.sleep(0.01)
+                continue
+            if second_observed_at > first_observed_at:
+                break
+            time.sleep(0.01)
+        assert second_observed_at > first_observed_at
+        assert index_thread.is_alive()
+    finally:
+        release_index.set()
+        state._stopped.set()
+        index_thread.join(timeout=1)
+        heartbeat_thread.join(timeout=1)
+
+    assert not index_thread.is_alive()
+    assert not heartbeat_thread.is_alive()
+
+
+def test_service_readiness_requires_live_worker() -> None:
+    state = object.__new__(SemanticServiceState)
+    state._stopped = threading.Event()
+    state._maintenance = threading.Event()
+    state._generation = SimpleNamespace()
+    state._worker = SimpleNamespace(is_alive=lambda: False)
+
+    assert state._query_available() is True
+    assert state._service_ready() is False
+
+    state._worker = SimpleNamespace(is_alive=lambda: True)
+    assert state._service_ready() is True
+    state._stopped.set()
+    assert state._service_ready() is False
+
+
 def test_query_path_warmup_exercises_three_queries_and_ann_search() -> None:
     state = object.__new__(SemanticServiceState)
     encoded: list[list[str]] = []

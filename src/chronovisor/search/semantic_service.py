@@ -91,6 +91,7 @@ from chronovisor.search.semantic_model import (
 )
 
 SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "semantic-service-status.json"
+SEMANTIC_STATUS_HEARTBEAT_SECONDS = 1.0
 QUERY_CACHE_TTL_SECONDS = 600.0
 FOREGROUND_ROLE = "search.semantic.foreground"
 INCREMENTAL_ROLE = "search.semantic.incremental"
@@ -556,11 +557,18 @@ class SemanticServiceState:
         )
         self._worker.start()
         self._publish_status(force=True)
+        self._status_thread = threading.Thread(
+            target=self._status_heartbeat,
+            name="semantic-status-heartbeat",
+            daemon=True,
+        )
+        self._status_thread.start()
 
     def close(self) -> None:
         self._stopped.set()
         self._batcher.close()
         self._worker.join(timeout=2)
+        self._status_thread.join(timeout=2)
         if self._cpu_ready and self._uses_local_controls(self._incremental_route):
             self._runtime.release_embedding(INCREMENTAL_ROLE)
         if self._uses_local_controls(self._foreground_route):
@@ -762,7 +770,30 @@ class SemanticServiceState:
         }
 
     def _query_available(self) -> bool:
-        return self._generation is not None and not self._maintenance.is_set()
+        stopped = getattr(self, "_stopped", None)
+        return (
+            (stopped is None or not stopped.is_set())
+            and self._generation is not None
+            and not self._maintenance.is_set()
+        )
+
+    def _service_ready(self) -> bool:
+        """Report query readiness only while the background worker is alive."""
+
+        if not self._query_available():
+            return False
+        worker = getattr(self, "_worker", None)
+        return worker is None or worker.is_alive()
+
+    def _status_heartbeat(self) -> None:
+        """Publish service status while indexing blocks the worker loop."""
+
+        while not self._stopped.wait(SEMANTIC_STATUS_HEARTBEAT_SECONDS):
+            try:
+                self._publish_status()
+            except Exception:
+                # Status publication must not terminate the indexing worker.
+                pass
 
     def _warm_query_path(self) -> dict[str, object]:
         """Exercise model and ANN search before the service advertises ready."""
@@ -909,7 +940,7 @@ class SemanticServiceState:
         return {
             "status": "ok",
             "pid": os.getpid(),
-            "ready": self._query_available(),
+            "ready": self._service_ready(),
             "maintenance": self._maintenance.is_set(),
             "generation_id": (
                 generation.manifest.generation_id if generation is not None else ""
@@ -949,6 +980,9 @@ class SemanticServiceState:
     def _publish_status(self, *, force: bool = False) -> None:
         now = time.monotonic()
         with self._status_lock:
+            stopped = getattr(self, "_stopped", None)
+            if stopped is not None and stopped.is_set():
+                return
             if not force and now - self._last_status_publish < 5.0:
                 return
             payload = {
@@ -956,6 +990,8 @@ class SemanticServiceState:
                 "observed_at_epoch": time.time(),
                 "pid": os.getpid(),
             }
+            if stopped is not None and stopped.is_set():
+                return
             try:
                 atomic_write(
                     SERVICE_STATUS_FILE,
