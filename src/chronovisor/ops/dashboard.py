@@ -38,6 +38,7 @@ from chronovisor.core.live_model_stream import (
     LiveModelStreamReceiver,
     empty_model_stream_snapshot,
 )
+from chronovisor.core.mtplx_adapter import MTPLX_BASE_URL
 from chronovisor.core.ollama import (
     OLLAMA_URL,
     ingest_model,
@@ -184,6 +185,7 @@ SERVICE_STATUS_MAX_AGE_SECONDS = 30.0
 # private to the dashboard snapshot so the two contracts are not conflated.
 _OMLX_OPENAI_MODELS_MARKER = "openai-models"
 _OMLX_DS4_OWNER = "ds4.c"
+_LOCAL_OPENAI_PROVIDERS = {"omlx", "mtplx", "local-openai"}
 _LOCK_TYPE = type(threading.Lock())
 _PROCESS_IDENTITY_MATCH = "match"
 _PROCESS_IDENTITY_MISMATCH = "mismatch"
@@ -460,15 +462,25 @@ def _ollama_tags_snapshot() -> dict[str, Any]:
         return {"available": False, "models": [], "error": str(exc)}
 
 
-def _omlx_snapshot() -> dict[str, Any]:
+def _omlx_snapshot(
+    *, provider_kind: str = "omlx", default_endpoint: str | None = None
+) -> dict[str, Any]:
+    """Read one local OpenAI-compatible model fleet.
+
+    ``omlx`` keeps the legacy name for callers and tests; MTPLX uses the same
+    discovery contract but is generation-only and reports its serving engine.
+    """
+
+    if default_endpoint is None:
+        default_endpoint = MTPLX_BASE_URL if provider_kind == "mtplx" else OMLX_BASE_URL
     endpoints: list[str] = []
     provider_by_endpoint: dict[str, str] = {}
     try:
         config = llm_config.load_llm_config()
         for provider_id, provider in config.providers.items():
-            if getattr(provider, "kind", None) != "omlx":
+            if getattr(provider, "kind", None) != provider_kind:
                 continue
-            endpoint = getattr(provider, "endpoint", None) or OMLX_BASE_URL
+            endpoint = getattr(provider, "endpoint", None) or default_endpoint
             if isinstance(endpoint, str):
                 endpoint = endpoint.rstrip("/")
                 if endpoint and endpoint not in endpoints:
@@ -478,7 +490,7 @@ def _omlx_snapshot() -> dict[str, Any]:
     except Exception:
         pass
     if not endpoints:
-        endpoints.append(OMLX_BASE_URL.rstrip("/"))
+        endpoints.append(default_endpoint.rstrip("/"))
 
     models_by_id: dict[str, dict[str, Any]] = {}
     unkeyed_models: list[dict[str, Any]] = []
@@ -523,6 +535,18 @@ def _omlx_snapshot() -> dict[str, Any]:
                         "discovery": _OMLX_OPENAI_MODELS_MARKER,
                     }
                 )
+            expected_model_ids = {
+                str(row.get("id")).strip()
+                for row in rows
+                if isinstance(row, dict)
+                and isinstance(row.get("id"), str)
+                and row.get("id", "").strip()
+            }
+            mtplx_ready = (
+                _mtplx_health_ready(endpoint, expected_models=expected_model_ids)
+                if provider_kind == "mtplx"
+                else None
+            )
             for row in rows:
                 if not isinstance(row, dict):
                     continue
@@ -548,12 +572,14 @@ def _omlx_snapshot() -> dict[str, Any]:
                         **row,
                         "name": model_id,
                         "model": model_id,
-                        "provider": provider_by_endpoint.get(endpoint) or "omlx",
+                        "provider": provider_by_endpoint.get(endpoint) or provider_kind,
                         "protocol": "openai-compatible",
                         "size": None,
                         "size_vram": None,
                         "context_length": context_length,
-                        "processor": row.get("processor"),
+                        "processor": row.get("processor")
+                        or row.get("engine")
+                        or ("MTPLX" if provider_kind == "mtplx" else None),
                         "details": details,
                         "_omlx_discovery": _OMLX_OPENAI_MODELS_MARKER,
                         "_omlx_alias_group": (
@@ -566,8 +592,14 @@ def _omlx_snapshot() -> dict[str, Any]:
                     # residency, so leave its ``loaded`` field unspecified.
                     if owner == _OMLX_DS4_OWNER:
                         normalized["loaded"] = True
+                    elif provider_kind == "mtplx":
+                        normalized["loaded"] = mtplx_ready is True
                     else:
                         normalized.pop("loaded", None)
+                    if provider_kind == "mtplx":
+                        normalized["processor"] = "MTPLX"
+                        details["format"] = "MTPLX"
+                        details["engine"] = "MTPLX"
                 else:
                     normalized = {
                         **row,
@@ -585,11 +617,15 @@ def _omlx_snapshot() -> dict[str, Any]:
                         or row.get("model_context_length"),
                         "processor": row.get("engine_type"),
                         "details": {
-                            "format": "MLX",
+                            "format": "MTPLX" if provider_kind == "mtplx" else "MLX",
                             "context_length": row.get("max_context_window")
                             or row.get("model_context_length"),
                         },
                     }
+                    if provider_kind == "mtplx":
+                        normalized["processor"] = "MTPLX"
+                        normalized["details"]["engine"] = "MTPLX"
+                        normalized["loaded"] = mtplx_ready is True
                 model_id = row.get("id")
                 if not isinstance(model_id, str) or not model_id:
                     unkeyed_models.append(normalized)
@@ -616,7 +652,7 @@ def _omlx_snapshot() -> dict[str, Any]:
     if available:
         snapshot = {
             "available": True,
-            "provider": "omlx",
+            "provider": provider_kind,
             "models": [*models_by_id.values(), *unkeyed_models],
         }
         if len(endpoint_status) > 1:
@@ -632,13 +668,59 @@ def _omlx_snapshot() -> dict[str, Any]:
         return snapshot
     snapshot = {
         "available": False,
-        "provider": "omlx",
+        "provider": provider_kind,
         "models": [],
         "error": "; ".join(errors),
     }
     if len(endpoint_status) > 1:
         snapshot["endpoint_status"] = endpoint_status
     return snapshot
+
+
+def _mtplx_snapshot() -> dict[str, Any]:
+    return _omlx_snapshot(provider_kind="mtplx", default_endpoint=MTPLX_BASE_URL)
+
+
+def _mtplx_health_ready(
+    endpoint: str, *, expected_models: set[str] | None = None
+) -> bool | None:
+    """Return MTPLX residency from the native post-load health contract."""
+
+    health_endpoint = endpoint.removesuffix("/v1") + "/health"
+    try:
+        resp = httpx.get(
+            health_endpoint,
+            headers={"x-api-key": OMLX_API_KEY},
+            timeout=1.5,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("ok") is not True:
+        return False
+    startup = payload.get("startup")
+    if not isinstance(startup, dict):
+        return False
+    expected = {
+        model.strip()
+        for model in (expected_models or set())
+        if isinstance(model, str) and model.strip()
+    }
+    advertised_model_ids = (payload.get("model"), startup.get("model_id"))
+    if not expected or not any(
+        isinstance(model_id, str)
+        and model_id.strip() in expected
+        for model_id in advertised_model_ids
+    ):
+        return False
+    model_path = payload.get("model_path")
+    if not isinstance(model_path, str) or not model_path.strip():
+        return False
+    warmup = startup.get("warmup")
+    return isinstance(warmup, dict) and warmup.get("error") is None
 
 
 def _local_model_snapshot() -> dict[str, Any]:
@@ -651,10 +733,49 @@ def _local_model_snapshot() -> dict[str, Any]:
         }
     except Exception:
         configured_kinds = set()
-    runtime = _omlx_snapshot() if "omlx" in configured_kinds else {
-        **_ollama_snapshot(),
-        "provider": "ollama",
-    }
+    local_openai_snapshots: list[dict[str, Any]] = []
+    if "omlx" in configured_kinds:
+        local_openai_snapshots.append(_omlx_snapshot())
+    if "mtplx" in configured_kinds:
+        local_openai_snapshots.append(_mtplx_snapshot())
+    if not local_openai_snapshots:
+        runtime = {
+            **_ollama_snapshot(),
+            "provider": "ollama",
+        }
+    elif len(local_openai_snapshots) == 1:
+        runtime = local_openai_snapshots[0]
+    else:
+        models = [
+            row
+            for snapshot in local_openai_snapshots
+            for row in snapshot.get("models", [])
+            if isinstance(row, dict)
+        ]
+        errors = [
+            str(snapshot.get("error"))
+            for snapshot in local_openai_snapshots
+            if snapshot.get("error")
+        ]
+        runtime = {
+            "available": any(
+                snapshot.get("available") for snapshot in local_openai_snapshots
+            ),
+            "provider": "local-openai",
+            "models": models,
+            "providers": {
+                str(snapshot.get("provider")): snapshot
+                for snapshot in local_openai_snapshots
+            },
+        }
+        if errors:
+            runtime.update(
+                {
+                    "status": "degraded",
+                    "partial": True,
+                    "error": "; ".join(errors),
+                }
+            )
     # Semantic and reranker services are local runtimes too, but they do not
     # expose an OpenAI model-list endpoint. Keep their residency in the same
     # fleet snapshot so configured models are not silently omitted.
@@ -800,6 +921,7 @@ def _is_local_model_route(route: Any) -> bool:
         in {
             "ollama",
             "omlx",
+            "mtplx",
             "nemotron",
             "semantic-service",
             "local-reranker",
@@ -1037,6 +1159,7 @@ def _configured_runtime_backend(provider: Any) -> tuple[str, str] | None:
     return {
         "ollama": ("ollama", "local"),
         "omlx": ("omlx", "local"),
+        "mtplx": ("mtplx", "local"),
         "local-transformers": ("local-reranker", "local"),
         "nemotron": ("nemotron", "local"),
     }.get(kind)
@@ -1211,13 +1334,14 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
     display_names = display_names if isinstance(display_names, dict) else {}
     runtime_snapshot = runtime or _local_model_snapshot()
     provider = str(runtime_snapshot.get("provider") or "ollama")
+    local_openai = provider in _LOCAL_OPENAI_PROVIDERS
     installed_snapshot = (
-        runtime_snapshot if provider == "omlx" else _ollama_tags_snapshot()
+        runtime_snapshot if local_openai else _ollama_tags_snapshot()
     )
     configured_model_roles = _configured_model_roles()
     configured_names = set(configured_model_roles)
     all_runtime_models = runtime_snapshot.get("models", [])
-    if provider == "omlx" and isinstance(all_runtime_models, list):
+    if local_openai and isinstance(all_runtime_models, list):
         all_runtime_models = _select_omlx_runtime_models(
             all_runtime_models, configured_names
         )
@@ -1227,12 +1351,12 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
             for row in all_runtime_models
             if isinstance(row, dict) and row.get("loaded")
         ]
-        if provider == "omlx" and isinstance(all_runtime_models, list)
+        if local_openai and isinstance(all_runtime_models, list)
         else all_runtime_models
     )
     installed_models = (
         [row for row in all_runtime_models if not row.get("_service_only")]
-        if provider == "omlx"
+        if local_openai
         else installed_snapshot.get("models", [])
     )
     if not isinstance(running_models, list):
@@ -1355,7 +1479,13 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
                 ),
                 "processor": running.get("processor")
                 if isinstance(running, dict)
-                else service.get("processor") if isinstance(service, dict) else None,
+                else (
+                    service.get("processor")
+                    if isinstance(service, dict)
+                    else installed.get("processor")
+                    if isinstance(installed, dict)
+                    else None
+                ),
                 "details": details,
                 "capabilities": capabilities,
             }
