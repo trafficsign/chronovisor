@@ -6731,6 +6731,64 @@ def test_model_display_name_preserves_api_identity(monkeypatch, label) -> None:
         assert "display_name" not in row
 
 
+def test_decision_model_names_follow_fleet_without_changing_api_identity() -> None:
+    renderer = (dashboard.STATIC_DIR / "app-renderer.js").read_text(encoding="utf-8")
+    scenario = """
+const vm = require("node:vm");
+const nodes = {};
+const panel = {
+  dataset: {},
+  querySelector: selector => nodes[selector] ||= {dataset: {}, textContent: ""},
+};
+const sandbox = {
+  window: {},
+  document: {
+    getElementById: () => panel,
+    querySelectorAll: () => Object.values(nodes).filter(n => "modelName" in n.dataset),
+  },
+};
+vm.createContext(sandbox);
+""" + f"vm.runInContext({json.dumps(renderer)}, sandbox);" + """
+vm.runInContext(`
+  const id = "qwen3.8-flash-next-chat";
+  const projection = {single_model: true, authority: {model: id}};
+  updateSingleAuthorityMeta({}, projection);
+  this.before = document.getElementById().querySelector("[data-single-model]").textContent;
+  updateModelDisplayNames({models: [{name: id, display_name: "Qwen3.8-Flash-Next-DS4-IQ2"}]});
+  this.after = document.getElementById().querySelector("[data-single-model]").textContent;
+  this.consoleText = decisionConsoleText({phase: "load", model: id}, {});
+  this.apiId = projection.authority.model;
+  this.title = document.getElementById().querySelector("[data-single-model]").title;
+  updateModelDisplayNames({});
+  this.partial = modelDisplayName(id);
+  updateSingleAuthorityMeta({}, projection);
+  this.rerendered = document.getElementById().querySelector("[data-single-model]").textContent;
+  updateModelDisplayNames({models: []});
+  this.removed = document.getElementById().querySelector("[data-single-model]").textContent;
+  this.unknown = modelDisplayName("other-model");
+`, sandbox);
+process.stdout.write(JSON.stringify({
+  before: sandbox.before, after: sandbox.after, consoleText: sandbox.consoleText,
+  apiId: sandbox.apiId, title: sandbox.title, partial: sandbox.partial,
+  rerendered: sandbox.rerendered, removed: sandbox.removed, unknown: sandbox.unknown,
+}));
+"""
+    result = json.loads(_run_node_scenario(scenario).stdout)
+    model_id = "qwen3.8-flash-next-chat"
+    display_name = "Qwen3.8-Flash-Next-DS4-IQ2"
+    assert result == {
+        "before": model_id,
+        "after": display_name,
+        "consoleText": f"load {display_name}",
+        "apiId": model_id,
+        "title": model_id,
+        "partial": display_name,
+        "rerendered": display_name,
+        "removed": model_id,
+        "unknown": "other-model",
+    }
+
+
 def test_model_status_snapshot_combines_ollama_and_config(monkeypatch) -> None:
     monkeypatch.setattr(
         dashboard,
