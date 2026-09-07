@@ -20,6 +20,38 @@ let processingRefreshInFlight = false;
 let processingEventSource = null;
 let modelStreamEventSource = null;
 
+function closeLiveStreams() {
+  if (processingEventSource !== null) {
+    processingEventSource.close();
+    processingEventSource = null;
+  }
+  if (modelStreamEventSource !== null) {
+    modelStreamEventSource.close();
+    modelStreamEventSource = null;
+  }
+}
+
+function resumeLiveStreams() {
+  if (document.visibilityState === "hidden") return;
+  connectProcessingActivityStream();
+  connectModelStream();
+  void refresh();
+  void refreshDecisionTrace();
+  void refreshProcessingActivity();
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState === "hidden") {
+    closeLiveStreams();
+    return;
+  }
+  resumeLiveStreams();
+}
+
+function handlePageShow(event) {
+  if (event.persisted) resumeLiveStreams();
+}
+
 async function refreshFast() {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), FAST_SNAPSHOT_TIMEOUT_MS);
@@ -29,7 +61,9 @@ async function refreshFast() {
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    render(await response.json());
+    const snapshot = await response.json();
+    if (hasRenderedFullSnapshot) return;
+    render(snapshot);
     document.body.dataset.snapshotState = "summary";
   } catch {
     // The full snapshot remains authoritative and reports its own failures.
@@ -237,6 +271,8 @@ async function refreshProcessingActivity() {
 }
 
 function connectProcessingActivityStream() {
+  if (document.visibilityState === "hidden") return;
+  if (processingEventSource !== null) return;
   if (!("EventSource" in window)) {
     setProcessingConnection("polling", "POLLING");
     return;
@@ -259,6 +295,8 @@ function connectProcessingActivityStream() {
 }
 
 function connectModelStream() {
+  if (document.visibilityState === "hidden") return;
+  if (modelStreamEventSource !== null) return;
   if (!("EventSource" in window)) return;
   modelStreamEventSource = new EventSource("/api/model-stream");
   modelStreamEventSource.addEventListener("model-stream", (event) => {
@@ -353,3 +391,6 @@ connectModelStream();
 void processingFallbackLoop();
 window.setInterval(updateProcessingElapsed, 1000);
 window.addEventListener("resize", refresh);
+document.addEventListener("visibilitychange", handleVisibilityChange);
+window.addEventListener("pagehide", closeLiveStreams);
+window.addEventListener("pageshow", handlePageShow);
