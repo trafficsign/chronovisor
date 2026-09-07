@@ -9,6 +9,29 @@ function shortName(value) {
   return `${text.slice(0, 30)}...${text.slice(-28)}`;
 }
 
+let modelDisplayNames = new Map();
+
+function modelDisplayName(value) {
+  return shortName(modelDisplayNames.get(value) || value);
+}
+
+function setModelName(node, value) {
+  if (!node) return;
+  node.dataset.modelName = value || "";
+  node.textContent = modelDisplayName(value);
+  node.title = fmt(value);
+}
+
+function updateModelDisplayNames(modelStatus) {
+  if (!Array.isArray(modelStatus?.models)) return;
+  modelDisplayNames = new Map(modelStatus.models.map(row => [row.name, row.display_name]));
+  if (typeof document !== "undefined") {
+    document.querySelectorAll("[data-model-name]").forEach(node => {
+      setModelName(node, node.dataset.modelName);
+    });
+  }
+}
+
 function decisionTraceModelLabel(value) {
   const base = fmt(value, "not configured").split("/").at(-1).split(":")[0];
   const family = base.split(/[-_]/)[0].replace(/(?<![.])\d+$/u, "");
@@ -203,7 +226,7 @@ function processingElapsedText(lane, now = Date.now()) {
 function processingLaneDetail(lane, now = Date.now()) {
   if (lane.state !== "active") return fmt(lane.detail, "waiting for work");
   const role = fmt(lane.role || lane.phase || lane.current_step, "work");
-  const details = [lane.model, role, processingElapsedText(lane, now)].filter(Boolean);
+  const details = [lane.model && modelDisplayName(lane.model), role, processingElapsedText(lane, now)].filter(Boolean);
   if (lane.recent) details.push("just completed");
   if (intValue(lane.active_jobs) > 1) details.push(`${intValue(lane.active_jobs)} jobs`);
   return details.join(" · ");
@@ -478,13 +501,13 @@ function renderWorkStatus(status) {
       if (localReviewOnly) {
         const latest = consensus.latest || {};
         const count = Number(consensus.count || 1);
-        const subject = [latest.role, latest.model].filter(Boolean).join(" · ");
+        const subject = [latest.role, latest.model && modelDisplayName(latest.model)].filter(Boolean).join(" · ");
         const activity = localEvaluationOnly ? "local eval vote" : "local vote";
         detail = `${count} active ${activity}${count === 1 ? "" : "s"}${subject ? ` · ${subject}` : ""}`;
       } else {
         const process = repair.process_activity || {};
         const latest = process.latest || repair.active_incident || {};
-        const subject = [latest.kind || latest.component, latest.model].filter(Boolean).join(" · ");
+        const subject = [latest.kind || latest.component, latest.model && modelDisplayName(latest.model)].filter(Boolean).join(" · ");
         detail = `exceptional code repair${subject ? ` · ${subject}` : ""}`;
       }
     } else {
@@ -556,7 +579,6 @@ function updateSingleAuthorityMeta(trace, projection) {
   const authority = projection?.authority || {};
   const values = {
     "[data-single-authority-label]": fmt(authority.label, "Single Authority"),
-    "[data-single-model]": shortName(authority.model),
     "[data-single-revision]": shortName(authority.revision),
     "[data-single-status]": fmt(projection?.labels?.validation, "Validating"),
     "[data-single-target]": fmt(authority.target, "1"),
@@ -566,6 +588,7 @@ function updateSingleAuthorityMeta(trace, projection) {
     const node = panel.querySelector(selector);
     if (node) node.textContent = value;
   });
+  setModelName(panel.querySelector("[data-single-model]"), authority.model);
 }
 
 function updateDecisionFactMode(single) {
@@ -1056,7 +1079,7 @@ function decisionConsoleText(event, trace) {
       ? "tie-break"
       : event.lane
     : "system";
-  const model = shortName(event?.model || "local model");
+  const model = modelDisplayName(event?.model || "local model");
   const generation = event?.generation || {};
   const tokens = numeric(generation.output_tokens)
     ? `${generation.token_count_exact ? "" : "~"}${generation.output_tokens} tok`
@@ -1124,7 +1147,7 @@ function renderDecisionGeneration(trace) {
     ? generation.generation_seconds
     : 0;
   const think = fmt(liveEvent?.think ?? lane.think, "—").toUpperCase();
-  els.decisionGenerationModel.textContent = shortName(liveEvent?.model || lane.model);
+  setModelName(els.decisionGenerationModel, liveEvent?.model || lane.model);
   els.decisionGenerationReasoning.textContent = think === "OFF"
     ? "DIRECT · NO REASONING"
     : `REASONING · ${think}`;
@@ -1179,7 +1202,7 @@ function renderModelStream(stream) {
     ? active && lastChannel === "output" ? "LIVE" : "CAPTURED"
     : active ? "WAITING" : "NONE";
   if (typeof value.model === "string" && value.model) {
-    els.decisionGenerationModel.textContent = shortName(value.model);
+    setModelName(els.decisionGenerationModel, value.model);
   }
   els.decisionGenerationTokens.textContent = outputTokens
     ? `${outputTokens.toLocaleString()} tok`
@@ -3317,6 +3340,7 @@ function renderModelStatus(modelStatus, runtimeFailures, activities = []) {
 }
 
 function renderLiveModelStatus(snapshot, activities) {
+  updateModelDisplayNames(snapshot?.model_status);
   latestLiveModelSnapshot = {
     model_status: snapshot?.model_status || {},
     local_runtime: snapshot?.local_runtime || snapshot?.ollama || {},
@@ -3645,7 +3669,7 @@ function renderLocalConsensusSummary(status) {
     `conservative votes ${conservativeVoteSummary}`,
   ].join(" · ");
   const activeModels = (consensus.activities || [])
-    .map((item) => [item.role, item.model].filter(Boolean).join(" · "))
+    .map((item) => [item.role, item.model && modelDisplayName(item.model)].filter(Boolean).join(" · "))
     .filter(Boolean);
   els.localConsensus.textContent = consensus.active
     ? `${intValue(consensus.count)} active · ${activeModels.join(" · ")} · ${vetoSummary}`
@@ -3673,7 +3697,7 @@ function renderLocalRuntimeMetric(modelStatus, runtime) {
   }
   els.ollamaSub.textContent = summary.installed !== undefined
     ? `${intValue(summary.loaded)} loaded · ${intValue(summary.installed)} installed`
-    : model.name || model.model || "no model";
+    : modelDisplayName(model.name || model.model || "no model");
 }
 
 function newestDashboardStatus(previous, candidate) {
@@ -3823,6 +3847,7 @@ function render(snapshot) {
     || snapshot.ollama
     || {};
   const modelStatus = latestLiveModelSnapshot?.model_status || snapshot.model_status || {};
+  updateModelDisplayNames(modelStatus);
 
   setState(status.state);
   const ready = intValue(status.pending);
@@ -3855,7 +3880,7 @@ function render(snapshot) {
   const repairSummary = repair.summary || {};
   const activeRepair = repair.active_incident || ((repair.process_activity || {}).latest) || {};
   els.frontierRepair.textContent = repair.active
-    ? `active · ${[activeRepair.component || activeRepair.kind, activeRepair.status, activeRepair.model].filter(Boolean).join(" · ")}`
+    ? `active · ${[activeRepair.component || activeRepair.kind, activeRepair.status, activeRepair.model && modelDisplayName(activeRepair.model)].filter(Boolean).join(" · ")}`
     : `${intValue(repairSummary.starts_24h)} starts / 24h · ${intValue(repairSummary.total)} total`;
   els.currentJob.textContent = status.current_job_id ? fmt(status.current_job_id) : "none";
   els.lastSuccess.textContent = status.last_success
