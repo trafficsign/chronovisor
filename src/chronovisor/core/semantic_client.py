@@ -11,6 +11,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core.llm_runtime import (
+    EmbeddingRequest,
+    EmbeddingResult,
+    RouteLocation,
+    SafeBackendError,
+)
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
 from chronovisor.core.search_types import ScoredPage
 
@@ -36,9 +42,7 @@ def _deadline_for(
     try:
         budget_ms = float(raw)
     except (TypeError, ValueError) as exc:
-        raise SemanticServiceUnavailable(
-            "semantic request deadline exhausted"
-        ) from exc
+        raise SemanticServiceUnavailable("semantic request deadline exhausted") from exc
     if not math.isfinite(budget_ms) or budget_ms <= 0:
         raise SemanticServiceUnavailable("semantic request deadline exhausted")
     if cap_ms is not None:
@@ -60,9 +64,7 @@ def _deadline_from_payload(deadline_at: float | None) -> float:
     try:
         deadline = float(deadline_at)
     except (TypeError, ValueError) as exc:
-        raise SemanticServiceUnavailable(
-            "semantic request deadline exhausted"
-        ) from exc
+        raise SemanticServiceUnavailable("semantic request deadline exhausted") from exc
     if not math.isfinite(deadline) or deadline <= time.monotonic():
         raise SemanticServiceUnavailable("semantic request deadline exhausted")
     return deadline
@@ -142,6 +144,7 @@ def request(
     *,
     timeout_ms: int | float | None = None,
     deadline_at: float | None = None,
+    circuit_breaker: bool = True,
 ) -> dict[str, Any]:
     _, derived_deadline = _deadline_for(timeout_ms, config.query_timeout_ms)
     payload_deadline = payload.get("deadline_at")
@@ -153,7 +156,8 @@ def request(
         deadline = derived_deadline
     if timeout_ms is not None:
         deadline = min(deadline, derived_deadline)
-    _breaker_before_request()
+    if circuit_breaker:
+        _breaker_before_request()
     path = _socket_path(config)
     if not path.exists():
         raise SemanticServiceUnavailable(f"semantic socket is missing: {path}")
@@ -163,7 +167,7 @@ def request(
         client.connect(str(path))
         client.settimeout(_remaining_seconds(deadline))
         wire_payload = payload
-        if payload.get("method") in {"search", "verify"}:
+        if payload.get("method") in {"search", "verify", "embed"}:
             wire_payload = {**payload, "deadline_at": deadline}
         client.sendall(
             json.dumps(wire_payload, ensure_ascii=False, separators=(",", ":")).encode()
@@ -179,7 +183,8 @@ def request(
             if b"\n" in chunk:
                 break
     except (OSError, TimeoutError) as exc:
-        _breaker_failure()
+        if circuit_breaker:
+            _breaker_failure()
         raise SemanticServiceUnavailable(
             str(exc) or "semantic request deadline exhausted"
         ) from exc
@@ -188,21 +193,82 @@ def request(
     try:
         _remaining_seconds(deadline)
     except TimeoutError as exc:
-        _breaker_failure()
+        if circuit_breaker:
+            _breaker_failure()
         raise SemanticServiceUnavailable(str(exc)) from exc
     try:
         response = json.loads(b"".join(chunks).split(b"\n", 1)[0])
     except (UnicodeDecodeError, json.JSONDecodeError, IndexError) as exc:
-        _breaker_failure()
+        if circuit_breaker:
+            _breaker_failure()
         raise SemanticServiceUnavailable("invalid semantic service response") from exc
     if not isinstance(response, dict):
-        _breaker_failure()
+        if circuit_breaker:
+            _breaker_failure()
         raise SemanticServiceUnavailable("invalid semantic service payload")
     if response.get("status") != "ok":
-        _breaker_failure()
+        if circuit_breaker:
+            _breaker_failure()
         raise SemanticServiceUnavailable(str(response.get("error") or response))
-    _breaker_success()
+    if circuit_breaker:
+        _breaker_success()
     return response
+
+
+class SemanticEmbeddingBackend:
+    """Reuse the resident semantic encoder without loading a caller-side model."""
+
+    provider = "semantic-service"
+    location = RouteLocation.LOCAL
+
+    def __init__(self, config: SearchEmbeddingConfig) -> None:
+        self.config = config
+
+    def embed(
+        self, embedding_request: EmbeddingRequest, *, model: str
+    ) -> EmbeddingResult:
+        _, deadline = _deadline_for(
+            embedding_request.timeout_ms, 60_000, cap_ms=300_000
+        )
+        vectors: list[tuple[float, ...]] = []
+        for text in embedding_request.texts:
+            # One document per RPC bounds foreground blocking and wire size.
+            if len(text.encode("utf-8")) > 512_000:
+                raise SafeBackendError("request_invalid")
+            response = request(
+                {
+                    "method": "embed",
+                    "model": model,
+                    "texts": [text],
+                    "purpose": embedding_request.purpose.value,
+                    "source_data_class": embedding_request.source.data_class.value,
+                    "source_sensitivity": embedding_request.source.sensitivity.value,
+                },
+                self.config,
+                deadline_at=deadline,
+                circuit_breaker=False,
+            )
+            rows = response.get("vectors")
+            if (
+                response.get("model") != model
+                or not isinstance(rows, list)
+                or len(rows) != 1
+            ):
+                raise SafeBackendError("backend_contract_error")
+            row = rows[0]
+            if (
+                not isinstance(row, list)
+                or len(row) != self.config.dimensions
+                or any(
+                    isinstance(v, bool)
+                    or not isinstance(v, (float, int))
+                    or not math.isfinite(v)
+                    for v in row
+                )
+            ):
+                raise SafeBackendError("backend_contract_error")
+            vectors.append(tuple(float(value) for value in row))
+        return EmbeddingResult(tuple(vectors), self.provider, model)
 
 
 def selected_for_rollout(query: str, config: SearchEmbeddingConfig) -> bool:

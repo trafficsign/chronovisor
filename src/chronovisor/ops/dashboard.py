@@ -178,6 +178,7 @@ DASHBOARD_IO_TIMEOUT_SECONDS = 30.0
 DASHBOARD_HANDLER_LIMIT = 32
 DASHBOARD_AUTH_CONCURRENCY_LIMIT = 2
 DASHBOARD_STREAM_LIMIT = 8
+SERVICE_STATUS_MAX_AGE_SECONDS = 30.0
 # DwarfStar's DS4 server exposes an OpenAI-compatible ``/v1/models`` route,
 # while oMLX exposes the richer ``/v1/models/status`` route. Keep the marker
 # private to the dashboard snapshot so the two contracts are not conflated.
@@ -650,9 +651,37 @@ def _local_model_snapshot() -> dict[str, Any]:
         }
     except Exception:
         configured_kinds = set()
-    if "omlx" in configured_kinds:
-        return _omlx_snapshot()
-    return {**_ollama_snapshot(), "provider": "ollama"}
+    runtime = _omlx_snapshot() if "omlx" in configured_kinds else {
+        **_ollama_snapshot(),
+        "provider": "ollama",
+    }
+    # Semantic and reranker services are local runtimes too, but they do not
+    # expose an OpenAI model-list endpoint. Keep their residency in the same
+    # fleet snapshot so configured models are not silently omitted.
+    service_models = [
+        *_service_model_rows(
+            CHRONOVISOR_ROOT / "runtime" / "semantic-service-status.json",
+            capability="embedding",
+        ),
+        *_service_model_rows(
+            CHRONOVISOR_ROOT / "runtime" / "reranker-service-status.json",
+            capability="rerank",
+        ),
+    ]
+    if service_models:
+        existing = {
+            _model_name(row)
+            for row in runtime.get("models", [])
+            if isinstance(row, dict)
+        }
+        runtime = {
+            **runtime,
+            "models": [
+                *runtime.get("models", []),
+                *(row for row in service_models if _model_name(row) not in existing),
+            ],
+        }
+    return runtime
 
 
 def _local_runtime_fields(runtime: dict[str, Any]) -> dict[str, Any]:
@@ -662,6 +691,79 @@ def _local_runtime_fields(runtime: dict[str, Any]) -> dict[str, Any]:
         "local_runtime": runtime,
         "ollama": runtime if runtime.get("provider") == "ollama" else {},
     }
+
+
+def _service_model_rows(path: Path, *, capability: str) -> list[dict[str, Any]]:
+    """Read one local service status file into model-fleet rows."""
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    ready = payload.get("status") in {"ok", "ready"} and bool(payload.get("ready"))
+    try:
+        observed_at = float(payload.get("observed_at_epoch"))
+    except (TypeError, ValueError):
+        observed_at = 0.0
+    now = time.time()
+    if (
+        not math.isfinite(observed_at)
+        or observed_at <= 0
+        or observed_at > now
+        or now - observed_at > SERVICE_STATUS_MAX_AGE_SECONDS
+        or not runtime_status._pid_is_alive(payload.get("pid"))
+    ):
+        ready = False
+    routes = payload.get("routes")
+    if not isinstance(routes, dict):
+        route = payload.get("route")
+        routes = {"service": route} if isinstance(route, dict) else {}
+    if not routes:
+        model = payload.get("model")
+        if isinstance(model, str) and model.strip():
+            routes = {
+                "service": {
+                    "model": model,
+                    "provider": (
+                        "nemotron" if capability == "embedding" else "local-reranker"
+                    ),
+                }
+            }
+    models: dict[str, dict[str, Any]] = {}
+    for route in routes.values():
+        if not isinstance(route, dict):
+            continue
+        model = route.get("model") or payload.get("model")
+        if not isinstance(model, str) or not model.strip():
+            continue
+        model = model.strip()
+        provider = route.get("provider") or (
+            "nemotron" if capability == "embedding" else "local-reranker"
+        )
+        row = models.setdefault(
+            model,
+            {
+                "name": model,
+                "model": model,
+                "provider": provider,
+                "loaded": ready,
+                "size": None,
+                "size_vram": None,
+                "processor": payload.get("device") or provider,
+                "details": {
+                    "format": "MLX" if payload.get("device") == "mlx" else "service",
+                    "revision": payload.get("revision"),
+                    "runtime_model": payload.get("runtime_model"),
+                    "runtime_revision": payload.get("runtime_revision"),
+                },
+                "capabilities": [capability],
+                "_service_only": True,
+            },
+        )
+        row["loaded"] = bool(row["loaded"] or ready)
+    return list(models.values())
 
 
 def _model_name(row: dict[str, Any] | None) -> str:
@@ -694,7 +796,15 @@ def _add_model_role(roles: dict[str, set[str]], model: str | None, role: str) ->
 def _is_local_model_route(route: Any) -> bool:
     location = getattr(route, "location", None)
     return (
-        getattr(route, "provider", None) in {"ollama", "omlx"}
+        getattr(route, "provider", None)
+        in {
+            "ollama",
+            "omlx",
+            "nemotron",
+            "semantic-service",
+            "local-reranker",
+            "local-transformers",
+        }
         and getattr(location, "value", location) == "local"
     )
 
@@ -775,11 +885,14 @@ def _configured_model_roles() -> dict[str, set[str]]:
         pass
 
     try:
-        embedding_route = llm_config.load_default_llm_runtime().resolve_embedding(
-            "knowledge.embedding"
-        )
-        if _is_local_model_route(embedding_route):
-            _add_model_role(roles, embedding_route.model, "embed")
+        embedding_runtime = llm_config.load_default_llm_runtime()
+        for embedding_role in ("knowledge.embedding", "classification.embedding"):
+            try:
+                embedding_route = embedding_runtime.resolve_embedding(embedding_role)
+            except Exception:
+                continue
+            if _is_local_model_route(embedding_route):
+                _add_model_role(roles, embedding_route.model, "embed")
     except Exception:
         pass
 
@@ -884,12 +997,31 @@ def _select_omlx_runtime_models(
 
 
 def _external_configured_model(name: str, roles: set[str]) -> bool:
-    return bool(
+    if not (
         roles <= {"rerank", "search-embed"}
         and roles
         and "/" in name
         and not name.startswith("hf.co/")
-    )
+    ):
+        return False
+    try:
+        config = llm_config.load_llm_config()
+        for route in config.roles.values():
+            if getattr(route, "model", None) != name:
+                continue
+            provider = config.providers.get(getattr(route, "provider_id", ""))
+            if getattr(provider, "kind", None) in {
+                "nemotron",
+                "semantic-service",
+                "local-reranker",
+                "local-transformers",
+                "ollama",
+                "omlx",
+            }:
+                return False
+    except Exception:
+        pass
+    return True
 
 
 def _configured_runtime_backend(provider: Any) -> tuple[str, str] | None:
@@ -1099,7 +1231,7 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
         else all_runtime_models
     )
     installed_models = (
-        all_runtime_models
+        [row for row in all_runtime_models if not row.get("_service_only")]
         if provider == "omlx"
         else installed_snapshot.get("models", [])
     )
@@ -1113,6 +1245,13 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
     }
     installed_by_name = {
         _model_name(row): row for row in installed_models if _model_name(row)
+    }
+    service_by_name = {
+        _model_name(row): row
+        for row in all_runtime_models
+        if isinstance(row, dict)
+        and row.get("_service_only")
+        and _model_name(row)
     }
     roles_by_name: dict[str, set[str]] = {}
     for name, roles in configured_model_roles.items():
@@ -1131,6 +1270,7 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
     for name in names:
         installed = installed_by_name.get(name)
         running = running_by_name.get(name)
+        service = service_by_name.get(name)
         roles = roles_by_name.get(name, set())
         configured = bool(roles)
         installed_size_value = installed.get("size") if installed else None
@@ -1149,6 +1289,7 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
             configured
             and not installed
             and not running
+            and not service
             and _external_configured_model(name, roles)
         )
         if running:
@@ -1165,7 +1306,7 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
             status = "unknown"
         details = {}
         capabilities: list[str] = []
-        for source in (installed, running):
+        for source in (service, installed, running):
             if isinstance(source, dict):
                 if isinstance(source.get("details"), dict):
                     details = dict(source["details"])
@@ -1177,7 +1318,7 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
                 "provider": next(
                     (
                         source.get("provider")
-                        for source in (running, installed)
+                        for source in (running, installed, service)
                         if isinstance(source, dict)
                         and isinstance(source.get("provider"), str)
                         and source.get("provider")
@@ -1214,7 +1355,7 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
                 ),
                 "processor": running.get("processor")
                 if isinstance(running, dict)
-                else None,
+                else service.get("processor") if isinstance(service, dict) else None,
                 "details": details,
                 "capabilities": capabilities,
             }
@@ -6533,6 +6674,8 @@ def _model_status_materialization_fingerprint(runtime: dict[str, Any]) -> str:
         CHRONOVISOR_ROOT / "runtime" / "model-lab" / "active-policy.json",
         CHRONOVISOR_ROOT / "runtime" / "model-lab" / "state.json",
         CHRONOVISOR_ROOT / "runtime" / "local-consensus" / "audit.jsonl",
+        CHRONOVISOR_ROOT / "runtime" / "semantic-service-status.json",
+        CHRONOVISOR_ROOT / "runtime" / "reranker-service-status.json",
         runtime_status.STATUS_FILE,
         runtime_status.EVENTS_FILE,
     ]
