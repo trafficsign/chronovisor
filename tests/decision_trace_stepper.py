@@ -291,6 +291,13 @@ function captureFrame(scenario, frame) {
     transform: node.getAttribute("transform"),
     shape: node.querySelector(":scope > path") ? "decision" : "circle",
   }));
+  const contextOptions = [...harness.querySelectorAll("[data-context-option]")].map((node) => ({
+    tokens: Number(node.dataset.contextTokens),
+    label: node.querySelector("[data-context-label]")?.textContent || "",
+    selected: node.classList.contains("selected"),
+    workflowNode: node.dataset.workflowNode || null,
+  }));
+  const contextSelection = harness.querySelector('[data-plan-value="context-selection"]')?.textContent || "";
   const labels = [...harness.querySelectorAll(".trace-node text, .trace-branch-label")].map((label) => {
     const rect = label.getBoundingClientRect();
     return {
@@ -589,6 +596,8 @@ function captureFrame(scenario, frame) {
       nodes: nodes.map(({ id, transform }) => [id, transform]),
     }),
     paths,
+    contextOptions,
+    contextSelection,
     skippedElements,
     guides,
     sharpCorners,

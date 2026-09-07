@@ -166,10 +166,10 @@ def test_projection_restores_context_and_reasoning_choices() -> None:
     assert result["context"] == {
         "selected_tokens": 65_536,
         "options": [
-            {"tokens": 32_768, "label": "32K", "selected": False},
-            {"tokens": 65_536, "label": "65K", "selected": True},
-            {"tokens": 98_304, "label": "98K", "selected": False},
-            {"tokens": 131_072, "label": "131K", "selected": False},
+            {"tokens": 65_536, "label": "65K以下", "selected": True},
+            {"tokens": 131_072, "label": "131K以下", "selected": False},
+            {"tokens": 196_608, "label": "197K以下", "selected": False},
+            {"tokens": 262_144, "label": "262K以下", "selected": False},
         ],
         "label": "required 55K → selected 65K",
     }
@@ -177,6 +177,38 @@ def test_projection_restores_context_and_reasoning_choices() -> None:
         "selected": "low",
         "options": ["off", "low", "medium", "high"],
     }
+
+
+@pytest.mark.parametrize(
+    ("selected", "upper_bound"),
+    [
+        (None, None),
+        (0, None),
+        (-1, None),
+        (1, 65_536),
+        (32_768, 65_536),
+        (65_536, 65_536),
+        (65_537, 131_072),
+        (114_688, 131_072),
+        (131_072, 131_072),
+        (131_073, 196_608),
+        (196_608, 196_608),
+        (196_609, 262_144),
+        (262_144, 262_144),
+        (262_145, None),
+    ],
+)
+def test_context_ranges_keep_fixed_quarters(selected, upper_bound) -> None:
+    options = projection._context_options(selected)
+    assert [option["tokens"] for option in options] == [
+        65_536,
+        131_072,
+        196_608,
+        262_144,
+    ]
+    assert [option["tokens"] for option in options if option["selected"]] == (
+        [upper_bound] if upper_bound else []
+    )
 
 
 @pytest.mark.parametrize(

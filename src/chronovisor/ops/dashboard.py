@@ -177,6 +177,11 @@ DASHBOARD_IO_TIMEOUT_SECONDS = 30.0
 DASHBOARD_HANDLER_LIMIT = 32
 DASHBOARD_AUTH_CONCURRENCY_LIMIT = 2
 DASHBOARD_STREAM_LIMIT = 8
+# DwarfStar's DS4 server exposes an OpenAI-compatible ``/v1/models`` route,
+# while oMLX exposes the richer ``/v1/models/status`` route. Keep the marker
+# private to the dashboard snapshot so the two contracts are not conflated.
+_OMLX_OPENAI_MODELS_MARKER = "openai-models"
+_OMLX_DS4_OWNER = "ds4.c"
 _LOCK_TYPE = type(threading.Lock())
 _PROCESS_IDENTITY_MATCH = "match"
 _PROCESS_IDENTITY_MISMATCH = "mismatch"
@@ -455,9 +460,10 @@ def _ollama_tags_snapshot() -> dict[str, Any]:
 
 def _omlx_snapshot() -> dict[str, Any]:
     endpoints: list[str] = []
+    provider_by_endpoint: dict[str, str] = {}
     try:
         config = llm_config.load_llm_config()
-        for provider in config.providers.values():
+        for provider_id, provider in config.providers.items():
             if getattr(provider, "kind", None) != "omlx":
                 continue
             endpoint = getattr(provider, "endpoint", None) or OMLX_BASE_URL
@@ -465,6 +471,8 @@ def _omlx_snapshot() -> dict[str, Any]:
                 endpoint = endpoint.rstrip("/")
                 if endpoint and endpoint not in endpoints:
                     endpoints.append(endpoint)
+                if endpoint:
+                    provider_by_endpoint.setdefault(endpoint, str(provider_id))
     except Exception:
         pass
     if not endpoints:
@@ -482,9 +490,22 @@ def _omlx_snapshot() -> dict[str, Any]:
                 headers={"x-api-key": OMLX_API_KEY},
                 timeout=1.5,
             )
-            resp.raise_for_status()
-            data = resp.json()
-            rows = data.get("models", [])
+            openai_models_fallback = (
+                getattr(resp, "status_code", None) == HTTPStatus.NOT_FOUND
+            )
+            if openai_models_fallback:
+                resp = httpx.get(
+                    f"{endpoint}/models",
+                    headers={"x-api-key": OMLX_API_KEY},
+                    timeout=1.5,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                rows = data.get("data", [])
+            else:
+                resp.raise_for_status()
+                data = resp.json()
+                rows = data.get("models", [])
             if not isinstance(rows, list):
                 rows = []
             available = True
@@ -493,28 +514,80 @@ def _omlx_snapshot() -> dict[str, Any]:
                 "available": True,
                 "model_count": len(rows),
             }
+            if openai_models_fallback:
+                endpoint_status[endpoint].update(
+                    {
+                        "protocol": "openai-compatible",
+                        "discovery": _OMLX_OPENAI_MODELS_MARKER,
+                    }
+                )
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                normalized = {
-                    **row,
-                    "name": row.get("id"),
-                    "model": row.get("id"),
-                    "size": row.get("actual_size") or row.get("estimated_size"),
-                    "size_vram": (
-                        row.get("actual_size") or row.get("resident_estimated_size")
-                        if row.get("loaded")
-                        else 0
-                    ),
-                    "context_length": row.get("max_context_window")
-                    or row.get("model_context_length"),
-                    "processor": row.get("engine_type"),
-                    "details": {
-                        "format": "MLX",
+                if openai_models_fallback:
+                    model_id = row.get("id")
+                    if not isinstance(model_id, str) or not model_id.strip():
+                        continue
+                    owner = row.get("owned_by")
+                    context_length = row.get("context_length") or row.get(
+                        "max_model_len"
+                    )
+                    top_provider = row.get("top_provider")
+                    if context_length is None and isinstance(top_provider, dict):
+                        context_length = top_provider.get("context_length")
+                    details = (
+                        dict(row["details"])
+                        if isinstance(row.get("details"), dict)
+                        else {}
+                    )
+                    if context_length is not None:
+                        details.setdefault("context_length", context_length)
+                    normalized = {
+                        **row,
+                        "name": model_id,
+                        "model": model_id,
+                        "provider": provider_by_endpoint.get(endpoint),
+                        "protocol": "openai-compatible",
+                        "size": None,
+                        "size_vram": None,
+                        "context_length": context_length,
+                        "processor": row.get("processor"),
+                        "details": details,
+                        "_omlx_discovery": _OMLX_OPENAI_MODELS_MARKER,
+                        "_omlx_alias_group": (
+                            model_id.removesuffix("-chat").removesuffix("-reasoner")
+                        ),
+                        "_omlx_owner": owner,
+                    }
+                    # DS4 publishes served aliases from its own runtime. A
+                    # generic OpenAI-compatible listing does not establish
+                    # residency, so leave its ``loaded`` field unspecified.
+                    if owner == _OMLX_DS4_OWNER:
+                        normalized["loaded"] = True
+                    else:
+                        normalized.pop("loaded", None)
+                else:
+                    normalized = {
+                        **row,
+                        "name": row.get("id"),
+                        "model": row.get("id"),
+                        "provider": row.get("provider")
+                        or provider_by_endpoint.get(endpoint),
+                        "size": row.get("actual_size") or row.get("estimated_size"),
+                        "size_vram": (
+                            row.get("actual_size") or row.get("resident_estimated_size")
+                            if row.get("loaded")
+                            else 0
+                        ),
                         "context_length": row.get("max_context_window")
                         or row.get("model_context_length"),
-                    },
-                }
+                        "processor": row.get("engine_type"),
+                        "details": {
+                            "format": "MLX",
+                            "context_length": row.get("max_context_window")
+                            or row.get("model_context_length"),
+                        },
+                    }
                 model_id = row.get("id")
                 if not isinstance(model_id, str) or not model_id:
                     unkeyed_models.append(normalized)
@@ -770,6 +843,45 @@ def _resolve_model_name(
     return name
 
 
+def _select_omlx_runtime_models(
+    rows: list[Any], configured_names: set[str]
+) -> list[Any]:
+    """Collapse DS4's served aliases to the configured model identity."""
+
+    selected: list[Any] = []
+    aliases: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        if (
+            not isinstance(row, dict)
+            or row.get("_omlx_discovery") != _OMLX_OPENAI_MODELS_MARKER
+            or row.get("_omlx_owner") != _OMLX_DS4_OWNER
+        ):
+            selected.append(row)
+            continue
+        group = row.get("_omlx_alias_group")
+        if not isinstance(group, str) or not group:
+            selected.append(row)
+            continue
+        aliases.setdefault(group, []).append(row)
+
+    for group_rows in aliases.values():
+        configured = [row for row in group_rows if _model_name(row) in configured_names]
+        if configured:
+            selected.extend(configured)
+            continue
+        selected.append(
+            min(
+                group_rows,
+                key=lambda row: (
+                    0 if _model_name(row) == row.get("_omlx_alias_group") else 1,
+                    0 if str(_model_name(row)).endswith("-chat") else 1,
+                    _model_name(row),
+                ),
+            )
+        )
+    return selected
+
+
 def _external_configured_model(name: str, roles: set[str]) -> bool:
     return bool(
         roles <= {"rerank", "search-embed"}
@@ -962,7 +1074,13 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
     installed_snapshot = (
         runtime_snapshot if provider == "omlx" else _ollama_tags_snapshot()
     )
+    configured_model_roles = _configured_model_roles()
+    configured_names = set(configured_model_roles)
     all_runtime_models = runtime_snapshot.get("models", [])
+    if provider == "omlx" and isinstance(all_runtime_models, list):
+        all_runtime_models = _select_omlx_runtime_models(
+            all_runtime_models, configured_names
+        )
     running_models = (
         [
             row
@@ -972,7 +1090,11 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
         if provider == "omlx" and isinstance(all_runtime_models, list)
         else all_runtime_models
     )
-    installed_models = installed_snapshot.get("models", [])
+    installed_models = (
+        all_runtime_models
+        if provider == "omlx"
+        else installed_snapshot.get("models", [])
+    )
     if not isinstance(running_models, list):
         running_models = []
     if not isinstance(installed_models, list):
@@ -985,7 +1107,7 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
         _model_name(row): row for row in installed_models if _model_name(row)
     }
     roles_by_name: dict[str, set[str]] = {}
-    for name, roles in _configured_model_roles().items():
+    for name, roles in configured_model_roles.items():
         resolved = _resolve_model_name(name, installed_by_name, running_by_name)
         roles_by_name.setdefault(resolved, set()).update(roles)
     names = sorted(set(running_by_name) | set(roles_by_name))
@@ -995,17 +1117,26 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
     external = 0
     loaded_size = 0
     installed_size = 0
+    loaded_size_unknown = 0
+    installed_size_unknown = 0
 
     for name in names:
         installed = installed_by_name.get(name)
         running = running_by_name.get(name)
         roles = roles_by_name.get(name, set())
         configured = bool(roles)
-        installed_size += _numeric_bytes(installed.get("size") if installed else 0)
-        loaded_size += _numeric_bytes(
-            (running.get("size_vram") if isinstance(running, dict) else 0)
-            or (running.get("size") if isinstance(running, dict) else 0)
-        )
+        installed_size_value = installed.get("size") if installed else None
+        loaded_size_value = (
+            running.get("size_vram") if isinstance(running, dict) else None
+        ) or (running.get("size") if isinstance(running, dict) else None)
+        if installed_size_value is None and installed is not None:
+            installed_size_unknown += 1
+        else:
+            installed_size += _numeric_bytes(installed_size_value)
+        if loaded_size_value is None and running is not None:
+            loaded_size_unknown += 1
+        else:
+            loaded_size += _numeric_bytes(loaded_size_value)
         is_external = (
             configured
             and not installed
@@ -1035,18 +1166,30 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
         rows.append(
             {
                 "name": name,
-                "provider": provider,
+                "provider": next(
+                    (
+                        source.get("provider")
+                        for source in (running, installed)
+                        if isinstance(source, dict)
+                        and isinstance(source.get("provider"), str)
+                        and source.get("provider")
+                    ),
+                    provider,
+                ),
                 "status": status,
                 "installed": installed is not None,
                 "running": running is not None,
                 "configured": configured,
                 "roles": sorted(roles, key=_role_sort_key),
-                "size_bytes": _numeric_bytes(
-                    installed.get("size") if installed else None
+                "size_bytes": (
+                    _numeric_bytes(installed_size_value)
+                    if installed_size_value is not None
+                    else None
                 ),
-                "loaded_size_bytes": _numeric_bytes(
-                    (running.get("size_vram") if isinstance(running, dict) else None)
-                    or (running.get("size") if isinstance(running, dict) else None)
+                "loaded_size_bytes": (
+                    _numeric_bytes(loaded_size_value)
+                    if loaded_size_value is not None
+                    else None
                 ),
                 "context_length": running.get("context_length")
                 if isinstance(running, dict)
@@ -1096,6 +1239,8 @@ def _model_status_snapshot(runtime: dict[str, Any] | None = None) -> dict[str, A
             "unused_installed": len(unused_installed),
             "installed_size_bytes": installed_size,
             "loaded_size_bytes": loaded_size,
+            "installed_size_unknown": installed_size_unknown,
+            "loaded_size_unknown": loaded_size_unknown,
         },
     }
 

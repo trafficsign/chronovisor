@@ -9,7 +9,12 @@ TRACE_PROJECTION_SCHEMA: Final = "chronovisor.decision-trace-projection.v3"
 TRACE_SINGLE_AUTHORITY_KIND: Final = "single_model_v1"
 TRACE_STATES: Final = frozenset({"pending", "active", "done", "skipped", "error"})
 TRACE_PHASES: Final = ("trigger", "load", "context", "generate", "validate", "vote")
-_CONTEXT_OPTIONS: Final = (32_768, 65_536, 98_304, 131_072)
+_CONTEXT_OPTIONS: Final = (
+    (65_536, "65K以下"),
+    (131_072, "131K以下"),
+    (196_608, "197K以下"),
+    (262_144, "262K以下"),
+)
 _REASONING_MODES: Final = ("off", "low", "medium", "high")
 _PLAN_ROUTE: Final = (
     "packet",
@@ -341,19 +346,17 @@ def _context_label(value: int | None) -> str:
 
 
 def _context_options(selected: int | None) -> list[dict[str, Any]]:
-    displayed = list(_CONTEXT_OPTIONS)
-    if selected and selected not in displayed:
-        nearest = min(
-            range(len(displayed)), key=lambda index: abs(displayed[index] - selected)
-        )
-        displayed[nearest] = selected
+    upper_bound = next(
+        (tokens for tokens, _ in _CONTEXT_OPTIONS if selected and 0 < selected <= tokens),
+        None,
+    )
     return [
         {
             "tokens": tokens,
-            "label": _context_label(tokens),
-            "selected": tokens == selected,
+            "label": label,
+            "selected": tokens == upper_bound,
         }
-        for tokens in displayed
+        for tokens, label in _CONTEXT_OPTIONS
     ]
 
 

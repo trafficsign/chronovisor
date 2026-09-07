@@ -459,6 +459,117 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         _capture_stepper_visuals(scenarios, Path(visual_dir), tmp_path)
 
 
+def test_context_window_ranges_render_fixed_quarters_and_boundaries(
+    tmp_path: Path,
+) -> None:
+    base = decision_trace_step_scenarios()[0]
+    thresholds = [65_536, 131_072, 196_608, 262_144]
+    labels = ["65K以下", "131K以下", "197K以下", "262K以下"]
+    cases = [
+        ("lower", 65_536, 65_536),
+        ("lower-plus-one", 65_537, 131_072),
+        ("middle", 131_072, 131_072),
+        ("middle-plus-one", 131_073, 196_608),
+        ("upper-middle", 196_608, 196_608),
+        ("upper-middle-plus-one", 196_609, 262_144),
+        ("maximum", 262_144, 262_144),
+        ("over-limit", 262_145, None),
+        ("unset", None, None),
+    ]
+    scenarios = []
+    for case_id, selected, expected in cases:
+        scenario = json.loads(json.dumps(base))
+        scenario["id"] = f"context-{case_id}"
+        frame = scenario["frames"][0]
+        scenario["frames"] = [frame]
+        frame["trace"]["projection"]["context"] = {
+            "selected_tokens": selected,
+            "options": [
+                {
+                    "tokens": tokens,
+                    "label": label,
+                    "selected": tokens == expected,
+                }
+                for tokens, label in zip(thresholds, labels, strict=True)
+            ],
+            "label": (
+                f"required 55K → selected {selected // 1000}K"
+                if selected
+                else "required 55K → selected —"
+            ),
+        }
+        scenarios.append(scenario)
+
+    browser_results: list[dict[str, object]] = []
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        stepper_handler(scenarios, browser_results),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    process = None
+    stderr = ""
+    try:
+        process = subprocess.Popen(
+            [
+                _chrome(),
+                "--headless=new",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-background-networking",
+                "--disable-component-update",
+                "--no-first-run",
+                "--force-prefers-reduced-motion=reduce",
+                "--run-all-compositor-stages-before-draw",
+                "--virtual-time-budget=15000",
+                "--window-size=1586,1200",
+                f"--user-data-dir={tmp_path / 'context-range-profile'}",
+                f"http://127.0.0.1:{server.server_port}/?audit=1",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 35
+        while len(browser_results) < len(scenarios) and time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            time.sleep(0.05)
+        if process.poll() is None:
+            process.terminate()
+        try:
+            _, stderr = process.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            _, stderr = process.communicate(timeout=3)
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+    assert len(browser_results) == len(scenarios), stderr[-4000:]
+    for result, (_, selected, expected) in zip(browser_results, cases, strict=True):
+        options = result["contextOptions"]
+        assert [option["tokens"] for option in options] == thresholds
+        assert [option["label"] for option in options] == labels
+        assert [option["tokens"] for option in options if option["selected"]] == (
+            [expected] if expected is not None else []
+        )
+        assert result["contextSelection"] == (
+            f"required 55K → selected {selected // 1000}K"
+            if selected
+            else "required 55K → selected —"
+        )
+        assert sum(option["selected"] for option in options) <= 1
+
+    if visual_dir := os.environ.get("CHRONOVISOR_DASHBOARD_VISUAL_DIR"):
+        _capture_stepper_visuals(scenarios, Path(visual_dir), tmp_path)
+
+
 def test_stepper_scenarios_are_json_serializable() -> None:
     payload = json.dumps(decision_trace_step_scenarios(), sort_keys=True)
 
