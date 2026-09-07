@@ -3318,6 +3318,143 @@ def test_dashboard_reuses_decision_trace_poll_for_live_consensus_status() -> Non
     assert "MODEL_ACTIVITY_LABELS[activity.phase]" in app
 
 
+def test_dashboard_live_streams_follow_page_visibility_without_duplicates() -> None:
+    client = (dashboard.STATIC_DIR / "app-client.js").read_text(encoding="utf-8")
+    stream_code = (
+        "function closeLiveStreams()"
+        + client.split("function closeLiveStreams()", 1)[1].split(
+            "els.saveModeButtons.forEach", 1
+        )[0]
+    )
+    scenario = f"""
+const vm = require("node:vm");
+const calls = [];
+const instances = [];
+const listeners = {{}};
+const document = {{
+  visibilityState: "hidden",
+  addEventListener: (name, callback) => {{ listeners["document:" + name] = callback; }},
+}};
+const window = {{
+  addEventListener: (name, callback) => {{ listeners["window:" + name] = callback; }},
+  setTimeout: () => 1,
+  clearTimeout: () => {{}},
+  EventSource: null,
+}};
+class FakeEventSource {{
+  static OPEN = 1;
+  static CLOSED = 2;
+  constructor(url) {{
+    this.url = url;
+    this.readyState = 0;
+    this.closed = 0;
+    instances.push(this);
+  }}
+  addEventListener() {{}}
+  close() {{ this.closed += 1; this.readyState = FakeEventSource.CLOSED; }}
+}}
+window.EventSource = FakeEventSource;
+const EventSource = FakeEventSource;
+const sandbox = {{
+  calls, instances, listeners, document, window, EventSource,
+  setProcessingConnection: () => {{}},
+  els: {{ decisionStreamState: {{ textContent: "" }} }},
+}};
+vm.createContext(sandbox);
+vm.runInContext(
+  "let processingEventSource = null;\\n"
+  + "let modelStreamEventSource = null;\\n"
+  + {json.dumps(stream_code)}
+  + '\\nrefresh = () => calls.push("refresh");\\n'
+  + 'refreshDecisionTrace = () => calls.push("decision");\\n'
+  + 'refreshProcessingActivity = () => calls.push("activity");\\n'
+  + "this.__test = {{ connectProcessingActivityStream, connectModelStream, "
+  + "closeLiveStreams, handleVisibilityChange, handlePageShow, resumeLiveStreams }};",
+  sandbox,
+);
+sandbox.__test.connectProcessingActivityStream();
+sandbox.__test.connectModelStream();
+if (sandbox.instances.length !== 0) throw new Error("hidden page opened a stream");
+sandbox.document.visibilityState = "visible";
+sandbox.__test.handlePageShow({{ persisted: false }});
+if (sandbox.instances.length !== 0) throw new Error("initial pageshow opened a stream");
+sandbox.__test.resumeLiveStreams();
+sandbox.__test.resumeLiveStreams();
+if (sandbox.instances.length !== 2) throw new Error("visible resume duplicated streams");
+if (JSON.stringify(sandbox.calls) !== JSON.stringify(["refresh", "decision", "activity", "refresh", "decision", "activity"])) throw new Error("unexpected resume calls");
+sandbox.document.visibilityState = "hidden";
+sandbox.__test.handleVisibilityChange();
+if (!sandbox.instances.every((source) => source.closed === 1)) throw new Error("hidden page kept a stream");
+sandbox.document.visibilityState = "visible";
+sandbox.__test.handleVisibilityChange();
+if (sandbox.instances.length !== 4) throw new Error("visible change did not reconnect");
+sandbox.__test.handlePageShow({{ persisted: true }});
+if (sandbox.instances.length !== 4) throw new Error("persisted pageshow duplicated streams");
+sandbox.__test.closeLiveStreams();
+if (!sandbox.instances.every((source) => source.closed === 1)) throw new Error("pagehide did not close streams");
+process.stdout.write(JSON.stringify({{
+  urls: sandbox.instances.map((source) => source.url),
+  calls: sandbox.calls,
+  closed: sandbox.instances.map((source) => source.closed),
+}}));
+"""
+
+    result = json.loads(_run_node_scenario(scenario).stdout)
+
+    assert result == {
+        "urls": [
+            "/api/activity-stream",
+            "/api/model-stream",
+            "/api/activity-stream",
+            "/api/model-stream",
+        ],
+        "calls": [
+            "refresh",
+            "decision",
+            "activity",
+            "refresh",
+            "decision",
+            "activity",
+            "refresh",
+            "decision",
+            "activity",
+            "refresh",
+            "decision",
+            "activity",
+        ],
+        "closed": [1, 1, 1, 1],
+    }
+
+
+def test_fast_snapshot_does_not_overwrite_a_newer_full_snapshot() -> None:
+    client = (dashboard.STATIC_DIR / "app-client.js").read_text(encoding="utf-8")
+    fast = "async function refreshFast()" + client.split(
+        "async function refreshFast()", 1
+    )[1].split("function refresh()", 1)[0]
+    scenario = f"""
+let hasRenderedFullSnapshot = false;
+const FAST_SNAPSHOT_TIMEOUT_MS = 3000;
+const document = {{ body: {{ dataset: {{ snapshotState: "full" }} }} }};
+const window = {{ setTimeout: () => 1, clearTimeout: () => {{}} }};
+const rendered = [];
+const render = (snapshot) => rendered.push(snapshot);
+let release;
+const body = new Promise(resolve => {{ release = resolve; }});
+const fetch = async () => ({{ ok: true, json: () => body }});
+{fast}
+const pending = refreshFast();
+hasRenderedFullSnapshot = true;
+release({{ stale: true }});
+pending.then(() => {{
+  if (rendered.length || document.body.dataset.snapshotState !== "full") {{
+    throw new Error("late summary overwrote the full snapshot");
+  }}
+  process.stdout.write("preserved");
+}});
+"""
+    assert _run_node_scenario(scenario).stdout == "preserved"
+
+
 def test_decision_trace_poll_pins_until_terminal_render() -> None:
     client = (dashboard.STATIC_DIR / "app-client.js").read_text(encoding="utf-8")
     refresh = (
