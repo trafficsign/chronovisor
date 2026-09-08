@@ -1,0 +1,159 @@
+{
+  "schema_version": "chronovisor.evidence_storage_recall.p0-contract.v1",
+  "kind": "p0-source-bound-review-and-sealed-split-contract",
+  "captured_at": "2026-09-08T13:58:55Z",
+  "scope": {
+    "purpose": "Record the existing source-bound candidate, formal local adjudication, and fresh sealed benchmark contract before a small trial.",
+    "private_payload_recorded": false,
+    "prompt_text_recorded": false,
+    "candidate_text_recorded": false,
+    "raw_ledger_copied": false,
+    "production_mutation": false
+  },
+  "source_snapshot": {
+    "path": "/Users/trafficsign/projects/sandbox/chronovisor-evidence-baseline",
+    "commit": "d652252bf39e744e71472ccf93ce3162f3860ce1",
+    "tree": "284ce250e8c36cb6442965c69b3ae3d9229134a2",
+    "working_tree": "clean"
+  },
+  "inspected_files": [
+    {"path": "src/chronovisor/ops/golden_expand.py", "sha256": "435cf7882d840500858bfff04caa35c939d5690cec404359cb7aade3d04202fa"},
+    {"path": "src/chronovisor/recall/search_label_contract.py", "sha256": "73f8e35e835641151e29826c4f0bb72184baf8b98a3e66ead6c18008c4bbe2fa"},
+    {"path": "src/chronovisor/search/search_eval.py", "sha256": "aa491e58d59194d94dbb99f7a956610efabc7c6d92b83504aa39e2857f46f66d"},
+    {"path": "src/chronovisor/recall/recall_answer_eval.py", "sha256": "6920204f1c16fd1b68c08aae51a25a5dcf8b8dd8b783425296f129e7d0d9d6c3"},
+    {"path": "src/chronovisor/decision/machine_consensus_receipt.py", "sha256": "7e36dd877f7c71cbb1832c8bdbb95d94537049a4f3c519a29c99502f517fa0c7"},
+    {"path": "src/chronovisor/decision/decision_authority.py", "sha256": "71e3bf5cb85cdb24ce4c5910514512232bbc8059e52c6c66d2a73d861abf42c8"},
+    {"path": "src/chronovisor/core/runtime_config.py", "sha256": "73daf8bf1ae03f9f3472a568e0301a51f7ab9fd5e6ba59672baad5d26a23c8c6"},
+    {"path": "src/chronovisor/decision/decision_schema_manifest.py", "sha256": "439156d981b8cf697c3a9ec8dda0e2f54f3d5a3272201a054d04ead0f22014e7"},
+    {"path": "src/chronovisor/decision/decision_router.py", "sha256": "854ca48c4187c8a844f0703e5a2275ce5597fdc6421daf52cc947d7c384faa81"}
+  ],
+  "candidate_contract": {
+    "generation_entrypoints": [
+      "python -m chronovisor.ops.golden_expand --no-write --json",
+      "python -m chronovisor.search.search_eval --build-label-queue --json"
+    ],
+    "accepted_source": "recall_questions",
+    "required_preregistration_fields": [
+      "query",
+      "expected_pages",
+      "source",
+      "source_page",
+      "split",
+      "split_role",
+      "preregistered_at",
+      "candidate_sha256",
+      "page_uid",
+      "content_sha256",
+      "content_byte_length",
+      "projection_policy_sha256"
+    ],
+    "required_values": {
+      "source": "recall_questions",
+      "expected_pages": "exactly [source_page]",
+      "split_role": "search_eval_only_not_answer_benchmark",
+      "projection_policy": "bounded page prefix, <=12000 bytes per page and <=32000 bytes total"
+    },
+    "candidate_state": "reviewed=false; queue_status=pending_review",
+    "auto_promotion": "forbidden",
+    "source_provenance_rule": "A Luna may select or arrange an existing page-authored RQ candidate, but a Luna-authored query must not be relabeled source=recall_questions without a contract change."
+  },
+  "formal_review_contract": {
+    "search_label_cli": "python -m chronovisor.search.search_eval --frontier-review-labels --frontier-votes N --limit N",
+    "search_label_artifact": {
+      "kind": "search_label_verdict",
+      "schema_version": 2,
+      "lane": "search_label",
+      "required_components": ["evidence", "evidence_sha256", "review", "authority"],
+      "approved_label_rule": "review decision=approved and expected_pages/negative_pages/stale_pages exactly equal the candidate buckets",
+      "authority_rule": "authority and current runtime router epoch must compare equal"
+    },
+    "answer_adjudication_function": "chronovisor.recall.recall_answer_eval.adjudicate_machine_search_label_candidates",
+    "answer_adjudication_receipt": {
+      "kind": "search_label_candidate_review",
+      "lane": "recall_answer_adjudication",
+      "subject_kind": "search_label_candidate",
+      "schema_version": 1,
+      "required_subject_fields": [
+        "candidate_preregistration_sha256",
+        "source_packet_sha256",
+        "source_packet",
+        "evidence_sha256",
+        "producer_kind",
+        "producer_model",
+        "producer_policy_sha256",
+        "production_answer_used"
+      ],
+      "decision_schema_required": [
+        "subject_kind",
+        "subject_sha256",
+        "evidence_complete",
+        "reference_independent",
+        "preregistered_before_evaluation",
+        "split_safe"
+      ],
+      "required_decision": "approved with all four boolean safeguards true",
+      "reference_independence_meaning": "Reference evidence is source-projected and does not reuse a production answer or field-on/off outcome; it does not require three judge models.",
+      "artifact_integrity": "DecisionArtifactStore seal, execution fingerprint, authority epoch, and hash-chained receipt must validate."
+    },
+    "current_authority": {
+      "search_label": {
+        "source": "configured_runtime_consensus",
+        "authority_kind": "single_model_v1",
+        "policy": "local_batch/search_label/enabled",
+        "route_count": 1,
+        "route_roles": ["classification.authority"],
+        "route_model": "qwen3.8-flash-next-chat"
+      },
+      "recall_answer_adjudication": {
+        "source": "configured_runtime_consensus",
+        "authority_kind": "single_model_v1",
+        "policy": "consensus/recall_answer_adjudication/enabled",
+        "route_count": 1,
+        "route_roles": ["classification.authority"],
+        "route_model": "qwen3.8-flash-next-chat"
+      },
+      "interpretation": "Luna generation and formal local Qwen adjudication are different stages; current single-model authority is sufficient for this contract."
+    }
+  },
+  "sealed_split_contract": {
+    "source_ledger_function": "build_machine_answer_benchmark_epoch",
+    "source_ledger_artifact": "machine-search-label-answer-source-ledger/schema2",
+    "benchmark_artifact": "independent-answer-benchmark-manifest/schema2",
+    "gold_function": "build_machine_gold_cycle",
+    "split_policy": "page-identity-connected-components-70-20-10-v2; successor epochs use sticky-page-identity-connected-components-70-20-10-v3",
+    "leakage_rule": "page_id/page_uid/content_sha256 connected components remain within one split; predecessor split identities are inherited",
+    "promotion_floors": {"train_clusters": 20, "locked_test_clusters": 20},
+    "evaluation_separation": "source packet is frozen before evaluation; production answer and field outcome are forbidden inputs",
+    "manual94_rule": "Do not re-split the existing manual94 manifest."
+  },
+  "human_review_boundary": {
+    "answer_review_receipt_function": "append_answer_review_receipt",
+    "allowed_kinds": ["gold_entry_review", "scorer_calibration_case_review"],
+    "allowed_reviewer_kinds": ["human_reviewer", "expert_adjudicator"],
+    "search_label_candidate_signing": false,
+    "user_judgment_required": "Only if choosing the human_review gold path or if machine adjudication returns a deterministic auth/oauth/quota/keychain/secret-store boundary. Ordinary label ambiguity is held/retried, not silently converted to user approval."
+  },
+  "runtime_state": {
+    "candidate_queue": {"path": "/Users/trafficsign/.chronovisor/recall/search-label-queue.jsonl", "rows": 56140, "recall_questions_rows": 55990, "validated_preregistered_sample": 40},
+    "answer_consensus_ledger": {"path": "/Users/trafficsign/.chronovisor/recall/answer-consensus-receipts.jsonl", "exists": false, "initial_rows": 0},
+    "answer_review_ledger": {"path": "/Users/trafficsign/.chronovisor/recall/answer-review-receipts.jsonl", "exists": false, "initial_rows": 0},
+    "fresh_benchmark": {"path": "/Users/trafficsign/.chronovisor/runtime/recall-answer-eval/benchmark.json", "exists": false},
+    "fresh_split_manifest": {"path": "/Users/trafficsign/.chronovisor/runtime/recall-answer-eval/split-manifest.json", "exists": false}
+  },
+  "small_trial_contract": {
+    "max_items": 20,
+    "write_scope": "isolated trial ledger and DecisionArtifactStore only; no search-golden or production benchmark pointer",
+    "preflight": "Run adjudicate_machine_search_label_candidates(..., dry_run=True) and inspect only status/pending/stale counts before allowing model calls.",
+    "postflight": "Validate the trial chain and each receipt against its source packet; run build_machine_answer_benchmark_epoch(..., dry_run=True) to inspect split counts."
+  },
+  "conclusion": {
+    "formal_source_bound_qwen_review_supported": true,
+    "new_quorum_required": false,
+    "fresh_60_dev_120_holdout_ready_now": false,
+    "blockers": [
+      "Current answer-consensus ledger has no receipts.",
+      "A 20-receipt trial is not yet a promotion-ready benchmark; train and locked-test cluster floors must be met in a fresh epoch.",
+      "Only page-authored recall_questions candidates satisfy the existing machine packet contract; arbitrary Luna-authored queries need a separate source kind/contract."
+    ]
+  }
+}

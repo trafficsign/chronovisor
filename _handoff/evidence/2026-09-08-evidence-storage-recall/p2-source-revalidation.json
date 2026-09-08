@@ -1,0 +1,26 @@
+{
+  "kind": "p2_current_transform_revalidation",
+  "observed_at": "2026-09-08T14:18:11.989081+00:00",
+  "counts": {
+    "input_rows": 7793,
+    "records": 146912,
+    "validated": 7785,
+    "lifecycle_ineligible": 6,
+    "revision_changed_since_inventory": 2
+  },
+  "elapsed_seconds": 72.682,
+  "source_inventory_sha256": "2730219d3fc0d100c26e4579eb4670295d987ade9e94d9a11443dae80ea610c5",
+  "source_code_sha256": "59ba699e30406495e3a64e3e361582077477ab32d5ec5a3030b78095a7971877",
+  "private_results_sha256": "554d3b4f3c50d9dc46844a61447f1ee6faced1b37b7eaa3576dd85634907b46a",
+  "private_results_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/2026-09-08-p2-revalidation.json",
+  "validator_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/revalidate_page_projection.py",
+  "validator_sha256": "aced3fa756954a1c9512210fc5bf9e937d998cb37c90a7e4ffbb06f7de61512e",
+  "model_calls": 0,
+  "source_writes": 0,
+  "index_writes": 0,
+  "projection_cas_writes": 0,
+  "frozen_corpus": false,
+  "quality_benchmark": false,
+  "backfill_completion": false,
+  "scope": "Previously inventoried sources whose current digest still matches; changed sources are counted separately, never silently substituted."
+}

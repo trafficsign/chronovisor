@@ -127,3 +127,17 @@ def test_resolve_fail_closed_for_stale_or_non_chunk_references() -> None:
         "span",
         (valid,),
     ) == ()
+
+
+def test_invalid_runtime_values_and_mixed_generations_do_not_escape_resolver() -> None:
+    uid = new_page_uid()
+    source = _canonical_source("first\n\nsecond\n", uid=uid)
+    valid = _evidence(source, uid, 0)
+    for invalid in (
+        replace(valid, doc_id=[]),
+        replace(valid, score=10**1000),
+        replace(valid, score="0.9"),
+    ):
+        assert resolve_semantic_evidence(source, "span", (invalid,)) == ()
+    other = replace(_evidence(source, uid, 1), generation_id="other-generation")
+    assert resolve_semantic_evidence(source, "span", (valid, other)) == ()

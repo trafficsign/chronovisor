@@ -1,0 +1,68 @@
+{
+  "schema_version": "chronovisor.evidence_storage_recall.p6-baseline-failures.v1",
+  "kind": "detached-baseline-five-nodeid-comparison",
+  "captured_at": "2026-09-08T14:27:00Z",
+  "scope": {
+    "purpose": "Determine whether the five residual full-suite failures predate the current candidate work.",
+    "model_calls": false,
+    "runtime_services_stopped": false,
+    "code_changes": false,
+    "raw_test_output_recorded": false
+  },
+  "command": "/Users/trafficsign/projects/personal/chronovisor/.venv/bin/python -m pytest -q --tb=short <five specified nodeids>",
+  "baseline": {
+    "path": "/Users/trafficsign/projects/sandbox/chronovisor-evidence-baseline",
+    "commit": "d652252bf39e744e71472ccf93ce3162f3860ce1",
+    "tree": "284ce250e8c36cb6442965c69b3ae3d9229134a2",
+    "working_tree": "clean",
+    "passed": 1,
+    "failed": 4,
+    "duration_seconds": 1.72
+  },
+  "current_tree": {
+    "path": "/Users/trafficsign/projects/personal/chronovisor",
+    "commit": "b2912bb800871ce94410d2754f71fce68548c9df",
+    "tree": "1a181f4781cc92e2f923ed5103bf52ebc1e2ec17",
+    "working_tree": "dirty_unrelated_changes_preserved",
+    "passed": 1,
+    "failed": 4,
+    "duration_seconds": 1.32
+  },
+  "nodeids": {
+    "tests/test_launchd_portability.py::test_contract_manifest_and_production_files_have_no_personal_home": {
+      "baseline": "failed",
+      "current": "failed",
+      "cause": "Both trees report two tracked portability offenders: scripts/sawfwair_quant_benchmark.py and scripts/vq32_benchmark.py contain the personal home prefix /Users/trafficsign.",
+      "classification": "preexisting_baseline_failure"
+    },
+    "tests/test_llm_config.py::test_repository_example_has_representative_local_role_map": {
+      "baseline": "failed",
+      "current": "failed",
+      "cause": "The repository example's Nemotron providers declare mps/cpu, while ambient ~/.chronovisor search embedding settings resolve mlx/mlx; build_llm_runtime rejects the device mismatch as llm_config_schema_invalid.",
+      "classification": "preexisting_environment_contract_mismatch"
+    },
+    "tests/test_omlx_service_scripts.py::test_examples_use_model_id_discovered_from_stable_nested_layout": {
+      "baseline": "failed",
+      "current": "failed",
+      "cause": "config.toml.example uses the logical model qwen3.8-flash-next-chat and does not contain the expected stable nested-layout model ID Qwen3.8-Flash-Next-oQ4e-mtp.",
+      "classification": "preexisting_example_contract_failure"
+    },
+    "tests/test_raw_replay.py::test_safe_replay_decision_is_not_blocked_by_confidence_metadata": {
+      "baseline": "passed",
+      "current": "passed",
+      "cause": "No residual failure; safe replay confidence metadata guard passes in both trees.",
+      "classification": "baseline_and_current_pass"
+    },
+    "tests/test_runtime_config.py::test_uvx_runtime_command_uses_pushed_github_source": {
+      "baseline": "failed",
+      "current": "failed",
+      "cause": "The ambient runtime source is configured as the pinned SSH GitHub URL with commit 873c2a3bc1743bc7a2fe309067904e903870fb1d, while this test still asserts the unpinned repository URL.",
+      "classification": "preexisting_baseline_test_expectation_mismatch"
+    }
+  },
+  "comparison": {
+    "same_nodeid_statuses": true,
+    "candidate_work_caused_new_failure_in_this_set": false,
+    "repair_scope": "none; failures are recorded for the parent plan and are outside this bounded comparison."
+  }
+}

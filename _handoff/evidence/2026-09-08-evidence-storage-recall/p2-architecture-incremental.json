@@ -1,0 +1,216 @@
+{
+  "schema": "chronovisor.architecture-incremental-receipt.v1",
+  "observed_at": "2026-09-08T23:29:05+09:00",
+  "scope": {
+    "mode": "targeted_p2_site_migration",
+    "baseline_commit": "8a1645018b81a55aa7c80d71736e98d13e577289",
+    "source_scan": "scripts/architecture_baseline.py",
+    "included_modules": [
+      "chronovisor.research.page_evidence_projection",
+      "chronovisor.research.page_section_semantic_adapter"
+    ],
+    "no_baseline_refresh": true,
+    "no_contract_hash_refresh": true,
+    "no_preexisting_drift_registration": true,
+    "new_cross_domain_edge": false,
+    "retired_edge_preserved": "arch:b38bed04c89db759cb85b0b6944458ea38320f21d1c9e43155775e339493d2e2"
+  },
+  "delta": {
+    "added_site_ids": [
+      "arch:2d5105e3bc034bc57faff695e4b09ffa55dda86913286c536b39b8a3396ef8d2",
+      "arch:4354af68f40381fb5695d4a4ae17a7d52c65d1ff18eaf11a73b87ac3f89032bd",
+      "arch:44f28ccab247ce159b2c3f553c2659570b4f08e0176b9fa0ee9f0f87b513a88f",
+      "arch:48612bfb6786262c286143d19b8363f08e8743567fbd62825e10d8fd6f3fcce4",
+      "arch:54b746413ea18157adba363a36209adea4463d29bea4ff8d8d965fb601002c1b",
+      "arch:565f679786775cbfacfc86d61418b77624f32476a4aa0c91f1786f29906d8190",
+      "arch:649f4f3869a411e952de8b4ce10733b4a20a9cea0a5506601604d768aaa42a62",
+      "arch:93c21613c38551f0ed756fe6cc8bad227c979faa1d40f47263f03b6f40b97459",
+      "arch:a0379d197bc134c60b7b1955ec7c92cd6d70ede3a2cff880b7b35c3582b54dcf",
+      "arch:bffac978f4a0c2ad73d594f8089faaf19ccc806157c7fb79c2ecbc170965aeaf",
+      "arch:d38d49fb4fd9b01228f81155f9e02826fc10239078690a025cb826ee0c801493"
+    ],
+    "removed_site_ids": [],
+    "added_sites": [
+      {
+        "semantic_id": "arch:2d5105e3bc034bc57faff695e4b09ffa55dda86913286c536b39b8a3396ef8d2",
+        "source_module": "chronovisor.research.page_evidence_projection",
+        "scope": "<module>",
+        "line": 24,
+        "target_module": "chronovisor.search.research_types",
+        "symbols": [
+          "EvidenceArtifact"
+        ],
+        "content_sha256": "defcd2c48f33ac11a91f015cbcc34e8d8656b1cf612e194fedf5ba3e7bcfd79a"
+      },
+      {
+        "semantic_id": "arch:4354af68f40381fb5695d4a4ae17a7d52c65d1ff18eaf11a73b87ac3f89032bd",
+        "source_module": "chronovisor.research.page_evidence_projection",
+        "scope": "<module>",
+        "line": 21,
+        "target_module": "chronovisor.core.page_identity",
+        "symbols": [
+          "normalize_page_uid"
+        ],
+        "content_sha256": "de2e5352512066404e744b4703a026ff6a02981b1bcbcd088470e9c946907af1"
+      },
+      {
+        "semantic_id": "arch:44f28ccab247ce159b2c3f553c2659570b4f08e0176b9fa0ee9f0f87b513a88f",
+        "source_module": "chronovisor.research.page_section_semantic_adapter",
+        "scope": "<module>",
+        "line": 21,
+        "target_module": "chronovisor.core.store",
+        "symbols": [
+          "SYSTEM_DIR"
+        ],
+        "content_sha256": "6ad658990991936dcc2faf09342b9502cab73d1f710d016f79bac6e55ab5b5b5"
+      },
+      {
+        "semantic_id": "arch:48612bfb6786262c286143d19b8363f08e8743567fbd62825e10d8fd6f3fcce4",
+        "source_module": "chronovisor.research.page_evidence_projection",
+        "scope": "<module>",
+        "line": 23,
+        "target_module": "chronovisor.search.research_store",
+        "symbols": [
+          "ResearchStore"
+        ],
+        "content_sha256": "fba483f4da86775e8ce91fe45f6c3350dd56b44f293d53189268deba70632c00"
+      },
+      {
+        "semantic_id": "arch:54b746413ea18157adba363a36209adea4463d29bea4ff8d8d965fb601002c1b",
+        "source_module": "chronovisor.research.page_section_semantic_adapter",
+        "scope": "<module>",
+        "line": 19,
+        "target_module": "chronovisor.core.semantic_evidence",
+        "symbols": [
+          "SourcePassage"
+        ],
+        "content_sha256": "4a80f4051893a59c12b71cd536c1983d0cb7509886883977b3280f923f3455a6"
+      },
+      {
+        "semantic_id": "arch:565f679786775cbfacfc86d61418b77624f32476a4aa0c91f1786f29906d8190",
+        "source_module": "chronovisor.research.page_section_semantic_adapter",
+        "scope": "<module>",
+        "line": 17,
+        "target_module": "chronovisor.core.canonical_document",
+        "symbols": [
+          "parse_document"
+        ],
+        "content_sha256": "471cc8742256f3c1420bbdce03014dc3e82ae905e3db881794ef3a412d34a0ed"
+      },
+      {
+        "semantic_id": "arch:649f4f3869a411e952de8b4ce10733b4a20a9cea0a5506601604d768aaa42a62",
+        "source_module": "chronovisor.research.page_evidence_projection",
+        "scope": "<module>",
+        "line": 19,
+        "target_module": "chronovisor.core.canonical_document",
+        "symbols": [
+          "CanonicalDocumentError",
+          "parse_document"
+        ],
+        "content_sha256": "c60f607e608c26d2b2a80c4573c43c39274defde9f79fd30bba0e179ca9f3229"
+      },
+      {
+        "semantic_id": "arch:93c21613c38551f0ed756fe6cc8bad227c979faa1d40f47263f03b6f40b97459",
+        "source_module": "chronovisor.research.page_evidence_projection",
+        "scope": "<module>",
+        "line": 22,
+        "target_module": "chronovisor.core.search_types",
+        "symbols": [
+          "tokenize"
+        ],
+        "content_sha256": "0cbd0c1418cbcaee014c706fca032a9a153a6090a7fcbc7d3e09a16b916dcebc"
+      },
+      {
+        "semantic_id": "arch:a0379d197bc134c60b7b1955ec7c92cd6d70ede3a2cff880b7b35c3582b54dcf",
+        "source_module": "chronovisor.research.page_evidence_projection",
+        "scope": "<module>",
+        "line": 20,
+        "target_module": "chronovisor.core.canonical_json",
+        "symbols": [
+          "canonical_json_line_bytes_strict"
+        ],
+        "content_sha256": "ea7a8aea2236c966e33cf763f7fc380b9003cba1308b42288706ad38e2ee34db"
+      },
+      {
+        "semantic_id": "arch:bffac978f4a0c2ad73d594f8089faaf19ccc806157c7fb79c2ecbc170965aeaf",
+        "source_module": "chronovisor.research.page_section_semantic_adapter",
+        "scope": "<module>",
+        "line": 18,
+        "target_module": "chronovisor.core.search_types",
+        "symbols": [
+          "SemanticEvidence"
+        ],
+        "content_sha256": "9511b0a5aab4cbcb18cb0e36aa4bf313cff1b2ef5733d728e09bf4795fb8189e"
+      },
+      {
+        "semantic_id": "arch:d38d49fb4fd9b01228f81155f9e02826fc10239078690a025cb826ee0c801493",
+        "source_module": "chronovisor.research.page_section_semantic_adapter",
+        "scope": "<module>",
+        "line": 20,
+        "target_module": "chronovisor.core.semantic_index",
+        "symbols": [
+          "SemanticDocument"
+        ],
+        "content_sha256": "ecae326702cdc354c3fb0ee2389d3784d89c098b39bbfa5b3ca57c84019cae23"
+      }
+    ],
+    "edge_delta": {
+      "baseline_count": 44,
+      "current_count": 44,
+      "added": [],
+      "removed": []
+    }
+  },
+  "ledger_update": {
+    "target_files": [
+      "docs/refactoring/architecture-exception-baseline.json",
+      "docs/refactoring/architecture-exceptions.json",
+      "_handoff/evidence/2026-09-08-evidence-storage-recall/p2-architecture-incremental.json"
+    ],
+    "active_exception_ids_before": 44,
+    "active_exception_ids_after": 44,
+    "active_cross_domain_sites_before": 1495,
+    "active_cross_domain_sites_after": 1506,
+    "retired_cross_domain_site_ids_before": 1322,
+    "retired_cross_domain_site_ids_after": 1322,
+    "edge_count_before": 44,
+    "edge_count_after": 44,
+    "updated_edges": {
+      "research->core": {
+        "sites_before": 25,
+        "sites_after": 34
+      },
+      "research->search": {
+        "sites_before": 22,
+        "sites_after": 24
+      }
+    },
+    "baseline_sha256": "3a264abf0177393c2ebc5d41b4b7e0a52952b42e664ba043c6080f4219a835ec"
+  },
+  "verification": {
+    "json_parse": "pass",
+    "seed_ledger_canonical_hash_match": "pass",
+    "active_retired_disjoint": "pass",
+    "ledger_site_ids_unique": "pass",
+    "targeted_delta_against_p1_baseline": "pass: added 11, removed 0",
+    "baseline_source_import_sites": 1505,
+    "current_source_import_sites": 1516,
+    "preexisting_current_unmatched_site_ids": 11,
+    "preexisting_stale_ledger_site_ids": 1,
+    "new_edge_guard": "pass: no research->recall edge; existing drift remains guarded",
+    "architecture_checks": "pytest -q tests/test_architecture_baseline.py tests/test_large_function_policy.py: 9 failed, 21 passed; same 9 known baseline failures, no new edge failure",
+    "guard_generate_exceptions": "rejected existing seed drift (exit 1); no full refresh attempted",
+    "guard_drift_summary": {
+      "preexisting_unmatched_site_ids": 11,
+      "preexisting_stale_ledger_site_ids": 1,
+      "active_seed_count": 1506,
+      "detected_current_site_count": 1516
+    }
+  },
+  "runtime": {
+    "production_restarted": false,
+    "published": false,
+    "provider_requested": false,
+    "p2_registration": true
+  }
+}

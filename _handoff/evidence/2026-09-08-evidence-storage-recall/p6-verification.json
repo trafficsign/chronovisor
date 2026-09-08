@@ -1,0 +1,102 @@
+{
+  "phase": "P6",
+  "status": "partial_verification_not_full_ci_pass",
+  "full_suite_attempt": {
+    "passed": 6231,
+    "failed": 15,
+    "deselected": 57,
+    "duration_seconds": 1773.28,
+    "interrupted": true,
+    "reason": "Existing semantic defer replay test remained CPU-bound; baseline d652252 reproduced timeout at 20 seconds (faulthandler in raw_segment).",
+    "test": "tests/test_semantic_defer_replay.py::test_existing_queue_row_does_not_cooldown_reopen_or_launch_while_deferred[pending]",
+    "failed_nodes_at_attempt_time": [
+      "tests.test_architecture_baseline::test_baseline_labels_repository_contract_hash_semantics",
+      "tests.test_architecture_baseline::test_current_architecture_does_not_weaken_baseline",
+      "tests.test_architecture_baseline::test_architecture_fitness_allows_and_reports_package_edge_removal",
+      "tests.test_architecture_baseline::test_current_exception_ledger_seed_and_schema_inventory_are_exact",
+      "tests.test_architecture_baseline::test_existing_edge_replacement_site_can_be_seeded_with_exact_ledger_match",
+      "tests.test_architecture_baseline::test_site_gate_rejects_unrecorded_stale_duplicate_identity_content_and_count",
+      "tests.test_architecture_baseline::test_site_deletion_retires_monotonically_and_reintroduction_is_rejected",
+      "tests.test_architecture_baseline::test_exception_metadata_routes_to_real_owner_and_removal_campaign",
+      "tests.test_architecture_baseline::test_exception_artifacts_are_fresh_and_head_independent",
+      "tests.test_large_function_policy::test_large_function_policy_covers_every_current_large_function",
+      "tests.test_launchd_portability::test_contract_manifest_and_production_files_have_no_personal_home",
+      "tests.test_llm_config::test_repository_example_has_representative_local_role_map",
+      "tests.test_omlx_service_scripts::test_examples_use_model_id_discovered_from_stable_nested_layout",
+      "tests.test_raw_replay::test_safe_replay_decision_is_not_blocked_by_confidence_metadata",
+      "tests.test_runtime_config::test_uvx_runtime_command_uses_pushed_github_source"
+    ],
+    "note": "Attempt started before final architecture migration; final scoped reruns supersede those intermediate architecture counts."
+  },
+  "remaining_tests": {
+    "selection": "top-level test modules alphabetically after test_semantic_defer_replay.py; deferred replay module remainder not covered",
+    "files": 25,
+    "passed": 282,
+    "failed": 0,
+    "seconds": 7.41
+  },
+  "latest_targeted": {
+    "source_and_isolated_adapter_passed": 21,
+    "broader_source_recall_projection_passed": 319,
+    "reranker_source_boundary_passed": 59
+  },
+  "static": {
+    "ruff": "passed",
+    "mypy": "94 files passed",
+    "core_import_boundary": "kept"
+  },
+  "private_logs": {
+    "full-suite.log": {
+      "path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/verification/full-suite.log",
+      "sha256": "8365d9620554e5419288ddb79000577ccd9379458642178e1e57af63f416a9fe"
+    },
+    "full-suite.xml": {
+      "path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/verification/full-suite.xml",
+      "sha256": "841197c42cc070fee1211faf3dab7e6496d9338607994b1df67f518d0aded5d1"
+    },
+    "remaining-suite.log": {
+      "path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/verification/remaining-suite.log",
+      "sha256": "93bf66dc92e7c033fe15b498ed7785d1c44df32bff166076c9cc9d0d820f95f3"
+    },
+    "remaining-suite.xml": {
+      "path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/verification/remaining-suite.xml",
+      "sha256": "eeb21e651928382a3130bba92ab815f5c8d1c93560f2763947921a4998a5efa2"
+    },
+    "remaining-test-files.json": {
+      "path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/verification/remaining-test-files.json",
+      "sha256": "d96cb16dd7c9126db1b88ea2ca172322f9880cdb32fe6a57333d36359dcaae68"
+    },
+    "baseline-defer-timeout.log": {
+      "path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/verification/baseline-defer-timeout.log",
+      "sha256": "ddc34f9eb9c80c2fac335734120418727278bb3cdb1f6ad4f9b7196b8b42dcee"
+    }
+  },
+  "no_quality_adoption_claim": true,
+  "production_deployed": false,
+  "cleanup": {
+    "isolated_index_and_test_output_dir_removed": "/Users/trafficsign/projects/sandbox/chronovisor-evidence-smoke",
+    "removed_bytes": 946907435,
+    "private_verification_logs_retained": true,
+    "baseline_worktree": "Removed after both baseline comparison tasks completed; detached d652252 remains available in Git."
+  },
+  "final_failure_triage": {
+    "architecture_and_large_function": {
+      "baseline_failed": 9,
+      "current_failed": 9,
+      "current_passed": 21,
+      "receipt": "p2-architecture-incremental.json"
+    },
+    "other_selected_tests": {
+      "baseline_failed": 4,
+      "current_failed": 4,
+      "baseline_passed": 1,
+      "current_passed": 1,
+      "receipt": "p6-baseline-failures.json"
+    },
+    "transient_or_order_dependent_unresolved": [
+      "test_safe_replay_decision_is_not_blocked_by_confidence_metadata failed in broad suite, passed on baseline/current scoped rerun; cause not established."
+    ],
+    "intermediate_architecture_failure_resolved": "retirement-history fixed value updated; latest scoped architecture comparison has no additional failure",
+    "known_full_ci_pass": false
+  }
+}

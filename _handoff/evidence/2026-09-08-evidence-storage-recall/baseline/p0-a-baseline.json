@@ -1,0 +1,250 @@
+{
+  "schema_version": "chronovisor.evidence_storage_recall.p0-baseline.v1",
+  "kind": "p0-a-current-page-aggregation-baseline",
+  "captured_at": "2026-09-08T13:39:35Z",
+  "scope": {
+    "purpose": "Freeze the existing A evaluation before candidate storage changes.",
+    "private_payload_recorded": false,
+    "prompt_text_recorded": false,
+    "response_text_recorded": false,
+    "raw_logs_copied": false
+  },
+  "source_snapshot": {
+    "path": "/Users/trafficsign/projects/sandbox/chronovisor-evidence-baseline",
+    "commit": "d652252bf39e744e71472ccf93ce3162f3860ce1",
+    "tree": "284ce250e8c36cb6442965c69b3ae3d9229134a2",
+    "working_tree": "clean",
+    "note": "Detached comparison snapshot; current dirty R6 and candidate files were not used."
+  },
+  "runtime": {
+    "root": "/Users/trafficsign/.chronovisor",
+    "config": {
+      "path": "/Users/trafficsign/.chronovisor/config.toml",
+      "bytes": 17106,
+      "sha256": "b8597c103f90e6fc8574437e38a87317ec4b05bfa242cccab05179757cdfc2eb"
+    },
+    "effective_recall_policy": {
+      "max_context_chars": 3000,
+      "max_state_context_chars": 1600,
+      "max_total_context_chars": 4602,
+      "max_pages": 3,
+      "max_queries": 3,
+      "total_timeout_ms": 4000,
+      "deterministic_fallback_reserve_ms": 600,
+      "context_style": "cards",
+      "gate_mode": "evidence",
+      "semantic": true,
+      "judge_mode": "auto"
+    }
+  },
+  "inputs": [
+    {
+      "path": "/Users/trafficsign/.chronovisor/recall/recall-log.jsonl",
+      "lines": 16683,
+      "bytes": 90646257,
+      "sha256": "063dc484502232b2c6b7713553d14c088aaaddb4af66fadbf2881cf44861708f"
+    },
+    {
+      "path": "/Users/trafficsign/.chronovisor/recall/feedback.jsonl",
+      "lines": 23408,
+      "bytes": 89171071,
+      "sha256": "62c29f7b2ff2e656c56b37fa4a3195b984ae392ef2f629509d057f7f251e16c5"
+    },
+    {
+      "path": "/Users/trafficsign/.chronovisor/recall/search-golden.jsonl",
+      "lines": 8022,
+      "bytes": 3586843,
+      "sha256": "f6325c5054d3c7d75db8acdabfe59fe41eaa18856852cee9b91796d860510d57"
+    },
+    {
+      "path": "/Users/trafficsign/.chronovisor/recall/answer-episodes.jsonl",
+      "lines": 2150,
+      "bytes": 55869401,
+      "sha256": "762098d3edfb859f40dbe623dededb067286af83546f9dc3c8f2cbbb54c4f402"
+    },
+    {
+      "path": "/Users/trafficsign/.chronovisor/recall/search-policy.json",
+      "bytes": 11303,
+      "sha256": "6744c973a9eec8ba777d5480cef43e1f78336dc22ae33aff41b0949273cb656f"
+    }
+  ],
+  "evaluation_contract": {
+    "variant": "A",
+    "description": "Current page aggregation and injection; no chunk/evidence-storage candidate change.",
+    "selection": {
+      "limit": 60,
+      "method": "stable-kind-balanced",
+      "available_examples": 18500,
+      "selected_examples": 60,
+      "selection_sha256": "f36d8f52961eaf199bca0576c88dd48115d01579f316759504a6c74424b72789"
+    },
+    "replay_command": "PYTHONPATH=/Users/trafficsign/projects/sandbox/chronovisor-evidence-baseline/src CHRONOVISOR_ROOT=/Users/trafficsign/.chronovisor /Users/trafficsign/projects/personal/chronovisor/.venv/bin/python -m chronovisor.recall.recall_eval --limit 60 --json",
+    "no_replay_sanity_command": "PYTHONPATH=/Users/trafficsign/projects/sandbox/chronovisor-evidence-baseline/src CHRONOVISOR_ROOT=/Users/trafficsign/.chronovisor /Users/trafficsign/projects/personal/chronovisor/.venv/bin/python -m chronovisor.recall.recall_eval --no-replay --limit 60 --json",
+    "dataset_authority": {
+      "feedback_derived_examples": 18500,
+      "active_search_authority_examples": 96,
+      "active_search_authority_split": {
+        "dev": 16,
+        "locked-test": 23,
+        "train": 57
+      },
+      "search_golden_rows": 8022,
+      "search_golden_generated_candidates": 7926,
+      "answer_episode_rows": 2150,
+      "answer_episode_verified_binding_status": 898,
+      "answer_episode_authority_eligible_exact_used_subset": 2,
+      "answer_episode_eligible_split": {
+        "train": 2,
+        "dev": 0,
+        "holdout": 0,
+        "locked-test": 0
+      },
+      "target_dev": 60,
+      "target_holdout": 120,
+      "target_status": "unavailable_without_new_independent_review",
+      "reason": "Generated recall_questions require an approved current-authority decision_artifact; verified answer bindings mostly have exact_used_subset=false and all episodes are unassigned."
+    },
+    "replay_metrics": {
+      "examples": 60,
+      "positives": 42,
+      "false_positives": 3,
+      "recall_at_1": 0.0,
+      "recall_at_3": 0.023809523809523808,
+      "mrr": 0.011904761904761904,
+      "waste_injection_rate": 0.0,
+      "avg_pages": 2.6666666666666665,
+      "decision_counts": {
+        "read": 54,
+        "none": 6
+      },
+      "latency_ms": {
+        "p50": 1632.5,
+        "p95": 3405.0,
+        "max": 3410.0
+      }
+    },
+    "no_replay_label_sanity": {
+      "examples": 60,
+      "positives": 42,
+      "recall_at_1": 0.6904761904761905,
+      "recall_at_3": 0.6904761904761905,
+      "mrr": 0.6904761904761905,
+      "latency_ms": {
+        "p50": 0.0,
+        "p95": 0.0,
+        "max": 0.0
+      },
+      "interpretation": "Injected-page label sanity only; not a retrieval result."
+    },
+    "bounded_channel_breakdown": {
+      "positive_examples": 42,
+      "expected_absent_from_all_channels": 20,
+      "expected_present_in_one_or_more_channels": 22,
+      "expected_present_but_not_injected": 21,
+      "final_hit_any": 1,
+      "channel_presence_overlapping_counts": {
+        "anchor": 6,
+        "lexical": 13,
+        "semantic": 15,
+        "graph": 7
+      },
+      "channel_present_but_not_injected_overlapping_counts": {
+        "anchor": 5,
+        "lexical": 12,
+        "semantic": 14,
+        "graph": 6
+      },
+      "search_mode": {
+        "hybrid": 54,
+        "bm25-fallback": 4
+      },
+      "status_decision": {
+        "ok:read": 54,
+        "degraded:none": 4,
+        "skipped:none": 2
+      },
+      "fallback_or_budget": 4,
+      "authority_or_identity_reason_observed": 0,
+      "interpretation": "Channel overlap is not mutually exclusive. The current receipt does not expose a verified source-loss versus post-candidate filtering, score, or authority attribution for the 21 candidates; instrument candidate-to-verified-to-context transitions in P0 before using this as a quality diagnosis."
+    }
+  },
+  "existing_absolute_lower_bound": {
+    "artifact_path": "/Users/trafficsign/.chronovisor/runtime/search-eval/recall-field-locked-e2e.json",
+    "artifact_bytes": 1825,
+    "artifact_sha256": "c5e60ca7bf914bd983238a545af10de6e9e4882e85993f50be3d173620468c0b",
+    "manifest_path": "/Users/trafficsign/.chronovisor/runtime/search-eval/manual-94-manifest.json",
+    "manifest_bytes": 52155,
+    "manifest_sha256": "2c15ac6e590ef5d06489403e6f16f5a1b530f4b82976c5320cd75f750bdff915",
+    "examples": 94,
+    "split": {
+      "dev": 16,
+      "locked-test": 22,
+      "train": 56
+    },
+    "metrics": {
+      "recall_at_5": 0.5492957746478874,
+      "recall_at_20": 0.7605633802816901,
+      "negative_hit_rate_at_20": 0.14285714285714285,
+      "processor_related_recall": 0.6056338028169014,
+      "processor_precision": 1.0,
+      "rich_precision": 1.0,
+      "pointer_precision": 1.0,
+      "latency_ms": {
+        "p50": 429.0,
+        "p95": 489.0,
+        "max": 576.0
+      },
+      "precision_lower_95": 0.92444
+    },
+    "gates_all_true": true,
+    "snapshot_sha256": "1fd214ef956c97278ae88825b35d8e54f931ac7a512b2dfe4c8459c0787899fb",
+    "interpretation": "Historical pinned 94-case retrieval/processor lower bound on its own sealed corpus; retain its gates, but do not compare directly to the feedback-derived A60 or call it proof of the new storage design."
+  },
+  "synthetic_assets_not_real_holdout": [
+    {
+      "path": "tests/fixtures/research_holdout.jsonl",
+      "lines": 6,
+      "bytes": 3153,
+      "sha256": "ddc50bdf899f75f0f73ec34dff16dc76ae1ceb19d616bf221ea6f289c909fc9e",
+      "kind": "test fixture"
+    },
+    {
+      "path": "tests/fixtures/recall_processor_cases.json",
+      "lines": 39,
+      "bytes": 1504,
+      "sha256": "edf131c1a04dead29812b9767aea5d55dfc19f37a505e98df583e3263a5b51dd",
+      "kind": "synthetic processor fixture"
+    },
+    {
+      "path": "tests/fixtures/recall_reranker_japanese.json",
+      "lines": 942,
+      "bytes": 31028,
+      "sha256": "22c9cab80a1bafe8b7e5f122d5bb949acf3e0385a871449a8eb9e77f08e939af",
+      "kind": "synthetic_diagnostic Japanese reranker fixture"
+    }
+  ],
+  "graph_coverage": {
+    "project": "Users-trafficsign-projects-personal-chronovisor",
+    "generation": "2026-09-08T13:37:25Z",
+    "paths": [
+      "scripts/recall_r7_harness.py",
+      "scripts/recall_r8_harness.py",
+      "src/chronovisor/recall/recall_eval.py",
+      "src/chronovisor/recall/recall_answer_eval.py",
+      "src/chronovisor/ops/golden_expand.py",
+      "src/chronovisor/recall/search_label_contract.py",
+      "src/chronovisor/recall/recall_growth.py",
+      "src/chronovisor/decision/recall_policy_contract.py",
+      "src/chronovisor/core/runtime_config.py"
+    ],
+    "status": "no_recorded_issue",
+    "freshness": "metadata_match",
+    "caveat": "Best-effort graph coverage; source was read for the cited contracts."
+  },
+  "conclusion": {
+    "p0_a_replay_ready": true,
+    "p0_independent_60_dev_120_holdout_ready": false,
+    "p1_quality_claim_ready": false,
+    "next_contract_step": "Keep this A receipt immutable; use P1 smoke only as storage identity/injection evidence, then freeze a new source-bound independent review cohort before any A/B/C quality adoption decision."
+  }
+}

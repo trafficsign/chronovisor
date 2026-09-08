@@ -384,11 +384,14 @@ def build_generation(
     batch_size: int,
     root: Path = SEMANTIC_ROOT,
     repo_commit: str | None = None,
+    extractor_schema_version: int = EXTRACTOR_SCHEMA_VERSION,
 ) -> GenerationManifest:
     """Build and seal a complete immutable generation."""
 
     if not documents:
         raise SemanticIndexError("cannot build an empty semantic generation")
+    if type(extractor_schema_version) is not int or extractor_schema_version < 1:
+        raise SemanticIndexError("invalid extractor schema version")
     doc_ids = [document.doc_id for document in documents]
     if len(set(doc_ids)) != len(doc_ids):
         raise SemanticIndexError("semantic generation contains duplicate doc ids")
@@ -413,7 +416,7 @@ def build_generation(
             "query_prefix": query_prefix,
             "document_prefix": document_prefix,
             "normalization": "l2",
-            "extractor": EXTRACTOR_SCHEMA_VERSION,
+            "extractor": extractor_schema_version,
             "corpus": _corpus_fingerprint(documents),
         },
         sort_keys=True,
@@ -461,7 +464,7 @@ def build_generation(
             query_prefix=query_prefix,
             document_prefix=document_prefix,
             normalization="l2",
-            extractor_schema_version=EXTRACTOR_SCHEMA_VERSION,
+            extractor_schema_version=extractor_schema_version,
             repo_commit=repo_commit if repo_commit is not None else _repo_commit(),
             corpus_fingerprint=_corpus_fingerprint(documents),
             page_count=len(page_ids),
@@ -840,7 +843,7 @@ class LoadedGeneration:
             if page_filter is not None and page_id not in page_filter:
                 continue
             score = float(scores[offset])
-            if self.kinds and self.kinds[row] == "chunk":
+            if self.kinds and self.kinds[row] in {"chunk", "section-v1"}:
                 score *= 0.92
             if score > by_page.get(page_id, float("-inf")):
                 by_page[page_id] = score
@@ -901,7 +904,7 @@ class LoadedGeneration:
             if page_filter is not None and page_id not in page_filter:
                 continue
             score = float(raw_score)
-            if self.delta_kinds and self.delta_kinds[row] == "chunk":
+            if self.delta_kinds and self.delta_kinds[row] in {"chunk", "section-v1"}:
                 score *= 0.92
             if score > by_page.get(page_id, float("-inf")):
                 by_page[page_id] = score

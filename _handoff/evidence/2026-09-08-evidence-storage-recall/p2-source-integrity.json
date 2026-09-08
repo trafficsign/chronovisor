@@ -1,0 +1,131 @@
+{
+  "counts": {
+    "indexed_stable": 7793,
+    "invalid": 0,
+    "metadata_rows": 7793,
+    "missing": 0,
+    "records_max": 1676,
+    "records_min": 1,
+    "records_total": 146943,
+    "revision_changed": 1,
+    "source_lifecycle_ineligible": 6,
+    "source_transform_failures": 0,
+    "validated": 7786
+  },
+  "execution": {
+    "duration_seconds": 72.91,
+    "observed_at": "2026-09-08T22:59:13+09:00"
+  },
+  "failures_by_class": {
+    "metadata_or_file_revision_changed": 1,
+    "source_lifecycle_ineligible": 6
+  },
+  "inventory": {
+    "count": 7793,
+    "entry_fields_private": [
+      "page_id",
+      "namespace",
+      "source_sha256",
+      "status",
+      "records"
+    ],
+    "manifest_sha256": "e5063e39d898f13210f0ab063fabc1b7a332a08047da0145459388c3349bc138",
+    "private_artifact_mode": "0600 (directory 0700)",
+    "private_artifact_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/2026-09-08-p2-source-inventory.json",
+    "private_artifact_sha256": "2730219d3fc0d100c26e4579eb4670295d987ade9e94d9a11443dae80ea610c5",
+    "public_receipt_policy": "aggregate and digests only; page IDs/titles/paths/full records are private",
+    "sort": [
+      "page_id",
+      "source_sha256"
+    ]
+  },
+  "kind": "p2_page_source_transform_integrity",
+  "language_classification": {
+    "authority": "non-authoritative heuristic; body codepoint presence only",
+    "buckets": [
+      "ja+en",
+      "ja",
+      "en",
+      "other"
+    ],
+    "counts": {
+      "en": 2987,
+      "ja": 3,
+      "ja+en": 4796
+    }
+  },
+  "lifecycle": {
+    "classification": "source lifecycle ineligible 6",
+    "current_index_source_status_matches": 6,
+    "current_index_source_status_mismatches": 0,
+    "current_observation": {
+      "index_snapshot_generation": 1788876306613973000,
+      "index_source_status_matches": 6,
+      "index_source_status_mismatches": 0,
+      "index_status_counts": {
+        "deprecated": 6
+      },
+      "observed_at": "2026-09-08T23:05:24+09:00",
+      "source_status_counts": {
+        "deprecated": 6
+      },
+      "source_status_enum_valid": true
+    },
+    "index_status_current_counts": {
+      "deprecated": 6
+    },
+    "note": "Deprecated source lifecycle is ineligible for this transform; it is not a transformation failure. No repair/retry was run.",
+    "snapshot_index_source_status_mismatches": 6,
+    "source_status_counts": {
+      "deprecated": 6
+    },
+    "source_status_enum": [
+      "draft",
+      "stable",
+      "deprecated"
+    ],
+    "transform_failures": 0
+  },
+  "schema": "chronovisor.page-evidence-source-integrity.v1",
+  "scope": {
+    "cas_writes": 0,
+    "model_calls": 0,
+    "not_backfill_completion": true,
+    "not_quality_benchmark": true,
+    "production_activation": false,
+    "read_only": true,
+    "source_files_modified": false
+  },
+  "source_code_sha256": {
+    "path": "src/chronovisor/research/page_evidence_projection.py",
+    "sha256": "00ffb19fe8714c044587479cffcbf4273207b6437043f8f194f275d70d02345c"
+  },
+  "source_snapshot": {
+    "available": true,
+    "benchmark_comparable": false,
+    "error": null,
+    "frozen": false,
+    "generation": 1788875885883778000,
+    "index_root": "/Users/trafficsign/.chronovisor",
+    "kind": "IndexStore metadata snapshot with live current-path reads",
+    "note": "P0 has no frozen source snapshot; this receipt records one live read point.",
+    "source_roots": [
+      "/Users/trafficsign/.chronovisor/pages",
+      "/Users/trafficsign/.chronovisor/system"
+    ]
+  },
+  "status": "partial",
+  "transform": {
+    "max_section_piece_chars": 900,
+    "pipeline": [
+      "IndexStore stable metadata snapshot",
+      "current canonical source bytes",
+      "project_page_evidence",
+      "load_page_evidence_artifact(source=source)",
+      "reconstruct_page_body == parse_document(source).body"
+    ],
+    "schema": "chronovisor.page-evidence-projection.v1",
+    "version": "semantic-section-v1"
+  },
+  "validation_command": "PYTHONDONTWRITEBYTECODE=1 CHRONOVISOR_READ_ONLY=1 .venv/bin/python <read-only P2 source-integrity validator>"
+}
