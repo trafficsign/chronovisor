@@ -1573,7 +1573,9 @@ def _context_from_semantic_evidence(result: Any) -> ContextItem | None:
         uid=passages[0].evidence.page_uid,
         snippets=[passage.text for passage in passages],
         sensitivity="normal"
-        if meta.get("sensitivity") == "normal" and not meta.get("is_system")
+        if meta.get("sensitivity") == "normal"
+        and not meta.get("is_system")
+        and not path.is_relative_to(CHRONOVISOR_ROOT / "system")
         else "high",
         evidence_kind="semantic_chunk",
         source_passages=passages,

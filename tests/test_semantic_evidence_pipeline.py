@@ -139,3 +139,19 @@ def test_service_evidence_identity_is_validated(field, value):
     ):
         semantic_client._response_evidence(row, "g")
     assert semantic_client._response_evidence({"page_id": "page"}, None) == ()
+
+
+def test_hydrated_system_source_keeps_high_sensitivity(monkeypatch, tmp_path):
+    source = b"---\nstatus: stable\nsensitivity: normal\n---\n# State\nSystem data.\n"
+    path = tmp_path / "system" / "state.md"
+    path.parent.mkdir()
+    path.write_bytes(source)
+    match = SemanticEvidence(
+        "state", "state#c0", "chunk", 0, hashlib.sha256(source).hexdigest(), "", "g", 0.9
+    )
+    monkeypatch.setattr(runtime, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(runtime, "find_readable_page", lambda _id: path)
+    item = runtime._context_from_semantic_evidence(
+        ScoredPage("state", "State", "", "", 0.9, evidence=(match,))
+    )
+    assert item is not None and item.sensitivity == "high"
