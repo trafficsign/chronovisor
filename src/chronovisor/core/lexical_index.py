@@ -16,6 +16,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -529,20 +530,19 @@ class LexicalIndex:
             return self._snapshot_error
 
     def build(self, *, force: bool = False) -> None:
-        with self._lock:
+        from chronovisor.core.page_mutation import _reentrant_exclusive_lock
+
+        # Metadata publication and every lexical writer share this lease.
+        # Acquire it before in-process locks; nested writer refreshes reenter.
+        publication_lock = (
+            nullcontext()
+            if os.environ.get("CHRONOVISOR_READ_ONLY") == "1"
+            else _reentrant_exclusive_lock(self.path.parent / "writer.lock")
+        )
+        with publication_lock, self._lock:
             connection = self._open()
             if not self._persistent:
                 return
-            writer_ok, writer_generation = self._writer_generation()
-            if not writer_ok and os.environ.get("CHRONOVISOR_READ_ONLY") == "1":
-                self._snapshot_available = False
-                self._snapshot_error = "snapshot_missing_or_invalid"
-                return
-            if not writer_ok:
-                # Normal maintenance remains the recovery path.  It may
-                # rebuild from canonical pages while metadata is repaired by
-                # the owning writer; read-only callers above fail closed.
-                writer_generation = None
             now = time.monotonic()
             if (
                 not force
@@ -562,6 +562,13 @@ class LexicalIndex:
                     stat.st_mtime_ns,
                     stat.st_size,
                 )
+            # The pages callback can refresh metadata during bootstrap. Read
+            # its generation afterwards, while still holding the writer lease.
+            writer_ok, writer_generation = self._writer_generation()
+            if not writer_ok:
+                # Maintenance can recover lexical rows before metadata is
+                # repaired; read-only callers continue to reject this snapshot.
+                writer_generation = None
             indexed_rows = connection.execute(
                 "SELECT page_id, mtime_ns, size, ordinal FROM pages"
             ).fetchall()
