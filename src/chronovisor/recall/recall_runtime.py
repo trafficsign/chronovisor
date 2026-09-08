@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from chronovisor.core import ollama, recall_context, runtime_config
 from chronovisor.core.index_store import (
@@ -42,7 +42,7 @@ from chronovisor.core.search import (
 )
 from chronovisor.core.search import search as run_search
 from chronovisor.core.search import search_existing_bm25 as search_existing_bm25
-from chronovisor.core.search_types import tokenize
+from chronovisor.core.search_types import merge_evidence, tokenize
 from chronovisor.core.semantic_client import SemanticServiceUnavailable
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
@@ -74,6 +74,9 @@ from chronovisor.recall.recall_publication import (
     context_item_annotations as context_item_annotations,
 )
 from chronovisor.recall.recall_publication import result_to_dict as result_to_dict
+
+if TYPE_CHECKING:
+    from chronovisor.core.semantic_evidence import SourcePassage
 
 _render_recall_payload = recall_context.render_recall_payload
 
@@ -263,6 +266,7 @@ class ContextItem:
     certificate_id: str = ""
     evidence_kind: str = "legacy"
     source_line: int = 0
+    source_passages: tuple[SourcePassage, ...] = ()
 
 
 @dataclass
@@ -1294,7 +1298,9 @@ def search_candidates(
         return [], ""
     _require_remaining_budget(deadline_at, "search")
     trace_decision_id = (
-        request.decision_id if request is not None and request.decision_id else new_decision_id()
+        request.decision_id
+        if request is not None and request.decision_id
+        else new_decision_id()
     )
 
     def trace_rows(
@@ -1324,16 +1330,17 @@ def search_candidates(
                 and (item.startswith("rel_") or item.startswith("merge_"))
             ]
             relation_ids = [item for item in path_ids if item.startswith("rel_")]
-            entity_merge_ids = [
-                item for item in path_ids if item.startswith("merge_")
-            ]
+            entity_merge_ids = [item for item in path_ids if item.startswith("merge_")]
             if not path_ids:
                 continue
             path_id = str(value.get("path_id") or "")
             if not path_id:
-                path_id = "path_" + hashlib.sha256(
-                    "|".join([page_id, *path_ids]).encode()
-                ).hexdigest()[:24]
+                path_id = (
+                    "path_"
+                    + hashlib.sha256(
+                        "|".join([page_id, *path_ids]).encode()
+                    ).hexdigest()[:24]
+                )
             output.append(
                 {
                     "schema_version": 1,
@@ -1411,13 +1418,17 @@ def search_candidates(
             raise
         actual_trace = last_search_trace()
         if partial_search is not None:
-            partial_search.append({
-                "query": query,
-                "channels": {"completed_search": list(results)},
-                "completed_channels": list(actual_trace.get("channels") or {}),
-                "failed_channel": "",
-                "snapshot_generation": str(actual_trace.get("snapshot_generation") or ""),
-            })
+            partial_search.append(
+                {
+                    "query": query,
+                    "channels": {"completed_search": list(results)},
+                    "completed_channels": list(actual_trace.get("channels") or {}),
+                    "failed_channel": "",
+                    "snapshot_generation": str(
+                        actual_trace.get("snapshot_generation") or ""
+                    ),
+                }
+            )
         actual_paths = actual_trace.get("paths")
         rows = trace_rows(
             query,
@@ -1467,7 +1478,11 @@ def search_candidates(
         _require_remaining_budget(deadline_at, "search merge")
     except BaseException as exc:
         partial = [
-            {"query": query, "failed_channel": "", "channels": {"completed_search": values[0]}}
+            {
+                "query": query,
+                "failed_channel": "",
+                "channels": {"completed_search": values[0]},
+            }
             for query, values in zip(queries, searched, strict=False)
         ] + list(getattr(exc, "_partial_search", []))
         if isinstance(exc, RecallWallClockTimeout):
@@ -1479,14 +1494,14 @@ def search_candidates(
     merged: dict[str, Any] = {}
     mode = "bm25"
     typed_trace_rows: list[dict[str, Any]] = []
-    for query_index, (results, search_mode, trace_values, timings) in enumerate(searched):
+    for query_index, (results, search_mode, trace_values, timings) in enumerate(
+        searched
+    ):
         typed_trace_rows.extend(trace_values)
         if stage_timings_ms is not None:
             for name, elapsed_ms in timings.items():
                 if isinstance(name, str) and isinstance(elapsed_ms, int):
-                    stage_timings_ms[name] = (
-                        stage_timings_ms.get(name, 0) + elapsed_ms
-                    )
+                    stage_timings_ms[name] = stage_timings_ms.get(name, 0) + elapsed_ms
         if search_mode != "bm25":
             mode = search_mode
         query_weight = max(0.50, 1.0 - (0.25 * query_index))
@@ -1501,7 +1516,17 @@ def search_candidates(
             )
             existing = merged.get(result.page_id)
             if existing is None or adjusted.score > existing.score:
+                if existing is not None:
+                    adjusted = replace(
+                        adjusted,
+                        evidence=merge_evidence(adjusted.evidence, existing.evidence),
+                    )
                 merged[result.page_id] = adjusted
+            elif adjusted.evidence:
+                merged[result.page_id] = replace(
+                    existing,
+                    evidence=merge_evidence(existing.evidence, adjusted.evidence),
+                )
     diagnostic_remaining_ms = _remaining_budget_ms(deadline_at)
     if diagnostic_rows is not None:
         diagnostic_rows.extend(typed_trace_rows)
@@ -1519,6 +1544,40 @@ def search_candidates(
             pass
     out = sorted(merged.values(), key=lambda item: item.score, reverse=True)
     return out, mode
+
+
+def _context_from_semantic_evidence(result: Any) -> ContextItem | None:
+    """Hydrate only selected pages, from the same bytes used to verify identity."""
+    from chronovisor.core.canonical_document import (
+        CanonicalDocumentError,
+        parse_document,
+    )
+    from chronovisor.core.semantic_evidence import resolve_semantic_evidence
+
+    path = find_readable_page(result.page_id)
+    if path is None:
+        return None
+    try:
+        source = path.read_bytes()
+        passages = resolve_semantic_evidence(source, result.page_id, result.evidence)
+        if not passages:
+            return None
+        meta = parse_document(source).metadata
+    except OSError, UnicodeError, CanonicalDocumentError, ValueError:
+        return None
+    return ContextItem(
+        page_id=result.page_id,
+        title=str(meta.get("title") or result.page_id),
+        updated=str(meta.get("updated") or ""),
+        score=round(result.score, 4),
+        uid=passages[0].evidence.page_uid,
+        snippets=[passage.text for passage in passages],
+        sensitivity="normal"
+        if meta.get("sensitivity") == "normal" and not meta.get("is_system")
+        else "high",
+        evidence_kind="semantic_chunk",
+        source_passages=passages,
+    )
 
 
 def collect_context(
@@ -1545,6 +1604,19 @@ def collect_context(
         _require_remaining_budget(deadline_at, "context store refresh")
         store.refresh_if_stale()
 
+    results = pre_results
+    if results is None:
+        results, _mode = search_candidates(
+            queries,
+            policy,
+            request=request,
+            deadline_at=deadline_at,
+        )
+    evidence_results = {
+        result.page_id: result
+        for result in results
+        if any(e.kind == "chunk" for e in getattr(result, "evidence", ()))
+    }
     items: list[ContextItem] = []
     seen: set[str] = set()
     _require_remaining_budget(deadline_at, "context hints")
@@ -1552,7 +1624,11 @@ def collect_context(
         _require_remaining_budget(deadline_at, "context hint")
         if page_id in seen:
             continue
-        hinted = context_item_from_page_id(page_id, queries, decision, score=1.0)
+        hinted = (
+            _context_from_semantic_evidence(evidence_results[page_id])
+            if page_id in evidence_results
+            else context_item_from_page_id(page_id, queries, decision, score=1.0)
+        )
         if hinted is None:
             continue
         if should_filter_sensitive_result(hinted, request):
@@ -1562,14 +1638,6 @@ def collect_context(
         if len(items) >= policy.max_pages:
             return items
 
-    results = pre_results
-    if results is None:
-        results, _mode = search_candidates(
-            queries,
-            policy,
-            request=request,
-            deadline_at=deadline_at,
-        )
     for result in results:
         _require_remaining_budget(deadline_at, "context page")
         if result.page_id in seen:
@@ -1581,6 +1649,14 @@ def collect_context(
             seen.add(result.page_id)
             continue
         seen.add(result.page_id)
+        if result.page_id in evidence_results:
+            item = _context_from_semantic_evidence(result)
+            _require_remaining_budget(deadline_at, "context evidence")
+            if item is not None and not should_filter_sensitive_result(item, request):
+                items.append(item)
+                if len(items) >= policy.max_pages:
+                    return items
+            continue
         snippets = [result.snippet] if result.snippet else []
         if not snippets and policy.context_style == "cards":
             _require_remaining_budget(deadline_at, "context summary")

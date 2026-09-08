@@ -56,13 +56,13 @@ table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}th,td{bo
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_d2c0de36600a457c8827262a47c36c87","created_at":"2026-09-08T22:05:32+09:00","状態":"draft","slug":"chronovisor-evidence-storage-recall"}
+{"task_id":"plan_d2c0de36600a457c8827262a47c36c87","created_at":"2026-09-08T22:05:32+09:00","状態":"running","slug":"chronovisor-evidence-storage-recall"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">証拠単位の保存とRecallの接続</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="draft">draft</span>
+<span class="badge" data-bind="状態" data-state="running">running</span>
 <span><code data-bind="task_id">plan_d2c0de36600a457c8827262a47c36c87</code></span>
 <span data-bind="created_at">2026-09-08T22:05:32+09:00</span>
 </div>
@@ -71,8 +71,8 @@ table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}th,td{bo
 <section data-section="目的">
 <h2>目的と今回の承認範囲</h2>
 <p><strong>原文と出典を保ち、検索で見つかった具体的な根拠を、位置・版・条件を失わず本体AIへ渡す。</strong>保存形式の推奨は「原文参照付きの出来事・証拠レコード」。既存Raw、EvidenceAtom / EvidencePacket、SQLite字句索引、ANN、Wikiを土台とし、検索の候補単位と注入単位を一致させる。</p>
-<p>本ファイルはユーザーの依頼に基づく<strong>実装計画の作成</strong>。実装・ベンチマーク実行・本番設定変更・push・再起動は今回未実施。状態draft、以下の実装チェックは全て未完了。計画実行の依頼後に進め、pushは明示依頼時だけ行う。</p>
-<p class="note"><strong>ベンチマークは必要。</strong>設計方針を決めるために公開ベンチを総当たりする必要はないが、本番採用前に日英の実データで精度・根拠の完全性・待ち時間を比較する。評価は実装工程に含め、改善が出なかった方式を採用しない。今回は研究結果と計画のみを保存する。</p>
+<p>本ファイルはユーザーの依頼に基づく<strong>実装計画の作成</strong>。ユーザーの「計画開始」により実装・比較検証を開始。状態running。全件再処理は評価と送信条件の確認後に実行する。本番push・再起動は未実施で、pushは明示依頼時だけ行う。</p>
+<p class="note"><strong>ベンチマークは必要。</strong>設計方針を決めるために公開ベンチを総当たりする必要はないが、本番採用前に日英の実データで精度・根拠の完全性・待ち時間を比較する。評価は実装工程に含め、改善が出なかった方式を採用しない。計画開始の承認に基づき、実装と隔離検証を進める。</p>
 </section>
 <section data-section="前提・仮定">
 <h2>確認済みの現状と既存計画との関係</h2>
@@ -115,7 +115,7 @@ table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}th,td{bo
 <h2>実行手順</h2>
 <ol class="checklist">
 <li><input type="checkbox"><span><strong>P0 — 実行基準と比較条件を固定。</strong>local / remote / deployed SHA、config・authority gate、Campaign X実状態を確認。既存評価contractとharnessを調べ、下記のpaired評価条件・数値・データsplitを候補実装前に登録する。現在のAを隔離snapshotで測定し、source消失・候補漏れ・注入時の欠落・回答側失敗を分ける。<em>完了:</em>再現可能なAのreceipt、凍結した問題・正解根拠・設定・判定規則がある。</span></li>
-<li><input type="checkbox"><span><strong>P1 — winning chunkの保持。</strong>semantic index → service response → semantic client → score fusion → ContextItem / context compilerの全経路でdocument/record ID、source digest、kind、範囲、選ばれた本文を保持。通常searchとverify、sync/service経路、cache、serialization、reranker入力も呼出関係から確認する。page score集約が必要でも根拠候補を消さず、同一pageの複数根拠を固定上限で残す。旧応答ではchunkを捏造せず既存fallbackへ戻す。readで無条件に別excerptへ置換する箇所も修正する。<em>完了:</em>Bとして当たった根拠が実際の注入本文に残り、stale digest / 不正範囲が拒否される回帰試験が通る。</span></li>
+<li><input type="checkbox" checked><span><strong>P1 — winning chunkの保持。</strong>semantic index → service response → semantic client → score fusion → ContextItem / context compilerの全経路でdocument/record ID、source digest、kind、範囲、選ばれた本文を保持。通常searchとverify、sync/service経路、cache、serialization、reranker入力も呼出関係から確認する。page score集約が必要でも根拠候補を消さず、同一pageの複数根拠を固定上限で残す。旧応答ではchunkを捏造せず既存fallbackへ戻す。readで無条件に別excerptへ置換する箇所も修正する。<em>完了:</em>Bとして当たった根拠が実際の注入本文に残り、stale digest / 不正範囲が拒否される回帰試験が通る。</span></li>
 <li><input type="checkbox"><span><strong>P2 — 証拠projectionの単位と文脈を改善。</strong>既存EvidenceAtom / projectionを用いて会話の出来事・話題と文書節をrecord化。原文参照、役割・条件、時間、明示訂正、検索用の短い文脈を保存する。新規LLM呼出しは既存ingestの出力・バッチ処理を再利用できない部分だけ非同期で行う。既存ページのsummary / questions / entitiesを重複生成しない。<em>完了:</em>Cの隔離projectionと索引が生成でき、原文欠損0・再構築一致・中断再開・生成失敗時fallbackが検証済み。</span></li>
 <li><input type="checkbox"><span><strong>P3 — 既存Recallへ接続。</strong>record IDをBM25 / ANNからEvidencePacketとbounded contextまで通す。page teacher・証拠authority・certificate・stop reasonを既存契約で維持。source revisionと索引generationを整合した単位で公開し、旧sourceと新recordの混在を拒否する。必要な前提・訂正だけを予算内で追加し、曖昧な関係は生成しない。<em>完了:</em>policyに適合したrecordのみに根拠traceが通り、通常Recall・fallback・更新競合の統合試験が通る。</span></li>
 <li><input type="checkbox"><span><strong>P4 — A/B/Cのpaired評価。</strong>同じsource snapshot、query、モデル、注入token上限、deadline、既存reranker採用状態で比較。Cにだけ追加推論や長いcontextを与えない。quality、根拠、時間、待ち時間、保存時費用を別々に報告する。Bが勝ちCの追加効果がない場合はBを採用し、Cを有効化しない。<em>完了:</em>事前登録した判定で採用候補か不採用が決まり、未測定を成功扱いしない。</span></li>
@@ -217,8 +217,8 @@ table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}th,td{bo
 <h2>実行中更新ルール</h2>
 <ul><li>各phaseの受入条件を満たした直後にcheckboxと時刻付き実行ログを更新し、結果receiptへリンクする。</li><li>状態変更は<code>script#plan-meta</code>の<code>状態</code>と<code>.badge[data-state]</code>の表示を同時に更新する。依存条件で進めない場合は未完了phaseと必要情報を記録する。</li><li>既存Campaign Yの歴史的完了状態を本計画の進捗で書き換えない。結果の正本は本計画と今回のrun receipt、既存計画は設計・履歴の参照。</li></ul>
 </section>
-<section class="blockers" data-section="ブロッカー"><h2>ブロッカー・未確認事項</h2><p>計画作成のblockerなし。実装は未依頼。P0で数値contract、評価資産、Campaign Xと本番の実状態を再確認する。OpenCode/Muse Sparkの全件再処理と最大10並列は計画へ反映済みだが、実行・資料送信は未開始。送信対象とprovider枠・支出上限は実行前に確定する。本番push / restartは今回の承認範囲外。</p></section>
+<section class="blockers" data-section="ブロッカー"><h2>ブロッカー・未確認事項</h2><p>P0確認: 本番は873c2a3bc1743bc7a2fe309067904e903870fb1d、実効Recall予算3,000文字。採用判定用heldout120問は現行authority資産では未成立（active dev16 / locked23）。未検証の自動生成問題で補充しない。既存architecture / large-function checksの9失敗は固定baseline d652252でも再現し、今回増分と分けて確認中。P1は446件の関連試験と実索引コピーでの原文一致smokeを通過。Recall全体の品質向上と採用判定は未実証。P2はpage-only資料にRaw receiptや有効時刻を捏造しない隔離artifactを作成中。OpenCode CLIはPATH上に未導入。native CLIとrouterのmodel IDは別namespaceとして実行前に確認。Cの採用gate・送信対象・provider利用枠が確定するまでMuse Spark全件送信を行わない。本番push / restartは未承認・未実施。</p><p><a href="evidence/2026-09-08-evidence-storage-recall/preflight.json">実状態preflight</a> / <a href="evidence/2026-09-08-evidence-storage-recall/p1-real-index-smoke.json">P1実索引smoke（品質比較ではない）</a></p></section>
 <section data-section="受け渡しメモ"><h2>次担当への受け渡し</h2><p>最初にP0、次にP1。新しい保存schemaの作成から始めない。原文アクセスの制約を維持した上で、既存チャンクのmetadataが失われる境界を端から端まで直す。その後にP2/P3を隔離して比較し、効果のある最小構成を採る。P4の採用判断後、P4aで既存全件を新規保存と共通の変換経路へ通し、差分追いつきと検証の後にP5へ進む。計画作成時にコード・本番設定・モデルを変更していない。</p></section>
-<section data-section="実行ログ"><h2>実行ログ</h2><ol class="log"><li><time datetime="2026-09-08T22:05:32+09:00">2026-09-08 22:05 JST</time><span>保存方式研究・本番archive照合・Campaign Yとの整合確認を基にcanonical generatorでdraftを作成。実装・ベンチマーク・deployは未開始。</span></li><li><time datetime="2026-09-08T22:26:36+09:00">2026-09-08 22:26 JST</time><span>ユーザー依頼により既存全件backfill、OpenCode + Muse Spark 1.3 Contributor、最大10ワーカー、段階的増加・単一publisher・再開・差分追いつき・外部送信範囲を追記。計画のみ更新、実行未開始。</span></li></ol></section>
+<section data-section="実行ログ"><h2>実行ログ</h2><ol class="log"><li><time datetime="2026-09-08T22:05:32+09:00">2026-09-08 22:05 JST</time><span>保存方式研究・本番archive照合・Campaign Yとの整合確認を基にcanonical generatorでdraftを作成。実装・ベンチマーク・deployは未開始。</span></li><li><time datetime="2026-09-08T22:26:36+09:00">2026-09-08 22:26 JST</time><span>ユーザー依頼により既存全件backfill、OpenCode + Muse Spark 1.3 Contributor、最大10ワーカー、段階的増加・単一publisher・再開・差分追いつき・外部送信範囲を追記。計画のみ更新、実行未開始。</span></li><li><time datetime="2026-09-08T22:29:04+09:00">2026-09-08 22:29 JST</time><span>ユーザーが計画開始を指示。P0の実状態・評価基準固定から開始。既存dirty変更を保護し、生成LLMへの資料送信や本番切替はまだ行っていない。</span></li><li><time datetime="2026-09-08T22:47:51+09:00">2026-09-08 22:47 JST</time><span>P0の本番/設定/評価資産確認と現行code baseline隔離を実施。P1はclient/fusion/penalty/ContextItemから実注入までの原文byte範囲保持を実装し、stale source拒否と同一page複数根拠の統合試験を確認。実索引copy + delta SQLite backupでも原文照合成功。P1全検証は継続中。P2以降・120問paired採用gate・全件backfill・本番配布は未完了。</span></li><li><time datetime="2026-09-08T23:11:32+09:00">2026-09-08 23:11 JST</time><span>P1受入完了: winning documentと最大2件の追加本文根拠をbase/delta・service/cache・client・fusion・reranker・contextへ保持。関連446 tests passed、mypy 94 files / ruff / import boundary通過。実索引コピー2 queryで注入6箇所の元byte範囲一致。P1 architecture移行は6追加・1退役のみ、baseline由来9失敗は未解消。全体CIは実行中。P0の採用用heldout不足とP2以降は未完了。</span></li></ol></section>
 </body>
 </html>

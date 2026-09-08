@@ -7,7 +7,7 @@ import math
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -29,8 +29,14 @@ from chronovisor.core.llm_runtime import (
     SourceDataClassification,
     SourceSensitivity,
 )
+from chronovisor.core.page_identity import normalize_page_uid
 from chronovisor.core.runtime_config import RerankerConfig, load_reranker_config
-from chronovisor.core.search_types import ScoredPage
+from chronovisor.core.search_types import (
+    ScoredPage,
+    SemanticEvidence,
+    parse_semantic_evidence,
+)
+from chronovisor.core.semantic_evidence import resolve_semantic_evidence
 from chronovisor.core.store import PAGES_DIR, SYSTEM_DIR
 
 RERANK_RUNTIME_ROLE = "search.rerank"
@@ -93,6 +99,7 @@ def resolve_rerank_candidate(
     *,
     store: IndexStore | None,
     max_chars: int = 2400,
+    evidence: tuple[SemanticEvidence, ...] | None = None,
 ) -> tuple[
     str,
     SourceDataClassification,
@@ -103,19 +110,60 @@ def resolve_rerank_candidate(
     page_id = candidate.page_id if isinstance(candidate, ScoredPage) else candidate
     title = candidate.title if isinstance(candidate, ScoredPage) else page_id
     snippet = candidate.snippet if isinstance(candidate, ScoredPage) else ""
+    candidate_evidence: tuple[SemanticEvidence, ...] = ()
+    evidence_invalid = False
+
+    def parse_candidate_evidence(
+        values: object,
+    ) -> tuple[SemanticEvidence, ...] | None:
+        if not isinstance(values, tuple):
+            return None
+        if not values:
+            return ()
+        if any(not isinstance(item, SemanticEvidence) for item in values):
+            return None
+        try:
+            return parse_semantic_evidence(
+                [asdict(item) for item in values],
+                page_id=page_id,
+            )
+        except (TypeError, ValueError):
+            return None
+
+    if isinstance(candidate, ScoredPage):
+        raw_evidence = candidate.evidence
+        if raw_evidence:
+            parsed = parse_candidate_evidence(raw_evidence)
+            if parsed is None:
+                evidence_invalid = True
+            else:
+                candidate_evidence = parsed
+    if evidence is not None:
+        parsed = parse_candidate_evidence(evidence)
+        if parsed is None:
+            evidence_invalid = True
+        else:
+            candidate_evidence = parsed
+    has_evidence = bool(candidate_evidence) or evidence_invalid
     fallback = f"{title}\n\n{snippet}".strip() or page_id
-    fallback_bytes = fallback.encode("utf-8")
+    # A candidate that carried evidence must never silently fall back to a
+    # stale snippet when that evidence cannot be resolved.  The page id is a
+    # bounded, source-free placeholder and remains classified as high-risk.
+    invalid_fallback = page_id if has_evidence else fallback
+    invalid_fallback_bytes = invalid_fallback.encode("utf-8")
     invalid = (
-        fallback,
+        invalid_fallback,
         _SYSTEM_SOURCE,
         (
             "invalid",
             "",
             0,
-            len(fallback_bytes),
-            hashlib.sha256(fallback_bytes).hexdigest(),
+            len(invalid_fallback_bytes),
+            hashlib.sha256(invalid_fallback_bytes).hexdigest(),
         ),
     )
+    if evidence_invalid:
+        return invalid
     try:
         if store is None:
             return invalid
@@ -138,6 +186,35 @@ def resolve_rerank_candidate(
         body = document.body.decode("utf-8").strip()
     except (CanonicalDocumentError, OSError, RuntimeError, UnicodeDecodeError):
         return invalid
+    source_digest = hashlib.sha256(data).hexdigest()
+    if (
+        isinstance(candidate, ScoredPage)
+        and has_evidence
+        and candidate.content_sha256
+        and candidate.content_sha256 != source_digest
+    ):
+        return invalid
+    if has_evidence:
+        if document.metadata.get("status") != "stable":
+            return invalid
+        raw_source_uid = document.metadata.get("uid")
+        if raw_source_uid in (None, ""):
+            source_uid = ""
+        else:
+            try:
+                source_uid = normalize_page_uid(raw_source_uid)
+            except (TypeError, ValueError):
+                return invalid
+        if isinstance(candidate, ScoredPage) and candidate.uid:
+            try:
+                candidate_uid = normalize_page_uid(candidate.uid)
+            except (TypeError, ValueError):
+                return invalid
+            if candidate_uid != source_uid:
+                return invalid
+        for item in candidate_evidence:
+            if item.source_sha256 != source_digest or item.page_uid != source_uid:
+                return invalid
     source = (
         _SYSTEM_SOURCE
         if namespace == "system"
@@ -148,9 +225,27 @@ def resolve_rerank_candidate(
     resolved_title = metadata.get("title")
     if not isinstance(resolved_title, str) or not resolved_title.strip():
         resolved_title = title
-    if snippet:
-        body = f"{snippet}\n\n{body}"
-    passage = f"{resolved_title}\n\n{body[:max_chars]}".strip()
+    chunk_evidence = tuple(item for item in candidate_evidence if item.kind == "chunk")
+    if chunk_evidence:
+        try:
+            passages = resolve_semantic_evidence(data, page_id, chunk_evidence)
+        except Exception:
+            passages = ()
+        if not passages:
+            return invalid
+        selected_body = "\n\n".join(passage.text for passage in passages).strip()
+        if not selected_body:
+            return invalid
+        passage = f"{resolved_title}\n\n{selected_body[:max_chars]}".strip()
+    elif candidate_evidence:
+        # Page/question documents are retrieval keys. Once their identities are
+        # bound to this canonical source, the canonical body is the safe passage
+        # fallback; their synthetic text is never sent to the model.
+        passage = f"{resolved_title}\n\n{body[:max_chars]}".strip()
+    else:
+        if snippet:
+            body = f"{snippet}\n\n{body}"
+        passage = f"{resolved_title}\n\n{body[:max_chars]}".strip()
     return (
         passage,
         source,

@@ -23,7 +23,7 @@ from collections import OrderedDict, deque
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -49,6 +49,7 @@ from chronovisor.core.runtime_config import (
     SearchEmbeddingConfig,
     load_search_embedding_config,
 )
+from chronovisor.core.search_types import SemanticEvidence
 from chronovisor.core.semantic_index import (
     SEMANTIC_ROOT,
     LoadedGeneration,
@@ -204,11 +205,19 @@ def _query_deadline_scope(deadline_at: float) -> Any:
         _CURRENT_QUERY_DEADLINE.reset(token)
 
 
+@dataclass(frozen=True)
+class _SearchResult:
+    """Immutable result tying every batched response to one generation."""
+
+    generation_id: str
+    rows: tuple[tuple[str, float, tuple[SemanticEvidence, ...]], ...]
+
+
 @dataclass
 class _QueryItem:
     query: str
     top_n: int
-    future: Future[list[tuple[str, float]]]
+    future: Future[_SearchResult]
     deadline_at: float
     enqueued_at: float
     expired_recorded: bool = False
@@ -240,7 +249,7 @@ class QueryBatcher:
         self,
         *,
         encode: Callable[[list[str], int], np.ndarray],
-        search: Callable[[np.ndarray, int], list[tuple[str, float]]],
+        search: Callable[[np.ndarray, int], _SearchResult],
         window_ms: int,
         max_batch: int,
         available: Callable[[], bool],
@@ -274,7 +283,7 @@ class QueryBatcher:
         timeout: float | None = None,
         *,
         deadline_at: float | None = None,
-    ) -> list[tuple[str, float]]:
+    ) -> _SearchResult:
         with self._close_lock:
             if self._closed.is_set():
                 raise ServiceBusy("semantic foreground queue is closed")
@@ -297,7 +306,7 @@ class QueryBatcher:
                     if not math.isfinite(budget_seconds) or budget_seconds <= 0:
                         raise TimeoutError("semantic query deadline exhausted")
                     deadline = min(deadline, started + budget_seconds)
-            future: Future[list[tuple[str, float]]] = Future()
+            future: Future[_SearchResult] = Future()
             item = _QueryItem(query, top_n, future, deadline, started)
             with self._metrics_lock:
                 self._submitted += 1
@@ -390,7 +399,7 @@ class QueryBatcher:
         with contextlib.suppress(Exception):
             item.future.set_exception(exc)
 
-    def _set_result(self, item: _QueryItem, result: list[tuple[str, float]]) -> None:
+    def _set_result(self, item: _QueryItem, result: _SearchResult) -> None:
         if self._expired_or_cancelled(item):
             self._set_expired(item)
             return
@@ -581,7 +590,7 @@ class SemanticServiceState:
         self._query_path_self_test = self._warm_query_path()
         self._batcher = QueryBatcher(
             encode=self._encode_queries,
-            search=self._search_vector,
+            search=self._search_vector_with_evidence,
             window_ms=config.foreground_batch_window_ms,
             max_batch=config.foreground_max_batch,
             available=self._query_available,
@@ -875,7 +884,9 @@ class SemanticServiceState:
             "semantic recall warmup",
         ]
         vectors = self._encode_queries(queries, len(queries))
-        hits = sum(bool(self._search_vector(vector, 1)) for vector in vectors)
+        hits = sum(
+            bool(self._search_vector_with_evidence(vector, 1)) for vector in vectors
+        )
         if hits != len(queries):
             raise ServiceBusy("semantic query-path warmup returned no result")
         return {
@@ -1173,13 +1184,9 @@ class SemanticServiceState:
             return self._encode_queries([query], 1)[0], False
         return self._encode_queries([query], 1, deadline_at=deadline_at)[0], False
 
-    def _search_vector(
-        self,
-        vector: np.ndarray,
-        top_n: int,
-        *,
-        deadline_at: float | None = None,
-    ) -> list[tuple[str, float]]:
+    def _generation_for_query(
+        self, *, deadline_at: float | None = None
+    ) -> tuple[LoadedGeneration, float | None]:
         if deadline_at is None:
             deadline_at = _CURRENT_QUERY_DEADLINE.get()
         if deadline_at is not None:
@@ -1197,10 +1204,48 @@ class SemanticServiceState:
             self._generation_lock.release()
         if generation is None:
             raise ServiceBusy("no active semantic generation")
-        result = generation.search(cast(Sequence[float], vector), top_n=top_n)
-        if deadline_at is not None:
-            _ensure_deadline(deadline_at)
-        return result
+        return generation, deadline_at
+
+    def _search_vector_with_evidence(
+        self,
+        vector: np.ndarray,
+        top_n: int,
+        *,
+        deadline_at: float | None = None,
+    ) -> _SearchResult:
+        """Search one immutable generation and retain document identities.
+
+        The generation is captured before scoring so a hot reload cannot change the
+        generation ID attached to an in-flight result.
+        """
+
+        generation, effective_deadline = self._generation_for_query(
+            deadline_at=deadline_at
+        )
+        rows = generation.search_with_evidence(
+            cast(Sequence[float], vector), top_n=top_n
+        )
+        if effective_deadline is not None:
+            _ensure_deadline(effective_deadline)
+        return _SearchResult(
+            generation_id=str(generation.manifest.generation_id),
+            rows=tuple(
+                (str(page_id), float(score), tuple(evidence))
+                for page_id, score, evidence in rows
+            ),
+        )
+
+    @staticmethod
+    def _serialize_search_rows(
+        result: _SearchResult,
+    ) -> list[dict[str, Any]]:
+        serialized: list[dict[str, Any]] = []
+        for page_id, score, evidence in result.rows:
+            row: dict[str, Any] = {"page_id": page_id, "score": float(score)}
+            if evidence:
+                row["evidence"] = [asdict(item) for item in evidence]
+            serialized.append(row)
+        return serialized
 
     def search(
         self,
@@ -1226,7 +1271,7 @@ class SemanticServiceState:
                 cached = self._query_vector_from_cache(query)
             cache_hit = cached is not None
             if cached is None:
-                results = self._batcher.submit(
+                result = self._batcher.submit(
                     query,
                     bounded_top_n,
                     _remaining_seconds(deadline),
@@ -1234,23 +1279,20 @@ class SemanticServiceState:
                 )
             else:
                 with _query_deadline_scope(deadline):
-                    results = self._search_vector(cached, bounded_top_n)
+                    result = self._search_vector_with_evidence(
+                        cached, bounded_top_n
+                    )
             _ensure_deadline(deadline)
-            generation = self._generation
             latency_ms = (time.monotonic() - started) * 1_000
             with self._metrics_lock:
                 self._query_latencies_ms.append(latency_ms)
             self._bump_query_metric("_query_successes")
             return {
                 "status": "ok",
-                "generation_id": (
-                    generation.manifest.generation_id if generation is not None else ""
-                ),
+                "generation_id": result.generation_id,
                 "cache_hit": cache_hit,
                 "latency_ms": round(latency_ms, 3),
-                "results": [
-                    {"page_id": page_id, "score": score} for page_id, score in results
-                ],
+                "results": self._serialize_search_rows(result),
             }
         except TimeoutError:
             self._bump_query_metric("_query_timeouts")
@@ -1298,16 +1340,23 @@ class SemanticServiceState:
                 if generation is None:
                     raise ServiceBusy("no active semantic generation")
                 _ensure_deadline(deadline)
-                rows = generation.score_pages(cast(Sequence[float], vector), unique)
+                rows = generation.score_pages_with_evidence(
+                    cast(Sequence[float], vector), unique
+                )
+                result = _SearchResult(
+                    generation_id=str(generation.manifest.generation_id),
+                    rows=tuple(
+                        (str(page_id), float(score), tuple(evidence))
+                        for page_id, score, evidence in rows
+                    ),
+                )
             _ensure_deadline(deadline)
             self._bump_query_metric("_query_successes")
             return {
                 "status": "ok",
-                "generation_id": generation.manifest.generation_id,
+                "generation_id": result.generation_id,
                 "cache_hit": cache_hit,
-                "results": [
-                    {"page_id": page_id, "score": score} for page_id, score in rows
-                ],
+                "results": self._serialize_search_rows(result),
             }
         except TimeoutError:
             self._bump_query_metric("_query_timeouts")

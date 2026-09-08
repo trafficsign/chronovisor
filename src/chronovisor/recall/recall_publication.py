@@ -80,6 +80,29 @@ def _recall_payload(
         }
     items: list[dict[str, Any]] = []
     for item in result.context_items:
+        if item.source_passages:
+            for passage in item.source_passages:
+                match = passage.evidence
+                items.append(
+                    {
+                        "page_id": item.page_id,
+                        "title": _neutralize_context_delimiters(
+                            _one_line(item.title, 160)
+                        ),
+                        "updated": item.updated,
+                        "sensitivity": item.sensitivity,
+                        "evidence": passage.text,
+                        "source_ref": {
+                            "doc_id": match.doc_id,
+                            "uid": match.page_uid,
+                            "sha256": match.source_sha256,
+                            "generation_id": match.generation_id,
+                            "byte_start": passage.byte_start,
+                            "byte_end": passage.byte_end,
+                        },
+                    }
+                )
+            continue
         evidence = item.snippets[0] if item.snippets else ""
         payload_item: dict[str, Any] = {
             "page_id": item.page_id,

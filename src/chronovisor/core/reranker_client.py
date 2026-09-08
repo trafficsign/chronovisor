@@ -7,6 +7,7 @@ import json
 import socket
 import threading
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,7 @@ from chronovisor.core.reranker import (
     safe_reranker_error,
 )
 from chronovisor.core.runtime_config import RerankerConfig
-from chronovisor.core.search_types import ScoredPage
+from chronovisor.core.search_types import ScoredPage, SemanticEvidence
 
 
 class RerankerServiceUnavailable(RuntimeError):
@@ -59,6 +60,29 @@ def _breaker_failure() -> None:
 
 def _socket_path(config: RerankerConfig) -> Path:
     return Path(config.service.socket).expanduser()
+
+
+def _candidate_evidence_payload(
+    candidates: list[ScoredPage],
+) -> list[dict[str, Any]]:
+    """Serialize optional semantic identities without changing legacy requests."""
+
+    payload: list[dict[str, Any]] = []
+    for candidate in candidates:
+        evidence = candidate.evidence
+        if not evidence:
+            continue
+        if not isinstance(evidence, tuple) or any(
+            not isinstance(item, SemanticEvidence) for item in evidence
+        ):
+            raise RerankerServiceUnavailable("invalid_response")
+        payload.append(
+            {
+                "page_id": candidate.page_id,
+                "evidence": [asdict(item) for item in evidence],
+            }
+        )
+    return payload
 
 
 def selected_for_rollout(query: str, config: RerankerConfig) -> bool:
@@ -159,12 +183,16 @@ def rerank(
         "model": route.model,
         "location": route.location.value,
     }
+    request_payload: dict[str, Any] = {
+        "method": "rerank",
+        "query": query,
+        "page_ids": [page.page_id for page in head],
+    }
+    evidence_payload = _candidate_evidence_payload(head)
+    if evidence_payload:
+        request_payload["candidate_evidence"] = evidence_payload
     response = request(
-        {
-            "method": "rerank",
-            "query": query,
-            "page_ids": [page.page_id for page in head],
-        },
+        request_payload,
         config,
         timeout_ms=timeout_ms,
     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from chronovisor.core.reranker import (
 )
 from chronovisor.core.runtime_config import RerankerConfig, RerankerServiceConfig
 from chronovisor.core.search import ScoredPage
+from chronovisor.core.search_types import SemanticEvidence
 from chronovisor.hosts import server
 
 
@@ -284,6 +286,192 @@ def test_candidate_resolver_missing_or_invalid_is_system_high() -> None:
 
     assert passage == "missing"
     assert source == SourceDataClassification(
+        SourceDataClass.SYSTEM, SourceSensitivity.HIGH
+    )
+    assert identity[0] == "invalid"
+
+
+def test_candidate_resolver_uses_verified_semantic_chunks_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    uid = "019fea6e-8a33-7401-b37b-c7afcf6711e1"
+    pages = tmp_path / "pages"
+    system = tmp_path / "system"
+    pages.mkdir()
+    system.mkdir()
+    source = (
+        f"---\nuid: {uid}\ntitle: Candidate\nstatus: stable\n"
+        "sensitivity: normal\n---\n"
+        "# First\nselected source passage\n\n"
+        "# Second\nsecret unselected passage\n"
+    ).encode()
+    path = pages / "candidate.md"
+    path.write_bytes(source)
+    digest = hashlib.sha256(source).hexdigest()
+    evidence = (
+        SemanticEvidence(
+            "candidate",
+            f"{uid}#c0",
+            "chunk",
+            0,
+            digest,
+            uid,
+            "generation-1",
+            0.9,
+        ),
+    )
+
+    class Store:
+        def meta(self, _page_id: str) -> dict[str, Any]:
+            return {
+                "namespace": "pages",
+                "path": str(path),
+                "title": "Candidate",
+                "status": "stable",
+                "sensitivity": "normal",
+                "uid": uid,
+            }
+
+    monkeypatch.setattr(reranker, "PAGES_DIR", pages)
+    monkeypatch.setattr(reranker, "SYSTEM_DIR", system)
+    candidate = ScoredPage(
+        page_id="candidate",
+        title="Candidate",
+        folder="",
+        updated="",
+        score=1.0,
+        snippet="stale snippet must not be used",
+        content_sha256=digest,
+        uid=uid,
+        evidence=evidence,
+    )
+
+    passage, source_class, identity = reranker.resolve_rerank_candidate(
+        candidate, store=Store()  # type: ignore[arg-type]
+    )
+
+    assert "selected source passage" in passage
+    assert "secret unselected passage" not in passage
+    assert "stale snippet must not be used" not in passage
+    assert source_class == SourceDataClassification(
+        SourceDataClass.PAGE, SourceSensitivity.NORMAL
+    )
+    assert identity[:2] == ("pages", str(path))
+
+
+def test_candidate_resolver_uses_canonical_body_for_page_keys_without_uid(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pages = tmp_path / "pages"
+    system = tmp_path / "system"
+    pages.mkdir()
+    system.mkdir()
+    source = (
+        b"---\ntitle: Legacy\nstatus: stable\nsensitivity: normal\n---\n"
+        b"canonical body\n"
+    )
+    path = pages / "legacy.md"
+    path.write_bytes(source)
+    digest = hashlib.sha256(source).hexdigest()
+    evidence = (
+        SemanticEvidence(
+            "legacy", "legacy", "page", -1, digest, "", "generation-1", 0.9
+        ),
+        SemanticEvidence(
+            "legacy", "legacy#q0", "question", 0, digest, "", "generation-1", 0.8
+        ),
+    )
+
+    class Store:
+        def meta(self, _page_id: str) -> dict[str, Any]:
+            return {
+                "namespace": "pages",
+                "path": str(path),
+                "title": "Legacy",
+                "status": "stable",
+                "sensitivity": "normal",
+            }
+
+    monkeypatch.setattr(reranker, "PAGES_DIR", pages)
+    monkeypatch.setattr(reranker, "SYSTEM_DIR", system)
+    candidate = ScoredPage(
+        page_id="legacy",
+        title="Legacy",
+        folder="",
+        updated="",
+        score=1.0,
+        snippet="stale generated question",
+        content_sha256=digest,
+        evidence=evidence,
+    )
+
+    passage, source_class, _identity = reranker.resolve_rerank_candidate(
+        candidate, store=Store()  # type: ignore[arg-type]
+    )
+
+    assert passage == "Legacy\n\ncanonical body"
+    assert "stale generated question" not in passage
+    assert source_class == SourceDataClassification(
+        SourceDataClass.PAGE, SourceSensitivity.NORMAL
+    )
+
+
+def test_candidate_resolver_fails_closed_for_stale_semantic_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    uid = "019fea6e-8a33-7401-b37b-c7afcf6711e1"
+    pages = tmp_path / "pages"
+    system = tmp_path / "system"
+    pages.mkdir()
+    system.mkdir()
+    source = (
+        f"---\nuid: {uid}\ntitle: Candidate\nstatus: stable\n---\n"
+        "actual source\n"
+    ).encode()
+    path = pages / "candidate.md"
+    path.write_bytes(source)
+    stale = SemanticEvidence(
+        "candidate",
+        f"{uid}#c0",
+        "chunk",
+        0,
+        "0" * 64,
+        uid,
+        "generation-1",
+        0.9,
+    )
+
+    class Store:
+        def meta(self, _page_id: str) -> dict[str, Any]:
+            return {
+                "namespace": "pages",
+                "path": str(path),
+                "title": "Candidate",
+                "status": "stable",
+                "sensitivity": "normal",
+                "uid": uid,
+            }
+
+    monkeypatch.setattr(reranker, "PAGES_DIR", pages)
+    monkeypatch.setattr(reranker, "SYSTEM_DIR", system)
+    candidate = ScoredPage(
+        page_id="candidate",
+        title="Candidate",
+        folder="",
+        updated="",
+        score=1.0,
+        snippet="forged stale snippet",
+        evidence=(stale,),
+    )
+
+    passage, source_class, identity = reranker.resolve_rerank_candidate(
+        candidate, store=Store()  # type: ignore[arg-type]
+    )
+
+    assert passage == "candidate"
+    assert "forged stale snippet" not in passage
+    assert "actual source" not in passage
+    assert source_class == SourceDataClassification(
         SourceDataClass.SYSTEM, SourceSensitivity.HIGH
     )
     assert identity[0] == "invalid"

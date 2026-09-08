@@ -20,7 +20,7 @@ import hashlib
 import json
 import os
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -601,16 +601,9 @@ def apply_penalties(
             adjusted.append(page)
             continue
         adjusted.append(
-            ScoredPage(
-                page_id=page.page_id,
-                title=page.title,
-                folder=page.folder,
-                updated=page.updated,
+            replace(
+                page,
                 score=float(page.score) * max(0.0, 1.0 - penalty),
-                status=page.status,
-                superseded_by=page.superseded_by,
-                page_type=page.page_type,
-                sensitivity=page.sensitivity,
             )
         )
     adjusted.sort(key=lambda x: x.score, reverse=True)
