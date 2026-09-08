@@ -1,0 +1,32 @@
+[
+  {
+    "repo": "nisavid/MemReranker-4B-OptiQ-4bit",
+    "revision": "b03972e13bf9cbe51688287e164de7cd774a9248",
+    "path": "/Users/trafficsign/.cache/huggingface/hub/models--nisavid--MemReranker-4B-OptiQ-4bit/snapshots/b03972e13bf9cbe51688287e164de7cd774a9248",
+    "download_wall_s": 54.89245120799751
+  },
+  {
+    "repo": "fuhao23/reranker_v1",
+    "revision": "f41563401581a4a71c7e522a9d7bec52550647f6",
+    "path": "/Users/trafficsign/.cache/huggingface/hub/models--fuhao23--reranker_v1/snapshots/f41563401581a4a71c7e522a9d7bec52550647f6",
+    "download_wall_s": 5.381812791005359
+  },
+  {
+    "repo": "Qwen/Qwen3-Reranker-0.6B",
+    "revision": "e61197ed45024b0ed8a2d74b80b4d909f1255473",
+    "path": "/Users/trafficsign/.cache/huggingface/hub/models--Qwen--Qwen3-Reranker-0.6B/snapshots/e61197ed45024b0ed8a2d74b80b4d909f1255473",
+    "download_wall_s": 49.065584791998845
+  },
+  {
+    "repo": "hotchpotch/japanese-reranker-xsmall-v2",
+    "revision": "de99fd2f16c7b5df1df1bcc1d9ad2c16d88ce93a",
+    "path": "/Users/trafficsign/.cache/huggingface/hub/models--hotchpotch--japanese-reranker-xsmall-v2/snapshots/de99fd2f16c7b5df1df1bcc1d9ad2c16d88ce93a",
+    "download_wall_s": 5.00943725000252
+  },
+  {
+    "repo": "BAAI/bge-reranker-v2-m3",
+    "revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+    "path": "/Users/trafficsign/.cache/huggingface/hub/models--BAAI--bge-reranker-v2-m3/snapshots/953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+    "download_wall_s": 0.4086227919906378
+  }
+]

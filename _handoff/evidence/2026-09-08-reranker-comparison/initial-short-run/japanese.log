@@ -1,0 +1,50 @@
+Loading weights:   0%|          | 0/66 [00:00<?, ?it/s]Loading weights: 100%|██████████| 66/66 [00:00<00:00, 7607.15it/s]
+{"id": "td01", "repeat": 0, "top1": 1, "latency_ms": 7.917875002021901}
+{"id": "td02", "repeat": 0, "top1": 1, "latency_ms": 59.746166996774264}
+{"id": "td03", "repeat": 0, "top1": 1, "latency_ms": 35.509374996763654}
+{"id": "td04", "repeat": 0, "top1": 1, "latency_ms": 46.19133399683051}
+{"id": "tu01", "repeat": 0, "top1": 1, "latency_ms": 25.15287499409169}
+{"id": "tu02", "repeat": 0, "top1": 1, "latency_ms": 19.3838339910144}
+{"id": "tu03", "repeat": 0, "top1": 1, "latency_ms": 12.555291992612183}
+{"id": "tu04", "repeat": 0, "top1": 1, "latency_ms": 6.908333001774736}
+{"id": "cr01", "repeat": 0, "top1": 1, "latency_ms": 87.69970899447799}
+{"id": "cr02", "repeat": 0, "top1": 1, "latency_ms": 21.088833003886975}
+{"id": "cr03", "repeat": 0, "top1": 1, "latency_ms": 7.518708996940404}
+{"id": "cr04", "repeat": 0, "top1": 1, "latency_ms": 12.130916002206504}
+{"id": "ts01", "repeat": 0, "top1": 1, "latency_ms": 67.91758400504477}
+{"id": "ts02", "repeat": 0, "top1": 1, "latency_ms": 128.11808299738914}
+{"id": "ts03", "repeat": 0, "top1": 1, "latency_ms": 25.74445799109526}
+{"id": "ts04", "repeat": 0, "top1": 1, "latency_ms": 75.90412499848753}
+{"id": "me01", "repeat": 0, "top1": 1, "latency_ms": 12.745624990202487}
+{"id": "me02", "repeat": 0, "top1": 1, "latency_ms": 6.529332997160964}
+{"id": "me03", "repeat": 0, "top1": 1, "latency_ms": 5.936374989687465}
+{"id": "me04", "repeat": 0, "top1": 1, "latency_ms": 5.297041992889717}
+{"id": "ne01", "repeat": 0, "top1": null, "latency_ms": 20.50095899903681}
+{"id": "ne02", "repeat": 0, "top1": null, "latency_ms": 11.92645900300704}
+{"id": "ne03", "repeat": 0, "top1": null, "latency_ms": 5.727707990445197}
+{"id": "ne04", "repeat": 0, "top1": null, "latency_ms": 12.8914579981938}
+{"id": "td01", "repeat": 1, "top1": 1, "latency_ms": 7.651542007806711}
+{"id": "td02", "repeat": 1, "top1": 1, "latency_ms": 6.431250003515743}
+{"id": "td03", "repeat": 1, "top1": 1, "latency_ms": 15.090125001734123}
+{"id": "td04", "repeat": 1, "top1": 1, "latency_ms": 7.232916992506944}
+{"id": "tu01", "repeat": 1, "top1": 1, "latency_ms": 8.573042010539211}
+{"id": "tu02", "repeat": 1, "top1": 1, "latency_ms": 14.601624992792495}
+{"id": "tu03", "repeat": 1, "top1": 1, "latency_ms": 12.573915999382734}
+{"id": "tu04", "repeat": 1, "top1": 1, "latency_ms": 6.788457991206087}
+{"id": "cr01", "repeat": 1, "top1": 1, "latency_ms": 14.121458007139154}
+{"id": "cr02", "repeat": 1, "top1": 1, "latency_ms": 13.523667003028095}
+{"id": "cr03", "repeat": 1, "top1": 1, "latency_ms": 6.187375009176321}
+{"id": "cr04", "repeat": 1, "top1": 1, "latency_ms": 11.14433399925474}
+{"id": "ts01", "repeat": 1, "top1": 1, "latency_ms": 16.42816700041294}
+{"id": "ts02", "repeat": 1, "top1": 1, "latency_ms": 14.740166006959043}
+{"id": "ts03", "repeat": 1, "top1": 1, "latency_ms": 8.4611250058515}
+{"id": "ts04", "repeat": 1, "top1": 1, "latency_ms": 8.30987500376068}
+{"id": "me01", "repeat": 1, "top1": 1, "latency_ms": 7.603458987432532}
+{"id": "me02", "repeat": 1, "top1": 1, "latency_ms": 7.027750005363487}
+{"id": "me03", "repeat": 1, "top1": 1, "latency_ms": 5.977000007987954}
+{"id": "me04", "repeat": 1, "top1": 1, "latency_ms": 6.595250000827946}
+{"id": "ne01", "repeat": 1, "top1": null, "latency_ms": 7.16741599899251}
+{"id": "ne02", "repeat": 1, "top1": null, "latency_ms": 13.491958001395687}
+{"id": "ne03", "repeat": 1, "top1": null, "latency_ms": 5.76425000326708}
+{"id": "ne04", "repeat": 1, "top1": null, "latency_ms": 7.744292001007125}
+{"status": "complete", "summary": {"positive_cases": 20, "timed_queries": 48, "top1_correct": 20, "top1": 1, "mrr": 1.0, "recall_at3": 0.975, "all_evidence_at3": 0.95, "ndcg_at3": 0.9806573596382729, "p50_ms": 12.028687502606772, "p95_ms": 75.90412499848753, "truncated_pairs": 0, "no_evidence_top_scores": [-3.290118455886841, -3.5835866928100586, -8.129657745361328, -2.8322067260742188], "abstention_evaluated": false}, "error": null}

@@ -1,0 +1,26 @@
+{
+  "verified_utc": "2026-09-08T10:30:46.218770+00:00",
+  "protocol_hashes_unchanged": {
+    "scripts/benchmark_recall_rerankers.py": true,
+    "tests/fixtures/recall_reranker_japanese.json": true,
+    "/Users/trafficsign/.chronovisor/config.toml": true
+  },
+  "initial_and_final_rankings_identical": {
+    "bge": true,
+    "japanese": true,
+    "lychee": true,
+    "mem": true
+  },
+  "tests": {
+    "command": ".venv/bin/pytest -q tests/test_benchmark_recall_rerankers.py tests/test_reranker.py",
+    "passed": 19,
+    "warnings": 1,
+    "warning": "Existing pydantic_settings unresolved lifespan forward reference"
+  },
+  "lint": {
+    "command": ".venv/bin/ruff check scripts/benchmark_recall_rerankers.py tests/test_benchmark_recall_rerankers.py",
+    "passed": true
+  },
+  "temporary_dependencies_removed": true,
+  "model_cache_policy": "Retain pinned model snapshots for reproducible follow-up comparisons; production config unchanged."
+}

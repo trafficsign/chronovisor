@@ -1,0 +1,25 @@
+{
+  "frozen_utc": "2026-09-08T10:25:22.528377+00:00",
+  "kind": "synthetic_diagnostic_not_production_acceptance",
+  "models_in_order": [
+    "bge",
+    "japanese",
+    "lychee",
+    "mem"
+  ],
+  "candidate_count": 6,
+  "primary_repeats": 2,
+  "context_ablation_categories": [
+    "coreference",
+    "topic_shift"
+  ],
+  "warmup_queries": 2,
+  "timing_scope": "resident model; includes tokenization, transfer, scoring, synchronization; excludes model load, candidate retrieval, service queue and answer generation",
+  "abstention": "not evaluated; uncalibrated score distributions only",
+  "label_review": "Independent review; tu03/cr01/cr04/ts01 corrected before any scored fixture run",
+  "hashes": {
+    "scripts/benchmark_recall_rerankers.py": "9646313919b349eb283f4beb349d30c24d5446ca0398a47ee5246394f87e649c",
+    "tests/fixtures/recall_reranker_japanese.json": "1234e9213d3e8b221c33450cbd54f5654d47e85f69dc0fd9d630b4cdb3db3bb5",
+    "/Users/trafficsign/.chronovisor/config.toml": "92a11f6fb51ce9d395c63c5e27e77770f4671315ff9e16ef014367eb2fb0869d"
+  }
+}

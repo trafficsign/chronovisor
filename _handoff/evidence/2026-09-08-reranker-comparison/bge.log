@@ -1,0 +1,50 @@
+Loading weights:   0%|          | 0/393 [00:00<?, ?it/s]Loading weights: 100%|██████████| 393/393 [00:00<00:00, 8069.48it/s]
+{"id": "td01", "repeat": 0, "top1": 1, "latency_ms": 26.312207992305048}
+{"id": "td02", "repeat": 0, "top1": 1, "latency_ms": 38.763042000937276}
+{"id": "td03", "repeat": 0, "top1": 1, "latency_ms": 67.13974999729544}
+{"id": "td04", "repeat": 0, "top1": 1, "latency_ms": 23.989958004676737}
+{"id": "tu01", "repeat": 0, "top1": 1, "latency_ms": 66.09416699211579}
+{"id": "tu02", "repeat": 0, "top1": 1, "latency_ms": 88.43024999077898}
+{"id": "tu03", "repeat": 0, "top1": 1, "latency_ms": 48.93150000134483}
+{"id": "tu04", "repeat": 0, "top1": 1, "latency_ms": 63.856624998152256}
+{"id": "cr01", "repeat": 0, "top1": 1, "latency_ms": 80.81041699915659}
+{"id": "cr02", "repeat": 0, "top1": 1, "latency_ms": 93.07066600013059}
+{"id": "cr03", "repeat": 0, "top1": 1, "latency_ms": 62.494790996424854}
+{"id": "cr04", "repeat": 0, "top1": 1, "latency_ms": 60.29795898939483}
+{"id": "ts01", "repeat": 0, "top1": 1, "latency_ms": 44.676249992335215}
+{"id": "ts02", "repeat": 0, "top1": 1, "latency_ms": 114.37975001172163}
+{"id": "ts03", "repeat": 0, "top1": 1, "latency_ms": 43.75412499939557}
+{"id": "ts04", "repeat": 0, "top1": 1, "latency_ms": 51.24533400521614}
+{"id": "me01", "repeat": 0, "top1": 1, "latency_ms": 27.193374990019947}
+{"id": "me02", "repeat": 0, "top1": 1, "latency_ms": 89.78400001069531}
+{"id": "me03", "repeat": 0, "top1": 1, "latency_ms": 51.47879100695718}
+{"id": "me04", "repeat": 0, "top1": 1, "latency_ms": 34.74895900581032}
+{"id": "ne01", "repeat": 0, "top1": null, "latency_ms": 34.487291995901614}
+{"id": "ne02", "repeat": 0, "top1": null, "latency_ms": 30.676667010993697}
+{"id": "ne03", "repeat": 0, "top1": null, "latency_ms": 69.14633300038986}
+{"id": "ne04", "repeat": 0, "top1": null, "latency_ms": 82.56962501036469}
+{"id": "td01", "repeat": 1, "top1": 1, "latency_ms": 31.989375012926757}
+{"id": "td02", "repeat": 1, "top1": 1, "latency_ms": 29.94479199696798}
+{"id": "td03", "repeat": 1, "top1": 1, "latency_ms": 23.771249994751997}
+{"id": "td04", "repeat": 1, "top1": 1, "latency_ms": 24.260624995804392}
+{"id": "tu01", "repeat": 1, "top1": 1, "latency_ms": 28.89741699618753}
+{"id": "tu02", "repeat": 1, "top1": 1, "latency_ms": 32.17608299746644}
+{"id": "tu03", "repeat": 1, "top1": 1, "latency_ms": 32.857541998964734}
+{"id": "tu04", "repeat": 1, "top1": 1, "latency_ms": 36.11433300829958}
+{"id": "cr01", "repeat": 1, "top1": 1, "latency_ms": 51.876000012271106}
+{"id": "cr02", "repeat": 1, "top1": 1, "latency_ms": 36.48500000417698}
+{"id": "cr03", "repeat": 1, "top1": 1, "latency_ms": 31.91370800777804}
+{"id": "cr04", "repeat": 1, "top1": 1, "latency_ms": 35.31983400171157}
+{"id": "ts01", "repeat": 1, "top1": 1, "latency_ms": 35.42691700567957}
+{"id": "ts02", "repeat": 1, "top1": 1, "latency_ms": 34.90766600589268}
+{"id": "ts03", "repeat": 1, "top1": 1, "latency_ms": 31.644333997974172}
+{"id": "ts04", "repeat": 1, "top1": 1, "latency_ms": 31.587959005264565}
+{"id": "me01", "repeat": 1, "top1": 1, "latency_ms": 25.22125000541564}
+{"id": "me02", "repeat": 1, "top1": 1, "latency_ms": 25.457332987571135}
+{"id": "me03", "repeat": 1, "top1": 1, "latency_ms": 23.327125003561378}
+{"id": "me04", "repeat": 1, "top1": 1, "latency_ms": 23.414499999489635}
+{"id": "ne01", "repeat": 1, "top1": null, "latency_ms": 21.942791994661093}
+{"id": "ne02", "repeat": 1, "top1": null, "latency_ms": 28.337124997051433}
+{"id": "ne03", "repeat": 1, "top1": null, "latency_ms": 21.865791990421712}
+{"id": "ne04", "repeat": 1, "top1": null, "latency_ms": 28.0110840103589}
+{"status": "complete", "summary": {"positive_cases": 20, "timed_queries": 48, "top1_correct": 20, "top1": 1, "mrr": 1.0, "recall_at3": 1.0, "all_evidence_at3": 1, "ndcg_at3": 0.9879581183722281, "p50_ms": 34.8283125058515, "p95_ms": 89.78400001069531, "truncated_pairs": 0, "no_evidence_top_scores": [-7.540648937225342, -5.698980808258057, -8.638260841369629, -4.727331161499023], "abstention_evaluated": false}, "error": null}

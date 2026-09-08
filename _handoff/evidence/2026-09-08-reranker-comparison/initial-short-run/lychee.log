@@ -1,0 +1,62 @@
+
+Loading weights:   0%|          | 0/310 [00:00<?, ?it/s]
+Loading weights:   0%|          | 1/310 [00:00<01:53,  2.72it/s]
+Loading weights:  99%|█████████▊| 306/310 [00:00<00:00, 851.36it/s]
+Loading weights: 100%|██████████| 310/310 [00:00<00:00, 660.22it/s]
+[transformers] [1mQwen3ForSequenceClassification LOAD REPORT[0m from: /Users/trafficsign/.cache/huggingface/hub/models--Qwen--Qwen3-Reranker-0.6B/snapshots/e61197ed45024b0ed8a2d74b80b4d909f1255473
+Key          | Status  |
+-------------+---------+-
+score.weight | MISSING |
+
+Notes:
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+[transformers] `use_return_dict` is deprecated! Use `return_dict` instead!
+{"id": "td01", "repeat": 0, "top1": 0, "latency_ms": 90.29820800060406}
+{"id": "td02", "repeat": 0, "top1": 1, "latency_ms": 179.8250830033794}
+{"id": "td03", "repeat": 0, "top1": 1, "latency_ms": 85.58112499304116}
+{"id": "td04", "repeat": 0, "top1": 1, "latency_ms": 277.7190420019906}
+{"id": "tu01", "repeat": 0, "top1": 1, "latency_ms": 90.39949999714736}
+{"id": "tu02", "repeat": 0, "top1": 0, "latency_ms": 87.20041700871661}
+{"id": "tu03", "repeat": 0, "top1": 1, "latency_ms": 81.47304100566544}
+{"id": "tu04", "repeat": 0, "top1": 1, "latency_ms": 214.4251670106314}
+{"id": "cr01", "repeat": 0, "top1": 1, "latency_ms": 115.30099999799859}
+{"id": "cr02", "repeat": 0, "top1": 1, "latency_ms": 102.20475000096485}
+{"id": "cr03", "repeat": 0, "top1": 1, "latency_ms": 143.0581660097232}
+{"id": "cr04", "repeat": 0, "top1": 0, "latency_ms": 219.43945800012443}
+{"id": "ts01", "repeat": 0, "top1": 0, "latency_ms": 105.18512499402277}
+{"id": "ts02", "repeat": 0, "top1": 1, "latency_ms": 98.03479199763387}
+{"id": "ts03", "repeat": 0, "top1": 1, "latency_ms": 108.74637500091922}
+{"id": "ts04", "repeat": 0, "top1": 1, "latency_ms": 98.68708299472928}
+{"id": "me01", "repeat": 0, "top1": 1, "latency_ms": 75.66008300636895}
+{"id": "me02", "repeat": 0, "top1": 1, "latency_ms": 83.71345800696872}
+{"id": "me03", "repeat": 0, "top1": 1, "latency_ms": 75.257958000293}
+{"id": "me04", "repeat": 0, "top1": 1, "latency_ms": 137.6252499903785}
+{"id": "ne01", "repeat": 0, "top1": null, "latency_ms": 67.59129199781455}
+{"id": "ne02", "repeat": 0, "top1": null, "latency_ms": 76.26375000108965}
+{"id": "ne03", "repeat": 0, "top1": null, "latency_ms": 78.52212499710731}
+{"id": "ne04", "repeat": 0, "top1": null, "latency_ms": 91.78312499716412}
+{"id": "td01", "repeat": 1, "top1": 0, "latency_ms": 80.46316599939018}
+{"id": "td02", "repeat": 1, "top1": 1, "latency_ms": 69.66633400588762}
+{"id": "td03", "repeat": 1, "top1": 1, "latency_ms": 66.83387499651872}
+{"id": "td04", "repeat": 1, "top1": 1, "latency_ms": 67.71520900656469}
+{"id": "tu01", "repeat": 1, "top1": 1, "latency_ms": 76.28529099747539}
+{"id": "tu02", "repeat": 1, "top1": 0, "latency_ms": 86.06291700561997}
+{"id": "tu03", "repeat": 1, "top1": 1, "latency_ms": 78.60683399485424}
+{"id": "tu04", "repeat": 1, "top1": 1, "latency_ms": 82.44729199213907}
+{"id": "cr01", "repeat": 1, "top1": 1, "latency_ms": 118.55308400117792}
+{"id": "cr02", "repeat": 1, "top1": 1, "latency_ms": 96.19687499071006}
+{"id": "cr03", "repeat": 1, "top1": 1, "latency_ms": 83.58874999976251}
+{"id": "cr04", "repeat": 1, "top1": 0, "latency_ms": 92.51083299750462}
+{"id": "ts01", "repeat": 1, "top1": 0, "latency_ms": 98.22816599626094}
+{"id": "ts02", "repeat": 1, "top1": 1, "latency_ms": 89.9983340059407}
+{"id": "ts03", "repeat": 1, "top1": 1, "latency_ms": 89.29124999849591}
+{"id": "ts04", "repeat": 1, "top1": 1, "latency_ms": 86.9726249948144}
+{"id": "me01", "repeat": 1, "top1": 1, "latency_ms": 75.8974169875728}
+{"id": "me02", "repeat": 1, "top1": 1, "latency_ms": 79.51379200676456}
+{"id": "me03", "repeat": 1, "top1": 1, "latency_ms": 77.71129200409632}
+{"id": "me04", "repeat": 1, "top1": 1, "latency_ms": 65.42541600356344}
+{"id": "ne01", "repeat": 1, "top1": null, "latency_ms": 69.46904199139681}
+{"id": "ne02", "repeat": 1, "top1": null, "latency_ms": 74.026166999829}
+{"id": "ne03", "repeat": 1, "top1": null, "latency_ms": 75.76108399371151}
+{"id": "ne04", "repeat": 1, "top1": null, "latency_ms": 77.63866700406652}
+{"status": "complete", "summary": {"positive_cases": 20, "timed_queries": 48, "top1_correct": 16, "top1": 0.8, "mrr": 0.8916666666666667, "recall_at3": 1.0, "all_evidence_at3": 1, "ndcg_at3": 0.9196394630357186, "p50_ms": 85.82202099933056, "p95_ms": 214.4251670106314, "truncated_pairs": 0, "no_evidence_top_scores": [1.123487949371338, -0.453757643699646, -1.9386584758758545, -1.2195618152618408], "abstention_evaluated": false}, "error": null}
