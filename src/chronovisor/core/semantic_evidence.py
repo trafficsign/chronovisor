@@ -224,7 +224,11 @@ def resolve_semantic_evidence(
     identity = source_uid or page_id
     max_chunks = 8
     for item in evidence:
-        if not isinstance(item, SemanticEvidence) or item.doc_id in seen_doc_ids:
+        if (
+            not isinstance(item, SemanticEvidence)
+            or not isinstance(item.doc_id, str)
+            or item.doc_id in seen_doc_ids
+        ):
             continue
         if item.page_id != page_id or item.kind != "chunk":
             continue
@@ -239,14 +243,16 @@ def resolve_semantic_evidence(
             continue
         if not isinstance(item.generation_id, str) or not item.generation_id.strip():
             continue
-        if isinstance(item.score, bool):
+        if type(item.score) not in {int, float}:
             continue
         try:
             score = float(item.score)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
         if not math.isfinite(score):
             continue
+        if valid and item.generation_id != valid[0].generation_id:
+            return ()
         valid.append(item)
         seen_doc_ids.add(item.doc_id)
     if not valid:
@@ -259,7 +265,7 @@ def resolve_semantic_evidence(
     if source[body_start:] != document.body:
         return ()
     body_char_to_byte = [0]
-    for char in body:
+    for char in body[:max(end for _start, end, _text in spans)]:
         body_char_to_byte.append(body_char_to_byte[-1] + len(char.encode("utf-8")))
 
     passages: list[SourcePassage] = []

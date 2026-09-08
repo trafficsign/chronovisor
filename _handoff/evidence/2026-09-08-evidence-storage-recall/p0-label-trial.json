@@ -1,0 +1,176 @@
+{
+  "schema_version": "chronovisor.evidence_storage_recall.p0-label-trial.v1",
+  "kind": "p0-source-bound-qwen-adjudication-trial",
+  "captured_at": "2026-09-08T14:23:08Z",
+  "source_snapshot": {
+    "path": "/Users/trafficsign/projects/sandbox/chronovisor-evidence-baseline",
+    "commit": "d652252bf39e744e71472ccf93ce3162f3860ce1",
+    "tree": "284ce250e8c36cb6442965c69b3ae3d9229134a2",
+    "working_tree": "clean",
+    "note": "Detached comparison snapshot; dirty R6 and candidate work were not used."
+  },
+  "scope": {
+    "purpose": "Exercise the existing source-bound local Qwen review path before any answer-storage benchmark promotion.",
+    "private_payload_recorded": true,
+    "private_payload_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p0-label-trial",
+    "raw_candidate_text_copied_to_repo": false,
+    "production_quality_claim": false,
+    "production_search_golden_or_split_mutation": false
+  },
+  "candidate_snapshot": {
+    "path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p0-label-trial/candidates.jsonl",
+    "sha256": "658f63c66ea4b3c905da08550290d203b78448cc31e6359dbba38fd7ba9f016b",
+    "bytes": 17609,
+    "rows": 20,
+    "source_counts": {"recall_questions": 20},
+    "split_counts": {"train": 10, "dev": 7, "locked-test": 3},
+    "language_counts": {"en": 19, "mixed": 1, "ja": 0},
+    "unique_queries": 20,
+    "unique_page_uids": 5,
+    "expected_pages_exactly_source_page": true,
+    "split_role": "search_eval_only_not_answer_benchmark",
+    "source_queue": {
+      "path": "/Users/trafficsign/.chronovisor/recall/search-label-queue.jsonl",
+      "rows": 56140,
+      "recall_questions_rows": 55990,
+      "sha256": "1e2208094bd3b051a2e1b0f04628567c2ea0c68f412c7bf129319162a6979a1a"
+    }
+  },
+  "dry_run": {
+    "max_items": 20,
+    "status": "waiting",
+    "reason": "candidate_consensus_pending",
+    "pending": 20,
+    "stale": 0,
+    "accepted": 0,
+    "already": 0,
+    "superseded": 0,
+    "model_calls": 0,
+    "production_files_changed": false
+  },
+  "formal_review": {
+    "requested_max_items": 20,
+    "status": "interrupted_bounded_runtime",
+    "reason": "10 accepted receipts were durable; the next local model stream exceeded the bounded trial runtime and was interrupted.",
+    "accepted": 10,
+    "already": 0,
+    "pending": 10,
+    "stale": 0,
+    "superseded": 0,
+    "model_calls_accepted": 10,
+    "model_call_in_progress_interrupted": 1,
+    "chain": {
+      "passed": true,
+      "reason": "verified_receipt_chain",
+      "rows": 10,
+      "ledger_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p0-label-trial/answer-consensus-receipts.jsonl",
+      "ledger_sha256": "2f7f1936a440ad1b730636d61fc6f3082a82df39f846e206dcd2606de0661c2c"
+    },
+    "validated_receipts": {
+      "passed": 10,
+      "failed": 0,
+      "reason_counts": {"verified_machine_consensus": 10},
+      "artifact_count": 10,
+      "artifact_missing": 0,
+      "artifact_seal_mismatch": 0,
+      "artifact_root": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p0-label-trial/runtime/decision-artifacts",
+      "audit_root": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p0-label-trial/runtime/local-consensus",
+      "audit_jsonl_sha256": "51dd883686bdc77c0a69c953a752cddd8a136447c0a3122369a034eb4a1a6cb6",
+      "summary_json_sha256": "5e2c804bfa1c85ae5faa5d7e6b1e8cc5754aeeae0e5fb65dbfaa71b44a1e39a6",
+      "trace_events_jsonl_sha256": "2006f9e69afaeecc6d2e13a779a7dd216f9dcaf286790c60a75775667d42f498",
+      "approved_decision_flags_all_true": true,
+      "production_answer_used_all_false": true
+    },
+    "authority": {
+      "source": "configured_runtime_consensus",
+      "authority_kind": "single_model_v1",
+      "route_count": 1,
+      "route_role": "classification.authority",
+      "model": "qwen3.8-flash-next-chat",
+      "new_quorum_required": false
+    }
+  },
+  "benchmark_dry_run": {
+    "output_file": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p0-label-trial/benchmark.json",
+    "source_ledger_dir": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p0-label-trial/benchmark-source-ledgers",
+    "private_ledger_copy": {
+      "path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p0-label-trial/recall/answer-consensus-receipts.jsonl",
+      "rows": 10,
+      "sha256": "2f7f1936a440ad1b730636d61fc6f3082a82df39f846e206dcd2606de0661c2c"
+    },
+    "status": "waiting",
+    "reason": "dry_run",
+    "entries": 10,
+    "cluster_counts": {"train": 2, "holdout": 1, "locked-test": 1},
+    "written": false,
+    "promotion_ready": false
+  },
+  "first_attempt_cleanup": {
+    "unintended_orphan_artifact_recovered": true,
+    "global_artifact_path": "/Users/trafficsign/.chronovisor/runtime/decision-artifacts/6c/6c09a879867e13d598ab966e0a9e2f732f7e653bf67055d8d1c66f80809f30db.json",
+    "global_lock_path": "/Users/trafficsign/.chronovisor/runtime/decision-artifacts/locks/6c/6c09a879867e13d598ab966e0a9e2f732f7e653bf67055d8d1c66f80809f30db.lock",
+    "first_receipt_sha256": "61b488c474f603803f8b4bc541abceb61d040cb2637b677e63f0ea802945ca20",
+    "execution_fingerprint": "6c09a879867e13d598ab966e0a9e2f732f7e653bf67055d8d1c66f80809f30db",
+    "decision_artifact_seal_sha256": "c7ed01b6e035770b4bb7a020f0e467fc622bf4c16cac8d7b31ff24eda0e4cf81",
+    "request_sha256": "df9854939a2c475c46c0fc82c5da419256e7b638fc9dbf7e49a9b6e182caeeb5",
+    "observed_at": "2026-09-08T14:04:10.502949Z",
+    "artifact_and_lock_verified_as_new_trial_outputs": true,
+    "removed_exact_artifact_and_lock": true,
+    "shared_production_ledger_reference": false,
+    "config_search_golden_split_unchanged": true,
+    "statement": "One unintended orphan artifact and lock were generated by the first isolation attempt, verified against its receipt identity, and recovered. This trial therefore does not claim zero production writes."
+  },
+  "production_state_after": {
+    "config": {
+      "path": "/Users/trafficsign/.chronovisor/config.toml",
+      "bytes": 17106,
+      "sha256": "b8597c103f90e6fc8574437e38a87317ec4b05bfa242cccab05179757cdfc2eb"
+    },
+    "search_golden": {
+      "path": "/Users/trafficsign/.chronovisor/recall/search-golden.jsonl",
+      "bytes": 3586843,
+      "sha256": "f6325c5054d3c7d75db8acdabfe59fe41eaa18856852cee9b91796d860510d57"
+    },
+    "search_label_queue": {
+      "path": "/Users/trafficsign/.chronovisor/recall/search-label-queue.jsonl",
+      "sha256": "1e2208094bd3b051a2e1b0f04628567c2ea0c68f412c7bf129319162a6979a1a"
+    },
+    "production_answer_consensus_ledger_exists": false,
+    "production_answer_benchmark_exists": false,
+    "production_split_manifest_exists": false,
+    "orphan_global_artifact_exists": false,
+    "orphan_global_lock_exists": false,
+    "trial_process_remaining": false,
+    "trial_private_lock_files_remaining": false
+  },
+  "quality_boundary": {
+    "pipeline_trial_only": true,
+    "not_source_gold": true,
+    "not_heldout": true,
+    "not_quality_benchmark": true,
+    "candidate_code_freeze_fairness": "Candidate implementation was fixed before formal calls, which supports procedural paired evaluation but does not remove data leakage or missing source-validity fields.",
+    "reasons": [
+      "The existing machine packet contract accepts source=recall_questions and split_role=search_eval_only_not_answer_benchmark; the selected RQ query metadata is present in the current indexed collection.",
+      "The 20 rows cover only 5 page identities and produced 4 connected components, below the train and locked-test cluster floors of 20 each.",
+      "The trial has no Japanese-only cases and cannot establish Japanese/English cross-language coverage.",
+      "The current answer packet carries page-prefix evidence and hashes but no enforceable source range, cutoff, obsolete/stale, or temporal-validity fields.",
+      "The formal machine entrypoint filters to recall_questions; an arbitrary Luna-authored query cannot be relabeled as recall_questions without a source-kind contract change."
+    ]
+  },
+  "fresh_heldout_min_next_step": [
+    "Freeze a source cutoff and source-only ledger before candidate evaluation; bind each evidence span to page identity, byte range, language, obsolete/stale status, and temporal validity.",
+    "Freeze a fresh query set separately from the index. A Luna may draft/select source-bound queries, but generated text must remain a distinct source kind or use pre-existing RQ provenance; do not mark it recall_questions by assertion.",
+    "Build and seal a separate evaluation index snapshot that excludes query-bearing recall_questions/question metadata, then verify page identity and query/index separation before model calls.",
+    "Use the existing configured single-model Qwen authority for formal review; no three-route quorum or authority relaxation is required.",
+    "Allocate the target 60 dev and 120 holdout cases with Japanese/English and source-range/obsolete/time strata, preserve page-identity connected components, and satisfy train>=20 and locked-test>=20 cluster floors.",
+    "Run the source-ledger and benchmark dry-run, then promote only a sealed epoch; do not re-split the existing manual94 manifest."
+  ],
+  "conclusion": {
+    "formal_qwen_review_exercised": true,
+    "formal_qwen_review_complete_for_requested_20": false,
+    "bounded_trial_durable_receipts": 10,
+    "fresh_60_dev_120_holdout_ready": false,
+    "p4_blocker": true,
+    "next_action_requires_contract_or_fresh_source_binding": true
+  }
+}

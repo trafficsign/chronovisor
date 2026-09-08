@@ -129,6 +129,7 @@ def test_deep_winning_chunks_reach_actual_injection(
         ("ordinal", True),
         ("page_id", "wrong"),
         ("score", float("nan")),
+        ("score", 10**1000),
     ],
 )
 def test_service_evidence_identity_is_validated(field, value):

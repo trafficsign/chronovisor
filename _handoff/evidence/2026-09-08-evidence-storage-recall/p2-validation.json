@@ -1,0 +1,40 @@
+{
+  "phase": "P2",
+  "status": "page_only_isolated_implementation_verified",
+  "full_phase_complete": false,
+  "changes": {
+    "projection_schema": "chronovisor.page-evidence-projection.v1",
+    "semantic_kind": "section-v1",
+    "extractor_schema_version": 3,
+    "legacy_extractor_default": 2,
+    "source_value": "exact canonical page byte range",
+    "retrieval_context": "section context and existing metadata keys; 512 chars each; never injected as source",
+    "recall_connection": "Isolated test passes SourcePassage to existing ContextItem/compiler. No production C hydration entrypoint or new package edge."
+  },
+  "verification": {
+    "projection_tests": 7,
+    "adapter_tests": 6,
+    "related_combined_tests_passed": 319,
+    "latest_adapter_tests_passed": 6,
+    "mypy_files_passed": 94,
+    "import_boundary": "kept",
+    "ruff": "passed",
+    "latest_isolated_tests_passed": 24
+  },
+  "source_code_sha256": {
+    "src/chronovisor/research/page_evidence_projection.py": "59ba699e30406495e3a64e3e361582077477ab32d5ec5a3030b78095a7971877",
+    "src/chronovisor/research/page_section_semantic_adapter.py": "cc775405211cce4703cf89b2fb8dcb8899f29ba9fc4c6fd665a019a3c6d2741b",
+    "src/chronovisor/core/semantic_index.py": "0fdcfec9dffce2734f2eb05d93f0b54ed2492f0ed95077ee97c81e7e9276faf1",
+    "src/chronovisor/core/search_types.py": "3ddaaf829e713ae7f011dfd7333fcd85e70acc277d3f4e5d150c35a44595a718"
+  },
+  "source_integrity": "p2-source-revalidation.json",
+  "pending": [
+    "conversation event and explicit correction extraction beyond existing Raw evidence",
+    "production C service/reranker/Recall integration",
+    "frozen source-bound bilingual/cross-language gold benchmark",
+    "paired A/B/C adoption gate",
+    "full backfill and production deployment"
+  ],
+  "production_activation": false,
+  "new_model_calls_for_projection": 0
+}

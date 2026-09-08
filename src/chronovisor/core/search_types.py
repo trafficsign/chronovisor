@@ -61,7 +61,7 @@ def parse_semantic_evidence(
                 result[0].page_uid, result[0].source_sha256, result[0].generation_id
             ):
                 raise ValueError
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("invalid semantic evidence") from exc
         result.append(item)
         seen.add(item.doc_id)
@@ -92,7 +92,9 @@ def merge_evidence(
     rows = list(unique.values())
     # Page/question documents are retrieval keys. Keep the winning key, then
     # prefer scored source chunks over redundant generated questions.
-    return tuple([rows[0], *(item for item in rows[1:] if item.kind == "chunk")])[:3]
+    return tuple(
+        [rows[0], *(item for item in rows[1:] if item.kind in {"chunk", "section-v1"})]
+    )[:3]
 
 
 @dataclass

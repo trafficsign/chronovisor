@@ -17,7 +17,7 @@
     "passed": 21,
     "preexisting_failures_unresolved": true
   },
-  "full_suite": "running_at_receipt_creation",
+  "full_suite": "interrupted_on_baseline_reproduced_hang; see p6-verification.json",
   "quality_adoption_gate": "not_established",
   "production_deployed": false,
   "evidence": "p1-real-index-smoke.json"
