@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -277,6 +278,323 @@ def test_cold_reader_loads_generation_matched_projection_without_scanning(
     rows = reader.query_existing("projectiontoken")
     assert [row.page_id for row in rows] == ["page"]
     assert rows[0].uid == "page-uid"
+
+
+@pytest.mark.parametrize("writer_method", ["refresh", "apply_changes"])
+@pytest.mark.parametrize("change", ["update", "remove", "system"])
+def test_metadata_writer_keeps_existing_lexical_projection_readable(
+    tmp_path: Path, writer_method: str, change: str,
+) -> None:
+    root = tmp_path / "wiki"
+    page = root / "pages" / "page.md"
+    page.parent.mkdir(parents=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n")
+    original = "---\ntitle: Page\nstatus: stable\ntype: knowledge\n---\noldtoken\n"
+    page.write_text(original)
+    metadata = IndexStore(root)
+    metadata.refresh()
+    path = root / ".index" / "lexical.sqlite"
+    lexical = LexicalIndex(path=path, pages=lambda: [page])
+    lexical.build()
+    lexical.close()
+    old_generation = metadata.snapshot_generation
+
+    upserts, removed = [], []
+    if change == "remove":
+        page.unlink()
+        removed = ["page"]
+    elif change == "system":
+        system = root / "system" / "state.md"
+        system.parent.mkdir()
+        system.write_text(original.replace("oldtoken", "newtoken"))
+        upserts = [system]
+    else:
+        page.write_text(original.replace("oldtoken", "newtoken"))
+        upserts = [page]
+    if writer_method == "refresh":
+        metadata.refresh()
+    else:
+        metadata.apply_changes(upserts, removed_page_ids=removed)
+
+    assert metadata.snapshot_generation != old_generation
+    reader = LexicalIndex(
+        path=path, pages=lambda: pytest.fail("Recall reader scanned pages"),
+    )
+    assert reader.load_existing(expected_generation=metadata.snapshot_generation)
+    expected = [] if change == "remove" else ["state" if change == "system" else "page"]
+    assert [row.page_id for row in reader.query_existing("newtoken")] == expected
+    if change != "system":
+        assert reader.query_existing("oldtoken") == []
+
+
+def test_lexical_writer_serializes_metadata_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "wiki"
+    page = root / "pages" / "page.md"
+    page.parent.mkdir(parents=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    page.write_text(
+        "---\ntitle: Page\nstatus: stable\ntype: knowledge\n---\noldtoken\n",
+        encoding="utf-8",
+    )
+    metadata_a = IndexStore(root)
+    metadata_a.refresh()
+    path = root / ".index" / "lexical.sqlite"
+    lexical = LexicalIndex(path=path, pages=lambda: [page], refresh_interval_seconds=0)
+    lexical.build()
+    lexical.close()
+    metadata_b = IndexStore(root)
+    metadata_b.refresh()
+    page.write_text(
+        "---\ntitle: Page\nstatus: stable\ntype: knowledge\n---\nnewtoken\n",
+        encoding="utf-8",
+    )
+
+    original_generation = LexicalIndex._writer_generation
+    first_generation_ready = threading.Event()
+    release_first = threading.Event()
+    second_generation_entered = threading.Event()
+    call_lock = threading.Lock()
+    calls = 0
+
+    def gated_generation(self: LexicalIndex) -> tuple[bool, int | None]:
+        nonlocal calls
+        with call_lock:
+            calls += 1
+            call_number = calls
+        result = original_generation(self)
+        if call_number == 1:
+            first_generation_ready.set()
+            if not release_first.wait(timeout=5):
+                raise AssertionError("first lexical writer was not released")
+        elif call_number == 2:
+            second_generation_entered.set()
+        return result
+
+    monkeypatch.setattr(LexicalIndex, "_writer_generation", gated_generation)
+    errors: list[BaseException] = []
+
+    def refresh(store: IndexStore) -> None:
+        try:
+            store.refresh()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    first = threading.Thread(target=refresh, args=(metadata_a,))
+    second = threading.Thread(target=refresh, args=(metadata_b,))
+    first.start()
+    try:
+        assert first_generation_ready.wait(timeout=5)
+        second.start()
+        overlapped = second_generation_entered.wait(timeout=1)
+    finally:
+        release_first.set()
+        first.join(timeout=5)
+        if second.ident is not None:
+            second.join(timeout=5)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert errors == []
+    assert overlapped is False
+
+    reader_metadata = IndexStore(root)
+    assert reader_metadata.load_existing() is True
+    generation = reader_metadata.snapshot_generation
+    assert generation is not None
+    reader = LexicalIndex(
+        path=path,
+        pages=lambda: pytest.fail("consistent projection load scanned pages"),
+    )
+    try:
+        assert reader.load_existing(expected_generation=generation) is True
+        assert [row.page_id for row in reader.query_existing("newtoken")] == ["page"]
+    finally:
+        reader.close()
+
+
+def test_lexical_writer_reads_generation_after_pages_callback(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wiki"
+    page = root / "pages" / "page.md"
+    page.parent.mkdir(parents=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    page.write_text(
+        "---\ntitle: Page\nstatus: stable\ntype: knowledge\n---\noldtoken\n",
+        encoding="utf-8",
+    )
+    metadata = IndexStore(root)
+    metadata.refresh()
+    path = root / ".index" / "lexical.sqlite"
+    lexical = LexicalIndex(path=path, pages=lambda: [page], refresh_interval_seconds=0)
+    lexical.build()
+    lexical.close()
+    old_generation = metadata.snapshot_generation
+    assert old_generation is not None
+
+    page.write_text(
+        "---\ntitle: Page\nstatus: stable\ntype: knowledge\n---\nnewtoken\n",
+        encoding="utf-8",
+    )
+
+    def pages_after_refresh() -> list[Path]:
+        metadata.refresh()
+        return [page]
+
+    writer = LexicalIndex(
+        path=path,
+        pages=pages_after_refresh,
+        refresh_interval_seconds=0,
+    )
+    try:
+        writer.build(force=True)
+    finally:
+        writer.close()
+
+    reader_metadata = IndexStore(root)
+    assert reader_metadata.load_existing() is True
+    new_generation = reader_metadata.snapshot_generation
+    assert new_generation is not None and new_generation != old_generation
+    reader = LexicalIndex(path=path, pages=lambda: pytest.fail("reader scanned pages"))
+    try:
+        assert reader.load_existing(expected_generation=new_generation) is True
+        assert [row.page_id for row in reader.query_existing("newtoken")] == ["page"]
+    finally:
+        reader.close()
+
+
+def test_stale_apply_receipt_merges_newer_metadata_snapshot(tmp_path: Path) -> None:
+    root = tmp_path / "wiki"
+    pages = root / "pages"
+    pages.mkdir(parents=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    for page_id, token in (("first", "firstold"), ("second", "secondold")):
+        (pages / f"{page_id}.md").write_text(
+            f"---\ntitle: {page_id.title()}\nstatus: stable\ntype: knowledge\n---\n"
+            f"{token}\n",
+            encoding="utf-8",
+        )
+    writer_a = IndexStore(root)
+    writer_a.refresh()
+    path = root / ".index" / "lexical.sqlite"
+    lexical = LexicalIndex(
+        path=path,
+        pages=lambda: sorted(pages.glob("*.md")),
+        refresh_interval_seconds=0,
+    )
+    lexical.build()
+    lexical.close()
+    writer_b = IndexStore(root)
+    writer_b.refresh()
+
+    first = pages / "first.md"
+    first.write_text(
+        "---\ntitle: First Updated\nstatus: stable\ntype: knowledge\n---\n"
+        "firstnew\n",
+        encoding="utf-8",
+    )
+    writer_a.apply_changes([first])
+
+    second = pages / "second.md"
+    second.write_text(
+        "---\ntitle: Second Updated\nstatus: stable\ntype: knowledge\n---\n"
+        "secondnew\n",
+        encoding="utf-8",
+    )
+    writer_b.apply_changes([second])
+
+    reader_metadata = IndexStore(root)
+    assert reader_metadata.load_existing() is True
+    assert reader_metadata.meta("first")["title"] == "First Updated"
+    assert reader_metadata.meta("second")["title"] == "Second Updated"
+    generation = reader_metadata.snapshot_generation
+    assert generation is not None
+    reader = LexicalIndex(path=path, pages=lambda: pytest.fail("receipt reader scanned pages"))
+    try:
+        assert reader.load_existing(expected_generation=generation) is True
+        assert [row.page_id for row in reader.query_existing("firstnew")] == ["first"]
+        assert [row.page_id for row in reader.query_existing("secondnew")] == ["second"]
+    finally:
+        reader.close()
+
+
+def test_failed_refresh_then_stale_apply_reconciles_other_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "wiki"
+    pages = root / "pages"
+    pages.mkdir(parents=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (root / name).write_text("legacy\n", encoding="utf-8")
+    for page_id, token in (("first", "firstold"), ("second", "secondold")):
+        (pages / f"{page_id}.md").write_text(
+            f"---\ntitle: {page_id.title()}\nstatus: stable\ntype: knowledge\n---\n"
+            f"{token}\n",
+            encoding="utf-8",
+        )
+    writer_a = IndexStore(root)
+    writer_a.refresh()
+    path = root / ".index" / "lexical.sqlite"
+    lexical = LexicalIndex(
+        path=path,
+        pages=lambda: sorted(pages.glob("*.md")),
+        refresh_interval_seconds=0,
+    )
+    lexical.build()
+    lexical.close()
+    writer_b = IndexStore(root)
+    writer_b.refresh()
+
+    first = pages / "first.md"
+    first.write_text(
+        "---\ntitle: First Updated\nstatus: stable\ntype: knowledge\n---\n"
+        "firstnew\n",
+        encoding="utf-8",
+    )
+    writer_a.apply_changes([first])
+
+    second = pages / "second.md"
+    second.write_text(
+        "---\ntitle: Second Updated\nstatus: stable\ntype: knowledge\n---\n"
+        "secondnew\n",
+        encoding="utf-8",
+    )
+    real_persist = writer_b._persist
+
+    def fail_persist(_generation: int) -> None:
+        raise OSError("injected metadata publication failure")
+
+    monkeypatch.setattr(writer_b, "_persist", fail_persist)
+    writer_b.refresh()
+    assert writer_b._persistence_dirty is True
+    monkeypatch.setattr(writer_b, "_persist", real_persist)
+
+    first.write_text(
+        "---\ntitle: First Latest\nstatus: stable\ntype: knowledge\n---\n"
+        "firstlatest\n",
+        encoding="utf-8",
+    )
+    writer_a.apply_changes([first])
+    writer_b.apply_changes([second])
+
+    reader_metadata = IndexStore(root)
+    assert reader_metadata.load_existing() is True
+    assert reader_metadata.meta("first")["title"] == "First Latest"
+    assert reader_metadata.meta("second")["title"] == "Second Updated"
+    generation = reader_metadata.snapshot_generation
+    assert generation is not None
+    reader = LexicalIndex(path=path, pages=lambda: pytest.fail("recovery reader scanned pages"))
+    try:
+        assert reader.load_existing(expected_generation=generation) is True
+        assert [row.page_id for row in reader.query_existing("firstlatest")] == ["first"]
+        assert [row.page_id for row in reader.query_existing("secondnew")] == ["second"]
+    finally:
+        reader.close()
 
 
 def test_generation_mismatch_is_unavailable_without_rebuilding(

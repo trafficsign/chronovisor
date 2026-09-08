@@ -17,6 +17,7 @@ import os
 import threading
 import time
 from collections.abc import Iterable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -772,6 +773,27 @@ class IndexStore:
         self._snapshot_available = True
         self._snapshot_error = None
 
+        # Publishing metadata also advances the reader's required generation.
+        # Keep an existing lexical projection in step at this shared writer
+        # boundary; Recall must never rebuild it on the synchronous read path.
+        lexical_path = self._index_dir / "lexical.sqlite"
+        if self._index_dir == self._root / ".index" and lexical_path.is_file():
+            from chronovisor.core.lexical_index import LexicalIndex
+
+            lexical = LexicalIndex(
+                path=lexical_path,
+                pages=lambda: sorted(
+                    Path(entry.path)
+                    for entry in self._entries.values()
+                    if entry.status == "stable"
+                ),
+                refresh_interval_seconds=0,
+            )
+            try:
+                lexical.build()
+            finally:
+                lexical.close()
+
     # -- refresh ----------------------------------------------------------
 
     def _scan_disk(self) -> list[tuple[str, Path, bool, int, int]]:
@@ -836,7 +858,14 @@ class IndexStore:
         self._refresh_locked()
 
     def _refresh_locked(self) -> None:
-        with self._lock:
+        from chronovisor.core.page_mutation import _reentrant_exclusive_lock
+
+        publication_lock = (
+            nullcontext()
+            if os.environ.get("CHRONOVISOR_READ_ONLY") == "1"
+            else _reentrant_exclusive_lock(self._index_dir / "writer.lock")
+        )
+        with publication_lock, self._lock:
             if not self._loaded:
                 loaded_from_disk = self._load_from_disk()
                 self._loaded = True
@@ -1071,7 +1100,23 @@ class IndexStore:
                 f"page ids cannot be removed and upserted together: {sorted(overlap)}"
             )
 
-        with okf_runtime_operation(self._root), self._lock:
+        from chronovisor.core.page_mutation import _reentrant_exclusive_lock
+
+        publication_lock = (
+            nullcontext()
+            if os.environ.get("CHRONOVISOR_READ_ONLY") == "1"
+            else _reentrant_exclusive_lock(self._index_dir / "writer.lock")
+        )
+        with okf_runtime_operation(self._root), publication_lock, self._lock:
+            # Another writer may have published since ensure_loaded(). Merge
+            # this receipt into that snapshot rather than dropping its changes.
+            if self._cache_files_signature() != self._cache_signature:
+                if self._persistence_dirty:
+                    # Recover unpublished canonical changes as well as the
+                    # other writer's changes after a failed publication.
+                    self._refresh_locked()
+                elif not self._load_from_disk():
+                    raise OSError("cannot load the latest metadata writer snapshot")
             for page_id, entry in updates.items():
                 existing = self._entries.get(page_id)
                 if (
