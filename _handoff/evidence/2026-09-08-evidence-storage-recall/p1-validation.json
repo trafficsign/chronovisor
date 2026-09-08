@@ -1,0 +1,24 @@
+{
+  "phase": "P1",
+  "status": "offline_source_integrity_passed",
+  "baseline_commit": "d652252",
+  "targeted_tests": {
+    "passed": 446,
+    "failed": 0
+  },
+  "static_checks": {
+    "ruff": "passed",
+    "mypy_files_passed": 94,
+    "import_boundary": "kept"
+  },
+  "architecture_checks": {
+    "current_failed": 9,
+    "baseline_failed": 9,
+    "passed": 21,
+    "preexisting_failures_unresolved": true
+  },
+  "full_suite": "running_at_receipt_creation",
+  "quality_adoption_gate": "not_established",
+  "production_deployed": false,
+  "evidence": "p1-real-index-smoke.json"
+}

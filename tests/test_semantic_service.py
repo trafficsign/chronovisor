@@ -21,6 +21,7 @@ from chronovisor.core.llm_runtime import (
     RouteLocation,
 )
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
+from chronovisor.core.search_types import SemanticEvidence
 from chronovisor.core.semantic_index import SemanticDocument, SemanticIndexError
 from chronovisor.search import semantic_service
 from chronovisor.search.semantic_model import SemanticModelError
@@ -675,14 +676,16 @@ def test_pointer_reload_propagates_deadline_and_records_late_work(tmp_path) -> N
     assert state._late_reload_ms >= 40
 
 
-def test_search_vector_honors_generation_lock_deadline() -> None:
+def test_search_vector_with_evidence_honors_generation_lock_deadline() -> None:
     state = object.__new__(SemanticServiceState)
     state._generation_lock = threading.Lock()
-    state._generation = SimpleNamespace(search=lambda *_args, **_kwargs: [])
+    state._generation = SimpleNamespace(
+        search_with_evidence=lambda *_args, **_kwargs: []
+    )
     state._generation_lock.acquire()
     try:
         with pytest.raises(TimeoutError):
-            state._search_vector(
+            state._search_vector_with_evidence(
                 np.asarray([1.0, 0.0], dtype=np.float32),
                 1,
                 deadline_at=time.monotonic() + 0.01,
@@ -771,7 +774,13 @@ def test_startup_embedding_allows_cold_work_beyond_query_timeout(
     else:
         state._query_cache_lock = threading.Lock()
         state._query_vector_cache = OrderedDict()
-        monkeypatch.setattr(state, "_search_vector", lambda *_args: [("page", 1.0)])
+        monkeypatch.setattr(
+            state,
+            "_search_vector_with_evidence",
+            lambda *_args: semantic_service._SearchResult(
+                "generation", (("page", 1.0, ()),)
+            ),
+        )
         result = state._warm_query_path()
         assert result["hits"] == result["queries"] == 3
     assert all(
@@ -806,7 +815,10 @@ def test_search_reuses_cached_query_vector_without_batcher() -> None:
     )
     state._generation_lock = threading.RLock()
     state._generation = SimpleNamespace(
-        manifest=SimpleNamespace(generation_id="test-generation")
+        manifest=SimpleNamespace(generation_id="test-generation"),
+        search_with_evidence=lambda cached, top_n: [
+            ("page", float(cached[0]) + top_n, ())
+        ],
     )
     state._metrics_lock = threading.Lock()
     state._query_latencies_ms = deque(maxlen=10)
@@ -814,7 +826,6 @@ def test_search_reuses_cached_query_vector_without_batcher() -> None:
     state._publish_status = lambda: pytest.fail(
         "status publication must stay off the foreground path"
     )
-    state._search_vector = lambda cached, top_n: [("page", float(cached[0]) + top_n)]
     state._batcher = SimpleNamespace(
         submit=lambda *_args, **_kwargs: pytest.fail("batcher was called")
     )
@@ -823,6 +834,181 @@ def test_search_reuses_cached_query_vector_without_batcher() -> None:
 
     assert response["cache_hit"] is True
     assert response["results"] == [{"page_id": "page", "score": 4.0}]
+
+
+def test_search_serializes_evidence_from_one_captured_generation() -> None:
+    state = object.__new__(SemanticServiceState)
+    vector = np.asarray([1.0, 0.0], dtype=np.float32)
+    evidence = SemanticEvidence(
+        page_id="page",
+        doc_id="page#c0",
+        kind="chunk",
+        ordinal=0,
+        source_sha256="a" * 64,
+        page_uid="",
+        generation_id="test-generation",
+        score=0.92,
+    )
+    state.config = SimpleNamespace(interactive_timeout_ms=500)
+    state._query_cache_lock = threading.Lock()
+    state._query_cache_seal = "route-seal"
+    state._query_vector_cache = OrderedDict(
+        {"route-seal\0query": (time.monotonic(), vector)}
+    )
+    state._generation_lock = threading.RLock()
+    state._generation = SimpleNamespace(
+        manifest=SimpleNamespace(generation_id="test-generation"),
+        search_with_evidence=lambda *_args, **_kwargs: [
+            ("page", 0.92, (evidence,))
+        ],
+    )
+    state._metrics_lock = threading.Lock()
+    state._query_latencies_ms = deque(maxlen=10)
+    state._reload_if_pointer_changed = lambda: None
+    state._batcher = SimpleNamespace(
+        submit=lambda *_args, **_kwargs: pytest.fail("batcher was called")
+    )
+
+    response = state.search("query", 1)
+
+    assert response["generation_id"] == "test-generation"
+    assert response["results"] == [
+        {
+            "page_id": "page",
+            "score": 0.92,
+            "evidence": [
+                {
+                    "page_id": "page",
+                    "doc_id": "page#c0",
+                    "kind": "chunk",
+                    "ordinal": 0,
+                    "source_sha256": "a" * 64,
+                    "page_uid": "",
+                    "generation_id": "test-generation",
+                    "score": 0.92,
+                }
+            ],
+        }
+    ]
+
+
+def test_search_keeps_captured_generation_during_hot_reload() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    old_evidence = SemanticEvidence(
+        page_id="page",
+        doc_id="page#c0",
+        kind="chunk",
+        ordinal=0,
+        source_sha256="a" * 64,
+        page_uid="",
+        generation_id="old-generation",
+        score=1.0,
+    )
+
+    class OldGeneration:
+        manifest = SimpleNamespace(generation_id="old-generation")
+
+        def search_with_evidence(self, *_args, **_kwargs):
+            started.set()
+            assert release.wait(timeout=1)
+            return [("page", 1.0, (old_evidence,))]
+
+    old_generation = OldGeneration()
+    new_generation = SimpleNamespace(
+        manifest=SimpleNamespace(generation_id="new-generation")
+    )
+    state = object.__new__(SemanticServiceState)
+    vector = np.asarray([1.0, 0.0], dtype=np.float32)
+    state.config = SimpleNamespace(interactive_timeout_ms=500)
+    state._query_cache_lock = threading.Lock()
+    state._query_cache_seal = "route-seal"
+    state._query_vector_cache = OrderedDict(
+        {"route-seal\0query": (time.monotonic(), vector)}
+    )
+    state._generation_lock = threading.RLock()
+    state._generation = old_generation
+    state._metrics_lock = threading.Lock()
+    state._query_latencies_ms = deque(maxlen=10)
+    state._reload_if_pointer_changed = lambda: None
+    state._batcher = SimpleNamespace(
+        submit=lambda *_args, **_kwargs: pytest.fail("batcher was called")
+    )
+    responses: list[dict[str, object]] = []
+    errors: list[BaseException] = []
+
+    def run_search() -> None:
+        try:
+            responses.append(state.search("query", 1))
+        except BaseException as exc:  # pragma: no cover - assertion below reports it
+            errors.append(exc)
+
+    thread = threading.Thread(target=run_search)
+    thread.start()
+    try:
+        assert started.wait(timeout=1)
+        with state._generation_lock:
+            state._generation = new_generation
+        release.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+    finally:
+        release.set()
+        thread.join(timeout=2)
+
+    assert errors == []
+    assert len(responses) == 1
+    assert responses[0]["generation_id"] == "old-generation"
+    assert responses[0]["results"][0]["evidence"][0]["generation_id"] == (
+        "old-generation"
+    )
+
+
+def test_verify_serializes_evidence_from_captured_generation() -> None:
+    state = object.__new__(SemanticServiceState)
+    vector = np.asarray([1.0, 0.0], dtype=np.float32)
+    evidence = SemanticEvidence(
+        page_id="page",
+        doc_id="page",
+        kind="page",
+        ordinal=-1,
+        source_sha256="a" * 64,
+        page_uid="",
+        generation_id="test-generation",
+        score=1.0,
+    )
+    state.config = SimpleNamespace(interactive_timeout_ms=500)
+    state._query_cache_lock = threading.Lock()
+    state._query_cache_seal = "route-seal"
+    state._query_vector_cache = OrderedDict(
+        {"route-seal\0query": (time.monotonic(), vector)}
+    )
+    state._generation_lock = threading.RLock()
+    state._generation = SimpleNamespace(
+        manifest=SimpleNamespace(generation_id="test-generation"),
+        score_pages_with_evidence=lambda *_args, **_kwargs: [
+            ("page", 1.0, (evidence,))
+        ],
+    )
+    state._metrics_lock = threading.Lock()
+    state._reload_if_pointer_changed = lambda: None
+
+    response = state.verify("query", ["page"])
+
+    assert response["generation_id"] == "test-generation"
+    assert response["cache_hit"] is True
+    assert response["results"][0]["evidence"] == [
+        {
+            "page_id": "page",
+            "doc_id": "page",
+            "kind": "page",
+            "ordinal": -1,
+            "source_sha256": "a" * 64,
+            "page_uid": "",
+            "generation_id": "test-generation",
+            "score": 1.0,
+        }
+    ]
 
 
 @pytest.mark.parametrize("field", ["role", "provider", "model", "location"])
@@ -881,7 +1067,9 @@ def test_reload_rejects_old_generation_without_exposing_details(
     assert state._generation is None
     assert state._last_error == "generation_invalid"
     with pytest.raises(ServiceBusy):
-        state._search_vector(np.asarray([1.0, 0.0], dtype=np.float32), 1)
+        state._search_vector_with_evidence(
+            np.asarray([1.0, 0.0], dtype=np.float32), 1
+        )
 
 
 def test_worker_persists_only_safe_job_failure_category(
@@ -1035,8 +1223,9 @@ def test_query_path_warmup_exercises_three_queries_and_ann_search() -> None:
         encoded.append(list(queries))
         or np.asarray([[1.0, float(index)] for index in range(len(queries))])
     )
-    state._search_vector = lambda vector, _top_n: (
-        searched.append(vector) or [("page", 1.0)]
+    state._search_vector_with_evidence = lambda vector, _top_n: (
+        searched.append(vector)
+        or semantic_service._SearchResult("generation", (("page", 1.0, ()),))
     )
 
     result = state._warm_query_path()

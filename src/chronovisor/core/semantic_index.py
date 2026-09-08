@@ -34,6 +34,7 @@ from chronovisor.core.canonical_document import (
 from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
 from chronovisor.core.hashutil import sha256_file as _sha256_file
 from chronovisor.core.page_identity import normalize_page_uid
+from chronovisor.core.search_types import SemanticEvidence, merge_evidence
 from chronovisor.core.store import CHRONOVISOR_ROOT, SYSTEM_DIR, page_id_from_path
 
 SEMANTIC_ROOT = CHRONOVISOR_ROOT / ".index" / "semantic"
@@ -733,6 +734,10 @@ class LoadedGeneration:
     page_rows: dict[str, list[int]]
     page_uids: list[str] = field(default_factory=list)
     ann_index: Any | None = None
+    ordinals: list[int] = field(default_factory=list)
+    delta_doc_ids: list[str] = field(default_factory=list)
+    delta_ordinals: list[int] = field(default_factory=list)
+    delta_source_hashes: list[str] = field(default_factory=list)
 
     def _normalized_query(self, query_vector: Sequence[float]) -> np.ndarray:
         vector = np.asarray(query_vector, dtype=np.float32)
@@ -763,18 +768,70 @@ class LoadedGeneration:
         )
         return np.asarray(matches.keys, dtype=np.int64)
 
-    def _score_base_rows(
+    @staticmethod
+    def _sort_evidence(
+        evidence: dict[str, list[SemanticEvidence]],
+    ) -> dict[str, tuple[SemanticEvidence, ...]]:
+        return {
+            page_id: merge_evidence(
+                tuple(
+                    sorted(
+                        rows,
+                        key=lambda row: (
+                            -row.score,
+                            row.doc_id,
+                            row.kind,
+                            row.ordinal,
+                        ),
+                    )
+                )
+            )[:3]
+            for page_id, rows in evidence.items()
+            if rows
+        }
+
+    def _base_evidence_for_row(
+        self, row: int, page_id: str, score: float
+    ) -> SemanticEvidence | None:
+        if (
+            row < 0
+            or row >= len(self.doc_ids)
+            or row >= len(self.kinds)
+            or row >= len(self.source_hashes)
+            or row >= len(self.ordinals)
+        ):
+            return None
+        doc_id = self.doc_ids[row]
+        source_sha256 = self.source_hashes[row]
+        if not doc_id or not source_sha256:
+            return None
+        page_uid = self.page_uids[row] if row < len(self.page_uids) else ""
+        if not page_uid:
+            page_uid = self._page_uid_from_doc_id(doc_id, page_id)
+        return SemanticEvidence(
+            page_id=page_id,
+            doc_id=doc_id,
+            kind=self.kinds[row],
+            ordinal=int(self.ordinals[row]),
+            source_sha256=source_sha256,
+            page_uid=page_uid,
+            generation_id=self.manifest.generation_id,
+            score=float(score),
+        )
+
+    def _score_base_rows_with_evidence(
         self,
         vector: np.ndarray,
         rows: Sequence[int],
         *,
         page_filter: set[str] | None = None,
-    ) -> dict[str, float]:
+    ) -> tuple[dict[str, float], dict[str, tuple[SemanticEvidence, ...]]]:
         selected = np.asarray(rows, dtype=np.int64)
         if not len(selected):
-            return {}
+            return {}, {}
         scores = np.asarray(self.vectors[selected] @ vector, dtype=np.float32)
         by_page: dict[str, float] = {}
+        evidence: dict[str, list[SemanticEvidence]] = {}
         for offset, raw_row in enumerate(selected):
             row = int(raw_row)
             page_id = self.page_ids[row]
@@ -787,18 +844,58 @@ class LoadedGeneration:
                 score *= 0.92
             if score > by_page.get(page_id, float("-inf")):
                 by_page[page_id] = score
-        return by_page
+            item = self._base_evidence_for_row(row, page_id, score)
+            if item is not None:
+                evidence.setdefault(page_id, []).append(item)
+        return by_page, self._sort_evidence(evidence)
 
-    def _score_delta(
+    @staticmethod
+    def _page_uid_from_doc_id(doc_id: str, page_id: str) -> str:
+        identity = doc_id.split("#", 1)[0]
+        if not identity or identity == page_id:
+            return ""
+        try:
+            return normalize_page_uid(identity)
+        except ValueError:
+            return ""
+
+    def _delta_evidence_for_row(
+        self, row: int, page_id: str, score: float
+    ) -> SemanticEvidence | None:
+        if (
+            row < 0
+            or row >= len(self.delta_doc_ids)
+            or row >= len(self.delta_kinds)
+            or row >= len(self.delta_source_hashes)
+            or row >= len(self.delta_ordinals)
+        ):
+            return None
+        doc_id = self.delta_doc_ids[row]
+        source_sha256 = self.delta_source_hashes[row]
+        if not doc_id or not source_sha256:
+            return None
+        return SemanticEvidence(
+            page_id=page_id,
+            doc_id=doc_id,
+            kind=self.delta_kinds[row],
+            ordinal=int(self.delta_ordinals[row]),
+            source_sha256=source_sha256,
+            page_uid=self._page_uid_from_doc_id(doc_id, page_id),
+            generation_id=self.manifest.generation_id,
+            score=float(score),
+        )
+
+    def _score_delta_with_evidence(
         self,
         vector: np.ndarray,
         *,
         page_filter: set[str] | None = None,
-    ) -> dict[str, float]:
+    ) -> tuple[dict[str, float], dict[str, tuple[SemanticEvidence, ...]]]:
         if not len(self.delta_vectors):
-            return {}
+            return {}, {}
         scores = np.asarray(self.delta_vectors @ vector, dtype=np.float32)
         by_page: dict[str, float] = {}
+        evidence: dict[str, list[SemanticEvidence]] = {}
         for row, raw_score in enumerate(scores):
             page_id = self.delta_page_ids[row]
             if page_filter is not None and page_id not in page_filter:
@@ -808,20 +905,81 @@ class LoadedGeneration:
                 score *= 0.92
             if score > by_page.get(page_id, float("-inf")):
                 by_page[page_id] = score
-        return by_page
+            item = self._delta_evidence_for_row(row, page_id, score)
+            if item is not None:
+                evidence.setdefault(page_id, []).append(item)
+        return by_page, self._sort_evidence(evidence)
+
+    @staticmethod
+    def _merge_page_evidence(
+        base: dict[str, tuple[SemanticEvidence, ...]],
+        delta: dict[str, tuple[SemanticEvidence, ...]],
+    ) -> dict[str, tuple[SemanticEvidence, ...]]:
+        merged: dict[str, list[SemanticEvidence]] = {
+            page_id: list(rows) for page_id, rows in base.items()
+        }
+        for page_id, rows in delta.items():
+            merged.setdefault(page_id, []).extend(rows)
+        return LoadedGeneration._sort_evidence(merged)
+
+    def search_with_evidence(
+        self, query_vector: Sequence[float], *, top_n: int
+    ) -> list[tuple[str, float, tuple[SemanticEvidence, ...]]]:
+        vector = self._normalized_query(query_vector)
+        base_scores, base_evidence = self._score_base_rows_with_evidence(
+            vector,
+            self._candidate_rows(vector, top_n=top_n).tolist(),
+        )
+        delta_scores, delta_evidence = self._score_delta_with_evidence(vector)
+        by_page = dict(base_scores)
+        for page_id, score in delta_scores.items():
+            if score > by_page.get(page_id, float("-inf")):
+                by_page[page_id] = score
+        evidence = self._merge_page_evidence(base_evidence, delta_evidence)
+        return [
+            (page_id, score, evidence.get(page_id, ()))
+            for page_id, score in sorted(
+                by_page.items(), key=lambda item: item[1], reverse=True
+            )[:top_n]
+        ]
 
     def search(
         self, query_vector: Sequence[float], *, top_n: int
     ) -> list[tuple[str, float]]:
+        return [
+            (page_id, score)
+            for page_id, score, _evidence in self.search_with_evidence(
+                query_vector, top_n=top_n
+            )
+        ]
+
+    def score_pages_with_evidence(
+        self,
+        query_vector: Sequence[float],
+        page_ids: Sequence[str],
+    ) -> list[tuple[str, float, tuple[SemanticEvidence, ...]]]:
+        """Exactly score a bounded page set and retain winning document identities."""
+
+        targets = {str(page_id) for page_id in page_ids if page_id}
+        if not targets:
+            return []
         vector = self._normalized_query(query_vector)
-        by_page = self._score_base_rows(
-            vector,
-            self._candidate_rows(vector, top_n=top_n).tolist(),
+        rows = [row for page_id in targets for row in self.page_rows.get(page_id, ())]
+        base_scores, base_evidence = self._score_base_rows_with_evidence(
+            vector, rows, page_filter=targets
         )
-        for page_id, score in self._score_delta(vector).items():
+        delta_scores, delta_evidence = self._score_delta_with_evidence(
+            vector, page_filter=targets
+        )
+        by_page = dict(base_scores)
+        for page_id, score in delta_scores.items():
             if score > by_page.get(page_id, float("-inf")):
                 by_page[page_id] = score
-        return sorted(by_page.items(), key=lambda item: item[1], reverse=True)[:top_n]
+        evidence = self._merge_page_evidence(base_evidence, delta_evidence)
+        return [
+            (page_id, score, evidence.get(page_id, ()))
+            for page_id, score in sorted(by_page.items(), key=lambda item: item[1], reverse=True)
+        ]
 
     def score_pages(
         self,
@@ -829,20 +987,12 @@ class LoadedGeneration:
         page_ids: Sequence[str],
     ) -> list[tuple[str, float]]:
         """Exactly score a bounded page set with authoritative full vectors."""
-
-        targets = {str(page_id) for page_id in page_ids if page_id}
-        if not targets:
-            return []
-        vector = self._normalized_query(query_vector)
-        rows = [row for page_id in targets for row in self.page_rows.get(page_id, ())]
-        by_page = self._score_base_rows(vector, rows, page_filter=targets)
-        for page_id, score in self._score_delta(
-            vector,
-            page_filter=targets,
-        ).items():
-            if score > by_page.get(page_id, float("-inf")):
-                by_page[page_id] = score
-        return sorted(by_page.items(), key=lambda item: item[1], reverse=True)
+        return [
+            (page_id, score)
+            for page_id, score, _evidence in self.score_pages_with_evidence(
+                query_vector, page_ids
+            )
+        ]
 
 
 def _delta_db(generation_id: str, *, root: Path) -> Path:
@@ -951,38 +1101,58 @@ def write_page_delta(
 
 def _load_delta(
     generation_id: str, *, dimensions: int, root: Path
-) -> tuple[set[str], np.ndarray, list[str], list[str]]:
+) -> tuple[
+    set[str],
+    np.ndarray,
+    list[str],
+    list[str],
+    list[str],
+    list[int],
+    list[str],
+]:
     path = root / "deltas" / f"{generation_id}.sqlite"
     if not path.exists():
-        return set(), np.empty((0, dimensions), dtype=np.float32), [], []
+        return set(), np.empty((0, dimensions), dtype=np.float32), [], [], [], [], []
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
+        # Keep page_state and documents on one WAL snapshot. Without an
+        # explicit read transaction, a writer can commit between the two
+        # SELECTs and pair an old override set with new vectors.
+        connection.execute("BEGIN")
         overridden = {
             str(row[0]) for row in connection.execute("SELECT page_id FROM page_state")
         }
         rows = connection.execute(
-            "SELECT page_id, kind, vector, dim FROM documents ORDER BY doc_id"
+            "SELECT doc_id, page_id, kind, ordinal, vector, dim, source_sha256 "
+            "FROM documents ORDER BY doc_id"
         ).fetchall()
     finally:
+        connection.rollback()
         connection.close()
     page_ids: list[str] = []
     kinds: list[str] = []
+    doc_ids: list[str] = []
+    ordinals: list[int] = []
+    source_hashes: list[str] = []
     vectors: list[np.ndarray] = []
-    for page_id, kind, blob, dim in rows:
+    for doc_id, page_id, kind, ordinal, blob, dim, source_sha256 in rows:
         if int(dim) != dimensions:
             raise SemanticIndexError("delta vector dimension mismatch")
         vector = np.frombuffer(blob, dtype=np.float32)
         if vector.shape != (dimensions,) or not np.isfinite(vector).all():
             raise SemanticIndexError("invalid delta vector")
+        doc_ids.append(str(doc_id))
         page_ids.append(str(page_id))
         kinds.append(str(kind))
+        ordinals.append(int(ordinal))
+        source_hashes.append(str(source_sha256))
         vectors.append(vector)
     matrix = (
         np.ascontiguousarray(np.stack(vectors), dtype=np.float32)
         if vectors
         else np.empty((0, dimensions), dtype=np.float32)
     )
-    return overridden, matrix, page_ids, kinds
+    return overridden, matrix, page_ids, kinds, doc_ids, ordinals, source_hashes
 
 
 def load_generation(
@@ -1009,7 +1179,15 @@ def load_generation(
             ann_index = Index.restore(directory / ANN_FILENAME, view=True)
         except Exception as exc:
             raise SemanticIndexError("semantic ANN index could not be loaded") from exc
-    overridden, delta_vectors, delta_page_ids, delta_kinds = _load_delta(
+    (
+        overridden,
+        delta_vectors,
+        delta_page_ids,
+        delta_kinds,
+        delta_doc_ids,
+        delta_ordinals,
+        delta_source_hashes,
+    ) = _load_delta(
         generation_id, dimensions=manifest.dimensions, root=root
     )
     page_rows: dict[str, list[int]] = {}
@@ -1022,10 +1200,14 @@ def load_generation(
         page_ids=[str(row[2]) for row in rows],
         kinds=[str(row[3]) for row in rows],
         source_hashes=[str(row[5]) for row in rows],
+        ordinals=[int(row[4]) for row in rows],
         overridden_pages=overridden,
         delta_vectors=delta_vectors,
         delta_page_ids=delta_page_ids,
         delta_kinds=delta_kinds,
+        delta_doc_ids=delta_doc_ids,
+        delta_ordinals=delta_ordinals,
+        delta_source_hashes=delta_source_hashes,
         page_rows=page_rows,
         page_uids=[str(row[7]) for row in rows],
         ann_index=ann_index,

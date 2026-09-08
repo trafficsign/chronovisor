@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Chronovisor — 証拠単位の保存・Recall実装計画</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}th,td{border:1px solid var(--rule);padding:.55rem;vertical-align:top;text-align:left}th{background:#f3f1eb}td,code,a{overflow-wrap:anywhere}pre{white-space:pre-wrap;background:#eee;padding:1rem;border-radius:6px}header{position:static}.note{border-left:3px solid var(--accent);padding:.6rem 1rem;background:#f3f1eb}h3{margin:1.3rem 0 .4rem}input[type=checkbox]{accent-color:var(--accent)}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_d2c0de36600a457c8827262a47c36c87","created_at":"2026-09-08T22:05:32+09:00","状態":"running","slug":"chronovisor-evidence-storage-recall"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">証拠単位の保存とRecallの接続</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="running">running</span>
+<span><code data-bind="task_id">plan_d2c0de36600a457c8827262a47c36c87</code></span>
+<span data-bind="created_at">2026-09-08T22:05:32+09:00</span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的と今回の承認範囲</h2>
+<p><strong>原文と出典を保ち、検索で見つかった具体的な根拠を、位置・版・条件を失わず本体AIへ渡す。</strong>保存形式の推奨は「原文参照付きの出来事・証拠レコード」。既存Raw、EvidenceAtom / EvidencePacket、SQLite字句索引、ANN、Wikiを土台とし、検索の候補単位と注入単位を一致させる。</p>
+<p>本ファイルはユーザーの依頼に基づく<strong>実装計画の作成</strong>。ユーザーの「計画開始」により実装・比較検証を開始。状態running。全件再処理は評価と送信条件の確認後に実行する。本番push・再起動は未実施で、pushは明示依頼時だけ行う。</p>
+<p class="note"><strong>ベンチマークは必要。</strong>設計方針を決めるために公開ベンチを総当たりする必要はないが、本番採用前に日英の実データで精度・根拠の完全性・待ち時間を比較する。評価は実装工程に含め、改善が出なかった方式を採用しない。計画開始の承認に基づき、実装と隔離検証を進める。</p>
+</section>
+<section data-section="前提・仮定">
+<h2>確認済みの現状と既存計画との関係</h2>
+<ul>
+<li>調査時のlocal HEAD: <code>8e013f73629fc6175963aa16f8df7b129133ad3e</code>。本番配布commit: <code>873c2a3bc1743bc7a2fe309067904e903870fb1d</code>。主要検索・Recall・Evidence実装の該当ファイルは配布archiveとlocalで一致。開始時に再確認する。</li>
+<li>意味索引はpage / question / chunkを既に保持する。<code>core/semantic_index.py:766–845</code>でpageごとのscoreへ集約し、勝ったdocumentのID・kind・ordinal・spanを返さない。<code>core/search.py:554–619</code>でもpage IDで統合しsnippetを空にする。</li>
+<li><code>recall/recall_runtime.py:1584–1605</code>はsnippet欠落時にページ要約を使い、readでは最大650文字のquery-term-centered excerptへ差し替える。検索で当たったチャンク本文がそのまま注入される契約ではない。</li>
+<li><code>research/evidence_reconstruction.py</code>には原文範囲・digest・時刻等を持つEvidence構築がある。通常Recallとの接続は<code>recall_runtime.py:2267–2319, 4190–4285</code>の任意observer等。これを新規schemaの不在と誤認しない。</li>
+<li>調査時のmetadataは7,789ページ、stableは7,783。description・recall_questions・entitiesは既存。字句索引はSQLiteのpages / anchors / terms / postings / projection_metaで、FTS5ではない。metadataとlexicalのgenerationは一致していた。これらは観測時点の値。</li>
+<li><a href="2026-08-09_chronovisor-next-phase.html">既存Campaign Y</a>のY1–Y8を置換せず、その検索・注入接続を具体化する続編とする。EvidencePacket、EvidenceLedger、既存評価・authority・rollbackを再利用。歴史的checkboxは現行の有効化・受入完了の証明にしない。</li>
+<li>永続schema変更と本番cutoverは既存Campaign Xのcanonical migration境界を尊重し、実状態・receiptを確認してから行う。L2の4秒deadline、L3明示検索、L4非同期Raw探索の区分を維持する。</li>
+<li>対象はM4 Max / 128 GiB、日英混在、検索時の生成LLM呼び出し追加なし。モデル追加学習・CUDAは前提としない。保存時の推論・索引生成費用は別に測る。</li>
+</ul>
+</section>
+<section data-section="設計判断">
+<h2>保存契約と最小の変更</h2>
+<p><strong>Rawと既存の原資料を保持し、そこから再構築できる証拠projectionを検索する。</strong>既存Wikiの手動編集や独立した原資料も保全する。全ページの内容がRawだけから再生成できるとは仮定しない。今回、Raw / pages / systemの全面変換や新しい正本データベースへの移し替えは行わない。</p>
+<table><thead><tr><th>層</th><th>契約</th><th>実装上の判断</th></tr></thead><tbody>
+<tr><td>原文・原資料</td><td>source UID、版/digest、話者、元の言語、取得時刻、該当範囲。原文は発言・観測の証拠であり、内容の真偽を自動認定しない。</td><td>既存RawStore / receipts / page identityを使う。直接編集されたpageは、その版の出典として扱う。</td></tr>
+<tr><td>証拠レコード</td><td>安定したrecord ID、source参照と範囲、原文抜粋、検索用の文脈、対象・scope、種類、時刻、有効性、明示された訂正関係。</td><td>EvidenceAtom / EvidencePacketと既存projectionを拡張。最初は既存chunkを保持し、その後に会話の出来事・話題、文書節へ単位を改善する。</td></tr>
+<tr><td>派生索引・表示</td><td>BM25 / ANN / 想定質問 / 要約 / 必要な関連リンクはrecordとsourceの版へ結び付ける。消失・陳腐化時に再構築可能。</td><td>既存のSQLite・ANN・publication lock / generation契約を使う。独立fact候補や索引を無制限に増やさない。Wikiは閲覧・互換経路を保持する。</td></tr>
+</tbody></table>
+<h3>必須フィールドの意味</h3>
+<ul>
+<li><strong>識別・出典:</strong>既存UID、source digest、receipt digest、範囲の単位を再利用する。Rawのlogical byte rangeとMarkdownの文字位置・chunk ordinalを混同せず、source種別ごとに明示して原文との一致を検証する。doc IDやordinalだけを版をまたいだidentityとして扱わない。record revisionはsource UID・digest・source固有の範囲・kind・固定projection版に結び付け、同一入力から同一identityを再構築する。改訂時は別revisionとして旧参照の混入を拒否する。</li>
+<li><strong>原文と検索キー:</strong>原文抜粋と生成した検索用文脈を別fieldで保持。事実・別名・質問をキーへ加えても、生成文を原文引用に見せない。日英の原文を残し、元の言語以外の別名・訳語は補助キーとする。</li>
+<li><strong>出来事と条件:</strong>会話は一つの判断・出来事・話題、文書は節を基本単位にする。上限を超えたら分割し前提への参照を保持。発言者、提案 / 決定 / 実行結果 / 未検証の区分、対象プロジェクトや言語などの条件を失わない。</li>
+<li><strong>時間:</strong>出来事の時間・事実の有効期間と、システムが記録した時間を分離。不明は不明のまま、相対日付の元表現も残す。取り込み時刻を出来事の時刻として補完しない。</li>
+<li><strong>訂正:</strong>SUPPORTS / CONTRADICTS / SUPERSEDESと元の根拠を既存契約で表す。同じsubject・scope・条件への明示的変更だけを置換として扱う。新しい発言・頻出だけで旧事実を打ち消さない。提案や反実仮想を実行結果へ昇格させない。</li>
+<li><strong>派生物の版:</strong>source digestとextractor/model/prompt/schema versionを保存し、生成出力を証跡として固定。同じ固定出力からのprojection再構築を決定論的にする。LLMを再実行して同じ文章になることは要求しない。</li>
+</ul>
+<h3>同期Recallの経路</h3>
+<pre>質問 → 既存BM25 + 意味検索 → record / chunk候補
+     → source identity・scope・有効性を検証
+     → 必要な前提・明示訂正を固定予算で補う
+     → 出典付きの該当本文 → 既存のcontext compiler → 本体AI</pre>
+<p>L2は事前生成・検証済みprojectionだけを使用し、同期Raw全探索や新しい生成的query plannerを加えない。抽出遅延・失敗時は既存の許可されたpage teacher / lexical fallback、または根拠不足の応答を使う。時刻が曖昧な質問を推測した期間でhard filterしない。sourceアクセス・sensitivityを索引への複製で緩和しない。</p>
+</section>
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist">
+<li><input type="checkbox"><span><strong>P0 — 実行基準と比較条件を固定。</strong>local / remote / deployed SHA、config・authority gate、Campaign X実状態を確認。既存評価contractとharnessを調べ、下記のpaired評価条件・数値・データsplitを候補実装前に登録する。現在のAを隔離snapshotで測定し、source消失・候補漏れ・注入時の欠落・回答側失敗を分ける。<em>完了:</em>再現可能なAのreceipt、凍結した問題・正解根拠・設定・判定規則がある。</span></li>
+<li><input type="checkbox" checked><span><strong>P1 — winning chunkの保持。</strong>semantic index → service response → semantic client → score fusion → ContextItem / context compilerの全経路でdocument/record ID、source digest、kind、範囲、選ばれた本文を保持。通常searchとverify、sync/service経路、cache、serialization、reranker入力も呼出関係から確認する。page score集約が必要でも根拠候補を消さず、同一pageの複数根拠を固定上限で残す。旧応答ではchunkを捏造せず既存fallbackへ戻す。readで無条件に別excerptへ置換する箇所も修正する。<em>完了:</em>Bとして当たった根拠が実際の注入本文に残り、stale digest / 不正範囲が拒否される回帰試験が通る。</span></li>
+<li><input type="checkbox"><span><strong>P2 — 証拠projectionの単位と文脈を改善。</strong>既存EvidenceAtom / projectionを用いて会話の出来事・話題と文書節をrecord化。原文参照、役割・条件、時間、明示訂正、検索用の短い文脈を保存する。新規LLM呼出しは既存ingestの出力・バッチ処理を再利用できない部分だけ非同期で行う。既存ページのsummary / questions / entitiesを重複生成しない。<em>完了:</em>Cの隔離projectionと索引が生成でき、原文欠損0・再構築一致・中断再開・生成失敗時fallbackが検証済み。</span></li>
+<li><input type="checkbox"><span><strong>P3 — 既存Recallへ接続。</strong>record IDをBM25 / ANNからEvidencePacketとbounded contextまで通す。page teacher・証拠authority・certificate・stop reasonを既存契約で維持。source revisionと索引generationを整合した単位で公開し、旧sourceと新recordの混在を拒否する。必要な前提・訂正だけを予算内で追加し、曖昧な関係は生成しない。<em>完了:</em>policyに適合したrecordのみに根拠traceが通り、通常Recall・fallback・更新競合の統合試験が通る。</span></li>
+<li><input type="checkbox"><span><strong>P4 — A/B/Cのpaired評価。</strong>同じsource snapshot、query、モデル、注入token上限、deadline、既存reranker採用状態で比較。Cにだけ追加推論や長いcontextを与えない。quality、根拠、時間、待ち時間、保存時費用を別々に報告する。Bが勝ちCの追加効果がない場合はBを採用し、Cを有効化しない。<em>完了:</em>事前登録した判定で採用候補か不採用が決まり、未測定を成功扱いしない。</span></li>
+<li><input type="checkbox"><span><strong>P4a — 既存全件backfill。</strong>下記「既存全件の再処理とOpenCode並列実行」に従い、C採用時はOpenCode + Muse Spark 1.3 Contributorの少量試行から最大10ワーカーへ増加し、外部送信可能な既存資料を再処理する。既存metadataの再利用、送信不可資料の許可済み経路、manifest全件のaccounting、冪等な再開、改訂差分の追いつき、単一publisherを含める。<em>完了:</em>対象件数・処理結果・残件・費用・source/索引coverage・原文検証を報告し、採用対象の失敗/待ち0。Bのみ採用の場合はLLM全件処理を省く理由と、必要な機械的再構築の完了証跡を残す。</span></li>
+<li><input type="checkbox"><span><strong>P5 — shadow / canary / 本番確認。</strong>隔離環境で切り替えとrollbackを演習。明示されたpush / deploy範囲で、対象変更だけを公開し、安全なingest boundaryで必要サービスを再起動する。配布SHA・archive・health・generationを照合し、低負荷shadow → canary → live queryで注入された根拠を確認する。shadow計算もwall timeに含め、同時実行負荷を記録する。<em>完了:</em>受入gate通過、即時rollback実証、実動の該当本文・出典・待ち時間の証跡がある。deploy未承認ならoffline検証済みまでとし、この項目を未完了で残す。</span></li>
+<li><input type="checkbox"><span><strong>P6 — 後片付けと受け渡し。</strong>採用結果を反映し、不要な実験モデル・一時DB・孤立projection・分岐を、参照中でないことを確認して除去。現行/rollbackに必要な版と評価receiptは保持。関連する必須CI、変更範囲のcommit、設定/運用/再構築手順、未完了点を記録する。<em>完了:</em>変更範囲・試験・採否・配布状態・片付けが追跡可能。性能改善しなかった場合も数値と不採用を明示し、改善完了とは呼ばない。</span></li>
+</ol>
+</section>
+<section data-section="検証手順">
+<h2>ベンチマーク契約</h2>
+<table><thead><tr><th>条件</th><th>変更するもの</th><th>目的</th></tr></thead><tbody>
+<tr><td>A: 現行</td><td>現行page集約・注入</td><td>基準を固定する</td></tr>
+<tr><td>B: chunk保持</td><td>既存chunkとidentityを検索から注入まで保持。分割・embeddingはAと同じ</td><td>受け渡しでの欠落の影響を分離する</td></tr>
+<tr><td>C: 文脈付き証拠record</td><td>Bに出来事/節、文脈キー、時間・訂正を加える</td><td>保存・検索単位の追加効果をBとの差で測る</td></tr>
+</tbody></table>
+<ul>
+<li><strong>データ:</strong>既存の実query・評価fixtureを優先。開発60問、未使用holdout120問を初期規模とし、holdoutは日本語→日本語40、英語→英語40、言語横断40（双方向）を目安に凍結する。不足する実例は合成と明示し、実例と分けて報告。日本語だけの短文reranker fixtureを全体評価の代用にしない。</li>
+<li><strong>内容:</strong>単純lookup、理由/判断、変更/現在状態、複数根拠、訂正/矛盾、根拠なしを含める。実例を無理に埋めて偽の根拠を作らない。各問は正解文だけでなく必須source範囲・禁止する旧根拠・as-of条件をラベル付け。同じthreadの近似例を開発とholdoutへ分散しない。</li>
+<li><strong>漏洩防止:</strong>質問イベント直前を排他的cutoffとしてsnapshotを作る。同一turnの評価質問・回答・評価ラベルをsource/indexに含めず、source inventoryとcutoffをreceiptで確認する。必要な質問前の会話文脈は別の固定入力として全条件へ等しく与える。heldoutの質問・正解を保存時の分割/抽出/想定質問生成へ渡さない。各条件で同じsource inventory・digest・モデル・設定・token上限を固定する。</li>
+<li><strong>品質:</strong>最終注入本文が必須根拠を全て含む率を主指標とする。検索で候補に出た率、page hit、decision=read、注入件数だけで代用しない。回答正確性、obsolete-use、根拠なしでの誤注入、source一致率を別に測る。同じ回答モデルと評価方式を使い、条件を隠したpaired採点と不一致の根拠確認を行う。</li>
+<li><strong>速度:</strong>query受付から注入context完成までのp50 / p95、deadline超過率、cold/warmを分ける。queue、embedding、BM25、ANN、fusion、reranker/shadow、source検証、context構築を分解。順序を入れ替えた複数反復と同一負荷で測定する。論文のGPU測定値をM4速度へ換算しない。</li>
+<li><strong>保存側:</strong>追加・更新・訂正の処理時間、LLM入出力tokens/calls、索引容量、再構築時間、検索可能になるまでの遅延、未処理backlogを記録。費用や処理を同期経路から非同期へ移しただけの場合も明示する。</li>
+</ul>
+<h3>採用gate（本計画の初期提案値。P0で既存contractのより厳しい値を継承し、候補結果を見る前に固定）</h3>
+<ul>
+<li>identity / 範囲 / sensitivity / authority違反0、生成LLMの検索時追加呼出し0、原文の欠落・改変0。既存の絶対品質lower boundがあればそのまま維持する。</li>
+<li>主指標の全根拠注入率がA比で5 percentage points以上改善し、paired 95%信頼区間の下限が0を上回ることを初期の有効性gateとする。Bが成立した場合、Cの追加採用はB比の改善と費用を別途判定し、効果が不明ならBに留める。</li>
+<li>回答正確性はpaired差の95%信頼区間下限が−2 points以上。言語sliceの点推定が各々Aを下回らず、旧情報利用・根拠なし誤注入の件数もAを上回らない。少数例の0件を真の誤り率0の証明とはしない。</li>
+<li>warm p95はA以下、4秒のL2上限を拡大しない。coldの超過率・fallback・外部に返る実時間もAより悪化しない。既存の厳しいlatency gateがあれば継承する。4秒以内は「瞬時」の証明ではなく、短縮量も必ず報告する。</li>
+<li>120問で統計的に判定不能なら成功扱いしない。未使用実例を60問単位で追加し、同じ固定候補で最大240問まで評価する追加段階をP0で登録する。途中結果を見て都合のよい時点で停止せず、追加段階を使う場合は逐次判定の補正方法も先に固定する。上限でも不明ならCの採用を見送る。</li>
+<li>基準Aが既存の絶対品質条件を満たさない場合、相対改善だけで本番有効化しない。固定回帰ケースの欠落修正は独立して出荷判断できるが、Recall全体の精度向上を実証済みと呼ばない。</li>
+</ul>
+<h3>回帰試験と既存評価資産</h3>
+<p>まず既存<code>scripts/recall_r*_harness.py</code>、<code>scripts/benchmark-sync-recall</code>、<code>tests/test_recall_eval.py</code>等を調べて必要な経路を再利用する。新しい評価frameworkは作らない。開始時に対象pathのgraph coverageとcallersを確認し、未カバーをソースで補う。</p>
+<p>重点ケースは、ページ後半の正解チャンク、同一ページの複数根拠、日英・代名詞、提案と実行結果、訂正と過去時点、未知時刻、source改訂/digest不一致、範囲外offset、旧service応答、更新競合、projection未完成/再構築、タイムアウトとfallback。既存semantic index/client/service、search、Recall runtime、Evidence、lexical snapshotの該当テストを拡張する。無関係な既知failureは固定基準と比較し、新規failureと分離する。</p>
+</section>
+<section data-section="既存データの再処理">
+<h2>既存全件の再処理とOpenCode並列実行</h2>
+<p><strong>実行役はOpenCode、LLMはMuse Spark 1.3 Contributor、最大10ワーカーの並列バッチを計画する。</strong>「10台」は追加の物理端末購入ではなく、同じホスト上で動かす独立したOpenCodeワーカー10本として扱う。今回はこの実行計画の追記だけであり、ワーカー起動・資料送信・全件処理は未実施。</p>
+<p>対象件数は開始時のmanifestで確定する。前回観測は7,789ページで、概算約8,000ページ。「千ページ」「8,000ページ」を固定値として分割しない。source UID・digest・状態・言語・関連Raw参照・外部送信可否・推定tokensを一覧化し、既存処理の有無と重複を照合する。件数だけでなくtokensにより仕事量を分配する。</p>
+<h3>新規保存との共通化・入力の扱い</h3>
+<ul>
+<li>新規保存と既存分の再処理で、同じrecord schema・抽出手順・validator・publication経路を使う。既存分はsnapshotを共通の変換入口へ投入するbackfillとし、移行専用の第二の保存形式を作らない。</li>
+<li>機械的に取り出せるchunk・見出し・既存出典・日時・metadataは先に回収し、既存summary / questions / entitiesを再利用。LLMは不足する文脈補完・出来事分割・条件抽出だけに使う。</li>
+<li>元の会話がある場合は、アクセスpolicyに適合する範囲でその根拠を使う。pageだけが残る場合は当該page revisionを原資料として保持し、失われた発言・日時・理由を復元したように生成しない。複数ページが同じRawを指す場合はsource単位で抽出を再利用し、参照を保つ。</li>
+<li>各ワーカーには割当済みの入力束と出力用の専用作業領域だけを渡す。秘密情報を含む作業ツリー全体や会話履歴を自動contextに載せない。元のpages / Rawと本番DB・索引をワーカーに直接変更させない。処理結果は構造化した候補recordとreceiptとして返す。</li>
+</ul>
+<h3>モデル・外部送信条件</h3>
+<p>OpenCode Goの候補model IDは<code>opencode-go/muse-spark-1.3-contributor</code>。GoのResponses endpointは<code>https://opencode.ai/zen/go/v1/responses</code>。この環境のcatalogにもMuse Spark 1.3 Contributorは登録されているが、実行時にOpenCode側のID、利用可能地域、context/output上限、契約枠、API制限を再確認する。登録済みと実行成功を同一視しない。料金・仕様の確認元: <a href="https://opencode.ai/docs/go/">OpenCode Go公式（2026-09-08確認）</a>。</p>
+<p><strong>Contributorは入力・出力のMeta学習利用あり、ゼロ保持ではない。</strong>全件backfillの計画への同意を、非公開情報の外部提供への包括同意として扱わない。既存のsensitivity / scope / Raw egress判定を送信前に適用し、外部提供可能と確認した資料だけをこの経路へ送る。対象外の資料は既存の許可されたローカル経路で同じschemaへ処理するか、未処理として明示する。model/providerの自動切替でこの境界を迂回しない。</p>
+<h3>最大10並列への段階的増加</h3>
+<ol>
+<li><strong>少量試行:</strong>P0の開発用資料から日英・長短・訂正・page-onlyを含む20〜40件を選び、1ワーカーでschema一致、出典一致、条件の保持、処理時間・tokens・再試行率を測る。heldoutの質問や正解は渡さない。Muse Sparkで作るCの試験結果もP4に含める。</li>
+<li><strong>増加:</strong>同じ品質基準で1 → 2 → 5 → 最大10ワーカーへ増やす。ワーカー数は常に設定可能とし、provider共有枠、CPU/RAM、通常ingest/Recallの待ち時間を確認する。10並列で10倍速になるとは仮定しない。</li>
+<li><strong>流量制御:</strong>全ワーカー合計の同時requestとtokensを単一の制御点で制限。429 / timeout / quota発生時はRetry-Afterまたはbackoffを守り、並列数を下げる。上限到達時はcheckpointから停止・再開し、アカウントや端末を増やして上限を回避しない。追加課金や別残高への自動fallbackは有効化しない。</li>
+<li><strong>全件実行:</strong>P4でCの採用条件を満たしてから全manifestを処理する。Bだけが採用された場合は、既存chunk索引の機械的再構築で足りる範囲に留め、不要な全件LLM再抽出を行わない。1ジョブは独立したページ/節/会話segmentの小束とし、全8,000ページを一つのpromptへ入れない。</li>
+</ol>
+<h3>分担・再開・更新整合性</h3>
+<ul>
+<li>既存queue / lease / receiptを再利用する。仕事のidentityはsource UID・digest・抽出設定版に結び付ける。1ジョブは同時に1ワーカーへ割り当て、期限切れの担当は再割当可能。結果採用時は現在のlease/attemptを確認し、遅れて戻った旧ワーカーの結果を二重反映しない。単一DB writerで結果検証・merge・publicationを行う。</li>
+<li>LLMへのrequest自体は再試行で重複し得るが、採用はjob identityで冪等にする。完了checkpoint、失敗理由、試行回数、source/config digest、モデル、使用tokensを保存。schema不正や出典不一致は隔離し、有限回の再試行後は未処理として残す。無限retryと未検証の自動採用をしない。</li>
+<li>ワーカー間のentityや訂正関係は、固定IDと原文参照を使って検証・統合する。各ワーカーが他のワーカーの生成文を独立した新証拠として引用したり、別scopeの事実を上書きしたりしない。</li>
+<li>処理中は既存Recallを稼働させる。snapshot後の新規・更新分は共通ingest経路で追跡し、採用前にsource digestを再照合。改訂分は新revisionを再queue、削除・失効・権限変更済みのsourceは旧結果を採用しない。全量処理後の差分追いつきと短いpublication境界で整合したgenerationへ切り替える。</li>
+<li>旧page/Rawを保持し、新projection・索引を隔離領域で作る。全件検証とP5のcanary/rollback条件を満たすまで本番の参照を変えない。新projectionを無効化しても元資料と従来経路で回答できる状態を維持する。</li>
+</ul>
+<h3>規模・費用・完了の判定</h3>
+<p>試行で実測した全体の成功件数/分と残り仕事量から所要時間を見積もる。件数だけでなくtokens、長い資料、再試行を含めて幅を示し、直列時間を単純に10で割らない。費用は全ワーカーの入力・出力・推論・cache・再試行を含む実usageで集計し、契約内消費と追加課金を分ける。必要な支出上限は全件開始前に確定する。</p>
+<p>manifest全件を「既存結果の検証再利用」「新規変換・検証済み」「改訂待ち」「失敗」「外部送信不可/別経路待ち」「対象外（理由付き）」に集計し、欠落・重複を0にする。対象外を分母から黙って外さない。source coverage、record数、索引coverage、全件構造検証、日英の原文対照sample、P4品質gate、P5の実注入・rollbackを確認する。待ち/失敗が残れば全件移行完了とは呼ばず、対象数・残件・現在のfallbackを明示する。</p>
+</section>
+<section data-section="やってはいけないこと">
+<h2>対象外と守る境界</h2>
+<ul>
+<li>新しいgraph DB、FTS5への全面置換、latent/KV/重みへの正本移行、RL・学習、新reranker選定、常時Deep Recall、生成的query plannerは対象外。</li>
+<li>原文やWikiの既存情報を要約だけで上書きしない。原文由来の事実と生成補足・仮説を混同しない。</li>
+<li>source identity、4秒deadline、authority/certificate、sensitivity、Rawアクセス/egressの既存境界を緩めない。L2からRawを直接読む経路を追加しない。</li>
+<li>既存dirty変更を上書き・stage・commitしない。特に<code>scripts/recall_r6_harness.py</code>と<code>tests/test_recall_r6_harness.py</code>は既存変更あり。無関係なhandoff・teacher salvage証跡も保持する。必要なら隔離worktreeと対象差分のみの移植を使う。</li>
+<li>local mainには本番と無関係な未公開履歴があるため、そのままpushしない。deploy時は確認した本番commit基準の必要変更だけを対象にする。</li>
+</ul>
+</section>
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<p>P0〜P6（既存全件backfillのP4aを含む）の証跡が揃い、採用した経路で検索した根拠のidentityと本文が実注入まで一致する。source保全、再構築、訂正・時刻・日英、更新整合性、既存の境界、品質・latency gate、canary/rollbackが検証済みであること。研究上の推奨、offline合格、配布済み、live受入済みを別々に記録する。本番作業未実施時は計画全体をdoneにしない。不採用の結論は評価完了として残すが、改善達成とは記載しない。</p>
+</section>
+<section data-section="研究根拠">
+<h2>判断に使った一次資料</h2>
+<ul>
+<li><a href="https://arxiv.org/html/2410.10813">LongMemEval</a>: 原文valueと検索keyの分離、factのkey merge、rank mergeの悪化。保存形式ごとの比較設計の根拠。</li>
+<li><a href="https://proceedings.iclr.cc/paper_files/paper/2025/file/e56f394bbd4f0ec81393d767caa5a31b-Paper-Conference.pdf">SeCom</a>: turn/sessionの間にある話題segmentの有効性。圧縮後だけを正本にはしない。</li>
+<li><a href="https://www.anthropic.com/engineering/contextual-retrieval">Contextual Retrieval</a>: 保存時の短い文脈をBM25/embeddingへ加える。reported gainsを日英混在・既存indexへそのまま外挿しない。</li>
+<li><a href="https://arxiv.org/html/2605.19952">TriMem</a> / <a href="https://arxiv.org/html/2605.16045v1">RecMem</a>: 原文を保持し、検索用の抽出情報から詳細へ戻る設計。TriMemのquery generationは採用しない。</li>
+<li><a href="https://arxiv.org/html/2608.12990v1">LycheeMemory V2</a>: 型付きrecordと構造索引。表現比較はfield一式の比較であり、個別fieldの因果効果ではない。planner/reranker込みのscoreを今回の見込み値にしない。</li>
+<li><a href="https://arxiv.org/abs/2501.13956">Zep / Graphiti</a> / <a href="https://arxiv.org/abs/2606.09900">Engram</a>: 二つの時間軸、原文provenance、非破壊の訂正・派生view。frameworkは導入しない。</li>
+<li><a href="https://arxiv.org/html/2608.13334v1">RippleMem</a>: 出来事と人物・場所・時間の索引。完全版はquery分析/計画LLMを含むため、offline構造化の参考に限定する。</li>
+<li><a href="https://arxiv.org/html/2401.18059">RAPTOR</a> / <a href="https://arxiv.org/abs/2409.04701">Late Chunking</a> / <a href="https://arxiv.org/abs/2112.01488">ColBERTv2</a>: 将来の比較候補。今回の最初の実装には追加しない。</li>
+</ul>
+<p>主な会話記憶実験は英語中心で、2026年提案には初期preprintも含む。異なるbenchmark・回答モデル・judgeのscoreを横並びにして勝者を決めていない。今回の採用gateの数値は論文の保証値ではなく、実装評価の提案値。</p>
+</section>
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul><li>各phaseの受入条件を満たした直後にcheckboxと時刻付き実行ログを更新し、結果receiptへリンクする。</li><li>状態変更は<code>script#plan-meta</code>の<code>状態</code>と<code>.badge[data-state]</code>の表示を同時に更新する。依存条件で進めない場合は未完了phaseと必要情報を記録する。</li><li>既存Campaign Yの歴史的完了状態を本計画の進捗で書き換えない。結果の正本は本計画と今回のrun receipt、既存計画は設計・履歴の参照。</li></ul>
+</section>
+<section class="blockers" data-section="ブロッカー"><h2>ブロッカー・未確認事項</h2><p>P0確認: 本番は873c2a3bc1743bc7a2fe309067904e903870fb1d、実効Recall予算3,000文字。採用判定用heldout120問は現行authority資産では未成立（active dev16 / locked23）。未検証の自動生成問題で補充しない。既存architecture / large-function checksの9失敗は固定baseline d652252でも再現し、今回増分と分けて確認中。P1は446件の関連試験と実索引コピーでの原文一致smokeを通過。Recall全体の品質向上と採用判定は未実証。P2はpage-only資料にRaw receiptや有効時刻を捏造しない隔離artifactを作成中。OpenCode CLIはPATH上に未導入。native CLIとrouterのmodel IDは別namespaceとして実行前に確認。Cの採用gate・送信対象・provider利用枠が確定するまでMuse Spark全件送信を行わない。本番push / restartは未承認・未実施。</p><p><a href="evidence/2026-09-08-evidence-storage-recall/preflight.json">実状態preflight</a> / <a href="evidence/2026-09-08-evidence-storage-recall/p1-real-index-smoke.json">P1実索引smoke（品質比較ではない）</a></p></section>
+<section data-section="受け渡しメモ"><h2>次担当への受け渡し</h2><p>最初にP0、次にP1。新しい保存schemaの作成から始めない。原文アクセスの制約を維持した上で、既存チャンクのmetadataが失われる境界を端から端まで直す。その後にP2/P3を隔離して比較し、効果のある最小構成を採る。P4の採用判断後、P4aで既存全件を新規保存と共通の変換経路へ通し、差分追いつきと検証の後にP5へ進む。計画作成時にコード・本番設定・モデルを変更していない。</p></section>
+<section data-section="実行ログ"><h2>実行ログ</h2><ol class="log"><li><time datetime="2026-09-08T22:05:32+09:00">2026-09-08 22:05 JST</time><span>保存方式研究・本番archive照合・Campaign Yとの整合確認を基にcanonical generatorでdraftを作成。実装・ベンチマーク・deployは未開始。</span></li><li><time datetime="2026-09-08T22:26:36+09:00">2026-09-08 22:26 JST</time><span>ユーザー依頼により既存全件backfill、OpenCode + Muse Spark 1.3 Contributor、最大10ワーカー、段階的増加・単一publisher・再開・差分追いつき・外部送信範囲を追記。計画のみ更新、実行未開始。</span></li><li><time datetime="2026-09-08T22:29:04+09:00">2026-09-08 22:29 JST</time><span>ユーザーが計画開始を指示。P0の実状態・評価基準固定から開始。既存dirty変更を保護し、生成LLMへの資料送信や本番切替はまだ行っていない。</span></li><li><time datetime="2026-09-08T22:47:51+09:00">2026-09-08 22:47 JST</time><span>P0の本番/設定/評価資産確認と現行code baseline隔離を実施。P1はclient/fusion/penalty/ContextItemから実注入までの原文byte範囲保持を実装し、stale source拒否と同一page複数根拠の統合試験を確認。実索引copy + delta SQLite backupでも原文照合成功。P1全検証は継続中。P2以降・120問paired採用gate・全件backfill・本番配布は未完了。</span></li><li><time datetime="2026-09-08T23:11:32+09:00">2026-09-08 23:11 JST</time><span>P1受入完了: winning documentと最大2件の追加本文根拠をbase/delta・service/cache・client・fusion・reranker・contextへ保持。関連446 tests passed、mypy 94 files / ruff / import boundary通過。実索引コピー2 queryで注入6箇所の元byte範囲一致。P1 architecture移行は6追加・1退役のみ、baseline由来9失敗は未解消。全体CIは実行中。P0の採用用heldout不足とP2以降は未完了。</span></li></ol></section>
+</body>
+</html>

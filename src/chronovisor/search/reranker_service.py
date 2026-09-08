@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import signal
@@ -37,6 +38,10 @@ from chronovisor.core.runtime_config import (
     load_reranker_config,
     runtime_identity,
 )
+from chronovisor.core.search_types import (
+    SemanticEvidence,
+    parse_semantic_evidence,
+)
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     okf_runtime_operation,
@@ -46,6 +51,41 @@ from chronovisor.search.accelerator_lease import accelerator_lease
 
 SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "reranker-service-status.json"
 PASSAGE_CACHE_SIZE = 512
+
+
+def _candidate_evidence_from_payload(
+    payload: dict[str, Any], page_ids: list[str]
+) -> dict[str, tuple[SemanticEvidence, ...]]:
+    """Validate optional per-page semantic identities from a service request."""
+
+    if "evidence" in payload:
+        raise ValueError("candidate evidence is invalid")
+    if "candidate_evidence" not in payload:
+        return {}
+    raw = payload["candidate_evidence"]
+    if not isinstance(raw, list) or len(raw) > len(page_ids):
+        raise ValueError("candidate evidence is invalid")
+    allowed_page_ids = set(page_ids)
+    parsed: dict[str, tuple[SemanticEvidence, ...]] = {}
+    for row in raw:
+        if not isinstance(row, dict):
+            raise ValueError("candidate evidence is invalid")
+        page_id = row.get("page_id")
+        values = row.get("evidence")
+        if (
+            not isinstance(page_id, str)
+            or not page_id
+            or page_id not in allowed_page_ids
+            or page_id in parsed
+            or not isinstance(values, list)
+            or not values
+        ):
+            raise ValueError("candidate evidence is invalid")
+        try:
+            parsed[page_id] = parse_semantic_evidence(values, page_id=page_id)
+        except ValueError as exc:
+            raise ValueError("candidate evidence is invalid") from exc
+    return parsed
 
 
 class ServiceBusy(RuntimeError):
@@ -99,9 +139,10 @@ class RerankerServiceState:
         self._passages: OrderedDict[
             str,
             tuple[
-                tuple[str, str, int, int, str],
+                tuple[tuple[str, str, int, int, str], str, tuple[str, ...]],
                 str,
                 SourceDataClassification,
+                str,
             ],
         ] = OrderedDict()
         self._latencies: deque[float] = deque(maxlen=2_000)
@@ -139,14 +180,27 @@ class RerankerServiceState:
             return warm_reranker(self.config, self._llm_runtime)
 
     def _candidate_passage(
-        self, page_id: str, *, store: index_store.IndexStore | None
+        self,
+        page_id: str,
+        *,
+        store: index_store.IndexStore | None,
+        evidence: tuple[SemanticEvidence, ...] = (),
     ) -> tuple[str, SourceDataClassification, str]:
-        passage, source, identity = resolve_rerank_candidate(page_id, store=store)
+        passage, source, identity = resolve_rerank_candidate(
+            page_id,
+            store=store,
+            evidence=evidence,
+        )
+        passage_hash = hashlib.sha256(passage.encode("utf-8")).hexdigest()
+        evidence_doc_ids = tuple(
+            item.doc_id for item in evidence if isinstance(item, SemanticEvidence)
+        )
+        cache_key = (identity, passage_hash, evidence_doc_ids)
         cached = self._passages.get(page_id)
-        if cached is not None and cached[0] == identity:
+        if cached is not None and cached[0] == cache_key:
             self._passages.move_to_end(page_id)
-            return cached[1], cached[2], cached[0][-1]
-        self._passages[page_id] = (identity, passage, source)
+            return cached[1], cached[2], cached[3]
+        self._passages[page_id] = (cache_key, passage, source, identity[-1])
         self._passages.move_to_end(page_id)
         while len(self._passages) > PASSAGE_CACHE_SIZE:
             self._passages.popitem(last=False)
@@ -204,7 +258,13 @@ class RerankerServiceState:
         self._last_error = _safe_service_error(exc)
         self._publish_status()
 
-    def _rerank(self, query: str, page_ids: list[str]) -> dict[str, Any]:
+    def _rerank(
+        self,
+        query: str,
+        page_ids: list[str],
+        *,
+        evidence_by_page: dict[str, tuple[SemanticEvidence, ...]] | None = None,
+    ) -> dict[str, Any]:
         if not query.strip():
             raise ValueError("query must not be empty")
         if not page_ids:
@@ -224,7 +284,11 @@ class RerankerServiceState:
                 except Exception:
                     candidate_store = None
                 passages_and_hashes = [
-                    self._candidate_passage(page_id, store=candidate_store)
+                    self._candidate_passage(
+                        page_id,
+                        store=candidate_store,
+                        evidence=(evidence_by_page or {}).get(page_id, ()),
+                    )
                     for page_id in page_ids
                 ]
                 with self._local_resources():
@@ -304,7 +368,12 @@ class RerankerServiceState:
             ]
             if len(normalized_ids) != len(page_ids):
                 raise ValueError("page_ids must contain non-empty strings")
-            return self._rerank(query, normalized_ids)
+            evidence_by_page = _candidate_evidence_from_payload(payload, normalized_ids)
+            return self._rerank(
+                query,
+                normalized_ids,
+                evidence_by_page=evidence_by_page,
+            )
         raise ValueError(f"unknown reranker method: {method}")
 
 

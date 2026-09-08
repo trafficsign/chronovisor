@@ -18,11 +18,26 @@ from chronovisor.core.llm_runtime import (
     SafeBackendError,
 )
 from chronovisor.core.runtime_config import SearchEmbeddingConfig
-from chronovisor.core.search_types import ScoredPage
+from chronovisor.core.search_types import (
+    ScoredPage,
+    SemanticEvidence,
+    parse_semantic_evidence,
+)
 
 
 class SemanticServiceUnavailable(RuntimeError):
     pass
+
+
+def _response_evidence(row: dict[str, Any], generation_id: Any) -> tuple[SemanticEvidence, ...]:
+    """Validate optional document identities; legacy responses remain supported."""
+    try:
+        values = row.get("evidence", [])
+        if values and (not isinstance(generation_id, str) or not generation_id):
+            raise ValueError("invalid semantic evidence")
+        return parse_semantic_evidence(values, page_id=str(row.get("page_id") or ""), generation_id=generation_id)
+    except ValueError as exc:
+        raise SemanticServiceUnavailable("invalid semantic evidence") from exc
 
 
 _BREAKER_LOCK = threading.Lock()
@@ -377,6 +392,8 @@ def search(
                 ),
                 page_type=page_type,
                 sensitivity=_meta_sensitivity(meta, folder=folder),
+                uid=str(meta.get("uid") or ""),
+                evidence=_response_evidence(row, response.get("generation_id")),
             )
         )
     try:
@@ -474,6 +491,8 @@ def verify(
                 ),
                 page_type=_meta_page_type(meta, folder=folder),
                 sensitivity=_meta_sensitivity(meta, folder=folder),
+                uid=str(meta.get("uid") or ""),
+                evidence=_response_evidence(row, response.get("generation_id")),
             )
         )
     try:

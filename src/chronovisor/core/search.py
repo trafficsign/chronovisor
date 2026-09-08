@@ -25,7 +25,7 @@ from chronovisor.core.runtime_config import (
     load_negative_feedback_config,
     load_search_embedding_config,
 )
-from chronovisor.core.search_types import ScoredPage
+from chronovisor.core.search_types import ScoredPage, merge_evidence
 from chronovisor.core.store import (
     CHRONOVISOR_ROOT,
     PAGES_DIR,
@@ -588,6 +588,18 @@ def fuse_results(
             scores[page.page_id] = scores.get(page.page_id, 0) + score
             if page.page_id not in meta:
                 meta[page.page_id] = page
+            else:
+                previous = meta[page.page_id]
+                evidence = merge_evidence(previous.evidence, page.evidence)
+                if previous.content_sha256:
+                    evidence = tuple(
+                        e
+                        for e in evidence
+                        if e.source_sha256 == previous.content_sha256
+                    )
+                if previous.uid:
+                    evidence = tuple(e for e in evidence if e.page_uid == previous.uid)
+                meta[page.page_id] = replace(previous, evidence=evidence)
 
     add_results(anchor_results or [], "anchor")
     add_results(bm25_results, "bm25")

@@ -1,0 +1,44 @@
+{
+  "kind": "offline_real_index_source_integrity_smoke",
+  "not_quality_benchmark": true,
+  "generation_id": "20260811T043448Z-f94f352690dd-46626a",
+  "source_snapshot": "immutable generation copy plus SQLite online backup of delta; source bytes validated at read time, not frozen corpus",
+  "snapshot_load_ms": 3124.565,
+  "queries": [
+    {
+      "query": "Chronovisor Recall timeout fallback",
+      "embed_ms": 48.599,
+      "candidate_search_ms": 105.957,
+      "candidate_pages": 5,
+      "candidate_document_refs": 15,
+      "verified_pages": 5,
+      "verified_passages": 10,
+      "injected_passages": 3,
+      "injected_chars": 2833,
+      "context_sha256": "9de75bdb582f862235f6f877cc65e1d49d99fe8838b17939be7ed84a827a52eb"
+    },
+    {
+      "query": "What is the current memory retrieval policy?",
+      "embed_ms": 90.961,
+      "candidate_search_ms": 134.336,
+      "candidate_pages": 5,
+      "candidate_document_refs": 8,
+      "verified_pages": 2,
+      "verified_passages": 3,
+      "injected_passages": 3,
+      "injected_chars": 1860,
+      "context_sha256": "95053c23815ed627afcda272a886121d93881b8c614d29d5382d1079f6bfe9aa"
+    }
+  ],
+  "candidate_variant": "winning document plus scored source chunks",
+  "source_sha256": {
+    "core/semantic_index.py": "aa536d84817e5bff47d37c8f446b202f39d4ca5d9321e4a4f64ecaf525532325",
+    "core/search_types.py": "90af27b4c964c058c32b83817bc84f0868bfb329981866cd25bcb921edb3e785",
+    "core/semantic_evidence.py": "e12f759d0750cde388d9615d0274fbeb9fdc0431be16473ebab216ab8ccd15e8",
+    "recall/recall_runtime.py": "f58823869b7d29909c8844708531069b777e5d1b3fa5da6fc3007d9231f687be",
+    "recall/recall_publication.py": "79476b1db2680ceb55fd1e0e7a69bb5e284acdf798fb1b86f2f366138cb345b4",
+    "core/recall_context.py": "86d577e125ab6b5c7468f594343dc461645f04944a72d29d085abc9f49c14e96"
+  },
+  "production_restarted": false,
+  "published": false
+}

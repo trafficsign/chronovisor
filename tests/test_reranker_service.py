@@ -4,6 +4,7 @@ import contextlib
 import json
 import os
 import threading
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -23,8 +24,10 @@ from chronovisor.core.llm_runtime import (
 )
 from chronovisor.core.reranker import RERANK_RUNTIME_ROLE
 from chronovisor.core.runtime_config import RerankerConfig, RerankerServiceConfig
-from chronovisor.core.search_types import ScoredPage
+from chronovisor.core.search_types import ScoredPage, SemanticEvidence
 from chronovisor.search import reranker_service
+
+EVIDENCE_UID = "019fea6e-8a33-7401-b37b-c7afcf6711e1"
 
 
 def page(page_id: str, score: float = 1.0) -> ScoredPage:
@@ -199,6 +202,167 @@ def test_service_and_client_round_trip_preserves_raw_scores(
     assert outcome.metadata["status"] == "applied"
     assert outcome.metadata["execution"] == "service"
     assert [detail.raw_score for detail in outcome.scores] == [0.9, 0.1]
+
+
+def test_client_sends_optional_candidate_evidence(monkeypatch, tmp_path) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    _state, _status, _backend, runtime, _controls = prepare_state(
+        tmp_path, monkeypatch, cfg
+    )
+    candidate = page("a")
+    evidence = SemanticEvidence(
+        "a",
+        f"{EVIDENCE_UID}#c0",
+        "chunk",
+        0,
+        "a" * 64,
+        EVIDENCE_UID,
+        "generation-1",
+        0.9,
+    )
+    candidate.evidence = (evidence,)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(reranker_client, "request", lambda payload, *_a, **_k: (
+        seen.update(payload)
+        or {
+            "status": "ok",
+            "route": {
+                "role": RERANK_RUNTIME_ROLE,
+                "provider": "local-reranker",
+                "model": "route-model",
+                "location": "local",
+            },
+            "scores": [{"page_id": "a", "raw_score": 0.5}],
+        }
+    ))
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+
+    outcome = reranker_client.rerank("query", [candidate], config=cfg)
+
+    assert outcome.metadata["status"] == "applied"
+    assert seen["page_ids"] == ["a"]
+    assert seen["candidate_evidence"] == [
+        {"page_id": "a", "evidence": [asdict(evidence)]}
+    ]
+
+
+def test_service_forwards_optional_candidate_evidence_to_resolver(
+    tmp_path, monkeypatch
+) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    state, _status, backend, _runtime, _controls = prepare_state(
+        tmp_path, monkeypatch, cfg
+    )
+    evidence = SemanticEvidence(
+        "a",
+        f"{EVIDENCE_UID}#c0",
+        "chunk",
+        0,
+        "a" * 64,
+        EVIDENCE_UID,
+        "generation-1",
+        0.9,
+    )
+    seen: list[tuple[SemanticEvidence, ...]] = []
+
+    def resolve(page_id, *, evidence=(), **_kwargs):
+        seen.append(evidence)
+        return (
+            page_id,
+            SourceDataClassification(SourceDataClass.PAGE, SourceSensitivity.NORMAL),
+            ("pages", page_id, 1, 1, "a" * 64),
+        )
+
+    monkeypatch.setattr(reranker_service, "resolve_rerank_candidate", resolve)
+    payload = state.handle(
+        {
+            "method": "rerank",
+            "query": "query",
+            "page_ids": ["a"],
+            "candidate_evidence": [
+                {"page_id": "a", "evidence": [asdict(evidence)]}
+            ],
+        }
+    )
+
+    assert payload["status"] == "ok"
+    assert seen == [(evidence,)]
+    assert len(backend.requests) == 1
+
+
+def test_service_rejects_malformed_candidate_evidence_before_backend(
+    tmp_path, monkeypatch
+) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    state, _status, backend, _runtime, _controls = prepare_state(
+        tmp_path, monkeypatch, cfg
+    )
+    bad = {
+        "page_id": "a",
+        "evidence": [
+            {
+                "page_id": "a",
+                "doc_id": f"{EVIDENCE_UID}#c0",
+                "kind": "chunk",
+                "ordinal": 0,
+                "source_sha256": "bad",
+                "page_uid": EVIDENCE_UID,
+                "generation_id": "generation-1",
+                "score": 0.9,
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="candidate evidence"):
+        state.handle(
+            {
+                "method": "rerank",
+                "query": "query",
+                "page_ids": ["a"],
+                "candidate_evidence": [bad],
+            }
+        )
+    assert backend.requests == []
+
+
+def test_service_rejects_empty_candidate_evidence_before_backend(
+    tmp_path, monkeypatch
+) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    state, _status, backend, _runtime, _controls = prepare_state(
+        tmp_path, monkeypatch, cfg
+    )
+
+    with pytest.raises(ValueError, match="candidate evidence"):
+        state.handle(
+            {
+                "method": "rerank",
+                "query": "query",
+                "page_ids": ["a"],
+                "candidate_evidence": [{"page_id": "a", "evidence": []}],
+            }
+        )
+    assert backend.requests == []
+
+
+def test_service_rejects_legacy_evidence_alias_before_backend(
+    tmp_path, monkeypatch
+) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    state, _status, backend, _runtime, _controls = prepare_state(
+        tmp_path, monkeypatch, cfg
+    )
+
+    with pytest.raises(ValueError, match="candidate evidence"):
+        state.handle(
+            {
+                "method": "rerank",
+                "query": "query",
+                "page_ids": ["a"],
+                "evidence": [],
+            }
+        )
+    assert backend.requests == []
 
 
 def test_service_socket_and_status_never_expose_backend_details(
@@ -417,6 +581,69 @@ def test_service_passage_cache_requires_exact_candidate_identity(
         "new passage",
         SourceDataClassification(SourceDataClass.SYSTEM, SourceSensitivity.HIGH),
     )
+
+
+def test_service_passage_cache_includes_selected_evidence_identity(
+    tmp_path, monkeypatch
+) -> None:
+    cfg = config(tmp_path / "reranker.sock")
+    state, _status, _backend, _runtime, _controls = prepare_state(
+        tmp_path, monkeypatch, cfg
+    )
+    identity = ("pages", "/pages/a.md", 1, 2, "same-source-digest")
+    responses = iter(
+        (
+            (
+                "passage selected first",
+                SourceDataClassification(
+                    SourceDataClass.PAGE, SourceSensitivity.NORMAL
+                ),
+                identity,
+            ),
+            (
+                "passage selected second",
+                SourceDataClassification(
+                    SourceDataClass.PAGE, SourceSensitivity.NORMAL
+                ),
+                identity,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        reranker_service,
+        "resolve_rerank_candidate",
+        lambda *_args, **_kwargs: next(responses),
+    )
+    first_evidence = SemanticEvidence(
+        "a",
+        f"{EVIDENCE_UID}#c0",
+        "chunk",
+        0,
+        "a" * 64,
+        EVIDENCE_UID,
+        "generation-1",
+        0.9,
+    )
+    second_evidence = SemanticEvidence(
+        "a",
+        f"{EVIDENCE_UID}#c1",
+        "chunk",
+        1,
+        "a" * 64,
+        EVIDENCE_UID,
+        "generation-1",
+        0.8,
+    )
+
+    first = state._candidate_passage(
+        "a", store=None, evidence=(first_evidence,)
+    )
+    second = state._candidate_passage(
+        "a", store=None, evidence=(second_evidence,)
+    )
+
+    assert first[0] == "passage selected first"
+    assert second[0] == "passage selected second"
 
 
 def test_reranker_rollout_selection_is_stable(tmp_path) -> None:

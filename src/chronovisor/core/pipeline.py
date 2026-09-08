@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from chronovisor.core.runtime_config import NegativeFeedbackConfig, RerankerConfig
-from chronovisor.core.search_types import ScoredPage
+from chronovisor.core.search_types import ScoredPage, merge_evidence
 
 
 @dataclass(frozen=True)
@@ -121,7 +121,15 @@ def plain_rrf(
             continue
         for rank, page in enumerate(results):
             scores[page.page_id] = scores.get(page.page_id, 0.0) + weight / (k + rank)
-            meta.setdefault(page.page_id, page)
+            previous = meta.setdefault(page.page_id, page)
+            evidence = merge_evidence(previous.evidence, page.evidence)
+            if previous.content_sha256:
+                evidence = tuple(
+                    e for e in evidence if e.source_sha256 == previous.content_sha256
+                )
+            if previous.uid:
+                evidence = tuple(e for e in evidence if e.page_uid == previous.uid)
+            meta[page.page_id] = replace(previous, evidence=evidence)
 
     fused: list[ScoredPage] = []
     for page_id, score in scores.items():

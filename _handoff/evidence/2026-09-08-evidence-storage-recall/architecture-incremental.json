@@ -1,0 +1,155 @@
+{
+  "schema": "chronovisor.architecture-incremental-receipt.v1",
+  "observed_at": "2026-09-08T23:03:59+09:00",
+  "scope": {
+    "mode": "targeted_p1_site_migration",
+    "baseline_commit": "d652252bf39e744e71472ccf93ce3162f3860ce1",
+    "source_scan": "scripts/architecture_baseline.py",
+    "p2_excluded_module": "chronovisor.research.page_evidence_projection",
+    "p2_excluded_import_sites": 6,
+    "no_baseline_refresh": true,
+    "no_contract_hash_refresh": true,
+    "no_preexisting_drift_registration": true
+  },
+  "delta": {
+    "added_site_ids": [
+      "arch:7c77588035c9fb769eabe200e0ae62980197869e6167f15d8810c145084e89ce",
+      "arch:82ec2ab3752ff899498014947e5c79989bc6104e68f407ef45fed9b582e31210",
+      "arch:896b6d264bbc736197d1063e944f79092532fd06d840c6c2212e7eb26751b17a",
+      "arch:aa865768cd9900cce081e87ee5b1a6c8294cf89799193af788852536f2f73747",
+      "arch:afa0f5ce3c58d8f2412bd1328ce925c9ff2172182c67775a9b4bee463e5b13cb",
+      "arch:dfe514791635ec10a46218846a35bb984c4cb3547cd289f71357f463e348dc14"
+    ],
+    "removed_site_ids": [
+      "arch:17dfff912265720f618d2e861f60fe4190e22e31b97fec8600bd4dc73e8764ed"
+    ],
+    "added_sites": [
+      {
+        "semantic_id": "arch:aa865768cd9900cce081e87ee5b1a6c8294cf89799193af788852536f2f73747",
+        "source_module": "chronovisor.search.reranker_service",
+        "scope": "<module>",
+        "line": 41,
+        "target_module": "chronovisor.core.search_types",
+        "symbols": [
+          "SemanticEvidence",
+          "parse_semantic_evidence"
+        ],
+        "content_sha256": "061d1c8bf1c887b5032a4656895e1dc52e66cf0a60972426c330e11245f09847"
+      },
+      {
+        "semantic_id": "arch:7c77588035c9fb769eabe200e0ae62980197869e6167f15d8810c145084e89ce",
+        "source_module": "chronovisor.search.semantic_service",
+        "scope": "<module>",
+        "line": 52,
+        "target_module": "chronovisor.core.search_types",
+        "symbols": [
+          "SemanticEvidence"
+        ],
+        "content_sha256": "9511b0a5aab4cbcb18cb0e36aa4bf313cff1b2ef5733d728e09bf4795fb8189e"
+      },
+      {
+        "semantic_id": "arch:82ec2ab3752ff899498014947e5c79989bc6104e68f407ef45fed9b582e31210",
+        "source_module": "chronovisor.recall.recall_runtime",
+        "scope": "_context_from_semantic_evidence",
+        "line": 1555,
+        "target_module": "chronovisor.core.semantic_evidence",
+        "symbols": [
+          "resolve_semantic_evidence"
+        ],
+        "content_sha256": "907d6439e22960d49b2e06e302a10d8f5f911cc2ec4c157898ff904757b23cd4"
+      },
+      {
+        "semantic_id": "arch:896b6d264bbc736197d1063e944f79092532fd06d840c6c2212e7eb26751b17a",
+        "source_module": "chronovisor.recall.recall_runtime",
+        "scope": "<module>",
+        "line": 45,
+        "target_module": "chronovisor.core.search_types",
+        "symbols": [
+          "merge_evidence",
+          "tokenize"
+        ],
+        "content_sha256": "dbd8f4c99cff9b6d6df65848f0237ffc269ca36b9c0995e9bd12e0d00d7a8df6"
+      },
+      {
+        "semantic_id": "arch:afa0f5ce3c58d8f2412bd1328ce925c9ff2172182c67775a9b4bee463e5b13cb",
+        "source_module": "chronovisor.recall.recall_runtime",
+        "scope": "<module>",
+        "line": 79,
+        "target_module": "chronovisor.core.semantic_evidence",
+        "symbols": [
+          "SourcePassage"
+        ],
+        "content_sha256": "4a80f4051893a59c12b71cd536c1983d0cb7509886883977b3280f923f3455a6"
+      },
+      {
+        "semantic_id": "arch:dfe514791635ec10a46218846a35bb984c4cb3547cd289f71357f463e348dc14",
+        "source_module": "chronovisor.recall.recall_runtime",
+        "scope": "_context_from_semantic_evidence",
+        "line": 1551,
+        "target_module": "chronovisor.core.canonical_document",
+        "symbols": [
+          "CanonicalDocumentError",
+          "parse_document"
+        ],
+        "content_sha256": "c60f607e608c26d2b2a80c4573c43c39274defde9f79fd30bba0e179ca9f3229"
+      }
+    ],
+    "removed_sites": [
+      {
+        "semantic_id": "arch:17dfff912265720f618d2e861f60fe4190e22e31b97fec8600bd4dc73e8764ed",
+        "source_module": "chronovisor.recall.recall_runtime",
+        "scope": "<module>",
+        "line": 45,
+        "target_module": "chronovisor.core.search_types",
+        "symbols": [
+          "tokenize"
+        ]
+      }
+    ]
+  },
+  "ledger_update": {
+    "target_files": [
+      "docs/refactoring/architecture-exception-baseline.json",
+      "docs/refactoring/architecture-exceptions.json",
+      "tests/test_architecture_baseline.py"
+    ],
+    "fixture_update": "RETIREMENT_HISTORY.cross_domain_site_semantic_ids now includes retired arch:17dfff...",
+    "active_cross_domain_sites_before": 1490,
+    "active_cross_domain_sites_after": 1495,
+    "retired_cross_domain_site_ids_before": 1321,
+    "retired_cross_domain_site_ids_after": 1322,
+    "edge_count_before": 44,
+    "edge_count_after": 44,
+    "updated_edges": {
+      "search->core": {
+        "sites_before": 47,
+        "sites_after": 49
+      },
+      "recall->core": {
+        "sites_before": 256,
+        "sites_after": 259
+      }
+    },
+    "baseline_sha256": "87ec23a11e6b6cddccaaa1333d528337eeedb897a03417814329164dda55cff3"
+  },
+  "verification": {
+    "json_parse": "pass",
+    "seed_ledger_canonical_hash_match": "pass",
+    "active_retired_disjoint": "pass",
+    "ledger_site_ids_unique": "pass",
+    "targeted_delta_against_baseline": "pass: added 6, removed 1 (final P1 source scan)",
+    "current_filtered_import_sites": 1505,
+    "raw_current_import_sites_including_p2": 1511,
+    "preexisting_current_unmatched_site_ids": 11,
+    "preexisting_stale_ledger_site_ids": 1,
+    "guard_generate_exceptions": "rejected existing seed drift (exit 1); no full refresh attempted",
+    "post_migration_gate_snapshot": "pytest -q tests/test_architecture_baseline.py tests/test_large_function_policy.py: 9 failed, 21 passed after updating RETIREMENT_HISTORY for the retired 17dfff site; remaining failures are static exact-ledger assertions and preexisting contract/fitness/large-function drift",
+    "known_gate_state": "Before this targeted migration, baseline and current each had 9 failing tests; contract hash drift, existing ledger/seed drift, and large-function drift (search_candidates 497 vs declared 409) remain intentionally untouched."
+  },
+  "runtime": {
+    "production_restarted": false,
+    "published": false,
+    "provider_requested": false,
+    "p2_registration": false
+  }
+}

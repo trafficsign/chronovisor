@@ -2058,6 +2058,7 @@ RETIREMENT_HISTORY = {
         sorted(
             (
                 *P2_RETIRED_SITE_IDS,
+                "arch:17dfff912265720f618d2e861f60fe4190e22e31b97fec8600bd4dc73e8764ed",
                 P3_RETIRED_PROVIDER_SITE_ID,
                 *P4C_RETIRED_DECISION_LAB_SITE_IDS,
                 *P4C_RETIRED_MOVED_SITE_IDS,

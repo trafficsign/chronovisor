@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -188,6 +189,15 @@ def test_build_validate_activate_and_search_generation(
     assert loaded.score_pages([1.0, 0.0, 0.0], ["alpha"]) == [
         ("alpha", pytest.approx(1.0))
     ]
+    evidence_rows = loaded.search_with_evidence([1.0, 0.0, 0.0], top_n=2)
+    assert evidence_rows[0][0] == "alpha"
+    assert evidence_rows[0][2]
+    assert len(evidence_rows[0][2]) <= 3
+    assert evidence_rows[0][2][0].doc_id == "alpha"
+    assert evidence_rows[0][2][0].kind == "page"
+    assert evidence_rows[0][2][0].ordinal == -1
+    assert evidence_rows[0][2][0].source_sha256 == "a" * 64
+    assert evidence_rows[0][2][0].generation_id == manifest.generation_id
     generation = tmp_path / "generations" / manifest.generation_id
     assert tmp_path.stat().st_mode & 0o777 == 0o700
     assert generation.stat().st_mode & 0o777 == 0o700
@@ -371,6 +381,204 @@ def test_delta_shadows_all_base_documents_for_updated_page(tmp_path: Path) -> No
 
     assert loaded.search([1.0, 0.0, 0.0], top_n=2)[0][0] == "beta"
     assert loaded.search([0.0, 0.0, 1.0], top_n=2)[0][0] == "alpha"
+    evidence_rows = loaded.search_with_evidence([0.0, 0.0, 1.0], top_n=2)
+    assert evidence_rows[0][0] == "alpha"
+    assert [item.doc_id for item in evidence_rows[0][2]] == ["alpha"]
+    assert evidence_rows[0][2][0].source_sha256 == "c" * 64
+    assert evidence_rows[0][2][0].generation_id == manifest.generation_id
+
+
+def test_evidence_keeps_top_three_documents_for_base_and_delta_page(
+    tmp_path: Path,
+) -> None:
+    documents = [
+        SemanticDocument(
+            doc_id=doc_id,
+            page_id="alpha",
+            kind=kind,
+            ordinal=ordinal,
+            text=doc_id,
+            source_path="/pages/alpha.md",
+            source_sha256="a" * 64,
+            source_mtime_ns=1,
+        )
+        for doc_id, kind, ordinal in (
+            ("alpha", "page", -1),
+            ("alpha#q0", "question", 0),
+            ("alpha#c0", "chunk", 0),
+            ("alpha#c1", "chunk", 1),
+        )
+    ]
+    base_vectors = np.asarray(
+        [[1.0, 0.0, 0.0], [0.95, 0.1, 0.0], [0.9, 0.1, 0.0], [0.8, 0.1, 0.0]],
+        dtype=np.float32,
+    )
+    manifest = build_generation(
+        documents,
+        encode_documents=lambda _documents, _batch_size: base_vectors,
+        **ROUTE,
+        revision="test-revision",
+        dimensions=3,
+        query_prefix="query: ",
+        document_prefix="passage: ",
+        batch_size=4,
+        root=tmp_path,
+        repo_commit="deadbeef",
+    )
+    activate_generation(manifest.generation_id, root=tmp_path)
+    loaded = load_active_generation(root=tmp_path)
+
+    base_rows = loaded.search_with_evidence([1.0, 0.0, 0.0], top_n=1)
+    base_evidence_ids = [item.doc_id for item in base_rows[0][2]]
+    assert base_evidence_ids[0] == "alpha"
+    assert len(base_evidence_ids) == 3
+    assert set(base_evidence_ids[1:]) == {"alpha#c0", "alpha#c1"}
+    assert all(item.source_sha256 == "a" * 64 for item in base_rows[0][2])
+    assert all(item.generation_id == manifest.generation_id for item in base_rows[0][2])
+
+    updated = [
+        SemanticDocument(
+            doc_id=doc_id,
+            page_id="alpha",
+            kind=kind,
+            ordinal=ordinal,
+            text=doc_id,
+            source_path="/pages/alpha.md",
+            source_sha256="c" * 64,
+            source_mtime_ns=2,
+        )
+        for doc_id, kind, ordinal in (
+            ("alpha", "page", -1),
+            ("alpha#q0", "question", 0),
+            ("alpha#c0", "chunk", 0),
+            ("alpha#c1", "chunk", 1),
+        )
+    ]
+    write_page_delta(
+        manifest.generation_id,
+        "alpha",
+        updated,
+        np.asarray(
+            [[0.0, 1.0, 0.0], [0.0, 0.95, 0.1], [0.0, 0.9, 0.1], [0.0, 0.8, 0.1]],
+            dtype=np.float32,
+        ),
+        dimensions=3,
+        root=tmp_path,
+    )
+    loaded = load_active_generation(root=tmp_path)
+
+    delta_rows = loaded.score_pages_with_evidence([0.0, 1.0, 0.0], ["alpha"])
+    delta_evidence_ids = [item.doc_id for item in delta_rows[0][2]]
+    assert delta_evidence_ids[0] == "alpha"
+    assert len(delta_evidence_ids) == 3
+    assert set(delta_evidence_ids[1:]) == {"alpha#c0", "alpha#c1"}
+    assert all(item.source_sha256 == "c" * 64 for item in delta_rows[0][2])
+    assert all(item.generation_id == manifest.generation_id for item in delta_rows[0][2])
+
+
+def test_load_delta_keeps_page_state_and_documents_on_one_wal_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generation_id = "generation"
+    old_document = SemanticDocument(
+        doc_id="old",
+        page_id="alpha",
+        kind="page",
+        ordinal=-1,
+        text="old",
+        source_path="/pages/alpha.md",
+        source_sha256="a" * 64,
+        source_mtime_ns=1,
+    )
+    write_page_delta(
+        generation_id,
+        "alpha",
+        [old_document],
+        np.asarray([[1.0, 0.0]], dtype=np.float32),
+        dimensions=2,
+        root=tmp_path,
+    )
+    delta_path = tmp_path / "deltas" / f"{generation_id}.sqlite"
+    check = sqlite3.connect(delta_path)
+    try:
+        assert check.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    finally:
+        check.close()
+    original_connect = semantic_index.sqlite3.connect
+    wrapped = False
+    writer_done = False
+
+    def connect(*args: object, **kwargs: object):
+        nonlocal wrapped
+        connection = original_connect(*args, **kwargs)
+        if wrapped:
+            return connection
+        wrapped = True
+
+        class TriggerConnection:
+            def __init__(self, inner: sqlite3.Connection) -> None:
+                self._inner = inner
+
+            def execute(self, sql: str, parameters: tuple[object, ...] = ()):
+                nonlocal writer_done
+                cursor = self._inner.execute(sql, parameters)
+                if (
+                    not writer_done
+                    and sql.strip().startswith("SELECT page_id FROM page_state")
+                ):
+                    writer_done = True
+                    writer = original_connect(delta_path)
+                    try:
+                        with writer:
+                            writer.execute("DELETE FROM page_state")
+                            writer.execute("DELETE FROM documents")
+                            writer.execute(
+                                "INSERT INTO documents "
+                                "(doc_id, page_id, kind, ordinal, vector, dim, "
+                                "source_sha256, source_mtime_ns) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    "new",
+                                    "beta",
+                                    "page",
+                                    -1,
+                                    np.asarray([0.0, 1.0], dtype=np.float32).tobytes(),
+                                    2,
+                                    "b" * 64,
+                                    2,
+                                ),
+                            )
+                            writer.execute(
+                                "INSERT INTO page_state "
+                                "(page_id, source_sha256, source_mtime_ns, deleted, "
+                                "updated_at) VALUES (?, ?, ?, ?, ?)",
+                                ("beta", "b" * 64, 2, 0, "2026-01-01T00:00:00Z"),
+                            )
+                    finally:
+                        writer.close()
+                return cursor
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._inner, name)
+
+        return TriggerConnection(connection)
+
+    monkeypatch.setattr(semantic_index.sqlite3, "connect", connect)
+    (
+        overridden,
+        _vectors,
+        page_ids,
+        _kinds,
+        doc_ids,
+        _ordinals,
+        source_hashes,
+    ) = semantic_index._load_delta(generation_id, dimensions=2, root=tmp_path)
+
+    assert writer_done is True
+    assert overridden == {"alpha"}
+    assert page_ids == ["alpha"]
+    assert doc_ids == ["old"]
+    assert source_hashes == ["a" * 64]
 
 
 def test_corrupt_generation_is_rejected_before_activation(tmp_path: Path) -> None:

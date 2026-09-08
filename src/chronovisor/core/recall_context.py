@@ -27,9 +27,18 @@ def render_recall_payload(payload: dict[str, Any], max_chars: int) -> str:
 
     def render(value: dict[str, Any]) -> str:
         encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        if "evidence_packet" in value:
-            encoded = encoded.replace(OPENING, r"\u005bRECALL_CONTEXT\u005d").replace(
-                CLOSING, r"\u005b/RECALL_CONTEXT\u005d"
+        if "evidence_packet" in value or (
+            isinstance(value.get("items"), list)
+            and any(
+                isinstance(item, dict) and "source_ref" in item
+                for item in value["items"]
+            )
+        ):
+            encoded = re.sub(
+                r"\[/?(?:RECALL_CONTEXT|WORKING_MEMORY)\]",
+                lambda match: match[0].replace("[", r"\u005b").replace("]", r"\u005d"),
+                encoded,
+                flags=re.IGNORECASE,
             )
         return "\n".join([*prefix, encoded, CLOSING])
 
@@ -43,6 +52,13 @@ def render_recall_payload(payload: dict[str, Any], max_chars: int) -> str:
         items.pop()
         context = render(payload)
     if len(context) > max_chars:
+        # A source range and its exact text are atomic. Never turn a verified
+        # passage into a different excerpt or a pointer advertised as evidence.
+        if any(isinstance(item, dict) and "source_ref" in item for item in items):
+            payload["queries"] = []
+            payload["reasons"] = []
+            context = render(payload)
+            return context if len(context) <= max_chars else ""
         for item in items:
             if not isinstance(item, dict):
                 continue
