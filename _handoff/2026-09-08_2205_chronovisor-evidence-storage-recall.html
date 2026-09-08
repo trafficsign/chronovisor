@@ -119,6 +119,7 @@ table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}th,td{bo
 <li><input type="checkbox"><span><strong>P2 — 証拠projectionの単位と文脈を改善。</strong>既存EvidenceAtom / projectionを用いて会話の出来事・話題と文書節をrecord化。原文参照、役割・条件、時間、明示訂正、検索用の短い文脈を保存する。新規LLM呼出しは既存ingestの出力・バッチ処理を再利用できない部分だけ非同期で行う。既存ページのsummary / questions / entitiesを重複生成しない。<em>完了:</em>Cの隔離projectionと索引が生成でき、原文欠損0・再構築一致・中断再開・生成失敗時fallbackが検証済み。</span></li>
 <li><input type="checkbox"><span><strong>P3 — 既存Recallへ接続。</strong>record IDをBM25 / ANNからEvidencePacketとbounded contextまで通す。page teacher・証拠authority・certificate・stop reasonを既存契約で維持。source revisionと索引generationを整合した単位で公開し、旧sourceと新recordの混在を拒否する。必要な前提・訂正だけを予算内で追加し、曖昧な関係は生成しない。<em>完了:</em>policyに適合したrecordのみに根拠traceが通り、通常Recall・fallback・更新競合の統合試験が通る。</span></li>
 <li><input type="checkbox"><span><strong>P4 — A/B/Cのpaired評価。</strong>同じsource snapshot、query、モデル、注入token上限、deadline、既存reranker採用状態で比較。Cにだけ追加推論や長いcontextを与えない。quality、根拠、時間、待ち時間、保存時費用を別々に報告する。Bが勝ちCの追加効果がない場合はBを採用し、Cを有効化しない。<em>完了:</em>事前登録した判定で採用候補か不採用が決まり、未測定を成功扱いしない。</span></li>
+<li><input type="checkbox"><span><strong>P4a — 既存全件backfill。</strong>下記「既存全件の再処理とOpenCode並列実行」に従い、C採用時はOpenCode + Muse Spark 1.3 Contributorの少量試行から最大10ワーカーへ増加し、外部送信可能な既存資料を再処理する。既存metadataの再利用、送信不可資料の許可済み経路、manifest全件のaccounting、冪等な再開、改訂差分の追いつき、単一publisherを含める。<em>完了:</em>対象件数・処理結果・残件・費用・source/索引coverage・原文検証を報告し、採用対象の失敗/待ち0。Bのみ採用の場合はLLM全件処理を省く理由と、必要な機械的再構築の完了証跡を残す。</span></li>
 <li><input type="checkbox"><span><strong>P5 — shadow / canary / 本番確認。</strong>隔離環境で切り替えとrollbackを演習。明示されたpush / deploy範囲で、対象変更だけを公開し、安全なingest boundaryで必要サービスを再起動する。配布SHA・archive・health・generationを照合し、低負荷shadow → canary → live queryで注入された根拠を確認する。shadow計算もwall timeに含め、同時実行負荷を記録する。<em>完了:</em>受入gate通過、即時rollback実証、実動の該当本文・出典・待ち時間の証跡がある。deploy未承認ならoffline検証済みまでとし、この項目を未完了で残す。</span></li>
 <li><input type="checkbox"><span><strong>P6 — 後片付けと受け渡し。</strong>採用結果を反映し、不要な実験モデル・一時DB・孤立projection・分岐を、参照中でないことを確認して除去。現行/rollbackに必要な版と評価receiptは保持。関連する必須CI、変更範囲のcommit、設定/運用/再構築手順、未完了点を記録する。<em>完了:</em>変更範囲・試験・採否・配布状態・片付けが追跡可能。性能改善しなかった場合も数値と不採用を明示し、改善完了とは呼ばない。</span></li>
 </ol>
@@ -151,6 +152,39 @@ table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}th,td{bo
 <p>まず既存<code>scripts/recall_r*_harness.py</code>、<code>scripts/benchmark-sync-recall</code>、<code>tests/test_recall_eval.py</code>等を調べて必要な経路を再利用する。新しい評価frameworkは作らない。開始時に対象pathのgraph coverageとcallersを確認し、未カバーをソースで補う。</p>
 <p>重点ケースは、ページ後半の正解チャンク、同一ページの複数根拠、日英・代名詞、提案と実行結果、訂正と過去時点、未知時刻、source改訂/digest不一致、範囲外offset、旧service応答、更新競合、projection未完成/再構築、タイムアウトとfallback。既存semantic index/client/service、search、Recall runtime、Evidence、lexical snapshotの該当テストを拡張する。無関係な既知failureは固定基準と比較し、新規failureと分離する。</p>
 </section>
+<section data-section="既存データの再処理">
+<h2>既存全件の再処理とOpenCode並列実行</h2>
+<p><strong>実行役はOpenCode、LLMはMuse Spark 1.3 Contributor、最大10ワーカーの並列バッチを計画する。</strong>「10台」は追加の物理端末購入ではなく、同じホスト上で動かす独立したOpenCodeワーカー10本として扱う。今回はこの実行計画の追記だけであり、ワーカー起動・資料送信・全件処理は未実施。</p>
+<p>対象件数は開始時のmanifestで確定する。前回観測は7,789ページで、概算約8,000ページ。「千ページ」「8,000ページ」を固定値として分割しない。source UID・digest・状態・言語・関連Raw参照・外部送信可否・推定tokensを一覧化し、既存処理の有無と重複を照合する。件数だけでなくtokensにより仕事量を分配する。</p>
+<h3>新規保存との共通化・入力の扱い</h3>
+<ul>
+<li>新規保存と既存分の再処理で、同じrecord schema・抽出手順・validator・publication経路を使う。既存分はsnapshotを共通の変換入口へ投入するbackfillとし、移行専用の第二の保存形式を作らない。</li>
+<li>機械的に取り出せるchunk・見出し・既存出典・日時・metadataは先に回収し、既存summary / questions / entitiesを再利用。LLMは不足する文脈補完・出来事分割・条件抽出だけに使う。</li>
+<li>元の会話がある場合は、アクセスpolicyに適合する範囲でその根拠を使う。pageだけが残る場合は当該page revisionを原資料として保持し、失われた発言・日時・理由を復元したように生成しない。複数ページが同じRawを指す場合はsource単位で抽出を再利用し、参照を保つ。</li>
+<li>各ワーカーには割当済みの入力束と出力用の専用作業領域だけを渡す。秘密情報を含む作業ツリー全体や会話履歴を自動contextに載せない。元のpages / Rawと本番DB・索引をワーカーに直接変更させない。処理結果は構造化した候補recordとreceiptとして返す。</li>
+</ul>
+<h3>モデル・外部送信条件</h3>
+<p>OpenCode Goの候補model IDは<code>opencode-go/muse-spark-1.3-contributor</code>。GoのResponses endpointは<code>https://opencode.ai/zen/go/v1/responses</code>。この環境のcatalogにもMuse Spark 1.3 Contributorは登録されているが、実行時にOpenCode側のID、利用可能地域、context/output上限、契約枠、API制限を再確認する。登録済みと実行成功を同一視しない。料金・仕様の確認元: <a href="https://opencode.ai/docs/go/">OpenCode Go公式（2026-09-08確認）</a>。</p>
+<p><strong>Contributorは入力・出力のMeta学習利用あり、ゼロ保持ではない。</strong>全件backfillの計画への同意を、非公開情報の外部提供への包括同意として扱わない。既存のsensitivity / scope / Raw egress判定を送信前に適用し、外部提供可能と確認した資料だけをこの経路へ送る。対象外の資料は既存の許可されたローカル経路で同じschemaへ処理するか、未処理として明示する。model/providerの自動切替でこの境界を迂回しない。</p>
+<h3>最大10並列への段階的増加</h3>
+<ol>
+<li><strong>少量試行:</strong>P0の開発用資料から日英・長短・訂正・page-onlyを含む20〜40件を選び、1ワーカーでschema一致、出典一致、条件の保持、処理時間・tokens・再試行率を測る。heldoutの質問や正解は渡さない。Muse Sparkで作るCの試験結果もP4に含める。</li>
+<li><strong>増加:</strong>同じ品質基準で1 → 2 → 5 → 最大10ワーカーへ増やす。ワーカー数は常に設定可能とし、provider共有枠、CPU/RAM、通常ingest/Recallの待ち時間を確認する。10並列で10倍速になるとは仮定しない。</li>
+<li><strong>流量制御:</strong>全ワーカー合計の同時requestとtokensを単一の制御点で制限。429 / timeout / quota発生時はRetry-Afterまたはbackoffを守り、並列数を下げる。上限到達時はcheckpointから停止・再開し、アカウントや端末を増やして上限を回避しない。追加課金や別残高への自動fallbackは有効化しない。</li>
+<li><strong>全件実行:</strong>P4でCの採用条件を満たしてから全manifestを処理する。Bだけが採用された場合は、既存chunk索引の機械的再構築で足りる範囲に留め、不要な全件LLM再抽出を行わない。1ジョブは独立したページ/節/会話segmentの小束とし、全8,000ページを一つのpromptへ入れない。</li>
+</ol>
+<h3>分担・再開・更新整合性</h3>
+<ul>
+<li>既存queue / lease / receiptを再利用する。仕事のidentityはsource UID・digest・抽出設定版に結び付ける。1ジョブは同時に1ワーカーへ割り当て、期限切れの担当は再割当可能。結果採用時は現在のlease/attemptを確認し、遅れて戻った旧ワーカーの結果を二重反映しない。単一DB writerで結果検証・merge・publicationを行う。</li>
+<li>LLMへのrequest自体は再試行で重複し得るが、採用はjob identityで冪等にする。完了checkpoint、失敗理由、試行回数、source/config digest、モデル、使用tokensを保存。schema不正や出典不一致は隔離し、有限回の再試行後は未処理として残す。無限retryと未検証の自動採用をしない。</li>
+<li>ワーカー間のentityや訂正関係は、固定IDと原文参照を使って検証・統合する。各ワーカーが他のワーカーの生成文を独立した新証拠として引用したり、別scopeの事実を上書きしたりしない。</li>
+<li>処理中は既存Recallを稼働させる。snapshot後の新規・更新分は共通ingest経路で追跡し、採用前にsource digestを再照合。改訂分は新revisionを再queue、削除・失効・権限変更済みのsourceは旧結果を採用しない。全量処理後の差分追いつきと短いpublication境界で整合したgenerationへ切り替える。</li>
+<li>旧page/Rawを保持し、新projection・索引を隔離領域で作る。全件検証とP5のcanary/rollback条件を満たすまで本番の参照を変えない。新projectionを無効化しても元資料と従来経路で回答できる状態を維持する。</li>
+</ul>
+<h3>規模・費用・完了の判定</h3>
+<p>試行で実測した全体の成功件数/分と残り仕事量から所要時間を見積もる。件数だけでなくtokens、長い資料、再試行を含めて幅を示し、直列時間を単純に10で割らない。費用は全ワーカーの入力・出力・推論・cache・再試行を含む実usageで集計し、契約内消費と追加課金を分ける。必要な支出上限は全件開始前に確定する。</p>
+<p>manifest全件を「既存結果の検証再利用」「新規変換・検証済み」「改訂待ち」「失敗」「外部送信不可/別経路待ち」「対象外（理由付き）」に集計し、欠落・重複を0にする。対象外を分母から黙って外さない。source coverage、record数、索引coverage、全件構造検証、日英の原文対照sample、P4品質gate、P5の実注入・rollbackを確認する。待ち/失敗が残れば全件移行完了とは呼ばず、対象数・残件・現在のfallbackを明示する。</p>
+</section>
 <section data-section="やってはいけないこと">
 <h2>対象外と守る境界</h2>
 <ul>
@@ -163,7 +197,7 @@ table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}th,td{bo
 </section>
 <section data-section="完了条件">
 <h2>完了条件</h2>
-<p>P0〜P6の証跡が揃い、採用した経路で検索した根拠のidentityと本文が実注入まで一致する。source保全、再構築、訂正・時刻・日英、更新整合性、既存の境界、品質・latency gate、canary/rollbackが検証済みであること。研究上の推奨、offline合格、配布済み、live受入済みを別々に記録する。本番作業未実施時は計画全体をdoneにしない。不採用の結論は評価完了として残すが、改善達成とは記載しない。</p>
+<p>P0〜P6（既存全件backfillのP4aを含む）の証跡が揃い、採用した経路で検索した根拠のidentityと本文が実注入まで一致する。source保全、再構築、訂正・時刻・日英、更新整合性、既存の境界、品質・latency gate、canary/rollbackが検証済みであること。研究上の推奨、offline合格、配布済み、live受入済みを別々に記録する。本番作業未実施時は計画全体をdoneにしない。不採用の結論は評価完了として残すが、改善達成とは記載しない。</p>
 </section>
 <section data-section="研究根拠">
 <h2>判断に使った一次資料</h2>
@@ -183,8 +217,8 @@ table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}th,td{bo
 <h2>実行中更新ルール</h2>
 <ul><li>各phaseの受入条件を満たした直後にcheckboxと時刻付き実行ログを更新し、結果receiptへリンクする。</li><li>状態変更は<code>script#plan-meta</code>の<code>状態</code>と<code>.badge[data-state]</code>の表示を同時に更新する。依存条件で進めない場合は未完了phaseと必要情報を記録する。</li><li>既存Campaign Yの歴史的完了状態を本計画の進捗で書き換えない。結果の正本は本計画と今回のrun receipt、既存計画は設計・履歴の参照。</li></ul>
 </section>
-<section class="blockers" data-section="ブロッカー"><h2>ブロッカー・未確認事項</h2><p>計画作成のblockerなし。実装は未依頼。P0で数値contract、評価資産、Campaign Xと本番の実状態を再確認する。本番push / restartは今回の承認範囲外。</p></section>
-<section data-section="受け渡しメモ"><h2>次担当への受け渡し</h2><p>最初にP0、次にP1。新しい保存schemaの作成から始めない。原文アクセスの制約を維持した上で、既存チャンクのmetadataが失われる境界を端から端まで直す。その後にP2/P3を隔離して比較し、効果のある最小構成を採る。計画作成時にコード・本番設定・モデルを変更していない。</p></section>
-<section data-section="実行ログ"><h2>実行ログ</h2><ol class="log"><li><time datetime="2026-09-08T22:05:32+09:00">2026-09-08 22:05 JST</time><span>保存方式研究・本番archive照合・Campaign Yとの整合確認を基にcanonical generatorでdraftを作成。実装・ベンチマーク・deployは未開始。</span></li></ol></section>
+<section class="blockers" data-section="ブロッカー"><h2>ブロッカー・未確認事項</h2><p>計画作成のblockerなし。実装は未依頼。P0で数値contract、評価資産、Campaign Xと本番の実状態を再確認する。OpenCode/Muse Sparkの全件再処理と最大10並列は計画へ反映済みだが、実行・資料送信は未開始。送信対象とprovider枠・支出上限は実行前に確定する。本番push / restartは今回の承認範囲外。</p></section>
+<section data-section="受け渡しメモ"><h2>次担当への受け渡し</h2><p>最初にP0、次にP1。新しい保存schemaの作成から始めない。原文アクセスの制約を維持した上で、既存チャンクのmetadataが失われる境界を端から端まで直す。その後にP2/P3を隔離して比較し、効果のある最小構成を採る。P4の採用判断後、P4aで既存全件を新規保存と共通の変換経路へ通し、差分追いつきと検証の後にP5へ進む。計画作成時にコード・本番設定・モデルを変更していない。</p></section>
+<section data-section="実行ログ"><h2>実行ログ</h2><ol class="log"><li><time datetime="2026-09-08T22:05:32+09:00">2026-09-08 22:05 JST</time><span>保存方式研究・本番archive照合・Campaign Yとの整合確認を基にcanonical generatorでdraftを作成。実装・ベンチマーク・deployは未開始。</span></li><li><time datetime="2026-09-08T22:26:36+09:00">2026-09-08 22:26 JST</time><span>ユーザー依頼により既存全件backfill、OpenCode + Muse Spark 1.3 Contributor、最大10ワーカー、段階的増加・単一publisher・再開・差分追いつき・外部送信範囲を追記。計画のみ更新、実行未開始。</span></li></ol></section>
 </body>
 </html>
