@@ -1,0 +1,98 @@
+{
+  "schema": "chronovisor.architecture-incremental-receipt.v1",
+  "observed_at": "2026-09-09T19:31:55+09:00",
+  "scope": {
+    "mode": "targeted_39f9fae_page_registry_import_site",
+    "baseline_commit": "5cb8e39fe5f93e96f571ca26d97e60f7310130e9",
+    "current_commit": "39f9fae451e15398767a0649e1469f47a65520e0",
+    "source_scan": "scripts/architecture_baseline.py",
+    "included_modules": [
+      "chronovisor.recall.recall_field_candidate"
+    ],
+    "new_import_site": "from chronovisor.ingest.page_registry import PageRegistry",
+    "no_baseline_refresh": true,
+    "no_contract_hash_refresh": true,
+    "no_preexisting_drift_registration": true,
+    "new_cross_domain_edge": false,
+    "retired_edge_preserved": "arch:7534962275f5cac248244898874a8d5f7613d70ba2d64360b2223e351c3aab87"
+  },
+  "delta": {
+    "added_site_ids": [
+      "arch:1ec40e35c5e7e745ab9c89d8facf260b8119e2703fef508235b2016f78ef43ad"
+    ],
+    "removed_site_ids": [],
+    "added_sites": [
+      {
+        "semantic_id": "arch:1ec40e35c5e7e745ab9c89d8facf260b8119e2703fef508235b2016f78ef43ad",
+        "source_module": "chronovisor.recall.recall_field_candidate",
+        "scope": "<module>",
+        "line": 19,
+        "target_module": "chronovisor.ingest.page_registry",
+        "symbols": [
+          "PageRegistry"
+        ],
+        "content_sha256": "ddafcb6e7c3c057428ab2fb5dc997df2a47b45b5bbe9468271fa37424ae35926"
+      }
+    ],
+    "removed_sites": [],
+    "edge_delta": {
+      "baseline_count": 44,
+      "current_count": 44,
+      "added": [],
+      "removed": []
+    }
+  },
+  "ledger_update": {
+    "target_files": [
+      "docs/refactoring/architecture-exception-baseline.json",
+      "docs/refactoring/architecture-exceptions.json",
+      "_handoff/evidence/2026-09-08-evidence-storage-recall/p4-architecture-incremental.json"
+    ],
+    "active_exception_ids_before": 44,
+    "active_exception_ids_after": 44,
+    "active_cross_domain_sites_before": 1499,
+    "active_cross_domain_sites_after": 1500,
+    "retired_cross_domain_site_ids_before": 1331,
+    "retired_cross_domain_site_ids_after": 1331,
+    "edge_count_before": 44,
+    "edge_count_after": 44,
+    "updated_edges": {
+      "recall->ingest": {
+        "sites_before": 26,
+        "sites_after": 27
+      }
+    },
+    "baseline_sha256_before": "59cc73533d78d9b544f460f438c79233e5f7487e718fce36c6c7abab55f307ea",
+    "baseline_sha256_after": "d7dd58f15dd72c5c50619cb4cbf279e7eaf6afdd0d1db259e9f200157b6600d8",
+    "contract_hashes_refreshed": false
+  },
+  "verification": {
+    "json_parse": "pass",
+    "seed_ledger_canonical_hash_match": "pass",
+    "active_retired_disjoint": "pass",
+    "ledger_site_ids_unique": "pass",
+    "targeted_delta_against_parent": "pass: added 1, removed 0",
+    "baseline_source_import_sites": 1509,
+    "current_source_import_sites": 1510,
+    "preexisting_current_unmatched_site_ids": 11,
+    "current_unmatched_site_ids": 11,
+    "preexisting_stale_ledger_site_ids": 1,
+    "new_edge_guard": "pass: no new package edge; recall->ingest edge retained",
+    "target_site_source_match": "pass",
+    "architecture_checks": "pytest -q tests/test_architecture_baseline.py: 8 failed, 21 passed; same 8 known baseline failures recorded by p3 receipt",
+    "guard_generate_exceptions": "not run: broad refresh prohibited; targeted source inventory only",
+    "guard_drift_summary": {
+      "preexisting_unmatched_site_ids": 11,
+      "current_unmatched_site_ids": 11,
+      "stale_active_site_ids": 1,
+      "active_seed_count": 1500,
+      "detected_current_site_count": 1510
+    }
+  },
+  "runtime": {
+    "production_restarted": false,
+    "published": false,
+    "provider_requested": false,
+    "architecture_incremental_registration": true
+  }
+}
