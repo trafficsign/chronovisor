@@ -1797,9 +1797,28 @@ timeout_ms = 1400
     assert policy.rewrite_timeout_ms == 1400
     assert policy.total_timeout_ms == 3500
     assert policy.max_state_context_chars == 500
-    assert policy.max_total_context_chars >= 1102
+    assert policy.max_total_context_chars == 1300
     assert policy.circuit_breaker_failures == 3
     assert policy.circuit_breaker_cooldown_seconds == 90
+
+
+def test_gate_config_preserves_total_budget_below_layer_sum(tmp_path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[recall.budgets]
+max_context_chars = 700
+max_state_context_chars = 450
+max_total_context_chars = 900
+""",
+        encoding="utf-8",
+    )
+
+    policy = load_policy(config)
+
+    assert policy.max_context_chars == 700
+    assert policy.max_state_context_chars == 450
+    assert policy.max_total_context_chars == 900
 
 
 def test_unified_config_loads_total_budget_and_breaker(tmp_path) -> None:
@@ -3673,6 +3692,63 @@ def test_context_layers_are_kept_as_whole_blocks() -> None:
     merged = merge_context_blocks(state, recall, max_chars=len(state) + len(recall) + 2)
 
     assert merged == f"{state}\n\n{recall}"
+
+
+def test_recall_execution_preserves_caller_total_budget(monkeypatch) -> None:
+    candidate = ScoredPage("page", "Page", "", "", 1.0)
+    monkeypatch.setattr(
+        recall_runtime,
+        "_run_evidence_search",
+        lambda **_kwargs: recall_runtime._EvidenceSearchOutcome(
+            score=0.8,
+            session_state=None,
+            pre_results=[candidate],
+            search_mode="bm25",
+            evidence_features={},
+            rewrite_queries=[],
+            reranker_metadata={},
+            field_shadow_metadata={},
+            post_authority={},
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "collect_context",
+        lambda *_args, **_kwargs: [
+            ContextItem("page", "Page", "", 1.0, snippets=["source text"])
+        ],
+    )
+    state = "[WORKING_MEMORY]\n" + ("s" * 650) + "\n[/WORKING_MEMORY]"
+    state_budgets: list[int] = []
+
+    def state_context(_request, state_policy):
+        state_budgets.append(state_policy.max_state_context_chars)
+        return state
+
+    monkeypatch.setattr(
+        recall_runtime,
+        "state_context_for_request",
+        state_context,
+    )
+
+    policy = RecallPolicy(
+        max_context_chars=700,
+        max_state_context_chars=800,
+        max_total_context_chars=900,
+        judge_mode="off",
+        rewrite_enabled=False,
+        log_decisions=False,
+    )
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(host="codex", event="UserPromptSubmit", prompt="query"),
+        policy,
+    )
+
+    assert policy.max_total_context_chars == 900
+    assert 0 < state_budgets[0] < policy.max_state_context_chars
+    assert len(result.context) <= policy.max_total_context_chars
+    assert state not in result.context
+    assert "source text" in result.context
 
 
 def test_recall_budget_exhaustion_uses_deterministic_fallback(monkeypatch) -> None:

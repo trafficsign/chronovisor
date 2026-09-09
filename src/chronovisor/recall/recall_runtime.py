@@ -325,11 +325,6 @@ def load_policy(path: Path = RECALL_CONFIG_FILE) -> RecallPolicy:
 
     _apply_search_embedding_boundary(policy, path)
 
-    policy.max_total_context_chars = max(
-        policy.max_total_context_chars,
-        policy.max_state_context_chars + policy.max_context_chars + 2,
-    )
-
     enabled_env = os.environ.get("CHRONOVISOR_RECALL_ENABLED")
     if enabled_env is not None:
         policy.enabled = enabled_env not in {"0", "false", "False", "no", "NO"}
@@ -2122,6 +2117,48 @@ def state_context_for_request(request: RecallRequest, policy: RecallPolicy) -> s
         return format_state_context(host=request.host, cwd=request.cwd)
 
 
+def _render_final_context(
+    result: RecallResult,
+    *,
+    active_request: RecallRequest,
+    policy: RecallPolicy,
+) -> tuple[str, str, str]:
+    """Render Recall first, then fit the always-on state block into the remainder."""
+
+    max_total = max(0, int(policy.max_total_context_chars))
+    recall_policy = replace(
+        policy,
+        max_context_chars=max(0, min(policy.max_context_chars, max_total)),
+    )
+    recall_context = format_recall_context(result, recall_policy)
+    if result.evidence_packet is not None and not recall_context:
+        result.evidence_packet = None
+        evidence = result.evidence_features.get("evidence_reconstruction")
+        if isinstance(evidence, dict):
+            evidence.update(status="fallback", authority="teacher", reason="context_budget")
+        recall_context = format_recall_context(result, recall_policy)
+
+    recall_length = len(recall_context.strip())
+    separator = 2 if recall_length else 0
+    remaining_state = min(
+        max(0, int(policy.max_state_context_chars)),
+        max_total - recall_length - separator,
+    )
+    state_context = ""
+    if remaining_state > 0:
+        state_policy = replace(policy, max_state_context_chars=remaining_state)
+        candidate = state_context_for_request(active_request, state_policy)
+        if len(candidate.strip()) <= remaining_state:
+            state_context = candidate
+
+    context = merge_context_blocks(
+        state_context,
+        recall_context,
+        max_chars=max_total,
+    )
+    return state_context, recall_context, context
+
+
 def _remaining_budget_ms(deadline_at: float | None) -> int | None:
     if deadline_at is None:
         return None
@@ -2435,20 +2472,10 @@ def _finalize_recall_result(
     _stage_started(telemetry, "finalize", deadline_at)
     if request.decision_id:
         result.decision_id = request.decision_id
-    recall_context = format_recall_context(result, policy)
-    if result.evidence_packet is not None and not recall_context:
-        result.evidence_packet = None
-        evidence = result.evidence_features.get("evidence_reconstruction")
-        if isinstance(evidence, dict):
-            evidence.update(
-                status="fallback", authority="teacher", reason="context_budget"
-            )
-        recall_context = format_recall_context(result, policy)
-    result.state_context = state_context_for_request(active_request, policy)
-    result.context = merge_context_blocks(
-        result.state_context,
-        recall_context,
-        max_chars=policy.max_total_context_chars,
+    result.state_context, recall_context, result.context = _render_final_context(
+        result,
+        active_request=active_request,
+        policy=policy,
     )
     retained_page_ids = (
         []
@@ -4385,10 +4412,6 @@ def _run_recall_impl(
     if not request.decision_id:
         request = replace(request, decision_id=new_decision_id())
     policy = policy or load_policy()
-    policy.max_total_context_chars = max(
-        policy.max_total_context_chars,
-        policy.max_state_context_chars + policy.max_context_chars + 2,
-    )
     final_deadline_at = (
         _final_deadline_at
         if _final_deadline_at is not None
@@ -4955,12 +4978,10 @@ def run_deterministic_fallback(
     try:
         remaining_ms = _require_remaining_budget(final_deadline_at, "fallback render")
         with recall_wall_clock_deadline(remaining_ms or budget_ms):
-            result.state_context = state_context_for_request(active_request, policy)
-            recall_block = format_recall_context(result, policy)
-            result.context = merge_context_blocks(
-                result.state_context,
-                recall_block,
-                max_chars=policy.max_total_context_chars,
+            result.state_context, recall_block, result.context = _render_final_context(
+                result,
+                active_request=active_request,
+                policy=policy,
             )
     except RecallBudgetExhausted, RecallWallClockTimeout:
         result.context_items = []

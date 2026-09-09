@@ -1,0 +1,35 @@
+{
+  "schema": "chronovisor.p4-total-context-budget-fix.v1",
+  "observed_at": "2026-09-10T02:34:39+09:00",
+  "p4": {
+    "repetitions_completed": 3,
+    "observations": 1080,
+    "semantic_rpc_calls": 1080,
+    "configured_total_chars": 3000,
+    "effective_total_chars": 4602,
+    "compliant_3000_char_latency_trial": false,
+    "original_captures_preserved": true,
+    "output_sha256": "046c25b84d5491b8e2cbfdf779510d37e0e3d7945ddd840e611c5a7ff9361eaf",
+    "resource_receipt_sha256": "03a56a95da8e881756cecd1d77852a4e895a126812ccd2e2af084b6860e2aa0a",
+    "private_processes_stopped": true,
+    "leases_released": true
+  },
+  "fix": {
+    "scope": "shared normal/fallback final renderer and policy loading",
+    "behavior": "Honor configured total; reserve bounded whole Recall source first and render state into remaining budget; reject oversized whole state block",
+    "search_candidates_changed": false,
+    "source_truncation_added": false,
+    "corrected_latency_measured": false
+  },
+  "validation": {
+    "runtime_tests_passed": 220,
+    "evidence_runtime_reconstruction_semantic_tests_passed": 52,
+    "ruff": "passed",
+    "diff_check": "passed"
+  },
+  "limitations": [
+    "Captured run is diagnostic, not proof of compliance with configured total.",
+    "Independent necessary-coverage upper-bound audit pending.",
+    "C1 outcomes do not decide C2 adoption."
+  ]
+}
