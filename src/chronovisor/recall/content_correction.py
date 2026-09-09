@@ -46,11 +46,16 @@ from chronovisor.core.page_mutation import (
     ExactReplacement,
     PageMutationError,
     PreparedPageMutation,
+    _mutation_evidence_ref_payload,
     apply_prepared_mutations,
     chronovisor_mutation_lock,
     decision_authority_lock,
     find_mutation_page,
+    mutation_evidence_error,
+    mutation_evidence_payload,
+    mutation_evidence_ref,
     prepare_page_mutation,
+    read_mutation_evidence,
     rollback_prepared_mutations,
 )
 from chronovisor.core.runtime_config import load_ingest_config, runtime_repo_root
@@ -2494,6 +2499,21 @@ def _jsonl_has_key(path: Path, key: str) -> bool:
 
 
 def _append_content_feedback(row: dict[str, Any]) -> bool:
+    if row.get("kind") == "content_correction" and row.get("mutation_evidence_refs"):
+        from chronovisor.recall.recall_answer_eval import resolve_turn_source_refs
+
+        # This background mutation audit binds the correction prompt, never the
+        # previous Recall turn. Missing capture remains explicitly unresolved;
+        # retain host/turn_ref so the same source can be resolved after Save.
+        try:
+            source = resolve_turn_source_refs(
+                host=row.get("host", ""),
+                turn_ref=row.get("correction_turn_ref", {}),
+                episode_file=CONTENT_FEEDBACK_FILE.with_name("answer-episodes.jsonl"),
+            )
+        except (OSError, TypeError, ValueError):
+            source = {"status": "held", "reason": "source_unavailable", "source_refs": []}
+        row = {**row, "correction_prompt_source": source}
     key = str(row.get("key") or "")
     CONTENT_FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
     lock_path = CONTENT_FEEDBACK_FILE.with_suffix(
@@ -2531,6 +2551,7 @@ def _review_artifact_payload(
                     "original_sha256": mutation.original_sha256,
                     "updated_sha256": mutation.updated_sha256,
                     "updated_size": len(mutation.updated),
+                    "mutation_evidence_ref": mutation_evidence_ref(mutation),
                 }
                 for mutation in mutations
             ],
@@ -2591,6 +2612,46 @@ def _review_artifact_error(
         ):
             return "frontier review artifact page hashes are stale"
         expected_review_hashes.add((mutation.page_id, original_sha256, updated_sha256))
+        evidence_ref = row.get("mutation_evidence_ref")
+        if not isinstance(evidence_ref, Mapping):
+            return "frontier mutation evidence binding is missing"
+        evidence_digest = evidence_ref.get("evidence_sha256")
+        if not isinstance(evidence_digest, str):
+            return "frontier mutation evidence digest is missing"
+        # A fresh review is sealed before the page CAS, so its pre-CAS receipt
+        # does not exist yet.  The apply path writes and validates that receipt
+        # immediately before replacing the page.  Recovery of an already
+        # visible postimage, however, must prove that the durable receipt was
+        # actually written before trusting the saved review.
+        if mutation.already_applied:
+            stored_evidence = read_mutation_evidence(
+                evidence_digest,
+                page_id=mutation.page_id,
+                correction_id=mutation.correction_id,
+            )
+            if stored_evidence is None:
+                return "frontier mutation evidence receipt is missing"
+            if dict(evidence_ref) != _mutation_evidence_ref_payload(stored_evidence):
+                return "frontier mutation evidence binding changed"
+            evidence_error = mutation_evidence_error(
+                stored_evidence,
+                expected_page_id=mutation.page_id,
+                expected_correction_id=mutation.correction_id,
+                expected_postimage=mutation.original,
+            )
+        else:
+            expected_evidence_ref = mutation_evidence_ref(mutation)
+            if dict(evidence_ref) != expected_evidence_ref:
+                return "frontier mutation evidence binding changed"
+            evidence_error = mutation_evidence_error(
+                mutation_evidence_payload(mutation),
+                expected_page_id=mutation.page_id,
+                expected_correction_id=mutation.correction_id,
+                expected_preimage=mutation.original,
+                expected_postimage=mutation.updated,
+            )
+        if evidence_error is not None:
+            return f"frontier mutation evidence is invalid: {evidence_error}"
         version = reviewed_versions.get(mutation.page_id)
         if (
             not isinstance(version, dict)
@@ -3408,6 +3469,7 @@ def _prepare_exact_user_correction(
 
 
 def _exact_patch_payload(mutation: PreparedPageMutation) -> list[dict[str, Any]]:
+    evidence_ref = mutation_evidence_ref(mutation)
     return [
         {
             "page_id": mutation.page_id,
@@ -3420,6 +3482,7 @@ def _exact_patch_payload(mutation: PreparedPageMutation) -> list[dict[str, Any]]
             "new_text_sha256": hashlib.sha256(
                 replacement.new_text.encode("utf-8")
             ).hexdigest(),
+            "mutation_evidence_ref": evidence_ref,
         }
         for replacement in mutation.replacements
     ]
@@ -3562,12 +3625,14 @@ def _process_exact_user_correction(
         "kind": "content_correction",
         "key": key,
         "correction_id": mutation.correction_id,
+        "host": event.get("host", ""),
         "source_decision_id": event.get("source_decision_id", ""),
         "source_turn_ref": event.get("source_turn_ref", {}),
         "correction_turn_ref": event.get("correction_turn_ref", {}),
         "classification": "page_fact_wrong",
         "pages": [mutation.page_id],
         "patches": _exact_patch_payload(mutation),
+        "mutation_evidence_refs": [mutation_evidence_ref(mutation)],
         "decision_authority": authority,
         "apply": apply_result,
         "verification": verification,
@@ -4118,6 +4183,7 @@ def _recover_exact_applied_correction(
                                 if locked_mutations
                                 else ""
                             ),
+                            "host": event.get("host", ""),
                             "source_decision_id": event.get(
                                 "source_decision_id", ""
                             ),
@@ -4128,6 +4194,10 @@ def _recover_exact_applied_correction(
                             "classification": proposal.get("decision"),
                             "pages": expected_pages,
                             "patches": proposal.get("proposals", []),
+                            "mutation_evidence_refs": [
+                                mutation_evidence_ref(mutation)
+                                for mutation in locked_mutations
+                            ],
                             "frontier": locked_review,
                             "apply": apply_result,
                             "verification": verification,
@@ -4226,12 +4296,16 @@ def _content_correction_audit_row(
         "kind": "content_correction",
         "key": key,
         "correction_id": mutations[0].correction_id if mutations else "",
+        "host": event.get("host", ""),
         "source_decision_id": event.get("source_decision_id", ""),
         "source_turn_ref": event.get("source_turn_ref", {}),
         "correction_turn_ref": event.get("correction_turn_ref", {}),
         "classification": proposal.get("decision"),
         "pages": page_ids,
         "patches": proposal.get("proposals", []),
+        "mutation_evidence_refs": [
+            mutation_evidence_ref(mutation) for mutation in mutations
+        ],
         "frontier": review,
         "apply": apply_result,
         "verification": verification,

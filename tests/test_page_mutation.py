@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -674,3 +675,226 @@ def test_mutation_preserves_nested_unknown_yaml_and_unrelated_body_bytes(
     written = path.read_bytes()
     assert b"nested:\n    keep: true" in written
     assert b"Prefix  bytes\r\nNew fact.\r\nSuffix  bytes\r\n" in written
+
+
+def test_mutation_evidence_receipt_roundtrips_utf8_source_spans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    path = pages / "memory.md"
+    path.write_bytes(
+        "---\ntitle: Memory\nuid: page-uid-1\nstatus: stable\n"
+        "type: knowledge\n---\n見出し\n\n古い事実です。\n".encode()
+    )
+    _patch_pages(monkeypatch, pages)
+
+    prepared = page_mutation.prepare_page_mutation(
+        "memory",
+        [{"old_text": "古い事実です。", "new_text": "新しい事実です。"}],
+        correction_id="corr-utf8-evidence",
+    )
+    [record] = prepared.evidence
+    assert record["span_status"] == "verified"
+    assert prepared.page_uid == "page-uid-1"
+    assert page_mutation.apply_prepared_mutations([prepared])["status"] == "applied"
+
+    rows = [
+        row
+        for row in page_mutation._read_jsonl(page_mutation.correction_constraints_file())
+        if row.get("correction_id") == "corr-utf8-evidence"
+    ]
+    assert rows
+    evidence = next(row["mutation_evidence"] for row in rows if "mutation_evidence" in row)
+    assert page_mutation.mutation_evidence_error(evidence) is None
+    assert evidence["preimage_utf8"].encode("utf-8") == prepared.original
+    assert evidence["postimage_utf8"].encode("utf-8") == prepared.updated
+    [stored_record] = evidence["replacements"]
+    preimage = evidence["preimage_utf8"].encode("utf-8")
+    postimage = evidence["postimage_utf8"].encode("utf-8")
+    assert preimage[stored_record["old_byte_start"] : stored_record["old_byte_end"]] == (
+        "古い事実です。".encode()
+    )
+    assert postimage[stored_record["new_byte_start"] : stored_record["new_byte_end"]] == (
+        "新しい事実です。".encode()
+    )
+    digest = row_digest = page_mutation.mutation_evidence_sha256(evidence)
+    assert page_mutation.read_mutation_evidence(
+        digest, page_id="memory", correction_id="corr-utf8-evidence"
+    ) == evidence
+    assert row_digest == rows[0]["mutation_evidence_sha256"]
+    active = page_mutation.active_correction_constraints("memory", path.read_text())
+    assert active and all("mutation_evidence" not in rule for rule in active)
+
+
+def test_mutation_evidence_rejects_tampered_hash_or_span(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    path = pages / "memory.md"
+    _page(path, title="Memory", body="Old fact.\n")
+    _patch_pages(monkeypatch, pages)
+    prepared = page_mutation.prepare_page_mutation(
+        "memory",
+        [{"old_text": "Old fact.", "new_text": "New fact."}],
+        correction_id="corr-tamper-evidence",
+    )
+    evidence = page_mutation.mutation_evidence_payload(prepared)
+    tampered_hash = {**evidence, "preimage_sha256": "0" * 64}
+    assert page_mutation.mutation_evidence_error(tampered_hash) is not None
+    tampered_span = {
+        **evidence,
+        "replacements": [
+            {**evidence["replacements"][0], "new_byte_start": 0}
+        ],
+    }
+    assert page_mutation.mutation_evidence_error(tampered_span) is not None
+    malformed_utf8 = {**evidence, "preimage_utf8": "\ud800"}
+    assert page_mutation.mutation_evidence_error(malformed_utf8) is not None
+
+
+def test_retraction_records_empty_postimage_span_explicitly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    path = pages / "memory.md"
+    _page(path, title="Memory", body="Retire this fact.\n")
+    _patch_pages(monkeypatch, pages)
+
+    prepared = page_mutation.prepare_page_mutation(
+        "memory",
+        [
+            {
+                "action": "retract",
+                "old_text": "Retire this fact.",
+                "new_text": "",
+            }
+        ],
+        correction_id="corr-retract-evidence",
+    )
+    [record] = prepared.evidence
+    assert record["span_status"] == "verified"
+    assert all(
+        record[field] is None
+        for field in (
+            "new_body_start",
+            "new_body_end",
+            "new_byte_start",
+            "new_byte_end",
+        )
+    )
+    assert page_mutation.apply_prepared_mutations([prepared])["status"] == "applied"
+    rows = page_mutation._read_jsonl(page_mutation.correction_constraints_file())
+    evidence = next(row["mutation_evidence"] for row in rows if "mutation_evidence" in row)
+    assert page_mutation.mutation_evidence_error(evidence) is None
+
+
+def test_evidence_holds_when_later_replacement_targets_generated_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    path = pages / "memory.md"
+    _page(path, title="Memory", body="Alpha.\n")
+    _patch_pages(monkeypatch, pages)
+
+    original = path.read_bytes()
+    updated = original.replace(b"Alpha.", b"Gamma.", 1)
+    records = page_mutation._replacement_evidence_records(
+        original,
+        updated,
+        (
+            page_mutation.ExactReplacement("Alpha.", "Beta."),
+            page_mutation.ExactReplacement("Beta.", "Gamma."),
+        ),
+    )
+    assert len(records) == 2
+    assert all(record["span_status"] == "unknown" for record in records)
+    assert (
+        page_mutation.mutation_evidence_error(
+            page_mutation.mutation_evidence_payload(
+                page_mutation.PreparedPageMutation(
+                    page_id="memory",
+                    path=path,
+                    correction_id="corr-generated-source",
+                    original=original,
+                    updated=updated,
+                    original_sha256=page_mutation._sha256_bytes(original),
+                    updated_sha256=page_mutation._sha256_bytes(updated),
+                    replacements=(
+                        page_mutation.ExactReplacement("Alpha.", "Beta."),
+                        page_mutation.ExactReplacement("Beta.", "Gamma."),
+                    ),
+                )
+            )
+        )
+        is not None
+    )
+
+
+def test_constraint_persist_failure_leaves_page_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    path = pages / "memory.md"
+    _page(path, title="Memory", body="Old fact.\n")
+    _patch_pages(monkeypatch, pages)
+    prepared = page_mutation.prepare_page_mutation(
+        "memory",
+        [{"old_text": "Old fact.", "new_text": "New fact."}],
+        correction_id="corr-evidence-save-failure",
+    )
+    before = path.read_bytes()
+
+    def fail_persist(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated evidence fsync failure")
+
+    monkeypatch.setattr(page_mutation, "append_jsonl_durable", fail_persist)
+    result = page_mutation.apply_prepared_mutations([prepared])
+
+    assert result["status"] == "retry"
+    assert path.read_bytes() == before
+
+
+def test_legacy_constraint_identity_is_upgraded_before_page_cas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    path = pages / "memory.md"
+    _page(path, title="Memory", body="Old fact.\n")
+    _patch_pages(monkeypatch, pages)
+    prepared = page_mutation.prepare_page_mutation(
+        "memory",
+        [{"old_text": "Old fact.", "new_text": "New fact."}],
+        correction_id="corr-legacy-constraint",
+    )
+    registry = page_mutation.correction_constraints_file()
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(
+        json.dumps(
+            {
+                "kind": "content_correction_constraint",
+                "correction_id": "corr-legacy-constraint",
+                "page_id": "memory",
+                "action": "replace",
+                "old_text": "Old fact.",
+                "new_text": "New fact.",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert page_mutation.apply_prepared_mutations([prepared])["status"] == "applied"
+    rows = page_mutation._read_jsonl(registry)
+    assert sum("mutation_evidence" in row for row in rows) == 1
+    evidence = next(row["mutation_evidence"] for row in rows if "mutation_evidence" in row)
+    assert page_mutation.read_mutation_evidence(
+        page_mutation.mutation_evidence_sha256(evidence),
+        page_id="memory",
+        correction_id="corr-legacy-constraint",
+    ) == evidence
