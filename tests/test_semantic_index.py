@@ -698,3 +698,19 @@ def test_legacy_archive_prune_rejects_manifest_path_escape(tmp_path: Path) -> No
     assert prune_expired_legacy_archives(archive_dir=tmp_path) == []
     assert outside.exists()
     outside.unlink()
+
+
+def test_section_extractor_covers_tail_and_preserves_legacy_profile(tmp_path: Path) -> None:
+    path = tmp_path / 'section-page.md'
+    body = '\n\n'.join(f'## Part {index}\n' + 'Detail text. ' * 90 for index in range(12))
+    path.write_text('---\nstatus: stable\ntitle: Source sections\n---\n' + body)
+    legacy = extract_page_documents(path)
+    sections = extract_page_documents(path, extractor_schema_version=3)
+    assert [row for row in legacy if row.kind == 'chunk']
+    records = [row for row in sections if row.kind == 'section-v1']
+    assert len(records) > 8
+    assert '## Part 11' in ''.join(row.text for row in records)
+    assert not any(row.kind == 'chunk' for row in sections)
+    assert sections[0] == legacy[0]
+    with pytest.raises(SemanticIndexError, match='unsupported semantic extractor'):
+        extract_page_documents(path, extractor_schema_version=4)

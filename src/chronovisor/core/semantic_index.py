@@ -141,8 +141,13 @@ def _repo_commit() -> str:
         return ""
 
 
-def extract_page_documents(path: Path) -> list[SemanticDocument]:
-    """Project one canonical page into page/question/chunk documents."""
+def extract_page_documents(
+    path: Path, *, extractor_schema_version: int = EXTRACTOR_SCHEMA_VERSION
+) -> list[SemanticDocument]:
+    """Project one source using the immutable generation's extraction profile."""
+
+    if type(extractor_schema_version) is not int or extractor_schema_version not in {2, 3}:
+        raise SemanticIndexError("unsupported semantic extractor schema")
 
     from chronovisor.core import search as search_core
 
@@ -214,6 +219,20 @@ def extract_page_documents(path: Path) -> list[SemanticDocument]:
         )
         for index, question in enumerate(questions)
     )
+    if extractor_schema_version == 3:
+        from chronovisor.core.page_evidence import (
+            PageSectionSemanticError,
+            build_page_section_documents,
+        )
+
+        try:
+            documents.extend(build_page_section_documents(
+                source, page_id, source_path=path, source_mtime_ns=mtime_ns
+            ))
+        except PageSectionSemanticError as exc:
+            # Keep publication atomic: never label a partial page as indexed.
+            raise SemanticIndexError(f"section projection failed: {page_id}") from exc
+        return documents
     documents.extend(
         SemanticDocument(
             doc_id=f"{identity}#c{index}",
@@ -237,6 +256,7 @@ def extract_page_documents(path: Path) -> list[SemanticDocument]:
 
 def extract_all_documents(
     paths: Iterable[Path] | None = None,
+    *, extractor_schema_version: int = EXTRACTOR_SCHEMA_VERSION,
 ) -> list[SemanticDocument]:
     if paths is None:
         from chronovisor.core.search import searchable_pages
@@ -245,7 +265,9 @@ def extract_all_documents(
     documents: list[SemanticDocument] = []
     seen_ids: set[str] = set()
     for path in sorted(paths):
-        for document in extract_page_documents(path):
+        for document in extract_page_documents(
+            path, extractor_schema_version=extractor_schema_version
+        ):
             if document.doc_id in seen_ids:
                 raise SemanticIndexError(
                     f"duplicate semantic doc_id: {document.doc_id}"

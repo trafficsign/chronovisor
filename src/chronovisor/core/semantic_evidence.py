@@ -192,12 +192,12 @@ def _optional_uid(value: object) -> str | None:
         return None
 
 
-def resolve_semantic_evidence(
+def _resolve_chunk_semantic_evidence(
     source: bytes,
     page_id: str,
     evidence: tuple[SemanticEvidence, ...],
 ) -> tuple[SourcePassage, ...]:
-    """Resolve valid chunk identities to exact slices of one canonical source.
+    """Resolve legacy chunk identities to exact slices of one canonical source.
 
     Resolution is deliberately fail-closed.  The source digest, stable status,
     page UID, generation, document identity, and finite score are all checked
@@ -289,3 +289,30 @@ def resolve_semantic_evidence(
             )
         )
     return tuple(passages)
+
+
+def resolve_semantic_evidence(
+    source: bytes,
+    page_id: str,
+    evidence: tuple[SemanticEvidence, ...],
+) -> tuple[SourcePassage, ...]:
+    """Dispatch source-backed chunk or section identities fail-closed."""
+
+    if not evidence or any(
+        not isinstance(item, SemanticEvidence) or not isinstance(item.kind, str)
+        for item in evidence
+    ):
+        return ()
+    kinds = {item.kind for item in evidence}
+    if not kinds <= {"page", "question", "chunk", "section-v1"}:
+        return ()
+    if "section-v1" in kinds:
+        if "chunk" in kinds:
+            return ()
+        sections = tuple(item for item in evidence if item.kind == "section-v1")
+        if not sections:
+            return ()
+        from chronovisor.core.page_evidence import resolve_page_section_evidence
+
+        return resolve_page_section_evidence(source, page_id, sections)
+    return _resolve_chunk_semantic_evidence(source, page_id, evidence)

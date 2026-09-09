@@ -48,15 +48,27 @@ def parse_semantic_evidence(
                 or not isinstance(item.source_sha256, str)
                 or not re.fullmatch(r"[0-9a-f]{64}", item.source_sha256)
                 or type(item.ordinal) is not int
-                or item.kind not in {"page", "question", "chunk"}
+                or item.kind not in {"page", "question", "chunk", "section-v1"}
                 or (item.kind == "page" and item.ordinal != -1)
-                or (item.kind != "page" and not 0 <= item.ordinal < 8)
+                or (
+                    item.kind in {"question", "chunk"}
+                    and not 0 <= item.ordinal < 8
+                )
+                or (item.kind == "section-v1" and item.ordinal < 0)
                 or type(item.score) not in {float, int} or not math.isfinite(item.score)
             ):
                 raise ValueError
-            suffix = "" if item.kind == "page" else f"#{'c' if item.kind == 'chunk' else 'q'}{item.ordinal}"
-            if item.doc_id != (item.page_uid or item.page_id) + suffix:
-                raise ValueError
+            if item.kind == "section-v1":
+                if re.fullmatch(r"page-record:[0-9a-f]{64}", item.doc_id) is None:
+                    raise ValueError
+            else:
+                suffix = (
+                    ""
+                    if item.kind == "page"
+                    else f"#{'c' if item.kind == 'chunk' else 'q'}{item.ordinal}"
+                )
+                if item.doc_id != (item.page_uid or item.page_id) + suffix:
+                    raise ValueError
             if result and (item.page_uid, item.source_sha256, item.generation_id) != (
                 result[0].page_uid, result[0].source_sha256, result[0].generation_id
             ):
