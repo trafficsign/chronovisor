@@ -99,6 +99,36 @@ def test_format_state_context_includes_only_allowlisted_core_memory(
     assert len(context) <= 1200
 
 
+@pytest.mark.parametrize("budget", [0, 100, 600, 850, 1200])
+def test_state_context_shrinking_terminates_within_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget: int
+) -> None:
+    for page_id in state_register.CORE_MEMORY_PAGE_IDS:
+        (tmp_path / f"{page_id}.md").write_text(
+            f"---\ntitle: {page_id}\nupdated: 2026-07-17\nstatus: stable\n"
+            f"type: knowledge\n---\n# {page_id}\n\n" + "long memory " * 100,
+            encoding="utf-8",
+        )
+    original_dumps = json.dumps
+    calls = 0
+
+    def bounded_dumps(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert calls < 50, "state truncation must make progress"
+        return original_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(state_register.json, "dumps", bounded_dumps)
+    context = state_register.format_state_context(
+        host="codex", path=tmp_path / "current-state.md", max_chars=budget
+    )
+
+    assert len(context) <= budget
+    if context:
+        payload = context.split("content_json=\n", 1)[1].split("\n[/WORKING_MEMORY]", 1)[0]
+        assert isinstance(json.loads(payload), list)
+
+
 def test_refresh_state_register_writes_recent_pages(
     tmp_path: Path, monkeypatch
 ) -> None:
