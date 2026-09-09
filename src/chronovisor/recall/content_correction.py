@@ -3439,6 +3439,8 @@ def _prepare_exact_user_correction(
             [replacement],
             correction_id=correction_id,
         )
+        if mutation.already_applied:
+            mutation_evidence_ref(mutation)
         return ExactUserCorrection(mutation=mutation, policy_audit=policy_audit)
 
     replacement = _parse_exact_user_replacement(

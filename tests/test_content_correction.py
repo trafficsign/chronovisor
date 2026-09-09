@@ -517,6 +517,14 @@ def test_unique_quoted_exact_replacement_applies_without_any_model(
     assert "preimage_utf8" not in audit
     assert "postimage_utf8" not in audit
     assert "mutation_evidence_ref" in audit["patches"][0]
+    # Legacy/torn recovery without the preimage receipt must fail during
+    # preparation, before the apply/audit path can invent a new binding.
+    page_mutation.correction_constraints_file().unlink()
+    with pytest.raises(page_mutation.PageMutationError, match="source receipt"):
+        content_correction._prepare_exact_user_correction(
+            key=merged["item"]["key"], event=event, page_ids=["memory"]
+        )
+    assert "Installed RAM is 32GB." in page.read_text(encoding="utf-8")
 
 
 def test_exact_user_correction_captures_only_cas_readback_veto_binding(
