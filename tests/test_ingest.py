@@ -11436,6 +11436,153 @@ class TestTriagePlanSchema:
         assert "Do not return JSON" in system
         assert "JSON Schema" not in system
 
+    def test_explicit_c2_triage_materializes_source_bound_semantics_once(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        del isolated_wiki
+        from chronovisor.core import search
+        from chronovisor.ingest import ingest, ingest_triage
+
+        class EmptyIndex:
+            def ensure_loaded(self) -> None:
+                pass
+
+            def all_canonical_page_keys(self) -> set[str]:
+                return set()
+
+            def page_count(self) -> int:
+                return 0
+
+        monkeypatch.setattr(ingest, "get_store", EmptyIndex)
+        monkeypatch.setattr(search, "search", lambda *_args, **_kwargs: ([], "bm25"))
+        monkeypatch.setattr(ingest, "_find_existing_create_target", lambda _op: None)
+        monkeypatch.setattr(
+            ingest,
+            "load_ingest_config",
+            lambda: SimpleNamespace(
+                model="triage:test",
+                num_ctx=32_768,
+                max_num_ctx=262_144,
+                num_predict=4_096,
+                keep_alive="0",
+                read_timeout_ms=5_000,
+            ),
+        )
+
+        records = [
+            {
+                "record_id": "turn-1",
+                "text": "決定: 保存形式を固定する。対象: triageのみ。",
+            }
+        ]
+        response = {
+            "operations": [],
+            "semantic_evidence": [
+                {
+                    "record_id": "turn-1",
+                    "quote": "保存形式を固定する",
+                    "kind": "decision",
+                    "subject_quote": "保存形式を固定する",
+                    "scope_quotes": ["triageのみ"],
+                    "condition_quotes": None,
+                }
+            ],
+        }
+        transport = _QueueStructuredTransport(
+            json.dumps(response, ensure_ascii=False)
+        )
+
+        result = ingest_triage.triage_c2(records, transport=transport)
+
+        assert result is not None
+        assert result["operations"] == []
+        semantic = result["semantic_evidence"]
+        assert len(semantic) == 1
+        assert semantic[0]["record_id"] == "turn-1"
+        assert semantic[0]["kind"] == "decision"
+        assert semantic[0]["byte_coordinate_space"] == "decoded_source_text_utf8"
+        assert semantic[0]["quote_span"]["byte_range"] == [8, 35]
+        assert semantic[0]["subject_span"]["byte_range"] == [8, 35]
+        assert semantic[0]["scope_spans"][0]["byte_range"] == [46, 58]
+        assert len(semantic[0]["source_text_sha256"]) == 64
+        assert len(transport.requests) == 1
+        assert result["audit"]["semantic_evidence_authority"] == "model_judgment"
+        assert result["audit"]["source_record_count"] == 1
+        assert len(result["audit"]["source_records_sha256"]) == 64
+        assert len(result["audit"]["schema_sha256"]) == 64
+        assert len(result["audit"]["prompt_sha256"]) == 64
+        assert len(result["audit"]["request_sha256"]) == 64
+        assert result["audit"]["local_structured"]["ok"] is True
+
+    def test_c2_semantics_reject_unknown_and_ambiguous_source_quotes(self) -> None:
+        from chronovisor.ingest import ingest_triage
+
+        records = ingest_triage._normalize_c2_source_records(
+            [{"record_id": "turn-1", "text": "同じ語 同じ語"}]
+        )
+        value = {
+            "operations": [],
+            "semantic_evidence": [
+                {
+                    "record_id": "missing",
+                    "quote": "同じ語",
+                    "kind": "unknown",
+                    "subject_quote": None,
+                    "scope_quotes": None,
+                    "condition_quotes": None,
+                },
+                {
+                    "record_id": "turn-1",
+                    "quote": "同じ語",
+                    "kind": "unknown",
+                    "subject_quote": None,
+                    "scope_quotes": None,
+                    "condition_quotes": None,
+                },
+            ],
+        }
+
+        issues = ingest_triage._c2_semantic_validation_issues(value, records)
+
+        assert {issue.pointer for issue in issues} == {
+            "/semantic_evidence/0/record_id",
+            "/semantic_evidence/1/quote",
+        }
+
+    def test_c2_known_kind_requires_quote_and_invalid_utf8_stops_before_model(
+        self,
+    ) -> None:
+        from chronovisor.ingest import ingest_triage
+
+        records = ingest_triage._normalize_c2_source_records(
+            [{"record_id": "turn-1", "text": "明示された決定"}]
+        )
+        value = {
+            "operations": [],
+            "semantic_evidence": [
+                {
+                    "record_id": "turn-1",
+                    "quote": None,
+                    "kind": "decision",
+                    "subject_quote": None,
+                    "scope_quotes": None,
+                    "condition_quotes": None,
+                }
+            ],
+        }
+        issues = ingest_triage._c2_semantic_validation_issues(value, records)
+        assert [issue.pointer for issue in issues] == ["/semantic_evidence/0/quote"]
+
+        transport = _QueueStructuredTransport('{"operations":[],"semantic_evidence":[]}')
+        with pytest.raises(ValueError, match="valid UTF-8"):
+            ingest_triage.triage_c2(
+                [{"record_id": "turn-\ud800", "text": "source"}],
+                transport=transport,
+            )
+        assert transport.requests == []
+
     def test_bare_create_is_rejected_with_folder_repair_contract(self) -> None:
         from chronovisor.ingest.ingest import _triage_plan_validation_issues
 

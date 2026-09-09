@@ -2,13 +2,30 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Any
 
 from chronovisor.core import ollama as ollama_runtime
-from chronovisor.decision.local_structured import ChatTransport
+from chronovisor.core.canonical_json import canonical_json_sha256_strict
+from chronovisor.decision.local_structured import (
+    ChatTransport,
+    ValidationIssue,
+    structured_request_sha256,
+)
+from chronovisor.ingest.ingest_schemas import (
+    TRIAGE_C2_MAX_QUOTE_CHARS,
+    TRIAGE_C2_MAX_QUOTE_LIST,
+    TRIAGE_C2_MAX_SEMANTIC_ROWS,
+    TRIAGE_C2_MAX_SOURCE_RECORD_ID_CHARS,
+    TRIAGE_C2_MAX_SOURCE_RECORD_TEXT_CHARS,
+    TRIAGE_C2_MAX_SOURCE_RECORDS,
+    TRIAGE_C2_SCHEMA,
+    TRIAGE_C2_SCHEMA_VERSION,
+)
 
 
 def _runtime():
@@ -115,7 +132,7 @@ def _decode_triage_output(text: str) -> list[dict[str, Any]]:
         raise ValueError("response must be NOOP or contain at least one operation row")
     return operations
 
-from chronovisor.ingest.ingest import (  # noqa: E402
+from chronovisor.ingest.ingest import (  # noqa: E402, I001
     _DEFAULT_GENERATE_WITH_PROGRESS,
     _TRIAGE_CATALOG_TOP_N,
     _TRIAGE_MAX_FEEDBACK_BYTES,
@@ -128,21 +145,274 @@ from chronovisor.ingest.ingest import (  # noqa: E402
 )
 
 
-def triage(
+TRIAGE_C2_SYSTEM_PROMPT = """\
+You are the explicit C2 knowledge-wiki triage engine. Analyze the supplied
+source records and return one JSON object with exactly two keys:
+`operations` and `semantic_evidence`.
+
+`operations` uses the existing five fields (type, filename, title, keywords,
+summary), with the same routing and one-operation-per-target rules as v1.
+`semantic_evidence` contains at most eight model judgments. Every row must
+name one supplied record_id. Copy quote, subject_quote, scope_quotes, and
+condition_quotes exactly from that record's text; use null or [] when unknown.
+Use kind=unknown unless the text explicitly supports proposal, decision, or
+result. Do not invent facts, dates, validity, hashes, or byte offsets. The
+host computes source ranges and digests after validating the copied text.
+Do not return any field outside the documented wrapper or row fields.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class _C2SourceRecord:
+    record_id: str
+    text: str
+
+
+def _normalize_c2_source_records(
+    source_records: Sequence[Mapping[str, Any]],
+) -> tuple[_C2SourceRecord, ...]:
+    """Validate the caller-owned source-record boundary before model use."""
+
+    if isinstance(source_records, (str, bytes, bytearray)):
+        raise ValueError("C2 source_records must be a sequence of mappings")
+    if not isinstance(source_records, Sequence) or not source_records:
+        raise ValueError("C2 source_records must contain at least one record")
+    if len(source_records) > TRIAGE_C2_MAX_SOURCE_RECORDS:
+        raise ValueError("C2 source_records exceed the fixed record limit")
+
+    normalized: list[_C2SourceRecord] = []
+    seen: set[str] = set()
+    for index, row in enumerate(source_records):
+        if not isinstance(row, Mapping):
+            raise ValueError(f"C2 source record {index} must be an object")
+        record_id = row.get("record_id")
+        text = row.get("text")
+        if (
+            not isinstance(record_id, str)
+            or not record_id.strip()
+            or record_id != record_id.strip()
+            or len(record_id) > TRIAGE_C2_MAX_SOURCE_RECORD_ID_CHARS
+            or any(ord(char) < 0x20 or char == "\x7f" for char in record_id)
+        ):
+            raise ValueError(f"C2 source record {index} has an invalid record_id")
+        if record_id in seen:
+            raise ValueError(f"C2 source record_id is duplicated: {record_id}")
+        if (
+            not isinstance(text, str)
+            or not text
+            or len(text) > TRIAGE_C2_MAX_SOURCE_RECORD_TEXT_CHARS
+        ):
+            raise ValueError(f"C2 source record {record_id} has invalid text")
+        try:
+            record_id.encode("utf-8")
+            text.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                f"C2 source record {record_id!r} must contain valid UTF-8 text"
+            ) from exc
+        seen.add(record_id)
+        normalized.append(_C2SourceRecord(record_id=record_id, text=text))
+    return tuple(normalized)
+
+
+def _render_c2_source_records(records: Sequence[_C2SourceRecord]) -> str:
+    """Render fixed source records without asking the model to derive identity."""
+
+    chunks: list[str] = []
+    for record in records:
+        chunks.append(
+            "--- SOURCE RECORD "
+            + record.record_id
+            + " ---\n"
+            + record.text
+            + "\n--- END SOURCE RECORD ---"
+        )
+    return "\n\n".join(chunks)
+
+
+def _c2_source_records_sha256(records: Sequence[_C2SourceRecord]) -> str:
+    return canonical_json_sha256_strict(
+        [{"record_id": record.record_id, "text": record.text} for record in records]
+    )
+
+
+def _c2_quote_span(text: str, quote: str) -> tuple[int, int] | None:
+    """Return a unique UTF-8 span; overlapping matches are ambiguous too."""
+
+    if not quote:
+        return None
+    start = text.find(quote)
+    if start < 0:
+        return None
+    if text.find(quote, start + 1) >= 0:
+        return None
+    byte_start = len(text[:start].encode("utf-8"))
+    byte_end = byte_start + len(quote.encode("utf-8"))
+    return byte_start, byte_end
+
+
+def _c2_quote_span_payload(
+    text: str,
+    quote: str | None,
+) -> dict[str, Any] | None:
+    if quote is None:
+        return None
+    span = _c2_quote_span(text, quote)
+    if span is None:
+        raise ValueError("C2 semantic quote is missing or ambiguous")
+    byte_start, byte_end = span
+    return {
+        "byte_range": [byte_start, byte_end],
+        "byte_coordinate_space": "decoded_source_text_utf8",
+        "span_sha256": hashlib.sha256(quote.encode("utf-8")).hexdigest(),
+    }
+
+
+def _c2_semantic_issue(
+    pointer: str,
+    message: str,
+    *,
+    keyword: str = "sourceQuote",
+) -> ValidationIssue:
+    return ValidationIssue(
+        pointer=pointer,
+        keyword=keyword,
+        expected="one unique substring of the selected source record",
+        received={"type": "untrusted_semantic_value"},
+        message=message,
+    )
+
+
+def _c2_semantic_validation_issues(
+    value: Any,
+    records: Sequence[_C2SourceRecord],
+) -> list[ValidationIssue]:
+    if not isinstance(value, Mapping):
+        return [
+            _c2_semantic_issue(
+                "",
+                "C2 output must be an object with operations and semantic_evidence",
+                keyword="type",
+            )
+        ]
+    rows = value.get("semantic_evidence")
+    if not isinstance(rows, list):
+        return [_c2_semantic_issue("/semantic_evidence", "semantic_evidence must be an array", keyword="type")]
+    by_id = {record.record_id: record for record in records}
+    issues: list[ValidationIssue] = []
+    if len(rows) > TRIAGE_C2_MAX_SEMANTIC_ROWS:
+        issues.append(
+            _c2_semantic_issue(
+                "/semantic_evidence",
+                "semantic_evidence exceeds the fixed row limit",
+                keyword="maxItems",
+            )
+        )
+    for index, row in enumerate(rows[:TRIAGE_C2_MAX_SEMANTIC_ROWS]):
+        pointer = f"/semantic_evidence/{index}"
+        if not isinstance(row, Mapping):
+            issues.append(_c2_semantic_issue(pointer, "semantic evidence row must be an object", keyword="type"))
+            continue
+        record_id = row.get("record_id")
+        record = by_id.get(record_id) if isinstance(record_id, str) else None
+        if record is None:
+            issues.append(_c2_semantic_issue(f"{pointer}/record_id", "record_id is not in the fixed source set", keyword="sourceRecord"))
+            continue
+        quote = row.get("quote")
+        if quote is not None and (
+            not isinstance(quote, str)
+            or not quote
+            or len(quote) > TRIAGE_C2_MAX_QUOTE_CHARS
+            or _c2_quote_span(record.text, quote) is None
+        ):
+            issues.append(_c2_semantic_issue(f"{pointer}/quote", "quote must be one unique source substring"))
+        if row.get("kind") in {"proposal", "decision", "result"} and quote is None:
+            issues.append(
+                _c2_semantic_issue(
+                    f"{pointer}/quote",
+                    "non-unknown semantic evidence requires a source quote",
+                )
+            )
+        subject_quote = row.get("subject_quote")
+        if subject_quote is not None and (
+            not isinstance(subject_quote, str)
+            or not subject_quote
+            or len(subject_quote) > TRIAGE_C2_MAX_QUOTE_CHARS
+            or _c2_quote_span(record.text, subject_quote) is None
+        ):
+            issues.append(_c2_semantic_issue(f"{pointer}/subject_quote", "subject_quote must be one unique source substring"))
+        for field in ("scope_quotes", "condition_quotes"):
+            quotes = row.get(field)
+            if quotes is None:
+                continue
+            if not isinstance(quotes, list) or len(quotes) > TRIAGE_C2_MAX_QUOTE_LIST:
+                issues.append(_c2_semantic_issue(f"{pointer}/{field}", f"{field} exceeds its fixed list limit", keyword="maxItems"))
+                continue
+            for quote_index, item in enumerate(quotes):
+                if (
+                    not isinstance(item, str)
+                    or not item
+                    or len(item) > TRIAGE_C2_MAX_QUOTE_CHARS
+                    or _c2_quote_span(record.text, item) is None
+                ):
+                    issues.append(_c2_semantic_issue(f"{pointer}/{field}/{quote_index}", f"{field} entries must be unique source substrings"))
+    return issues
+
+
+def _materialize_c2_semantic_evidence(
+    rows: Sequence[Mapping[str, Any]],
+    records: Sequence[_C2SourceRecord],
+) -> list[dict[str, Any]]:
+    """Attach deterministic spans/digests in decoded-source coordinates."""
+
+    by_id = {record.record_id: record for record in records}
+    materialized: list[dict[str, Any]] = []
+    for row in rows:
+        record_id = row.get("record_id")
+        record = by_id.get(record_id) if isinstance(record_id, str) else None
+        if record is None:
+            raise ValueError("C2 semantic evidence references an unknown record")
+        output: dict[str, Any] = {
+            "record_id": record.record_id,
+            "quote": row.get("quote"),
+            "kind": row.get("kind"),
+            "subject_quote": row.get("subject_quote"),
+            "scope_quotes": row.get("scope_quotes"),
+            "condition_quotes": row.get("condition_quotes"),
+            "source_text_sha256": hashlib.sha256(record.text.encode("utf-8")).hexdigest(),
+            "byte_coordinate_space": "decoded_source_text_utf8",
+        }
+        output["quote_span"] = _c2_quote_span_payload(record.text, row.get("quote"))
+        output["subject_span"] = _c2_quote_span_payload(
+            record.text, row.get("subject_quote")
+        )
+        for field, span_field in (
+            ("scope_quotes", "scope_spans"),
+            ("condition_quotes", "condition_spans"),
+        ):
+            quotes = row.get(field)
+            output[span_field] = (
+                None
+                if quotes is None
+                else [
+                    _c2_quote_span_payload(record.text, quote)
+                    for quote in quotes
+                ]
+            )
+        materialized.append(output)
+    return materialized
+
+
+def _build_triage_catalog(
     content: str,
     *,
-    progress_callback: Callable[[dict[str, Any]], None] | None = None,
-    frontier_feedback: str | None = None,
-    transport: ChatTransport | None = None,
-    raise_on_failure: bool = False,
-) -> list[dict] | None:
-    """Stage 1: Analyze raw content and return a plan, or None on parse failure.
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    raise_on_failure: bool,
+    failure_message: str,
+    log_label: str = "",
+) -> tuple[Any, str] | None:
+    """Build the bounded existing-page catalog shared by v1 and C2 triage."""
 
-    Distinguishing ``None`` (parser/model failure) from ``[]`` (model said
-    "nothing wiki-worthy") matters for the caller: failures should leave
-    raw files un-marked so the next tick retries them, while a legitimate
-    empty plan should mark the raws processed to avoid forever-retry.
-    """
     store = _runtime().get_store()
     store.ensure_loaded()
     existing_folders = sorted(
@@ -155,7 +425,7 @@ def triage(
     catalog_lines = [
         (
             "Existing top-level folders (prefer the best semantic match for "
-            f"every create): {', '.join(f'{f}/' for f in existing_folders)}"
+            f"every create): {', '.join(f'{folder}/' for folder in existing_folders)}"
         ),
         (
             "Create routing contract: never create directly under pages/. "
@@ -164,7 +434,6 @@ def triage(
         ),
         "",
     ]
-
     catalog_lines.append("Existing wiki pages (page_id — title):")
     try:
         from chronovisor.core.search import search as chronovisor_search
@@ -183,59 +452,47 @@ def triage(
                 top_n=_TRIAGE_CATALOG_TOP_N,
             )
     except Exception as exc:
-        failure = IngestTriageFailure(
-            "transport_error",
-            "triage catalog search unavailable after bounded lexical fallback",
-        )
+        failure = IngestTriageFailure("transport_error", failure_message)
         _emit_triage_failure(progress_callback, failure)
         if raise_on_failure:
             raise failure from exc
         return None
     results = results[:_TRIAGE_CATALOG_TOP_N]
-    for r in results:
-        catalog_lines.append(f"  [[{r.page_id}]] — {r.title}")
+    for row in results:
+        catalog_lines.append(f"  [[{row.page_id}]] — {row.title}")
+    label = f" {log_label}" if log_label else ""
     _safe_log(
-        f"ingest | triage catalog filtered to {len(results)} pages "
+        f"ingest | triage{label} catalog filtered to {len(results)} pages "
         f"(of {store.page_count()} total)"
     )
+    return store, "\n".join(catalog_lines)
 
-    catalog = "\n".join(catalog_lines)
 
-    feedback_block = ""
-    if frontier_feedback:
-        feedback_block = f"""
-
----
-Previous local consensus review (authoritative correction instructions):
----
-{frontier_feedback}
----
-Regenerate the plan from the raw evidence. Remove unsupported claims, keep
-only durable facts explicitly grounded in the raw, and use the smallest
-complete create/update set that resolves the review.
-"""
-
-    prompt = f"""{catalog}
-
----
-Raw session data to triage:
----
-{content}
----
-{feedback_block}
-
-Analyze the raw data above and return the page-operation record."""
+def _run_structured_triage_session(
+    prompt: str,
+    schema: Mapping[str, Any],
+    *,
+    system: str,
+    role: str,
+    transport: ChatTransport | None,
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    value_validator: Callable[[Any], Sequence[ValidationIssue]] | None = None,
+    plain_text_contract: str | None = None,
+    plain_text_decoder: Callable[[str], Any] | None = None,
+    raise_on_failure: bool,
+) -> Any | None:
+    """Run one triage LocalStructuredSession with the shared runtime guards."""
 
     config = load_ingest_config()
     triage_num_predict = min(config.num_predict, _TRIAGE_NUM_PREDICT)
     required_num_ctx = required_structured_context_tokens(
         prompt,
-        TRIAGE_PLAN_SCHEMA,
-        system=TRIAGE_SYSTEM_PROMPT,
+        schema,
+        system=system,
         num_predict=triage_num_predict,
         max_output_chars=_TRIAGE_MAX_OUTPUT_BYTES,
         max_feedback_chars=_TRIAGE_MAX_FEEDBACK_BYTES,
-        plain_text_contract=TRIAGE_TEXT_OUTPUT_CONTRACT,
+        plain_text_contract=plain_text_contract,
     )
     try:
         selected_num_ctx = _select_ingest_context(
@@ -278,7 +535,7 @@ Analyze the raw data above and return the page-operation record."""
             result = LocalStructuredSession(
                 model=route.model if route is not None else "injected",
                 transport=session_transport,
-                role="ingest_triage",
+                role=role,
                 runtime_role=ollama_runtime.INGEST_GENERATION_RUNTIME_ROLE,
                 runtime_location=route.location if route is not None else None,
                 source_data_class="raw",
@@ -288,19 +545,16 @@ Analyze the raw data above and return the page-operation record."""
                 num_predict=triage_num_predict,
                 keep_alive=config.keep_alive,
                 read_timeout_ms=config.read_timeout_ms,
-                # Context preflight below remains the authoritative bound. This
-                # independent byte cap prevents an input larger than the exact
-                # admitted runner from reaching Ollama.
                 max_input_chars=selected_num_ctx,
                 max_output_chars=_TRIAGE_MAX_OUTPUT_BYTES,
                 max_feedback_chars=_TRIAGE_MAX_FEEDBACK_BYTES,
             ).run(
                 prompt,
-                TRIAGE_PLAN_SCHEMA,
-                system=TRIAGE_SYSTEM_PROMPT,
-                value_validator=_validate_effective_triage_plan,
-                plain_text_contract=TRIAGE_TEXT_OUTPUT_CONTRACT,
-                plain_text_decoder=_decode_triage_output,
+                schema,
+                system=system,
+                value_validator=value_validator,
+                plain_text_contract=plain_text_contract,
+                plain_text_decoder=plain_text_decoder,
             )
     except IngestContextCapacityError as exc:
         failure = IngestTriageFailure("context_window_exceeded", str(exc))
@@ -318,6 +572,73 @@ Analyze the raw data above and return the page-operation record."""
         _emit_triage_failure(progress_callback, failure)
         if raise_on_failure:
             raise
+        return None
+    return result
+
+
+def triage(
+    content: str,
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    frontier_feedback: str | None = None,
+    transport: ChatTransport | None = None,
+    raise_on_failure: bool = False,
+) -> list[dict] | None:
+    """Stage 1: Analyze raw content and return a plan, or None on parse failure.
+
+    Distinguishing ``None`` (parser/model failure) from ``[]`` (model said
+    "nothing wiki-worthy") matters for the caller: failures should leave
+    raw files un-marked so the next tick retries them, while a legitimate
+    empty plan should mark the raws processed to avoid forever-retry.
+    """
+    catalog_result = _build_triage_catalog(
+        content,
+        progress_callback=progress_callback,
+        raise_on_failure=raise_on_failure,
+        failure_message="triage catalog search unavailable after bounded lexical fallback",
+    )
+    if catalog_result is None:
+        return None
+    _, catalog = catalog_result
+
+    feedback_block = ""
+    if frontier_feedback:
+        feedback_block = f"""
+
+---
+Previous local consensus review (authoritative correction instructions):
+---
+{frontier_feedback}
+---
+Regenerate the plan from the raw evidence. Remove unsupported claims, keep
+only durable facts explicitly grounded in the raw, and use the smallest
+complete create/update set that resolves the review.
+"""
+
+    prompt = f"""{catalog}
+
+---
+Raw session data to triage:
+---
+{content}
+---
+{feedback_block}
+
+Analyze the raw data above and return the page-operation record."""
+
+    result = _run_structured_triage_session(
+        prompt,
+        TRIAGE_PLAN_SCHEMA,
+        system=TRIAGE_SYSTEM_PROMPT,
+        role="ingest_triage",
+        transport=transport,
+        progress_callback=progress_callback,
+        value_validator=_validate_effective_triage_plan,
+        plain_text_contract=TRIAGE_TEXT_OUTPUT_CONTRACT,
+        plain_text_decoder=_decode_triage_output,
+        raise_on_failure=raise_on_failure,
+    )
+    if result is None:
         return None
     if not result.ok:
         failure = IngestTriageFailure(
@@ -356,3 +677,157 @@ Analyze the raw data above and return the page-operation record."""
     if progress_callback is not None:
         progress_callback({"event": "done", "active": False})
     return validated
+
+
+def triage_c2(
+    source_records: Sequence[Mapping[str, Any]],
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    frontier_feedback: str | None = None,
+    transport: ChatTransport | None = None,
+    raise_on_failure: bool = False,
+) -> dict[str, Any] | None:
+    """Run the explicit C2 triage wrapper against fixed source records.
+
+    The model sees the supplied record text and may *judge* a bounded semantic
+    row, but it never supplies hashes or offsets.  Returned semantic rows are
+    host materializations in ``decoded_source_text_utf8`` coordinates; they are
+    not RawEvidenceRef bindings or fact-validity assertions.  The ordinary
+    :func:`triage` entry point, its five-column fallback, and its v1 bytes are
+    intentionally untouched.
+    """
+
+    records = _normalize_c2_source_records(source_records)
+    source_text = _render_c2_source_records(records)
+    source_records_sha256 = _c2_source_records_sha256(records)
+
+    catalog_result = _build_triage_catalog(
+        source_text,
+        progress_callback=progress_callback,
+        raise_on_failure=raise_on_failure,
+        failure_message="triage C2 catalog search unavailable after bounded lexical fallback",
+        log_label="C2",
+    )
+    if catalog_result is None:
+        return None
+    _, catalog = catalog_result
+
+    feedback_block = ""
+    if frontier_feedback:
+        feedback_block = f"""
+
+---
+Previous local consensus review (authoritative correction instructions):
+---
+{frontier_feedback}
+---
+Regenerate the operations and semantic judgments from the fixed source
+records. Remove unsupported claims and use null/[] when a field is not
+explicitly grounded in one record.
+"""
+
+    prompt = f"""{catalog}
+
+---
+Fixed source records (record_id labels are host-bound; quote only record text):
+---
+{source_text}
+---
+{feedback_block}
+
+Return the C2 wrapper. `operations` must contain the existing five operation
+fields. `semantic_evidence` may contain at most {TRIAGE_C2_MAX_SEMANTIC_ROWS}
+rows. For every semantic row, copy each quote exactly from the selected record;
+do not calculate or emit hashes, byte offsets, dates, or validity intervals.
+"""
+
+    def validate_c2(value: Any) -> Sequence[ValidationIssue]:
+        issues = _validate_effective_triage_plan(
+            value.get("operations") if isinstance(value, Mapping) else None,
+        )
+        issues.extend(_c2_semantic_validation_issues(value, records))
+        return issues
+
+    result = _run_structured_triage_session(
+        prompt,
+        TRIAGE_C2_SCHEMA,
+        system=TRIAGE_C2_SYSTEM_PROMPT,
+        role="ingest_triage_c2",
+        transport=transport,
+        progress_callback=progress_callback,
+        value_validator=validate_c2,
+        raise_on_failure=raise_on_failure,
+    )
+    if result is None:
+        return None
+
+    audit = {
+        "schema_version": TRIAGE_C2_SCHEMA_VERSION,
+        "schema_sha256": canonical_json_sha256_strict(TRIAGE_C2_SCHEMA),
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "request_sha256": structured_request_sha256(
+            prompt,
+            TRIAGE_C2_SCHEMA,
+            TRIAGE_C2_SYSTEM_PROMPT,
+        ),
+        "source_records_sha256": source_records_sha256,
+        "source_record_count": len(records),
+        "semantic_evidence_authority": "model_judgment",
+        "local_structured": result.audit_record(),
+    }
+    if not result.ok:
+        failure = IngestTriageFailure(
+            result.failure_class or "unknown",
+            result.failure_reason or "structured C2 triage failed",
+        )
+        _safe_log(
+            "ingest | triage C2 structured session failed "
+            f"({failure.failure_class}: {failure.reason[:160]})"
+        )
+        _emit_triage_failure(progress_callback, failure)
+        if raise_on_failure:
+            raise failure
+        return None
+
+    raw_value = result.value
+    if not isinstance(raw_value, Mapping):
+        failure = IngestTriageFailure(
+            "value_validation_error",
+            "C2 triage returned a non-object wrapper",
+        )
+        _emit_triage_failure(progress_callback, failure)
+        if raise_on_failure:
+            raise failure
+        return None
+    operations = raw_value.get("operations")
+    semantic_rows = raw_value.get("semantic_evidence")
+    validated_operations = _validate_triage_plan(
+        operations,
+        coerce_missing_updates=True,
+    )
+    semantic_issues = _c2_semantic_validation_issues(raw_value, records)
+    if validated_operations is None or semantic_issues:
+        failure = IngestTriageFailure(
+            "value_validation_error",
+            "C2 triage host validation rejected the wrapper",
+        )
+        _emit_triage_failure(progress_callback, failure)
+        if raise_on_failure:
+            raise failure
+        return None
+    assert isinstance(semantic_rows, list)
+    try:
+        materialized = _materialize_c2_semantic_evidence(semantic_rows, records)
+    except (TypeError, ValueError) as exc:
+        failure = IngestTriageFailure("value_validation_error", str(exc))
+        _emit_triage_failure(progress_callback, failure)
+        if raise_on_failure:
+            raise failure from exc
+        return None
+    if progress_callback is not None:
+        progress_callback({"event": "done", "active": False})
+    return {
+        "operations": validated_operations,
+        "semantic_evidence": materialized,
+        "audit": audit,
+    }
