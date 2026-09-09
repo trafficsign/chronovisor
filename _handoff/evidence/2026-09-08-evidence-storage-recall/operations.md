@@ -14,13 +14,17 @@
 - [P3 validation](p3-validation.json): active generation の extractor 追従、更新/rebuild/rollback の接続と CAS 回帰を確認。既定 extractor は 2、候補 C は 3、production 変更はなし。
 - [P5 cutover](p5-runtime-cutover.json): push、対象サービス再起動、archive `direct_url` provenance、health を確認。実Raw処理10件・authority正常まで確認。計画全体の品質採用は未完了。
 
-production は extractor 2 を維持し、候補 C1/C2 は有効化していない。現行 archive は 0c22b66（訂正前後の原文保全まで）、配布候補 0eddbc8 は GitHub へ push 済みで、本番再起動はローカル20件試行後に行う。
+production は extractor 2 を維持し、候補 C1/C2 は有効化していない。現行 runtime.source は `git+ssh://git@github.com/trafficsign/chronovisor@7af88177d6a82f17dd54a830e89aed15cfcc413e`。safe boundaryで本番5サービスを再起動し、全archive一致、semantic/reranker正常、LAN TLS検証と認証なし401を確認。[最終配布証跡](p5-state-budget-followup-deployment.json)を参照。healthの集計snapshotはstaleで、runtime照合・サービス直接probeと区別する。
 
-[P4予算修正](p4-total-context-budget-fix.json): 比較は120問×3方式×3反復を実行したが、設定した全体3000文字が旧runtime内部で4602へ上書きされていた。原captureを保存し、3000文字の適合測定・速度成功とは扱わない。修正後は根拠のRecall blockを先に確保し、残枠に作業メモを収める。source本文を途中で切らず、収まらないblockを拒否する。通常経路とdeterministic fallbackは同じfinal rendererを使う。関連272 testsはmain/release双方で通過。修正版のlive速度は未測定。
+[P4予算修正](p4-total-context-budget-fix.json): 比較は120問×3方式×3反復を実行したが、設定した全体3000文字が旧runtime内部で4602へ上書きされていた。原captureを保存し、3000文字の適合測定・速度成功とは扱わない。修正後は根拠のRecall blockを先に確保し、残枠に作業メモを収める。source本文を途中で切らず、収まらないblockを拒否する。通常経路・deterministic fallback・蒸留fast pathは同じfinal rendererを使う。fast pathはstate budget0で従来のstate bypassを維持する。runtime全221 testsと配布候補の関連273 testsが通過。修正版の実hookはmain3.53秒 / dispatcher3.26秒、注入2929文字、出典2件とも原文一致。[全canary試行](p5-final-live-canary.json)には冷間semantic timeoutとbreaker fallbackも保持しており、p95や常時成功を示す測定ではない。
 
 C2の保存・復元は明示的な試行経路として用意した。原文、役割、出来事時刻、記録時刻と未知の有効期間を保ち、モデル生成の提案/決定/結果・条件は検証した原文引用とCASに保存する。モデル候補で原文atomを置き換えない。[Piとversioned packetの検証](p3-c2-packet-publication.json)、[指定Rawの再構築](p2-c2-bounded-source-rebuild.json)を参照。通常Recall索引への自動公開と明示訂正関係は未実装であり、既存as-of/authorityの拒否を回避して本番有効化しない。
 
-既存資料の全件LLM処理は、候補の採用条件を満たしてから実行する。C1の評価結果をC2全体の採否へ転用しない。固定native20 child / 69 recordsの試行はローカルQwenのみを使い、Contributorへ非公開原文を送らない。根拠なし負例・時点指定例・独立回答採点の不足も、全面品質受入とは区別する。
+既存資料の全件LLM処理は、候補の採用条件を満たしてから実行する。C1の評価結果をC2全体の採否へ転用しない。固定native20 child / 69 recordsの試行はローカルQwenで完了し、13成功・7検証不合格だった。Contributorへ非公開原文は送っていない。[source-only評価](p2-c2-native20-results.json)では成功13 CASと21 native atomsを再検証、source identity/range違反0。claimはdecoded原文の外側whitespaceを除いたcanonical表現であり、Raw bytesそのものとは区別する。暫定意味注釈の完全一致は7/29 recordsで、現在事実としての通常as-of受入は0/69。現C2を本番へ公開せず、全件LLM変換は行わない。根拠なし負例・時点指定例・独立回答採点の不足も、全面品質受入とは区別する。
+
+[縮小ループの修正](p5-state-budget-regression.json): 3000文字の残枠を作業メモに渡すと、旧最小27文字のループが終了しない場合があった。本文21＋省略記号3で24文字まで必ず縮み、枠自体が収まらなければ空文字を返す。関連234 testsをmain/release双方で通過。診断中のreranker off設定は元のshadowに復帰、processor・deadline・authorityは変更していない。
+
+配布は上記コードcommitへ固定する。この後の計画・receiptのみのcommitでorigin/mainが進んでも、実行コードは一致した固定SHAを使用する。ロールバックは既存手順とreceiptの0600 config backupを用い、今回の小予算ループを戻す場合は旧予算4602との整合にも注意する。不要なprivateサービスは停止・leaseは解放し、原文・凍結評価物・CAS・profile・復旧archiveは再現性のため保持する。
 
 ## 1. 変更しない契約と新規保存
 

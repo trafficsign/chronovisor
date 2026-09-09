@@ -1,0 +1,391 @@
+{
+  "schema": "chronovisor.final-hook-canaries.v1",
+  "target_commit": "7af88177d6a82f17dd54a830e89aed15cfcc413e",
+  "attempts": [
+    {
+      "schema": "chronovisor.actual-hook-canary.v1",
+      "observed_at": "2026-09-09T18:26:44.184639+00:00",
+      "caller_commit": "e350714bb864d06c70d5cff2abbef41d7e251885",
+      "caller_commit_verified": true,
+      "caller_module": "/Users/trafficsign/.cache/uv/archive-v0/eenVqoq-x0jYI-qIJmw53/lib/python3.14/site-packages/chronovisor/hosts/hook_dispatcher.py",
+      "caller_module_sha256": "2c4053dd2d829e659fd482ef5057983662aeb56f4564fe5278010fe3869bb9c8",
+      "exit_code": 0,
+      "full_main_wall_ms": 4259.414,
+      "dispatcher_wall_ms": 4098.232,
+      "decision": "none",
+      "status": "timeout",
+      "source_ref_count": 0,
+      "all_sources_match": false,
+      "source_checks": [],
+      "query_sha256": "32a134b0445ea16d40d0a391a4dfdf0360aba480e7e8a441cdc79a5e81cb587e",
+      "semantic_rpcs": [
+        {
+          "wall_ms": 503.725,
+          "service_ms": 501.935,
+          "cache_hit": false,
+          "status": "ok"
+        }
+      ],
+      "scope": "actual host deadline and source integrity smoke; not paired quality acceptance",
+      "stdout_sha256": "ec88e6c1f5ad2fc15c507e8a05b7e6cb559400332b7f3a83fc82cf2081fe761c",
+      "additional_context_chars": 0,
+      "within_3000": true,
+      "has_context": false,
+      "background_before": {
+        "model_active": true,
+        "run_id": "collection-review-01a06384-0-31b9b2d6",
+        "note": "Active background captured by first wrapper; wrapper failed after hook completion on absent active record. Original stdout retained."
+      },
+      "stage_timings_ms": {
+        "scheduler": 0,
+        "prepare": 124,
+        "cleanup": 8,
+        "session_load": 0,
+        "teacher": 2532,
+        "reranker": 0,
+        "evidence_search": 2546,
+        "context": 319,
+        "evidence_reconstruction": 16,
+        "finalize": 870
+      },
+      "timing_note": "Nested stage timings are not additive",
+      "last_stage_started": "finalize",
+      "remaining_ms_at_last_stage": 611,
+      "breaker_open": false
+    },
+    {
+      "schema": "chronovisor.actual-hook-canary.v1",
+      "observed_at": "2026-09-09T18:27:18.939511+00:00",
+      "caller_commit": "e350714bb864d06c70d5cff2abbef41d7e251885",
+      "caller_commit_verified": true,
+      "caller_module": "/Users/trafficsign/.cache/uv/archive-v0/eenVqoq-x0jYI-qIJmw53/lib/python3.14/site-packages/chronovisor/hosts/hook_dispatcher.py",
+      "caller_module_sha256": "2c4053dd2d829e659fd482ef5057983662aeb56f4564fe5278010fe3869bb9c8",
+      "exit_code": 0,
+      "full_main_wall_ms": 4228.268,
+      "dispatcher_wall_ms": 4063.516,
+      "decision": "none",
+      "status": "timeout",
+      "source_ref_count": 0,
+      "all_sources_match": false,
+      "source_checks": [],
+      "query_sha256": "32a134b0445ea16d40d0a391a4dfdf0360aba480e7e8a441cdc79a5e81cb587e",
+      "semantic_rpcs": [
+        {
+          "wall_ms": 202.407,
+          "service_ms": 200.649,
+          "cache_hit": true,
+          "status": "ok"
+        }
+      ],
+      "scope": "actual host deadline and source integrity smoke; not paired quality acceptance",
+      "stdout_sha256": "4a80b93c28c4f87ffa91f634d19cb64f081aace653393ee68c42c52e059ce781",
+      "additional_context_chars": 0,
+      "within_3000": true,
+      "has_context": false,
+      "background_before": {
+        "run_id": null,
+        "pid": null,
+        "model_pid": null,
+        "needs_model": null,
+        "model_active": false
+      },
+      "subprocess_wall_ms": 4480.748,
+      "subprocess_returncode": 0,
+      "stage_timings_ms": {
+        "scheduler": 0,
+        "prepare": 114,
+        "cleanup": 1,
+        "session_load": 0,
+        "teacher": 845,
+        "reranker": 0,
+        "evidence_search": 851,
+        "context": 309,
+        "evidence_reconstruction": 853,
+        "field": 139,
+        "compiler": 0,
+        "reranker_shadow": 833,
+        "finalize": 872
+      },
+      "timing_note": "Nested stage timings are not additive",
+      "last_stage_started": "finalize",
+      "remaining_ms_at_last_stage": 614,
+      "breaker_open": false
+    },
+    {
+      "schema": "chronovisor.actual-hook-canary.v1",
+      "observed_at": "2026-09-09T18:29:50.850612+00:00",
+      "caller_commit": "e350714bb864d06c70d5cff2abbef41d7e251885",
+      "caller_commit_verified": true,
+      "caller_module": "/Users/trafficsign/.cache/uv/archive-v0/eenVqoq-x0jYI-qIJmw53/lib/python3.14/site-packages/chronovisor/hosts/hook_dispatcher.py",
+      "caller_module_sha256": "2c4053dd2d829e659fd482ef5057983662aeb56f4564fe5278010fe3869bb9c8",
+      "exit_code": 0,
+      "full_main_wall_ms": 4235.631,
+      "dispatcher_wall_ms": 4087.352,
+      "decision": "none",
+      "status": "timeout",
+      "source_ref_count": 0,
+      "all_sources_match": false,
+      "source_checks": [],
+      "query_sha256": "32a134b0445ea16d40d0a391a4dfdf0360aba480e7e8a441cdc79a5e81cb587e",
+      "semantic_rpcs": [
+        {
+          "wall_ms": 133.098,
+          "service_ms": 131.177,
+          "cache_hit": true,
+          "status": "ok"
+        }
+      ],
+      "scope": "actual host deadline and source integrity smoke; not paired quality acceptance",
+      "stdout_sha256": "a3aa473c0beeba0eb3458ef3ac84ecdf2930a7540b5fb1cc4b1a1e43aa1a11d0",
+      "additional_context_chars": 0,
+      "within_3000": true,
+      "has_context": false,
+      "background_before": {
+        "run_id": null,
+        "pid": null,
+        "model_pid": null,
+        "needs_model": null,
+        "model_active": false
+      },
+      "subprocess_wall_ms": 4529.306,
+      "subprocess_returncode": 0,
+      "reranker_service_mode": "off",
+      "actual_stdout_source_verification": {
+        "source_refs": 0,
+        "all_sources_match": false,
+        "context_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stage_timings_ms": {
+        "scheduler": 0,
+        "prepare": 113,
+        "cleanup": 5,
+        "session_load": 0,
+        "teacher": 1794,
+        "reranker": 0,
+        "evidence_search": 1804,
+        "context": 316,
+        "evidence_reconstruction": 830,
+        "finalize": 906
+      },
+      "remaining_ms_at_last_stage": 647,
+      "breaker_open": false
+    },
+    {
+      "schema": "chronovisor.actual-hook-canary.v1",
+      "observed_at": "2026-09-09T18:34:40.699787+00:00",
+      "caller_commit": "7af88177d6a82f17dd54a830e89aed15cfcc413e",
+      "caller_commit_verified": true,
+      "caller_module": "/Users/trafficsign/.cache/uv/archive-v0/qu28_vr6WE-USE-Gs3guO/lib/python3.14/site-packages/chronovisor/hosts/hook_dispatcher.py",
+      "caller_module_sha256": "2c4053dd2d829e659fd482ef5057983662aeb56f4564fe5278010fe3869bb9c8",
+      "exit_code": 0,
+      "full_main_wall_ms": 1976.716,
+      "dispatcher_wall_ms": 1816.166,
+      "decision": "none",
+      "status": "degraded",
+      "source_ref_count": 0,
+      "all_sources_match": false,
+      "source_checks": [],
+      "query_sha256": "32a134b0445ea16d40d0a391a4dfdf0360aba480e7e8a441cdc79a5e81cb587e",
+      "semantic_rpcs": [
+        {
+          "wall_ms": 802.112,
+          "error": "SemanticServiceUnavailable"
+        }
+      ],
+      "scope": "actual host deadline and source integrity smoke; not paired quality acceptance",
+      "stdout_sha256": "e48a4a146b29263fc8d9f90db8320eb7d37a096fa7914e02640e8b76f5045518",
+      "additional_context_chars": 1567,
+      "within_3000": true,
+      "has_context": true,
+      "background_before": {
+        "run_id": null,
+        "pid": null,
+        "model_pid": null,
+        "needs_model": null,
+        "model_active": false
+      },
+      "subprocess_wall_ms": 2213.437,
+      "subprocess_returncode": 0,
+      "reranker_service_mode": "shadow",
+      "actual_stdout_source_verification": {
+        "source_refs": 0,
+        "all_sources_match": false,
+        "context_sha256": "7d6551bcd52dd5000ac83ede37875cdb9b5959874de0d72b98064d180a207a5e"
+      },
+      "stage_timings_ms": {
+        "scheduler": 0,
+        "prepare": 112,
+        "cleanup": 1,
+        "session_load": 0,
+        "bm25_load": 0,
+        "bm25_snapshot": 645,
+        "bm25_anchor": 12,
+        "bm25_query": 30,
+        "context_seed": 3,
+        "semantic": 803,
+        "evidence_search": 1502,
+        "teacher": 1496
+      },
+      "breaker_open": false
+    },
+    {
+      "schema": "chronovisor.actual-hook-canary.v1",
+      "observed_at": "2026-09-09T18:35:01.909019+00:00",
+      "caller_commit": "7af88177d6a82f17dd54a830e89aed15cfcc413e",
+      "caller_commit_verified": true,
+      "caller_module": "/Users/trafficsign/.cache/uv/archive-v0/qu28_vr6WE-USE-Gs3guO/lib/python3.14/site-packages/chronovisor/hosts/hook_dispatcher.py",
+      "caller_module_sha256": "2c4053dd2d829e659fd482ef5057983662aeb56f4564fe5278010fe3869bb9c8",
+      "exit_code": 0,
+      "full_main_wall_ms": 3579.536,
+      "dispatcher_wall_ms": 3301.787,
+      "decision": "read",
+      "status": "ok",
+      "source_ref_count": 0,
+      "all_sources_match": false,
+      "source_checks": [],
+      "query_sha256": "32a134b0445ea16d40d0a391a4dfdf0360aba480e7e8a441cdc79a5e81cb587e",
+      "semantic_rpcs": [],
+      "scope": "actual host deadline and source integrity smoke; not paired quality acceptance",
+      "stdout_sha256": "bbb2e5820e23a9f6c11a8ca0bd24c152a042ed4898b274b50d390665538d42bd",
+      "additional_context_chars": 3000,
+      "within_3000": true,
+      "reranker_service_mode": "shadow",
+      "actual_stdout_source_verification": {
+        "source_refs": 0,
+        "all_sources_match": false,
+        "context_sha256": "ab98c039eebbaaee787f863c959ad7f22f35dcb38e65a0ff10a2e4eb895ec9de"
+      },
+      "stage_timings_ms": {
+        "bm25_load": 0,
+        "bm25_snapshot": 647,
+        "bm25_anchor": 14,
+        "bm25_query": 30,
+        "context_seed": 2,
+        "graph": 80,
+        "usage": 0,
+        "negative_feedback": 24,
+        "filter": 0,
+        "scheduler": 0,
+        "prepare": 110,
+        "cleanup": 1,
+        "session_load": 0,
+        "teacher": 813,
+        "reranker": 0,
+        "evidence_search": 819,
+        "context": 380,
+        "evidence_reconstruction": 785,
+        "field": 140,
+        "compiler": 1,
+        "reranker_shadow": 860,
+        "finalize": 91
+      },
+      "breaker_open": true
+    },
+    {
+      "schema": "chronovisor.actual-hook-canary.v1",
+      "observed_at": "2026-09-09T18:36:02.051005+00:00",
+      "caller_commit": "7af88177d6a82f17dd54a830e89aed15cfcc413e",
+      "caller_commit_verified": true,
+      "caller_module": "/Users/trafficsign/.cache/uv/archive-v0/qu28_vr6WE-USE-Gs3guO/lib/python3.14/site-packages/chronovisor/hosts/hook_dispatcher.py",
+      "caller_module_sha256": "2c4053dd2d829e659fd482ef5057983662aeb56f4564fe5278010fe3869bb9c8",
+      "exit_code": 0,
+      "full_main_wall_ms": 3525.037,
+      "dispatcher_wall_ms": 3255.638,
+      "decision": "read",
+      "status": "ok",
+      "source_ref_count": 2,
+      "all_sources_match": true,
+      "source_checks": [
+        {
+          "page_id_sha256": "3fb60fd57e35a5736eb9e1dc0567742b42a9c2b92b78c74643175f30bd9fb256",
+          "verified": true
+        },
+        {
+          "page_id_sha256": "3fb60fd57e35a5736eb9e1dc0567742b42a9c2b92b78c74643175f30bd9fb256",
+          "verified": true
+        }
+      ],
+      "query_sha256": "32a134b0445ea16d40d0a391a4dfdf0360aba480e7e8a441cdc79a5e81cb587e",
+      "semantic_rpcs": [
+        {
+          "wall_ms": 164.801,
+          "service_ms": 162.998,
+          "cache_hit": false,
+          "status": "ok"
+        }
+      ],
+      "scope": "actual host deadline and source integrity smoke; not paired quality acceptance",
+      "stdout_sha256": "2e2239a8eefc5f8cf02a4e6ce8fb67e368238b5a3af15283190ae29126161e8d",
+      "additional_context_chars": 2929,
+      "within_3000": true,
+      "reranker_service_mode": "shadow",
+      "actual_stdout_source_verification": {
+        "source_refs": 2,
+        "all_sources_match": true,
+        "context_sha256": "921e67dd114c1fa25580dca78244d408025cd237b479ab0ffddbc0847fe66491"
+      },
+      "stage_timings_ms": {
+        "bm25_load": 0,
+        "bm25_snapshot": 632,
+        "bm25_anchor": 13,
+        "bm25_query": 31,
+        "context_seed": 2,
+        "semantic": 167,
+        "graph": 110,
+        "verify": 12,
+        "usage": 0,
+        "negative_feedback": 26,
+        "filter": 0,
+        "scheduler": 0,
+        "prepare": 112,
+        "cleanup": 1,
+        "session_load": 0,
+        "teacher": 1005,
+        "reranker": 0,
+        "evidence_search": 1011,
+        "context": 307,
+        "evidence_reconstruction": 813,
+        "field": 129,
+        "compiler": 0,
+        "reranker_shadow": 692,
+        "processor_shadow": 0,
+        "finalize": 87
+      },
+      "breaker_open": false
+    }
+  ],
+  "deadline_ms": 4000,
+  "max_total_context_chars": 3000,
+  "scope": "Source-integrity smoke; all failed and degraded attempts retained, no p95 or quality acceptance claim",
+  "final_smoke_passed": true,
+  "diagnostic_attempts": [
+    {
+      "schema": "chronovisor.actual-hook-canary.v1",
+      "observed_at": "2026-09-09T18:31:25.434498+00:00",
+      "caller_commit": "e350714bb864d06c70d5cff2abbef41d7e251885",
+      "caller_commit_verified": true,
+      "caller_module": "/Users/trafficsign/.cache/uv/archive-v0/eenVqoq-x0jYI-qIJmw53/lib/python3.14/site-packages/chronovisor/hosts/hook_dispatcher.py",
+      "caller_module_sha256": "2c4053dd2d829e659fd482ef5057983662aeb56f4564fe5278010fe3869bb9c8",
+      "exit_code": 0,
+      "full_main_wall_ms": 4277.612,
+      "dispatcher_wall_ms": 4113.901,
+      "decision": "none",
+      "status": "timeout",
+      "source_ref_count": 0,
+      "all_sources_match": false,
+      "source_checks": [],
+      "query_sha256": "32a134b0445ea16d40d0a391a4dfdf0360aba480e7e8a441cdc79a5e81cb587e",
+      "semantic_rpcs": [
+        {
+          "wall_ms": 198.171,
+          "service_ms": 196.214,
+          "cache_hit": true,
+          "status": "ok"
+        }
+      ],
+      "scope": "actual host deadline and source integrity smoke; not paired quality acceptance",
+      "measurement": "Instrumented cProfile diagnostic; excluded from ordinary latency comparisons",
+      "stdout_sha256": "a31d6eb1ee22b0f26f5c8e6b8a86644f43cba1ffb64bd6a9a287d1f31c51b532"
+    }
+  ]
+}

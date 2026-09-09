@@ -1,0 +1,466 @@
+{
+  "active_model_after_lease_checks": [
+    {
+      "active_file_present": false,
+      "api": "chronovisor.core.research_scheduler._active_research/_model_is_active",
+      "model_active": false,
+      "model_pid_alive": false,
+      "site_packages": "$HOME/.cache/uv/archive-v0/7LEIwiMpSnuMjHv06-3ft/lib/python3.14/site-packages"
+    }
+  ],
+  "active_model_before_lease": {
+    "active_file_present": false,
+    "api": "chronovisor.core.research_scheduler._active_research/_model_is_active",
+    "model_active": false,
+    "model_pid_alive": false,
+    "site_packages": "$HOME/.cache/uv/archive-v0/7LEIwiMpSnuMjHv06-3ft/lib/python3.14/site-packages"
+  },
+  "active_model_before_mutation_checks": [
+    {
+      "active_file_present": false,
+      "api": "chronovisor.core.research_scheduler._active_research/_model_is_active",
+      "model_active": false,
+      "model_pid_alive": false,
+      "site_packages": "$HOME/.cache/uv/archive-v0/7LEIwiMpSnuMjHv06-3ft/lib/python3.14/site-packages"
+    }
+  ],
+  "checkout_head_before": "40fedee975d06ebab842b9a0ec716abf1d5099db",
+  "ingest_after_lease": {
+    "batch_index": 4,
+    "batch_total": 4,
+    "current_job_active": false,
+    "liveness": {
+      "alert": false,
+      "authority_available": true,
+      "ingest_runtime_available": true,
+      "observed_at": "2026-09-10T03:18:19",
+      "pending_raws": 4,
+      "present": true,
+      "retryable": false,
+      "status": "ready"
+    },
+    "pending": 0,
+    "present": true,
+    "runtime_state": "idle",
+    "stage": "idle",
+    "state": "idle",
+    "updated_at": "2026-09-10T03:19:15"
+  },
+  "ingest_before": {
+    "batch_index": 4,
+    "batch_total": 4,
+    "current_job_active": true,
+    "liveness": {
+      "alert": false,
+      "authority_available": true,
+      "ingest_runtime_available": true,
+      "observed_at": "2026-09-10T03:18:19",
+      "pending_raws": 4,
+      "present": true,
+      "retryable": false,
+      "status": "ready"
+    },
+    "pending": 1,
+    "present": true,
+    "runtime_state": "running",
+    "stage": "complete",
+    "state": "running",
+    "updated_at": "2026-09-10T03:19:10"
+  },
+  "kickstart_return_codes": {
+    "dashboard": 0,
+    "ingest_drain": 0,
+    "lan_dashboard": 0,
+    "reranker": 0,
+    "semantic": 0
+  },
+  "launchctl_before": {
+    "dashboard": {
+      "active_count": 1,
+      "archive_id": "k44d7IZbTBgvN-owrMM9U",
+      "archive_path": "$HOME/.cache/uv/archive-v0/k44d7IZbTBgvN-owrMM9U",
+      "direct_url_commit_id": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "direct_url_matches_target": false,
+      "direct_url_requested_revision": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "label": "com.trafficsign.chronovisor-dashboard.managed-v2",
+      "last_exit_code": "143",
+      "loaded": true,
+      "pid": 8381,
+      "print_rc": 0,
+      "runs": 5,
+      "service_pid": 8993,
+      "site_packages": "$HOME/.cache/uv/archive-v0/k44d7IZbTBgvN-owrMM9U/lib/python3.14/site-packages",
+      "state": "running",
+      "wrapper_pid": 8381
+    },
+    "ingest_drain": {
+      "active_count": 1,
+      "archive_id": "8X_etggmyy-jIXCkEBDQD",
+      "archive_path": "$HOME/.cache/uv/archive-v0/8X_etggmyy-jIXCkEBDQD",
+      "direct_url_commit_id": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "direct_url_matches_target": false,
+      "direct_url_requested_revision": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "label": "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+      "last_exit_code": "143",
+      "loaded": true,
+      "pid": 8415,
+      "print_rc": 0,
+      "runs": 5,
+      "service_pid": 8991,
+      "site_packages": "$HOME/.cache/uv/archive-v0/8X_etggmyy-jIXCkEBDQD/lib/python3.14/site-packages",
+      "state": "running",
+      "wrapper_pid": 8415
+    },
+    "lan_dashboard": {
+      "active_count": 1,
+      "archive_id": "t5_knggwx2VZJ5rqzojFs",
+      "archive_path": "$HOME/.cache/uv/archive-v0/t5_knggwx2VZJ5rqzojFs",
+      "direct_url_commit_id": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "direct_url_matches_target": false,
+      "direct_url_requested_revision": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "label": "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+      "last_exit_code": "143",
+      "loaded": true,
+      "pid": 8395,
+      "print_rc": 0,
+      "runs": 5,
+      "service_pid": 8992,
+      "site_packages": "$HOME/.cache/uv/archive-v0/t5_knggwx2VZJ5rqzojFs/lib/python3.14/site-packages",
+      "state": "running",
+      "wrapper_pid": 8395
+    },
+    "reranker": {
+      "active_count": 1,
+      "archive_id": "Djtbpt5B1cuBBMqQr4UtC",
+      "archive_path": "$HOME/.cache/uv/archive-v0/Djtbpt5B1cuBBMqQr4UtC",
+      "direct_url_commit_id": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "direct_url_matches_target": false,
+      "direct_url_requested_revision": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "label": "com.trafficsign.chronovisor-reranker.managed-v2",
+      "last_exit_code": "1",
+      "loaded": true,
+      "pid": 9467,
+      "print_rc": 0,
+      "runs": 10,
+      "service_pid": 9486,
+      "site_packages": "$HOME/.cache/uv/archive-v0/Djtbpt5B1cuBBMqQr4UtC/lib/python3.14/site-packages",
+      "state": "running",
+      "wrapper_pid": 9467
+    },
+    "semantic": {
+      "active_count": 1,
+      "archive_id": "a6-wz_DQ1ArUGigu16htg",
+      "archive_path": "$HOME/.cache/uv/archive-v0/a6-wz_DQ1ArUGigu16htg",
+      "direct_url_commit_id": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "direct_url_matches_target": false,
+      "direct_url_requested_revision": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "label": "com.trafficsign.chronovisor-semantic.managed-v2",
+      "last_exit_code": "1",
+      "loaded": true,
+      "pid": 9946,
+      "print_rc": 0,
+      "runs": 11,
+      "service_pid": 9965,
+      "site_packages": "$HOME/.cache/uv/archive-v0/a6-wz_DQ1ArUGigu16htg/lib/python3.14/site-packages",
+      "state": "running",
+      "wrapper_pid": 9946
+    }
+  },
+  "lease_acquired_at": "2026-09-09T18:19:17.031Z",
+  "lease_attempts": 1,
+  "lease_last_state": {
+    "ingest_lock_acquired": true,
+    "ingest_lock_attempts": 5,
+    "ingest_lock_released": true,
+    "ingest_lock_wait_s": 4.029
+  },
+  "lease_wait_snapshot": {
+    "ingest_lock_acquired": true,
+    "ingest_lock_attempts": 5,
+    "ingest_lock_wait_s": 4.029
+  },
+  "lock_available_before": false,
+  "native20": {
+    "batch_sha256": "2254a940d44cdfe21a9a56e314bf8445b70be34c06ff652c25d0dc38137b60b9",
+    "execution_started": true,
+    "finished_at": "2026-09-09T18:10:17+00:00",
+    "foreground": {
+      "entered": true,
+      "preempted": true,
+      "released": true,
+      "research_overlap": true
+    },
+    "model_calls": 38,
+    "raw_mutated": false,
+    "summary": {
+      "completed": 20,
+      "failed": 7,
+      "pending": 0,
+      "running": 0,
+      "skipped": 0,
+      "success": 13,
+      "total": 20
+    },
+    "window_sha256": "c4d3927cfbdf42178d3bc36efeb272f58af0a13f3346b2906fc5d9cfd73e4556",
+    "window_status": "failed",
+    "canonical_raw_pages_index_mutated": false,
+    "background_review_preempted": true,
+    "generation_call_count_source": "p2-c2-native20-results.json: first20 + repair18; previous wrapper model_calls=0 did not count nested provider calls"
+  },
+  "preemption_and_recovery": {
+    "librarian_cancellation_was_observed": true,
+    "librarian_current_before_cutover": {
+      "active_count": 1,
+      "enabled": true,
+      "generation": 6181,
+      "label": "com.trafficsign.chronovisor-librarian-review.managed-v2",
+      "last_exit_code": "0",
+      "last_swept_scope_generation": "sha256:9fb0d4fdf17246ba226378fabb6e0960fa83cfde4eb25433c1254eec11f16361",
+      "loaded": true,
+      "mode": "active",
+      "pid": 96313,
+      "print_rc": 0,
+      "process_count": 2,
+      "processes_alive": true,
+      "queue": {
+        "actionable": 500,
+        "completed": 4156,
+        "held": 3676,
+        "queued": 500,
+        "running": 0
+      },
+      "runs": 183,
+      "scope_generation": "sha256:9fb0d4fdf17246ba226378fabb6e0960fa83cfde4eb25433c1254eec11f16361",
+      "state": "running"
+    },
+    "native20_foreground_overlap_preempted": true,
+    "native20_pages_or_index_mutated": false,
+    "native20_raw_mutated": false,
+    "note": "Native20 foreground entered while librarian research overlapped; its child was cancelled by the existing foreground mechanism. This receipt keeps that event distinct from the cutover and defines no production mutation narrowly as canonical Raw/pages/index unchanged."
+  },
+  "private_config_backup": {
+    "mode": "0o600",
+    "sha256": "06bc66cf60163bbef9fe20b8a252e15cd9b172c4a77655726f972d40cf5932e8"
+  },
+  "push_performed_by_this_agent": false,
+  "recorded_at": "2026-09-09T18:19:09.192Z",
+  "recorded_at_end": "2026-09-09T18:20:58.989Z",
+  "remote_main_sha": "e350714bb864d06c70d5cff2abbef41d7e251885",
+  "restart_performed_by_this_agent": true,
+  "runtime_config_after": {
+    "max_context_chars": 3000,
+    "max_state_context_chars": 1600,
+    "max_total_context_chars": 3000,
+    "mode": "0o600",
+    "query_timeout_ms": null,
+    "runtime_source": "git+ssh://git@github.com/trafficsign/chronovisor@e350714bb864d06c70d5cff2abbef41d7e251885",
+    "runtime_source_sha": "e350714bb864d06c70d5cff2abbef41d7e251885",
+    "sha256": "4876ef7a2997495d8c4d8c352683748af8f64bf0266c5c8d1f3b9ef3a4945bde"
+  },
+  "runtime_config_before": {
+    "max_context_chars": 3000,
+    "max_state_context_chars": 1600,
+    "max_total_context_chars": 4602,
+    "mode": "0o600",
+    "query_timeout_ms": null,
+    "runtime_source": "git+ssh://git@github.com/trafficsign/chronovisor@0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+    "runtime_source_sha": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+    "sha256": "06bc66cf60163bbef9fe20b8a252e15cd9b172c4a77655726f972d40cf5932e8"
+  },
+  "schema": "chronovisor.final-runtime-deployment.v1",
+  "scope": "correction-source + recall max_total_context_chars cutover; five managed-v2 services",
+  "target_commit": "e350714bb864d06c70d5cff2abbef41d7e251885",
+  "status": "deployed-then-superseded-by-state-budget-fix",
+  "verified_at": "2026-09-09T18:27:51.621245+00:00",
+  "services_after": {
+    "dashboard": {
+      "label": "com.trafficsign.chronovisor-dashboard.managed-v2",
+      "wrapper_pid": 97670,
+      "running": true,
+      "archives": [
+        {
+          "pid": 97904,
+          "archive": "/Users/trafficsign/.cache/uv/archive-v0/eenVqoq-x0jYI-qIJmw53",
+          "commit": "e350714bb864d06c70d5cff2abbef41d7e251885"
+        }
+      ],
+      "all_match": true
+    },
+    "lan_dashboard": {
+      "label": "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+      "wrapper_pid": 97672,
+      "running": true,
+      "archives": [
+        {
+          "pid": 97905,
+          "archive": "/Users/trafficsign/.cache/uv/archive-v0/TlDYrFSYkw08uj7IzhyIU",
+          "commit": "e350714bb864d06c70d5cff2abbef41d7e251885"
+        }
+      ],
+      "all_match": true
+    },
+    "ingest_drain": {
+      "label": "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+      "wrapper_pid": 97679,
+      "running": true,
+      "archives": [
+        {
+          "pid": 97906,
+          "archive": "/Users/trafficsign/.cache/uv/archive-v0/dVjOQskUgRA34nF74SFNF",
+          "commit": "e350714bb864d06c70d5cff2abbef41d7e251885"
+        }
+      ],
+      "all_match": true
+    },
+    "semantic": {
+      "label": "com.trafficsign.chronovisor-semantic.managed-v2",
+      "wrapper_pid": 97719,
+      "running": true,
+      "archives": [
+        {
+          "pid": 97902,
+          "archive": "/Users/trafficsign/.cache/uv/archive-v0/KMV-sJBab0hffMXkBwOkj",
+          "commit": "e350714bb864d06c70d5cff2abbef41d7e251885"
+        }
+      ],
+      "all_match": true
+    },
+    "reranker": {
+      "label": "com.trafficsign.chronovisor-reranker.managed-v2",
+      "wrapper_pid": 98325,
+      "running": true,
+      "archives": [
+        {
+          "pid": 98344,
+          "archive": "/Users/trafficsign/.cache/uv/archive-v0/6so6dBdFAcKYXzRc3lC3D",
+          "commit": "e350714bb864d06c70d5cff2abbef41d7e251885"
+        }
+      ],
+      "all_match": true
+    }
+  },
+  "health_after": {
+    "status": "ok",
+    "stale": true,
+    "refreshing": true,
+    "materialized_at": "2026-09-09T18:21:59Z",
+    "runtime": {
+      "github_repository": "trafficsign/chronovisor",
+      "user_agent": "Chronovisor/0.1 (+https://github.com/trafficsign/chronovisor)",
+      "launchd_label_prefix": "com.trafficsign.chronovisor-",
+      "ollama_url": "http://localhost:11434",
+      "dashboard": {
+        "host": "127.0.0.1",
+        "port": 8765,
+        "url": "http://127.0.0.1:8765"
+      },
+      "runtime_source": "git+ssh://git@github.com/trafficsign/chronovisor@e350714bb864d06c70d5cff2abbef41d7e251885",
+      "commit_id": "e350714bb864d06c70d5cff2abbef41d7e251885",
+      "expected_commit": "e350714bb864d06c70d5cff2abbef41d7e251885",
+      "drift": false,
+      "archive_path": "/Users/trafficsign/.cache/uv/archive-v0/eenVqoq-x0jYI-qIJmw53/lib/python3.14",
+      "module_path": "/Users/trafficsign/.cache/uv/archive-v0/eenVqoq-x0jYI-qIJmw53/lib/python3.14/site-packages/chronovisor/core/runtime_config.py",
+      "package_version": "0.2.0",
+      "direct_url": {
+        "url": "ssh://git@github.com/trafficsign/chronovisor",
+        "vcs_info": {
+          "vcs": "git",
+          "commit_id": "e350714bb864d06c70d5cff2abbef41d7e251885",
+          "requested_revision": "e350714bb864d06c70d5cff2abbef41d7e251885"
+        }
+      }
+    }
+  },
+  "lan_tls": {
+    "certificate_verified": true,
+    "unauthenticated_http_status": 401
+  },
+  "ingest_liveness_after": {
+    "schema_version": 2,
+    "status": "idle",
+    "observed_at": "2026-09-10T03:27:40",
+    "pending_raws": 0,
+    "ingest_runtime_available": true,
+    "authority_available": true,
+    "alert": false,
+    "retryable": false,
+    "consecutive_unavailable_checks": 0,
+    "unavailable_since": null,
+    "last_recovered_at": "2026-09-06T09:26:53",
+    "error": "",
+    "authority_preflight": null,
+    "transitioned": false
+  },
+  "live_canary_receipt": "p5-final-live-canary.json",
+  "semantic_after": {
+    "status": "ok",
+    "pid": 97902,
+    "ready": true,
+    "maintenance": false,
+    "generation_id": "20260811T043448Z-f94f352690dd-46626a",
+    "self_test": {
+      "device": "mlx",
+      "dimensions": 2048,
+      "positive_score": 0.48864585161209106,
+      "negative_score": 0.11380437016487122
+    },
+    "query_path_self_test": {
+      "queries": 3,
+      "hits": 3,
+      "latency_ms": 419.035
+    },
+    "last_error": "",
+    "batcher": {
+      "queue_depth": 0,
+      "active_batch_size": 0,
+      "queue_wait_samples": 1,
+      "queue_wait_p50_ms": 2.705,
+      "queue_wait_p95_ms": 2.705,
+      "submitted": 1,
+      "completed": 1,
+      "expired": 0,
+      "cancelled": 0,
+      "queue_full": 0
+    },
+    "queries": {
+      "samples": 2,
+      "errors": 0,
+      "attempts": 4,
+      "successes": 4,
+      "timeouts": 0,
+      "failures": 0,
+      "late_reload_count": 0,
+      "late_reload_ms": 0.0,
+      "p50_ms": 351.292,
+      "p95_ms": 486.871,
+      "max_ms": 501.935
+    },
+    "index": {
+      "current_page_count": 7839,
+      "covered_page_count": 7839,
+      "missing_page_count": 0,
+      "stale_page_count": 0,
+      "deleted_page_count": 0,
+      "coverage": 1.0
+    }
+  },
+  "reranker_after": {
+    "status": "ok",
+    "verified_with": "scripts/chronovisor-reranker-service status"
+  },
+  "reranker_shadow_config_change": {
+    "observed_at": "2026-09-09T18:29:46.260254+00:00",
+    "field": "search.reranker.service.mode",
+    "before": "shadow",
+    "after": "off",
+    "reason": "Synchronous non-authoritative shadow used833ms inside4s hook deadline; disable existing optional comparison path without changing answer ranking or certificate checks",
+    "backup": "/Users/trafficsign/.chronovisor/runtime/deployment-backups/config.toml.pre-reranker-shadow-off-20260909T182946Z",
+    "backup_sha256": "4876ef7a2997495d8c4d8c352683748af8f64bf0266c5c8d1f3b9ef3a4945bde",
+    "config_after_sha256": "2bfc0025b5be116b7c299b72290cbab411e8795fc1fd4c6527f325697aae7df4",
+    "restart_required_for_fresh_hook": false,
+    "restored_to": "shadow",
+    "reason_restored": "Diagnostic exclusion did not resolve timeout; root cause is non-progress state register truncation. Preserve original comparison config.",
+    "config_restored_sha256": "4876ef7a2997495d8c4d8c352683748af8f64bf0266c5c8d1f3b9ef3a4945bde"
+  },
+  "followup_receipt": "p5-state-budget-followup-deployment.json"
+}

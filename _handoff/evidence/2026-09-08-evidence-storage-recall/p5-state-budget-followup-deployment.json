@@ -1,0 +1,189 @@
+{
+  "schema": "chronovisor.state-budget-followup-deployment.v1",
+  "target_commit": "7af88177d6a82f17dd54a830e89aed15cfcc413e",
+  "remote_main_verified": "7af88177d6a82f17dd54a830e89aed15cfcc413e",
+  "previous_commit": "e350714bb864d06c70d5cff2abbef41d7e251885",
+  "started_at": "2026-09-09T18:33:23.361116+00:00",
+  "reason": "Fix state context non-progress loop under small remaining budget",
+  "lease_acquired": true,
+  "lease_wait_s": 0.0,
+  "active_model_before_mutation": false,
+  "config_backup": "/Users/trafficsign/.chronovisor/runtime/deployment-backups/config.toml.pre-state-budget-fix-20260909T183323Z",
+  "backup_sha256": "4876ef7a2997495d8c4d8c352683748af8f64bf0266c5c8d1f3b9ef3a4945bde",
+  "config_sha256": "8e59234172bc3ec8546de68b52fc8de4c16e3ab48d7bf4381c7f7b39da4ff82a",
+  "max_total_context_chars": 3000,
+  "reranker_mode": "shadow",
+  "kickstart_return_codes": {
+    "dashboard": 0,
+    "lan-dashboard": 0,
+    "ingest-drain": 0,
+    "semantic": 0,
+    "reranker": 0
+  },
+  "status": "verified-correctness-smoke",
+  "lease_released": true,
+  "finished_at": "2026-09-09T18:33:24.897182+00:00",
+  "services_after": {
+    "dashboard": {
+      "wrapper_pid": 5761,
+      "running": true,
+      "archives": [
+        {
+          "pid": 6029,
+          "archive": "/Users/trafficsign/.cache/uv/archive-v0/qu28_vr6WE-USE-Gs3guO",
+          "commit": "7af88177d6a82f17dd54a830e89aed15cfcc413e"
+        }
+      ],
+      "all_match": true
+    },
+    "lan-dashboard": {
+      "wrapper_pid": 5768,
+      "running": true,
+      "archives": [
+        {
+          "pid": 6031,
+          "archive": "/Users/trafficsign/.cache/uv/archive-v0/2Y5zk8c9vlBWrzjOkKg_t",
+          "commit": "7af88177d6a82f17dd54a830e89aed15cfcc413e"
+        }
+      ],
+      "all_match": true
+    },
+    "ingest-drain": {
+      "wrapper_pid": 5773,
+      "running": true,
+      "archives": [
+        {
+          "pid": 6030,
+          "archive": "/Users/trafficsign/.cache/uv/archive-v0/2Emfg06BK_zpcI0Mr4LJN",
+          "commit": "7af88177d6a82f17dd54a830e89aed15cfcc413e"
+        }
+      ],
+      "all_match": true
+    },
+    "semantic": {
+      "wrapper_pid": 5800,
+      "running": true,
+      "archives": [
+        {
+          "pid": 6018,
+          "archive": "/Users/trafficsign/.cache/uv/archive-v0/NeQ7wyU2WSyY5x9EnX8KX",
+          "commit": "7af88177d6a82f17dd54a830e89aed15cfcc413e"
+        }
+      ],
+      "all_match": true
+    },
+    "reranker": {
+      "wrapper_pid": 6648,
+      "running": true,
+      "archives": [
+        {
+          "pid": 6667,
+          "archive": "/Users/trafficsign/.cache/uv/archive-v0/IJuUGhJhg6jyxaVXI6WC-",
+          "commit": "7af88177d6a82f17dd54a830e89aed15cfcc413e"
+        }
+      ],
+      "all_match": true
+    }
+  },
+  "health_error": "timed out",
+  "semantic_after": {
+    "status": "ok",
+    "pid": 6018,
+    "ready": true,
+    "maintenance": false,
+    "generation_id": "20260811T043448Z-f94f352690dd-46626a",
+    "self_test": {
+      "device": "mlx",
+      "dimensions": 2048,
+      "positive_score": 0.48864585161209106,
+      "negative_score": 0.11380437016487122
+    },
+    "query_path_self_test": {
+      "queries": 3,
+      "hits": 3,
+      "latency_ms": 393.522
+    },
+    "last_error": "",
+    "index": {
+      "current_page_count": 7839,
+      "covered_page_count": 7839,
+      "missing_page_count": 0,
+      "stale_page_count": 0,
+      "deleted_page_count": 0,
+      "coverage": 1.0
+    }
+  },
+  "reranker_after": {
+    "returncode": 0,
+    "output": "reranker_service\tok"
+  },
+  "health_after": {
+    "status": "ok",
+    "stale": true,
+    "refreshing": true,
+    "materialized_at": "2026-09-09T18:28:01Z",
+    "runtime": {
+      "github_repository": "trafficsign/chronovisor",
+      "user_agent": "Chronovisor/0.1 (+https://github.com/trafficsign/chronovisor)",
+      "launchd_label_prefix": "com.trafficsign.chronovisor-",
+      "ollama_url": "http://localhost:11434",
+      "dashboard": {
+        "host": "127.0.0.1",
+        "port": 8765,
+        "url": "http://127.0.0.1:8765"
+      },
+      "runtime_source": "git+ssh://git@github.com/trafficsign/chronovisor@7af88177d6a82f17dd54a830e89aed15cfcc413e",
+      "commit_id": "7af88177d6a82f17dd54a830e89aed15cfcc413e",
+      "expected_commit": "7af88177d6a82f17dd54a830e89aed15cfcc413e",
+      "drift": false,
+      "archive_path": "/Users/trafficsign/.cache/uv/archive-v0/qu28_vr6WE-USE-Gs3guO/lib/python3.14",
+      "module_path": "/Users/trafficsign/.cache/uv/archive-v0/qu28_vr6WE-USE-Gs3guO/lib/python3.14/site-packages/chronovisor/core/runtime_config.py",
+      "package_version": "0.2.0",
+      "direct_url": {
+        "url": "ssh://git@github.com/trafficsign/chronovisor",
+        "vcs_info": {
+          "vcs": "git",
+          "commit_id": "7af88177d6a82f17dd54a830e89aed15cfcc413e",
+          "requested_revision": "7af88177d6a82f17dd54a830e89aed15cfcc413e"
+        }
+      }
+    }
+  },
+  "lan_tls": {
+    "curl_exit": 0,
+    "certificate_verified": true,
+    "unauthenticated_status": "401"
+  },
+  "ingest_liveness_after": {
+    "schema_version": 2,
+    "status": "idle",
+    "observed_at": "2026-09-10T03:34:56",
+    "pending_raws": 0,
+    "ingest_runtime_available": true,
+    "authority_available": true,
+    "alert": false,
+    "retryable": false,
+    "consecutive_unavailable_checks": 0,
+    "unavailable_since": null,
+    "last_recovered_at": "2026-09-06T09:26:53",
+    "error": "",
+    "authority_preflight": null,
+    "transitioned": false
+  },
+  "verified_at": "2026-09-09T18:35:40.491094+00:00",
+  "live_canary_receipt": "p5-final-live-canary.json",
+  "live_canary_passed": true,
+  "full_recall_quality_accepted": false,
+  "cleanup": {
+    "deployment_lease_released": true,
+    "diagnostic_reranker_config_restored": "shadow",
+    "private_evaluation_services": "stopped; prior P4 receipt",
+    "retained": "Frozen source/index/protocol/gold/CAS/output/profile and rollback archives retained for reproducibility",
+    "canonical_data_not_deleted": true
+  },
+  "limitations": [
+    "Health materialized snapshot stale; runtime identity and direct service probes verified separately",
+    "Post-restart cold semantic timeout and breaker fallback retained among canary attempts",
+    "No revised p95 or answer-accuracy acceptance"
+  ]
+}

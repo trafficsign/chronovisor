@@ -1,0 +1,44 @@
+{
+  "schema": "chronovisor.state-context-budget-regression.v1",
+  "main_commit": "1de4b01",
+  "release_commit": "7af88177d6a82f17dd54a830e89aed15cfcc413e",
+  "cause": "Truncation selected content longer than24, but its floor24 plus three-dot suffix produced minimum27. Under insufficient remaining context, JSON never became smaller and loop never ended.",
+  "profile": {
+    "sha256": "f9a593481a8c6f27c9d1492fb008761163dcf2105e44561ee56fbce98f7053cc",
+    "state_formatter_interrupted_cumulative_ms": 859,
+    "json_dumps_calls": 171022,
+    "note": "Instrumented diagnostic; timings not uninstrumented latency acceptance"
+  },
+  "baseline_reproduction": {
+    "budget": 600,
+    "json_dump_guard": 50,
+    "result": "non-progress loop reproduced"
+  },
+  "fix": [
+    "Return empty state when framing alone cannot fit",
+    "Use21 content characters plus three-dot suffix as24-character floor, so each iteration strictly shrinks"
+  ],
+  "validation": {
+    "main_state_and_recall_tests": 234,
+    "release_state_and_recall_tests": 234,
+    "ruff": "passed",
+    "diff_check": "passed",
+    "regression_budgets": [
+      0,
+      100,
+      600,
+      850,
+      1200
+    ],
+    "bounded_serialization_and_valid_json": true
+  },
+  "config_diagnostic": {
+    "reranker_shadow_temporarily_disabled": true,
+    "timeout_persisted": true,
+    "restored_to_original_shadow": true,
+    "processor_shadow_unchanged": true,
+    "deadline_ms": 4000,
+    "max_total_context_chars": 3000
+  },
+  "retained_profile": "private evaluation archive; no source bodies in this receipt"
+}
