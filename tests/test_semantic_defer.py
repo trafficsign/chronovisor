@@ -350,6 +350,60 @@ def test_guarded_semantic_publish_keeps_newer_operational_hold_atomic(
     assert unrelated is accepted
 
 
+def test_scoped_deferred_lookup_does_not_resolve_unrelated_failure_rows(
+    semantic_defer_wiki: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scoped status query must not rescan the complete Raw archive."""
+
+    from chronovisor.core import raw_store
+    from chronovisor.core.raw_store import RawUnit
+    from chronovisor.ingest import failure_supervisor
+
+    chronovisor_root, _artifact = semantic_defer_wiki
+    target = chronovisor_root / "raw" / "target.md"
+    target.write_text("target source\n", encoding="utf-8")
+    unrelated_name = "unrelated.md"
+    monkeypatch.setattr(
+        failure_supervisor,
+        "_load_state",
+        lambda: {
+            "failures": {
+                target.name: {
+                    "failure_class": "ingest.runtime_schema_invalid",
+                    "self_heal_queued": True,
+                },
+                unrelated_name: {
+                    "failure_class": "ingest.runtime_schema_invalid",
+                    "self_heal_queued": True,
+                },
+            }
+        },
+    )
+    failures_dir = chronovisor_root / "runtime" / "failures"
+    failures_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        failure_supervisor,
+        "_runtime_failures_dir",
+        lambda: failures_dir,
+    )
+
+    real_raw_store = raw_store.RawStore
+    resolve_calls: list[str] = []
+
+    class CountingRawStore(real_raw_store):
+        def resolve(self, raw_id: str) -> RawUnit | None:
+            resolve_calls.append(raw_id)
+            return super().resolve(raw_id)
+
+    monkeypatch.setattr(raw_store, "RawStore", CountingRawStore)
+
+    assert failure_supervisor.operational_deferred_raw_files([target]) == {
+        target.name: "packet_missing",
+    }
+    assert resolve_calls == []
+
+
 def test_authority_artifact_change_reopens_and_unreadable_artifact_fails_closed(
     semantic_defer_wiki: tuple[Path, Path],
 ) -> None:

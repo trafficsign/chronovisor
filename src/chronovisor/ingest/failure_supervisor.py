@@ -13,7 +13,7 @@ import json
 import re
 import shutil
 import threading
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -973,6 +973,7 @@ def _semantic_packet_source_raws(
 def _semantic_defer_packet_records(
     *,
     verify_sources: bool,
+    raw_names: Collection[str] | None = None,
 ) -> list[tuple[Path, dict[str, Any], frozenset[str]]]:
     """Read active semantic packets; superseded/released packets are excluded."""
 
@@ -996,6 +997,15 @@ def _semantic_defer_packet_records(
             or packet.get("failure_class") != SEMANTIC_NO_QUORUM_FAILURE_CLASS
         ):
             continue
+        if raw_names is not None:
+            source_raws = packet.get("source_raws")
+            if not isinstance(source_raws, list) or not any(
+                isinstance(source, dict)
+                and isinstance(source.get("filename"), str)
+                and source["filename"] in raw_names
+                for source in source_raws
+            ):
+                continue
         authority_sha256 = packet.get("authority_artifact_sha256")
         if (
             not isinstance(authority_sha256, str)
@@ -1024,8 +1034,14 @@ def current_adopted_authority_epoch() -> str | None:
 def semantic_defer_packet_records(
     *,
     verify_sources: bool,
+    raw_names: Collection[str] | None = None,
 ) -> list[tuple[Path, dict[str, Any], frozenset[str]]]:
-    return _semantic_defer_packet_records(verify_sources=verify_sources)
+    if raw_names is None:
+        return _semantic_defer_packet_records(verify_sources=verify_sources)
+    return _semantic_defer_packet_records(
+        verify_sources=verify_sources,
+        raw_names=raw_names,
+    )
 
 
 def _release_semantic_defer_packet(
@@ -1879,6 +1895,7 @@ def _operational_deferred_raw_files_unlocked(
     failures = state.get("failures")
     if not isinstance(failures, dict):
         failures = {}
+    scoped_raw_names: set[str] | None = None
     if raw_paths is None:
         from chronovisor.core.raw_store import RawStore
 
@@ -1894,6 +1911,7 @@ def _operational_deferred_raw_files_unlocked(
         }
     else:
         available_paths = {path.name: path for path in raw_paths}
+        scoped_raw_names = set(available_paths)
     deferred: dict[str, str] = {}
     authority_sha256_loaded = False
     current_authority_sha256: str | None = None
@@ -1902,6 +1920,8 @@ def _operational_deferred_raw_files_unlocked(
 
     for raw_file, value in list(failures.items()):
         if not isinstance(raw_file, str) or not isinstance(value, dict):
+            continue
+        if scoped_raw_names is not None and raw_file not in scoped_raw_names:
             continue
         if (
             value.get("terminal_deferred") is True
@@ -1953,6 +1973,11 @@ def _operational_deferred_raw_files_unlocked(
                 continue
         raw_path = available_paths.get(raw_file)
         if raw_path is None:
+            if scoped_raw_names is not None:
+                # Explicitly scoped callers must not resolve unrelated failure
+                # rows through the complete RawStore.  That fallback is only
+                # valid for the unscoped, whole-archive query above.
+                continue
             from chronovisor.core.raw_store import RawStore
 
             store = RawStore(chronovisor_store.RAW_DIR)
@@ -1976,9 +2001,14 @@ def _operational_deferred_raw_files_unlocked(
     # The semantic packet is published before state.json. Rebuild the hold
     # directly from byte-bound packet evidence so a crash, missing state file,
     # malformed state JSON, or a lost per-raw entry cannot trigger blind replay.
-    for _packet_path, packet, packet_raws in _semantic_defer_packet_records(
-        verify_sources=True
-    ):
+    if scoped_raw_names is None:
+        packet_records = _semantic_defer_packet_records(verify_sources=True)
+    else:
+        packet_records = _semantic_defer_packet_records(
+            verify_sources=True,
+            raw_names=scoped_raw_names,
+        )
+    for _packet_path, packet, packet_raws in packet_records:
         stored_authority_epoch = packet.get(
             "authority_epoch",
             packet["authority_artifact_sha256"],
@@ -1991,6 +2021,8 @@ def _operational_deferred_raw_files_unlocked(
             or current_authority_epoch == stored_authority_epoch
         ):
             for raw_file in packet_raws:
+                if scoped_raw_names is not None and raw_file not in scoped_raw_names:
+                    continue
                 deferred[raw_file] = SEMANTIC_NO_QUORUM_DEFER_REASON
         # A different executable authority epoch is the automatic release
         # condition. Superseded and explicitly released packets never reach
