@@ -162,6 +162,54 @@
       "token_count_exact": false
     },
     "conclusion": "Client watchdog expired; no throughput or completed-review improvement is established. The private index builder resumed automatically before the watchdog.",
-    "preregistration_sha256": "abe51dcc8258e20b9aa9bd273fa576754314bbabade25a4e52fd426560733346"
+    "preregistration_sha256": "abe51dcc8258e20b9aa9bd273fa576754314bbabade25a4e52fd426560733346",
+    "stale_activity_cleanup": {
+      "pid": 59399,
+      "owner_absent_confirmed": true,
+      "action": "moved from private active directory to failed-probe-activity without changing bytes",
+      "sha256": "6c11a52d0a21ca0165f35c72f5324e7c0ab790a6d9b907e62faae1a0d5f8e7b5"
+    }
+  },
+  "nothink512_probe": {
+    "observed_at": "2026-09-09T11:48:29.510060+00:00",
+    "requested_num_predict": 512,
+    "reasoning_disabled": true,
+    "official_adopted_authority_preserved": true,
+    "separate_consensus_ledger": true,
+    "runtime": {
+      "started_at": "2026-09-09T11:45:43.203889+00:00",
+      "status": "completed",
+      "returncode": 0,
+      "elapsed_seconds": 32.46,
+      "log_sha256": "ec00377eb155f7002990ef58ffa6cf7852540adb290d54f115abe76cd4bb3bb9",
+      "builder_paused_seconds": 42.462,
+      "production_process_stopped": false
+    },
+    "accepted": 1,
+    "already": 0,
+    "pending": 269,
+    "repair_turns": 0,
+    "receipt_sha256": "8040a69a4d2a4d56cc32da09856f13749a4673cc62d66c470ec775cd90841646",
+    "execution_fingerprint": "7b61f16950a97d7657db6b4a8f1542aa47de4687c137ab2b0e0cc88551efde06",
+    "code_commit": "dd292b7",
+    "release_commit": "eb96bc2",
+    "tests": {
+      "related_passed": 191,
+      "release_passed": 14,
+      "ruff": "passed"
+    },
+    "generation_policy_sha256_unchanged": true,
+    "legacy_identity_unchanged_by_default": true,
+    "adopted_for_remaining_review": true,
+    "remaining_review_helper_sha256": "6b34f34f64c7ffb017343738396a5ae010622f5abad62ece6d8d369d950046a1",
+    "original_receipt_revalidated": {
+      "already": 1,
+      "pending": 269,
+      "stale": 0,
+      "model_calls": 0
+    },
+    "quality_queries_executed": 0,
+    "preregistration_sha256": "eb6456fa473b52832e368edbfd0921fd1b30d9f6a8600994e0a1a0e8587f6f21",
+    "limitation": "One same-source probe; not a throughput percentile or a controlled causal decomposition. Original review and failed 512-budget probe remain preserved."
   }
 }
