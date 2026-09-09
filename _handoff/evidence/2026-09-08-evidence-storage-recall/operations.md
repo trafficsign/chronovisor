@@ -14,7 +14,7 @@
 - [P3 validation](p3-validation.json): active generation の extractor 追従、更新/rebuild/rollback の接続と CAS 回帰を確認。既定 extractor は 2、候補 C は 3、production 変更はなし。
 - [P5 cutover](p5-runtime-cutover.json): push、対象サービス再起動、archive `direct_url` provenance、health を確認。ただし full production acceptance と live processing canary は未完了。
 
-現在は C を採用せず、production の extractor 2 を維持する。`query_timeout_ms=800` の後続 canary は source reference 2 件の byte/SHA 一致まで確認できたが、wall time 4.31 秒で全体の 4 秒契約を超えたため、受入済みとは扱わない。4 秒の caller budget と paired p95 非劣化を保ったまま再検証する。
+現在は C を採用せず、production の extractor 2 を維持する。`query_timeout_ms=800` と台帳重複読込修正を d98adcd に配布。未使用 query の実 hook 出力で source reference 2 件の byte/SHA 一致、プロセス起動から実 stdout まで 3.749 秒を確認した。これは欠落修正の限定 canary であり、別言い換えの degraded / lexical-only 結果も保持する。全体品質と cold/warm paired p95 非劣化は未測定で、C の採用条件には代用しない。
 
 ## 1. 変更しない契約と新規保存
 
@@ -251,7 +251,7 @@ EXPECTED_SHA="<pushed-release-commit>"
 test "$EXPECTED_SHA" = "$(git ls-remote origin refs/heads/main | cut -f1)"
 ```
 
-最後に semantic の status/health と task-specific live query を確認する。`scripts/chronovisor-semantic-service status` の `ready` は archive provenance、generation ID、source byte/SHA、4 秒 caller budget の受入を代替しない。現在の canary は wall 4.31 秒で hold 中なので、source が一致しても受入済みと記録しない。
+最後に semantic の status/health と task-specific live query を確認する。`scripts/chronovisor-semantic-service status` の `ready` は archive provenance、generation ID、source byte/SHA、4 秒 caller budget の受入を代替しない。最新の限定 canary は起動から実 stdout まで 3.749 秒、source 2 件一致。paired 品質・p95 と本番 ingest 実処理の確認は別の受入条件として記録する。
 
 ```sh
 CHRONOVISOR_ROOT="$HOME/.chronovisor" scripts/chronovisor-semantic-service status
@@ -279,4 +279,4 @@ rollback を行う場合は、まず `active.json` の `generation_id` が想定
 
 ### この runbook の検証範囲
 
-参照したコードの graph coverage は、`semantic_index.py`、`page_evidence.py`、`page_evidence_projection.py`、`page_section_semantic_adapter.py`、`research_store.py`、`semantic_service.py`、`search.py`、`semantic_client.py` すべて `no_recorded_issue / metadata_match` だった（knowledge graph の best-effort 信号であり、ソース完全性の証明ではない）。この文書自体のコマンド、隔離 rebuild、全件 CAS publish、追加 restart、4 秒 canary の再実行は未実施である。
+参照したコードの graph coverage は、`semantic_index.py`、`page_evidence.py`、`page_evidence_projection.py`、`page_section_semantic_adapter.py`、`research_store.py`、`semantic_service.py`、`search.py`、`semantic_client.py` すべて `no_recorded_issue / metadata_match` だった（knowledge graph の best-effort 信号であり、ソース完全性の証明ではない）。この文書自体のコマンド、隔離 rebuild、全件 CAS publish、追加 restart をこの手順例で実行したわけではない。実際の配布と 4 秒 canary は上記の個別 receipt を正本とする。
