@@ -29,6 +29,7 @@ from chronovisor.research.evidence_reconstruction import (
     EVALUATION_CONTRACT,
     EVALUATION_CONTRACT_SHA256,
     EVIDENCE_AUTHORITY_ROLES,
+    EVIDENCE_PACKET_C2_SCHEMA,
     EVIDENCE_PACKET_SCHEMA,
     EpisodeProjection,
     EvidenceAtom,
@@ -1028,7 +1029,12 @@ def evidence_publication_payload(
                 "stop_rules": program["stop_rules"],
             },
         )
-        rebuilt_packet = build_evidence_packet(
+        packet_builder = (
+            build_evidence_packet_c2
+            if packet_value.schema == EVIDENCE_PACKET_C2_SCHEMA
+            else build_evidence_packet
+        )
+        rebuilt_packet = packet_builder(
             query=packet_value.query,
             as_of=packet_value.as_of,
             retrieval_program_id=packet_value.retrieval_program_id,
@@ -1198,7 +1204,11 @@ def _verified_applied_session(
             "abstained",
             "abstention_reason",
         }
-        or packet.get("schema") != EVIDENCE_PACKET_SCHEMA
+        or packet.get("schema") != (
+            EVIDENCE_PACKET_C2_SCHEMA
+            if projection.schema == EPISODE_PROJECTION_C2_SCHEMA
+            else EVIDENCE_PACKET_SCHEMA
+        )
         or packet.get("abstained") is not False
         or packet.get("abstention_reason") != ""
         or not isinstance(packet.get("atoms"), list)
@@ -1291,6 +1301,8 @@ def _verified_applied_session(
         "abstained": False,
         "abstention_reason": "",
     }
+    if projection.schema == EPISODE_PROJECTION_C2_SCHEMA:
+        unsigned_packet["schema"] = EVIDENCE_PACKET_C2_SCHEMA
     expected_packet_id = "packet:" + hashlib.sha256(
         canonical_json_line_bytes_strict(unsigned_packet)
     ).hexdigest()

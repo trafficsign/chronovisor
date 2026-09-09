@@ -1,0 +1,37 @@
+{
+  "schema": "chronovisor.c2-packet-publication-check.v1",
+  "observed_at": "2026-09-09T16:42:31.092138+00:00",
+  "status": "isolated_integration_passed",
+  "changes": [
+    "Reuse the Pi transcript decoder for native reconstruction and source verification.",
+    "Select the matching v1/v2 canonical packet builder during publication.",
+    "Bind injected receipt verification to the projection schema and the versioned packet identity."
+  ],
+  "verification": {
+    "related_tests_passed": 97,
+    "native_fixed_child_count": 20,
+    "native_fixed_record_count": 69,
+    "native_binding_failures": 0,
+    "unsupported_hosts": 0,
+    "rendered_context_limit_chars": 3000,
+    "actual_renderer_and_append_log_used": true,
+    "version_mix_rejected": true,
+    "tampered_render_receipt_rejected": true,
+    "tampered_trace_rejected": true,
+    "source_claim_unchanged": true,
+    "unknown_validity_preserved": true
+  },
+  "publication_probe": {
+    "source": "synthetic committed Raw fixture",
+    "must_match_as_of": false,
+    "normal_compiler_changed": false,
+    "authority_roles_changed": false,
+    "as_of_unknown_still_held": true
+  },
+  "limitations": [
+    "This verifies the explicit native packet to final renderer and receipt path, not automatic C2 index publication or retrieval quality.",
+    "Production C2 is not enabled.",
+    "The historical v1 rollout counter still loads only the v1 projection.",
+    "No inferred supersession or compact excerpts are added."
+  ]
+}

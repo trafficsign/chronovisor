@@ -174,11 +174,12 @@ def _committed_rows(
     rows: list[dict[str, object]],
     *,
     raw_id: str = "save-codex-c2.md",
+    host: str = "codex",
 ) -> None:
     raw_dir.parent.mkdir(parents=True, exist_ok=True)
     for name in ("index.md", "log.md", "schema.md"):
         (raw_dir.parent / name).write_text("legacy\n", encoding="utf-8")
-    source = raw_dir.parent / "c2-session.jsonl"
+    source = raw_dir.parent / f"{host}-c2-session.jsonl"
     raw = b"".join(
         json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
         for row in rows
@@ -188,7 +189,7 @@ def _committed_rows(
         raw_dir=raw_dir,
         raw_id=raw_id,
         idempotency_key=raw_id.removeprefix("save-").removesuffix(".md"),
-        host="codex",
+        host=host,
         session_key="c" * 24,
         session_id="session-c2",
         source_file=source,
@@ -460,6 +461,96 @@ def test_c2_projection_keeps_event_time_recorded_at_and_validity_separate(
     v1 = load_episode_projection(build_episode_projection(raw_dir))
     v1_missing = next(atom for atom in v1.atoms if atom.claim == "Why did it fail?")
     assert v1_missing.validity == TimeInterval(NOW.isoformat(), NOW.isoformat())
+
+
+def test_pi_projection_reuses_native_message_semantics_and_preserves_roles(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "pi" / "raw"
+    _committed_rows(
+        raw_dir,
+        [
+            {
+                "type": "session",
+                "id": "pi-session",
+            },
+            {
+                "type": "message",
+                "timestamp": "2026-08-11T09:00:00+09:00",
+                "message": {"role": "user", "content": "質問"},
+            },
+            {
+                "type": "message",
+                "timestamp": "2026-08-11T09:01:00+09:00",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "internal"},
+                        {"type": "text", "text": "回答"},
+                    ],
+                },
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "toolResult",
+                    "content": [{"type": "text", "text": "ツール結果"}],
+                },
+            },
+            {
+                "type": "message",
+                "message": {"role": "unknown", "content": "不明な役割"},
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": "<system-reminder>注入された文脈</system-reminder>",
+                },
+            },
+        ],
+        raw_id="save-pi-c2.md",
+        host="pi",
+    )
+
+    v1_bytes = build_episode_projection(raw_dir)
+    v1 = load_episode_projection(v1_bytes)
+    assert {atom.claim for atom in v1.atoms} == {"質問", "回答", "ツール結果"}
+    assert {atom.provenance.source_role for atom in v1.atoms} == {
+        "user",
+        "assistant",
+        "tool",
+    }
+
+    c2_bytes = build_episode_projection_c2(raw_dir)
+    assert c2_bytes == build_episode_projection_c2(raw_dir)
+    c2 = load_episode_projection_c2(c2_bytes)
+    by_claim = {atom.claim: atom for atom in c2.atoms}
+    assert set(by_claim) == {"質問", "回答", "ツール結果"}
+    assert by_claim["質問"].event_type == "user"
+    assert by_claim["質問"].role == "user"
+    assert by_claim["回答"].event_type == "assistant"
+    assert by_claim["回答"].role == "assistant"
+    assert by_claim["ツール結果"].event_type == "toolResult"
+    assert by_claim["ツール結果"].role == "tool"
+    assert all(atom.event_time is not None for atom in c2.atoms if atom.claim != "ツール結果")
+    assert by_claim["ツール結果"].event_time is None
+    assert all(atom.validity is None for atom in c2.atoms)
+    assert all(atom.recorded_at == NOW.isoformat() for atom in c2.atoms)
+
+    store = RawStore(raw_dir, mode="v2")
+    unit = store.resolve_segment("save-pi-c2.md")
+    assert unit is not None
+    native = store.read_bytes(unit)
+    for atom in c2.atoms:
+        encoded = native[atom.evidence.byte_start : atom.evidence.byte_end]
+        assert json.loads(encoded)["type"] == "message"
+        assert json.loads(encoded)["message"]["role"] in {
+            "user",
+            "assistant",
+            "toolResult",
+        }
+        verify_projection_atom_c2(raw_dir, atom)
 
 
 def test_c2_projection_accepts_only_explicit_validity_and_rejects_bad_timestamp(

@@ -44,7 +44,17 @@
   "limitations": [
     "Storage trial inputs and provisional source-only annotations are not heldout retrieval or adoption evidence.",
     "Unknown fact validity is not inferred from event or recorded timestamps.",
-    "Pi native reconstruction is being fixed; no unsupported row is silently accepted.",
     "Native sources remain local; the OpenCode Go proof used synthetic text only."
-  ]
+  ],
+  "pi_reconstruction_followup": {
+    "supported_native_atoms": 69,
+    "unsupported_host_records": 0,
+    "exact_binding_failures": 0,
+    "as_of_accepted": 0,
+    "as_of_rejected": 69,
+    "unknown_validity_rejections": 48,
+    "authority_role_rejections": 21,
+    "model_calls": 0,
+    "receipt_sha256": "8c3404348fca969c06749b3aeba51ea9645c9e7fed5b9554b8937bdf8c97c5a9"
+  }
 }

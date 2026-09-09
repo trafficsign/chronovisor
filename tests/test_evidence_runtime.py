@@ -700,6 +700,91 @@ def test_c2_runtime_holds_unknown_fact_validity_and_keeps_v1_entrypoint_closed(
         run_evidence_retrieval(program, c2_projection)
 
 
+def test_c2_native_packet_publication_and_receipt_keep_version_and_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.recall import recall_runtime
+
+    raw_dir, v1, _raw = _projection(tmp_path)
+    projection = load_episode_projection_c2(build_episode_projection_c2(raw_dir))
+    base = compile_projection_program("feature enabled", NOW.isoformat()).to_dict()
+    plan = {
+        key: value
+        for key, value in base.items()
+        if key not in {"schema", "program_id", "query"}
+    }
+    # This explicit integration probe asks for a recorded utterance. It does
+    # not change the normal current-fact compiler or infer native validity.
+    plan["required_evidence"][0]["must_match_as_of"] = False
+    run = run_evidence_retrieval_c2(
+        compile_retrieval_program("feature enabled", plan),
+        projection,
+    )
+    metadata = {
+        **run.telemetry,
+        "status": "active",
+        "authority": "evidence_reconstruction",
+        "trace": dict(run.trace),
+        "trace_sha256": canonical_json_sha256_strict(run.trace),
+    }
+    payload = runtime.evidence_publication_payload(run.packet, metadata, 3000)
+    assert payload["evidence_packet"] == run.packet.to_dict()
+    assert payload["evidence_packet"]["schema"] == "chronovisor.evidence-packet.v2"
+    assert run.packet.atoms[0].claim == "The feature is enabled."
+    assert run.packet.atoms[0] in projection.atoms
+    assert run.packet.atoms[0].validity is None
+    assert runtime.evidence_publication_payload(run.packet, metadata, 1) == {}
+    assert (
+        runtime.evidence_publication_payload(
+            run.packet,
+            {**metadata, "trace_sha256": "0" * 64},
+            3000,
+        )
+        == {}
+    )
+
+    result = RecallResult(
+        status="ok",
+        decision="read",
+        confidence=1.0,
+        queries=[run.packet.query],
+        reasons=[],
+        matched_terms={},
+        decision_id="c2-publication",
+        session_id="c2-session",
+        context_style="cards",
+        evidence_packet=run.packet,
+        evidence_features={"evidence_reconstruction": metadata},
+    )
+    result.context = format_recall_context(
+        result,
+        RecallPolicy(max_context_chars=3000, max_total_context_chars=3000),
+    )
+    assert len(result.context) <= 3000
+    assert '"schema":"chronovisor.evidence-packet.v2"' in result.context
+    assert "The feature is enabled." in result.context
+    log = tmp_path / "c2-recall-log.jsonl"
+    monkeypatch.setattr(recall_runtime, "RECALL_LOG_FILE", log)
+    recall_runtime.append_recall_log(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt=run.packet.query,
+            session_id="c2-session",
+        ),
+        result,
+    )
+    row = json.loads(log.read_text())
+    projection_sha = projection.projection_id.removeprefix("projection:")
+    assert (
+        runtime._verified_applied_session(row, projection, projection_sha) is not None
+    )
+    assert runtime._verified_applied_session(row, v1, projection_sha) is None
+    row["context_receipt"]["rendered_context_sha256"] = "0" * 64
+    assert runtime._verified_applied_session(row, projection, projection_sha) is None
+
+
 def test_c2_ledger_requires_fact_validity_and_never_uses_event_or_recorded_time() -> None:
     program = _program("feature enabled")
     evidence = EvidenceRef("c2.md", 0, 1, "a" * 64, "b" * 64)
