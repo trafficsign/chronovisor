@@ -112,11 +112,23 @@ INDEPENDENT_ANSWER_BENCHMARK = (
     / "recall-answer-eval"
     / "independent-benchmark.json"
 )
+SOURCE_SPAN_QUERY_BENCHMARK = (
+    CHRONOVISOR_ROOT
+    / "runtime"
+    / "recall-answer-eval"
+    / "source-span-independent-benchmark.json"
+)
 ANSWER_BENCHMARK_SOURCE_LEDGER_DIR = (
     CHRONOVISOR_ROOT
     / "runtime"
     / "recall-answer-eval"
     / "benchmark-source-ledgers"
+)
+SOURCE_SPAN_QUERY_SOURCE_LEDGER_DIR = (
+    CHRONOVISOR_ROOT
+    / "runtime"
+    / "recall-answer-eval"
+    / "source-span-query-source-ledgers"
 )
 SEARCH_GOLDEN_FILE = CHRONOVISOR_ROOT / "recall" / "search-golden.jsonl"
 SEARCH_MANUAL94_MANIFEST = (
@@ -293,6 +305,118 @@ BOUNDED_EVIDENCE_PROJECTION_POLICY_SHA256 = _canonical_sha(
         "maximum_total_bytes": 32_000,
         "format": "[PAGE <page_id>]\\n<utf8-prefix>",
         "source": "independent_page_snapshot",
+    }
+)
+
+# ``source_span_query`` is the source-bound evaluation input used for fresh
+# questions.  It deliberately reuses the bounded evidence projection format
+# above, while carrying the provenance that a page-authored Recall question
+# does not have (cutoff, temporal state, lifecycle, and index separation).
+SOURCE_SPAN_QUERY_SOURCE_KIND = "source_span_query"
+SOURCE_SPAN_QUERY_SPLIT_ROLE = "answer_benchmark_source_span"
+SOURCE_SPAN_QUERY_LANGUAGES = frozenset({"ja", "en", "cross"})
+SOURCE_SPAN_QUERY_LIFECYCLE_STATUSES = frozenset(
+    {"draft", "stable", "deprecated"}
+)
+SOURCE_SPAN_QUERY_POLICY_SHA256 = _canonical_sha(
+    {
+        "version": 1,
+        "source_kind": SOURCE_SPAN_QUERY_SOURCE_KIND,
+        "required": "source_spans",
+        "forbidden": "forbidden_spans",
+        "maximum_span_bytes": 12_000,
+        "maximum_total_bytes": 32_000,
+        "query_in_index": False,
+        "as_of_unknown": None,
+        "source_lifecycle_status_separate_from_obsolete": True,
+    }
+)
+SOURCE_SPAN_QUERY_MAX_SPAN_BYTES = 12_000
+SOURCE_SPAN_QUERY_MAX_TOTAL_BYTES = 32_000
+_INDEPENDENT_GOLD_SOURCE_BASE_KEYS = frozenset(
+    {
+        "schema_version",
+        "source_kind",
+        "case_id",
+        "prompt",
+        "prompt_content_sha256",
+        "evidence_chunks",
+        "reference_evidence_sha256",
+        "page_bindings",
+        "source_authority_sha256",
+        "source_entry_sha256",
+        "split",
+        "split_epoch_id",
+        "component_sha256",
+        "source_frozen_at",
+        "projection_policy_sha256",
+    }
+)
+_SOURCE_SPAN_METADATA_KEYS = frozenset(
+    {
+        "schema_version",
+        "candidate_sha256",
+        "preregistered_at",
+        "source_root_sha256",
+        "source_cutoff",
+        "as_of",
+        "lifecycle_status",
+        "obsolete",
+        "language",
+        "index_snapshot_sha256",
+        "query_key_sha256",
+        "query_in_index",
+        "root_component_sha256",
+        "split_slice",
+        "required_spans",
+        "forbidden_spans",
+        "policy_sha256",
+    }
+)
+_SOURCE_SPAN_IDENTITY_KEYS = (
+    "page_id",
+    "page_uid",
+    "content_sha256",
+    "content_byte_length",
+    "byte_start",
+    "byte_end",
+    "excerpt_sha256",
+)
+_SOURCE_SPAN_QUERY_CANDIDATE_KEYS = frozenset(
+    {
+        "schema_version",
+        "source_kind",
+        "case_id",
+        "candidate_sha256",
+        "query",
+        "language",
+        "preregistered_at",
+        "source_frozen_at",
+        "source_cutoff",
+        "as_of",
+        "lifecycle_status",
+        "obsolete",
+        "source_root_sha256",
+        "source_authority_sha256",
+        "index_snapshot_sha256",
+        "query_in_index",
+        "root_component_sha256",
+        "split_role",
+        "source_spans",
+        "forbidden_spans",
+    }
+)
+_SOURCE_SPAN_CANDIDATE_SPAN_KEYS = frozenset(
+    {
+        "page_id",
+        "page_uid",
+        "content_sha256",
+        "content_byte_length",
+        "byte_start",
+        "byte_end",
+        "excerpt",
+        "excerpt_sha256",
+        "truncated",
     }
 )
 
@@ -3015,28 +3139,248 @@ def _gold_machine_subject(
     }
 
 
-def _independent_gold_source_packet_error(packet: object) -> str:
+def _source_span_identity(
+    binding: Mapping[str, Any], chunk: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Return the immutable identity of one required evidence span."""
+
+    return {
+        "page_id": str(binding.get("page_id") or ""),
+        "page_uid": str(binding.get("page_uid") or ""),
+        "content_sha256": str(binding.get("content_sha256") or ""),
+        "content_byte_length": binding.get("content_byte_length"),
+        "byte_start": chunk.get("byte_start"),
+        "byte_end": chunk.get("byte_end"),
+        "excerpt_sha256": str(chunk.get("excerpt_sha256") or ""),
+    }
+
+
+def _source_span_item_error(
+    span: object,
+    *,
+    require_excerpt: bool = True,
+) -> str:
+    """Validate one source span, including UTF-8 byte range semantics."""
+
+    if not isinstance(span, Mapping):
+        return "source_span_query_span_invalid"
+    expected = _SOURCE_SPAN_CANDIDATE_SPAN_KEYS
+    if require_excerpt:
+        if set(span) != expected:
+            return "source_span_query_span_invalid"
+    else:
+        # A metadata identity may omit excerpt bytes when validating a legacy
+        # projection.  New source-span packets retain full required/forbidden
+        # excerpts and therefore use the strict branch above.
+        expected = frozenset(
+            {
+                "page_id",
+                "page_uid",
+                "content_sha256",
+                "content_byte_length",
+                "byte_start",
+                "byte_end",
+                "excerpt_sha256",
+            }
+        )
+        if set(span) != expected:
+            return "source_span_query_span_invalid"
+    page_id = span.get("page_id")
+    page_uid = span.get("page_uid")
+    content_sha = span.get("content_sha256")
+    content_length = span.get("content_byte_length")
+    start = span.get("byte_start")
+    end = span.get("byte_end")
+    excerpt_sha = span.get("excerpt_sha256")
+    if (
+        not isinstance(page_id, str)
+        or not page_id.strip()
+        or not isinstance(page_uid, str)
+        or not _valid_sha(content_sha)
+        or not isinstance(content_length, int)
+        or isinstance(content_length, bool)
+        or content_length <= 0
+        or not isinstance(start, int)
+        or isinstance(start, bool)
+        or not isinstance(end, int)
+        or isinstance(end, bool)
+        or not 0 <= start < end <= content_length
+        or end - start > SOURCE_SPAN_QUERY_MAX_SPAN_BYTES
+        or not _valid_sha(excerpt_sha)
+    ):
+        return "source_span_query_span_invalid"
+    if require_excerpt:
+        excerpt = span.get("excerpt")
+        if (
+            not isinstance(excerpt, str)
+            or not isinstance(span.get("truncated"), bool)
+            or len(excerpt.encode("utf-8")) != end - start
+            or _sha_text(excerpt) != excerpt_sha
+            or span.get("truncated") is not (start > 0 or end < content_length)
+        ):
+            return "source_span_query_span_invalid"
+    return ""
+
+
+def _source_span_metadata_error(
+    packet: Mapping[str, Any],
+    *,
+    chunks: Sequence[object],
+    bindings: Sequence[object],
+    allow_unassigned: bool = False,
+) -> str:
+    """Validate source-only provenance attached to a source-span packet."""
+
+    metadata = packet.get("source_span")
+    if not isinstance(metadata, Mapping) or set(metadata) != _SOURCE_SPAN_METADATA_KEYS:
+        return "source_span_query_metadata_invalid"
+    source_cutoff = _strict_utc(metadata.get("source_cutoff"))
+    source_frozen_at = _strict_utc(packet.get("source_frozen_at"))
+    as_of = metadata.get("as_of")
+    normalized_as_of = _strict_utc(as_of) if as_of is not None else None
+    if (
+        metadata.get("schema_version") != 1
+        or not _valid_sha(metadata.get("candidate_sha256"))
+        or not _strict_utc(metadata.get("preregistered_at"))
+        or not _valid_sha(metadata.get("source_root_sha256"))
+        or not source_cutoff
+        or not source_frozen_at
+        or (as_of is not None and not normalized_as_of)
+        or metadata.get("lifecycle_status") not in SOURCE_SPAN_QUERY_LIFECYCLE_STATUSES
+        or not isinstance(metadata.get("obsolete"), bool)
+        or metadata.get("language") not in SOURCE_SPAN_QUERY_LANGUAGES
+        or not _valid_sha(metadata.get("index_snapshot_sha256"))
+        or metadata.get("query_key_sha256") != packet.get("prompt_content_sha256")
+        or metadata.get("query_in_index") is not False
+        or not _valid_sha(metadata.get("root_component_sha256"))
+        or metadata.get("split_slice")
+        not in {
+            "dev",
+            "train",
+            "holdout",
+            "locked-test",
+            "unassigned",
+        }
+        or not isinstance(metadata.get("required_spans"), list)
+        or not isinstance(metadata.get("forbidden_spans"), list)
+        or metadata.get("policy_sha256") != SOURCE_SPAN_QUERY_POLICY_SHA256
+    ):
+        return "source_span_query_metadata_invalid"
+    cutoff_dt = datetime.fromisoformat(source_cutoff.replace("Z", "+00:00"))
+    frozen_dt = datetime.fromisoformat(source_frozen_at.replace("Z", "+00:00"))
+    preregistered_at = datetime.fromisoformat(
+        _strict_utc(metadata.get("preregistered_at")).replace("Z", "+00:00")
+    )
+    if not frozen_dt <= cutoff_dt < preregistered_at:
+        return "source_span_query_temporal_order_invalid"
+    packet_split = packet.get("split")
+    split_slice = str(metadata.get("split_slice") or "")
+    if split_slice == "unassigned":
+        if not allow_unassigned or packet.get("split_epoch_id") != "0" * 64:
+            return "source_span_query_split_assignment_invalid"
+    elif (
+        (
+            packet.get("split_epoch_id") == "0" * 64
+            and not allow_unassigned
+        )
+        or (packet_split == "train" and split_slice not in {"dev", "train"})
+        or (packet_split in {"holdout", "locked-test"} and split_slice != packet_split)
+    ):
+        return "source_span_query_split_assignment_invalid"
+    if normalized_as_of is not None:
+        as_of_dt = datetime.fromisoformat(normalized_as_of.replace("Z", "+00:00"))
+        if as_of_dt > cutoff_dt:
+            return "source_span_query_temporal_order_invalid"
+    required = metadata.get("required_spans")
+    forbidden = metadata.get("forbidden_spans")
+    assert isinstance(required, list) and isinstance(forbidden, list)
+    if len(required) != len(chunks) or not required or len(required) > 32 or len(forbidden) > 64:
+        return "source_span_query_metadata_invalid"
+    expected_required: list[dict[str, Any]] = []
+    for binding, chunk in zip(bindings, chunks, strict=True):
+        if not isinstance(binding, Mapping) or not isinstance(chunk, Mapping):
+            return "source_span_query_metadata_invalid"
+        expected_required.append(_source_span_identity(binding, chunk))
+    if any(
+        _source_span_item_error(item, require_excerpt=True)
+        for item in required
+    ):
+        return "source_span_query_metadata_invalid"
+    required_identity = [
+        {
+            key: item.get(key)
+            for key in _SOURCE_SPAN_IDENTITY_KEYS
+        }
+        for item in required
+        if isinstance(item, Mapping)
+    ]
+    if required_identity != expected_required:
+        return "source_span_query_metadata_invalid"
+    total_span_bytes = sum(
+        len(str(item.get("excerpt") or "").encode("utf-8"))
+        for item in [*required, *forbidden]
+        if isinstance(item, Mapping)
+    )
+    if total_span_bytes > SOURCE_SPAN_QUERY_MAX_TOTAL_BYTES:
+        return "source_span_query_metadata_invalid"
+    required_seen: set[tuple[Any, ...]] = set()
+    for item in required:
+        assert isinstance(item, Mapping)
+        identity = tuple(item.get(key) for key in _SOURCE_SPAN_IDENTITY_KEYS)
+        if identity in required_seen:
+            return "source_span_query_metadata_invalid"
+        required_seen.add(identity)
+    for item in forbidden:
+        if _source_span_item_error(item, require_excerpt=True):
+            return "source_span_query_metadata_invalid"
+    required_ranges: dict[
+        tuple[str, str, str], list[tuple[int, int]]
+    ] = {}
+    for item in required:
+        assert isinstance(item, Mapping)
+        key = (
+            str(item["page_id"]),
+            str(item["page_uid"]),
+            str(item["content_sha256"]),
+        )
+        required_ranges.setdefault(key, []).append(
+            (int(item["byte_start"]), int(item["byte_end"]))
+        )
+    forbidden_seen: set[tuple[Any, ...]] = set()
+    for item in forbidden:
+        assert isinstance(item, Mapping)
+        identity = tuple(item.get(key) for key in _SOURCE_SPAN_IDENTITY_KEYS)
+        if identity in forbidden_seen:
+            return "source_span_query_metadata_invalid"
+        forbidden_seen.add(identity)
+        key = (
+            str(item["page_id"]),
+            str(item["page_uid"]),
+            str(item["content_sha256"]),
+        )
+        forbidden_range = (int(item["byte_start"]), int(item["byte_end"]))
+        if any(
+            max(required_start, forbidden_range[0])
+            < min(required_end, forbidden_range[1])
+            for required_start, required_end in required_ranges.get(key, [])
+        ):
+            return "source_span_query_forbidden_overlap"
+    return ""
+
+
+def _independent_gold_source_packet_error(
+    packet: object,
+    *,
+    _allow_unassigned_source_span: bool = False,
+) -> str:
     """Validate a gold packet without consulting Recall treatment output."""
 
     if not isinstance(packet, Mapping):
         return "independent_gold_source_packet_invalid"
-    expected_keys = {
-        "schema_version",
-        "source_kind",
-        "case_id",
-        "prompt",
-        "prompt_content_sha256",
-        "evidence_chunks",
-        "reference_evidence_sha256",
-        "page_bindings",
-        "source_authority_sha256",
-        "source_entry_sha256",
-        "split",
-        "split_epoch_id",
-        "component_sha256",
-        "source_frozen_at",
-        "projection_policy_sha256",
-    }
+    source_kind = packet.get("source_kind")
+    expected_keys = set(_INDEPENDENT_GOLD_SOURCE_BASE_KEYS)
+    if source_kind == SOURCE_SPAN_QUERY_SOURCE_KIND:
+        expected_keys.add("source_span")
     prompt = packet.get("prompt")
     chunks = packet.get("evidence_chunks")
     bindings = packet.get("page_bindings")
@@ -3046,7 +3390,12 @@ def _independent_gold_source_packet_error(packet: object) -> str:
         packet.get("schema_version") != 1
         or not isinstance(packet.get("source_kind"), str)
         or packet.get("source_kind")
-        not in {"manual94_candidate_seed", "machine_search_label_consensus", "synthetic_fixture"}
+        not in {
+            "manual94_candidate_seed",
+            "machine_search_label_consensus",
+            "synthetic_fixture",
+            SOURCE_SPAN_QUERY_SOURCE_KIND,
+        }
         or not isinstance(packet.get("case_id"), str)
         or not str(packet.get("case_id") or "")
         or not isinstance(prompt, str)
@@ -3069,7 +3418,11 @@ def _independent_gold_source_packet_error(packet: object) -> str:
             or set(binding)
             != {"page_id", "page_uid", "content_sha256", "content_byte_length"}
             or not str(binding.get("page_id") or "")
-            or not str(binding.get("page_uid") or "")
+            or not isinstance(binding.get("page_uid"), str)
+            or (
+                source_kind != SOURCE_SPAN_QUERY_SOURCE_KIND
+                and not str(binding.get("page_uid") or "")
+            )
             or not _valid_sha(binding.get("content_sha256"))
             or not isinstance(binding.get("content_byte_length"), int)
             or isinstance(binding.get("content_byte_length"), bool)
@@ -3087,17 +3440,50 @@ def _independent_gold_source_packet_error(packet: object) -> str:
         for chunk in chunks
     ]
     if (
-        len(set(binding_page_ids)) != len(binding_page_ids)
-        or len(set(chunk_page_ids)) != len(chunk_page_ids)
-        or binding_page_ids != chunk_page_ids
+        binding_page_ids != chunk_page_ids
+        or (
+            source_kind != SOURCE_SPAN_QUERY_SOURCE_KIND
+            and (
+                len(set(binding_page_ids)) != len(binding_page_ids)
+                or len(set(chunk_page_ids)) != len(chunk_page_ids)
+            )
+        )
     ):
         return "independent_gold_source_packet_invalid"
     rendered: list[str] = []
     for binding, chunk in zip(bindings, chunks, strict=True):
+        if not isinstance(binding, Mapping) or not isinstance(chunk, Mapping):
+            return "independent_gold_source_packet_invalid"
+        chunk_start = chunk.get("byte_start")
+        chunk_end = chunk.get("byte_end")
+        binding_length = binding.get("content_byte_length")
         if (
-            not isinstance(binding, Mapping)
-            or not isinstance(chunk, Mapping)
-            or set(chunk)
+            not isinstance(chunk_start, int)
+            or isinstance(chunk_start, bool)
+            or not isinstance(chunk_end, int)
+            or isinstance(chunk_end, bool)
+            or not isinstance(binding_length, int)
+            or isinstance(binding_length, bool)
+        ):
+            return "independent_gold_source_packet_invalid"
+        chunk_expected_end = (
+            chunk_end - chunk_start
+            if source_kind == SOURCE_SPAN_QUERY_SOURCE_KIND
+            else chunk_end
+        )
+        chunk_expected_truncated = (
+            chunk_start > 0
+            or chunk_end < binding_length
+            if source_kind == SOURCE_SPAN_QUERY_SOURCE_KIND
+            else chunk_end < binding_length
+        )
+        chunk_end_bound = (
+            binding_length
+            if source_kind == SOURCE_SPAN_QUERY_SOURCE_KIND
+            else min(SOURCE_SPAN_QUERY_MAX_SPAN_BYTES, binding_length)
+        )
+        if (
+            set(chunk)
             != {
                 "page_id",
                 "content_sha256",
@@ -3109,21 +3495,24 @@ def _independent_gold_source_packet_error(packet: object) -> str:
             }
             or chunk.get("page_id") != binding.get("page_id")
             or chunk.get("content_sha256") != binding.get("content_sha256")
-            or chunk.get("byte_start") != 0
-            or not isinstance(chunk.get("byte_end"), int)
-            or isinstance(chunk.get("byte_end"), bool)
+            or (
+                source_kind != SOURCE_SPAN_QUERY_SOURCE_KIND
+                and chunk_start != 0
+            )
             or not 0
-            < int(chunk["byte_end"])
-            <= min(12_000, int(binding.get("content_byte_length") or 0))
+            <= chunk_start
+            < chunk_end
+            <= chunk_end_bound
+            or (
+                source_kind == SOURCE_SPAN_QUERY_SOURCE_KIND
+                and chunk_end - chunk_start > SOURCE_SPAN_QUERY_MAX_SPAN_BYTES
+            )
             or not isinstance(chunk.get("excerpt"), str)
-            or len(str(chunk["excerpt"]).encode("utf-8")) != chunk.get("byte_end")
+            or len(str(chunk["excerpt"]).encode("utf-8")) != chunk_expected_end
             or chunk.get("excerpt_sha256") != _sha_text(str(chunk["excerpt"]))
             or not isinstance(chunk.get("truncated"), bool)
             or chunk.get("truncated")
-            is not (
-                int(chunk["byte_end"])
-                < int(binding.get("content_byte_length") or 0)
-            )
+            is not chunk_expected_truncated
         ):
             return "independent_gold_source_packet_invalid"
         rendered.append(f"[PAGE {chunk['page_id']}]\n{chunk['excerpt']}")
@@ -3133,6 +3522,15 @@ def _independent_gold_source_packet_error(packet: object) -> str:
         or packet.get("reference_evidence_sha256") != _sha_text(evidence)
     ):
         return "independent_gold_source_packet_invalid"
+    if source_kind == SOURCE_SPAN_QUERY_SOURCE_KIND:
+        source_error = _source_span_metadata_error(
+            packet,
+            chunks=chunks,
+            bindings=bindings,
+            allow_unassigned=_allow_unassigned_source_span,
+        )
+        if source_error:
+            return source_error
     return ""
 
 
@@ -3499,6 +3897,495 @@ def _freeze_search_label_candidate_packet(row: Mapping[str, Any]) -> dict[str, A
     if packet_error:
         raise ValueError(packet_error)
     return packet
+
+
+def _source_span_query_candidate_error(row: object) -> str:
+    """Validate a source-bound query row before it enters the review lane."""
+
+    if not isinstance(row, Mapping) or set(row) != _SOURCE_SPAN_QUERY_CANDIDATE_KEYS:
+        return "source_span_query_candidate_invalid"
+    query = row.get("query")
+    source_spans = row.get("source_spans")
+    forbidden_spans = row.get("forbidden_spans")
+    candidate_sha = row.get("candidate_sha256")
+    if (
+        row.get("schema_version") != 1
+        or row.get("source_kind") != SOURCE_SPAN_QUERY_SOURCE_KIND
+        or not isinstance(row.get("case_id"), str)
+        or not str(row.get("case_id") or "").strip()
+        or not isinstance(query, str)
+        or not query.strip()
+        or not isinstance(row.get("language"), str)
+        or row.get("language") not in SOURCE_SPAN_QUERY_LANGUAGES
+        or not _strict_utc(row.get("preregistered_at"))
+        or not _strict_utc(row.get("source_frozen_at"))
+        or not _strict_utc(row.get("source_cutoff"))
+        or (row.get("as_of") is not None and not _strict_utc(row.get("as_of")))
+        or row.get("lifecycle_status") not in SOURCE_SPAN_QUERY_LIFECYCLE_STATUSES
+        or not isinstance(row.get("obsolete"), bool)
+        or not _valid_sha(row.get("source_root_sha256"))
+        or not _valid_sha(row.get("source_authority_sha256"))
+        or not _valid_sha(row.get("index_snapshot_sha256"))
+        or row.get("query_in_index") is not False
+        or not _valid_sha(row.get("root_component_sha256"))
+        or row.get("split_role") != SOURCE_SPAN_QUERY_SPLIT_ROLE
+        or not isinstance(candidate_sha, str)
+        or not _valid_sha(candidate_sha)
+        or not isinstance(source_spans, list)
+        or not source_spans
+        or len(source_spans) > 32
+        or not isinstance(forbidden_spans, list)
+        or len(forbidden_spans) > 64
+    ):
+        return "source_span_query_candidate_invalid"
+    candidate_unsigned = {
+        key: value for key, value in row.items() if key != "candidate_sha256"
+    }
+    if _canonical_sha(candidate_unsigned) != candidate_sha:
+        return "source_span_query_candidate_digest_invalid"
+    cutoff = datetime.fromisoformat(
+        _strict_utc(row["source_cutoff"]).replace("Z", "+00:00")
+    )
+    frozen = datetime.fromisoformat(
+        _strict_utc(row["source_frozen_at"]).replace("Z", "+00:00")
+    )
+    if frozen > datetime.now(UTC) + timedelta(minutes=5):
+        return "source_span_query_timestamp_invalid"
+    preregistered = datetime.fromisoformat(
+        _strict_utc(row["preregistered_at"]).replace("Z", "+00:00")
+    )
+    if preregistered > datetime.now(UTC) + timedelta(minutes=5):
+        return "source_span_query_timestamp_invalid"
+    # The source snapshot must be complete before its exclusive cutoff, and
+    # the query must be preregistered strictly after that cutoff.  The packet
+    # is frozen/reviewed only later; preregistration is intentionally allowed
+    # after source freeze so a fresh, independent question can be derived from
+    # the immutable snapshot without leaking a pre-existing index query.
+    if not frozen <= cutoff < preregistered:
+        return "source_span_query_temporal_order_invalid"
+    as_of = row.get("as_of")
+    if as_of is not None and datetime.fromisoformat(
+        _strict_utc(as_of).replace("Z", "+00:00")
+    ) > cutoff:
+        return "source_span_query_temporal_order_invalid"
+    required_identities: list[tuple[Any, ...]] = []
+    page_lengths: dict[tuple[str, str, str], int] = {}
+    for span in source_spans:
+        error = _source_span_item_error(span)
+        if error:
+            return "source_span_query_candidate_span_invalid"
+        assert isinstance(span, Mapping)
+        page_key = tuple(
+            str(span.get(key) or "")
+            for key in ("page_id", "page_uid", "content_sha256")
+        )
+        content_length = int(span["content_byte_length"])
+        previous_length = page_lengths.setdefault(page_key, content_length)
+        if previous_length != content_length:
+            return "source_span_query_candidate_span_invalid"
+        identity = tuple(span.get(key) for key in _SOURCE_SPAN_IDENTITY_KEYS)
+        if identity in required_identities:
+            return "source_span_query_candidate_duplicate_span"
+        required_identities.append(identity)
+    forbidden_identities: set[tuple[Any, ...]] = set()
+    for span in forbidden_spans:
+        error = _source_span_item_error(span)
+        if error:
+            return "source_span_query_candidate_span_invalid"
+        assert isinstance(span, Mapping)
+        page_key = tuple(
+            str(span.get(key) or "")
+            for key in ("page_id", "page_uid", "content_sha256")
+        )
+        content_length = int(span["content_byte_length"])
+        previous_length = page_lengths.setdefault(page_key, content_length)
+        if previous_length != content_length:
+            return "source_span_query_candidate_span_invalid"
+        identity = tuple(span.get(key) for key in _SOURCE_SPAN_IDENTITY_KEYS)
+        if identity in forbidden_identities:
+            return "source_span_query_candidate_duplicate_span"
+        forbidden_identities.add(identity)
+        for required in source_spans:
+            assert isinstance(required, Mapping)
+            same_page = all(
+                required.get(key) == span.get(key)
+                for key in ("page_id", "page_uid", "content_sha256")
+            )
+            if same_page and max(
+                int(required["byte_start"]), int(span["byte_start"])
+            ) < min(int(required["byte_end"]), int(span["byte_end"])):
+                return "source_span_query_forbidden_overlap"
+    total_span_bytes = sum(
+        len(str(span.get("excerpt") or "").encode("utf-8"))
+        for span in [*source_spans, *forbidden_spans]
+        if isinstance(span, Mapping)
+    )
+    if total_span_bytes > SOURCE_SPAN_QUERY_MAX_TOTAL_BYTES:
+        return "source_span_query_candidate_payload_too_large"
+    return ""
+
+
+def _source_span_query_review_entry(
+    packet: Mapping[str, Any],
+    *,
+    rubric_sha256: str,
+) -> dict[str, Any]:
+    reference_answer = _packet_reference_evidence(packet)
+    evidence = {
+        "source_packet": copy.deepcopy(dict(packet)),
+        "source_packet_sha256": _sealed_canonical_sha(packet),
+        "source_frozen_at": str(packet.get("source_frozen_at") or ""),
+        "reference_policy_sha256": DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256,
+    }
+    return {
+        "episode_id": str(packet.get("case_id") or ""),
+        "gold_answer": reference_answer,
+        "evidence": evidence,
+        "evidence_sha256": _canonical_sha(
+            {
+                "episode_id": str(packet.get("case_id") or ""),
+                "gold_answer": reference_answer,
+                "evidence": evidence,
+                "rubric_sha256": rubric_sha256,
+            }
+        ),
+    }
+
+
+def _freeze_source_span_query_packet(
+    row: Mapping[str, Any],
+    *,
+    split: str = "train",
+    split_epoch_id: str = "0" * 64,
+    component_sha256: str | None = None,
+    split_slice: str = "unassigned",
+) -> dict[str, Any]:
+    """Freeze source bytes supplied by a candidate row; never reread live pages."""
+
+    error = _source_span_query_candidate_error(row)
+    if error:
+        raise ValueError(error)
+    if split not in {"train", "holdout", "locked-test"}:
+        raise ValueError("source span split assignment is invalid")
+    if not _valid_sha(split_epoch_id):
+        raise ValueError("source span split epoch is invalid")
+    component = component_sha256 or str(row.get("root_component_sha256") or "")
+    if not _valid_sha(component):
+        raise ValueError("source span component is invalid")
+    spans = row["source_spans"]
+    forbidden = row["forbidden_spans"]
+    assert isinstance(spans, list) and isinstance(forbidden, list)
+    chunks: list[dict[str, Any]] = []
+    bindings: list[dict[str, Any]] = []
+    for span in spans:
+        assert isinstance(span, Mapping)
+        binding = {
+            key: span[key]
+            for key in (
+                "page_id",
+                "page_uid",
+                "content_sha256",
+                "content_byte_length",
+            )
+        }
+        chunk = {
+            key: span[key]
+            for key in (
+                "page_id",
+                "content_sha256",
+                "byte_start",
+                "byte_end",
+                "excerpt",
+                "excerpt_sha256",
+                "truncated",
+            )
+        }
+        bindings.append(binding)
+        chunks.append(chunk)
+    # Keep the exact candidate spans in the review packet.  The evidence
+    # chunks are the required spans; retaining forbidden excerpts separately
+    # lets the formal judge inspect stale/obsolete text without treating it as
+    # answer evidence.  Identity hashes and byte ranges are still checked
+    # against the frozen source metadata by the packet validator.
+    required_spans = [
+        copy.deepcopy(dict(span))
+        for span in spans
+        if isinstance(span, Mapping)
+    ]
+    forbidden_spans = [
+        copy.deepcopy(dict(span))
+        for span in forbidden
+        if isinstance(span, Mapping)
+    ]
+    prompt = str(row["query"])
+    source_entry_sha = _canonical_sha(
+        {
+            "candidate_sha256": row["candidate_sha256"],
+            "source_root_sha256": row["source_root_sha256"],
+            "required_spans": required_spans,
+            "forbidden_spans": forbidden_spans,
+        }
+    )
+    packet = {
+        "schema_version": 1,
+        "source_kind": SOURCE_SPAN_QUERY_SOURCE_KIND,
+        "case_id": str(row["case_id"]),
+        "prompt": prompt,
+        "prompt_content_sha256": _sha_text(prompt),
+        "evidence_chunks": chunks,
+        "reference_evidence_sha256": _sha_text(
+            "\n\n".join(
+                f"[PAGE {chunk['page_id']}]\n{chunk['excerpt']}" for chunk in chunks
+            )
+        ),
+        "page_bindings": bindings,
+        "source_authority_sha256": str(row["source_authority_sha256"]),
+        "source_entry_sha256": source_entry_sha,
+        "split": split,
+        "split_epoch_id": split_epoch_id,
+        "component_sha256": component,
+        "source_frozen_at": str(row["source_frozen_at"]),
+        "projection_policy_sha256": BOUNDED_EVIDENCE_PROJECTION_POLICY_SHA256,
+        "source_span": {
+            "schema_version": 1,
+            "candidate_sha256": str(row["candidate_sha256"]),
+            "preregistered_at": str(row["preregistered_at"]),
+            "source_root_sha256": str(row["source_root_sha256"]),
+            "source_cutoff": str(row["source_cutoff"]),
+            "as_of": row.get("as_of"),
+            "lifecycle_status": str(row["lifecycle_status"]),
+            "obsolete": bool(row["obsolete"]),
+            "language": str(row["language"]),
+            "index_snapshot_sha256": str(row["index_snapshot_sha256"]),
+            "query_key_sha256": _sha_text(prompt),
+            "query_in_index": False,
+            "root_component_sha256": str(row["root_component_sha256"]),
+            "split_slice": split_slice,
+            "required_spans": required_spans,
+            "forbidden_spans": forbidden_spans,
+            "policy_sha256": SOURCE_SPAN_QUERY_POLICY_SHA256,
+        },
+    }
+    packet_error = _independent_gold_source_packet_error(
+        packet,
+        _allow_unassigned_source_span=(
+            split_slice == "unassigned" and split_epoch_id == "0" * 64
+        ),
+    )
+    if packet_error:
+        raise ValueError(packet_error)
+    return packet
+
+
+def _source_span_query_review_subject(
+    packet: Mapping[str, Any],
+    *,
+    rubric_sha256: str,
+    expected_split: str,
+    split_epoch_id: str,
+) -> dict[str, Any]:
+    entry = _source_span_query_review_entry(packet, rubric_sha256=rubric_sha256)
+    return _gold_machine_subject(
+        entry,
+        rubric_sha256=rubric_sha256,
+        gold_family_id="source-span-query-review",
+        expected_split=expected_split,
+        split_epoch_id=split_epoch_id,
+    )
+
+
+def _validated_source_span_query_receipt(
+    receipt_sha256: object,
+    *,
+    packet: Mapping[str, Any],
+    rubric_sha256: str,
+    consensus_ledger_file: Path,
+    chronovisor_root: Path,
+) -> dict[str, Any]:
+    subject = _source_span_query_review_subject(
+        packet,
+        rubric_sha256=rubric_sha256,
+        expected_split=str(packet.get("split") or ""),
+        split_epoch_id=str(packet.get("split_epoch_id") or ""),
+    )
+    prompt = build_recall_answer_adjudication_prompt(
+        {"subject": subject, "subject_sha256": _sealed_canonical_sha(subject)}
+    )
+    checked = validate_machine_consensus_receipt(
+        receipt_sha256,
+        expected_kind="gold_entry_review",
+        expected_subject=subject,
+        expected_producer_policy_sha256=DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256,
+        prompt=prompt,
+        schema=RECALL_ANSWER_ADJUDICATION_SCHEMA,
+        system=None,
+        lane=ANSWER_ADJUDICATION_LANE,
+        ledger_file=consensus_ledger_file,
+        chronovisor_root=chronovisor_root,
+    )
+    if checked.get("passed") is not True:
+        return checked
+    receipt = checked.get("receipt")
+    metadata = packet.get("source_span")
+    created_at = (
+        _utc_order_key(receipt.get("created_at"))
+        if isinstance(receipt, Mapping)
+        else ""
+    )
+    preregistered_at = (
+        _utc_order_key(metadata.get("preregistered_at"))
+        if isinstance(metadata, Mapping)
+        else ""
+    )
+    if not created_at or not preregistered_at or not preregistered_at < created_at:
+        return {"passed": False, "reason": "source_span_query_review_causality_invalid"}
+    return checked
+
+
+def adjudicate_source_span_query_candidates(
+    *,
+    candidate_file: Path,
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
+    split: str = "train",
+    split_epoch_id: str,
+    max_items: int = 1,
+    dry_run: bool = False,
+    router_factory: Callable[[str], Any] | None = None,
+) -> dict[str, Any]:
+    """Run formal local authority review for frozen source-span candidates.
+
+    This uses the existing ``gold_entry_review`` lane with a source-span
+    packet embedded in the subject.  The packet contains only source evidence
+    and hashes; generated answers and field outcomes are never accepted.
+    """
+
+    if split not in {"train", "holdout", "locked-test"} or not _valid_sha(
+        split_epoch_id
+    ):
+        return {"status": "held", "reason": "source_span_query_split_invalid"}
+    chain = list_machine_consensus_receipts(ledger_file=consensus_ledger_file)
+    if chain.get("passed") is not True:
+        return {"status": "held", "reason": str(chain.get("reason") or "ledger_invalid")}
+    rubric_sha = _canonical_sha(
+        {
+            "version": 1,
+            "dimensions": list(ANSWER_DIMENSIONS),
+            "reference": "deterministic_source_evidence_projection",
+        }
+    )
+    rows = [
+        row
+        for row in _read_jsonl(candidate_file)
+        if row.get("source_kind") == SOURCE_SPAN_QUERY_SOURCE_KIND
+    ]
+    packets: list[dict[str, Any]] = []
+    seen_cases: set[str] = set()
+    stale = 0
+    for row in rows:
+        case_id = str(row.get("case_id") or "")
+        if not case_id or case_id in seen_cases:
+            stale += 1
+            continue
+        try:
+            packet = _freeze_source_span_query_packet(
+                row,
+                split=split,
+                split_epoch_id=split_epoch_id,
+                component_sha256=str(row.get("root_component_sha256") or ""),
+                split_slice="dev" if split == "train" else split,
+            )
+            packets.append(packet)
+            seen_cases.add(case_id)
+        except (OSError, TypeError, ValueError):
+            stale += 1
+    packets.sort(key=lambda packet: str(packet.get("case_id") or ""))
+    if not packets:
+        return {"status": "waiting", "reason": "source_span_query_candidates_missing", "stale": stale}
+    existing: dict[str, Mapping[str, Any]] = {}
+    for receipt in chain.get("receipts", []):
+        if not isinstance(receipt, Mapping) or receipt.get("kind") != "gold_entry_review":
+            continue
+        subject = receipt.get("subject")
+        packet = subject.get("source_packet") if isinstance(subject, Mapping) else None
+        if (
+            not isinstance(packet, Mapping)
+            or packet.get("source_kind") != SOURCE_SPAN_QUERY_SOURCE_KIND
+            or packet.get("split") != split
+            or packet.get("split_epoch_id") != split_epoch_id
+        ):
+            continue
+        checked = _validated_source_span_query_receipt(
+            receipt.get("receipt_sha256"),
+            packet=packet,
+            rubric_sha256=rubric_sha,
+            consensus_ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+        )
+        current = next(
+            (
+                candidate
+                for candidate in packets
+                if candidate.get("case_id") == packet.get("case_id")
+            ),
+            None,
+        )
+        if checked.get("passed") is True and isinstance(current, Mapping) and dict(packet) == dict(current):
+            existing[str(packet.get("case_id") or "")] = receipt
+    accepted = 0
+    pending = 0
+    for packet in packets:
+        case_id = str(packet["case_id"])
+        if case_id in existing:
+            continue
+        pending += 1
+        if dry_run or accepted >= max(0, max_items):
+            continue
+        subject = _source_span_query_review_subject(
+            packet,
+            rubric_sha256=rubric_sha,
+            expected_split=split,
+            split_epoch_id=split_epoch_id,
+        )
+        prompt = build_recall_answer_adjudication_prompt(
+            {"subject": subject, "subject_sha256": _sealed_canonical_sha(subject)}
+        )
+        result = append_machine_consensus_receipt(
+            kind="gold_entry_review",
+            subject=subject,
+            producer_policy_sha256=DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256,
+            prompt=prompt,
+            schema=RECALL_ANSWER_ADJUDICATION_SCHEMA,
+            system=None,
+            lane=ANSWER_ADJUDICATION_LANE,
+            ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+            router_factory=router_factory,
+        )
+        if result.get("status") != "accepted":
+            return {
+                "status": str(result.get("status") or "held"),
+                "reason": str(result.get("reason") or "source_span_query_review_held"),
+                "accepted": accepted,
+                "pending": pending,
+                "stale": stale,
+            }
+        existing[case_id] = result.get("receipt", {})
+        accepted += 1
+    remaining = len(packets) - len(existing)
+    return {
+        "status": "complete" if remaining == 0 and stale == 0 else "waiting",
+        "reason": (
+            "verified_source_span_query_consensus"
+            if remaining == 0 and stale == 0
+            else "source_span_query_review_pending"
+        ),
+        "accepted": accepted,
+        "already": len(existing) - accepted,
+        "pending": remaining,
+        "stale": stale,
+        "dry_run": dry_run,
+    }
 
 
 def _validated_search_label_candidate_receipt(
@@ -4143,6 +5030,963 @@ def _benchmark_component_assignments(
     return assignments, split_epoch_id, cluster_counts
 
 
+def _source_span_query_component_assignments(
+    packets: Sequence[Mapping[str, Any]],
+    *,
+    source_authority_sha256: str,
+    dev_components: int = 60,
+    holdout_components: int = 120,
+    locked_min_components: int = 20,
+) -> tuple[dict[str, tuple[str, str, str]], str, dict[str, int], dict[str, int]]:
+    """Assign fresh source-span cases by an explicit root-component policy.
+
+    The generic benchmark splitter operates at a 70/20/10 ratio and therefore
+    requires many more independent components than the planned 60-dev/120-
+    holdout dataset.  This lane has its own pre-registered counts and keeps all
+    cases sharing a source root in one split.  Empty page UIDs never become a
+    connected-component node; the source root supplied by the frozen manifest
+    is the only grouping key here.
+    """
+
+    if (
+        not _valid_sha(source_authority_sha256)
+        or not isinstance(dev_components, int)
+        or isinstance(dev_components, bool)
+        or dev_components < 0
+        or not isinstance(holdout_components, int)
+        or isinstance(holdout_components, bool)
+        or holdout_components < 0
+        or not isinstance(locked_min_components, int)
+        or isinstance(locked_min_components, bool)
+        or locked_min_components < 1
+    ):
+        raise ValueError("source span split policy is invalid")
+    languages = ("ja", "en", "cross")
+    if (
+        dev_components % len(languages) != 0
+        or holdout_components % len(languages) != 0
+    ):
+        raise ValueError("source span language strata are not divisible")
+    dev_per_language = dev_components // len(languages)
+    holdout_per_language = holdout_components // len(languages)
+    by_root: dict[str, list[Mapping[str, Any]]] = {}
+    root_languages: dict[str, set[str]] = {}
+    case_ids: set[str] = set()
+    for packet in packets:
+        if _independent_gold_source_packet_error(
+            packet, _allow_unassigned_source_span=True
+        ):
+            raise ValueError("source span packet is invalid")
+        if packet.get("source_authority_sha256") != source_authority_sha256:
+            raise ValueError("source span authority mismatch")
+        case_id = str(packet.get("case_id") or "")
+        source_span = packet.get("source_span")
+        root_component = (
+            source_span.get("root_component_sha256")
+            if isinstance(source_span, Mapping)
+            else None
+        )
+        if (
+            not case_id
+            or case_id in case_ids
+            or not isinstance(source_span, Mapping)
+            or not _valid_sha(root_component)
+            or root_component == "0" * 64
+        ):
+            raise ValueError("source span root component is invalid")
+        case_ids.add(case_id)
+        root_key = str(root_component)
+        by_root.setdefault(root_key, []).append(packet)
+        language = str(source_span.get("language") or "")
+        root_languages.setdefault(root_key, set()).add(language)
+    required_components = dev_components + holdout_components + locked_min_components
+    if len(by_root) < required_components:
+        raise ValueError("source span independent components are insufficient")
+    if any(len(values) != 1 for values in root_languages.values()):
+        raise ValueError("source span component crosses language strata")
+    roots_by_language = {
+        language: sorted(
+            root for root, values in root_languages.items() if language in values
+        )
+        for language in languages
+    }
+    if any(
+        len(roots) < dev_per_language + holdout_per_language
+        for roots in roots_by_language.values()
+    ):
+        raise ValueError("source span language strata are insufficient")
+    assigned_split: dict[str, tuple[str, str]] = {}
+    for language in languages:
+        roots = roots_by_language[language]
+        for index, root_component in enumerate(roots):
+            if index < dev_per_language:
+                assigned_split[root_component] = ("train", "dev")
+            elif index < dev_per_language + holdout_per_language:
+                assigned_split[root_component] = ("holdout", "holdout")
+            else:
+                assigned_split[root_component] = ("locked-test", "locked-test")
+    ordered_roots = sorted(by_root)
+    component_manifest: list[dict[str, Any]] = []
+    assignments: dict[str, tuple[str, str, str]] = {}
+    for root_component in ordered_roots:
+        split, split_slice = assigned_split[root_component]
+        members = sorted(str(packet["case_id"]) for packet in by_root[root_component])
+        component_sha = _canonical_sha(
+            {
+                "root_component_sha256": root_component,
+                "case_ids": members,
+            }
+        )
+        component_manifest.append(
+            {
+                "component_sha256": component_sha,
+                "root_component_sha256": root_component,
+                "case_ids": members,
+                "split": split,
+                "split_slice": split_slice,
+            }
+        )
+        assignments.update(
+            {
+                case_id: (component_sha, split, split_slice)
+                for case_id in members
+            }
+        )
+    policy = {
+        "name": "source-span-root-component-fixed-v1",
+        "dev_components": dev_components,
+        "holdout_components": holdout_components,
+        "locked_min_components": locked_min_components,
+        "empty_page_uid_is_not_a_component_node": True,
+    }
+    split_epoch_id = _canonical_sha(
+        {
+            "source_authority_sha256": source_authority_sha256,
+            "policy": policy,
+            "components": component_manifest,
+        }
+    )
+    cluster_counts = {
+        split: sum(1 for row in component_manifest if row["split"] == split)
+        for split in ("train", "holdout", "locked-test")
+    }
+    slice_counts = {
+        "dev": sum(
+            len(by_root[row["root_component_sha256"]])
+            for row in component_manifest
+            if row["split_slice"] == "dev"
+        ),
+        "train": sum(
+            len(by_root[row["root_component_sha256"]])
+            for row in component_manifest
+            if row["split_slice"] == "train"
+        ),
+        "holdout": sum(
+            len(by_root[row["root_component_sha256"]])
+            for row in component_manifest
+            if row["split_slice"] == "holdout"
+        ),
+        "locked-test": sum(
+            len(by_root[row["root_component_sha256"]])
+            for row in component_manifest
+            if row["split_slice"] == "locked-test"
+        ),
+    }
+    for language in languages:
+        for split_slice in ("dev", "holdout"):
+            slice_counts[f"{split_slice}_{language}"] = sum(
+                len(by_root[row["root_component_sha256"]])
+                for row in component_manifest
+                if row["split_slice"] == split_slice
+                and root_languages[row["root_component_sha256"]] == {language}
+            )
+    return assignments, split_epoch_id, cluster_counts, slice_counts
+
+
+def _source_span_query_entries_from_receipts(
+    receipts: Sequence[Mapping[str, Any]],
+    *,
+    rubric_sha256: str,
+    consensus_ledger_file: Path,
+    chronovisor_root: Path,
+    case_ids: set[str] | None = None,
+    split_epoch_id: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Project accepted source-span review receipts into a source ledger."""
+
+    grouped: dict[str, list[tuple[str, Mapping[str, Any], Mapping[str, Any]]]] = {}
+    for receipt in receipts:
+        if receipt.get("kind") != "gold_entry_review":
+            continue
+        subject = receipt.get("subject")
+        packet = subject.get("source_packet") if isinstance(subject, Mapping) else None
+        if not isinstance(packet, Mapping) or packet.get("source_kind") != SOURCE_SPAN_QUERY_SOURCE_KIND:
+            continue
+        packet_error = _independent_gold_source_packet_error(packet)
+        if packet_error:
+            raise ValueError(packet_error)
+        checked = _validated_source_span_query_receipt(
+            receipt.get("receipt_sha256"),
+            packet=packet,
+            rubric_sha256=rubric_sha256,
+            consensus_ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+        )
+        if checked.get("passed") is not True:
+            raise ValueError(str(checked.get("reason") or "source span receipt invalid"))
+        metadata = packet.get("source_span")
+        if not isinstance(metadata, Mapping):
+            raise ValueError("source span metadata is missing")
+        case_id = str(packet.get("case_id") or "")
+        if case_ids is not None and case_id not in case_ids:
+            continue
+        if split_epoch_id is not None and packet.get("split_epoch_id") != split_epoch_id:
+            continue
+        rank = _utc_order_key(metadata.get("preregistered_at"))
+        if not case_id or not rank:
+            raise ValueError("source span preregistration timestamp invalid")
+        grouped.setdefault(case_id, []).append((rank, packet, receipt))
+    entries: list[dict[str, Any]] = []
+    retirements: list[dict[str, Any]] = []
+    for case_id, versions in sorted(grouped.items()):
+        versions.sort(
+            key=lambda row: (
+                row[0],
+                str(row[1].get("source_entry_sha256") or ""),
+                str(row[2].get("receipt_sha256") or ""),
+            )
+        )
+        _active_rank, packet, receipt = versions[-1]
+        metadata = packet["source_span"]
+        identity = {
+            "candidate_sha256": metadata.get("candidate_sha256"),
+            "source_packet_sha256": _sealed_canonical_sha(packet),
+            "consensus_receipt_sha256": receipt.get("receipt_sha256"),
+        }
+        source_sha = _canonical_sha(identity)
+        entries.append(
+            {
+                "case_id": case_id,
+                "source_entry_sha256": source_sha,
+                **identity,
+                "source_packet": copy.deepcopy(dict(packet)),
+            }
+        )
+        logical_key_sha = _canonical_sha(
+            {
+                "case_id": case_id,
+                "root_component_sha256": metadata.get("root_component_sha256"),
+            }
+        )
+        for old_rank, old_packet, old_receipt in versions[:-1]:
+            old_metadata = old_packet["source_span"]
+            retirements.append(
+                {
+                    "logical_key_sha256": logical_key_sha,
+                    "superseded_candidate_sha256": old_metadata.get("candidate_sha256"),
+                    "superseded_source_packet_sha256": _sealed_canonical_sha(old_packet),
+                    "superseded_consensus_receipt_sha256": old_receipt.get(
+                        "receipt_sha256"
+                    ),
+                    "superseded_preregistered_at": old_rank,
+                    "superseded_by_candidate_sha256": metadata.get("candidate_sha256"),
+                    "superseded_by_source_packet_sha256": _sealed_canonical_sha(packet),
+                    "superseded_by_consensus_receipt_sha256": receipt.get(
+                        "receipt_sha256"
+                    ),
+                    "superseded_by_preregistered_at": _utc_order_key(
+                        metadata.get("preregistered_at")
+                    ),
+                }
+            )
+    entries.sort(key=lambda entry: str(entry["source_entry_sha256"]))
+    retirements.sort(
+        key=lambda row: (
+            str(row["logical_key_sha256"]),
+            str(row["superseded_preregistered_at"]),
+        )
+    )
+    return entries, retirements
+
+
+def _source_span_query_source_ledger_entry_error(
+    entry: object,
+    *,
+    rubric_sha256: str,
+    consensus_ledger_file: Path,
+    chronovisor_root: Path,
+    ledger_frozen_at: str,
+    receipt_positions: Mapping[str, int],
+    frozen_head_position: int,
+) -> str:
+    expected_keys = {
+        "case_id",
+        "source_entry_sha256",
+        "candidate_sha256",
+        "source_packet_sha256",
+        "source_packet",
+        "consensus_receipt_sha256",
+    }
+    if not isinstance(entry, Mapping) or set(entry) != expected_keys:
+        return "source_span_query_source_entry_invalid"
+    packet = entry.get("source_packet")
+    identity = {
+        "candidate_sha256": entry.get("candidate_sha256"),
+        "source_packet_sha256": entry.get("source_packet_sha256"),
+        "consensus_receipt_sha256": entry.get("consensus_receipt_sha256"),
+    }
+    source_sha = _canonical_sha(identity)
+    if (
+        not isinstance(packet, Mapping)
+        or packet.get("source_kind") != SOURCE_SPAN_QUERY_SOURCE_KIND
+        or _independent_gold_source_packet_error(packet)
+        or entry.get("source_packet_sha256") != _sealed_canonical_sha(packet)
+        or entry.get("source_entry_sha256") != source_sha
+        or entry.get("case_id") != packet.get("case_id")
+        or not _valid_sha(entry.get("candidate_sha256"))
+        or not _valid_sha(entry.get("consensus_receipt_sha256"))
+    ):
+        return "source_span_query_source_entry_invalid"
+    metadata = packet.get("source_span")
+    if (
+        not isinstance(metadata, Mapping)
+        or metadata.get("candidate_sha256") != entry.get("candidate_sha256")
+    ):
+        return "source_span_query_source_entry_invalid"
+    checked = _validated_source_span_query_receipt(
+        entry.get("consensus_receipt_sha256"),
+        packet=packet,
+        rubric_sha256=rubric_sha256,
+        consensus_ledger_file=consensus_ledger_file,
+        chronovisor_root=chronovisor_root,
+    )
+    if checked.get("passed") is not True:
+        return str(checked.get("reason") or "source span receipt invalid")
+    receipt = checked.get("receipt")
+    source_frozen = _utc_order_key(packet.get("source_frozen_at"))
+    created_at = (
+        _utc_order_key(receipt.get("created_at"))
+        if isinstance(receipt, Mapping)
+        else ""
+    )
+    position = receipt_positions.get(str(entry.get("consensus_receipt_sha256") or ""), -1)
+    if (
+        not source_frozen
+        or not created_at
+        or not _strict_utc(ledger_frozen_at)
+        or not source_frozen < created_at <= _strict_utc(ledger_frozen_at)
+        or not _strict_utc(metadata.get("preregistered_at"))
+        or not _utc_order_key(metadata.get("preregistered_at")) < created_at
+        or position < 0
+        or position > frozen_head_position
+    ):
+        return "source_span_query_source_epoch_invalid"
+    return ""
+
+
+def validate_source_span_query_source_ledger(
+    value: Path | Mapping[str, Any],
+    *,
+    consensus_ledger_file: Path | None = None,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
+) -> dict[str, Any]:
+    """Validate a source-span ledger against the immutable consensus chain."""
+
+    try:
+        payload = (
+            read_sealed_json(value)
+            if isinstance(value, Path)
+            else verify_sealed_object(dict(value))
+        )
+    except (DurableStateError, OSError, TypeError, ValueError):
+        return {"passed": False, "reason": "source_span_query_ledger_seal_invalid"}
+    if (
+        set(payload)
+        != {
+            "schema_version",
+            "artifact_kind",
+            "frozen_at",
+            "entries",
+            "entries_sha256",
+            "retirements",
+            "retirements_sha256",
+            "consensus_ledger_path",
+            "consensus_ledger_head_sha256",
+            "seal_sha256",
+        }
+        or payload.get("schema_version") != 1
+        or payload.get("artifact_kind") != "source-span-query-answer-source-ledger"
+        or not _strict_utc(payload.get("frozen_at"))
+        or not isinstance(payload.get("entries"), list)
+        or not payload.get("entries")
+        or payload.get("entries_sha256") != _canonical_sha(payload.get("entries"))
+        or not isinstance(payload.get("retirements"), list)
+        or payload.get("retirements_sha256")
+        != _canonical_sha(payload.get("retirements"))
+    ):
+        return {"passed": False, "reason": "source_span_query_ledger_invalid"}
+    bound_ledger = Path(str(payload.get("consensus_ledger_path") or ""))
+    expected_ledger = (
+        chronovisor_root / "recall" / "answer-consensus-receipts.jsonl"
+    ).expanduser().resolve(strict=False)
+    if (
+        not str(payload.get("consensus_ledger_path") or "")
+        or bound_ledger.expanduser().resolve(strict=False) != expected_ledger
+        or (
+            consensus_ledger_file is not None
+            and bound_ledger.expanduser().resolve(strict=False)
+            != consensus_ledger_file.expanduser().resolve(strict=False)
+        )
+    ):
+        return {"passed": False, "reason": "source_span_query_ledger_invalid"}
+    chain = list_machine_consensus_receipts(ledger_file=bound_ledger)
+    receipts = chain.get("receipts")
+    receipt_shas = (
+        [str(receipt.get("receipt_sha256") or "") for receipt in receipts]
+        if isinstance(receipts, list)
+        else []
+    )
+    frozen_head = str(payload.get("consensus_ledger_head_sha256") or "")
+    positions = {receipt_sha: index for index, receipt_sha in enumerate(receipt_shas)}
+    head_position = positions.get(frozen_head, -1)
+    if (
+        chain.get("passed") is not True
+        or not _valid_sha(frozen_head)
+        or frozen_head == "0" * 64
+        or head_position < 0
+    ):
+        return {"passed": False, "reason": "source_span_query_consensus_ledger_invalid"}
+    rubric_sha = _canonical_sha(
+        {
+            "version": 1,
+            "dimensions": list(ANSWER_DIMENSIONS),
+            "reference": "deterministic_source_evidence_projection",
+        }
+    )
+    try:
+        ledger_case_ids = {
+            str(entry.get("case_id") or "")
+            for entry in payload.get("entries", [])
+            if isinstance(entry, Mapping)
+        }
+        ledger_epoch_ids = {
+            str(
+                entry.get("source_packet", {}).get("split_epoch_id")
+                if isinstance(entry, Mapping)
+                and isinstance(entry.get("source_packet"), Mapping)
+                else ""
+            )
+            for entry in payload.get("entries", [])
+            if isinstance(entry, Mapping)
+        }
+        ledger_epoch = next(iter(ledger_epoch_ids), None) if len(ledger_epoch_ids) == 1 else None
+        expected_entries, expected_retirements = _source_span_query_entries_from_receipts(
+            [receipt for receipt in receipts[: head_position + 1] if isinstance(receipt, Mapping)],
+            rubric_sha256=rubric_sha,
+            consensus_ledger_file=bound_ledger,
+            chronovisor_root=chronovisor_root,
+            case_ids=ledger_case_ids,
+            split_epoch_id=ledger_epoch,
+        )
+    except (OSError, TypeError, ValueError):
+        return {"passed": False, "reason": "source_span_query_receipt_invalid"}
+    if payload.get("entries") != expected_entries or payload.get("retirements") != expected_retirements:
+        return {"passed": False, "reason": "source_span_query_epoch_invalid"}
+    by_sha: dict[str, dict[str, Any]] = {}
+    case_ids: set[str] = set()
+    for entry in expected_entries:
+        error = _source_span_query_source_ledger_entry_error(
+            entry,
+            rubric_sha256=rubric_sha,
+            consensus_ledger_file=bound_ledger,
+            chronovisor_root=chronovisor_root,
+            ledger_frozen_at=_utc_order_key(payload.get("frozen_at")),
+            receipt_positions=positions,
+            frozen_head_position=head_position,
+        )
+        case_id = str(entry.get("case_id") or "")
+        source_sha = str(entry.get("source_entry_sha256") or "")
+        if error or not source_sha or source_sha in by_sha or case_id in case_ids:
+            return {
+                "passed": False,
+                "reason": error or "source_span_query_entry_duplicate",
+            }
+        by_sha[source_sha] = entry
+        case_ids.add(case_id)
+    return {
+        "passed": True,
+        "reason": "verified_source_span_query_ledger",
+        "payload": payload,
+        "entries": by_sha,
+        "manifest_sha256": str(payload["seal_sha256"]),
+    }
+
+
+def _packet_from_source_span_query_entry(
+    entry: Mapping[str, Any],
+    *,
+    source_authority_sha256: str,
+    frozen_at: str,
+) -> dict[str, Any]:
+    packet = entry.get("source_packet")
+    if (
+        not isinstance(packet, Mapping)
+        or packet.get("source_kind") != SOURCE_SPAN_QUERY_SOURCE_KIND
+        or _independent_gold_source_packet_error(packet)
+    ):
+        raise ValueError("source span source packet is invalid")
+    projected = copy.deepcopy(dict(packet))
+    original_source_frozen = _strict_utc(projected.get("source_frozen_at"))
+    benchmark_frozen = _strict_utc(frozen_at)
+    if (
+        not original_source_frozen
+        or not benchmark_frozen
+        or original_source_frozen > benchmark_frozen
+    ):
+        raise ValueError("source span benchmark freeze order is invalid")
+    projected["source_authority_sha256"] = source_authority_sha256
+    metadata = projected.get("source_span")
+    if isinstance(metadata, Mapping):
+        projected["source_span"] = copy.deepcopy(dict(metadata))
+    if _independent_gold_source_packet_error(projected):
+        raise ValueError("source span projected packet is invalid")
+    return projected
+
+
+def build_source_span_query_benchmark_epoch(
+    *,
+    candidate_file: Path,
+    output_file: Path = SOURCE_SPAN_QUERY_BENCHMARK,
+    source_ledger_dir: Path = SOURCE_SPAN_QUERY_SOURCE_LEDGER_DIR,
+    consensus_ledger_file: Path = ANSWER_CONSENSUS_LEDGER,
+    chronovisor_root: Path = CHRONOVISOR_ROOT,
+    dev_components: int = 60,
+    holdout_components: int = 120,
+    locked_min_components: int = 20,
+    router_factory: Callable[[str], Any] | None = None,
+    max_items: int = 1,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Freeze, review, and publish a fresh source-span benchmark epoch."""
+
+    chain = list_machine_consensus_receipts(ledger_file=consensus_ledger_file)
+    if chain.get("passed") is not True:
+        return {"status": "held", "reason": str(chain.get("reason") or "ledger_invalid")}
+    rows = [
+        row
+        for row in _read_jsonl(candidate_file)
+        if row.get("source_kind") == SOURCE_SPAN_QUERY_SOURCE_KIND
+    ]
+    if not rows:
+        return {"status": "waiting", "reason": "source_span_query_candidates_missing"}
+    provisional: list[dict[str, Any]] = []
+    seen_cases: set[str] = set()
+    stale = 0
+    for row in rows:
+        case_id = str(row.get("case_id") or "")
+        if case_id in seen_cases:
+            stale += 1
+            continue
+        try:
+            packet = _freeze_source_span_query_packet(row)
+        except (OSError, TypeError, ValueError):
+            stale += 1
+            continue
+        seen_cases.add(case_id)
+        provisional.append(packet)
+    if not provisional:
+        return {"status": "waiting", "reason": "source_span_query_candidates_invalid", "stale": stale}
+    authorities = {str(packet["source_authority_sha256"]) for packet in provisional}
+    if len(authorities) != 1:
+        return {"status": "held", "reason": "source_span_query_authority_mismatch"}
+    source_authority = next(iter(authorities))
+    try:
+        assignments, split_epoch_id, cluster_counts, slice_counts = (
+            _source_span_query_component_assignments(
+                provisional,
+                source_authority_sha256=source_authority,
+                dev_components=dev_components,
+                holdout_components=holdout_components,
+                locked_min_components=locked_min_components,
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        return {"status": "waiting", "reason": str(exc)}
+    packets: list[dict[str, Any]] = []
+    for packet in provisional:
+        component_sha, split, split_slice = assignments[str(packet["case_id"])]
+        updated = copy.deepcopy(packet)
+        updated["component_sha256"] = component_sha
+        updated["split"] = split
+        updated["split_epoch_id"] = split_epoch_id
+        source_span = updated.get("source_span")
+        if isinstance(source_span, Mapping):
+            source_span_copy = copy.deepcopy(dict(source_span))
+            source_span_copy["split_slice"] = split_slice
+            updated["source_span"] = source_span_copy
+        if _independent_gold_source_packet_error(updated):
+            return {"status": "held", "reason": "source_span_query_packet_invalid"}
+        packets.append(updated)
+    packets.sort(key=lambda packet: str(packet["case_id"]))
+    rubric_sha = _canonical_sha(
+        {
+            "version": 1,
+            "dimensions": list(ANSWER_DIMENSIONS),
+            "reference": "deterministic_source_evidence_projection",
+        }
+    )
+    existing: dict[str, Mapping[str, Any]] = {}
+    for receipt in chain.get("receipts", []):
+        if not isinstance(receipt, Mapping) or receipt.get("kind") != "gold_entry_review":
+            continue
+        subject = receipt.get("subject")
+        reviewed_packet = (
+            subject.get("source_packet") if isinstance(subject, Mapping) else None
+        )
+        if not isinstance(reviewed_packet, Mapping) or reviewed_packet.get("source_kind") != SOURCE_SPAN_QUERY_SOURCE_KIND:
+            continue
+        packet_by_id = {str(packet["case_id"]): packet for packet in packets}
+        expected_packet = packet_by_id.get(str(reviewed_packet.get("case_id") or ""))
+        if expected_packet is None or dict(reviewed_packet) != expected_packet:
+            continue
+        checked = _validated_source_span_query_receipt(
+            receipt.get("receipt_sha256"),
+            packet=expected_packet,
+            rubric_sha256=rubric_sha,
+            consensus_ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+        )
+        if checked.get("passed") is True:
+            existing[str(expected_packet["case_id"])] = receipt
+    accepted = 0
+    for packet in packets:
+        case_id = str(packet["case_id"])
+        if case_id in existing:
+            continue
+        if dry_run or accepted >= max(0, max_items):
+            continue
+        subject = _source_span_query_review_subject(
+            packet,
+            rubric_sha256=rubric_sha,
+            expected_split=str(packet["split"]),
+            split_epoch_id=split_epoch_id,
+        )
+        prompt = build_recall_answer_adjudication_prompt(
+            {"subject": subject, "subject_sha256": _sealed_canonical_sha(subject)}
+        )
+        result = append_machine_consensus_receipt(
+            kind="gold_entry_review",
+            subject=subject,
+            producer_policy_sha256=DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256,
+            prompt=prompt,
+            schema=RECALL_ANSWER_ADJUDICATION_SCHEMA,
+            system=None,
+            lane=ANSWER_ADJUDICATION_LANE,
+            ledger_file=consensus_ledger_file,
+            chronovisor_root=chronovisor_root,
+            router_factory=router_factory,
+        )
+        if result.get("status") != "accepted":
+            return {
+                "status": str(result.get("status") or "held"),
+                "reason": str(result.get("reason") or "source_span_query_review_held"),
+                "accepted": accepted,
+                "pending": len(packets) - len(existing) - accepted,
+                "stale": stale,
+            }
+        receipt = result.get("receipt")
+        if isinstance(receipt, Mapping):
+            existing[case_id] = receipt
+        accepted += 1
+    pending = len(packets) - len(existing)
+    if pending or stale:
+        return {
+            "status": "waiting",
+            "reason": "source_span_query_review_pending",
+            "accepted": accepted,
+            "already": len(existing) - accepted,
+            "pending": pending,
+            "stale": stale,
+            "cluster_counts": cluster_counts,
+            "slice_counts": slice_counts,
+            "split_epoch_id": split_epoch_id,
+            "dry_run": dry_run,
+        }
+    receipts_now = list_machine_consensus_receipts(ledger_file=consensus_ledger_file)
+    if receipts_now.get("passed") is not True:
+        return {"status": "held", "reason": "source_span_query_consensus_ledger_invalid"}
+    receipt_rows = receipts_now.get("receipts")
+    if not isinstance(receipt_rows, list) or not receipt_rows:
+        return {"status": "held", "reason": "source_span_query_consensus_ledger_invalid"}
+    entries, retirements = _source_span_query_entries_from_receipts(
+        [receipt for receipt in receipt_rows if isinstance(receipt, Mapping)],
+        rubric_sha256=rubric_sha,
+        consensus_ledger_file=consensus_ledger_file,
+        chronovisor_root=chronovisor_root,
+        case_ids={str(packet["case_id"]) for packet in packets},
+        split_epoch_id=split_epoch_id,
+    )
+    by_case = {str(entry["case_id"]): entry for entry in entries}
+    if any(str(packet["case_id"]) not in by_case for packet in packets):
+        return {"status": "waiting", "reason": "source_span_query_review_pending"}
+    frozen_at = _now_utc()
+    ledger_entries = sorted(
+        by_case.values(), key=lambda entry: str(entry["source_entry_sha256"])
+    )
+    ledger_payload = {
+        "schema_version": 1,
+        "artifact_kind": "source-span-query-answer-source-ledger",
+        "frozen_at": frozen_at,
+        "entries": ledger_entries,
+        "entries_sha256": "",
+        "retirements": retirements,
+        "retirements_sha256": _canonical_sha(retirements),
+        "consensus_ledger_path": str(consensus_ledger_file),
+        "consensus_ledger_head_sha256": str(receipt_rows[-1].get("receipt_sha256") or ""),
+    }
+    ledger_payload["entries_sha256"] = _canonical_sha(ledger_payload["entries"])
+    sealed_ledger = seal_object(ledger_payload)
+    ledger_sha = str(sealed_ledger["seal_sha256"])
+    ledger_path = source_ledger_dir / f"{ledger_sha}.json"
+    ledger_check = validate_source_span_query_source_ledger(
+        sealed_ledger,
+        consensus_ledger_file=consensus_ledger_file,
+        chronovisor_root=chronovisor_root,
+    )
+    if ledger_check.get("passed") is not True:
+        return {"status": "held", "reason": str(ledger_check.get("reason") or "source_span_query_ledger_invalid")}
+    payload: dict[str, Any] = {
+        "schema_version": 3,
+        "artifact_kind": "independent-answer-benchmark-manifest",
+        "source_kind": SOURCE_SPAN_QUERY_SOURCE_KIND,
+        "frozen_at": frozen_at,
+        "source_authority_sha256": source_authority,
+        "source_ledger_sha256": ledger_sha,
+        "source_ledger_path": str(ledger_path),
+        "split_epoch_id": split_epoch_id,
+        "split_policy": {
+            "name": "source-span-root-component-fixed-v1",
+            "dev_components": dev_components,
+            "holdout_components": holdout_components,
+            "locked_min_components": locked_min_components,
+            "empty_page_uid_is_not_a_component_node": True,
+        },
+        "cluster_counts": cluster_counts,
+        "slice_counts": slice_counts,
+        "promotion_gates": {
+            "train_cluster_floor": cluster_counts["train"] >= ANSWER_BENCHMARK_MIN_TRAIN_CLUSTERS,
+            "locked_cluster_floor": cluster_counts["locked-test"] >= max(
+                ANSWER_BENCHMARK_MIN_LOCKED_CLUSTERS, locked_min_components
+            ),
+            "holdout_component_target": cluster_counts["holdout"] == holdout_components,
+            "dev_component_target": slice_counts["dev"] == dev_components,
+        },
+        "promotion_status": "",
+        "entries": packets,
+    }
+    payload["promotion_status"] = (
+        "promotion_ready"
+        if all(payload["promotion_gates"].values())
+        else "waiting_for_source_span_expansion"
+    )
+    if dry_run:
+        return {
+            "status": "waiting",
+            "reason": "dry_run",
+            "entries": len(packets),
+            "cluster_counts": cluster_counts,
+            "slice_counts": slice_counts,
+            "split_epoch_id": split_epoch_id,
+        }
+    try:
+        _create_once_sealed(ledger_path, ledger_payload)
+        sealed = _publish_versioned_benchmark(
+            output_file, payload, chronovisor_root=chronovisor_root
+        )
+    except (DurableStateError, OSError, ValueError):
+        return {"status": "held", "reason": "source_span_query_publish_conflict"}
+    return {
+        "status": "complete",
+        "reason": str(payload["promotion_status"]),
+        "artifact": str(output_file),
+        "entries": len(packets),
+        "manifest_sha256": str(sealed["seal_sha256"]),
+        "split_epoch_id": split_epoch_id,
+    }
+
+
+def _validate_source_span_query_benchmark_payload(
+    value: Path | Mapping[str, Any],
+    payload: Mapping[str, Any],
+    *,
+    chronovisor_root: Path,
+) -> dict[str, Any]:
+    expected_keys = {
+        "schema_version",
+        "artifact_kind",
+        "source_kind",
+        "frozen_at",
+        "source_authority_sha256",
+        "source_ledger_sha256",
+        "source_ledger_path",
+        "split_epoch_id",
+        "split_policy",
+        "cluster_counts",
+        "slice_counts",
+        "promotion_gates",
+        "promotion_status",
+        "entries",
+        "seal_sha256",
+    }
+    if (
+        set(payload) != expected_keys
+        or payload.get("schema_version") != 3
+        or payload.get("artifact_kind") != "independent-answer-benchmark-manifest"
+        or payload.get("source_kind") != SOURCE_SPAN_QUERY_SOURCE_KIND
+        or not _strict_utc(payload.get("frozen_at"))
+        or not _valid_sha(payload.get("source_authority_sha256"))
+        or not _valid_sha(payload.get("source_ledger_sha256"))
+        or not _valid_sha(payload.get("split_epoch_id"))
+        or not isinstance(payload.get("source_ledger_path"), str)
+        or not isinstance(payload.get("split_policy"), Mapping)
+        or not isinstance(payload.get("cluster_counts"), Mapping)
+        or not isinstance(payload.get("slice_counts"), Mapping)
+        or not isinstance(payload.get("promotion_gates"), Mapping)
+        or not isinstance(payload.get("entries"), list)
+        or not payload.get("entries")
+    ):
+        return {"passed": False, "reason": "source_span_query_benchmark_shape_invalid"}
+    policy = payload["split_policy"]
+    assert isinstance(policy, Mapping)
+    if set(policy) != {
+        "name",
+        "dev_components",
+        "holdout_components",
+        "locked_min_components",
+        "empty_page_uid_is_not_a_component_node",
+    } or policy.get("name") != "source-span-root-component-fixed-v1":
+        return {"passed": False, "reason": "source_span_query_split_policy_invalid"}
+    if (
+        not isinstance(policy.get("dev_components"), int)
+        or isinstance(policy.get("dev_components"), bool)
+        or not isinstance(policy.get("holdout_components"), int)
+        or isinstance(policy.get("holdout_components"), bool)
+        or not isinstance(policy.get("locked_min_components"), int)
+        or isinstance(policy.get("locked_min_components"), bool)
+        or policy.get("empty_page_uid_is_not_a_component_node") is not True
+    ):
+        return {"passed": False, "reason": "source_span_query_split_policy_invalid"}
+    ledger_sha = str(payload.get("source_ledger_sha256") or "")
+    ledger_path = Path(str(payload.get("source_ledger_path") or ""))
+    if ledger_path != ledger_path.parent / f"{ledger_sha}.json":
+        return {"passed": False, "reason": "source_span_query_ledger_path_invalid"}
+    ledger_check = validate_source_span_query_source_ledger(
+        ledger_path,
+        consensus_ledger_file=None,
+        chronovisor_root=chronovisor_root,
+    )
+    if (
+        ledger_check.get("passed") is not True
+        or ledger_check.get("manifest_sha256") != ledger_sha
+    ):
+        return {"passed": False, "reason": "source_span_query_ledger_invalid"}
+    entries = payload["entries"]
+    assert isinstance(entries, list)
+    by_case: dict[str, dict[str, Any]] = {}
+    ledger_entries = ledger_check.get("entries", {})
+    for raw in entries:
+        packet = dict(raw) if isinstance(raw, Mapping) else {}
+        case_id = str(packet.get("case_id") or "")
+        if (
+            not case_id
+            or case_id in by_case
+            or _independent_gold_source_packet_error(packet)
+            or packet.get("source_kind") != SOURCE_SPAN_QUERY_SOURCE_KIND
+            or packet.get("source_authority_sha256")
+            != payload.get("source_authority_sha256")
+            or packet.get("split_epoch_id") != payload.get("split_epoch_id")
+            or _strict_utc(packet.get("source_frozen_at"))
+            > _strict_utc(payload.get("frozen_at"))
+        ):
+            return {"passed": False, "reason": "source_span_query_benchmark_entry_invalid"}
+        ledger_entry = next(
+            (
+                entry
+                for entry in ledger_entries.values()
+                if isinstance(entry, Mapping) and entry.get("case_id") == case_id
+            ),
+            None,
+        )
+        if (
+            not isinstance(ledger_entry, Mapping)
+            or ledger_entry.get("source_packet") != packet
+        ):
+            return {"passed": False, "reason": "source_span_query_benchmark_source_join_invalid"}
+        by_case[case_id] = packet
+    try:
+        assignments, expected_epoch, cluster_counts, slice_counts = (
+            _source_span_query_component_assignments(
+                list(by_case.values()),
+                source_authority_sha256=str(payload["source_authority_sha256"]),
+                dev_components=int(policy["dev_components"]),
+                holdout_components=int(policy["holdout_components"]),
+                locked_min_components=int(policy["locked_min_components"]),
+            )
+        )
+    except (TypeError, ValueError):
+        return {"passed": False, "reason": "source_span_query_benchmark_split_invalid"}
+    if expected_epoch != payload.get("split_epoch_id"):
+        return {"passed": False, "reason": "source_span_query_benchmark_split_drift"}
+    for case_id, packet in by_case.items():
+        source_span = packet.get("source_span")
+        expected = assignments.get(case_id)
+        if (
+            not isinstance(source_span, Mapping)
+            or expected is None
+            or (packet.get("component_sha256"), packet.get("split"))
+            != expected[:2]
+            or source_span.get("split_slice") != expected[2]
+        ):
+            return {"passed": False, "reason": "source_span_query_benchmark_split_drift"}
+    if (
+        dict(payload.get("cluster_counts") or {}) != cluster_counts
+        or dict(payload.get("slice_counts") or {}) != slice_counts
+        or not isinstance(payload.get("promotion_gates"), Mapping)
+        or payload.get("promotion_gates")
+        != {
+            "train_cluster_floor": cluster_counts["train"] >= ANSWER_BENCHMARK_MIN_TRAIN_CLUSTERS,
+            "locked_cluster_floor": cluster_counts["locked-test"]
+            >= max(
+                ANSWER_BENCHMARK_MIN_LOCKED_CLUSTERS,
+                int(policy["locked_min_components"]),
+            ),
+            "holdout_component_target": cluster_counts["holdout"]
+            == int(policy["holdout_components"]),
+            "dev_component_target": slice_counts["dev"]
+            == int(policy["dev_components"]),
+        }
+        or payload.get("promotion_status")
+        != (
+            "promotion_ready"
+            if all(payload["promotion_gates"].values())
+            else "waiting_for_source_span_expansion"
+        )
+    ):
+        return {"passed": False, "reason": "source_span_query_benchmark_gate_invalid"}
+    return {
+        "passed": True,
+        "reason": "verified_source_span_query_benchmark",
+        "payload": payload,
+        "entries": by_case,
+        "manifest_sha256": str(payload["seal_sha256"]),
+        "split_epoch_id": str(payload["split_epoch_id"]),
+        "cluster_counts": cluster_counts,
+        "slice_counts": slice_counts,
+        "promotion_ready": all(payload["promotion_gates"].values()),
+        "manifest_path": str(value) if isinstance(value, Path) else "",
+    }
+
+
 def validate_independent_answer_benchmark(
     value: Path | Mapping[str, Any],
     *,
@@ -4180,6 +6024,15 @@ def validate_independent_answer_benchmark(
         ):
             return {"passed": False, "reason": "independent_benchmark_pointer_drift"}
         return nested
+    if (
+        payload.get("schema_version") == 3
+        and payload.get("source_kind") == SOURCE_SPAN_QUERY_SOURCE_KIND
+    ):
+        return _validate_source_span_query_benchmark_payload(
+            value,
+            payload,
+            chronovisor_root=chronovisor_root,
+        )
     entries = payload.get("entries")
     split_epoch_id = payload.get("split_epoch_id")
     schema_version = payload.get("schema_version")
@@ -4873,7 +6726,10 @@ def build_machine_gold_cycle(
             ),
         }
     benchmark = benchmark_check["payload"]
-    if benchmark.get("source_kind") != "machine_search_label_consensus":
+    if benchmark.get("source_kind") not in {
+        "machine_search_label_consensus",
+        SOURCE_SPAN_QUERY_SOURCE_KIND,
+    }:
         return {"status": "waiting", "reason": "machine_benchmark_authority_required"}
     if benchmark_check.get("promotion_ready") is not True:
         return {"status": "waiting", "reason": "waiting_for_machine_expansion"}
@@ -4978,7 +6834,13 @@ def build_machine_gold_cycle(
         evidence: dict[str, Any] = {
             "source_packet": source_packet,
             "source_packet_sha256": _sealed_canonical_sha(source_packet),
-            "source_frozen_at": source_frozen_at,
+            # A source-span packet records the source snapshot time, which can
+            # precede publication of the benchmark epoch.  Preserve that exact
+            # value for causal-order validation instead of replacing it with
+            # the benchmark publication time.
+            "source_frozen_at": str(
+                source_packet.get("source_frozen_at") or source_frozen_at
+            ),
             "reference_policy_sha256": DETERMINISTIC_GOLD_PROJECTION_POLICY_SHA256,
         }
         evidence_sha = _canonical_sha(
@@ -5399,6 +7261,16 @@ def validate_gold_manifest(
             )
             machine_receipt = machine_check.get("receipt", {})
             source_frozen_at = _strict_utc(machine_subject.get("source_frozen_at"))
+            source_span_metadata = (
+                source_packet.get("source_span")
+                if isinstance(source_packet, Mapping)
+                else None
+            )
+            preregistered_at = (
+                _strict_utc(source_span_metadata.get("preregistered_at"))
+                if isinstance(source_span_metadata, Mapping)
+                else ""
+            )
             receipt_created_at = _strict_utc(
                 machine_receipt.get("created_at")
                 if isinstance(machine_receipt, Mapping)
@@ -5408,6 +7280,15 @@ def validate_gold_manifest(
                 source_frozen_at
                 and receipt_created_at
                 and frozen_at
+                and (
+                    not preregistered_at
+                    or datetime.fromisoformat(
+                        preregistered_at.replace("Z", "+00:00")
+                    )
+                    < datetime.fromisoformat(
+                        receipt_created_at.replace("Z", "+00:00")
+                    )
+                )
                 and datetime.fromisoformat(source_frozen_at.replace("Z", "+00:00"))
                 < datetime.fromisoformat(receipt_created_at.replace("Z", "+00:00"))
                 <= datetime.fromisoformat(frozen_at.replace("Z", "+00:00"))
@@ -6511,7 +8392,7 @@ def build_machine_scorer_calibration_cycle(
     if (
         benchmark.get("passed") is not True
         or benchmark.get("payload", {}).get("source_kind")
-        != "machine_search_label_consensus"
+        not in {"machine_search_label_consensus", SOURCE_SPAN_QUERY_SOURCE_KIND}
     ):
         return {"status": "waiting", "reason": "machine_benchmark_authority_required"}
     controls = _machine_calibration_controls(benchmark)
@@ -6829,7 +8710,7 @@ def validate_machine_scorer_calibration_artifact(
     if (
         benchmark.get("passed") is not True
         or benchmark.get("payload", {}).get("source_kind")
-        != "machine_search_label_consensus"
+        not in {"machine_search_label_consensus", SOURCE_SPAN_QUERY_SOURCE_KIND}
         or len(controls) != MACHINE_SCORER_CALIBRATION_MIN_CASES
         or payload.get("schema_version") != MACHINE_SCORER_CALIBRATION_SCHEMA_VERSION
         or payload.get("artifact_kind") != "machine-answer-scorer-calibration"
@@ -7606,9 +9487,9 @@ def evaluate_independent_answer_benchmark(
     )
     selected_ids = [str(packet["case_id"]) for packet in selected]
     machine_benchmark_authority = bool(
-        benchmark_payload.get("schema_version") == 2
-        and benchmark_payload.get("source_kind")
-        == "machine_search_label_consensus"
+        benchmark_payload.get("source_kind")
+        in {"machine_search_label_consensus", SOURCE_SPAN_QUERY_SOURCE_KIND}
+        and benchmark_payload.get("schema_version") in {2, 3}
     )
     gold_check = (
         validate_gold_manifest(
@@ -8857,6 +10738,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--build-split-manifest", action="store_true")
     parser.add_argument("--split-manifest", default=str(ANSWER_SPLIT_MANIFEST))
+    parser.add_argument("--build-source-span-benchmark", action="store_true")
+    parser.add_argument("--source-span-candidates")
+    parser.add_argument("--source-span-output", default=str(SOURCE_SPAN_QUERY_BENCHMARK))
+    parser.add_argument(
+        "--source-span-source-ledger-dir",
+        default=str(SOURCE_SPAN_QUERY_SOURCE_LEDGER_DIR),
+    )
+    parser.add_argument("--source-span-dev-components", type=int, default=60)
+    parser.add_argument("--source-span-holdout-components", type=int, default=120)
+    parser.add_argument("--source-span-locked-min-components", type=int, default=20)
+    parser.add_argument("--consensus-ledger", default=str(ANSWER_CONSENSUS_LEDGER))
     parser.add_argument("--gold-manifest")
     parser.add_argument("--scorer-calibration")
     parser.add_argument("--evaluate", action="store_true")
@@ -8893,7 +10785,24 @@ def main(argv: list[str] | None = None) -> int:
 def _main_locked(args: argparse.Namespace) -> int:
     if not args.dry_run:
         init_chronovisor()
-    if args.build_split_manifest:
+    if args.build_source_span_benchmark:
+        if not args.source_span_candidates:
+            result = {
+                "status": "held",
+                "reason": "source_span_candidate_file_required",
+            }
+        else:
+            result = build_source_span_query_benchmark_epoch(
+                candidate_file=Path(args.source_span_candidates).expanduser(),
+                output_file=Path(args.source_span_output).expanduser(),
+                source_ledger_dir=Path(args.source_span_source_ledger_dir).expanduser(),
+                consensus_ledger_file=Path(args.consensus_ledger).expanduser(),
+                dev_components=args.source_span_dev_components,
+                holdout_components=args.source_span_holdout_components,
+                locked_min_components=args.source_span_locked_min_components,
+                dry_run=args.dry_run,
+            )
+    elif args.build_split_manifest:
         result = write_answer_split_manifest(
             output_file=Path(args.split_manifest).expanduser()
         )
