@@ -453,9 +453,13 @@ def _run_structured_triage_session(
     value_validator: Callable[[Any], Sequence[ValidationIssue]] | None = None,
     plain_text_contract: str | None = None,
     plain_text_decoder: Callable[[str], Any] | None = None,
+    reasoning_disabled: bool = False,
     raise_on_failure: bool,
 ) -> Any | None:
     """Run one triage LocalStructuredSession with the shared runtime guards."""
+
+    if not isinstance(reasoning_disabled, bool):
+        raise ValueError("reasoning_disabled must be a boolean")
 
     config = load_ingest_config()
     triage_num_predict = min(config.num_predict, _TRIAGE_NUM_PREDICT)
@@ -522,6 +526,7 @@ def _run_structured_triage_session(
                 max_input_chars=selected_num_ctx,
                 max_output_chars=_TRIAGE_MAX_OUTPUT_BYTES,
                 max_feedback_chars=_TRIAGE_MAX_FEEDBACK_BYTES,
+                reasoning_disabled=reasoning_disabled,
             ).run(
                 prompt,
                 schema,
@@ -659,6 +664,7 @@ def triage_c2(
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     frontier_feedback: str | None = None,
     transport: ChatTransport | None = None,
+    reasoning_disabled: bool = False,
     raise_on_failure: bool = False,
 ) -> dict[str, Any] | None:
     """Run the explicit C2 triage wrapper against fixed source records.
@@ -671,6 +677,8 @@ def triage_c2(
     intentionally untouched.
     """
 
+    if not isinstance(reasoning_disabled, bool):
+        raise ValueError("reasoning_disabled must be a boolean")
     records = _normalize_c2_source_records(source_records)
     source_text = _render_c2_source_records(records)
     source_records_sha256 = _c2_source_records_sha256(records)
@@ -730,6 +738,7 @@ do not calculate or emit hashes, byte offsets, dates, or validity intervals.
         transport=transport,
         progress_callback=progress_callback,
         value_validator=validate_c2,
+        reasoning_disabled=reasoning_disabled,
         raise_on_failure=raise_on_failure,
     )
     if result is None:

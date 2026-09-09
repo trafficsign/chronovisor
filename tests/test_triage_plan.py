@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from chronovisor.ingest.triage_plan import (
     canonical_triage_target,
     collapse_exact_duplicate_operations,
@@ -187,3 +189,102 @@ def test_prompt_forbids_multiple_operations_for_one_target() -> None:
         TRIAGE_SYSTEM_PROMPT
     )
     assert "preserve all of them" in TRIAGE_SYSTEM_PROMPT
+
+
+def test_c2_reasoning_disabled_is_explicit_and_default_false_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.ingest import ingest_triage
+
+    config = SimpleNamespace(
+        model="triage:test",
+        num_ctx=32_768,
+        max_num_ctx=65_536,
+        num_predict=256,
+        keep_alive="0",
+        read_timeout_ms=5_000,
+    )
+    monkeypatch.setattr(
+        ingest_triage,
+        "_build_triage_catalog",
+        lambda *_args, **_kwargs: (object(), "bounded catalog"),
+    )
+    monkeypatch.setattr(
+        ingest_triage,
+        "load_ingest_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        ingest_triage,
+        "required_structured_context_tokens",
+        lambda *_args, **_kwargs: 512,
+    )
+    monkeypatch.setattr(
+        ingest_triage,
+        "_select_ingest_context",
+        lambda *_args, **_kwargs: 32_768,
+    )
+    monkeypatch.setattr(
+        ingest_triage,
+        "_validate_effective_triage_plan",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        ingest_triage,
+        "_validate_triage_plan",
+        lambda value, **_kwargs: list(value) if isinstance(value, list) else None,
+    )
+
+    captured: list[dict[str, object]] = []
+    real_session = ingest_triage.LocalStructuredSession
+
+    def capture_session(**kwargs: object):
+        captured.append(dict(kwargs))
+        return real_session(**kwargs)
+
+    monkeypatch.setattr(ingest_triage, "LocalStructuredSession", capture_session)
+    records = [{"record_id": "turn-1", "text": "明示された決定"}]
+    response = json.dumps({"operations": [], "semantic_evidence": []})
+
+    default_transport = _QueueTransport(response)
+    default_result = ingest_triage.triage_c2(
+        records,
+        transport=default_transport,
+    )
+    disabled_transport = _QueueTransport(response)
+    disabled_result = ingest_triage.triage_c2(
+        records,
+        transport=disabled_transport,
+        reasoning_disabled=True,
+    )
+
+    assert default_result is not None
+    assert disabled_result is not None
+    assert default_result == ingest_triage.triage_c2(
+        records,
+        transport=_QueueTransport(response),
+        reasoning_disabled=False,
+    )
+    assert len(captured) == 3
+    assert captured[0]["reasoning_disabled"] is False
+    assert captured[1]["reasoning_disabled"] is True
+    assert captured[2]["reasoning_disabled"] is False
+    assert default_transport.requests[0].think is not False
+    assert disabled_transport.requests[0].think is False
+    assert disabled_transport.requests[0].think_selection_reason == (
+        "caller_disabled_reasoning"
+    )
+    assert disabled_result["audit"]["local_structured"]["think"] is False
+    assert disabled_result["audit"]["local_structured"]["think_selection_reason"] == (
+        "caller_disabled_reasoning"
+    )
+    assert default_result["audit"]["request_sha256"] == disabled_result["audit"]["request_sha256"]
+
+    invalid_transport = _QueueTransport(response)
+    with pytest.raises(ValueError, match="reasoning_disabled"):
+        ingest_triage.triage_c2(
+            records,
+            transport=invalid_transport,
+            reasoning_disabled=1,  # type: ignore[arg-type]
+        )
+    assert invalid_transport.requests == []
