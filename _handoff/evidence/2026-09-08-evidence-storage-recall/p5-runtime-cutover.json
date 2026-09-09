@@ -603,7 +603,7 @@
     "periodic librarian-review was not targeted but its observed run resolved d98",
     "Dashboard materialized projections may lag the new service runtime",
     "LAN health returns expected 401 before authentication",
-    "production Qwen oMLX ds4-server PID807 and C builder PID40541 were intentionally left running; no model process was killed",
+    "production Qwen DwarfStar ds4-server PID807 and C builder PID40541 were intentionally left running; no model process was killed",
     "Semantic had a transient accelerator lease timeout on first spawn and recovered on launchd retry"
   ],
   "historical_c7_cutover": {
@@ -874,7 +874,7 @@
       "periodic librarian-review was not targeted and will resolve the pinned runtime on its next scheduled run",
       "Dashboard materialized projections may lag the new service runtime",
       "LAN health returns expected 401 before authentication",
-      "PID807 production Qwen oMLX ds4-server was left running; no model process was killed"
+      "PID807 production Qwen DwarfStar ds4-server was left running; no model process was killed"
     ],
     "acceptance": {
       "archive_provenance_complete": true,
@@ -916,11 +916,22 @@
     "prior_key": "untouched_p4_mlx_pid",
     "prior_value": 807,
     "prior_residual_text": "P4 MLX process PID807 was intentionally left running; no generic model kill was used",
-    "corrected_label": "production Qwen oMLX ds4-server",
+    "corrected_label": "production Qwen DwarfStar ds4-server",
     "corrected_value": 807,
     "facts_preserved": [
       "PID807 remained running",
       "no model process was killed"
     ]
+  },
+  "runtime_backend_clarification": {
+    "pid": 807,
+    "backend": "DwarfStar ds4-server",
+    "chronovisor_provider_adapter": "omlx",
+    "native_omlx_server": false,
+    "legacy_omlx_pid_keys_refer_to_adapter_name": true,
+    "batched_session_enabled": false,
+    "resident_sessions": 1,
+    "verification": "live argv and /v1/models owned_by ds4.c",
+    "mutation_performed": false
   }
 }
