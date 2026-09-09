@@ -1,103 +1,304 @@
 {
   "schema": "chronovisor.architecture-incremental-receipt.v1",
-  "observed_at": "2026-09-09T23:12:00+09:00",
+  "observed_at": "2026-09-10T00:26:03+09:00",
   "scope": {
-    "mode": "targeted_c2_raw_time_resolver_and_content_correction_site_migration",
-    "baseline_commit": "bbef44624d450accc448bcaaa897b8005ddfebbd",
-    "current_commit": "c01c33434c683befe910274c9a7aac1890a88f13",
+    "mode": "targeted_c2_triage_and_native_projection_site_migration",
+    "baseline_commit": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+    "current_commit": "5de28b37a139d01bf4324c2103151d5881278bd6",
     "source_scan": "scripts/architecture_baseline.py",
     "included_modules": [
-      "chronovisor.recall.recall_answer_eval",
-      "chronovisor.research.evidence_reconstruction",
-      "chronovisor.recall.content_correction"
+      "chronovisor.ingest.ingest_schemas",
+      "chronovisor.ingest.ingest_triage",
+      "chronovisor.ingest.raw_semantic_projection"
     ],
     "new_import_sites": [
       "from chronovisor.core.canonical_json import canonical_json_sha256_strict",
-      "from chronovisor.core.raw_segment import RawSegmentCorrupt",
-      "from chronovisor.core.page_mutation import public mutation helpers and mutation_evidence_ref"
+      "from chronovisor.core.claude_code_transcript import claude_semantic_view",
+      "from chronovisor.decision.local_structured import ChatTransport, ValidationIssue, structured_request_sha256",
+      "from chronovisor.core.raw_store import RawStore",
+      "from chronovisor.core.codex_transcript import codex_semantic_view",
+      "from chronovisor.core.pi_transcript import claude_semantic_view, pi_message_view",
+      "from chronovisor.core.canonical_json import canonical_json_sha256_strict",
+      "from chronovisor.core.search import search_existing_bm25",
+      "from chronovisor.core.search import search",
+      "from chronovisor.core.raw_store import committed_event_spans",
+      "from chronovisor.core.raw_store import RawStore"
     ],
     "no_baseline_refresh": true,
     "no_contract_hash_refresh": true,
     "no_preexisting_drift_registration": true,
     "new_cross_domain_edge": false,
     "retired_edge_preserved": "arch:b38bed04c89db759cb85b0b6944458ea38320f21d1c9e43155775e339493d2e2",
-    "retired_site_preserved": "arch:f43b7d453438992ce8811e86529d9d82008e3e96602b3c7008649b2e503f7128"
+    "unstaged_modules_excluded": [
+      "src/chronovisor/research/c2_semantic_projection.py"
+    ]
   },
   "delta": {
     "added_site_ids": [
-      "arch:3904fec927501ee4d7f6d28ad55420a87e3080b9c5c9ecb6f83c6b9a55663ab7",
-      "arch:a61c5bf726b2f385c0b8fb3ad256b06deb5843a6d617b4f5821efeeaaa8aeca4",
-      "arch:fd815e09e440d98fcde4359fddb8fe0a1528d97be81eaec45390a4bb26240f66"
+      "arch:0dbb3eca48fac98c5664bb1d3448bba36cfb0cdae1efcf37cdae3e6fb18706e1",
+      "arch:1820d67ba29c4bacb7487819af539e21a4d4caad24e8ce0200831dd4e89fadd6",
+      "arch:251487fe01b35515da91a023953c34531b8922444abf02e87b6ae58760ec2d7d",
+      "arch:61a9b3743356e64eb93c7d0ca0cb5b3793fbc8f774fe546847b804b18c99409f",
+      "arch:63473ece8cdd3ff1bf04774f7e78f868317e46e00b9557223464911669fc82b3",
+      "arch:83a5bbead3731c674e63f1227141dd84335bacddbc292b1788fef2d1e8f3f11e",
+      "arch:90ac5a74aa208031b1c37bbf8cab0778b46dcd8c809e6281bac3a2e374536fa4",
+      "arch:b2bff97f60099b1e00a390ba7fc87542e96cebfc07a75ac153439bf8c69d858e",
+      "arch:cca5c2ea6975c062122e578d8190dd78bad5295eaa185e4bc7ddc8333658e75e",
+      "arch:e41f19b86d3708852a8f82c67c80a56b169f6c97083761f4abc58234c6f99523",
+      "arch:fd459b4e0e1a709ccab1d8c2a66ce4f843494ca22d95b5bd084b3585b96bd36c"
     ],
     "removed_site_ids": [
-      "arch:f43b7d453438992ce8811e86529d9d82008e3e96602b3c7008649b2e503f7128"
+      "arch:16ff10dace60e57610441edf83d3adf2c0c54bdfc6c5ba8d2e1afe901e7f4b4e",
+      "arch:4a25416288260ad2586b4ddf78a504bc1ff61a79fb65c31bec4367910dd09657",
+      "arch:4e3439ef2e8e3b50b15230ebbba305f4c0fb9cfe5de2363e3785759e81a6bc8a",
+      "arch:599e428eeda006f1e7facc15144251db1ab35e0586c2bcf0c9b3fa56d80fe3c2",
+      "arch:8ca1bc27afdd63734febd8b0309e8b750b6ec80b7a980f9ef6e0833277618a0f",
+      "arch:ed29d8c7776962cde906cfbc181b6f56375df9e6a0e5686c733f5788a0e02220"
     ],
     "added_sites": [
       {
-        "semantic_id": "arch:3904fec927501ee4d7f6d28ad55420a87e3080b9c5c9ecb6f83c6b9a55663ab7",
-        "source_module": "chronovisor.recall.recall_answer_eval",
+        "semantic_id": "arch:0dbb3eca48fac98c5664bb1d3448bba36cfb0cdae1efcf37cdae3e6fb18706e1",
+        "source_module": "chronovisor.ingest.raw_semantic_projection",
+        "scope_kind": "module",
         "scope": "<module>",
-        "line": 31,
+        "statement_kind": "from",
         "target_module": "chronovisor.core.canonical_json",
         "symbols": [
           "canonical_json_sha256_strict"
         ],
-        "content_sha256": "b718de2a8ab0045a7681e64f890efffa1810390d27d2b511e95aadf0a2de8655"
+        "content_sha256": "9a30042f9e19bad0fcc3b0acba3272a0aa54bc7399ea63ed846dc175fafa3789",
+        "occurrence": 1,
+        "line": 30
       },
       {
-        "semantic_id": "arch:a61c5bf726b2f385c0b8fb3ad256b06deb5843a6d617b4f5821efeeaaa8aeca4",
-        "source_module": "chronovisor.research.evidence_reconstruction",
-        "scope": "<module>",
-        "line": 26,
-        "target_module": "chronovisor.core.raw_segment",
+        "semantic_id": "arch:1820d67ba29c4bacb7487819af539e21a4d4caad24e8ce0200831dd4e89fadd6",
+        "source_module": "chronovisor.ingest.raw_semantic_projection",
+        "scope_kind": "function",
+        "scope": "_native_event_semantics",
+        "statement_kind": "from",
+        "target_module": "chronovisor.core.claude_code_transcript",
         "symbols": [
-          "RawSegmentCorrupt"
+          "claude_semantic_view"
         ],
-        "content_sha256": "23cdd33abe03e515c92a14f89cdd9e0aa733301565c5beb1a5297301cd31286a"
+        "content_sha256": "267030f79876a884e9b048bd58315c487e3e7dbdb298816e4e207b7ff1e2f51b",
+        "occurrence": 1,
+        "line": 530
       },
       {
-        "semantic_id": "arch:fd815e09e440d98fcde4359fddb8fe0a1528d97be81eaec45390a4bb26240f66",
-        "source_module": "chronovisor.recall.content_correction",
+        "semantic_id": "arch:251487fe01b35515da91a023953c34531b8922444abf02e87b6ae58760ec2d7d",
+        "source_module": "chronovisor.ingest.ingest_triage",
+        "scope_kind": "module",
         "scope": "<module>",
-        "line": 45,
-        "target_module": "chronovisor.core.page_mutation",
+        "statement_kind": "from",
+        "target_module": "chronovisor.decision.local_structured",
         "symbols": [
-          "ExactReplacement",
-          "PageMutationError",
-          "PreparedPageMutation",
-          "apply_prepared_mutations",
-          "chronovisor_mutation_lock",
-          "decision_authority_lock",
-          "find_mutation_page",
-          "mutation_evidence_error",
-          "mutation_evidence_payload",
-          "mutation_evidence_ref",
-          "prepare_page_mutation",
-          "read_mutation_evidence",
-          "rollback_prepared_mutations"
+          "ChatTransport",
+          "ValidationIssue",
+          "structured_request_sha256"
         ],
-        "content_sha256": "8a7f11a4d459738e87a710c89b3e5933e21a2ee53fd7650efed75d57b8681742"
+        "content_sha256": "716263def71b956dff2d8d46de6fc03f6d3f10bf1c3d012f2a73bb0c8a92d033",
+        "occurrence": 1,
+        "line": 14
+      },
+      {
+        "semantic_id": "arch:61a9b3743356e64eb93c7d0ca0cb5b3793fbc8f774fe546847b804b18c99409f",
+        "source_module": "chronovisor.ingest.raw_semantic_projection",
+        "scope_kind": "module",
+        "scope": "<module>",
+        "statement_kind": "from",
+        "target_module": "chronovisor.core.raw_store",
+        "symbols": [
+          "RawStore"
+        ],
+        "content_sha256": "aed3a8936ddcbdf8948903d72052b67f81e0e459d4a8986a0324110838f6d272",
+        "occurrence": 1,
+        "line": 43
+      },
+      {
+        "semantic_id": "arch:63473ece8cdd3ff1bf04774f7e78f868317e46e00b9557223464911669fc82b3",
+        "source_module": "chronovisor.ingest.raw_semantic_projection",
+        "scope_kind": "function",
+        "scope": "_native_event_semantics",
+        "statement_kind": "from",
+        "target_module": "chronovisor.core.codex_transcript",
+        "symbols": [
+          "codex_semantic_view"
+        ],
+        "content_sha256": "4ba1379878bf8b3408992c61ab1a765acb5126562d24b09caa6ecf3344bfbd22",
+        "occurrence": 1,
+        "line": 507
+      },
+      {
+        "semantic_id": "arch:83a5bbead3731c674e63f1227141dd84335bacddbc292b1788fef2d1e8f3f11e",
+        "source_module": "chronovisor.ingest.raw_semantic_projection",
+        "scope_kind": "function",
+        "scope": "_native_event_semantics",
+        "statement_kind": "from",
+        "target_module": "chronovisor.core.pi_transcript",
+        "symbols": [
+          "claude_semantic_view",
+          "pi_message_view"
+        ],
+        "content_sha256": "a48d3ba64cbc26c7c58b97c27e5ffc6dc5a15a09b2704e30b40565e87f939394",
+        "occurrence": 1,
+        "line": 544
+      },
+      {
+        "semantic_id": "arch:90ac5a74aa208031b1c37bbf8cab0778b46dcd8c809e6281bac3a2e374536fa4",
+        "source_module": "chronovisor.ingest.ingest_triage",
+        "scope_kind": "module",
+        "scope": "<module>",
+        "statement_kind": "from",
+        "target_module": "chronovisor.core.canonical_json",
+        "symbols": [
+          "canonical_json_sha256_strict"
+        ],
+        "content_sha256": "b718de2a8ab0045a7681e64f890efffa1810390d27d2b511e95aadf0a2de8655",
+        "occurrence": 1,
+        "line": 13
+      },
+      {
+        "semantic_id": "arch:b2bff97f60099b1e00a390ba7fc87542e96cebfc07a75ac153439bf8c69d858e",
+        "source_module": "chronovisor.ingest.ingest_triage",
+        "scope_kind": "function",
+        "scope": "_build_triage_catalog",
+        "statement_kind": "from",
+        "target_module": "chronovisor.core.search",
+        "symbols": [
+          "search_existing_bm25"
+        ],
+        "content_sha256": "8b5b0eaa351ffaf7322d6831ef0d43534f209f9f52454ea4204a3f0d6127390a",
+        "occurrence": 1,
+        "line": 440
+      },
+      {
+        "semantic_id": "arch:cca5c2ea6975c062122e578d8190dd78bad5295eaa185e4bc7ddc8333658e75e",
+        "source_module": "chronovisor.ingest.ingest_triage",
+        "scope_kind": "function",
+        "scope": "_build_triage_catalog",
+        "statement_kind": "from",
+        "target_module": "chronovisor.core.search",
+        "symbols": [
+          "search"
+        ],
+        "content_sha256": "ac6fa04665fb51e020c093c85dee66da294126accf0ab17e836c15a6cd3cc92e",
+        "occurrence": 1,
+        "line": 439
+      },
+      {
+        "semantic_id": "arch:e41f19b86d3708852a8f82c67c80a56b169f6c97083761f4abc58234c6f99523",
+        "source_module": "chronovisor.ingest.raw_semantic_projection",
+        "scope_kind": "function",
+        "scope": "_decode_native_records",
+        "statement_kind": "from",
+        "target_module": "chronovisor.core.raw_store",
+        "symbols": [
+          "committed_event_spans"
+        ],
+        "content_sha256": "867c0bf1eef7ed56f314acdabbe40d1360d828758c9788403ca433c13737daaa",
+        "occurrence": 1,
+        "line": 603
+      },
+      {
+        "semantic_id": "arch:fd459b4e0e1a709ccab1d8c2a66ce4f843494ca22d95b5bd084b3585b96bd36c",
+        "source_module": "chronovisor.ingest.raw_semantic_projection",
+        "scope_kind": "function",
+        "scope": "_resolve_named_native_reference",
+        "statement_kind": "from",
+        "target_module": "chronovisor.core.raw_store",
+        "symbols": [
+          "RawStore"
+        ],
+        "content_sha256": "aed3a8936ddcbdf8948903d72052b67f81e0e459d4a8986a0324110838f6d272",
+        "occurrence": 1,
+        "line": 2124
       }
     ],
     "removed_sites": [
       {
-        "semantic_id": "arch:f43b7d453438992ce8811e86529d9d82008e3e96602b3c7008649b2e503f7128",
-        "source_module": "chronovisor.recall.content_correction",
-        "scope": "<module>",
-        "line": 45,
-        "target_module": "chronovisor.core.page_mutation",
+        "semantic_id": "arch:16ff10dace60e57610441edf83d3adf2c0c54bdfc6c5ba8d2e1afe901e7f4b4e",
+        "source_module": "chronovisor.ingest.raw_semantic_projection",
+        "scope_kind": "function",
+        "scope": "project_native_transcript",
+        "statement_kind": "from",
+        "target_module": "chronovisor.core.claude_code_transcript",
         "symbols": [
-          "ExactReplacement",
-          "PageMutationError",
-          "PreparedPageMutation",
-          "apply_prepared_mutations",
-          "chronovisor_mutation_lock",
-          "decision_authority_lock",
-          "find_mutation_page",
-          "prepare_page_mutation",
-          "rollback_prepared_mutations"
+          "claude_semantic_view"
         ],
-        "content_sha256": "948ca8a0a96ab93b024a16715a1292955450e1505947a7ffd2e2a56f66d1237c"
+        "content_sha256": "267030f79876a884e9b048bd58315c487e3e7dbdb298816e4e207b7ff1e2f51b",
+        "occurrence": 1,
+        "line": 1134
+      },
+      {
+        "semantic_id": "arch:4a25416288260ad2586b4ddf78a504bc1ff61a79fb65c31bec4367910dd09657",
+        "source_module": "chronovisor.ingest.ingest_triage",
+        "scope_kind": "module",
+        "scope": "<module>",
+        "statement_kind": "from",
+        "target_module": "chronovisor.decision.local_structured",
+        "symbols": [
+          "ChatTransport"
+        ],
+        "content_sha256": "c39dceaf1ac8d9605ca25b71eca411bddd5955e667ab287ff2ab06951407dc7c",
+        "occurrence": 1,
+        "line": 11
+      },
+      {
+        "semantic_id": "arch:4e3439ef2e8e3b50b15230ebbba305f4c0fb9cfe5de2363e3785759e81a6bc8a",
+        "source_module": "chronovisor.ingest.raw_semantic_projection",
+        "scope_kind": "function",
+        "scope": "project_native_transcript",
+        "statement_kind": "from",
+        "target_module": "chronovisor.core.codex_transcript",
+        "symbols": [
+          "codex_semantic_view"
+        ],
+        "content_sha256": "4ba1379878bf8b3408992c61ab1a765acb5126562d24b09caa6ecf3344bfbd22",
+        "occurrence": 1,
+        "line": 1111
+      },
+      {
+        "semantic_id": "arch:599e428eeda006f1e7facc15144251db1ab35e0586c2bcf0c9b3fa56d80fe3c2",
+        "source_module": "chronovisor.ingest.ingest_triage",
+        "scope_kind": "function",
+        "scope": "triage",
+        "statement_kind": "from",
+        "target_module": "chronovisor.core.search",
+        "symbols": [
+          "search_existing_bm25"
+        ],
+        "content_sha256": "8b5b0eaa351ffaf7322d6831ef0d43534f209f9f52454ea4204a3f0d6127390a",
+        "occurrence": 1,
+        "line": 171
+      },
+      {
+        "semantic_id": "arch:8ca1bc27afdd63734febd8b0309e8b750b6ec80b7a980f9ef6e0833277618a0f",
+        "source_module": "chronovisor.ingest.ingest_triage",
+        "scope_kind": "function",
+        "scope": "triage",
+        "statement_kind": "from",
+        "target_module": "chronovisor.core.search",
+        "symbols": [
+          "search"
+        ],
+        "content_sha256": "ac6fa04665fb51e020c093c85dee66da294126accf0ab17e836c15a6cd3cc92e",
+        "occurrence": 1,
+        "line": 170
+      },
+      {
+        "semantic_id": "arch:ed29d8c7776962cde906cfbc181b6f56375df9e6a0e5686c733f5788a0e02220",
+        "source_module": "chronovisor.ingest.raw_semantic_projection",
+        "scope_kind": "function",
+        "scope": "project_native_transcript",
+        "statement_kind": "from",
+        "target_module": "chronovisor.core.pi_transcript",
+        "symbols": [
+          "claude_semantic_view",
+          "pi_message_view"
+        ],
+        "content_sha256": "a48d3ba64cbc26c7c58b97c27e5ffc6dc5a15a09b2704e30b40565e87f939394",
+        "occurrence": 1,
+        "line": 1148
       }
     ],
     "edge_delta": {
@@ -111,28 +312,29 @@
     "target_files": [
       "docs/refactoring/architecture-exception-baseline.json",
       "docs/refactoring/architecture-exceptions.json",
+      "tests/test_architecture_baseline.py",
       "_handoff/evidence/2026-09-08-evidence-storage-recall/p2-architecture-incremental.json"
     ],
     "active_exception_ids_before": 44,
     "active_exception_ids_after": 44,
-    "active_cross_domain_sites_before": 1500,
-    "active_cross_domain_sites_after": 1502,
-    "retired_cross_domain_site_ids_before": 1331,
-    "retired_cross_domain_site_ids_after": 1332,
+    "active_cross_domain_sites_before": 1502,
+    "active_cross_domain_sites_after": 1507,
+    "retired_cross_domain_site_ids_before": 1332,
+    "retired_cross_domain_site_ids_after": 1338,
     "edge_count_before": 44,
     "edge_count_after": 44,
     "updated_edges": {
-      "recall->core": {
-        "sites_before": 259,
-        "sites_after": 260
+      "ingest->core": {
+        "sites_before": 192,
+        "sites_after": 197
       },
-      "research->core": {
-        "sites_before": 27,
-        "sites_after": 28
+      "ingest->decision": {
+        "sites_before": 62,
+        "sites_after": 62
       }
     },
-    "baseline_sha256_before": "d7dd58f15dd72c5c50619cb4cbf279e7eaf6afdd0d1db259e9f200157b6600d8",
-    "baseline_sha256_after": "c95b3efa27ae4306092e9fd239176d9bc5408b4850d18353c516df00ea63edf5",
+    "baseline_sha256_before": "c95b3efa27ae4306092e9fd239176d9bc5408b4850d18353c516df00ea63edf5",
+    "baseline_sha256_after": "61fb266a7582a4d75b76bf3445d3e156349490d5a9961875dab4aed10c22e295",
     "contract_hashes_refreshed": false
   },
   "verification": {
@@ -140,15 +342,15 @@
     "seed_ledger_canonical_hash_match": "pass",
     "active_retired_disjoint": "pass",
     "ledger_site_ids_unique": "pass",
-    "targeted_delta_against_parent": "pass: added 3, removed 1",
-    "baseline_source_import_sites": 1510,
-    "current_source_import_sites": 1512,
+    "targeted_delta_against_parent": "pass: added 11, removed 6",
+    "baseline_source_import_sites": 1512,
+    "current_source_import_sites": 1517,
     "preexisting_current_unmatched_site_ids": 11,
     "current_unmatched_site_ids": 11,
     "preexisting_stale_ledger_site_ids": 1,
     "current_stale_ledger_site_ids": 1,
     "new_edge_guard": "pass: no new package edge; edge count 44 retained",
-    "target_site_source_match": "pass: all 3 added rows match current scanner output; retired f43 absent from current source",
+    "target_site_source_match": "pass: all 11 added rows match 5de28b3 scanner output; all 6 retired rows absent from 5de28b3 source",
     "architecture_output_compare": {
       "baseline_edge_count": 44,
       "current_edge_count": 44,
@@ -158,25 +360,30 @@
     },
     "graph_coverage": {
       "signal": "best_effort",
-      "freshness": "metadata_match_except_content_correction_metadata_changed",
+      "freshness": "metadata_match (best-effort) for all checked paths",
       "paths": [
-        "src/chronovisor/recall/recall_answer_eval.py",
-        "src/chronovisor/research/evidence_reconstruction.py",
-        "src/chronovisor/recall/content_correction.py",
-        "src/chronovisor/core/page_mutation.py"
+        "src/chronovisor/ingest/ingest_schemas.py",
+        "src/chronovisor/ingest/ingest_triage.py",
+        "src/chronovisor/ingest/raw_semantic_projection.py",
+        "src/chronovisor/core/canonical_json.py",
+        "src/chronovisor/core/claude_code_transcript.py",
+        "src/chronovisor/core/raw_store.py",
+        "src/chronovisor/core/codex_transcript.py",
+        "src/chronovisor/core/pi_transcript.py",
+        "src/chronovisor/core/search.py",
+        "src/chronovisor/decision/local_structured.py"
       ],
-      "recorded_issue": "none",
-      "content_correction_action": "read source directly; no index claim made"
+      "recorded_issue": "none for all checked paths; committed-revision source scanner remains authoritative"
     },
-    "architecture_checks": "pytest -q tests/test_architecture_baseline.py tests/test_large_function_policy.py: 9 failed, 21 passed; same 9 known baseline failures (contract-hash, retained ledger/seed drift, large-function policy), no new edge failure",
-    "guard_generate_exceptions": "rejected existing seed drift (expected); no full refresh attempted",
+    "architecture_checks": "isolated checkout at 5de28b3: uv run pytest -q tests/test_architecture_baseline.py tests/test_large_function_policy.py -> 9 failed, 21 passed; same 9 known baseline failures (contract-hash, retained ledger/seed drift, large-function policy), no new edge/import failure",
+    "guard_generate_exceptions": "not run: existing drift intentionally preserved; broad refresh prohibited",
     "guard_drift_summary": {
       "preexisting_unmatched_site_ids": 11,
       "current_unmatched_site_ids": 11,
       "preexisting_stale_ledger_site_ids": 1,
       "current_stale_ledger_site_ids": 1,
-      "active_seed_count": 1502,
-      "detected_current_site_count": 1512
+      "active_seed_count": 1507,
+      "detected_current_site_count": 1517
     }
   },
   "runtime": {
