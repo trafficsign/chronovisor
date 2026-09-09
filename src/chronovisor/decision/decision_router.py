@@ -1762,9 +1762,12 @@ class DecisionRouter:
         artifact_replay: bool | None = None,
         decision_artifact_root: Path | None = None,
         excluded_roles: Iterable[str] = (),
+        reasoning_disabled: bool = False,
     ) -> None:
         if not isinstance(audit_role, str) or not AUDIT_ROLE_RE.fullmatch(audit_role):
             raise ValueError("audit_role must be a safe identifier of at most 80 chars")
+        if not isinstance(reasoning_disabled, bool):
+            raise ValueError("reasoning_disabled must be a boolean")
         baseline_config = config or load_decision_router_config()
         self.authority_kind = getattr(
             baseline_config, "authority_kind", QUORUM_AUTHORITY_KIND
@@ -1977,6 +1980,7 @@ class DecisionRouter:
         self.residency_planner = residency_planner or ollama.plan_model_residency
         self.reuse_larger_context = bool(reuse_larger_context)
         self.decision_lane = decision_lane
+        self.reasoning_disabled = reasoning_disabled
         self.model_observer = model_observer or ollama.observe_model_runtime
         # Synthetic transports deliberately opt out unless they supply an
         # observer. Production adaptive routing always records /api/ps after
@@ -2215,6 +2219,7 @@ class DecisionRouter:
                 router_policy=router_policy,
                 generation_policy_sha256=structured_generation_policy_sha256(),
                 model_runtime=model_runtime,
+                reasoning_disabled=self.reasoning_disabled,
             ),
             context_tier,
         )
@@ -2575,6 +2580,7 @@ class DecisionRouter:
                 else "normal"
             ),
             reasoning_authority=reasoning_authority,
+            reasoning_disabled=self.reasoning_disabled,
         )
 
     def _vote(

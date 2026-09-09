@@ -49,7 +49,10 @@ def execution_fingerprint(
     router_policy: Mapping[str, Any],
     generation_policy_sha256: str,
     model_runtime: Mapping[str, Any],
+    reasoning_disabled: bool = False,
 ) -> tuple[str, dict[str, Any]]:
+    if not isinstance(reasoning_disabled, bool):
+        raise ValueError("reasoning_disabled must be a boolean")
     identity = {
         "fingerprint_version": EXECUTION_FINGERPRINT_VERSION,
         "request_sha256": request_sha256,
@@ -60,7 +63,19 @@ def execution_fingerprint(
         "generation_policy_sha256": generation_policy_sha256,
         "model_runtime_sha256": canonical_sha256(model_runtime),
     }
+    # Keep the legacy identity byte-for-byte stable unless a caller has
+    # explicitly selected the no-reasoning execution path.  The marker is
+    # sealed as part of the identity, so replay cannot mix the two modes.
+    if reasoning_disabled:
+        identity["reasoning_disabled"] = True
     return canonical_sha256(identity), identity
+
+
+def _validate_reasoning_disabled_identity(identity: Mapping[str, Any]) -> None:
+    """Reject forged or ambiguous no-reasoning identity markers."""
+
+    if "reasoning_disabled" in identity and identity["reasoning_disabled"] is not True:
+        raise DecisionArtifactError("decision artifact reasoning identity is invalid")
 
 
 class DecisionArtifactStore:
@@ -100,7 +115,10 @@ class DecisionArtifactStore:
         if payload.get("execution_fingerprint") != fingerprint:
             raise DecisionArtifactError("decision artifact path identity mismatch")
         identity = payload.get("execution_identity")
-        if not isinstance(identity, dict) or canonical_sha256(identity) != fingerprint:
+        if not isinstance(identity, dict):
+            raise DecisionArtifactError("decision artifact execution identity mismatch")
+        _validate_reasoning_disabled_identity(identity)
+        if canonical_sha256(identity) != fingerprint:
             raise DecisionArtifactError("decision artifact execution identity mismatch")
         if payload.get("decision_sha256") != canonical_sha256(payload.get("decision")):
             raise DecisionArtifactError("decision artifact payload digest mismatch")
@@ -160,7 +178,10 @@ class DecisionArtifactStore:
         if payload.get("execution_fingerprint") != fingerprint:
             raise DecisionArtifactError("decision artifact path identity mismatch")
         identity = payload.get("execution_identity")
-        if not isinstance(identity, dict) or canonical_sha256(identity) != fingerprint:
+        if not isinstance(identity, dict):
+            raise DecisionArtifactError("decision artifact execution identity mismatch")
+        _validate_reasoning_disabled_identity(identity)
+        if canonical_sha256(identity) != fingerprint:
             raise DecisionArtifactError("decision artifact execution identity mismatch")
         if payload.get("decision_sha256") != canonical_sha256(payload.get("decision")):
             raise DecisionArtifactError("decision artifact payload digest mismatch")
@@ -234,6 +255,9 @@ class DecisionArtifactStore:
         authority_kind: str = QUORUM_AUTHORITY_KIND,
         single_model_proof: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if not isinstance(identity, Mapping):
+            raise DecisionArtifactError("decision artifact execution identity is invalid")
+        _validate_reasoning_disabled_identity(identity)
         if canonical_sha256(identity) != fingerprint:
             raise DecisionArtifactError("execution identity does not match fingerprint")
         if authority_kind == SINGLE_MODEL_AUTHORITY_KIND:

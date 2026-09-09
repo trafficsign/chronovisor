@@ -1534,6 +1534,55 @@ def test_disagreement_uses_low_until_adaptive_canary(
     )
 
 
+def test_router_reasoning_override_disables_only_initial_reasoning() -> None:
+    baseline_transport = ModelTransport(
+        {
+            "ornith:test": [_payload("apply")],
+            "gpt-oss:test": [_payload("apply")],
+        }
+    )
+    baseline = DecisionRouter(
+        config=_config(), transport=baseline_transport
+    ).decide("prompt", SCHEMA)
+
+    override_transport = ModelTransport(
+        {
+            "ornith:test": [_payload("apply")],
+            "gpt-oss:test": [_payload("apply")],
+        }
+    )
+    override = DecisionRouter(
+        config=_config(),
+        transport=override_transport,
+        reasoning_disabled=True,
+    ).decide("prompt", SCHEMA)
+
+    assert baseline.ok is True
+    assert override.ok is True
+    assert [request.think for request in baseline_transport.requests] == [
+        "low",
+        "low",
+    ]
+    assert [request.num_predict for request in baseline_transport.requests] == [
+        170,
+        170,
+    ]
+    assert [request.think for request in override_transport.requests] == [
+        False,
+        False,
+    ]
+    assert [request.num_predict for request in override_transport.requests] == [
+        256,
+        256,
+    ]
+    assert all(
+        vote.result.audit_record()["structured_generation_policy_sha256"]
+        == structured_generation_policy_sha256()
+        for result in (baseline, override)
+        for vote in result.votes
+    )
+
+
 @pytest.mark.parametrize(
     (
         "role",

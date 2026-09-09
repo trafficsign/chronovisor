@@ -22,6 +22,7 @@ from chronovisor.core.managed_hold import ManagedHoldStore
 from chronovisor.core.runtime_config import DecisionRouterConfig
 from chronovisor.decision import decision_authority, decision_router
 from chronovisor.decision.decision_artifact import (
+    SINGLE_MODEL_DECISION_ARTIFACT_SCHEMA,
     DecisionArtifactError,
     DecisionArtifactStore,
     execution_fingerprint,
@@ -227,6 +228,62 @@ def test_decision_artifact_is_content_addressed(tmp_path: Path) -> None:
     assert published["frontier_calls"] == 0
 
 
+def test_reasoning_override_fingerprint_preserves_legacy_identity_and_rejects_forgery(
+    tmp_path: Path,
+) -> None:
+    args = {
+        "request_sha256": "a" * 64,
+        "lane": "lane",
+        "context_tier": 32_768,
+        "authority": {"epoch": "one"},
+        "router_policy": {"artifact": "b" * 64},
+        "generation_policy_sha256": "c" * 64,
+        "model_runtime": {"models": ["a", "b"]},
+    }
+    legacy_fingerprint, legacy_identity = execution_fingerprint(**args)
+    false_fingerprint, false_identity = execution_fingerprint(
+        **args, reasoning_disabled=False
+    )
+    override_fingerprint, override_identity = execution_fingerprint(
+        **args, reasoning_disabled=True
+    )
+
+    assert false_fingerprint == legacy_fingerprint
+    assert false_identity == legacy_identity
+    assert legacy_identity == {
+        "fingerprint_version": 2,
+        "request_sha256": args["request_sha256"],
+        "lane": args["lane"],
+        "context_tier": args["context_tier"],
+        "authority_sha256": durable_state.canonical_sha256(args["authority"]),
+        "router_policy_sha256": durable_state.canonical_sha256(args["router_policy"]),
+        "generation_policy_sha256": args["generation_policy_sha256"],
+        "model_runtime_sha256": durable_state.canonical_sha256(args["model_runtime"]),
+    }
+    assert override_fingerprint != legacy_fingerprint
+    assert override_identity["reasoning_disabled"] is True
+    for invalid in (None, 0, 1, "true"):
+        with pytest.raises(ValueError, match="reasoning_disabled"):
+            execution_fingerprint(**args, reasoning_disabled=invalid)
+
+    forged_identity = dict(legacy_identity)
+    forged_identity["reasoning_disabled"] = False
+    forged_fingerprint = durable_state.canonical_sha256(forged_identity)
+    store = DecisionArtifactStore(tmp_path)
+    path = store.path_for(forged_fingerprint)
+    path.parent.mkdir(parents=True)
+    payload = durable_state.seal_object(
+        {
+            "schema": SINGLE_MODEL_DECISION_ARTIFACT_SCHEMA,
+            "execution_fingerprint": forged_fingerprint,
+            "execution_identity": forged_identity,
+        }
+    )
+    path.write_bytes(durable_state.canonical_bytes(payload))
+    with pytest.raises(DecisionArtifactError, match="reasoning identity"):
+        store.load(forged_fingerprint)
+
+
 def test_router_replays_same_execution_without_model_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -281,6 +338,72 @@ def test_router_replays_same_execution_without_model_call(
     assert replay["model_invocations"] == 0
     assert replay["models"] == ["primary:test", "challenger:test"]
     assert replay["vote_roles"] == ["primary", "challenger"]
+
+
+def test_reasoning_override_replay_isolated_from_legacy_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chronovisor.core import store
+
+    monkeypatch.setattr(store, "CHRONOVISOR_ROOT", tmp_path / "wiki")
+    monkeypatch.setattr(
+        decision_router,
+        "bind_lane_contract_request",
+        lambda _lane, prompt, _schema, system: (prompt, system),
+    )
+    monkeypatch.setattr(
+        decision_authority,
+        "current_semantic_authority",
+        lambda lane: ({"source": "test", "lane": lane, "epoch": "one"}, None),
+    )
+    artifact_root = tmp_path / "artifacts"
+    baseline_transport = _Transport()
+    baseline_router = DecisionRouter(
+        config=_config(),
+        transport=baseline_transport,
+        resolve_adoption=False,
+        record_replay=False,
+        live_resource_control=False,
+        artifact_replay=True,
+        decision_artifact_root=artifact_root,
+    )
+    baseline_first = baseline_router.decide(
+        "prompt", SCHEMA, decision_lane="test_lane"
+    )
+    baseline_second = baseline_router.decide(
+        "prompt", SCHEMA, decision_lane="test_lane"
+    )
+
+    override_transport = _Transport()
+    override_router = DecisionRouter(
+        config=_config(),
+        transport=override_transport,
+        resolve_adoption=False,
+        record_replay=False,
+        live_resource_control=False,
+        artifact_replay=True,
+        decision_artifact_root=artifact_root,
+        reasoning_disabled=True,
+    )
+    override_first = override_router.decide(
+        "prompt", SCHEMA, decision_lane="test_lane"
+    )
+    override_second = override_router.decide(
+        "prompt", SCHEMA, decision_lane="test_lane"
+    )
+
+    assert baseline_first.ok and baseline_second.ok
+    assert override_first.ok and override_second.ok
+    assert baseline_second.residency["source"] == "canonical_artifact_replay"
+    assert override_second.residency["source"] == "canonical_artifact_replay"
+    assert len(baseline_transport.calls) == 2
+    assert len(override_transport.calls) == 2
+    assert baseline_first.residency["execution_fingerprint"] != (
+        override_first.residency["execution_fingerprint"]
+    )
+    artifacts = list(artifact_root.glob("[0-9a-f][0-9a-f]/*.json"))
+    assert len(artifacts) == 2
 
 
 def test_router_does_not_replay_unfingerprintable_custom_agreement_callable(
