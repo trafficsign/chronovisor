@@ -35,7 +35,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Call the configured ingest model once, with bounded repairs",
     )
+    parser.add_argument(
+        "--reasoning-disabled",
+        action="store_true",
+        help="Disable model reasoning for this explicit C2 generation trial",
+    )
     args = parser.parse_args(argv)
+    if args.reasoning_disabled and not args.generate:
+        parser.error("--reasoning-disabled requires --generate")
     root = args.root.expanduser().resolve()
     raw_dir = args.raw_dir.expanduser().resolve()
     production = (Path.home() / ".chronovisor").resolve()
@@ -66,7 +73,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.generate:
             from chronovisor.ingest.ingest_triage import triage_c2
 
-            triage = triage_c2(sources["source_records"], raise_on_failure=True)
+            triage = triage_c2(
+                sources["source_records"],
+                reasoning_disabled=args.reasoning_disabled,
+                raise_on_failure=True,
+            )
         else:
             triage = json.loads(args.triage_result.read_text(encoding="utf-8"))
         if not isinstance(triage, dict):
@@ -97,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
                 "projection_id": sources["projection_id"],
                 "source_record_count": len(sources["source_records"]),
                 "model_called": args.generate,
+                "reasoning_disabled": args.reasoning_disabled,
                 "page_operations_applied": False,
                 "production_c2_enabled": False,
             },
