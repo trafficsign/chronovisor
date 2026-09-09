@@ -1,0 +1,133 @@
+{
+  "batch_accounting": {
+    "all_job_rows_accounted": true,
+    "expected_children": 20,
+    "failed": 7,
+    "failure_types": {
+      "repair_exhausted": 7
+    },
+    "failure_validator_detail_persisted": false,
+    "job_rows": 20,
+    "pending": 0,
+    "running": 0,
+    "skipped": 0,
+    "success": 13
+  },
+  "candidate_classification": {
+    "candidate_kind_counts": {
+      "decision": 6,
+      "proposal": 8,
+      "result": 20,
+      "unknown": 19
+    },
+    "condition": {
+      "absent_candidate": 2,
+      "baseline_present": 10,
+      "exact_matches": 0,
+      "mismatch": 1,
+      "processed_present": 3,
+      "unresolved_due_failed_jobs": 7
+    },
+    "correction": {
+      "baseline_present": 7,
+      "exact_matches": 1,
+      "mismatch": 2,
+      "processed_present": 3,
+      "relation_promoted": 0,
+      "unresolved_due_failed_jobs": 4
+    },
+    "label_comparison_processed_records": 29,
+    "semantic_metadata_complete_records": 7,
+    "semantic_metadata_missing_or_unknown_records": 22,
+    "semantic_rows_observed": 53,
+    "source_label_absent_candidate_processed": {
+      "decision": 0,
+      "proposal": 0,
+      "result": 1
+    },
+    "source_label_baseline_present": {
+      "decision": 34,
+      "proposal": 14,
+      "result": 30
+    },
+    "source_label_exact_matches_processed": {
+      "decision": 2,
+      "proposal": 1,
+      "result": 5
+    },
+    "source_label_mismatch_processed": {
+      "decision": 10,
+      "proposal": 3,
+      "result": 6
+    },
+    "source_label_unresolved_due_failed_jobs": {
+      "decision": 22,
+      "proposal": 10,
+      "result": 18
+    },
+    "unknown_or_missing_is_not_relabelled": true
+  },
+  "formal_limitations": [
+    "This is provisional source/native evaluation, not formal retrieval gold and not an adoption decision.",
+    "Provider output token values are final-attempt audit values; prompt plus repair-attempt totals are unavailable.",
+    "Seven jobs ended repair_exhausted without a persisted validator-specific reason; they remain hold and are not reclassified.",
+    "No answer scoring, threshold, authority, validity, or supersession claim was made."
+  ],
+  "frozen_inputs": {
+    "base_projection_sha256": "91853dcc772ee5b4125a97cbc45366260cfc5d74e2e997b1712df6333cdc229a",
+    "batch_receipt_sha256": "2254a940d44cdfe21a9a56e314bf8445b70be34c06ff652c25d0dc38137b60b9",
+    "freeze_manifest_sha256": "ea9a7947b872fd7caeba44e5169a3ae6aa1d21f3fd1e4d4f206dd57ea227ae34",
+    "protocol_sha256": "7805a12e67a9ebc552f10bbcadada9604f3c9abbfa9070209debce6a7d26699f",
+    "source_only_annotation_sha256": "fcba08c9c1f0b8198c054400416a64888b06504ea96a833bc352fbc0e33a7ecf"
+  },
+  "observed_at": "2026-09-09T18:13:17Z",
+  "provenance": {
+    "model_calls_for_evaluator": 0,
+    "private_detail_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/c2-native-trial-20260910/native20-source-only-evaluation-results.private.json",
+    "private_detail_sha256": "2809bdd0e551ab46bf289d28c1b42a76b62f21f5c7d722397b68888b2ca38455",
+    "production_modified": false,
+    "raw_or_index_modified": false,
+    "repository_head_at_evaluation": "40fedee975d06ebab842b9a0ec716abf1d5099db"
+  },
+  "runtime_cost": {
+    "provider_generation_calls_observed": 38,
+    "provider_generation_ms_last_attempt_sum": 309039.0,
+    "provider_generation_ms_total_all_attempts": null,
+    "provider_output_tokens_last_attempt_sum": 13751,
+    "provider_output_tokens_total_all_attempts": null,
+    "provider_output_tokens_total_unknown": true,
+    "provider_token_count_exact_last_attempt_observed": true,
+    "repair_turns_observed": 18,
+    "runner_actual_usage_available_jobs": 0,
+    "runner_actual_usage_unknown_jobs": 13,
+    "runner_retry_count": 0,
+    "runner_wall_ms_sum_all_20_jobs": 759078.0
+  },
+  "safety": {
+    "as_of_true_accepted_records": 0,
+    "as_of_true_rejected_records": 69,
+    "as_of_true_unknown_validity_rejections": 48,
+    "event_quote_separate_from_current_fact": true,
+    "native_relation_policy": "supports_only",
+    "semantic_authority_changes": 0,
+    "supersedes_relations_added": 0,
+    "user_roles_relabelled": 0,
+    "validity_intervals_inferred": 0
+  },
+  "schema": "chronovisor.c2-native20-source-only-evaluation-results.v1",
+  "scope": "fixed native20 selected children; source/native/CAS evaluation with released candidate outputs; no answer scoring",
+  "source_validation": {
+    "candidate_rows_out_of_scope": 0,
+    "cas_artifacts_revalidated": 13,
+    "cas_or_source_identity_failures": 0,
+    "native_atoms_revalidated": 21,
+    "native_claim_canonical_outer_trim_matches": 21,
+    "raw_byte_range_or_receipt_failures": 0,
+    "selected_children": 20,
+    "selected_source_records": 69,
+    "source_records_revalidated": 29,
+    "source_records_unresolved_after_failed_jobs": 40,
+    "successful_children_revalidated": 13
+  },
+  "status": "complete_provisional"
+}

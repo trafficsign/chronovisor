@@ -1,0 +1,440 @@
+{
+  "schema": "chronovisor.p4-empty-context-diagnostic.v1",
+  "observed_at": "2026-09-09T17:57:55Z",
+  "scope": {
+    "capture_dir": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p4-runtime-20260909",
+    "raw_capture_files": [
+      {
+        "basename": "p4-formal-repeat-persistent-total3000-v2-20260910.rep1.raw.json",
+        "bytes": 2691091,
+        "sha256": "6f581c12e3e3a75f12471026a791d437ac37c051ef12983031ce5d17cf99cd83"
+      },
+      {
+        "basename": "p4-formal-repeat-persistent-total3000-v2-20260910.rep2.raw.json",
+        "bytes": 2689193,
+        "sha256": "9955bcb501a96b06ff0147cf04c42615a5adba1765a908a782be9004516c55f9"
+      },
+      {
+        "basename": "p4-formal-repeat-persistent-total3000-v2-20260910.rep3.raw.json",
+        "bytes": 2693954,
+        "sha256": "007b7e8e5957b475902f066c8cf3465cdd6740c916358d5bca918c69f1b80c24"
+      }
+    ],
+    "repetitions": 3,
+    "arms": [
+      "A",
+      "B",
+      "C"
+    ],
+    "all_rows": 1080,
+    "empty_recall_rows": 1012,
+    "nonempty_recall_rows": 68,
+    "empty_definition": "rendered_context does not contain a Recall marker"
+  },
+  "aggregate": {
+    "status": {
+      "ok": 994,
+      "skipped": 18
+    },
+    "recall_result_status": {
+      "ok": 994,
+      "skipped": 18
+    },
+    "decision": {
+      "none": 1012
+    },
+    "normal_empty_context": {
+      "True": 1012
+    },
+    "search_mode": {
+      "bm25+graph": 63,
+      "hybrid": 949
+    },
+    "error": {
+      "empty_string_or_null": 1012
+    },
+    "used_judge": {
+      "False": 981,
+      "True": 31
+    },
+    "semantic_rpc_count": {
+      "1": 1012
+    },
+    "semantic_rpc_list_length": {
+      "1": 1012
+    },
+    "by_repetition_arm": {
+      "rep1/A": {
+        "empty_recall_rows": 113,
+        "nonempty_recall_rows": 7,
+        "status": {
+          "ok": 110,
+          "skipped": 3
+        },
+        "recall_result_status": {
+          "ok": 110,
+          "skipped": 3
+        },
+        "decision": {
+          "none": 113
+        },
+        "normal_empty_context": {
+          "True": 113
+        },
+        "search_mode": {
+          "bm25+graph": 7,
+          "hybrid": 106
+        },
+        "error": {
+          "empty_string_or_null": 113
+        },
+        "used_judge": {
+          "False": 110,
+          "True": 3
+        },
+        "semantic_rpc_observation": {
+          "count=1,list_len=1": 113
+        }
+      },
+      "rep1/B": {
+        "empty_recall_rows": 113,
+        "nonempty_recall_rows": 7,
+        "status": {
+          "ok": 110,
+          "skipped": 3
+        },
+        "recall_result_status": {
+          "ok": 110,
+          "skipped": 3
+        },
+        "decision": {
+          "none": 113
+        },
+        "normal_empty_context": {
+          "True": 113
+        },
+        "search_mode": {
+          "bm25+graph": 7,
+          "hybrid": 106
+        },
+        "error": {
+          "empty_string_or_null": 113
+        },
+        "used_judge": {
+          "False": 110,
+          "True": 3
+        },
+        "semantic_rpc_observation": {
+          "count=1,list_len=1": 113
+        }
+      },
+      "rep1/C": {
+        "empty_recall_rows": 112,
+        "nonempty_recall_rows": 8,
+        "status": {
+          "ok": 110,
+          "skipped": 2
+        },
+        "recall_result_status": {
+          "ok": 110,
+          "skipped": 2
+        },
+        "decision": {
+          "none": 112
+        },
+        "normal_empty_context": {
+          "True": 112
+        },
+        "search_mode": {
+          "bm25+graph": 7,
+          "hybrid": 105
+        },
+        "error": {
+          "empty_string_or_null": 112
+        },
+        "used_judge": {
+          "False": 109,
+          "True": 3
+        },
+        "semantic_rpc_observation": {
+          "count=1,list_len=1": 112
+        }
+      },
+      "rep2/A": {
+        "empty_recall_rows": 113,
+        "nonempty_recall_rows": 7,
+        "status": {
+          "ok": 111,
+          "skipped": 2
+        },
+        "recall_result_status": {
+          "ok": 111,
+          "skipped": 2
+        },
+        "decision": {
+          "none": 113
+        },
+        "normal_empty_context": {
+          "True": 113
+        },
+        "search_mode": {
+          "bm25+graph": 7,
+          "hybrid": 106
+        },
+        "error": {
+          "empty_string_or_null": 113
+        },
+        "used_judge": {
+          "False": 109,
+          "True": 4
+        },
+        "semantic_rpc_observation": {
+          "count=1,list_len=1": 113
+        }
+      },
+      "rep2/B": {
+        "empty_recall_rows": 112,
+        "nonempty_recall_rows": 8,
+        "status": {
+          "ok": 111,
+          "skipped": 1
+        },
+        "recall_result_status": {
+          "ok": 111,
+          "skipped": 1
+        },
+        "decision": {
+          "none": 112
+        },
+        "normal_empty_context": {
+          "True": 112
+        },
+        "search_mode": {
+          "bm25+graph": 7,
+          "hybrid": 105
+        },
+        "error": {
+          "empty_string_or_null": 112
+        },
+        "used_judge": {
+          "False": 108,
+          "True": 4
+        },
+        "semantic_rpc_observation": {
+          "count=1,list_len=1": 112
+        }
+      },
+      "rep2/C": {
+        "empty_recall_rows": 112,
+        "nonempty_recall_rows": 8,
+        "status": {
+          "ok": 110,
+          "skipped": 2
+        },
+        "recall_result_status": {
+          "ok": 110,
+          "skipped": 2
+        },
+        "decision": {
+          "none": 112
+        },
+        "normal_empty_context": {
+          "True": 112
+        },
+        "search_mode": {
+          "bm25+graph": 7,
+          "hybrid": 105
+        },
+        "error": {
+          "empty_string_or_null": 112
+        },
+        "used_judge": {
+          "False": 109,
+          "True": 3
+        },
+        "semantic_rpc_observation": {
+          "count=1,list_len=1": 112
+        }
+      },
+      "rep3/A": {
+        "empty_recall_rows": 113,
+        "nonempty_recall_rows": 7,
+        "status": {
+          "ok": 111,
+          "skipped": 2
+        },
+        "recall_result_status": {
+          "ok": 111,
+          "skipped": 2
+        },
+        "decision": {
+          "none": 113
+        },
+        "normal_empty_context": {
+          "True": 113
+        },
+        "search_mode": {
+          "bm25+graph": 7,
+          "hybrid": 106
+        },
+        "error": {
+          "empty_string_or_null": 113
+        },
+        "used_judge": {
+          "False": 109,
+          "True": 4
+        },
+        "semantic_rpc_observation": {
+          "count=1,list_len=1": 113
+        }
+      },
+      "rep3/B": {
+        "empty_recall_rows": 112,
+        "nonempty_recall_rows": 8,
+        "status": {
+          "ok": 111,
+          "skipped": 1
+        },
+        "recall_result_status": {
+          "ok": 111,
+          "skipped": 1
+        },
+        "decision": {
+          "none": 112
+        },
+        "normal_empty_context": {
+          "True": 112
+        },
+        "search_mode": {
+          "bm25+graph": 7,
+          "hybrid": 105
+        },
+        "error": {
+          "empty_string_or_null": 112
+        },
+        "used_judge": {
+          "False": 108,
+          "True": 4
+        },
+        "semantic_rpc_observation": {
+          "count=1,list_len=1": 112
+        }
+      },
+      "rep3/C": {
+        "empty_recall_rows": 112,
+        "nonempty_recall_rows": 8,
+        "status": {
+          "ok": 110,
+          "skipped": 2
+        },
+        "recall_result_status": {
+          "ok": 110,
+          "skipped": 2
+        },
+        "decision": {
+          "none": 112
+        },
+        "normal_empty_context": {
+          "True": 112
+        },
+        "search_mode": {
+          "bm25+graph": 7,
+          "hybrid": 105
+        },
+        "error": {
+          "empty_string_or_null": 112
+        },
+        "used_judge": {
+          "False": 109,
+          "True": 3
+        },
+        "semantic_rpc_observation": {
+          "count=1,list_len=1": 112
+        }
+      }
+    }
+  },
+  "recorded_reason_categories": {
+    "unit": "reason_occurrences; a row may contribute multiple categories",
+    "counts": {
+      "ambiguous_reference": 27,
+      "core_memory_injected": 1012,
+      "cwd_matches_recurring_work": 1012,
+      "design_operation_decision": 171,
+      "judge_decision_reason_freeform": 31,
+      "judge_unavailable_fail_silent": 18,
+      "judge_unavailable_output_truncated": 13,
+      "judge_unavailable_timeout": 5,
+      "known_recurring_project_topic": 94,
+      "state_register_injected": 1012
+    },
+    "judge_decision_reason_freeform_distinct_digest_count": 10,
+    "raw_reason_text_retained": false,
+    "keyword_counts_in_recorded_reasons": {}
+  },
+  "requested_field_availability": {
+    "stop_reason": {
+      "explicit_field_paths": [],
+      "rows_with_explicit_field": 0,
+      "status_and_reasons_available": true
+    },
+    "pre_candidate_count": {
+      "explicit_field_paths": [],
+      "rows_with_value": 0,
+      "state": "not_recorded"
+    },
+    "context_candidate_count": {
+      "explicit_field_paths": [],
+      "rows_with_value": 0,
+      "state": "not_recorded"
+    },
+    "source_rejection_reason": {
+      "explicit_field_paths": [],
+      "rows_with_value": 0,
+      "state": "not_recorded"
+    },
+    "final_empty_indicator": {
+      "field_path": "normal_empty_context",
+      "rows_true": 1012,
+      "rendered_context_marker_absent_rows": 1012
+    },
+    "semantic_rpc": {
+      "field_paths": [
+        "timing_diagnostics.semantic_rpc_count",
+        "timing_diagnostics.semantic_rpc"
+      ],
+      "rows_with_count_1": 1012,
+      "rows_with_list_length_1": 1012,
+      "interpretation": "instrumentation call count only; not a candidate count"
+    },
+    "semantic_candidate_key_scan": {
+      "matching_runtime_field_paths": [],
+      "code_binding_filename_match_excluded": true,
+      "rows_with_runtime_candidate_field": 0
+    }
+  },
+  "privacy": {
+    "source_and_questions_read_from_existing_private_capture_only": true,
+    "all_input_privacy_records_pass": true,
+    "gpu_calls_recorded_in_inputs": [
+      0
+    ],
+    "service_started_recorded_in_inputs": [
+      false
+    ],
+    "question_gold_written_recorded_in_inputs": [
+      false
+    ],
+    "model_calls_by_this_diagnostic": false,
+    "new_search_by_this_diagnostic": false,
+    "raw_reason_or_context_text_retained": false
+  },
+  "interpretation": {
+    "candidate_shortage_vs_authority_gate_vs_final_render_loss": "undetermined_from_recorded_fields",
+    "observed_final_empty_state": "all 1012 rows have normal_empty_context=true and no Recall marker",
+    "observed_status_only": "994 ok and 18 skipped; all 18 skipped rows carry judge-unavailable reason categories",
+    "source_rejection_attribution": "not_supported; no source rejection field or source/rejection/authority/evidence keyword was recorded in reasons",
+    "採否基準変更": false,
+    "判定変更": false
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "schema": "chronovisor.p6-final-scoped-review.v1",
+  "observed_at": "2026-09-10T02:52:00+09:00",
+  "status": "scoped_review_pass_with_known_baseline_failures",
+  "commits": {
+    "raw_reference_bound_builder": "a925ade",
+    "shared_context_budget": "19e2e39",
+    "distilled_fast_path_budget": "40fedee",
+    "review_head": "40fedee"
+  },
+  "reviewed_paths": [
+    "src/chronovisor/research/evidence_reconstruction.py",
+    "src/chronovisor/recall/recall_runtime.py",
+    "src/chronovisor/recall/recall_publication.py",
+    "src/chronovisor/hosts/evidence_composition.py",
+    "src/chronovisor/recall/recall_answer_eval.py"
+  ],
+  "graph_coverage": {
+    "status": "no_recorded_issue",
+    "freshness": "metadata_match",
+    "index_mode": "full",
+    "caveat": "best_effort",
+    "scopes": [
+      "src/chronovisor/research",
+      "src/chronovisor/recall",
+      "src/chronovisor/core/raw_store.py"
+    ],
+    "new_callers": {
+      "live_final_context_formatter_bypass": 0,
+      "raw_c2_projection_production_callers": 0
+    }
+  },
+  "architecture_delta": {
+    "package_edges": {
+      "before": 44,
+      "after": 44,
+      "added": [],
+      "removed": []
+    },
+    "scc_equal": true,
+    "import_sites": {
+      "before": 1536,
+      "after": 1536,
+      "added": 0,
+      "removed": 0
+    },
+    "fitness_violations_from_scoped_delta": [],
+    "global_check": "failed_on_preexisting_contract_asset_and_11_unrecorded_plus_1_stale_site_drift"
+  },
+  "raw_reconstruction_review": {
+    "explicit_selection": "basename_only_sorted_unique_direct_verified_reference",
+    "integrity": "symlink_missing_invalid_commit_and_unbound_reference_fail_closed",
+    "default_inventory_path": "unchanged",
+    "production_wiring": "none; helper remains opt_in",
+    "source_omission_risk": "no new omission in scoped code; production adoption is not claimed",
+    "tests": {
+      "selected_and_invalid_reference_cases_passed": 13
+    }
+  },
+  "context_budget_review": {
+    "standard_and_fallback": "use_shared_render_final_context",
+    "distilled_fast_path": "uses_shared_renderer_with_max_state_context_chars_zero",
+    "state_bypass": "preserved; state_context_for_request is not called",
+    "evidence_semantics": "shared evidence fallback and retained-page receipt flow preserved",
+    "direct_formatter_calls": {
+      "live_bypass_remaining": [],
+      "evaluation_only": [
+        "src/chronovisor/hosts/evidence_composition.py:65",
+        "src/chronovisor/recall/recall_answer_eval.py:2751"
+      ]
+    },
+    "regression": {
+      "policy": {
+        "max_context_chars": 2000,
+        "max_total_context_chars": 720
+      },
+      "state_forbidden": true,
+      "receipt_render_hash_checked": true,
+      "runtime_module_tests_passed": 221,
+      "ruff": "passed",
+      "diff_check": "passed"
+    }
+  },
+  "residual_risks": [
+    "C2 explicit raw selection has no production caller yet.",
+    "Global architecture gate remains failed for preexisting drift; scoped commits add no package edge or import site.",
+    "Graph completeness is best effort and source grep was used for direct formatter inventory."
+  ],
+  "production_deployed": false,
+  "state_budget_followup_review": {
+    "reviewed_commit": "1de4b01",
+    "release_commit": "7af88177d6a82f17dd54a830e89aed15cfcc413e",
+    "files": [
+      "src/chronovisor/ingest/state_register.py",
+      "tests/test_state_register.py"
+    ],
+    "coverage": "metadata_match/no_recorded_issue; indexed2026-09-09T18:34:31Z; best effort",
+    "findings": [],
+    "conclusion": "Header guard enforces small total budget;21-char floor plus ellipsis strictly shrinks every candidate longer than24. Five regression budgets terminate and retain valid JSON. Release two-file diff identical."
+  }
+}
