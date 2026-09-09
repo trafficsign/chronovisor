@@ -1,0 +1,33 @@
+{
+  "schema": "chronovisor.c2-source-availability.v1",
+  "observed_at": "2026-09-09T16:10:52.361937+00:00",
+  "source_scope": "development split only; heldout and locked source bodies not read",
+  "status": "native_source_reprojection_verified",
+  "semantic_child_refs": 59,
+  "verified_parent_raw_receipt_and_commit_refs": 59,
+  "identity_failures": 0,
+  "existing_children_with_c2_bindings": 0,
+  "deterministic_reprojection": {
+    "trials": 40,
+    "passed": 40,
+    "binding_rows": 1500,
+    "language_slices": {
+      "ja": 14,
+      "en": 13,
+      "cross": 13
+    },
+    "short": 19,
+    "long": 21,
+    "include_source_bindings": true,
+    "temporary_outputs_removed": true
+  },
+  "production_source_and_manifests_unchanged": true,
+  "model_calls": 0,
+  "quality_adoption_established": false,
+  "limitations": [
+    "The missing child binding metadata can be reconstructed from verified existing parent Raw; it does not imply loss of the original Raw.",
+    "Page corpus source_root_sha256 is not a parent Raw hash; preserve and verify individual Raw receipt/commit identities.",
+    "C2 semantic classification labels are not present; existing claims or keywords are not C2 gold.",
+    "17 development pages have no native Raw reference and must retain their canonical page revision as source."
+  ]
+}
