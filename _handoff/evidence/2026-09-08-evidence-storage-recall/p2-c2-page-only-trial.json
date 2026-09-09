@@ -1,0 +1,15 @@
+{
+  "schema": "chronovisor.c2-page-only-trial-summary.v1",
+  "observed_at": "2026-09-09T16:51:07.927149+00:00",
+  "status": "passed",
+  "freeze_manifest_sha256": "ea9a7947b872fd7caeba44e5169a3ae6aa1d21f3fd1e4d4f206dd57ea227ae34",
+  "private_receipt_sha256": "448b72cc6f74ad72dd0182d9a6efe8947d75ac0f918451613a8591e97511115d",
+  "pages": 4,
+  "records": 44,
+  "source_bytes": 10134,
+  "all_source_and_reconstruction_exact": true,
+  "native_speaker_or_time_fabricated": false,
+  "model_calls": 0,
+  "production_modified": false,
+  "semantic_classification": "not_generated; canonical page projection retained"
+}

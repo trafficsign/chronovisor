@@ -1,0 +1,28 @@
+{
+  "atom_count": 94,
+  "direct_reference_only": true,
+  "elapsed_seconds": 0.478965,
+  "freeze_manifest_sha256": "ea9a7947b872fd7caeba44e5169a3ae6aa1d21f3fd1e4d4f206dd57ea227ae34",
+  "iter_segment_units_calls": 0,
+  "model_calls": 0,
+  "parent_reference_snapshot_unchanged": true,
+  "production_modified": false,
+  "projection_byte_length": 174513,
+  "projection_mode": 384,
+  "projection_sha256": "91853dcc772ee5b4125a97cbc45366260cfc5d74e2e997b1712df6333cdc229a",
+  "raw_ids_sha256": "f357ce1c25e404992b82a7614c4c353ae32d0201b1687432a55821274b031898",
+  "raw_snapshot_unchanged": true,
+  "repeat_byte_equal": true,
+  "resolve_segment_calls": 0,
+  "schema": "chronovisor.c2-bounded-builder-trial.v1",
+  "selected_raw_count": 20,
+  "selected_segment_file_count": 15,
+  "source_receipt_count": 20,
+  "status": "passed",
+  "private_receipt_sha256": "c994b73a39f19c19332bd198a643347b64e299bdfb1ffc7f803383429f7e3b93",
+  "related_tests_passed": 52,
+  "limitations": [
+    "The 94 native atoms cover 20 parent Raw units; the fixed child trial still has 69 selected source records.",
+    "This is reconstruction and source verification without model calls, not retrieval-quality evidence."
+  ]
+}

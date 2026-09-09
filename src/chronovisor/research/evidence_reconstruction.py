@@ -895,18 +895,95 @@ def build_episode_projection(raw_dir: Path) -> bytes:
     )
 
 
-def build_episode_projection_c2(raw_dir: Path) -> bytes:
+def _normalize_c2_raw_ids(raw_ids: Sequence[str]) -> tuple[str, ...]:
+    """Validate and canonicalize an explicit C2 Raw selection."""
+
+    if isinstance(raw_ids, (str, bytes, bytearray)) or not isinstance(
+        raw_ids, Sequence
+    ):
+        raise EvidenceReconstructionError(
+            "C2 raw_ids must be a non-empty sequence of strings"
+        )
+    selected = tuple(raw_ids)
+    if not selected:
+        raise EvidenceReconstructionError("C2 raw_ids must not be empty")
+    if any(
+        not isinstance(raw_id, str)
+        or not raw_id
+        or raw_id in {".", ".."}
+        or Path(raw_id).name != raw_id
+        or "\\" in raw_id
+        or "\x00" in raw_id
+        for raw_id in selected
+    ):
+        raise EvidenceReconstructionError("C2 raw_id must be a basename string")
+    if len(set(selected)) != len(selected):
+        raise EvidenceReconstructionError("C2 raw_ids must not contain duplicates")
+    return tuple(sorted(selected))
+
+
+def _resolve_c2_bound_raw(store: RawStore, raw_id: str) -> Any:
+    """Resolve one C2 Raw only through its durable logical reference."""
+
+    root = store.raw_dir
+    reference_dirs = (
+        root,
+        root.parent / "runtime" / "raw-projections" / "parents",
+    )
+    for directory in reference_dirs:
+        reference = directory / raw_id
+        if reference.is_symlink():
+            raise EvidenceReconstructionError("C2 Raw reference is a symlink")
+        if not reference.exists():
+            continue
+        if not reference.is_file():
+            raise EvidenceReconstructionError("C2 Raw reference is not a file")
+        try:
+            with open_regular_nofollow(reference) as stream:
+                payload = json.loads(stream.read())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise EvidenceReconstructionError("C2 Raw reference is invalid") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("commit"), dict):
+            raise EvidenceReconstructionError("C2 Raw reference is invalid")
+        try:
+            unit = store.resolve_reference(reference)
+        except (OSError, ValueError, RawSegmentCorrupt) as exc:
+            raise EvidenceReconstructionError(
+                "C2 Raw reference is invalid"
+            ) from exc
+        if unit is not None:
+            if unit.raw_id != raw_id:
+                raise EvidenceReconstructionError("C2 Raw reference ID is invalid")
+            return unit
+    raise EvidenceReconstructionError(f"C2 Raw reference is unavailable: {raw_id}")
+
+
+def build_episode_projection_c2(
+    raw_dir: Path, *, raw_ids: Sequence[str] | None = None
+) -> bytes:
     """Build the opt-in C2 projection with explicit time/source metadata.
 
     The source receipt and exact Raw byte ranges are shared with v1.  C2 does
     not copy the native event object; callers can reread it through the bound
-    ``EvidenceRef`` when a full event is needed.
+    ``EvidenceRef`` when a full event is needed.  When ``raw_ids`` is given,
+    each ID must have an existing, non-symlink logical reference in either the
+    Raw root or ``runtime/raw-projections/parents``.  Those references are
+    resolved directly in sorted ID order; no inventory fallback is allowed.
+    The default ``None`` path retains the complete inventory behavior.
     """
 
     store = RawStore(raw_dir, mode="v2")
+    if raw_ids is None:
+        units = store.iter_segment_units()
+    else:
+        selected_ids = _normalize_c2_raw_ids(raw_ids)
+        selected_units: list[Any] = []
+        for raw_id in selected_ids:
+            selected_units.append(_resolve_c2_bound_raw(store, raw_id))
+        units = iter(selected_units)
     receipts: list[dict[str, Any]] = []
     atoms: list[EvidenceAtom] = []
-    for unit in store.iter_segment_units():
+    for unit in units:
         commit = unit.commit
         if commit is None or unit.sha256 is None or unit.captured_at is None:
             raise EvidenceReconstructionError("Raw unit has no committed receipt")
