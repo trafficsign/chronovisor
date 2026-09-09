@@ -2833,6 +2833,85 @@ def _independent_benchmark(packet: dict) -> dict:
     )
 
 
+def _source_span_candidate(
+    index: int = 0,
+    *,
+    include_forbidden: bool = False,
+) -> dict:
+    content_length = 128
+    page_id = f"span-page-{index}"
+    content_sha = f"{index + 11:064x}"
+    required_text = f"required source span {index}"
+    required_bytes = required_text.encode("utf-8")
+    required = {
+        "page_id": page_id,
+        "page_uid": "",
+        "content_sha256": content_sha,
+        "content_byte_length": content_length,
+        "byte_start": 0,
+        "byte_end": len(required_bytes),
+        "excerpt": required_text,
+        "excerpt_sha256": recall_answer_eval._sha_text(required_text),
+        "truncated": True,
+    }
+    second_text = f"second span {index}"
+    second_bytes = second_text.encode("utf-8")
+    second_start = 64
+    second = {
+        "page_id": page_id,
+        "page_uid": "",
+        "content_sha256": content_sha,
+        "content_byte_length": content_length,
+        "byte_start": second_start,
+        "byte_end": second_start + len(second_bytes),
+        "excerpt": second_text,
+        "excerpt_sha256": recall_answer_eval._sha_text(second_text),
+        "truncated": True,
+    }
+    forbidden = []
+    if include_forbidden:
+        forbidden_text = f"obsolete span {index}"
+        forbidden.append(
+            {
+                "page_id": page_id,
+                "page_uid": "",
+                "content_sha256": content_sha,
+                "content_byte_length": content_length,
+                "byte_start": 32,
+                "byte_end": 32 + len(forbidden_text.encode("utf-8")),
+                "excerpt": forbidden_text,
+                "excerpt_sha256": recall_answer_eval._sha_text(forbidden_text),
+                "truncated": True,
+            }
+        )
+    row = {
+        "schema_version": 1,
+        "source_kind": recall_answer_eval.SOURCE_SPAN_QUERY_SOURCE_KIND,
+        "case_id": f"span-case-{index}",
+        "candidate_sha256": "",
+        "query": f"What changed in source {index}?",
+        "language": "en",
+        "preregistered_at": "2026-07-01T01:00:00Z",
+        "source_frozen_at": "2026-07-01T00:00:00Z",
+        "source_cutoff": "2026-07-01T00:30:00Z",
+        "as_of": None,
+        "lifecycle_status": "stable",
+        "obsolete": False,
+        "source_root_sha256": "a" * 64,
+        "source_authority_sha256": "b" * 64,
+        "index_snapshot_sha256": "c" * 64,
+        "query_in_index": False,
+        "root_component_sha256": f"{index + 101:064x}",
+        "split_role": recall_answer_eval.SOURCE_SPAN_QUERY_SPLIT_ROLE,
+        "source_spans": [required, second],
+        "forbidden_spans": forbidden,
+    }
+    row["candidate_sha256"] = recall_answer_eval._canonical_sha(
+        {key: value for key, value in row.items() if key != "candidate_sha256"}
+    )
+    return row
+
+
 def test_independent_benchmark_rejects_treatment_context_and_is_create_once(
     tmp_path: Path,
 ) -> None:
@@ -2966,6 +3045,312 @@ def test_independent_packet_rejects_impossible_length_and_duplicates() -> None:
         recall_answer_eval._independent_gold_source_packet_error(duplicate)
         == "independent_gold_source_packet_invalid"
     )
+
+
+def test_source_span_packet_preserves_ranges_and_rejects_unassigned() -> None:
+    row = _source_span_candidate(include_forbidden=True)
+    provisional = recall_answer_eval._freeze_source_span_query_packet(row)
+
+    # The internal freeze representation cannot be published before a sealed
+    # split epoch is assigned.
+    assert (
+        recall_answer_eval._independent_gold_source_packet_error(provisional)
+        == "source_span_query_split_assignment_invalid"
+    )
+    assigned = recall_answer_eval._freeze_source_span_query_packet(
+        row,
+        split="train",
+        split_epoch_id="d" * 64,
+        component_sha256="e" * 64,
+        split_slice="dev",
+    )
+
+    assert recall_answer_eval._independent_gold_source_packet_error(assigned) == ""
+    assert len(assigned["evidence_chunks"]) == 2
+    assert assigned["evidence_chunks"][1]["byte_start"] == 64
+    assert assigned["page_bindings"][0]["page_uid"] == ""
+    assert len(assigned["source_span"]["forbidden_spans"]) == 1
+    assert assigned["source_span"]["forbidden_spans"][0]["excerpt"].startswith(
+        "obsolete span"
+    )
+
+
+def test_source_span_packet_rejects_query_index_and_forbidden_overlap() -> None:
+    row = _source_span_candidate(include_forbidden=True)
+    indexed = copy.deepcopy(row)
+    indexed["query_in_index"] = True
+    indexed["candidate_sha256"] = recall_answer_eval._canonical_sha(
+        {key: value for key, value in indexed.items() if key != "candidate_sha256"}
+    )
+    assert (
+        recall_answer_eval._source_span_query_candidate_error(indexed)
+        == "source_span_query_candidate_invalid"
+    )
+
+    overlap = copy.deepcopy(row)
+    overlap["forbidden_spans"][0]["byte_start"] = 1
+    overlap["forbidden_spans"][0]["byte_end"] = 1 + len(
+        overlap["forbidden_spans"][0]["excerpt"].encode("utf-8")
+    )
+    overlap["candidate_sha256"] = recall_answer_eval._canonical_sha(
+        {key: value for key, value in overlap.items() if key != "candidate_sha256"}
+    )
+    assert (
+        recall_answer_eval._source_span_query_candidate_error(overlap)
+        == "source_span_query_forbidden_overlap"
+    )
+
+
+def test_source_span_candidate_requires_cutoff_between_freeze_and_preregistration() -> None:
+    row = _source_span_candidate()
+
+    before_freeze = copy.deepcopy(row)
+    before_freeze["source_cutoff"] = "2026-06-30T23:59:59Z"
+    before_freeze["candidate_sha256"] = recall_answer_eval._canonical_sha(
+        {
+            key: value
+            for key, value in before_freeze.items()
+            if key != "candidate_sha256"
+        }
+    )
+    assert (
+        recall_answer_eval._source_span_query_candidate_error(before_freeze)
+        == "source_span_query_temporal_order_invalid"
+    )
+
+    after_preregistration = copy.deepcopy(row)
+    after_preregistration["source_cutoff"] = "2026-07-01T01:00:00Z"
+    after_preregistration["candidate_sha256"] = recall_answer_eval._canonical_sha(
+        {
+            key: value
+            for key, value in after_preregistration.items()
+            if key != "candidate_sha256"
+        }
+    )
+    assert (
+        recall_answer_eval._source_span_query_candidate_error(after_preregistration)
+        == "source_span_query_temporal_order_invalid"
+    )
+
+
+def test_source_span_allows_absolute_offsets_beyond_projection_prefix() -> None:
+    row = _source_span_candidate()
+    for span in row["source_spans"]:
+        span["content_byte_length"] = 20_000
+    row["source_spans"][1]["byte_start"] = 15_000
+    row["source_spans"][1]["byte_end"] = 15_000 + len(
+        row["source_spans"][1]["excerpt"].encode("utf-8")
+    )
+    row["candidate_sha256"] = recall_answer_eval._canonical_sha(
+        {key: value for key, value in row.items() if key != "candidate_sha256"}
+    )
+    assert recall_answer_eval._source_span_query_candidate_error(row) == ""
+    packet = recall_answer_eval._freeze_source_span_query_packet(
+        row,
+        split="train",
+        split_epoch_id="d" * 64,
+        component_sha256="e" * 64,
+        split_slice="dev",
+    )
+    assert recall_answer_eval._independent_gold_source_packet_error(packet) == ""
+
+
+def test_source_span_rejects_total_payload_over_32kib() -> None:
+    row = _source_span_candidate()
+    long_text = "z" * 12_000
+    for start in (1_000, 13_000, 25_000):
+        row["forbidden_spans"].append(
+            {
+                "page_id": row["source_spans"][0]["page_id"],
+                "page_uid": "",
+                "content_sha256": row["source_spans"][0]["content_sha256"],
+                "content_byte_length": 50_000,
+                "byte_start": start,
+                "byte_end": start + len(long_text.encode("utf-8")),
+                "excerpt": long_text,
+                "excerpt_sha256": recall_answer_eval._sha_text(long_text),
+                "truncated": True,
+            }
+        )
+    for span in row["source_spans"]:
+        span["content_byte_length"] = 50_000
+    row["candidate_sha256"] = recall_answer_eval._canonical_sha(
+        {key: value for key, value in row.items() if key != "candidate_sha256"}
+    )
+    assert (
+        recall_answer_eval._source_span_query_candidate_error(row)
+        == "source_span_query_candidate_payload_too_large"
+    )
+
+
+def test_source_span_component_split_uses_root_not_empty_page_uid() -> None:
+    rows = []
+    for index, language in enumerate(
+        ("ja", "en", "cross") * 3
+    ):
+        row = _source_span_candidate(index)
+        row["language"] = language
+        row["candidate_sha256"] = recall_answer_eval._canonical_sha(
+            {key: value for key, value in row.items() if key != "candidate_sha256"}
+        )
+        rows.append(row)
+    packets = [
+        recall_answer_eval._freeze_source_span_query_packet(row)
+        for row in rows
+    ]
+    assignments, epoch, clusters, slices = (
+        recall_answer_eval._source_span_query_component_assignments(
+            packets,
+            source_authority_sha256="b" * 64,
+            dev_components=3,
+            holdout_components=3,
+            locked_min_components=1,
+        )
+    )
+
+    assert recall_answer_eval._valid_sha(epoch)
+    assert len(assignments) == 9
+    assert clusters == {"train": 3, "holdout": 3, "locked-test": 3}
+    assert slices["dev"] == 3
+    assert slices["train"] == 0
+    assert slices["holdout"] == 3
+    assert slices["locked-test"] == 3
+    assert slices["dev_ja"] == slices["dev_en"] == slices["dev_cross"] == 1
+    assert (
+        slices["holdout_ja"]
+        == slices["holdout_en"]
+        == slices["holdout_cross"]
+        == 1
+    )
+    assert {value[2] for value in assignments.values()} == {
+        "dev",
+        "holdout",
+        "locked-test",
+    }
+
+
+def test_source_span_component_split_rejects_cross_language_root() -> None:
+    first = _source_span_candidate(0)
+    second = _source_span_candidate(1)
+    second["language"] = "ja"
+    second["root_component_sha256"] = first["root_component_sha256"]
+    second["candidate_sha256"] = recall_answer_eval._canonical_sha(
+        {key: value for key, value in second.items() if key != "candidate_sha256"}
+    )
+    packets = [
+        recall_answer_eval._freeze_source_span_query_packet(row)
+        for row in (first, second)
+    ]
+    with pytest.raises(ValueError, match="crosses language"):
+        recall_answer_eval._source_span_query_component_assignments(
+            packets,
+            source_authority_sha256="b" * 64,
+            dev_components=0,
+            holdout_components=0,
+            locked_min_components=1,
+        )
+
+
+def test_source_span_component_split_rejects_mixed_authority() -> None:
+    first = _source_span_candidate(0)
+    second = _source_span_candidate(1)
+    second["source_authority_sha256"] = "d" * 64
+    second["candidate_sha256"] = recall_answer_eval._canonical_sha(
+        {
+            key: value for key, value in second.items() if key != "candidate_sha256"
+        }
+    )
+    packets = [
+        recall_answer_eval._freeze_source_span_query_packet(row)
+        for row in (first, second)
+    ]
+    with pytest.raises(ValueError, match="authority mismatch"):
+        recall_answer_eval._source_span_query_component_assignments(
+            packets,
+            source_authority_sha256="b" * 64,
+            dev_components=0,
+            holdout_components=0,
+            locked_min_components=1,
+        )
+
+
+def test_source_span_adjudication_reuses_formal_gold_lane_without_answer_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_file = tmp_path / "source-span-candidates.jsonl"
+    candidate_file.write_text(
+        json.dumps(_source_span_candidate()) + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "list_machine_consensus_receipts",
+        lambda **_kwargs: {"passed": True, "receipts": []},
+    )
+    calls: list[dict[str, Any]] = []
+
+    def append(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {
+            "status": "accepted",
+            "receipt": {
+                "receipt_sha256": "f" * 64,
+                "created_at": "2026-07-01T02:00:00Z",
+            },
+        }
+
+    monkeypatch.setattr(recall_answer_eval, "append_machine_consensus_receipt", append)
+    result = recall_answer_eval.adjudicate_source_span_query_candidates(
+        candidate_file=candidate_file,
+        consensus_ledger_file=tmp_path / "consensus.jsonl",
+        chronovisor_root=tmp_path,
+        split="train",
+        split_epoch_id="d" * 64,
+        max_items=1,
+    )
+
+    assert result["status"] == "complete"
+    assert result["accepted"] == 1
+    assert len(calls) == 1
+    assert calls[0]["kind"] == "gold_entry_review"
+    assert calls[0]["subject"]["subject_kind"] == "gold_entry"
+    assert calls[0]["subject"]["source_packet"]["source_kind"] == (
+        recall_answer_eval.SOURCE_SPAN_QUERY_SOURCE_KIND
+    )
+    assert calls[0]["subject"]["production_answer_used"] is False
+    assert "gold_answer" not in calls[0]["subject"]["source_packet"]
+
+
+def test_source_span_review_rejects_receipt_before_preregistration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    packet = recall_answer_eval._freeze_source_span_query_packet(
+        _source_span_candidate(),
+        split="train",
+        split_epoch_id="d" * 64,
+        component_sha256="e" * 64,
+        split_slice="dev",
+    )
+    monkeypatch.setattr(
+        recall_answer_eval,
+        "validate_machine_consensus_receipt",
+        lambda *_args, **_kwargs: {
+            "passed": True,
+            "receipt": {"created_at": "2026-07-01T00:45:00Z"},
+        },
+    )
+    result = recall_answer_eval._validated_source_span_query_receipt(
+        "f" * 64,
+        packet=packet,
+        rubric_sha256="1" * 64,
+        consensus_ledger_file=tmp_path / "consensus.jsonl",
+        chronovisor_root=tmp_path,
+    )
+    assert result == {
+        "passed": False,
+        "reason": "source_span_query_review_causality_invalid",
+    }
 
 
 def test_machine_gold_rejects_alternate_benchmark_packet_graft(
