@@ -1577,7 +1577,11 @@ def _context_from_semantic_evidence(result: Any) -> ContextItem | None:
         and not meta.get("is_system")
         and not path.is_relative_to(CHRONOVISOR_ROOT / "system")
         else "high",
-        evidence_kind="semantic_chunk",
+        evidence_kind=(
+            "semantic_section"
+            if any(item.kind == "section-v1" for item in result.evidence)
+            else "semantic_chunk"
+        ),
         source_passages=passages,
     )
 
@@ -1617,7 +1621,10 @@ def collect_context(
     evidence_results = {
         result.page_id: result
         for result in results
-        if any(e.kind == "chunk" for e in getattr(result, "evidence", ()))
+        if any(
+            e.kind in {"chunk", "section-v1"}
+            for e in getattr(result, "evidence", ())
+        )
     }
     items: list[ContextItem] = []
     seen: set[str] = set()

@@ -225,10 +225,12 @@ def resolve_rerank_candidate(
     resolved_title = metadata.get("title")
     if not isinstance(resolved_title, str) or not resolved_title.strip():
         resolved_title = title
-    chunk_evidence = tuple(item for item in candidate_evidence if item.kind == "chunk")
-    if chunk_evidence:
+    source_evidence = tuple(
+        item for item in candidate_evidence if item.kind in {"chunk", "section-v1"}
+    )
+    if source_evidence:
         try:
-            passages = resolve_semantic_evidence(data, page_id, chunk_evidence)
+            passages = resolve_semantic_evidence(data, page_id, source_evidence)
         except Exception:
             passages = ()
         if not passages:

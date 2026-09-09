@@ -341,12 +341,12 @@ def _index_test_state(monkeypatch: pytest.MonkeyPatch) -> SemanticServiceState:
     state.config = SearchEmbeddingConfig(dimensions=2)
     state.root = Path("/semantic")
     state._generation = SimpleNamespace(
-        manifest=SimpleNamespace(generation_id="generation")
+        manifest=SimpleNamespace(generation_id="generation", extractor_schema_version=2)
     )
     state.reload = lambda **_kwargs: {"ready": True}  # type: ignore[method-assign]
     monkeypatch.setattr(semantic_service, "find_page", lambda _page_id: Path("page.md"))
     monkeypatch.setattr(
-        semantic_service, "extract_page_documents", lambda _path: [document]
+        semantic_service, "extract_page_documents", lambda _path, **_kwargs: [document]
     )
     monkeypatch.setattr(semantic_service, "write_page_delta", lambda *_args, **_kwargs: None)
     return state
@@ -1233,3 +1233,59 @@ def test_query_path_warmup_exercises_three_queries_and_ann_search() -> None:
     assert len(encoded[0]) == 3
     assert len(searched) == 3
     assert result["hits"] == 3
+
+
+def test_incremental_projection_follows_active_generation_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = _index_test_state(monkeypatch)
+    state._generation.manifest.extractor_schema_version = 3
+    versions: list[int] = []
+    monkeypatch.setattr(
+        semantic_service, 'extract_page_documents',
+        lambda _path, *, extractor_schema_version: versions.append(extractor_schema_version) or [],
+    )
+    state._index_page('page', expected_hash='')
+    state._generation.manifest.extractor_schema_version = 2
+    state._index_page('page', expected_hash='')
+    assert versions == [3, 2]
+
+
+@pytest.mark.parametrize('concurrent_rollback', [False, True])
+def test_rebuild_preserves_extractor_and_compares_original_pointer(
+    monkeypatch: pytest.MonkeyPatch, concurrent_rollback: bool,
+) -> None:
+    state = _index_test_state(monkeypatch)
+    state._generation.manifest.extractor_schema_version = 3
+    state._maintenance = threading.Event()
+    state._model_lock = threading.Lock()
+    state._validate_runtime_routes = lambda: None
+    state._foreground_route = SimpleNamespace(model='test')
+    state._uses_local_controls = lambda _route: False
+    state._route_identity = lambda _route: {}
+    versions: list[int] = []
+    active = {'generation_id': 'generation'}
+    monkeypatch.setattr(semantic_service, 'read_active', lambda **_kwargs: dict(active))
+    monkeypatch.setattr(semantic_service, 'extract_all_documents',
+                        lambda *, extractor_schema_version: versions.append(extractor_schema_version) or [])
+    def build(_documents, **kwargs):
+        assert kwargs['extractor_schema_version'] == 3
+        if concurrent_rollback:
+            active['generation_id'] = 'rollback'
+        return SimpleNamespace(generation_id='rebuilt')
+    def activate(generation_id, *, expected_current, **_kwargs):
+        assert expected_current == 'generation'
+        if active['generation_id'] != expected_current:
+            raise SemanticIndexError('active generation changed')
+        active['generation_id'] = generation_id
+    monkeypatch.setattr(semantic_service, 'build_generation', build)
+    monkeypatch.setattr(semantic_service, 'activate_generation', activate)
+    monkeypatch.setattr(semantic_service, 'prune_generations', lambda **_kwargs: None)
+    if concurrent_rollback:
+        with pytest.raises(SemanticIndexError, match='active generation changed'):
+            state._rebuild()
+        assert active['generation_id'] == 'rollback'
+        assert versions == [3]
+    else:
+        state._rebuild()
+        assert active['generation_id'] == 'rebuilt'
+        assert versions == [3, 3]
+    assert not state._maintenance.is_set()

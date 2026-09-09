@@ -1,0 +1,30 @@
+{
+  "phase": "P3",
+  "observed_at": "2026-09-09T17:42:30.123463+09:00",
+  "implementation": "section-v1 source references flow through the shared parser, reranker, source resolver, Recall context and bounded renderer; extraction follows the active immutable generation during updates and rebuilds",
+  "default_extractor": 2,
+  "candidate_extractor": 3,
+  "active_production_changed": false,
+  "validation": {
+    "related_pytest_passed": 337,
+    "mypy_files_passed": 95,
+    "ruff": "passed",
+    "core_import_boundary": "kept",
+    "architecture_delta": {
+      "new_package_edges": 0,
+      "added_sites": 2,
+      "retired_sites": 9,
+      "preexisting_failures_preserved": true
+    }
+  },
+  "regressions": [
+    "source digest mismatch rejected",
+    "source record ordinal beyond eight retained",
+    "mixed chunk/section generation rejected",
+    "generated section context excluded from quote",
+    "incremental extraction follows rollback generation",
+    "rebuild CAS rejects concurrent rollback"
+  ],
+  "quality_benchmark_completed": false,
+  "deployment_completed": false
+}

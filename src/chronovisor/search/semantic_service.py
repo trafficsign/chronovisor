@@ -1440,7 +1440,11 @@ class SemanticServiceState:
         if path is None:
             system_path = SYSTEM_DIR / f"{page_id}.md"
             path = system_path if system_path.is_file() else None
-        documents = extract_page_documents(path) if path is not None else []
+        documents = (
+            extract_page_documents(
+                path, extractor_schema_version=generation.manifest.extractor_schema_version
+            ) if path is not None else []
+        )
         current_hash = documents[0].source_sha256 if documents else ""
         if expected_hash and current_hash != expected_hash:
             enqueue_pages([page_id], source_hashes={page_id: current_hash})
@@ -1457,7 +1461,11 @@ class SemanticServiceState:
             else:
                 self._ensure_cpu()
                 vectors = self._embed_incremental_documents(texts, source=source)
-            refreshed = extract_page_documents(path) if path is not None else []
+            refreshed = (
+                extract_page_documents(
+                    path, extractor_schema_version=generation.manifest.extractor_schema_version
+                ) if path is not None else []
+            )
             refreshed_hash = refreshed[0].source_sha256 if refreshed else ""
             if refreshed_hash != current_hash:
                 enqueue_pages([page_id], source_hashes={page_id: refreshed_hash})
@@ -1478,7 +1486,17 @@ class SemanticServiceState:
         self._maintenance.set()
         try:
             self._validate_runtime_routes()
-            documents = extract_all_documents()
+            expected_current = str(read_active(root=self.root).get("generation_id") or "")
+            if (
+                self._generation is not None
+                and self._generation.manifest.generation_id != expected_current
+            ):
+                raise SemanticIndexError("active generation changed before rebuild")
+            extractor_version = (
+                self._generation.manifest.extractor_schema_version
+                if self._generation is not None else 2
+            )
+            documents = extract_all_documents(extractor_schema_version=extractor_version)
             built_hashes = {
                 document.page_id: document.source_sha256 for document in documents
             }
@@ -1509,12 +1527,12 @@ class SemanticServiceState:
                         query_prefix=self.config.query_prefix,
                         document_prefix=self.config.document_prefix,
                         batch_size=self.config.maintenance_max_batch,
+                        extractor_schema_version=extractor_version,
                         root=self.root,
                     )
-            current = str(read_active(root=self.root).get("generation_id") or "")
             activate_generation(
                 manifest.generation_id,
-                expected_current=current,
+                expected_current=expected_current,
                 root=self.root,
             )
             prune_generations(root=self.root)
@@ -1522,7 +1540,9 @@ class SemanticServiceState:
             # Close the mutation window between the corpus snapshot and active
             # pointer publication. New, changed, and deleted pages become
             # generation-scoped delta jobs.
-            current_documents = extract_all_documents()
+            current_documents = extract_all_documents(
+                extractor_schema_version=extractor_version
+            )
             current_hashes = {
                 document.page_id: document.source_sha256
                 for document in current_documents

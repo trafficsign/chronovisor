@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import math
-from dataclasses import replace
+from dataclasses import asdict, replace
 
+from chronovisor.core.page_evidence import project_page_evidence
 from chronovisor.core.page_identity import new_page_uid
-from chronovisor.core.search_types import SemanticEvidence
+from chronovisor.core.search_types import SemanticEvidence, parse_semantic_evidence
 from chronovisor.core.semantic_evidence import (
     SourcePassage,
     resolve_semantic_evidence,
@@ -141,3 +142,69 @@ def test_invalid_runtime_values_and_mixed_generations_do_not_escape_resolver() -
         assert resolve_semantic_evidence(source, "span", (invalid,)) == ()
     other = replace(_evidence(source, uid, 1), generation_id="other-generation")
     assert resolve_semantic_evidence(source, "span", (valid, other)) == ()
+
+
+def test_section_evidence_dispatches_and_rejects_chunk_mixing() -> None:
+    uid = new_page_uid(timestamp_ms=1_725_000_000_127, random_bits=12349)
+    source = _canonical_source(
+        "# Current\n現在の接続先は port 7443。\n\n"
+        "# History\nThe old endpoint was port 7442.\n",
+        uid=uid,
+    )
+    projection = project_page_evidence(source, "span")
+    section = tuple(
+        SemanticEvidence(
+            page_id="span",
+            doc_id=record.record_id,
+            kind="section-v1",
+            ordinal=index,
+            source_sha256=projection.content_sha256,
+            page_uid=uid,
+            generation_id="generation-section",
+            score=0.9 - index / 10,
+        )
+        for index, record in enumerate(projection.records[:2])
+    )
+    passages = resolve_semantic_evidence(source, "span", section)
+    assert [passage.evidence.doc_id for passage in passages] == [
+        record.record_id for record in projection.records[:2]
+    ]
+    assert all(
+        source[passage.byte_start : passage.byte_end].decode() == passage.text
+        for passage in passages
+    )
+    page_match = replace(section[0], kind="page", doc_id=uid, ordinal=-1)
+    assert resolve_semantic_evidence(source, "span", (page_match, section[0])) == passages[:1]
+    assert resolve_semantic_evidence(
+        source,
+        "span",
+        (section[0], _evidence(source, uid, 0)),
+    ) == ()
+
+
+def test_section_wire_identity_uses_record_id_and_unbounded_ordinal() -> None:
+    uid = new_page_uid(timestamp_ms=1_725_000_000_128, random_bits=12350)
+    source = _canonical_source("section\n", uid=uid)
+    projection = project_page_evidence(source, "span")
+    record = projection.records[0]
+    item = SemanticEvidence(
+        page_id="span",
+        doc_id=record.record_id,
+        kind="section-v1",
+        ordinal=12,
+        source_sha256=projection.content_sha256,
+        page_uid=uid,
+        generation_id="generation-section",
+        score=0.8,
+    )
+    parsed = parse_semantic_evidence(
+        [asdict(item)], page_id="span", generation_id="generation-section"
+    )
+    assert parsed == (item,)
+    bad_record = replace(item, doc_id="not-a-page-record")
+    try:
+        parse_semantic_evidence([asdict(bad_record)], page_id="span")
+    except ValueError as exc:
+        assert str(exc) == "invalid semantic evidence"
+    else:
+        raise AssertionError("section doc IDs must be page-record digests")
