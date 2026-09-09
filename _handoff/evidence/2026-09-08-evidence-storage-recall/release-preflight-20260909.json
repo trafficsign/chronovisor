@@ -1,0 +1,243 @@
+{
+  "schema": "chronovisor.evidence-storage-recall.release-preflight.v1",
+  "observed_at": "2026-09-09T17:49:05+09:00",
+  "scope": {
+    "mode": "read-only-preflight",
+    "main_checkout_changed": false,
+    "production_push": false,
+    "production_restart": false,
+    "runtime_config_changed": false,
+    "network_requests": false,
+    "secrets_or_environment_values_recorded": false
+  },
+  "git": {
+    "base": "origin/main@873c2a3bc1743bc7a2fe309067904e903870fb1d",
+    "local_head": "1e05bd7d1c7195f82f757a0e2357800159cc3795",
+    "local_divergence": {
+      "origin_behind": 15,
+      "local_ahead": 35,
+      "dirty_paths_preserved": true
+    },
+    "release_source_commits": [
+      "8a1645018b81a55aa7c80d71736e98d13e577289",
+      "b2912bb800871ce94410d2754f71fce68548c9df",
+      "1e05bd7d1c7195f82f757a0e2357800159cc3795",
+      "0f442bf39e7845438bd39a9395be020cb5264a41",
+      "8bfac6ae3327cbc2f7a56d493a0d58fa4ec99e90"
+    ],
+    "candidate_worktree": "/private/tmp/chronovisor-release-candidate-vrzhBS",
+    "candidate_synthetic_head": "a4a044397bb0a9e1034c02735af46baa52584f34",
+    "candidate_diff": {
+      "paths": 46,
+      "insertions": 6235,
+      "deletions": 181,
+      "diff_check": "passed"
+    },
+    "cherry_pick_trial": {
+      "order": "8a16450 -> b2912bb -> 1e05bd7 -> 0f442bf -> 8bfac6a",
+      "code_conflicts": 0,
+      "modify_delete_conflict": {
+        "path": "_handoff/2026-09-08_2205_chronovisor-evidence-storage-recall.html",
+        "resolution": "kept incoming release evidence"
+      }
+    }
+  },
+  "runtime_source": {
+    "config": "$HOME/.chronovisor/config.toml",
+    "pinned_source_sha": "873c2a3bc1743bc7a2fe309067904e903870fb1d",
+    "launchd_source_dir": "$HOME/.chronovisor/runtime/launchd-sources",
+    "chronovisor_runtime_source_overrides": "absent in inspected source plists"
+  },
+  "resident_services": [
+    {
+      "label": "com.trafficsign.chronovisor-dashboard.managed-v2",
+      "wrapper_pid": 76803,
+      "child_pid": 76844,
+      "archive_id": "K-Yp6A3QMtre-h6UeujXV",
+      "pinned_source_sha": "873c2a3bc1743bc7a2fe309067904e903870fb1d",
+      "mode": "persistent"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+      "wrapper_pid": 76815,
+      "child_pid": 76845,
+      "archive_id": "K-Yp6A3QMtre-h6UeujXV",
+      "pinned_source_sha": "873c2a3bc1743bc7a2fe309067904e903870fb1d",
+      "mode": "persistent"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+      "wrapper_pid": 76886,
+      "child_pid": 76927,
+      "archive_id": "34oGAVQbdJyXuBRgW853m",
+      "pinned_source_sha": "873c2a3bc1743bc7a2fe309067904e903870fb1d",
+      "mode": "persistent",
+      "safe_boundary": "blocked-active-batch"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-semantic.managed-v2",
+      "wrapper_pid": 77605,
+      "child_pid": 77624,
+      "archive_id": "7CE-wXLd_jbdTJkbHiomD",
+      "pinned_source_sha": "873c2a3bc1743bc7a2fe309067904e903870fb1d",
+      "mode": "persistent"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-reranker.managed-v2",
+      "wrapper_pid": 76876,
+      "child_pid": 76924,
+      "archive_id": "B3AWa_PSj0Gy7fQPzRL-V",
+      "pinned_source_sha": "873c2a3bc1743bc7a2fe309067904e903870fb1d",
+      "mode": "persistent"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-converge.managed-v2",
+      "wrapper_pid": 44125,
+      "child_pid": 44140,
+      "archive_id": "K-Yp6A3QMtre-h6UeujXV",
+      "pinned_source_sha": "873c2a3bc1743bc7a2fe309067904e903870fb1d",
+      "mode": "periodic",
+      "interval_seconds": 1800
+    },
+    {
+      "label": "com.trafficsign.chronovisor-librarian-review.managed-v2",
+      "wrapper_pid": 68564,
+      "child_pid": 68589,
+      "archive_id": "RPIO4jSWc1YVtS_fiQ2Kr",
+      "pinned_source_sha": "873c2a3bc1743bc7a2fe309067904e903870fb1d",
+      "mode": "periodic",
+      "interval_seconds": 300,
+      "throttle_seconds": 60
+    },
+    {
+      "label": "com.trafficsign.chronovisor-deadman-observer.managed-v2",
+      "mode": "periodic-observer",
+      "interval_seconds": 300
+    },
+    {
+      "label": "com.trafficsign.chronovisor-watchdog.managed-v2",
+      "mode": "periodic-observer",
+      "interval_seconds": 900
+    },
+    {
+      "label": "com.trafficsign.chronovisor-sleep.managed-v2",
+      "mode": "calendar"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-searxng.managed-v2",
+      "wrapper_pid": 800,
+      "mode": "persistent-independent-local-service",
+      "release_scope": "not Chronovisor GitHub runtime"
+    }
+  ],
+  "health_snapshot": {
+    "dashboard_materialized": {
+      "status": "ok",
+      "runtime_commit_matches_expected": true,
+      "runtime_drift": false
+    },
+    "semantic": {
+      "status": "ok",
+      "ready": true,
+      "pid": 77624,
+      "query_path_self_test": {
+        "hits": 3,
+        "queries": 3,
+        "latency_ms": 85.657
+      }
+    },
+    "reranker": {
+      "status": "ok",
+      "ready": true,
+      "pid": 76924,
+      "runtime_commit_matches_expected": true,
+      "runtime_drift": false
+    }
+  },
+  "ingest_safe_boundary": {
+    "status_path": "$HOME/.chronovisor/runtime/status.json",
+    "state": "running",
+    "runtime_state": "running",
+    "stage": "generate",
+    "current_job_id": "b7e67ca6",
+    "current_job_pid": 76927,
+    "batch_index": 7,
+    "batch_total": 10,
+    "succeeded": 6,
+    "deferred": 0,
+    "failed": 0,
+    "pending": 13,
+    "authority_preflight": "ready",
+    "ingest_orchestrator_lock_holder_pid": 76927,
+    "restart_allowed": false,
+    "required_transition": [
+      "wait for terminal or idle state and null current_job_id/current_job_pid",
+      "confirm ingest-orchestrator.lock has no holder",
+      "acquire exclusive lease",
+      "kickstart ingest-drain while lease is held",
+      "release lease after old PID exits"
+    ],
+    "raw_force_kill": false
+  },
+  "quality": {
+    "full_ci_before_p3": {
+      "base_origin": {
+        "passed": 6501,
+        "failed": 10,
+        "deselected": 57,
+        "duration_seconds": 958.62
+      },
+      "candidate_before_p3": {
+        "passed": 6543,
+        "failed": 10,
+        "deselected": 57,
+        "duration_seconds": 952.50
+      },
+      "same_failure_nodeids": true,
+      "candidate_only_failures": 0,
+      "failure_classes": [
+        "9 architecture/refactor baseline drift tests",
+        "1 pre-existing config example model-id assertion"
+      ]
+    },
+    "post_p3_related": {
+      "selected_tests": 337,
+      "passed": 337,
+      "failed": 0,
+      "duration_seconds": 5.05,
+      "warning_count": 1
+    },
+    "post_p3_broader_related": {
+      "selected_tests": 379,
+      "passed": 379,
+      "failed": 0,
+      "duration_seconds": 5.56,
+      "warning_count": 1
+    },
+    "static_gates_post_p3": {
+      "python314_gil": "passed",
+      "ruff": "passed",
+      "mypy": "passed (95 files)",
+      "import_linter": "passed",
+      "compileall": "passed",
+      "diff_check": "passed",
+      "architecture_baseline": "pre-existing drift (non-zero)",
+      "architecture_refactor_tests": "9 failed, 27 passed (pre-existing drift)"
+    }
+  },
+  "release_procedure": [
+    "From a clean release worktree, cherry-pick the listed source commits in order; preserve unrelated main checkout changes.",
+    "Run the focused and required quality gates, then compare HEAD, origin/main, and git ls-remote origin refs/heads/main.",
+    "Push only the assembled release commit after quality approval; do not restart before the push.",
+    "Wait for ingest status terminal/idle and ingest-orchestrator.lock release; do not force-kill Raw.",
+    "Hold an exclusive ingest-orchestrator lease while kickstarting the ingest-drain managed-v2 label.",
+    "Kickstart dashboard, lan-dashboard, semantic, and reranker managed-v2 labels (and any periodic writer only after its active run exits).",
+    "Verify launchctl print, archive direct_url commit, service health/readiness, and task-specific live checks in that order."
+  ],
+  "residual_risks": [
+    "Ingest batch was active at observation and blocked restart.",
+    "Dashboard materialized health may lag the current runtime status.",
+    "The release diff includes evidence/report artifacts and should be reviewed as a 46-path change.",
+    "Full CI retains the same 10 known baseline failures; no candidate-only failure was observed before P3 commits."
+  ]
+}
