@@ -1,0 +1,200 @@
+{
+  "archives": {
+    "dashboard": {
+      "archive_id": "k44d7IZbTBgvN-owrMM9U",
+      "archive_path": "/Users/trafficsign/.cache/uv/archive-v0/k44d7IZbTBgvN-owrMM9U",
+      "direct_url_commit_id": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "direct_url_matches_target": true,
+      "direct_url_requested_revision": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "pid": 8993,
+      "site_packages": "/Users/trafficsign/.cache/uv/archive-v0/k44d7IZbTBgvN-owrMM9U/lib/python3.14/site-packages"
+    },
+    "ingest_drain": {
+      "archive_id": "8X_etggmyy-jIXCkEBDQD",
+      "archive_path": "/Users/trafficsign/.cache/uv/archive-v0/8X_etggmyy-jIXCkEBDQD",
+      "direct_url_commit_id": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "direct_url_matches_target": true,
+      "direct_url_requested_revision": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "pid": 8991,
+      "site_packages": "/Users/trafficsign/.cache/uv/archive-v0/8X_etggmyy-jIXCkEBDQD/lib/python3.14/site-packages"
+    },
+    "lan_dashboard": {
+      "archive_id": "t5_knggwx2VZJ5rqzojFs",
+      "archive_path": "/Users/trafficsign/.cache/uv/archive-v0/t5_knggwx2VZJ5rqzojFs",
+      "direct_url_commit_id": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "direct_url_matches_target": true,
+      "direct_url_requested_revision": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "pid": 8992,
+      "site_packages": "/Users/trafficsign/.cache/uv/archive-v0/t5_knggwx2VZJ5rqzojFs/lib/python3.14/site-packages"
+    },
+    "reranker": {
+      "archive_id": "Djtbpt5B1cuBBMqQr4UtC",
+      "archive_path": "/Users/trafficsign/.cache/uv/archive-v0/Djtbpt5B1cuBBMqQr4UtC",
+      "direct_url_commit_id": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "direct_url_matches_target": true,
+      "direct_url_requested_revision": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "pid": 9486,
+      "site_packages": "/Users/trafficsign/.cache/uv/archive-v0/Djtbpt5B1cuBBMqQr4UtC/lib/python3.14/site-packages"
+    },
+    "semantic": {
+      "archive_id": "a6-wz_DQ1ArUGigu16htg",
+      "archive_path": "/Users/trafficsign/.cache/uv/archive-v0/a6-wz_DQ1ArUGigu16htg",
+      "direct_url_commit_id": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "direct_url_matches_target": true,
+      "direct_url_requested_revision": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+      "pid": 9965,
+      "site_packages": "/Users/trafficsign/.cache/uv/archive-v0/a6-wz_DQ1ArUGigu16htg/lib/python3.14/site-packages"
+    }
+  },
+  "deployment": {
+    "code_commit_or_push_performed": false,
+    "git_push_performed_by_this_agent": false,
+    "ls_remote_main_sha": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+    "origin_main_sha": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+    "previous_runtime_source_sha": "d98adcdc2d067b0445ee070f118c78b06981f659",
+    "push_preexisting": true,
+    "release_candidate_sha": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb"
+  },
+  "health": {
+    "dashboard_loopback_api": {
+      "http_status": 200,
+      "url": "http://127.0.0.1:8765/api/health"
+    },
+    "lan_dashboard_tls_auth": {
+      "expected_auth_boundary": true,
+      "http_status": 401,
+      "url": "https://192.168.100.3:8766/api/health"
+    }
+  },
+  "ingest": {
+    "alert": false,
+    "authority_available": true,
+    "current_job_id": "269e3235",
+    "current_job_pid": 8991,
+    "ingest_runtime_available": true,
+    "liveness_observed_at": "2026-09-09T23:24:14",
+    "lock_owner_pids": [
+      8991
+    ],
+    "pending": 269,
+    "pending_raws": 277,
+    "resumed_after_release": true,
+    "runtime_state": "running",
+    "stage": "raw",
+    "state": "running",
+    "status_file_updated_at": "2026-09-09T23:24:52"
+  },
+  "ingest_lease": {
+    "acquired_at": "2026-09-09T14:18:45.325767+00:00",
+    "helper_base": "/private/tmp/chronovisor-cutover-20260909-0c22b666-lhpj89j9",
+    "helper_held_after_release": false,
+    "helper_pid": 7612,
+    "helper_process_alive": false,
+    "lease_state_capture_note": "acquired_at captured before helper release; release state file intentionally contains final held=false state",
+    "lock_path": "/Users/trafficsign/.chronovisor/runtime/ingest-orchestrator.lock",
+    "post_release_lock_owner_pids": [
+      8991
+    ],
+    "release_marker_mtime": "2026-09-09T14:23:10.999151+00:00",
+    "released_at": "2026-09-09T14:23:11.193055+00:00"
+  },
+  "notes": [
+    "Active Raw was allowed to finish naturally before lock acquisition; no force-kill was used.",
+    "DS4/backend/searxng and source-reviewer processes were not stopped.",
+    "Runtime override inspection found no CHRONOVISOR_RUNTIME_SOURCE override in the five launchd sources."
+  ],
+  "protected_processes_alive": {
+    "backend_pid_805": true,
+    "ds4_backend_pid_807": true,
+    "searxng_pid_800": true,
+    "source_reviewer_pid_50303": true
+  },
+  "recorded_at": "2026-09-09T14:24:53.362735+00:00",
+  "reranker": {
+    "last_error_empty": true,
+    "pid": 9486,
+    "ready": true,
+    "runtime_commit_matches_target": true,
+    "runtime_drift": false,
+    "status": "ok",
+    "warmup_status": "ready"
+  },
+  "residual_risks": [
+    "Semantic initial self-test hit an accelerator lease timeout during restart; launchd retry reached status ok/ready before lease release.",
+    "Correction-path canary is performed by root separately; this receipt records deployment and runtime health only."
+  ],
+  "runtime_config": {
+    "config_sha256": "06bc66cf60163bbef9fe20b8a252e15cd9b172c4a77655726f972d40cf5932e8",
+    "mode": "0o600",
+    "path": "/Users/trafficsign/.chronovisor/config.toml",
+    "private_backup_mode": "0o600",
+    "private_backup_path": "/Users/trafficsign/.chronovisor/runtime/deployment-backups/config.toml.pre-d98adcdc2d06-cutover-20260909T141935Z",
+    "private_backup_sha256": "6357598df27cade8bed8870d3abcb31630362ffe33e49be266b1b97bf3a9250b",
+    "query_timeout_ms": 800,
+    "runtime_source_matches_target": true,
+    "runtime_source_sha": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb"
+  },
+  "schema": "chronovisor.p5.correction_source_deployment.v1",
+  "semantic": {
+    "last_error_empty": true,
+    "pid": 9965,
+    "ready": true,
+    "self_test_hits": 3,
+    "self_test_queries": 3,
+    "status": "ok"
+  },
+  "targeted_restart": {
+    "kickstart_return_codes": {
+      "dashboard": 0,
+      "ingest_drain": 0,
+      "lan_dashboard": 0,
+      "reranker": 0,
+      "semantic": 0
+    },
+    "labels": [
+      "com.trafficsign.chronovisor-dashboard.managed-v2",
+      "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+      "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+      "com.trafficsign.chronovisor-semantic.managed-v2",
+      "com.trafficsign.chronovisor-reranker.managed-v2"
+    ],
+    "launchctl": {
+      "dashboard": {
+        "active_count": 1,
+        "label": "com.trafficsign.chronovisor-dashboard.managed-v2",
+        "loaded": true,
+        "print_rc": 0,
+        "state": "running"
+      },
+      "ingest_drain": {
+        "active_count": 1,
+        "label": "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+        "loaded": true,
+        "print_rc": 0,
+        "state": "running"
+      },
+      "lan_dashboard": {
+        "active_count": 1,
+        "label": "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+        "loaded": true,
+        "print_rc": 0,
+        "state": "running"
+      },
+      "reranker": {
+        "active_count": 1,
+        "label": "com.trafficsign.chronovisor-reranker.managed-v2",
+        "loaded": true,
+        "print_rc": 0,
+        "state": "running"
+      },
+      "semantic": {
+        "active_count": 1,
+        "label": "com.trafficsign.chronovisor-semantic.managed-v2",
+        "loaded": true,
+        "print_rc": 0,
+        "state": "running"
+      }
+    },
+    "scope_only_five_managed_v2": true
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "schema": "chronovisor.evidence-storage-implementation-check.v1",
+  "scope": "Preserve future exact correction preimages before CAS; bind correction prompts to committed Raw when available",
+  "local_commit": "738da0ff9c69e822a9474643304be735bbc6c56a",
+  "release_candidate_commit": "0c22b6669ccc3481c1e7996456e2bc6c9f1d12cb",
+  "runtime_activation": "deployed_all_five_services",
+  "storage": {
+    "full_preimage_and_postimage": "Existing content-correction-constraints.jsonl, durable before canonical page replacement",
+    "source_identity": "Existing page UID or null, page ID, correction ID, canonical UTF-8 SHA-256",
+    "source_spans": "Uniquely verified pre/post byte ranges and quote hashes; generated or ambiguous source spans held",
+    "retractions": "Empty new quote hash with no postimage range",
+    "review_and_applied_audit": "Compact immutable evidence references; no full source duplication",
+    "constraint_consumers": "Archived full bodies excluded from ordinary replacement-rule projection",
+    "legacy_constraint_without_receipt": "Append verified full preimage receipt before CAS; preserve the earlier row",
+    "write_failure": "Canonical page unchanged",
+    "rollback": "Existing owner-only CAS rollback retained",
+    "already_applied_recovery": "Reuse the original verified pre-CAS receipt; never create a postimage-to-postimage source identity"
+  },
+  "raw_binding": {
+    "consumer": "Existing applied correction audit append path",
+    "identity": "Preserved host and correction_turn_ref, never prior source_turn_ref",
+    "verified_capture": "Exact resolver result with committed Raw SHA, receipt SHA and byte ranges",
+    "missing_capture": "Explicit held reason and empty source_refs; preserved turn identity can be resolved after Save",
+    "automatic_later_audit_enrichment": false,
+    "l2_raw_reads_added": false,
+    "semantic_supersedes_inferred": false
+  },
+  "validation": {
+    "isolated_related_tests_passed": 160,
+    "release_related_tests_passed": 160,
+    "release_mypy_source_files_passed": 95,
+    "ruff": "passed",
+    "covered": [
+      "UTF-8 pre/post reconstruction and exact byte spans",
+      "Missing, tampered and malformed source rejection",
+      "Generated-text multi-step source held",
+      "Receipt persistence failure leaves canonical source unchanged",
+      "Legacy constraint upgrade occurs before page CAS",
+      "Fresh review and already-applied recovery ordering",
+      "Correction prompt uses its own captured Raw, including chunk boundaries",
+      "Missing capture retains exact identity without changing an earlier audit"
+    ],
+    "deployed_archive_canary": {
+      "schema": "chronovisor.deployed-source-canary.v1",
+      "status": "passed",
+      "archive": "/Users/trafficsign/.cache/uv/archive-v0/8X_etggmyy-jIXCkEBDQD/lib/python3.14/site-packages",
+      "correction": {
+        "preimage_exact": true,
+        "postimage_exact": true,
+        "recovery_reuses_original_receipt": true,
+        "missing_receipt_held": true
+      },
+      "captured_turn": {
+        "status": "ok",
+        "source_refs": 1,
+        "source_bytes": 40482,
+        "reconstruction_sha_match": true,
+        "candidates_checked": 1,
+        "preceding_held_reasons": {}
+      },
+      "elapsed_seconds": 27.531,
+      "production_writes": false,
+      "model_calls": 0,
+      "scope": "Synthetic page mutation in temporary root plus read-only existing captured turn; no production page modification"
+    }
+  },
+  "limitations": [
+    "Historical preimages absent from existing evidence are not reconstructed by inference",
+    "Old recovery artifacts lacking durable preimage evidence are held",
+    "This does not establish C2 topic extraction, formal retrieval quality or plan-wide acceptance"
+  ],
+  "observed_at": "2026-09-09T14:27:40.391872+00:00"
+}
