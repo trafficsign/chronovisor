@@ -1,0 +1,12 @@
+{
+  "captured_at": "2026-09-09T08:44:37.759612+00:00",
+  "source_manifest_sha256": "ca4c4e27a51afb69b83138e92400bd79ba0fed7421399b3ea5b799c41980937c",
+  "source_root_sha256": "7582b9efe18a53c9502c30e8dd8f28c59f631bb689b896e1df6000b894c1e6e6",
+  "pages": 7812,
+  "records": 147322,
+  "failures": 0,
+  "reconstruction_mismatches": 0,
+  "elapsed_seconds": 43.938,
+  "generation_llm_calls": 0,
+  "scope": "every frozen source; exact body byte reconstruction and per-span SHA256; not quality or production backfill completion"
+}
