@@ -1,0 +1,46 @@
+{
+  "schema": "chronovisor.c2-triage-candidates.v1",
+  "status": "implemented_isolated_entrypoint",
+  "commit": "74dca55b0bff81c78814a22b02900600a1f9eefe",
+  "ordinary_triage_changed": false,
+  "production_c2_enabled": false,
+  "schema_version": "chronovisor.ingest-triage-c2.v1",
+  "model_call": "existing LocalStructuredSession and ingest runtime transport",
+  "maximum_records": 64,
+  "maximum_record_text_chars": 64000,
+  "maximum_semantic_rows": 8,
+  "kind": [
+    "unknown",
+    "proposal",
+    "decision",
+    "result"
+  ],
+  "source_validation": [
+    "record ID must exist",
+    "each quote must be exact and unique in selected decoded source text",
+    "host computes UTF-8 byte ranges and SHA-256",
+    "known kind requires quote",
+    "invalid UTF-8 rejected before model call"
+  ],
+  "coordinate": "decoded_source_text_utf8",
+  "authority": "model_judgment, not proof of semantic truth",
+  "audit": [
+    "schema SHA",
+    "prompt SHA",
+    "request SHA",
+    "source records SHA",
+    "model and local structured execution receipt"
+  ],
+  "validation": {
+    "related_tests_passed": 498,
+    "ruff": "passed",
+    "mypy_files_passed": 95,
+    "real_model_quality": "not measured"
+  },
+  "remaining": [
+    "verified native Raw child binding",
+    "durable semantic projection publication",
+    "query consumer connection and semantic acceptance"
+  ],
+  "v1_compatibility": "existing entrypoint and five-column fallback retained"
+}
