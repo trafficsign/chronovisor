@@ -16,6 +16,7 @@ from chronovisor.core import semantic_client
 from chronovisor.core.durable_state import exclusive_text_file_lock
 from chronovisor.core.runtime_config import load_search_embedding_config
 from chronovisor.core.store import CHRONOVISOR_ROOT, find_page
+from chronovisor.ingest.page_registry import PageRegistry
 from chronovisor.recall.recall_field_schema import (
     RecallFieldConfig,
     load_recall_field_config,
@@ -702,7 +703,8 @@ def append_candidate_trace(
     )
     content_hashes: dict[str, str] = {}
     page_uids: dict[str, str] = {}
-    from chronovisor.recall.recall_runtime import page_uid_for_id
+    registry_state: dict[str, Any] | None = None
+    registry_loaded = False
 
     for page_id in all_pages:
         path_value = find_page(page_id)
@@ -716,7 +718,27 @@ def append_candidate_trace(
             digest = ""
         if digest:
             content_hashes[page_id] = digest
-            uid = page_uid_for_id(page_id)
+            if not registry_loaded:
+                # Resolve all UIDs from one validated registry snapshot.  The
+                # legacy page_uid_for_id path reparses the multi-megabyte
+                # registry for every page and turns this shadow write into a
+                # latency-critical operation.
+                try:
+                    registry_state = PageRegistry(CHRONOVISOR_ROOT).load()
+                except Exception:
+                    # Match page_uid_for_id's fail-closed empty-UID behavior
+                    # without retrying the failed load for every page.
+                    registry_state = None
+                registry_loaded = True
+            try:
+                resolved = (
+                    PageRegistry.resolve_from_state(registry_state, page_id)
+                    if registry_state is not None
+                    else None
+                )
+            except Exception:
+                resolved = None
+            uid = str(resolved.get("uid") or "") if isinstance(resolved, dict) else ""
             if uid:
                 page_uids[page_id] = uid
     prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
