@@ -1,0 +1,107 @@
+{
+  "active": {
+    "extractor_schema_version": 2,
+    "generation_id": "20260811T043448Z-f94f352690dd-46626a",
+    "manifest_sha256": "b301ecce37b1f9fd4025ad4d11756f7e8c3b1922582a0f440d8a3a4e5beb742c",
+    "pointer_unchanged": true,
+    "schema_version": 4
+  },
+  "base": {
+    "documents": 45285,
+    "kind_counts": {
+      "chunk": 30748,
+      "page": 4239,
+      "question": 10298
+    },
+    "pages": 4239
+  },
+  "captured_at": {
+    "atomic_snapshot": false,
+    "end": "2026-09-09T13:11:32.992+00:00",
+    "source_mutated_during_read": 0,
+    "start": "2026-09-09T13:11:28.156+00:00"
+  },
+  "delta": {
+    "deleted_pages": 0,
+    "documents": 53538,
+    "kind_counts": {
+      "chunk": 29913,
+      "page": 4084,
+      "question": 19541
+    },
+    "nondeleted_pages": 4084,
+    "page_state_rows": 4084,
+    "pages_with_documents": 4084
+  },
+  "integrity": {
+    "base_page_source_hash_mixed": 0,
+    "deleted_pages_with_delta_documents": 0,
+    "delta_page_source_hash_mixed": 0,
+    "delta_pages_without_page_state": 0,
+    "delta_state_document_hash_mismatch": 0,
+    "effective_document_id_collision": 0,
+    "state_pages_without_delta_documents": 0
+  },
+  "jobs": {
+    "non_completed": 0,
+    "non_completed_with_error": 0
+  },
+  "overlay": {
+    "base_documents_overridden": 6307,
+    "effective_documents": 92516,
+    "effective_kind_counts": {
+      "chunk": 56616,
+      "page": 7812,
+      "question": 28088
+    },
+    "effective_pages": 7812,
+    "page_overlap": 511
+  },
+  "source_revision": {
+    "effective_index_fingerprint_sha256": "71ed5605ff6aaefb94283a293cd6f13b11efeafdd060c04ad76579d680cb17af",
+    "inventory_scope": "persisted_index_store_catalog",
+    "mtime_diff": 0,
+    "sha256_and_mtime_diff": 0,
+    "sha256_diff": 0,
+    "sha256_same": 7812,
+    "source_fingerprint_sha256": "71ed5605ff6aaefb94283a293cd6f13b11efeafdd060c04ad76579d680cb17af",
+    "source_hashed_paths": 7812,
+    "source_index_page_id_diff": 0,
+    "source_read_errors": 0,
+    "source_stable_paths": 7812
+  },
+  "validation": {
+    "load_active_generation_checksums_route_delta": {
+      "base_documents": 45285,
+      "base_pages": 4239,
+      "base_vector_shape": [
+        45285,
+        2048
+      ],
+      "delta_documents": 53538,
+      "delta_pages": 4084,
+      "delta_vector_shape": [
+        53538,
+        2048
+      ],
+      "elapsed_ms": 732.626,
+      "status": "ok"
+    },
+    "semantic_index_status": {
+      "coverage": 1,
+      "covered_page_count": 7812,
+      "current_page_count": 7812,
+      "deleted_page_count": 0,
+      "missing_page_count": 0,
+      "stale_page_count": 0,
+      "status": "ok"
+    },
+    "status_elapsed_ms": 287.563,
+    "validate_generation_checksums_route": {
+      "elapsed_ms": 256.749,
+      "status": "ok"
+    }
+  },
+  "scope": "Read-only non-atomic observation of the production extractor-2 index after existing incremental updates caught up. Not acceptance of candidate C or a quality result.",
+  "helper_sha256": "2d37d884b469a1afb37a63eba027d2fa1ebc96a4e8dcf6284e5119d5c55a1ad2"
+}
