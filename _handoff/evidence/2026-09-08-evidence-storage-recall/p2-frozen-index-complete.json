@@ -1,0 +1,77 @@
+{
+  "schema": "chronovisor.evidence-storage.frozen-index-complete.v1",
+  "observed_at": "2026-09-09T13:07:00.961439+00:00",
+  "status": "complete_and_copied_to_isolated_C",
+  "build": {
+    "manifest": {
+      "schema_version": 4,
+      "generation_id": "20260909T130426Z-cb896114a4eb-273c25",
+      "created_at": "2026-09-09T13:04:34.432+00:00",
+      "role": "search.semantic.foreground",
+      "provider": "nemotron",
+      "model": "nvidia/Nemotron-3-Embed-1B-BF16",
+      "location": "local",
+      "revision": "a5e0f804b9e90a1ca6784ecbf6e41595774fc834",
+      "dimensions": 2048,
+      "dtype": "float32",
+      "query_prefix": "query: ",
+      "document_prefix": "passage: ",
+      "normalization": "l2",
+      "extractor_schema_version": 3,
+      "repo_commit": "b77ff7a631322e866fa7f0e0e1acde98c737ed66",
+      "corpus_fingerprint": "5c60cdd2bfdc841188f186c41f957e66e34d2ea2a0385ed9b159c2daecdbd61e",
+      "page_count": 7812,
+      "document_count": 183222,
+      "kind_counts": {
+        "page": 7812,
+        "question": 28088,
+        "section-v1": 147322
+      },
+      "metadata_sha256": "4b13ccd918190be8f730f764e7bea8b44ae1451b01c463eb54ddaf52fb5e42e1",
+      "vectors_sha256": "b7b33e8eb3f1f9629d48cc47447e493fbd39972683503b020743565898c44732",
+      "ann_kind": "usearch_hnsw_f16",
+      "ann_dimensions": 512,
+      "ann_sha256": "06cc58db0e17a192d3b8b8643e6c94d37f87616a4a31a91b6c0bd876af47512e"
+    },
+    "code_base_commit": "b77ff7a631322e866fa7f0e0e1acde98c737ed66",
+    "code_file_sha256": {
+      "src/chronovisor/core/semantic_index.py": "6f023268e89feb1ba21261be10062bc188b8315cec2dd6bb1fd13e7db4c217dc",
+      "src/chronovisor/core/page_evidence.py": "50545d8a128433564b34976bc7010e8682ea35b24d6dc2c1a5a95d5a9c218379",
+      "src/chronovisor/core/search.py": "d47bd94b6b043b7f1547ce2bf103aefe2ebf6b40be0e6ff8b759e9a4dbc78f1c",
+      "src/chronovisor/core/search_types.py": "7f84d6f37f2da663eb68b0fc13a887cffa168e0c8632d5c982e4461ee5b99e8d",
+      "src/chronovisor/core/nemotron_mlx.py": "500949a92a9a13ed8c117ac958115a6fbeac0c9d56cd1cf8f88214cc828c9d02"
+    },
+    "builder_sha256": "b3dec41c33adadea1cd785bd12967d1d8a9ffbcfdd3a112febec067d1e304ecd",
+    "embedding_input_sha256": "da246a004d08df1f133b841232291d6f97e633d3f16e2f6cf890c10ec50c11ee",
+    "source_root_sha256": "7582b9efe18a53c9502c30e8dd8f28c59f631bb689b896e1df6000b894c1e6e6",
+    "source_manifest_sha256": "ca4c4e27a51afb69b83138e92400bd79ba0fed7421399b3ea5b799c41980937c",
+    "cached_generation": "20260811T043448Z-f94f352690dd-46626a",
+    "cached_manifest_sha256": "b301ecce37b1f9fd4025ad4d11756f7e8c3b1922582a0f440d8a3a4e5beb742c",
+    "reused": 0,
+    "encoded": 110911,
+    "elapsed_seconds": 12103.15,
+    "extra_generation_llm_calls": 0
+  },
+  "build_receipt_sha256": "67a55647d00ddda0fd86e499ebd19b5f62c4a5e11b167a4a324401fffd43a344",
+  "cost_scope": "The build receipt encoded/reused/elapsed fields cover the resumed run only, not the initial run or all pause/wait time. Earlier logs and checkpoints are retained.",
+  "resume": {
+    "checkpoint_documents": 72311,
+    "encoded_after_resume": 110911,
+    "final_documents": 183222
+  },
+  "verification": {
+    "active_complete_manifest_checksums": true,
+    "source_snapshot_identity_matches": true,
+    "verified_checkout_commit": "382ed37e9f91d7ce4aaf61878a1b119a62f0aa07",
+    "source_tree_sha256": "ba2414b32b1907155cad5560d80cf4cf7ccd988b3c1fafe81b01aff621295989",
+    "target_tree_sha256": "ba2414b32b1907155cad5560d80cf4cf7ccd988b3c1fafe81b01aff621295989",
+    "source_unchanged_during_copy": true,
+    "independent_inodes": true,
+    "copied_bytes": 3550377651,
+    "copy_receipt_sha256": "a206f76fbec9a336af03823f059a01748cf8400c48e655e446cfb243c1e47d70",
+    "preparation_overlay_sha256": "b6e742719735e153e1ba980aa4b32f9c01ee92dde2479a9f6edc7c0893f33963"
+  },
+  "quality_queries_executed": 0,
+  "production_C_activation": false,
+  "scope": "Deterministic page/section candidate. Raw conversation event/correction extraction beyond existing Raw evidence, formal quality, adoption, and live backfill are not completed by this receipt."
+}
