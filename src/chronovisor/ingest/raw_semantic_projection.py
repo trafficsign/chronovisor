@@ -2234,11 +2234,24 @@ def read_native_c2_source_records(
     commit = getattr(unit, "commit", None)
     unit_raw_id = getattr(unit, "raw_id", None)
     unit_sha256 = getattr(unit, "sha256", None)
+    parent = parents[0]
+    parent_receipt = parent.get("receipt")
+    expected_receipt = {
+        "host": getattr(commit, "host", None),
+        "session_key": getattr(commit, "session_key", None),
+        "after_line": getattr(commit, "after_line", None),
+        "until_line": getattr(commit, "until_line", None),
+        "idempotency_key": getattr(commit, "idempotency_key", None),
+        "payload_sha256": getattr(commit, "sha256", None),
+    }
     if (
         not isinstance(commit, RawSegmentCommit)
         or unit_raw_id != raw_id
         or unit_sha256 != source.get("record_payload_sha256")
-        or unit_sha256 != parents[0].get("raw_sha256")
+        or unit_sha256 != parent.get("raw_sha256")
+        or parent.get("raw_bytes") != commit.length
+        or not isinstance(parent_receipt, dict)
+        or parent_receipt != expected_receipt
     ):
         raise RawSemanticProjectionError("native C2 source commit identity mismatch")
     raw_reader = getattr(store, "read_bytes", None)
