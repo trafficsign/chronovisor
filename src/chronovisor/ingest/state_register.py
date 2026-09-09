@@ -193,7 +193,9 @@ def format_state_context(
     lines.append("content_json=")
     closing = "[/WORKING_MEMORY]"
     overhead = len("\n".join([*lines, "", closing]))
-    available = max(2, max_chars - overhead)
+    if overhead + 2 > max_chars:
+        return ""
+    available = max_chars - overhead
     encoded = json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
     # Shrink the largest entry first so every available allowlisted source gets
     # a chance to remain visible instead of letting current-state consume the
@@ -207,7 +209,7 @@ def format_state_context(
         largest = max(candidates, key=lambda entry: len(str(entry["content"])))
         content = str(largest["content"])
         shrink_by = max(1, min(len(content) - 24, len(encoded) - available))
-        target_len = max(24, len(content) - shrink_by - 3)
+        target_len = max(21, len(content) - shrink_by - 3)
         largest["content"] = content[:target_len].rstrip() + "..."
         encoded = json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
     lines.append(encoded if len(encoded) <= available else "[]")
