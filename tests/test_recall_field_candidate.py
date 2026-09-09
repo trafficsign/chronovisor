@@ -508,3 +508,110 @@ def test_candidate_trace_hashes_prompt_and_measures_commit_coverage(tmp_path) ->
     assert record["field_verified"] is True
     assert "private prompt" not in serialized
     assert json.loads(serialized)["prompt_sha256"] == record["prompt_sha256"]
+
+
+def test_candidate_trace_resolves_all_uids_from_one_registry_snapshot(
+    tmp_path, monkeypatch
+) -> None:
+    from chronovisor.ingest.page_registry import PageRegistry
+
+    pages = {}
+    for page_id in ("source", "target"):
+        page_path = tmp_path / "pages" / f"{page_id}.md"
+        page_path.parent.mkdir(parents=True, exist_ok=True)
+        page_path.write_text(
+            f"---\ntitle: {page_id}\nstatus: stable\ntype: knowledge\n---\n",
+            encoding="utf-8",
+        )
+        pages[page_id] = page_path
+
+    registry = PageRegistry(tmp_path)
+    registry.ensure_manifest()
+    source_uid = registry.resolve("source")["uid"]
+    target_uid = registry.resolve("target")["uid"]
+    registry.add_redirect(source_uid, target_uid)
+
+    class CountingRegistry(PageRegistry):
+        load_calls = 0
+
+        def load(self):
+            type(self).load_calls += 1
+            return super().load()
+
+    monkeypatch.setattr(recall_field_candidate, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(
+        recall_field_candidate,
+        "PageRegistry",
+        CountingRegistry,
+    )
+    monkeypatch.setattr(
+        recall_field_candidate,
+        "find_page",
+        lambda page_id: pages.get(page_id),
+    )
+
+    record = recall_field_candidate.append_candidate_trace(
+        session_hash="0123456789abcdef",
+        prompt="query",
+        observer={
+            "status": "observed",
+            "quality_eligible": True,
+            "field_attempted": True,
+            "field_verified": True,
+            "field_page_ids": ["source"],
+            "teacher_page_ids": ["target"],
+        },
+        committed_page_ids=["source", "target"],
+        latency_ms=120,
+        path=tmp_path / "trace.jsonl",
+    )
+
+    assert CountingRegistry.load_calls == 1
+    assert record["page_uids"] == {"source": target_uid, "target": target_uid}
+
+
+def test_candidate_trace_keeps_empty_uids_after_registry_load_failure(
+    tmp_path, monkeypatch
+) -> None:
+    pages = {}
+    for page_id in ("a", "b"):
+        page_path = tmp_path / f"{page_id}.md"
+        page_path.write_bytes(page_id.encode("utf-8"))
+        pages[page_id] = page_path
+
+    class BrokenRegistry:
+        load_calls = 0
+
+        def __init__(self, _root):
+            pass
+
+        def load(self):
+            type(self).load_calls += 1
+            raise OSError("registry unavailable")
+
+        @staticmethod
+        def resolve_from_state(_state, _page_id):
+            raise AssertionError("failed registry load must not resolve pages")
+
+    monkeypatch.setattr(recall_field_candidate, "PageRegistry", BrokenRegistry)
+    monkeypatch.setattr(
+        recall_field_candidate,
+        "find_page",
+        lambda page_id: pages.get(page_id),
+    )
+
+    record = recall_field_candidate.append_candidate_trace(
+        session_hash="0123456789abcdef",
+        prompt="query",
+        observer={
+            "status": "observed",
+            "field_page_ids": ["a"],
+            "teacher_page_ids": ["b"],
+        },
+        committed_page_ids=["a", "b"],
+        latency_ms=120,
+        path=tmp_path / "trace.jsonl",
+    )
+
+    assert BrokenRegistry.load_calls == 1
+    assert record["page_uids"] == {}
