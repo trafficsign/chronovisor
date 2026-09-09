@@ -1,0 +1,46 @@
+{
+  "schema": "chronovisor.c2-native-bindings-verification.v1",
+  "status": "implemented_isolated_entrypoint",
+  "commit": "5de28b37a139d01bf4324c2103151d5881278bd6",
+  "source_module_sha256": "1fe5a1559e0c449e0163170f97a719616713d66b010d54c5039468d1e19f02fc",
+  "native_canary": {
+    "host": "claude-code",
+    "raw_bytes": 44520,
+    "selected_records": 3,
+    "selected_chars": 278,
+    "child_count": 1,
+    "native_and_selected_text_sha_verified": true,
+    "model_calls": 0,
+    "production_writes": false
+  },
+  "compatibility": {
+    "default_artifact_files": 3,
+    "all_bytes_identical": true,
+    "baseline_commit": "3445e3d7fbfebb810f4745c0a56578b9eae47622"
+  },
+  "validation": {
+    "projection_archive_store_orchestrator_tests_passed": 86,
+    "ruff": "passed",
+    "mypy": "16 pre-existing errors in old code; no new error"
+  },
+  "contract": {
+    "opt_in": "project_native_transcript(include_source_bindings=True)",
+    "persistence": "existing projection manifest, no new database",
+    "raw_lookup": "explicit named logical reference only",
+    "source_coordinates": "logical_raw native event bytes and separate decoded text character interval",
+    "digests": [
+      "committed Raw bytes",
+      "full canonical commit receipt",
+      "native event bytes",
+      "native source row",
+      "native decoded text",
+      "selected child decoded text"
+    ],
+    "unavailable_source": "held; no inventory scan or live transcript fallback",
+    "ordinary_v1_activation": "unchanged"
+  },
+  "remaining": [
+    "semantic envelope persistence and consumer acceptance",
+    "real model semantic quality"
+  ]
+}
