@@ -14,7 +14,13 @@
 - [P3 validation](p3-validation.json): active generation の extractor 追従、更新/rebuild/rollback の接続と CAS 回帰を確認。既定 extractor は 2、候補 C は 3、production 変更はなし。
 - [P5 cutover](p5-runtime-cutover.json): push、対象サービス再起動、archive `direct_url` provenance、health を確認。実Raw処理10件・authority正常まで確認。計画全体の品質採用は未完了。
 
-現在は C を採用せず、production の extractor 2 を維持する。`query_timeout_ms=800` と台帳重複読込修正を d98adcd に配布。未使用 query の実 hook 出力で source reference 2 件の byte/SHA 一致、プロセス起動から実 stdout まで 3.749 秒を確認した。これは欠落修正の限定 canary であり、別言い換えの degraded / lexical-only 結果も保持する。全体品質と cold/warm paired p95 非劣化は未測定で、C の採用条件には代用しない。
+production は extractor 2 を維持し、候補 C1/C2 は有効化していない。現行 archive は 0c22b66（訂正前後の原文保全まで）、配布候補 0eddbc8 は GitHub へ push 済みで、本番再起動はローカル20件試行後に行う。
+
+[P4予算修正](p4-total-context-budget-fix.json): 比較は120問×3方式×3反復を実行したが、設定した全体3000文字が旧runtime内部で4602へ上書きされていた。原captureを保存し、3000文字の適合測定・速度成功とは扱わない。修正後は根拠のRecall blockを先に確保し、残枠に作業メモを収める。source本文を途中で切らず、収まらないblockを拒否する。通常経路とdeterministic fallbackは同じfinal rendererを使う。関連272 testsはmain/release双方で通過。修正版のlive速度は未測定。
+
+C2の保存・復元は明示的な試行経路として用意した。原文、役割、出来事時刻、記録時刻と未知の有効期間を保ち、モデル生成の提案/決定/結果・条件は検証した原文引用とCASに保存する。モデル候補で原文atomを置き換えない。[Piとversioned packetの検証](p3-c2-packet-publication.json)、[指定Rawの再構築](p2-c2-bounded-source-rebuild.json)を参照。通常Recall索引への自動公開と明示訂正関係は未実装であり、既存as-of/authorityの拒否を回避して本番有効化しない。
+
+既存資料の全件LLM処理は、候補の採用条件を満たしてから実行する。C1の評価結果をC2全体の採否へ転用しない。固定native20 child / 69 recordsの試行はローカルQwenのみを使い、Contributorへ非公開原文を送らない。根拠なし負例・時点指定例・独立回答採点の不足も、全面品質受入とは区別する。
 
 ## 1. 変更しない契約と新規保存
 
@@ -162,6 +168,20 @@ checkpoint_page_evidence_projection(
 上の `source`、`page_id`、`projection` は同一ページについて `project_page_evidence` で作った値を渡す。既存 P2 receipt の `projection_cas_writes=0` は「この backfill を実行済み」という意味ではないため、全件処理時は manifest ごとに `validated / published / checkpointed / failed / ineligible` を集計する。
 
 semantic generation の publish は `build_generation` が staging、manifest、`COMPLETE`、fsync、atomic rename の順で封印し、`activate_generation(..., expected_current=...)` が active pointer を CAS 更新する。active generation のディレクトリを直接編集しない。
+
+### C2の明示的な保存・再現
+
+既存CLI `scripts/project_c2_evidence.py` は、native source map付きchildと読み取り専用Rawから、隔離rootへsource-bound C2 artifactを作る。`--help`のインターフェースを確認済み。以下は再現用の未実行例で、各変数には固定した試行の絶対パスを指定する。
+
+```sh
+.venv/bin/python scripts/project_c2_evidence.py \
+  --root "$C2_ISOLATED_ROOT" --raw-dir "$C2_RAW_DIR" \
+  --child "$C2_CHILD" --triage-result "$C2_FIXED_TRIAGE_RESULT"
+```
+
+`--triage-result`は保存済みtriage結果の再生であり、モデルを呼ばない。新しい候補を作る場合だけ、この引数を`--generate --reasoning-disabled`へ置き換える。これは隔離rootの設定モデルを使う明示処理で、通常ingestの設定を変えない。CLIはtriageのpage操作を適用せず、Rawをprocessedにしない。
+
+元Rawの存在、commit、digest、引用範囲の検証が失敗した成果物を公開しない。固定20件の入力manifestを結果を見て入れ替えず、再実行は同じidentityの検証済み成果物を再利用する。保存試行に成功しても、通常Recallへの公開・現在事実としてのauthority・検索品質の合格には読み替えない。
 
 ## 4. rollback と C 不採用時の扱い
 

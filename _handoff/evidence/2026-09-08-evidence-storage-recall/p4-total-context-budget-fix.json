@@ -31,5 +31,13 @@
     "Captured run is diagnostic, not proof of compliance with configured total.",
     "Independent necessary-coverage upper-bound audit pending.",
     "C1 outcomes do not decide C2 adoption."
-  ]
+  ],
+  "followup": {
+    "observed_at": "2026-09-10T02:49:21+09:00",
+    "scope": "distilled fast path uses shared final renderer with state budget zero",
+    "runtime_tests_passed": 221,
+    "state_bypass_preserved": true,
+    "render_receipt_verified": true,
+    "necessary_coverage_audit": "p4-final-evaluation-audit.json"
+  }
 }
