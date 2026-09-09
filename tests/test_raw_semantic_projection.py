@@ -7,18 +7,22 @@ from pathlib import Path
 
 import pytest
 
+from chronovisor.core.raw_segment import COMMIT_SCHEMA, RawSegmentCommit
 from chronovisor.core.save_transaction import (
     attach_save_transaction_marker,
     make_save_transaction,
 )
 from chronovisor.ingest.raw_semantic_projection import (
+    C2_RECORD_BINDINGS_SCHEMA,
     PROJECTION_BUNDLE_RECEIPT_SCHEMA,
     PROJECTION_CHILD_SCHEMA,
     ProjectionConflictError,
     RawSemanticProjectionError,
+    project_native_transcript,
     project_parent_raw,
     project_reassembled_raws,
     projection_bundle_state_for_parent,
+    read_native_c2_source_records,
     verify_projection_bundle,
 )
 
@@ -62,6 +66,63 @@ def _transcript_raw(
         encoding="utf-8",
     )
     return path
+
+
+def _native_raw(
+    tmp_path: Path,
+    rows: list[dict],
+    *,
+    host: str = "hermes",
+) -> tuple[Path, bytes, object]:
+    raw_dir = tmp_path / "raw"
+    source_file = tmp_path / "native-session.jsonl"
+    raw_bytes = b"".join(
+        json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        + b"\n"
+        for row in rows
+    )
+    session_key = "a" * 24
+    idempotency_key = f"{host}-{session_key}-from0-to{len(rows)}"
+    raw_id = f"save-{idempotency_key}.md"
+    source_file.write_bytes(raw_bytes)
+    commit = RawSegmentCommit(
+        schema=COMMIT_SCHEMA,
+        raw_id=raw_id,
+        idempotency_key=idempotency_key,
+        host=host,
+        session_key=session_key,
+        session_id="session-1",
+        source_file=str(source_file),
+        after_line=0,
+        until_line=len(rows),
+        offset=0,
+        length=len(raw_bytes),
+        sha256=hashlib.sha256(raw_bytes).hexdigest(),
+        record_count=len(rows),
+        captured_at="2026-09-09T00:00:00+09:00",
+        part=1,
+    )
+    commit.validate()
+    reference = tmp_path / "runtime" / "raw-projections" / "parents" / raw_id
+    reference.parent.mkdir(parents=True, exist_ok=True)
+    reference.write_text("{}", encoding="utf-8")
+    unit = type(
+        "_Unit",
+        (),
+        {"raw_id": raw_id, "sha256": commit.sha256, "commit": commit},
+    )()
+    store_raw_dir = raw_dir
+
+    class _StubRawStore:
+        raw_dir = store_raw_dir
+
+        def resolve_reference(self, path: Path) -> object | None:
+            return unit if path == reference else None
+
+        def read_bytes(self, _value: object) -> bytes:
+            return raw_bytes
+
+    return reference, raw_bytes, _StubRawStore()
 
 
 def _child_records(path: Path) -> list[dict]:
@@ -217,6 +278,179 @@ def test_projects_only_nonblank_user_assistant_text_byte_exact(tmp_path: Path) -
         )
         == "completed"
     )
+
+
+def test_native_source_bindings_round_trip_from_child_and_manifest(
+    tmp_path: Path,
+) -> None:
+    reference, raw_bytes, store = _native_raw(
+        tmp_path,
+        [
+            {"message": {"role": "user", "content": "日本語🙂の質問"}},
+            {"message": {"role": "tool", "content": "hidden tool"}},
+            {"message": {"role": "assistant", "content": "回答の根拠"}},
+        ],
+    )
+    unit = store.resolve_reference(reference)
+    assert unit is not None and unit.commit is not None
+    default = project_native_transcript(
+        reference,
+        raw_bytes,
+        unit.commit,
+        output_dir=tmp_path / "default",
+        max_child_bytes=2_000,
+    )
+    bound = project_native_transcript(
+        reference,
+        raw_bytes,
+        unit.commit,
+        output_dir=tmp_path / "bound",
+        max_child_bytes=2_000,
+        include_source_bindings=True,
+    )
+    assert default.manifest_path is not None
+    assert bound.manifest_path is not None
+    default_manifest = verify_projection_bundle(default.manifest_path)
+    bound_manifest = verify_projection_bundle(bound.manifest_path)
+    assert "c2_record_bindings" not in default_manifest["source"]
+    assert (
+        bound_manifest["source"]["c2_record_bindings"]["schema"]
+        == C2_RECORD_BINDINGS_SCHEMA
+    )
+    assert default_manifest["projection_id"] != bound_manifest["projection_id"]
+
+    child_result = read_native_c2_source_records(
+        bound.child_paths[0],
+        raw_store=store,
+        raw_dir=reference.parent,
+    )
+    manifest_result = read_native_c2_source_records(
+        bound.manifest_path,
+        raw_store=store,
+        raw_dir=reference.parent,
+    )
+    expected = ["日本語🙂の質問", "回答の根拠"]
+    assert [row["text"] for row in child_result["source_records"]] == expected
+    assert [row["text"] for row in manifest_result["source_records"]] == expected
+    assert len(child_result["bindings"]) == 2
+    assert all(
+        binding["byte_coordinate_space"] == "logical_raw"
+        for binding in child_result["bindings"]
+    )
+    for binding in child_result["bindings"]:
+        start, end = binding["byte_range"]
+        assert raw_bytes[start:end]
+        assert binding["source_text_sha256"] == binding["native_text_sha256"]
+
+    with pytest.raises(RawSemanticProjectionError, match="bindings"):
+        read_native_c2_source_records(
+            default.child_paths[0],
+            raw_store=store,
+            raw_dir=reference.parent,
+        )
+
+
+def test_native_source_bindings_keep_child_utf8_slices_and_reject_missing_raw(
+    tmp_path: Path,
+) -> None:
+    text = "あ🙂é" * 900
+    reference, raw_bytes, store = _native_raw(
+        tmp_path,
+        [{"message": {"role": "user", "content": text}}],
+    )
+    unit = store.resolve_reference(reference)
+    assert unit is not None and unit.commit is not None
+    projected = project_native_transcript(
+        reference,
+        raw_bytes,
+        unit.commit,
+        output_dir=tmp_path / "bound",
+        max_child_bytes=1_350,
+        include_source_bindings=True,
+    )
+    assert projected.child_count > 1
+    slices: list[str] = []
+    for child in projected.child_paths:
+        result = read_native_c2_source_records(
+            child,
+            raw_store=store,
+            raw_dir=reference.parent,
+        )
+        slices.extend(row["text"] for row in result["source_records"])
+        for row, binding in zip(
+            result["source_records"], result["bindings"], strict=True
+        ):
+            assert binding["source_character_end"] > binding["source_character_start"]
+            assert binding["source_text_sha256"] == hashlib.sha256(
+                row["text"].encode("utf-8")
+            ).hexdigest()
+            assert binding["native_text_sha256"] == hashlib.sha256(
+                text.encode("utf-8")
+            ).hexdigest()
+    assert "".join(slices) == text
+
+    reference.unlink()
+    with pytest.raises(RawSemanticProjectionError, match="reference is unavailable"):
+        read_native_c2_source_records(
+            projected.child_paths[0],
+            raw_store=store,
+            raw_dir=reference.parent,
+        )
+
+
+def test_native_source_bindings_reject_tampered_manifest_and_raw_revision(
+    tmp_path: Path,
+) -> None:
+    reference, raw_bytes, store = _native_raw(
+        tmp_path,
+        [{"message": {"role": "user", "content": "bound source"}}],
+    )
+    unit = store.resolve_reference(reference)
+    assert unit is not None and unit.commit is not None
+    projected = project_native_transcript(
+        reference,
+        raw_bytes,
+        unit.commit,
+        output_dir=tmp_path / "bound",
+        max_child_bytes=2_000,
+        include_source_bindings=True,
+    )
+    assert projected.manifest_path is not None
+
+    manifest = json.loads(projected.manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["c2_record_bindings"]["records"][0]["byte_range"][0] = 1
+    _write_canonical_json(projected.manifest_path, manifest)
+    with pytest.raises(RawSemanticProjectionError):
+        read_native_c2_source_records(
+            projected.child_paths[0],
+            raw_store=store,
+            raw_dir=reference.parent,
+        )
+
+    class _TamperedRawStore:
+        raw_dir = store.raw_dir
+
+        def resolve_reference(self, path: Path) -> object | None:
+            return store.resolve_reference(path)
+
+        def read_bytes(self, _value: object) -> bytes:
+            return b"{}\n"
+
+    # Rebuild an intact bound projection before checking the source digest.
+    projected = project_native_transcript(
+        reference,
+        raw_bytes,
+        unit.commit,
+        output_dir=tmp_path / "bound-intact",
+        max_child_bytes=2_000,
+        include_source_bindings=True,
+    )
+    with pytest.raises(RawSemanticProjectionError, match="bytes disagree"):
+        read_native_c2_source_records(
+            projected.child_paths[0],
+            raw_store=_TamperedRawStore(),
+            raw_dir=reference.parent,
+        )
 
 
 def test_malformed_delegated_children_are_invalid_not_incomplete(

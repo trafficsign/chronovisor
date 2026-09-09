@@ -22,10 +22,13 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from chronovisor.core.canonical_json import (
     canonical_json_line_bytes_strict as _canonical_bytes,
+)
+from chronovisor.core.canonical_json import (
+    canonical_json_sha256_strict as _canonical_sha256,
 )
 from chronovisor.core.durable_state import fsync_directory as _fsync_directory
 from chronovisor.core.hashutil import sha256_bytes as _sha256
@@ -36,11 +39,16 @@ from chronovisor.core.save_transaction import (
 )
 from chronovisor.core.sealed_artifact_decoder import schema_matches
 
+if TYPE_CHECKING:
+    from chronovisor.core.raw_store import RawStore
+
 PROJECTION_POLICY_VERSION = 2
 PROJECTION_MANIFEST_SCHEMA = "chronovisor.raw-semantic-projection-manifest.v1"
 PROJECTION_CHILD_SCHEMA = "chronovisor.raw-semantic-projection-child.v1"
 PROJECTION_NOOP_SCHEMA = "chronovisor.raw-semantic-projection-noop.v1"
 PROJECTION_BUNDLE_RECEIPT_SCHEMA = "chronovisor.raw-semantic-projection-bundle-receipt.v1"
+C2_RECORD_BINDINGS_SCHEMA = "chronovisor.raw-semantic-c2-record-bindings.v1"
+C2_RECORD_BINDINGS_VERSION = 1
 
 _INDEX_WIDTH = 8
 _MAX_INDEX = (10**_INDEX_WIDTH) - 1
@@ -61,6 +69,7 @@ _CHILD_FILENAME_RE = re.compile(
     r"^semantic-(?P<projection>[0-9a-f]{64})-child-"
     r"(?P<index>[0-9]{8})-(?P<child>[0-9a-f]{64})\.md$"
 )
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class RawSemanticProjectionError(ValueError):
@@ -204,6 +213,132 @@ def _source_parent_payload(parent: _VerifiedParent) -> dict[str, Any]:
     }
 
 
+def _valid_sha256(value: object) -> bool:
+    return isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None
+
+
+def _normalize_c2_record_bindings(value: object) -> dict[str, Any]:
+    """Validate the optional native source-record binding envelope.
+
+    The bindings are deliberately kept in the existing projection manifest so
+    the manifest's content-addressed receipt covers them.  This validator only
+    checks the sealed shape; the read API below rereads the named Raw and
+    recomputes every range and digest before exposing a record to C2.
+    """
+
+    if not isinstance(value, dict):
+        raise RawSemanticProjectionError("C2 record bindings are malformed")
+    if (
+        value.get("schema") != C2_RECORD_BINDINGS_SCHEMA
+        or value.get("version") != C2_RECORD_BINDINGS_VERSION
+        or value.get("byte_coordinate_space") != "logical_raw"
+    ):
+        raise RawSemanticProjectionError("C2 record bindings schema is invalid")
+    records = value.get("records")
+    if not isinstance(records, list):
+        raise RawSemanticProjectionError("C2 record bindings records are malformed")
+    if not records:
+        raise RawSemanticProjectionError("C2 record bindings records are empty")
+
+    normalized: list[dict[str, Any]] = []
+    seen_indices: set[int] = set()
+    seen_ids: set[str] = set()
+    common_raw_id: str | None = None
+    common_raw_sha256: str | None = None
+    common_receipt_sha256: str | None = None
+    previous_index = -1
+    for index, row in enumerate(records):
+        if not isinstance(row, dict):
+            raise RawSemanticProjectionError(
+                f"C2 record binding {index} is malformed"
+            )
+        record_id = row.get("record_id")
+        source_index = row.get("source_record_index")
+        raw_id = row.get("raw_id")
+        raw_sha256 = row.get("raw_sha256")
+        receipt_sha256 = row.get("receipt_sha256")
+        source_record_sha256 = row.get("source_record_sha256")
+        source_text_sha256 = row.get("source_text_sha256")
+        range_sha256 = row.get("range_sha256")
+        byte_range = row.get("byte_range")
+        source_line = row.get("source_line")
+        byte_coordinate_space = row.get("byte_coordinate_space")
+        if (
+            not isinstance(record_id, str)
+            or not record_id
+            or record_id != record_id.strip()
+            or len(record_id) > 200
+            or any(ord(char) < 0x20 or char == "\x7f" for char in record_id)
+            or isinstance(source_index, bool)
+            or not isinstance(source_index, int)
+            or source_index < 0
+            or source_index in seen_indices
+            or source_index <= previous_index
+            or not isinstance(raw_id, str)
+            or not raw_id
+            or len(raw_id) > 240
+            or Path(raw_id).name != raw_id
+            or any(char in raw_id for char in ("/", "\\", "\x00"))
+            or not _valid_sha256(raw_sha256)
+            or not _valid_sha256(receipt_sha256)
+            or not _valid_sha256(source_record_sha256)
+            or not _valid_sha256(source_text_sha256)
+            or not _valid_sha256(range_sha256)
+            or not isinstance(byte_range, list)
+            or len(byte_range) != 2
+            or isinstance(byte_range[0], bool)
+            or isinstance(byte_range[1], bool)
+            or not isinstance(byte_range[0], int)
+            or not isinstance(byte_range[1], int)
+            or byte_range[0] < 0
+            or byte_range[1] <= byte_range[0]
+            or isinstance(source_line, bool)
+            or not isinstance(source_line, int)
+            or source_line < 1
+            or byte_coordinate_space != "logical_raw"
+            or record_id in seen_ids
+        ):
+            raise RawSemanticProjectionError(
+                f"C2 record binding {index} has invalid identity or range"
+            )
+        if common_raw_id is None:
+            common_raw_id = raw_id
+            common_raw_sha256 = raw_sha256
+            common_receipt_sha256 = receipt_sha256
+        elif (
+            raw_id != common_raw_id
+            or raw_sha256 != common_raw_sha256
+            or receipt_sha256 != common_receipt_sha256
+        ):
+            raise RawSemanticProjectionError(
+                "C2 record bindings disagree about native Raw identity"
+            )
+        normalized.append(
+            {
+                "record_id": record_id,
+                "source_record_index": source_index,
+                "raw_id": raw_id,
+                "raw_sha256": raw_sha256,
+                "receipt_sha256": receipt_sha256,
+                "source_record_sha256": source_record_sha256,
+                "source_text_sha256": source_text_sha256,
+                "range_sha256": range_sha256,
+                "byte_range": [byte_range[0], byte_range[1]],
+                "byte_coordinate_space": "logical_raw",
+                "source_line": source_line,
+            }
+        )
+        seen_indices.add(source_index)
+        seen_ids.add(record_id)
+        previous_index = source_index
+    return {
+        "schema": C2_RECORD_BINDINGS_SCHEMA,
+        "version": C2_RECORD_BINDINGS_VERSION,
+        "byte_coordinate_space": "logical_raw",
+        "records": normalized,
+    }
+
+
 def _source_identity(source: Mapping[str, Any]) -> dict[str, Any]:
     parents = source.get("parents")
     if not isinstance(parents, list):
@@ -248,13 +383,18 @@ def _source_identity(source: Mapping[str, Any]) -> dict[str, Any]:
         raise RawSemanticProjectionError(
             "projection source record audit metadata is malformed"
         )
-    return {
+    identity: dict[str, Any] = {
         "kind": kind,
         "record_payload_sha256": payload_sha256,
         "parents": identity_parents,
         "record_count": record_count,
         "role_counts": dict(sorted(role_counts.items())),
     }
+    if "c2_record_bindings" in source:
+        identity["c2_record_bindings"] = _normalize_c2_record_bindings(
+            source.get("c2_record_bindings")
+        )
+    return identity
 
 
 def _source_sha256(source: Mapping[str, Any]) -> str:
@@ -350,6 +490,203 @@ def _parse_records(payload_bytes: bytes) -> tuple[_TranscriptRecord, ...]:
     return tuple(records)
 
 
+def _native_event_semantics(
+    event: dict[str, Any],
+    *,
+    host: str,
+    source_line: int,
+    line_index: int,
+) -> tuple[str, str, str | None, str | None, dict[str, Any]]:
+    """Decode one native event into the shared semantic record shape."""
+
+    timestamp_value = event.get("timestamp")
+    timestamp = timestamp_value if isinstance(timestamp_value, str) else None
+    phase: str | None = None
+    event_type: str | None = None
+    if host == "codex":
+        from chronovisor.core.codex_transcript import codex_semantic_view
+
+        item_type = event.get("type")
+        payload = event.get("payload")
+        role, text = codex_semantic_view(item_type, payload)
+        payload_type = payload.get("type") if isinstance(payload, dict) else None
+        event_type = (
+            payload_type
+            if isinstance(payload_type, str)
+            else item_type
+            if isinstance(item_type, str)
+            else None
+        )
+        phase_value = payload.get("phase") if isinstance(payload, dict) else None
+        phase = phase_value if isinstance(phase_value, str) else None
+        semantic_row: dict[str, Any] = {
+            "line": source_line,
+            "role": role,
+            "text": text,
+            "timestamp": timestamp,
+            "phase": phase,
+        }
+    elif host == "claude-code":
+        from chronovisor.core.claude_code_transcript import claude_semantic_view
+
+        item_type = event.get("type")
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        role, text = claude_semantic_view(item_type, content)
+        event_type = item_type if isinstance(item_type, str) else None
+        semantic_row = {
+            "line": source_line,
+            "role": role,
+            "text": text,
+            "timestamp": timestamp,
+        }
+    elif host == "pi":
+        from chronovisor.core.pi_transcript import (
+            claude_semantic_view,
+            pi_message_view,
+        )
+
+        item_type, content = pi_message_view(event)
+        role, text = claude_semantic_view(item_type, content)
+        event_type = item_type
+        semantic_row = {
+            "line": source_line,
+            "role": role,
+            "text": text,
+            "timestamp": timestamp,
+        }
+    elif host == "hermes":
+        message = event.get("message")
+        if not isinstance(message, dict):
+            raise RawSemanticProjectionError(
+                f"native Hermes transcript line {line_index + 1} has no message object"
+            )
+        role_value = message.get("role")
+        role = role_value if isinstance(role_value, str) and role_value else "unknown"
+        content = message.get("content")
+        text = (
+            content
+            if isinstance(content, str)
+            else ""
+            if content is None
+            else json.dumps(content, ensure_ascii=False, sort_keys=True)
+        )
+        event_type = "message"
+        semantic_row = {
+            "line": source_line,
+            "role": role,
+            "text": text,
+            "timestamp": timestamp,
+        }
+    else:
+        raise UnsupportedNativeTranscriptHostError(
+            f"unsupported native transcript host: {host}"
+        )
+    if event_type is not None:
+        semantic_row["event_type"] = event_type
+    semantic_row["event"] = event
+    return (
+        role,
+        text,
+        timestamp,
+        phase,
+        semantic_row,
+    )
+
+
+def _decode_native_records(
+    raw_bytes: bytes,
+    commit: RawSegmentCommit,
+) -> tuple[tuple[_TranscriptRecord, ...], tuple[tuple[int, bytes], ...]]:
+    """Decode native records and retain the exact committed event spans."""
+
+    from chronovisor.core.raw_store import committed_event_spans
+
+    try:
+        event_spans = committed_event_spans(raw_bytes, commit.record_count)
+    except Exception as exc:
+        # Keep the projection boundary's error type stable while preserving the
+        # raw-store validator as the sole byte-coordinate parser.
+        raise RawSemanticProjectionError(str(exc)) from exc
+    records: list[_TranscriptRecord] = []
+    for index, (_start, encoded_line) in enumerate(event_spans):
+        try:
+            event = json.loads(encoded_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RawSemanticProjectionError(
+                f"native transcript line {index + 1} is invalid JSON"
+            ) from exc
+        if not isinstance(event, dict):
+            raise RawSemanticProjectionError(
+                f"native transcript line {index + 1} is not an object"
+            )
+        source_line = commit.after_line + index + 1
+        role, text, timestamp, phase, semantic_row = (
+            _native_event_semantics(
+                event,
+                host=commit.host,
+                source_line=source_line,
+                line_index=index,
+            )
+        )
+        records.append(
+            _TranscriptRecord(
+                index=index,
+                role=role,
+                text=text,
+                line=source_line,
+                timestamp=timestamp,
+                phase=phase,
+                row_sha256=_sha256(_canonical_bytes(semantic_row)),
+            )
+        )
+    if len(records) != commit.record_count:
+        raise RawSemanticProjectionError(
+            "native transcript record count disagrees with commit"
+        )
+    return tuple(records), event_spans
+
+
+def _native_c2_record_bindings(
+    records: Sequence[_TranscriptRecord],
+    event_spans: Sequence[tuple[int, bytes]],
+    commit: RawSegmentCommit,
+) -> dict[str, Any]:
+    """Build the opt-in, manifest-bound native C2 source map."""
+
+    if len(records) != len(event_spans) or len(records) != commit.record_count:
+        raise RawSemanticProjectionError("native source map record count mismatch")
+    receipt_sha256 = _canonical_sha256(commit.to_dict())
+    bindings: list[dict[str, Any]] = []
+    for record, (start, encoded_event) in zip(records, event_spans, strict=True):
+        record_id = f"{commit.raw_id}#{record.index}"
+        if len(record_id) > 200:
+            raise RawSemanticProjectionError(
+                "native C2 record ID exceeds the triage limit"
+            )
+        bindings.append(
+            {
+                "record_id": record_id,
+                "source_record_index": record.index,
+                "raw_id": commit.raw_id,
+                "raw_sha256": commit.sha256,
+                "receipt_sha256": receipt_sha256,
+                "source_record_sha256": record.row_sha256,
+                "source_text_sha256": _sha256(record.text.encode("utf-8")),
+                "range_sha256": _sha256(encoded_event),
+                "byte_range": [start, start + len(encoded_event)],
+                "byte_coordinate_space": "logical_raw",
+                "source_line": commit.after_line + record.index + 1,
+            }
+        )
+    return {
+        "schema": C2_RECORD_BINDINGS_SCHEMA,
+        "version": C2_RECORD_BINDINGS_VERSION,
+        "byte_coordinate_space": "logical_raw",
+        "records": bindings,
+    }
+
+
 def _extract_transcript_payload(text: str) -> tuple[bytes, str] | None:
     matches = list(_TRANSCRIPT_BLOCK_RE.finditer(text))
     if not matches:
@@ -374,7 +711,11 @@ def _extract_transcript_payload(text: str) -> tuple[bytes, str] | None:
     return match.group("payload").encode("utf-8"), host
 
 
-def _selected_record_payload(record: _TranscriptRecord) -> dict[str, Any]:
+def _selected_record_payload(
+    record: _TranscriptRecord,
+    *,
+    include_source_bindings: bool = False,
+) -> dict[str, Any]:
     text_bytes = record.text.encode("utf-8")
     payload: dict[str, Any] = {
         "source_record_index": record.index,
@@ -384,6 +725,8 @@ def _selected_record_payload(record: _TranscriptRecord) -> dict[str, Any]:
         "text_bytes": len(text_bytes),
         "text_sha256": _sha256(text_bytes),
     }
+    if include_source_bindings:
+        payload["source_text_sha256"] = _sha256(text_bytes)
     if record.line is not None:
         payload["source_line"] = record.line
     if record.timestamp is not None:
@@ -403,6 +746,8 @@ def _segment_payload(
     *,
     segment_index: int,
     segment_count: int,
+    source_character_start: int | None = None,
+    source_character_end: int | None = None,
 ) -> dict[str, Any]:
     segment_bytes = text.encode("utf-8")
     payload = dict(selected)
@@ -411,6 +756,16 @@ def _segment_payload(
     payload["segment_count"] = _fixed_index(segment_count)
     payload["segment_bytes"] = len(segment_bytes)
     payload["segment_sha256"] = _sha256(segment_bytes)
+    if source_character_start is not None or source_character_end is not None:
+        if (
+            source_character_start is None
+            or source_character_end is None
+            or source_character_start < 0
+            or source_character_end < source_character_start
+        ):
+            raise RawSemanticProjectionError("source character span is invalid")
+        payload["source_character_start"] = source_character_start
+        payload["source_character_end"] = source_character_end
     return payload
 
 
@@ -469,8 +824,16 @@ def _fits_single_unit(
     projection_id: str,
     source_sha256: str,
     max_child_bytes: int,
+    include_source_offsets: bool = False,
 ) -> bool:
-    unit = _segment_payload(selected, text, segment_index=1, segment_count=1)
+    unit = _segment_payload(
+        selected,
+        text,
+        segment_index=1,
+        segment_count=1,
+        source_character_start=0 if include_source_offsets else None,
+        source_character_end=len(text) if include_source_offsets else None,
+    )
     rendered, _ = _render_child(
         projection_id=projection_id,
         source_sha256=source_sha256,
@@ -487,6 +850,7 @@ def _split_selected_record(
     projection_id: str,
     source_sha256: str,
     max_child_bytes: int,
+    include_source_offsets: bool = False,
 ) -> list[dict[str, Any]]:
     text = str(selected["text"])
     if _fits_single_unit(
@@ -495,10 +859,20 @@ def _split_selected_record(
         projection_id=projection_id,
         source_sha256=source_sha256,
         max_child_bytes=max_child_bytes,
+        include_source_offsets=include_source_offsets,
     ):
-        return [_segment_payload(selected, text, segment_index=1, segment_count=1)]
+        return [
+            _segment_payload(
+                selected,
+                text,
+                segment_index=1,
+                segment_count=1,
+                source_character_start=0 if include_source_offsets else None,
+                source_character_end=len(text) if include_source_offsets else None,
+            )
+        ]
 
-    pieces: list[str] = []
+    pieces: list[tuple[int, int, str]] = []
     offset = 0
     while offset < len(text):
         low = 1
@@ -512,6 +886,10 @@ def _split_selected_record(
                 candidate,
                 segment_index=_MAX_INDEX,
                 segment_count=_MAX_INDEX,
+                source_character_start=offset if include_source_offsets else None,
+                source_character_end=offset + middle
+                if include_source_offsets
+                else None,
             )
             rendered, _ = _render_child(
                 projection_id=projection_id,
@@ -530,7 +908,7 @@ def _split_selected_record(
                 "max_child_bytes cannot fit one UTF-8 code point plus the "
                 "lossless projection envelope"
             )
-        pieces.append(text[offset : offset + accepted])
+        pieces.append((offset, offset + accepted, text[offset : offset + accepted]))
         offset += accepted
         if len(pieces) > _MAX_INDEX:
             raise ProjectionCapacityError("one record requires too many UTF-8 segments")
@@ -542,8 +920,10 @@ def _split_selected_record(
             piece,
             segment_index=index,
             segment_count=count,
+            source_character_start=start if include_source_offsets else None,
+            source_character_end=end if include_source_offsets else None,
         )
-        for index, piece in enumerate(pieces, start=1)
+        for index, (start, end, piece) in enumerate(pieces, start=1)
     ]
     reconstructed = "".join(str(segment["text"]) for segment in segments)
     if reconstructed.encode("utf-8") != text.encode("utf-8"):
@@ -557,6 +937,7 @@ def _pack_children(
     projection_id: str,
     source_sha256: str,
     max_child_bytes: int,
+    include_source_offsets: bool = False,
 ) -> list[list[dict[str, Any]]]:
     if isinstance(max_child_bytes, bool) or not isinstance(max_child_bytes, int):
         raise TypeError("max_child_bytes must be an integer")
@@ -571,6 +952,7 @@ def _pack_children(
                 projection_id=projection_id,
                 source_sha256=source_sha256,
                 max_child_bytes=max_child_bytes,
+                include_source_offsets=include_source_offsets,
             )
         )
 
@@ -756,6 +1138,7 @@ def _build_projection(
     records: Sequence[_TranscriptRecord],
     output_dir: Path,
     max_child_bytes: int,
+    include_source_bindings: bool = False,
 ) -> ProjectionArtifacts:
     source_sha256 = _source_sha256(source)
     if (
@@ -774,7 +1157,10 @@ def _build_projection(
             "projection source audit metadata does not match parsed records"
         )
     selected = [
-        _selected_record_payload(record)
+        _selected_record_payload(
+            record,
+            include_source_bindings=include_source_bindings,
+        )
         for record in records
         if record.role in {"user", "assistant"} and record.text.strip()
     ]
@@ -824,6 +1210,7 @@ def _build_projection(
             projection_id=projection_id,
             source_sha256=source_sha256,
             max_child_bytes=max_child_bytes,
+            include_source_offsets=include_source_bindings,
         )
         child_count = len(child_records)
         child_count_label = _fixed_index(child_count)
@@ -953,6 +1340,7 @@ def _build_projection(
                 records=records,
                 output_dir=output_dir,
                 max_child_bytes=max_child_bytes,
+                include_source_bindings=include_source_bindings,
             )
         raise
     for child_path, child_bytes in planned_child_bytes:
@@ -1080,8 +1468,14 @@ def project_native_transcript(
     *,
     output_dir: Path,
     max_child_bytes: int,
+    include_source_bindings: bool = False,
 ) -> ProjectionArtifacts:
-    """Project source-native JSONL bytes referenced by one v2 commit."""
+    """Project source-native JSONL bytes referenced by one v2 commit.
+
+    ``include_source_bindings`` is an explicit opt-in for the C2 source map.
+    The default keeps the historical projection identity and artifact bytes
+    unchanged.
+    """
 
     if raw_path.name != commit.raw_id:
         raise RawSemanticProjectionError("native Raw reference ID mismatch")
@@ -1089,121 +1483,7 @@ def project_native_transcript(
         raise RawSemanticProjectionError("native Raw bytes disagree with commit")
     if not raw_bytes.endswith(b"\n"):
         raise RawSemanticProjectionError("native transcript is not line complete")
-
-    records: list[_TranscriptRecord] = []
-    for index, encoded_line in enumerate(raw_bytes.splitlines(), start=0):
-        try:
-            event = json.loads(encoded_line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise RawSemanticProjectionError(
-                f"native transcript line {index + 1} is invalid JSON"
-            ) from exc
-        if not isinstance(event, dict):
-            raise RawSemanticProjectionError(
-                f"native transcript line {index + 1} is not an object"
-            )
-        source_line = commit.after_line + index + 1
-        timestamp = event.get("timestamp")
-        timestamp = timestamp if isinstance(timestamp, str) else None
-        phase: str | None = None
-        event_type: str | None = None
-        if commit.host == "codex":
-            from chronovisor.core.codex_transcript import codex_semantic_view
-
-            item_type = event.get("type")
-            payload = event.get("payload")
-            role, text = codex_semantic_view(item_type, payload)
-            payload_type = payload.get("type") if isinstance(payload, dict) else None
-            event_type = (
-                payload_type
-                if isinstance(payload_type, str)
-                else item_type
-                if isinstance(item_type, str)
-                else None
-            )
-            phase_value = payload.get("phase") if isinstance(payload, dict) else None
-            phase = phase_value if isinstance(phase_value, str) else None
-            semantic_row: dict[str, Any] = {
-                "line": source_line,
-                "role": role,
-                "text": text,
-                "timestamp": timestamp,
-                "phase": phase,
-            }
-        elif commit.host == "claude-code":
-            from chronovisor.core.claude_code_transcript import claude_semantic_view
-
-            item_type = event.get("type")
-            message = event.get("message")
-            content = message.get("content") if isinstance(message, dict) else None
-            role, text = claude_semantic_view(item_type, content)
-            event_type = item_type if isinstance(item_type, str) else None
-            semantic_row = {
-                "line": source_line,
-                "role": role,
-                "text": text,
-                "timestamp": timestamp,
-            }
-        elif commit.host == "pi":
-            from chronovisor.core.pi_transcript import (
-                claude_semantic_view,
-                pi_message_view,
-            )
-
-            item_type, content = pi_message_view(event)
-            role, text = claude_semantic_view(item_type, content)
-            event_type = item_type
-            semantic_row = {
-                "line": source_line,
-                "role": role,
-                "text": text,
-                "timestamp": timestamp,
-            }
-        elif commit.host == "hermes":
-            message = event.get("message")
-            if not isinstance(message, dict):
-                raise RawSemanticProjectionError(
-                    f"native Hermes transcript line {index + 1} has no message object"
-                )
-            role_value = message.get("role")
-            role = role_value if isinstance(role_value, str) and role_value else "unknown"
-            content = message.get("content")
-            text = (
-                content
-                if isinstance(content, str)
-                else ""
-                if content is None
-                else json.dumps(content, ensure_ascii=False, sort_keys=True)
-            )
-            event_type = "message"
-            semantic_row = {
-                "line": source_line,
-                "role": role,
-                "text": text,
-                "timestamp": timestamp,
-            }
-        else:
-            raise UnsupportedNativeTranscriptHostError(
-                f"unsupported native transcript host: {commit.host}"
-            )
-        if event_type is not None:
-            semantic_row["event_type"] = event_type
-        semantic_row["event"] = event
-        records.append(
-            _TranscriptRecord(
-                index=index,
-                role=role,
-                text=text,
-                line=source_line,
-                timestamp=timestamp,
-                phase=phase,
-                row_sha256=_sha256(_canonical_bytes(semantic_row)),
-            )
-        )
-    if len(records) != commit.record_count:
-        raise RawSemanticProjectionError(
-            "native transcript record count disagrees with commit"
-        )
+    records, event_spans = _decode_native_records(raw_bytes, commit)
     role_counts = dict(sorted(Counter(record.role for record in records).items()))
     receipt = {
         "host": commit.host,
@@ -1227,12 +1507,19 @@ def project_native_transcript(
             }
         ],
     }
+    if include_source_bindings:
+        source["c2_record_bindings"] = _native_c2_record_bindings(
+            records,
+            event_spans,
+            commit,
+        )
     return _build_projection(
         parent_paths=(raw_path,),
         source=source,
         records=records,
         output_dir=output_dir,
         max_child_bytes=max_child_bytes,
+        include_source_bindings=include_source_bindings,
     )
 
 
@@ -1759,6 +2046,311 @@ def verify_projection_bundle(manifest_path: Path) -> dict[str, Any]:
     return manifest
 
 
+def _projection_c2_units(
+    manifest_path: Path,
+    manifest: Mapping[str, Any],
+    *,
+    child_path: Path | None,
+) -> list[dict[str, Any]]:
+    """Load verified child segments for the C2 read API."""
+
+    projection_id = manifest.get("projection_id")
+    source_sha256 = manifest.get("source_sha256")
+    children = manifest.get("children")
+    if (
+        not isinstance(projection_id, str)
+        or not isinstance(source_sha256, str)
+        or not isinstance(children, list)
+    ):
+        raise RawSemanticProjectionError("projection C2 child identity is malformed")
+    target_name = child_path.name if child_path is not None else None
+    selected: list[dict[str, Any]] = []
+    target_found = False
+    child_count_label = _fixed_index(len(children))
+    for child_index, row in enumerate(children, start=1):
+        if not isinstance(row, dict):
+            raise RawSemanticProjectionError("projection C2 child row is malformed")
+        filename = row.get("filename")
+        index_label = _fixed_index(child_index)
+        if (
+            not isinstance(filename, str)
+            or Path(filename).name != filename
+            or row.get("child_index") != index_label
+            or row.get("child_count") != child_count_label
+        ):
+            raise RawSemanticProjectionError("projection C2 child order is malformed")
+        if target_name is not None and filename != target_name:
+            continue
+        target_found = True
+        child_file = manifest_path.parent / filename
+        child_payload, child_bytes = _load_canonical_json(child_file)
+        if (
+            row.get("file_sha256") != _sha256(child_bytes)
+            or row.get("file_bytes") != len(child_bytes)
+            or row.get("child_id") != child_payload.get("child_id")
+            or row.get("child_sha256") != child_payload.get("records_sha256")
+        ):
+            raise RawSemanticProjectionError("projection C2 child read-back mismatch")
+        selected.extend(
+            _validate_child_payload(
+                child_payload,
+                projection_id=projection_id,
+                source_sha256=source_sha256,
+                index=index_label,
+                count=child_count_label,
+            )
+        )
+    if child_path is not None and not target_found:
+        raise RawSemanticProjectionError("projection C2 child is not in its manifest")
+    if child_path is None and not selected:
+        raise RawSemanticProjectionError("projection C2 manifest has no child records")
+    return selected
+
+
+def _resolve_named_native_reference(
+    raw_id: str,
+    *,
+    raw_store: RawStore | Any | None,
+    raw_dir: Path | None,
+) -> tuple[Any, Any]:
+    """Resolve one explicit logical Raw reference without inventory scanning."""
+
+    store = raw_store
+    if store is None:
+        if raw_dir is None:
+            raise RawSemanticProjectionError(
+                "native C2 source resolution requires RawStore or raw_dir"
+            )
+        from chronovisor.core.raw_store import RawStore
+
+        store = RawStore(raw_dir, mode="v2")
+
+    candidate_dirs: list[Path] = []
+    if raw_dir is not None:
+        candidate_dirs.append(raw_dir.expanduser())
+        candidate_dirs.append(
+            raw_dir.expanduser().parent
+            / "runtime"
+            / "raw-projections"
+            / "parents"
+        )
+    store_root = getattr(store, "raw_dir", None)
+    if isinstance(store_root, (str, Path)):
+        root = Path(store_root).expanduser()
+        candidate_dirs.extend(
+            [
+                root,
+                root.parent / "runtime" / "raw-projections" / "parents",
+            ]
+        )
+    seen: set[Path] = set()
+    for directory in candidate_dirs:
+        directory = directory.resolve(strict=False)
+        if directory in seen:
+            continue
+        seen.add(directory)
+        reference = directory / raw_id
+        if not reference.is_file() or reference.is_symlink():
+            continue
+        resolver = getattr(store, "resolve_reference", None)
+        if not callable(resolver):
+            raise RawSemanticProjectionError(
+                "native C2 source store lacks resolve_reference"
+            )
+        unit = resolver(reference)
+        if unit is not None:
+            return store, unit
+    raise RawSemanticProjectionError(
+        f"native C2 source reference is unavailable: {raw_id}"
+    )
+
+
+def read_native_c2_source_records(
+    artifact_path: Path,
+    *,
+    raw_store: RawStore | Any | None = None,
+    raw_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Read C2 source records from one child or its projection manifest.
+
+    The caller must provide an explicit :class:`RawStore` or v2 Raw root.  A
+    materialized logical-reference file is resolved by name; this function
+    never falls back to ``RawStore.resolve``/an inventory scan.  Child input
+    returns only that child's UTF-8 segments.  A manifest input returns all
+    selected segments.  Raw event ranges remain ``logical_raw`` coordinates,
+    while ``source_character_start/end`` describe the decoded child slice.
+    """
+
+    artifact_path = artifact_path.expanduser()
+    child_match = _CHILD_FILENAME_RE.fullmatch(artifact_path.name)
+    child_path = artifact_path if child_match is not None else None
+    if child_path is not None:
+        child_payload, _child_bytes = _load_canonical_json(child_path)
+        projection_id = child_payload.get("projection_id")
+        if not isinstance(projection_id, str):
+            raise RawSemanticProjectionError("projection C2 child ID is missing")
+        manifest_path = child_path.parent / f"semantic-{projection_id}.manifest.json"
+    elif artifact_path.name.endswith(".manifest.json"):
+        manifest_path = artifact_path
+    else:
+        raise RawSemanticProjectionError(
+            "native C2 source path must be a projection child or manifest"
+        )
+
+    manifest = verify_projection_bundle(manifest_path)
+    source = manifest.get("source")
+    if not isinstance(source, dict) or source.get("kind") != "transcript_delta":
+        raise RawSemanticProjectionError(
+            "native C2 source bindings require a transcript_delta manifest"
+        )
+    parents = source.get("parents")
+    if (
+        not isinstance(parents, list)
+        or len(parents) != 1
+        or not isinstance(parents[0], dict)
+    ):
+        raise RawSemanticProjectionError(
+            "native C2 source parent identity is malformed"
+        )
+    bindings = _normalize_c2_record_bindings(source.get("c2_record_bindings"))
+    binding_rows = bindings["records"]
+    units = _projection_c2_units(
+        manifest_path,
+        manifest,
+        child_path=child_path,
+    )
+    binding_by_index = {
+        int(row["source_record_index"]): row for row in binding_rows
+    }
+    raw_ids = {str(row["raw_id"]) for row in binding_rows}
+    if len(raw_ids) != 1:
+        raise RawSemanticProjectionError("native C2 source Raw identity is ambiguous")
+    raw_id = next(iter(raw_ids))
+    store, unit = _resolve_named_native_reference(
+        raw_id,
+        raw_store=raw_store,
+        raw_dir=raw_dir,
+    )
+    commit = getattr(unit, "commit", None)
+    unit_raw_id = getattr(unit, "raw_id", None)
+    unit_sha256 = getattr(unit, "sha256", None)
+    if (
+        not isinstance(commit, RawSegmentCommit)
+        or unit_raw_id != raw_id
+        or unit_sha256 != source.get("record_payload_sha256")
+        or unit_sha256 != parents[0].get("raw_sha256")
+    ):
+        raise RawSemanticProjectionError("native C2 source commit identity mismatch")
+    raw_reader = getattr(store, "read_bytes", None)
+    if not callable(raw_reader):
+        raise RawSemanticProjectionError("native C2 source store lacks read_bytes")
+    raw_bytes = raw_reader(unit)
+    if not isinstance(raw_bytes, bytes):
+        raise RawSemanticProjectionError("native C2 source bytes are malformed")
+    if len(raw_bytes) != commit.length or _sha256(raw_bytes) != commit.sha256:
+        raise RawSemanticProjectionError("native C2 source bytes disagree with commit")
+    decoded_records, event_spans = _decode_native_records(raw_bytes, commit)
+    receipt_sha256 = _canonical_sha256(commit.to_dict())
+    if len(binding_rows) != len(decoded_records):
+        raise RawSemanticProjectionError("native C2 source map record count mismatch")
+    for record, (start, encoded_event), binding in zip(
+        decoded_records,
+        event_spans,
+        binding_rows,
+        strict=True,
+    ):
+        expected_range = [start, start + len(encoded_event)]
+        if (
+            binding.get("source_record_index") != record.index
+            or binding.get("raw_id") != commit.raw_id
+            or binding.get("raw_sha256") != commit.sha256
+            or binding.get("receipt_sha256") != receipt_sha256
+            or binding.get("source_record_sha256") != record.row_sha256
+            or binding.get("source_text_sha256")
+            != _sha256(record.text.encode("utf-8"))
+            or binding.get("range_sha256") != _sha256(encoded_event)
+            or binding.get("byte_range") != expected_range
+            or binding.get("source_line") != commit.after_line + record.index + 1
+        ):
+            raise RawSemanticProjectionError(
+                f"native C2 source binding mismatch at record {record.index}"
+            )
+
+    source_records: list[dict[str, str]] = []
+    output_bindings: list[dict[str, Any]] = []
+    seen_output_ids: set[str] = set()
+    for unit_row in units:
+        source_index = unit_row.get("source_record_index")
+        text = unit_row.get("text")
+        segment_index = unit_row.get("segment_index")
+        segment_count = unit_row.get("segment_count")
+        char_start_value = unit_row.get("source_character_start")
+        char_end_value = unit_row.get("source_character_end")
+        if isinstance(source_index, bool) or not isinstance(source_index, int):
+            raise RawSemanticProjectionError("native C2 child source index is malformed")
+        if not isinstance(text, str):
+            raise RawSemanticProjectionError("native C2 child source text is malformed")
+        if (
+            not isinstance(segment_index, str)
+            or not segment_index.isdigit()
+            or not isinstance(segment_count, str)
+            or not segment_count.isdigit()
+        ):
+            raise RawSemanticProjectionError("native C2 child segment identity is malformed")
+        if isinstance(char_start_value, bool) or not isinstance(char_start_value, int):
+            raise RawSemanticProjectionError("native C2 child source start is malformed")
+        if isinstance(char_end_value, bool) or not isinstance(char_end_value, int):
+            raise RawSemanticProjectionError("native C2 child source slice is malformed")
+        source_start = char_start_value
+        source_end = char_end_value
+        binding = binding_by_index.get(source_index)
+        if binding is None or source_index >= len(decoded_records):
+            raise RawSemanticProjectionError("native C2 child source index is invalid")
+        full_text = decoded_records[source_index].text
+        if (
+            source_start < 0
+            or source_end < source_start
+            or source_end > len(full_text)
+            or text != full_text[source_start:source_end]
+            or unit_row.get("segment_bytes") != len(text.encode("utf-8"))
+            or unit_row.get("segment_sha256") != _sha256(text.encode("utf-8"))
+            or unit_row.get("source_text_sha256") != binding["source_text_sha256"]
+            or unit_row.get("source_record_sha256")
+            != binding["source_record_sha256"]
+        ):
+            raise RawSemanticProjectionError(
+                f"native C2 child source slice mismatch at record {source_index}"
+            )
+        base_record_id = str(binding["record_id"])
+        output_id = (
+            base_record_id
+            if int(segment_count) == 1
+            else f"{base_record_id}@{int(segment_index):08d}"
+        )
+        if output_id in seen_output_ids:
+            raise RawSemanticProjectionError("native C2 child record ID is duplicated")
+        seen_output_ids.add(output_id)
+        source_records.append({"record_id": output_id, "text": text})
+        output_binding = dict(binding)
+        output_binding["record_id"] = output_id
+        if output_id != base_record_id:
+            output_binding["source_record_id"] = base_record_id
+        # The sealed map's source_text_sha256 is the whole native event text.
+        # C2 sees the selected child slice, so expose both digests explicitly
+        # instead of making a split segment look like the full source event.
+        output_binding["native_text_sha256"] = binding["source_text_sha256"]
+        output_binding["source_text_sha256"] = _sha256(text.encode("utf-8"))
+        output_binding["source_character_start"] = source_start
+        output_binding["source_character_end"] = source_end
+        output_bindings.append(output_binding)
+    return {
+        "source_records": source_records,
+        "bindings": output_bindings,
+        "projection_id": manifest["projection_id"],
+        "source_sha256": manifest["source_sha256"],
+    }
+
+
 def projection_bundle_state_for_parent(
     raw_path: Path,
     *,
@@ -1911,6 +2503,8 @@ __all__ = [
     "PROJECTION_MANIFEST_SCHEMA",
     "PROJECTION_NOOP_SCHEMA",
     "PROJECTION_POLICY_VERSION",
+    "C2_RECORD_BINDINGS_SCHEMA",
+    "C2_RECORD_BINDINGS_VERSION",
     "ProjectionArtifacts",
     "ProjectionCapacityError",
     "ProjectionChildArtifact",
@@ -1921,6 +2515,7 @@ __all__ = [
     "project_parent_raw",
     "project_reassembled_raws",
     "projection_bundle_state_for_parent",
+    "read_native_c2_source_records",
     "verify_projection_child",
     "verify_projection_bundle",
 ]
