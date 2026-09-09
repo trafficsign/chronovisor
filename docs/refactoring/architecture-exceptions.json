@@ -1,14 +1,14 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "59cc73533d78d9b544f460f438c79233e5f7487e718fce36c6c7abab55f307ea",
+  "baseline_sha256": "d7dd58f15dd72c5c50619cb4cbf279e7eaf6afdd0d1db259e9f200157b6600d8",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 44,
     "by_category": {
       "cross_domain_edge": 44
     },
-    "cross_domain_sites": 1499,
+    "cross_domain_sites": 1500,
     "production_to_lab_edges": 0,
     "production_to_lab_static_sites": 0,
     "production_to_lab_dynamic_sites": 0,
@@ -16124,6 +16124,20 @@
         {
           "semantic_id": "arch:141dce87053bcfc355ae3e9ec8f347e8d6c660dfad661cf66cc27ab1acd870d9",
           "source_module": "chronovisor.recall.merge_transaction",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.ingest.page_registry",
+          "symbols": [
+            "PageRegistry"
+          ],
+          "content_sha256": "ddafcb6e7c3c057428ab2fb5dc997df2a47b45b5bbe9468271fa37424ae35926",
+          "occurrence": 1,
+          "line": 19
+        },
+        {
+          "semantic_id": "arch:1ec40e35c5e7e745ab9c89d8facf260b8119e2703fef508235b2016f78ef43ad",
+          "source_module": "chronovisor.recall.recall_field_candidate",
           "scope_kind": "module",
           "scope": "<module>",
           "statement_kind": "from",
