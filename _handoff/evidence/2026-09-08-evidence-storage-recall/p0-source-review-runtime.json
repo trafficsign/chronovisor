@@ -211,5 +211,80 @@
     "quality_queries_executed": 0,
     "preregistration_sha256": "eb6456fa473b52832e368edbfd0921fd1b30d9f6a8600994e0a1a0e8587f6f21",
     "limitation": "One same-source probe; not a throughput percentile or a controlled causal decomposition. Original review and failed 512-budget probe remain preserved."
+  },
+  "concurrent_probe": {
+    "runtime": {
+      "status": "client_watchdog_timeout",
+      "elapsed_seconds": 120.005,
+      "before": {
+        "extractor_version": 3,
+        "input_sha256": "da246a004d08df1f133b841232291d6f97e633d3f16e2f6cf890c10ec50c11ee",
+        "completed": 154231,
+        "total": 183222,
+        "order": "length-bucketed",
+        "reused_this_run": 0,
+        "encoded_this_run": 81920,
+        "elapsed_seconds": 8106.87
+      },
+      "after": {
+        "extractor_version": 3,
+        "input_sha256": "da246a004d08df1f133b841232291d6f97e633d3f16e2f6cf890c10ec50c11ee",
+        "completed": 155255,
+        "total": 183222,
+        "order": "length-bucketed",
+        "reused_this_run": 0,
+        "encoded_this_run": 82944,
+        "elapsed_seconds": 8231.21
+      },
+      "builder_paused": false,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "preregistration_sha256": "838954c51cbe37fa4ba383beb8a3cd4dac6620c7a22d80726f754642d0749dfd",
+    "official_review_confirmed": false,
+    "original_ledger_after": {
+      "already": 1,
+      "pending": 269,
+      "stale": 0
+    },
+    "adopted": false,
+    "decision": "Keep index-build then review sequence. Different source case and non-streaming activity do not establish the causal bottleneck.",
+    "activity_cleanup": [
+      {
+        "pid": 97553,
+        "sha256": "1773d7de9223428b99ec103fceec1a8dd48dbf389a7027363207c2e6681257f6",
+        "phase": "generate",
+        "think": false,
+        "generation": null
+      }
+    ],
+    "production_process_stopped": false
+  },
+  "case2_isolated_probe": {
+    "runtime": {
+      "status": "completed",
+      "returncode": 0,
+      "elapsed_seconds": 86.711,
+      "log_sha256": "eceb3f5856b5451e3b9ed6fe8ddb25a390191eaf008f809be27a89a19a33c371",
+      "builder_paused_seconds": 96.717,
+      "production_process_stopped": false
+    },
+    "same_case_as_concurrent_probe": true,
+    "accepted": 1,
+    "already": 1,
+    "pending": 268,
+    "stale": 0,
+    "repair_turns": 0,
+    "receipt_sha256": "082c42574dc5a656264199279c9c107fab3e12da08e48c574d1e9a475724b961",
+    "execution_fingerprint": "1ba6b075c89115c252679b014a9d605a521248becd042e6518026bb9c1ecb66c",
+    "generation": {
+      "generation_seconds": 86.148,
+      "max_output_tokens": 512,
+      "output_tokens": 186,
+      "token_count_exact": true,
+      "tokens_per_second": 2.159
+    },
+    "think": false,
+    "preregistration_sha256": "13f5088349b0a5557c1c87642d814114ec99f09848ede9103158aabada5b9b53",
+    "conclusion": "Same pending case completed with the builder paused. Production ingest/research remained active; generation_seconds includes request wall time and does not isolate decode, prefill, or provider queue. Retain sequential execution and do not extrapolate 32 seconds per case."
   }
 }

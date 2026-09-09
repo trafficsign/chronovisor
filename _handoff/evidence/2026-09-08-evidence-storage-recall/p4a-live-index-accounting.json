@@ -1,0 +1,249 @@
+{
+  "active": {
+    "extractor_schema_version": 2,
+    "generation_id": "20260811T043448Z-f94f352690dd-46626a",
+    "location": "local",
+    "manifest_sha256": "b301ecce37b1f9fd4025ad4d11756f7e8c3b1922582a0f440d8a3a4e5beb742c",
+    "model": "nvidia/Nemotron-3-Embed-1B-BF16",
+    "provider": "nemotron",
+    "revision": "a5e0f804b9e90a1ca6784ecbf6e41595774fc834",
+    "role": "search.semantic.foreground",
+    "schema_version": 4
+  },
+  "base": {
+    "distinct_source_sha256": 4239,
+    "documents": 45285,
+    "kind_counts": {
+      "chunk": 30748,
+      "page": 4239,
+      "question": 10298
+    },
+    "pages": 4239
+  },
+  "captured_at": {
+    "atomic_snapshot": false,
+    "end": "2026-09-09T11:58:36.358+00:00",
+    "scan_wall_ms": 1071.598,
+    "source_mutated_during_read": 0,
+    "start": "2026-09-09T11:58:35.286+00:00"
+  },
+  "commands": [
+    "CHRONOVISOR_ROOT=/Users/trafficsign/.chronovisor CHRONOVISOR_READ_ONLY=1 uv run --project . python /Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p4a_live_accounting.py",
+    "scripts/chronovisor-semantic-service status (read-only status path)"
+  ],
+  "conclusion": "No full extractor-2 rebuild is justified by this snapshot. Keep the verified active generation and process the one stale revision plus pending jobs through the existing worker only after the current safe writer/research boundary; revalidate SHA/mtime and status after drain.",
+  "delta": {
+    "deleted_pages": 0,
+    "distinct_source_sha256": 4084,
+    "documents": 53538,
+    "kind_counts": {
+      "chunk": 29913,
+      "page": 4084,
+      "question": 19541
+    },
+    "nondeleted_pages": 4084,
+    "page_state_rows": 4084,
+    "pages_with_documents": 4084
+  },
+  "existing_contracts": {
+    "active_loader": "src/chronovisor/core/semantic_index.py:load_active_generation",
+    "full_validator": "src/chronovisor/core/semantic_index.py:validate_generation",
+    "incremental_worker": "src/chronovisor/search/semantic_service.py:_worker_loop -> _index_page",
+    "rebuild_chain": "src/chronovisor/search/semantic_service.py:_rebuild -> extract_all_documents -> build_generation -> activate_generation",
+    "single_page_api": "src/chronovisor/core/semantic_client.py:index_pages (wait=True invokes embedding; wait=False only queues)",
+    "status_helper": "src/chronovisor/core/semantic_index.py:semantic_index_status"
+  },
+  "graph_coverage": {
+    "cited_paths_status": "no_recorded_issue",
+    "freshness": "metadata_match",
+    "indexed_at": "2026-09-09T11:48:52Z",
+    "signal": "best_effort"
+  },
+  "integrity": {
+    "base_page_source_hash_mixed": 0,
+    "deleted_pages_with_delta_documents": 0,
+    "delta_page_source_hash_mixed": 0,
+    "delta_pages_without_page_state": 0,
+    "delta_state_document_hash_mismatch": 0,
+    "effective_document_id_collision": 0,
+    "state_pages_without_delta_documents": 0
+  },
+  "jobs_and_runtime": {
+    "interpretation": "pending jobs are eligible for the existing worker after research/ingest pause gates clear; query_timeout is not the queue admission condition",
+    "runtime_gates_observed": {
+      "incremental_device": "mlx",
+      "incremental_enabled": true,
+      "incremental_max_batch": 1,
+      "ingest_lock_held_by_other": true,
+      "ingest_runtime_active": true,
+      "pause_during_ingest_generation": true,
+      "pause_during_research": true,
+      "research_active_file": true,
+      "research_model_active": true
+    },
+    "semantic_jobs": {
+      "completed": 5405,
+      "oldest_created_at": "2026-09-09T11:37:32.006+00:00",
+      "pending": 2,
+      "pending_attempts_zero": 2,
+      "pending_errors": 0,
+      "pending_id_hash_prefixes": [
+        "d50680b75f40141a",
+        "b384a760b2570fb8"
+      ],
+      "pending_leases": 0,
+      "stale_pending_created_at": "2026-09-09T11:38:33.172+00:00",
+      "stale_pending_last_update": "2026-09-09T12:02:05.290+00:00",
+      "stale_pending_next_attempt_at": "2026-09-09T12:02:05.290+00:00"
+    },
+    "service": {
+      "active_batch_size": 0,
+      "last_error": "",
+      "maintenance": false,
+      "pid": 76165,
+      "queue_depth": 0,
+      "ready": true,
+      "status": "ok"
+    }
+  },
+  "overlay": {
+    "base_documents_overridden": 6307,
+    "effective_documents": 92516,
+    "effective_kind_counts": {
+      "chunk": 56616,
+      "page": 7812,
+      "question": 28088
+    },
+    "effective_pages": 7812,
+    "page_overlap": 511
+  },
+  "physical_inventory_observation": {
+    "all_canonical_call": {
+      "require_stable": false,
+      "strict": true
+    },
+    "canonical_paths": 7818,
+    "captured_at": "2026-09-09T12:20:58.420097+00:00",
+    "catalog_not_in_stable_inventory": 0,
+    "catalog_paths": 7812,
+    "comparison": "resolved physical paths versus persisted IndexStore all_page_ids(include_system=True) metadata paths",
+    "elapsed_seconds": 14.972,
+    "enumerator": "chronovisor.core.index_store.canonical_document_paths",
+    "namespaces": [
+      "pages",
+      "system"
+    ],
+    "nonstable_canonical_paths": 6,
+    "scan_is_atomic": false,
+    "scope": "canonical non-reserved documents only; separate later inventory observation, not an atomic extension of the earlier content-hash scan",
+    "stable_call": {
+      "require_stable": true,
+      "strict": false
+    },
+    "stable_missing_from_catalog": 0,
+    "stable_paths": 7812,
+    "status": "enumerated"
+  },
+  "prohibitions_honored": [
+    "no model/query execution",
+    "no config/index/service mutation",
+    "no page body or question/gold content emitted"
+  ],
+  "purpose": "P4a live extractor-2 base+delta accounting (read-only)",
+  "reproduction": {
+    "last_readonly_rerun_end": "2026-09-09T12:09:34.271+00:00",
+    "last_readonly_rerun_start": "2026-09-09T12:09:28.837+00:00",
+    "last_rerun_note": "rerun emitted aggregate-only values; historical 11:58 snapshot above remains unchanged",
+    "last_rerun_pointer_unchanged": true,
+    "script_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p4a_live_accounting.py",
+    "script_sha256": "2d37d884b469a1afb37a63eba027d2fa1ebc96a4e8dcf6284e5119d5c55a1ad2"
+  },
+  "runtime_process_snapshot": {
+    "c_builder": {
+      "command_basename": "build_frozen_indexes.py",
+      "parent_pid": 1778,
+      "pid": 40541,
+      "relation": "distinct from research parent/child and ingest owner",
+      "started_local": "2026-09-09T18:42:22+09:00"
+    },
+    "captured_at": "2026-09-09T12:06:26+00:00",
+    "ingest": {
+      "batch_index": 2,
+      "batch_succeeded": 1,
+      "batch_total": 10,
+      "command_basename": "chronovisor-ingest-drain",
+      "command_mode": "--watch",
+      "current_job_id_sha256_prefix": "057fcea9",
+      "current_op_class": "raw-semantic-projection-child-v1",
+      "job_kind": "generate",
+      "lock_held": true,
+      "owner_pid": 74424,
+      "pending_count": 33,
+      "runtime_state": "running",
+      "stage": "generate",
+      "status_updated_local": "2026-09-09T21:03:46+09:00"
+    },
+    "p0_probe_process_observed": "none in process snapshot; recent probe receipts are file artifacts only",
+    "research": {
+      "active_file": true,
+      "active_file_mtime": "2026-09-09T12:03:02.710+00:00",
+      "active_started_at": "2026-09-09T12:03:02.707+00:00",
+      "child_command_basename": "collection_anomaly_worker",
+      "child_pid": 1255,
+      "child_started_local": "2026-09-09T21:03:02+09:00",
+      "mode": "on",
+      "model_active": true,
+      "needs_model": true,
+      "parent_command_basename": "chronovisor-librarian",
+      "parent_command_mode": "--full-sweep --json",
+      "parent_pid": 72593,
+      "parent_started_local": "2026-09-09T20:28:02+09:00",
+      "purpose": "explicit",
+      "relation_to_c_builder_or_probe": "separate process tree; this is the existing librarian collection-review loop, not build_frozen_indexes or a live P0 probe",
+      "run_id_sha256_prefix": "efe3fe935752c685",
+      "scheduler_event_shape": "research_enter/research_call_terminal/research_exit; no operation or job_kind field"
+    }
+  },
+  "schema_version": 1,
+  "source_revision": {
+    "effective_index_fingerprint_sha256": "eabf4237b73179587502b5a82322ffea1cb19578c7c47cd61266d46c207e16ce",
+    "inventory_scope": "persisted_index_store_catalog",
+    "note": "source inventory is the persisted IndexStore catalog; files were read sequentially while another writer could run, so this is not an atomic corpus snapshot",
+    "sha256_and_mtime_diff": 1,
+    "sha256_diff_mtime_same": 0,
+    "sha256_same": 7811,
+    "sha256_same_mtime_diff": 0,
+    "source_fingerprint_sha256": "42e6f35621e710adc44c3c3ea97b94d2477f78e5fca8fd79674106797419507d",
+    "source_hashed_paths": 7812,
+    "source_index_page_id_diff": 0,
+    "source_read_errors": 0,
+    "source_stable_paths": 7812
+  },
+  "validation": {
+    "load_active_generation_checksums_route_delta": {
+      "base_vector_shape": [
+        45285,
+        2048
+      ],
+      "delta_vector_shape": [
+        53538,
+        2048
+      ],
+      "elapsed_ms": 659.351,
+      "status": "ok"
+    },
+    "semantic_index_status": {
+      "coverage": 0.9998719918074757,
+      "covered_pages": 7811,
+      "current_pages": 7812,
+      "deleted_pages": 0,
+      "missing_pages": 0,
+      "stale_pages": 1,
+      "status": "ok"
+    },
+    "validate_generation_checksums_route": {
+      "elapsed_ms": 243.76,
+      "status": "ok"
+    }
+  }
+}
