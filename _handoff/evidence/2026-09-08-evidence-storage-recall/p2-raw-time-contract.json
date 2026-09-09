@@ -1,0 +1,54 @@
+{
+  "schema": "chronovisor.evidence-storage-implementation-check.v1",
+  "observed_at": "2026-09-09T13:49:47Z",
+  "scope": "Opt-in Raw C2 time metadata and exact committed-turn source resolver; not P4 quality acceptance",
+  "local_commit": "279ab8aec340ac974f5afd765d91cbda65e4107c",
+  "pushed_commit": "cd15c6941939d635ab23378fd0d03fe9a26345c2",
+  "production_runtime_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+  "contracts": {
+    "event_time": "Explicit native timestamp or null",
+    "recorded_at": "Verified committed Raw receipt captured_at, never rebuild clock",
+    "fact_validity": "Explicit validity interval or null; unknown is held when as_of is required",
+    "native_metadata": ["event_type", "role", "phase"],
+    "raw_reference": "Logical UTF-8 byte range, Raw SHA and canonical commit-receipt SHA",
+    "turn_resolver": "Unique exact captured turn, verified episode/Save receipt/Raw/slice/turn identity; no live transcript fallback",
+    "correction_prompt_source": "correction_turn_ref; source_turn_ref is the prior turn",
+    "unknown_source": "held with reason and empty source_refs"
+  },
+  "validation": {
+    "isolated_related_tests_passed": 32,
+    "release_worktree_related_tests_passed": 32,
+    "ruff": "passed",
+    "import_contracts": "1 kept, 0 broken",
+    "scoped_mypy_follow_imports_silent": {
+      "baseline_errors": 40,
+      "candidate_errors": 38,
+      "new_errors": 0,
+      "remaining_errors_scope": "Existing recall_answer_eval.py diagnostics outside this change"
+    },
+    "read_only_current_raw_canary": {
+      "scope": "One existing captured turn; no production write or model call",
+      "resolver_status": "ok",
+      "verified_source_refs": 1,
+      "verified_native_atoms": 3,
+      "unknown_event_time": 0,
+      "unknown_fact_validity": 3
+    },
+    "v1_baseline_comparison": {
+      "fixture": "Two committed native events, fixed receipt time",
+      "projection_bytes_equal": true,
+      "packet_bytes_equal": true,
+      "projection_sha256": "07c86467fd30e5f854fd72742702b498232a3364aa95a46dee4b794368020b7f",
+      "packet_sha256": "575a229c62bc494a25fca711c597cf9ba8734bf1e108198c8264dc8e2b6db420"
+    }
+  },
+  "not_completed": [
+    "Production activation of the opt-in C2 projection",
+    "Correction preimage persistence and resolver consumer integration",
+    "Semantic topic/condition/correction extraction acceptance",
+    "Formal P4 quality, negative cases and independent answer scoring",
+    "Plan-wide P2/P4/P4a/P5/P6 acceptance"
+  ],
+  "frozen_p4_arms_changed": false,
+  "additional_query_time_llm_calls": 0
+}
