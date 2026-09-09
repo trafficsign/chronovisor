@@ -1,0 +1,78 @@
+{
+  "schema": "chronovisor.p4-runtime-preparation.v1",
+  "observed_at": "2026-09-10T01:58:00+09:00",
+  "status": "formal_repetition_1_running",
+  "prior_runs": [
+    {
+      "status": "infrastructure_invalid",
+      "cause": "missing lexical snapshot before semantic RPC",
+      "quality_usable": false
+    },
+    {
+      "status": "stopped_before_observations",
+      "cause": "per-observation process lifecycle exceeded intended observation watchdog",
+      "formal_observations": 0
+    },
+    {
+      "status": "held_before_execution",
+      "cause": "missing wrapper binding in configuration identity",
+      "formal_observations": 0
+    }
+  ],
+  "fixed_runtime": {
+    "context_total_chars": 3000,
+    "recall_acceptance_deadline_ms": 4000,
+    "semantic_timeout_ms": 800,
+    "adapter_startup_timeout_ms": 60000,
+    "observation_watchdog_ms": 15000,
+    "persistent_process_scope": "one per arm per repetition",
+    "repetitions": 3,
+    "holdout_cases_per_repetition": 120,
+    "wrapper_sha256": "e4c1dbb6ddd875edc1f2f882b6ed3026da02e58ab4d9420c4679109c8cd09a87",
+    "adapter_sha256": "3dd577dccfb8ee76a2013d9d5f3e978566c6a77662b4c7defb757792f87dbc30",
+    "controller_sha256": "baf38cab3ffc64d3fd3414856fe5ed1992e6d30eb5ed6defd05d428bf30a887b",
+    "config_identity_sha256": "b8f8fb8f6d951f32ffed761cdb08b4e840626a08bfe38e209add6603eacac1b5"
+  },
+  "canary": {
+    "receipt_sha256": "081aff40c0e85691c3245658c60f35f77ae7fe1cbcc9c35eb52c048861653a66",
+    "calls": 6,
+    "calls_per_arm": 2,
+    "all_status_ok": true,
+    "semantic_rpc_calls_per_observation": 1,
+    "adapter_startup_ms": [
+      246.7,
+      228.2,
+      229.9
+    ],
+    "observation_wall_ms": {
+      "A": [
+        2732,
+        1583
+      ],
+      "B": [
+        2801,
+        1632
+      ],
+      "C1": [
+        3324,
+        2738
+      ]
+    },
+    "context_chars": 1594,
+    "context_kind": "working_memory_only",
+    "source_evidence_items": 0,
+    "formal_quality_measurement": false
+  },
+  "progress": {
+    "completed_cases_rep1": 10,
+    "observations_rep1": 30,
+    "elapsed_ms_rep1": 93113.836,
+    "repetitions_completed": 0
+  },
+  "limitations": [
+    "Warm canary validates infrastructure only; its context is not page evidence.",
+    "Per-call lifecycle overhead was observed; startup/import alone was not proven to explain all prior latency.",
+    "Cold hook latency and formal quality are not established by the warm canary.",
+    "C1 results do not decide C2 adoption."
+  ]
+}

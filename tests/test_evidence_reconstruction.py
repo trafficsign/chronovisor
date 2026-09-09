@@ -463,6 +463,193 @@ def test_c2_projection_keeps_event_time_recorded_at_and_validity_separate(
     assert v1_missing.validity == TimeInterval(NOW.isoformat(), NOW.isoformat())
 
 
+def test_c2_projection_can_rebuild_only_selected_raw_ids_without_direct_inventory_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw_dir = tmp_path / "selected" / "raw"
+    _committed_rows(
+        raw_dir,
+        [
+            {
+                "type": "response_item",
+                "timestamp": "2026-08-11T09:00:00+09:00",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "First."}],
+                },
+            }
+        ],
+        raw_id="save-codex-c2-a.md",
+    )
+    _committed_rows(
+        raw_dir,
+        [
+            {
+                "type": "response_item",
+                "timestamp": "2026-08-11T09:01:00+09:00",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Second."}],
+                },
+            }
+        ],
+        raw_id="save-codex-c2-b.md",
+    )
+
+    all_bytes = build_episode_projection_c2(raw_dir)
+    selected_store = RawStore(raw_dir, mode="v2")
+    selected_units = {
+        raw_id: selected_store.resolve_segment(raw_id)
+        for raw_id in ("save-codex-c2-a.md", "save-codex-c2-b.md")
+    }
+    assert all(unit is not None for unit in selected_units.values())
+    reference_dir = raw_dir.parent / "runtime" / "raw-projections" / "parents"
+    for unit in selected_units.values():
+        assert unit is not None
+        selected_store.materialize_ingest(unit, reference_dir)
+    def no_inventory(self: RawStore):
+        raise AssertionError(
+            "selected C2 rebuild must not call direct inventory enumeration"
+        )
+
+    def no_segment_resolve(self: RawStore, raw_id: str):
+        raise AssertionError(f"selected C2 rebuild called resolve_segment: {raw_id}")
+
+    monkeypatch.setattr(RawStore, "resolve_segment", no_segment_resolve)
+    monkeypatch.setattr(RawStore, "iter_segment_units", no_inventory)
+    selected_bytes = build_episode_projection_c2(
+        raw_dir, raw_ids=("save-codex-c2-b.md", "save-codex-c2-a.md")
+    )
+    assert selected_bytes == all_bytes
+
+    selected_payload = json.loads(
+        build_episode_projection_c2(raw_dir, raw_ids=("save-codex-c2-b.md",))
+    )
+    assert [row["raw_id"] for row in selected_payload["source_receipts"]] == [
+        "save-codex-c2-b.md"
+    ]
+    assert {row["evidence"]["raw_id"] for row in selected_payload["atoms"]} == {
+        "save-codex-c2-b.md"
+    }
+
+
+@pytest.mark.parametrize(
+    ("raw_ids", "message"),
+    (
+        ("save-codex-c2-a.md", "sequence"),
+        (b"save-codex-c2-a.md", "sequence"),
+        ((), "empty"),
+        (("save-codex-c2-a.md", "save-codex-c2-a.md"), "duplicates"),
+        ((".",), "basename"),
+        (("..",), "basename"),
+        (("../save-codex-c2-a.md",), "basename"),
+        (("save-codex-missing.md",), "missing"),
+    ),
+)
+def test_c2_projection_rejects_invalid_or_missing_raw_selection(
+    tmp_path: Path, raw_ids: object, message: str
+) -> None:
+    raw_dir = tmp_path / "invalid-selection" / "raw"
+    _committed_rows(
+        raw_dir,
+        [
+            {
+                "type": "response_item",
+                "timestamp": "2026-08-11T09:00:00+09:00",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Only."}],
+                },
+            }
+        ],
+        raw_id="save-codex-c2-a.md",
+    )
+    with pytest.raises(EvidenceReconstructionError, match=message):
+        build_episode_projection_c2(raw_dir, raw_ids=raw_ids)  # type: ignore[arg-type]
+
+
+def test_c2_projection_rejects_symlink_bound_reference(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "symlink-selection" / "raw"
+    _committed_rows(
+        raw_dir,
+        [
+            {
+                "type": "response_item",
+                "timestamp": "2026-08-11T09:00:00+09:00",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Only."}],
+                },
+            }
+        ],
+        raw_id="save-codex-c2-a.md",
+    )
+    store = RawStore(raw_dir, mode="v2")
+    unit = store.resolve_segment("save-codex-c2-a.md")
+    assert unit is not None
+    reference_dir = raw_dir.parent / "runtime" / "raw-projections" / "parents"
+    reference = store.materialize_ingest(unit, reference_dir)
+    reference.unlink()
+    reference.symlink_to(unit.path)
+    with pytest.raises(EvidenceReconstructionError, match="symlink"):
+        build_episode_projection_c2(raw_dir, raw_ids=("save-codex-c2-a.md",))
+
+
+@pytest.mark.parametrize("payload", ("missing-commit", "invalid-json", "non-object"))
+def test_c2_projection_rejects_unbound_reference_without_inventory_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: str
+) -> None:
+    raw_dir = tmp_path / "unbound-selection" / "raw"
+    _committed_rows(
+        raw_dir,
+        [
+            {
+                "type": "response_item",
+                "timestamp": "2026-08-11T09:00:00+09:00",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Only."}],
+                },
+            }
+        ],
+        raw_id="save-codex-c2-a.md",
+    )
+    store = RawStore(raw_dir, mode="v2")
+    unit = store.resolve_segment("save-codex-c2-a.md")
+    assert unit is not None
+    reference_dir = raw_dir.parent / "runtime" / "raw-projections" / "parents"
+    reference = store.materialize_ingest(unit, reference_dir)
+    if payload == "missing-commit":
+        value = json.loads(reference.read_text(encoding="utf-8"))
+        assert isinstance(value, dict)
+        value.pop("commit", None)
+        reference.write_text(
+            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            + "\n",
+            encoding="utf-8",
+        )
+    elif payload == "invalid-json":
+        reference.write_text("{not-json\n", encoding="utf-8")
+    else:
+        reference.write_text("[]\n", encoding="utf-8")
+
+    def no_inventory(self: RawStore):
+        raise AssertionError("unbound C2 reference must not call inventory enumeration")
+
+    def no_segment_resolve(self: RawStore, raw_id: str):
+        raise AssertionError(f"unbound C2 reference called resolve_segment: {raw_id}")
+
+    monkeypatch.setattr(RawStore, "resolve_segment", no_segment_resolve)
+    monkeypatch.setattr(RawStore, "iter_segment_units", no_inventory)
+    with pytest.raises(EvidenceReconstructionError, match="invalid"):
+        build_episode_projection_c2(raw_dir, raw_ids=("save-codex-c2-a.md",))
+
+
 def test_pi_projection_reuses_native_message_semantics_and_preserves_roles(
     tmp_path: Path,
 ) -> None:
