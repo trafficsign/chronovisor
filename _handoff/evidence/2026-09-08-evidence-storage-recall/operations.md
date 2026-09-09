@@ -12,7 +12,7 @@
 - [P2 validation](p2-validation.json): `page-evidence-projection.v1` と隔離 `section-v1`、projection/adapter の原文復元検証。全件 backfill・production activation・C の品質採用は未完了。
 - [P2 frozen projection](p2-frozen-projection-integrity.json): 凍結した原文の body/span SHA 検証は失敗 0。これは品質 benchmark や本番 backfill 完了の証明ではない。
 - [P3 validation](p3-validation.json): active generation の extractor 追従、更新/rebuild/rollback の接続と CAS 回帰を確認。既定 extractor は 2、候補 C は 3、production 変更はなし。
-- [P5 cutover](p5-runtime-cutover.json): push、対象サービス再起動、archive `direct_url` provenance、health を確認。ただし full production acceptance と live processing canary は未完了。
+- [P5 cutover](p5-runtime-cutover.json): push、対象サービス再起動、archive `direct_url` provenance、health を確認。実Raw処理10件・authority正常まで確認。計画全体の品質採用は未完了。
 
 現在は C を採用せず、production の extractor 2 を維持する。`query_timeout_ms=800` と台帳重複読込修正を d98adcd に配布。未使用 query の実 hook 出力で source reference 2 件の byte/SHA 一致、プロセス起動から実 stdout まで 3.749 秒を確認した。これは欠落修正の限定 canary であり、別言い換えの degraded / lexical-only 結果も保持する。全体品質と cold/warm paired p95 非劣化は未測定で、C の採用条件には代用しない。
 
@@ -251,7 +251,7 @@ EXPECTED_SHA="<pushed-release-commit>"
 test "$EXPECTED_SHA" = "$(git ls-remote origin refs/heads/main | cut -f1)"
 ```
 
-最後に semantic の status/health と task-specific live query を確認する。`scripts/chronovisor-semantic-service status` の `ready` は archive provenance、generation ID、source byte/SHA、4 秒 caller budget の受入を代替しない。最新の限定 canary は起動から実 stdout まで 3.749 秒、source 2 件一致。paired 品質・p95 と本番 ingest 実処理の確認は別の受入条件として記録する。
+最後に semantic の status/health と task-specific live query を確認する。`scripts/chronovisor-semantic-service status` の `ready` は archive provenance、generation ID、source byte/SHA、4 秒 caller budget の受入を代替しない。最新の限定 canary は起動から実 stdout まで 3.749 秒、source 2 件一致。本番 ingest も実処理10件・authority正常を確認済み。paired 品質・p95 は別の未完了条件として記録する。
 
 ```sh
 CHRONOVISOR_ROOT="$HOME/.chronovisor" scripts/chronovisor-semantic-service status
