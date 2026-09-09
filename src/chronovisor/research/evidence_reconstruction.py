@@ -23,6 +23,7 @@ from chronovisor.core import (
     durable_state,
     raw_store,
 )
+from chronovisor.core.raw_segment import RawSegmentCorrupt
 from chronovisor.research.research_tools import ActionType
 
 canonical_json_line_bytes_strict = canonical_json.canonical_json_line_bytes_strict
@@ -33,7 +34,10 @@ committed_raw_watermark = raw_store.committed_raw_watermark
 
 EVALUATION_CONTRACT_SCHEMA = "chronovisor.evidence-evaluation-contract.v1"
 EVIDENCE_PACKET_SCHEMA = "chronovisor.evidence-packet.v1"
+EVIDENCE_PACKET_C2_SCHEMA = "chronovisor.evidence-packet.v2"
+EVIDENCE_ATOM_C2_SCHEMA = "chronovisor.evidence-atom.v2"
 EPISODE_PROJECTION_SCHEMA = "chronovisor.episode-evidence-projection.v1"
+EPISODE_PROJECTION_C2_SCHEMA = "chronovisor.episode-evidence-projection.v2"
 RETRIEVAL_PROGRAM_SCHEMA = "chronovisor.retrieval-program.v1"
 EVIDENCE_AUTHORITY_ROLES = ("assistant",)
 
@@ -252,8 +256,16 @@ class EvidenceAtom:
     entities: tuple[str, ...]
     provenance: Provenance
     evidence: EvidenceRef
-    validity: TimeInterval
+    validity: TimeInterval | None
     relations: tuple[EvidenceRelation, ...]
+    # C2-only source metadata.  ``recorded_at`` is the marker that selects
+    # the versioned representation; v1 atoms leave every field at ``None``
+    # and therefore retain their byte-for-byte serialization.
+    event_time: str | None = None
+    recorded_at: str | None = None
+    event_type: str | None = None
+    role: str | None = None
+    phase: str | None = None
 
     def __post_init__(self) -> None:
         if not self.atom_id.startswith("atom:"):
@@ -275,7 +287,6 @@ class EvidenceAtom:
         if (
             not isinstance(self.provenance, Provenance)
             or not isinstance(self.evidence, EvidenceRef)
-            or not isinstance(self.validity, TimeInterval)
             or not isinstance(self.relations, tuple)
             or not self.relations
             or any(
@@ -285,18 +296,54 @@ class EvidenceAtom:
             or len(set(self.relations)) != len(self.relations)
         ):
             raise EvidenceReconstructionError("relations must be non-empty and unique")
+        c2 = self.recorded_at is not None
+        if not c2:
+            if not isinstance(self.validity, TimeInterval) or any(
+                value is not None
+                for value in (self.event_time, self.event_type, self.role, self.phase)
+            ):
+                raise EvidenceReconstructionError("v1 atom metadata is invalid")
+            return
+        recorded_at = self.recorded_at
+        assert recorded_at is not None
+        _timestamp(recorded_at, "recorded_at")
+        if self.event_time is not None:
+            _timestamp(self.event_time, "event_time")
+        if self.validity is not None and not isinstance(self.validity, TimeInterval):
+            raise EvidenceReconstructionError("fact validity is invalid")
+        if self.event_type is not None:
+            _nonempty(self.event_type, "event_type")
+        if self.role is None:
+            raise EvidenceReconstructionError("role is required for C2 atoms")
+        _nonempty(self.role, "role")
+        if self.phase is not None:
+            _nonempty(self.phase, "phase")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "atom_id": self.atom_id,
             "episode_id": self.episode_id,
             "claim": self.claim,
             "entities": list(self.entities),
             "provenance": self.provenance.to_dict(),
             "evidence": self.evidence.to_dict(),
-            "validity": self.validity.to_dict(),
+            "validity": self.validity.to_dict()
+            if self.validity is not None
+            else None,
             "relations": [relation.to_dict() for relation in self.relations],
         }
+        if self.recorded_at is not None:
+            payload.update(
+                {
+                    "schema": EVIDENCE_ATOM_C2_SCHEMA,
+                    "event_time": self.event_time,
+                    "recorded_at": self.recorded_at,
+                    "event_type": self.event_type,
+                    "role": self.role,
+                    "phase": self.phase,
+                }
+            )
+        return payload
 
 
 def _identity(prefix: str, value: object) -> str:
@@ -318,6 +365,8 @@ def build_evidence_atom(
     claim = _nonempty(claim, "claim")
     if any(not isinstance(entity, str) for entity in entities):
         raise EvidenceReconstructionError("entities must be strings")
+    if not isinstance(validity, TimeInterval):
+        raise EvidenceReconstructionError("v1 atom validity is required")
     if any(not isinstance(relation, EvidenceRelation) for relation in relations):
         raise EvidenceReconstructionError("relations are invalid")
     rows = tuple(sorted(relations, key=lambda row: (row.kind.value, row.claim_id)))
@@ -343,6 +392,81 @@ def build_evidence_atom(
     )
 
 
+def build_evidence_atom_c2(
+    *,
+    episode_id: str,
+    claim: str,
+    entities: Sequence[str],
+    provenance: Provenance,
+    evidence: EvidenceRef,
+    event_time: str | None,
+    recorded_at: str,
+    validity: TimeInterval | None,
+    event_type: str | None,
+    role: str,
+    phase: str | None,
+    relations: Sequence[EvidenceRelation],
+) -> EvidenceAtom:
+    """Build one C2 atom while keeping event and fact time independent.
+
+    C2 is deliberately additive: the original v1 builder still requires a
+    concrete ``TimeInterval`` and produces the same identity and bytes.  C2
+    uses the verified Raw receipt's ``captured_at`` as ``recorded_at`` and
+    leaves event/fact time unknown unless the source carries explicit values.
+    """
+
+    episode_id = _nonempty(episode_id, "episode_id")
+    claim = _nonempty(claim, "claim")
+    if any(not isinstance(entity, str) for entity in entities):
+        raise EvidenceReconstructionError("entities must be strings")
+    if any(not isinstance(relation, EvidenceRelation) for relation in relations):
+        raise EvidenceReconstructionError("relations are invalid")
+    _timestamp(recorded_at, "recorded_at")
+    if event_time is not None:
+        _timestamp(event_time, "event_time")
+    if validity is not None and not isinstance(validity, TimeInterval):
+        raise EvidenceReconstructionError("fact validity is invalid")
+    if event_type is not None:
+        _nonempty(event_type, "event_type")
+    role = _nonempty(role, "role")
+    if role != provenance.source_role:
+        raise EvidenceReconstructionError("C2 role/provenance mismatch")
+    if phase is not None:
+        _nonempty(phase, "phase")
+    rows = tuple(sorted(relations, key=lambda row: (row.kind.value, row.claim_id)))
+    entity_rows = tuple(sorted(dict.fromkeys(entities)))
+    unsigned = {
+        "schema": EVIDENCE_ATOM_C2_SCHEMA,
+        "episode_id": episode_id,
+        "claim": claim,
+        "entities": list(entity_rows),
+        "provenance": provenance.to_dict(),
+        "evidence": evidence.to_dict(),
+        "event_time": event_time,
+        "recorded_at": recorded_at,
+        "event_type": event_type,
+        "role": role,
+        "phase": phase,
+        "validity": validity.to_dict() if validity is not None else None,
+        "relations": [relation.to_dict() for relation in rows],
+    }
+    return EvidenceAtom(
+        atom_id=_identity("atom", unsigned),
+        episode_id=episode_id,
+        claim=claim,
+        entities=entity_rows,
+        provenance=provenance,
+        evidence=evidence,
+        validity=validity,
+        relations=rows,
+        event_time=event_time,
+        recorded_at=recorded_at,
+        event_type=event_type,
+        role=role,
+        phase=phase,
+    )
+
+
 @dataclass(frozen=True)
 class EvidencePacket:
     packet_id: str
@@ -352,6 +476,7 @@ class EvidencePacket:
     atoms: tuple[EvidenceAtom, ...]
     abstained: bool = False
     abstention_reason: str = ""
+    schema: str = EVIDENCE_PACKET_SCHEMA
 
     def __post_init__(self) -> None:
         if not self.packet_id.startswith("packet:"):
@@ -371,6 +496,15 @@ class EvidencePacket:
             or len({atom.atom_id for atom in self.atoms}) != len(self.atoms)
         ):
             raise EvidenceReconstructionError("packet atoms must be unique")
+        if self.schema not in {EVIDENCE_PACKET_SCHEMA, EVIDENCE_PACKET_C2_SCHEMA}:
+            raise EvidenceReconstructionError("packet schema is invalid")
+        c2_atoms = tuple(atom.recorded_at is not None for atom in self.atoms)
+        if self.schema == EVIDENCE_PACKET_SCHEMA and any(c2_atoms):
+            raise EvidenceReconstructionError("v1 packet cannot contain C2 atoms")
+        if self.schema == EVIDENCE_PACKET_C2_SCHEMA and any(
+            not is_c2 for is_c2 in c2_atoms
+        ):
+            raise EvidenceReconstructionError("C2 packet atoms are invalid")
         if not isinstance(self.abstained, bool):
             raise EvidenceReconstructionError("abstained must be boolean")
         if self.abstained != bool(self.abstention_reason):
@@ -380,7 +514,7 @@ class EvidencePacket:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema": EVIDENCE_PACKET_SCHEMA,
+            "schema": self.schema,
             "packet_id": self.packet_id,
             "query": self.query,
             "as_of": self.as_of,
@@ -424,6 +558,42 @@ def build_evidence_packet(
     )
 
 
+def build_evidence_packet_c2(
+    *,
+    query: str,
+    as_of: str,
+    retrieval_program_id: str,
+    atoms: Sequence[EvidenceAtom],
+    abstention_reason: str = "",
+) -> EvidencePacket:
+    """Build the explicit C2 packet representation."""
+
+    query = _nonempty(query, "query")
+    abstention_reason = abstention_reason.strip()
+    atom_rows = tuple(sorted(atoms, key=lambda atom: atom.atom_id))
+    if any(atom.recorded_at is None for atom in atom_rows):
+        raise EvidenceReconstructionError("C2 packet requires C2 atoms")
+    unsigned = {
+        "schema": EVIDENCE_PACKET_C2_SCHEMA,
+        "query": query,
+        "as_of": as_of,
+        "retrieval_program_id": retrieval_program_id,
+        "atoms": [atom.to_dict() for atom in atom_rows],
+        "abstained": bool(abstention_reason),
+        "abstention_reason": abstention_reason,
+    }
+    return EvidencePacket(
+        packet_id=_identity("packet", unsigned),
+        query=query,
+        as_of=as_of,
+        retrieval_program_id=retrieval_program_id,
+        atoms=atom_rows,
+        abstained=bool(abstention_reason),
+        abstention_reason=abstention_reason,
+        schema=EVIDENCE_PACKET_C2_SCHEMA,
+    )
+
+
 def _event_semantics(host: str, event: Mapping[str, Any]) -> tuple[str, str]:
     event_type = event.get("type")
     if host == "codex":
@@ -462,6 +632,54 @@ def _event_time(event: Mapping[str, Any], captured_at: str) -> str:
         raise EvidenceReconstructionError("event timestamp must be a string")
     _timestamp(timestamp, "event timestamp")
     return timestamp
+
+
+def _event_time_c2(event: Mapping[str, Any]) -> str | None:
+    """Return only an explicitly supplied native event timestamp."""
+
+    if "timestamp" not in event or event["timestamp"] is None:
+        return None
+    timestamp = event["timestamp"]
+    if not isinstance(timestamp, str):
+        raise EvidenceReconstructionError("event timestamp must be a string")
+    _timestamp(timestamp, "event timestamp")
+    return timestamp
+
+
+def _event_type_c2(host: str, event: Mapping[str, Any]) -> str | None:
+    """Extract the native event type without classifying its meaning."""
+
+    if host == "codex":
+        payload = event.get("payload")
+        value = payload.get("type") if isinstance(payload, Mapping) else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    value = event.get("type")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _event_phase_c2(event: Mapping[str, Any]) -> str | None:
+    payload = event.get("payload")
+    value = payload.get("phase") if isinstance(payload, Mapping) else None
+    if value is None:
+        value = event.get("phase")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _event_validity_c2(event: Mapping[str, Any]) -> TimeInterval | None:
+    """Read an explicit validity interval; never infer it from event time."""
+
+    value: object = event.get("validity")
+    payload = event.get("payload")
+    if value is None and isinstance(payload, Mapping):
+        value = payload.get("validity")
+    if value is None:
+        return None
+    row = _strict_fields(value, {"start", "end"}, "event validity")
+    start, end = row["start"], row["end"]
+    if not isinstance(start, str) or not isinstance(end, str):
+        raise EvidenceReconstructionError("event validity timestamps are invalid")
+    return TimeInterval(start, end)
 
 
 def _projection_atom(
@@ -509,6 +727,61 @@ def _projection_atom(
             receipt_sha256=receipt_sha256,
         ),
         validity=TimeInterval(start=instant, end=instant),
+        relations=(EvidenceRelation(EvidenceRelationKind.SUPPORTS, claim_id),),
+    )
+
+
+def _projection_atom_c2(
+    *,
+    raw_id: str,
+    raw_sha256: str,
+    receipt_sha256: str,
+    host: str,
+    session_key: str,
+    captured_at: str,
+    line: bytes,
+    index: int,
+    start: int,
+) -> EvidenceAtom | None:
+    try:
+        event = json.loads(line)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EvidenceReconstructionError(
+            f"committed Raw event {raw_id}:{index} is invalid JSON"
+        ) from exc
+    if not isinstance(event, dict):
+        raise EvidenceReconstructionError("committed Raw event must be an object")
+    _timestamp(captured_at, "receipt captured_at")
+    event_time = _event_time_c2(event)
+    role, text = _event_semantics(host, event)
+    claim = text.strip()
+    if not claim:
+        return None
+    episode_id = _identity("episode", {"host": host, "session_key": session_key})
+    claim_id = _identity("claim", {"episode_id": episode_id, "claim": claim})
+    return build_evidence_atom_c2(
+        episode_id=episode_id,
+        claim=claim,
+        entities=_event_entities(event),
+        provenance=Provenance(
+            producer="committed-raw-receipt",
+            source_event_id=f"{raw_id}:{index}",
+            source_role=role,
+            event_index=index,
+        ),
+        evidence=EvidenceRef(
+            raw_id=raw_id,
+            byte_start=start,
+            byte_end=start + len(line),
+            raw_sha256=raw_sha256,
+            receipt_sha256=receipt_sha256,
+        ),
+        event_time=event_time,
+        recorded_at=captured_at,
+        validity=_event_validity_c2(event),
+        event_type=_event_type_c2(host, event),
+        role=role,
+        phase=_event_phase_c2(event),
         relations=(EvidenceRelation(EvidenceRelationKind.SUPPORTS, claim_id),),
     )
 
@@ -586,7 +859,7 @@ def build_episode_projection(raw_dir: Path) -> bytes:
             continue
         try:
             spans = raw_store.committed_event_spans(raw, commit.record_count)
-        except raw_store.RawSegmentCorrupt as exc:
+        except RawSegmentCorrupt as exc:
             raise EvidenceReconstructionError(str(exc)) from exc
         for index, (start, encoded_event) in enumerate(spans):
             atom = _projection_atom(
@@ -615,17 +888,70 @@ def build_episode_projection(raw_dir: Path) -> bytes:
     )
 
 
+def build_episode_projection_c2(raw_dir: Path) -> bytes:
+    """Build the opt-in C2 projection with explicit time/source metadata.
+
+    The source receipt and exact Raw byte ranges are shared with v1.  C2 does
+    not copy the native event object; callers can reread it through the bound
+    ``EvidenceRef`` when a full event is needed.
+    """
+
+    store = RawStore(raw_dir, mode="v2")
+    receipts: list[dict[str, Any]] = []
+    atoms: list[EvidenceAtom] = []
+    for unit in store.iter_segment_units():
+        commit = unit.commit
+        if commit is None or unit.sha256 is None or unit.captured_at is None:
+            raise EvidenceReconstructionError("Raw unit has no committed receipt")
+        raw = store.read_bytes(unit)
+        receipt = _source_receipt(unit)
+        receipt_sha256 = receipt["receipt_sha256"]
+        receipts.append(receipt)
+        if store.is_archived_legacy_markdown(unit, raw):
+            continue
+        try:
+            spans = raw_store.committed_event_spans(raw, commit.record_count)
+        except RawSegmentCorrupt as exc:
+            raise EvidenceReconstructionError(str(exc)) from exc
+        for index, (start, encoded_event) in enumerate(spans):
+            atom = _projection_atom_c2(
+                raw_id=unit.raw_id,
+                raw_sha256=unit.sha256,
+                receipt_sha256=receipt_sha256,
+                host=commit.host,
+                session_key=commit.session_key,
+                captured_at=commit.captured_at,
+                line=encoded_event,
+                index=index,
+                start=start,
+            )
+            if atom is not None:
+                atoms.append(atom)
+    unsigned = {
+        "schema": EPISODE_PROJECTION_C2_SCHEMA,
+        "evidence_authority_roles": list(EVIDENCE_AUTHORITY_ROLES),
+        "source_receipts": receipts,
+        "atoms": [
+            atom.to_dict() for atom in sorted(atoms, key=lambda row: row.atom_id)
+        ],
+    }
+    return canonical_json_line_bytes_strict(
+        {"projection_id": _identity("projection", unsigned), **unsigned}
+    )
+
+
 @dataclass(frozen=True)
 class EpisodeProjection:
     projection_id: str
     evidence_authority_roles: tuple[str, ...]
     source_receipts: tuple[Mapping[str, Any], ...]
     atoms: tuple[EvidenceAtom, ...]
+    schema: str = EPISODE_PROJECTION_SCHEMA
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "projection_id": self.projection_id,
-            "schema": EPISODE_PROJECTION_SCHEMA,
+            "schema": self.schema,
             "evidence_authority_roles": list(self.evidence_authority_roles),
             "source_receipts": [dict(row) for row in self.source_receipts],
             "atoms": [atom.to_dict() for atom in self.atoms],
@@ -635,21 +961,33 @@ class EpisodeProjection:
         return canonical_json_line_bytes_strict(self.to_dict())
 
 
-def _parse_evidence_atom(value: object, index: int) -> EvidenceAtom:
-    row = _strict_fields(
-        value,
-        {
-            "atom_id",
-            "episode_id",
-            "claim",
-            "entities",
-            "provenance",
-            "evidence",
-            "validity",
-            "relations",
-        },
-        f"atoms[{index}]",
-    )
+def _parse_evidence_atom(
+    value: object, index: int, *, c2: bool = False
+) -> EvidenceAtom:
+    fields = {
+        "atom_id",
+        "episode_id",
+        "claim",
+        "entities",
+        "provenance",
+        "evidence",
+        "validity",
+        "relations",
+    }
+    if c2:
+        fields.update(
+            {
+                "schema",
+                "event_time",
+                "recorded_at",
+                "event_type",
+                "role",
+                "phase",
+            }
+        )
+    row = _strict_fields(value, fields, f"atoms[{index}]")
+    if c2 and row["schema"] != EVIDENCE_ATOM_C2_SCHEMA:
+        raise EvidenceReconstructionError("C2 atom schema is invalid")
     provenance_row = _strict_fields(
         row["provenance"],
         {"producer", "source_event_id", "source_role", "event_index"},
@@ -666,9 +1004,18 @@ def _parse_evidence_atom(value: object, index: int) -> EvidenceAtom:
         },
         f"atoms[{index}].evidence",
     )
-    validity_row = _strict_fields(
-        row["validity"], {"start", "end"}, f"atoms[{index}].validity"
-    )
+    byte_range = evidence_row["byte_range"]
+    if (
+        not isinstance(byte_range, list)
+        or len(byte_range) != 2
+        or evidence_row["byte_coordinate_space"] != "logical_raw"
+    ):
+        raise EvidenceReconstructionError("atom evidence byte range is invalid")
+    entities = row["entities"]
+    if not isinstance(entities, list) or any(
+        not isinstance(entity, str) for entity in entities
+    ):
+        raise EvidenceReconstructionError("atom entities are invalid")
     raw_relations = row["relations"]
     if not isinstance(raw_relations, list) or not raw_relations:
         raise EvidenceReconstructionError("atom relations must be non-empty")
@@ -686,18 +1033,6 @@ def _parse_evidence_atom(value: object, index: int) -> EvidenceAtom:
         if not isinstance(relation["claim_id"], str):
             raise EvidenceReconstructionError("atom relation claim_id is invalid")
         relations.append(EvidenceRelation(kind, relation["claim_id"]))
-    byte_range = evidence_row["byte_range"]
-    if (
-        not isinstance(byte_range, list)
-        or len(byte_range) != 2
-        or evidence_row["byte_coordinate_space"] != "logical_raw"
-    ):
-        raise EvidenceReconstructionError("atom evidence byte range is invalid")
-    entities = row["entities"]
-    if not isinstance(entities, list) or any(
-        not isinstance(entity, str) for entity in entities
-    ):
-        raise EvidenceReconstructionError("atom entities are invalid")
     string_fields = (
         row["atom_id"],
         row["episode_id"],
@@ -708,61 +1043,96 @@ def _parse_evidence_atom(value: object, index: int) -> EvidenceAtom:
         evidence_row["raw_id"],
         evidence_row["raw_sha256"],
         evidence_row["receipt_sha256"],
-        validity_row["start"],
-        validity_row["end"],
     )
-    if any(not isinstance(value, str) for value in string_fields):
+    if any(not isinstance(item, str) for item in string_fields):
         raise EvidenceReconstructionError("atom string field is invalid")
-    atom = build_evidence_atom(
-        episode_id=row["episode_id"],
-        claim=row["claim"],
-        entities=entities,
-        provenance=Provenance(
-            provenance_row["producer"],
-            provenance_row["source_event_id"],
-            provenance_row["source_role"],
-            provenance_row["event_index"],
-        ),
-        evidence=EvidenceRef(
-            evidence_row["raw_id"],
-            byte_range[0],
-            byte_range[1],
-            evidence_row["raw_sha256"],
-            evidence_row["receipt_sha256"],
-        ),
-        validity=TimeInterval(validity_row["start"], validity_row["end"]),
-        relations=relations,
+    provenance = Provenance(
+        provenance_row["producer"],
+        provenance_row["source_event_id"],
+        provenance_row["source_role"],
+        provenance_row["event_index"],
     )
+    evidence = EvidenceRef(
+        evidence_row["raw_id"],
+        byte_range[0],
+        byte_range[1],
+        evidence_row["raw_sha256"],
+        evidence_row["receipt_sha256"],
+    )
+    if not c2:
+        validity_row = _strict_fields(
+            row["validity"], {"start", "end"}, f"atoms[{index}].validity"
+        )
+        if not isinstance(validity_row["start"], str) or not isinstance(
+            validity_row["end"], str
+        ):
+            raise EvidenceReconstructionError("atom string field is invalid")
+        atom = build_evidence_atom(
+            episode_id=row["episode_id"],
+            claim=row["claim"],
+            entities=entities,
+            provenance=provenance,
+            evidence=evidence,
+            validity=TimeInterval(validity_row["start"], validity_row["end"]),
+            relations=relations,
+        )
+    else:
+        optional_strings = (row["event_time"], row["event_type"], row["phase"])
+        if any(
+            item is not None and not isinstance(item, str)
+            for item in optional_strings
+        ):
+            raise EvidenceReconstructionError("C2 atom optional field is invalid")
+        if not isinstance(row["recorded_at"], str) or not isinstance(
+            row["role"], str
+        ):
+            raise EvidenceReconstructionError("atom string field is invalid")
+        validity_value = row["validity"]
+        if validity_value is None:
+            validity = None
+        else:
+            validity_row = _strict_fields(
+                validity_value, {"start", "end"}, f"atoms[{index}].validity"
+            )
+            if not isinstance(validity_row["start"], str) or not isinstance(
+                validity_row["end"], str
+            ):
+                raise EvidenceReconstructionError(
+                    "fact validity timestamps are invalid"
+                )
+            validity = TimeInterval(validity_row["start"], validity_row["end"])
+        atom = build_evidence_atom_c2(
+            episode_id=row["episode_id"],
+            claim=row["claim"],
+            entities=entities,
+            provenance=provenance,
+            evidence=evidence,
+            event_time=row["event_time"],
+            recorded_at=row["recorded_at"],
+            validity=validity,
+            event_type=row["event_type"],
+            role=row["role"],
+            phase=row["phase"],
+            relations=relations,
+        )
     if row["atom_id"] != atom.atom_id:
         raise EvidenceReconstructionError("atom identity mismatch")
     return atom
 
 
-def load_episode_projection(source: bytes | Path) -> EpisodeProjection:
-    """Strictly load a canonical projection and revalidate every identity."""
-
-    if isinstance(source, Path):
-        try:
-            with open_regular_nofollow(source) as stream:
-                file_stat = os.fstat(stream.fileno())
-            return _load_episode_projection_path(
-                str(source.absolute()),
-                file_stat.st_dev,
-                file_stat.st_ino,
-                file_stat.st_mtime_ns,
-                file_stat.st_size,
-            )
-        except EvidenceReconstructionError:
-            raise
-        except (OSError, ValueError) as exc:
-            raise EvidenceReconstructionError(
-                "episode projection cannot be read"
-            ) from exc
+def _load_episode_projection_bytes(
+    raw: bytes, *, schema: str
+) -> EpisodeProjection:
     try:
-        raw = source
         payload = json.loads(raw)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise EvidenceReconstructionError("episode projection is invalid JSON") from exc
+    except (OSError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        message = (
+            "C2 episode projection is invalid JSON"
+            if schema == EPISODE_PROJECTION_C2_SCHEMA
+            else "episode projection is invalid JSON"
+        )
+        raise EvidenceReconstructionError(message) from exc
+    c2 = schema == EPISODE_PROJECTION_C2_SCHEMA
     root = _strict_fields(
         payload,
         {
@@ -772,12 +1142,15 @@ def load_episode_projection(source: bytes | Path) -> EpisodeProjection:
             "source_receipts",
             "atoms",
         },
-        "episode projection",
+        "C2 episode projection" if c2 else "episode projection",
     )
-    if root["schema"] != EPISODE_PROJECTION_SCHEMA:
-        raise EvidenceReconstructionError("episode projection schema is invalid")
-    raw_roles = root["evidence_authority_roles"]
-    if raw_roles != list(EVIDENCE_AUTHORITY_ROLES):
+    if root["schema"] != schema:
+        raise EvidenceReconstructionError(
+            "C2 episode projection schema is invalid"
+            if c2
+            else "episode projection schema is invalid"
+        )
+    if root["evidence_authority_roles"] != list(EVIDENCE_AUTHORITY_ROLES):
         raise EvidenceReconstructionError("projection evidence authority is invalid")
     raw_receipts = root["source_receipts"]
     raw_atoms = root["atoms"]
@@ -797,7 +1170,11 @@ def load_episode_projection(source: bytes | Path) -> EpisodeProjection:
     receipts: list[Mapping[str, Any]] = []
     receipt_by_raw_id: dict[str, Mapping[str, Any]] = {}
     for index, value in enumerate(raw_receipts):
-        receipt = _strict_fields(value, receipt_fields, f"source_receipts[{index}]")
+        receipt = _strict_fields(
+            value,
+            receipt_fields,
+            f"source_receipts[{index}]",
+        )
         raw_id = receipt["raw_id"]
         byte_range = receipt["byte_range"]
         line_range = receipt["source_line_range"]
@@ -836,7 +1213,8 @@ def load_episode_projection(source: bytes | Path) -> EpisodeProjection:
         receipts.append(canonical)
         receipt_by_raw_id[raw_id] = canonical
     atoms = tuple(
-        _parse_evidence_atom(value, index) for index, value in enumerate(raw_atoms)
+        _parse_evidence_atom(value, index, c2=c2)
+        for index, value in enumerate(raw_atoms)
     )
     if [row["raw_id"] for row in receipts] != sorted(receipt_by_raw_id):
         raise EvidenceReconstructionError("source receipts are not canonical")
@@ -851,6 +1229,7 @@ def load_episode_projection(source: bytes | Path) -> EpisodeProjection:
             or atom.evidence.raw_sha256 != bound_receipt["raw_sha256"]
             or atom.evidence.receipt_sha256 != bound_receipt["receipt_sha256"]
             or atom.evidence.byte_end > bound_receipt["byte_range"][1]
+            or (c2 and atom.recorded_at != bound_receipt["captured_at"])
         ):
             raise EvidenceReconstructionError("atom receipt binding is invalid")
         expected_episode = _identity(
@@ -863,7 +1242,7 @@ def load_episode_projection(source: bytes | Path) -> EpisodeProjection:
         if atom.episode_id != expected_episode:
             raise EvidenceReconstructionError("atom episode identity mismatch")
     unsigned = {
-        "schema": EPISODE_PROJECTION_SCHEMA,
+        "schema": schema,
         "evidence_authority_roles": list(EVIDENCE_AUTHORITY_ROLES),
         "source_receipts": [dict(row) for row in receipts],
         "atoms": [atom.to_dict() for atom in atoms],
@@ -876,10 +1255,68 @@ def load_episode_projection(source: bytes | Path) -> EpisodeProjection:
         EVIDENCE_AUTHORITY_ROLES,
         tuple(receipts),
         atoms,
+        schema,
     )
     if projection.canonical_bytes() != raw:
         raise EvidenceReconstructionError("episode projection is not canonical")
     return projection
+
+
+def load_episode_projection(source: bytes | Path) -> EpisodeProjection:
+    """Strictly load a canonical v1 projection and revalidate every identity."""
+
+    if isinstance(source, Path):
+        try:
+            with open_regular_nofollow(source) as stream:
+                file_stat = os.fstat(stream.fileno())
+            return _load_episode_projection_path(
+                str(source.absolute()),
+                file_stat.st_dev,
+                file_stat.st_ino,
+                file_stat.st_mtime_ns,
+                file_stat.st_size,
+            )
+        except EvidenceReconstructionError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise EvidenceReconstructionError(
+                "episode projection cannot be read"
+            ) from exc
+    return _load_episode_projection_bytes(source, schema=EPISODE_PROJECTION_SCHEMA)
+
+
+def load_episode_projection_c2(source: bytes | Path) -> EpisodeProjection:
+    """Strictly load the explicit C2 projection representation."""
+
+    if isinstance(source, Path):
+        try:
+            with open_regular_nofollow(source) as stream:
+                before = os.fstat(stream.fileno())
+                raw = stream.read()
+                after = os.fstat(stream.fileno())
+        except (OSError, ValueError) as exc:
+            raise EvidenceReconstructionError(
+                "C2 episode projection cannot be read"
+            ) from exc
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mtime_ns,
+            before.st_size,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mtime_ns,
+            after.st_size,
+        )
+        if before_identity != after_identity or len(raw) != before.st_size:
+            raise EvidenceReconstructionError(
+                "C2 episode projection changed while reading"
+            )
+    else:
+        raw = source
+    return _load_episode_projection_bytes(raw, schema=EPISODE_PROJECTION_C2_SCHEMA)
 
 
 @lru_cache(maxsize=2)
@@ -934,7 +1371,7 @@ def verify_projection_atom(raw_dir: Path, atom: EvidenceAtom) -> None:
     raw = store.read_bytes(unit)
     try:
         spans = raw_store.committed_event_spans(raw, commit.record_count)
-    except raw_store.RawSegmentCorrupt as exc:
+    except RawSegmentCorrupt as exc:
         raise EvidenceReconstructionError(str(exc)) from exc
     index = atom.provenance.event_index
     if index >= len(spans):
@@ -959,6 +1396,47 @@ def verify_projection_atom(raw_dir: Path, atom: EvidenceAtom) -> None:
     if expected != atom:
         raise EvidenceReconstructionError(
             "projection atom does not match committed Raw"
+        )
+
+
+def verify_projection_atom_c2(raw_dir: Path, atom: EvidenceAtom) -> None:
+    """Reconstruct one C2 atom from its committed Raw receipt."""
+
+    if atom.recorded_at is None:
+        raise EvidenceReconstructionError("C2 atom metadata is missing")
+    store = RawStore(raw_dir, mode="v2")
+    unit = store.resolve_segment(atom.evidence.raw_id)
+    if unit is None or unit.commit is None or unit.sha256 is None:
+        raise EvidenceReconstructionError("C2 projection atom Raw receipt is missing")
+    commit = unit.commit
+    raw = store.read_bytes(unit)
+    try:
+        spans = raw_store.committed_event_spans(raw, commit.record_count)
+    except RawSegmentCorrupt as exc:
+        raise EvidenceReconstructionError(str(exc)) from exc
+    index = atom.provenance.event_index
+    if index >= len(spans):
+        raise EvidenceReconstructionError("C2 projection atom event index is invalid")
+    start, encoded_event = spans[index]
+    if (start, start + len(encoded_event)) != (
+        atom.evidence.byte_start,
+        atom.evidence.byte_end,
+    ):
+        raise EvidenceReconstructionError("C2 projection atom byte range mismatch")
+    expected = _projection_atom_c2(
+        raw_id=unit.raw_id,
+        raw_sha256=unit.sha256,
+        receipt_sha256=canonical_json_sha256_strict(commit.to_dict()),
+        host=commit.host,
+        session_key=commit.session_key,
+        captured_at=commit.captured_at,
+        line=encoded_event,
+        index=index,
+        start=start,
+    )
+    if expected != atom:
+        raise EvidenceReconstructionError(
+            "C2 projection atom does not match committed Raw"
         )
 
 

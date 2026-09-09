@@ -28,6 +28,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from chronovisor.core.canonical_json import canonical_json_sha256_strict
 from chronovisor.core.durable_state import (
     DurableStateError,
     read_sealed_json,
@@ -1719,6 +1720,219 @@ def _latest_episode_rows(path: Path) -> list[dict[str, Any]]:
         if episode_id:
             latest[episode_id] = row
     return [latest[key] for key in sorted(latest)]
+
+
+def _turn_source_ref_identity(
+    turn_ref: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
+    """Normalize the immutable identity fields shared by captured turns."""
+
+    if not isinstance(turn_ref, Mapping):
+        return None, "turn_ref_invalid"
+    strings = ("session_id", "turn_id", "prompt_hash", "session_file")
+    identity: dict[str, Any] = {}
+    for key in strings:
+        value = turn_ref.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return None, "turn_ref_invalid"
+        identity[key] = value.strip()
+    try:
+        identity["session_file"] = str(
+            Path(identity["session_file"]).expanduser().resolve(strict=False)
+        )
+    except (OSError, ValueError):
+        return None, "turn_ref_invalid"
+    for key in ("user_line", "assistant_line"):
+        value = turn_ref.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            return None, "turn_ref_invalid"
+        identity[key] = value
+    if identity["assistant_line"] < identity["user_line"]:
+        return None, "turn_ref_invalid"
+    return identity, ""
+
+
+def _turn_source_hold(reason: str) -> dict[str, Any]:
+    return {"status": "held", "reason": reason, "source_refs": []}
+
+
+def _receipt_turn_source_refs(
+    receipt: Mapping[str, Any], *, start_line: int, end_line: int
+) -> tuple[list[dict[str, Any]], bytes, str]:
+    """Project an exact turn range from named committed Raw units only."""
+
+    chunks = receipt.get("chunks")
+    if not isinstance(chunks, list) or start_line <= 0 or end_line < start_line:
+        return [], b"", "save_receipt_chunks_missing"
+    refs: list[dict[str, Any]] = []
+    selected: list[bytes] = []
+    expected_line = start_line
+    for chunk in chunks:
+        if not isinstance(chunk, Mapping):
+            return [], b"", "save_receipt_chunk_invalid"
+        after_line = chunk.get("after_line")
+        until_line = chunk.get("until_line")
+        if (
+            not isinstance(after_line, int)
+            or isinstance(after_line, bool)
+            or not isinstance(until_line, int)
+            or isinstance(until_line, bool)
+            or until_line < expected_line
+            or after_line >= end_line
+        ):
+            continue
+        raw_id = str(chunk.get("raw_id") or "")
+        raw_dir = Path(str(chunk.get("raw_dir") or ""))
+        expected_sha = chunk.get("logical_sha256")
+        commit = chunk.get("commit")
+        if not raw_id or not _valid_sha(expected_sha) or not isinstance(commit, Mapping):
+            return [], b"", "save_receipt_chunk_invalid"
+        try:
+            store = RawStore(raw_dir, mode="v2")
+            unit = store.resolve(raw_id)
+            if unit is None or unit.commit is None or unit.commit.to_dict() != dict(commit):
+                return [], b"", "save_receipt_raw_missing"
+            logical = store.read_bytes(unit)
+            # EvidenceRef byte ranges are byte offsets in UTF-8 logical Raw,
+            # never character positions.  Reject non-UTF-8 rather than
+            # estimating offsets from a decoded replacement string.
+            logical.decode("utf-8")
+        except (OSError, UnicodeError, ValueError):
+            return [], b"", "save_receipt_raw_unavailable"
+        if hashlib.sha256(logical).hexdigest() != expected_sha:
+            return [], b"", "logical_digest_mismatch"
+        lines = logical.splitlines(keepends=True)
+        if len(lines) != until_line - after_line or any(
+            not line.endswith(b"\n") for line in lines
+        ):
+            return [], b"", "save_receipt_raw_line_count_mismatch"
+        slice_start = max(expected_line, after_line + 1)
+        slice_end = min(end_line, until_line)
+        if slice_start > slice_end:
+            continue
+        if slice_start != expected_line:
+            return [], b"", "save_receipt_turn_gap"
+        local_start = slice_start - after_line - 1
+        local_end = slice_end - after_line
+        byte_start = sum(len(line) for line in lines[:local_start])
+        byte_end = byte_start + sum(len(line) for line in lines[local_start:local_end])
+        if byte_end <= byte_start:
+            return [], b"", "save_receipt_turn_range_unknown"
+        selected.append(logical[byte_start:byte_end])
+        refs.append(
+            {
+                "raw_id": raw_id,
+                "byte_range": [byte_start, byte_end],
+                "byte_coordinate_space": "logical_raw",
+                "raw_sha256": expected_sha,
+                "receipt_sha256": canonical_json_sha256_strict(dict(commit)),
+            }
+        )
+        expected_line = slice_end + 1
+        if expected_line > end_line:
+            break
+    if expected_line != end_line + 1:
+        return [], b"", "save_receipt_turn_gap"
+    source = b"".join(selected)
+    try:
+        source.decode("utf-8")
+    except UnicodeDecodeError:
+        return [], b"", "save_receipt_raw_utf8_invalid"
+    return refs, source, ""
+
+
+def resolve_turn_source_refs(
+    *,
+    host: str,
+    turn_ref: Mapping[str, Any],
+    episode_file: Path = ANSWER_EPISODE_LEDGER,
+) -> dict[str, Any]:
+    """Resolve one exact captured turn to committed logical-Raw references.
+
+    Callers handling a content-correction event must pass its
+    ``correction_turn_ref``.  ``source_turn_ref`` identifies the prior turn
+    whose Recall may be corrected and is not evidence for the user's
+    correction prompt.
+    """
+
+    if not isinstance(host, str) or not host.strip():
+        return _turn_source_hold("turn_ref_invalid")
+    expected_ref, ref_error = _turn_source_ref_identity(turn_ref)
+    if ref_error or expected_ref is None:
+        return _turn_source_hold(ref_error or "turn_ref_invalid")
+    candidates: list[dict[str, Any]] = []
+    for episode in _latest_episode_rows(episode_file):
+        episode_ref = episode.get("turn_ref")
+        observed_ref, observed_error = _turn_source_ref_identity(
+            episode_ref if isinstance(episode_ref, Mapping) else {}
+        )
+        if (
+            not observed_error
+            and observed_ref == expected_ref
+            and episode.get("host") == host.strip()
+            and episode.get("canonical_session_id") == expected_ref["session_id"]
+        ):
+            candidates.append(episode)
+    if not candidates:
+        return _turn_source_hold("turn_episode_not_captured")
+    if len(candidates) != 1:
+        return _turn_source_hold("turn_episode_ambiguous")
+    episode = candidates[0]
+    episode_sha = episode.get("episode_sha256")
+    unsigned_episode = {
+        key: value for key, value in episode.items() if key != "episode_sha256"
+    }
+    if not _valid_sha(episode_sha) or episode_sha != _canonical_sha(unsigned_episode):
+        return _turn_source_hold("episode_integrity_mismatch")
+    raw_ref = episode.get("raw_ref")
+    if not isinstance(raw_ref, Mapping):
+        return _turn_source_hold("missing_raw_ref")
+    try:
+        raw_path = Path(str(raw_ref.get("transcript_path") or "")).expanduser()
+        raw_path = raw_path.resolve(strict=False)
+    except (OSError, ValueError):
+        return _turn_source_hold("raw_ref_session_file_mismatch")
+    if raw_path != Path(expected_ref["session_file"]).resolve(strict=False):
+        return _turn_source_hold("raw_ref_session_file_mismatch")
+    start_line = raw_ref.get("start_line")
+    end_line = raw_ref.get("end_line")
+    if start_line != expected_ref["user_line"] or end_line != expected_ref["assistant_line"]:
+        return _turn_source_hold("raw_ref_turn_range_mismatch")
+    receipt = raw_ref.get("save_receipt")
+    receipt_error = _receipt_error(
+        receipt if isinstance(receipt, Mapping) else {},
+        host=host.strip(),
+        session_file=raw_path,
+        session_id=expected_ref["session_id"],
+        user_line=start_line,
+        assistant_line=end_line,
+        require_live_source=False,
+    )
+    if receipt_error:
+        return _turn_source_hold(receipt_error)
+    # Do not use ``binding_status`` here: it also contains Recall/context
+    # conditions unrelated to whether this exact Raw source is sealed.
+    turn, turn_error = _load_bound_turn(episode)
+    if turn_error or turn is None:
+        return _turn_source_hold(turn_error or "turn_binding_mismatch")
+    restored_ref, restored_error = _turn_source_ref_identity(turn.turn_ref())
+    if restored_error or restored_ref != expected_ref:
+        return _turn_source_hold("turn_binding_mismatch")
+    refs, source, source_error = _receipt_turn_source_refs(
+        receipt if isinstance(receipt, Mapping) else {},
+        start_line=start_line,
+        end_line=end_line,
+    )
+    if source_error:
+        return _turn_source_hold(source_error)
+    expected_digest = raw_ref.get("transcript_slice_sha256")
+    if not _valid_sha(expected_digest) or hashlib.sha256(source).hexdigest() != expected_digest:
+        return _turn_source_hold("raw_digest_mismatch")
+    return {
+        "status": "ok",
+        "episode_id": str(episode.get("episode_id") or ""),
+        "source_refs": refs,
+    }
 
 
 def _episode_page_bindings(episode: Mapping[str, Any]) -> list[dict[str, str]]:

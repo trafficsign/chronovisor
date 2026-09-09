@@ -13,6 +13,7 @@ import pytest
 
 from chronovisor.core.durable_state import DurableStateError, seal_object
 from chronovisor.core.raw_segment import append_capture
+from chronovisor.core.raw_store import RawStore
 from chronovisor.recall import recall_answer_eval
 from chronovisor.recall.recall_runtime import stable_prompt_hash
 
@@ -1736,6 +1737,196 @@ def test_multichunk_receipt_binds_exact_chunks_and_survives_segment_append(
         user_line=1,
         assistant_line=2,
     ) == ""
+
+
+def _captured_turn_source_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, list[dict[str, Any]], list[bytes], dict[str, Any]]:
+    """Persist two turns, with the correction turn split across Raw units."""
+
+    session = tmp_path / "session.jsonl"
+    session_id = "session"
+    records = [
+        {
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": "/repo"},
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-09-09T00:00:00Z",
+            "payload": {"type": "message", "role": "user", "content": "source prompt"},
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-09-09T00:00:01Z",
+            "payload": {"type": "message", "role": "assistant", "content": "source answer"},
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-09-09T00:00:02Z",
+            "payload": {"type": "message", "role": "user", "content": "訂正: source answer is wrong"},
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-09-09T00:00:03Z",
+            "payload": {"type": "message", "role": "assistant", "content": "correction noted"},
+        },
+    ]
+    lines = [
+        (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+        for record in records
+    ]
+    session.write_bytes(b"".join(lines))
+    raw_dir = tmp_path / "raw"
+    results = []
+    for after_line, until_line in ((0, 4), (4, 5)):
+        transaction = recall_answer_eval.make_save_transaction(
+            host="codex",
+            session_file=session,
+            session_id=session_id,
+            after_line=after_line,
+            until_line=until_line,
+        )
+        results.append(
+            append_capture(
+                raw_dir=raw_dir,
+                raw_id=f"save-{transaction.idempotency_key}.md",
+                idempotency_key=transaction.idempotency_key,
+                host="codex",
+                session_key=transaction.session_key,
+                session_id=session_id,
+                source_file=session,
+                after_line=after_line,
+                until_line=until_line,
+                source_bytes=b"".join(lines[after_line:until_line]),
+                record_count=until_line - after_line,
+            ).to_result()
+        )
+    episodes = tmp_path / "episodes.jsonl"
+    capture = recall_answer_eval.capture_session_answer_episodes(
+        host="codex",
+        session_file=session,
+        episode_file=episodes,
+        cursor_file=tmp_path / "cursor.json",
+        recall_log_file=tmp_path / "recall.jsonl",
+        pull_log_file=tmp_path / "pull.jsonl",
+        save_output={
+            "status": "saved",
+            "session_file": str(session),
+            "session_id": session_id,
+            "after_line": 0,
+            "scanned_until_line": 5,
+            "chunk_count": 2,
+            "save_results": results,
+        },
+        raw_dir=raw_dir,
+    )
+    assert capture["captured"] == 2
+    rows = [json.loads(line) for line in episodes.read_text(encoding="utf-8").splitlines()]
+    return episodes, raw_dir, rows, lines, {"host": "codex", "session_id": session_id}
+
+
+def test_resolve_turn_source_refs_uses_correction_turn_and_committed_multichunk_raw(
+    tmp_path: Path,
+) -> None:
+    episodes, raw_dir, rows, lines, event = _captured_turn_source_fixture(tmp_path)
+    source = next(row for row in rows if row["turn_ref"]["user_line"] == 2)
+    correction = next(row for row in rows if row["turn_ref"]["user_line"] == 4)
+    event["source_turn_ref"] = source["turn_ref"]
+    event["correction_turn_ref"] = correction["turn_ref"]
+
+    resolved = recall_answer_eval.resolve_turn_source_refs(
+        host=event["host"],
+        turn_ref=event["correction_turn_ref"],
+        episode_file=episodes,
+    )
+
+    assert correction["binding_status"] == "unknown"
+    assert resolved["status"] == "ok"
+    assert resolved["episode_id"] == correction["episode_id"]
+    refs = resolved["source_refs"]
+    assert len(refs) == 2
+    restored = b""
+    for ref in refs:
+        assert ref["byte_coordinate_space"] == "logical_raw"
+        unit = RawStore(raw_dir, mode="v2").resolve(ref["raw_id"])
+        assert unit is not None and unit.commit is not None
+        logical = RawStore(raw_dir, mode="v2").read_bytes(unit)
+        start, end = ref["byte_range"]
+        restored += logical[start:end]
+        assert ref["raw_sha256"] == hashlib.sha256(logical).hexdigest()
+        assert ref["receipt_sha256"] == recall_answer_eval.canonical_json_sha256_strict(
+            unit.commit.to_dict()
+        )
+    assert restored == b"".join(lines[3:5])
+    assert b"source prompt" not in restored
+    assert "訂正".encode() in restored
+
+
+def test_resolve_turn_source_refs_holds_for_missing_ambiguous_and_tampered_rows(
+    tmp_path: Path,
+) -> None:
+    episodes, _raw_dir, rows, _lines, event = _captured_turn_source_fixture(tmp_path)
+    correction = next(row for row in rows if row["turn_ref"]["user_line"] == 4)
+
+    missing = recall_answer_eval.resolve_turn_source_refs(
+        host=event["host"],
+        turn_ref=correction["turn_ref"],
+        episode_file=tmp_path / "not-captured.jsonl",
+    )
+    assert missing == {
+        "status": "held",
+        "reason": "turn_episode_not_captured",
+        "source_refs": [],
+    }
+
+    duplicate = dict(correction)
+    duplicate["episode_id"] = "different-episode-id"
+    duplicate["episode_sha256"] = recall_answer_eval._canonical_sha(
+        {key: value for key, value in duplicate.items() if key != "episode_sha256"}
+    )
+    _write_rows(episodes, [*rows, duplicate])
+    ambiguous = recall_answer_eval.resolve_turn_source_refs(
+        host=event["host"], turn_ref=correction["turn_ref"], episode_file=episodes
+    )
+    assert ambiguous["status"] == "held"
+    assert ambiguous["reason"] == "turn_episode_ambiguous"
+
+    tampered = dict(correction)
+    tampered_raw_ref = dict(tampered["raw_ref"])
+    tampered_raw_ref["transcript_slice_sha256"] = "0" * 64
+    tampered["raw_ref"] = tampered_raw_ref
+    tampered["episode_sha256"] = recall_answer_eval._canonical_sha(
+        {key: value for key, value in tampered.items() if key != "episode_sha256"}
+    )
+    _write_rows(episodes, [tampered])
+    invalid = recall_answer_eval.resolve_turn_source_refs(
+        host=event["host"], turn_ref=correction["turn_ref"], episode_file=episodes
+    )
+    assert invalid["status"] == "held"
+    assert invalid["reason"] == "raw_digest_mismatch"
+
+    legacy = copy.deepcopy(correction)
+    legacy_receipt = legacy["raw_ref"]["save_receipt"]
+    legacy_receipt["chunks"][0]["storage"] = "legacy_file"
+    legacy_receipt["receipt_manifest_sha256"] = recall_answer_eval._canonical_sha(
+        {
+            key: value
+            for key, value in legacy_receipt.items()
+            if key != "receipt_manifest_sha256"
+        }
+    )
+    legacy["episode_sha256"] = recall_answer_eval._canonical_sha(
+        {key: value for key, value in legacy.items() if key != "episode_sha256"}
+    )
+    _write_rows(episodes, [legacy])
+    unavailable = recall_answer_eval.resolve_turn_source_refs(
+        host=event["host"], turn_ref=correction["turn_ref"], episode_file=episodes
+    )
+    assert unavailable["status"] == "held"
+    assert unavailable["reason"] == "save_receipt_chunk_invalid"
 
 
 def test_capture_all_complete_turns_is_exact_once_and_binds_used_subset(

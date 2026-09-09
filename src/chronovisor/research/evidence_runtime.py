@@ -24,6 +24,8 @@ from chronovisor.core import (
     store,
 )
 from chronovisor.research.evidence_reconstruction import (
+    EPISODE_PROJECTION_C2_SCHEMA,
+    EPISODE_PROJECTION_SCHEMA,
     EVALUATION_CONTRACT,
     EVALUATION_CONTRACT_SHA256,
     EVIDENCE_AUTHORITY_ROLES,
@@ -42,11 +44,13 @@ from chronovisor.research.evidence_reconstruction import (
     build_episode_projection,
     build_evidence_atom,
     build_evidence_packet,
+    build_evidence_packet_c2,
     committed_raw_watermark,
     compile_retrieval_program,
     load_episode_projection,
     physical_raw_inventory,
     verify_projection_atom,
+    verify_projection_atom_c2,
 )
 from chronovisor.research.research_tools import (
     Action,
@@ -349,6 +353,7 @@ class EvidenceLedger:
         }
         self._future: dict[str, int] = dict.fromkeys(self._atoms, 0)
         self._expired: dict[str, int] = dict.fromkeys(self._atoms, 0)
+        self._unknown_validity: dict[str, int] = dict.fromkeys(self._atoms, 0)
 
     def add(self, slot_id: str, atom: EvidenceAtom) -> bool:
         if slot_id not in self._atoms:
@@ -363,6 +368,11 @@ class EvidenceLedger:
         ):
             return False
         if requirement.must_match_as_of:
+            if atom.validity is None:
+                # C2 deliberately keeps event_time and fact validity separate;
+                # a missing fact interval is held for as_of requests.
+                self._unknown_validity[slot_id] += 1
+                return False
             start = datetime.fromisoformat(atom.validity.start.replace("Z", "+00:00"))
             end = datetime.fromisoformat(atom.validity.end.replace("Z", "+00:00"))
             as_of = datetime.fromisoformat(self.program.as_of.replace("Z", "+00:00"))
@@ -419,7 +429,7 @@ class EvidenceLedger:
             )
         }
         covered = len(covered_atoms) >= requirement.minimum_atoms and not contradiction
-        return {
+        state = {
             "covered": covered,
             "contradiction": contradiction,
             "as_of_satisfied": covered,
@@ -429,6 +439,11 @@ class EvidenceLedger:
             "expired_count": self._expired[slot_id],
             "superseded_count": len(superseded),
         }
+        # Keep v1 snapshots byte-compatible; expose this only when C2 has
+        # actually observed an unknown validity interval.
+        if self._unknown_validity[slot_id]:
+            state["unknown_validity_count"] = self._unknown_validity[slot_id]
+        return state
 
     def gaps(self) -> tuple[str, ...]:
         return tuple(
@@ -454,6 +469,7 @@ class EvidenceLedger:
             (
                 self.slot_state(slot.slot_id)["future_count"] > 0
                 or self.slot_state(slot.slot_id)["expired_count"] > 0
+                or self.slot_state(slot.slot_id).get("unknown_validity_count", 0) > 0
             )
             and self.slot_state(slot.slot_id)["covered_atom_count"] == 0
             for slot in self.program.claim_slots
@@ -671,12 +687,15 @@ def _raw_search_atoms(
                 atom.evidence.byte_start < byte_end
                 and byte_start < atom.evidence.byte_end
             ):
-                verify_projection_atom(raw_dir, atom)
+                if atom.recorded_at is None:
+                    verify_projection_atom(raw_dir, atom)
+                else:
+                    verify_projection_atom_c2(raw_dir, atom)
                 selected[atom.atom_id] = atom
     return tuple(sorted(selected.values(), key=lambda atom: atom.atom_id))
 
 
-def run_evidence_retrieval(
+def _run_evidence_retrieval(
     program: RetrievalProgram,
     projection: EpisodeProjection,
     *,
@@ -684,6 +703,7 @@ def run_evidence_retrieval(
     actions: Sequence[tuple[str, Action]] = (),
     raw_dir: Path | None = None,
     deadline_ms: int = 4_000,
+    _c2: bool = False,
 ) -> EvidenceRun:
     """Run projection first, then local tools only for remaining claim slots."""
 
@@ -691,6 +711,11 @@ def run_evidence_retrieval(
         projection, EpisodeProjection
     ):
         raise EvidenceReconstructionError("runtime contract identity is invalid")
+    projection_schema = (
+        EPISODE_PROJECTION_C2_SCHEMA if _c2 else EPISODE_PROJECTION_SCHEMA
+    )
+    if projection.schema != projection_schema:
+        raise EvidenceReconstructionError("runtime projection schema is invalid")
     rebuilt_program = compile_retrieval_program(
         program.query,
         {
@@ -776,7 +801,8 @@ def run_evidence_retrieval(
         stop_reason = abstention_reason = "action_exhausted"
     else:
         stop_reason = abstention_reason = "missing_required_evidence"
-    packet = build_evidence_packet(
+    packet_builder = build_evidence_packet_c2 if _c2 else build_evidence_packet
+    packet = packet_builder(
         query=program.query,
         as_of=program.as_of,
         retrieval_program_id=program.program_id,
@@ -810,6 +836,54 @@ def run_evidence_retrieval(
         "raw_relation_mode": "supports-only",
     }
     return EvidenceRun(packet, stop_reason, trace, telemetry)
+
+
+def run_evidence_retrieval(
+    program: RetrievalProgram,
+    projection: EpisodeProjection,
+    *,
+    tool_context: ToolContext | None = None,
+    actions: Sequence[tuple[str, Action]] = (),
+    raw_dir: Path | None = None,
+    deadline_ms: int = 4_000,
+) -> EvidenceRun:
+    """Run projection-first retrieval against the fixed v1 projection."""
+
+    return _run_evidence_retrieval(
+        program,
+        projection,
+        tool_context=tool_context,
+        actions=actions,
+        raw_dir=raw_dir,
+        deadline_ms=deadline_ms,
+        _c2=False,
+    )
+
+
+def run_evidence_retrieval_c2(
+    program: RetrievalProgram,
+    projection: EpisodeProjection,
+    *,
+    tool_context: ToolContext | None = None,
+    actions: Sequence[tuple[str, Action]] = (),
+    raw_dir: Path | None = None,
+    deadline_ms: int = 4_000,
+) -> EvidenceRun:
+    """Run the same local Ledger against an explicitly loaded C2 projection."""
+
+    if not isinstance(projection, EpisodeProjection) or (
+        projection.schema != EPISODE_PROJECTION_C2_SCHEMA
+    ):
+        raise EvidenceReconstructionError("C2 runtime projection schema is invalid")
+    return _run_evidence_retrieval(
+        program,
+        projection,
+        tool_context=tool_context,
+        actions=actions,
+        raw_dir=raw_dir,
+        deadline_ms=deadline_ms,
+        _c2=True,
+    )
 
 
 def raw_gap_actions(program: RetrievalProgram) -> tuple[tuple[str, Action], ...]:
