@@ -1,0 +1,39 @@
+{
+  "schema": "chronovisor.source-span-preregistration.v1",
+  "recorded_at": "2026-09-09T09:13:24.537992+00:00",
+  "candidate_sha256": "7e1a88ca2422068f3ee3f114766442486babb05364051d0de0e48ecaedc9a50d",
+  "source_root_sha256": "7582b9efe18a53c9502c30e8dd8f28c59f631bb689b896e1df6000b894c1e6e6",
+  "index_input_snapshot_sha256": "caac5c5d769fe729c59687c4f5d57a89e2969ca7aa9bab2eed411ffe7d9bbc0f",
+  "source_manifest_sha256": "ca4c4e27a51afb69b83138e92400bd79ba0fed7421399b3ea5b799c41980937c",
+  "preregistered_at": "2026-09-09T09:00:49.118610+00:00",
+  "candidates": 270,
+  "source_components": 270,
+  "synthetic_queries": 270,
+  "query_exact_match_in_frozen_sources": 0,
+  "source_span_validation_errors": 0,
+  "splits": {
+    "dev": {
+      "ja": 20,
+      "en": 20,
+      "cross": 20
+    },
+    "holdout": {
+      "ja": 40,
+      "en": 40,
+      "cross": 40
+    },
+    "locked": {
+      "ja": 30,
+      "en": 30,
+      "cross": 30
+    }
+  },
+  "split_epoch_id": "7cfceb10dd838e19c6f987923c718f5c7ea7ac6be61c8aae7c28d1526dd9b38d",
+  "label_status": "formal source review in progress; 1 approved, 269 pending",
+  "quality_results_observed": false,
+  "source_capture": "per-page stable bytes, not atomic global live snapshot",
+  "sampling": "hash ordered distinct components; source bodies 800..14000 bytes, full 7812-page retrieval corpus",
+  "component_rule": "same source page, explicit shared transcript identity, or shared verbatim paragraph >=250 chars; unknown lineage not invented",
+  "unknown_as_of": null,
+  "scope": "candidate preregistration; not reviewed gold or adoption completion"
+}
