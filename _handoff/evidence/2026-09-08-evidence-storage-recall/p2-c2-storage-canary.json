@@ -1,0 +1,52 @@
+{
+  "schema": "chronovisor.c2-storage-canary.v1",
+  "observed_at": "2026-09-09T15:56:30.659423+00:00",
+  "status": "functional_canary_passed",
+  "commit": "82a2ef9",
+  "release_candidate": "e5ac958",
+  "tests": {
+    "triage_and_ingest": 498,
+    "evidence_native_and_consumer": 69,
+    "cli_targeted_recheck": 9,
+    "release_candidate_evidence_native_and_consumer": 69,
+    "mypy_source_files": 3,
+    "ruff": "passed",
+    "test_count_note": "Separate runs include overlapping tests; counts are not summed."
+  },
+  "model_trial": {
+    "provider": "omlx",
+    "model": "qwen3.8-flash-next-chat",
+    "location": "local",
+    "elapsed_seconds": 97.146,
+    "first_pass_valid": true,
+    "repair_turns": 0,
+    "source_records": 3,
+    "semantic_rows": 5,
+    "artifact_id": "sha256:abc26ba64b094e8d8f703ce76519c510f12410c7f1d756824607149ab25d0bc1",
+    "config_sha256": "d2b78afc2e5615a4f2956ed7d6e6b6ade658c435e1acc411687aba528b0797fd"
+  },
+  "consumer": {
+    "selected_native_atoms": 3,
+    "native_atoms_unchanged": true,
+    "native_projection_readback": true,
+    "source_quote_probes": 5,
+    "bounded_context_probe_count": 4,
+    "held_probe_count": 1,
+    "held_reason": "Source-role authority excludes the user proposal from assistant evidence; no authority promotion.",
+    "maximum_context_chars": 1544
+  },
+  "production_raw_unchanged": true,
+  "production_c2_enabled": false,
+  "source_raw_sha256": "a79b9647c624defd8d3b79deee58a109ec0046465b619c015cabeb3bb764421b",
+  "limitations": [
+    "semantic classification quality not evaluated",
+    "no automatic supersession overlay",
+    "as_of acceptance not asserted for unknown validity",
+    "source-quote probes are integration canaries, not heldout retrieval quality",
+    "97.146 seconds is one background storage call including runtime overhead, not L2 latency or a per-page forecast"
+  ],
+  "private_receipts": {
+    "triage-live-v2-receipt.json": "19749be9b947dbe9a1a28ae6d96052317383620ec76f8643be2c3213fb7447ce",
+    "triage-live-consumer-receipt.json": "5d864eedd0eb98d9daa4a6ccd93eab4675f0c09e703406e63d78fc9cecacf2cb"
+  }
+}

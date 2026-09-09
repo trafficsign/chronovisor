@@ -1,0 +1,56 @@
+{
+  "schema": "chronovisor.evidence-storage-run-disposition.v1",
+  "observed_at": "2026-09-09T15:46:03.174960+00:00",
+  "status": "execution_invalid",
+  "reason": "missing_lexical_snapshot_in_all_private_arms",
+  "quality_comparison_valid": false,
+  "candidate_adoption_decided": false,
+  "source_gold_changed": false,
+  "budgets_changed": false,
+  "repetitions_observed": [
+    {
+      "repetition": "rep1",
+      "raw_sha256": "514f67d4cb2275e31996623a2a55994281fd8e7b6937ea09fce87e8bc7d02165",
+      "arms": {
+        "A": {
+          "observations": 120,
+          "semantic_rpc_count": 0,
+          "all_normal_empty": true
+        },
+        "B": {
+          "observations": 120,
+          "semantic_rpc_count": 0,
+          "all_normal_empty": true
+        },
+        "C": {
+          "observations": 120,
+          "semantic_rpc_count": 0,
+          "all_normal_empty": true
+        }
+      }
+    },
+    {
+      "repetition": "rep2",
+      "raw_sha256": "14e81476fc2fb0554a55074cf409fd680f9fd0306f702213a1fd2286f1b78aea",
+      "arms": {
+        "A": {
+          "observations": 120,
+          "semantic_rpc_count": 0,
+          "all_normal_empty": true
+        },
+        "B": {
+          "observations": 120,
+          "semantic_rpc_count": 0,
+          "all_normal_empty": true
+        },
+        "C": {
+          "observations": 120,
+          "semantic_rpc_count": 0,
+          "all_normal_empty": true
+        }
+      }
+    }
+  ],
+  "next_action": "Build lexical snapshots from the frozen source and verify actual Recall execution before a separately bound rerun.",
+  "note": "These empty observations do not establish the relative quality of A, B or C1."
+}
