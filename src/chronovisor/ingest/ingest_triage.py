@@ -11,6 +11,12 @@ from typing import Any
 
 from chronovisor.core import ollama as ollama_runtime
 from chronovisor.core.canonical_json import canonical_json_sha256_strict
+from chronovisor.core.triage_contract import (
+    quote_span_payload as _c2_quote_span_payload,
+)
+from chronovisor.core.triage_contract import (
+    unique_quote_byte_range as _c2_quote_span,
+)
 from chronovisor.decision.local_structured import (
     ChatTransport,
     ValidationIssue,
@@ -234,38 +240,6 @@ def _c2_source_records_sha256(records: Sequence[_C2SourceRecord]) -> str:
     return canonical_json_sha256_strict(
         [{"record_id": record.record_id, "text": record.text} for record in records]
     )
-
-
-def _c2_quote_span(text: str, quote: str) -> tuple[int, int] | None:
-    """Return a unique UTF-8 span; overlapping matches are ambiguous too."""
-
-    if not quote:
-        return None
-    start = text.find(quote)
-    if start < 0:
-        return None
-    if text.find(quote, start + 1) >= 0:
-        return None
-    byte_start = len(text[:start].encode("utf-8"))
-    byte_end = byte_start + len(quote.encode("utf-8"))
-    return byte_start, byte_end
-
-
-def _c2_quote_span_payload(
-    text: str,
-    quote: str | None,
-) -> dict[str, Any] | None:
-    if quote is None:
-        return None
-    span = _c2_quote_span(text, quote)
-    if span is None:
-        raise ValueError("C2 semantic quote is missing or ambiguous")
-    byte_start, byte_end = span
-    return {
-        "byte_range": [byte_start, byte_end],
-        "byte_coordinate_space": "decoded_source_text_utf8",
-        "span_sha256": hashlib.sha256(quote.encode("utf-8")).hexdigest(),
-    }
 
 
 def _c2_semantic_issue(
