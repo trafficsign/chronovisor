@@ -33,7 +33,9 @@
     "bounded_context_probe_count": 4,
     "held_probe_count": 1,
     "held_reason": "Source-role authority excludes the user proposal from assistant evidence; no authority promotion.",
-    "maximum_context_chars": 1544
+    "maximum_context_chars": 1544,
+    "must_match_as_of": false,
+    "normal_as_of_policy_tested": false
   },
   "production_raw_unchanged": true,
   "production_c2_enabled": false,
