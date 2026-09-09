@@ -4122,7 +4122,11 @@ def _run_distilled_fast_path(
         decision_id=active_request.decision_id,
     )
     try:
-        result.context = format_recall_context(result, policy)
+        _state_context, _recall_context, result.context = _render_final_context(
+            result,
+            active_request=active_request,
+            policy=replace(policy, max_state_context_chars=0),
+        )
     except Exception:
         trace.update(status="abstained", fallback="fast_path_error", candidate_count=len(scored))
         return finish(RecallResult(

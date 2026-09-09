@@ -1,0 +1,729 @@
+{
+  "aggregate": {
+    "aggregate_decisions": {
+      "B": {
+        "adoptable": false,
+        "answer_scoring": "deferred",
+        "primary_passed_all_three": false,
+        "primary_passed_by_rep": [
+          false,
+          false,
+          false
+        ],
+        "reason": "answer_scoring_deferred"
+      },
+      "C": {
+        "adoptable": false,
+        "answer_scoring": "deferred",
+        "primary_passed_all_three": false,
+        "primary_passed_by_rep": [
+          false,
+          false,
+          false
+        ],
+        "reason": "answer_scoring_deferred"
+      }
+    },
+    "independent_case_units": 120,
+    "privacy": {
+      "formal_query_gold_read": true,
+      "gpu_calls_by_controller": 0,
+      "production_root_written": false,
+      "service_started_by_controller": false
+    },
+    "quality_status": "held_until_deferred_answer_scoring",
+    "repetitions_per_case_target": 3,
+    "schema": "chronovisor.p4-repeat-controller.v3",
+    "status": "completed"
+  },
+  "configuration": {
+    "by_arm": {
+      "A": {
+        "config_sha256": "539514217c0ac9bcdbbc7eca85ffce1684c1b4bb82352cbb2c7fbaf2ef8cbd4c",
+        "max_context_chars": 3000,
+        "max_state_context_chars": 1600,
+        "max_total_context_chars": 3000
+      },
+      "B": {
+        "config_sha256": "cba36c4a61ff3f25b76302f28ef692e92da031652c0be69bcf92960915a242b4",
+        "max_context_chars": 3000,
+        "max_state_context_chars": 1600,
+        "max_total_context_chars": 3000
+      },
+      "C": {
+        "config_sha256": "48dc49352d463b7b60e777471e0f33f6d58ec000e42eae5a47917cbb4f9ea315",
+        "max_context_chars": 3000,
+        "max_state_context_chars": 1600,
+        "max_total_context_chars": 3000
+      }
+    },
+    "final_renderer_callsites": [
+      2475,
+      4125,
+      4985
+    ],
+    "indirect_policy_identity_effect": true,
+    "max_total_reference_lines": [
+      396,
+      397,
+      398,
+      2128
+    ],
+    "p4_adapter_session_scope": "unique per case and arm; processor disabled",
+    "runtime_source_file_sha256": "252176ecd6847862f688059b91d3eb2f464dea1d16d67120b55449c770b1f6fb",
+    "search_policy_or_candidate_reference_found": false,
+    "working_memory_is_non_evidence": true
+  },
+  "contract_validation": {
+    "active_pointer": {
+      "entry_count": 270,
+      "manifest_sha256": "59870e8e417b1ec51e4198460f5fb46b5d3e0899bafc16f2d9ed5302d2c0f744",
+      "passed": true,
+      "reason": "verified_source_span_query_benchmark",
+      "split_epoch_id": "7cfceb10dd838e19c6f987923c718f5c7ea7ac6be61c8aae7c28d1526dd9b38d"
+    },
+    "epoch": {
+      "entry_count": 270,
+      "manifest_sha256": "59870e8e417b1ec51e4198460f5fb46b5d3e0899bafc16f2d9ed5302d2c0f744",
+      "passed": true,
+      "reason": "verified_source_span_query_benchmark",
+      "split_epoch_id": "7cfceb10dd838e19c6f987923c718f5c7ea7ac6be61c8aae7c28d1526dd9b38d"
+    },
+    "frozen_corpus": {
+      "manifest_file_sha256": "ca4c4e27a51afb69b83138e92400bd79ba0fed7421399b3ea5b799c41980937c",
+      "page_count": 7812,
+      "snapshot_file_sha256": "caac5c5d769fe729c59687c4f5d57a89e2969ca7aa9bab2eed411ffe7d9bbc0f"
+    },
+    "source_ledger": {
+      "consensus_file_sha256": "53e2986e75ae78a1f5d7858419b50041dc557f6a61abc4af58d01e2d64f631d8",
+      "entry_count": 270,
+      "ledger_file_sha256": "3e6f25f9b992d2a59d8f06aa11dade257f84687376aaeea5b982c6a27f2e5624",
+      "manifest_sha256": "cb907ce16f6774dd86e5db173e823e5656b40d3d23e504ad325f25997592b7ef",
+      "passed": true,
+      "reason": "verified_source_span_query_ledger"
+    }
+  },
+  "created_at": "2026-09-09T17:44:24.063376Z",
+  "interpretation": {
+    "B_vs_A_gate_threshold_pp": 5.0,
+    "B_vs_A_upper_bound_below_gate": true,
+    "C_absolute_full_coverage_count_per_rep": 0,
+    "answer_scoring": "deferred_pre_registered_after_primary_failure",
+    "latency": "old_capture_values_preserved; corrected_render_latency_not_measured",
+    "no_source_query_gold_or_threshold_changes": true,
+    "observed_old_B_vs_A_full_coverage_point_pp": 0.8333333333333334,
+    "recall_only_B_vs_A_full_coverage_point_pp": 0.8333333333333334,
+    "recall_only_C_vs_B_full_coverage_point_pp": -0.8333333333333334
+  },
+  "per_rep_audit": [
+    {
+      "coverage_increase_rows": 0,
+      "old": {
+        "A": {
+          "budget_exceeded": 7,
+          "full": 0,
+          "rows": 120,
+          "source_consistent": 119
+        },
+        "B": {
+          "budget_exceeded": 7,
+          "full": 1,
+          "rows": 120,
+          "source_consistent": 120
+        },
+        "C": {
+          "budget_exceeded": 8,
+          "full": 0,
+          "rows": 120,
+          "source_consistent": 120
+        }
+      },
+      "protocol_sha256": "dd3800c7af9053a652b84b2ff8143504c2e4a4565a6225223bb454a4fa5b9315",
+      "raw_sha256": "6f581c12e3e3a75f12471026a791d437ac37c051ef12983031ce5d17cf99cd83",
+      "recall_block_chars": {
+        "max": 2993,
+        "p50": 0.0,
+        "p95": 1500
+      },
+      "recall_block_missing_rows": 338,
+      "recall_block_over_3000_rows": 0,
+      "recall_only": {
+        "A": {
+          "budget_exceeded": 0,
+          "empty": 113,
+          "full": 0,
+          "rows": 120,
+          "source_consistent": 119,
+          "unknown": 1
+        },
+        "B": {
+          "budget_exceeded": 0,
+          "empty": 113,
+          "full": 1,
+          "rows": 120,
+          "source_consistent": 120,
+          "unknown": 0
+        },
+        "C": {
+          "budget_exceeded": 0,
+          "empty": 112,
+          "full": 0,
+          "rows": 120,
+          "source_consistent": 120,
+          "unknown": 0
+        }
+      },
+      "rep": "rep1",
+      "result_sha256": "fff4be898866f8fa22240fac8f0f3a7122f4aa24480936767594adf6b7052adb",
+      "result_status": "held"
+    },
+    {
+      "coverage_increase_rows": 0,
+      "old": {
+        "A": {
+          "budget_exceeded": 7,
+          "full": 0,
+          "rows": 120,
+          "source_consistent": 119
+        },
+        "B": {
+          "budget_exceeded": 8,
+          "full": 1,
+          "rows": 120,
+          "source_consistent": 120
+        },
+        "C": {
+          "budget_exceeded": 8,
+          "full": 0,
+          "rows": 120,
+          "source_consistent": 120
+        }
+      },
+      "protocol_sha256": "c94ab2369b31d5717ebb6756be6a11c178e6c58d07b095d25122da8e5bdccadc",
+      "raw_sha256": "9955bcb501a96b06ff0147cf04c42615a5adba1765a908a782be9004516c55f9",
+      "recall_block_chars": {
+        "max": 2993,
+        "p50": 0.0,
+        "p95": 1641
+      },
+      "recall_block_missing_rows": 337,
+      "recall_block_over_3000_rows": 0,
+      "recall_only": {
+        "A": {
+          "budget_exceeded": 0,
+          "empty": 113,
+          "full": 0,
+          "rows": 120,
+          "source_consistent": 119,
+          "unknown": 1
+        },
+        "B": {
+          "budget_exceeded": 0,
+          "empty": 112,
+          "full": 1,
+          "rows": 120,
+          "source_consistent": 120,
+          "unknown": 0
+        },
+        "C": {
+          "budget_exceeded": 0,
+          "empty": 112,
+          "full": 0,
+          "rows": 120,
+          "source_consistent": 120,
+          "unknown": 0
+        }
+      },
+      "rep": "rep2",
+      "result_sha256": "6a6f045b55eca76f32a4c3ee894af7d123aeea5a6c76ee20591fb2986535546f",
+      "result_status": "held"
+    },
+    {
+      "coverage_increase_rows": 0,
+      "old": {
+        "A": {
+          "budget_exceeded": 7,
+          "full": 0,
+          "rows": 120,
+          "source_consistent": 119
+        },
+        "B": {
+          "budget_exceeded": 8,
+          "full": 1,
+          "rows": 120,
+          "source_consistent": 120
+        },
+        "C": {
+          "budget_exceeded": 8,
+          "full": 0,
+          "rows": 120,
+          "source_consistent": 120
+        }
+      },
+      "protocol_sha256": "85de739ffdbdc37e3a1ae08ffa288aa5b457db67f7217eea98ddbf6949ac167b",
+      "raw_sha256": "007b7e8e5957b475902f066c8cf3465cdd6740c916358d5bca918c69f1b80c24",
+      "recall_block_chars": {
+        "max": 2993,
+        "p50": 0.0,
+        "p95": 1641
+      },
+      "recall_block_missing_rows": 337,
+      "recall_block_over_3000_rows": 0,
+      "recall_only": {
+        "A": {
+          "budget_exceeded": 0,
+          "empty": 113,
+          "full": 0,
+          "rows": 120,
+          "source_consistent": 119,
+          "unknown": 1
+        },
+        "B": {
+          "budget_exceeded": 0,
+          "empty": 112,
+          "full": 1,
+          "rows": 120,
+          "source_consistent": 120,
+          "unknown": 0
+        },
+        "C": {
+          "budget_exceeded": 0,
+          "empty": 112,
+          "full": 0,
+          "rows": 120,
+          "source_consistent": 120,
+          "unknown": 0
+        }
+      },
+      "rep": "rep3",
+      "result_sha256": "0a25d865835a0968fe941946cd00eb4a1f48de4faa1cee2fe990fd3dcd7e100e",
+      "result_status": "held"
+    }
+  ],
+  "protocol_audit": {
+    "case_count_by_rep": {
+      "rep1": 120,
+      "rep2": 120,
+      "rep3": 120
+    },
+    "common_identity_diff_keys": [],
+    "config_identity_file_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p4-runtime-20260909/p4-formal-protocols-persistent-total3000-v2-20260910/config-identity.json",
+    "config_identity_file_sha256": "b8f8fb8f6d951f32ffed761cdb08b4e840626a08bfe38e209add6603eacac1b5",
+    "config_identity_sha256": "0918b98ac3ccc1b4dee6d900a20b4899f42a1512e03a97f668eb1848f429ec3f",
+    "config_identity_sha256_semantics": "canonical JSON digest of config-identity body; file SHA is raw file digest",
+    "language_counts_by_rep": {
+      "rep1": {
+        "cross": 40,
+        "en": 40,
+        "ja": 40
+      },
+      "rep2": {
+        "cross": 40,
+        "en": 40,
+        "ja": 40
+      },
+      "rep3": {
+        "cross": 40,
+        "en": 40,
+        "ja": 40
+      }
+    },
+    "preregistered_before_run_all": true,
+    "protocol_file_sha256_by_rep": {
+      "rep1": "c731df7d4060052b92373db0305403683c6359d7021b53cd80195ba1c3731878",
+      "rep2": "5d8be72bbc2b58c7483e583bbb0940e324ce637f6618d3b2d35795ed0dd144a1",
+      "rep3": "406ce503ec29b16578d21f2e41c8a50cb20dd798f84a8ae3d6c4cc4049ba9315"
+    },
+    "protocol_sha256_by_rep": {
+      "rep1": "dd3800c7af9053a652b84b2ff8143504c2e4a4565a6225223bb454a4fa5b9315",
+      "rep2": "c94ab2369b31d5717ebb6756be6a11c178e6c58d07b095d25122da8e5bdccadc",
+      "rep3": "85de739ffdbdc37e3a1ae08ffa288aa5b457db67f7217eea98ddbf6949ac167b"
+    },
+    "protocol_sha256_semantics": "protocol_sha256 is canonical JSON body digest; protocol_file_sha256 is raw indented file digest"
+  },
+  "repetitions": [
+    {
+      "answer_accuracy": {
+        "B_vs_A": {
+          "n": 0,
+          "valid": false
+        },
+        "C_vs_B": {
+          "n": 0,
+          "valid": false
+        }
+      },
+      "execution_wall_ms": 738431.694,
+      "gates": {
+        "B": {
+          "answer_accuracy": false,
+          "answer_scores": false,
+          "coverage": false,
+          "false_injection_non_degrade": true,
+          "language_non_degrade": true,
+          "latency": false,
+          "passed": false,
+          "safety": false,
+          "warm": true
+        },
+        "C": {
+          "answer_accuracy": false,
+          "answer_scores": false,
+          "coverage": false,
+          "false_injection_non_degrade": true,
+          "language_non_degrade": false,
+          "latency": true,
+          "passed": false,
+          "safety": false,
+          "warm": false
+        }
+      },
+      "metrics": {
+        "A": {
+          "deadline_exceed_rate": 0.0,
+          "full_required_coverage_rate": 0.0,
+          "samples": 120,
+          "source_consistency_rate": 0.9916666666666667,
+          "timing_valid_rate": 1.0,
+          "wall_ms": {
+            "max": 2856.953,
+            "p50": 1126.39,
+            "p95": 1943.935
+          }
+        },
+        "B": {
+          "deadline_exceed_rate": 0.0,
+          "full_required_coverage_rate": 0.008333333333333333,
+          "samples": 120,
+          "source_consistency_rate": 1.0,
+          "timing_valid_rate": 1.0,
+          "wall_ms": {
+            "max": 2654.647,
+            "p50": 1128.887,
+            "p95": 1981.044
+          }
+        },
+        "C": {
+          "deadline_exceed_rate": 0.0,
+          "full_required_coverage_rate": 0.0,
+          "samples": 120,
+          "source_consistency_rate": 1.0,
+          "timing_valid_rate": 1.0,
+          "wall_ms": {
+            "max": 2934.339,
+            "p50": 1155.646,
+            "p95": 1837.242
+          }
+        }
+      },
+      "paired": {
+        "coverage_B_vs_A": {
+          "lcb95": 0.0,
+          "n": 120,
+          "point": 0.008333333333333333,
+          "repeats": 2000,
+          "seed": 1729,
+          "ucb95": 0.025,
+          "valid": true
+        },
+        "coverage_C_vs_B": {
+          "lcb95": -0.03333333333333333,
+          "n": 120,
+          "point": -0.008333333333333333,
+          "repeats": 2000,
+          "seed": 1730,
+          "ucb95": 0.0,
+          "valid": true
+        }
+      },
+      "protocol_sha256": "dd3800c7af9053a652b84b2ff8143504c2e4a4565a6225223bb454a4fa5b9315",
+      "raw_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p4-runtime-20260909/p4-formal-repeat-persistent-total3000-v2-20260910.rep1.raw.json",
+      "raw_sha256": "6f581c12e3e3a75f12471026a791d437ac37c051ef12983031ce5d17cf99cd83",
+      "rep": "rep1",
+      "result_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p4-runtime-20260909/p4-formal-repeat-persistent-total3000-v2-20260910.rep1.result.json",
+      "result_sha256": "fff4be898866f8fa22240fac8f0f3a7122f4aa24480936767594adf6b7052adb",
+      "status": "held"
+    },
+    {
+      "answer_accuracy": {
+        "B_vs_A": {
+          "n": 0,
+          "valid": false
+        },
+        "C_vs_B": {
+          "n": 0,
+          "valid": false
+        }
+      },
+      "execution_wall_ms": 749367.877,
+      "gates": {
+        "B": {
+          "answer_accuracy": false,
+          "answer_scores": false,
+          "coverage": false,
+          "false_injection_non_degrade": true,
+          "language_non_degrade": true,
+          "latency": true,
+          "passed": false,
+          "safety": false,
+          "warm": true
+        },
+        "C": {
+          "answer_accuracy": false,
+          "answer_scores": false,
+          "coverage": false,
+          "false_injection_non_degrade": true,
+          "language_non_degrade": false,
+          "latency": true,
+          "passed": false,
+          "safety": false,
+          "warm": false
+        }
+      },
+      "metrics": {
+        "A": {
+          "deadline_exceed_rate": 0.0,
+          "full_required_coverage_rate": 0.0,
+          "samples": 120,
+          "source_consistency_rate": 0.9916666666666667,
+          "timing_valid_rate": 1.0,
+          "wall_ms": {
+            "max": 2484.299,
+            "p50": 1138.315,
+            "p95": 1992.421
+          }
+        },
+        "B": {
+          "deadline_exceed_rate": 0.0,
+          "full_required_coverage_rate": 0.008333333333333333,
+          "samples": 120,
+          "source_consistency_rate": 1.0,
+          "timing_valid_rate": 1.0,
+          "wall_ms": {
+            "max": 2617.526,
+            "p50": 1160.009,
+            "p95": 1934.891
+          }
+        },
+        "C": {
+          "deadline_exceed_rate": 0.0,
+          "full_required_coverage_rate": 0.0,
+          "samples": 120,
+          "source_consistency_rate": 1.0,
+          "timing_valid_rate": 1.0,
+          "wall_ms": {
+            "max": 2745.712,
+            "p50": 1194.243,
+            "p95": 1764.942
+          }
+        }
+      },
+      "paired": {
+        "coverage_B_vs_A": {
+          "lcb95": 0.0,
+          "n": 120,
+          "point": 0.008333333333333333,
+          "repeats": 2000,
+          "seed": 1730,
+          "ucb95": 0.03333333333333333,
+          "valid": true
+        },
+        "coverage_C_vs_B": {
+          "lcb95": -0.025,
+          "n": 120,
+          "point": -0.008333333333333333,
+          "repeats": 2000,
+          "seed": 1731,
+          "ucb95": 0.0,
+          "valid": true
+        }
+      },
+      "protocol_sha256": "c94ab2369b31d5717ebb6756be6a11c178e6c58d07b095d25122da8e5bdccadc",
+      "raw_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p4-runtime-20260909/p4-formal-repeat-persistent-total3000-v2-20260910.rep2.raw.json",
+      "raw_sha256": "9955bcb501a96b06ff0147cf04c42615a5adba1765a908a782be9004516c55f9",
+      "rep": "rep2",
+      "result_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p4-runtime-20260909/p4-formal-repeat-persistent-total3000-v2-20260910.rep2.result.json",
+      "result_sha256": "6a6f045b55eca76f32a4c3ee894af7d123aeea5a6c76ee20591fb2986535546f",
+      "status": "held"
+    },
+    {
+      "answer_accuracy": {
+        "B_vs_A": {
+          "n": 0,
+          "valid": false
+        },
+        "C_vs_B": {
+          "n": 0,
+          "valid": false
+        }
+      },
+      "execution_wall_ms": 726785.666,
+      "gates": {
+        "B": {
+          "answer_accuracy": false,
+          "answer_scores": false,
+          "coverage": false,
+          "false_injection_non_degrade": true,
+          "language_non_degrade": true,
+          "latency": false,
+          "passed": false,
+          "safety": false,
+          "warm": false
+        },
+        "C": {
+          "answer_accuracy": false,
+          "answer_scores": false,
+          "coverage": false,
+          "false_injection_non_degrade": true,
+          "language_non_degrade": false,
+          "latency": true,
+          "passed": false,
+          "safety": false,
+          "warm": false
+        }
+      },
+      "metrics": {
+        "A": {
+          "deadline_exceed_rate": 0.0,
+          "full_required_coverage_rate": 0.0,
+          "samples": 120,
+          "source_consistency_rate": 0.9916666666666667,
+          "timing_valid_rate": 1.0,
+          "wall_ms": {
+            "max": 2375.58,
+            "p50": 1111.354,
+            "p95": 1780.725
+          }
+        },
+        "B": {
+          "deadline_exceed_rate": 0.0,
+          "full_required_coverage_rate": 0.008333333333333333,
+          "samples": 120,
+          "source_consistency_rate": 1.0,
+          "timing_valid_rate": 1.0,
+          "wall_ms": {
+            "max": 2351.841,
+            "p50": 1119.087,
+            "p95": 1936.807
+          }
+        },
+        "C": {
+          "deadline_exceed_rate": 0.0,
+          "full_required_coverage_rate": 0.0,
+          "samples": 120,
+          "source_consistency_rate": 1.0,
+          "timing_valid_rate": 1.0,
+          "wall_ms": {
+            "max": 2752.423,
+            "p50": 1173.177,
+            "p95": 1763.004
+          }
+        }
+      },
+      "paired": {
+        "coverage_B_vs_A": {
+          "lcb95": 0.0,
+          "n": 120,
+          "point": 0.008333333333333333,
+          "repeats": 2000,
+          "seed": 1731,
+          "ucb95": 0.025,
+          "valid": true
+        },
+        "coverage_C_vs_B": {
+          "lcb95": -0.025,
+          "n": 120,
+          "point": -0.008333333333333333,
+          "repeats": 2000,
+          "seed": 1732,
+          "ucb95": 0.0,
+          "valid": true
+        }
+      },
+      "protocol_sha256": "85de739ffdbdc37e3a1ae08ffa288aa5b457db67f7217eea98ddbf6949ac167b",
+      "raw_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p4-runtime-20260909/p4-formal-repeat-persistent-total3000-v2-20260910.rep3.raw.json",
+      "raw_sha256": "007b7e8e5957b475902f066c8cf3465cdd6740c916358d5bca918c69f1b80c24",
+      "rep": "rep3",
+      "result_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p4-runtime-20260909/p4-formal-repeat-persistent-total3000-v2-20260910.rep3.result.json",
+      "result_sha256": "0a25d865835a0968fe941946cd00eb4a1f48de4faa1cee2fe990fd3dcd7e100e",
+      "status": "held"
+    }
+  ],
+  "resource_receipt": {
+    "controller_return_code": 0,
+    "error_is_none": true,
+    "privacy": {
+      "model_calls_by_wrapper": 0,
+      "private_services_started": 6,
+      "quality_queries_by_wrapper": 0,
+      "question_gold_read_by_wrapper": false
+    },
+    "process_return_code": 0,
+    "protocol_flags": {
+      "all_three_present": true,
+      "all_three_wrapper_bound": true,
+      "sealed_manifest_present": true
+    },
+    "status": "completed",
+    "window_flags": {
+      "foreground_entered": true,
+      "foreground_released": true,
+      "ingest_lock_acquired": true,
+      "ingest_lock_released": true,
+      "private_process_groups_only": true
+    }
+  },
+  "schema": "chronovisor.p4-final-evaluation-audit.v1",
+  "scope": {
+    "acceptance_deadline_ms": 4000,
+    "aggregate_output_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p4-runtime-20260909/p4-formal-repeat-persistent-total3000-v2-20260910.json",
+    "aggregate_output_sha256": "046c25b84d5491b8e2cbfdf779510d37e0e3d7945ddd840e611c5a7ff9361eaf",
+    "arms": [
+      "A",
+      "B",
+      "C"
+    ],
+    "benchmark_manifest_seal_sha256": "59870e8e417b1ec51e4198460f5fb46b5d3e0899bafc16f2d9ed5302d2c0f744",
+    "context_budget_chars": 3000,
+    "formal_root": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p0-frozen-20260909/formal-review",
+    "holdout_cases": 120,
+    "index_snapshot_sha256": "caac5c5d769fe729c59687c4f5d57a89e2969ca7aa9bab2eed411ffe7d9bbc0f",
+    "language_counts": {
+      "cross": 40,
+      "en": 40,
+      "ja": 40
+    },
+    "protocol_directory": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p4-runtime-20260909/p4-formal-protocols-persistent-total3000-v2-20260910",
+    "repetitions": 3,
+    "resource_receipt_path": "/Users/trafficsign/.chronovisor/runtime/evidence-storage-evaluation/p4-runtime-20260909/p4-formal-resource-receipt-persistent-total3000-v2-20260910.json",
+    "resource_receipt_sha256": "03a56a95da8e881756cecd1d77852a4e895a126812ccd2e2af084b6860e2aa0a",
+    "source_epoch_id": "7cfceb10dd838e19c6f987923c718f5c7ea7ac6be61c8aae7c28d1526dd9b38d",
+    "source_ledger_seal_sha256": "cb907ce16f6774dd86e5db173e823e5656b40d3d23e504ad325f25997592b7ef",
+    "source_root_sha256": "7582b9efe18a53c9502c30e8dd8f28c59f631bb689b896e1df6000b894c1e6e6"
+  },
+  "status": "audited",
+  "upper_bound_replay": {
+    "budget_exceeded_rows": 0,
+    "coverage_increase_rows": 0,
+    "empty_rows": 1012,
+    "final_corrected_latency_measured": false,
+    "final_render_order": "state_then_recall",
+    "intermediate_floor_only_replay_is_final_result": false,
+    "method": "retain only each stored [RECALL_CONTEXT] block, omit WORKING_MEMORY state, merge_context_blocks(max_chars=3000), then validate_context against the frozen corpus",
+    "old_full_counts": {
+      "A": 0,
+      "B": 3,
+      "C": 0
+    },
+    "recall_block_over_3000_rows": 0,
+    "recall_only_full_counts": {
+      "A": 0,
+      "B": 3,
+      "C": 0
+    },
+    "source_ranges_atomic": true,
+    "state_omitted": true,
+    "total_rows": 1080,
+    "unknown_rows": 3
+  }
+}

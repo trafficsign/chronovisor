@@ -5452,6 +5452,75 @@ def test_distilled_fast_path_bypasses_mutable_recall_lanes(monkeypatch, tmp_path
     assert "candidate_ids" not in result.evidence_features["distilled_fast_path"]
 
 
+def test_distilled_fast_path_honors_total_context_budget(monkeypatch) -> None:
+    fast_policy = SimpleNamespace(
+        policy_id="fast-v2",
+        feature_schema="recall-distill-text-v2",
+        threshold=0.6,
+        margin=0.0,
+        max_cards=1,
+    )
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.build_text_features = lambda _query, _candidate: {
+        "query_chargram_coverage": 1.0,
+        "candidate_chargram_precision": 1.0,
+    }
+    module.score_fast_features = lambda _features, _policy: 0.9
+    receipts: list[dict[str, object]] = []
+    module.record_exact_exposure = lambda **kwargs: receipts.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(
+        recall_runtime, "_load_active_distillation_policy", lambda _request: fast_policy
+    )
+    candidate = ScoredPage(
+        "page", "Page", "chronovisor", "2026-08-14", 1.0, snippet="chronovisor"
+    )
+    candidate.content_sha256 = hashlib.sha256(candidate.page_id.encode()).hexdigest()
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_existing_lexical",
+        lambda *_args, **_kwargs: ([candidate], []),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "context_item_from_page_id",
+        lambda *_args, **_kwargs: ContextItem(
+            "page", "Page", "", 0.9, snippets=["source text " * 120]
+        ),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "state_context_for_request",
+        lambda *_args, **_kwargs: pytest.fail("fast path must not inject state"),
+    )
+
+    policy = RecallPolicy(
+        log_decisions=False,
+        max_context_chars=2_000,
+        max_total_context_chars=720,
+    )
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="Chronovisor recall fast path",
+            session_id="session-1",
+        ),
+        policy,
+    )
+
+    assert len(result.context) <= policy.max_total_context_chars
+    assert [item.page_id for item in result.context_items] == ["page"]
+    assert len(receipts) == 1
+    assert receipts[0]["candidate_refs"][0]["candidate_id"] == "page"
+    assert receipts[0]["render_sha256"] == hashlib.sha256(
+        result.context.encode()
+    ).hexdigest()
+
+
 def test_invalid_distilled_policy_falls_back_to_evidence_path(monkeypatch) -> None:
     called: list[bool] = []
     candidate = ScoredPage("page", "Page", "", "2026-08-14", 1.0)
