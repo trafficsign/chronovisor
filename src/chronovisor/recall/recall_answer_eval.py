@@ -5691,7 +5691,7 @@ def build_source_span_query_benchmark_epoch(
                 "status": str(result.get("status") or "held"),
                 "reason": str(result.get("reason") or "source_span_query_review_held"),
                 "accepted": accepted,
-                "pending": len(packets) - len(existing) - accepted,
+                "pending": len(packets) - len(existing),
                 "stale": stale,
             }
         receipt = result.get("receipt")

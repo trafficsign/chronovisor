@@ -3321,6 +3321,50 @@ def test_source_span_adjudication_reuses_formal_gold_lane_without_answer_input(
     assert "gold_answer" not in calls[0]["subject"]["source_packet"]
 
 
+def test_source_span_epoch_counts_pending_after_partial_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = []
+    for index, language in enumerate(("ja", "en", "cross") * 3):
+        row = _source_span_candidate(index)
+        row["language"] = language
+        row["candidate_sha256"] = recall_answer_eval._canonical_sha(
+            {key: value for key, value in row.items() if key != "candidate_sha256"}
+        )
+        rows.append(row)
+    candidate_file = tmp_path / "candidates.jsonl"
+    candidate_file.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        recall_answer_eval, "list_machine_consensus_receipts",
+        lambda **_kwargs: {"passed": True, "receipts": []},
+    )
+    reviews = iter([
+        {"status": "accepted", "receipt": {"receipt_sha256": "a" * 64}},
+        {"status": "accepted", "receipt": {"receipt_sha256": "b" * 64}},
+        {"status": "held", "reason": "review_unavailable"},
+    ])
+    monkeypatch.setattr(
+        recall_answer_eval, "append_machine_consensus_receipt",
+        lambda **_kwargs: next(reviews),
+    )
+
+    result = recall_answer_eval.build_source_span_query_benchmark_epoch(
+        candidate_file=candidate_file,
+        consensus_ledger_file=tmp_path / "consensus.jsonl",
+        chronovisor_root=tmp_path,
+        dev_components=3, holdout_components=3, locked_min_components=1,
+        max_items=9,
+    )
+
+    assert result["status"] == "held"
+    assert result["reason"] == "review_unavailable"
+    assert result["accepted"] == 2
+    assert result["pending"] == 7
+
+
 def test_source_span_review_rejects_receipt_before_preregistration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
