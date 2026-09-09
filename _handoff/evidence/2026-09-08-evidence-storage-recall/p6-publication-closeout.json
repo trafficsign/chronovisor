@@ -1,0 +1,24 @@
+{
+  "schema": "chronovisor.publication-closeout.v1",
+  "runtime_code_commit": "7af88177d6a82f17dd54a830e89aed15cfcc413e",
+  "initial_document_publication_commit": "79b157fe31aa69e54f632c2be581413d655fbb5c",
+  "code_diff_after_document_publication": {
+    "paths": [
+      "src",
+      "scripts",
+      "tests",
+      "pyproject.toml",
+      "uv.lock"
+    ],
+    "empty": true
+  },
+  "runtime_config_pin_unchanged": true,
+  "health_after_document_push": {
+    "commit_id": "7af88177d6a82f17dd54a830e89aed15cfcc413e",
+    "expected_commit": "79b157fe31aa69e54f632c2be581413d655fbb5c",
+    "drift": true,
+    "reason": "expected_commit follows origin main, including documentation-only advances"
+  },
+  "scope": "This closeout itself only updates handoff documents. No code or service change. Runtime/source smoke remains bound to7af8817.",
+  "release_worktree_cleanup": "No open files under disposable release worktree (lsof exit1 empty); remove after final push with git worktree remove, retaining commits and frozen evaluation artifacts."
+}

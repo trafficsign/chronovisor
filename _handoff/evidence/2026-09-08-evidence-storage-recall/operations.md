@@ -24,7 +24,7 @@ C2の保存・復元は明示的な試行経路として用意した。原文、
 
 [縮小ループの修正](p5-state-budget-regression.json): 3000文字の残枠を作業メモに渡すと、旧最小27文字のループが終了しない場合があった。本文21＋省略記号3で24文字まで必ず縮み、枠自体が収まらなければ空文字を返す。関連234 testsをmain/release双方で通過。診断中のreranker off設定は元のshadowに復帰、processor・deadline・authorityは変更していない。
 
-配布は上記コードcommitへ固定する。この後の計画・receiptのみのcommitでorigin/mainが進んでも、実行コードは一致した固定SHAを使用する。ロールバックは既存手順とreceiptの0600 config backupを用い、今回の小予算ループを戻す場合は旧予算4602との整合にも注意する。不要なprivateサービスは停止・leaseは解放し、原文・凍結評価物・CAS・profile・復旧archiveは再現性のため保持する。
+配布は上記コードcommitへ固定する。この後の計画・receiptのみのcommitでorigin/mainが進んでも、実行コードは一致した固定SHAを使用する。healthのexpected_commitはorigin/mainを参照するため、この文書のみの進行でもdrift=trueとなる。最終照合では7af8817から配布文書版へのsrc/scripts/tests/依存定義差分が空であることを確認した。drift=falseという表示は最終条件に含めず、コード一致と5archive一致を証跡にする。ロールバックは既存手順とreceiptの0600 config backupを用い、今回の小予算ループを戻す場合は旧予算4602との整合にも注意する。不要なprivateサービスは停止・leaseは解放し、原文・凍結評価物・CAS・profile・復旧archiveは再現性のため保持する。
 
 ## 1. 変更しない契約と新規保存
 
