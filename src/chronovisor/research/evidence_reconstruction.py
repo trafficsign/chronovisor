@@ -21,6 +21,7 @@ from chronovisor.core import (
     claude_code_transcript,
     codex_transcript,
     durable_state,
+    pi_transcript,
     raw_store,
 )
 from chronovisor.core.raw_segment import RawSegmentCorrupt
@@ -602,6 +603,9 @@ def _event_semantics(host: str, event: Mapping[str, Any]) -> tuple[str, str]:
         message = event.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         return claude_code_transcript.claude_semantic_view(event_type, content)
+    if host == "pi":
+        item_type, content = pi_transcript.pi_message_view(dict(event))
+        return pi_transcript.claude_semantic_view(item_type, content)
     raise EvidenceReconstructionError(f"unsupported committed Raw host: {host}")
 
 
@@ -654,6 +658,9 @@ def _event_type_c2(host: str, event: Mapping[str, Any]) -> str | None:
         value = payload.get("type") if isinstance(payload, Mapping) else None
         if isinstance(value, str) and value.strip():
             return value.strip()
+    if host == "pi":
+        item_type, _content = pi_transcript.pi_message_view(dict(event))
+        return item_type
     value = event.get("type")
     return value.strip() if isinstance(value, str) and value.strip() else None
 
@@ -1200,7 +1207,7 @@ def _load_episode_projection_bytes(
             )
             or line_range[0] < 0
             or line_range[1] <= line_range[0]
-            or receipt["host"] not in {"codex", "claude-code"}
+            or receipt["host"] not in {"codex", "claude-code", "pi"}
             or not isinstance(receipt["session_key"], str)
             or not receipt["session_key"]
             or not isinstance(receipt["captured_at"], str)

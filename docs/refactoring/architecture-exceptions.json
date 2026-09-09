@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "source_baseline_head": "d404a6b20d00e3bcd1d4cdb89edfa5a718c51833",
-  "baseline_sha256": "b9fecdb32085b69fd0bcaf3bcde04a14481cd420ed87e725f03450dbebc7aacc",
+  "baseline_sha256": "61c917fbb70c33e9c6d65ad069be7e24f1951662cb96494eabf9071f4521736a",
   "semantic_identity": "cross-domain edges use category+source_package+target_package; statement exceptions use category+source_package+source_module+scope_kind+scope+statement_kind+target_package+target_module+symbols+occurrence; source line is diagnostic and normalized statement content is verified independently",
   "counts": {
     "exceptions": 44,
@@ -18962,24 +18962,6 @@
           "line": 17
         },
         {
-          "semantic_id": "arch:1b6876c858fbafa601503489bbe4fee60d08bf70eea037b1c30b08796a455da2",
-          "source_module": "chronovisor.research.evidence_reconstruction",
-          "scope_kind": "module",
-          "scope": "<module>",
-          "statement_kind": "from",
-          "target_module": "chronovisor.core",
-          "symbols": [
-            "canonical_json",
-            "claude_code_transcript",
-            "codex_transcript",
-            "durable_state",
-            "raw_store"
-          ],
-          "content_sha256": "6360ee8933f97bbbbfd9cbedf55c31ea57df870231b526777b13ff22b1c8ae44",
-          "occurrence": 1,
-          "line": 19
-        },
-        {
           "semantic_id": "arch:1e00530e79d3d052f865e40ed793fbdb0fd242b3114e95c823b62f4e7d165c1f",
           "source_module": "chronovisor.research.oracle",
           "scope_kind": "module",
@@ -19250,6 +19232,25 @@
           "content_sha256": "ab48174366db078557dba548dcb8244b209b3505686bdeff53a352d10de51358",
           "occurrence": 1,
           "line": 16
+        },
+        {
+          "semantic_id": "arch:8d69f16599a46febc7d9af80714d24f582de81ec46ca4da930bf078eb804cb7d",
+          "source_module": "chronovisor.research.evidence_reconstruction",
+          "scope_kind": "module",
+          "scope": "<module>",
+          "statement_kind": "from",
+          "target_module": "chronovisor.core",
+          "symbols": [
+            "canonical_json",
+            "claude_code_transcript",
+            "codex_transcript",
+            "durable_state",
+            "pi_transcript",
+            "raw_store"
+          ],
+          "content_sha256": "20407e04326da7bbad4568cf425efdba2a74aac80b8280e6fa077f3902b3d66d",
+          "occurrence": 1,
+          "line": 19
         },
         {
           "semantic_id": "arch:9a984890bf2fedcba46f15eed1714166a22d0adcf0044237eb41afd042a09671",
