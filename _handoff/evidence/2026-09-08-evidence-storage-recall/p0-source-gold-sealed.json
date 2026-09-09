@@ -1,0 +1,33 @@
+{
+  "schema": "chronovisor.source-gold-seal-receipt.v1",
+  "status": "sealed",
+  "manifest_seal_sha256": "59870e8e417b1ec51e4198460f5fb46b5d3e0899bafc16f2d9ed5302d2c0f744",
+  "manifest_file_sha256": "7537c4e23356b92a6d770552cd2a1ca869bd4a95b195942a9f3aac3c88cb307d",
+  "active_pointer_sha256": "7144aff04bd63a337f0c4818b5ef5f9e07b7c9c7504787d3c00f223a31f033d7",
+  "source_ledger_seal_sha256": "cb907ce16f6774dd86e5db173e823e5656b40d3d23e504ad325f25997592b7ef",
+  "source_ledger_file_sha256": "3e6f25f9b992d2a59d8f06aa11dade257f84687376aaeea5b982c6a27f2e5624",
+  "split_epoch_id": "7cfceb10dd838e19c6f987923c718f5c7ea7ac6be61c8aae7c28d1526dd9b38d",
+  "entries": 270,
+  "split_language_counts": {
+    "holdout/cross": 40,
+    "holdout/en": 40,
+    "holdout/ja": 40,
+    "locked-test/cross": 30,
+    "locked-test/en": 30,
+    "locked-test/ja": 30,
+    "train/cross": 20,
+    "train/en": 20,
+    "train/ja": 20
+  },
+  "source_review_receipts": 270,
+  "remaining_review_run_elapsed_seconds": 8138.834,
+  "remaining_review_exit_code": 0,
+  "quality_queries_executed": 0,
+  "limitations": [
+    "source-only synthetic questions",
+    "no true no-answer examples",
+    "as-of coverage insufficient",
+    "answer correctness not yet measured"
+  ],
+  "p0_remaining": "A baseline measurement and paired evaluation"
+}
