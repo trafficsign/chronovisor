@@ -1,0 +1,115 @@
+{
+  "schema_version": "chronovisor.evidence-storage-recall.p0-source-review-runtime.v1",
+  "kind": "p0-source-review-runtime-numeric-receipt",
+  "observed_at": "2026-09-09T18:12:24+09:00",
+  "scope": {
+    "mode": "numeric_sha_only",
+    "requested_max_items": 1,
+    "accepted": 1,
+    "pending_after": 269,
+    "production_files_changed": false,
+    "production_services_stopped": false,
+    "private_builder_stop_observed": true
+  },
+  "formal_review": {
+    "status": "accepted",
+    "accepted": 1,
+    "pending_after": 269,
+    "model_calls": 2,
+    "authority_kind": "single_model_v1",
+    "model": "qwen3.8-flash-next-chat",
+    "provider": "omlx",
+    "protocol": "omlx-native",
+    "config": {
+      "num_predict": 2048,
+      "read_timeout_ms": 300000,
+      "requested_num_ctx": 32768,
+      "required_num_ctx": 22560,
+      "initial_think": "low",
+      "repair_think": false
+    },
+    "timings": {
+      "started_at": "2026-09-09T09:02:07.254655Z",
+      "completed_at": "2026-09-09T09:09:23.805382Z",
+      "runner_elapsed_seconds": 436.858,
+      "trace_elapsed_seconds": 436.551,
+      "trigger_to_load_seconds": 84.479,
+      "initial_generate_observed_seconds": 298.872,
+      "repair_generation_seconds": 53.18,
+      "repair_turns": 1
+    },
+    "validation": {
+      "first_pass_valid": false,
+      "first_pass_failure": "output_truncated",
+      "repair_valid": true,
+      "decision": "approved",
+      "evidence_complete": true
+    }
+  },
+  "prior_bounded_comparison": {
+    "baseline": "p0-label-trial-one-item",
+    "baseline_runner_elapsed_seconds": 45.316,
+    "current_runner_elapsed_seconds": 436.858,
+    "slowdown_factor": 9.6403,
+    "current_vs_baseline_note": "same adopted Qwen authority path; current run included long resource wait and slow initial stream"
+  },
+  "contention_observation": {
+    "private_embedding_builder": {
+      "pid": 77840,
+      "role": "search.semantic.foreground",
+      "before_stop_state": "running",
+      "after_stop_state": "stopped",
+      "progress_completed": 72311,
+      "progress_total": 183222,
+      "progress_elapsed_seconds": 1680.52,
+      "stopped_at": "2026-09-09T09:08:12.503500Z"
+    },
+    "qwen_server": {
+      "pid": 807,
+      "models_http_status": 200,
+      "stream_socket_established": true
+    },
+    "review_runner": {
+      "pid": 6710,
+      "resource_lock_held_during_review": true,
+      "admission_lock_held_during_review": true
+    },
+    "session_88486_os_process_found": false,
+    "snapshots": {
+      "before_builder_stop": {
+        "updated_at": "2026-09-09T09:07:26.566257Z",
+        "generation_seconds": 234.831,
+        "output_tokens_snapshot": 244,
+        "tokens_per_second_marker": 1.039
+      },
+      "after_builder_stop": {
+        "updated_at": "2026-09-09T09:08:23.099139Z",
+        "generation_seconds": 291.365,
+        "output_tokens_snapshot": 1002,
+        "tokens_per_second_marker": 3.439,
+        "delta_output_tokens": 758,
+        "interval_seconds": 56.533,
+        "interval_tokens_per_second": 13.408,
+        "interval_includes_builder_stop": true,
+        "pre_stop_seconds_in_interval": 45.937243,
+        "post_stop_seconds_in_interval": 10.595639,
+        "interval_tokens_per_second_label": "mixed_pre_post_stop_interval"
+      }
+    },
+    "limited_conclusion": "The stream advanced while the private embedding-index builder was stopped at 09:08:12.503500Z, but the measured before-to-after interval includes 45.937243 seconds before the stop and only 10.595639 seconds after it. The slowdown is consistent with same-host GPU/Metal contention; prefill-to-decode transition and Raw competition remain unseparated, so no exclusive causal claim is made. Repair timing may include prefill and validation overhead."
+  },
+  "evidence_sha256": {
+    "formal_first_review_log": "5bf6c64a7b06465ca7cd8da377813b59fc78166697ef65d703daf48b9160bac9",
+    "formal_trace_events": "62aa3007924f83f7ca197b6148ba62f4b1e699d3d40d5a727b0b747ed6c4c808",
+    "formal_audit": "639f4a68f9233541497f249f29e44270a797f85185dae2bb512df2d6aa4a37ec",
+    "formal_summary": "7d0d1c93bf488c1e57c76e81547afb66c18bbda3ac7e8c74fffa80e78111657b",
+    "formal_decision_artifact": "4072de2fbbff277baea3cf489aee2d3fa179a02430d79bdbbd6b4970298e4cdc",
+    "formal_consensus_receipt": "c4bc60de02834ac4813a7451f7ab817c6abb3552d2efa721e6ccdb236c78dd4b",
+    "baseline_trace_events": "6a0bb0580aacdc15a55d382d684ad8551aad764a71b376fd64157288f9478c0c",
+    "baseline_audit": "3f549f5dcb9e382af659cbfafffba8aead0ca3a33de6505dfd6216e8e762fe9a",
+    "baseline_summary": "134e6b9c098574b41b948bc396c3ac90e04f17145561b1eff6cfff9b226a5ea6",
+    "baseline_consensus_receipt": "2f7f1936a440ad1b730636d61fc6f3082a82df39f846e206dcd2606de0661c2c",
+    "builder_script": "b3dec41c33adadea1cd785bd12967d1d8a9ffbcfdd3a112febec067d1e304ecd",
+    "builder_progress": "cb1544f30ddd9ef06f3367c7a8712635ed996331e46c54b28dd57356df1a6864"
+  }
+}
