@@ -1,126 +1,21 @@
 {
-  "acceptance": {
-    "archive_provenance_complete": true,
-    "cutover_and_health_complete": true,
-    "full_production_acceptance_complete": false,
-    "ingest_live_processing_canary_complete": false,
-    "reason": "helper lease intentionally held; new ingest drain is ready but cannot start a write batch until root releases the lease"
+  "schema": "chronovisor.evidence-storage-recall.p5-runtime-cutover.v1",
+  "observed_at": "2026-09-09T19:37:00+09:00",
+  "scope": {
+    "mode": "production-cutover-health",
+    "production_push": true,
+    "production_restart": true,
+    "runtime_config_changed": true,
+    "live_local_http_checks": true,
+    "main_code_edited": false,
+    "secrets_or_environment_values_recorded": false
   },
-  "actions": {
-    "config_source_pin": "873c2a3bc1743bc7a2fe309067904e903870fb1d -> c7b4fbebbed652fe5bb6ff1020974cd027867503",
-    "kickstart_labels": [
-      "com.trafficsign.chronovisor-dashboard.managed-v2",
-      "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
-      "com.trafficsign.chronovisor-ingest-drain.managed-v2",
-      "com.trafficsign.chronovisor-semantic.managed-v2",
-      "com.trafficsign.chronovisor-reranker.managed-v2"
-    ],
-    "periodic_labels_not_restarted": [
-      "com.trafficsign.chronovisor-converge.managed-v2",
-      "com.trafficsign.chronovisor-librarian-review.managed-v2"
-    ],
-    "release_lease": "held pending root P0/live canary follow-up",
-    "untouched_p4_mlx_pid": 807
-  },
-  "health": {
-    "dashboard": {
-      "api_health_http": 200,
-      "api_status_http": 200,
-      "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
-      "child_pid": 31261
-    },
-    "ingest": {
-      "current_job_id": null,
-      "current_job_pid": null,
-      "lease_held": true,
-      "pending": 34,
-      "pending_raws": 34,
-      "runtime_state": "ready",
-      "stage": "waiting",
-      "state": "ready"
-    },
-    "lan_dashboard": {
-      "api_health_http": 401,
-      "api_status_http": 401,
-      "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
-      "auth_boundary_expected": true,
-      "bind": "192.168.100.3:8766",
-      "child_pid": 31063
-    },
-    "reranker": {
-      "archive_id": "xaxjig82HjrC6MjAfaODV",
-      "drift": false,
-      "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-      "pid": 32001,
-      "ready": true,
-      "runtime_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-      "status": "ok",
-      "warmup_latency_ms": 30422
-    },
-    "semantic": {
-      "archive_id": "L6FXMn4_ftopRoz4nM3Pc",
-      "pid": 31129,
-      "query_path_self_test": {
-        "hits": 3,
-        "latency_ms": 417.124,
-        "queries": 3
-      },
-      "ready": true,
-      "status": "ok"
-    }
-  },
-  "observed_at": "2026-09-09T18:33:49+09:00",
-  "periodic_services": [
-    {
-      "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
-      "child_pid": 32742,
-      "interval_seconds": 1800,
-      "label": "com.trafficsign.chronovisor-converge.managed-v2",
-      "mode": "periodic-writer",
-      "note": "interval run naturally resolved the new runtime source after cutover",
-      "pinned_source_sha": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-      "state": "running",
-      "targeted_restart": false,
-      "wrapper_pid": 32728
-    },
-    {
-      "interval_seconds": 300,
-      "label": "com.trafficsign.chronovisor-librarian-review.managed-v2",
-      "mode": "periodic-writer",
-      "note": "not part of the five-service restart; next scheduled run resolves runtime.source",
-      "state": "not running",
-      "targeted_restart": false,
-      "throttle_seconds": 60
-    },
-    {
-      "interval_seconds": 300,
-      "label": "com.trafficsign.chronovisor-deadman-observer.managed-v2",
-      "mode": "periodic-observer",
-      "targeted_restart": false
-    },
-    {
-      "interval_seconds": 900,
-      "label": "com.trafficsign.chronovisor-watchdog.managed-v2",
-      "mode": "periodic-observer",
-      "targeted_restart": false
-    },
-    {
-      "label": "com.trafficsign.chronovisor-sleep.managed-v2",
-      "mode": "calendar",
-      "targeted_restart": false
-    },
-    {
-      "label": "com.trafficsign.chronovisor-searxng.managed-v2",
-      "mode": "persistent-independent-local-service",
-      "targeted_restart": false
-    }
-  ],
   "release": {
-    "candidate_head": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+    "candidate_head": "d98adcdc2d067b0445ee070f118c78b06981f659",
     "candidate_worktree": "/private/tmp/chronovisor-release-candidate-vrzhBS",
+    "previous_remote_sha": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+    "remote_main_sha": "d98adcdc2d067b0445ee070f118c78b06981f659",
     "git_ls_remote_verified": true,
-    "previous_remote_sha": "5b922ea27c6b818491c7011cddc6aa7b887a117b",
-    "remote_main_sha": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
     "source_commits": [
       "8a1645018b81a55aa7c80d71736e98d13e577289",
       "b2912bb800871ce94410d2754f71fce68548c9df",
@@ -131,46 +26,66 @@
       "c08c5c5449fb5d21ca0ecab2fcd4e71621923ae1",
       "cac699aba481f8da1681753a1e72040b264537f8",
       "a9d98551f66ce6eb8402775d7fbf9bb28fe54d18",
-      "b77ff7a631322e866fa7f0e0e1acde98c737ed66"
-    ]
+      "b77ff7a631322e866fa7f0e0e1acde98c737ed66",
+      "0e1fdd8ec3757f5e901faf6b8ebeb9eb172300a6",
+      "8ceff12e0f477e8cb9dd140999ef6f069db984a6",
+      "5cb8e39fe5f93e96f571ca26d97e60f7310130e9",
+      "39f9fae451e15398767a0649e1469f47a65520e0"
+    ],
+    "push": "origin/main advanced c7 -> d98 before restart",
+    "deployed_code_sha": "d98adcdc2d067b0445ee070f118c78b06981f659",
+    "remote_main_sha_at_cutover": "d98adcdc2d067b0445ee070f118c78b06981f659",
+    "follow_up_docs_commits": [
+      "b8fe9ba",
+      "6dafc16",
+      "b3730c9"
+    ],
+    "remote_docs_head_note": "runtime archives and deployed code remain pinned to deployed_code_sha; documentation-only follow-up commits may advance remote main after cutover"
   },
-  "residual_risks": [
-    "ingest lease remains held by helper PID3106; pending Raw count continues to grow until root releases it",
-    "periodic librarian-review was not targeted and will resolve the pinned runtime on its next scheduled run",
-    "Dashboard materialized projections may lag the new service runtime",
-    "LAN health returns expected 401 before authentication",
-    "P4 MLX process PID807 was intentionally left running; no generic model kill was used"
-  ],
   "runtime_source": {
-    "backup_mode": "0600",
-    "changed_key": "runtime.source",
-    "chronovisor_runtime_source_overrides": "absent in inspected source plists",
     "config": "$HOME/.chronovisor/config.toml",
+    "changed_key": "runtime.source",
+    "previous_source_sha": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+    "pinned_source_sha": "d98adcdc2d067b0445ee070f118c78b06981f659",
+    "private_backup": "$HOME/.chronovisor/runtime/deployment-backups/config.toml.pre-d98adcdc2d06-20260909T101737Z",
+    "backup_mode": "0600",
     "launchd_source_dir": "$HOME/.chronovisor/runtime/launchd-sources",
-    "pinned_source_sha": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-    "previous_source_sha": "873c2a3bc1743bc7a2fe309067904e903870fb1d",
-    "private_backup": "$HOME/.chronovisor/runtime/deployment-backups/config.toml.pre-c7b4fbebbed6-20260909T092621Z"
+    "chronovisor_runtime_source_overrides": "absent in inspected source plists",
+    "query_timeout_ms": 800
   },
   "safe_boundary": {
     "captured_at": "2026-09-09T18:17:33+09:00",
+    "post_cutover_captured_at": "2026-09-09T19:37:00+09:00",
     "helper_pid": 3106,
-    "lease_held": true,
     "lease_lock": "$HOME/.chronovisor/runtime/ingest-orchestrator.lock",
     "lock_holder_pids": [
-      3106
+      74424
     ],
-    "new_ingest_processing_blocked": true,
+    "lease_held": true,
+    "release_marker_touched": true,
+    "raw_force_kill": false,
     "old_processes_exited": true,
+    "targeted_old_processes_exited": true,
+    "non_targeted_converge_orphan_natural_completion": true,
+    "new_ingest_processing_blocked": false,
+    "status_path": "$HOME/.chronovisor/runtime/status.json",
     "post_cutover": {
+      "observed_at": "2026-09-09T19:35:04",
       "authority_available": true,
-      "current_job_id": null,
-      "current_job_pid": null,
+      "current_job_id": "c37f9978",
+      "current_job_pid": 74424,
       "ingest_runtime_available": true,
-      "pending": 34,
-      "pending_raws": 34,
-      "runtime_state": "ready",
-      "stage": "waiting",
-      "state": "ready"
+      "pending": 27,
+      "pending_raws": 29,
+      "raw_outstanding": 457,
+      "runtime_state": "running",
+      "stage": "triage",
+      "state": "running",
+      "last_failure_at": "2026-09-09T18:39:48",
+      "last_error": "triage structured failure [repair_exhausted]: initial response and two repair turns were invalid",
+      "liveness_status": "ready",
+      "liveness_alert": false,
+      "liveness_observed_at": "2026-09-09T19:36:53"
     },
     "pre_cutover": {
       "current_job_id": null,
@@ -184,122 +99,828 @@
       "stage": "waiting",
       "state": "ready"
     },
-    "raw_force_kill": false,
-    "release_marker_touched": false,
-    "status_path": "$HOME/.chronovisor/runtime/status.json"
+    "post_cutover_before_release": {
+      "authority_available": true,
+      "current_job_id": null,
+      "current_job_pid": null,
+      "ingest_runtime_available": true,
+      "pending": 34,
+      "pending_raws": 34,
+      "raw_outstanding": 457,
+      "runtime_state": "ready",
+      "stage": "waiting",
+      "state": "ready"
+    },
+    "helper_lease_released": true,
+    "ingest_child_lease_held": true,
+    "release_marker_path": "/private/tmp/chronovisor-cutover-20260909-a4a0443.release",
+    "release_marker_touched_at": "2026-09-09T19:29:36+09:00",
+    "helper_exit_observed": true,
+    "post_release_processing": {
+      "release_at": "2026-09-09T19:29:36+09:00",
+      "helper_pid": 3106,
+      "helper_lease_released": true,
+      "helper_exit_observed": true,
+      "active_lease_holder_pids": [
+        74424
+      ],
+      "ingest_child_pid": 74424,
+      "first_resumed_batch": {
+        "timestamp": "2026-09-09T19:31:20.338647",
+        "batch": 1,
+        "pending_before": 34,
+        "pending_after": 34,
+        "files_processed": 10,
+        "files_failed": 0,
+        "files_deferred": 0,
+        "files_continued": 0,
+        "files_quarantined": 0,
+        "triggered": true,
+        "reason": "force=True with 34 pending"
+      },
+      "successful_batches_observed": 2,
+      "successful_files_observed": 20,
+      "latest_resumed_batch": {
+        "timestamp": "2026-09-09T19:31:50.220500",
+        "batch": 2,
+        "pending_before": 34,
+        "pending_after": 29,
+        "files_processed": 10,
+        "files_failed": 0,
+        "files_deferred": 0,
+        "files_continued": 0,
+        "files_quarantined": 0,
+        "triggered": true,
+        "reason": "force=True with 34 pending"
+      },
+      "authority_available": true,
+      "liveness_status": "ready",
+      "liveness_alert": false,
+      "last_failure_at": "2026-09-09T18:39:48",
+      "no_new_failure_at_since_release": true
+    }
   },
-  "schema": "chronovisor.evidence-storage-recall.p5-runtime-cutover.v1",
-  "scope": {
-    "live_local_http_checks": true,
-    "main_code_edited": false,
-    "mode": "production-cutover-health",
-    "production_push": true,
-    "production_restart": true,
-    "runtime_config_changed": true,
-    "secrets_or_environment_values_recorded": false
+  "actions": {
+    "push": "git push origin HEAD:main",
+    "config_source_pin": "c7b4fbebbed652fe5bb6ff1020974cd027867503 -> d98adcdc2d067b0445ee070f118c78b06981f659",
+    "kickstart_labels": [
+      "com.trafficsign.chronovisor-dashboard.managed-v2",
+      "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+      "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+      "com.trafficsign.chronovisor-semantic.managed-v2",
+      "com.trafficsign.chronovisor-reranker.managed-v2"
+    ],
+    "periodic_labels_not_restarted": [
+      "com.trafficsign.chronovisor-converge.managed-v2",
+      "com.trafficsign.chronovisor-deadman-observer.managed-v2",
+      "com.trafficsign.chronovisor-watchdog.managed-v2",
+      "com.trafficsign.chronovisor-sleep.managed-v2",
+      "com.trafficsign.chronovisor-librarian-review.managed-v2",
+      "com.trafficsign.chronovisor-searxng.managed-v2"
+    ],
+    "release_lease": "release marker touched on 2026-09-09T19:29:36+09:00 per root instruction; helper PID3106 exited and managed ingest child acquired the lease",
+    "untouched_production_qwen_omlx_pid": 807,
+    "untouched_c_builder_pid": 40541,
+    "model_processes_killed": false,
+    "release_marker_path": "/private/tmp/chronovisor-cutover-20260909-a4a0443.release",
+    "release_marker_touched_at": "2026-09-09T19:29:36+09:00",
+    "post_release_ingest_child_pid": 74424
   },
   "services": [
     {
-      "archive_direct_url": {
-        "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-        "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-        "vcs": "git"
-      },
-      "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
-      "child_pid": 31261,
-      "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-      "label": "com.trafficsign.chronovisor-dashboard.managed-v2",
-      "last_exit_code": 143,
       "name": "dashboard",
-      "provenance_match": true,
-      "runs": 3,
+      "label": "com.trafficsign.chronovisor-dashboard.managed-v2",
       "state": "running",
-      "wrapper_pid": 31229
+      "runs": 4,
+      "last_exit_code": 143,
+      "last_exit_code_note": "143 is the prior child shutdown recorded during kickstart; current wrapper is running",
+      "wrapper_pid": 74330,
+      "child_pid": 74400,
+      "archive_id": "qWOcfh239ax6hJrcBaBuW",
+      "archive_path": "$HOME/.cache/uv/archive-v0/qWOcfh239ax6hJrcBaBuW/lib/python3.14",
+      "expected_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "archive_direct_url": {
+        "url": "ssh://git@github.com/trafficsign/chronovisor",
+        "vcs": "git",
+        "commit_id": "d98adcdc2d067b0445ee070f118c78b06981f659",
+        "requested_revision": "d98adcdc2d067b0445ee070f118c78b06981f659"
+      },
+      "provenance_match": true
     },
     {
-      "archive_direct_url": {
-        "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-        "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-        "vcs": "git"
-      },
-      "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
-      "child_pid": 31063,
-      "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-      "label": "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
-      "last_exit_code": 143,
       "name": "lan_dashboard",
-      "provenance_match": true,
-      "runs": 3,
+      "label": "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
       "state": "running",
-      "wrapper_pid": 31009
-    },
-    {
-      "archive_direct_url": {
-        "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-        "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-        "vcs": "git"
-      },
-      "archive_id": "6no8-VhqNFBkeS8foEwWo",
-      "child_pid": 31065,
-      "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-      "label": "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+      "runs": 4,
       "last_exit_code": 143,
+      "last_exit_code_note": "143 is the prior child shutdown recorded during kickstart; current wrapper is running",
+      "wrapper_pid": 74332,
+      "child_pid": 74423,
+      "archive_id": "_-VHS6ox5Bcf3FEEhizcZ",
+      "archive_path": "$HOME/.cache/uv/archive-v0/_-VHS6ox5Bcf3FEEhizcZ/lib/python3.14",
+      "expected_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "archive_direct_url": {
+        "url": "ssh://git@github.com/trafficsign/chronovisor",
+        "vcs": "git",
+        "commit_id": "d98adcdc2d067b0445ee070f118c78b06981f659",
+        "requested_revision": "d98adcdc2d067b0445ee070f118c78b06981f659"
+      },
+      "provenance_match": true
+    },
+    {
       "name": "ingest_drain",
-      "provenance_match": true,
-      "runs": 3,
+      "label": "com.trafficsign.chronovisor-ingest-drain.managed-v2",
       "state": "running",
-      "wrapper_pid": 31024
+      "runs": 4,
+      "last_exit_code": 143,
+      "last_exit_code_note": "143 is the prior child shutdown recorded during kickstart; current wrapper is running",
+      "wrapper_pid": 74342,
+      "child_pid": 74424,
+      "archive_id": "vQO5NCVmsOkbbx4Dmxzjy",
+      "archive_path": "$HOME/.cache/uv/archive-v0/vQO5NCVmsOkbbx4Dmxzjy/lib/python3.14",
+      "expected_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "archive_direct_url": {
+        "url": "ssh://git@github.com/trafficsign/chronovisor",
+        "vcs": "git",
+        "commit_id": "d98adcdc2d067b0445ee070f118c78b06981f659",
+        "requested_revision": "d98adcdc2d067b0445ee070f118c78b06981f659"
+      },
+      "provenance_match": true
     },
     {
-      "archive_direct_url": {
-        "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-        "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-        "vcs": "git"
-      },
-      "archive_id": "L6FXMn4_ftopRoz4nM3Pc",
-      "child_pid": 31129,
-      "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-      "label": "com.trafficsign.chronovisor-semantic.managed-v2",
-      "last_exit_code": 0,
       "name": "semantic",
-      "provenance_match": true,
-      "runs": 5,
+      "label": "com.trafficsign.chronovisor-semantic.managed-v2",
       "state": "running",
-      "wrapper_pid": 31072
+      "runs": 8,
+      "last_exit_code": 1,
+      "last_exit_code_note": "initial accelerator lease timeout triggered launchd retry; current child is ready",
+      "wrapper_pid": 76146,
+      "child_pid": 76165,
+      "archive_id": "IDFAISbYugDd6EFnlKiC9",
+      "archive_path": "$HOME/.cache/uv/archive-v0/IDFAISbYugDd6EFnlKiC9/lib/python3.14",
+      "expected_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "archive_direct_url": {
+        "url": "ssh://git@github.com/trafficsign/chronovisor",
+        "vcs": "git",
+        "commit_id": "d98adcdc2d067b0445ee070f118c78b06981f659",
+        "requested_revision": "d98adcdc2d067b0445ee070f118c78b06981f659"
+      },
+      "provenance_match": true
     },
     {
-      "archive_direct_url": {
-        "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-        "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-        "vcs": "git"
-      },
-      "archive_id": "xaxjig82HjrC6MjAfaODV",
-      "child_pid": 32001,
-      "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
-      "label": "com.trafficsign.chronovisor-reranker.managed-v2",
-      "last_exit_code": 1,
       "name": "reranker",
-      "provenance_match": true,
-      "runs": 6,
+      "label": "com.trafficsign.chronovisor-reranker.managed-v2",
       "state": "running",
-      "wrapper_pid": 31982
+      "runs": 7,
+      "last_exit_code": 0,
+      "last_exit_code_note": "current child is ready",
+      "wrapper_pid": 74502,
+      "child_pid": 74527,
+      "archive_id": "-lUN-JD_u69lGc_HWDUjX",
+      "archive_path": "$HOME/.cache/uv/archive-v0/-lUN-JD_u69lGc_HWDUjX/lib/python3.14",
+      "expected_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "archive_direct_url": {
+        "url": "ssh://git@github.com/trafficsign/chronovisor",
+        "vcs": "git",
+        "commit_id": "d98adcdc2d067b0445ee070f118c78b06981f659",
+        "requested_revision": "d98adcdc2d067b0445ee070f118c78b06981f659"
+      },
+      "provenance_match": true
     }
   ],
-  "validation": {
-    "a9_additional_fix": {
-      "large_function_limit": 367,
-      "static_and_eval": "passed (parent receipt)",
-      "validate_gold_manifest_lines": 360
+  "periodic_services": [
+    {
+      "label": "com.trafficsign.chronovisor-converge.managed-v2",
+      "mode": "periodic-writer",
+      "interval_seconds": 1800,
+      "targeted_restart": false,
+      "state": "not running",
+      "natural_completion": true,
+      "last_orphan": {
+        "wrapper_pid": 32728,
+        "child_pid": 32742,
+        "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
+        "source_sha": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "process_state": "orphan exited naturally",
+        "maintenance_status": "ok",
+        "stop_reason": "frontier_lane_budget_exhausted"
+      }
     },
+    {
+      "label": "com.trafficsign.chronovisor-librarian-review.managed-v2",
+      "mode": "periodic-writer",
+      "interval_seconds": 300,
+      "targeted_restart": false,
+      "state": "running",
+      "wrapper_pid": 76511,
+      "child_pid": 76535,
+      "archive_id": "JJX6Ksbq9ODB7_96564Xb",
+      "archive_path": "$HOME/.cache/uv/archive-v0/JJX6Ksbq9ODB7_96564Xb/lib/python3.14",
+      "archive_direct_url": {
+        "url": "ssh://git@github.com/trafficsign/chronovisor",
+        "vcs": "git",
+        "commit_id": "d98adcdc2d067b0445ee070f118c78b06981f659",
+        "requested_revision": "d98adcdc2d067b0445ee070f118c78b06981f659"
+      },
+      "provenance_match": true,
+      "note": "scheduled run was not targeted; current archive resolves runtime.source to d98"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-deadman-observer.managed-v2",
+      "mode": "periodic-observer",
+      "interval_seconds": 300,
+      "targeted_restart": false,
+      "state": "not running"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-watchdog.managed-v2",
+      "mode": "periodic-observer",
+      "interval_seconds": 900,
+      "targeted_restart": false,
+      "state": "not running"
+    },
+    {
+      "label": "com.trafficsign.chronovisor-sleep.managed-v2",
+      "mode": "calendar",
+      "targeted_restart": false
+    },
+    {
+      "label": "com.trafficsign.chronovisor-searxng.managed-v2",
+      "mode": "persistent-independent-local-service",
+      "targeted_restart": false
+    }
+  ],
+  "health": {
+    "dashboard": {
+      "api_health_http": 200,
+      "api_status_http": 200,
+      "status": "ok",
+      "archive_id": "qWOcfh239ax6hJrcBaBuW",
+      "archive_path": "$HOME/.cache/uv/archive-v0/qWOcfh239ax6hJrcBaBuW/lib/python3.14",
+      "child_pid": 74400,
+      "runtime_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "expected_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "drift": false,
+      "direct_url": {
+        "url": "ssh://git@github.com/trafficsign/chronovisor",
+        "vcs": "git",
+        "commit_id": "d98adcdc2d067b0445ee070f118c78b06981f659",
+        "requested_revision": "d98adcdc2d067b0445ee070f118c78b06981f659"
+      }
+    },
+    "lan_dashboard": {
+      "api_health_http": 401,
+      "api_status_http": 401,
+      "auth_boundary_expected": true,
+      "bind": "192.168.100.3:8766",
+      "archive_id": "_-VHS6ox5Bcf3FEEhizcZ",
+      "archive_path": "$HOME/.cache/uv/archive-v0/_-VHS6ox5Bcf3FEEhizcZ/lib/python3.14",
+      "child_pid": 74423,
+      "runtime_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "expected_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "drift": false,
+      "direct_url": {
+        "url": "ssh://git@github.com/trafficsign/chronovisor",
+        "vcs": "git",
+        "commit_id": "d98adcdc2d067b0445ee070f118c78b06981f659",
+        "requested_revision": "d98adcdc2d067b0445ee070f118c78b06981f659"
+      }
+    },
+    "ingest": {
+      "status": "ready",
+      "runtime_state": "running",
+      "stage": "triage",
+      "state": "running",
+      "current_job_id": "c37f9978",
+      "current_job_pid": 74424,
+      "pending": 27,
+      "pending_raws": 29,
+      "raw_outstanding": 457,
+      "lease_held": true,
+      "helper_pid": 3106,
+      "archive_id": "vQO5NCVmsOkbbx4Dmxzjy",
+      "archive_path": "$HOME/.cache/uv/archive-v0/vQO5NCVmsOkbbx4Dmxzjy/lib/python3.14",
+      "child_pid": 74424,
+      "runtime_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "expected_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "drift": false,
+      "direct_url": {
+        "url": "ssh://git@github.com/trafficsign/chronovisor",
+        "vcs": "git",
+        "commit_id": "d98adcdc2d067b0445ee070f118c78b06981f659",
+        "requested_revision": "d98adcdc2d067b0445ee070f118c78b06981f659"
+      },
+      "lease_owner_pids": [
+        74424
+      ],
+      "helper_lease_released": true,
+      "release_marker_touched": true,
+      "last_failure_at": "2026-09-09T18:39:48",
+      "last_failure_at_pre_release": "2026-09-09T18:39:48",
+      "last_failure_is_pre_release": true,
+      "liveness_alert": false,
+      "authority_available": true,
+      "ingest_runtime_available": true,
+      "post_release_processing": {
+        "release_at": "2026-09-09T19:29:36+09:00",
+        "helper_pid": 3106,
+        "helper_lease_released": true,
+        "helper_exit_observed": true,
+        "active_lease_holder_pids": [
+          74424
+        ],
+        "ingest_child_pid": 74424,
+        "first_resumed_batch": {
+          "timestamp": "2026-09-09T19:31:20.338647",
+          "batch": 1,
+          "pending_before": 34,
+          "pending_after": 34,
+          "files_processed": 10,
+          "files_failed": 0,
+          "files_deferred": 0,
+          "files_continued": 0,
+          "files_quarantined": 0,
+          "triggered": true,
+          "reason": "force=True with 34 pending"
+        },
+        "successful_batches_observed": 2,
+        "successful_files_observed": 20,
+        "latest_resumed_batch": {
+          "timestamp": "2026-09-09T19:31:50.220500",
+          "batch": 2,
+          "pending_before": 34,
+          "pending_after": 29,
+          "files_processed": 10,
+          "files_failed": 0,
+          "files_deferred": 0,
+          "files_continued": 0,
+          "files_quarantined": 0,
+          "triggered": true,
+          "reason": "force=True with 34 pending"
+        },
+        "authority_available": true,
+        "liveness_status": "ready",
+        "liveness_alert": false,
+        "last_failure_at": "2026-09-09T18:39:48",
+        "no_new_failure_at_since_release": true
+      }
+    },
+    "semantic": {
+      "status": "ok",
+      "ready": true,
+      "archive_id": "IDFAISbYugDd6EFnlKiC9",
+      "archive_path": "$HOME/.cache/uv/archive-v0/IDFAISbYugDd6EFnlKiC9/lib/python3.14",
+      "pid": 76165,
+      "wrapper_pid": 76146,
+      "runtime_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "expected_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "drift": false,
+      "query_path_self_test": {
+        "hits": 3,
+        "queries": 3,
+        "latency_ms": 530.728
+      },
+      "startup_retry_recovered": true,
+      "startup_retry_error": "AcceleratorLeaseTimeout",
+      "direct_url": {
+        "url": "ssh://git@github.com/trafficsign/chronovisor",
+        "vcs": "git",
+        "commit_id": "d98adcdc2d067b0445ee070f118c78b06981f659",
+        "requested_revision": "d98adcdc2d067b0445ee070f118c78b06981f659"
+      }
+    },
+    "reranker": {
+      "status": "ok",
+      "ready": true,
+      "archive_id": "-lUN-JD_u69lGc_HWDUjX",
+      "archive_path": "$HOME/.cache/uv/archive-v0/-lUN-JD_u69lGc_HWDUjX/lib/python3.14",
+      "pid": 74527,
+      "wrapper_pid": 74502,
+      "runtime_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "expected_commit": "d98adcdc2d067b0445ee070f118c78b06981f659",
+      "drift": false,
+      "warmup_latency_ms": 29292,
+      "direct_url": {
+        "url": "ssh://git@github.com/trafficsign/chronovisor",
+        "vcs": "git",
+        "commit_id": "d98adcdc2d067b0445ee070f118c78b06981f659",
+        "requested_revision": "d98adcdc2d067b0445ee070f118c78b06981f659"
+      }
+    }
+  },
+  "validation": {
     "candidate_related_tests": {
+      "selected": 92,
+      "passed": 92,
       "failed": 0,
-      "passed": 63,
-      "selected": 63
+      "breakdown": {
+        "prior_candidate_suite": 63,
+        "new_field_and_benchmark_suite": 29
+      }
     },
     "candidate_source_independent_tests": {
-      "failed": 0,
+      "selected": 14,
       "passed": 14,
-      "selected": 14
+      "failed": 0
+    },
+    "new_field_and_benchmark_tests": {
+      "field_candidate": {
+        "selected": 13,
+        "passed": 13
+      },
+      "benchmark_evidence_storage": {
+        "selected": 16,
+        "passed": 16
+      }
+    },
+    "ruff_changed_files": "passed",
+    "import_linter": "1 contract kept, 0 broken",
+    "compileall_changed_files": "passed",
+    "git_diff_check": "passed",
+    "architecture_baseline": {
+      "exit_code": 1,
+      "baseline_and_candidate_edge_count": 44,
+      "new_edges": [],
+      "scc_regressions": [],
+      "candidate_only_site_ids": [],
+      "existing_ledger_drift": "site/non-Python asset drift present in c7 baseline and candidate"
+    },
+    "architecture_page_registry_import_site": {
+      "path": "src/chronovisor/recall/recall_field_candidate.py:19",
+      "target": "chronovisor.ingest.page_registry",
+      "symbol": "PageRegistry",
+      "semantic_id": "arch:1ec40e35c5e7e745ab9c89d8facf260b8119e2703fef508235b2016f78ef43ad",
+      "classification": "required import site within existing recall->ingest edge; no edge/SCC growth"
     }
+  },
+  "acceptance": {
+    "archive_provenance_complete": true,
+    "cutover_and_health_complete": true,
+    "full_production_acceptance_complete": false,
+    "ingest_live_processing_canary_complete": true,
+    "reason": "Ingest lease was released after the deployed live canary; managed child resumed Raw processing with successful post-release batches. Full production acceptance remains a separate quality gate.",
+    "ingest_live_processing_canary": {
+      "release_at": "2026-09-09T19:29:36+09:00",
+      "successful_batches_observed": 2,
+      "successful_files_observed": 20,
+      "first_resumed_batch": {
+        "timestamp": "2026-09-09T19:31:20.338647",
+        "batch": 1,
+        "pending_before": 34,
+        "pending_after": 34,
+        "files_processed": 10,
+        "files_failed": 0,
+        "files_deferred": 0,
+        "files_continued": 0,
+        "files_quarantined": 0,
+        "triggered": true,
+        "reason": "force=True with 34 pending"
+      },
+      "latest_resumed_batch": {
+        "timestamp": "2026-09-09T19:31:50.220500",
+        "batch": 2,
+        "pending_before": 34,
+        "pending_after": 29,
+        "files_processed": 10,
+        "files_failed": 0,
+        "files_deferred": 0,
+        "files_continued": 0,
+        "files_quarantined": 0,
+        "triggered": true,
+        "reason": "force=True with 34 pending"
+      },
+      "authority_available": true,
+      "liveness_status": "ready",
+      "liveness_alert": false,
+      "last_failure_at": "2026-09-09T18:39:48",
+      "no_new_failure_storm_observed": true
+    }
+  },
+  "residual_risks": [
+    "managed ingest child PID74424 holds the lease while draining; pending Raw count was 27 at 2026-09-09T19:35:04",
+    "last recorded ingest failure remains pre-release at 2026-09-09T18:39:48; liveness authority is healthy and no post-release failure storm was observed",
+    "periodic converge c7 orphan completed naturally; future interval runs should resolve runtime.source to d98",
+    "periodic librarian-review was not targeted but its observed run resolved d98",
+    "Dashboard materialized projections may lag the new service runtime",
+    "LAN health returns expected 401 before authentication",
+    "production Qwen oMLX ds4-server PID807 and C builder PID40541 were intentionally left running; no model process was killed",
+    "Semantic had a transient accelerator lease timeout on first spawn and recovered on launchd retry"
+  ],
+  "historical_c7_cutover": {
+    "observed_at": "2026-09-09T18:33:49+09:00",
+    "release": {
+      "candidate_head": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "candidate_worktree": "/private/tmp/chronovisor-release-candidate-vrzhBS",
+      "git_ls_remote_verified": true,
+      "previous_remote_sha": "5b922ea27c6b818491c7011cddc6aa7b887a117b",
+      "remote_main_sha": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "source_commits": [
+        "8a1645018b81a55aa7c80d71736e98d13e577289",
+        "b2912bb800871ce94410d2754f71fce68548c9df",
+        "1e05bd7d1c7195f82f757a0e2357800159cc3795",
+        "0f442bf39e7845438bd39a9395be020cb5264a41",
+        "8bfac6ae3327cbc2f7a56d493a0d58fa4ec99e90",
+        "553c480ad2571b19c606f78a176a1154511bc614",
+        "c08c5c5449fb5d21ca0ecab2fcd4e71621923ae1",
+        "cac699aba481f8da1681753a1e72040b264537f8",
+        "a9d98551f66ce6eb8402775d7fbf9bb28fe54d18",
+        "b77ff7a631322e866fa7f0e0e1acde98c737ed66"
+      ]
+    },
+    "runtime_source": {
+      "backup_mode": "0600",
+      "changed_key": "runtime.source",
+      "chronovisor_runtime_source_overrides": "absent in inspected source plists",
+      "config": "$HOME/.chronovisor/config.toml",
+      "launchd_source_dir": "$HOME/.chronovisor/runtime/launchd-sources",
+      "pinned_source_sha": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "previous_source_sha": "873c2a3bc1743bc7a2fe309067904e903870fb1d",
+      "private_backup": "$HOME/.chronovisor/runtime/deployment-backups/config.toml.pre-c7b4fbebbed6-20260909T092621Z"
+    },
+    "safe_boundary": {
+      "captured_at": "2026-09-09T18:17:33+09:00",
+      "helper_pid": 3106,
+      "lease_held": true,
+      "lease_lock": "$HOME/.chronovisor/runtime/ingest-orchestrator.lock",
+      "lock_holder_pids": [
+        3106
+      ],
+      "new_ingest_processing_blocked": true,
+      "old_processes_exited": true,
+      "post_cutover": {
+        "authority_available": true,
+        "current_job_id": null,
+        "current_job_pid": null,
+        "ingest_runtime_available": true,
+        "pending": 34,
+        "pending_raws": 34,
+        "runtime_state": "ready",
+        "stage": "waiting",
+        "state": "ready"
+      },
+      "pre_cutover": {
+        "current_job_id": null,
+        "current_job_pid": null,
+        "old_archive_id": "34oGAVQbdJyXuBRgW853m",
+        "old_child_pid": 76927,
+        "old_source_sha": "873c2a3bc1743bc7a2fe309067904e903870fb1d",
+        "old_wrapper_pid": 76886,
+        "pending": 9,
+        "runtime_state": "ready",
+        "stage": "waiting",
+        "state": "ready"
+      },
+      "raw_force_kill": false,
+      "release_marker_touched": false,
+      "status_path": "$HOME/.chronovisor/runtime/status.json"
+    },
+    "actions": {
+      "config_source_pin": "873c2a3bc1743bc7a2fe309067904e903870fb1d -> c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "kickstart_labels": [
+        "com.trafficsign.chronovisor-dashboard.managed-v2",
+        "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+        "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+        "com.trafficsign.chronovisor-semantic.managed-v2",
+        "com.trafficsign.chronovisor-reranker.managed-v2"
+      ],
+      "periodic_labels_not_restarted": [
+        "com.trafficsign.chronovisor-converge.managed-v2",
+        "com.trafficsign.chronovisor-librarian-review.managed-v2"
+      ],
+      "release_lease": "held pending root P0/live canary follow-up",
+      "untouched_production_qwen_omlx_pid": 807
+    },
+    "health": {
+      "dashboard": {
+        "api_health_http": 200,
+        "api_status_http": 200,
+        "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
+        "child_pid": 31261
+      },
+      "ingest": {
+        "current_job_id": null,
+        "current_job_pid": null,
+        "lease_held": true,
+        "pending": 34,
+        "pending_raws": 34,
+        "runtime_state": "ready",
+        "stage": "waiting",
+        "state": "ready"
+      },
+      "lan_dashboard": {
+        "api_health_http": 401,
+        "api_status_http": 401,
+        "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
+        "auth_boundary_expected": true,
+        "bind": "192.168.100.3:8766",
+        "child_pid": 31063
+      },
+      "reranker": {
+        "archive_id": "xaxjig82HjrC6MjAfaODV",
+        "drift": false,
+        "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "pid": 32001,
+        "ready": true,
+        "runtime_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "status": "ok",
+        "warmup_latency_ms": 30422
+      },
+      "semantic": {
+        "archive_id": "L6FXMn4_ftopRoz4nM3Pc",
+        "pid": 31129,
+        "query_path_self_test": {
+          "hits": 3,
+          "latency_ms": 417.124,
+          "queries": 3
+        },
+        "ready": true,
+        "status": "ok"
+      }
+    },
+    "services": [
+      {
+        "archive_direct_url": {
+          "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+          "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+          "vcs": "git"
+        },
+        "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
+        "child_pid": 31261,
+        "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "label": "com.trafficsign.chronovisor-dashboard.managed-v2",
+        "last_exit_code": 143,
+        "name": "dashboard",
+        "provenance_match": true,
+        "runs": 3,
+        "state": "running",
+        "wrapper_pid": 31229
+      },
+      {
+        "archive_direct_url": {
+          "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+          "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+          "vcs": "git"
+        },
+        "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
+        "child_pid": 31063,
+        "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "label": "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+        "last_exit_code": 143,
+        "name": "lan_dashboard",
+        "provenance_match": true,
+        "runs": 3,
+        "state": "running",
+        "wrapper_pid": 31009
+      },
+      {
+        "archive_direct_url": {
+          "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+          "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+          "vcs": "git"
+        },
+        "archive_id": "6no8-VhqNFBkeS8foEwWo",
+        "child_pid": 31065,
+        "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "label": "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+        "last_exit_code": 143,
+        "name": "ingest_drain",
+        "provenance_match": true,
+        "runs": 3,
+        "state": "running",
+        "wrapper_pid": 31024
+      },
+      {
+        "archive_direct_url": {
+          "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+          "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+          "vcs": "git"
+        },
+        "archive_id": "L6FXMn4_ftopRoz4nM3Pc",
+        "child_pid": 31129,
+        "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "label": "com.trafficsign.chronovisor-semantic.managed-v2",
+        "last_exit_code": 0,
+        "name": "semantic",
+        "provenance_match": true,
+        "runs": 5,
+        "state": "running",
+        "wrapper_pid": 31072
+      },
+      {
+        "archive_direct_url": {
+          "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+          "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+          "vcs": "git"
+        },
+        "archive_id": "xaxjig82HjrC6MjAfaODV",
+        "child_pid": 32001,
+        "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "label": "com.trafficsign.chronovisor-reranker.managed-v2",
+        "last_exit_code": 1,
+        "name": "reranker",
+        "provenance_match": true,
+        "runs": 6,
+        "state": "running",
+        "wrapper_pid": 31982
+      }
+    ],
+    "periodic_services": [
+      {
+        "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
+        "child_pid": 32742,
+        "interval_seconds": 1800,
+        "label": "com.trafficsign.chronovisor-converge.managed-v2",
+        "mode": "periodic-writer",
+        "note": "interval run naturally resolved the new runtime source after cutover",
+        "pinned_source_sha": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "state": "running",
+        "targeted_restart": false,
+        "wrapper_pid": 32728
+      },
+      {
+        "interval_seconds": 300,
+        "label": "com.trafficsign.chronovisor-librarian-review.managed-v2",
+        "mode": "periodic-writer",
+        "note": "not part of the five-service restart; next scheduled run resolves runtime.source",
+        "state": "not running",
+        "targeted_restart": false,
+        "throttle_seconds": 60
+      },
+      {
+        "interval_seconds": 300,
+        "label": "com.trafficsign.chronovisor-deadman-observer.managed-v2",
+        "mode": "periodic-observer",
+        "targeted_restart": false
+      },
+      {
+        "interval_seconds": 900,
+        "label": "com.trafficsign.chronovisor-watchdog.managed-v2",
+        "mode": "periodic-observer",
+        "targeted_restart": false
+      },
+      {
+        "label": "com.trafficsign.chronovisor-sleep.managed-v2",
+        "mode": "calendar",
+        "targeted_restart": false
+      },
+      {
+        "label": "com.trafficsign.chronovisor-searxng.managed-v2",
+        "mode": "persistent-independent-local-service",
+        "targeted_restart": false
+      }
+    ],
+    "residual_risks": [
+      "ingest lease remains held by helper PID3106; pending Raw count continues to grow until root releases it",
+      "periodic librarian-review was not targeted and will resolve the pinned runtime on its next scheduled run",
+      "Dashboard materialized projections may lag the new service runtime",
+      "LAN health returns expected 401 before authentication",
+      "PID807 production Qwen oMLX ds4-server was left running; no model process was killed"
+    ],
+    "acceptance": {
+      "archive_provenance_complete": true,
+      "cutover_and_health_complete": true,
+      "full_production_acceptance_complete": false,
+      "ingest_live_processing_canary_complete": false,
+      "reason": "helper lease intentionally held; new ingest drain is ready but cannot start a write batch until root releases the lease"
+    },
+    "validation": {
+      "a9_additional_fix": {
+        "large_function_limit": 367,
+        "static_and_eval": "passed (parent receipt)",
+        "validate_gold_manifest_lines": 360
+      },
+      "candidate_related_tests": {
+        "failed": 0,
+        "passed": 63,
+        "selected": 63
+      },
+      "candidate_source_independent_tests": {
+        "failed": 0,
+        "passed": 14,
+        "selected": 14
+      }
+    },
+    "scope": {
+      "live_local_http_checks": true,
+      "main_code_edited": false,
+      "mode": "production-cutover-health",
+      "production_push": true,
+      "production_restart": true,
+      "runtime_config_changed": true,
+      "secrets_or_environment_values_recorded": false
+    }
+  },
+  "historical_correction": {
+    "corrected_at": "2026-09-09T19:27:29+09:00",
+    "field": "actions.untouched_p4_mlx_pid and residual_risks model label",
+    "prior_key": "untouched_p4_mlx_pid",
+    "prior_value": 807,
+    "prior_residual_text": "P4 MLX process PID807 was intentionally left running; no generic model kill was used",
+    "corrected_label": "production Qwen oMLX ds4-server",
+    "corrected_value": 807,
+    "facts_preserved": [
+      "PID807 remained running",
+      "no model process was killed"
+    ]
   }
 }
