@@ -145,6 +145,7 @@ table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}th,td{bo
 <li>identity / 範囲 / sensitivity / authority違反0、生成LLMの検索時追加呼出し0、原文の欠落・改変0。既存の絶対品質lower boundがあればそのまま維持する。</li>
 <li>主指標の全根拠注入率がA比で5 percentage points以上改善し、paired 95%信頼区間の下限が0を上回ることを初期の有効性gateとする。Bが成立した場合、Cの追加採用はB比の改善と費用を別途判定し、効果が不明ならBに留める。</li>
 <li>回答正確性はpaired差の95%信頼区間下限が−2 points以上。言語sliceの点推定が各々Aを下回らず、旧情報利用・根拠なし誤注入の件数もAを上回らない。少数例の0件を真の誤り率0の証明とはしない。</li>
+<li><strong>回答指標の実行定義（品質実行前）:</strong>回答正確性は既存の独立採点器のcorrectness（0〜1）を使い、grounding / citationとの平均にはしない。3反復の各case内paired差を算術平均し、120個のcaseを標本単位として既存paired bootstrap 2,000回で95%区間を計算する（case_id順、B対A seed 1731、C対B seed 1732）。grounding / citationも全件記録する。採点はP4で実際に注入したprivate保存contextとSHAに対して行い、検索を再実行して置換しない。正式gold review、独立したrunner / scorer identity、既存calibration gateの検証を前提とし、未校正・欠損値・実行receipt不整合は未受入とする。</li>
 <li>warm p95はA以下、4秒のL2上限を拡大しない。coldの超過率・fallback・外部に返る実時間もAより悪化しない。既存の厳しいlatency gateがあれば継承する。4秒以内は「瞬時」の証明ではなく、短縮量も必ず報告する。</li>
 <li><strong>不要な回答生成の省略:</strong>候補の主指標・出典保全・latencyの必要条件が固定holdout評価で不合格なら、その候補は不採用とし、追加の回答生成・採点を省略できる。未測定の回答正確性は未測定と記録し、合格へ読み替えない。B対AとC対Bを別々に判定し、Cの不合格をBの不合格へ転用しない。この規則は候補の結果を観測する前に登録する。</li>
 <li>120問で統計的に判定不能なら成功扱いしない。未使用実例を60問単位で追加し、同じ固定候補で最大240問まで評価する追加段階をP0で登録する。途中結果を見て都合のよい時点で停止せず、追加段階を使う場合は逐次判定の補正方法も先に固定する。上限でも不明ならCの採用を見送る。</li>
