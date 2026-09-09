@@ -111,5 +111,57 @@
     "baseline_consensus_receipt": "2f7f1936a440ad1b730636d61fc6f3082a82df39f846e206dcd2606de0661c2c",
     "builder_script": "b3dec41c33adadea1cd785bd12967d1d8a9ffbcfdd3a112febec067d1e304ecd",
     "builder_progress": "cb1544f30ddd9ef06f3367c7a8712635ed996331e46c54b28dd57356df1a6864"
+  },
+  "isolated_resumption_preflight": {
+    "observed_at": "2026-09-09T20:14:55+09:00",
+    "before": {
+      "environment_root": "formal-review",
+      "config_present": false,
+      "validation_reason": "llm_config_unavailable",
+      "already": 0,
+      "pending": 270
+    },
+    "repair": {
+      "copied_frozen_config": true,
+      "config_sha256": "b92dfe1bf7a41ad5b0c65ba692fe13d0f5c253810f14b910ad2d4fdacf3e369b",
+      "helper_sets_root_before_import": true,
+      "helper_sha256": "e1371545738ed5111ffacf284d9f16368b626ab43df160a7f79640204804e0e2",
+      "production_mutated": false,
+      "model_policy_changed": false
+    },
+    "after": {
+      "dry_run": true,
+      "already": 1,
+      "pending": 269,
+      "stale": 0,
+      "split_epoch_id": "7cfceb10dd838e19c6f987923c718f5c7ea7ac6be61c8aae7c28d1526dd9b38d",
+      "model_calls": 0
+    }
+  },
+  "budget512_probe": {
+    "observed_at": "2026-09-09T20:25:12+09:00",
+    "requested_num_predict": 512,
+    "adoption_requirement_preflight": "passed",
+    "separate_consensus_ledger": true,
+    "runtime": {
+      "status": "client_watchdog_timeout",
+      "seconds": 180,
+      "elapsed_seconds": 180.00753129200893,
+      "builder_paused_seconds": 150.00487266702112,
+      "production_process_stopped": false
+    },
+    "accepted_review_confirmed": false,
+    "adopted_for_remaining_review": false,
+    "quality_queries_executed": 0,
+    "initial_trace_think": "low",
+    "repair_trace_think": false,
+    "last_generation_snapshot": {
+      "phase": "repair",
+      "generation_seconds": 117.56,
+      "output_tokens": 113,
+      "token_count_exact": false
+    },
+    "conclusion": "Client watchdog expired; no throughput or completed-review improvement is established. The private index builder resumed automatically before the watchdog.",
+    "preregistration_sha256": "abe51dcc8258e20b9aa9bd273fa576754314bbabade25a4e52fd426560733346"
   }
 }
