@@ -1,0 +1,190 @@
+{
+  "captured_at": "2026-09-09T09:46:20.410+00:00",
+  "cleanup": {
+    "private_processes_started": 0,
+    "private_root_removed": true
+  },
+  "private_generations": {
+    "active_sequence": [
+      "20260909T094620Z-da74b48529d6-d167e2",
+      "20260909T094620Z-3b357434cf17-d8d407",
+      "20260909T094620Z-da74b48529d6-d167e2"
+    ],
+    "candidate": {
+      "generation_id": "20260909T094620Z-3b357434cf17-d8d407",
+      "manifest_sha256": "e7c160170c8ce5b6b90b1252c1298702d5fd7fde4884d9753681132d0b0cf014",
+      "vectors_sha256": "80179c622f5b28e253d0988383ab6ad62db93d1db95b564f749591ccd710f07c"
+    },
+    "candidate_pointer": {
+      "generation_id": "20260909T094620Z-3b357434cf17-d8d407",
+      "manifest_sha256": "e7c160170c8ce5b6b90b1252c1298702d5fd7fde4884d9753681132d0b0cf014",
+      "previous_generation_id": "20260909T094620Z-da74b48529d6-d167e2"
+    },
+    "old": {
+      "generation_id": "20260909T094620Z-da74b48529d6-d167e2",
+      "manifest_sha256": "71d621e06c86cb3f35bbeb8915fbf0f1035a8b730991330e13acde684defc2d3",
+      "vectors_sha256": "63dc1c5cda49d0697bd6f9fbc79b7339c296060070bd85a4f10bbc7b000beaf3"
+    },
+    "old_pointer": {
+      "generation_id": "20260909T094620Z-da74b48529d6-d167e2",
+      "manifest_sha256": "71d621e06c86cb3f35bbeb8915fbf0f1035a8b730991330e13acde684defc2d3",
+      "previous_generation_id": ""
+    },
+    "rollback_pointer": {
+      "generation_id": "20260909T094620Z-da74b48529d6-d167e2",
+      "manifest_sha256": "71d621e06c86cb3f35bbeb8915fbf0f1035a8b730991330e13acde684defc2d3",
+      "previous_generation_id": "20260909T094620Z-3b357434cf17-d8d407"
+    },
+    "root_basename": "p5-private-rollback-5nve9rou"
+  },
+  "schema": "chronovisor.evidence-storage-recall.p5-private-rollback.v1",
+  "scope": {
+    "frozen_index_modified": false,
+    "gpu_required": false,
+    "mode": "private-generation-cas-rollback",
+    "model_calls": 0,
+    "p4_roots_modified": false,
+    "private_fixture_removed_after_run": true,
+    "production_modified": false
+  },
+  "source_fixture": {
+    "cached_dimensions": 2048,
+    "cached_generation_id": "20260811T043448Z-f94f352690dd-46626a",
+    "cached_vectors_sha256": "1cbedac2002969136cab05e79f3eb2e53dbbbc5c68e80be4cc767f368bdc9e14",
+    "documents": 2,
+    "entries": [
+      {
+        "language": "ja",
+        "page_id": "qwen36-27b-local-frontier-compression",
+        "path": "pages/agi-continual-learning-and-weight-updates/qwen36-27b-local-frontier-compression.md",
+        "source_sha256": "4be2b1aed5f92a23d6d66e4a4445a1d6af8d115ff0aa2dece471271347b44b34",
+        "vector_row": 344
+      },
+      {
+        "language": "en",
+        "page_id": "continuous-model-evolution",
+        "path": "pages/agi-continual-learning-and-weight-updates/continuous-model-evolution.md",
+        "source_sha256": "3676f972e4b5a49302c6c66f63de52c3e5785887fc9a10af1d827d2bae5eb0e6",
+        "vector_row": 186
+      }
+    ],
+    "languages": [
+      "ja",
+      "en"
+    ],
+    "source_manifest_sha256": "ca4c4e27a51afb69b83138e92400bd79ba0fed7421399b3ea5b799c41980937c",
+    "source_root_sha256": "7582b9efe18a53c9502c30e8dd8f28c59f631bb689b896e1df6000b894c1e6e6"
+  },
+  "verification": {
+    "candidate_loaded": true,
+    "candidate_query": [
+      {
+        "evidence": [
+          {
+            "doc_id": "qwen36-27b-local-frontier-compression",
+            "kind": "page",
+            "ordinal": -1,
+            "page_id": "qwen36-27b-local-frontier-compression",
+            "page_uid": "",
+            "source_sha256": "4be2b1aed5f92a23d6d66e4a4445a1d6af8d115ff0aa2dece471271347b44b34"
+          }
+        ],
+        "page_id": "qwen36-27b-local-frontier-compression",
+        "score": 0.999988913536
+      },
+      {
+        "evidence": [
+          {
+            "doc_id": "continuous-model-evolution",
+            "kind": "page",
+            "ordinal": -1,
+            "page_id": "continuous-model-evolution",
+            "page_uid": "",
+            "source_sha256": "3676f972e4b5a49302c6c66f63de52c3e5785887fc9a10af1d827d2bae5eb0e6"
+          }
+        ],
+        "page_id": "continuous-model-evolution",
+        "score": 0.327433943748
+      }
+    ],
+    "candidate_source_identity_same": true,
+    "candidate_vectors_differed": true,
+    "cas_conflict": {
+      "active_unchanged": true,
+      "error_class": "SemanticIndexError",
+      "error_message_sha256": "b08756344537e69c7c8b644539c64cee310dd7f04f5c3d1aee71cf940d48fce3",
+      "rejected": true
+    },
+    "old_loaded_after_rollback": true,
+    "old_loaded_before": true,
+    "old_manifest_sha_before_after_equal": true,
+    "old_query_after": [
+      {
+        "evidence": [
+          {
+            "doc_id": "qwen36-27b-local-frontier-compression",
+            "kind": "page",
+            "ordinal": -1,
+            "page_id": "qwen36-27b-local-frontier-compression",
+            "page_uid": "",
+            "source_sha256": "4be2b1aed5f92a23d6d66e4a4445a1d6af8d115ff0aa2dece471271347b44b34"
+          }
+        ],
+        "page_id": "qwen36-27b-local-frontier-compression",
+        "score": 1.0
+      },
+      {
+        "evidence": [
+          {
+            "doc_id": "continuous-model-evolution",
+            "kind": "page",
+            "ordinal": -1,
+            "page_id": "continuous-model-evolution",
+            "page_uid": "",
+            "source_sha256": "3676f972e4b5a49302c6c66f63de52c3e5785887fc9a10af1d827d2bae5eb0e6"
+          }
+        ],
+        "page_id": "continuous-model-evolution",
+        "score": 0.327433943748
+      }
+    ],
+    "old_query_before": [
+      {
+        "evidence": [
+          {
+            "doc_id": "qwen36-27b-local-frontier-compression",
+            "kind": "page",
+            "ordinal": -1,
+            "page_id": "qwen36-27b-local-frontier-compression",
+            "page_uid": "",
+            "source_sha256": "4be2b1aed5f92a23d6d66e4a4445a1d6af8d115ff0aa2dece471271347b44b34"
+          }
+        ],
+        "page_id": "qwen36-27b-local-frontier-compression",
+        "score": 1.0
+      },
+      {
+        "evidence": [
+          {
+            "doc_id": "continuous-model-evolution",
+            "kind": "page",
+            "ordinal": -1,
+            "page_id": "continuous-model-evolution",
+            "page_uid": "",
+            "source_sha256": "3676f972e4b5a49302c6c66f63de52c3e5785887fc9a10af1d827d2bae5eb0e6"
+          }
+        ],
+        "page_id": "continuous-model-evolution",
+        "score": 0.327433943748
+      }
+    ],
+    "production_active_file_sha256_after": "64eb62612b15af12345824230b52593410322fea18cf32cafabe08bcf0058aec",
+    "production_active_file_sha256_before": "64eb62612b15af12345824230b52593410322fea18cf32cafabe08bcf0058aec",
+    "production_active_generation_id": "20260811T043448Z-f94f352690dd-46626a",
+    "production_manifest_sha256_after": "b301ecce37b1f9fd4025ad4d11756f7e8c3b1922582a0f440d8a3a4e5beb742c",
+    "production_manifest_sha256_before": "b301ecce37b1f9fd4025ad4d11756f7e8c3b1922582a0f440d8a3a4e5beb742c",
+    "production_pointer_stable": true,
+    "query_identity_before_after_equal": true,
+    "source_identity_before_after_equal": true
+  }
+}
