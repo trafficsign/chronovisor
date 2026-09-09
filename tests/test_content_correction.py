@@ -58,6 +58,49 @@ def _valid_okf_root(
     monkeypatch.setattr(content_correction, "CHRONOVISOR_ROOT", tmp_path)
 
 
+def test_applied_audit_binds_correction_raw_and_retains_uncaptured_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall.recall_answer_eval import resolve_turn_source_refs
+    from tests.test_recall_answer_eval import _captured_turn_source_fixture
+
+    episodes, _raw, rows, _lines, event = _captured_turn_source_fixture(tmp_path)
+    prior = next(row for row in rows if row["turn_ref"]["user_line"] == 2)
+    correction = next(row for row in rows if row["turn_ref"]["user_line"] == 4)
+    audit = tmp_path / "recall" / "content-feedback.jsonl"
+    monkeypatch.setattr(content_correction, "CONTENT_FEEDBACK_FILE", audit)
+    row = {
+        "kind": "content_correction",
+        "key": "before-capture",
+        "host": event["host"],
+        "source_turn_ref": prior["turn_ref"],
+        "correction_turn_ref": correction["turn_ref"],
+        "mutation_evidence_refs": [{"evidence_sha256": "a" * 64}],
+    }
+    assert content_correction._append_content_feedback(row)
+    held = json.loads(audit.read_text())
+    assert held["correction_prompt_source"] == {
+        "status": "held", "reason": "turn_episode_not_captured", "source_refs": []
+    }
+
+    captured = audit.with_name("answer-episodes.jsonl")
+    captured.write_bytes(episodes.read_bytes())
+    assert content_correction._append_content_feedback({**row, "key": "after-capture"})
+    saved = json.loads(audit.read_text().splitlines()[-1])
+    assert saved["correction_prompt_source"]["status"] == "ok"
+    assert saved["correction_prompt_source"]["episode_id"] == correction["episode_id"]
+    assert saved["correction_prompt_source"]["episode_id"] != prior["episode_id"]
+    assert len(saved["correction_prompt_source"]["source_refs"]) == 2
+    # The original audit remains immutable. Its preserved identity resolves
+    # after capture without reconstructing a source from the prior turn.
+    resolved = resolve_turn_source_refs(
+        host=held["host"], turn_ref=held["correction_turn_ref"], episode_file=captured
+    )
+    assert resolved == saved["correction_prompt_source"]
+    assert content_correction._append_content_feedback(row) is False
+    assert len(audit.read_text().splitlines()) == 2
+
+
 def test_local_proposer_repairs_invalid_json_in_same_session(tmp_path: Path) -> None:
     prompts: list[str] = []
     responses = iter(
@@ -468,6 +511,12 @@ def test_unique_quoted_exact_replacement_applies_without_any_model(
     )
     assert audit["decision_authority"]["kind"] == "exact_user_correction"
     assert audit["decision_authority"]["model_calls"] == 0
+    [evidence_ref] = audit["mutation_evidence_refs"]
+    assert len(evidence_ref["evidence_sha256"]) == 64
+    assert evidence_ref["page_id"] == "memory"
+    assert "preimage_utf8" not in audit
+    assert "postimage_utf8" not in audit
+    assert "mutation_evidence_ref" in audit["patches"][0]
 
 
 def test_exact_user_correction_captures_only_cas_readback_veto_binding(

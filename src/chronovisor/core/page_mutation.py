@@ -7,7 +7,7 @@ import fcntl
 import json
 import os
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -21,6 +21,9 @@ from chronovisor.core.canonical_document import (
     parse_document,
     serialize_document,
     validate_canonical_document,
+)
+from chronovisor.core.canonical_json import (
+    canonical_json_sha256_strict as _canonical_json_sha256,
 )
 from chronovisor.core.hashutil import sha256_bytes as _sha256_bytes
 from chronovisor.core.index_store import canonical_document_path_for_id
@@ -36,6 +39,8 @@ from chronovisor.core.store import (
 CHRONOVISOR_MUTATION_LOCK = CHRONOVISOR_ROOT / "runtime" / "chronovisor-mutation.lock"
 DECISION_AUTHORITY_LOCK = CHRONOVISOR_ROOT / "runtime" / "decision-authority.lock"
 CORRECTION_CONSTRAINT_SCHEMA_VERSION = 1
+MUTATION_EVIDENCE_SCHEMA_VERSION = 1
+MUTATION_EVIDENCE_KIND = "content_correction_mutation_evidence"
 ACTIVE_CLAIM_FRONTMATTER_FIELDS = frozenset(
     {
         "title",
@@ -97,6 +102,11 @@ class PreparedPageMutation:
     updated_sha256: str
     replacements: tuple[ExactReplacement, ...]
     already_applied: bool = False
+    # These fields are deliberately outside the bounded review projection.  The
+    # durable constraint receipt stores their full canonical bytes before CAS;
+    # review_payload() continues to expose only bounded context/diff material.
+    page_uid: str | None = None
+    evidence: tuple[dict[str, Any], ...] = ()
 
     def review_payload(self, *, preview_chars: int = 12_000) -> dict[str, Any]:
         before = self.original.decode("utf-8")
@@ -239,6 +249,500 @@ def _sha256_text(value: str) -> str:
     return _sha256_bytes(value.encode("utf-8"))
 
 
+def _metadata_page_uid(metadata: Mapping[str, Any]) -> str | None:
+    """Return an existing page UID without inventing one for legacy pages."""
+
+    value = metadata.get("uid")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _body_byte_offset(data: bytes, body: bytes) -> int:
+    """Return the byte offset of the parsed body in a canonical document."""
+
+    # ``parse_document`` retains the body suffix byte-for-byte, so subtracting
+    # its length avoids matching a repeated body phrase in YAML frontmatter.
+    return len(data) - len(body)
+
+
+def _byte_span(
+    data: bytes,
+    body: bytes,
+    start: int | None,
+    end: int | None,
+) -> tuple[int | None, int | None]:
+    if start is None or end is None:
+        return None, None
+    prefix = _body_byte_offset(data, body)
+    text = body.decode("utf-8")
+    return (
+        prefix + len(text[:start].encode("utf-8")),
+        prefix + len(text[:end].encode("utf-8")),
+    )
+
+
+def _contiguous_origin(values: list[int | None]) -> tuple[int, int] | None:
+    if not values or any(value is None for value in values):
+        return None
+    first = cast(int, values[0])
+    if values != list(range(first, first + len(values))):
+        return None
+    return first, first + len(values)
+
+
+def _replacement_evidence_records(
+    original: bytes,
+    updated: bytes,
+    replacements: tuple[ExactReplacement, ...],
+) -> tuple[dict[str, Any], ...]:
+    """Map exact replacements back to immutable pre/post body byte spans.
+
+    The origin/token maps make a later replacement that targets text introduced
+    by an earlier replacement explicitly unknown.  Such a span is never guessed
+    from a fuzzy search in the final body.
+    """
+
+    try:
+        original_document = parse_document(original)
+        updated_document = parse_document(updated)
+        original_body_bytes = original_document.body
+        updated_body_bytes = updated_document.body
+        original_body = original_body_bytes.decode("utf-8")
+        updated_body = updated_body_bytes.decode("utf-8")
+    except (CanonicalDocumentError, UnicodeDecodeError):
+        return tuple(
+            {
+                "index": index,
+                "action": replacement.action,
+                "span_status": "unknown",
+                "old_text_sha256": _sha256_text(replacement.old_text),
+                "new_text_sha256": _sha256_text(replacement.new_text),
+                "old_quote_sha256": _sha256_text(replacement.old_text),
+                "new_quote_sha256": _sha256_text(replacement.new_text),
+                "old_body_start": None,
+                "old_body_end": None,
+                "new_body_start": None,
+                "new_body_end": None,
+                "old_byte_start": None,
+                "old_byte_end": None,
+                "new_byte_start": None,
+                "new_byte_end": None,
+            }
+            for index, replacement in enumerate(replacements)
+        )
+
+    working = original_body
+    origins: list[int | None] = list(range(len(original_body)))
+    tokens: list[int | None] = [None] * len(original_body)
+    records: list[dict[str, Any]] = []
+    for index, replacement in enumerate(replacements):
+        start = working.find(replacement.old_text)
+        count = working.count(replacement.old_text)
+        old_end = start + len(replacement.old_text) if start >= 0 else None
+        old_origin = (
+            _contiguous_origin(origins[start:old_end])
+            if start >= 0 and old_end is not None
+            else None
+        )
+        # A phrase repeated in the original body is not a unique source span,
+        # even when an earlier replacement happened to remove one occurrence.
+        old_known = (
+            count == 1
+            and original_body.count(replacement.old_text) == 1
+            and old_origin is not None
+        )
+        if not old_known or start < 0 or count != 1 or old_end is None:
+            records.append(
+                {
+                    "index": index,
+                    "action": replacement.action,
+                    "span_status": "unknown",
+                    "old_text_sha256": _sha256_text(replacement.old_text),
+                    "new_text_sha256": _sha256_text(replacement.new_text),
+                    "old_quote_sha256": _sha256_text(replacement.old_text),
+                    "new_quote_sha256": _sha256_text(replacement.new_text),
+                    "old_body_start": None,
+                    "old_body_end": None,
+                    "new_body_start": None,
+                    "new_body_end": None,
+                    "old_byte_start": None,
+                    "old_byte_end": None,
+                    "new_byte_start": None,
+                    "new_byte_end": None,
+                }
+            )
+            # The prepared mutation should already have rejected this state;
+            # stop mapping rather than manufacture coordinates for later edits.
+            break
+
+        old_start, old_original_end = cast(tuple[int, int], old_origin)
+        origins = origins[:start] + [None] * len(replacement.new_text) + origins[old_end:]
+        tokens = tokens[:start] + [index] * len(replacement.new_text) + tokens[old_end:]
+        working = working[:start] + replacement.new_text + working[old_end:]
+        records.append(
+            {
+                "index": index,
+                "action": replacement.action,
+                "span_status": "verified" if old_known else "unknown",
+                "old_text_sha256": _sha256_text(replacement.old_text),
+                "new_text_sha256": _sha256_text(replacement.new_text),
+                "old_quote_sha256": _sha256_text(replacement.old_text),
+                "new_quote_sha256": _sha256_text(replacement.new_text),
+                "old_body_start": old_start if old_known else None,
+                "old_body_end": old_original_end if old_known else None,
+                "new_body_start": None,
+                "new_body_end": None,
+                "old_byte_start": (
+                    _byte_span(
+                        original,
+                        original_body_bytes,
+                        old_start,
+                        old_original_end,
+                    )[0]
+                    if old_known
+                    else None
+                ),
+                "old_byte_end": (
+                    _byte_span(
+                        original,
+                        original_body_bytes,
+                        old_start,
+                        old_original_end,
+                    )[1]
+                    if old_known
+                    else None
+                ),
+                "new_byte_start": None,
+                "new_byte_end": None,
+            }
+        )
+
+    if working != updated_body:
+        # A manually constructed/tampered PreparedPageMutation must not receive
+        # apparently valid offsets from a different postimage.
+        return tuple(
+            {
+                **record,
+                "span_status": "unknown",
+                "old_body_start": None,
+                "old_body_end": None,
+                "new_body_start": None,
+                "new_body_end": None,
+                "old_byte_start": None,
+                "old_byte_end": None,
+                "new_byte_start": None,
+                "new_byte_end": None,
+            }
+            for record in records
+        )
+
+    for record in records:
+        index = int(record["index"])
+        replacement = replacements[index]
+        if not replacement.new_text:
+            continue
+        positions = [position for position, token in enumerate(tokens) if token == index]
+        contiguous = bool(positions) and positions == list(
+            range(positions[0], positions[0] + len(positions))
+        )
+        if contiguous:
+            new_start = positions[0]
+            new_end = positions[-1] + 1
+            record["new_body_start"] = new_start
+            record["new_body_end"] = new_end
+            record["new_byte_start"], record["new_byte_end"] = _byte_span(
+                updated,
+                updated_body_bytes,
+                new_start,
+                new_end,
+            )
+        else:
+            record["span_status"] = "unknown"
+            record["new_body_start"] = None
+            record["new_body_end"] = None
+            record["new_byte_start"] = None
+            record["new_byte_end"] = None
+            record["old_body_start"] = None
+            record["old_body_end"] = None
+            record["old_byte_start"] = None
+            record["old_byte_end"] = None
+    return tuple(records)
+
+
+def mutation_evidence_payload(mutation: PreparedPageMutation) -> dict[str, Any]:
+    """Build the pre-apply canonical mutation evidence envelope."""
+
+    try:
+        original_document = parse_document(mutation.original)
+        updated_document = parse_document(mutation.updated)
+        page_uid = _metadata_page_uid(original_document.metadata)
+        updated_uid = _metadata_page_uid(updated_document.metadata)
+        if page_uid != updated_uid:
+            page_uid = None
+    except (CanonicalDocumentError, UnicodeDecodeError):
+        page_uid = mutation.page_uid
+    records = mutation.evidence or _replacement_evidence_records(
+        mutation.original,
+        mutation.updated,
+        mutation.replacements,
+    )
+    return {
+        "schema_version": MUTATION_EVIDENCE_SCHEMA_VERSION,
+        "kind": MUTATION_EVIDENCE_KIND,
+        "page_id": mutation.page_id,
+        "correction_id": mutation.correction_id,
+        # A parsed pre/post UID mismatch is an explicit stale/tampered state;
+        # do not let the dataclass fallback hide that mismatch.  The fallback
+        # is only for malformed bytes, where the validator will reject the
+        # envelope before it can be persisted.
+        "page_uid": page_uid,
+        "preimage_utf8": mutation.original.decode("utf-8", errors="strict"),
+        "postimage_utf8": mutation.updated.decode("utf-8", errors="strict"),
+        "preimage_sha256": mutation.original_sha256,
+        "postimage_sha256": mutation.updated_sha256,
+        "replacements": [dict(record) for record in records],
+    }
+
+
+def mutation_evidence_sha256(evidence: Mapping[str, Any]) -> str:
+    return _canonical_json_sha256(dict(evidence))
+
+
+def mutation_evidence_error(
+    evidence: Mapping[str, Any],
+    *,
+    expected_page_id: str | None = None,
+    expected_correction_id: str | None = None,
+    expected_preimage: bytes | None = None,
+    expected_postimage: bytes | None = None,
+    require_verified_spans: bool = True,
+) -> str | None:
+    """Validate a durable mutation receipt against bytes and recorded spans."""
+
+    if not isinstance(evidence, Mapping):
+        return "mutation evidence is missing"
+    if (
+        evidence.get("schema_version") != MUTATION_EVIDENCE_SCHEMA_VERSION
+        or evidence.get("kind") != MUTATION_EVIDENCE_KIND
+    ):
+        return "mutation evidence schema is invalid"
+    page_id = evidence.get("page_id")
+    correction_id = evidence.get("correction_id")
+    if not isinstance(page_id, str) or not page_id:
+        return "mutation evidence page_id is invalid"
+    if not isinstance(correction_id, str) or not correction_id:
+        return "mutation evidence correction_id is invalid"
+    if expected_page_id is not None and page_id != expected_page_id:
+        return "mutation evidence page_id mismatch"
+    if expected_correction_id is not None and correction_id != expected_correction_id:
+        return "mutation evidence correction_id mismatch"
+    preimage_text = evidence.get("preimage_utf8")
+    postimage_text = evidence.get("postimage_utf8")
+    if not isinstance(preimage_text, str) or not isinstance(postimage_text, str):
+        return "mutation evidence canonical bytes are missing"
+    try:
+        preimage = preimage_text.encode("utf-8")
+        postimage = postimage_text.encode("utf-8")
+        parse_preimage = parse_document(preimage)
+        parse_postimage = parse_document(postimage)
+        parse_preimage.body.decode("utf-8")
+        parse_postimage.body.decode("utf-8")
+    except (CanonicalDocumentError, UnicodeError):
+        return "mutation evidence canonical bytes are invalid"
+    pre_sha = evidence.get("preimage_sha256")
+    post_sha = evidence.get("postimage_sha256")
+    if pre_sha != _sha256_bytes(preimage) or post_sha != _sha256_bytes(postimage):
+        return "mutation evidence image hash mismatch"
+    if expected_preimage is not None and preimage != expected_preimage:
+        return "mutation evidence preimage changed"
+    if expected_postimage is not None and postimage != expected_postimage:
+        return "mutation evidence postimage changed"
+    page_uid = evidence.get("page_uid")
+    if page_uid is not None and (not isinstance(page_uid, str) or not page_uid.strip()):
+        return "mutation evidence page_uid is invalid"
+    original_uid = _metadata_page_uid(parse_preimage.metadata)
+    updated_uid = _metadata_page_uid(parse_postimage.metadata)
+    if page_uid != original_uid or page_uid != updated_uid:
+        return "mutation evidence page_uid mismatch"
+    records = evidence.get("replacements")
+    if not isinstance(records, list) or not records:
+        return "mutation evidence replacements are missing"
+    for index, record in enumerate(records):
+        if not isinstance(record, Mapping) or record.get("index") != index:
+            return "mutation evidence replacement identity is invalid"
+        if record.get("action") not in {"replace", "retract", "supersede"}:
+            return "mutation evidence replacement action is invalid"
+        status = record.get("span_status")
+        if status not in {"verified", "unknown"}:
+            return "mutation evidence span status is invalid"
+        if require_verified_spans and status != "verified":
+            return "mutation evidence span is unknown"
+        old_quote = record.get("old_quote_sha256")
+        new_quote = record.get("new_quote_sha256")
+        if not isinstance(old_quote, str) or not isinstance(new_quote, str):
+            return "mutation evidence quote hashes are missing"
+        if (
+            record.get("old_text_sha256") != old_quote
+            or record.get("new_text_sha256") != new_quote
+        ):
+            return "mutation evidence text and quote hashes differ"
+        old_body_start = record.get("old_body_start")
+        old_body_end = record.get("old_body_end")
+        new_body_start = record.get("new_body_start")
+        new_body_end = record.get("new_body_end")
+        old_start = record.get("old_byte_start")
+        old_end = record.get("old_byte_end")
+        new_start = record.get("new_byte_start")
+        new_end = record.get("new_byte_end")
+        if any(
+            value is not None
+            and (isinstance(value, bool) or not isinstance(value, int) or value < 0)
+            for value in (
+                old_body_start,
+                old_body_end,
+                new_body_start,
+                new_body_end,
+                old_start,
+                old_end,
+                new_start,
+                new_end,
+            )
+        ):
+            return "mutation evidence byte span is invalid"
+        for start_value, end_value in (
+            (old_body_start, old_body_end),
+            (new_body_start, new_body_end),
+            (old_start, old_end),
+            (new_start, new_end),
+        ):
+            if (start_value is None) != (end_value is None):
+                return "mutation evidence byte span is incomplete"
+        if status == "verified" and (
+            old_start is None
+            or old_end is None
+            or old_body_start is None
+            or old_body_end is None
+        ):
+            return "mutation evidence old span is missing"
+        # A non-empty replacement must carry a postimage span.  Retractions
+        # intentionally have an empty postimage and therefore use no range;
+        # a partial empty range is still tampering rather than a valid delete.
+        empty_quote_sha256 = _sha256_text("")
+        new_span_values = (new_body_start, new_body_end, new_start, new_end)
+        if status == "verified" and new_quote != empty_quote_sha256 and any(
+            value is None for value in new_span_values
+        ):
+            return "mutation evidence new span is missing"
+        if status == "verified" and new_quote == empty_quote_sha256 and any(
+            value is not None for value in new_span_values
+        ):
+            return "mutation evidence empty new span is invalid"
+        original_body = parse_preimage.body
+        updated_body = parse_postimage.body
+        original_body_text = original_body.decode("utf-8")
+        updated_body_text = updated_body.decode("utf-8")
+        original_body_offset = _body_byte_offset(preimage, original_body)
+        updated_body_offset = _body_byte_offset(postimage, updated_body)
+        if old_body_start is not None:
+            expected_old_start, expected_old_end = _byte_span(
+                preimage,
+                original_body,
+                old_body_start,
+                old_body_end,
+            )
+            if (
+                old_start is None
+                or old_end is None
+                or old_body_end is None
+                or old_body_end <= old_body_start
+                or old_body_end > len(original_body_text)
+                or old_start != expected_old_start
+                or old_end != expected_old_end
+                or old_start < original_body_offset
+                or old_end > len(preimage)
+            ):
+                return "mutation evidence old span is out of bounds"
+            old_start_in_body = len(
+                original_body_text[:old_body_start].encode("utf-8")
+            )
+            old_end_in_body = len(
+                original_body_text[:old_body_end].encode("utf-8")
+            )
+            old_bytes = original_body[old_start_in_body:old_end_in_body]
+            if _sha256_bytes(old_bytes) != old_quote:
+                return "mutation evidence old quote hash mismatch"
+            if original_body.count(old_bytes) != 1:
+                return "mutation evidence old quote is not unique"
+        if new_body_start is not None:
+            expected_new_start, expected_new_end = _byte_span(
+                postimage,
+                updated_body,
+                new_body_start,
+                new_body_end,
+            )
+            if (
+                new_start is None
+                or new_end is None
+                or new_body_end is None
+                or new_body_end < new_body_start
+                or new_body_end > len(updated_body_text)
+                or new_start != expected_new_start
+                or new_end != expected_new_end
+                or new_start < updated_body_offset
+                or new_end > len(postimage)
+            ):
+                return "mutation evidence new span is out of bounds"
+            new_start_in_body = len(
+                updated_body_text[:new_body_start].encode("utf-8")
+            )
+            new_end_in_body = len(
+                updated_body_text[:new_body_end].encode("utf-8")
+            )
+            new_bytes = updated_body[new_start_in_body:new_end_in_body]
+            if _sha256_bytes(new_bytes) != new_quote:
+                return "mutation evidence new quote hash mismatch"
+    return None
+
+
+def _mutation_evidence_ref_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Project one full receipt into its compact review/audit binding."""
+
+    return {
+        "schema_version": MUTATION_EVIDENCE_SCHEMA_VERSION,
+        "kind": MUTATION_EVIDENCE_KIND,
+        "page_id": payload["page_id"],
+        "correction_id": payload["correction_id"],
+        "page_uid": payload["page_uid"],
+        "preimage_sha256": payload["preimage_sha256"],
+        "postimage_sha256": payload["postimage_sha256"],
+        "evidence_sha256": mutation_evidence_sha256(payload),
+        "replacements": [
+            {
+                key: record.get(key)
+                for key in (
+                    "index",
+                    "action",
+                    "span_status",
+                    "old_quote_sha256",
+                    "new_quote_sha256",
+                    "old_byte_start",
+                    "old_byte_end",
+                    "new_byte_start",
+                    "new_byte_end",
+                )
+            }
+            for record in payload["replacements"]
+        ],
+    }
+
+
+def mutation_evidence_ref(mutation: PreparedPageMutation) -> dict[str, Any]:
+    """Return a compact durable binding to a pre-apply evidence receipt."""
+
+    return _mutation_evidence_ref_payload(mutation_evidence_payload(mutation))
+
+
 def find_mutation_page(page_id: str) -> Path | None:
     """Resolve a normal page or one explicitly correctable memory page.
 
@@ -299,8 +803,11 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 def _constraint_row(
     mutation: PreparedPageMutation,
     replacement: ExactReplacement,
+    *,
+    mutation_evidence: Mapping[str, Any] | None = None,
+    mutation_evidence_sha256: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    row: dict[str, Any] = {
         "schema_version": CORRECTION_CONSTRAINT_SCHEMA_VERSION,
         "kind": "content_correction_constraint",
         "recorded_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -312,6 +819,11 @@ def _constraint_row(
         "old_text_sha256": _sha256_text(replacement.old_text),
         "new_text_sha256": _sha256_text(replacement.new_text),
     }
+    if mutation_evidence_sha256:
+        row["mutation_evidence_sha256"] = mutation_evidence_sha256
+    if mutation_evidence is not None:
+        row["mutation_evidence"] = dict(mutation_evidence)
+    return row
 
 
 def _constraint_identity(row: dict[str, Any]) -> tuple[str, str, str, str]:
@@ -333,23 +845,94 @@ def _persist_constraints_locked(mutations: Iterable[PreparedPageMutation]) -> No
     """
 
     path = correction_constraints_file()
-    existing = {
-        _constraint_identity(row)
+    existing_rows = [
+        row
         for row in _read_jsonl(path)
         if row.get("kind") == "content_correction_constraint"
-    }
+    ]
+    existing = {_constraint_identity(row) for row in existing_rows}
+    existing_evidence: set[str] = set()
+    for row in existing_rows:
+        digest = row.get("mutation_evidence_sha256")
+        evidence = row.get("mutation_evidence")
+        if (
+            isinstance(digest, str)
+            and isinstance(evidence, Mapping)
+            and mutation_evidence_sha256(evidence) == digest
+            and mutation_evidence_error(evidence) is None
+        ):
+            existing_evidence.add(digest)
     pending: list[dict[str, Any]] = []
     for mutation in mutations:
-        for replacement in mutation.replacements:
-            row = _constraint_row(mutation, replacement)
+        if mutation.already_applied:
+            # An already-applied mutation must reuse its earlier receipt; the
+            # current postimage cannot recreate the original source bytes.
+            continue
+        evidence = mutation_evidence_payload(mutation)
+        evidence_error = mutation_evidence_error(
+            evidence,
+            expected_page_id=mutation.page_id,
+            expected_correction_id=mutation.correction_id,
+            expected_preimage=mutation.original,
+            expected_postimage=mutation.updated,
+        )
+        if evidence_error is not None:
+            raise PageMutationError(evidence_error)
+        evidence_digest = mutation_evidence_sha256(evidence)
+        receipt_missing = evidence_digest not in existing_evidence
+        for index, replacement in enumerate(mutation.replacements):
+            row = _constraint_row(
+                mutation,
+                replacement,
+                mutation_evidence=evidence if index == 0 else None,
+                mutation_evidence_sha256=evidence_digest,
+            )
             identity = _constraint_identity(row)
             if identity in existing:
+                # Upgrade a legacy constraint by appending one
+                # valid full receipt.  The registry is append-only, and
+                # readers select the latest durable evidence by digest.
+                if index == 0 and receipt_missing:
+                    pending.append(row)
+                    existing_evidence.add(evidence_digest)
+                    receipt_missing = False
                 continue
             existing.add(identity)
             pending.append(row)
+            if index == 0:
+                existing_evidence.add(evidence_digest)
+                receipt_missing = False
     if not pending:
         return
     append_jsonl_durable(path, pending, sort_keys=True)
+
+
+def read_mutation_evidence(
+    evidence_sha256: str,
+    *,
+    page_id: str | None = None,
+    correction_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Read and revalidate one pre-apply evidence receipt from the registry."""
+
+    if not isinstance(evidence_sha256, str) or len(evidence_sha256) != 64:
+        return None
+    for row in reversed(_read_jsonl(correction_constraints_file())):
+        if row.get("mutation_evidence_sha256") != evidence_sha256:
+            continue
+        evidence = row.get("mutation_evidence")
+        if not isinstance(evidence, Mapping):
+            continue
+        if mutation_evidence_sha256(evidence) != evidence_sha256:
+            continue
+        if mutation_evidence_error(
+            evidence,
+            expected_page_id=page_id,
+            expected_correction_id=correction_id,
+        ) is not None:
+            continue
+        return dict(evidence)
+    return None
 
 
 def _audit_constraint_rows() -> list[dict[str, Any]]:
@@ -471,7 +1054,8 @@ def active_global_correction_constraints(
         if identity in seen:
             continue
         seen.add(identity)
-        found.append(dict(row))
+        # Constraint consumers need the replacement rule, not archived bodies.
+        found.append({key: value for key, value in row.items() if key != "mutation_evidence"})
     return tuple(found)
 
 
@@ -797,6 +1381,7 @@ def prepare_page_mutation(
             updated_sha256=digest,
             replacements=items,
             already_applied=True,
+            page_uid=_metadata_page_uid(meta),
         )
 
     updated_body = body
@@ -861,6 +1446,12 @@ def prepare_page_mutation(
     if updated == original:
         raise PageMutationError("prepared correction produced no change")
 
+    evidence = _replacement_evidence_records(original, updated, items)
+    if len(evidence) != len(items) or any(
+        record.get("span_status") != "verified" for record in evidence
+    ):
+        raise PageMutationError("replacement source span is unknown")
+
     return PreparedPageMutation(
         page_id=page_id,
         path=path,
@@ -870,6 +1461,8 @@ def prepare_page_mutation(
         original_sha256=_sha256_bytes(original),
         updated_sha256=_sha256_bytes(updated),
         replacements=items,
+        page_uid=_metadata_page_uid(meta),
+        evidence=evidence,
     )
 
 
