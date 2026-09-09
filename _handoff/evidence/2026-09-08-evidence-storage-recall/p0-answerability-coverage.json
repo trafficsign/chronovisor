@@ -1,0 +1,67 @@
+{
+  "schema": "chronovisor.evidence-storage-recall.answerability-coverage.v1",
+  "source_candidate_sha256": "7e1a88ca2422068f3ee3f114766442486babb05364051d0de0e48ecaedc9a50d",
+  "quality_queries_executed": 0,
+  "questions_or_source_text_in_report": false,
+  "cases": 270,
+  "language_counts": {
+    "ja": 90,
+    "en": 90,
+    "cross": 90
+  },
+  "required_span_counts": {
+    "1": 76,
+    "2": 64,
+    "3": 52,
+    "4": 42,
+    "6": 9,
+    "5": 24,
+    "7": 2,
+    "9": 1
+  },
+  "forbidden_span_counts": {
+    "0": 260,
+    "1": 9,
+    "2": 1
+  },
+  "cases_with_no_required_evidence": 0,
+  "literal_required_excerpt_chars": {
+    "ja": {
+      "min": 306,
+      "max": 794,
+      "over_3000_before_overlap_merge": 0
+    },
+    "en": {
+      "min": 302,
+      "max": 799,
+      "over_3000_before_overlap_merge": 0
+    },
+    "cross": {
+      "min": 102,
+      "max": 712,
+      "over_3000_before_overlap_merge": 0
+    }
+  },
+  "observed_at": "2026-09-09T20:06:19+09:00",
+  "evaluation_scope": {
+    "synthetic_source_queries": 270,
+    "existing_source_page_bytes_min": 800,
+    "existing_source_page_bytes_max": 14000,
+    "empirical_unanswerable_queries": 0,
+    "empirical_false_injection_rate": "unmeasured",
+    "positive_queries_still_require_formal_review": true
+  },
+  "contract_audit": {
+    "source_span_candidates_require_nonempty_source_spans": true,
+    "source_span_gold_requires_nonempty_required_spans": true,
+    "working_memory_empty_regressions_are_not_negative_gold": true,
+    "forbidden_spans_are_not_expected_abstention": true,
+    "primary_epoch_unchanged": true,
+    "quality_queries_executed": 0
+  },
+  "acceptance": {
+    "negative_gate_passed": false,
+    "unmeasured_does_not_mean_zero_errors": true,
+    "full_adoption_requires_negative_evaluation_if_primary_gates_pass": true
+  }
+}
