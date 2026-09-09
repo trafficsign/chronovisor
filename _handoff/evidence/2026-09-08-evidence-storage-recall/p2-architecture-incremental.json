@@ -1,157 +1,103 @@
 {
   "schema": "chronovisor.architecture-incremental-receipt.v1",
-  "observed_at": "2026-09-08T23:29:05+09:00",
+  "observed_at": "2026-09-09T23:12:00+09:00",
   "scope": {
-    "mode": "targeted_p2_site_migration",
-    "baseline_commit": "8a1645018b81a55aa7c80d71736e98d13e577289",
+    "mode": "targeted_c2_raw_time_resolver_and_content_correction_site_migration",
+    "baseline_commit": "bbef44624d450accc448bcaaa897b8005ddfebbd",
+    "current_commit": "c01c33434c683befe910274c9a7aac1890a88f13",
     "source_scan": "scripts/architecture_baseline.py",
     "included_modules": [
-      "chronovisor.research.page_evidence_projection",
-      "chronovisor.research.page_section_semantic_adapter"
+      "chronovisor.recall.recall_answer_eval",
+      "chronovisor.research.evidence_reconstruction",
+      "chronovisor.recall.content_correction"
+    ],
+    "new_import_sites": [
+      "from chronovisor.core.canonical_json import canonical_json_sha256_strict",
+      "from chronovisor.core.raw_segment import RawSegmentCorrupt",
+      "from chronovisor.core.page_mutation import public mutation helpers and mutation_evidence_ref"
     ],
     "no_baseline_refresh": true,
     "no_contract_hash_refresh": true,
     "no_preexisting_drift_registration": true,
     "new_cross_domain_edge": false,
-    "retired_edge_preserved": "arch:b38bed04c89db759cb85b0b6944458ea38320f21d1c9e43155775e339493d2e2"
+    "retired_edge_preserved": "arch:b38bed04c89db759cb85b0b6944458ea38320f21d1c9e43155775e339493d2e2",
+    "retired_site_preserved": "arch:f43b7d453438992ce8811e86529d9d82008e3e96602b3c7008649b2e503f7128"
   },
   "delta": {
     "added_site_ids": [
-      "arch:2d5105e3bc034bc57faff695e4b09ffa55dda86913286c536b39b8a3396ef8d2",
-      "arch:4354af68f40381fb5695d4a4ae17a7d52c65d1ff18eaf11a73b87ac3f89032bd",
-      "arch:44f28ccab247ce159b2c3f553c2659570b4f08e0176b9fa0ee9f0f87b513a88f",
-      "arch:48612bfb6786262c286143d19b8363f08e8743567fbd62825e10d8fd6f3fcce4",
-      "arch:54b746413ea18157adba363a36209adea4463d29bea4ff8d8d965fb601002c1b",
-      "arch:565f679786775cbfacfc86d61418b77624f32476a4aa0c91f1786f29906d8190",
-      "arch:649f4f3869a411e952de8b4ce10733b4a20a9cea0a5506601604d768aaa42a62",
-      "arch:93c21613c38551f0ed756fe6cc8bad227c979faa1d40f47263f03b6f40b97459",
-      "arch:a0379d197bc134c60b7b1955ec7c92cd6d70ede3a2cff880b7b35c3582b54dcf",
-      "arch:bffac978f4a0c2ad73d594f8089faaf19ccc806157c7fb79c2ecbc170965aeaf",
-      "arch:d38d49fb4fd9b01228f81155f9e02826fc10239078690a025cb826ee0c801493"
+      "arch:3904fec927501ee4d7f6d28ad55420a87e3080b9c5c9ecb6f83c6b9a55663ab7",
+      "arch:a61c5bf726b2f385c0b8fb3ad256b06deb5843a6d617b4f5821efeeaaa8aeca4",
+      "arch:fd815e09e440d98fcde4359fddb8fe0a1528d97be81eaec45390a4bb26240f66"
     ],
-    "removed_site_ids": [],
+    "removed_site_ids": [
+      "arch:f43b7d453438992ce8811e86529d9d82008e3e96602b3c7008649b2e503f7128"
+    ],
     "added_sites": [
       {
-        "semantic_id": "arch:2d5105e3bc034bc57faff695e4b09ffa55dda86913286c536b39b8a3396ef8d2",
-        "source_module": "chronovisor.research.page_evidence_projection",
+        "semantic_id": "arch:3904fec927501ee4d7f6d28ad55420a87e3080b9c5c9ecb6f83c6b9a55663ab7",
+        "source_module": "chronovisor.recall.recall_answer_eval",
         "scope": "<module>",
-        "line": 24,
-        "target_module": "chronovisor.search.research_types",
-        "symbols": [
-          "EvidenceArtifact"
-        ],
-        "content_sha256": "defcd2c48f33ac11a91f015cbcc34e8d8656b1cf612e194fedf5ba3e7bcfd79a"
-      },
-      {
-        "semantic_id": "arch:4354af68f40381fb5695d4a4ae17a7d52c65d1ff18eaf11a73b87ac3f89032bd",
-        "source_module": "chronovisor.research.page_evidence_projection",
-        "scope": "<module>",
-        "line": 21,
-        "target_module": "chronovisor.core.page_identity",
-        "symbols": [
-          "normalize_page_uid"
-        ],
-        "content_sha256": "de2e5352512066404e744b4703a026ff6a02981b1bcbcd088470e9c946907af1"
-      },
-      {
-        "semantic_id": "arch:44f28ccab247ce159b2c3f553c2659570b4f08e0176b9fa0ee9f0f87b513a88f",
-        "source_module": "chronovisor.research.page_section_semantic_adapter",
-        "scope": "<module>",
-        "line": 21,
-        "target_module": "chronovisor.core.store",
-        "symbols": [
-          "SYSTEM_DIR"
-        ],
-        "content_sha256": "6ad658990991936dcc2faf09342b9502cab73d1f710d016f79bac6e55ab5b5b5"
-      },
-      {
-        "semantic_id": "arch:48612bfb6786262c286143d19b8363f08e8743567fbd62825e10d8fd6f3fcce4",
-        "source_module": "chronovisor.research.page_evidence_projection",
-        "scope": "<module>",
-        "line": 23,
-        "target_module": "chronovisor.search.research_store",
-        "symbols": [
-          "ResearchStore"
-        ],
-        "content_sha256": "fba483f4da86775e8ce91fe45f6c3350dd56b44f293d53189268deba70632c00"
-      },
-      {
-        "semantic_id": "arch:54b746413ea18157adba363a36209adea4463d29bea4ff8d8d965fb601002c1b",
-        "source_module": "chronovisor.research.page_section_semantic_adapter",
-        "scope": "<module>",
-        "line": 19,
-        "target_module": "chronovisor.core.semantic_evidence",
-        "symbols": [
-          "SourcePassage"
-        ],
-        "content_sha256": "4a80f4051893a59c12b71cd536c1983d0cb7509886883977b3280f923f3455a6"
-      },
-      {
-        "semantic_id": "arch:565f679786775cbfacfc86d61418b77624f32476a4aa0c91f1786f29906d8190",
-        "source_module": "chronovisor.research.page_section_semantic_adapter",
-        "scope": "<module>",
-        "line": 17,
-        "target_module": "chronovisor.core.canonical_document",
-        "symbols": [
-          "parse_document"
-        ],
-        "content_sha256": "471cc8742256f3c1420bbdce03014dc3e82ae905e3db881794ef3a412d34a0ed"
-      },
-      {
-        "semantic_id": "arch:649f4f3869a411e952de8b4ce10733b4a20a9cea0a5506601604d768aaa42a62",
-        "source_module": "chronovisor.research.page_evidence_projection",
-        "scope": "<module>",
-        "line": 19,
-        "target_module": "chronovisor.core.canonical_document",
-        "symbols": [
-          "CanonicalDocumentError",
-          "parse_document"
-        ],
-        "content_sha256": "c60f607e608c26d2b2a80c4573c43c39274defde9f79fd30bba0e179ca9f3229"
-      },
-      {
-        "semantic_id": "arch:93c21613c38551f0ed756fe6cc8bad227c979faa1d40f47263f03b6f40b97459",
-        "source_module": "chronovisor.research.page_evidence_projection",
-        "scope": "<module>",
-        "line": 22,
-        "target_module": "chronovisor.core.search_types",
-        "symbols": [
-          "tokenize"
-        ],
-        "content_sha256": "0cbd0c1418cbcaee014c706fca032a9a153a6090a7fcbc7d3e09a16b916dcebc"
-      },
-      {
-        "semantic_id": "arch:a0379d197bc134c60b7b1955ec7c92cd6d70ede3a2cff880b7b35c3582b54dcf",
-        "source_module": "chronovisor.research.page_evidence_projection",
-        "scope": "<module>",
-        "line": 20,
+        "line": 31,
         "target_module": "chronovisor.core.canonical_json",
         "symbols": [
-          "canonical_json_line_bytes_strict"
+          "canonical_json_sha256_strict"
         ],
-        "content_sha256": "ea7a8aea2236c966e33cf763f7fc380b9003cba1308b42288706ad38e2ee34db"
+        "content_sha256": "b718de2a8ab0045a7681e64f890efffa1810390d27d2b511e95aadf0a2de8655"
       },
       {
-        "semantic_id": "arch:bffac978f4a0c2ad73d594f8089faaf19ccc806157c7fb79c2ecbc170965aeaf",
-        "source_module": "chronovisor.research.page_section_semantic_adapter",
+        "semantic_id": "arch:a61c5bf726b2f385c0b8fb3ad256b06deb5843a6d617b4f5821efeeaaa8aeca4",
+        "source_module": "chronovisor.research.evidence_reconstruction",
         "scope": "<module>",
-        "line": 18,
-        "target_module": "chronovisor.core.search_types",
+        "line": 26,
+        "target_module": "chronovisor.core.raw_segment",
         "symbols": [
-          "SemanticEvidence"
+          "RawSegmentCorrupt"
         ],
-        "content_sha256": "9511b0a5aab4cbcb18cb0e36aa4bf313cff1b2ef5733d728e09bf4795fb8189e"
+        "content_sha256": "23cdd33abe03e515c92a14f89cdd9e0aa733301565c5beb1a5297301cd31286a"
       },
       {
-        "semantic_id": "arch:d38d49fb4fd9b01228f81155f9e02826fc10239078690a025cb826ee0c801493",
-        "source_module": "chronovisor.research.page_section_semantic_adapter",
+        "semantic_id": "arch:fd815e09e440d98fcde4359fddb8fe0a1528d97be81eaec45390a4bb26240f66",
+        "source_module": "chronovisor.recall.content_correction",
         "scope": "<module>",
-        "line": 20,
-        "target_module": "chronovisor.core.semantic_index",
+        "line": 45,
+        "target_module": "chronovisor.core.page_mutation",
         "symbols": [
-          "SemanticDocument"
+          "ExactReplacement",
+          "PageMutationError",
+          "PreparedPageMutation",
+          "apply_prepared_mutations",
+          "chronovisor_mutation_lock",
+          "decision_authority_lock",
+          "find_mutation_page",
+          "mutation_evidence_error",
+          "mutation_evidence_payload",
+          "mutation_evidence_ref",
+          "prepare_page_mutation",
+          "read_mutation_evidence",
+          "rollback_prepared_mutations"
         ],
-        "content_sha256": "ecae326702cdc354c3fb0ee2389d3784d89c098b39bbfa5b3ca57c84019cae23"
+        "content_sha256": "8a7f11a4d459738e87a710c89b3e5933e21a2ee53fd7650efed75d57b8681742"
+      }
+    ],
+    "removed_sites": [
+      {
+        "semantic_id": "arch:f43b7d453438992ce8811e86529d9d82008e3e96602b3c7008649b2e503f7128",
+        "source_module": "chronovisor.recall.content_correction",
+        "scope": "<module>",
+        "line": 45,
+        "target_module": "chronovisor.core.page_mutation",
+        "symbols": [
+          "ExactReplacement",
+          "PageMutationError",
+          "PreparedPageMutation",
+          "apply_prepared_mutations",
+          "chronovisor_mutation_lock",
+          "decision_authority_lock",
+          "find_mutation_page",
+          "prepare_page_mutation",
+          "rollback_prepared_mutations"
+        ],
+        "content_sha256": "948ca8a0a96ab93b024a16715a1292955450e1505947a7ffd2e2a56f66d1237c"
       }
     ],
     "edge_delta": {
@@ -169,48 +115,74 @@
     ],
     "active_exception_ids_before": 44,
     "active_exception_ids_after": 44,
-    "active_cross_domain_sites_before": 1495,
-    "active_cross_domain_sites_after": 1506,
-    "retired_cross_domain_site_ids_before": 1322,
-    "retired_cross_domain_site_ids_after": 1322,
+    "active_cross_domain_sites_before": 1500,
+    "active_cross_domain_sites_after": 1502,
+    "retired_cross_domain_site_ids_before": 1331,
+    "retired_cross_domain_site_ids_after": 1332,
     "edge_count_before": 44,
     "edge_count_after": 44,
     "updated_edges": {
-      "research->core": {
-        "sites_before": 25,
-        "sites_after": 34
+      "recall->core": {
+        "sites_before": 259,
+        "sites_after": 260
       },
-      "research->search": {
-        "sites_before": 22,
-        "sites_after": 24
+      "research->core": {
+        "sites_before": 27,
+        "sites_after": 28
       }
     },
-    "baseline_sha256": "3a264abf0177393c2ebc5d41b4b7e0a52952b42e664ba043c6080f4219a835ec"
+    "baseline_sha256_before": "d7dd58f15dd72c5c50619cb4cbf279e7eaf6afdd0d1db259e9f200157b6600d8",
+    "baseline_sha256_after": "c95b3efa27ae4306092e9fd239176d9bc5408b4850d18353c516df00ea63edf5",
+    "contract_hashes_refreshed": false
   },
   "verification": {
     "json_parse": "pass",
     "seed_ledger_canonical_hash_match": "pass",
     "active_retired_disjoint": "pass",
     "ledger_site_ids_unique": "pass",
-    "targeted_delta_against_p1_baseline": "pass: added 11, removed 0",
-    "baseline_source_import_sites": 1505,
-    "current_source_import_sites": 1516,
+    "targeted_delta_against_parent": "pass: added 3, removed 1",
+    "baseline_source_import_sites": 1510,
+    "current_source_import_sites": 1512,
     "preexisting_current_unmatched_site_ids": 11,
+    "current_unmatched_site_ids": 11,
     "preexisting_stale_ledger_site_ids": 1,
-    "new_edge_guard": "pass: no research->recall edge; existing drift remains guarded",
-    "architecture_checks": "pytest -q tests/test_architecture_baseline.py tests/test_large_function_policy.py: 9 failed, 21 passed; same 9 known baseline failures, no new edge failure",
-    "guard_generate_exceptions": "rejected existing seed drift (exit 1); no full refresh attempted",
+    "current_stale_ledger_site_ids": 1,
+    "new_edge_guard": "pass: no new package edge; edge count 44 retained",
+    "target_site_source_match": "pass: all 3 added rows match current scanner output; retired f43 absent from current source",
+    "architecture_output_compare": {
+      "baseline_edge_count": 44,
+      "current_edge_count": 44,
+      "added_edges": [],
+      "removed_edges": [],
+      "scc_unchanged": true
+    },
+    "graph_coverage": {
+      "signal": "best_effort",
+      "freshness": "metadata_match_except_content_correction_metadata_changed",
+      "paths": [
+        "src/chronovisor/recall/recall_answer_eval.py",
+        "src/chronovisor/research/evidence_reconstruction.py",
+        "src/chronovisor/recall/content_correction.py",
+        "src/chronovisor/core/page_mutation.py"
+      ],
+      "recorded_issue": "none",
+      "content_correction_action": "read source directly; no index claim made"
+    },
+    "architecture_checks": "pytest -q tests/test_architecture_baseline.py tests/test_large_function_policy.py: 9 failed, 21 passed; same 9 known baseline failures (contract-hash, retained ledger/seed drift, large-function policy), no new edge failure",
+    "guard_generate_exceptions": "rejected existing seed drift (expected); no full refresh attempted",
     "guard_drift_summary": {
       "preexisting_unmatched_site_ids": 11,
+      "current_unmatched_site_ids": 11,
       "preexisting_stale_ledger_site_ids": 1,
-      "active_seed_count": 1506,
-      "detected_current_site_count": 1516
+      "current_stale_ledger_site_ids": 1,
+      "active_seed_count": 1502,
+      "detected_current_site_count": 1512
     }
   },
   "runtime": {
     "production_restarted": false,
     "published": false,
     "provider_requested": false,
-    "p2_registration": true
+    "architecture_incremental_registration": true
   }
 }
