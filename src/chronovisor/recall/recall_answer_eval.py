@@ -6981,6 +6981,45 @@ def build_machine_gold_cycle(
     }
 
 
+def _machine_gold_receipt_causal_order(
+    *,
+    machine_subject: Mapping[str, Any],
+    source_packet: object,
+    machine_receipt: object,
+    frozen_at: str,
+) -> tuple[bool, str]:
+    """Check source freeze/preregistration/review ordering for one receipt."""
+
+    source_frozen_at = _strict_utc(machine_subject.get("source_frozen_at"))
+    source_span_metadata = (
+        source_packet.get("source_span")
+        if isinstance(source_packet, Mapping)
+        else None
+    )
+    preregistered_at = (
+        _strict_utc(source_span_metadata.get("preregistered_at"))
+        if isinstance(source_span_metadata, Mapping)
+        else ""
+    )
+    receipt_created_at = (
+        _strict_utc(machine_receipt.get("created_at"))
+        if isinstance(machine_receipt, Mapping)
+        else ""
+    )
+    causal_order = bool(
+        source_frozen_at
+        and receipt_created_at
+        and frozen_at
+        and (
+            not preregistered_at
+            or _utc_order_key(preregistered_at) < _utc_order_key(receipt_created_at)
+        )
+        and _utc_order_key(source_frozen_at) < _utc_order_key(receipt_created_at)
+        <= _utc_order_key(frozen_at)
+    )
+    return causal_order, receipt_created_at
+
+
 def validate_gold_manifest(
     value: Path | Mapping[str, Any],
     *,
@@ -7259,39 +7298,11 @@ def validate_gold_manifest(
                     else None
                 ),
             )
-            machine_receipt = machine_check.get("receipt", {})
-            source_frozen_at = _strict_utc(machine_subject.get("source_frozen_at"))
-            source_span_metadata = (
-                source_packet.get("source_span")
-                if isinstance(source_packet, Mapping)
-                else None
-            )
-            preregistered_at = (
-                _strict_utc(source_span_metadata.get("preregistered_at"))
-                if isinstance(source_span_metadata, Mapping)
-                else ""
-            )
-            receipt_created_at = _strict_utc(
-                machine_receipt.get("created_at")
-                if isinstance(machine_receipt, Mapping)
-                else ""
-            )
-            causal_order = bool(
-                source_frozen_at
-                and receipt_created_at
-                and frozen_at
-                and (
-                    not preregistered_at
-                    or datetime.fromisoformat(
-                        preregistered_at.replace("Z", "+00:00")
-                    )
-                    < datetime.fromisoformat(
-                        receipt_created_at.replace("Z", "+00:00")
-                    )
-                )
-                and datetime.fromisoformat(source_frozen_at.replace("Z", "+00:00"))
-                < datetime.fromisoformat(receipt_created_at.replace("Z", "+00:00"))
-                <= datetime.fromisoformat(frozen_at.replace("Z", "+00:00"))
+            causal_order, receipt_created_at = _machine_gold_receipt_causal_order(
+                machine_subject=machine_subject,
+                source_packet=source_packet,
+                machine_receipt=machine_check.get("receipt", {}),
+                frozen_at=frozen_at,
             )
             if machine_source_error:
                 review_error = machine_source_error
