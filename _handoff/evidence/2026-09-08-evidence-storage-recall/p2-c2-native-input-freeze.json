@@ -1,0 +1,50 @@
+{
+  "schema": "chronovisor.c2-native-storage-inputs.v1",
+  "observed_at": "2026-09-09T16:32:55.011048+00:00",
+  "status": "inputs_and_source_only_review_frozen",
+  "native_children": 20,
+  "selected_source_records": 69,
+  "language_counts": {
+    "cross": 6,
+    "en": 7,
+    "ja": 7
+  },
+  "page_only_sources": 4,
+  "page_only_candidate_count": 18,
+  "page_only_definition": "No semantic child source reference; 17 pages have no source_raw reference of any kind and one additional page has a non-semantic reference.",
+  "native_source_bytes": 1493535,
+  "native_bindings_verified": 20,
+  "duplicate_parent_count": 0,
+  "whole_parent_processed": false,
+  "model_calls": 0,
+  "production_modified": false,
+  "source_only_review": {
+    "status": "provisional",
+    "candidate_output_read": false,
+    "formal_gold": false,
+    "source_quote_and_identity_validation": "passed"
+  },
+  "temporal_preflight": {
+    "event_time_present": 69,
+    "recorded_at_present": 69,
+    "event_time_differs_from_recorded_at": 69,
+    "fact_validity_unknown": 69,
+    "as_of_supported_atoms_before_pi_fix": 48,
+    "as_of_accepted_before_pi_fix": 0,
+    "unknown_validity_rejections_before_pi_fix": 31,
+    "unsupported_pi_records_before_fix": 21
+  },
+  "selection_note": "Frozen content_byte_length ordering differs by two native references from the earlier body-length audit subset; selection and source-only review remain fixed. All twenty selected child bindings were verified independently.",
+  "private_receipts": {
+    "manifest.json": "ea9a7947b872fd7caeba44e5169a3ae6aa1d21f3fd1e4d4f206dd57ea227ae34",
+    "selection-receipt.json": "abf9f8906b18e0d7454e558e7676be4c3d2948615524a9273759e98a4cd38a03",
+    "validity-summary.json": "15eb3cc50bd755ea86b9538353e95007851f0daa9d0d426a04ae07a420c88de6",
+    "source-only-provisional-review-native20-20260910.json": "fcba08c9c1f0b8198c054400416a64888b06504ea96a833bc352fbc0e33a7ecf"
+  },
+  "limitations": [
+    "Storage trial inputs and provisional source-only annotations are not heldout retrieval or adoption evidence.",
+    "Unknown fact validity is not inferred from event or recorded timestamps.",
+    "Pi native reconstruction is being fixed; no unsupported row is silently accepted.",
+    "Native sources remain local; the OpenCode Go proof used synthetic text only."
+  ]
+}
