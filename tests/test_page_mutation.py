@@ -725,6 +725,18 @@ def test_mutation_evidence_receipt_roundtrips_utf8_source_spans(
     assert row_digest == rows[0]["mutation_evidence_sha256"]
     active = page_mutation.active_correction_constraints("memory", path.read_text())
     assert active and all("mutation_evidence" not in rule for rule in active)
+    recovered = page_mutation.prepare_page_mutation(
+        "memory",
+        [{"old_text": "古い事実です。", "new_text": "新しい事実です。"}],
+        correction_id="corr-utf8-evidence",
+    )
+    assert recovered.already_applied
+    assert page_mutation.mutation_evidence_payload(recovered) == evidence
+    assert page_mutation.mutation_evidence_ref(recovered) == page_mutation.mutation_evidence_ref(prepared)
+    page_mutation.correction_constraints_file().unlink()
+    with pytest.raises(page_mutation.PageMutationError, match="source receipt"):
+        page_mutation.mutation_evidence_payload(recovered)
+    assert path.read_bytes() == prepared.updated
 
 
 def test_mutation_evidence_rejects_tampered_hash_or_span(

@@ -473,6 +473,28 @@ def _replacement_evidence_records(
 def mutation_evidence_payload(mutation: PreparedPageMutation) -> dict[str, Any]:
     """Build the pre-apply canonical mutation evidence envelope."""
 
+    if mutation.already_applied:
+        # The visible postimage is not a replacement for the original source.
+        # Resolve the receipt persisted before CAS instead of minting a new
+        # postimage-to-postimage evidence identity during recovery.
+        matches: dict[str, dict[str, Any]] = {}
+        for row in _read_jsonl(correction_constraints_file()):
+            payload = row.get("mutation_evidence")
+            if not isinstance(payload, Mapping) or (
+                payload.get("page_id") != mutation.page_id
+                or payload.get("correction_id") != mutation.correction_id
+                or payload.get("postimage_sha256") != mutation.original_sha256
+            ):
+                continue
+            digest = mutation_evidence_sha256(payload)
+            if row.get("mutation_evidence_sha256") == digest and mutation_evidence_error(
+                payload, expected_postimage=mutation.original
+            ) is None:
+                matches[digest] = dict(payload)
+        if len(matches) != 1:
+            raise PageMutationError("already-applied source receipt is missing or ambiguous")
+        return next(iter(matches.values()))
+
     try:
         original_document = parse_document(mutation.original)
         updated_document = parse_document(mutation.updated)

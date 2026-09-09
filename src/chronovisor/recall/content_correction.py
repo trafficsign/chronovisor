@@ -46,7 +46,6 @@ from chronovisor.core.page_mutation import (
     ExactReplacement,
     PageMutationError,
     PreparedPageMutation,
-    _mutation_evidence_ref_payload,
     apply_prepared_mutations,
     chronovisor_mutation_lock,
     decision_authority_lock,
@@ -2631,7 +2630,11 @@ def _review_artifact_error(
             )
             if stored_evidence is None:
                 return "frontier mutation evidence receipt is missing"
-            if dict(evidence_ref) != _mutation_evidence_ref_payload(stored_evidence):
+            try:
+                recovered_ref = mutation_evidence_ref(mutation)
+            except PageMutationError:
+                return "frontier mutation evidence source receipt is invalid"
+            if dict(evidence_ref) != recovered_ref:
                 return "frontier mutation evidence binding changed"
             evidence_error = mutation_evidence_error(
                 stored_evidence,
