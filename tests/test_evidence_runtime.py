@@ -41,9 +41,12 @@ from chronovisor.research.evidence_reconstruction import (
     Provenance,
     TimeInterval,
     build_episode_projection,
+    build_episode_projection_c2,
     build_evidence_atom,
+    build_evidence_atom_c2,
     compile_retrieval_program,
     load_episode_projection,
+    load_episode_projection_c2,
 )
 from chronovisor.research.evidence_runtime import (
     EvidenceLedger,
@@ -57,6 +60,7 @@ from chronovisor.research.evidence_runtime import (
     load_evidence_rollout,
     rollback_evidence_rollout,
     run_evidence_retrieval,
+    run_evidence_retrieval_c2,
 )
 from chronovisor.research.research_tools import ToolContext
 from chronovisor.search.research_types import Action, ActionType
@@ -674,6 +678,70 @@ def test_ledger_fails_closed_on_contradiction_future_and_resolves_superseded() -
     )
     assert expired.temporal_gap() is True
     assert expired.slot_state("answer")["expired_count"] == 1
+
+
+def test_c2_runtime_holds_unknown_fact_validity_and_keeps_v1_entrypoint_closed(
+    tmp_path: Path,
+) -> None:
+    raw_dir, _v1_projection, _raw = _projection(tmp_path)
+    c2_projection = load_episode_projection_c2(build_episode_projection_c2(raw_dir))
+    program = compile_projection_program(
+        "The feature is enabled.", "2026-08-11T10:00:00+09:00"
+    )
+
+    held = run_evidence_retrieval_c2(program, c2_projection)
+
+    assert held.packet.schema == "chronovisor.evidence-packet.v2"
+    assert held.packet.abstained is True
+    assert held.stop_reason == "as_of_unsatisfied"
+    assert held.packet.atoms == ()
+    assert held.trace["ledger"]["slots"]["answer"]["unknown_validity_count"] == 1
+    with pytest.raises(EvidenceReconstructionError, match="projection schema"):
+        run_evidence_retrieval(program, c2_projection)
+
+
+def test_c2_ledger_requires_fact_validity_and_never_uses_event_or_recorded_time() -> None:
+    program = _program("feature enabled")
+    evidence = EvidenceRef("c2.md", 0, 1, "a" * 64, "b" * 64)
+    known = build_evidence_atom_c2(
+        episode_id="episode:c2",
+        claim="feature enabled",
+        entities=(),
+        provenance=Provenance("test", "event:known", "assistant", 0),
+        evidence=evidence,
+        event_time="2026-08-11T09:00:00+09:00",
+        recorded_at="2026-08-11T09:30:00+09:00",
+        validity=TimeInterval(
+            "2026-08-11T09:00:00+09:00", "2026-08-11T10:00:00+09:00"
+        ),
+        event_type="message",
+        role="assistant",
+        phase=None,
+        relations=(EvidenceRelation(EvidenceRelationKind.SUPPORTS, "claim:known"),),
+    )
+    ledger = EvidenceLedger(program)
+    assert ledger.add("answer", known) is True
+    assert ledger.covered() is True
+
+    unknown = build_evidence_atom_c2(
+        episode_id="episode:c2",
+        claim="feature enabled",
+        entities=(),
+        provenance=Provenance("test", "event:unknown", "assistant", 1),
+        evidence=EvidenceRef("c2-unknown.md", 0, 1, "c" * 64, "d" * 64),
+        event_time="2026-08-11T09:00:00+09:00",
+        recorded_at="2026-08-11T09:30:00+09:00",
+        validity=None,
+        event_type="message",
+        role="assistant",
+        phase=None,
+        relations=(EvidenceRelation(EvidenceRelationKind.SUPPORTS, "claim:unknown"),),
+    )
+    held = EvidenceLedger(program)
+    assert held.add("answer", unknown) is False
+    assert held.covered() is False
+    assert held.temporal_gap() is True
+    assert held.slot_state("answer")["unknown_validity_count"] == 1
 
 
 def test_deadline_and_unapproved_actions_abstain_before_execution(

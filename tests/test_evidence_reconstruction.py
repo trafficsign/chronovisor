@@ -22,12 +22,16 @@ from chronovisor.research.evidence_reconstruction import (
     Provenance,
     TimeInterval,
     build_episode_projection,
+    build_episode_projection_c2,
     build_evidence_atom,
     build_evidence_packet,
+    build_evidence_packet_c2,
     compile_retrieval_program,
     evaluation_contract_bytes,
     load_episode_projection,
+    load_episode_projection_c2,
     verify_projection_atom,
+    verify_projection_atom_c2,
 )
 
 NOW = datetime(2026, 8, 11, 9, 30, tzinfo=ZoneInfo("Asia/Tokyo"))
@@ -163,6 +167,37 @@ def _committed_raw(
         receipt.data_path.read_bytes() + b'{"uncommitted":true}\n'
     )
     return receipt.data_path, raw, receipt.commit.to_dict()
+
+
+def _committed_rows(
+    raw_dir: Path,
+    rows: list[dict[str, object]],
+    *,
+    raw_id: str = "save-codex-c2.md",
+) -> None:
+    raw_dir.parent.mkdir(parents=True, exist_ok=True)
+    for name in ("index.md", "log.md", "schema.md"):
+        (raw_dir.parent / name).write_text("legacy\n", encoding="utf-8")
+    source = raw_dir.parent / "c2-session.jsonl"
+    raw = b"".join(
+        json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+        for row in rows
+    )
+    source.write_bytes(raw)
+    append_capture(
+        raw_dir=raw_dir,
+        raw_id=raw_id,
+        idempotency_key=raw_id.removeprefix("save-").removesuffix(".md"),
+        host="codex",
+        session_key="c" * 24,
+        session_id="session-c2",
+        source_file=source,
+        after_line=0,
+        until_line=len(rows),
+        source_bytes=raw,
+        record_count=len(rows),
+        now=NOW,
+    )
 
 
 def _legacy_source_archive(raw_dir: Path, source_root: Path) -> Path:
@@ -387,6 +422,124 @@ def test_y3_event_timestamp_falls_back_only_when_missing(tmp_path: Path) -> None
     )
     with pytest.raises(EvidenceReconstructionError, match="event timestamp"):
         build_episode_projection(empty_raw)
+
+
+def test_c2_projection_keeps_event_time_recorded_at_and_validity_separate(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "c2" / "raw"
+    _committed_raw(raw_dir, first_timestamp=MISSING)
+
+    first = build_episode_projection_c2(raw_dir)
+    second = build_episode_projection_c2(raw_dir)
+    assert first == second
+    projection = load_episode_projection_c2(first)
+    assert projection.schema == "chronovisor.episode-evidence-projection.v2"
+    assert projection.canonical_bytes() == first
+    assert len(projection.atoms) == 2
+    assert all("event" not in atom and "payload" not in atom for atom in json.loads(first)["atoms"])
+    by_claim = {atom.claim: atom for atom in projection.atoms}
+    missing = by_claim["Why did it fail?"]
+    explicit = by_claim["The lease expired."]
+    assert missing.event_time is None
+    assert explicit.event_time == "2026-08-11T09:01:00+09:00"
+    assert missing.recorded_at == NOW.isoformat()
+    assert explicit.recorded_at == NOW.isoformat()
+    assert missing.validity is None
+    assert explicit.validity is None
+    assert missing.event_type == explicit.event_type == "message"
+    assert missing.role == "user"
+    assert explicit.role == "assistant"
+    assert all(atom.role == atom.provenance.source_role for atom in projection.atoms)
+    assert missing.phase is explicit.phase is None
+    for atom in projection.atoms:
+        verify_projection_atom_c2(raw_dir, atom)
+
+    # The existing v1 projection remains the original fallback behavior and
+    # its canonical bytes are independent of the opt-in C2 artifact.
+    v1 = load_episode_projection(build_episode_projection(raw_dir))
+    v1_missing = next(atom for atom in v1.atoms if atom.claim == "Why did it fail?")
+    assert v1_missing.validity == TimeInterval(NOW.isoformat(), NOW.isoformat())
+
+
+def test_c2_projection_accepts_only_explicit_validity_and_rejects_bad_timestamp(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "validity" / "raw"
+    _committed_rows(
+        raw_dir,
+        [
+            {
+                "type": "response_item",
+                "timestamp": "2026-08-11T09:00:00+09:00",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "answer",
+                    "content": [{"type": "output_text", "text": "Fact."}],
+                },
+                "validity": {
+                    "start": "2026-08-11T08:00:00+09:00",
+                    "end": "2026-08-11T10:00:00+09:00",
+                },
+            }
+        ],
+    )
+    projection = load_episode_projection_c2(build_episode_projection_c2(raw_dir))
+    assert projection.atoms[0].event_time == "2026-08-11T09:00:00+09:00"
+    assert projection.atoms[0].phase == "answer"
+    assert projection.atoms[0].validity == TimeInterval(
+        "2026-08-11T08:00:00+09:00", "2026-08-11T10:00:00+09:00"
+    )
+    tampered = json.loads(build_episode_projection_c2(raw_dir))
+    tampered["atoms"][0]["event_time"] = "2026-08-11T09:01:00+09:00"
+    with pytest.raises(EvidenceReconstructionError, match="identity mismatch"):
+        load_episode_projection_c2(
+            json.dumps(tampered, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            + b"\n"
+        )
+    role_tampered = json.loads(build_episode_projection_c2(raw_dir))
+    role_tampered["atoms"][0]["role"] = "user"
+    with pytest.raises(EvidenceReconstructionError, match="role/provenance mismatch"):
+        load_episode_projection_c2(
+            json.dumps(
+                role_tampered,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            + b"\n"
+        )
+
+    bad_raw = tmp_path / "invalid" / "raw"
+    _committed_raw(bad_raw, first_timestamp="not-a-timestamp")
+    with pytest.raises(EvidenceReconstructionError, match="event timestamp"):
+        build_episode_projection_c2(bad_raw)
+
+
+def test_c2_packet_serialization_is_versioned_and_rejects_v1_mixing(
+    tmp_path: Path,
+) -> None:
+    raw_dir = tmp_path / "packet" / "raw"
+    _committed_raw(raw_dir, first_timestamp=MISSING)
+    projection = load_episode_projection_c2(build_episode_projection_c2(raw_dir))
+    atom = next(atom for atom in projection.atoms if atom.role == "assistant")
+    packet = build_evidence_packet_c2(
+        query=atom.claim,
+        as_of="2026-08-11T10:00:00+09:00",
+        retrieval_program_id="program:" + "a" * 64,
+        atoms=(atom,),
+    )
+    payload = json.loads(packet.canonical_bytes())
+    assert payload["schema"] == "chronovisor.evidence-packet.v2"
+    assert payload["atoms"][0]["schema"] == "chronovisor.evidence-atom.v2"
+    with pytest.raises(EvidenceReconstructionError, match="v1 packet"):
+        build_evidence_packet(
+            query=atom.claim,
+            as_of="2026-08-11T10:00:00+09:00",
+            retrieval_program_id="program:" + "a" * 64,
+            atoms=(atom,),
+        )
 
 
 def _valid_plan() -> dict[str, object]:
