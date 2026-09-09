@@ -1,0 +1,305 @@
+{
+  "acceptance": {
+    "archive_provenance_complete": true,
+    "cutover_and_health_complete": true,
+    "full_production_acceptance_complete": false,
+    "ingest_live_processing_canary_complete": false,
+    "reason": "helper lease intentionally held; new ingest drain is ready but cannot start a write batch until root releases the lease"
+  },
+  "actions": {
+    "config_source_pin": "873c2a3bc1743bc7a2fe309067904e903870fb1d -> c7b4fbebbed652fe5bb6ff1020974cd027867503",
+    "kickstart_labels": [
+      "com.trafficsign.chronovisor-dashboard.managed-v2",
+      "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+      "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+      "com.trafficsign.chronovisor-semantic.managed-v2",
+      "com.trafficsign.chronovisor-reranker.managed-v2"
+    ],
+    "periodic_labels_not_restarted": [
+      "com.trafficsign.chronovisor-converge.managed-v2",
+      "com.trafficsign.chronovisor-librarian-review.managed-v2"
+    ],
+    "release_lease": "held pending root P0/live canary follow-up",
+    "untouched_p4_mlx_pid": 807
+  },
+  "health": {
+    "dashboard": {
+      "api_health_http": 200,
+      "api_status_http": 200,
+      "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
+      "child_pid": 31261
+    },
+    "ingest": {
+      "current_job_id": null,
+      "current_job_pid": null,
+      "lease_held": true,
+      "pending": 34,
+      "pending_raws": 34,
+      "runtime_state": "ready",
+      "stage": "waiting",
+      "state": "ready"
+    },
+    "lan_dashboard": {
+      "api_health_http": 401,
+      "api_status_http": 401,
+      "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
+      "auth_boundary_expected": true,
+      "bind": "192.168.100.3:8766",
+      "child_pid": 31063
+    },
+    "reranker": {
+      "archive_id": "xaxjig82HjrC6MjAfaODV",
+      "drift": false,
+      "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "pid": 32001,
+      "ready": true,
+      "runtime_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "status": "ok",
+      "warmup_latency_ms": 30422
+    },
+    "semantic": {
+      "archive_id": "L6FXMn4_ftopRoz4nM3Pc",
+      "pid": 31129,
+      "query_path_self_test": {
+        "hits": 3,
+        "latency_ms": 417.124,
+        "queries": 3
+      },
+      "ready": true,
+      "status": "ok"
+    }
+  },
+  "observed_at": "2026-09-09T18:33:49+09:00",
+  "periodic_services": [
+    {
+      "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
+      "child_pid": 32742,
+      "interval_seconds": 1800,
+      "label": "com.trafficsign.chronovisor-converge.managed-v2",
+      "mode": "periodic-writer",
+      "note": "interval run naturally resolved the new runtime source after cutover",
+      "pinned_source_sha": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "state": "running",
+      "targeted_restart": false,
+      "wrapper_pid": 32728
+    },
+    {
+      "interval_seconds": 300,
+      "label": "com.trafficsign.chronovisor-librarian-review.managed-v2",
+      "mode": "periodic-writer",
+      "note": "not part of the five-service restart; next scheduled run resolves runtime.source",
+      "state": "not running",
+      "targeted_restart": false,
+      "throttle_seconds": 60
+    },
+    {
+      "interval_seconds": 300,
+      "label": "com.trafficsign.chronovisor-deadman-observer.managed-v2",
+      "mode": "periodic-observer",
+      "targeted_restart": false
+    },
+    {
+      "interval_seconds": 900,
+      "label": "com.trafficsign.chronovisor-watchdog.managed-v2",
+      "mode": "periodic-observer",
+      "targeted_restart": false
+    },
+    {
+      "label": "com.trafficsign.chronovisor-sleep.managed-v2",
+      "mode": "calendar",
+      "targeted_restart": false
+    },
+    {
+      "label": "com.trafficsign.chronovisor-searxng.managed-v2",
+      "mode": "persistent-independent-local-service",
+      "targeted_restart": false
+    }
+  ],
+  "release": {
+    "candidate_head": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+    "candidate_worktree": "/private/tmp/chronovisor-release-candidate-vrzhBS",
+    "git_ls_remote_verified": true,
+    "previous_remote_sha": "5b922ea27c6b818491c7011cddc6aa7b887a117b",
+    "remote_main_sha": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+    "source_commits": [
+      "8a1645018b81a55aa7c80d71736e98d13e577289",
+      "b2912bb800871ce94410d2754f71fce68548c9df",
+      "1e05bd7d1c7195f82f757a0e2357800159cc3795",
+      "0f442bf39e7845438bd39a9395be020cb5264a41",
+      "8bfac6ae3327cbc2f7a56d493a0d58fa4ec99e90",
+      "553c480ad2571b19c606f78a176a1154511bc614",
+      "c08c5c5449fb5d21ca0ecab2fcd4e71621923ae1",
+      "cac699aba481f8da1681753a1e72040b264537f8",
+      "a9d98551f66ce6eb8402775d7fbf9bb28fe54d18",
+      "b77ff7a631322e866fa7f0e0e1acde98c737ed66"
+    ]
+  },
+  "residual_risks": [
+    "ingest lease remains held by helper PID3106; pending Raw count continues to grow until root releases it",
+    "periodic librarian-review was not targeted and will resolve the pinned runtime on its next scheduled run",
+    "Dashboard materialized projections may lag the new service runtime",
+    "LAN health returns expected 401 before authentication",
+    "P4 MLX process PID807 was intentionally left running; no generic model kill was used"
+  ],
+  "runtime_source": {
+    "backup_mode": "0600",
+    "changed_key": "runtime.source",
+    "chronovisor_runtime_source_overrides": "absent in inspected source plists",
+    "config": "$HOME/.chronovisor/config.toml",
+    "launchd_source_dir": "$HOME/.chronovisor/runtime/launchd-sources",
+    "pinned_source_sha": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+    "previous_source_sha": "873c2a3bc1743bc7a2fe309067904e903870fb1d",
+    "private_backup": "$HOME/.chronovisor/runtime/deployment-backups/config.toml.pre-c7b4fbebbed6-20260909T092621Z"
+  },
+  "safe_boundary": {
+    "captured_at": "2026-09-09T18:17:33+09:00",
+    "helper_pid": 3106,
+    "lease_held": true,
+    "lease_lock": "$HOME/.chronovisor/runtime/ingest-orchestrator.lock",
+    "lock_holder_pids": [
+      3106
+    ],
+    "new_ingest_processing_blocked": true,
+    "old_processes_exited": true,
+    "post_cutover": {
+      "authority_available": true,
+      "current_job_id": null,
+      "current_job_pid": null,
+      "ingest_runtime_available": true,
+      "pending": 34,
+      "pending_raws": 34,
+      "runtime_state": "ready",
+      "stage": "waiting",
+      "state": "ready"
+    },
+    "pre_cutover": {
+      "current_job_id": null,
+      "current_job_pid": null,
+      "old_archive_id": "34oGAVQbdJyXuBRgW853m",
+      "old_child_pid": 76927,
+      "old_source_sha": "873c2a3bc1743bc7a2fe309067904e903870fb1d",
+      "old_wrapper_pid": 76886,
+      "pending": 9,
+      "runtime_state": "ready",
+      "stage": "waiting",
+      "state": "ready"
+    },
+    "raw_force_kill": false,
+    "release_marker_touched": false,
+    "status_path": "$HOME/.chronovisor/runtime/status.json"
+  },
+  "schema": "chronovisor.evidence-storage-recall.p5-runtime-cutover.v1",
+  "scope": {
+    "live_local_http_checks": true,
+    "main_code_edited": false,
+    "mode": "production-cutover-health",
+    "production_push": true,
+    "production_restart": true,
+    "runtime_config_changed": true,
+    "secrets_or_environment_values_recorded": false
+  },
+  "services": [
+    {
+      "archive_direct_url": {
+        "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "vcs": "git"
+      },
+      "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
+      "child_pid": 31261,
+      "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "label": "com.trafficsign.chronovisor-dashboard.managed-v2",
+      "last_exit_code": 143,
+      "name": "dashboard",
+      "provenance_match": true,
+      "runs": 3,
+      "state": "running",
+      "wrapper_pid": 31229
+    },
+    {
+      "archive_direct_url": {
+        "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "vcs": "git"
+      },
+      "archive_id": "9ZdeB-5XCU0nUv7BMj_rM",
+      "child_pid": 31063,
+      "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "label": "com.trafficsign.chronovisor-lan-dashboard.managed-v2",
+      "last_exit_code": 143,
+      "name": "lan_dashboard",
+      "provenance_match": true,
+      "runs": 3,
+      "state": "running",
+      "wrapper_pid": 31009
+    },
+    {
+      "archive_direct_url": {
+        "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "vcs": "git"
+      },
+      "archive_id": "6no8-VhqNFBkeS8foEwWo",
+      "child_pid": 31065,
+      "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "label": "com.trafficsign.chronovisor-ingest-drain.managed-v2",
+      "last_exit_code": 143,
+      "name": "ingest_drain",
+      "provenance_match": true,
+      "runs": 3,
+      "state": "running",
+      "wrapper_pid": 31024
+    },
+    {
+      "archive_direct_url": {
+        "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "vcs": "git"
+      },
+      "archive_id": "L6FXMn4_ftopRoz4nM3Pc",
+      "child_pid": 31129,
+      "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "label": "com.trafficsign.chronovisor-semantic.managed-v2",
+      "last_exit_code": 0,
+      "name": "semantic",
+      "provenance_match": true,
+      "runs": 5,
+      "state": "running",
+      "wrapper_pid": 31072
+    },
+    {
+      "archive_direct_url": {
+        "commit_id": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "requested_revision": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+        "vcs": "git"
+      },
+      "archive_id": "xaxjig82HjrC6MjAfaODV",
+      "child_pid": 32001,
+      "expected_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "label": "com.trafficsign.chronovisor-reranker.managed-v2",
+      "last_exit_code": 1,
+      "name": "reranker",
+      "provenance_match": true,
+      "runs": 6,
+      "state": "running",
+      "wrapper_pid": 31982
+    }
+  ],
+  "validation": {
+    "a9_additional_fix": {
+      "large_function_limit": 367,
+      "static_and_eval": "passed (parent receipt)",
+      "validate_gold_manifest_lines": 360
+    },
+    "candidate_related_tests": {
+      "failed": 0,
+      "passed": 63,
+      "selected": 63
+    },
+    "candidate_source_independent_tests": {
+      "failed": 0,
+      "passed": 14,
+      "selected": 14
+    }
+  }
+}

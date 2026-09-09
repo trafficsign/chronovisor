@@ -1,0 +1,67 @@
+{
+  "schema": "chronovisor.evidence-storage-live-canaries.v1",
+  "scope": "source integrity smoke; not paired quality or latency acceptance",
+  "observations": [
+    {
+      "schema": "chronovisor.live-source-canary.v1",
+      "observed_at": "2026-09-09T09:39:28.028743+00:00",
+      "runtime_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "query_sha256": "32a134b0445ea16d40d0a391a4dfdf0360aba480e7e8a441cdc79a5e81cb587e",
+      "decision": "none",
+      "wall_ms": 1972.334,
+      "context_chars": 1567,
+      "context_budget_chars": 4602,
+      "source_ref_count": 0,
+      "source_checks": [],
+      "all_sources_match": false,
+      "scope": "production path source-integrity smoke; not paired quality or latency acceptance"
+    },
+    {
+      "schema": "chronovisor.live-source-canary.v1",
+      "observed_at": "2026-09-09T09:39:48.738520+00:00",
+      "runtime_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "query_sha256": "32a134b0445ea16d40d0a391a4dfdf0360aba480e7e8a441cdc79a5e81cb587e",
+      "decision": "none",
+      "wall_ms": 2021.953,
+      "context_chars": 1567,
+      "context_budget_chars": 4602,
+      "source_ref_count": 0,
+      "source_checks": [],
+      "all_sources_match": false,
+      "scope": "production path source-integrity smoke; not paired quality or latency acceptance"
+    },
+    {
+      "schema": "chronovisor.live-source-canary.v1",
+      "observed_at": "2026-09-09T09:51:26.157525+00:00",
+      "runtime_commit": "c7b4fbebbed652fe5bb6ff1020974cd027867503",
+      "query_sha256": "32a134b0445ea16d40d0a391a4dfdf0360aba480e7e8a441cdc79a5e81cb587e",
+      "decision": "read",
+      "wall_ms": 4309.924,
+      "context_chars": 4033,
+      "context_budget_chars": 4602,
+      "source_ref_count": 2,
+      "source_checks": [
+        {
+          "page_id_sha256": "3fb60fd57e35a5736eb9e1dc0567742b42a9c2b92b78c74643175f30bd9fb256",
+          "source_sha256": "d7d58f37249553bf971069eec63c3259fd285e76c63984e4b03d29a0fdedf0ba",
+          "byte_start": 903,
+          "byte_end": 1253,
+          "verified": true
+        },
+        {
+          "page_id_sha256": "3fb60fd57e35a5736eb9e1dc0567742b42a9c2b92b78c74643175f30bd9fb256",
+          "source_sha256": "d7d58f37249553bf971069eec63c3259fd285e76c63984e4b03d29a0fdedf0ba",
+          "byte_start": 1255,
+          "byte_end": 1408,
+          "verified": true
+        }
+      ],
+      "all_sources_match": true,
+      "scope": "production path source-integrity smoke; not paired quality or latency acceptance"
+    }
+  ],
+  "query_timeout_ms_after": 800,
+  "source_integrity_passed": true,
+  "latency_accepted": false,
+  "full_plan_accepted": false
+}
