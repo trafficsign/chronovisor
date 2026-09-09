@@ -15,6 +15,17 @@ TRIAGE_MAX_OUTPUT_BYTES = 8_000
 TRIAGE_MAX_FEEDBACK_BYTES = 4_096
 TRIAGE_NUM_PREDICT = 4_096
 
+# C2 is an explicit, source-record-bound extension of triage.  These limits
+# keep the optional semantic projection inside the existing ingest budget;
+# they do not change the v1 operation contract below.
+TRIAGE_C2_SCHEMA_VERSION = "chronovisor.ingest-triage-c2.v1"
+TRIAGE_C2_MAX_SOURCE_RECORDS = 64
+TRIAGE_C2_MAX_SOURCE_RECORD_ID_CHARS = 200
+TRIAGE_C2_MAX_SOURCE_RECORD_TEXT_CHARS = 64_000
+TRIAGE_C2_MAX_SEMANTIC_ROWS = 8
+TRIAGE_C2_MAX_QUOTE_CHARS = 512
+TRIAGE_C2_MAX_QUOTE_LIST = 8
+
 TRIAGE_PLAN_VALIDATION_SCHEMA: dict[str, Any] = {
     "type": "array",
     "maxItems": TRIAGE_MAX_OPERATIONS,
@@ -49,6 +60,79 @@ TRIAGE_PLAN_SCHEMA: dict[str, Any] = {
             "title": {"type": "string"},
             "keywords": {"type": "array", "items": {"type": "string"}},
             "summary": {"type": "string"},
+        },
+    },
+}
+
+# The model-facing C2 wrapper is deliberately separate from TRIAGE_PLAN_SCHEMA.
+# Keeping the v1 array untouched preserves its canonical bytes and its
+# five-column plain-text fallback.  Host code materializes semantic quotes
+# only after this strict wrapper has passed validation against fixed source
+# records.
+TRIAGE_C2_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["operations", "semantic_evidence"],
+    "properties": {
+        # Reuse the exact v1 operation schema; host validation still applies
+        # the existing effective-target and size rules after this wrapper.
+        "operations": TRIAGE_PLAN_SCHEMA,
+        "semantic_evidence": {
+            "type": "array",
+            "maxItems": TRIAGE_C2_MAX_SEMANTIC_ROWS,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "record_id",
+                    "quote",
+                    "kind",
+                    "subject_quote",
+                    "scope_quotes",
+                    "condition_quotes",
+                ],
+                "properties": {
+                    "record_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": TRIAGE_C2_MAX_SOURCE_RECORD_ID_CHARS,
+                    },
+                    "quote": {
+                        "type": ["string", "null"],
+                        "minLength": 1,
+                        "maxLength": TRIAGE_C2_MAX_QUOTE_CHARS,
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["unknown", "proposal", "decision", "result"],
+                    },
+                    "subject_quote": {
+                        "type": ["string", "null"],
+                        "minLength": 1,
+                        "maxLength": TRIAGE_C2_MAX_QUOTE_CHARS,
+                    },
+                    "scope_quotes": {
+                        "type": ["array", "null"],
+                        "maxItems": TRIAGE_C2_MAX_QUOTE_LIST,
+                        "uniqueItems": True,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": TRIAGE_C2_MAX_QUOTE_CHARS,
+                        },
+                    },
+                    "condition_quotes": {
+                        "type": ["array", "null"],
+                        "maxItems": TRIAGE_C2_MAX_QUOTE_LIST,
+                        "uniqueItems": True,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": TRIAGE_C2_MAX_QUOTE_CHARS,
+                        },
+                    },
+                },
+            },
         },
     },
 }
