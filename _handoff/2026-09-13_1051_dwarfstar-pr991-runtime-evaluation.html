@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>DwarfStar PR #991 更新評価</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+code{overflow-wrap:anywhere} .table-wrap{overflow-x:auto} table{width:100%;border-collapse:collapse;margin:1rem 0;min-width:440px} th,td{text-align:left;border-bottom:1px solid var(--rule);padding:0.55rem} th{background:#f3f1eb} .result{padding:0.8rem 1rem;border-left:4px solid var(--accent);background:#edf2f8} a{color:var(--accent)} </style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">{"task_id": "plan_1efec05652df4a038fc4c574a49a25bb", "created_at": "2026-09-13T10:51:26+09:00", "状態": "done", "slug": "dwarfstar-pr991-runtime-evaluation", "finished_at": "2026-09-13T11:27:38.652498+09:00", "candidate_adopted": false}</script>
+<header><h1>DwarfStar PR #991 更新評価</h1><div class="meta-bar"><span class="badge" data-bind="状態" data-state="done">done</span><span>2026年9月13日</span><span>Apple M4 Max / 128 GiB</span></div></header>
+<section class="result"><h2 style="margin-top:0;border:0">更新は不採用：現行版を継続</h2><p>候補 <code>3030554</code> は同じモデル・設定で正常に推論できたが、生成速度が<strong>7.5〜7.8%低下</strong>した。出力品質に改善は見られず、runtimeだけを入れ替える採用条件を満たさなかった。現行 <code>ffd85d4</code> へ復帰し、生成canaryと元のサービス状態を確認した。</p></section>
+<section><h2>比較対象と固定条件</h2><ul>
+<li>現行: <code>ffd85d426313ace6dae805e9f2fb4424d5b427fd</code>。候補: <a href="https://github.com/antirez/ds4/pull/991">PR #991</a> の <code>30305544f96cc35357e0dd376eeff2b1ab3e365e</code>（取得時は未マージ）。</li>
+<li>macOS 26.6.2、Apple M4 Max、128 GiB。モデルプロセスは同時に2つロードせず順次比較した。</li>
+<li><code>Qwen3.8-Flash-Next-IQ2XXSImatrix-MXFP4Down-MTP.gguf</code>（50,343,093,376 bytes）と外部 <code>Qwen3.8-Flash-Next-PLE-Q4_1.gguf</code>（32,000,157,440 bytes）。既存ファイルを使用し、モデルの追加取得・変換はしていない。</li>
+<li>本番と同じ <code>--metal --ctx 262144 --prefill-chunk 1024 --power 100 --mtp --mtp-exact-sampling</code>。生成測定はtemperature=0、seed=42、thinking無効。</li>
+</ul></section>
+<section><h2>検証結果</h2><p>候補のMetalビルド、server unit test、Qwen Metal kernel test、低ビット演算のexact一致テストはすべて成功した。</p>
+<p>短文品質は両版とも<strong>27/32件成功</strong>し、32件すべての回答文字列が一致した。失敗IDも <code>percent</code>、<code>remainder</code>、<code>set</code>、<code>precedence</code>、<code>jp_order</code> で同じ。needleは各2/2成功。実資料は20,792 input / 2,045 output tokensで、生成本文が完全一致し、既存の出力形式検証に合格した。</p>
+<p>Chronovisorのnative adapterとDecisionRouterを使うtriage・reconciliation・orphan link・local repairの4ケースは、両版とも<strong>schema 4/4、意味効果4/4</strong>で成功した。実資料・判定の出力先は検証用領域で、本番Wikiへ適用していない。</p>
+<div class="table-wrap"><table><caption>同じプロンプト・設定で測定</caption><thead><tr><th scope="col">測定</th><th scope="col">現行 ffd85d4</th><th scope="col">候補 3030554</th></tr></thead><tbody><tr><th scope="row">生成速度中央値・最初の3回</th><td>55.41 token/s</td><td>51.28 token/s</td></tr>
+<tr><th scope="row">生成速度中央値・逆順3回</th><td>55.77 token/s</td><td>51.42 token/s</td></tr>
+<tr><th scope="row">4K needle TTFT</th><td>6.75秒</td><td>6.74秒</td></tr>
+<tr><th scope="row">16K needle TTFT</th><td>26.54秒</td><td>26.54秒</td></tr>
+<tr><th scope="row">実資料 TTFT</th><td>38.63秒</td><td>39.44秒</td></tr>
+<tr><th scope="row">実資料 全体時間</th><td>74.45秒</td><td>77.69秒</td></tr></tbody></table></div>
+<p>最初は現行→候補の順。生成速度の低下が 7.46% だったため、候補→現行の順で各3回を追加し、7.81% の低下が再現した。実資料の全体時間は 4.36% 増加した。needle・実資料は両版ともcached_tokens=0。全4 armで測定中のSwapouts増加は0。</p>
+<p>これは既存IQ2/MXFP4Downを使うM4 Maxでの限定評価。262Kは起動時のcontext容量で、今回の最大実入力は20,792 tokens。新しい標準Q2_K-downモデルやM5での性能は測っていない。速度差の原因を特定する設定別の切り分けは実施していない。</p></section>
+<section><h2>復帰と後片付け</h2><p>Ingestの処理中batchが終わるまで待ち、cross-process leaseとmodel resource leaseを取得してから一時停止した。Qwen kernelと比較実行はaccelerator lease内で行った。2回の比較後に、元々enabledだった11サービスとDwarfStarを復帰した。</p>
+<p>config.toml・DwarfStar plist・現行binaryのSHA256、runtime commit、起動引数、モデルとPLEのsize/mtime/inodeが比較前後で不変。82GBの重み全体の再hashは行っていない。復帰した現行server（確認時PID 19310）の生成canaryは<strong>READY</strong>。semantic/rerankerは新しいstatusでready=trueかつprocess生存、Ingestはidle・pending 0・authority/runtime availableを確認した。</p>
+<p>Dashboardと集約healthはHTTP 200。集約healthはstatus=ok・current authority readyだったが、stale=true、およびChronovisor本体の実行commit <code>7af88177</code> とexpected commit <code>22935aa7</code> の差を表示していた。今回のDwarfStar試験ではChronovisorのruntime sourceを変更していない。最初のhealth取得はtimeoutし、再取得で応答を確認した。</p>
+<p>不採用の候補checkout/buildは、cleanな対象SHA、実行中プロセスなし、GGUFモデルなしを確認して削除した。再利用する検証script・build log・非公開の入力と出力・集計は保持。無関係な作業ツリー変更は保持し、この評価記録だけをcommitする。pushは行わない。</p></section>
+<section><h2>完了チェック</h2><ol class="checklist">
+<li><input type="checkbox" checked disabled aria-label="候補SHA固定・ビルド・server/kernel検証。"><span>候補SHA固定・ビルド・server/kernel検証。</span></li>
+<li><input type="checkbox" checked disabled aria-label="同じモデルと設定で品質・長文・native acceptanceを比較。"><span>同じモデルと設定で品質・長文・native acceptanceを比較。</span></li>
+<li><input type="checkbox" checked disabled aria-label="速度差を逆順で再測定し、不採用と判断。"><span>速度差を逆順で再測定し、不採用と判断。</span></li>
+<li><input type="checkbox" checked disabled aria-label="本番の不変性・元のサービス状態・生成canaryを確認し、不要な候補buildを削除。"><span>本番の不変性・元のサービス状態・生成canaryを確認し、不要な候補buildを削除。</span></li>
+</ol></section>
+<section><h2>証跡と再実行</h2><p>詳細証跡は <code>/Users/trafficsign/projects/sandbox/dwarfstar-update-20260913</code>。<code>method.json</code> に測定前の条件、<code>results/decision-summary.json</code> に比較結果、<code>results/restored-canary.json</code> と <code>results/restored-health.json</code>・<code>results/restored-dashboard-recheck.json</code> に復帰確認を保存した。実資料と回答本文はこのローカル領域に留め、Gitには含めていない。</p>
+<p>9月11日のharnessを再利用した <code>verify.py</code> と <code>recheck.py</code> を保持。再実行する場合は別の証跡先を用意し、候補SHAをcandidateへcheckout・Metalビルドしたうえで、既存のChronovisor仮想環境のPythonで実行する。既存測定は上書きしない。</p>
+<p>現行binary SHA256: <code>579696f76eb8ee6acfcff8e3810926c8b143674d6485e8526a6dadc4aa70e2c5</code><br>候補binary SHA256: <code>40f72beff9a439115c32fdae4944f19527fd00168c725bcf197c06d3f592e123</code></p></section>
+<section><h2>記録の検証</h2><p>HTML構造・状態metadata・表の測定値を機械的に照合した。ローカルHTMLのブラウザ表示は安全ポリシーで拒否されたため、見た目の確認は未実施。この制約は上記の実機測定結果には影響しない。</p></section>
+<section><h2>実行ログ</h2><ol class="log">
+<li><time>2026-09-13 10:51 JST</time><span>Metalビルド・server test・harness self-check完了。Ingestの安全停止境界を待機。</span></li>
+<li><time>2026-09-13 11:10 JST</time><span>batch完了境界を取得。kernel/low-bit exact検証成功、現行→候補の比較開始。</span></li>
+<li><time>2026-09-13 11:21 JST</time><span>逆順比較まで完了。保護対象の不変と元のサービス状態への復帰を確認。</span></li>
+<li><time>2026-09-13 11:24 JST</time><span>生成canary・status/HTTP確認、候補buildの削除完了。評価終了。</span></li>
+</ol></section>
+</body></html>
