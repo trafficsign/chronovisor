@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>DwarfStar 推奨Q2モデルと新版エンジンの比較</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{border-bottom:1px solid var(--rule);padding:.5rem .45rem;text-align:right}th:first-child,td:first-child{text-align:left}caption{text-align:left;color:var(--muted);margin:.5rem 0}</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id": "plan_3b7a5ddb9d114affa90c80f2c1b29ff0", "created_at": "2026-09-13T11:58:52+09:00", "状態": "done", "slug": "dwarfstar-q2-combination-evaluation", "production_changed": false, "conclusion": "prefill_small_gain_decode_small_regression_short_quality_gain"}
+</script>
+
+<header><h1>推奨Q2モデル＋新版エンジン：速度と品質の比較</h1><div class="meta-bar"><span class="badge" data-state="done">done</span><code>plan_3b7a5ddb9d114affa90c80f2c1b29ff0</code><span>2026-09-13T12:35:56+09:00</span></div></header>
+<section><h2>結果</h2><p><strong>新版＋推奨モデルは、現行構成に対してプリフィルが約1%向上し、デコードが2.7〜3.2%低下した。短問は27/32から30/32へ改善した。</strong>エンジンだけを更新した場合より差は小さいが、速度を目的とする更新の利益は確認できなかった。試験後は現行構成へ復帰。推奨モデルと候補ビルドは再検証用としてsandboxに保持する。</p><p>ここでの品質は限られたfixtureの結果。一般的な品質向上・同等性、長期運用の安定性、本番採用は未確認。</p></section>
+<section><h2>同じ実行内での3構成</h2><table><caption>速度はtoken/s。デコードは同じ3入力の中央値。PLE、MTP、context/chunk、sampling設定を固定。</caption><thead><tr><th>構成</th><th>4K prefill</th><th>16K prefill</th><th>decode</th><th>短問</th><th>native受入</th></tr></thead><tbody><tr><td>現行：旧エンジン＋旧モデル</td><td>605.40</td><td>616.37</td><td>55.87</td><td>27/32</td><td>4/4</td></tr><tr><td>新版エンジン＋旧モデル</td><td>616.76</td><td>629.49</td><td>53.14</td><td>27/32</td><td>4/4</td></tr><tr><td>新版エンジン＋推奨Q2モデル</td><td>612.27</td><td>622.92</td><td>54.10</td><td>30/32</td><td>4/4</td></tr><tr><td>旧エンジン＋推奨Q2モデル</td><td colspan="5">読み込み不可：down tensorが768列、旧版は640列を要求</td></tr></tbody></table><p>旧モデルのままのエンジン更新はこの実行ではdecode -4.88%。先の独立試験の7.5〜7.8%とは別測定であり、この表の比較には今回の同時期の基準を使う。</p></section>
+<section><h2>逆順再測定</h2><table><thead><tr><th>項目</th><th>現行</th><th>新版＋推奨モデル</th><th>速度差</th></tr></thead><tbody><tr><td>初回decode</td><td>55.87</td><td>54.10</td><td>-3.17%</td></tr><tr><td>逆順decode</td><td>56.76</td><td>55.22</td><td>-2.73%</td></tr></tbody></table><p>4K prefill速度は初回+1.13%／再測定+1.23%、16Kは+1.06%／+1.13%。全needle成功、cached_tokensは0。全測定armでSwapouts増加0。</p></section>
+<section><h2>品質と実資料</h2><p>短問32件のうち、割合・集合・日本語の並び順の3件が新たに正解になり、新規の不正解は0。余りと演算順位の2件は引き続き不正解だった。現行と「新版＋旧モデル」は32件すべて回答が一致。比較はIDだけで突き合わせず、順序と入力本文の一致を検証した。native受入は3構成とも4/4、schema/effectとも4/4。</p><table><thead><tr><th>20,792-token実資料</th><th>現行</th><th>新版＋推奨モデル</th></tr></thead><tbody><tr><td>prefill時間</td><td>37.429s</td><td>36.280s</td></tr><tr><td>生成中速度</td><td>57.38 token/s</td><td>56.30 token/s</td></tr><tr><td>全体時間</td><td>73.11s</td><td>75.90s</td></tr><tr><td>出力tokens</td><td>2,045</td><td>2,228</td></tr><tr><td>生出力の形式検証</td><td>成功</td><td>初回missing_end_marker</td></tr></tbody></table><p>出力の長さ・本文が変わるため、全体時間の差をエンジン速度だけに帰属させない。実入力の最大は20,792 tokensで、262Kは確保context容量。256K実入力の性能評価はしていない。</p><p>新しいサーバーへ同じ実資料を直接再投入すると、2,466 tokens／79.99秒で終了マーカー付きとなり、形式検証に成功した。初回と前段のリクエスト履歴が異なるため、同じ全実行列で欠落を再現したわけではない。</p><p><strong>生出力の形式失敗と本番CREATE失敗は区別する。</strong>本番と同一の既存validator／境界補修関数を実runtime archiveと照合した。初回本文をdone=True・done_reason=stopという明示的完了metadataとともに補修関数へ渡すオフライン再演は成功した。計測harnessはfinish_reasonだけを保存しており、本番adapterのdoneフィールドやCREATE全経路を実行した試験ではない。validatorやモデル出力の修正は行っていない。</p><p>原資料との限定比較では新規の明白な事実捏造は見つからなかったが、分析・計画を断定形に圧縮する表現や省略があり、網羅的な事実性評価は未実施。</p></section>
+<section><h2>固定条件とモデル出典</h2><ul><li>Apple M4 Max、128 GiB、macOS 26.6.2。</li><li>旧runtime <code>ffd85d426313ace6dae805e9f2fb4424d5b427fd</code>、候補 <code>30305544f96cc35357e0dd376eeff2b1ab3e365e</code>（<a href="https://github.com/antirez/ds4/pull/991">PR 991</a>）。</li><li>推奨モデル <code>IQ2XXSImatrix-Q2KDownPad768-MTP</code>、44,806,612,192 bytes。<a href="https://huggingface.co/ivanfioravanti/Qwen3.8-Flash-Next-DS4-IQ2/tree/b8b20398acfcc9d9a05defb408ab857cfa02a56a">固定HF revision b8b20398</a>。SHA256 <code>341c8d79468384a05e22998ae834a489145f6c385e276dcf79170a6b0d0ffd2d</code>。</li><li>旧モデル <code>IQ2XXSImatrix-MXFP4Down-MTP</code>、50,343,093,376 bytes。既存Q4_1 PLE 32,000,157,440 bytesを共用し、公開SHA256一致を確認。旧モデルも全体SHA256を記録。</li><li><code>--ctx 262144 --prefill-chunk 1024 --power 100 --mtp --mtp-exact-sampling</code>、temperature 0、seed 42、thinking無効。native受入は既存fixture自身の設定。</li></ul></section>
+<section><h2>完了と復帰</h2><ol class="checklist"><li><input type="checkbox" checked disabled aria-label="取得とビルド"><span>固定モデル取得と公開hash照合、Metalビルド、Qwen kernel/low-bit exact tests成功。</span></li><li><input type="checkbox" checked disabled aria-label="組み合わせ比較"><span>動作する3構成、非互換1構成、逆順の速度再測定を完了。</span></li><li><input type="checkbox" checked disabled aria-label="形式確認"><span>終了マーカー欠落を記録し、サーバー再起動後の同一入力と既存補修関数を限定確認。</span></li><li><input type="checkbox" checked disabled aria-label="復帰"><span>2回のmaintenanceともprotected_unchanged=true、services_restored=true、errors=[]。現行プロセス・生成canary READY、semantic/reranker readyとprocess生存、Ingest idle／pending 0を確認。</span></li></ol><p id="dashboard-check">Dashboard本体はHTTP 200。集約healthは初回25秒timeout後、再取得はHTTP 200／0.42秒、status=ok・current authority=ready・stale=true。集約状態の古さは個別live確認と分けて記録した。</p><p>進行中Rawを止めず、Ingest safe boundaryとmodel/accelerator leaseで隔離した。設定・plist・現行binary・modelとPLEのsize/mtime/inodeは不変。無関係な作業ツリーは保持。pushは行っていない。</p></section>
+<section><h2>再実行と証跡</h2><p><code>/Users/trafficsign/projects/sandbox/dwarfstar-q2-combination-20260913</code> に <code>method.json</code>、<code>model-verification.json</code>、<code>compare.py</code>、<code>confirm_material.py</code>、<code>summarize.py</code> とログを保持。結果集計は <code>results/summary.json</code>。形式補修の条件付き確認は <code>results/boundary-repair-check.json</code>、復帰は <code>results/restored-health.json</code>。元の実資料と生成本文はローカルに留め、Gitに含めない。</p><p>計測harnessは先のruntime-only試験を再利用した。<code>compare.py --self-check</code>、既存ログを使ったprefill抽出、32件の入力一致・baseline自己一致、前後の保護対象と復帰状態を検証。HTMLは構造・metadata・数値を静的検証し、ブラウザでの見た目は未確認。</p></section>
+<section><h2>実行ログ</h2><ol class="log"><li><time>2026-09-13T12:09:30+09:00</time><span>全モデルのSHA256照合完了</span></li><li><time>2026-09-13T12:22:19+09:00</time><span>3構成比較と逆順再測定完了、1回目の復帰確認</span></li><li><time>2026-09-13T12:24:29+09:00</time><span>実資料再確認と2回目の復帰確認</span></li><li><time>2026-09-13T12:31:54+09:00</time><span>既存の境界補修を条件付きでオフライン確認</span></li></ol></section>
+</body>
+</html>
