@@ -55,7 +55,7 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 code{overflow-wrap:anywhere} .table-wrap{overflow-x:auto} table{width:100%;border-collapse:collapse;margin:1rem 0;min-width:440px} th,td{text-align:left;border-bottom:1px solid var(--rule);padding:0.55rem} th{background:#f3f1eb} .result{padding:0.8rem 1rem;border-left:4px solid var(--accent);background:#edf2f8} a{color:var(--accent)} </style>
 </head>
 <body>
-<script type="application/json" id="plan-meta">{"task_id": "plan_1efec05652df4a038fc4c574a49a25bb", "created_at": "2026-09-13T10:51:26+09:00", "状態": "done", "slug": "dwarfstar-pr991-runtime-evaluation", "finished_at": "2026-09-13T11:27:38.652498+09:00", "candidate_adopted": false}</script>
+<script type="application/json" id="plan-meta">{"task_id": "plan_1efec05652df4a038fc4c574a49a25bb", "created_at": "2026-09-13T10:51:26+09:00", "状態": "done", "slug": "dwarfstar-pr991-runtime-evaluation", "finished_at": "2026-09-13T11:27:38.652498+09:00", "candidate_adopted": false, "cleanup": {"completed_at": "2026-09-13T12:55:56+09:00", "removed": [{"path": "/Users/trafficsign/projects/sandbox/dwarfstar-q2-combination-20260913", "files": 2919, "logical_bytes": 45016598353, "allocated_bytes": 45025652736}, {"path": "/Users/trafficsign/projects/sandbox/dwarfstar-update-20260913", "files": 110, "logical_bytes": 1784251, "allocated_bytes": 2035712}], "logical_bytes": 45018382604, "allocated_bytes": 45027688448, "production_unchanged": true, "retained": "The two committed evaluation reports only; experimental raw logs, scripts, model and build trees removed at user request."}}</script>
 <header><h1>DwarfStar PR #991 更新評価</h1><div class="meta-bar"><span class="badge" data-bind="状態" data-state="done">done</span><span>2026年9月13日</span><span>Apple M4 Max / 128 GiB</span></div></header>
 <section class="result"><h2 style="margin-top:0;border:0">更新は不採用：現行版を継続</h2><p>候補 <code>3030554</code> は同じモデル・設定で正常に推論できたが、生成速度が<strong>7.5〜7.8%低下</strong>した。出力品質に改善は見られず、runtimeだけを入れ替える採用条件を満たさなかった。現行 <code>ffd85d4</code> へ復帰し、生成canaryと元のサービス状態を確認した。</p></section>
 <section><h2>比較対象と固定条件</h2><ul>
@@ -85,8 +85,7 @@ code{overflow-wrap:anywhere} .table-wrap{overflow-x:auto} table{width:100%;borde
 <li><input type="checkbox" checked disabled aria-label="速度差を逆順で再測定し、不採用と判断。"><span>速度差を逆順で再測定し、不採用と判断。</span></li>
 <li><input type="checkbox" checked disabled aria-label="本番の不変性・元のサービス状態・生成canaryを確認し、不要な候補buildを削除。"><span>本番の不変性・元のサービス状態・生成canaryを確認し、不要な候補buildを削除。</span></li>
 </ol></section>
-<section><h2>証跡と再実行</h2><p>詳細証跡は <code>/Users/trafficsign/projects/sandbox/dwarfstar-update-20260913</code>。<code>method.json</code> に測定前の条件、<code>results/decision-summary.json</code> に比較結果、<code>results/restored-canary.json</code> と <code>results/restored-health.json</code>・<code>results/restored-dashboard-recheck.json</code> に復帰確認を保存した。実資料と回答本文はこのローカル領域に留め、Gitには含めていない。</p>
-<p>9月11日のharnessを再利用した <code>verify.py</code> と <code>recheck.py</code> を保持。再実行する場合は別の証跡先を用意し、候補SHAをcandidateへcheckout・Metalビルドしたうえで、既存のChronovisor仮想環境のPythonで実行する。既存測定は上書きしない。</p>
+<section><h2>証跡とクリーンアップ</h2><p>比較結果と固定条件はこの評価記録に保持した。ユーザー依頼により、実験ディレクトリ <code>/Users/trafficsign/projects/sandbox/dwarfstar-update-20260913</code> の一時スクリプト、生ログ、実資料と生成本文の検証用コピーは削除済み。原資料や稼働中モデルは削除していない。</p>
 <p>現行binary SHA256: <code>579696f76eb8ee6acfcff8e3810926c8b143674d6485e8526a6dadc4aa70e2c5</code><br>候補binary SHA256: <code>40f72beff9a439115c32fdae4944f19527fd00168c725bcf197c06d3f592e123</code></p></section>
 <section><h2>記録の検証</h2><p>HTML構造・状態metadata・表の測定値を機械的に照合した。ローカルHTMLのブラウザ表示は安全ポリシーで拒否されたため、見た目の確認は未実施。この制約は上記の実機測定結果には影響しない。</p></section>
 <section><h2>実行ログ</h2><ol class="log">
@@ -95,4 +94,5 @@ code{overflow-wrap:anywhere} .table-wrap{overflow-x:auto} table{width:100%;borde
 <li><time>2026-09-13 11:21 JST</time><span>逆順比較まで完了。保護対象の不変と元のサービス状態への復帰を確認。</span></li>
 <li><time>2026-09-13 11:24 JST</time><span>生成canary・status/HTTP確認、候補buildの削除完了。評価終了。</span></li>
 </ol></section>
+<section><h2>ユーザー依頼による後片付け</h2><p>2026-09-13T12:55:56+09:00：今回の2実験の資材を削除。対象ファイルの割当量は合計 45.03 GB（41.94 GiB）。稼働中プロセス、設定・plist・現行binaryのSHA256、runtime commit、既存モデルのsize/mtime/inodeは前後で不変。</p></section>
 </body></html>
