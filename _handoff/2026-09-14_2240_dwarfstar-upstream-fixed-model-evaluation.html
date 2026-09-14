@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>DwarfStar正式版・モデル固定評価</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{padding:.4rem .6rem;border-bottom:1px solid var(--rule);text-align:right}th:first-child,td:first-child{text-align:left}code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id": "plan_6d58cceb2f794b4abe525e00e202bb46", "created_at": "2026-09-14T22:40:29+09:00", "状態": "done", "slug": "dwarfstar-upstream-fixed-model-evaluation", "candidate_sha": "f06d3ebd52942ed1fa400dcc4c74fa1dea38359e", "current_sha": "ffd85d426313ace6dae805e9f2fb4424d5b427fd", "candidate_adopted": false, "results": {"paired_performance": {"pairs": [{"order": "forward", "kind": "needle", "target": 4096, "repeat": null, "current": 613.24, "candidate": 613.13, "change_percent": -0.017937512230126185, "output_equal": true, "output_tokens_equal": true, "cached_tokens_current": 0, "cached_tokens_candidate": 0}, {"order": "forward", "kind": "needle", "target": 16384, "repeat": null, "current": 627.68, "candidate": 627.9, "change_percent": 0.03504970685699327, "output_equal": true, "output_tokens_equal": true, "cached_tokens_current": 0, "cached_tokens_candidate": 0}, {"order": "forward", "kind": "decode", "target": null, "repeat": 1, "current": 54.97, "candidate": 50.78, "change_percent": -7.6223394578861186, "output_equal": true, "output_tokens_equal": true, "cached_tokens_current": 0, "cached_tokens_candidate": 0}, {"order": "forward", "kind": "decode", "target": null, "repeat": 2, "current": 55.16, "candidate": 50.34, "change_percent": -8.738216098622175, "output_equal": true, "output_tokens_equal": true, "cached_tokens_current": 0, "cached_tokens_candidate": 0}, {"order": "forward", "kind": "decode", "target": null, "repeat": 3, "current": 51.32, "candidate": 48.5, "change_percent": -5.494933749025721, "output_equal": true, "output_tokens_equal": true, "cached_tokens_current": 0, "cached_tokens_candidate": 0}, {"order": "reverse", "kind": "needle", "target": 4096, "repeat": null, "current": 566.82, "candidate": 567.39, "change_percent": 0.10056102466389216, "output_equal": true, "output_tokens_equal": true, "cached_tokens_current": 0, "cached_tokens_candidate": 0}, {"order": "reverse", "kind": "needle", "target": 16384, "repeat": null, "current": 628.39, "candidate": 627.92, "change_percent": -0.07479431563202077, "output_equal": true, "output_tokens_equal": true, "cached_tokens_current": 0, "cached_tokens_candidate": 0}, {"order": "reverse", "kind": "decode", "target": null, "repeat": 1, "current": 54.71, "candidate": 51.17, "change_percent": -6.470480716505211, "output_equal": true, "output_tokens_equal": true, "cached_tokens_current": 0, "cached_tokens_candidate": 0}, {"order": "reverse", "kind": "decode", "target": null, "repeat": 2, "current": 54.44, "candidate": 48.4, "change_percent": -11.09478324761205, "output_equal": true, "output_tokens_equal": true, "cached_tokens_current": 0, "cached_tokens_candidate": 0}, {"order": "reverse", "kind": "decode", "target": null, "repeat": 3, "current": 51.87, "candidate": 49.06, "change_percent": -5.417389627915936, "output_equal": true, "output_tokens_equal": true, "cached_tokens_current": 0, "cached_tokens_candidate": 0}], "median_decode_change_percent": -7.046410087195665, "median_prefill_change_percent": 0.008556097313433542}, "toggle_medians": {"control-before": -0.24469022217872283, "cpu-argmax": -0.10766369775864204, "copy-restore": -1.1647254575707144, "control-after": 0.24469022217872283}, "quality": {"current": 27, "candidate": 27, "total": 32, "identical_outputs": 32}, "native_acceptance": {"current": 4, "candidate": 4, "total": 4}, "replay": {"candidate": {"returncode": 0, "observed_turns": 9, "checkpoint_staging_failures": 0}, "current": {"returncode": 1, "observed_turns": 5, "checkpoint_staging_failures": 9}}, "replay_example": {"candidate": {"case": "tools-omit", "turn": 2, "seconds": 0.6691041250014678, "usage": {"prompt_tokens": 3387, "completion_tokens": 26, "total_tokens": 3413, "prompt_tokens_details": {"cached_tokens": 3362, "cache_write_tokens": 25}}, "finish": "stop", "reasoning_chars": 71, "content": "53", "tool_calls": null}, "current": {"case": "tools-omit", "turn": 2, "seconds": 6.171472167014144, "usage": {"prompt_tokens": 3358, "completion_tokens": 21, "total_tokens": 3379, "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 3358}}, "finish": "stop", "reasoning_chars": 46, "content": "53", "tool_calls": null}}}, "provenance": {"current": "ffd85d426313ace6dae805e9f2fb4424d5b427fd", "candidate": "f06d3ebd52942ed1fa400dcc4c74fa1dea38359e", "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)\nTarget: arm64-apple-darwin25.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin", "candidate_binary_sha256": "ed6326ca18ca2f848d13db1cd83dbdfad5e63b61eb67835ca15eecbed491e558", "arguments": ["/Users/trafficsign/.local/share/dwarfstar/runtime/ds4-server", "-m", "/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-IQ2XXSImatrix-MXFP4Down-MTP.gguf", "--ple", "/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-PLE-Q4_1.gguf", "--metal", "--host", "127.0.0.1", "--port", "18136", "--ctx", "262144", "--prefill-chunk", "1024", "--power", "100", "--mtp", "--mtp-exact-sampling"], "order": ["current", "candidate", "candidate-repeat", "current-repeat"], "environment_overrides": {}, "decode_inputs": [{"messages": [{"role": "user", "content": "試行1。議事録の事実と推測を区別して要約する方法を具体例付きで日本語で詳しく説明してください。少なくとも800文字書いてください。"}], "prompt_sha256": "0fd786510d38b155b54f93bd31a037b8f83746316454d302e064664d0ec52043", "prompt_tokens": 50, "completion_tokens": 384, "finish_reason": "length"}, {"messages": [{"role": "user", "content": "試行2。議事録の事実と推測を区別して要約する方法を具体例付きで日本語で詳しく説明してください。少なくとも800文字書いてください。"}], "prompt_sha256": "4ebe1e8d7081e7f71f0a36f04e6eb5d3dc31c5dd6a0af2d89b51c5db3366f8da", "prompt_tokens": 50, "completion_tokens": 384, "finish_reason": "length"}, {"messages": [{"role": "user", "content": "試行3。議事録の事実と推測を区別して要約する方法を具体例付きで日本語で詳しく説明してください。少なくとも800文字書いてください。"}], "prompt_sha256": "a3689e50d220d7d75f3f9004f4896b0afaa2c25ba6b3911c3381f5d906f3e241", "prompt_tokens": 50, "completion_tokens": 384, "finish_reason": "length"}]}, "restoration": {"protected_unchanged": true, "services_restored": true, "canary": "READY", "current_binary_sha256": "579696f76eb8ee6acfcff8e3810926c8b143674d6485e8526a6dadc4aa70e2c5", "weights": {"/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-IQ2XXSImatrix-MXFP4Down-MTP.gguf": {"size": 50343093376, "mtime_ns": 1788738075789766895, "inode": 190934287}, "/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-PLE-Q4_1.gguf": {"size": 32000157440, "mtime_ns": 1788737843387469823, "inode": 190934325}}, "live": {"semantic-service-status.json": {"ready": true, "status": "ok", "pid": 69238, "observed_at_epoch": 1789394350.062614, "last_error": "", "process_alive": true, "file_mtime": "2026-09-14T22:59:10.062821+09:00"}, "reranker-service-status.json": {"ready": true, "status": "ok", "pid": 69550, "observed_at_epoch": 1789394353.9218528, "last_error": "", "process_alive": true, "file_mtime": "2026-09-14T22:59:13.922329+09:00"}, "ingest-liveness.json": {"status": "idle", "observed_at": "2026-09-14T22:59:13", "pending_raws": 0, "ingest_runtime_available": true, "authority_available": true, "error": "", "file_mtime": "2026-09-14T22:59:13.460058+09:00"}, "dashboard_http_status": 200, "experiment_process_references": []}, "config_sha256": "8e59234172bc3ec8546de68b52fc8de4c16e3ab48d7bf4381c7f7b39da4ff82a", "plist_sha256": "db0d3174d711f80a9c16dcd2a47001a37826849fc6db554762ffc340f310363d", "cleanup": {"path": "/Users/trafficsign/projects/sandbox/dwarfstar-upstream-20260914", "file_count": 2978, "logical_bytes": 1139016611, "allocated_bytes": 1148252160, "process_references": [], "launchagent_config_references": [], "protected_identity_rechecked": true, "deleted": true, "deleted_at": "2026-09-14T23:05:28+09:00"}}, "finished_at": "2026-09-14T23:05:28+09:00"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">DwarfStar正式版・モデル固定評価</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="done">done</span>
+<span><code data-bind="task_id">plan_6d58cceb2f794b4abe525e00e202bb46</code></span>
+<span data-bind="created_at">2026-09-14T22:40:29+09:00</span>
+</div>
+</header>
+
+<section data-section="結論"><h2>結論</h2><p><strong>モデルを変えず正式版に更新すると、生成速度は約7%低下した。一方、checkpoint保存と会話履歴の再利用には改善を確認した。</strong>今回の試験では正式版を本番採用せず、現行runtime・モデル・設定へ復帰した。</p><p>速度低下は6つの対応比較すべてで再現し、出力の違いや計測中のswap増加では説明されない。原因は未特定であり、最新版全体・他のMac・別モデルの速度へ一般化しない。</p></section>
+<section data-section="目的">
+<h2>目的</h2>
+<p>既存QwenモデルとPLE、起動引数を固定し、DwarfStar正式マージ版 f06d3eb と現行 ffd85d4 の速度・出力・保存復元を隔離比較する。</p>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<p>モデル・設定・本番バイナリの差替え、稼働中Ingestの強制終了、未依頼の本番採用は行わない。</p>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定</h2>
+<p>M4 Max、128 GiB。既存IQ2XXSImatrix-MXFP4Down-MTPとQ4_1 PLE、ctx262144、prefill chunk1024、MTP exact、temperature0、seed42を固定。候補は取得済みの本家マージSHAに固定。</p>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist"><li><input id="step-build" type="checkbox" checked disabled><span>正式版のビルドと比較条件・復帰方法を検証。</span></li><li><input id="step-compare" type="checkbox" checked disabled><span>安全境界とleaseを取得し、現行・新版・新版・現行で速度を比較。初回は既存32問とnative4件も確認。</span></li><li><input id="step-stability" type="checkbox" checked disabled><span>新版の公式checkpoint・保存復元テストを既存モデルで実行。</span></li><li><input id="step-restore" type="checkbox" checked disabled><span>現行サービス・モデル・設定を復帰確認し、集計・後片付けを完了して結果を保存。</span></li></ol>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="一次結果"><h2>モデル固定の比較結果</h2><p>対応する入力ごとの生成速度変化率の中央値は<strong>-7.05%</strong>。生成6比較すべてで新版が低く、入力処理4比較は-0.08〜+0.10%だった。サーバー内部のtoken/sを使用し、SSE側の計測も同方向。全行でprompt hash・入力tokens・出力tokensが一致し、生成本文も同一、cached_tokens=0。</p><table><thead><tr><th>順序</th><th>入力</th><th>現行 t/s</th><th>新版 t/s</th><th>差</th></tr></thead><tbody><tr><td>forward</td><td>4K目標入力</td><td>613.24</td><td>613.13</td><td>-0.02%</td></tr><tr><td>forward</td><td>16K目標入力</td><td>627.68</td><td>627.90</td><td>+0.04%</td></tr><tr><td>forward</td><td>生成 1</td><td>54.97</td><td>50.78</td><td>-7.62%</td></tr><tr><td>forward</td><td>生成 2</td><td>55.16</td><td>50.34</td><td>-8.74%</td></tr><tr><td>forward</td><td>生成 3</td><td>51.32</td><td>48.50</td><td>-5.49%</td></tr><tr><td>reverse</td><td>4K目標入力</td><td>566.82</td><td>567.39</td><td>+0.10%</td></tr><tr><td>reverse</td><td>16K目標入力</td><td>628.39</td><td>627.92</td><td>-0.07%</td></tr><tr><td>reverse</td><td>生成 1</td><td>54.71</td><td>51.17</td><td>-6.47%</td></tr><tr><td>reverse</td><td>生成 2</td><td>54.44</td><td>48.40</td><td>-11.09%</td></tr><tr><td>reverse</td><td>生成 3</td><td>51.87</td><td>49.06</td><td>-5.42%</td></tr></tbody></table><p>既存短問32件は両版27/32で、回答本文は32件すべて一致。native受入は両版4/4、schema/effectとも4/4。全4実行でSwapouts増加0、既存swap使用量802.75 MiBは不変。初回の32問を省いた逆順試験では両版の4K prefillが低く、順序を混ぜず対応する試験内で比較した。</p><p>正式版の低ビット演算test-qwen4-q2、およびprefill checkpoint・session snapshot・exact MTP rewindの3公式テストは成功。後者は15.24秒。長期の無故障や本番全機能の安定性を証明する試験ではない。</p></section>
+<section data-section="追加診断"><h2>MTP変更の切り分け</h2><p>正式版の既定設定を前後に置き、その間でGPU argmaxを無効化、swap restoreを無効化する試験を個別に実行した。表の差は、同じ入力の前後対照速度の平均に対する比。本文・入力hash・出力tokensを照合した。</p><table><thead><tr><th>条件</th><th>入力</th><th>生成 t/s</th><th>前後対照比</th></tr></thead><tbody><tr><td>control-before</td><td>1</td><td>50.96</td><td>-0.24%</td></tr><tr><td>cpu-argmax</td><td>1</td><td>51.03</td><td>-0.11%</td></tr><tr><td>copy-restore</td><td>1</td><td>50.49</td><td>-1.16%</td></tr><tr><td>control-after</td><td>1</td><td>51.21</td><td>+0.24%</td></tr><tr><td>control-before</td><td>2</td><td>50.83</td><td>-0.89%</td></tr><tr><td>cpu-argmax</td><td>2</td><td>49.23</td><td>-4.01%</td></tr><tr><td>copy-restore</td><td>2</td><td>47.51</td><td>-7.36%</td></tr><tr><td>control-after</td><td>2</td><td>51.74</td><td>+0.89%</td></tr><tr><td>control-before</td><td>3</td><td>47.42</td><td>+0.23%</td></tr><tr><td>cpu-argmax</td><td>3</td><td>51.08</td><td>+7.97%</td></tr><tr><td>copy-restore</td><td>3</td><td>47.59</td><td>+0.59%</td></tr><tr><td>control-after</td><td>3</td><td>47.20</td><td>-0.23%</td></tr></tbody></table><p>GPU argmax無効の対応比中央値は-0.11%、copy restoreへ戻した場合は-1.16%。いずれも旧版相当への速度回復は確認できず、この2変更単独を原因と断定できない。診断用環境変数は試験プロセス内だけに設定して解除し、本番設定へ保存していない。</p></section><section data-section="保存再利用"><h2>保存・復元と会話履歴の再利用</h2><p>本家の同一Pythonテストを、実行するserverの選択だけ変えて両版へ適用した。モデル・PLEは同一、版ごとにcache dirを分離。公式試験条件はctx16384、prefill chunk1024、MTP exact、KV disk cache512 MiB。通常の速度比較条件ctx262144とは別試験である。</p><p>新版は3ケース×3ターン、計4回のserver起動を含む9ターンと後段ログ検証を通過。旧版はtool-lessの3ターンを通過したが、tools-omitの2ターン目（全体5ターン目）でcached_tokens&gt;3000の条件に失敗した。残り4ターンは未実施。</p><table><thead><tr><th>tools-omit 2ターン目</th><th>旧版</th><th>正式版</th></tr></thead><tbody><tr><td>応答時間</td><td>6.171s</td><td>0.669s</td></tr><tr><td>cached_tokens</td><td>0</td><td>3362</td></tr><tr><td>prompt_tokens</td><td>3358</td><td>3387</td></tr><tr><td>回答</td><td>53</td><td>53</td></tr></tbody></table><p>クライアントが履歴へ思考部分を戻さないツール付き会話では、旧版が入力を再計算し、新版は前の履歴を再利用した。これはこのケースの応答改善であり、全リクエストの高速化ではない。保持された思考履歴が異なり入力・出力token数も完全同一ではないため、この時間比を純粋な演算速度比として扱わない。</p><p>旧版ログには途中checkpointの <code>session has no valid checkpoint to stage</code> に伴う保存失敗が9件、新版では0件。旧版も回答は正しく、クラッシュではなく保存・再利用条件の失敗だった。</p><p>本番の起動設定ではKV disk cacheは有効にしていない。今回の結果だけで現行Chronovisorの全経路にこの改善が効くとは主張しない。C側のcheckpoint/snapshot/exact-resample試験は正式版で成功したが、旧版には同じCテストが無く直接対照は未実施。</p></section><section data-section="復帰"><h2>復帰確認</h2><p>2回の試験とも protected_unchanged=true、services_restored=true、errors=[]。現行runtime commit、binary SHA256、config.toml、DwarfStar plist、起動引数、model/PLEのsize・mtime・inodeが不変。82GBの重み全体の再hashは行わず、同じ既存ファイルを両版が読み込んだ。</p><p>復帰後の現行serverでREADY生成に成功。semantic/rerankerは新しいstatusでready=true・プロセス生存・last_error空、Ingestはidle・pending_raws=0・authority/runtime available。Dashboard HTTP200、管理対象11サービスがenabled。</p></section><section data-section="出典"><h2>出典と再現条件</h2><ul><li><a href="https://github.com/antirez/ds4/commit/f06d3ebd52942ed1fa400dcc4c74fa1dea38359e">本家マージ f06d3eb</a> と現行 ffd85d4。</li><li><a href="https://github.com/antirez/ds4/blob/f06d3ebd52942ed1fa400dcc4c74fa1dea38359e/docs/QWEN38_FLASH_NEXT.md">公式検証手順</a>、<a href="https://github.com/antirez/ds4/blob/f06d3ebd52942ed1fa400dcc4c74fa1dea38359e/tests/test_qwen4_checkpoint_replay.py">server replayテスト</a>。</li><li>既存の /Users/trafficsign/projects/sandbox/dwarfstar-update-20260911/verify.py と ds4-iq2-bench-20260907 のharnessを再利用。生成は同じ3つの日本語入力、max_tokens384、temperature0、seed42、thinking無効。cold入力は4K/16K needle。モデルは既存IQ2XXSImatrix-MXFP4Down-MTPとQ4_1 PLE。</li><li>候補はmake -j6 all ds4_test tests/test_qwen4_kernels tests/test_qwen4_moe_mm_specializeでビルド。GPU演算は単一プロセスで直列実行し、Ingest境界・model lease・accelerator leaseを取得した。</li></ul></section>
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<p>速度は対応する入力ごとに比較し、順序別と全体の変化率を報告する。3%を超える同方向の低下は今回の性能懸念として扱い、境界付近は不確実と記す。新規の出力失敗、swap増加、復帰失敗を隠さない。試験結果にかかわらず本番は現行へ戻す。</p><p>初回の生成低下を受け、正式版の既定設定を前後の対照としてGPU argmax無効・swap restore無効を各一変数で追加比較する。また、同一の公式server replay試験を旧版と正式版へ適用し、保存復元の差を確認する。追加試験も本番へ採用せず復帰する。</p>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<p>prefillと生成を分離。cold行cached_tokens=0、入力ハッシュ・token数・生成本文・finish_reasonを照合。OS swapとRSSを記録。旧設定・plist・model metadata・binary SHA256とservice状態を前後比較し、復帰後にREADY生成を確認。</p>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>なし</li></ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<p>試験用フォルダー /Users/trafficsign/projects/sandbox/dwarfstar-upstream-20260914 は参照がないことを確認後に削除済み（2,978ファイル、論理サイズ1139.0 MB）。新規モデルの取得はなし。先行試験のharnessと過去の証跡は保持し、今回の結果・条件・復帰確認をこのHTMLへ保存した。</p>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log"><li><time>2026-09-14T23:05:28+09:00</time><span>MTP追加診断と両版replay比較を完了。現行binary・設定・モデルの不変を再確認し、試験フォルダーを削除。結果を保存して完了。</span></li><li><time>2026-09-14T22:52:52+0900</time><span>既存モデルで公式checkpoint・snapshot・rewind試験を実行。結果は個別ログに記録。</span></li><li><time>2026-09-14T22:52:37+0900</time><span>ABBA順の速度比較、32問とnative4件の比較を実行完了。</span></li><li><time>2026-09-14T22:45:39+0900</time><span>正式マージ版のビルドとharness self-checkが完了。</span></li><li><time>2026-09-14T22:40:29+09:00</time><span>ユーザーの試験承認。現行identityと正式マージSHAを確認し、隔離checkoutでビルド開始。</span></li></ol>
+</section>
+
+</body>
+</html>
