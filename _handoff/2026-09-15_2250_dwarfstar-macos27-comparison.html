@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>macOS 27：DwarfStar比較</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id": "plan_36b02e26be11405cb9c2e01a406e6e2c", "created_at": "2026-09-15T22:50:53+09:00", "状態": "blocked", "slug": "dwarfstar-macos27-comparison", "current_sha": "ffd85d426313ace6dae805e9f2fb4424d5b427fd", "candidate_sha": "9139e2ae58a41503968a500f36f75895c1ba63fc", "candidate_adopted": false, "comparison_complete": false, "blocker": "Latest runtime removed quantized PLE sidecar support; selecting a compatible runtime or a new model is required.", "results": {"current": {"performance": [{"kind": "needle", "target": 4096, "repeat": null, "server_prefill_tps": 566.51, "client_decode_tps": 47.22244553782412, "ttft_seconds": 7.1855428329999995, "usage": {"prompt_tokens": 4045, "completion_tokens": 10, "total_tokens": 4055, "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 4045}}, "prompt_sha256": "0c4a892ad957319c2aa24d82edebf1291e7a9ddfd055ea85f3935701c25f29c2", "output_sha256": "ca38033ecf84a5f253f0c5c1b0aa740cc3d5c4a0c1df99454bf06e8cc9a48042", "needle_passed": true}, {"kind": "needle", "target": 16384, "repeat": null, "server_prefill_tps": 627.89, "client_decode_tps": 55.04487398494137, "ttft_seconds": 26.065480707999996, "usage": {"prompt_tokens": 16335, "completion_tokens": 11, "total_tokens": 16346, "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 16335}}, "prompt_sha256": "8bc808a6261c0f6670e40fd602eee562b2c40446aa77aca7c68afeb667db78f3", "output_sha256": "7b8cbe663a86705e88a10aa7daf97fb09f46a9c3ace30eaa949350a4e7a65951", "needle_passed": true}, {"kind": "decode", "target": null, "repeat": 1, "server_prefill_tps": 168.19, "client_decode_tps": 57.02808343040057, "ttft_seconds": 0.3220814579999569, "usage": {"prompt_tokens": 50, "completion_tokens": 384, "total_tokens": 434, "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 50}}, "prompt_sha256": "0fd786510d38b155b54f93bd31a037b8f83746316454d302e064664d0ec52043", "output_sha256": "b68effd6eec9627fadc7183ea67225fc2836c2ab2058fc7f7b6e488c767926b5", "needle_passed": null}, {"kind": "decode", "target": null, "repeat": 2, "server_prefill_tps": 167.63, "client_decode_tps": 56.612748408174895, "ttft_seconds": 0.32234124999968117, "usage": {"prompt_tokens": 50, "completion_tokens": 384, "total_tokens": 434, "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 50}}, "prompt_sha256": "4ebe1e8d7081e7f71f0a36f04e6eb5d3dc31c5dd6a0af2d89b51c5db3366f8da", "output_sha256": "8ad8da336f0cc9847a395c5898cc55fd31bee4b1c313db8a7d4ac9aaa8426ab7", "needle_passed": null}, {"kind": "decode", "target": null, "repeat": 3, "server_prefill_tps": 168.05, "client_decode_tps": 55.35962305007734, "ttft_seconds": 0.321334458000365, "usage": {"prompt_tokens": 50, "completion_tokens": 384, "total_tokens": 434, "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 50}}, "prompt_sha256": "a3689e50d220d7d75f3f9004f4896b0afaa2c25ba6b3911c3381f5d906f3e241", "output_sha256": "dfe6004a1d25d064382bf0ee0e0f92659dfc41394fc62d3033812cc362272acf", "needle_passed": null}], "server_decode_tps": [56.98, 56.57, 55.32], "median_client_decode_tps": 56.612748408174895, "median_server_decode_tps": 56.57, "quality": {"passed": 27, "total": 32}, "native_acceptance": {"total": 4, "ok": 4, "schema_valid": 4, "effect_matches": 4}}, "latest": {"commit": "9139e2ae58a41503968a500f36f75895c1ba63fc", "startup_exit_code": 2, "startup_error": "unknown option: --ple", "inference_measured": false, "sidecar_removal_commit": "97ba327538ef4592c290e9f92c977d2b52f28347", "last_sidecar_compatible_commit": "e68bcc8fab138dea8c871c0826864a7c8bac958c", "kernel_checks": ["test_qwen4_kernels PASS", "test_qwen4_moe_mm_specialize PASS"]}, "paired_comparison_complete": false}, "provenance": {"current_sha": "ffd85d426313ace6dae805e9f2fb4424d5b427fd", "candidate_sha": "9139e2ae58a41503968a500f36f75895c1ba63fc", "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428", "compiler": "Apple clang version 21.0.0 (clang-2100.3.34.2)\nTarget: arm64-apple-darwin27.0.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin", "arguments": ["/Users/trafficsign/.local/share/dwarfstar/runtime/ds4-server", "-m", "/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-IQ2XXSImatrix-MXFP4Down-MTP.gguf", "--ple", "/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-PLE-Q4_1.gguf", "--metal", "--host", "127.0.0.1", "--port", "18136", "--ctx", "262144", "--prefill-chunk", "1024", "--power", "100", "--mtp", "--mtp-exact-sampling"], "candidate_binary_sha256": "61e7a18b15981da57540f4d50dba16781d3595e7e72fd5ae24d27c96ea5b159c", "order": ["current-forward", "candidate-forward", "candidate-reverse", "current-reverse"], "environment_overrides": {}, "harness_sha256": "2aef6a51dbcaaa5cc449cb5460d16de1a9a993f9105e7eaa9a0dcd0c568482db"}, "restoration": {"identity_unchanged": true, "files_and_services": {"snapshot": {"config_sha256": "8e59234172bc3ec8546de68b52fc8de4c16e3ab48d7bf4381c7f7b39da4ff82a", "plist_sha256": "db0d3174d711f80a9c16dcd2a47001a37826849fc6db554762ffc340f310363d", "weights": {"/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-IQ2XXSImatrix-MXFP4Down-MTP.gguf": {"size": 50343093376, "mtime_ns": 1788738075789766895, "inode": 190934287}, "/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-PLE-Q4_1.gguf": {"size": 32000157440, "mtime_ns": 1788737843387469823, "inode": 190934325}}, "arguments": ["/Users/trafficsign/.local/share/dwarfstar/runtime/ds4-server", "-m", "/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-IQ2XXSImatrix-MXFP4Down-MTP.gguf", "--ple", "/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-PLE-Q4_1.gguf", "--metal", "--host", "127.0.0.1", "--port", "18136", "--ctx", "262144", "--prefill-chunk", "1024", "--power", "100", "--mtp", "--mtp-exact-sampling"], "engine_commit": "ffd85d426313ace6dae805e9f2fb4424d5b427fd", "binary_sha256": "579696f76eb8ee6acfcff8e3810926c8b143674d6485e8526a6dadc4aa70e2c5", "services": {"services": [{"plist": "com.trafficsign.chronovisor-converge.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-dashboard.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-deadman-observer.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-ingest-drain.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-lan-dashboard.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-librarian-review.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-reranker.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-searxng.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-semantic.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-sleep.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-watchdog.managed-v2.plist", "status": "enabled"}]}}, "protected_unchanged": true, "services_restored": true, "errors": []}, "live": {"checked_at": "2026-09-15T23:07:06.343876+09:00", "services": {"services": [{"plist": "com.trafficsign.chronovisor-converge.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-dashboard.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-deadman-observer.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-ingest-drain.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-lan-dashboard.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-librarian-review.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-reranker.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-searxng.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-semantic.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-sleep.managed-v2.plist", "status": "enabled"}, {"plist": "com.trafficsign.chronovisor-watchdog.managed-v2.plist", "status": "enabled"}]}, "semantic": {"status": "ok", "ready": true, "pid": 40003, "last_error": "", "observed_at_epoch": null}, "reranker": {"status": "ok", "ready": true, "pid": 39372, "last_error": "", "observed_at_epoch": 1789481226.5559309}, "dashboard_http_status": 200, "canary": {"content": "READY", "finish_reason": "stop", "usage": {"prompt_tokens": 17, "completion_tokens": 1, "total_tokens": 18, "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 17}}, "wall_seconds": 0.23421083300036116}, "ingest": {"state": "running", "stage": "target-resolution", "current_job_id": "47b54d3a", "updated_at": "2026-09-15T23:07:13", "runtime_state": "running", "mutation_ready": true}}}, "experiment_retained_for_continuation": "/Users/trafficsign/projects/sandbox/dwarfstar-macos27-20260915"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">macOS 27：DwarfStar現行版と最新版の比較</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="blocked">blocked</span>
+<span><code data-bind="task_id">plan_36b02e26be11405cb9c2e01a406e6e2c</code></span>
+<span data-bind="created_at">2026-09-15T22:50:53+09:00</span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<p>M4 Max・128GB・macOS 27.0で、同じQwen3.8モデルを使う現行ffd85d4と最新版9139e2aの入力処理・生成速度、限定品質とnative受入を比較する。</p>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<p>モデル、PLE、本番設定・plist・binaryを変更しない。進行中Rawを強制停止しない。候補を本番採用しない。</p>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定</h2>
+<p>既存IQ2XXS/MXFP4DownとQ4_1 PLE、ctx262144、prefill chunk1024、power100、MTP exactを固定する。macOS 26時代の数値は参考値とし、OS効果の厳密な対照試験とは扱わない。</p>
+</section>
+
+<section data-section="初回の結果"><h2>初回の結果と比較条件の制約</h2><p>現行版は生成55.36〜57.03 token/s（中央値56.61）、4K入力566.51 token/s、16K入力627.89 token/s。短問27/32、native受入4/4。最新版9139e2aは <code>unknown option: --ple</code> で起動終了（exit 2）し、速度は未測定。</p><p>97ba327で量子化PLE sidecar方式が廃止され、元のBF16 n-gramをGGUFに含む形式へ移行した。現行モデルに対応する最後の版はe68bcc8。最新版の公式Q2は137.10 GiB（うち95.37 GiBのn-gram表はSSDから必要行を読む）。モデルを固定した比較と、新モデルを含む構成比較のどちらを続けるか選択待ち。</p><p>元のbinary/config/plist・モデルmetadata・11サービスを復帰確認。DwarfStarはREADYを生成、Semantic/Rerankerはlive healthでready、DashboardはHTTP 200、Ingestは次のbatchを再開。</p></section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist"><li><input type="checkbox" checked disabled><span>固定SHAを隔離buildし、既存harnessのself-checkを通す。</span></li><li><input type="checkbox" disabled><span>Ingest境界とmodel/accelerator leaseで隔離し、現行→候補→候補→現行の順で同じ4K/16K入力と3つの384-token生成を計測する。初回両版で32短問とnative4件を確認する。</span></li><li><input type="checkbox" disabled><span>runtime identityとサービス・live応答を復帰確認し、数値・限界を記録、今回の不要物を片付ける。</span></li></ol>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<p>入力hash、出力token数、cached_tokens=0を照合し、入力処理と生成の対応比を報告する。順序を逆にして再測定し、3%超の同方向差を性能上の差として扱う。正しさだけで高速化と判断しない。</p>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<p>候補のQwen kernel checks、32短問、native4件。model/PLE metadata、binary/config/plist SHA256、元のサービス状態、DwarfStar生成、Semantic/Reranker readiness、Dashboard HTTPを確認する。</p>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>最新版9139e2aは--pleを廃止しているため現行モデルでは起動不可。対応最終版e68bcc8で比較するか、137.10 GiBの新Q2モデルを使うか、確認結果で終了するかの選択待ち。</li></ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<p>初回測定と本番復帰は完了。旧版を含むABBA速度比較は未完了。隔離buildと測定結果は再開用に保持しており、本番参照はない。続行時はcurrent-forwardの既存数値を上書きせず、新しい比較runとして測定する。</p>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log"><li><time>2026-09-15T23:07:51+09:00</time><span>最新版は--ple廃止で起動不可。現行版の初回測定・復帰確認を完了。比較対象の再選択待ち。</span></li><li><time>2026-09-15T22:58:47+09:00</time><span>最新版9139e2aのbuildと既存harness self-check成功。処理境界の取得後、ABBA比較を開始する。</span></li><li><time>2026-09-15T22:50:53+09:00</time><span>比較承認。固定モデル、ABBA順、限定品質と復帰条件を確定し、隔離buildを開始。</span></li></ol>
+</section>
+
+<section data-section="一次資料"><h2>一次資料</h2><ul><li><a href="https://github.com/antirez/ds4/blob/9139e2ae58a41503968a500f36f75895c1ba63fc/docs/QWEN38_FLASH_NEXT.md">最新版のQwenモデル形式・ダウンロード容量</a></li><li><a href="https://github.com/antirez/ds4/commit/97ba327538ef4592c290e9f92c977d2b52f28347">97ba327: sidecar廃止とBF16 n-gram直接読み込み</a></li></ul></section>
+</body>
+</html>
