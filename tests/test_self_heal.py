@@ -4339,10 +4339,12 @@ def test_verified_local_repair_dry_run_is_byte_for_byte_read_only(
 
 
 @pytest.mark.parametrize("python_directory", ("python3.13", "python3.14"))
+@pytest.mark.parametrize("pinned_source", (False, True))
 def test_verified_local_repair_git_state_binds_clean_pushed_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     python_directory: str,
+    pinned_source: bool,
 ) -> None:
     from chronovisor.core import runtime_config
     from chronovisor.ingest import self_heal
@@ -4384,7 +4386,10 @@ def test_verified_local_repair_git_state_binds_clean_pushed_runtime(
             "archive_path": str(archive_path),
             "module_path": str(module_path),
             "github_repository": "trafficsign/chronovisor",
-            "runtime_source": ("git+ssh://git@github.com/trafficsign/chronovisor"),
+            "runtime_source": (
+                "git+ssh://git@github.com/trafficsign/chronovisor"
+                + (f"@{commit}" if pinned_source else "")
+            ),
             "direct_url": {
                 "url": "ssh://git@github.com/trafficsign/chronovisor",
                 "vcs_info": {"vcs": "git", "commit_id": commit},
@@ -4407,6 +4412,19 @@ def test_verified_local_repair_git_state_binds_clean_pushed_runtime(
     assert evidence["runtime_commit_sha"] == commit
     assert evidence["runtime_archive_root"] == str(archive_root)
     assert evidence["runtime_drift"] is False
+
+    for revision in ("main", commit[:12], "b" * 40):
+        monkeypatch.setattr(
+            runtime_config,
+            "runtime_identity",
+            lambda revision=revision: identity(
+                runtime_source=(
+                    "git+ssh://git@github.com/trafficsign/chronovisor@" + revision
+                )
+            ),
+        )
+        with pytest.raises(ValueError, match="repair_runtime_source_revision_mismatch"):
+            self_heal._verified_local_repair_git_state(commit)
 
     monkeypatch.setattr(
         runtime_config, "runtime_identity", lambda: identity(commit_id=None)
