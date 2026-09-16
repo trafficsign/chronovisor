@@ -1,0 +1,96 @@
+{
+  "completed_at": "2026-09-16T21:08:53+09:00",
+  "runtime_commit": "f201706c05550bb14e2331080f8151da11a774e7",
+  "engine": "MLX-Serve 26.9.3",
+  "model": "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-3.3bpw",
+  "model_revision": "2b7da62be0151a7932e4dfcab1d73c93ccf83f64",
+  "endpoint": "http://127.0.0.1:18136/v1",
+  "context_limit": 262144,
+  "generation_routes": 37,
+  "matching_service_archives": 5,
+  "restored_managed_services": 11,
+  "native_acceptance": {
+    "passed": 4,
+    "total": 4
+  },
+  "restart_passed": true,
+  "isolated_ingest": {
+    "create": {
+      "status": "completed",
+      "assertions": {
+        "status_stable": true,
+        "old_date_present": true,
+        "old_value_present": true
+      }
+    },
+    "update": {
+      "status": "completed",
+      "assertions": {
+        "status_stable": true,
+        "old_date_present": true,
+        "old_value_present": true,
+        "new_date_present": true,
+        "new_value_present": true,
+        "old_before_new": true
+      }
+    }
+  },
+  "natural_ingest": {
+    "attempted": 1,
+    "succeeded": 0,
+    "terminal_semantic_defer": 1,
+    "reason": "Invalid tag repair budget exhausted; not a runtime identity or transport failure."
+  },
+  "health": {
+    "dashboard_http": 200,
+    "lan_http": 401,
+    "api_health_status": "ok",
+    "api_health_seconds": 42.165457,
+    "semantic_ready": true,
+    "reranker_ready": true
+  },
+  "preflight": {
+    "long_context_inputs": [
+      65478,
+      131015,
+      262023
+    ],
+    "all_correct": true,
+    "continuous_generation_passed": 12,
+    "peak_nonfile_gib": 92.39633,
+    "swap_growth_mib": 0
+  },
+  "cleanup": {
+    "removed_logical_bytes": 83369252835,
+    "removed_allocated_bytes": 83441819648,
+    "filesystem_available_delta_bytes": 83456135168,
+    "old_launch_agent_removed": true,
+    "old_active_references": 0,
+    "old_results_preserved_files": 325,
+    "local_branches_removed": 12,
+    "remote_branches_removed": 1,
+    "remaining_branch": "main",
+    "unrelated_uncommitted_edits_preserved": true
+  },
+  "validation": {
+    "related_tests_passed": 392,
+    "main_integration_tests_passed": 205,
+    "full_suite_before_followup_fixes": {
+      "passed": 6635,
+      "failed": 13,
+      "deselected": 57
+    },
+    "failures_reproduced_on_old_main": 11,
+    "main_consolidation_failures_fixed": 2,
+    "followup_gate_tests_passed": 67,
+    "ruff": "passed",
+    "import_contracts": "passed",
+    "mypy_local": "146 identical diagnostics on old and new code",
+    "github_quality": "pre-existing five optional dependency typing errors",
+    "github_security": "existing GitPython dependency audit and four historical secret-scan findings; new commit scan found zero",
+    "ci_all_green": false
+  },
+  "private_evidence": "~/.local/state/chronovisor/evidence/2026-09-16-mlx-serve-cutover",
+  "retired_evidence": "~/.local/state/chronovisor/evidence/2026-09-16-retired-dwarfstar",
+  "branch_bundle": "~/.local/state/chronovisor/evidence/2026-09-16-main-consolidation/branches-before-cleanup.bundle"
+}

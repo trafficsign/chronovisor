@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>Plan</title>
+<title>MLX-Serve本番移行 完了</title>
 <style>
 :root{
   --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
@@ -55,13 +55,13 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id": "plan_e8191d6d9e364783b17e754c69afbf91", "created_at": "2026-09-16T19:46:24+09:00", "状態": "running", "slug": "mlx-serve-production-cutover", "authorized_scope": "Production cutover to MLX-Serve 3.3bpw and complete cleanup of retired DwarfStar environment."}
+{"task_id": "plan_e8191d6d9e364783b17e754c69afbf91", "created_at": "2026-09-16T19:46:24+09:00", "状態": "done", "slug": "mlx-serve-production-cutover", "authorized_scope": "Production cutover to MLX-Serve 3.3bpw and complete cleanup of retired DwarfStar environment."}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">MLX-Serve本番切替と旧DwarfStar環境の清掃</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="running">running</span>
+<span class="badge" data-bind="状態" data-state="done">done</span>
 <span><code data-bind="task_id">plan_e8191d6d9e364783b17e754c69afbf91</code></span>
 <span data-bind="created_at">2026-09-16T19:46:24+09:00</span>
 </div>
@@ -84,7 +84,7 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 
 <section data-section="実行手順">
 <h2>実行手順</h2>
-<ol class="checklist"><li><input type="checkbox" checked disabled><span>本番用配置・切替差分を準備し、長文/連続処理の事前検証を実施。</span></li><li><input type="checkbox" disabled><span>本番configとLaunchAgentを切り替え、実処理と再起動後のlive healthを確認。</span></li><li><input type="checkbox" disabled><span>旧環境と関連実験物を削除し、回収容量・残存参照・最終状態を記録。</span></li></ol>
+<ol class="checklist"><li><input type="checkbox" checked disabled><span>本番用配置・切替差分を準備し、長文/連続処理の事前検証を実施。</span></li><li><input type="checkbox" checked disabled><span>本番configとLaunchAgentを切り替え、実処理と再起動後のlive healthを確認。</span></li><li><input type="checkbox" checked disabled><span>旧環境と関連実験物を削除し、回収容量・残存参照・最終状態を記録。</span></li></ol>
 </section>
 
 <section class="rules" data-section="実行中更新ルール">
@@ -113,17 +113,21 @@ code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-siz
 
 <section data-section="受け渡しメモ">
 <h2>受け渡しメモ（次担当へ）</h2>
-<p><strong>事前検証は合格。本番は元構成へ復帰済み。</strong></p>
+<p><strong>本番をMLX-Serve 26.9.3 + 3.3bpwへ切り替え、旧環境を削除。ローカル・GitHubともmain一本に整理済み。</strong></p>
 <table><thead><tr><th>実入力</th><th>所要時間</th><th>回答</th></tr></thead><tbody><tr><td>65,478 tokens</td><td>94.97秒</td><td>正答</td></tr><tr><td>131,015 tokens</td><td>189.82秒</td><td>正答</td></tr><tr><td>262,023 tokens</td><td>391.08秒</td><td>正答</td></tr></tbody></table>
-<ul><li>連続生成12/12、中央値59.18 tok/s。入力が短いため、ABBA比較の値とは別の安定性検証。</li><li>Chronovisor native acceptance: 4/4、schema_valid 4/4、effect_matches 4/4。</li><li>長文検証時の全体non-file memoryピーク92.40GiB、swap増加0MiB、Swapouts増加0。</li><li>関連392テストとruff通過。本番ベースへ分離後の89テストも通過。37経路の新revision識別チェック合格。</li><li>復帰後は保護対象の一致、11サービスの登録状態一致、5サービスの実行archive SHA一致を確認。DashboardトップページはHTTP 200（0.007秒）。</li><li>制約: Dashboard /api/health は移行前15秒・復帰後50秒ともtimeout。切替後の総合health判定は未実施で、トップページ応答を総合health合格へ読み替えていない。</li></ul>
+<ul><li>連続生成12/12、中央値59.18 tok/s。入力が短いため、ABBA比較の値とは別の安定性検証。</li><li>Chronovisor native acceptance: 4/4、schema_valid 4/4、effect_matches 4/4。</li><li>長文検証時の全体non-file memoryピーク92.40GiB、swap増加0MiB、Swapouts増加0。</li><li>関連392テストとruff通過。本番ベースへ分離後の89テストも通過。37経路の新revision識別チェック合格。</li><li>復帰後は保護対象の一致、11サービスの登録状態一致、5サービスの実行archive SHA一致を確認。DashboardトップページはHTTP 200（0.007秒）。</li><li>Dashboard /api/health は切替後42.17秒でHTTP 200、health.status=ok。移行前も遅く、応答時間の改善は今回の範囲外。トップページHTTP 200、LAN認証境界HTTP 401。</li></ul>
 <p>変更本体はmain上のa33f6db4。ユーザーの指定によりGitHub mainとローカルmainを統合し、切替用分岐の履歴もmainへ取り込んだ。新MLX設定を維持し、本番と同じself-heal修正を保持。関連205テスト通過。全src・pyproject.toml・uv.lock・config.toml.exampleが検証済み740250fcと一致することを確認。</p>
-<p>本番配置: <code>~/.local/share/mlx-serve/runtime/v26.9.3</code> と <code>~/.local/share/mlx-serve/models/qwen3.8-flash-next-chat</code>。新LaunchAgent、37経路を更新するconfig、rollback付き切替手順は <code>~/projects/sandbox/mlx-serve-33bpw-20260916/cutover/</code> に準備済み。push後に同ディレクトリの <code>apply_cutover.py --apply</code> を使い、インストール済みpackageのroute probe、再起動、全サービスarchive、実Ingest、healthを確認する。</p>
-<p>旧環境は約77.70GiB。旧比較証跡325 files / 5,404,875 bytesは <code>~/.local/state/chronovisor/evidence/2026-09-16-retired-dwarfstar</code> へ保存し、SHA-256一致を確認済み。旧 <code>ds4-iq2-bench-20260907/chronovisor-candidate</code> は登録worktreeなので <code>git worktree remove</code> を使う。削除は切替・live canary合格後に、使用中process/FD不在を確認して行う。</p>
+<p>本番配置: <code>~/.local/share/mlx-serve/runtime/v26.9.3</code> と <code>~/.local/share/mlx-serve/models/qwen3.8-flash-next-chat</code>。本番runtimeはmainの <code>f201706c05550bb14e2331080f8151da11a774e7</code> に固定。37経路、2ロールの実応答、native 4/4、LaunchAgent再起動、11サービス復帰、5サービスの実archive一致を確認。Semantic/Rerankerは新PIDでready。旧DwarfStarプロセス・開いたファイルなし。</p>
+<p>実キューの最初の1件は223.25秒でterminal_semantic_defer。構造化審査が同じ無効タグの修復を2回要求し、回数上限に達した。正常成功とは数えない。runtimeの接続・識別エラーはなく、隔離IngestのCREATE→UPDATEは両方completed、保存後の旧値・新値・順序を確認済み。本番と同じインストールarchiveとサーバーを使用し、本番Wikiにはテストページを作成していない。</p>
+<p>main以外のローカル12ブランチとリモート1ブランチは、復元可能なGit bundleへ保存して削除済み。<code>~/.local/state/chronovisor/evidence/2026-09-16-main-consolidation/branches-before-cleanup.bundle</code>（検証済み）。未統合の古い機能を本番へ追加せず、履歴を保持した。既存未コミット作業は保持。</p>
+<p>旧モデル・runtime・LaunchAgent・sandbox・対象Trashを削除。削除ファイルは 83.37GB、ファイルシステムの空き容量は約83.46GB増加。旧プロセス・開いたファイル・現役設定参照がないことを確認した。旧比較証跡325 files / 5,404,875 bytesは <code>~/.local/state/chronovisor/evidence/2026-09-16-retired-dwarfstar</code> に保存し、削除前に全SHA-256を再照合。今回の詳細証跡は <code>~/.local/state/chronovisor/evidence/2026-09-16-mlx-serve-cutover</code>。共有キャッシュ・他モデル・既存未コミット作業を保持。</p>
+<p>全体テストは6635成功・13失敗。旧mainでも11件の失敗を再現。今回の統合により表面化したmerge履歴の扱いと個人home固定2箇所を修正し、関係67テストが成功。H1/H2の固定証跡はハッシュで保持し、receipt改変・不正verifierを拒否する回帰確認も成功。アプリのsrc・依存lock・モデルconfigは本番f201706cと同一。</p>
+<p>残件: 旧mainからの型検査・architecture baseline等の全体テスト不整合、GitPythonの依存監査、過去履歴のsecret-scan指摘。全体CIは未合格。今回公開した99コミットのsecret scanは0件。実キュー1件のsemantic deferも成功扱いせず残した。移行とbranch整理の検証結果は <a href="evidence/2026-09-16-mlx-serve-production-cutover/summary.json">summary.json</a> に記録。</p>
 </section>
 
 <section data-section="実行ログ">
 <h2>実行ログ</h2>
-<ol class="log"><li><time>2026-09-16T19:49:25+09:00</time><span>ユーザーが本番切替と旧環境の全清掃を承認。準備を開始。</span></li><li><time>2026-09-16T20:04:51+09:00</time><span>新配置完了。切替コード a33f6db4、現行本番から分離した公開候補 740250fc。関連392テスト、分離版89テスト、37経路の識別チェックが成功。AGENTS.mdの明示push条件に従い専用ブランチpushの回答待ち。Ingestバッチの安全境界を待ちながら長文事前検証を実行中。</span></li><li><time>2026-09-16T20:13:32+09:00</time><span>30秒pollingがバッチ間の短い境界を取り逃がしたため、待機中preflightだけを終了。設定・サービス不変を検証し、blocking flockで次の境界取得を予約して再実行。旧比較証跡325 files / 5,404,875 bytesをprivate evidenceへコピーし、全SHA-256一致を検証。</span></li><li><time>2026-09-16T20:32:35+09:00</time><span>事前検証を完了。64K/128K/262K正答、連続12回、native 4/4、swap増加なし。設定・モデル・11サービスを元構成へ復帰し、5サービスarchiveも確認。旧helperの一時変更を復元。専用ブランチpushの明示承認待ちで本番切替と旧環境削除は保留。</span></li><li><time>2026-09-16T20:38:45+09:00</time><span>ユーザーがmain一本への整理とpushを明示承認。mainの履歴分岐を統合し、今回の切替用branchもmainへ取り込み済み。新設定と既存修正の両方を保持し、205テストとruffが成功。作業中の無関係な未コミット差分はbyte-for-byte保持。</span></li></ol>
+<ol class="log"><li><time>2026-09-16T19:49:25+09:00</time><span>ユーザーが本番切替と旧環境の全清掃を承認。準備を開始。</span></li><li><time>2026-09-16T20:04:51+09:00</time><span>新配置完了。切替コード a33f6db4、現行本番から分離した公開候補 740250fc。関連392テスト、分離版89テスト、37経路の識別チェックが成功。AGENTS.mdの明示push条件に従い専用ブランチpushの回答待ち。Ingestバッチの安全境界を待ちながら長文事前検証を実行中。</span></li><li><time>2026-09-16T20:13:32+09:00</time><span>30秒pollingがバッチ間の短い境界を取り逃がしたため、待機中preflightだけを終了。設定・サービス不変を検証し、blocking flockで次の境界取得を予約して再実行。旧比較証跡325 files / 5,404,875 bytesをprivate evidenceへコピーし、全SHA-256一致を検証。</span></li><li><time>2026-09-16T20:32:35+09:00</time><span>事前検証を完了。64K/128K/262K正答、連続12回、native 4/4、swap増加なし。設定・モデル・11サービスを元構成へ復帰し、5サービスarchiveも確認。旧helperの一時変更を復元。専用ブランチpushの明示承認待ちで本番切替と旧環境削除は保留。</span></li><li><time>2026-09-16T20:38:45+09:00</time><span>ユーザーがmain一本への整理とpushを明示承認。mainの履歴分岐を統合し、今回の切替用branchもmainへ取り込み済み。新設定と既存修正の両方を保持し、205テストとruffが成功。作業中の無関係な未コミット差分はbyte-for-byte保持。</span></li><li><time>2026-09-16T20:55:09+09:00</time><span>main f201706cをpushし、安全境界で本番切替。native/restart/5 archives/11 services/health合格。main以外の全branchをbundle退避後に削除。実Ingest1件はinvalid tagの修復上限で保留となったため、成功する全経路canaryを追加確認中。</span></li><li><time>2026-09-16T21:03:53+09:00</time><span>インストールarchive f201から隔離run_ingestでCREATE/UPDATEとread-backの全assertionが成功。本番の保留1件とは分離して記録。切替手順完了、旧環境の削除を開始。</span></li><li><time>2026-09-16T21:08:53+09:00</time><span>旧環境83.37GB削除、空き容量約83.46GB増。旧参照なし、新モデルready。main統合の追加2問題を修正し67テスト合格。旧main由来の11失敗とCI残件を明記し、今回の移行・清掃・main一本化を完了。</span></li></ol>
 </section>
 
 </body>
