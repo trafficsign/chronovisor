@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Plan</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id": "plan_e8191d6d9e364783b17e754c69afbf91", "created_at": "2026-09-16T19:46:24+09:00", "状態": "blocked", "slug": "mlx-serve-production-cutover", "authorized_scope": "Production cutover to MLX-Serve 3.3bpw and complete cleanup of retired DwarfStar environment."}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">MLX-Serve本番切替と旧DwarfStar環境の清掃</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="blocked">blocked</span>
+<span><code data-bind="task_id">plan_e8191d6d9e364783b17e754c69afbf91</code></span>
+<span data-bind="created_at">2026-09-16T19:46:24+09:00</span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的</h2>
+<p>測定済みMLX-Serve 26.9.3 + Qwen3.8 Flash Next iQ-MLX 3.3bpwへ本番を切り替え、旧モデル・runtime・LaunchAgent・関連sandboxを清掃する。</p>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<p>移行検証の完了前に旧モデルを削除しない。進行中Ingestをforce-killしない。無関係なdirty filesや他モデル、証跡を削除しない。</p>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定</h2>
+<p>loopback18136、モデルID qwen3.8-flash-next-chat、ctx262144を維持。新revision 2b7da62be0151a7932e4dfcab1d73c93ccf83f64、MTP exact、MLX cache2GiB、同時モデル1。</p>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist"><li><input type="checkbox" checked disabled><span>本番用配置・切替差分を準備し、長文/連続処理の事前検証を実施。</span></li><li><input type="checkbox" disabled><span>本番configとLaunchAgentを切り替え、実処理と再起動後のlive healthを確認。</span></li><li><input type="checkbox" disabled><span>旧環境と関連実験物を削除し、回収容量・残存参照・最終状態を記録。</span></li></ol>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<p>64K/128K/最大262Kで正答とメモリ、連続処理、native acceptance、実際の全generation route、launchd再起動、Dashboard/worker healthが通り、旧プロセスと現役設定参照が残らない。</p>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<p>既存model/accelerator leaseとIngest境界を使用。元構成は切替合格まで維持。失敗時は復旧して原因を修正する。切替後のarchive SHA、モデルrevision・PID・health・memoryを記録してから清掃する。</p>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>GitHub専用ブランチへのpush承認待ち。ユーザー提示AGENTS.mdの「push は明示依頼時だけ」に従い確認済み。切替・旧環境削除はまだ実施していない。</li></ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<p><strong>事前検証は合格。本番は元構成へ復帰済み。</strong></p>
+<table><thead><tr><th>実入力</th><th>所要時間</th><th>回答</th></tr></thead><tbody><tr><td>65,478 tokens</td><td>94.97秒</td><td>正答</td></tr><tr><td>131,015 tokens</td><td>189.82秒</td><td>正答</td></tr><tr><td>262,023 tokens</td><td>391.08秒</td><td>正答</td></tr></tbody></table>
+<ul><li>連続生成12/12、中央値59.18 tok/s。入力が短いため、ABBA比較の値とは別の安定性検証。</li><li>Chronovisor native acceptance: 4/4、schema_valid 4/4、effect_matches 4/4。</li><li>長文検証時の全体non-file memoryピーク92.40GiB、swap増加0MiB、Swapouts増加0。</li><li>関連392テストとruff通過。本番ベースへ分離後の89テストも通過。37経路の新revision識別チェック合格。</li><li>復帰後は保護対象の一致、11サービスの登録状態一致、5サービスの実行archive SHA一致を確認。DashboardトップページはHTTP 200（0.007秒）。</li><li>制約: Dashboard /api/health は移行前15秒・復帰後50秒ともtimeout。切替後の総合health判定は未実施で、トップページ応答を総合health合格へ読み替えていない。</li></ul>
+<p>変更本体はmain上のa33f6db4。公開対象は本番7af88177だけをベースにした専用ブランチ <code>codex/mlx-serve-33bpw-cutover</code> の <code>740250fcf141870a820c4369ca9167ef8c0f1968</code>。mainの未公開履歴や無関係なdirty filesは対象外。</p>
+<p>本番配置: <code>~/.local/share/mlx-serve/runtime/v26.9.3</code> と <code>~/.local/share/mlx-serve/models/qwen3.8-flash-next-chat</code>。新LaunchAgent、37経路を更新するconfig、rollback付き切替手順は <code>~/projects/sandbox/mlx-serve-33bpw-20260916/cutover/</code> に準備済み。push後に同ディレクトリの <code>apply_cutover.py --apply</code> を使い、インストール済みpackageのroute probe、再起動、全サービスarchive、実Ingest、healthを確認する。</p>
+<p>旧環境は約77.70GiB。旧比較証跡325 files / 5,404,875 bytesは <code>~/.local/state/chronovisor/evidence/2026-09-16-retired-dwarfstar</code> へ保存し、SHA-256一致を確認済み。旧 <code>ds4-iq2-bench-20260907/chronovisor-candidate</code> は登録worktreeなので <code>git worktree remove</code> を使う。削除は切替・live canary合格後に、使用中process/FD不在を確認して行う。</p>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log"><li><time>2026-09-16T19:49:25+09:00</time><span>ユーザーが本番切替と旧環境の全清掃を承認。準備を開始。</span></li><li><time>2026-09-16T20:04:51+09:00</time><span>新配置完了。切替コード a33f6db4、現行本番から分離した公開候補 740250fc。関連392テスト、分離版89テスト、37経路の識別チェックが成功。AGENTS.mdの明示push条件に従い専用ブランチpushの回答待ち。Ingestバッチの安全境界を待ちながら長文事前検証を実行中。</span></li><li><time>2026-09-16T20:13:32+09:00</time><span>30秒pollingがバッチ間の短い境界を取り逃がしたため、待機中preflightだけを終了。設定・サービス不変を検証し、blocking flockで次の境界取得を予約して再実行。旧比較証跡325 files / 5,404,875 bytesをprivate evidenceへコピーし、全SHA-256一致を検証。</span></li><li><time>2026-09-16T20:32:35+09:00</time><span>事前検証を完了。64K/128K/262K正答、連続12回、native 4/4、swap増加なし。設定・モデル・11サービスを元構成へ復帰し、5サービスarchiveも確認。旧helperの一時変更を復元。専用ブランチpushの明示承認待ちで本番切替と旧環境削除は保留。</span></li></ol>
+</section>
+
+</body>
+</html>
