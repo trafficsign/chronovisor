@@ -124,6 +124,7 @@ def test_generate_maps_parameters_and_drops_unsupported() -> None:
     assert body["temperature"] == 0.3
     assert body["seed"] == 7
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert body["enable_thinking"] is False
     assert "num_ctx" not in body
     assert "keep_alive" not in body
     assert urlparse(str(captured[0]["url"])).path.startswith("/v1/chat/completions")
@@ -161,6 +162,7 @@ def test_generate_maps_reasoning_level_to_omlx_controls() -> None:
 
     assert captured[0]["reasoning_effort"] == "low"
     assert captured[0]["chat_template_kwargs"] == {"enable_thinking": True}
+    assert captured[0]["enable_thinking"] is True
 
 
 @pytest.mark.parametrize(
@@ -189,6 +191,7 @@ def test_generate_maps_muse_reasoning_strength(
         "enable_thinking": think is not False,
         "reasoning_strength": reasoning_strength,
     }
+    assert captured[0]["enable_thinking"] is (think is not False)
 
 
 def test_generate_sends_x_api_key_header() -> None:

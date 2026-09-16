@@ -229,6 +229,8 @@ class OMLXAdapter:
                     think if isinstance(think, str) else "high" if think else "low"
                 )
             payload["chat_template_kwargs"] = template_kwargs
+            # MLX-Serve reads the top-level field; oMLX reads template kwargs.
+            payload["enable_thinking"] = think is not False
             if isinstance(think, str):
                 payload["reasoning_effort"] = think
         return payload
