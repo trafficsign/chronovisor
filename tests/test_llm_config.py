@@ -901,10 +901,10 @@ def test_repository_example_has_representative_local_role_map() -> None:
     text = example.read_text(encoding="utf-8")
     parsed = tomllib.loads(text)
     qwen_model = "qwen3.8-flash-next-chat"
-    qwen_revision = "672c52bbea7865352c8f0aa766c43939acf0f0d5"
+    qwen_revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
     ornith_model = "Ornith-1.5-9B-MLX-4bit"
     authority = config.roles["classification.authority"]
-    assert authority.provider_id == "dwarfstar"
+    assert authority.provider_id == "mlx_serve"
     assert authority.model == qwen_model
     assert authority.revision == qwen_revision
     assert parsed["decision_router"]["authority_kind"] == "single_model_v1"
@@ -914,8 +914,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
     assert parsed["llm"]["providers"]["omlx"]["endpoint"] == (
         "http://127.0.0.1:18125/v1"
     )
-    assert parsed["llm"]["providers"]["dwarfstar"]["kind"] == "omlx"
-    assert parsed["llm"]["providers"]["dwarfstar"]["endpoint"] == (
+    assert parsed["llm"]["providers"]["mlx_serve"]["kind"] == "omlx"
+    assert parsed["llm"]["providers"]["mlx_serve"]["endpoint"] == (
         "http://127.0.0.1:18136/v1"
     )
     runtime = build_llm_runtime(config)
@@ -927,7 +927,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
     active_generation_roles = {
         role
         for role, route in config.roles.items()
-        if route.provider_id == "dwarfstar" and route.model == qwen_model
+        if route.provider_id == "mlx_serve" and route.model == qwen_model
     }
     active_generation_roles.remove("classification.authority")
     assert len(active_generation_roles) == 36
@@ -964,6 +964,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "gpt-oss:20b",
         "ornith:9b-q4_K_M",
         "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "dwarfstar",
+        "672c52bbea7865352c8f0aa766c43939acf0f0d5",
         "2615fc0e976e65c2f3b55daca3a948f1cdc5b9f8",
         'provider = "local"',
     )
@@ -992,7 +994,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
     for role in proposer_roles:
         assert f'# role = "{role}"\n# data_class = "raw"' in text
     rubric_variant = config.roles["recall.rubric.variant"]
-    assert rubric_variant.provider_id == "dwarfstar"
+    assert rubric_variant.provider_id == "mlx_serve"
     assert rubric_variant.model == qwen_model
     assert rubric_variant.required_capabilities == ("structured_output",)
     assert (
@@ -1006,7 +1008,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "recall.distill.utility_judge",
     )
     distill_routes = [config.roles[role] for role in distill_roles]
-    assert [route.provider_id for route in distill_routes] == ["dwarfstar"] * 5
+    assert [route.provider_id for route in distill_routes] == ["mlx_serve"] * 5
     assert all(
         route.required_capabilities == ("structured_output",)
         for route in distill_routes
@@ -1035,7 +1037,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
         for role in ("research.planner", "research.challenge", "research.tie_break")
     )
     deep_retrieval_requery = config.roles["research.deep_retrieval_requery"]
-    assert deep_retrieval_requery.provider_id == "dwarfstar"
+    assert deep_retrieval_requery.provider_id == "mlx_serve"
     assert deep_retrieval_requery.model == qwen_model
     assert deep_retrieval_requery.required_capabilities == ("structured_output",)
     assert (
@@ -1043,7 +1045,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
         in text
     )
     ingest_generation = config.roles["ingest.generation"]
-    assert ingest_generation.provider_id == "dwarfstar"
+    assert ingest_generation.provider_id == "mlx_serve"
     assert ingest_generation.model == qwen_model
     assert config.roles["lint.tag_repair"].model == ingest_generation.model
     assert config.roles["lint.orphan_link"].model == ingest_generation.model
@@ -1060,8 +1062,13 @@ def test_repository_example_has_representative_local_role_map() -> None:
     [
         (
             "qwen3.8-flash-next-chat",
-            "672c52bbea7865352c8f0aa766c43939acf0f0d5",
+            "2b7da62be0151a7932e4dfcab1d73c93ccf83f64",
             None,
+        ),
+        (
+            "qwen3.8-flash-next-chat",
+            "672c52bbea7865352c8f0aa766c43939acf0f0d5",
+            "single-model runtime route identity is invalid",
         ),
         (
             "Qwen3.8-Flash-Next-oQ4e-mtp",
