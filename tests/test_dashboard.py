@@ -7598,8 +7598,21 @@ def test_model_status_snapshot_collapses_ds4_aliases_and_counts_unknown_sizes(
     }
 
 
-def test_omlx_openai_models_listing_does_not_claim_generic_residency(
+@pytest.mark.parametrize(
+    ("owner", "loaded", "expected_loaded"),
+    [
+        ("generic-openai-server", True, None),
+        ("mlx-serve", True, True),
+        ("mlx-serve", False, False),
+        ("mlx-serve", None, False),
+        ("mlx-serve", "true", False),
+    ],
+)
+def test_omlx_openai_models_listing_only_claims_verified_residency(
     monkeypatch,
+    owner: str,
+    loaded: object,
+    expected_loaded: bool | None,
 ) -> None:
     endpoint = "http://127.0.0.1:18137/v1"
     model = "generic-model"
@@ -7632,8 +7645,9 @@ def test_omlx_openai_models_listing_does_not_claim_generic_residency(
                 "data": [
                     {
                         "id": model,
-                        "owned_by": "generic-openai-server",
-                        "loaded": True,
+                        "owned_by": owner,
+                        "state": "ready",
+                        **({"loaded": loaded} if loaded is not None else {}),
                     }
                 ],
             },
@@ -7645,12 +7659,15 @@ def test_omlx_openai_models_listing_does_not_claim_generic_residency(
     row = runtime["models"][0]
     snapshot = dashboard._model_status_snapshot(runtime)
 
-    assert "loaded" not in row
+    if expected_loaded is None:
+        assert "loaded" not in row
+    else:
+        assert row["loaded"] is expected_loaded
     assert row["size"] is None
     assert row["size_vram"] is None
-    assert snapshot["summary"]["loaded"] == 0
+    assert snapshot["summary"]["loaded"] == int(expected_loaded is True)
     assert snapshot["summary"]["installed"] == 1
-    assert snapshot["models"][0]["status"] == "ready"
+    assert snapshot["models"][0]["status"] == ("loaded" if expected_loaded else "ready")
 
 
 def test_omlx_snapshot_does_not_fallback_for_non_404_errors(monkeypatch) -> None:

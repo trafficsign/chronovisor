@@ -587,13 +587,14 @@ def _omlx_snapshot(
                         ),
                         "_omlx_owner": owner,
                     }
-                    # DS4 publishes served aliases from its own runtime. A
-                    # generic OpenAI-compatible listing does not establish
-                    # residency, so leave its ``loaded`` field unspecified.
+                    # Use known runtimes' residency contracts; a generic
+                    # OpenAI-compatible listing alone does not prove loading.
                     if owner == _OMLX_DS4_OWNER:
                         normalized["loaded"] = True
                     elif provider_kind == "mtplx":
                         normalized["loaded"] = mtplx_ready is True
+                    elif owner == "mlx-serve":
+                        normalized["loaded"] = row.get("loaded") is True
                     else:
                         normalized.pop("loaded", None)
                     if provider_kind == "mtplx":

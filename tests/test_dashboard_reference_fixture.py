@@ -56,8 +56,8 @@ def _model_fleet_scenarios() -> list[dict[str, object]]:
         },
         {
             "name": "qwen3.8-flash-next-chat",
-            "display_name": "Qwen3.8-Flash-Next-DS4-IQ2",
-            "provider": "dwarfstar",
+            "display_name": "Qwen3.8-Flash-Next-MLX-3.3bpw",
+            "provider": "mlx_serve",
             "status": "loaded",
             "installed": True,
             "running": True,
@@ -137,8 +137,12 @@ def _model_fleet_scenarios() -> list[dict[str, object]]:
             "installed_size_unknown": 1,
         }
     )
+    ready = json.loads(json.dumps(loaded))
+    ready["models"][2].update({"status": "ready", "running": False})
+    ready["summary"].update({"loaded": 3, "loaded_size_unknown": 2})
     return [
         {"id": "service-loaded", "model_status": loaded},
+        {"id": "mlx-serve-ready", "model_status": ready},
         {"id": "unknown-memory", "model_status": unknown},
         {"id": "configured-stale", "model_status": stale},
     ]
@@ -176,6 +180,8 @@ const emitResult = () => {
 const grid = document.getElementById("model-grid");
 const rows = [...grid.querySelectorAll(".model-row")].map((row) => ({
   name: row.querySelector(".model-name")?.textContent || "",
+  status: row.querySelector(".model-state")?.textContent || "",
+  loaded: row.classList.contains("loaded"),
   overflow: row.scrollWidth > row.clientWidth + 1
     || [...row.querySelectorAll("*")].some((node) => node.scrollWidth > node.clientWidth + 1),
 }));
@@ -892,11 +898,20 @@ def test_model_fleet_service_states_render_without_overflow(tmp_path: Path) -> N
         == {
             "nvidia/Nemotron-3-Embed-1B-BF16",
             "BAAI/bge-reranker-v2-m3",
-            "Qwen3.8-Flash-Next-DS4-IQ2",
+            "Qwen3.8-Flash-Next-MLX-3.3bpw",
             "Ornith-1.5-9B-MLX-4bit",
         }
         for row in browser_results
     )
+    for result in browser_results:
+        qwen = next(
+            row
+            for row in result["rows"]
+            if row["name"] == "Qwen3.8-Flash-Next-MLX-3.3bpw"
+        )
+        loaded = result["scenario"] != "mlx-serve-ready"
+        assert qwen["status"] == ("loaded" if loaded else "ready")
+        assert qwen["loaded"] is loaded
 
 
 @pytest.mark.parametrize("width", [1280, 760])
