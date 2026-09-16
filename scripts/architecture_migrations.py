@@ -111,6 +111,10 @@ RECEIPT_HARDENING_PATHS = (
 RECEIPT_HARDENING_TEST_SHA256 = (
     "79fe6c9e6918378bf3d9cea5f100ff83a2e035653b1028d9201e102fbc99e3c4"
 )
+# The completed H1/H2 evidence pins this original verifier, even after tool updates.
+RECEIPT_HARDENING_VERIFIER_SHA256 = (
+    "07d9f612b77657cd50d0d0f90927c4c9c9795d695dfefd607f6241e6caf2c451"
+)
 EXPECTED_H0_ACTIVE_COUNTS = {
     "exceptions": 162,
     "cross_domain_sites": 1267,
@@ -1227,13 +1231,16 @@ def validate_history(
         raise MigrationValidationError(
             f"cannot read current trusted verifier: {exc}"
         ) from exc
-    if _git_file(
+    committed_verifier = _git_file(
         root,
         evidence_parent,
         "scripts/architecture_migrations.py",
-    ) != verifier_raw:
+    )
+    if committed_verifier != verifier_raw and hashlib.sha256(
+        committed_verifier
+    ).hexdigest() != RECEIPT_HARDENING_VERIFIER_SHA256:
         raise MigrationValidationError(
-            "receipt-hardening verifier differs from the current trusted verifier"
+            "receipt-hardening verifier differs from a trusted verifier"
         )
     committed_tests = _git_file(
         root,
@@ -1750,7 +1757,8 @@ def _receipt_additions(root: Path, h1: str, tip: str, receipt_path: str) -> list
     )
     additions = []
     for commit in commits:
-        parent = _single_parent(root, commit)
+        # Later merges may preserve the receipt; H2 itself still requires one parent.
+        parent = _git(root, "rev-parse", f"{commit}^1").decode().strip()
         status = (
             _git(
                 root,

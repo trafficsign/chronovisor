@@ -14,11 +14,13 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-WORK = Path("/Users/trafficsign/.omlx/experiments/sawfwair-q3-native-ple")
+HOME = Path.home()
+OMLX_HOME = HOME / ".omlx"
+WORK = OMLX_HOME / "experiments/sawfwair-q3-native-ple"
 OUT = ROOT / "_handoff/evidence/2026-09-06-sawfwair-q3-benchmark"
 CLI = "/Applications/oMLX.app/Contents/MacOS/omlx-cli"
 URL = "http://127.0.0.1:18136"
-OLD = Path("/Users/trafficsign/.omlx/models/Jundot/Qwen3.8-Flash-Next-oQ4e-mtp")
+OLD = OMLX_HOME / "models/Jundot/Qwen3.8-Flash-Next-oQ4e-mtp"
 ARM_PATHS = {
     "baseline": OLD,
     "candidate": WORK / "model",
@@ -100,9 +102,9 @@ def prepare(arm):
     link = model_dir / arm
     if not link.exists():
         link.symlink_to(ARM_PATHS[arm], target_is_directory=True)
-    config = json.loads(
-        Path("/Users/trafficsign/.omlx/model_settings.json").read_text()
-    )["models"]["Qwen3.8-Flash-Next-oQ4e-mtp"]
+    config = json.loads((OMLX_HOME / "model_settings.json").read_text())["models"][
+        "Qwen3.8-Flash-Next-oQ4e-mtp"
+    ]
     config.update(is_default=True, is_pinned=True, trust_remote_code=False)
     if arm == "candidate-no-mtp":
         config["mtp_enabled"] = False
@@ -478,16 +480,14 @@ def isolated_run(arm):
                 ).hexdigest(),
             },
         )
-    manager = (
-        "/Users/trafficsign/Applications/Chronovisor.app/Contents/MacOS/Chronovisor"
-    )
+    manager = HOME / "Applications/Chronovisor.app/Contents/MacOS/Chronovisor"
     state = json.loads(command(manager, "status"))
     enabled = [s["plist"] for s in state["services"] if s["status"] == "enabled"]
     save(f"{arm}-services-before.json", state)
     protected = [
-        Path("/Users/trafficsign/.chronovisor/config.toml"),
-        Path("/Users/trafficsign/.omlx/settings.json"),
-        Path("/Users/trafficsign/.omlx/model_settings.json"),
+        HOME / ".chronovisor/config.toml",
+        OMLX_HOME / "settings.json",
+        OMLX_HOME / "model_settings.json",
     ]
     before = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in protected}
     try:

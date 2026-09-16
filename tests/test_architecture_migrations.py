@@ -498,8 +498,9 @@ def test_tree_entries_reject_symlink_executable_gitlink_and_missing(
             migrations._git_file(repo, gitlink_commit, path)
 
 
+@pytest.mark.parametrize("tamper_receipt_in_merge", [False, True])
 def test_history_h1_h2_and_receipt_verify_end_to_end(
-    migrations: ModuleType, tmp_path: Path
+    migrations: ModuleType, tmp_path: Path, tamper_receipt_in_merge: bool
 ) -> None:
     repo, plan, evidence_parent = _clone_with_evidence_parent(tmp_path, migrations)
     assert migrations.validate_history(repo, plan, evidence_parent) == {
@@ -530,6 +531,24 @@ def test_history_h1_h2_and_receipt_verify_end_to_end(
     assert verified["h1_commit"] == h1
     assert verified["h2_commit"] == h2
     assert verified["state"] == "valid-h2-receipt"
+
+    _git(repo, "checkout", "--quiet", "-b", "post-h2")
+    changed_path = migrations.RECEIPT_PATH if tamper_receipt_in_merge else Path("later.txt")
+    target = repo / changed_path
+    target.write_bytes(target.read_bytes() + b" " if target.exists() else b"later\n")
+    _git(repo, "add", "--", changed_path.as_posix())
+    _commit(repo, "post-migration change")
+    _git(repo, "checkout", "--quiet", "--detach", h2)
+    _git(repo, "merge", "--no-ff", "--no-commit", "post-h2")
+    tip = _commit(repo, "merge after H2")
+
+    if tamper_receipt_in_merge:
+        with pytest.raises(migrations.MigrationValidationError, match="non-additive"):
+            migrations.verify_receipt(repo, plan, receipt, tip)
+    else:
+        merged = migrations.verify_receipt(repo, plan, receipt, tip)
+        assert merged["h2_commit"] == h2
+        assert merged["tip_commit"] == tip
 
 
 def test_evidence_history_rejects_extra_path_and_plan_byte_drift(
@@ -584,6 +603,16 @@ def test_evidence_history_rejects_extra_path_and_plan_byte_drift(
     drift = _commit(repo, "plan byte drift")
     with pytest.raises(migrations.MigrationValidationError, match="scope mismatch"):
         migrations.validate_history(repo, plan, drift)
+
+    _git(repo, "checkout", "--quiet", "--detach", migrations.RECEIPT_HARDENING_COMMIT)
+    for relative in migrations.RECEIPT_HARDENING_PATHS:
+        shutil.copyfile(ROOT / relative, repo / relative)
+    verifier = repo / "scripts/architecture_migrations.py"
+    verifier.write_bytes(verifier.read_bytes() + b"\n# untrusted modification\n")
+    _git(repo, "add", "--", *migrations.RECEIPT_HARDENING_PATHS)
+    tampered = _commit(repo, "untrusted verifier")
+    with pytest.raises(migrations.MigrationValidationError, match="trusted verifier"):
+        migrations.validate_history(repo, plan, tampered)
 
 
 def test_history_rejects_h1_directly_atop_fixed_receipt_hardening(

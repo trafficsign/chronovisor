@@ -7,10 +7,11 @@ import hashlib
 import json
 import socket
 import urllib.request
+from pathlib import Path
 
 import sawfwair_quant_benchmark as bench
 
-WORK = bench.Path("/Users/trafficsign/.omlx/experiments/vq32")
+WORK = Path.home() / ".omlx/experiments/vq32"
 REVISION = "b3a40c3590785c7276e6d51bda97486d0b179f0e"
 MODEL_REPO = "TheDrainFlorist/Qwen3.8-Flash-Next-VQ-3.2bpw"
 
