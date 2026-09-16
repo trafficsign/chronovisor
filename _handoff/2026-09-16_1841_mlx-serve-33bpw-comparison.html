@@ -1,0 +1,1306 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>MLX-Serve 3.3bpwとDwarfStarの比較</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:0.55rem 0.65rem;border-bottom:1px solid var(--rule);text-align:left}th{background:#eeeee8;white-space:nowrap}.table-wrap{overflow-x:auto;margin:0.8rem 0}pre{overflow-x:auto;background:var(--code-bg);padding:1rem;font-size:12px}code{overflow-wrap:anywhere}summary{cursor:pointer;font-weight:600}h3{font-size:1rem;margin-top:1rem}@media(max-width:600px){body{padding:0 0.75rem}header{position:static}h1{font-size:1.3rem}}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{
+  "task_id": "plan_ee6676bfab0c48d98f1d8b2e9f7baa9a",
+  "created_at": "2026-09-16T18:41:51+09:00",
+  "状態": "done",
+  "slug": "mlx-serve-33bpw-comparison",
+  "candidate_adopted": false,
+  "model_revision": "2b7da62be0151a7932e4dfcab1d73c93ccf83f64",
+  "mlx_serve_version": "26.9.3",
+  "completed_at": "2026-09-16T19:12:30+09:00",
+  "decision": "Promising isolated candidate; production restored, adoption requires separate validation.",
+  "summary": {
+    "pairs": [
+      {
+        "order": "forward",
+        "kind": "needle",
+        "target": 4096,
+        "repeat": null,
+        "current": 589.6253381029467,
+        "mlx": 569.9299899648227,
+        "change_percent": -3.340315767550217,
+        "prompt_tokens": [
+          4045,
+          4045
+        ],
+        "output_tokens": [
+          10,
+          10
+        ],
+        "output_equal": true,
+        "prompt_sha256": "0c4a892ad957319c2aa24d82edebf1291e7a9ddfd055ea85f3935701c25f29c2"
+      },
+      {
+        "order": "forward",
+        "kind": "needle",
+        "target": 16384,
+        "repeat": null,
+        "current": 605.8103910569408,
+        "mlx": 695.2069402249807,
+        "change_percent": 14.756522913394111,
+        "prompt_tokens": [
+          16335,
+          16335
+        ],
+        "output_tokens": [
+          11,
+          11
+        ],
+        "output_equal": true,
+        "prompt_sha256": "8bc808a6261c0f6670e40fd602eee562b2c40446aa77aca7c68afeb667db78f3"
+      },
+      {
+        "order": "forward",
+        "kind": "needle",
+        "target": 32768,
+        "repeat": null,
+        "current": 605.4304179315144,
+        "mlx": 692.6628964499746,
+        "change_percent": 14.408340898446204,
+        "prompt_tokens": [
+          32719,
+          32719
+        ],
+        "output_tokens": [
+          11,
+          11
+        ],
+        "output_equal": true,
+        "prompt_sha256": "8a7799cffd12b504d43a2a82896c0be9cf78ae698170688a587b6df09feafb18"
+      },
+      {
+        "order": "forward",
+        "kind": "decode",
+        "target": null,
+        "repeat": 1,
+        "current": 52.165247363678716,
+        "mlx": 53.182874702110205,
+        "change_percent": 1.9507764073980693,
+        "prompt_tokens": [
+          50,
+          50
+        ],
+        "output_tokens": [
+          384,
+          384
+        ],
+        "output_equal": false,
+        "prompt_sha256": "0fd786510d38b155b54f93bd31a037b8f83746316454d302e064664d0ec52043"
+      },
+      {
+        "order": "forward",
+        "kind": "decode",
+        "target": null,
+        "repeat": 2,
+        "current": 52.119052255799204,
+        "mlx": 55.1235257223148,
+        "change_percent": 5.764635649492833,
+        "prompt_tokens": [
+          50,
+          50
+        ],
+        "output_tokens": [
+          384,
+          384
+        ],
+        "output_equal": false,
+        "prompt_sha256": "4ebe1e8d7081e7f71f0a36f04e6eb5d3dc31c5dd6a0af2d89b51c5db3366f8da"
+      },
+      {
+        "order": "forward",
+        "kind": "decode",
+        "target": null,
+        "repeat": 3,
+        "current": 50.964203421148795,
+        "mlx": 55.70417273708445,
+        "change_percent": 9.300585504626358,
+        "prompt_tokens": [
+          50,
+          50
+        ],
+        "output_tokens": [
+          384,
+          384
+        ],
+        "output_equal": false,
+        "prompt_sha256": "a3689e50d220d7d75f3f9004f4896b0afaa2c25ba6b3911c3381f5d906f3e241"
+      },
+      {
+        "order": "reverse",
+        "kind": "needle",
+        "target": 4096,
+        "repeat": null,
+        "current": 591.7905808744631,
+        "mlx": 623.1802285174865,
+        "change_percent": 5.304181691543697,
+        "prompt_tokens": [
+          4045,
+          4045
+        ],
+        "output_tokens": [
+          10,
+          10
+        ],
+        "output_equal": true,
+        "prompt_sha256": "0c4a892ad957319c2aa24d82edebf1291e7a9ddfd055ea85f3935701c25f29c2"
+      },
+      {
+        "order": "reverse",
+        "kind": "needle",
+        "target": 16384,
+        "repeat": null,
+        "current": 605.8809668358265,
+        "mlx": 701.1713999699759,
+        "change_percent": 15.727583197042394,
+        "prompt_tokens": [
+          16335,
+          16335
+        ],
+        "output_tokens": [
+          11,
+          11
+        ],
+        "output_equal": true,
+        "prompt_sha256": "8bc808a6261c0f6670e40fd602eee562b2c40446aa77aca7c68afeb667db78f3"
+      },
+      {
+        "order": "reverse",
+        "kind": "needle",
+        "target": 32768,
+        "repeat": null,
+        "current": 607.1719084926444,
+        "mlx": 693.1396115559571,
+        "change_percent": 14.158708902843475,
+        "prompt_tokens": [
+          32719,
+          32719
+        ],
+        "output_tokens": [
+          11,
+          11
+        ],
+        "output_equal": true,
+        "prompt_sha256": "8a7799cffd12b504d43a2a82896c0be9cf78ae698170688a587b6df09feafb18"
+      },
+      {
+        "order": "reverse",
+        "kind": "decode",
+        "target": null,
+        "repeat": 1,
+        "current": 51.78155154795338,
+        "mlx": 55.29124158983847,
+        "change_percent": 6.777877326898696,
+        "prompt_tokens": [
+          50,
+          50
+        ],
+        "output_tokens": [
+          384,
+          384
+        ],
+        "output_equal": false,
+        "prompt_sha256": "0fd786510d38b155b54f93bd31a037b8f83746316454d302e064664d0ec52043"
+      },
+      {
+        "order": "reverse",
+        "kind": "decode",
+        "target": null,
+        "repeat": 2,
+        "current": 51.965858177698394,
+        "mlx": 56.59906524762229,
+        "change_percent": 8.9158675184013,
+        "prompt_tokens": [
+          50,
+          50
+        ],
+        "output_tokens": [
+          384,
+          384
+        ],
+        "output_equal": false,
+        "prompt_sha256": "4ebe1e8d7081e7f71f0a36f04e6eb5d3dc31c5dd6a0af2d89b51c5db3366f8da"
+      },
+      {
+        "order": "reverse",
+        "kind": "decode",
+        "target": null,
+        "repeat": 3,
+        "current": 52.79928275453651,
+        "mlx": 57.346083165527446,
+        "change_percent": 8.611481394792753,
+        "prompt_tokens": [
+          50,
+          50
+        ],
+        "output_tokens": [
+          384,
+          384
+        ],
+        "output_equal": false,
+        "prompt_sha256": "a3689e50d220d7d75f3f9004f4896b0afaa2c25ba6b3911c3381f5d906f3e241"
+      }
+    ],
+    "memory": {
+      "current-forward": {
+        "baseline_nonfile_gib": 29.877334594726562,
+        "peak_nonfile_gib": 86.95947265625,
+        "peak_added_nonfile_gib": 57.08213806152344,
+        "peak_file_cache_gib": 97.94493103027344,
+        "swap_growth_mib": 0.0,
+        "swapouts_delta": 0
+      },
+      "mlx-forward": {
+        "baseline_nonfile_gib": 29.806655883789062,
+        "peak_nonfile_gib": 83.36138916015625,
+        "peak_added_nonfile_gib": 53.55473327636719,
+        "peak_file_cache_gib": 91.6131591796875,
+        "swap_growth_mib": 0.0,
+        "swapouts_delta": 0
+      },
+      "mlx-reverse": {
+        "baseline_nonfile_gib": 29.813430786132812,
+        "peak_nonfile_gib": 83.26844787597656,
+        "peak_added_nonfile_gib": 53.45501708984375,
+        "peak_file_cache_gib": 68.16545104980469,
+        "swap_growth_mib": 0.0,
+        "swapouts_delta": 0
+      },
+      "current-reverse": {
+        "baseline_nonfile_gib": 29.622604370117188,
+        "peak_nonfile_gib": 87.02621459960938,
+        "peak_added_nonfile_gib": 57.40361022949219,
+        "peak_file_cache_gib": 73.17298889160156,
+        "swap_growth_mib": 0.0,
+        "swapouts_delta": 0
+      }
+    },
+    "median_decode_change_percent": 7.694679360845724,
+    "median_prefill_change_percent": 14.283524900644839,
+    "quality": {
+      "current": 27,
+      "mlx": 30
+    },
+    "quality_count": 32,
+    "quality_regressions": [],
+    "native": {
+      "current": {
+        "total": 4,
+        "ok": 4,
+        "schema_valid": 4,
+        "effect_matches": 4
+      },
+      "mlx": {
+        "total": 4,
+        "ok": 4,
+        "schema_valid": 4,
+        "effect_matches": 4
+      }
+    }
+  },
+  "provenance": {
+    "current": {
+      "config_sha256": "8e59234172bc3ec8546de68b52fc8de4c16e3ab48d7bf4381c7f7b39da4ff82a",
+      "plist_sha256": "db0d3174d711f80a9c16dcd2a47001a37826849fc6db554762ffc340f310363d",
+      "weights": {
+        "/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-IQ2XXSImatrix-MXFP4Down-MTP.gguf": {
+          "size": 50343093376,
+          "mtime_ns": 1788738075789766895,
+          "inode": 190934287
+        },
+        "/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-PLE-Q4_1.gguf": {
+          "size": 32000157440,
+          "mtime_ns": 1788737843387469823,
+          "inode": 190934325
+        }
+      },
+      "arguments": [
+        "/Users/trafficsign/.local/share/dwarfstar/runtime/ds4-server",
+        "-m",
+        "/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-IQ2XXSImatrix-MXFP4Down-MTP.gguf",
+        "--ple",
+        "/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-PLE-Q4_1.gguf",
+        "--metal",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18136",
+        "--ctx",
+        "262144",
+        "--prefill-chunk",
+        "1024",
+        "--power",
+        "100",
+        "--mtp",
+        "--mtp-exact-sampling"
+      ],
+      "engine_commit": "ffd85d426313ace6dae805e9f2fb4424d5b427fd",
+      "binary_sha256": "579696f76eb8ee6acfcff8e3810926c8b143674d6485e8526a6dadc4aa70e2c5",
+      "services": {
+        "services": [
+          {
+            "plist": "com.trafficsign.chronovisor-converge.managed-v2.plist",
+            "status": "enabled"
+          },
+          {
+            "plist": "com.trafficsign.chronovisor-dashboard.managed-v2.plist",
+            "status": "enabled"
+          },
+          {
+            "plist": "com.trafficsign.chronovisor-deadman-observer.managed-v2.plist",
+            "status": "enabled"
+          },
+          {
+            "plist": "com.trafficsign.chronovisor-ingest-drain.managed-v2.plist",
+            "status": "enabled"
+          },
+          {
+            "plist": "com.trafficsign.chronovisor-lan-dashboard.managed-v2.plist",
+            "status": "enabled"
+          },
+          {
+            "plist": "com.trafficsign.chronovisor-librarian-review.managed-v2.plist",
+            "status": "enabled"
+          },
+          {
+            "plist": "com.trafficsign.chronovisor-reranker.managed-v2.plist",
+            "status": "enabled"
+          },
+          {
+            "plist": "com.trafficsign.chronovisor-searxng.managed-v2.plist",
+            "status": "enabled"
+          },
+          {
+            "plist": "com.trafficsign.chronovisor-semantic.managed-v2.plist",
+            "status": "enabled"
+          },
+          {
+            "plist": "com.trafficsign.chronovisor-sleep.managed-v2.plist",
+            "status": "enabled"
+          },
+          {
+            "plist": "com.trafficsign.chronovisor-watchdog.managed-v2.plist",
+            "status": "enabled"
+          }
+        ]
+      }
+    },
+    "os": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0\nBuildVersion:\t\t26A428",
+    "mlx_release": "v26.9.3",
+    "mlx_binary_sha256": "eeab7d63766e6d12961ed9e69af6a975ca11e372f2fae1120d699782bf9a5f6f",
+    "mlx_args": [
+      "/Users/trafficsign/projects/sandbox/mlx-serve-33bpw-20260916/binary/mlx-serve-macos-arm64/mlx-serve",
+      "--model",
+      "/Users/trafficsign/projects/sandbox/mlx-serve-33bpw-20260916/model",
+      "--serve",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "18136",
+      "--ctx-size",
+      "262144",
+      "--prefill-chunk",
+      "1024",
+      "--mtp",
+      "--max-concurrent",
+      "1",
+      "--max-resident-models",
+      "1",
+      "--prefix-cache-entries",
+      "0",
+      "--prefix-cache-mem",
+      "0",
+      "--prefix-cache-disk",
+      "0",
+      "--tokenize-cache-entries",
+      "0",
+      "--no-drafter",
+      "--no-pld",
+      "--no-warmup-eager"
+    ],
+    "mlx_environment": {
+      "MLX_SERVE_ROUND_COST_PERSIST": "0",
+      "MLX_SERVE_CACHE_LIMIT": "2147483648"
+    },
+    "model_revision": "2b7da62be0151a7932e4dfcab1d73c93ccf83f64",
+    "model_total_bytes": 86355119649,
+    "order": [
+      "current-forward",
+      "mlx-forward",
+      "mlx-reverse",
+      "current-reverse"
+    ],
+    "harness_sha256": "cf1b06f344da2767eb824edc4b80bce2a3379d3209e803a0568dff55844088cf"
+  },
+  "memory_detail": {
+    "current-forward": {
+      "phase_peak_nonfile_gib": {
+        "startup": 79.27145385742188,
+        "warmup": 85.44380187988281,
+        "performance": 86.52146911621094,
+        "quality": 86.84584045410156,
+        "native_acceptance": 86.95947265625
+      },
+      "file_cache_at_nonfile_peak_gib": 40.13958740234375,
+      "samples": 180
+    },
+    "mlx-forward": {
+      "phase_peak_nonfile_gib": {
+        "startup": 78.96240234375,
+        "warmup": 80.54450988769531,
+        "performance": 83.36138916015625,
+        "quality": 82.16412353515625,
+        "native_acceptance": 81.78758239746094,
+        "shutdown": 80.87432861328125
+      },
+      "file_cache_at_nonfile_peak_gib": 43.78208923339844,
+      "samples": 139
+    },
+    "mlx-reverse": {
+      "phase_peak_nonfile_gib": {
+        "startup": 78.25361633300781,
+        "warmup": 79.40641784667969,
+        "performance": 83.26844787597656,
+        "shutdown": 80.38917541503906
+      },
+      "file_cache_at_nonfile_peak_gib": 43.79048156738281,
+      "samples": 111
+    },
+    "current-reverse": {
+      "phase_peak_nonfile_gib": {
+        "startup": 76.50567626953125,
+        "warmup": 85.85409545898438,
+        "performance": 87.02621459960938
+      },
+      "file_cache_at_nonfile_peak_gib": 40.05706787109375,
+      "samples": 139
+    }
+  },
+  "restoration": {
+    "checked_at": "2026-09-16T19:09:05+09:00",
+    "identity_restored": true,
+    "generation_canary": {
+      "content": "READY",
+      "usage": {
+        "prompt_tokens": 16,
+        "completion_tokens": 1,
+        "total_tokens": 17,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 16
+        }
+      },
+      "ttft_seconds": 0.895324166995124,
+      "wall_seconds": 0.8958472499944037,
+      "finish_reason": "stop"
+    },
+    "dashboard_http_status": 200,
+    "services": {
+      "services": [
+        {
+          "plist": "com.trafficsign.chronovisor-converge.managed-v2.plist",
+          "status": "enabled"
+        },
+        {
+          "plist": "com.trafficsign.chronovisor-dashboard.managed-v2.plist",
+          "status": "enabled"
+        },
+        {
+          "plist": "com.trafficsign.chronovisor-deadman-observer.managed-v2.plist",
+          "status": "enabled"
+        },
+        {
+          "plist": "com.trafficsign.chronovisor-ingest-drain.managed-v2.plist",
+          "status": "enabled"
+        },
+        {
+          "plist": "com.trafficsign.chronovisor-lan-dashboard.managed-v2.plist",
+          "status": "enabled"
+        },
+        {
+          "plist": "com.trafficsign.chronovisor-librarian-review.managed-v2.plist",
+          "status": "enabled"
+        },
+        {
+          "plist": "com.trafficsign.chronovisor-reranker.managed-v2.plist",
+          "status": "enabled"
+        },
+        {
+          "plist": "com.trafficsign.chronovisor-searxng.managed-v2.plist",
+          "status": "enabled"
+        },
+        {
+          "plist": "com.trafficsign.chronovisor-semantic.managed-v2.plist",
+          "status": "enabled"
+        },
+        {
+          "plist": "com.trafficsign.chronovisor-sleep.managed-v2.plist",
+          "status": "enabled"
+        },
+        {
+          "plist": "com.trafficsign.chronovisor-watchdog.managed-v2.plist",
+          "status": "enabled"
+        }
+      ]
+    },
+    "ingest": {
+      "state": "idle",
+      "stage": "idle",
+      "current_job_id": null,
+      "updated_at": "2026-09-16T19:08:19"
+    },
+    "health": {
+      "semantic": {
+        "status": "ok",
+        "ready": true,
+        "last_error": "",
+        "pid": 14622
+      },
+      "reranker": {
+        "status": "ok",
+        "ready": true,
+        "last_error": "",
+        "pid": 14303
+      }
+    },
+    "reranker_runtime_reported_drift": true,
+    "initial_health_probe": "Sockets were not yet created immediately after service registration; retried after startup."
+  },
+  "cleanup": {
+    "checked_at": "2026-09-16T19:10:56+09:00",
+    "experiment_server_running": false,
+    "global_mlx_state_created": false,
+    "removed": [
+      {
+        "path": "/Users/trafficsign/projects/sandbox/mlx-serve-33bpw-20260916/mlx-serve-bin-macos-arm64.tar.gz",
+        "logical_bytes": 72072610
+      },
+      {
+        "path": "/Users/trafficsign/projects/sandbox/mlx-serve-33bpw-20260916/hf-cache",
+        "logical_bytes": 6007
+      },
+      {
+        "path": "/Users/trafficsign/projects/sandbox/mlx-serve-33bpw-20260916/xet-cache",
+        "logical_bytes": 0
+      },
+      {
+        "path": "/Users/trafficsign/projects/sandbox/mlx-serve-33bpw-20260916/__pycache__",
+        "logical_bytes": 28483
+      }
+    ],
+    "removed_logical_bytes": 72107100,
+    "retained": [
+      "model",
+      "binary",
+      "compare.py",
+      "results",
+      "release-manifest.json",
+      "model-manifest.json",
+      "download.log",
+      "run.log",
+      "mlx-user-state-before.json"
+    ],
+    "reason": "Measured speed and memory improvements justify retaining the isolated candidate for a possible follow-up; no production adoption."
+  },
+  "html_validation": {
+    "method": "static HTML/JSON/numeric checks",
+    "visual_check": "not performed; local file URL was blocked by browser URL security policy"
+  }
+}
+</script>
+
+<header>
+<h1>比較結果: <span id="plan-title">MLX-Serve 3.3bpwとDwarfStarの比較</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="done">done</span>
+<span><code data-bind="task_id">plan_ee6676bfab0c48d98f1d8b2e9f7baa9a</code></span>
+<span data-bind="created_at">2026-09-16T18:41:51+09:00</span>
+</div>
+</header>
+<section data-section="比較結果">
+<h2>結論：軽量3.3bpwは今回の条件で速く、メモリも減った</h2>
+<p><strong>生成速度の中央値は 52.0 → 55.5 tok/s、追加メモリは約 3.7 GiB削減。</strong>16K・32K入力の初回応答も約13%短縮した。100 tok/sは今回の日本語生成では出ていない。現行以下のメモリという条件を満たしたため、次の検証に進める候補として扱う。</p>
+<div class="table-wrap"><table><thead><tr><th>指標</th><th>現行DwarfStar</th><th>MLX-Serve 3.3bpw</th><th>差</th></tr></thead><tbody><tr><td>生成速度（384 token × 6測定の中央値）</td><td>52.04 tok/s</td><td>55.50 tok/s</td><td>+6.64%</td></tr><tr><td>4K入力・初回応答（2測定の中央値）</td><td>6.85 秒</td><td>6.79 秒</td><td>-0.78%</td></tr><tr><td>16K入力・初回応答（2測定の中央値）</td><td>26.96 秒</td><td>23.40 秒</td><td>-13.22%</td></tr><tr><td>32K入力・初回応答（2測定の中央値）</td><td>53.97 秒</td><td>47.22 秒</td><td>-12.50%</td></tr><tr><td>追加メモリ（各巡ピークの平均）</td><td>57.24 GiB</td><td>53.50 GiB</td><td>−3.74 GiB</td></tr><tr><td>固定短問32件</td><td>27 / 32</td><td>30 / 32</td><td>改善3件・後退0件</td></tr><tr><td>Chronovisor native受入</td><td>4 / 4</td><td>4 / 4</td><td>全件初回でvalid</td></tr><tr><td>swap使用量増分・swapout増分</td><td>0・0</td><td>0・0</td><td>両版とも増加なし</td></tr></tbody></table></div>
+<p>追加メモリはOS全体の非ファイル物理メモリの「起動前→ピーク」増分。モデル単体の専用メモリ値ではない。独立した中央値の比は+6.64%、同じ入力同士の6組の改善率中央値は+7.69%。集計方法が違うため両値は一致しない。</p>
+<p><strong>本番は元のDwarfStarへ復帰済み。</strong>本結果は32Kまでの固定入力と限定的な品質確認に対する結果で、262K全文投入・長時間運用・広い品質評価は未実施。macOS 27同士で構成全体を比較しており、OS更新だけの効果は分離していない。</p>
+</section>
+<section data-section="測定条件">
+<h2>測定条件と比較の範囲</h2>
+<ul>
+<li>M4 Max・128 GiB、macOS 27.0 build 26A428。現行→MLX→MLX→現行のABBA順。各armを別プロセスで起動し、READYの短いwarmup後に計測。</li>
+<li>両版context 262144・prefill chunk 1024・同一messages・temperature 0・seed 42。入力token数は4,045 / 16,335 / 32,719で両版一致。日本語生成は入力50・出力384 tokenで全6組一致。</li>
+<li>性能・短問ではthinking off。MLXはrootのenable_thinking=falseとenable_mtp=trueを明示。native受入はOMLXAdapter/LLMRuntime/DecisionRouterの既存ポリシーを変更せず、隔離fixtureへ適用した。</li>
+<li>現行はMTP exact、MLXは既定の厳密MTPとadaptive depth。approximate acceptance、drafter、PLDを使用していない。MLXのbuffer pool cache上限は2 GiBに固定（MLX_SERVE_CACHE_LIMIT=2147483648）。既定設定全般の性能を代表する測定ではない。</li>
+<li>prefix/tokenize cacheをMLXで無効化し、全性能リクエストのcached_tokens=0を確認。MLXのngram warmは既定どおり。/propsのn_ctxとmax_safe_contextは262144、ngram warm完了を確認したが、実投入は32Kまで。</li>
+<li>モデル量子化と実装が異なり、同じ重みを使ったエンジン単体の比較ではない。日本語自由生成の文章は異なる。画像・音声・コード生成・並列処理は評価対象外。</li>
+</ul>
+</section>
+<section data-section="速度詳細">
+<h2>速度の再現性</h2>
+<p>生成は6組すべてMLXが高速で、5組が+3%を超えた。各順序内の3組の改善率中央値も+5.76% / +8.92%。4K入力は−3.34%と+5.30%で符号が変わり、一貫した改善とは扱わない。16K・32Kは両順序とも初回応答が短縮した。反復は少数であり、統計的な信頼区間は求めていない。</p>
+<h3>生成速度（tok/s）</h3>
+<div class="table-wrap"><table><thead><tr><th>順序</th><th>試行</th><th>現行</th><th>MLX</th><th>改善率</th></tr></thead><tbody><tr><td>forward</td><td>1</td><td>52.17</td><td>53.18</td><td>+1.95%</td></tr><tr><td>forward</td><td>2</td><td>52.12</td><td>55.12</td><td>+5.76%</td></tr><tr><td>forward</td><td>3</td><td>50.96</td><td>55.70</td><td>+9.30%</td></tr><tr><td>reverse</td><td>1</td><td>51.78</td><td>55.29</td><td>+6.78%</td></tr><tr><td>reverse</td><td>2</td><td>51.97</td><td>56.60</td><td>+8.92%</td></tr><tr><td>reverse</td><td>3</td><td>52.80</td><td>57.35</td><td>+8.61%</td></tr></tbody></table></div>
+<p>両版に共通するクライアント計測：最初のcontent受信から完了までに対し (completion_tokens − 1) / 経過秒。SSEの送出単位差を含む。MLXのサーバーtimingsは53.32〜57.43 tok/sで、クライアント値との差は小さい。</p>
+<h3>入力token数 ÷ 初回応答秒（tok/s）</h3>
+<div class="table-wrap"><table><thead><tr><th>順序</th><th>入力</th><th>現行</th><th>MLX</th><th>改善率</th></tr></thead><tbody><tr><td>forward</td><td>4K</td><td>589.63</td><td>569.93</td><td>-3.34%</td></tr><tr><td>forward</td><td>16K</td><td>605.81</td><td>695.21</td><td>+14.76%</td></tr><tr><td>forward</td><td>32K</td><td>605.43</td><td>692.66</td><td>+14.41%</td></tr><tr><td>reverse</td><td>4K</td><td>591.79</td><td>623.18</td><td>+5.30%</td></tr><tr><td>reverse</td><td>16K</td><td>605.88</td><td>701.17</td><td>+15.73%</td></tr><tr><td>reverse</td><td>32K</td><td>607.17</td><td>693.14</td><td>+14.16%</td></tr></tbody></table></div>
+<p>この入力指標にはtokenize・最初の生成・HTTP/SSEの時間も含まれ、純粋なカーネルprefill速度ではない。長文中の指定値を返すneedleは両版各6/6正解、出力も一致した。</p>
+</section>
+<section data-section="メモリ詳細">
+<h2>メモリ：起動前の差を引いてもMLXが軽い</h2>
+<div class="table-wrap"><table><thead><tr><th>arm</th><th>起動前 GiB</th><th>全体ピーク GiB</th><th>追加 GiB</th><th>同時点file cache GiB</th><th>swap増分 MiB</th></tr></thead><tbody><tr><td>current-forward</td><td>29.88</td><td>86.96</td><td>57.08</td><td>40.14</td><td>0</td></tr><tr><td>mlx-forward</td><td>29.81</td><td>83.36</td><td>53.55</td><td>43.78</td><td>0</td></tr><tr><td>mlx-reverse</td><td>29.81</td><td>83.27</td><td>53.46</td><td>43.79</td><td>0</td></tr><tr><td>current-reverse</td><td>29.62</td><td>87.03</td><td>57.40</td><td>40.06</td><td>0</td></tr></tbody></table></div>
+<p>vm_statを約1秒ごとに採取し、(Pages wired down + Anonymous pages + Pages occupied by compressor) × page_sizeを非ファイル物理メモリの指標にした。file-backed pagesは再利用可能なファイルキャッシュとして別表示。瞬間的なピークの取り逃しや他アプリの小さな変動は残る。RSSは主判定に使わない。</p>
+<p>1巡目は起動・性能・短問・native受入、2巡目は起動・性能の期間を含む。両版でswap使用量の増加・swapout増加は0。MLXのモデル一式はdisk上86.36 GBで、うち約32 GBはngram用ファイル。ディスク容量と常駐メモリは区別する。</p>
+</section>
+<section data-section="品質詳細">
+<h2>固定fixtureの品質と実処理受入</h2>
+<div class="table-wrap"><table><thead><tr><th>短問ID</th><th>現行</th><th>MLX</th></tr></thead><tbody><tr><td>percent</td><td>FAIL</td><td>PASS</td></tr><tr><td>remainder</td><td>FAIL</td><td>FAIL</td></tr><tr><td>set</td><td>FAIL</td><td>PASS</td></tr><tr><td>precedence</td><td>FAIL</td><td>FAIL</td></tr><tr><td>jp_order</td><td>FAIL</td><td>PASS</td></tr></tbody></table></div>
+<p>その他27件は両版正解。percent・set・jp_orderの3件が改善し、現行で正解した問題の後退はなかった。remainderとprecedenceは両版不正解。この32問で一般的な品質向上を保証するものではない。</p>
+<div class="table-wrap"><table><thead><tr><th>native lane</th><th>現行ok</th><th>MLX ok</th><th>repair回数 現行 / MLX</th></tr></thead><tbody><tr><td>ingest_triage</td><td>True</td><td>True</td><td>0 / 0</td></tr><tr><td>ingest_reconciliation</td><td>True</td><td>True</td><td>0 / 0</td></tr><tr><td>orphan_link</td><td>True</td><td>True</td><td>0 / 0</td></tr><tr><td>local_repair</td><td>True</td><td>True</td><td>0 / 0</td></tr></tbody></table></div>
+<p>各lane 1 fixtureのschema/effect適合を確認し、両版とも初回で4/4通過した。自由記述までのJSON完全一致を要求した試験ではなく、実データのwiki更新も行っていない。nativeの思考動作・出力文章は実装間で異なるため、受入の所要時間からエンジン速度の改善率は求めない。</p>
+</section>
+<section data-section="復帰と保存">
+<h2>復帰と後片付け</h2>
+<p>Ingest境界、model lease、accelerator leaseを取得して測定した。現行DwarfStarのengine commit・binary/config/plist SHA256・model metadata・起動引数は前後一致。元の11サービスはenabledに復帰した。</p>
+<p>2026-09-16T19:09:05+09:00 に本番生成READY、Semantic/Rerankerのstatus=ok・ready=true・last_error空、Dashboard HTTP 200、Ingest idleを確認。登録直後はsocket作成前だったため、起動完了後にlive healthを再確認した。Reranker health内のruntime情報にはdrift=trueも記録されており、そのrevision差の診断は本比較に含めない。</p>
+<p>実験サーバーは終了し、~/.mlx-serveへの設定作成なし。重複download archive/cache約72.11 MBを削除した。改善が確認できたため、モデル・CLI・測定スクリプト・生データは隔離フォルダ <code>/Users/trafficsign/projects/sandbox/mlx-serve-33bpw-20260916</code> に保持する。本番切替は行っていない。</p>
+</section>
+<section data-section="出典と再現情報">
+<h2>固定した配布物と再現情報</h2>
+<ul>
+<li>MLX-Serve <a href="https://github.com/ddalcu/mlx-serve/releases/tag/v26.9.3">v26.9.3公式release</a>。binary SHA256 <code>eeab7d63766e6d12961ed9e69af6a975ca11e372f2fae1120d699782bf9a5f6f</code>。</li>
+<li><a href="https://huggingface.co/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-3.3bpw/tree/2b7da62be0151a7932e4dfcab1d73c93ccf83f64">3.3bpwモデル固定revision</a> <code>2b7da62be0151a7932e4dfcab1d73c93ccf83f64</code>。113ファイル・86,355,119,649 bytes。全sizeとtensor header整合性を確認。モデル全ファイルのSHA256再走査はしていない。</li>
+<li>現行DwarfStar commit <code>ffd85d426313ace6dae805e9f2fb4424d5b427fd</code>、binary SHA256 <code>579696f76eb8ee6acfcff8e3810926c8b143674d6485e8526a6dadc4aa70e2c5</code>。現行GGUF本体50,343,093,376 bytes＋PLE 32,000,157,440 bytes。</li>
+<li>測定driver SHA256 <code>cf1b06f344da2767eb824edc4b80bce2a3379d3209e803a0568dff55844088cf</code>。既存maintenance・固定fixture・native受入harnessを再利用。実行結果は隔離フォルダ内のresults/summary.json、各armのperformance/quality/acceptance/memory、live-restoration.jsonに保存。</li>
+<li><a href="https://github.com/ddalcu/mlx-serve/blob/v26.9.3/benchmarks.md">公式benchmark</a>のmixed-4-8bitとはモデル・生成内容・測定条件が異なるため、その値と直接比較しない。</li>
+</ul>
+<details><summary>測定時のCLIと環境変数</summary><pre>{
+  &quot;current&quot;: [
+    &quot;/Users/trafficsign/.local/share/dwarfstar/runtime/ds4-server&quot;,
+    &quot;-m&quot;,
+    &quot;/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-IQ2XXSImatrix-MXFP4Down-MTP.gguf&quot;,
+    &quot;--ple&quot;,
+    &quot;/Users/trafficsign/.local/share/dwarfstar/models/Qwen3.8-Flash-Next-PLE-Q4_1.gguf&quot;,
+    &quot;--metal&quot;,
+    &quot;--host&quot;,
+    &quot;127.0.0.1&quot;,
+    &quot;--port&quot;,
+    &quot;18136&quot;,
+    &quot;--ctx&quot;,
+    &quot;262144&quot;,
+    &quot;--prefill-chunk&quot;,
+    &quot;1024&quot;,
+    &quot;--power&quot;,
+    &quot;100&quot;,
+    &quot;--mtp&quot;,
+    &quot;--mtp-exact-sampling&quot;
+  ],
+  &quot;mlx&quot;: [
+    &quot;/Users/trafficsign/projects/sandbox/mlx-serve-33bpw-20260916/binary/mlx-serve-macos-arm64/mlx-serve&quot;,
+    &quot;--model&quot;,
+    &quot;/Users/trafficsign/projects/sandbox/mlx-serve-33bpw-20260916/model&quot;,
+    &quot;--serve&quot;,
+    &quot;--host&quot;,
+    &quot;127.0.0.1&quot;,
+    &quot;--port&quot;,
+    &quot;18136&quot;,
+    &quot;--ctx-size&quot;,
+    &quot;262144&quot;,
+    &quot;--prefill-chunk&quot;,
+    &quot;1024&quot;,
+    &quot;--mtp&quot;,
+    &quot;--max-concurrent&quot;,
+    &quot;1&quot;,
+    &quot;--max-resident-models&quot;,
+    &quot;1&quot;,
+    &quot;--prefix-cache-entries&quot;,
+    &quot;0&quot;,
+    &quot;--prefix-cache-mem&quot;,
+    &quot;0&quot;,
+    &quot;--prefix-cache-disk&quot;,
+    &quot;0&quot;,
+    &quot;--tokenize-cache-entries&quot;,
+    &quot;0&quot;,
+    &quot;--no-drafter&quot;,
+    &quot;--no-pld&quot;,
+    &quot;--no-warmup-eager&quot;
+  ],
+  &quot;environment&quot;: {
+    &quot;MLX_SERVE_ROUND_COST_PERSIST&quot;: &quot;0&quot;,
+    &quot;MLX_SERVE_CACHE_LIMIT&quot;: &quot;2147483648&quot;
+  }
+}</pre></details>
+<details><summary>集計・復帰のJSON証跡</summary><pre>{
+  &quot;summary&quot;: {
+    &quot;pairs&quot;: [
+      {
+        &quot;order&quot;: &quot;forward&quot;,
+        &quot;kind&quot;: &quot;needle&quot;,
+        &quot;target&quot;: 4096,
+        &quot;repeat&quot;: null,
+        &quot;current&quot;: 589.6253381029467,
+        &quot;mlx&quot;: 569.9299899648227,
+        &quot;change_percent&quot;: -3.340315767550217,
+        &quot;prompt_tokens&quot;: [
+          4045,
+          4045
+        ],
+        &quot;output_tokens&quot;: [
+          10,
+          10
+        ],
+        &quot;output_equal&quot;: true,
+        &quot;prompt_sha256&quot;: &quot;0c4a892ad957319c2aa24d82edebf1291e7a9ddfd055ea85f3935701c25f29c2&quot;
+      },
+      {
+        &quot;order&quot;: &quot;forward&quot;,
+        &quot;kind&quot;: &quot;needle&quot;,
+        &quot;target&quot;: 16384,
+        &quot;repeat&quot;: null,
+        &quot;current&quot;: 605.8103910569408,
+        &quot;mlx&quot;: 695.2069402249807,
+        &quot;change_percent&quot;: 14.756522913394111,
+        &quot;prompt_tokens&quot;: [
+          16335,
+          16335
+        ],
+        &quot;output_tokens&quot;: [
+          11,
+          11
+        ],
+        &quot;output_equal&quot;: true,
+        &quot;prompt_sha256&quot;: &quot;8bc808a6261c0f6670e40fd602eee562b2c40446aa77aca7c68afeb667db78f3&quot;
+      },
+      {
+        &quot;order&quot;: &quot;forward&quot;,
+        &quot;kind&quot;: &quot;needle&quot;,
+        &quot;target&quot;: 32768,
+        &quot;repeat&quot;: null,
+        &quot;current&quot;: 605.4304179315144,
+        &quot;mlx&quot;: 692.6628964499746,
+        &quot;change_percent&quot;: 14.408340898446204,
+        &quot;prompt_tokens&quot;: [
+          32719,
+          32719
+        ],
+        &quot;output_tokens&quot;: [
+          11,
+          11
+        ],
+        &quot;output_equal&quot;: true,
+        &quot;prompt_sha256&quot;: &quot;8a7799cffd12b504d43a2a82896c0be9cf78ae698170688a587b6df09feafb18&quot;
+      },
+      {
+        &quot;order&quot;: &quot;forward&quot;,
+        &quot;kind&quot;: &quot;decode&quot;,
+        &quot;target&quot;: null,
+        &quot;repeat&quot;: 1,
+        &quot;current&quot;: 52.165247363678716,
+        &quot;mlx&quot;: 53.182874702110205,
+        &quot;change_percent&quot;: 1.9507764073980693,
+        &quot;prompt_tokens&quot;: [
+          50,
+          50
+        ],
+        &quot;output_tokens&quot;: [
+          384,
+          384
+        ],
+        &quot;output_equal&quot;: false,
+        &quot;prompt_sha256&quot;: &quot;0fd786510d38b155b54f93bd31a037b8f83746316454d302e064664d0ec52043&quot;
+      },
+      {
+        &quot;order&quot;: &quot;forward&quot;,
+        &quot;kind&quot;: &quot;decode&quot;,
+        &quot;target&quot;: null,
+        &quot;repeat&quot;: 2,
+        &quot;current&quot;: 52.119052255799204,
+        &quot;mlx&quot;: 55.1235257223148,
+        &quot;change_percent&quot;: 5.764635649492833,
+        &quot;prompt_tokens&quot;: [
+          50,
+          50
+        ],
+        &quot;output_tokens&quot;: [
+          384,
+          384
+        ],
+        &quot;output_equal&quot;: false,
+        &quot;prompt_sha256&quot;: &quot;4ebe1e8d7081e7f71f0a36f04e6eb5d3dc31c5dd6a0af2d89b51c5db3366f8da&quot;
+      },
+      {
+        &quot;order&quot;: &quot;forward&quot;,
+        &quot;kind&quot;: &quot;decode&quot;,
+        &quot;target&quot;: null,
+        &quot;repeat&quot;: 3,
+        &quot;current&quot;: 50.964203421148795,
+        &quot;mlx&quot;: 55.70417273708445,
+        &quot;change_percent&quot;: 9.300585504626358,
+        &quot;prompt_tokens&quot;: [
+          50,
+          50
+        ],
+        &quot;output_tokens&quot;: [
+          384,
+          384
+        ],
+        &quot;output_equal&quot;: false,
+        &quot;prompt_sha256&quot;: &quot;a3689e50d220d7d75f3f9004f4896b0afaa2c25ba6b3911c3381f5d906f3e241&quot;
+      },
+      {
+        &quot;order&quot;: &quot;reverse&quot;,
+        &quot;kind&quot;: &quot;needle&quot;,
+        &quot;target&quot;: 4096,
+        &quot;repeat&quot;: null,
+        &quot;current&quot;: 591.7905808744631,
+        &quot;mlx&quot;: 623.1802285174865,
+        &quot;change_percent&quot;: 5.304181691543697,
+        &quot;prompt_tokens&quot;: [
+          4045,
+          4045
+        ],
+        &quot;output_tokens&quot;: [
+          10,
+          10
+        ],
+        &quot;output_equal&quot;: true,
+        &quot;prompt_sha256&quot;: &quot;0c4a892ad957319c2aa24d82edebf1291e7a9ddfd055ea85f3935701c25f29c2&quot;
+      },
+      {
+        &quot;order&quot;: &quot;reverse&quot;,
+        &quot;kind&quot;: &quot;needle&quot;,
+        &quot;target&quot;: 16384,
+        &quot;repeat&quot;: null,
+        &quot;current&quot;: 605.8809668358265,
+        &quot;mlx&quot;: 701.1713999699759,
+        &quot;change_percent&quot;: 15.727583197042394,
+        &quot;prompt_tokens&quot;: [
+          16335,
+          16335
+        ],
+        &quot;output_tokens&quot;: [
+          11,
+          11
+        ],
+        &quot;output_equal&quot;: true,
+        &quot;prompt_sha256&quot;: &quot;8bc808a6261c0f6670e40fd602eee562b2c40446aa77aca7c68afeb667db78f3&quot;
+      },
+      {
+        &quot;order&quot;: &quot;reverse&quot;,
+        &quot;kind&quot;: &quot;needle&quot;,
+        &quot;target&quot;: 32768,
+        &quot;repeat&quot;: null,
+        &quot;current&quot;: 607.1719084926444,
+        &quot;mlx&quot;: 693.1396115559571,
+        &quot;change_percent&quot;: 14.158708902843475,
+        &quot;prompt_tokens&quot;: [
+          32719,
+          32719
+        ],
+        &quot;output_tokens&quot;: [
+          11,
+          11
+        ],
+        &quot;output_equal&quot;: true,
+        &quot;prompt_sha256&quot;: &quot;8a7799cffd12b504d43a2a82896c0be9cf78ae698170688a587b6df09feafb18&quot;
+      },
+      {
+        &quot;order&quot;: &quot;reverse&quot;,
+        &quot;kind&quot;: &quot;decode&quot;,
+        &quot;target&quot;: null,
+        &quot;repeat&quot;: 1,
+        &quot;current&quot;: 51.78155154795338,
+        &quot;mlx&quot;: 55.29124158983847,
+        &quot;change_percent&quot;: 6.777877326898696,
+        &quot;prompt_tokens&quot;: [
+          50,
+          50
+        ],
+        &quot;output_tokens&quot;: [
+          384,
+          384
+        ],
+        &quot;output_equal&quot;: false,
+        &quot;prompt_sha256&quot;: &quot;0fd786510d38b155b54f93bd31a037b8f83746316454d302e064664d0ec52043&quot;
+      },
+      {
+        &quot;order&quot;: &quot;reverse&quot;,
+        &quot;kind&quot;: &quot;decode&quot;,
+        &quot;target&quot;: null,
+        &quot;repeat&quot;: 2,
+        &quot;current&quot;: 51.965858177698394,
+        &quot;mlx&quot;: 56.59906524762229,
+        &quot;change_percent&quot;: 8.9158675184013,
+        &quot;prompt_tokens&quot;: [
+          50,
+          50
+        ],
+        &quot;output_tokens&quot;: [
+          384,
+          384
+        ],
+        &quot;output_equal&quot;: false,
+        &quot;prompt_sha256&quot;: &quot;4ebe1e8d7081e7f71f0a36f04e6eb5d3dc31c5dd6a0af2d89b51c5db3366f8da&quot;
+      },
+      {
+        &quot;order&quot;: &quot;reverse&quot;,
+        &quot;kind&quot;: &quot;decode&quot;,
+        &quot;target&quot;: null,
+        &quot;repeat&quot;: 3,
+        &quot;current&quot;: 52.79928275453651,
+        &quot;mlx&quot;: 57.346083165527446,
+        &quot;change_percent&quot;: 8.611481394792753,
+        &quot;prompt_tokens&quot;: [
+          50,
+          50
+        ],
+        &quot;output_tokens&quot;: [
+          384,
+          384
+        ],
+        &quot;output_equal&quot;: false,
+        &quot;prompt_sha256&quot;: &quot;a3689e50d220d7d75f3f9004f4896b0afaa2c25ba6b3911c3381f5d906f3e241&quot;
+      }
+    ],
+    &quot;memory&quot;: {
+      &quot;current-forward&quot;: {
+        &quot;baseline_nonfile_gib&quot;: 29.877334594726562,
+        &quot;peak_nonfile_gib&quot;: 86.95947265625,
+        &quot;peak_added_nonfile_gib&quot;: 57.08213806152344,
+        &quot;peak_file_cache_gib&quot;: 97.94493103027344,
+        &quot;swap_growth_mib&quot;: 0.0,
+        &quot;swapouts_delta&quot;: 0
+      },
+      &quot;mlx-forward&quot;: {
+        &quot;baseline_nonfile_gib&quot;: 29.806655883789062,
+        &quot;peak_nonfile_gib&quot;: 83.36138916015625,
+        &quot;peak_added_nonfile_gib&quot;: 53.55473327636719,
+        &quot;peak_file_cache_gib&quot;: 91.6131591796875,
+        &quot;swap_growth_mib&quot;: 0.0,
+        &quot;swapouts_delta&quot;: 0
+      },
+      &quot;mlx-reverse&quot;: {
+        &quot;baseline_nonfile_gib&quot;: 29.813430786132812,
+        &quot;peak_nonfile_gib&quot;: 83.26844787597656,
+        &quot;peak_added_nonfile_gib&quot;: 53.45501708984375,
+        &quot;peak_file_cache_gib&quot;: 68.16545104980469,
+        &quot;swap_growth_mib&quot;: 0.0,
+        &quot;swapouts_delta&quot;: 0
+      },
+      &quot;current-reverse&quot;: {
+        &quot;baseline_nonfile_gib&quot;: 29.622604370117188,
+        &quot;peak_nonfile_gib&quot;: 87.02621459960938,
+        &quot;peak_added_nonfile_gib&quot;: 57.40361022949219,
+        &quot;peak_file_cache_gib&quot;: 73.17298889160156,
+        &quot;swap_growth_mib&quot;: 0.0,
+        &quot;swapouts_delta&quot;: 0
+      }
+    },
+    &quot;median_decode_change_percent&quot;: 7.694679360845724,
+    &quot;median_prefill_change_percent&quot;: 14.283524900644839,
+    &quot;quality&quot;: {
+      &quot;current&quot;: 27,
+      &quot;mlx&quot;: 30
+    },
+    &quot;quality_count&quot;: 32,
+    &quot;quality_regressions&quot;: [],
+    &quot;native&quot;: {
+      &quot;current&quot;: {
+        &quot;total&quot;: 4,
+        &quot;ok&quot;: 4,
+        &quot;schema_valid&quot;: 4,
+        &quot;effect_matches&quot;: 4
+      },
+      &quot;mlx&quot;: {
+        &quot;total&quot;: 4,
+        &quot;ok&quot;: 4,
+        &quot;schema_valid&quot;: 4,
+        &quot;effect_matches&quot;: 4
+      }
+    }
+  },
+  &quot;memory_detail&quot;: {
+    &quot;current-forward&quot;: {
+      &quot;phase_peak_nonfile_gib&quot;: {
+        &quot;startup&quot;: 79.27145385742188,
+        &quot;warmup&quot;: 85.44380187988281,
+        &quot;performance&quot;: 86.52146911621094,
+        &quot;quality&quot;: 86.84584045410156,
+        &quot;native_acceptance&quot;: 86.95947265625
+      },
+      &quot;file_cache_at_nonfile_peak_gib&quot;: 40.13958740234375,
+      &quot;samples&quot;: 180
+    },
+    &quot;mlx-forward&quot;: {
+      &quot;phase_peak_nonfile_gib&quot;: {
+        &quot;startup&quot;: 78.96240234375,
+        &quot;warmup&quot;: 80.54450988769531,
+        &quot;performance&quot;: 83.36138916015625,
+        &quot;quality&quot;: 82.16412353515625,
+        &quot;native_acceptance&quot;: 81.78758239746094,
+        &quot;shutdown&quot;: 80.87432861328125
+      },
+      &quot;file_cache_at_nonfile_peak_gib&quot;: 43.78208923339844,
+      &quot;samples&quot;: 139
+    },
+    &quot;mlx-reverse&quot;: {
+      &quot;phase_peak_nonfile_gib&quot;: {
+        &quot;startup&quot;: 78.25361633300781,
+        &quot;warmup&quot;: 79.40641784667969,
+        &quot;performance&quot;: 83.26844787597656,
+        &quot;shutdown&quot;: 80.38917541503906
+      },
+      &quot;file_cache_at_nonfile_peak_gib&quot;: 43.79048156738281,
+      &quot;samples&quot;: 111
+    },
+    &quot;current-reverse&quot;: {
+      &quot;phase_peak_nonfile_gib&quot;: {
+        &quot;startup&quot;: 76.50567626953125,
+        &quot;warmup&quot;: 85.85409545898438,
+        &quot;performance&quot;: 87.02621459960938
+      },
+      &quot;file_cache_at_nonfile_peak_gib&quot;: 40.05706787109375,
+      &quot;samples&quot;: 139
+    }
+  },
+  &quot;restoration&quot;: {
+    &quot;checked_at&quot;: &quot;2026-09-16T19:09:05+09:00&quot;,
+    &quot;identity_restored&quot;: true,
+    &quot;generation_canary&quot;: {
+      &quot;content&quot;: &quot;READY&quot;,
+      &quot;usage&quot;: {
+        &quot;prompt_tokens&quot;: 16,
+        &quot;completion_tokens&quot;: 1,
+        &quot;total_tokens&quot;: 17,
+        &quot;prompt_tokens_details&quot;: {
+          &quot;cached_tokens&quot;: 0,
+          &quot;cache_write_tokens&quot;: 16
+        }
+      },
+      &quot;ttft_seconds&quot;: 0.895324166995124,
+      &quot;wall_seconds&quot;: 0.8958472499944037,
+      &quot;finish_reason&quot;: &quot;stop&quot;
+    },
+    &quot;dashboard_http_status&quot;: 200,
+    &quot;services&quot;: {
+      &quot;services&quot;: [
+        {
+          &quot;plist&quot;: &quot;com.trafficsign.chronovisor-converge.managed-v2.plist&quot;,
+          &quot;status&quot;: &quot;enabled&quot;
+        },
+        {
+          &quot;plist&quot;: &quot;com.trafficsign.chronovisor-dashboard.managed-v2.plist&quot;,
+          &quot;status&quot;: &quot;enabled&quot;
+        },
+        {
+          &quot;plist&quot;: &quot;com.trafficsign.chronovisor-deadman-observer.managed-v2.plist&quot;,
+          &quot;status&quot;: &quot;enabled&quot;
+        },
+        {
+          &quot;plist&quot;: &quot;com.trafficsign.chronovisor-ingest-drain.managed-v2.plist&quot;,
+          &quot;status&quot;: &quot;enabled&quot;
+        },
+        {
+          &quot;plist&quot;: &quot;com.trafficsign.chronovisor-lan-dashboard.managed-v2.plist&quot;,
+          &quot;status&quot;: &quot;enabled&quot;
+        },
+        {
+          &quot;plist&quot;: &quot;com.trafficsign.chronovisor-librarian-review.managed-v2.plist&quot;,
+          &quot;status&quot;: &quot;enabled&quot;
+        },
+        {
+          &quot;plist&quot;: &quot;com.trafficsign.chronovisor-reranker.managed-v2.plist&quot;,
+          &quot;status&quot;: &quot;enabled&quot;
+        },
+        {
+          &quot;plist&quot;: &quot;com.trafficsign.chronovisor-searxng.managed-v2.plist&quot;,
+          &quot;status&quot;: &quot;enabled&quot;
+        },
+        {
+          &quot;plist&quot;: &quot;com.trafficsign.chronovisor-semantic.managed-v2.plist&quot;,
+          &quot;status&quot;: &quot;enabled&quot;
+        },
+        {
+          &quot;plist&quot;: &quot;com.trafficsign.chronovisor-sleep.managed-v2.plist&quot;,
+          &quot;status&quot;: &quot;enabled&quot;
+        },
+        {
+          &quot;plist&quot;: &quot;com.trafficsign.chronovisor-watchdog.managed-v2.plist&quot;,
+          &quot;status&quot;: &quot;enabled&quot;
+        }
+      ]
+    },
+    &quot;ingest&quot;: {
+      &quot;state&quot;: &quot;idle&quot;,
+      &quot;stage&quot;: &quot;idle&quot;,
+      &quot;current_job_id&quot;: null,
+      &quot;updated_at&quot;: &quot;2026-09-16T19:08:19&quot;
+    },
+    &quot;health&quot;: {
+      &quot;semantic&quot;: {
+        &quot;status&quot;: &quot;ok&quot;,
+        &quot;ready&quot;: true,
+        &quot;last_error&quot;: &quot;&quot;,
+        &quot;pid&quot;: 14622
+      },
+      &quot;reranker&quot;: {
+        &quot;status&quot;: &quot;ok&quot;,
+        &quot;ready&quot;: true,
+        &quot;last_error&quot;: &quot;&quot;,
+        &quot;pid&quot;: 14303
+      }
+    },
+    &quot;reranker_runtime_reported_drift&quot;: true,
+    &quot;initial_health_probe&quot;: &quot;Sockets were not yet created immediately after service registration; retried after startup.&quot;
+  },
+  &quot;cleanup&quot;: {
+    &quot;checked_at&quot;: &quot;2026-09-16T19:10:56+09:00&quot;,
+    &quot;experiment_server_running&quot;: false,
+    &quot;global_mlx_state_created&quot;: false,
+    &quot;removed&quot;: [
+      {
+        &quot;path&quot;: &quot;/Users/trafficsign/projects/sandbox/mlx-serve-33bpw-20260916/mlx-serve-bin-macos-arm64.tar.gz&quot;,
+        &quot;logical_bytes&quot;: 72072610
+      },
+      {
+        &quot;path&quot;: &quot;/Users/trafficsign/projects/sandbox/mlx-serve-33bpw-20260916/hf-cache&quot;,
+        &quot;logical_bytes&quot;: 6007
+      },
+      {
+        &quot;path&quot;: &quot;/Users/trafficsign/projects/sandbox/mlx-serve-33bpw-20260916/xet-cache&quot;,
+        &quot;logical_bytes&quot;: 0
+      },
+      {
+        &quot;path&quot;: &quot;/Users/trafficsign/projects/sandbox/mlx-serve-33bpw-20260916/__pycache__&quot;,
+        &quot;logical_bytes&quot;: 28483
+      }
+    ],
+    &quot;removed_logical_bytes&quot;: 72107100,
+    &quot;retained&quot;: [
+      &quot;model&quot;,
+      &quot;binary&quot;,
+      &quot;compare.py&quot;,
+      &quot;results&quot;,
+      &quot;release-manifest.json&quot;,
+      &quot;model-manifest.json&quot;,
+      &quot;download.log&quot;,
+      &quot;run.log&quot;,
+      &quot;mlx-user-state-before.json&quot;
+    ],
+    &quot;reason&quot;: &quot;Measured speed and memory improvements justify retaining the isolated candidate for a possible follow-up; no production adoption.&quot;
+  }
+}</pre></details>
+</section>
+
+
+<section data-section="目的">
+<h2>目的</h2>
+<p>M4 Max 128GB・macOS 27で、現行DwarfStar＋IQ2XXS/MXFP4Downと、MLX-Serve 26.9.3＋iQ-MLX 3.3bpwを隔離比較する。ユーザーの優先条件は現行以下のメモリ使用量。モデル量子化と実装が異なるため、実用構成全体の比較として扱う。</p>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<p>本番runtime/model/config/plistを書き換えない。重いモデルを同時ロードしない。進行中Rawを強制終了しない。比較結果だけで本番採用しない。大きいmixed-4-8bit版は対象外。</p>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定</h2>
+<p>CLIとモデルrevisionを固定。両版context262144、同じmessages、温度0、seed42。性能・短問はthinking無効、native受入は既存の実処理ポリシーを使用。現行MTP exactに対しMLXも厳密なMTPを使用する。近似acceptanceは無効。メモリ優先のためMLXの再利用用GPU buffer cacheはMLX_SERVE_CACHE_LIMIT=2147483648（2 GiB）に制限する（128GB機の標準は8 GiB）。4K/16K/32K入力と384-token日本語生成3件、32短問、native受入4件。キャッシュ再利用と入力token差はログで検証する。</p>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<ol class="checklist"><li><input type="checkbox" checked disabled><span>公式CLI・モデルを隔離downloadし、hash/size/引数とharness self-checkを確認。</span></li><li><input type="checkbox" checked disabled><span>Ingest境界・model/accelerator leaseを取得し、現行→MLX→MLX→現行の順で速度・メモリ・限定品質を計測。</span></li><li><input type="checkbox" checked disabled><span>本番identity・サービス・live応答を復帰確認し、結果を記録、不要な実験物を整理する。</span></li></ol>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の完了直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<p>対応入力の生成速度・初回応答・入力処理速度、OS全体のwired/anonymous/compressorとfile cacheを分けて報告する。非ファイルメモリのpeakとbaseline差、swap増分を比較し、繰り返しで一貫した3%超を速度上の差とする。メモリ増加や品質/native受入の後退があれば採用候補としない。</p>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<p>ローカルloopback API。プロンプトhash・completion数・cached_tokens・reasoning無効を確認する。GPU使用量はRSSだけで判定せず、vm_statとengineログを併記。メモリ圧迫やswap急増なら実験サーバーだけ止め、必ず元の構成へ復帰。元のbinary/config/plist SHA256・model metadata・サービス状態と生成canary、Semantic/Reranker live health、Dashboard HTTPを確認する。</p>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>なし</li></ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<p>前回のDwarfStar最新版は--ple廃止のため起動できなかった。本比較はユーザーが新たに承認したMLX-Serve＋3.3bpw候補であり、137GBの新GGUFや75GB常駐版はdownloadしない。実験フォルダは /Users/trafficsign/projects/sandbox/mlx-serve-33bpw-20260916。</p>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log"><li><time>2026-09-16T19:13:13+09:00</time><span>HTML/JSON構造・数値・状態/checklistを検証。ローカルfile URLはブラウザーURLポリシーで拒否され、表示確認は未実施。</span></li><li><time>2026-09-16T19:12:30+09:00</time><span>本番READY応答、Semantic/Reranker live health、Dashboard 200、Ingest idle、11サービスenabledを確認。重複archive/cache 72.11 MBを削除。再利用価値のあるモデル・CLI・証跡を隔離保存し、比較完了。</span></li><li><time>2026-09-16T19:08:23+09:00</time><span>ABBA全4arm完了。decode差の中央値+7.69%、品質27→30/32、native両4/4。runtime identityと11サービス復帰。live health確認へ。</span></li><li><time>2026-09-16T18:58:13+09:00</time><span>113ファイル86.36 GB取得完了、全sizeとtensor headerを検証。CLI引数とharness self-check成功。ABBA比較を開始。</span></li><li><time>2026-09-16T18:44:08+09:00</time><span>比較承認。公式CLIのSHA256検証完了。固定revisionの3.3bpwモデル86.36 GBをdownload中。</span></li></ol>
+</section>
+
+</body>
+</html>
