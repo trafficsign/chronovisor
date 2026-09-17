@@ -475,6 +475,10 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         assert result["visibleCursor"] == frame["cursor"]
         assert result["milestone"] == frame["milestone"]
         assert result["graphId"] == f"workflow:{scenario['pipeline']}:v2"
+        for option in result["contextOptions"]:
+            assert option["labelFill"] == (
+                "rgb(255, 179, 64)" if option["selected"] else "rgb(132, 147, 156)"
+            ), (scenario["id"], frame["cursor"], option)
 
         geometry = str(result["geometry"])
         previous_geometry = geometry_by_pipeline.setdefault(
@@ -708,7 +712,7 @@ def test_context_window_ranges_render_fixed_quarters_and_boundaries(
     for case_id, selected, expected in cases:
         scenario = json.loads(json.dumps(base))
         scenario["id"] = f"context-{case_id}"
-        frame = scenario["frames"][0]
+        frame = scenario["frames"][-1]
         scenario["frames"] = [frame]
         frame["trace"]["projection"]["context"] = {
             "selected_tokens": selected,
@@ -793,6 +797,10 @@ def test_context_window_ranges_render_fixed_quarters_and_boundaries(
             else "required 55K → selected —"
         )
         assert sum(option["selected"] for option in options) <= 1
+        for option in options:
+            assert option["labelFill"] == (
+                "rgb(255, 179, 64)" if option["selected"] else "rgb(132, 147, 156)"
+            ), (result["scenario"], option)
 
     if visual_dir := os.environ.get("CHRONOVISOR_DASHBOARD_VISUAL_DIR"):
         _capture_stepper_visuals(scenarios, Path(visual_dir), tmp_path)

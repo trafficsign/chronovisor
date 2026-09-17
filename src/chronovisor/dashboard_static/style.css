@@ -3426,7 +3426,7 @@ canvas {
   filter: url(#trace-glow-violet);
 }
 
-.decision-trace-harness .trace-node.done text:not(.trace-branch-label) {
+.decision-trace-harness .trace-node.done text:not(.trace-branch-label, [data-context-label]) {
   fill: #c4cad0;
 }
 

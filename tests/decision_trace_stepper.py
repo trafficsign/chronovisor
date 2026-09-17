@@ -314,6 +314,7 @@ function captureFrame(scenario, frame) {
   const contextOptions = [...harness.querySelectorAll("[data-context-option]")].map((node) => ({
     tokens: Number(node.dataset.contextTokens),
     label: node.querySelector("[data-context-label]")?.textContent || "",
+    labelFill: getComputedStyle(node.querySelector("[data-context-label]")).fill,
     selected: node.classList.contains("selected"),
     workflowNode: node.dataset.workflowNode || null,
   }));
