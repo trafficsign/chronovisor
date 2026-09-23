@@ -654,7 +654,7 @@ def calibrate(
     if (
         candidate["precision"] < baseline["precision"]
         or candidate["recall"] < baseline["recall"]
-        or candidate["specificity"] < baseline["specificity"]
+        or candidate.get("specificity", 0.0) < baseline.get("specificity", 0.0)
     ):
         return {
             "status": "skipped",

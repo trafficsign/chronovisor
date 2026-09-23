@@ -2321,7 +2321,7 @@ def test_page_split_proposals_flag_oversized_pages_with_bounded_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(collection_authority, "_OVERSIZED_PAGE_BYTES", 100)
+    monkeypatch.setattr(collection_authority, "OVERSIZED_PAGE_BYTES", 100)
     monkeypatch.setattr(collection_authority, "_PAGE_SPLIT_PROPOSAL_LIMIT", 2)
     monkeypatch.setattr(collection_authority, "_PAGE_SPLIT_SECTION_LIMIT", 3)
     tmp_path = tmp_path.resolve()

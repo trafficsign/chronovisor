@@ -1053,7 +1053,7 @@ def _label_propagation(
 
 
 # Oversized pages only grow through ingest's append-only compact update path.
-_OVERSIZED_PAGE_BYTES = 50_000
+OVERSIZED_PAGE_BYTES = 50_000
 _PAGE_SPLIT_PROPOSAL_LIMIT = 20
 _PAGE_SPLIT_SECTION_LIMIT = 10
 
@@ -1076,7 +1076,7 @@ def _page_split_proposals(
             size = int(row.get("size") or 0)
         except (TypeError, ValueError):
             continue
-        if size >= _OVERSIZED_PAGE_BYTES:
+        if size >= OVERSIZED_PAGE_BYTES:
             candidates.append((size, str(page_id), row))
     candidates.sort(key=lambda item: (-item[0], item[1]))
     oversized = unreadable = 0
@@ -1091,7 +1091,7 @@ def _page_split_proposals(
         except (OSError, UnicodeDecodeError):
             unreadable += 1
             continue
-        if len(data) < _OVERSIZED_PAGE_BYTES:
+        if len(data) < OVERSIZED_PAGE_BYTES:
             continue
         oversized += 1
         if len(proposals) >= _PAGE_SPLIT_PROPOSAL_LIMIT:

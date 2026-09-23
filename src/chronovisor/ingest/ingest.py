@@ -1135,7 +1135,7 @@ def _normalize_triage_plan(plan: list[dict]) -> list[dict]:
 
 def _redirect_split_hub_update(op: dict, hub_path: Path) -> dict:
     """Send updates for a split hub to its newest child instead of regrowing it."""
-    from chronovisor.recall.split_transaction import split_children
+    from chronovisor.core.markdown_sections import split_children
 
     try:
         children = split_children(hub_path.read_text(encoding="utf-8"))

@@ -179,7 +179,7 @@ def test_split_cli_dry_run_then_activate(
     from chronovisor.recall import collection_authority
 
     big, _other, body = _fixture(tmp_path)
-    monkeypatch.setattr(collection_authority, "_OVERSIZED_PAGE_BYTES", 500)
+    monkeypatch.setattr(collection_authority, "OVERSIZED_PAGE_BYTES", 500)
     monkeypatch.setattr(split_transaction, "CHILD_TARGET_BYTES", 300)
 
     dry = run_page_splits(tmp_path, limit=5)

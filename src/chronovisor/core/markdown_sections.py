@@ -91,3 +91,16 @@ def markdown_sections(text: str) -> tuple[MarkdownSection, ...]:
             )
         )
     return tuple(sections)
+
+
+def split_children(text: str) -> list[str]:
+    """Return a hub page's child filenames (empty for ordinary pages)."""
+
+    from chronovisor.core import frontmatter
+
+    try:
+        meta, _body = frontmatter.parse(text)
+    except Exception:
+        return []
+    value = meta.get("split_children")
+    return [str(item) for item in value] if isinstance(value, list) else []

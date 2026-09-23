@@ -38,6 +38,7 @@ from chronovisor.core.markdown_sections import (
     MARKDOWN_FENCE_RE,
     MarkdownSection,
     markdown_sections,
+    split_children,
 )
 from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.timeutil import utc_now as _now
@@ -55,17 +56,6 @@ _SAME_DOC_LINK_RE = re.compile(r"\]\(<?#([^)\s>]+)>?\)")
 
 class SplitPlanError(ValueError):
     """A split plan failed a deterministic gate."""
-
-
-def split_children(text: str) -> list[str]:
-    """Return a hub page's child filenames (empty for ordinary pages)."""
-
-    try:
-        meta, _body = frontmatter.parse(text)
-    except Exception:
-        return []
-    value = meta.get("split_children")
-    return [str(item) for item in value] if isinstance(value, list) else []
 
 
 def unique_sections(
