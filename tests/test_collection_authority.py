@@ -2312,3 +2312,50 @@ def test_anomaly_worker_requires_structured_route_before_controls(
 
     with pytest.raises(CollectionAuthorityError, match="requires structured output"):
         collection_anomaly_worker.run(_anomaly_worker_payload())
+
+
+def test_page_split_proposals_flag_oversized_pages_with_bounded_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(collection_authority, "_OVERSIZED_PAGE_BYTES", 100)
+    monkeypatch.setattr(collection_authority, "_PAGE_SPLIT_PROPOSAL_LIMIT", 2)
+    monkeypatch.setattr(collection_authority, "_PAGE_SPLIT_SECTION_LIMIT", 3)
+    tmp_path = tmp_path.resolve()
+    pages = tmp_path / "pages" / "topic"
+    pages.mkdir(parents=True)
+    entries = {}
+
+    def entry(name: str, text: str | None, size: object) -> None:
+        path = pages / f"{name}.md"
+        if text is not None:
+            path.write_text(text, encoding="utf-8")
+        entries[name] = {
+            "path": str(path),
+            "relative_path": f"topic/{name}.md",
+            "status": "stable",
+            "size": size,
+        }
+
+    for index in range(3):
+        body = "## Repeated\nsame body\n" * (index + 2) + "## Other\n" + "x" * 80 + "\n"
+        text = "---\ntitle: t\nstatus: stable\ntype: knowledge\n---\n" + body
+        entry(f"page-{index}", text, len(text.encode("utf-8")))
+    entry("stale-index", "---\ntitle: s\nstatus: stable\ntype: knowledge\n---\ntiny\n", 10_000)
+    entry("missing", None, 10_000)
+    entry("bad-size", "x" * 500, "not-a-number")
+
+    count, unreadable, proposals = collection_authority._page_split_proposals(
+        tmp_path, entries
+    )
+
+    assert count == 3
+    assert unreadable == 1
+    assert [row["page_id"] for row in proposals] == ["page-2", "page-1"]
+    largest = proposals[0]
+    assert largest["section_count"] == 5
+    assert largest["duplicate_heading_count"] == 3
+    assert largest["identical_section_count"] == 3
+    assert len(largest["largest_sections"]) == 3
+    assert largest["largest_sections"][0]["heading"] == "## Other"
+    assert largest["auto_split"] is False

@@ -878,6 +878,15 @@ def _collection_control_plane(root: Path) -> dict[str, Any]:
         "warnings": list(quality.get("warnings") or []),
         "hard_failures": list(quality.get("hard_failures") or []),
         "split_proposals": list(quality.get("split_proposals") or []),
+        # Summary only: full proposals stay in collection-quality.json.
+        "page_split_proposals": [
+            {
+                key: row.get(key)
+                for key in ("page_id", "bytes", "duplicate_heading_count")
+            }
+            for row in (quality.get("page_split_proposals") or [])[:5]
+            if isinstance(row, Mapping)
+        ],
         "queue": {
             "candidate_count": int(queue.get("candidate_count") or 0),
             "open": int(queue.get("open") or 0),

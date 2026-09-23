@@ -38,6 +38,8 @@ from chronovisor.core.index_store import (
     stable_indexed_document_path,
 )
 from chronovisor.core.jobs import JobStatus, job_store
+from chronovisor.core.markdown_sections import MarkdownSection as _MarkdownSection
+from chronovisor.core.markdown_sections import markdown_sections as _markdown_sections
 from chronovisor.core.ollama import (
     GENERATE_SYSTEM_PROMPT as GENERATE_SYSTEM_PROMPT,
 )
@@ -1470,17 +1472,6 @@ def _read_optional_exact_utf8(path: Path) -> str | None:
 
 
 @dataclass(frozen=True)
-class _MarkdownSection:
-    """One byte-complete Markdown section from an existing page."""
-
-    start_line: int
-    end_line: int
-    heading: str | None
-    content: str
-    sha256: str
-
-
-@dataclass(frozen=True)
 class _CompactUpdateContext:
     """Read-only, hash-bound context for an append-only oversized update."""
 
@@ -1497,81 +1488,6 @@ class _PageGenerationBudget:
     num_ctx: int
     num_predict: int
     required_num_ctx: int
-
-
-_MARKDOWN_SECTION_HEADING_RE = re.compile(
-    r"^ {0,3}(?P<marks>#{1,2})[\t ]+(?P<title>.*?)(?:[\t ]+#+)?[\t ]*(?:\n)?$"
-)
-_MARKDOWN_FENCE_RE = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})")
-
-
-def _markdown_sections(text: str) -> tuple[_MarkdownSection, ...]:
-    """Split Markdown at H1/H2 boundaries outside fenced code blocks.
-
-    Sections are a lossless partition of ``text``: concatenating their
-    ``content`` fields reproduces the exact page bytes.  A pre-heading region
-    (normally frontmatter) is represented as a section with ``heading=None``.
-    Lower-level headings remain inside their enclosing H2 section so selection
-    never detaches a subsection from its top-level semantic unit.
-    """
-
-    if not text:
-        return ()
-    lines = text.splitlines(keepends=True)
-    heading_rows: list[tuple[int, str]] = []
-    fence_char: str | None = None
-    fence_width = 0
-    for index, line in enumerate(lines):
-        fence_match = _MARKDOWN_FENCE_RE.match(line)
-        if fence_match is not None:
-            marker = fence_match.group("marker")
-            if fence_char is None:
-                fence_char = marker[0]
-                fence_width = len(marker)
-            elif (
-                marker[0] == fence_char
-                and len(marker) >= fence_width
-                and re.fullmatch(
-                    r"[\t ]*(?:\r?\n)?",
-                    line[fence_match.end() :],
-                )
-                is not None
-            ):
-                fence_char = None
-                fence_width = 0
-            continue
-        if fence_char is not None:
-            continue
-        heading_match = _MARKDOWN_SECTION_HEADING_RE.match(line)
-        if heading_match is not None:
-            heading_rows.append(
-                (
-                    index,
-                    f"{heading_match.group('marks')} "
-                    f"{heading_match.group('title').strip()}",
-                )
-            )
-
-    boundaries = [index for index, _heading in heading_rows]
-    if not boundaries or boundaries[0] != 0:
-        boundaries.insert(0, 0)
-    boundaries.append(len(lines))
-    headings_by_index = dict(heading_rows)
-    sections: list[_MarkdownSection] = []
-    for start, end in zip(boundaries[:-1], boundaries[1:], strict=True):
-        content = "".join(lines[start:end])
-        if not content:
-            continue
-        sections.append(
-            _MarkdownSection(
-                start_line=start + 1,
-                end_line=end,
-                heading=headings_by_index.get(start),
-                content=content,
-                sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
-            )
-        )
-    return tuple(sections)
 
 
 def _semantic_relevance_text(raw_content: str) -> str:

@@ -86,6 +86,19 @@ calls. Model-backed placement review is a separate explicit P3 lane using the
 same cancellable scheduler as other research work and defaults to Gemma. It
 never calls a frontier model.
 
+## Oversized page split proposals
+
+Ingest's compact update path is append-only, so pages above the local model's
+budget only grow. The collection quality snapshot therefore also reports
+`page_split_proposals`: stable non-system pages of at least 50,000 bytes
+(re-read and revalidated, never trusting index size alone), partitioned with
+the lossless H1/H2 splitter. It records the top 20 by size with duplicate
+heading / identical section surplus counts and the 10 largest sections, plus
+`oversized_page_count` and `oversized_page_unreadable_count`. Any oversized
+page adds the `oversized_page` warning (never a hard failure). Proposals are
+deterministic, make no model calls, and never split a page; Librarian status
+exposes only a five-row summary.
+
 ## Merge hard gates
 
 `merge_transaction.py` is explicit-activation only. A plan must provide:

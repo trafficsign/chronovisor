@@ -27,6 +27,8 @@ from chronovisor.core.durable_state import (
     read_sealed_json,
     write_sealed_json,
 )
+from chronovisor.core.index_store import stable_indexed_document_path
+from chronovisor.core.markdown_sections import markdown_sections
 from chronovisor.core.page_identity import new_page_uid, normalize_page_uid
 from chronovisor.core.research_scheduler import (
     research_lane,
@@ -1040,6 +1042,87 @@ def _label_propagation(
     )
 
 
+# Oversized pages only grow through ingest's append-only compact update path.
+_OVERSIZED_PAGE_BYTES = 50_000
+_PAGE_SPLIT_PROPOSAL_LIMIT = 20
+_PAGE_SPLIT_SECTION_LIMIT = 10
+
+
+def _page_split_proposals(
+    root: Path,
+    entries: Mapping[str, Any],
+) -> tuple[int, int, list[dict[str, Any]]]:
+    """Propose H2-section splits for oversized pages; never mutates a page.
+
+    The index ``size`` only preselects candidates; bytes, hashes and sections
+    come from one revalidated read so a stale index cannot fabricate a proposal.
+    """
+
+    candidates = []
+    for page_id, row in entries.items():
+        if not isinstance(row, Mapping) or row.get("is_system"):
+            continue
+        try:
+            size = int(row.get("size") or 0)
+        except (TypeError, ValueError):
+            continue
+        if size >= _OVERSIZED_PAGE_BYTES:
+            candidates.append((size, str(page_id), row))
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    oversized = unreadable = 0
+    proposals = []
+    for _size, page_id, row in candidates:
+        path = stable_indexed_document_path(row, pages_dir=root / "pages")
+        try:
+            if path is None:
+                raise OSError("unstable indexed path")
+            data = path.read_bytes()
+            sections = markdown_sections(data.decode("utf-8"))
+        except (OSError, UnicodeDecodeError):
+            unreadable += 1
+            continue
+        if len(data) < _OVERSIZED_PAGE_BYTES:
+            continue
+        oversized += 1
+        if len(proposals) >= _PAGE_SPLIT_PROPOSAL_LIMIT:
+            continue
+        headed = [section for section in sections if section.heading]
+        heading_counts = Counter(section.heading for section in headed)
+        sha_counts = Counter(section.sha256 for section in headed)
+        largest = sorted(
+            headed,
+            key=lambda section: len(section.content.encode("utf-8")),
+            reverse=True,
+        )
+        proposals.append(
+            {
+                "page_id": page_id,
+                "bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "section_count": len(headed),
+                # Surplus occurrences (n - 1) per repeated heading / section body.
+                "duplicate_heading_count": sum(
+                    count - 1 for count in heading_counts.values() if count > 1
+                ),
+                "identical_section_count": sum(
+                    count - 1 for count in sha_counts.values() if count > 1
+                ),
+                "largest_sections": [
+                    {
+                        "heading": section.heading,
+                        "bytes": len(section.content.encode("utf-8")),
+                        "start_line": section.start_line,
+                    }
+                    for section in largest[:_PAGE_SPLIT_SECTION_LIMIT]
+                ],
+                "algorithm": "markdown_h2_sections_v1",
+                "decision": "proposal_only",
+                "auto_split": False,
+            }
+        )
+    return oversized, unreadable, proposals
+
+
 def collection_quality_snapshot(
     root: Path,
     *,
@@ -1113,6 +1196,9 @@ def collection_quality_snapshot(
                 "auto_split": False,
             }
         )
+    oversized_page_count, oversized_page_unreadable, page_split_proposals = (
+        _page_split_proposals(root, entries)
+    )
     link_path = root / "runtime" / "librarian" / "uid-link-index.json"
     try:
         link_index = _read_object(link_path)
@@ -1139,6 +1225,8 @@ def collection_quality_snapshot(
         "review_candidate_rate": round(candidate_rate, 6),
         "review_queue_open": int(queue_state.get("open") or 0),
         "unresolved_link_count": int(link_index.get("unresolved_count") or 0),
+        "oversized_page_count": oversized_page_count,
+        "oversized_page_unreadable_count": oversized_page_unreadable,
     }
     hard_failures = []
     if metrics["assignment_coverage"] < float(gates["assignment_coverage_min"]):
@@ -1164,6 +1252,8 @@ def collection_quality_snapshot(
         warnings.append("top_collection_share")
     if metrics["review_candidate_rate"] > float(gates["review_candidate_rate_warn"]):
         warnings.append("review_candidate_rate")
+    if oversized_page_count:
+        warnings.append("oversized_page")
     return {
         "schema": COLLECTION_QUALITY_SCHEMA,
         "generated_at": _now(),
@@ -1175,6 +1265,7 @@ def collection_quality_snapshot(
         "warnings": warnings,
         "status": "passed" if not hard_failures else "blocked",
         "split_proposals": split_proposals,
+        "page_split_proposals": page_split_proposals,
         "model_calls": 0,
         "frontier_calls": 0,
         "page_mutations": 0,
