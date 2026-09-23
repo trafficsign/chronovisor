@@ -23,6 +23,7 @@ from chronovisor.core.index_store import (
     get_store,
     stable_indexed_document_path,
 )
+from chronovisor.core.markdown_sections import markdown_sections
 from chronovisor.core.store import (
     ACTIVITY_FILE,
     CHRONOVISOR_ROOT,
@@ -312,21 +313,59 @@ def _find_page_with_alias(
     )
 
 
+# Host tool results above ~100k chars are rejected outright, so page bodies are
+# returned in windows and oversized pages advertise their section offsets.
+READ_MAX_CHARS = 40_000
+_READ_SECTION_INDEX_LIMIT = 80
+
+
+def _content_window(content: str, offset: int, max_chars: int) -> dict[str, Any]:
+    total = len(content)
+    offset = min(max(0, offset), total)
+    max_chars = max(1, min(max_chars, READ_MAX_CHARS))
+    end = min(total, offset + max_chars)
+    window: dict[str, Any] = {"content": content[offset:end]}
+    if offset or end < total:
+        sections = []
+        position = 0
+        for section in markdown_sections(content):
+            if section.heading:
+                sections.append({"heading": section.heading, "offset": position})
+            position += len(section.content)
+        window.update(
+            {
+                "truncated": True,
+                "content_chars": total,
+                "offset": offset,
+                "next_offset": end if end < total else None,
+                "sections": sections[:_READ_SECTION_INDEX_LIMIT],
+                "section_count": len(sections),
+            }
+        )
+    return window
+
+
 @mcp.tool()
 def chronovisor_read(
     page: str,
     session_id: str | None = None,
     decision_id: str | None = None,
+    offset: int = 0,
+    max_chars: int = READ_MAX_CHARS,
     ctx: Context = None,
 ) -> str:
     """Read a wiki page with outlinks and backlinks.
 
-    Searches pages/ first, then system/ for system files.
+    Searches pages/ first, then system/ for system files. Large pages are
+    returned in windows: when ``truncated`` is true, call again with
+    ``offset=next_offset`` or jump to a heading offset from ``sections``.
 
     Args:
         page: Page ID (filename without .md extension)
         session_id: Optional session id for recall pull feedback.
         decision_id: Optional automatic-Recall decision id for turn tracing.
+        offset: Character offset into the page body to start from.
+        max_chars: Maximum characters of content to return (capped at 40000).
     """
     store = get_store()
     store.refresh()
@@ -393,7 +432,7 @@ def chronovisor_read(
                 if canonical_page_id != page
                 else {}
             ),
-            "content": content,
+            **_content_window(content, offset, max_chars),
             "outlinks": outlinks,
             "backlinks": backlinks,
         },
@@ -548,7 +587,8 @@ def chronovisor_status() -> str:
             "raw_outstanding": raw_pending + semantic_deferred + operational_deferred,
             "orphan_count": orphan_count,
             "page_types": page_types,
-            "health": health,
+            # health_snapshot embeds the same Librarian status; ship it once.
+            "health": {k: v for k, v in health.items() if k != "librarian"},
             "librarian": librarian,
             "ollama_status": ollama_status,
             "oldest_page": oldest,
@@ -738,6 +778,32 @@ def _record_search_pull(
     )
 
 
+_SESSION_LIBRARIAN_KEYS = (
+    "state",
+    "reason_codes",
+    "detail",
+    "mode",
+    "enabled",
+    "authority",
+    "queue",
+    "debts",
+    "eta",
+    "blocked_reasons",
+    "last_run",
+)
+
+
+def _session_librarian_summary(librarian: dict[str, Any]) -> dict[str, Any]:
+    """Session bootstrap only needs health; chronovisor_status has the detail."""
+
+    summary = {key: librarian[key] for key in _SESSION_LIBRARIAN_KEYS if key in librarian}
+    authority = librarian.get("collection_authority")
+    if isinstance(authority, dict):
+        summary["collection_warnings"] = authority.get("warnings") or []
+        summary["collection_hard_failures"] = authority.get("hard_failures") or []
+    return summary
+
+
 @mcp.tool()
 def chronovisor_init() -> str:
     """Initialize session: returns system pages + status in a single call.
@@ -802,7 +868,7 @@ def chronovisor_init() -> str:
                 ),
                 "ollama_status": ollama_status,
                 "chronovisor_root": str(CHRONOVISOR_ROOT),
-                "librarian": librarian,
+                "librarian": _session_librarian_summary(librarian),
             },
             "system_pages": system_pages,
         },

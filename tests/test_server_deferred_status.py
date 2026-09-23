@@ -155,3 +155,33 @@ def test_chronovisor_init_reports_deferred_counts_in_parallel_bootstrap_status(
         "current-state",
         "lessons-learned",
     }
+
+
+def test_read_content_window_pages_oversized_bodies() -> None:
+    from chronovisor.hosts import server
+
+    body = "---\ntitle: t\n---\n" + "".join(
+        f"## Section {index}\n" + "x" * 30 + "\n" for index in range(10)
+    )
+
+    whole = server._content_window(body, 0, 10_000)
+    assert whole == {"content": body}
+
+    first = server._content_window(body, 0, 100)
+    assert first["content"] == body[:100]
+    assert first["truncated"] is True
+    assert first["content_chars"] == len(body)
+    assert first["next_offset"] == 100
+    assert first["section_count"] == 10
+    heading = first["sections"][3]
+    assert body[heading["offset"] :].startswith("## Section 3\n")
+
+    rebuilt, offset = "", 0
+    while offset is not None:
+        window = server._content_window(body, offset, 100)
+        rebuilt += window["content"]
+        offset = window.get("next_offset")
+    assert rebuilt == body
+
+    capped = server._content_window("y" * 100_000, 0, 10**9)
+    assert len(capped["content"]) == server.READ_MAX_CHARS
