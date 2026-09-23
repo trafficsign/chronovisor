@@ -189,3 +189,16 @@ def test_split_cli_dry_run_then_activate(
     active = run_page_splits(tmp_path, limit=5, activate=True)
     assert [row["status"] for row in active["results"]] == ["committed"]
     assert split_children(big.read_text(encoding="utf-8"))
+
+
+def test_link_regex_is_linear_on_unclosed_long_targets() -> None:
+    import time
+
+    from chronovisor.core.canonical_document import rewrite_internal_markdown_links
+
+    text = "[a](" + "x" * 20_000 + " y\n"
+    started = time.monotonic()
+    rewrite_internal_markdown_links(
+        text, source_namespace="pages", source_path="t/a.md", rewrite=lambda *_: None
+    )
+    assert time.monotonic() - started < 1.0

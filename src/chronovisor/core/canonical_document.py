@@ -15,7 +15,7 @@ import yaml  # type: ignore[import-untyped]
 
 _MARKDOWN_LINK_RE = re.compile(
     r"(?<![!\\])\[(?P<label>(?:\\[^\n]|[^\]\\\n])*)\]\(\s*"
-    r"(?P<target><[^>\n]+>|(?:[^\s()\n]+|\([^()\n]*\))+)"
+    r"(?P<target><[^>\n]+>|(?:[^\s()\n]|\([^()\n]*\))+)"
     r"(?:\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?\s*\)"
 )
 _FENCE_OPEN_RE = re.compile(r"(?m)^[ \t]{0,3}(?P<fence>`{3,}|~{3,})[^\n]*(?:\n|$)")
