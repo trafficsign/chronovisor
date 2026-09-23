@@ -545,3 +545,33 @@ def test_calibration_writers_are_hard_off_for_distillation_single_writer(
     assert recall_calibration.rollback_last()["status"] == "hard_off"
     assert not history_file.exists()
     assert not calibration_file.exists()
+
+
+def test_degenerate_always_recall_calibration_is_ignored_and_detected(
+    monkeypatch,
+) -> None:
+    from chronovisor.recall import recall_runtime
+
+    # The 2026-08-11 production artifact: positive bias, (almost) all-positive
+    # weights, so even an empty feature vector scores 0.75 (> read threshold).
+    degenerate = {
+        "weights": {"top1_score_norm": 0.97, "rewrite_confidence": -0.01},
+        "bias": 1.09,
+    }
+    monkeypatch.setattr(recall_runtime, "calibration_artifact", lambda: degenerate)
+    policy = RecallPolicy()
+    features = {"top1_score_norm": 0.4, "heuristic_score": 0.1, "hit_count": 9}
+
+    assert recall_runtime.calibrated_score(features, policy) is None
+    assert features["calibration_rejected"] == "degenerate_always_recall"
+    assert recall_runtime.evidence_score(features, policy) < policy.search_threshold
+
+    sane = {"weights": {"top1_score_norm": 4.0}, "bias": -3.0}
+    monkeypatch.setattr(recall_runtime, "calibration_artifact", lambda: sane)
+    assert recall_runtime.calibrated_score({"top1_score_norm": 0.0}, policy) < 0.1
+
+    constant = recall_calibration.score_probabilities(
+        [(0.9, 1)] * 9 + [(0.9, 0)], threshold=0.35
+    )
+    assert constant["accuracy"] == 0.9
+    assert constant["specificity"] == 0.0

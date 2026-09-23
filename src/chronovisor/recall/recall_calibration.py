@@ -419,6 +419,9 @@ def score_probabilities(
         "accuracy": (tp + tn) / total if total else 0.0,
         "precision": tp / (tp + fp) if (tp + fp) else 0.0,
         "recall": tp / (tp + fn) if (tp + fn) else 0.0,
+        # Labels are ~90% positive, so an always-recall gate wins on accuracy;
+        # specificity is what exposes it.
+        "specificity": tn / (tn + fp) if (tn + fp) else 0.0,
     }
 
 
@@ -651,10 +654,11 @@ def calibrate(
     if (
         candidate["precision"] < baseline["precision"]
         or candidate["recall"] < baseline["recall"]
+        or candidate["specificity"] < baseline["specificity"]
     ):
         return {
             "status": "skipped",
-            "reason": "candidate precision or recall regressed on the temporal holdout",
+            "reason": "candidate precision, recall or specificity regressed on the temporal holdout",
             "candidate": artifact,
         }
     # Compatibility only: no caller may disable the final semantic reviewer.

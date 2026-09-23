@@ -111,6 +111,11 @@ PAST_REFERENCE_TERMS = [
     "続き",
     "例の",
     "あの時",
+    "確か",
+    "知ってた",
+    "覚えて",
+    "言ってた",
+    "話した",
     "last time",
     "previous",
     "yesterday",
@@ -1162,7 +1167,13 @@ def calibrated_score(features: dict[str, Any], policy: RecallPolicy) -> float | 
         total = float(bias)
         for key, weight in weights.items():
             total += float(weight) * float(features.get(key, 0.0) or 0.0)
+        # Features are normalized to [0, 1]. If even the weakest possible input
+        # clears the search threshold, the gate can never stay silent: ignore it.
+        floor = float(bias) + sum(min(0.0, float(w)) for w in weights.values())
     except (TypeError, ValueError):
+        return None
+    if 1.0 / (1.0 + math.exp(-max(-40.0, min(40.0, floor)))) >= policy.search_threshold:
+        features["calibration_rejected"] = "degenerate_always_recall"
         return None
     if total < -40:
         return 0.0
