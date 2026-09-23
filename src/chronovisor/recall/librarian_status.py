@@ -38,8 +38,6 @@ def _now(now: datetime | None = None) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
-
-
 def _empty_state() -> dict[str, Any]:
     return {
         "schema": STATE_SCHEMA,
@@ -122,8 +120,7 @@ def _observed_scope(root: Path, registry: Mapping[str, Any]) -> dict[str, Any]:
         relative
         for relative in missing
         if relative.startswith("pages/")
-        and str((registered.get(relative) or {}).get("status") or "stable")
-        == "stable"
+        and str((registered.get(relative) or {}).get("status") or "stable") == "stable"
     )
     changed: list[str] = []
     collection_changed: list[str] = []
@@ -140,18 +137,12 @@ def _observed_scope(root: Path, registry: Mapping[str, Any]) -> dict[str, Any]:
     for relative, stat in sorted(actual.items()):
         row = registered.get(relative)
         status = str(row.get("status") or "stable") if row else "stable"
-        in_collection_scope = (
-            relative.startswith("pages/") and status == "stable"
-        )
+        in_collection_scope = relative.startswith("pages/") and status == "stable"
         collection_actual_total += int(in_collection_scope)
-        collection_registered_current += int(
-            in_collection_scope and row is not None
-        )
+        collection_registered_current += int(in_collection_scope and row is not None)
         rows.append((relative, stat.st_size, stat.st_mtime_ns, status))
         if in_collection_scope:
-            collection_rows.append(
-                (relative, stat.st_size, stat.st_mtime_ns, status)
-            )
+            collection_rows.append((relative, stat.st_size, stat.st_mtime_ns, status))
         if row is None:
             continue
         is_current = (
@@ -230,7 +221,7 @@ def _safe_receipt(path: Path) -> dict[str, Any]:
         return {}
     try:
         value = read_sealed_json(path, recover_backup=False)
-    except (DurableStateError, OSError, json.JSONDecodeError):
+    except DurableStateError, OSError, json.JSONDecodeError:
         return {"status": "unreadable", "path": str(path)}
     return value if isinstance(value, dict) else {}
 
@@ -257,12 +248,8 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
     query2doc_state = _safe_receipt(query2doc_root / "state.json")
     query2doc_manifest = _safe_receipt(query2doc_root / "manifest.json")
     query2doc_evaluation = _safe_receipt(query2doc_root / "evaluation.json")
-    query2doc_unseen_state = _safe_receipt(
-        query2doc_unseen_root / "state.json"
-    )
-    query2doc_unseen_manifest = _safe_receipt(
-        query2doc_unseen_root / "manifest.json"
-    )
+    query2doc_unseen_state = _safe_receipt(query2doc_unseen_root / "state.json")
+    query2doc_unseen_manifest = _safe_receipt(query2doc_unseen_root / "manifest.json")
     query2doc_unseen_evaluation = _safe_receipt(
         query2doc_unseen_root / "evaluation.json"
     )
@@ -316,9 +303,7 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
     annif_runtime_status = str(annif_state.get("status") or "")
     profile_runtime_status = str(profile_state.get("status") or "")
     query2doc_runtime_status = str(query2doc_state.get("status") or "")
-    query2doc_unseen_runtime_status = str(
-        query2doc_unseen_state.get("status") or ""
-    )
+    query2doc_unseen_runtime_status = str(query2doc_unseen_state.get("status") or "")
     state = "not_started"
     if completed or runtime_status in {"running", "retrying", "observing"}:
         state = "running"
@@ -349,8 +334,7 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
     if query2doc_unseen_runtime_status:
         state = (
             "running"
-            if query2doc_unseen_runtime_status
-            in {"running", "prepared", "locked"}
+            if query2doc_unseen_runtime_status in {"running", "prepared", "locked"}
             else query2doc_unseen_runtime_status
         )
     package_receipts = [_safe_receipt(path) for path in source_manifests]
@@ -495,8 +479,7 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
             "status": annif_runtime_status or None,
             "stage": annif_state.get("stage"),
             "decision": (
-                annif_evaluation.get("decision")
-                or annif_state.get("decision")
+                annif_evaluation.get("decision") or annif_state.get("decision")
             ),
             "council_decision": annif_review.get("decision"),
             "council_hit_count": annif_review.get("council_hit_count"),
@@ -520,23 +503,16 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
             "status": profile_runtime_status or None,
             "stage": profile_state.get("stage"),
             "decision": (
-                profile_evaluation.get("decision")
-                or profile_state.get("decision")
+                profile_evaluation.get("decision") or profile_state.get("decision")
             ),
             "case_count": profile_evaluation.get("case_count"),
             "baseline_hit_count": profile_evaluation.get("baseline_hit_count"),
-            "baseline_recall_at_12": profile_evaluation.get(
-                "baseline_recall_at_12"
-            ),
+            "baseline_recall_at_12": profile_evaluation.get("baseline_recall_at_12"),
             "baseline_mrr": profile_evaluation.get("baseline_mrr"),
             "profile_hit_count": profile_evaluation.get("profile_hit_count"),
-            "profile_recall_at_12": profile_evaluation.get(
-                "profile_recall_at_12"
-            ),
+            "profile_recall_at_12": profile_evaluation.get("profile_recall_at_12"),
             "profile_mrr": profile_evaluation.get("profile_mrr"),
-            "minimum_profile_hits": profile_evaluation.get(
-                "minimum_profile_hits"
-            ),
+            "minimum_profile_hits": profile_evaluation.get("minimum_profile_hits"),
             "larger_evaluation_authorized": profile_evaluation.get(
                 "larger_evaluation_authorized"
             ),
@@ -560,8 +536,7 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
             "status": query2doc_runtime_status or None,
             "stage": query2doc_state.get("stage"),
             "decision": (
-                query2doc_evaluation.get("decision")
-                or query2doc_state.get("decision")
+                query2doc_evaluation.get("decision") or query2doc_state.get("decision")
             ),
             "case_count": query2doc_evaluation.get("case_count"),
             "model": query2doc_evaluation.get("model"),
@@ -572,23 +547,15 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
             "raw_lexical": (
                 (query2doc_evaluation.get("metrics") or {}).get("raw_lexical")
             ),
-            "raw_dense": (
-                (query2doc_evaluation.get("metrics") or {}).get("raw_dense")
-            ),
+            "raw_dense": ((query2doc_evaluation.get("metrics") or {}).get("raw_dense")),
             "query2doc_lexical": (
-                (query2doc_evaluation.get("metrics") or {}).get(
-                    "query2doc_lexical"
-                )
+                (query2doc_evaluation.get("metrics") or {}).get("query2doc_lexical")
             ),
             "query2doc_dense": (
-                (query2doc_evaluation.get("metrics") or {}).get(
-                    "query2doc_dense"
-                )
+                (query2doc_evaluation.get("metrics") or {}).get("query2doc_dense")
             ),
             "fused": (query2doc_evaluation.get("metrics") or {}).get("fused"),
-            "minimum_fused_hits": query2doc_evaluation.get(
-                "minimum_fused_hits"
-            ),
+            "minimum_fused_hits": query2doc_evaluation.get("minimum_fused_hits"),
             "unseen_evaluation_authorized": query2doc_evaluation.get(
                 "unseen_evaluation_authorized"
             ),
@@ -613,18 +580,12 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
             "model_digest": query2doc_unseen_evaluation.get("model_digest"),
             "prompt_sha256": query2doc_unseen_evaluation.get("prompt_sha256"),
             "model_calls": query2doc_unseen_evaluation.get("model_calls"),
-            "model_attempts": query2doc_unseen_evaluation.get(
-                "model_attempts"
-            ),
+            "model_attempts": query2doc_unseen_evaluation.get("model_attempts"),
             "raw_lexical": (
-                (query2doc_unseen_evaluation.get("metrics") or {}).get(
-                    "raw_lexical"
-                )
+                (query2doc_unseen_evaluation.get("metrics") or {}).get("raw_lexical")
             ),
             "raw_dense": (
-                (query2doc_unseen_evaluation.get("metrics") or {}).get(
-                    "raw_dense"
-                )
+                (query2doc_unseen_evaluation.get("metrics") or {}).get("raw_dense")
             ),
             "query2doc_lexical": (
                 (query2doc_unseen_evaluation.get("metrics") or {}).get(
@@ -636,31 +597,19 @@ def _library_evidence_status(root: Path) -> dict[str, Any]:
                     "query2doc_dense"
                 )
             ),
-            "fused": (
-                (query2doc_unseen_evaluation.get("metrics") or {}).get(
-                    "fused"
-                )
-            ),
-            "minimum_fused_hits": query2doc_unseen_evaluation.get(
-                "minimum_fused_hits"
-            ),
-            "best_raw_hit_count": query2doc_unseen_evaluation.get(
-                "best_raw_hit_count"
-            ),
+            "fused": ((query2doc_unseen_evaluation.get("metrics") or {}).get("fused")),
+            "minimum_fused_hits": query2doc_unseen_evaluation.get("minimum_fused_hits"),
+            "best_raw_hit_count": query2doc_unseen_evaluation.get("best_raw_hit_count"),
             "decision_trial_authorized": query2doc_unseen_evaluation.get(
                 "decision_trial_authorized"
             ),
             "larger_corpus_evaluation_authorized": (
-                query2doc_unseen_evaluation.get(
-                    "larger_corpus_evaluation_authorized"
-                )
+                query2doc_unseen_evaluation.get("larger_corpus_evaluation_authorized")
             ),
             "classification_judge_calls": query2doc_unseen_evaluation.get(
                 "classification_judge_calls"
             ),
-            "page_mutations": query2doc_unseen_evaluation.get(
-                "page_mutations"
-            ),
+            "page_mutations": query2doc_unseen_evaluation.get("page_mutations"),
             "query_count": query2doc_unseen_manifest.get("query_count"),
         },
         "retention": receipts["E8"].get("retention") or {},
@@ -677,7 +626,7 @@ def _flow(events: Iterable[Mapping[str, Any]], since: datetime) -> dict[str, int
     for row in events:
         try:
             timestamp = datetime.fromisoformat(str(row.get("timestamp")))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         if timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=UTC)
@@ -709,7 +658,7 @@ def _restore_points(root: Path) -> dict[str, Any]:
                 manifest = json.loads(
                     (path / "manifest.json").read_text(encoding="utf-8")
                 )
-            except (OSError, ValueError, json.JSONDecodeError):
+            except OSError, ValueError, json.JSONDecodeError:
                 rows.append({"restore_id": path.name, "status": "invalid"})
                 continue
             rows.append(
@@ -741,7 +690,7 @@ def _transaction_preimages(root: Path) -> dict[str, Any]:
                 manifest = json.loads(
                     (path / "manifest.json").read_text(encoding="utf-8")
                 )
-            except (OSError, ValueError, json.JSONDecodeError):
+            except OSError, ValueError, json.JSONDecodeError:
                 rows.append({"transaction_id": path.name, "status": "invalid"})
                 continue
             rows.append(
@@ -766,7 +715,7 @@ def _migration_dispositions(root: Path) -> dict[str, Any]:
     path = root / "runtime" / "librarian" / "migration-dispositions.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
+    except OSError, ValueError, json.JSONDecodeError:
         return {"terminal": 0, "scope_generation": None}
     pages = payload.get("pages")
     pages = pages if isinstance(pages, dict) else {}
@@ -803,14 +752,14 @@ def _soak_status(root: Path, now: datetime) -> dict[str, Any]:
     path = root / "runtime" / "librarian" / "soak.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
+    except OSError, ValueError, json.JSONDecodeError:
         return {"status": "not_started", "remaining_seconds": None}
     if payload.get("observation_mode") == "concurrent_migration":
         try:
             starts = datetime.fromisoformat(str(payload["starts_at"]))
             if starts.tzinfo is None:
                 starts = starts.replace(tzinfo=UTC)
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             return {"status": "invalid", "remaining_seconds": None}
         return {
             **payload,
@@ -821,7 +770,7 @@ def _soak_status(root: Path, now: datetime) -> dict[str, Any]:
         ends = datetime.fromisoformat(str(payload["ends_at"]))
         if ends.tzinfo is None:
             ends = ends.replace(tzinfo=UTC)
-    except (KeyError, TypeError, ValueError):
+    except KeyError, TypeError, ValueError:
         return {"status": "invalid", "remaining_seconds": None}
     remaining = max(0, int((ends - now).total_seconds()))
     return {
@@ -907,25 +856,17 @@ def _current_quality(
 
 def _collection_control_plane(root: Path) -> dict[str, Any]:
     quality_path = root / "runtime" / "librarian" / "collection-quality.json"
-    queue_path = (
-        root / "runtime" / "librarian" / "collection-review-queue.json"
-    )
-    registry_path = (
-        root / "runtime" / "librarian" / "collection-registry.json"
-    )
+    queue_path = root / "runtime" / "librarian" / "collection-review-queue.json"
+    registry_path = root / "runtime" / "librarian" / "collection-registry.json"
     quality = _safe_receipt(quality_path)
     queue = _safe_receipt(queue_path)
     registry = _safe_receipt(registry_path)
     metrics = quality.get("metrics")
     metrics = dict(metrics) if isinstance(metrics, Mapping) else {}
     queue_items = [
-        row
-        for row in (queue.get("items") or {}).values()
-        if isinstance(row, Mapping)
+        row for row in (queue.get("items") or {}).values() if isinstance(row, Mapping)
     ]
-    status_counts = Counter(
-        str(row.get("status") or "unknown") for row in queue_items
-    )
+    status_counts = Counter(str(row.get("status") or "unknown") for row in queue_items)
     challenge_counts = Counter(
         str(row.get("challenge_status"))
         for row in queue_items
@@ -945,22 +886,16 @@ def _collection_control_plane(root: Path) -> dict[str, Any]:
             "reviewer_calls": int(queue.get("reviewer_calls") or 0),
             "frontier_calls": int(queue.get("frontier_calls") or 0),
             "primary_reviews": sum(
-                isinstance(row.get("model_review"), Mapping)
-                for row in queue_items
+                isinstance(row.get("model_review"), Mapping) for row in queue_items
             ),
             "challenger_reviews": sum(
-                isinstance(row.get("challenger_review"), Mapping)
-                for row in queue_items
+                isinstance(row.get("challenger_review"), Mapping) for row in queue_items
             ),
-            "consensus_recommended": int(
-                challenge_counts["consensus_recommended"]
-            ),
+            "consensus_recommended": int(challenge_counts["consensus_recommended"]),
             "disagreement_or_insufficient": int(
                 challenge_counts["disagreement_or_insufficient"]
             ),
-            "rejected_recommendation": int(
-                challenge_counts["rejected_recommendation"]
-            ),
+            "rejected_recommendation": int(challenge_counts["rejected_recommendation"]),
             "status_counts": dict(sorted(status_counts.items())),
         },
         "registry": {
@@ -1005,30 +940,24 @@ def _librarian_status_reason(
     detail = str(authority.get("reason") or "librarian state available")
     if code == "NOT_READY":
         detail = (
-            (
-                f"Live scope has {observed['actionable']} unswept change(s); "
-                if observed["actionable"]
-                else "Shadow migration is current; "
-            )
-            + (
-                "collection authority remains fail-closed until the sealed "
-                "collection audit and current quality gates pass."
-                if collection_first
-                else "classification authority remains fail-closed until a "
-                "complete licensed UDC package and calibrated locked fixture "
-                "exist."
-            )
+            f"Live scope has {observed['actionable']} unswept change(s); "
+            if observed["actionable"]
+            else "Shadow migration is current; "
+        ) + (
+            "collection authority remains fail-closed until the sealed "
+            "collection audit and current quality gates pass."
+            if collection_first
+            else "classification authority remains fail-closed until a "
+            "complete licensed UDC package and calibrated locked fixture "
+            "exist."
         )
     elif code == "MIGRATING":
-        detail = (
-            f"{current_terminal} of {actual_total} pages have terminal "
-            + (
-                "collection assignment; initial organization and review-queue "
-                "triage are still in progress."
-                if collection_first
-                else "classification; initial organization and concurrent "
-                "migration observation are still in progress."
-            )
+        detail = f"{current_terminal} of {actual_total} pages have terminal " + (
+            "collection assignment; initial organization and review-queue "
+            "triage are still in progress."
+            if collection_first
+            else "classification; initial organization and concurrent "
+            "migration observation are still in progress."
         )
     return reason_codes, detail
 
@@ -1053,7 +982,14 @@ def build_librarian_status(
         }
         for row in events[-12:]
     ][::-1]
-    recent_receipts.extend(MergeLedger(root).recent(limit=8)[::-1])
+    # Ledger rows carry full claim_map payloads (100k+ chars); keep summary fields only.
+    recent_receipts.extend(
+        {
+            key: row.get(key)
+            for key in ("recorded_at", "operation", "status", "transaction_id")
+        }
+        for row in MergeLedger(root).recent(limit=8)[::-1]
+    )
     try:
         registry = PageRegistry(root).load()
         registry_error = None
@@ -1081,7 +1017,7 @@ def build_librarian_status(
             )
 
             authority = classification_authority_status(root)
-    except (DurableStateError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
+    except DurableStateError, OSError, RuntimeError, ValueError, json.JSONDecodeError:
         authority = {
             "active": False,
             "mode": "collection-first",
@@ -1108,9 +1044,7 @@ def build_librarian_status(
         else int(observed["current_held"])
     )
     current_terminal = (
-        current_classified
-        if collection_first
-        else int(observed["current_terminal"])
+        current_classified if collection_first else int(observed["current_terminal"])
     )
     current_adopted = (
         current_classified - current_held
@@ -1119,9 +1053,7 @@ def build_librarian_status(
     )
     observed_generation = str(
         observed[
-            "collection_scope_generation"
-            if collection_first
-            else "scope_generation"
+            "collection_scope_generation" if collection_first else "scope_generation"
         ]
     )
     for key, numerator in (
@@ -1149,9 +1081,7 @@ def build_librarian_status(
         "scope_generation": observed_generation,
     }
     sweep_current = bool(
-        not observed[
-            "collection_actionable" if collection_first else "actionable"
-        ]
+        not observed["collection_actionable" if collection_first else "actionable"]
         and state.get("last_swept_scope_generation") == observed_generation
     )
     progress["full_sweep"] = {
@@ -1177,17 +1107,12 @@ def build_librarian_status(
         "actionable": (
             actual_total
             - current_classified
-            + len(
-                observed[
-                    "collection_missing" if collection_first else "missing"
-                ]
-            )
+            + len(observed["collection_missing" if collection_first else "missing"])
             + collection_unclassified
         ),
         "running": 0,
         "held": current_held,
-        "quarantined": int(queue.get("quarantined") or 0)
-        + int(preimages["invalid"]),
+        "quarantined": int(queue.get("quarantined") or 0) + int(preimages["invalid"]),
         "completed": current_adopted,
     }
     debts = {
@@ -1195,21 +1120,13 @@ def build_librarian_status(
         "unclassified": actual_total - current_classified,
         "explicit_hold": current_held,
         "scope_unregistered": len(
-            observed[
-                "collection_unregistered"
-                if collection_first
-                else "unregistered"
-            ]
+            observed["collection_unregistered" if collection_first else "unregistered"]
         ),
         "scope_changed": len(
-            observed[
-                "collection_changed" if collection_first else "changed"
-            ]
+            observed["collection_changed" if collection_first else "changed"]
         ),
         "scope_missing": len(
-            observed[
-                "collection_missing" if collection_first else "missing"
-            ]
+            observed["collection_missing" if collection_first else "missing"]
         ),
         "collection_review_queue": collection_queue_open,
     }
@@ -1282,12 +1199,8 @@ def build_librarian_status(
                 "collection_status": collection_plane["status"],
                 "collection_metrics": collection_plane["metrics"],
                 "collection_warnings": collection_plane["warnings"],
-                "collection_hard_failures": collection_plane[
-                    "hard_failures"
-                ],
-                "legacy_page_udc_gate": (
-                    "superseded_by_collection_authority_v1"
-                ),
+                "collection_hard_failures": collection_plane["hard_failures"],
+                "legacy_page_udc_gate": ("superseded_by_collection_authority_v1"),
             }
             if collection_first
             else _current_quality(root, state.get("quality") or {})
