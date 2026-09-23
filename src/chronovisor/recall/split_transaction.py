@@ -476,7 +476,7 @@ def apply_split_plan(
                 "preimage": str(preimage),
             }
     if preimage_ttl_days <= 0:
-        shutil.rmtree(preimage)
+        shutil.rmtree(preimage, ignore_errors=True)  # a GC may beat us to it
     return {
         "status": "committed",
         "transaction_id": transaction_id,
