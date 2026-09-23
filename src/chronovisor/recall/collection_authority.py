@@ -901,6 +901,9 @@ def build_review_candidates(
     )
 
 
+ADJUDICATED_REVIEW_STATUSES = frozenset({"dismissed", "move_approved"})
+
+
 def _stale_legacy_open_reviews(items: Mapping[str, Any], schema: object) -> None:
     if schema == COLLECTION_QUEUE_SCHEMA:
         return
@@ -962,6 +965,13 @@ def refresh_review_queue(
         },
         "items": items,
         "candidate_count": len(candidates),
+        # Deterministic candidates reappear every sweep; ones already
+        # adjudicated are terminal and no longer review debt.
+        "pending_candidate_count": sum(
+            (items.get(str(row["candidate_id"])) or {}).get("status")
+            not in ADJUDICATED_REVIEW_STATUSES
+            for row in candidates
+        ),
         "added": added,
         "open": sum(
             row.get("status") in {"queued", "review_recommended"}
@@ -1154,7 +1164,13 @@ def collection_quality_snapshot(
     )
     sizes = sorted(value for key, value in counts.items() if key != "_unclassified")
     queue_state = dict(queue or refresh_review_queue(root, state=registry_state))
-    candidate_rate = int(queue_state.get("candidate_count") or 0) / max(1, total)
+    pending_candidates = int(
+        queue_state.get(
+            "pending_candidate_count", queue_state.get("candidate_count")
+        )
+        or 0
+    )
+    candidate_rate = pending_candidates / max(1, total)
     gates = contract["quality_gates"]
     split_proposals = []
     entries = page_index.get("entries") or {}
@@ -1221,7 +1237,11 @@ def collection_quality_snapshot(
         "top_collection_share": round(top_count / max(1, total), 6),
         "median_collection_size": median(sizes) if sizes else 0,
         "unclassified_count": counts.get("_unclassified", 0),
-        "review_candidate_count": int(queue_state.get("candidate_count") or 0),
+        "review_candidate_count": pending_candidates,
+        "crosswalk_unresolved_collection_count": sum(
+            bool((crosswalk["by_slug"].get(slug) or {}).get("review_required"))
+            for slug in audited_slugs
+        ),
         "review_candidate_rate": round(candidate_rate, 6),
         "review_queue_open": int(queue_state.get("open") or 0),
         "unresolved_link_count": int(link_index.get("unresolved_count") or 0),

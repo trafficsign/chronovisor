@@ -1879,11 +1879,14 @@ def test_quality_gate_warns_and_proposes_without_auto_split(
         tmp_path,
         state=state,
         queue={
-            "candidate_count": 0,
+            "candidate_count": 8,
+            "pending_candidate_count": 0,
             "open": 0,
         },
     )
 
+    assert quality["metrics"]["review_candidate_count"] == 0
+    assert "review_candidate_rate" not in quality["warnings"]
     assert quality["metrics"]["assignment_coverage"] == 1.0
     assert quality["metrics"]["top_collection_share"] == 0.75
     assert "top_collection_share" in quality["hard_failures"]
@@ -2359,3 +2362,34 @@ def test_page_split_proposals_flag_oversized_pages_with_bounded_output(
     assert len(largest["largest_sections"]) == 3
     assert largest["largest_sections"][0]["heading"] == "## Other"
     assert largest["auto_split"] is False
+
+
+def test_adjudicated_review_candidates_are_not_pending_debt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = [
+        {"candidate_id": name, "page_uid": name, "reason": "collection_requires_review"}
+        for name in ("dismissed", "approved", "open", "new")
+    ]
+    monkeypatch.setattr(
+        collection_authority,
+        "build_review_candidates",
+        lambda _root, *, state=None: [dict(row) for row in candidates],
+    )
+    write_sealed_json(
+        tmp_path / "runtime" / "librarian" / "collection-review-queue.json",
+        {
+            "schema": collection_authority.COLLECTION_QUEUE_SCHEMA,
+            "items": {
+                "dismissed": {**candidates[0], "status": "dismissed"},
+                "approved": {**candidates[1], "status": "move_approved"},
+                "open": {**candidates[2], "status": "queued"},
+            },
+        },
+    )
+
+    queue = collection_authority.refresh_review_queue(tmp_path, state={})
+
+    assert queue["candidate_count"] == 4
+    assert queue["pending_candidate_count"] == 2

@@ -122,6 +122,20 @@ def _observed_scope(root: Path, registry: Mapping[str, Any]) -> dict[str, Any]:
         if relative.startswith("pages/")
         and str((registered.get(relative) or {}).get("status") or "stable") == "stable"
     )
+    # A page held only because its collection's crosswalk is unresolved stops
+    # being a hold once its review was adjudicated (fail-closed is terminal).
+    from chronovisor.recall.collection_authority import ADJUDICATED_REVIEW_STATUSES
+
+    queue = _safe_receipt(
+        root / "runtime" / "librarian" / "collection-review-queue.json"
+    )
+    adjudicated_uids = {
+        str(item.get("page_uid") or "")
+        for item in (queue.get("items") or {}).values()
+        if isinstance(item, Mapping)
+        and item.get("reason") == "collection_requires_review"
+        and item.get("status") in ADJUDICATED_REVIEW_STATUSES
+    }
     changed: list[str] = []
     collection_changed: list[str] = []
     current_classified = 0
@@ -158,6 +172,7 @@ def _observed_scope(root: Path, registry: Mapping[str, Any]) -> dict[str, Any]:
             current_collection_assigned += 1
             current_collection_review += int(
                 row.get("collection_status") == "review_required"
+                and str(row.get("uid") or "") not in adjudicated_uids
             )
         if isinstance(row.get("classification"), Mapping):
             current_classified += 1
