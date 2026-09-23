@@ -2844,7 +2844,10 @@ function renderLibrarian(librarian) {
       `${intValue(collectionMetrics.assignment_count).toLocaleString()} pages`
     : "--";
   els.librarianCrosswalk.textContent = numeric(collectionMetrics.crosswalk_audit_coverage)
-    ? `${(collectionMetrics.crosswalk_audit_coverage * 100).toFixed(1)}% audited`
+    ? `${(collectionMetrics.crosswalk_audit_coverage * 100).toFixed(1)}% audited` +
+      (numeric(collectionMetrics.crosswalk_unresolved_collection_count)
+        ? ` · ${intValue(collectionMetrics.crosswalk_unresolved_collection_count)} unresolved`
+        : "")
     : "--";
   els.librarianTopShare.textContent = numeric(collectionMetrics.top_collection_share)
     ? `${fmt(collectionMetrics.top_collection_slug, "unknown")} · ` +
@@ -2860,9 +2863,18 @@ function renderLibrarian(librarian) {
   const splitProposals = Array.isArray(collectionPlane.split_proposals)
     ? collectionPlane.split_proposals
     : [];
+  const pageSplits = Array.isArray(collectionPlane.page_split_proposals)
+    ? collectionPlane.page_split_proposals
+    : [];
   els.librarianSplitProposals.textContent = collectionFirst
-    ? `${splitProposals.length} proposal · no auto-split`
+    ? `${splitProposals.length} collection` +
+      (numeric(collectionMetrics.oversized_page_count)
+        ? ` · ${intValue(collectionMetrics.oversized_page_count)} oversized page`
+        : "")
     : "--";
+  els.librarianSplitProposals.title = pageSplits
+    .map((row) => `${fmt(row.page_id, "?")} · ${intValue(row.bytes).toLocaleString()} B`)
+    .join("\n");
   const rolloutStatus = fmt(rollout.status, "not_started").replaceAll("_", " ");
   const rolloutStage = fmt(rollout.stage, "").replaceAll("_", " ");
   els.librarianRollout.textContent = rolloutStage
