@@ -12269,6 +12269,24 @@ class TestTriagePlanSchema:
         )
         assert target.read_bytes() == original
 
+    def test_update_to_split_hub_is_redirected_to_newest_child(
+        self, isolated_wiki: Path
+    ) -> None:
+        from chronovisor.ingest import ingest
+
+        page = "---\ntitle: {0}\nstatus: stable\ntype: knowledge\n{1}---\nbody\n"
+        _seed_page(
+            isolated_wiki,
+            "memory/big.md",
+            page.format("Big", "split_children:\n- big-part-01.md\n- big-part-02.md\n"),
+        )
+        _seed_page(isolated_wiki, "memory/big-part-02.md", page.format("Big 2", ""))
+        operation = {"type": "update", "filename": "memory/big.md"}
+
+        assert ingest._normalize_triage_plan([operation]) == [
+            {"type": "update", "filename": "memory/big-part-02.md"}
+        ]
+
     def test_missing_update_without_summary_gets_neutral_create_topic(
         self, isolated_wiki: Path
     ) -> None:

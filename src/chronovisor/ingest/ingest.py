@@ -1103,7 +1103,7 @@ def _normalize_triage_plan(plan: list[dict]) -> list[dict]:
             continue
 
         if existing_path is not None:
-            normalized.append(op)
+            normalized.append(_redirect_split_hub_update(op, existing_path))
             continue
         if os.path.lexists(full_path):
             normalized.append(op)
@@ -1131,6 +1131,28 @@ def _normalize_triage_plan(plan: list[dict]) -> list[dict]:
         )
 
     return normalized
+
+
+def _redirect_split_hub_update(op: dict, hub_path: Path) -> dict:
+    """Send updates for a split hub to its newest child instead of regrowing it."""
+    from chronovisor.recall.split_transaction import split_children
+
+    try:
+        children = split_children(hub_path.read_text(encoding="utf-8"))
+    except OSError:
+        return op
+    if not children:
+        return op
+    child = hub_path.parent / children[-1]
+    if not child.is_file():
+        return op
+    redirected = dict(op)
+    redirected["filename"] = _relative_page_filename(child)
+    _safe_log(
+        f"ingest | update target {hub_path.stem!r} is a split hub; "
+        f"redirected to {child.stem!r}"
+    )
+    return redirected
 
 
 def _normalize_match_text(text: object) -> str:
