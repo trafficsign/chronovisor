@@ -168,17 +168,31 @@ class PageRegistry:
         """Return current stable, non-redirect canonical page rows."""
 
         snapshot = state if state is not None else self.load()
-        redirects = snapshot.get("redirects")
-        redirect_uids = set(redirects) if isinstance(redirects, Mapping) else set()
         return {
-            str(uid): dict(row)
-            for uid, row in snapshot["pages"].items()
-            if isinstance(row, Mapping)
-            and row.get("status") == "stable"
-            and not row.get("canonical_uid")
-            and uid not in redirect_uids
-            and self._canonical_path(row, require_stable=True) is not None
+            str(uid): row
+            for uid in snapshot["pages"]
+            if (row := self.stable_page(str(uid), snapshot)) is not None
         }
+
+    def stable_page(
+        self,
+        uid: str,
+        state: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Return one stable, non-redirect canonical page row, else ``None``."""
+
+        snapshot = state if state is not None else self.load()
+        row = snapshot["pages"].get(uid)
+        redirects = snapshot.get("redirects")
+        if (
+            not isinstance(row, Mapping)
+            or row.get("status") != "stable"
+            or row.get("canonical_uid")
+            or (isinstance(redirects, Mapping) and uid in redirects)
+            or self._canonical_path(row, require_stable=True) is None
+        ):
+            return None
+        return dict(row)
 
     def _canonical_path(
         self,

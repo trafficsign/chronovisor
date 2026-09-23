@@ -99,6 +99,18 @@ page adds the `oversized_page` warning (never a hard failure). Proposals are
 deterministic, make no model calls, and never split a page; Librarian status
 exposes only a five-row summary.
 
+Executing a split is a separate, explicit operation
+(`split_transaction.py`, CLI `chronovisor-librarian-merge split [--limit N]
+[--activate]`, dry run by default). The parent keeps its UID as a hub
+(frontmatter plus preface, `split_children`, and a `## 分割先` link list); each
+unique H1/H2 section moves verbatim into one `<stem>-part-NN.md` child in the
+same folder (~30,000 bytes each, identical duplicate sections kept once).
+Anchor links into moved headings are retargeted to the child holding them.
+Apply mirrors merges: preimage, `operation: split` ledger rows, mutation lock,
+CAS on every touched file, one registry generation, postflight validation, and
+rollback of every owned byte. Ingest routes later `update` ops aimed at a hub
+to its newest child, so the hub never regrows.
+
 ## Merge hard gates
 
 `merge_transaction.py` is explicit-activation only. A plan must provide:

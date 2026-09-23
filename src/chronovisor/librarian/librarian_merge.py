@@ -681,15 +681,72 @@ def _run_merge_migration_locked(
     return receipt
 
 
+def run_page_splits(
+    root: Path, *, limit: int, activate: bool = False
+) -> dict[str, Any]:
+    """Plan (and with ``activate`` apply) splits of the largest oversized pages."""
+    from chronovisor.recall import split_transaction
+    from chronovisor.recall.collection_authority import _OVERSIZED_PAGE_BYTES
+
+    registry = PageRegistry(root)
+    candidates = []
+    for uid, row in registry.stable_pages(registry.load()).items():
+        path = root / str(row.get("path") or "")
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        if size >= _OVERSIZED_PAGE_BYTES:
+            candidates.append((size, uid, str(row.get("path"))))
+    candidates.sort(reverse=True)
+    results = []
+    for size, uid, path in candidates:
+        if len(results) >= limit:
+            break
+        try:
+            plan = split_transaction.prepare_split_plan(
+                root, page_key=uid, target_bytes=split_transaction.CHILD_TARGET_BYTES
+            )
+        except (split_transaction.SplitPlanError, KeyError) as exc:
+            results.append(
+                {"path": path, "bytes": size, "status": "skipped", "reason": str(exc)}
+            )
+            continue
+        row = {
+            "path": path,
+            "bytes": size,
+            "children": [child["path"] for child in plan["children"]],
+            "link_rewrites": len(plan["link_rewrites"]),
+            "verification_receipt": plan["verification_receipt"],
+        }
+        if activate:
+            outcome = split_transaction.apply_split_plan(root, plan, activate=True)
+            row["status"] = outcome["status"]
+            row["error"] = outcome.get("error")
+        else:
+            row["status"] = "planned"
+        results.append(row)
+    return {
+        "mode": "activate" if activate else "dry_run",
+        "oversized_pages": len(candidates),
+        "results": results,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the ``chronovisor-librarian-merge`` command-line entry point."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",
-        choices=("discover", "pilot", "migrate"),
+        choices=("discover", "pilot", "migrate", "split"),
     )
     parser.add_argument("--root", type=Path, default=CHRONOVISOR_ROOT)
     parser.add_argument("--limit", type=int, default=3)
+    parser.add_argument(
+        "--activate",
+        action="store_true",
+        help="split: apply plans (default is a read-only dry run)",
+    )
     args = parser.parse_args(argv)
     from chronovisor.core.okf_cutover import OKFStartupBlocked
 
@@ -704,6 +761,8 @@ def main(argv: list[str] | None = None) -> int:
 def _main_locked(args: argparse.Namespace) -> int:
     if args.command == "discover":
         result = discover_clusters(args.root)
+    elif args.command == "split":
+        result = run_page_splits(args.root, limit=args.limit, activate=args.activate)
     elif args.command == "pilot":
         result = run_merge_migration(args.root, pilot_limit=args.limit)
     else:
