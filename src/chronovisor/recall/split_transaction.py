@@ -209,6 +209,10 @@ def prepare_split_plan(
     if split_children(text):
         raise SplitPlanError(f"{page_key} is already a split hub")
     meta, _body = frontmatter.parse(text)
+    if meta.get("split_from"):
+        # A child that is still oversized holds one huge section; re-splitting
+        # it only peels off its H1 and nests hubs forever.
+        raise SplitPlanError(f"{page_key} is a split child")
     preface, sections, duplicates = unique_sections(text)
     if preface is None or not meta:
         raise SplitPlanError("page lacks frontmatter to keep on the hub")

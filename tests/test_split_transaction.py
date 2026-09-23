@@ -102,6 +102,8 @@ def test_split_keeps_every_section_once_and_retargets_anchors(tmp_path: Path) ->
 
     with pytest.raises(SplitPlanError, match="already a split hub"):
         prepare_split_plan(tmp_path, page_key="big")
+    with pytest.raises(SplitPlanError, match="split child"):
+        prepare_split_plan(tmp_path, page_key=children[0].removesuffix(".md"))
 
 
 def test_split_rolls_back_every_owned_file_on_failure(
