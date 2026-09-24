@@ -57,14 +57,74 @@ def _production(tmp_path: Path, *, admitted: bool) -> Path:
     return root
 
 
+def _r5_artifact(tmp_path: Path, *, profile: str = "local-triad-v1") -> Path:
+    cohort = "ox-alpha-backfill-v1" if profile == "ox-alpha-single-v1" else "local-triad-v1"
+    contract = "c" * 64 if profile == "ox-alpha-single-v1" else ""
+    policy = {
+        "schema": HARNESS.R5_FLOOR_POLICY_SCHEMA,
+        "training_schema": HARNESS.R5_TRAINING_SCHEMA,
+        "gate_schema": HARNESS.R5_GATE_SCHEMA,
+        "truth_authority": "teacher_only_not_verified",
+        "profile": profile,
+        "cohort": cohort,
+        "profile_contract_id": contract,
+        "split_plan_id": "d" * 64,
+        "hard_floors": {
+            "rallies": 1, "days": 1, "windows": 1, "labels": 1,
+            "per_class": 1, "probes": 1, "counterfactuals": 1,
+        },
+        "backlog": {"ready": 0, "leased": 0, "manifest": 0, "candidate": 0},
+        "rows_profile_bound": True,
+    }
+    unsigned = {
+        "schema": HARNESS.R5_SCHEMA,
+        "namespace": "recall-distillation",
+        "captured_at": "2026-08-25T00:00:00Z",
+        "source": {}, "source_after": {}, "production": {}, "production_after": {},
+        "clone": {}, "r4_dependency": {},
+        "dataset": {
+            "passed": True, "capture_only": False, "reasons": [], "metrics": {}, "policy": policy,
+        },
+        "phases": [], "cleanup": {}, "provider_calls": 0, "egress_attempts": 0,
+        "process_attempts": 0, "supervised": False, "test_only": False,
+    }
+    artifact = {"artifact_id": HARNESS._digest(unsigned), **unsigned}
+    artifact["seal_sha256"] = HARNESS._digest(artifact)
+    path = tmp_path / f"r5-{profile}.json"
+    path.write_bytes(HARNESS._canonical(artifact) + b"\n")
+    return path
+
+
 @pytest.mark.darwin_contract
 def test_missing_exact_runtime_blocks_without_provider(tmp_path: Path) -> None:
     source, commit = _source(tmp_path)
-    result = HARNESS.run_once(production=_production(tmp_path, admitted=False), source=source, output=tmp_path / "output", source_commit=commit)
+    result = HARNESS.run_once(production=_production(tmp_path, admitted=False), source=source, output=tmp_path / "output", source_commit=commit, r5_artifact=_r5_artifact(tmp_path))
     assert result["kind"] == "r6-official-worker-blocked"
     assert result["external_provider_calls"] == 0
     assert result["clone_candidate_published"] is False
     assert result["production_candidate_published"] is False
+
+
+def test_r5_artifact_readback_requires_canonical_policy_and_seal(tmp_path: Path) -> None:
+    path = _r5_artifact(tmp_path)
+    value = HARNESS._read_r5_artifact(path)
+    assert value["schema"] == HARNESS.R5_SCHEMA
+    assert value["dataset"]["policy"]["cohort"] == "local-triad-v1"
+    tampered = dict(value)
+    tampered["dataset"] = {**value["dataset"], "policy": {**value["dataset"]["policy"], "cohort": "ox-alpha-single-v1"}}
+    tampered["artifact_id"] = HARNESS._digest({key: item for key, item in tampered.items() if key not in {"artifact_id", "seal_sha256"}})
+    tampered["seal_sha256"] = HARNESS._digest({key: item for key, item in tampered.items() if key != "seal_sha256"})
+    path.write_bytes(HARNESS._canonical(tampered) + b"\n")
+    with pytest.raises(HARNESS.R6Error, match="local dataset policy|R5 dataset policy"):
+        HARNESS._read_r5_artifact(path)
+
+
+def test_r5_artifact_symlink_is_rejected(tmp_path: Path) -> None:
+    target = _r5_artifact(tmp_path)
+    link = tmp_path / "r5-link.json"
+    link.symlink_to(target)
+    with pytest.raises(HARNESS.R6Error, match="symlink"):
+        HARNESS._read_r5_artifact(link)
 
 
 def test_official_worker_is_called_once_with_empty_teachers_and_no_factory(tmp_path: Path) -> None:
@@ -527,6 +587,7 @@ def test_phase_watchdog_returns_blocker_and_cleans_clone(
     monkeypatch.setattr(HARNESS, "_candidate_ledger_state", lambda *_args: {"records": 0, "head_sha256": ""})
     result = HARNESS.run_once(
         production=production, source=source, output=tmp_path / "output", source_commit=commit,
+        r5_artifact=_r5_artifact(tmp_path),
     )
     assert result["kind"] == "r6-official-worker-blocked"
     assert result["cleanup_receipt"]["remaining"] == 0
@@ -557,6 +618,7 @@ def test_parent_monkeypatch_does_not_reach_isolated_worker_receipt(
     monkeypatch.setattr(HARNESS, "_candidate_ledger_state", lambda *_args: {"records": 0, "head_sha256": ""})
     result = HARNESS.run_once(
         production=production, source=source, output=tmp_path / "output", source_commit=commit,
+        r5_artifact=_r5_artifact(tmp_path),
     )
     assert result["kind"] == "r6-official-worker-blocked"
     assert result["provider_calls"] == 0
@@ -622,7 +684,9 @@ def test_trusted_executable_rejects_symlink_and_path_spoof(
     spoof.write_text("not git")
     link = tmp_path / "git-link"
     link.symlink_to(spoof)
-    monkeypatch.setitem(HARNESS._TRUSTED_EXECUTABLES, str(link), "0" * 64)
+    monkeypatch.setattr(
+        HARNESS, "_TRUSTED_EXECUTABLES", HARNESS._TRUSTED_EXECUTABLES | {str(link)}
+    )
     with pytest.raises(HARNESS.R6Error, match="symlink"):
         HARNESS._trusted_executable(str(link))
     monkeypatch.setenv("PATH", str(tmp_path))
@@ -740,6 +804,7 @@ def test_external_git_redirect_environment_is_rejected(tmp_path: Path, monkeypat
             source=source,
             output=tmp_path / "output",
             source_commit=commit,
+            r5_artifact=_r5_artifact(tmp_path),
         )
 
 
@@ -791,7 +856,7 @@ def test_official_candidate_requires_official_empty_teacher_promotion(tmp_path: 
 def test_admitted_but_unrunnable_official_path_returns_blocker(tmp_path: Path) -> None:
     source, commit = _source(tmp_path)
     production = _production(tmp_path, admitted=True)
-    result = HARNESS.run_once(production=production, source=source, output=tmp_path / "output", source_commit=commit)
+    result = HARNESS.run_once(production=production, source=source, output=tmp_path / "output", source_commit=commit, r5_artifact=_r5_artifact(tmp_path))
     assert result["kind"] == "r6-official-worker-blocked"
     assert result["external_provider_calls"] == 0
     assert result["clone_candidate_published"] is False
@@ -803,14 +868,14 @@ def test_rejects_dirty_source_overlap_symlink_and_tampered_output(tmp_path: Path
     source, commit = _source(tmp_path)
     production = _production(tmp_path, admitted=False)
     with pytest.raises(HARNESS.R6Error, match="overlap"):
-        HARNESS.run_once(production=production, source=source, output=production / "out", source_commit=commit)
+        HARNESS.run_once(production=production, source=source, output=production / "out", source_commit=commit, r5_artifact=_r5_artifact(tmp_path))
     link = tmp_path / "link"
     link.symlink_to(production, target_is_directory=True)
     with pytest.raises(HARNESS.R6Error, match="symlink"):
-        HARNESS.run_once(production=link, source=source, output=tmp_path / "out", source_commit=commit)
+        HARNESS.run_once(production=link, source=source, output=tmp_path / "out", source_commit=commit, r5_artifact=_r5_artifact(tmp_path))
     (source / "dirty").write_text("x")
     with pytest.raises(HARNESS.R6Error, match="exact and clean"):
-        HARNESS.run_once(production=production, source=source, output=tmp_path / "out", source_commit=commit)
+        HARNESS.run_once(production=production, source=source, output=tmp_path / "out", source_commit=commit, r5_artifact=_r5_artifact(tmp_path))
     sealed = HARNESS._seal({"schema": HARNESS.R6_SCHEMA, "namespace": "recall-distillation", "kind": "x"})
     path = tmp_path / "tampered.json"
     path.write_text(json.dumps(sealed))
@@ -936,8 +1001,8 @@ def _closed_candidate_fixture() -> tuple[Any, ...]:
             "verdict": "helpful",
             "authority": "teacher-only",
             "features": {"query_chargram_coverage": 0.5, "candidate_chargram_precision": 0.5},
-            "route": "local/teacher",
-            "route_identity": {"provider": "local", "model": "teacher", "location": "local"},
+            "route": "recall.distill.teacher.a",
+            "route_identity": {"role": "recall.distill.teacher.a", "provider": "local", "model": "teacher", "location": "local"},
             "teacher_role": "critic",
             "model_digest": ids["cohort"],
             "generator_model_digest": "",
@@ -955,7 +1020,13 @@ def _closed_candidate_fixture() -> tuple[Any, ...]:
             "profile": "local-triad-v1",
             "cohort": "local-triad-v1",
             "assignment_revision": "assignment-v2",
-            "assignment_authority": "",
+            "assignment_authority": {
+                "revision": "assignment-v2", "kind": "teacher-label", "profile": "",
+                "split": "", "probe": False, "owner": "", "routes": [],
+                "probe_revision": "", "repeat_pair_id": "", "fixed_repeat": False,
+                "order_swap": False, "blind_order": "", "probe_batch_id": "",
+                "order_variant": 0, "candidate_position": -1,
+            },
             "profile_contract_id": "",
             "expires_at": "",
             "identity_revision": "",
@@ -967,6 +1038,9 @@ def _closed_candidate_fixture() -> tuple[Any, ...]:
             "payload_digest": "",
             "payload_source": {},
             "work_id": "",
+            "source_commit": "",
+            "source_tree_sha256": "",
+            "source_ox_identity_sha256": "",
             "negative_veto_conflict": False,
             "feature_parity": True,
             "future_leakage": False,
@@ -984,6 +1058,20 @@ def _closed_candidate_fixture() -> tuple[Any, ...]:
         "model_cohort_sha256": ids["cohort"],
         "split_revision": "grouped-rolling-v1",
     }
+    template = dict(replay["training_rows"][0])
+    replay["training_rows"] = [
+        template,
+        {**template, "group_id": "8" * 64, "split": "validation", "label_record_sha256": "8" * 64},
+        {
+            **template,
+            "group_id": "9" * 64,
+            "split": "test",
+            "label_record_sha256": "9" * 64,
+            "locked_test_read_only": True,
+            "locked_test_evidence_ref": f"split-plan:{ids['split']}",
+        },
+    ]
+    policy["training_rows"] = 3
     run = {
         "schema": "chronovisor.recall-distill-run.v1",
         "namespace": "recall-distillation",
@@ -1071,6 +1159,9 @@ def _closed_candidate_fixture() -> tuple[Any, ...]:
         "cohort_sha256": ids["cohort"],
         "split_plan_id": ids["split"],
         "profile_contract_id": "",
+        "r5_artifact_id": "a" * 64,
+        "r5_artifact_seal_sha256": "b" * 64,
+        "r5_dataset_policy_sha256": "c" * 64,
     }
     heads = {"candidate": ids["candidate_head"], "label": ids["label_head"], "manifest": ids["manifest_head"]}
     return module, pointer, policy, replay, run, state, r5, heads
@@ -1081,6 +1172,22 @@ def test_exact_official_worker_fixture_passes_closed_schemas() -> None:
     HARNESS._assert_candidate_artifact_schemas(
         module, pointer, policy, replay, run, state=state, r5=r5, heads=heads
     )
+
+
+def test_legacy_ox_replay_rows_are_non_certifying() -> None:
+    module, pointer, policy, replay, run, state, r5, heads = _closed_candidate_fixture()
+    legacy_fields = {
+        "status": "ok", "error_class": None, "route_digest": "", "route_identity_exact": True,
+        "prompt_sha256": "", "schema_sha256": "", "request_sha256": "", "provider_request_sha256": "",
+        "provider_response_request_sha256": "", "group_identity_exact": True,
+        "future_leakage_evidence_ref": "", "repeat_pair_id": "", "fixed_repeat": False,
+        "fixed_split_plan": True, "order_swap": False, "blind_order": "",
+    }
+    replay["training_rows"] = [{**row, **legacy_fields} for row in replay["training_rows"]]
+    with pytest.raises(HARNESS.R6Error, match="legacy v1 replay rows"):
+        HARNESS._assert_candidate_artifact_schemas(
+            module, pointer, policy, replay, run, state=state, r5=r5, heads=heads
+        )
 
 
 @pytest.mark.darwin_contract

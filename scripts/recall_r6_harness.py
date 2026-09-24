@@ -37,13 +37,25 @@ from typing import Any
 
 R6_SCHEMA = "chronovisor.recall-r6.v2"
 BASELINE_SCHEMA = "chronovisor.recall-distill-baseline.v1"
+R5_SCHEMA = "chronovisor.recall-r5.v1"
+R5_FLOOR_POLICY_SCHEMA = "chronovisor.recall-r5-floor-policy.v2"
+R5_TRAINING_SCHEMA = "chronovisor.recall-distill-training.v2"
+R5_GATE_SCHEMA = "chronovisor.recall-offline-training-gate.v2"
+_LOCAL_PROFILE = "local-triad-v1"
+_OX_PROFILE = "ox-alpha-single-v1"
+_LOCAL_COHORT = "local-triad-v1"
+_OX_COHORT = "ox-alpha-backfill-v1"
+_LOCAL_ROLES = frozenset({
+    "recall.distill.teacher.a",
+    "recall.distill.teacher.b",
+    "recall.distill.teacher.c",
+})
+_OX_ROLE = "recall.distill.teacher.ox-alpha"
 MAX_FILE_BYTES = 32 * 1024 * 1024
 _SHA = set("0123456789abcdef")
 _CLONE_TARGETS = (Path("config.toml"), Path("raw"), Path("runtime/recall-distillation"))
-_TRUSTED_EXECUTABLES = {
-    "/usr/bin/git": "b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9",
-    "/bin/cp": "f0629f462c6535f7b1a19f559b7093638e714961bea9228cfb2ae7896f8557f4",
-}
+# Paths live on the sealed read-only system volume; content hashes would break on every OS update.
+_TRUSTED_EXECUTABLES = frozenset({"/usr/bin/git", "/bin/cp"})
 _GIT_ENV_PREFIX = "GIT_"
 _GIT_REDIRECT_KEYS = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"})
 _GIT_LAYOUT_KEYS = frozenset({"entry", "entry_sha256", "entry_bytes", "entry_inode", "entry_mode", "git_dir", "git_dir_inode", "git_dir_mode", "work_tree", "index", "index_sha256", "index_bytes", "index_inode", "index_mode"})
@@ -148,7 +160,7 @@ def _trusted_executable(path: str) -> Path:
     ):
         raise R6Error("trusted executable is unsafe")
     executable = original.resolve(strict=True)
-    if executable != original or hashlib.sha256(executable.read_bytes()).hexdigest() != _TRUSTED_EXECUTABLES[path]:
+    if executable != original:
         raise R6Error("trusted executable identity mismatch")
     return executable
 
@@ -242,6 +254,200 @@ def _read_sealed(path: Path, schema: str) -> dict[str, Any]:
     if value.get("seal_sha256") != _digest(unsigned):
         raise R6Error("evidence seal mismatch")
     return value
+
+
+def _read_r5_artifact(path: Path) -> dict[str, Any]:
+    """Read and independently validate one immutable R5 formal receipt."""
+
+    if not isinstance(path, Path) or _symlink_component(path):
+        raise R6Error("R5 artifact path contains a symlink")
+    try:
+        before = path.lstat()
+        if path.is_symlink() or not stat.S_ISREG(before.st_mode) or before.st_size > MAX_FILE_BYTES:
+            raise R6Error("R5 artifact path is unsafe")
+        raw = path.read_bytes()
+        after = path.lstat()
+    except OSError as exc:
+        raise R6Error("R5 artifact cannot be read") from exc
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+    ):
+        raise R6Error("R5 artifact changed during read")
+    try:
+        value = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise R6Error("R5 artifact is not JSON") from exc
+    if not isinstance(value, dict):
+        raise R6Error("R5 artifact is not an object")
+    if raw not in {_canonical(value), _canonical(value) + b"\n"}:
+        raise R6Error("R5 artifact is not canonical")
+    expected = {
+        "artifact_id", "schema", "namespace", "seal_sha256", "captured_at",
+        "source", "source_after", "production", "production_after", "clone",
+        "r4_dependency", "dataset", "phases", "cleanup", "provider_calls",
+        "egress_attempts", "process_attempts", "supervised", "test_only",
+    }
+    if set(value) != expected or value.get("schema") != R5_SCHEMA or value.get("namespace") != "recall-distillation":
+        raise R6Error("R5 artifact schema is not closed")
+    _assert_artifact_integrity(value, "R5 artifact", has_id=True)
+    if value.get("supervised") is not False or not isinstance(value.get("test_only"), bool):
+        raise R6Error("R5 artifact execution flags are invalid")
+    _strict_timestamp(value["captured_at"], "R5 artifact captured_at")
+    if not isinstance(value["phases"], list) or any(
+        not isinstance(phase, Mapping) or set(phase) != {"name", "elapsed_ms"}
+        or not isinstance(phase["name"], str)
+        or isinstance(phase["elapsed_ms"], bool)
+        or not isinstance(phase["elapsed_ms"], (int, float))
+        or phase["elapsed_ms"] < 0
+        for phase in value["phases"]
+    ):
+        raise R6Error("R5 artifact phases schema is invalid")
+    if not isinstance(value["cleanup"], Mapping) or set(value["cleanup"]) not in (set(), {"clone_removed", "remaining"}):
+        raise R6Error("R5 artifact cleanup schema is invalid")
+    for field in ("provider_calls", "egress_attempts", "process_attempts"):
+        _strict_int(value[field], f"R5 artifact {field}")
+    for field in ("source", "source_after", "production", "production_after", "clone", "r4_dependency"):
+        if not isinstance(value[field], Mapping):
+            raise R6Error(f"R5 artifact {field} is not an object")
+    if value["source"] != value["source_after"] or value["production"] != value["production_after"]:
+        raise R6Error("R5 artifact source or production changed")
+    source = value["source"]
+    source_keys = {
+        "commit", "clean", "status_sha256", "status_count", "tree_sha256", "file_count",
+        "symlink_count", "ox_identity_sha256", "account_uid", "account_home", "tree",
+        "index_count", "index_sha256", "git_index", "tracked_bytes_sha256", "tool_identities",
+    }
+    if set(source) not in (set(), {"commit", "tree_sha256"}, source_keys):
+        raise R6Error("R5 artifact source identity is invalid")
+    if set(source) == {"commit", "tree_sha256"}:
+        commit = source["commit"]
+        if not isinstance(commit, str) or len(commit) != 40 or set(commit) - _SHA:
+            raise R6Error("R5 artifact source commit is invalid")
+        _artifact_id(source["tree_sha256"])
+    production = value["production"]
+    production_keys = {"root", "managed_inventory", "raw", "runtime", "config", "protected_inventory"}
+    if set(production) not in (set(), {"raw", "runtime", "config"}, production_keys):
+        raise R6Error("R5 artifact production identity is invalid")
+    if set(value["clone"]) not in (set(), {"test_only"}, {"owned", "state"}, {"owned", "cow", "dev", "ino", "volume", "tool", "parity", "state"}):
+        raise R6Error("R5 artifact clone schema is invalid")
+    dependency_keys = {"artifact_id", "seal_sha256", "authority_artifact_id", "authority_seal_sha256", "artifact_path", "authority_relative_path", "source_root", "source_commit", "source_tree_sha256", "artifact_file_state", "authority_file_state"}
+    if set(value["r4_dependency"]) not in (set(), {"artifact_id"}, {"artifact_id", "seal_sha256"}, dependency_keys):
+        raise R6Error("R5 artifact R4 dependency schema is invalid")
+    dataset = value["dataset"]
+    if set(dataset) not in ({"passed", "capture_only", "reasons", "metrics", "policy"}, {"passed", "test_only"}, {"passed"}):
+        raise R6Error("R5 artifact dataset schema is not closed")
+    policy = dataset.get("policy")
+    if policy is None:
+        raise R6Error("R5 artifact dataset policy is missing")
+    if set(dataset) == {"passed", "capture_only", "reasons", "metrics", "policy"} and (
+        dataset["passed"] is not True
+        or dataset["capture_only"] is not False
+        or dataset["reasons"] != []
+        or not isinstance(dataset["metrics"], Mapping)
+    ):
+        raise R6Error("R5 artifact dataset values are invalid")
+    _assert_r5_floor_policy(policy)
+    return value
+
+
+def _assert_r5_floor_policy(policy: object) -> None:
+    expected = {
+        "schema", "training_schema", "gate_schema", "truth_authority", "profile", "cohort",
+        "profile_contract_id", "split_plan_id", "hard_floors", "backlog", "rows_profile_bound",
+    }
+    if not isinstance(policy, Mapping) or set(policy) != expected:
+        raise R6Error("R5 dataset policy schema is not closed")
+    if (
+        policy.get("schema") != R5_FLOOR_POLICY_SCHEMA
+        or policy.get("training_schema") != R5_TRAINING_SCHEMA
+        or policy.get("gate_schema") != R5_GATE_SCHEMA
+        or policy.get("truth_authority") != "teacher_only_not_verified"
+        or policy.get("profile") not in {_LOCAL_PROFILE, _OX_PROFILE}
+        or not isinstance(policy.get("cohort"), str)
+        or not isinstance(policy.get("profile_contract_id"), str)
+        or policy.get("rows_profile_bound") is not True
+    ):
+        raise R6Error("R5 dataset policy values are invalid")
+    if policy["profile"] == _LOCAL_PROFILE:
+        if policy["cohort"] != _LOCAL_COHORT or policy["profile_contract_id"] != "":
+            raise R6Error("R5 local dataset policy binding is invalid")
+    elif policy["cohort"] != _OX_COHORT:
+        raise R6Error("R5 OX dataset policy cohort is invalid")
+    _artifact_id(policy["split_plan_id"])
+    floors = policy["hard_floors"]
+    if not isinstance(floors, Mapping) or set(floors) != {
+        "rallies", "days", "windows", "labels", "per_class", "probes", "counterfactuals",
+    }:
+        raise R6Error("R5 dataset floor schema is invalid")
+    for key, value in floors.items():
+        _strict_int(value, f"R5 dataset hard_floors.{key}")
+        if value <= 0:
+            raise R6Error("R5 dataset hard floors are not positive")
+    backlog = policy["backlog"]
+    if not isinstance(backlog, Mapping) or set(backlog) != {"ready", "leased", "manifest", "candidate"}:
+        raise R6Error("R5 dataset backlog schema is invalid")
+    for key, value in backlog.items():
+        _strict_int(value, f"R5 dataset backlog.{key}")
+        if value != 0:
+            raise R6Error("R5 dataset backlog is nonzero")
+
+
+def _bind_r5_preflight(
+    preflight: Mapping[str, Any],
+    artifact: Mapping[str, Any],
+    *,
+    module: Any,
+    clone: Path,
+    source: Mapping[str, Any] | None = None,
+    source_root: Path | None = None,
+    production: Path | None = None,
+) -> dict[str, Any]:
+    """Bind the R5 sealed receipt to the independently recomputed R6 facts."""
+
+    if preflight.get("passed") is not True:
+        return dict(preflight)
+    dataset = artifact.get("dataset")
+    policy = dataset.get("policy") if isinstance(dataset, Mapping) else None
+    _assert_r5_floor_policy(policy)
+    assert isinstance(policy, Mapping)
+    if source is not None:
+        source_identity = artifact.get("source")
+        if isinstance(source_identity, Mapping) and source_identity.get("commit") and source_identity.get("commit") != source.get("head"):
+            raise R6Error("R5 source commit is not bound to current source")
+        if (
+            isinstance(source_identity, Mapping)
+            and source_root is not None
+            and source_identity.get("tree")
+            and _git(source_root, "rev-parse", "HEAD^{tree}") != source_identity.get("tree")
+        ):
+            raise R6Error("R5 source tree is not bound to current source")
+    production_identity = artifact.get("production")
+    if production is not None and isinstance(production_identity, Mapping) and set(production_identity) == {"root", "managed_inventory", "raw", "runtime", "config", "protected_inventory"}:
+        root = production_identity["root"]
+        if not isinstance(root, Mapping) or set(root) != {"dev", "ino", "uid", "gid", "mode", "ctime_ns"}:
+            raise R6Error("R5 production root identity is invalid")
+        actual = production.lstat()
+        if any(root[key] != value for key, value in {
+            "dev": actual.st_dev, "ino": actual.st_ino, "uid": actual.st_uid,
+            "gid": actual.st_gid, "mode": actual.st_mode & 0o7777, "ctime_ns": actual.st_ctime_ns,
+        }.items()):
+            raise R6Error("R5 production root is not bound to current production")
+    load_config = getattr(module, "load_distillation_config", None)
+    if callable(load_config) and "profile_contract_id" in preflight and "split_plan_id" in preflight:
+        config = load_config(clone / "config.toml")
+        expected_profile = _OX_PROFILE if getattr(config, "teacher_profile", "") == _OX_PROFILE else _LOCAL_PROFILE
+        if (
+            policy["profile"] != expected_profile
+            or policy["profile_contract_id"] != preflight["profile_contract_id"]
+            or policy["split_plan_id"] != preflight["split_plan_id"]
+        ):
+            raise R6Error("R5 floor policy is not bound to current preflight")
+    return {
+        **dict(preflight),
+        "r5_artifact_id": _artifact_id(artifact["artifact_id"]),
+        "r5_artifact_seal_sha256": _artifact_id(artifact["seal_sha256"]),
+        "r5_dataset_policy_sha256": _digest(policy),
+    }
 
 
 def _symlink_component(path: Path) -> bool:
@@ -1708,7 +1914,9 @@ def _sandbox_identity() -> dict[str, Any]:
     }
 
 
-def _isolated_worker_env(*, source: Path, clone: Path, capability: str = "") -> dict[str, str]:
+def _isolated_worker_env(
+    *, source: Path, clone: Path, capability: str = "", r5_binding: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
     """A fixed clean environment; inherited hooks never reach the worker."""
 
     env = {
@@ -1723,10 +1931,14 @@ def _isolated_worker_env(*, source: Path, clone: Path, capability: str = "") -> 
     }
     if capability:
         env["R6_ISOLATED_CHILD_CAPABILITY"] = capability
+    if r5_binding is not None:
+        env["R6_R5_BINDING"] = _canonical(dict(r5_binding)).decode("utf-8")
     return env
 
 
-def _official_chunk_isolated(source: Path, clone: Path) -> dict[str, Any]:
+def _official_chunk_isolated(
+    source: Path, clone: Path, *, r5_binding: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Run the official worker out-of-process and accept one sealed result."""
 
     source_before = source_snapshot(source)
@@ -1746,7 +1958,9 @@ def _official_chunk_isolated(source: Path, clone: Path) -> dict[str, Any]:
             cwd=clone,
             timeout=_PHASE_TIMEOUT_SECONDS,
             check=True,
-            env=_isolated_worker_env(source=source, clone=clone, capability=capability),
+            env=_isolated_worker_env(
+                source=source, clone=clone, capability=capability, r5_binding=r5_binding,
+            ),
             worker_roots=(source, clone),
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired, R6Error) as exc:
@@ -2022,18 +2236,29 @@ _REPLAY_ROW_BASE_KEYS = frozenset(
         "payload_digest", "payload_source", "work_id", "negative_veto_conflict",
         "feature_parity", "future_leakage", "split", "split_plan_id",
         "locked_test_read_only", "locked_test_evidence_ref",
+        "source_commit", "source_tree_sha256", "source_ox_identity_sha256",
     }
 )
-_REPLAY_ROW_OX_KEYS = _REPLAY_ROW_BASE_KEYS | frozenset(
+_REPLAY_ROW_OX_V2_KEYS = _REPLAY_ROW_BASE_KEYS | frozenset(
     {
         "status", "error_class", "route_digest", "route_identity_exact",
         "prompt_sha256", "schema_sha256", "request_sha256", "provider_request_sha256",
-        "provider_response_request_sha256", "group_identity_exact",
+        "provider_receipt_sha256", "group_identity_exact",
         "future_leakage_evidence_ref", "repeat_pair_id", "fixed_repeat", "fixed_split_plan",
         "order_swap",
         "blind_order",
     }
 )
+_REPLAY_ROW_OX_V1_KEYS = _REPLAY_ROW_BASE_KEYS | frozenset(
+    {
+        "status", "error_class", "route_digest", "route_identity_exact",
+        "prompt_sha256", "schema_sha256", "request_sha256", "provider_request_sha256",
+        "provider_response_request_sha256", "group_identity_exact",
+        "future_leakage_evidence_ref", "repeat_pair_id", "fixed_repeat", "fixed_split_plan",
+        "order_swap", "blind_order",
+    }
+)
+_REPLAY_ROW_OX_KEYS = _REPLAY_ROW_OX_V2_KEYS | _REPLAY_ROW_OX_V1_KEYS
 
 
 def _strict_int(value: object, field: str, *, maximum: int | None = None) -> int:
@@ -2208,28 +2433,72 @@ def _assert_workset_schema(
                 _strict_int(stage_value[key], f"{flavor}_workset.stages.{stage}.{key}")
 
 
+def _assert_assignment_authority(value: object, field: str) -> None:
+    expected = {
+        "revision", "kind", "profile", "split", "probe", "owner", "routes",
+        "probe_revision", "repeat_pair_id", "fixed_repeat", "order_swap",
+        "blind_order", "probe_batch_id", "order_variant", "candidate_position",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise R6Error(f"{field} schema is not closed")
+    for key in ("revision", "kind", "profile", "split", "owner", "probe_revision", "repeat_pair_id", "blind_order", "probe_batch_id"):
+        _strict_text(value[key], f"{field}.{key}")
+    _strict_string_list(value["routes"], f"{field}.routes")
+    for key in ("probe", "fixed_repeat", "order_swap"):
+        _strict_bool(value[key], f"{field}.{key}")
+    for key in ("order_variant", "candidate_position"):
+        if isinstance(value[key], bool) or not isinstance(value[key], int) or value[key] < -1:
+            raise R6Error(f"{field}.{key} type or bounds are invalid")
+
+
+def _assert_route_identity(value: object, field: str, *, local: bool | None = None) -> None:
+    if not isinstance(value, Mapping):
+        raise R6Error(f"{field} type is invalid")
+    keys = set(value)
+    if keys not in (set(), {"provider", "model", "location"}, {"role", "provider", "model", "location"}):
+        raise R6Error(f"{field} schema is not closed")
+    for key in keys:
+        _strict_text(value[key], f"{field}.{key}", allow_empty=False)
+    if local is True and value and value.get("location") != "local":
+        raise R6Error(f"{field} is not local")
+    if local is False and value and value.get("location") != "remote":
+        raise R6Error(f"{field} is not remote")
+
+
 def _assert_replay_rows_schema(
     rows: object,
     *,
     lineage: Mapping[str, Any],
-) -> None:
+) -> bool:
+    """Validate canonical materializer rows and report legacy OX v1 rows."""
     if not isinstance(rows, list) or not rows:
         raise R6Error("locked replay rows are invalid")
+    legacy_noncertifying = False
+    seen_groups: dict[str, str] = {}
+    seen_splits: set[str] = set()
+    probe_pairs: dict[str, set[str]] = {}
     for index, row in enumerate(rows):
-        if not isinstance(row, Mapping) or set(row) not in {_REPLAY_ROW_BASE_KEYS, _REPLAY_ROW_OX_KEYS}:
+        if not isinstance(row, Mapping):
             raise R6Error(f"locked replay row {index} schema is not closed")
+        row_keys = set(row)
+        if row_keys not in {_REPLAY_ROW_BASE_KEYS, _REPLAY_ROW_OX_V1_KEYS, _REPLAY_ROW_OX_V2_KEYS}:
+            raise R6Error(f"locked replay row {index} schema is not closed")
+        is_ox = row_keys in {_REPLAY_ROW_OX_V1_KEYS, _REPLAY_ROW_OX_V2_KEYS}
+        is_legacy = row_keys == _REPLAY_ROW_OX_V1_KEYS
+        legacy_noncertifying |= is_legacy
         prefix = f"locked replay row {index}"
         for field in (
             "rally_id", "candidate_id", "session_cluster_id", "as_of", "dimension",
             "verdict", "authority", "route", "teacher_role", "model_digest",
             "generator_model_digest", "judge_model_digest", "counterfactual_producer",
             "counterfactual_revision", "source", "profile", "cohort",
-            "assignment_revision", "assignment_authority", "profile_contract_id",
-            "expires_at", "identity_revision", "request_revision", "group_id",
-            "label_split_plan_id", "label_record_sha256", "payload_digest", "work_id",
-            "split", "split_plan_id", "locked_test_evidence_ref",
+            "assignment_revision", "profile_contract_id", "expires_at", "identity_revision",
+            "request_revision", "group_id", "label_split_plan_id", "label_record_sha256",
+            "payload_digest", "work_id", "split", "split_plan_id", "locked_test_evidence_ref",
+            "source_commit", "source_tree_sha256", "source_ox_identity_sha256",
         ):
             _strict_text(row[field], f"{prefix}.{field}")
+        _assert_assignment_authority(row["assignment_authority"], f"{prefix}.assignment_authority")
         _strict_timestamp(row["as_of"], f"{prefix}.as_of")
         if row["expires_at"]:
             _strict_timestamp(row["expires_at"], f"{prefix}.expires_at")
@@ -2237,107 +2506,117 @@ def _assert_replay_rows_schema(
             raise R6Error(f"{prefix}.source is invalid")
         if row["split"] not in {"train", "validation", "test", "embargo"}:
             raise R6Error(f"{prefix}.split is invalid")
+        seen_splits.add(row["split"])
         for field in (
             "rally_id", "candidate_id", "session_cluster_id", "model_digest",
             "generator_model_digest", "judge_model_digest", "counterfactual_ref",
-            "a0_sha256", "a1_sha256", "label_record_sha256", "payload_digest",
-            "split_plan_id",
+            "a0_sha256", "a1_sha256", "label_record_sha256", "payload_digest", "split_plan_id",
         ):
             value = row[field]
             if value and (not isinstance(value, str) or len(value) != 64 or set(value) - _SHA):
+                raise R6Error(f"{prefix}.{field} identity is invalid")
+        for field, size in (("source_commit", 40), ("source_tree_sha256", 64), ("source_ox_identity_sha256", 64)):
+            value = row[field]
+            if value and (len(value) != size or set(value) - _SHA):
                 raise R6Error(f"{prefix}.{field} identity is invalid")
         if row["split_plan_id"] != lineage["split_plan_id"]:
             raise R6Error(f"{prefix}.split_plan_id is not bound to lineage")
         if row["profile_contract_id"] != lineage["profile_contract_id"]:
             raise R6Error(f"{prefix}.profile_contract_id is not bound to lineage")
         if lineage["profile_contract_id"]:
-            if row["profile"] != "ox-alpha-single-v1" or row["cohort"] != "ox-alpha-single-v1":
+            if row["profile"] != _OX_PROFILE or row["cohort"] != _OX_COHORT or row["route"] != "opencode-go/ox-alpha-free":
                 raise R6Error(f"{prefix}.profile/cohort is not bound to the R5 OX profile")
-            if row["route"] != "opencode-go/ox-alpha-free":
-                raise R6Error(f"{prefix}.route is not bound to the R5 OX profile")
-        elif row["profile"] != "local-triad-v1" or row["cohort"] != "local-triad-v1":
+        elif row["profile"] != _LOCAL_PROFILE or row["cohort"] != _LOCAL_COHORT:
             raise R6Error(f"{prefix}.profile/cohort is not bound to the R5 local profile")
-        if not isinstance(row["features"], Mapping) or set(row["features"]) != {
-            "query_chargram_coverage", "candidate_chargram_precision",
-        }:
+        if not isinstance(row["features"], Mapping) or set(row["features"]) != {"query_chargram_coverage", "candidate_chargram_precision"}:
             raise R6Error(f"{prefix}.features schema is invalid")
         for field in row["features"]:
             feature = row["features"][field]
             if isinstance(feature, bool) or not isinstance(feature, (int, float)) or not 0 <= feature <= 1:
                 raise R6Error(f"{prefix}.features type is invalid")
-        for field in ("route_identity", "generator_route_identity", "judge_route_identity", "payload_source"):
-            if not isinstance(row[field], Mapping):
-                raise R6Error(f"{prefix}.{field} type is invalid")
-        for field in ("route_identity", "generator_route_identity", "judge_route_identity"):
-            identity = row[field]
-            if set(identity) not in (set(), {"provider", "model", "location"}):
-                raise R6Error(f"{prefix}.{field} schema is not closed")
-            for identity_field in identity:
-                _strict_text(identity[identity_field], f"{prefix}.{field}.{identity_field}", allow_empty=False)
+        _assert_route_identity(row["route_identity"], f"{prefix}.route_identity", local=not bool(lineage["profile_contract_id"]))
+        _assert_route_identity(row["generator_route_identity"], f"{prefix}.generator_route_identity")
+        _assert_route_identity(row["judge_route_identity"], f"{prefix}.judge_route_identity")
         payload_source = row["payload_source"]
-        payload_keys = {
-            "rally_id", "candidate_id", "snapshot_sha256", "query_sha256",
-            "candidate_text_sha256", "context_sha256",
-        }
+        if not isinstance(payload_source, Mapping):
+            raise R6Error(f"{prefix}.payload_source type is invalid")
+        payload_keys = {"rally_id", "candidate_id", "snapshot_sha256", "query_sha256", "candidate_text_sha256", "context_sha256"}
         if set(payload_source) not in (set(), payload_keys, payload_keys | {"assignment"}):
             raise R6Error(f"{prefix}.payload_source schema is not closed")
         _strict_string_list(row["blind_orders"], f"{prefix}.blind_orders")
-        for field in (
-            "probe", "order_agreement", "negative_veto_conflict", "feature_parity",
-            "future_leakage", "locked_test_read_only",
-        ):
+        for field in ("probe", "order_agreement", "negative_veto_conflict", "feature_parity", "future_leakage", "locked_test_read_only"):
             _strict_bool(row[field], f"{prefix}.{field}")
-        if row["negative_veto_conflict"] or row["future_leakage"]:
-            raise R6Error(f"{prefix} contains a forbidden leakage/veto conflict")
+        if not row["feature_parity"] or row["negative_veto_conflict"] or row["future_leakage"]:
+            raise R6Error(f"{prefix} feature/leakage binding is invalid")
+        if row["split"] == "test":
+            if row["locked_test_read_only"] is not True or row["locked_test_evidence_ref"] != f"split-plan:{row['split_plan_id']}":
+                raise R6Error(f"{prefix} locked-test binding is invalid")
+        elif row["locked_test_read_only"] or row["locked_test_evidence_ref"]:
+            raise R6Error(f"{prefix} non-test locked-test fields are invalid")
+        if row["group_id"] in seen_groups and seen_groups[row["group_id"]] != row["split"]:
+            raise R6Error(f"{prefix} group crosses split boundaries")
+        seen_groups[row["group_id"]] = row["split"]
         if row["source"] == "counterfactual-label":
             if (
-                not row["counterfactual_ref"]
-                or not row["a0_sha256"]
-                or not row["a1_sha256"]
+                not row["counterfactual_ref"] or not row["a0_sha256"] or not row["a1_sha256"]
                 or row["counterfactual_producer"] != "chronovisor-local-blind-v1"
                 or row["counterfactual_revision"] != "two-order-locked-v1"
                 or row["order_agreement"] is not True
                 or set(row["blind_orders"]) != {"a0_first", "a1_first"}
                 or len(row["blind_orders"]) != 2
-                or not row["generator_route_identity"]
-                or not row["judge_route_identity"]
+                or not row["generator_route_identity"] or not row["judge_route_identity"]
                 or row["generator_route_identity"] == row["judge_route_identity"]
             ):
                 raise R6Error(f"{prefix} counterfactual binding is invalid")
             for identity_name in ("generator_route_identity", "judge_route_identity"):
+                _assert_route_identity(row[identity_name], f"{prefix}.{identity_name}", local=True)
                 identity = row[identity_name]
-                if (
-                    set(identity) != {"provider", "model", "location"}
-                    or identity["location"] != "local"
-                    or not identity["provider"]
-                    or not identity["model"]
-                ):
+                if set(identity) not in ({"provider", "model", "location"}, {"role", "provider", "model", "location"}):
                     raise R6Error(f"{prefix}.{identity_name} is invalid")
+            if row["assignment_authority"]["kind"] != "counterfactual":
+                raise R6Error(f"{prefix} counterfactual assignment authority is invalid")
         else:
-            if (
-                row["counterfactual_ref"]
-                or row["a0_sha256"]
-                or row["a1_sha256"]
-                or row["counterfactual_producer"]
-                or row["counterfactual_revision"]
-                or row["blind_orders"]
-            ):
+            if row["counterfactual_ref"] or row["a0_sha256"] or row["a1_sha256"] or row["counterfactual_producer"] or row["counterfactual_revision"] or row["blind_orders"]:
                 raise R6Error(f"{prefix} teacher row carries counterfactual fields")
-            route_identity = row["route_identity"]
+            if row["probe"] and (
+                not row["assignment_authority"]["repeat_pair_id"]
+                or row["assignment_authority"]["fixed_repeat"] is not True
+                or row["assignment_authority"]["order_swap"] is not True
+                or not row["assignment_authority"]["blind_order"]
+            ):
+                raise R6Error(f"{prefix} probe order-swap binding is invalid")
+            if row["probe"]:
+                pair_id = row["assignment_authority"]["repeat_pair_id"]
+                probe_pairs.setdefault(pair_id, set()).add(row["assignment_authority"]["blind_order"])
             if lineage["profile_contract_id"]:
-                if route_identity != {
-                    "provider": "opencode-go",
-                    "model": "opencode-go/ox-alpha-free",
-                    "location": "remote",
-                }:
+                if row["route_identity"] != {"provider": "opencode-go", "model": "opencode-go/ox-alpha-free", "location": "remote"}:
                     raise R6Error(f"{prefix} OX route identity is invalid")
-            elif route_identity.get("location") != "local":
+                if row["teacher_role"] != _OX_ROLE:
+                    raise R6Error(f"{prefix} OX teacher role is invalid")
+                if not is_legacy and not row.get("provider_receipt_sha256"):
+                    raise R6Error(f"{prefix} OX provider receipt is missing")
+            elif row["route_identity"].get("location") != "local":
                 raise R6Error(f"{prefix} local route identity is invalid")
-        if set(row) == _REPLAY_ROW_OX_KEYS:
+            elif row["route"] not in _LOCAL_ROLES or set(row["route_identity"]) != {"role", "provider", "model", "location"} or row["route_identity"].get("role") != row["route"]:
+                raise R6Error(f"{prefix} local route role identity is invalid")
+        if is_ox:
             for field in ("route_identity_exact", "group_identity_exact", "fixed_repeat", "fixed_split_plan", "order_swap"):
                 _strict_bool(row[field], f"{prefix}.{field}")
             if row["error_class"] is not None:
                 _strict_text(row["error_class"], f"{prefix}.error_class")
+            for field in ("route_digest", "prompt_sha256", "schema_sha256", "request_sha256", "provider_request_sha256"):
+                _strict_id_or_empty(row[field], f"{prefix}.{field}")
+            if is_legacy:
+                _strict_id_or_empty(row["provider_response_request_sha256"], f"{prefix}.provider_response_request_sha256")
+            else:
+                _strict_id_or_empty(row["provider_receipt_sha256"], f"{prefix}.provider_receipt_sha256")
+                if row["provider_receipt_sha256"] and row["provider_receipt_sha256"] == row["provider_request_sha256"]:
+                    raise R6Error(f"{prefix} provider receipt is not distinct from request")
+    if not {"train", "validation", "test"}.issubset(seen_splits):
+        raise R6Error("locked replay split plan is incomplete")
+    if any(orders != {"a_first", "b_first"} for orders in probe_pairs.values()):
+        raise R6Error("locked replay order-swap pairs are incomplete")
+    return legacy_noncertifying
 
 
 def _assert_source_snapshot_schema(value: object) -> None:
@@ -2386,7 +2665,8 @@ def _assert_runtime_schema(value: object, *, source: Mapping[str, Any] | None = 
 
 
 def _assert_r5_schema(value: object) -> None:
-    expected = {"passed", "reason", "baseline_id", "raw_watermark", "label_head", "cohort_sha256", "split_plan_id", "profile_contract_id"}
+    base = {"passed", "reason", "baseline_id", "raw_watermark", "label_head", "cohort_sha256", "split_plan_id", "profile_contract_id"}
+    expected = base | {"r5_artifact_id", "r5_artifact_seal_sha256", "r5_dataset_policy_sha256"} if isinstance(value, Mapping) and value.get("passed") is True else base
     if not isinstance(value, Mapping) or set(value) != expected:
         raise R6Error("R5 binding schema is not closed")
     _strict_bool(value["passed"], "R5 passed")
@@ -2394,6 +2674,9 @@ def _assert_r5_schema(value: object) -> None:
     for field in ("baseline_id", "raw_watermark", "label_head", "cohort_sha256", "split_plan_id"):
         _artifact_id(value[field])
     _strict_id_or_empty(value["profile_contract_id"], "R5 profile contract")
+    if value["passed"]:
+        for field in ("r5_artifact_id", "r5_artifact_seal_sha256", "r5_dataset_policy_sha256"):
+            _artifact_id(value[field])
 
 
 def _assert_output_artifact_envelopes(
@@ -2491,7 +2774,8 @@ def _assert_output_artifact_envelopes(
     if lineage["feature_revision"] != "recall-distill-text-v2":
         raise R6Error("formal policy lineage feature revision is invalid")
     _strict_id_or_empty(lineage["profile_contract_id"], "formal policy lineage profile contract")
-    _assert_replay_rows_schema(replay["training_rows"], lineage=lineage)
+    if _assert_replay_rows_schema(replay["training_rows"], lineage=lineage):
+        raise R6Error("legacy v1 replay rows are non-certifying")
     if replay["training_rows_sha256"] != _digest(replay["training_rows"]):
         raise R6Error("formal replay training rows digest is invalid")
     if replay["policy_sha256"] != _policy_payload_digest(policy):
@@ -2695,6 +2979,7 @@ def _assert_candidate_artifact_schemas(
     state: Mapping[str, Any] | None = None,
     r5: Mapping[str, Any] | None = None,
     heads: Mapping[str, str] | None = None,
+    root: Path | None = None,
 ) -> None:
     """Close immutable worker artifacts to their official v1/v2 field contracts."""
 
@@ -2812,7 +3097,28 @@ def _assert_candidate_artifact_schemas(
     if replay.get("split_revision") != "grouped-rolling-v1":
         raise R6Error("locked replay split revision is invalid")
     lineage = policy["lineage"]
-    _assert_replay_rows_schema(replay["training_rows"], lineage=lineage)
+    if _assert_replay_rows_schema(replay["training_rows"], lineage=lineage):
+        raise R6Error("legacy v1 replay rows are non-certifying")
+    if root is not None:
+        verifier = getattr(module, "_authoritative_materialized_row_binding", None)
+        if not callable(verifier):
+            raise R6Error("authoritative materialized row verifier is unavailable")
+        split_plan: Mapping[str, Any] | None = None
+        reader = getattr(module, "_read_split_plan", None)
+        if callable(reader):
+            try:
+                candidate_plan = reader(root)
+            except Exception as exc:
+                raise R6Error("authoritative split plan read failed") from exc
+            if isinstance(candidate_plan, Mapping):
+                split_plan = candidate_plan
+        for index, row in enumerate(replay["training_rows"]):
+            try:
+                valid = verifier(root, row, split_plan)
+            except Exception as exc:
+                raise R6Error(f"authoritative row {index} verification failed") from exc
+            if valid is not True:
+                raise R6Error(f"authoritative row {index} binding is invalid")
     if replay["training_rows_sha256"] != _digest(replay["training_rows"]):
         raise R6Error("locked replay training rows digest is invalid")
     if replay["policy_sha256"] != _policy_payload_digest(policy):
@@ -2872,6 +3178,7 @@ def _official_candidate(
     before_id: str,
     before_snapshot: Mapping[str, str],
     before_candidate_ledger: Mapping[str, Any],
+    root: Path | None = None,
 ) -> dict[str, Any]:
     """Read official store artifacts and rerun its lineage verifier."""
 
@@ -2949,7 +3256,7 @@ def _official_candidate(
         schema="chronovisor.recall-distill-run.v1",
     )
     state = store.read_sealed(store.distillation_dir(clone) / store.STATE_FILE, schema=store.DISTILLATION_SCHEMA)
-    _assert_candidate_artifact_schemas(module, pointer, policy, replay, run)
+    _assert_candidate_artifact_schemas(module, pointer, policy, replay, run, root=root)
     if (
         run.get("kind") != "bounded-chunk"
         or run.get("artifact_id") != run_id
@@ -2976,6 +3283,7 @@ def _official_candidate(
         state=state,
         r5=r5,
         heads=heads,
+        root=root,
     )
     after_snapshot = _worker_snapshot(clone)
     _require_candidate_newness(
@@ -3581,10 +3889,12 @@ def _assert_completion_schema(value: Mapping[str, Any]) -> None:
         _strict_int(value[field], f"completion {field}")
 
 
-def run_once(*, production: Path, source: Path, output: Path, source_commit: str) -> dict[str, Any]:
+def run_once(*, production: Path, source: Path, output: Path, source_commit: str, r5_artifact: Path) -> dict[str, Any]:
     _reject_ambient_git_env()
     _assert_guard_modules()
     assert_root_matrix(production, source, output)
+    _assert_no_overlap(production, source, output, r5_artifact)
+    r5_receipt = _read_r5_artifact(r5_artifact)
     before_source = source_snapshot(source)
     if before_source["head"] != source_commit or before_source["status_count"] != 0:
         raise R6Error("source identity is not exact and clean")
@@ -3609,7 +3919,11 @@ def run_once(*, production: Path, source: Path, output: Path, source_commit: str
         with _clone_runtime_context(clone, source):
             try:
                 module, runtime = _load_runtime(source, clone)
-                preflight = _r5_preflight(module, clone, before_source)
+                preflight = _bind_r5_preflight(
+                    _r5_preflight(module, clone, before_source), r5_receipt,
+                    module=module, clone=clone, source=before_source,
+                    source_root=source, production=production,
+                )
             except (R6Error, OSError, ValueError) as exc:
                 after_production = _target_identity(production)
                 if after_production != before_production or source_snapshot(source) != before_source:
@@ -3650,10 +3964,11 @@ def run_once(*, production: Path, source: Path, output: Path, source_commit: str
                 candidate_before_id = _candidate_pointer_id(module, clone)
                 worker_before = _worker_snapshot(clone)
                 candidate_ledger_before = _candidate_ledger_state(module.store, clone)
-                worker = _official_chunk_isolated(source, clone)
+                worker = _official_chunk_isolated(source, clone, r5_binding=preflight)
                 candidate = _official_candidate(
                     module, clone, preflight, worker, before_id=candidate_before_id,
                     before_snapshot=worker_before, before_candidate_ledger=candidate_ledger_before,
+                    root=clone,
                 )
             except (R6Error, OSError, ValueError) as exc:
                 after_production = _target_identity(production)
@@ -3673,17 +3988,22 @@ def run_once(*, production: Path, source: Path, output: Path, source_commit: str
                     raise R6Error("second APFS clone identity failed")
                 with _clone_runtime_context(clone_second, source):
                     module_second, _ = _load_runtime(source, clone_second)
-                    repeat_r5 = _r5_preflight(module_second, clone_second, before_source)
+                    repeat_r5 = _bind_r5_preflight(
+                        _r5_preflight(module_second, clone_second, before_source), r5_receipt,
+                        module=module_second, clone=clone_second, source=before_source,
+                        source_root=source, production=production,
+                    )
                     if repeat_r5 != preflight:
                         raise R6Error("second clone R5 facts differ")
                     repeat_before_id = _candidate_pointer_id(module_second, clone_second)
                     repeat_worker_before = _worker_snapshot(clone_second)
                     repeat_candidate_ledger_before = _candidate_ledger_state(module_second.store, clone_second)
-                    repeat_worker = _official_chunk_isolated(source, clone_second)
+                    repeat_worker = _official_chunk_isolated(source, clone_second, r5_binding=repeat_r5)
                     repeat_candidate = _official_candidate(
                         module_second, clone_second, repeat_r5, repeat_worker,
                         before_id=repeat_before_id, before_snapshot=repeat_worker_before,
                         before_candidate_ledger=repeat_candidate_ledger_before,
+                        root=clone_second,
                     )
                 first_state_full_sha256 = _digest(candidate["state"])
                 first_state_stable_sha256 = _stable_state_digest(candidate["state"])
@@ -3699,6 +4019,8 @@ def run_once(*, production: Path, source: Path, output: Path, source_commit: str
                     or second_state_stable_sha256 != first_state_stable_sha256
                 ):
                     raise R6Error("second frozen clone is not idempotent")
+                if _read_r5_artifact(r5_artifact) != r5_receipt:
+                    raise R6Error("R5 artifact changed during clone evaluation")
             except (R6Error, OSError, ValueError) as exc:
                 after_production = _target_identity(production)
                 if after_production != before_production or source_snapshot(source) != before_source:
@@ -3787,6 +4109,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--production-root", type=Path)
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--source-commit")
+    parser.add_argument("--r5-artifact", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--clone-root", type=Path)
     parser.add_argument("--child-capability")
@@ -3799,10 +4122,16 @@ def main(argv: list[str] | None = None) -> int:
             clone=args.clone_root.resolve(strict=True),
             capability=args.child_capability,
         )
-    if args.production_root is None or args.source_commit is None or args.output is None:
-        parser.error("--production-root, --source-commit, and --output are required")
+    if args.production_root is None or args.source_commit is None or args.output is None or args.r5_artifact is None:
+        parser.error("--production-root, --source-commit, --r5-artifact, and --output are required")
     try:
-        result = run_once(production=args.production_root.resolve(strict=True), source=args.source_root.resolve(strict=True), output=args.output.resolve(strict=False), source_commit=args.source_commit)
+        result = run_once(
+            production=args.production_root.resolve(strict=True),
+            source=args.source_root.resolve(strict=True),
+            output=args.output.resolve(strict=False),
+            source_commit=args.source_commit,
+            r5_artifact=args.r5_artifact,
+        )
     except (R6Error, OSError, ValueError) as exc:
         print(f"r6 harness failed: {str(exc).split(':', 1)[0]}", file=sys.stderr)
         return 2
