@@ -1913,6 +1913,12 @@ POST_BASELINE_RETIRED_SITE_IDS = (
     "arch:d9390b4c1112b88c29b9bca6e1e621f87a21c08a2f8d2d0773b9b73a2c8bf3e1",
     "arch:086b86f00b5a6439068449659d1bb5c5b6e036d5ce82e5c1279ed07b4865124e",
 )
+DASHBOARD_RAW_COLLECTION_RETIRED_SITE_IDS = (
+    # RawStore imports moved from _save_history_snapshot into
+    # _collect_raw_entries when the function was brought back under its cap.
+    "arch:60ce2a1d9dfaef1371e40df6ca9c194671f1f13a83e880e6e248b314515039af",
+    "arch:c0b2152c08a933c8992a36259e614522217617fd1c9e39a27552e5ed673fe2eb",
+)
 C2_RETIRED_TRIAGE_NATIVE_SITE_IDS = (
     "arch:16ff10dace60e57610441edf83d3adf2c0c54bdfc6c5ba8d2e1afe901e7f4b4e",
     "arch:4a25416288260ad2586b4ddf78a504bc1ff61a79fb65c31bec4367910dd09657",
@@ -2191,6 +2197,7 @@ RETIREMENT_HISTORY = {
                 *POST_BASELINE_RETIRED_SITE_IDS,
                 *C2_RETIRED_TRIAGE_NATIVE_SITE_IDS,
                 *PI_RETIRED_EVIDENCE_RECONSTRUCTION_SITE_IDS,
+                *DASHBOARD_RAW_COLLECTION_RETIRED_SITE_IDS,
             )
         )
     ),
@@ -2614,7 +2621,7 @@ def test_baseline_labels_repository_contract_hash_semantics(
     schema = hashes["production_schema_manifest"]
     signature = hashes["production_signature_manifest"]
     assert authority["lane_contract_case_manifest_sha256"] == (
-        "29986e234b61e75f6ec3ec6232cf5cdbedb34e61c3c422410f3c9757579c3b76"
+        "78899b9605406c6692b7ea4ecdb2faa94eec17da9899af612e9a4dc38002832f"
     )
     assert schema["canonical_mapping_sha256"]["sha256"] == (
         "e83ea1675494d831585ad74ec3dcadcd1cb05ffb97af9ee15582b62140aeaf52"
@@ -2943,7 +2950,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 44
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1490
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1549
     assert {
         field: counts[field]
         for field in (
@@ -2956,7 +2963,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 44,
-        "cross_domain_sites": 1490,
+        "cross_domain_sites": 1549,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
