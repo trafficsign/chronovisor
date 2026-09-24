@@ -24,7 +24,7 @@ MARKDOWN_SECTION_HEADING_RE = re.compile(
 MARKDOWN_FENCE_RE = re.compile(r"^ {0,3}(?P<marker>`{3,}|~{3,})")
 
 
-def markdown_sections(text: str) -> tuple[MarkdownSection, ...]:
+def markdown_sections(text: str, *, max_level: int = 2) -> tuple[MarkdownSection, ...]:
     """Split Markdown at H1/H2 boundaries outside fenced code blocks.
 
     Sections are a lossless partition of ``text``: concatenating their
@@ -32,10 +32,18 @@ def markdown_sections(text: str) -> tuple[MarkdownSection, ...]:
     (normally frontmatter) is represented as a section with ``heading=None``.
     Lower-level headings remain inside their enclosing H2 section so selection
     never detaches a subsection from its top-level semantic unit.
+    ``max_level=3`` also splits at H3 (used to break one oversized section).
     """
 
     if not text:
         return ()
+    heading_re = (
+        MARKDOWN_SECTION_HEADING_RE
+        if max_level == 2
+        else re.compile(
+            MARKDOWN_SECTION_HEADING_RE.pattern.replace("#{1,2}", f"#{{1,{max_level}}}")
+        )
+    )
     lines = text.splitlines(keepends=True)
     heading_rows: list[tuple[int, str]] = []
     fence_char: str | None = None
@@ -61,7 +69,7 @@ def markdown_sections(text: str) -> tuple[MarkdownSection, ...]:
             continue
         if fence_char is not None:
             continue
-        heading_match = MARKDOWN_SECTION_HEADING_RE.match(line)
+        heading_match = heading_re.match(line)
         if heading_match is not None:
             heading_rows.append(
                 (

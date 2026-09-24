@@ -209,15 +209,28 @@ def prepare_split_plan(
     if split_children(text):
         raise SplitPlanError(f"{page_key} is already a split hub")
     meta, _body = frontmatter.parse(text)
-    if meta.get("split_from"):
-        # A child that is still oversized holds one huge section; re-splitting
-        # it only peels off its H1 and nests hubs forever.
-        raise SplitPlanError(f"{page_key} is a split child")
     preface, sections, duplicates = unique_sections(text)
+    # A single section larger than a child is broken at its H3 boundaries.
+    sections = [
+        piece
+        for section in sections
+        for piece in (
+            markdown_sections(section.content, max_level=3)
+            if len(section.content.encode("utf-8")) > target_bytes
+            else (section,)
+        )
+    ]
     if preface is None or not meta:
         raise SplitPlanError("page lacks frontmatter to keep on the hub")
-    if len(sections) < 2:
-        raise SplitPlanError("page has fewer than two unique sections")
+    # A child's leading "# title" line is synthetic; peeling it off alone would
+    # nest a useless hub, so it does not count as a section of its own.
+    real = [s for s in sections if s.content.strip() != (s.heading or "").strip()]
+    if len(real) < 2:
+        raise SplitPlanError(
+            f"{page_key} is a split child without two real sections"
+            if meta.get("split_from")
+            else "page has fewer than two unique sections"
+        )
 
     if groups is None:
         groups = [

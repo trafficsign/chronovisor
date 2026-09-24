@@ -102,8 +102,9 @@ def test_split_keeps_every_section_once_and_retargets_anchors(tmp_path: Path) ->
 
     with pytest.raises(SplitPlanError, match="already a split hub"):
         prepare_split_plan(tmp_path, page_key="big")
+    five = next(name for name, text in texts.items() if "## 5. Topic 5" in text)
     with pytest.raises(SplitPlanError, match="split child"):
-        prepare_split_plan(tmp_path, page_key=children[0].removesuffix(".md"))
+        prepare_split_plan(tmp_path, page_key=five.removesuffix(".md"), target_bytes=1)
 
 
 def test_split_rolls_back_every_owned_file_on_failure(
@@ -204,3 +205,22 @@ def test_link_regex_is_linear_on_unclosed_long_targets() -> None:
         text, source_namespace="pages", source_path="t/a.md", rewrite=lambda *_: None
     )
     assert time.monotonic() - started < 1.0
+
+
+def test_single_oversized_h2_is_split_at_h3(tmp_path: Path) -> None:
+    body = "# Log\n\n## History\nlead\n" + "".join(
+        f"### Day {n}\n" + f"entry {n}\n" * 30 for n in range(1, 7)
+    )
+    page = tmp_path / "pages" / "topic" / "daily.md"
+    _write(page, "Log", body)
+    PageRegistry(tmp_path).ensure_manifest()
+
+    plan = prepare_split_plan(tmp_path, page_key="daily", target_bytes=400)
+    assert apply_split_plan(tmp_path, plan, activate=True)["status"] == "committed"
+
+    children = split_children(page.read_text(encoding="utf-8"))
+    joined = "".join((page.parent / c).read_text(encoding="utf-8") for c in children)
+    assert len(children) >= 3
+    assert "## History\nlead\n" in joined
+    for n in range(1, 7):
+        assert joined.count(f"### Day {n}\n" + f"entry {n}\n" * 30) == 1

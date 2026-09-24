@@ -12287,6 +12287,18 @@ class TestTriagePlanSchema:
             {"type": "update", "filename": "memory/big-part-02.md"}
         ]
 
+        _seed_page(
+            isolated_wiki,
+            "memory/big-part-02.md",
+            page.format("Big 2", "split_children:\n- big-part-02-part-01.md\n"),
+        )
+        _seed_page(
+            isolated_wiki, "memory/big-part-02-part-01.md", page.format("Big 2.1", "")
+        )
+        assert ingest._normalize_triage_plan([operation]) == [
+            {"type": "update", "filename": "memory/big-part-02-part-01.md"}
+        ]
+
     def test_missing_update_without_summary_gets_neutral_create_topic(
         self, isolated_wiki: Path
     ) -> None:

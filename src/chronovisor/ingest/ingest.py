@@ -1137,14 +1137,19 @@ def _redirect_split_hub_update(op: dict, hub_path: Path) -> dict:
     """Send updates for a split hub to its newest child instead of regrowing it."""
     from chronovisor.core.markdown_sections import split_children
 
-    try:
-        children = split_children(hub_path.read_text(encoding="utf-8"))
-    except OSError:
-        return op
-    if not children:
-        return op
-    child = hub_path.parent / children[-1]
-    if not child.is_file():
+    child = hub_path
+    for _depth in range(8):  # nested hubs: an oversized child split again
+        try:
+            children = split_children(child.read_text(encoding="utf-8"))
+        except OSError:
+            return op
+        if not children:
+            break
+        nxt = child.parent / children[-1]
+        if not nxt.is_file():
+            return op
+        child = nxt
+    if child == hub_path:
         return op
     redirected = dict(op)
     redirected["filename"] = _relative_page_filename(child)
