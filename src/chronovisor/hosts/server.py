@@ -971,6 +971,12 @@ def _direct_search_hits(
     return direct_hits
 
 
+# Hubs of split pages link every child; unbounded one-hop expansion let a
+# single hub flood the response.
+_EXPANDED_PER_HIT = 3
+_EXPANDED_TOTAL = 20
+
+
 def _expanded_search_hits(
     direct_hits: list[dict[str, Any]],
     *,
@@ -989,7 +995,10 @@ def _expanded_search_hits(
     seen = {hit["page_id"] for hit in direct_hits}
     target_tags = set(tag_filter)
     for hit in direct_hits:
+        taken = 0
         for link in store.outlinks(hit["page_id"]):
+            if taken >= _EXPANDED_PER_HIT or len(expanded_hits) >= _EXPANDED_TOTAL:
+                break
             if link in seen:
                 continue
             meta = store.meta(link)
@@ -1005,6 +1014,7 @@ def _expanded_search_hits(
                 if not matches:
                     continue
             seen.add(link)
+            taken += 1
             identity = registry_row(link)
             expanded_hits.append(
                 {
@@ -1058,6 +1068,28 @@ def _search_filters_applied(
     if classification_status:
         filters["classification_status"] = classification_status
     return filters
+
+
+def _retrieval_summary(trace: object, hits: list) -> object:
+    """Bound the retrieval trace in MCP output; the full trace is logged."""
+
+    if not isinstance(trace, dict):
+        return trace
+    shown = {str(hit.get("page_id")) for hit in hits if isinstance(hit, dict)}
+    summary = dict(trace)
+    channels = trace.get("channels")
+    if isinstance(channels, dict):
+        summary["channels"] = {
+            name: {"count": len(ids), "top": list(ids[:5])}
+            if isinstance(ids, list)
+            else ids
+            for name, ids in channels.items()
+        }
+    paths = trace.get("paths")
+    if isinstance(paths, dict):
+        summary["paths"] = {k: v for k, v in paths.items() if k in shown}
+        summary["path_count"] = len(paths)
+    return summary
 
 
 @mcp.tool()
@@ -1243,7 +1275,9 @@ def chronovisor_search(
                 ),
             },
             "reranker": reranker_meta,
-            "retrieval": retrieval_trace,
+            "retrieval": _retrieval_summary(
+                retrieval_trace, [*direct_hits, *expanded_hits]
+            ),
             "direct_hits": direct_hits,
             "provisional_hits": provisional_hits,
             "expanded_hits": expanded_hits,

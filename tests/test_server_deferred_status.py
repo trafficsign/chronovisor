@@ -185,3 +185,40 @@ def test_read_content_window_pages_oversized_bodies() -> None:
 
     capped = server._content_window("y" * 100_000, 0, 10**9)
     assert len(capped["content"]) == server.READ_MAX_CHARS
+
+
+def test_search_expansion_and_retrieval_trace_are_bounded() -> None:
+    from chronovisor.hosts import server
+
+    class Store:
+        def outlinks(self, page_id):
+            return [f"{page_id}-part-{n:02d}" for n in range(30)]
+
+        def meta(self, page_id):
+            return {"title": page_id, "updated": "2026-09-24"}
+
+        def tags(self, page_id):
+            return []
+
+    hits = [{"page_id": f"hub{n}", "score": 1.0} for n in range(10)]
+    expanded, edges = server._expanded_search_hits(
+        hits,
+        depth=1,
+        store=Store(),
+        registry_row=lambda _p: {},
+        tag_filter=[],
+        tag_match="any",
+    )
+    assert len(expanded) == len(edges) == server._EXPANDED_TOTAL
+    assert sum(hit["via"] == ["hub0"] for hit in expanded) == server._EXPANDED_PER_HIT
+
+    trace = {
+        "channels": {"lexical": [f"p{n}" for n in range(100)]},
+        "paths": {"p1": {"hops": 1}, "p2": {"hops": 1}},
+    }
+    summary = server._retrieval_summary(trace, [{"page_id": "p1"}])
+    assert summary["channels"]["lexical"] == {
+        "count": 100,
+        "top": ["p0", "p1", "p2", "p3", "p4"],
+    }
+    assert summary["paths"] == {"p1": {"hops": 1}} and summary["path_count"] == 2
