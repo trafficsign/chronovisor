@@ -2723,6 +2723,7 @@ def _collect_raw_entries(
     raw_dir: Path, raw_paths: list[Path] | None
 ) -> tuple[list[tuple[Path, str, int, date | None]], list[Path]]:
     """Return (raw save entries, logical raw paths) for the save history."""
+    from chronovisor.core.raw_store import RawStore
 
     raw_entries: list[tuple[Path, str, int, date | None]] = []
     effective_raw_paths: list[Path] = []
@@ -2731,8 +2732,6 @@ def _collect_raw_entries(
         units_by_name: dict[str, Any] = {}
         if raw_dir.exists():
             try:
-                from chronovisor.core.raw_store import RawStore
-
                 units_by_name = {
                     unit.raw_id: unit for unit in RawStore(raw_dir).iter_units()
                 }
@@ -2758,8 +2757,6 @@ def _collect_raw_entries(
                 )
             )
     elif raw_dir.exists():
-        from chronovisor.core.raw_store import RawStore
-
         store = RawStore(raw_dir)
         reference_dir = raw_dir.parent / "runtime" / "raw-projections" / "parents"
         for unit in store.iter_units():

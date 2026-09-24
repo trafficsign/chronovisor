@@ -43,8 +43,11 @@ from chronovisor.core.markdown_sections import (
 from chronovisor.core.page_mutation import chronovisor_mutation_lock
 from chronovisor.core.timeutil import utc_now as _now
 from chronovisor.ingest.page_registry import PageRegistry
+from chronovisor.recall.collection_authority import OVERSIZED_PAGE_BYTES
 from chronovisor.recall.merge_ledger import MergeLedger
 from chronovisor.recall.merge_transaction import _write_preimage
+
+__all__ = ["OVERSIZED_PAGE_BYTES", "apply_split_plan", "prepare_split_plan"]
 
 PLAN_SCHEMA = "chronovisor.split-plan.v1"
 CHILD_TARGET_BYTES = 30_000

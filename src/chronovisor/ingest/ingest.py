@@ -38,8 +38,11 @@ from chronovisor.core.index_store import (
     stable_indexed_document_path,
 )
 from chronovisor.core.jobs import JobStatus, job_store
-from chronovisor.core.markdown_sections import MarkdownSection as _MarkdownSection
-from chronovisor.core.markdown_sections import markdown_sections as _markdown_sections
+from chronovisor.core.markdown_sections import (
+    MarkdownSection,
+    markdown_sections,
+    split_children,
+)
 from chronovisor.core.ollama import (
     GENERATE_SYSTEM_PROMPT as GENERATE_SYSTEM_PROMPT,
 )
@@ -1135,8 +1138,6 @@ def _normalize_triage_plan(plan: list[dict]) -> list[dict]:
 
 def _redirect_split_hub_update(op: dict, hub_path: Path) -> dict:
     """Send updates for a split hub to its newest child instead of regrowing it."""
-    from chronovisor.core.markdown_sections import split_children
-
     child = hub_path
     for _depth in range(8):  # nested hubs: an oversized child split again
         try:
@@ -1507,7 +1508,7 @@ class _CompactUpdateContext:
     page_sha256: str
     page_bytes: int
     section_count: int
-    selected_sections: tuple[_MarkdownSection, ...]
+    selected_sections: tuple[MarkdownSection, ...]
 
 
 @dataclass(frozen=True)
@@ -1535,7 +1536,7 @@ def _semantic_relevance_text(raw_content: str) -> str:
 
 
 def _section_relevance_score(
-    section: _MarkdownSection,
+    section: MarkdownSection,
     *,
     explicit_tokens: set[str],
     raw_tokens: set[str],
@@ -1553,8 +1554,8 @@ def _render_compact_update_context(
     *,
     page_id: str,
     page_text: str,
-    sections: tuple[_MarkdownSection, ...],
-    selected: tuple[_MarkdownSection, ...],
+    sections: tuple[MarkdownSection, ...],
+    selected: tuple[MarkdownSection, ...],
 ) -> str:
     page_bytes = len(page_text.encode("utf-8"))
     page_sha256 = hashlib.sha256(page_text.encode("utf-8")).hexdigest()
@@ -1626,7 +1627,7 @@ def _build_compact_update_context(
     if existing_path is None:
         return None
     page_text = _read_exact_utf8(existing_path)
-    sections = _markdown_sections(page_text)
+    sections = markdown_sections(page_text)
     if not sections or "".join(section.content for section in sections) != page_text:
         return None
 
@@ -1680,7 +1681,7 @@ def _build_compact_update_context(
         # very context needed to avoid a duplicate or contradictory append.
         return None
 
-    selected: list[_MarkdownSection] = []
+    selected: list[MarkdownSection] = []
     selected_bytes = 0
     for section, relevance_score in ranked:
         if relevance_score <= 0:

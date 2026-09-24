@@ -686,7 +686,6 @@ def run_page_splits(
 ) -> dict[str, Any]:
     """Plan (and with ``activate`` apply) splits of the largest oversized pages."""
     from chronovisor.recall import split_transaction
-    from chronovisor.recall.collection_authority import OVERSIZED_PAGE_BYTES
 
     registry = PageRegistry(root)
     candidates = []
@@ -696,7 +695,7 @@ def run_page_splits(
             size = path.stat().st_size
         except OSError:
             continue
-        if size >= OVERSIZED_PAGE_BYTES:
+        if size >= split_transaction.OVERSIZED_PAGE_BYTES:
             candidates.append((size, uid, str(row.get("path"))))
     candidates.sort(reverse=True)
     results = []

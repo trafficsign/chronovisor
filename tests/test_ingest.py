@@ -13003,7 +13003,7 @@ class TestOversizedAppendOnlyUpdateContext:
             "### Nested evidence\nstays in the complete H2 section\n"
         )
 
-        sections = ingest._markdown_sections(page)
+        sections = ingest.markdown_sections(page)
 
         assert "".join(section.content for section in sections) == page
         assert [section.heading for section in sections] == [
@@ -13039,7 +13039,7 @@ class TestOversizedAppendOnlyUpdateContext:
         )
         relevant = next(
             section
-            for section in ingest._markdown_sections(page_text)
+            for section in ingest.markdown_sections(page_text)
             if section.heading == "## Product value"
         )
         op = {
@@ -13069,7 +13069,7 @@ class TestOversizedAppendOnlyUpdateContext:
         assert '"## fenced heading"' not in first.text
         assert f"page_bytes: {len(page_text.encode('utf-8'))}" in first.text
         assert hashlib.sha256(page_text.encode("utf-8")).hexdigest() in first.text
-        for section in ingest._markdown_sections(page_text):
+        for section in ingest.markdown_sections(page_text):
             digest_b64url = base64.urlsafe_b64encode(
                 bytes.fromhex(section.sha256)
             ).rstrip(b"=")
@@ -13159,7 +13159,7 @@ class TestOversizedAppendOnlyUpdateContext:
             )
         )
 
-        sections = ingest._markdown_sections(page_text)
+        sections = ingest.markdown_sections(page_text)
         outline = ingest._render_compact_update_context(
             page_id="large-outline",
             page_text=page_text,
@@ -13206,7 +13206,7 @@ class TestOversizedAppendOnlyUpdateContext:
             + "## Needle evidence\nneedle evidence body\n"
         )
         _seed_page(isolated_wiki, "memory/large-outline.md", page_text)
-        sections = ingest._markdown_sections(page_text)
+        sections = ingest.markdown_sections(page_text)
         outline = ingest._render_compact_update_context(
             page_id="large-outline",
             page_text=page_text,
@@ -13625,7 +13625,7 @@ class TestOversizedAppendOnlyUpdateContext:
             page_bytes=len(huge),
             section_count=1,
             selected_sections=(
-                ingest._MarkdownSection(
+                ingest.MarkdownSection(
                     start_line=1,
                     end_line=1,
                     heading="# Too large",
