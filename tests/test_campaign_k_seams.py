@@ -113,7 +113,23 @@ def test_frontier_attempt_outcome_is_deterministic() -> None:
 
 
 def test_content_correction_audit_row_is_a_pure_projection() -> None:
-    mutation = SimpleNamespace(correction_id="correction-1")
+
+    from chronovisor.core import page_mutation
+
+    before = b"---\ntitle: P\n---\nold value\n"
+    after = b"---\ntitle: P\n---\nnew value\n"
+    mutation = page_mutation.PreparedPageMutation(
+        page_id="p",
+        path=Path("p.md"),
+        correction_id="correction-1",
+        original=before,
+        updated=after,
+        original_sha256=hashlib.sha256(before).hexdigest(),
+        updated_sha256=hashlib.sha256(after).hexdigest(),
+        replacements=(
+            page_mutation.ExactReplacement(old_text="old value", new_text="new value"),
+        ),
+    )
     row = content_correction._content_correction_audit_row(
         key="item-1",
         event={"source_decision_id": "decision-1"},
@@ -130,6 +146,9 @@ def test_content_correction_audit_row_is_a_pure_projection() -> None:
     assert row["correction_id"] == "correction-1"
     assert row["classification"] == "wrong_retrieval"
     assert row["pages"] == ["p"]
+    assert row["mutation_evidence_refs"] == [
+        page_mutation.mutation_evidence_ref(mutation)
+    ]
 
 
 def test_review_artifact_projection_requires_exact_applied_postimages() -> None:

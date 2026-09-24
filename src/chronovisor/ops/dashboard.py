@@ -2719,28 +2719,11 @@ def _flow_series_snapshot(
     }
 
 
-def _save_history_snapshot(
-    days: int = 371,
-    today: date | None = None,
-    *,
-    raw_paths: list[Path] | None = None,
-    deferred_statuses: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    explicit_day = today is not None
-    end = today or datetime.now(DASHBOARD_TIMEZONE).date()
-    start = end - timedelta(days=max(1, days) - 1)
-    flow_start = end - timedelta(days=29)
-    rows = {
-        (start + timedelta(days=offset)).isoformat(): _new_save_day(
-            start + timedelta(days=offset)
-        )
-        for offset in range((end - start).days + 1)
-    }
+def _collect_raw_entries(
+    raw_dir: Path, raw_paths: list[Path] | None
+) -> tuple[list[tuple[Path, str, int, date | None]], list[Path]]:
+    """Return (raw save entries, logical raw paths) for the save history."""
 
-    raw_dir = CHRONOVISOR_ROOT / "raw"
-    raw_files: dict[str, dict[str, Any]] = {}
-    flow_raw_files: dict[str, dict[str, Any]] = {}
-    raw_status: dict[str, str] = {}
     raw_entries: list[tuple[Path, str, int, date | None]] = []
     effective_raw_paths: list[Path] = []
     if raw_paths is not None:
@@ -2801,13 +2784,78 @@ def _save_history_snapshot(
         artifact_dir = raw_dir.parent / "runtime" / "raw-projections" / "artifacts"
         if artifact_dir.exists():
             effective_raw_paths.extend(sorted(artifact_dir.glob("*.md")))
+    return raw_entries, effective_raw_paths
+
+
+def _completion_log_events(
+    record: dict[str, Any], per_raw: Any, processed_files: Any
+) -> list[tuple[object, tuple[str, ...]]]:
+    """Source files a completion-log record finished (per-raw when present)."""
+
+    events: list[tuple[object, tuple[str, ...]]] = []
+    if per_raw:
+        for item in per_raw:
+            if not isinstance(item, dict):
+                continue
+            item_deferred = item.get("deferred") is True or (
+                isinstance(item.get("supervision"), dict)
+                and item["supervision"].get("terminal_deferred") is True
+            )
+            item_continued = item.get("continued") is True
+            if (
+                item.get("succeeded") is not True
+                or item_deferred
+                or item_continued
+            ):
+                continue
+            names = item.get("source_files")
+            if not isinstance(names, list):
+                names = [item.get("filename")]
+            source_names = tuple(
+                name for name in names if isinstance(name, str)
+            )
+            if source_names:
+                events.append(
+                    (record.get("timestamp"), source_names)
+                )
+    else:
+        for filename in processed_files:
+            if isinstance(filename, str):
+                events.append(
+                    (record.get("timestamp"), (filename,))
+                )
+    return events
+
+
+def _save_history_snapshot(
+    days: int = 371,
+    today: date | None = None,
+    *,
+    raw_paths: list[Path] | None = None,
+    deferred_statuses: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    explicit_day = today is not None
+    end = today or datetime.now(DASHBOARD_TIMEZONE).date()
+    start = end - timedelta(days=max(1, days) - 1)
+    flow_start = end - timedelta(days=29)
+    rows = {
+        (start + timedelta(days=offset)).isoformat(): _new_save_day(
+            start + timedelta(days=offset)
+        )
+        for offset in range((end - start).days + 1)
+    }
+
+    raw_dir = CHRONOVISOR_ROOT / "raw"
+    raw_files: dict[str, dict[str, Any]] = {}
+    flow_raw_files: dict[str, dict[str, Any]] = {}
+    raw_status: dict[str, str] = {}
+    raw_entries, effective_raw_paths = _collect_raw_entries(raw_dir, raw_paths)
     if raw_dir.exists():
         for path, raw_name, raw_bytes, raw_date in raw_entries:
-            # Projection children are generated processing artifacts.  The
-            # original lossless parent is already counted as the save, so
-            # including children would double-count bytes and invent a
-            # "manual" user save on the projection date.  Queue cardinality
-            # remains visible through the canonical pending counter.
+            # Projection children are generated artifacts; the lossless parent is
+            # already the save, so counting children would double-count bytes and
+            # invent a "manual" save on the projection date.  Queue cardinality
+            # stays visible through the canonical pending counter.
             if SEMANTIC_PROJECTION_CHILD_RE.fullmatch(raw_name.lower()):
                 continue
             if raw_date is not None and flow_start <= raw_date <= end:
@@ -3003,37 +3051,9 @@ def _save_history_snapshot(
                             and raw_status.get(filename) != "processed"
                         ):
                             raw_status[filename] = "failed"
-                if per_raw:
-                    for item in per_raw:
-                        if not isinstance(item, dict):
-                            continue
-                        item_deferred = item.get("deferred") is True or (
-                            isinstance(item.get("supervision"), dict)
-                            and item["supervision"].get("terminal_deferred") is True
-                        )
-                        item_continued = item.get("continued") is True
-                        if (
-                            item.get("succeeded") is not True
-                            or item_deferred
-                            or item_continued
-                        ):
-                            continue
-                        names = item.get("source_files")
-                        if not isinstance(names, list):
-                            names = [item.get("filename")]
-                        source_names = tuple(
-                            name for name in names if isinstance(name, str)
-                        )
-                        if source_names:
-                            completion_log_events.append(
-                                (record.get("timestamp"), source_names)
-                            )
-                else:
-                    for filename in processed_files:
-                        if isinstance(filename, str):
-                            completion_log_events.append(
-                                (record.get("timestamp"), (filename,))
-                            )
+                completion_log_events.extend(
+                    _completion_log_events(record, per_raw, processed_files)
+                )
                 for filename in processed_files[:3]:
                     if isinstance(filename, str):
                         _add_sample(row, "raw_samples", filename)

@@ -918,7 +918,12 @@ def test_repository_example_has_representative_local_role_map() -> None:
     assert parsed["llm"]["providers"]["mlx_serve"]["endpoint"] == (
         "http://127.0.0.1:18136/v1"
     )
-    runtime = build_llm_runtime(config)
+    from chronovisor.core.runtime_config import load_search_embedding_config
+
+    # Validate against the example's own embedding devices, not the operator's.
+    runtime = build_llm_runtime(
+        config, search_embedding_config=load_search_embedding_config(example)
+    )
     authority_route = runtime.resolve_generation("classification.authority")
     assert authority_route.provider == "omlx"
     assert authority_route.protocol == "omlx-native"

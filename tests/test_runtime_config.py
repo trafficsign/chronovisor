@@ -47,6 +47,8 @@ def test_uvx_runtime_command_uses_pushed_github_source(
     python.chmod(0o755)
     monkeypatch.setenv("CHRONOVISOR_PYTHON", str(python))
     monkeypatch.delenv("CHRONOVISOR_RUNTIME_SOURCE", raising=False)
+    # Isolate from the operator's config, which may pin a deployed commit.
+    monkeypatch.setattr(runtime_config, "CONFIG_FILE", tmp_path / "config.toml")
 
     command = runtime_config.uvx_runtime_command(
         "chronovisor-sleep",

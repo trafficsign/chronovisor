@@ -90,7 +90,8 @@ def test_examples_use_model_id_discovered_from_stable_nested_layout() -> None:
     model_settings = json.loads(
         (ROOT / "config/omlx/model_settings.json.example").read_text(encoding="utf-8")
     )
-    assert MODEL_ID in config_text
+    # Generation moved to MLX-Serve; oMLX keeps the discovered id in its own
+    # model settings, and the config must never use the nested repo path.
     assert MODEL_ID in model_settings["models"]
     assert "Jundot/Qwen3.8-Flash-Next-oQ4e-mtp" not in config_text
 
