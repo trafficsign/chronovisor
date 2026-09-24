@@ -1266,9 +1266,16 @@ def test_rebuild_preserves_extractor_and_compares_original_pointer(
     monkeypatch.setattr(semantic_service, 'read_active', lambda **_kwargs: dict(active))
     monkeypatch.setattr(semantic_service, 'extract_all_documents',
                         lambda *, extractor_schema_version: versions.append(extractor_schema_version) or [])
+    state._document_source = lambda _rows: None
+    state._runtime_vectors = lambda _role, texts, _purpose, *, source: np.array(
+        [[len(text), 0.0] for text in texts], dtype=np.float32
+    )
     def build(_documents, **kwargs):
         assert kwargs['extractor_schema_version'] == 3
         assert not state._maintenance.is_set()  # queries stay served while building
+        rows = [SimpleNamespace(text='x' * n) for n in (5, 1, 9, 3, 7, 2, 8, 4, 6, 10)]
+        vectors = kwargs['encode_documents'](rows, 32)
+        assert vectors[:, 0].tolist() == [5, 1, 9, 3, 7, 2, 8, 4, 6, 10]
         if concurrent_rollback:
             active['generation_id'] = 'rollback'
         return SimpleNamespace(generation_id='rebuilt')

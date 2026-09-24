@@ -95,6 +95,7 @@ SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "semantic-service-status.js
 SEMANTIC_STATUS_HEARTBEAT_SECONDS = 1.0
 QUERY_CACHE_TTL_SECONDS = 600.0
 _SHUTDOWN_GRACE_SECONDS = 10.0
+_REBUILD_SLICE = 8
 FOREGROUND_ROLE = "search.semantic.foreground"
 INCREMENTAL_ROLE = "search.semantic.incremental"
 QUERY_SOURCE = SourceDataClassification(SourceDataClass.RAW, SourceSensitivity.NORMAL)
@@ -1504,17 +1505,25 @@ class SemanticServiceState:
             }
 
             def encode_batch(rows: Any, _batch_size: int) -> np.ndarray:
-                # Per-batch background hold lets waiting queries run in between.
-                self._model_lock.acquire(background=True)
-                try:
-                    return self._runtime_vectors(
-                        FOREGROUND_ROLE,
-                        [document.text for document in rows],
-                        EmbeddingPurpose.DOCUMENT,
-                        source=self._document_source(rows),
-                    )
-                finally:
-                    self._model_lock.release()
+                # Short, length-sorted slices keep each background model hold
+                # well under the interactive query deadline and cut padding.
+                rows = list(rows)
+                order = sorted(range(len(rows)), key=lambda i: len(rows[i].text))
+                matrix = np.empty((len(rows), self.config.dimensions), dtype=np.float32)
+                for start in range(0, len(order), _REBUILD_SLICE):
+                    picked = order[start : start + _REBUILD_SLICE]
+                    chunk = [rows[i] for i in picked]
+                    self._model_lock.acquire(background=True)
+                    try:
+                        matrix[picked] = self._runtime_vectors(
+                            FOREGROUND_ROLE,
+                            [document.text for document in chunk],
+                            EmbeddingPurpose.DOCUMENT,
+                            source=self._document_source(chunk),
+                        )
+                    finally:
+                        self._model_lock.release()
+                return matrix
 
             activity = (
                 model_activity(
