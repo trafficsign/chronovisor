@@ -94,6 +94,7 @@ from chronovisor.search.semantic_model import (
 SERVICE_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "semantic-service-status.json"
 SEMANTIC_STATUS_HEARTBEAT_SECONDS = 1.0
 QUERY_CACHE_TTL_SECONDS = 600.0
+_SHUTDOWN_GRACE_SECONDS = 10.0
 FOREGROUND_ROLE = "search.semantic.foreground"
 INCREMENTAL_ROLE = "search.semantic.incremental"
 QUERY_SOURCE = SourceDataClassification(SourceDataClass.RAW, SourceSensitivity.NORMAL)
@@ -1483,7 +1484,8 @@ class SemanticServiceState:
         self.reload(verify_checksums=False)
 
     def _rebuild(self) -> None:
-        self._maintenance.set()
+        # Queries keep using the active generation while the new one builds;
+        # only the pointer swap below is a maintenance window.
         try:
             self._validate_runtime_routes()
             expected_current = str(read_active(root=self.root).get("generation_id") or "")
@@ -1500,36 +1502,43 @@ class SemanticServiceState:
             built_hashes = {
                 document.page_id: document.source_sha256 for document in documents
             }
-            with self._model_lock:
-                activity = (
-                    model_activity(
-                        model=self._foreground_route.model,
-                        operation="generate",
-                        pipeline="improve",
+
+            def encode_batch(rows: Any, _batch_size: int) -> np.ndarray:
+                # Per-batch background hold lets waiting queries run in between.
+                self._model_lock.acquire(background=True)
+                try:
+                    return self._runtime_vectors(
+                        FOREGROUND_ROLE,
+                        [document.text for document in rows],
+                        EmbeddingPurpose.DOCUMENT,
+                        source=self._document_source(rows),
                     )
-                    if self._uses_local_controls(self._foreground_route)
-                    else contextlib.nullcontext()
+                finally:
+                    self._model_lock.release()
+
+            activity = (
+                model_activity(
+                    model=self._foreground_route.model,
+                    operation="generate",
+                    pipeline="improve",
                 )
-                with activity:
-                    manifest = build_generation(
-                        documents,
-                        encode_documents=lambda rows, _batch_size: (
-                            self._runtime_vectors(
-                                FOREGROUND_ROLE,
-                                [document.text for document in rows],
-                                EmbeddingPurpose.DOCUMENT,
-                                source=self._document_source(rows),
-                            )
-                        ),
-                        **self._route_identity(self._foreground_route),
-                        revision=self.config.revision,
-                        dimensions=self.config.dimensions,
-                        query_prefix=self.config.query_prefix,
-                        document_prefix=self.config.document_prefix,
-                        batch_size=self.config.maintenance_max_batch,
-                        extractor_schema_version=extractor_version,
-                        root=self.root,
-                    )
+                if self._uses_local_controls(self._foreground_route)
+                else contextlib.nullcontext()
+            )
+            with activity:
+                manifest = build_generation(
+                    documents,
+                    encode_documents=encode_batch,
+                    **self._route_identity(self._foreground_route),
+                    revision=self.config.revision,
+                    dimensions=self.config.dimensions,
+                    query_prefix=self.config.query_prefix,
+                    document_prefix=self.config.document_prefix,
+                    batch_size=self.config.maintenance_max_batch,
+                    extractor_schema_version=extractor_version,
+                    root=self.root,
+                )
+            self._maintenance.set()
             activate_generation(
                 manifest.generation_id,
                 expected_current=expected_current,
@@ -1736,9 +1745,15 @@ def _serve_locked(config: SearchEmbeddingConfig | None) -> None:
     server = _Server(str(socket_path), _Handler)
     server.state = state  # type: ignore[attr-defined]
     os.chmod(socket_path, 0o600)
+    socket_inode = socket_path.stat().st_ino
 
     def stop(_signum: int, _frame: object) -> None:
         threading.Thread(target=server.shutdown, daemon=True).start()
+        # A native call stuck in close() must not outlive launchd's SIGKILL of
+        # the uv wrapper as an orphan holding the accelerator.
+        timer = threading.Timer(_SHUTDOWN_GRACE_SECONDS, os._exit, (75,))
+        timer.daemon = True
+        timer.start()
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
@@ -1747,7 +1762,9 @@ def _serve_locked(config: SearchEmbeddingConfig | None) -> None:
     finally:
         server.server_close()
         state.close()
-        socket_path.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            if socket_path.stat().st_ino == socket_inode:
+                socket_path.unlink()
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1256,7 +1256,7 @@ def test_rebuild_preserves_extractor_and_compares_original_pointer(
     state = _index_test_state(monkeypatch)
     state._generation.manifest.extractor_schema_version = 3
     state._maintenance = threading.Event()
-    state._model_lock = threading.Lock()
+    state._model_lock = semantic_service._ModelLock()
     state._validate_runtime_routes = lambda: None
     state._foreground_route = SimpleNamespace(model='test')
     state._uses_local_controls = lambda _route: False
@@ -1268,11 +1268,13 @@ def test_rebuild_preserves_extractor_and_compares_original_pointer(
                         lambda *, extractor_schema_version: versions.append(extractor_schema_version) or [])
     def build(_documents, **kwargs):
         assert kwargs['extractor_schema_version'] == 3
+        assert not state._maintenance.is_set()  # queries stay served while building
         if concurrent_rollback:
             active['generation_id'] = 'rollback'
         return SimpleNamespace(generation_id='rebuilt')
     def activate(generation_id, *, expected_current, **_kwargs):
         assert expected_current == 'generation'
+        assert state._maintenance.is_set()
         if active['generation_id'] != expected_current:
             raise SemanticIndexError('active generation changed')
         active['generation_id'] = generation_id
