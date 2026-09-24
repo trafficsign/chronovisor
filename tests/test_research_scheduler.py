@@ -161,7 +161,10 @@ def test_foreground_marker_cancels_running_sleep_child(tmp_path, monkeypatch) ->
             )
         )
         thread.start()
-        time.sleep(0.05)
+        deadline = time.monotonic() + 5
+        while not (research_scheduler._active_research() or {}).get("model_pid"):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
         with research_scheduler.foreground_lane(preempt_grace_ms=250) as receipt:
             thread.join(timeout=1)
             assert receipt.research_overlap is True
