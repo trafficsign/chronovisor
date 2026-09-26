@@ -247,6 +247,7 @@ function captureFrame(scenario, frame) {
       kind: group.dataset.kind,
       state: group.dataset.state,
       d: path.getAttribute("d"),
+      display: getComputedStyle(path).display,
     };
   });
   const guides = [...harness.querySelectorAll(".trace-context-guide, .trace-reasoning-guide")].map((guide) => {

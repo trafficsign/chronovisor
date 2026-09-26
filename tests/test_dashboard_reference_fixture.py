@@ -488,6 +488,7 @@ def test_all_decision_inputs_keep_real_dashboard_paths_connected(
         assert geometry == previous_geometry
 
         paths = result["paths"]
+        assert all(path["display"] != "none" for path in paths), result["scenario"]
         path_states = {
             (path["source"], path["target"]): path["state"] for path in paths
         }
@@ -785,6 +786,10 @@ def test_context_window_ranges_render_fixed_quarters_and_boundaries(
 
     assert len(browser_results) == len(scenarios), stderr[-4000:]
     for result, (_, selected, expected) in zip(browser_results, cases, strict=True):
+        assert all(path["display"] != "none" for path in result["paths"]), result[
+            "scenario"
+        ]
+        assert all(error["distance"] < 0.75 for error in result["endpointErrors"])
         options = result["contextOptions"]
         assert [option["tokens"] for option in options] == thresholds
         assert [option["label"] for option in options] == labels

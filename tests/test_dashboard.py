@@ -3232,7 +3232,7 @@ def test_decision_trace_context_options_flow_left_to_right() -> None:
     assert all(path.startswith("M458 132") and path.endswith("H614") for _slot, path in context_paths[:4])
     assert all(path.startswith("M634") and path.endswith("H752") for _slot, path in context_paths[4:])
     assert "projectedContext.findIndex((option) => option.selected)" in renderer
-    assert "path.dataset.contextSlot === String(contextIndex)" in renderer
+    assert "path.dataset.contextSlot === String(contextSlot)" in renderer
 
 
 def test_decision_trace_plan_nodes_center_four_way_branches() -> None:

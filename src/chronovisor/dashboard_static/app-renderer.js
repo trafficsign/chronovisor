@@ -624,13 +624,14 @@ function updateDecisionPlanSelection(projection) {
     setDecisionSvgState(node, "pending");
   });
   const contextIndex = projectedContext.findIndex((option) => option.selected);
-  const contextNode = contextOptions[contextIndex] || contextOptions[0];
+  const contextSlot = Math.max(0, contextIndex);
+  const contextNode = contextOptions[contextSlot];
   contextNode?.setAttribute("data-workflow-node", "context_choice");
   contextNode?.classList.toggle("selected", contextIndex >= 0);
   harness.querySelectorAll("[data-context-slot]").forEach((path) => {
     path.classList.toggle(
       "selected",
-      path.dataset.contextSlot === String(contextIndex),
+      path.dataset.contextSlot === String(contextSlot),
     );
   });
   const contextLabel = harness.querySelector('[data-plan-value="context-selection"]');
