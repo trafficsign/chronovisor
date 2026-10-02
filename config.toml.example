@@ -43,7 +43,7 @@ num_ctx = 114688
 max_num_ctx = 262144
 
 [decision_router]
-# The cutover uses one pinned MLX-Serve 3.3bpw resident model. The quorum field remains
+# The cutover uses one pinned MLX-Serve Sushi 2.6bpw resident model. The quorum field remains
 # owned by the decision policy and is intentionally not relaxed here.
 authority_kind = "single_model_v1"
 single_runtime_role = "classification.authority"
@@ -88,7 +88,7 @@ canary_min_days = 7
 kind = "omlx"
 endpoint = "http://127.0.0.1:18125/v1"
 
-# MLX-Serve 3.3bpw server for the pinned Flash Next generation roles.
+# MLX-Serve Sushi 2.6bpw server for the pinned Flash Next generation roles.
 [llm.providers.mlx_serve]
 kind = "omlx"
 # Uses MLX-Serve's local OpenAI-compatible chat transport.
@@ -117,13 +117,13 @@ model = "bge-m3-mlx-fp16"
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."knowledge.community_summary"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."classification.embedding"]
 capability = "embedding"
@@ -149,25 +149,25 @@ model = "nvidia/Nemotron-3-Embed-1B-BF16"
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."librarian.review.challenger"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."recall.answer.runner"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."recall.answer.scorer"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."recall.certificate_judge.primary"]
 capability = "generation"
@@ -178,37 +178,37 @@ model = "Ornith-1.5-9B-MLX-4bit"
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."ingest.generation"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."lint.tag_repair"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."lint.orphan_link"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."recall.content_correction.proposer"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."recall.auditor"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."recall.gate"]
 capability = "generation"
@@ -224,21 +224,21 @@ model = "Ornith-1.5-9B-MLX-4bit"
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.policy_proposer.challenger"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.rubric.variant"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 required_capabilities = ["structured_output"]
 
 # Offline Recall distillation is local-only. These raw/high inputs must never
@@ -247,70 +247,70 @@ required_capabilities = ["structured_output"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.teacher.b"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.teacher.c"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.answer_generator"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 required_capabilities = ["structured_output"]
 
 [llm.roles."recall.distill.utility_judge"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.planner"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.challenge"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.tie_break"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 required_capabilities = ["structured_output"]
 
 [llm.roles."research.deep_retrieval_requery"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 required_capabilities = ["structured_output"]
 
 [llm.roles."classification.authority"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 # Legacy classification role names remain mapped to the same model for replay
 # compatibility; production authority resolves only the route above.
@@ -318,73 +318,73 @@ revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."classification.challenger"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."classification.tie_break"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."classification.anchor_set"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."classification.decision"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."classification.direct_decision"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."classification.hierarchy"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."classification.query"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."classification.query_v2"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."classification.anchor"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."classification.anchor.primary"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 [llm.roles."classification.anchor.challenger"]
 capability = "generation"
 provider = "mlx_serve"
 model = "qwen3.8-flash-next-chat"
-revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+revision = "98165936edfe1ee4532816bb1f6e02837680b220"
 
 # Cloud-only alternative: one OpenAI credential/profile can serve both roles.
 # Store it with `chronovisor credentials set openai/default`; never put its

@@ -901,7 +901,7 @@ def test_repository_example_has_representative_local_role_map() -> None:
     text = example.read_text(encoding="utf-8")
     parsed = tomllib.loads(text)
     qwen_model = "qwen3.8-flash-next-chat"
-    qwen_revision = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+    qwen_revision = "98165936edfe1ee4532816bb1f6e02837680b220"
     ornith_model = "Ornith-1.5-9B-MLX-4bit"
     authority = config.roles["classification.authority"]
     assert authority.provider_id == "mlx_serve"
@@ -1067,8 +1067,13 @@ def test_repository_example_has_representative_local_role_map() -> None:
     [
         (
             "qwen3.8-flash-next-chat",
-            "2b7da62be0151a7932e4dfcab1d73c93ccf83f64",
+            "98165936edfe1ee4532816bb1f6e02837680b220",
             None,
+        ),
+        (
+            "qwen3.8-flash-next-chat",
+            "2b7da62be0151a7932e4dfcab1d73c93ccf83f64",
+            "single-model runtime route identity is invalid",
         ),
         (
             "qwen3.8-flash-next-chat",

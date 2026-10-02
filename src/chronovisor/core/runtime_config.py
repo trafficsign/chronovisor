@@ -28,11 +28,11 @@ DEFAULT_DECISION_TIE_BREAK_MODEL = "gemma4:26b-optiq4"
 SINGLE_MODEL_AUTHORITY_KIND = "single_model_v1"
 QUORUM_AUTHORITY_KIND = "quorum_v1"
 DEFAULT_DECISION_SINGLE_RUNTIME_ROLE = "classification.authority"
-# Immutable production route identity for the MLX-Serve 3.3bpw cutover. The
+# Immutable production route identity for the MLX-Serve Sushi 2.6bpw cutover. The
 # model name remains a runtime-role concern; these constants are shared by the
 # route/proof validators and structured-session compatibility table.
 SINGLE_MODEL_RUNTIME_MODEL = "qwen3.8-flash-next-chat"
-SINGLE_MODEL_RUNTIME_REVISION = "2b7da62be0151a7932e4dfcab1d73c93ccf83f64"
+SINGLE_MODEL_RUNTIME_REVISION = "98165936edfe1ee4532816bb1f6e02837680b220"
 SINGLE_MODEL_RUNTIME_MODEL_TYPE = "qwen4_exp"
 SINGLE_MODEL_RUNTIME_ARCHITECTURE = "Qwen4ExpForConditionalGeneration"
 DEFAULT_HEAVY_NUM_CTX = 32_768
