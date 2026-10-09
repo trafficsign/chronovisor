@@ -9704,6 +9704,84 @@ def test_counterfactual_blinding_rejects_same_generator_and_judge_model(
     assert result["order_agreement"] is False
 
 
+def test_counterfactual_judge_input_is_answer_independent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run(actual_answer: str) -> tuple[dict[str, object], list[dict[str, object]]]:
+        calls: list[tuple[str, dict[str, object]]] = []
+        answers = iter(("without", "with"))
+
+        def fake_worker_call(
+            operation: str, _role: str, payload: object, **_kwargs: object
+        ) -> dict[str, object]:
+            assert isinstance(payload, dict)
+            calls.append((operation, dict(payload)))
+            if operation == "answer":
+                return {
+                    "answer": next(answers),
+                    "_model_digest": "a" * 64,
+                    "_route_identity": {},
+                }
+            return {
+                "blind_choice": "tie",
+                "_model_digest": "a" * 64,
+                "_route_identity": {},
+            }
+
+        monkeypatch.setattr(distill, "_worker_call", fake_worker_call)
+        worker = distill._WorkerCounterfactual(
+            12_000,
+            {
+                "recall.distill.answer_generator": {},
+                "recall.distill.utility_judge": {},
+            },
+            {
+                "recall.distill.answer_generator": "a" * 64,
+                "recall.distill.utility_judge": "a" * 64,
+            },
+        )
+        result = worker.compare(
+            {
+                "rally_id": "rally",
+                "candidate_id": "candidate",
+                "query": "point-in-time query",
+                "context": ["point-in-time context"],
+                "a0_evidence": [],
+                "a1_evidence": ["candidate"],
+                "actual_answer": actual_answer,
+            }
+        )
+        utility_inputs = [
+            payload for operation, payload in calls if operation == "utility"
+        ]
+        return result, utility_inputs
+
+    first_result, first_utility_inputs = run("answer-one")
+    second_result, second_utility_inputs = run("answer-two")
+
+    assert first_result["verdict"] == second_result["verdict"] == "uncertain"
+    assert first_result["order_agreement"] is False
+    assert second_result["order_agreement"] is False
+    assert len(first_utility_inputs) == len(second_utility_inputs) == 2
+    assert first_utility_inputs == second_utility_inputs
+    assert [payload["blind_order"] for payload in first_utility_inputs] == [
+        "a_first",
+        "b_first",
+    ]
+    for payload in first_utility_inputs:
+        assert set(payload) == {
+            "rally_id",
+            "candidate_id",
+            "query",
+            "context",
+            "answer_a",
+            "answer_b",
+            "blind_order",
+        }
+        assert payload["query"] == "point-in-time query"
+        assert payload["context"] == ["point-in-time context"]
+
+
 def test_cold_start_api_uses_fixed_split_and_nonblocking_writer_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

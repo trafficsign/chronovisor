@@ -429,10 +429,11 @@ class _WorkerCounterfactual:
                 {
                     "rally_id": base["rally_id"],
                     "candidate_id": base["candidate_id"],
+                    "query": base["query"],
+                    "context": base["context"],
                     "answer_a": a0 if a_first else a1,
                     "answer_b": a1 if a_first else a0,
                     "blind_order": "a_first" if a_first else "b_first",
-                    "actual_answer_diagnostic": payload.get("actual_answer", ""),
                 },
                 max_input_bytes=self.max_input_bytes,
                 expected_route=self.routes["recall.distill.utility_judge"],
