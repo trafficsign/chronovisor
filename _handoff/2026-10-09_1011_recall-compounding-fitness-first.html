@@ -65,13 +65,13 @@ summary{cursor:pointer;font-weight:600}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_98a6d3b36c7844f1ab2f87a13b423968","created_at":"2026-10-09T10:11:08+09:00","状態":"running","slug":"recall-compounding-fitness-first","investigation_state":"complete","implementation_state":"in_progress","updated_at":"2026-10-09T10:50:05+09:00","base_commit":"da6b8e36","parent_plan":"2026-08-14_1846_autonomous-recall-offline-distillation.html"}
+{"task_id":"plan_98a6d3b36c7844f1ab2f87a13b423968","created_at":"2026-10-09T10:11:08+09:00","状態":"blocked","slug":"recall-compounding-fitness-first","investigation_state":"complete","implementation_state":"waiting_for_acceptance_evidence","updated_at":"2026-10-09T10:56:49+09:00","base_commit":"da6b8e36","parent_plan":"2026-08-14_1846_autonomous-recall-offline-distillation.html"}
 </script>
 
 <header>
 <h1>Plan: <span id="plan-title">Recall の改善が積み上がる状態にする（8/14 蒸留計画への追加）</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="running">running · 実装・検証中</span>
+<span class="badge" data-bind="状態" data-state="blocked">blocked · 実データと翌朝確認待ち</span>
 <span><code data-bind="task_id">plan_98a6d3b36c7844f1ab2f87a13b423968</code></span>
 <span data-bind="created_at">2026-10-09T10:11:08+09:00</span>
 <span>調査元 <code>da6b8e36</code></span>
@@ -151,9 +151,9 @@ summary{cursor:pointer;font-weight:600}
 <div class="phase"><h3>P0 · 旧レーンの書き込みを止める（S）</h3>
 <p>引き継がれるもの：なし（これ以上の汚れを足さない）。</p>
 <ol class="checklist">
-<li><input type="checkbox"><span><code>recall_auto_apply</code> の <code>query_hint</code> の新規適用を止める方法を確認する。既存の停止設定があればそれを使い、なければ最小の設定を足す。<code>alias</code> と <code>page_tag</code> は同じ feedback が元なので、同じ扱いにするかをここで決める。</span></li>
-<li><input type="checkbox"><span>既存 1,782 件は削除しない。本番の注入経路（<code>recall_runtime.py:1638</code> の <code>query_hint_page_ids</code>）で読まれないようにする。Recall Field 側（<code>recall_field.py:181</code>）は観測のまま残す。</span></li>
-<li><input type="checkbox"><span>旧較正レーンが feedback ラベルで再び適用されない状態かを確認する（<code>recall_calibration.py:561</code> の hard_off が今の設定で効いているか）。</span></li>
+<li><input type="checkbox" checked><span><code>recall_auto_apply</code> の <code>query_hint</code> の新規適用を止める方法を確認する。既存の停止設定があればそれを使い、なければ最小の設定を足す。<code>alias</code> と <code>page_tag</code> は同じ feedback が元なので、同じ扱いにするかをここで決める。</span></li>
+<li><input type="checkbox" checked><span>既存 1,782 件は削除しない。本番の注入経路（<code>recall_runtime.py:1638</code> の <code>query_hint_page_ids</code>）で読まれないようにする。Recall Field 側（<code>recall_field.py:181</code>）は観測のまま残す。</span></li>
+<li><input type="checkbox" checked><span>旧較正レーンが feedback ラベルで再び適用されない状態かを確認する（<code>recall_calibration.py:561</code> の hard_off が今の設定で効いているか）。</span></li>
 <li><input type="checkbox"><span>1 晩おいて、<code>auto-apply.jsonl</code> に <code>query_hint</code> の <code>applied</code> が増えていないことを確認する。</span></li>
 </ol>
 <p>受入：新規適用 0。<code>query-hints.json</code> の中身は不変。戻す手順を 1 行で書ける。</p>
@@ -331,6 +331,7 @@ summary{cursor:pointer;font-weight:600}
 <section data-section="実行ログ">
 <h2>実行ログ</h2>
 <ol class="log">
+<li><time>2026-10-09 10:56 JST</time><span>P0 の即時 3 項目を実行版で確認。auto_apply（query_hint / alias / page_tag）と旧 calibration / improvement の writer は停止。hint・calibration・active-policy の hash は開始時と同一、applied は 1,371 / 1 / 27 のまま。較正の読み取りと閾値 0.35 / 0.65 は保持。capture=true、training=false、serving policy は空、sealed identity は有効。ローカル全体 6,685 tests passed、追加 capture テストを含む distillation 289 / runtime 224 tests passed。GitHub Linux mypy の既存 optional-import 失敗を <code>355c1142</code> で修正。CI の既存依存監査は 7 パッケージ 34 件で未通過（依存 lock は変更なし）。5 サービスの最終切り替え・archive・health の確定証跡は private <code>~/.chronovisor/runtime/recall-fitness-rollout/2026-10-09/deployment-final.json</code> に記録する。Ingest は batch lease が空くまで待ち、処理中 Raw は中断しない。P0 翌朝確認を 10/10 09:00 の一回だけ予約（automation <code>recall-p0</code>）。P1 以降の採用と本線 R5/R6/R7 は未受入のまま。</span></li>
 <li><time>2026-10-09 10:50 JST</time><span>P1 の局所修正を commit <code>0e9e2dbe</code> に保存。capture_enabled を学習・serving から独立させ、sealed identity と source binding が有効な legacy card 観測だけを記録する。evidence_packet は正確なページ対応を持たないため記録を棄却する。per-route の同一 locked cohort に learned / always-inject / always-reject の混同行列と cohort hash を残し、定数方針が通らないことを検証。distillation 289 件、runtime 224 件、large-function・ruff・設定対象 mypy・import/architecture 検査が通過。生データの正式評価と配備は後続。</span></li>
 <li><time>2026-10-09 10:43 JST</time><span>P2b の候補生成経路を commit <code>82e1f842</code> に保存。日本語 prompt は明示 opt-in とし、本番生成の既定 bytes は維持。別世代・上限必須・local-only・source/config/model hash 固定の候補 bundle を追加。実 2 ページで同数 5 問ずつの日本語質問を生成（fallback 0 / failed 0 / source byte 変更 0）。全 9,781 ページ中 8 件は canonical/stable 要件外で除外。これは smoke であり、全ページ生成・A〜E 比較・P1 による採用は未完。旧 recall_improvement 指標は本 Plan の採否に使わず、同 lane は off にした。P0 source は commit <code>291223f8</code>、本番配備は後続。</span></li>
 <li><time>2026-10-09 10:35 JST</time><span>P1 の日次 lane 現状確認を完了。Raw 抽出 14,956 rally / 87 日、9 月以降 5,982 件のうち eligible 0（exact exposure 欠落 5,662、answer 欠落 320）。最新 training snapshot は 8/29 の 505 行、eligible 502 は train のみで probe・CF・validation・locked-test が無い。旧外部教師 contract は期限切れ。現在の local 教師と generator/judge は同一モデルで独立性要件未達。現在ページによる過去の穴埋めはせず、将来の exact exposure 保存経路を確認する。P0 設定は auto_apply と calibration/improvement decision lane を off にし、現行スコアの較正読み取りと閾値は保持した。</span></li>

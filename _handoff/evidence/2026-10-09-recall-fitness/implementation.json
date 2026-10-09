@@ -1,6 +1,6 @@
 {
   "schema": "chronovisor.recall-fitness-implementation.v1",
-  "updated_at": "2026-10-09T10:50:05+09:00",
+  "updated_at": "2026-10-09T10:56:49+09:00",
   "plan": "_handoff/2026-10-09_1011_recall-compounding-fitness-first.html",
   "base_commit": "da6b8e362441e0f21eac53bd86d1fc853fa42d2f",
   "promotion_status": "waiting_for_verified_temporal_data_and_local_teacher_contract",
@@ -53,7 +53,8 @@
   "implementation_commits": [
     "291223f8",
     "82e1f842",
-    "0e9e2dbe"
+    "0e9e2dbe",
+    "355c1142"
   ],
   "capture_contract": {
     "opt_in_setting": "recall.distillation.capture_enabled",
@@ -63,6 +64,41 @@
     "all_host_recovery_verified": false
   },
   "deployment": {
-    "status": "pending"
+    "status": "final_result_recorded_locally",
+    "receipt": "~/.chronovisor/runtime/recall-fitness-rollout/2026-10-09/deployment-final.json",
+    "private_receipt_contains_no_replayed_user_bodies": true
+  },
+  "verification": {
+    "isolated_full_tests": 6685,
+    "capture_distillation_tests": 289,
+    "recall_runtime_tests": 224,
+    "nemotron_mlx_tests": 5,
+    "configured_mypy_files": 97,
+    "ruff": "passed",
+    "architecture": "passed",
+    "import_contracts": "passed",
+    "dependency_audit": {
+      "status": "preexisting_failure",
+      "packages": 7,
+      "reported_findings": 34,
+      "lock_changed": false
+    }
+  },
+  "p0_immediate": {
+    "query_hint_reading": false,
+    "automatic_writers": [
+      "recall_auto_apply:off",
+      "recall_calibration:off",
+      "recall_improvement:off"
+    ],
+    "protected_files_unchanged": true,
+    "applied_counts": {
+      "query_hint": 1371,
+      "alias": 1,
+      "page_tag": 27
+    },
+    "overnight_status": "scheduled",
+    "automation_id": "recall-p0",
+    "scheduled_local_time": "2026-10-10T09:00:00+09:00"
   }
 }
