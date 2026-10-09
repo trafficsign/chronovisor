@@ -33,3 +33,11 @@ regexTarget = "line"
 commits = ["2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6"]
 paths = ['''^_handoff/evidence/2026-09-05-fixed-model-optimization/a3-results\.json$''']
 regexes = ['''^\s+"canonical_keys":\s+"[0-9a-f]{64}",?$''']
+
+[[allowlists]]
+description = "Benchmark metadata content digests in release archives"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|.*!)chronovisor-[^/]+/_handoff/evidence/2026-09-05-fixed-model-optimization/a3-results\.json$''']
+regexes = ['''^\s+"canonical_keys":\s+"(?:15b8f0119b59e0b62e29bd0737d14623974e3a5b6f708f393b32362e9b84b3aa|93dcf762d0bf8aa0f7b57d04c6910735d2161baef053b834ea8e004300f64923)",?$''']

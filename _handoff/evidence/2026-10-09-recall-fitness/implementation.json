@@ -127,7 +127,10 @@
       "status": "passed_locally_final_ci_pending",
       "history_findings_after": 0,
       "previous_false_positive_digest_findings": 4,
-      "exception_scope": "AND exact commit, path, generic-api-key rule, canonical_keys SHA256 line"
+      "exception_scope": "AND exact commit, path, generic-api-key rule, canonical_keys SHA256 line",
+      "release_artifact_findings_after": 0,
+      "release_artifact_exception_scope": "AND exact archive member path, generic-api-key rule, canonical_keys line, two independently confirmed SHA256 digest values (four occurrences)",
+      "release_before_reproduced": 4
     },
     "finish": {
       "r5_catalog": 171,
