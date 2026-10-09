@@ -394,6 +394,10 @@ def test_reconcile_rejects_path_traversal_processed_id_without_echo(
         monkeypatch,
         processed=["../outside.md", "/absolute/outside.md"],
     )
+    # Keep path rejection independent of CI filesystem latency.
+    monkeypatch.setattr(
+        orchestrator, "time", SimpleNamespace(perf_counter=lambda: 0.0)
+    )
 
     result = orchestrator.reconcile_processed_projections()
 
