@@ -835,6 +835,79 @@ def test_official_worker_integration_accepts_empty_teacher_mapping(
     )
     assert result["teachers_available"] is False
     assert result["status"] in {"capture_only", "deferred"}
+    worker = {
+        **result,
+        "r6_egress_attempts": 0,
+        "r6_provider_attempts": 0,
+        "r6_git_sha256": "",
+        "r6_child_containment": {
+            "schema": "chronovisor.recall-r6-child-containment.v1",
+            "registered_descendants": 0,
+            "rejected_registry_entries": 0,
+            "remaining_descendants": 0,
+            "registry_fd_closed": True,
+            "sandbox": HARNESS._sandbox_identity(),
+        },
+    }
+    HARNESS._assert_worker_result_schema(worker, module=distill, root=tmp_path)
+    tampered = dict(worker)
+    tampered["runtime_identity"] = {"forged": True}
+    with pytest.raises(HARNESS.R6Error, match="local producer identity"):
+        HARNESS._assert_worker_result_schema(tampered)
+
+
+def test_ox_producer_identity_derivation_roundtrip_and_tamper(
+    tmp_path: Path,
+) -> None:
+    contract = "c" * 64
+    quality_gate = "a" * 64
+    source = {
+        "source_commit": "1" * 40,
+        "source_tree_sha256": "2" * 64,
+        "source_ox_identity_sha256": "3" * 64,
+    }
+    heads = {
+        "ox_ramp_receipts": {"records": 0, "head_sha256": ""},
+        "ox_failure_receipts": {"records": 0, "head_sha256": ""},
+        "ox_lease_recovery_receipts": {"records": 0, "head_sha256": ""},
+    }
+    runtime = {"root": str(tmp_path), "runtime_digest": "4" * 64}
+    gate = {"artifact_id": quality_gate, "profile_contract_id": contract, **source}
+    module = SimpleNamespace(
+        _ox_contract_source_binding=lambda _root, _contract: dict(source),
+        _ox_event_heads=lambda _root: {key: dict(value) for key, value in heads.items()},
+        _r4_runtime_identity_projection=lambda _root, **_kwargs: dict(runtime),
+        store=SimpleNamespace(
+            distillation_dir=lambda root: root / "distillation",
+            read_sealed=lambda _path, schema: gate,
+        ),
+    )
+    value = {
+        "ox_profile_contract_id": contract,
+        "profile_contract_id": contract,
+        "ox_quality_gate_id": quality_gate,
+        "runtime_identity": runtime,
+        **source,
+        **heads,
+        "ramp_receipts": [],
+        "failure_receipts": [],
+        "lease_recovery": {"recovered": 0, "leased_after": 0, "receipt_count": 0},
+        "quality_gates": {"passed": False, "reasons": ["fixture"]},
+    }
+    HARNESS._assert_producer_identity_shape(value, "OX fixture")
+    HARNESS._assert_producer_identity_derivation(
+        module, value, root=tmp_path, owner="OX fixture"
+    )
+    for field, replacement in (
+        ("source_commit", "f" * 40),
+        ("runtime_identity", {"forged": True}),
+    ):
+        tampered = dict(value)
+        tampered[field] = replacement
+        with pytest.raises(HARNESS.R6Error, match="mismatch"):
+            HARNESS._assert_producer_identity_derivation(
+                module, tampered, root=tmp_path, owner="OX fixture"
+            )
 
 
 def test_official_candidate_requires_official_empty_teacher_promotion(tmp_path: Path) -> None:
@@ -1090,6 +1163,9 @@ def _closed_candidate_fixture() -> tuple[Any, ...]:
         "local_workset": _closed_workset(include_timing=True),
         "ox_profile_contract_id": "",
         "ox_profile_stopped": False,
+        "ox_quality_gate_id": "",
+        "profile_contract_id": "",
+        "runtime_identity": {},
         "counterfactuals_written": 0,
         "p5_allowed": True,
     }
@@ -1113,6 +1189,9 @@ def _closed_candidate_fixture() -> tuple[Any, ...]:
         "local_workset": _closed_workset(include_timing=True),
         "ox_profile_contract_id": "",
         "ox_profile_stopped": False,
+        "ox_quality_gate_id": "",
+        "profile_contract_id": "",
+        "runtime_identity": {},
         "counterfactuals_written": 0,
         "teacher_model_calls": 0,
         "counterfactual_model_calls": 0,
@@ -1205,6 +1284,9 @@ def test_completion_worker_nested_schema_is_closed_and_range_checked() -> None:
         "local_workset": _closed_workset(include_timing=True),
         "ox_profile_contract_id": "",
         "ox_profile_stopped": False,
+        "ox_quality_gate_id": "",
+        "profile_contract_id": "",
+        "runtime_identity": {},
         "counterfactuals_written": 0,
         "cold_start_pending": False,
         "split_plan_id": heads["candidate"],

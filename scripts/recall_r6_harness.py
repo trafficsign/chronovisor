@@ -2133,6 +2133,9 @@ _RUN_KEYS = frozenset(
         "local_workset",
         "ox_profile_contract_id",
         "ox_profile_stopped",
+        "ox_quality_gate_id",
+        "profile_contract_id",
+        "runtime_identity",
         "counterfactuals_written",
         "p5_allowed",
     }
@@ -2143,6 +2146,29 @@ _OX_RAMP_KEYS = frozenset(
         "ox_ramp_valid_receipts",
         "ox_ramp_provider_attempts",
         "ox_ramp_request_revision",
+    }
+)
+# _persist_distillation_chunk emits these identity fields for every profile.
+# OX-only source, event, and projection fields are admitted separately below.
+_PRODUCER_IDENTITY_KEYS = frozenset(
+    {
+        "ox_quality_gate_id",
+        "profile_contract_id",
+        "runtime_identity",
+    }
+)
+_PRODUCER_OX_KEYS = frozenset(
+    {
+        "source_commit",
+        "source_tree_sha256",
+        "source_ox_identity_sha256",
+        "ox_ramp_receipts",
+        "ox_failure_receipts",
+        "ox_lease_recovery_receipts",
+        "ramp_receipts",
+        "failure_receipts",
+        "lease_recovery",
+        "quality_gates",
     }
 )
 _STATE_KEYS = frozenset(
@@ -2166,6 +2192,9 @@ _STATE_KEYS = frozenset(
         "local_workset",
         "ox_profile_contract_id",
         "ox_profile_stopped",
+        "ox_quality_gate_id",
+        "profile_contract_id",
+        "runtime_identity",
         "counterfactuals_written",
         "teacher_model_calls",
         "counterfactual_model_calls",
@@ -2203,7 +2232,8 @@ _WORKER_KEYS = frozenset(
         "status", "processed", "p5_allowed", "teachers_available",
         "counterfactual_available", "candidate_snapshots", "labels_written",
         "ox_workset", "local_workset", "ox_profile_contract_id",
-        "ox_profile_stopped", "counterfactuals_written", "cold_start_pending",
+        "ox_profile_stopped", "ox_quality_gate_id", "profile_contract_id",
+        "runtime_identity", "counterfactuals_written", "cold_start_pending",
         "split_plan_id", "manifest_backlog", "candidate_backlog", "promotion",
         "rollout_evaluation", "run_id", "state_sha256", "r6_egress_attempts",
         "r6_provider_attempts", "r6_git_sha256", "r6_child_containment",
@@ -2679,6 +2709,131 @@ def _assert_r5_schema(value: object) -> None:
             _artifact_id(value[field])
 
 
+def _assert_producer_identity_shape(value: Mapping[str, Any], owner: str) -> bool:
+    """Check the common/optional envelope emitted by the real worker."""
+
+    if not _PRODUCER_IDENTITY_KEYS.issubset(value):
+        raise R6Error(f"{owner} producer identity fields are incomplete")
+    contract = value.get("profile_contract_id")
+    ox_contract = value.get("ox_profile_contract_id")
+    _strict_id_or_empty(contract, f"{owner} profile contract")
+    _strict_id_or_empty(ox_contract, f"{owner} OX profile contract")
+    if contract != ox_contract:
+        raise R6Error(f"{owner} profile contract is not producer-bound")
+    _strict_id_or_empty(value["ox_quality_gate_id"], f"{owner} OX quality gate")
+    if not isinstance(value["runtime_identity"], Mapping):
+        raise R6Error(f"{owner} runtime identity is not an object")
+    has_ox = bool(contract)
+    optional = set(value).intersection(_PRODUCER_OX_KEYS)
+    if has_ox:
+        if optional != set(_PRODUCER_OX_KEYS):
+            raise R6Error(f"{owner} OX producer fields are incomplete")
+        if not value["ox_quality_gate_id"] or not value["runtime_identity"]:
+            raise R6Error(f"{owner} OX producer identity is incomplete")
+        if (
+            not isinstance(value["ramp_receipts"], list)
+            or not isinstance(value["failure_receipts"], list)
+            or not isinstance(value["lease_recovery"], Mapping)
+            or not isinstance(value["quality_gates"], Mapping)
+        ):
+            raise R6Error(f"{owner} OX projection schema is invalid")
+        for key in (
+            "ox_ramp_receipts",
+            "ox_failure_receipts",
+            "ox_lease_recovery_receipts",
+        ):
+            head = value[key]
+            if not isinstance(head, Mapping) or set(head) != {"records", "head_sha256"}:
+                raise R6Error(f"{owner} OX event head schema is invalid")
+            _strict_int(head["records"], f"{owner} {key} records")
+            if head["records"] < 0:
+                raise R6Error(f"{owner} {key} records are invalid")
+            _strict_id_or_empty(head["head_sha256"], f"{owner} {key} head")
+        for key, size in (
+            ("source_commit", 40),
+            ("source_tree_sha256", 64),
+            ("source_ox_identity_sha256", 64),
+        ):
+            token = value[key]
+            if not isinstance(token, str) or len(token) != size or set(token) - _SHA:
+                raise R6Error(f"{owner} {key} is invalid")
+    elif optional:
+        raise R6Error(f"{owner} has OX fields without a profile contract")
+    elif value["ox_quality_gate_id"] or value["runtime_identity"] != {}:
+        raise R6Error(f"{owner} local producer identity is invalid")
+    return has_ox
+
+
+def _assert_producer_identity_derivation(
+    module: Any,
+    value: Mapping[str, Any],
+    *,
+    root: Path,
+    owner: str,
+) -> None:
+    """Re-derive profile/source/runtime values from the isolated producer root."""
+
+    if not value.get("profile_contract_id"):
+        return
+    contract_id = str(value["profile_contract_id"])
+    source_fn = getattr(module, "_ox_contract_source_binding", None)
+    heads_fn = getattr(module, "_ox_event_heads", None)
+    runtime_fn = getattr(module, "_r4_runtime_identity_projection", None)
+    if not all(callable(fn) for fn in (source_fn, heads_fn, runtime_fn)):
+        raise R6Error(f"{owner} producer identity derivation is unavailable")
+    try:
+        source = source_fn(root, contract_id)
+    except Exception as exc:
+        raise R6Error(f"{owner} OX source binding derivation failed") from exc
+    if not isinstance(source, Mapping) or not source:
+        raise R6Error(f"{owner} OX source binding is unavailable")
+    for key in ("source_commit", "source_tree_sha256", "source_ox_identity_sha256"):
+        if value.get(key) != source.get(key):
+            raise R6Error(f"{owner} OX source binding mismatch")
+    try:
+        expected_heads = heads_fn(root)
+    except Exception as exc:
+        raise R6Error(f"{owner} OX event head derivation failed") from exc
+    if not isinstance(expected_heads, Mapping) or any(
+        value.get(key) != expected_heads.get(key)
+        for key in (
+            "ox_ramp_receipts",
+            "ox_failure_receipts",
+            "ox_lease_recovery_receipts",
+        )
+    ):
+        raise R6Error(f"{owner} OX event heads are not producer-bound")
+    store = getattr(module, "store", None)
+    quality_id = str(value["ox_quality_gate_id"])
+    try:
+        gate = store.read_sealed(
+            store.distillation_dir(root) / "ox-quality-gates" / f"{quality_id}.json",
+            schema="chronovisor.recall-distill-ox-quality-gate.v1",
+        )
+    except Exception as exc:
+        raise R6Error(f"{owner} OX quality gate is unavailable") from exc
+    if (
+        not isinstance(gate, Mapping)
+        or gate.get("artifact_id") != quality_id
+        or gate.get("profile_contract_id") != contract_id
+        or any(gate.get(key) != source.get(key) for key in source)
+    ):
+        raise R6Error(f"{owner} OX quality gate is not producer-bound")
+    try:
+        runtime = runtime_fn(
+            root,
+            config_path=(root / "config.toml") if (root / "config.toml").exists() else None,
+            source_binding=source,
+            profile_contract_id=contract_id,
+            candidate_path=store.distillation_dir(root) / "candidate-ledger.jsonl",
+            label_path=store.distillation_dir(root) / "label-ledger.jsonl",
+        )
+    except Exception as exc:
+        raise R6Error(f"{owner} runtime identity derivation failed") from exc
+    if not isinstance(runtime, Mapping) or not runtime or dict(value["runtime_identity"]) != dict(runtime):
+        raise R6Error(f"{owner} runtime identity mismatch")
+
+
 def _assert_output_artifact_envelopes(
     value: Mapping[str, Any],
     *,
@@ -2709,14 +2864,15 @@ def _assert_output_artifact_envelopes(
     }
     if set(replay) != replay_keys:
         raise R6Error("formal locked replay schema is not closed")
-    if set(run) - (_RUN_KEYS | _OX_RAMP_KEYS) or not _RUN_KEYS.issubset(run):
+    if set(run) - (_RUN_KEYS | _PRODUCER_OX_KEYS | _OX_RAMP_KEYS) or not _RUN_KEYS.issubset(run):
         raise R6Error("formal run schema is not closed")
-    if set(state) - (_STATE_KEYS | _STATE_ROLLOUT_KEYS | _OX_RAMP_KEYS) or not _STATE_KEYS.issubset(state):
+    if set(state) - (_STATE_KEYS | _STATE_ROLLOUT_KEYS | _PRODUCER_OX_KEYS | _OX_RAMP_KEYS) or not _STATE_KEYS.issubset(state):
         raise R6Error("formal state schema is not closed")
     for owner_name, owner in (("run", run), ("state", state)):
         ramp = set(owner).intersection(_OX_RAMP_KEYS)
         if ramp and ramp != set(_OX_RAMP_KEYS):
             raise R6Error(f"formal {owner_name} OX ramp schema is not closed")
+        _assert_producer_identity_shape(owner, f"formal {owner_name}")
     _assert_artifact_integrity(pointer, "formal candidate pointer", has_id=False)
     _assert_artifact_integrity(policy, "formal candidate policy", has_id=True)
     _assert_artifact_integrity(replay, "formal locked replay", has_id=True)
@@ -2842,7 +2998,7 @@ def _assert_run_schema(run: Mapping[str, Any], *, r5: Mapping[str, Any], heads: 
     """Validate the bounded-chunk run envelope independently on readback."""
 
     present_ramp = set(run).intersection(_OX_RAMP_KEYS)
-    if set(run) - (_RUN_KEYS | _OX_RAMP_KEYS) or not _RUN_KEYS.issubset(run):
+    if set(run) - (_RUN_KEYS | _PRODUCER_OX_KEYS | _OX_RAMP_KEYS) or not _RUN_KEYS.issubset(run):
         raise R6Error("official run schema is not closed")
     if present_ramp and present_ramp != set(_OX_RAMP_KEYS):
         raise R6Error("official run OX ramp schema is not closed")
@@ -2860,6 +3016,7 @@ def _assert_run_schema(run: Mapping[str, Any], *, r5: Mapping[str, Any], heads: 
     _strict_bool(run["p5_allowed"], "official run p5_allowed")
     _strict_bool(run["ox_profile_stopped"], "official run ox_profile_stopped")
     _strict_id_or_empty(run["ox_profile_contract_id"], "official run OX profile contract")
+    _assert_producer_identity_shape(run, "official run")
     if present_ramp:
         if run["ox_ramp_cap"] not in {1, 2, 5, 10}:
             raise R6Error("official run OX ramp cap is invalid")
@@ -2890,7 +3047,7 @@ def _assert_worker_state_schema(module: Any | None, state: Mapping[str, Any], *,
         or set(heads) != {"candidate", "label", "manifest"}
     ):
         raise R6Error("worker state binding inputs are malformed")
-    if set(state) - (_STATE_KEYS | _STATE_ROLLOUT_KEYS | _OX_RAMP_KEYS) or not _STATE_KEYS.issubset(state):
+    if set(state) - (_STATE_KEYS | _STATE_ROLLOUT_KEYS | _PRODUCER_OX_KEYS | _OX_RAMP_KEYS) or not _STATE_KEYS.issubset(state):
         raise R6Error("official worker state schema is not closed")
     state_schema = getattr(getattr(module, "store", None), "DISTILLATION_SCHEMA", "chronovisor.recall-distillation.v1")
     if state.get("schema") != state_schema or state.get("namespace") != "recall-distillation" or state.get("kind") != "worker-state":
@@ -2916,6 +3073,7 @@ def _assert_worker_state_schema(module: Any | None, state: Mapping[str, Any], *,
         if field in state:
             _strict_bool(state[field], f"worker state {field}")
     _strict_id_or_empty(state["ox_profile_contract_id"], "worker state OX profile contract")
+    _assert_producer_identity_shape(state, "official worker state")
     _strict_id_or_empty(state["split_plan_id"], "worker state split plan")
     _strict_text(state["promotion_status"], "worker state promotion_status", allow_empty=False)
     _strict_text(state["promotion_reason"], "worker state promotion_reason")
@@ -3005,10 +3163,19 @@ def _assert_candidate_artifact_schemas(
         or not isinstance(policy.get("lineage"), Mapping)
         or set(policy["lineage"]) != lineage_keys
         or set(replay) != replay_keys
-        or set(run) - (_RUN_KEYS | _OX_RAMP_KEYS)
+        or set(run) - (_RUN_KEYS | _PRODUCER_OX_KEYS | _OX_RAMP_KEYS)
         or not _RUN_KEYS.issubset(run)
     ):
         raise R6Error("official candidate artifact schema is not closed")
+    _assert_producer_identity_shape(run, "official run")
+    if state is not None:
+        _assert_producer_identity_shape(state, "official worker state")
+    if root is not None:
+        _assert_producer_identity_derivation(module, run, root=root, owner="official run")
+        if state is not None:
+            _assert_producer_identity_derivation(
+                module, state, root=root, owner="official worker state"
+            )
     if run.get("schema") != "chronovisor.recall-distill-run.v1" or run.get("namespace") != "recall-distillation" or run.get("kind") != "bounded-chunk":
         raise R6Error("official run identity is invalid")
     _artifact_id(run["artifact_id"])
@@ -3285,6 +3452,14 @@ def _official_candidate(
         heads=heads,
         root=root,
     )
+    _assert_producer_identity_shape(result, "completion worker")
+    for field in _PRODUCER_IDENTITY_KEYS | _PRODUCER_OX_KEYS:
+        if field in run and result.get(field) != run[field]:
+            raise R6Error(f"completion worker {field} is not bound to run")
+    if root is not None:
+        _assert_producer_identity_derivation(
+            module, result, root=root, owner="completion worker"
+        )
     after_snapshot = _worker_snapshot(clone)
     _require_candidate_newness(
         before_snapshot, after_snapshot, before_candidate_ledger,
@@ -3774,15 +3949,24 @@ def _assert_child_containment(value: object) -> None:
         raise R6Error("completion child sandbox identity is not parent-bound")
 
 
-def _assert_worker_result_schema(value: object) -> None:
+def _assert_worker_result_schema(
+    value: object, *, module: Any | None = None, root: Path | None = None
+) -> None:
     """Validate the exact mapping returned by _persist_distillation_chunk."""
 
     if not isinstance(value, Mapping):
         raise R6Error("completion worker result is not an object")
     present_ramp = set(value).intersection(_OX_RAMP_KEYS)
     expected = _WORKER_KEYS | (set(_OX_RAMP_KEYS) if present_ramp else set())
-    if set(value) != expected or (present_ramp and present_ramp != set(_OX_RAMP_KEYS)):
+    if set(value) - (expected | _PRODUCER_OX_KEYS) or not _WORKER_KEYS.issubset(value) or (present_ramp and present_ramp != set(_OX_RAMP_KEYS)):
         raise R6Error("completion worker schema is not closed")
+    _assert_producer_identity_shape(value, "completion worker")
+    if root is not None:
+        if module is None:
+            raise R6Error("completion worker producer module is unavailable")
+        _assert_producer_identity_derivation(
+            module, value, root=root, owner="completion worker"
+        )
     _strict_text(value["status"], "completion worker status", allow_empty=False)
     if value["status"] not in {"deferred", "ready", "capture_only"}:
         raise R6Error("completion worker status is invalid")
