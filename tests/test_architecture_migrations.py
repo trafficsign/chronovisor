@@ -119,6 +119,8 @@ def _clone_with_evidence_parent(
         check=True,
         capture_output=True,
     )
+    _git(repo, "config", "user.name", "Migration Test")
+    _git(repo, "config", "user.email", "migration@example.invalid")
     _git(
         repo,
         "checkout",

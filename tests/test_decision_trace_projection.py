@@ -492,8 +492,9 @@ process.stdout.write(JSON.stringify({{
 }}));
 """
     completed = subprocess.run(
-        ["node", "-e", scenario],
+        ["node"],
         cwd=ROOT,
+        input=scenario,
         check=True,
         capture_output=True,
         text=True,

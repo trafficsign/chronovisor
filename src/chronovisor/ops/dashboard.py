@@ -1676,7 +1676,9 @@ def _raw_file_date(path: Path) -> date | None:
         except ValueError:
             pass
     try:
-        return datetime.fromtimestamp(path.stat().st_mtime).date()
+        return datetime.fromtimestamp(
+            path.stat().st_mtime, tz=DASHBOARD_TIMEZONE
+        ).date()
     except OSError:
         return None
 
