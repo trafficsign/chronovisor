@@ -545,27 +545,11 @@ def _verify_artifact_binding(binding: Mapping[str, Any], label: str) -> None:
         _verify_artifact_binding(companion, f"{label} companion manifest")
 
 
-def _expected_formal_comparison(holdout: Mapping[str, Any] | None) -> dict[str, Any]:
-    if holdout is None:
-        holdout = {
-            "status": "not_available",
-            "independent_provenance": "unverified",
-            "entries": 0,
-            "sha256": "",
-            "path": "",
-        }
-    return {
-        "status": "not_measured",
-        "cases": 0,
-        "reason": "independent_source_span_ground_truth_unavailable",
-        "independent_provenance": "unverified",
-        "holdout": dict(holdout),
-    }
-
-
 def _verify_formal_comparison(value: Any) -> None:
     if not isinstance(value, dict):
         raise BundleError("formal comparison metadata is missing")
+    if set(value) != {"status", "cases", "reason", "independent_provenance", "holdout"}:
+        raise BundleError("formal comparison metadata changed")
     if value.get("status") != "not_measured" or value.get("cases") != 0:
         raise BundleError("formal comparison must remain not_measured with zero cases")
     if value.get("reason") != "independent_source_span_ground_truth_unavailable":
@@ -575,6 +559,8 @@ def _verify_formal_comparison(value: Any) -> None:
     holdout = value.get("holdout")
     if not isinstance(holdout, dict):
         raise BundleError("formal comparison holdout binding is missing")
+    if set(holdout) - {"status", "independent_provenance", "entries", "sha256", "path", "schema_version"}:
+        raise BundleError("holdout binding metadata changed")
     holdout_sha = holdout.get("sha256")
     holdout_path = holdout.get("path")
     if holdout_sha:
