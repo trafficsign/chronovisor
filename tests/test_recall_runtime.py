@@ -5549,6 +5549,88 @@ def test_distilled_fast_path_honors_total_context_budget(monkeypatch) -> None:
     ).hexdigest()
 
 
+def test_distilled_fast_path_caps_anchor_bm25_union_for_exact_receipt(
+    monkeypatch,
+) -> None:
+    """The 12-row receipt contract bounds a 24-row anchor/BM25 union."""
+
+    fast_policy = SimpleNamespace(
+        policy_id="fast-v2",
+        feature_schema="recall-distill-text-v2",
+        threshold=0.6,
+        margin=0.0,
+        max_cards=3,
+    )
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.build_text_features = lambda _query, _candidate: {
+        "query_chargram_coverage": 1.0,
+        "candidate_chargram_precision": 1.0,
+    }
+    module.score_fast_features = lambda _features, _policy: 0.9
+    receipts: list[dict[str, object]] = []
+    module.record_exact_exposure = lambda **kwargs: receipts.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(
+        recall_runtime, "_load_active_distillation_policy", lambda _request: fast_policy
+    )
+    candidates = [
+        ScoredPage(
+            f"candidate-{index:02d}",
+            f"Candidate {index:02d}",
+            "chronovisor",
+            "2026-10-09",
+            float(24 - index),
+            snippet="chronovisor",
+            uid=f"candidate-{index:02d}-uid",
+            content_sha256=hashlib.sha256(
+                f"candidate-{index:02d}".encode()
+            ).hexdigest(),
+        )
+        for index in range(24)
+    ]
+    monkeypatch.setattr(
+        recall_runtime,
+        "search_existing_lexical",
+        lambda *_args, **_kwargs: (candidates[:12], candidates[12:]),
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "context_item_from_page_id",
+        lambda page_id, *_args, **_kwargs: ContextItem(
+            page_id,
+            page_id,
+            "2026-10-09",
+            0.9,
+            uid=f"{page_id}-uid",
+            snippets=[page_id],
+        ),
+    )
+
+    result = recall_runtime._run_recall_impl(
+        RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="Chronovisor recall union cap",
+            session_id="session-1",
+        ),
+        RecallPolicy(log_decisions=False, max_context_chars=2_000),
+    )
+
+    assert result.evidence_features["distilled_fast_path"]["candidate_count"] == 12
+    assert result.evidence_features["distilled_fast_path"]["exposure_receipt"] == (
+        "exact_recorded"
+    )
+    assert len(receipts) == 1
+    assert len(receipts[0]["candidate_feature_snapshot"]) == 12
+    assert len(receipts[0]["candidate_pool_refs"]) == 12
+    assert [row["candidate_id"] for row in receipts[0]["candidate_pool_refs"]] == [
+        f"candidate-{index:02d}" for index in range(12)
+    ]
+
+
 def test_invalid_distilled_policy_falls_back_to_evidence_path(monkeypatch) -> None:
     called: list[bool] = []
     candidate = ScoredPage("page", "Page", "", "2026-08-14", 1.0)

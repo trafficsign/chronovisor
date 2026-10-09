@@ -91,6 +91,8 @@ TYPED_GRAPH_TRACE_FILE = (
 RECALL_GATE_RUNTIME_ROLE = "recall.gate"
 RECALL_QUERY_REWRITER_RUNTIME_ROLE = "recall.query_rewriter"
 _DISTILLED_FAST_PATH_MAX_MS = 180
+# Bound the combined anchor/BM25 pool to the exact receipt contract.
+_DISTILLED_FAST_PATH_MAX_CANDIDATES = 12
 
 TRIVIAL_PROMPT_RE = re.compile(
     r"^\s*(はい|いいえ|うん|おう|ok|okay|yes|no|y|n|ありがとう|thanks|thx|了解|りょ)\s*[。.!！?？]*\s*$",
@@ -3505,7 +3507,9 @@ def _readonly_fast_feature_rows(
     """Build the sole live/offline feature contract from the read-only index."""
 
     _require_remaining_budget(deadline_at, "distilled fast candidates")
-    anchors, bm25 = search_existing_lexical(request.prompt, top_n=12)
+    anchors, bm25 = search_existing_lexical(
+        request.prompt, top_n=_DISTILLED_FAST_PATH_MAX_CANDIDATES
+    )
     candidates: dict[str, Any] = {}
     for page in [*anchors, *bm25]:
         if page.superseded_by or should_filter_sensitive_result(page, request):
@@ -3513,7 +3517,9 @@ def _readonly_fast_feature_rows(
         existing = candidates.get(page.page_id)
         if existing is None or float(page.score) > float(existing.score):
             candidates[page.page_id] = page
-    ordered = sorted(candidates.values(), key=lambda page: float(page.score), reverse=True)
+    ordered = sorted(
+        candidates.values(), key=lambda page: float(page.score), reverse=True
+    )[:_DISTILLED_FAST_PATH_MAX_CANDIDATES]
     from chronovisor.recall.recall_distillation import build_text_features
 
     rows: list[tuple[Any, dict[str, float]]] = []
