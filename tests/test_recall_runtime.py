@@ -6634,6 +6634,47 @@ def test_capture_only_records_timeout_and_degraded_fallback(monkeypatch) -> None
     assert receipts == []
 
 
+def test_evidence_packet_capture_fails_closed_without_empty_exposure(
+    monkeypatch,
+) -> None:
+    receipts: list[dict[str, object]] = []
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.record_exact_exposure = lambda **kwargs: receipts.append(kwargs)
+    module.record_exposure = lambda **kwargs: receipts.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    result = RecallResult(
+        status="ok",
+        decision="search",
+        confidence=0.9,
+        queries=["evidence"],
+        reasons=[],
+        matched_terms={},
+        session_id="session-1",
+        evidence_packet=object(),
+        decision_id="evidence-packet-capture",
+    )
+    trace: dict[str, object] = {}
+    recall_runtime._record_distilled_exposure(
+        result,
+        request=RecallRequest(
+            host="codex",
+            event="UserPromptSubmit",
+            prompt="evidence",
+            session_id=result.session_id,
+            decision_id=result.decision_id,
+        ),
+        policy_id="a" * 64,
+        candidate_feature_snapshot=[],
+        trace=trace,
+    )
+
+    assert receipts == []
+    assert trace["exposure_receipt"] == "skipped_evidence_packet"
+
+
 @pytest.mark.parametrize("with_item", [True, False], ids=["read", "none"])
 def test_capture_only_distillation_observes_legacy_result_without_changing_it(
     monkeypatch, tmp_path, with_item: bool

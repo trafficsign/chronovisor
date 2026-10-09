@@ -3345,6 +3345,12 @@ def _record_distilled_exposure_unbounded(
     if not request.session_id:
         receipt_status("skipped_no_session")
         return
+    # Evidence reconstruction publishes a separate packet, not Recall page
+    # cards.  It has no exact page source binding for this receipt contract;
+    # fail closed instead of minting an empty exposure that can qualify a rally.
+    if result.evidence_packet is not None:
+        receipt_status("skipped_evidence_packet")
+        return
     payload = recall_context.parse_recall_payload(result.context)
     rendered_items = (
         {

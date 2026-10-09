@@ -2229,6 +2229,184 @@ def test_config_is_off_by_default_and_environment_is_authoritative(
     assert distill.distillation_enabled(missing)
 
 
+def test_capture_enabled_is_explicit_and_does_not_enable_training(tmp_path: Path) -> None:
+    config = _config(tmp_path, enabled=False, capture_enabled=True)
+
+    assert distill.capture_enabled(config) is True
+    assert distill.distillation_enabled(config) is False
+    loaded = distill.load_distillation_config(config)
+    assert loaded.capture_enabled is True
+    assert loaded.enabled is False
+
+
+def test_capture_policy_identity_requires_explicit_capture_or_training(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, enabled=False, capture_enabled=True)
+    baseline_id = _baseline_identity(tmp_path)
+    artifact = _fixture_candidate(tmp_path, baseline_artifact_id=baseline_id)
+    policy_id = str(artifact["artifact_id"])
+    store.write_pointer(tmp_path, "active", policy_id)
+
+    assert distill.load_capture_policy_identity(tmp_path) == policy_id
+
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "capture_enabled = true", "capture_enabled = false"
+        ),
+        encoding="utf-8",
+    )
+    assert distill.distillation_enabled(config) is False
+    assert distill.load_capture_policy_identity(tmp_path) == ""
+
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "enabled = false", "enabled = true", 1
+        ),
+        encoding="utf-8",
+    )
+    assert distill.distillation_enabled(config) is True
+    assert distill.load_capture_policy_identity(tmp_path) == policy_id
+
+    store.write_pointer(tmp_path, "active", "f" * 64)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "capture_enabled = false", "capture_enabled = true"
+        ),
+        encoding="utf-8",
+    )
+    assert distill.load_capture_policy_identity(tmp_path) == ""
+
+
+def test_capture_only_runtime_finalizer_writes_exact_and_page_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_field, recall_runtime
+    from chronovisor.recall.recall_runtime import (
+        ContextItem,
+        RecallPolicy,
+        RecallRequest,
+        RecallResult,
+    )
+
+    config = _config(tmp_path, enabled=False, capture_enabled=True)
+    baseline_id = _baseline_identity(tmp_path)
+    artifact = _fixture_candidate(tmp_path, baseline_artifact_id=baseline_id)
+    policy_id = str(artifact["artifact_id"])
+    store.write_pointer(tmp_path, "active", policy_id)
+    monkeypatch.setattr(recall_runtime, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(recall_field, "queue_teacher_commits", lambda **_kwargs: {})
+    page = SimpleNamespace(
+        page_id="capture-page",
+        title="Capture page",
+        updated="2026-09-01",
+        snippet="stable capture",
+        content_sha256="a" * 64,
+    )
+    features = distill.build_fast_features(
+        query_chargram_coverage=1.0,
+        candidate_chargram_precision=1.0,
+    )
+    monkeypatch.setattr(
+        recall_runtime,
+        "_readonly_fast_feature_rows",
+        lambda *_args, **_kwargs: [(page, features)],
+    )
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="capture query",
+        cwd=str(tmp_path),
+        session_id="capture-session",
+        decision_id="capture-exact",
+    )
+    result = recall_runtime._finalize_recall_result(
+        RecallResult(
+            status="ok",
+            decision="search",
+            confidence=0.9,
+            queries=[request.prompt],
+            reasons=["capture"],
+            matched_terms={},
+            session_id=request.session_id,
+            context_items=[
+                ContextItem(
+                    "capture-page",
+                    "Capture page",
+                    "2026-09-01",
+                    0.9,
+                    snippets=["stable capture"],
+                )
+            ],
+            decision_id=request.decision_id,
+        ),
+        request=request,
+        active_request=request,
+        policy=RecallPolicy(log_decisions=False),
+        session_state=None,
+        queries=[request.prompt],
+        deadline_at=time.monotonic() + 1.0,
+    )
+    assert result.context_items
+
+    monkeypatch.setattr(
+        recall_runtime,
+        "_readonly_fast_feature_rows",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("capture")),
+    )
+    page_request = replace(request, decision_id="capture-page-fallback")
+    page_result = RecallResult(
+        status="ok",
+        decision="search",
+        confidence=0.9,
+        queries=[page_request.prompt],
+        reasons=["capture"],
+        matched_terms={},
+        session_id=page_request.session_id,
+        context_items=[
+            ContextItem(
+                "capture-page",
+                "Capture page",
+                "2026-09-01",
+                0.9,
+                snippets=["stable capture"],
+            )
+        ],
+        decision_id=page_request.decision_id,
+    )
+    recall_runtime._finalize_recall_result(
+        page_result,
+        request=page_request,
+        active_request=page_request,
+        policy=RecallPolicy(log_decisions=False),
+        session_state=None,
+        queries=[page_request.prompt],
+        deadline_at=time.monotonic() + 1.0,
+    )
+
+    store.write_pointer(tmp_path, "active", "f" * 64)
+    invalid_request = replace(page_request, decision_id="capture-invalid")
+    recall_runtime._finalize_recall_result(
+        replace(page_result, decision_id=invalid_request.decision_id),
+        request=invalid_request,
+        active_request=invalid_request,
+        policy=RecallPolicy(log_decisions=False),
+        session_state=None,
+        queries=[invalid_request.prompt],
+        deadline_at=time.monotonic() + 1.0,
+    )
+
+    receipts = store.read_chain(
+        store.distillation_dir(tmp_path) / "exposure-receipts.jsonl"
+    )
+    assert distill.distillation_enabled(config) is False
+    assert distill.load_active_policy(tmp_path) == {}
+    assert [row["kind"] for row in receipts] == [
+        "prospective-exact-exposure-v1",
+        "prospective-page-exposure",
+    ]
+
+
 def test_migrate_distillation_config_dry_run_apply_and_idempotence(
     tmp_path: Path,
 ) -> None:
@@ -9138,7 +9316,7 @@ def test_probe_and_locked_test_rows_cannot_change_policy_bytes() -> None:
 
 
 def test_offline_gate_uses_route_stability_and_agreed_counterfactuals(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     positive = distill.build_fast_features(
         query_chargram_coverage=1, candidate_chargram_precision=1
@@ -9293,6 +9471,36 @@ def test_offline_gate_uses_route_stability_and_agreed_counterfactuals(
     assert gate["reasons"] == []
     assert gate["passed"] is True
     assert gate["truth_authority"] == "teacher_only_not_verified"
+    controls = gate["control_evidence"]
+    assert controls["constants_rejected"] is True
+    assert controls["learned_passed"] is True
+    assert len(controls["folds"]) == len(distill.TEACHER_ROLES)
+    for fold in controls["folds"].values():
+        assert fold["eligible"] is True
+        assert fold["learned_passed"] is True
+        assert fold["constants_rejected"] is True
+        matrices = fold["matrices"]
+        assert matrices["learned"]["rows"] >= 2 * 30
+        assert matrices["always_inject"]["specificity_wilson_lower"] == 0.0
+        assert matrices["always_inject"]["passed"] is False
+        assert matrices["always_reject"]["recall_wilson_lower"] == 0.0
+        assert matrices["always_reject"]["passed"] is False
+        assert {
+            matrix["cohort_sha256"] for matrix in matrices.values()
+        } == {fold["cohort"]["sha256"]}
+    locked_rows = [
+        row
+        for row in rows
+        if row.get("probe") is True
+        and row.get("split") == "test"
+        and row.get("route") in distill.TEACHER_ROLES
+    ]
+    changed = [dict(row) for row in locked_rows]
+    changed[0]["features"] = dict(changed[0]["features"])
+    changed[0]["features"]["query_chargram_coverage"] = 0.0
+    assert distill._control_cohort_sha256(locked_rows) != distill._control_cohort_sha256(
+        changed
+    )
     unstable = [dict(row) for row in rows]
     for row in unstable:
         if row.get("probe") is True and row.get("route") == distill.TEACHER_ROLES[0]:
@@ -9339,6 +9547,33 @@ def test_offline_gate_uses_route_stability_and_agreed_counterfactuals(
     assert set(recovered["model_cohort"]["teacher_model_digests"].values()) == set(
         next_digests.values()
     )
+
+    def constant_policy(bias: float) -> dict[str, object]:
+        return {
+            "feature_keys": list(distill.FAST_FEATURE_KEYS),
+            "feature_revision": distill.TEXT_FEATURE_REVISION,
+            "weights": {key: 0.0 for key in distill.FAST_FEATURE_KEYS},
+            "bias": bias,
+            "threshold": 0.65,
+            "abstain_margin": 0.08,
+            "max_cards": 3,
+        }
+
+    monkeypatch.setattr(
+        distill, "train_tiny_policy", lambda _rows: constant_policy(100.0)
+    )
+    always_inject = distill._offline_training_gate(rows, config, root=tmp_path)
+    assert always_inject["passed"] is False
+    assert "route_holdout_failed_a" in always_inject["reasons"]
+    assert "control_learned_failed" in always_inject["reasons"]
+
+    monkeypatch.setattr(
+        distill, "train_tiny_policy", lambda _rows: constant_policy(-100.0)
+    )
+    always_reject = distill._offline_training_gate(rows, config, root=tmp_path)
+    assert always_reject["passed"] is False
+    assert "route_holdout_failed_a" in always_reject["reasons"]
+    assert "control_learned_failed" in always_reject["reasons"]
 
 
 def test_authenticated_correction_is_negative_veto_only(tmp_path: Path) -> None:

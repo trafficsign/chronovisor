@@ -141,6 +141,8 @@ RELEVANCE_CLOSED_PREDICATES = frozenset(
 )
 TEXT_FEATURE_REVISION = "recall-distill-text-v2"
 FAST_FEATURE_KEYS = ("query_chargram_coverage", "candidate_chargram_precision")
+_CONTROL_MIN_CLASS = 30
+_CONTROL_MIN_WILSON_LOWER = 0.65
 REPLAY_OBSERVATION_SCHEMA = "chronovisor.recall-rollout-replay-observation.v1"
 SHADOW_PRODUCER_NAME = "chronovisor.recall-runtime"
 SHADOW_PRODUCER_VERSION = 1
@@ -716,6 +718,7 @@ def _default_workers(
 @dataclass(frozen=True)
 class DistillationConfig:
     enabled: bool = False
+    capture_enabled: bool = False
     chunk_size: int = 25
     max_input_bytes: int = 12_000
     max_candidates: int = 200
@@ -2865,6 +2868,7 @@ def _default_distillation_config() -> dict[str, Any]:
 _DISTILLATION_CONFIG = _default_distillation_config()
 _OPTIONAL_PROFILE_CONFIG = frozenset(
     {
+        "capture_enabled",
         "teacher_profile",
         "teacher_max_inflight",
         "teacher_claim_limit",
@@ -2902,6 +2906,15 @@ def distillation_enabled(config_path: Path | None = None) -> bool:
     return _config_table(config_path).get("enabled") is True
 
 
+def capture_enabled(config_path: Path | None = None) -> bool:
+    """Return whether capture-only exposure recording is explicitly enabled."""
+
+    value = _config_table(config_path).get("capture_enabled", False)
+    if not isinstance(value, bool):
+        raise DistillationError("recall.distillation.capture_enabled must be boolean")
+    return value
+
+
 def load_distillation_config(config_path: Path | None = None) -> DistillationConfig:
     table = _config_table(config_path)
 
@@ -2914,6 +2927,9 @@ def load_distillation_config(config_path: Path | None = None) -> DistillationCon
     stages = table.get("rollout_stages", [5, 25, 100])
     if not isinstance(stages, list) or tuple(stages) != (5, 25, 100):
         raise DistillationError("rollout_stages must be [5, 25, 100]")
+    capture = table.get("capture_enabled", False)
+    if not isinstance(capture, bool):
+        raise DistillationError("recall.distillation.capture_enabled must be boolean")
     teacher_profile = table.get("teacher_profile", LOCAL_TRIAD_PROFILE)
     if teacher_profile not in TEACHER_PROFILES:
         raise DistillationError("recall.distillation.teacher_profile is invalid")
@@ -2934,6 +2950,7 @@ def load_distillation_config(config_path: Path | None = None) -> DistillationCon
         raise DistillationError("teacher_claim_limit must be at most 500")
     return DistillationConfig(
         enabled=distillation_enabled(config_path),
+        capture_enabled=capture,
         chunk_size=positive("chunk_size", 25),
         max_input_bytes=positive("max_input_bytes", 12_000),
         max_candidates=positive("max_candidates", 200),
@@ -2983,7 +3000,15 @@ def _migration_additions(data: Mapping[str, Any]) -> tuple[str, ...]:
         if not isinstance(enabled, bool) or set(distillation).difference(expected):
             raise DistillationError("recall.distillation conflicts or is incomplete")
         for name, value in distillation.items():
-            if name == "enabled" or name in _OPTIONAL_PROFILE_CONFIG:
+            if name == "enabled":
+                continue
+            if name == "capture_enabled":
+                if not isinstance(value, bool):
+                    raise DistillationError(
+                        "recall.distillation.capture_enabled must be boolean"
+                    )
+                continue
+            if name in _OPTIONAL_PROFILE_CONFIG:
                 continue
             if value != expected[name]:
                 raise DistillationError(
@@ -3792,7 +3817,12 @@ def load_capture_policy_identity(root: Path | None = None) -> str:
 
     root = root or CHRONOVISOR_ROOT
     if not _enabled_for_root(root):
-        return ""
+        config_path = root / "config.toml"
+        try:
+            if not capture_enabled(config_path if config_path.exists() else None):
+                return ""
+        except DistillationError:
+            return ""
     try:
         policy_id = str(_stable_pointer_read(root, "active")["policy_id"])
         _validate_exposure_policy_identity(root, policy_id)
@@ -5907,6 +5937,132 @@ def _wilson_upper(successes: int, total: int) -> float:
     return min(1.0, 1.0 - _wilson_lower(total - successes, total))
 
 
+def _control_cohort_sha256(rows: Sequence[Mapping[str, Any]]) -> str:
+    """Identify a locked cohort, including labels, features, and provenance."""
+
+    row_hashes = sorted(
+        canonical_json.canonical_json_sha256_strict(dict(row)) for row in rows
+    )
+    return canonical_json.canonical_json_sha256_strict(row_hashes)
+
+
+def _control_confusion_matrix(
+    rows: Sequence[Mapping[str, Any]],
+    accepted: Callable[[Mapping[str, Any]], bool],
+    *,
+    cohort_sha256: str,
+) -> dict[str, Any]:
+    """Score one decision rule on the exact locked test cohort."""
+
+    relevant = [row for row in rows if row.get("verdict") == "relevant"]
+    irrelevant = [row for row in rows if row.get("verdict") == "irrelevant"]
+    true_positive = sum(accepted(row) for row in relevant)
+    false_negative = len(relevant) - true_positive
+    false_positive = sum(accepted(row) for row in irrelevant)
+    true_negative = len(irrelevant) - false_positive
+    recall = _wilson_lower(true_positive, len(relevant))
+    specificity = _wilson_lower(true_negative, len(irrelevant))
+    eligible = (
+        len(relevant) >= _CONTROL_MIN_CLASS
+        and len(irrelevant) >= _CONTROL_MIN_CLASS
+    )
+    return {
+        "cohort_sha256": cohort_sha256,
+        "rows": len(relevant) + len(irrelevant),
+        "positive": len(relevant),
+        "negative": len(irrelevant),
+        "true_positive": true_positive,
+        "false_negative": false_negative,
+        "false_positive": false_positive,
+        "true_negative": true_negative,
+        "recall_wilson_lower": round(recall, 8),
+        "specificity_wilson_lower": round(specificity, 8),
+        "eligible": eligible,
+        "passed": (
+            eligible
+            and recall >= _CONTROL_MIN_WILSON_LOWER
+            and specificity >= _CONTROL_MIN_WILSON_LOWER
+        ),
+    }
+
+
+def _control_fold_evidence(
+    test: Sequence[Mapping[str, Any]], policy: Mapping[str, Any]
+) -> dict[str, Any]:
+    cohort_sha256 = _control_cohort_sha256(test)
+    matrices = {
+        "learned": _control_confusion_matrix(
+            test,
+            lambda row: (
+                policy_decision(
+                    score_fast_features(row["features"], policy), policy
+                )["decision"]
+                == "read"
+            ),
+            cohort_sha256=cohort_sha256,
+        ),
+        "always_inject": _control_confusion_matrix(
+            test, lambda _row: True, cohort_sha256=cohort_sha256
+        ),
+        "always_reject": _control_confusion_matrix(
+            test, lambda _row: False, cohort_sha256=cohort_sha256
+        ),
+    }
+    eligible = matrices["learned"]["eligible"]
+    return {
+        "cohort": {
+            "split": "test",
+            "rows": len(test),
+            "sha256": cohort_sha256,
+        },
+        "matrices": matrices,
+        "eligible": eligible,
+        "learned_passed": matrices["learned"]["passed"],
+        "constants_rejected": bool(
+            eligible
+            and not matrices["always_inject"]["passed"]
+            and not matrices["always_reject"]["passed"]
+        ),
+    }
+
+
+def _route_fold_evidence(
+    rows: Sequence[Mapping[str, Any]], probes: Sequence[Mapping[str, Any]]
+) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    route_folds: dict[str, Any] = {}
+    control_folds: dict[str, Any] = {}
+    reasons: list[str] = []
+    for holdout in TEACHER_ROLES:
+        fold_policy = train_tiny_policy(
+            [
+                row
+                for row in rows
+                if row.get("route") != holdout
+                and (
+                    row.get("probe") is not True or row.get("source") != "teacher-label"
+                )
+            ]
+        )
+        test = [
+            row
+            for row in probes
+            if row.get("route") == holdout and row.get("split") == "test"
+        ]
+        control = _control_fold_evidence(test, fold_policy)
+        learned = control["matrices"]["learned"]
+        route_folds[holdout] = {
+            "relevant": learned["positive"],
+            "irrelevant": learned["negative"],
+            "recall_wilson_lower": learned["recall_wilson_lower"],
+            "specificity_wilson_lower": learned["specificity_wilson_lower"],
+            "passed": learned["passed"],
+        }
+        control_folds[holdout] = control
+        if not learned["passed"]:
+            reasons.append(f"route_holdout_failed_{holdout.rsplit('.', 1)[-1]}")
+    return route_folds, control_folds, reasons
+
+
 def _authoritative_materialized_row_binding(
     root: Path, row: Mapping[str, Any], split_plan: Mapping[str, Any] | None
 ) -> bool:
@@ -6682,52 +6838,37 @@ def _offline_training_gate(
     ):
         reasons.append("chronological_split_incomplete")
 
-    route_folds: dict[str, Any] = {}
-    for holdout in TEACHER_ROLES:
-        fold_policy = train_tiny_policy(
-            [
-                row
-                for row in rows
-                if row.get("route") != holdout
-                and (
-                    row.get("probe") is not True or row.get("source") != "teacher-label"
-                )
-            ]
-        )
-        test = [
-            row
-            for row in probes
-            if row.get("route") == holdout and row.get("split") == "test"
-        ]
-        relevant = [row for row in test if row.get("verdict") == "relevant"]
-        irrelevant = [row for row in test if row.get("verdict") == "irrelevant"]
-
-        def accepted(
-            row: Mapping[str, Any], policy: Mapping[str, Any] = fold_policy
-        ) -> bool:
-            score = score_fast_features(row["features"], policy)
-            return policy_decision(score, policy)["decision"] == "read"
-
-        recall = _wilson_lower(sum(accepted(row) for row in relevant), len(relevant))
-        specificity = _wilson_lower(
-            sum(not accepted(row) for row in irrelevant), len(irrelevant)
-        )
-        passed = (
-            len(relevant) >= 30
-            and len(irrelevant) >= 30
-            and recall >= 0.65
-            and specificity >= 0.65
-        )
-        route_folds[holdout] = {
-            "relevant": len(relevant),
-            "irrelevant": len(irrelevant),
-            "recall_wilson_lower": round(recall, 8),
-            "specificity_wilson_lower": round(specificity, 8),
-            "passed": passed,
-        }
-        if not passed:
-            reasons.append(f"route_holdout_failed_{holdout.rsplit('.', 1)[-1]}")
-
+    route_folds, control_folds, fold_reasons = _route_fold_evidence(rows, probes)
+    reasons.extend(fold_reasons)
+    final_policy = train_tiny_policy(rows)
+    control_evidence = {
+        "schema": "chronovisor.recall-distill-control-evidence.v1",
+        "machine_gate": {
+            "minimum_class": _CONTROL_MIN_CLASS,
+            "minimum_wilson_lower": _CONTROL_MIN_WILSON_LOWER,
+            "per_route_locked_cohorts": True,
+        },
+        "folds": control_folds,
+        "eligible": bool(control_folds)
+        and all(fold["eligible"] for fold in control_folds.values()),
+        "learned_passed": bool(control_folds)
+        and all(fold["learned_passed"] for fold in control_folds.values()),
+        "constants_rejected": bool(control_folds)
+        and all(fold["constants_rejected"] for fold in control_folds.values()),
+    }
+    control_evidence["passed"] = bool(
+        control_evidence["eligible"]
+        and control_evidence["learned_passed"]
+        and control_evidence["constants_rejected"]
+    )
+    if not control_evidence["eligible"]:
+        reasons.append("control_cohort_below_floor")
+    if not control_evidence["learned_passed"]:
+        reasons.append("control_learned_failed")
+    if control_evidence["eligible"] and not control_evidence["constants_rejected"]:
+        reasons.append("constant_control_passed")
+    if not control_evidence["passed"]:
+        reasons.append("control_evidence_failed")
     cf_test = [
         row
         for row in counterfactual
@@ -6735,7 +6876,6 @@ def _offline_training_gate(
     ]
     if len(cf_test) < config.hard_floor_counterfactual_pairs:
         reasons.append("counterfactual_pairs_below_floor")
-    final_policy = train_tiny_policy(rows)
     directional = sum(
         (
             policy_decision(
@@ -6767,6 +6907,7 @@ def _offline_training_gate(
             "is_truth": False,
         },
         "route_folds": route_folds,
+        "control_evidence": control_evidence,
         "counterfactual_direction": {
             "denominator": len(cf_test),
             "wilson_lower": round(cf_lower, 8),
