@@ -822,6 +822,12 @@ def test_official_worker_integration_accepts_empty_teacher_mapping(
 ) -> None:
     """The real worker's empty-teacher route is bounded and never builds defaults."""
 
+    # The separate Darwin contract tests exercise the real sandbox executable.
+    sandbox = {
+        "path": "/usr/bin/sandbox-exec", "dev": 1, "ino": 1,
+        "uid": 0, "mode": 0o755, "sha256": "f" * 64,
+    }
+    monkeypatch.setattr(HARNESS, "_sandbox_identity", lambda: dict(sandbox))
     init_chronovisor(RuntimeContext(tmp_path))
     (tmp_path / "config.toml").write_text("[recall.distillation]\nenabled = true\n")
     monkeypatch.setattr(distill, "_default_workers", lambda *_args, **_kwargs: pytest.fail("default provider factory called"))
