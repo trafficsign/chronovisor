@@ -24,3 +24,12 @@ condition = "AND"
 regexTarget = "line"
 paths = ['''(^|/)scripts/recall_r8_harness\.py$''']
 regexes = ['''key\s*==\s*"r[23]_completion"''']
+
+[[allowlists]]
+description = "Benchmark metadata content digests"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+commits = ["2aa90b82063e0b0b29d5b4ed13f3ecae6c5e12a6"]
+paths = ['''^_handoff/evidence/2026-09-05-fixed-model-optimization/a3-results\.json$''']
+regexes = ['''^\s+"canonical_keys":\s+"[0-9a-f]{64}",?$''']
