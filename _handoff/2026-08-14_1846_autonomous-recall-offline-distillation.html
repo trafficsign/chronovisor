@@ -619,6 +619,7 @@ user query ─► BM25/anchor
 <section data-section="実行ログ">
 <h2>実行ログ</h2>
 <ol class="log">
+<li><time>2026-10-09 11:20 JST</time><span>P1 capture の配備後検証で anchor/BM25 union 24 件と exact receipt 上限 12 件の不整合を再現。<code>a9a18137</code> で共通候補を 12 件に制限し、validator を緩めず回帰保護を追加（runtime 225 passed）。正式な R5/R6/R7 の受入と全 host の capture 回復は未確認のまま。最終配備と CI は追加 Plan の private deployment receipt に記録する。</span></li>
 <li><time>2026-10-09 10:56 JST</time><span>追加 Plan の P0 即時停止と P1 capture-only 修復を実装・検証。capture_enabled=true / enabled=false に分離し、sealed identity と正確な対応を持つ legacy card の記録を開始。evidence_packet は記録対象外。per-route の固定 test cohort に learned と 2 定数方針の混同行列を記録し、定数方針が通らないことを確認。全体 6,685 tests passed。本線 R5/R6/R7 のチェックは未変更。正式な時系列 cohort・独立 local teacher と generator/judge・probe/CF/blind repeat が足りず、条件を緩めない。</span></li>
 <li><time>2026-10-09 10:43</time><span>承認済み追加 Plan <code>2026-10-09_1011_recall-compounding-fitness-first.html</code> から R5 状態を再確認。9 月以降の Raw 5,982 件は exact exposure 5,662 件欠落・answer 320 件欠落で eligible 0。8/29 materialization は eligible teacher label 502 の train のみで validation / locked test / probe / CF が不足。現在は local-only を優先し、期限切れ外部教師 cohort は再開しない。local 教師 3 枠と generator/judge は同一 model revision のため独立性契約未達。R5/R6/R7 は未checkのまま。probe hard floor の旧 config 1 を canonical 100 へ復帰し、training は disabled を維持して観測保存のみの分離を実装中。</span></li>
 <li><time>2026-08-14 18:46</time><span>正規 generator で plan を作成。ユーザー案、既存 Recall/Evidence/Raw/learning 調査、DeepSeek群の調査、Kimi K3 の反証を一つの自律設計へ統合。</span></li>

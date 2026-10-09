@@ -65,7 +65,7 @@ summary{cursor:pointer;font-weight:600}
 </head>
 <body>
 <script type="application/json" id="plan-meta">
-{"task_id":"plan_98a6d3b36c7844f1ab2f87a13b423968","created_at":"2026-10-09T10:11:08+09:00","状態":"blocked","slug":"recall-compounding-fitness-first","investigation_state":"complete","implementation_state":"waiting_for_acceptance_evidence","updated_at":"2026-10-09T10:56:49+09:00","base_commit":"da6b8e36","parent_plan":"2026-08-14_1846_autonomous-recall-offline-distillation.html"}
+{"task_id":"plan_98a6d3b36c7844f1ab2f87a13b423968","created_at":"2026-10-09T10:11:08+09:00","状態":"blocked","slug":"recall-compounding-fitness-first","investigation_state":"complete","implementation_state":"waiting_for_acceptance_evidence","updated_at":"2026-10-09T11:20:33+09:00","base_commit":"da6b8e36","parent_plan":"2026-08-14_1846_autonomous-recall-offline-distillation.html"}
 </script>
 
 <header>
@@ -331,6 +331,7 @@ summary{cursor:pointer;font-weight:600}
 <section data-section="実行ログ">
 <h2>実行ログ</h2>
 <ol class="log">
+<li><time>2026-10-09 11:20 JST</time><span>配備後の自然な観測 4 件は page receipt へ fallback していた。実索引の read-only 再現で anchor/BM25 の union が最大 24 件になる一方、exact receipt 契約は 12 件までという不整合を確認。commit <code>a9a18137</code> で共通候補生成を dedupe・score 順の 12 件に制限し、保存側 validator を維持した。24→12 件と exact writer 到達を回帰テストで固定（runtime 225 tests passed）。Linux CI で発見した Git fixture の identity、大型 Node script の引数上限、Dashboard の mtime 日付判定のホスト TZ 依存は <code>19a27aae</code> で修正。日付の既存 flow 6 件は UTC / Asia-Tokyo の双方で通過。最終 SHA の CI と再配備の結果は private deployment receipt に記録する。P0 翌朝・P1 正式受入の待機条件は変更しない。</span></li>
 <li><time>2026-10-09 10:56 JST</time><span>P0 の即時 3 項目を実行版で確認。auto_apply（query_hint / alias / page_tag）と旧 calibration / improvement の writer は停止。hint・calibration・active-policy の hash は開始時と同一、applied は 1,371 / 1 / 27 のまま。較正の読み取りと閾値 0.35 / 0.65 は保持。capture=true、training=false、serving policy は空、sealed identity は有効。ローカル全体 6,685 tests passed、追加 capture テストを含む distillation 289 / runtime 224 tests passed。GitHub Linux mypy の既存 optional-import 失敗を <code>355c1142</code> で修正。CI の既存依存監査は 7 パッケージ 34 件で未通過（依存 lock は変更なし）。5 サービスの最終切り替え・archive・health の確定証跡は private <code>~/.chronovisor/runtime/recall-fitness-rollout/2026-10-09/deployment-final.json</code> に記録する。Ingest は batch lease が空くまで待ち、処理中 Raw は中断しない。P0 翌朝確認を 10/10 09:00 の一回だけ予約（automation <code>recall-p0</code>）。P1 以降の採用と本線 R5/R6/R7 は未受入のまま。</span></li>
 <li><time>2026-10-09 10:50 JST</time><span>P1 の局所修正を commit <code>0e9e2dbe</code> に保存。capture_enabled を学習・serving から独立させ、sealed identity と source binding が有効な legacy card 観測だけを記録する。evidence_packet は正確なページ対応を持たないため記録を棄却する。per-route の同一 locked cohort に learned / always-inject / always-reject の混同行列と cohort hash を残し、定数方針が通らないことを検証。distillation 289 件、runtime 224 件、large-function・ruff・設定対象 mypy・import/architecture 検査が通過。生データの正式評価と配備は後続。</span></li>
 <li><time>2026-10-09 10:43 JST</time><span>P2b の候補生成経路を commit <code>82e1f842</code> に保存。日本語 prompt は明示 opt-in とし、本番生成の既定 bytes は維持。別世代・上限必須・local-only・source/config/model hash 固定の候補 bundle を追加。実 2 ページで同数 5 問ずつの日本語質問を生成（fallback 0 / failed 0 / source byte 変更 0）。全 9,781 ページ中 8 件は canonical/stable 要件外で除外。これは smoke であり、全ページ生成・A〜E 比較・P1 による採用は未完。旧 recall_improvement 指標は本 Plan の採否に使わず、同 lane は off にした。P0 source は commit <code>291223f8</code>、本番配備は後続。</span></li>

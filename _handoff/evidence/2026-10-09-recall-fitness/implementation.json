@@ -1,6 +1,6 @@
 {
   "schema": "chronovisor.recall-fitness-implementation.v1",
-  "updated_at": "2026-10-09T10:56:49+09:00",
+  "updated_at": "2026-10-09T11:20:33+09:00",
   "plan": "_handoff/2026-10-09_1011_recall-compounding-fitness-first.html",
   "base_commit": "da6b8e362441e0f21eac53bd86d1fc853fa42d2f",
   "promotion_status": "waiting_for_verified_temporal_data_and_local_teacher_contract",
@@ -54,14 +54,22 @@
     "291223f8",
     "82e1f842",
     "0e9e2dbe",
-    "355c1142"
+    "355c1142",
+    "a9a18137",
+    "19a27aae"
   ],
   "capture_contract": {
     "opt_in_setting": "recall.distillation.capture_enabled",
     "training_enabled": false,
     "sealed_identity_required": true,
     "evidence_packet_receipts": "skipped",
-    "all_host_recovery_verified": false
+    "all_host_recovery_verified": false,
+    "maximum_candidate_pool": 12,
+    "post_deployment_fix": {
+      "cause": "anchor and BM25 union exceeded the 12-candidate exact receipt limit",
+      "regression": "24 candidate union bounded to 12; exact writer reached",
+      "validator_relaxed": false
+    }
   },
   "deployment": {
     "status": "final_result_recorded_locally",
@@ -71,7 +79,7 @@
   "verification": {
     "isolated_full_tests": 6685,
     "capture_distillation_tests": 289,
-    "recall_runtime_tests": 224,
+    "recall_runtime_tests": 225,
     "nemotron_mlx_tests": 5,
     "configured_mypy_files": 97,
     "ruff": "passed",
@@ -82,7 +90,13 @@
       "packages": 7,
       "reported_findings": 34,
       "lock_changed": false
-    }
+    },
+    "linux_portability_fixes": {
+      "git_merge_fixture": "repository-local identity",
+      "node_scenario": "stdin replaces oversized argv",
+      "dashboard_date": "explicit DASHBOARD_TIMEZONE; 6 flow tests passed in UTC and Asia/Tokyo"
+    },
+    "functional_ci": "final revision result recorded in private deployment receipt"
   },
   "p0_immediate": {
     "query_hint_reading": false,
