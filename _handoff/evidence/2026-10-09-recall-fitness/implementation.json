@@ -1,0 +1,68 @@
+{
+  "schema": "chronovisor.recall-fitness-implementation.v1",
+  "updated_at": "2026-10-09T10:50:05+09:00",
+  "plan": "_handoff/2026-10-09_1011_recall-compounding-fitness-first.html",
+  "base_commit": "da6b8e362441e0f21eac53bd86d1fc853fa42d2f",
+  "promotion_status": "waiting_for_verified_temporal_data_and_local_teacher_contract",
+  "production_promoted": false,
+  "p1_inventory": {
+    "native_rallies": 14956,
+    "days": 87,
+    "eligible": 15,
+    "post_september_rallies": 5982,
+    "post_september_eligible": 0,
+    "post_september_missing_exact_exposure": 5662,
+    "post_september_missing_answer": 320,
+    "latest_training_rows": 505,
+    "eligible_teacher_labels": 502,
+    "teacher_relevant": 202,
+    "teacher_irrelevant": 300,
+    "validation_rows": 0,
+    "locked_test_rows": 0,
+    "probe_pairs": 0,
+    "counterfactual_pairs": 0,
+    "local_teacher_models_distinct": false
+  },
+  "p2b_local_smoke": {
+    "status": "complete",
+    "promotion_status": "blocked_until_p1",
+    "selected_pages": 2,
+    "source_enumerated": 9781,
+    "source_excluded": 8,
+    "generated": 2,
+    "fallback": 0,
+    "failed": 0,
+    "source_snapshot_sha256": "8e67ce0f908703e886239c21ee3834d24e5c7776bfc48eba34563ae1cf07d5f7",
+    "candidates_sha256": "a1247f72b8e83b528997e4380b1bca9e9eb2275773778e74434cc9024cc145dd"
+  },
+  "p2b_local_smoke_comparison": {
+    "same_question_count_pages": 2,
+    "japanese_questions": 10,
+    "live_page_or_index_writes": 0
+  },
+  "not_accepted": [
+    "P0 overnight stability",
+    "P1 independent blind repeats and counterfactuals",
+    "P1 semantic answer-leak and planted-value controls",
+    "R5 formal acceptance",
+    "R6 real candidate",
+    "R7 real-time canary",
+    "P2b real-query five-arm comparison",
+    "P3-P7 future phase entry conditions"
+  ],
+  "implementation_commits": [
+    "291223f8",
+    "82e1f842",
+    "0e9e2dbe"
+  ],
+  "capture_contract": {
+    "opt_in_setting": "recall.distillation.capture_enabled",
+    "training_enabled": false,
+    "sealed_identity_required": true,
+    "evidence_packet_receipts": "skipped",
+    "all_host_recovery_verified": false
+  },
+  "deployment": {
+    "status": "pending"
+  }
+}

@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Plan: Recall の改善が積み上がる状態にする（8/14 蒸留計画への追加）</title>
+<style>
+:root{
+  --fg:#1a1a1a; --muted:#666; --bg:#fafaf7; --accent:#2c5aa0;
+  --done:#888; --warn:#c0392b; --ok:#2e7d32; --rule:#e0e0d8;
+  --code-bg:#eee;
+}
+*{box-sizing:border-box}
+body{
+  font-family:-apple-system,'Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif;
+  color:var(--fg); background:var(--bg);
+  max-width:880px; margin:2rem auto; padding:0 1.5rem;
+  line-height:1.7; font-size:15px;
+}
+header{
+  border-bottom:2px solid var(--rule); padding-bottom:1rem; margin-bottom:1.5rem;
+  position:sticky; top:0; background:var(--bg); z-index:10;
+}
+h1{font-size:1.6rem;margin:0 0 0.5rem 0}
+h2{font-size:1.15rem;margin:1.75rem 0 0.5rem 0;padding-bottom:0.25rem;border-bottom:1px solid var(--rule)}
+h3{font-size:1rem;margin:1.1rem 0 0.3rem 0}
+.meta-bar{display:flex;gap:1rem;font-size:0.85rem;color:var(--muted);flex-wrap:wrap;align-items:center}
+.meta-bar code{background:transparent;color:var(--muted)}
+.badge{
+  display:inline-block;padding:0.15rem 0.7rem;border-radius:1rem;
+  background:var(--accent);color:#fff;font-weight:600;font-size:0.8rem;
+  letter-spacing:0.02em;
+}
+.badge[data-state="ready"]{background:#16a085}
+.badge[data-state="running"]{background:#e67e22}
+.badge[data-state="done"]{background:var(--ok)}
+.badge[data-state="blocked"]{background:var(--warn)}
+section{margin:0 0 0.5rem 0}
+ul,ol{padding-left:1.5rem;margin:0.5rem 0}
+li{margin:0.25rem 0}
+ol.checklist{list-style:none;padding-left:0}
+ol.checklist li{display:flex;align-items:flex-start;gap:0.6rem;padding:0.15rem 0}
+ol.checklist input[type=checkbox]{margin-top:0.4rem;flex-shrink:0}
+ol.checklist input[type=checkbox]:checked + span{color:var(--done);text-decoration:line-through}
+section.rules{background:#f3f1eb;padding:0.5rem 1rem;border-radius:6px;font-size:0.9rem;border-left:3px solid var(--accent)}
+section.rules h2{border:none;margin-top:0.5rem}
+section.blockers ul{color:var(--warn)}
+ol.log{list-style:none;padding-left:0;font-family:'SF Mono',Menlo,monospace;font-size:0.85rem}
+ol.log li{padding:0.3rem 0;border-bottom:1px dashed var(--rule);display:flex;gap:0.75rem}
+ol.log time{color:var(--muted);flex-shrink:0;min-width:9.5rem}
+code{background:var(--code-bg);padding:0.1rem 0.35rem;border-radius:3px;font-size:0.9em;font-family:'SF Mono',Menlo,monospace}
+.table-wrap{overflow-x:auto;margin:0.5rem 0}
+table{border-collapse:collapse;width:100%;font-size:0.88rem}
+th,td{border:1px solid var(--rule);padding:0.35rem 0.55rem;text-align:left;vertical-align:top}
+th{background:#f3f1eb;font-weight:600}
+.phase{border-left:3px solid var(--rule);padding:0.1rem 0 0.1rem 0.9rem;margin:0.9rem 0}
+.phase p{margin:0.3rem 0}
+.muted{color:var(--muted);font-size:0.9rem}
+details{margin:0.5rem 0}
+summary{cursor:pointer;font-weight:600}
+@media print{
+  body{font-size:11pt;max-width:none;margin:0;padding:1rem}
+  header{position:static}
+}
+</style>
+</head>
+<body>
+<script type="application/json" id="plan-meta">
+{"task_id":"plan_98a6d3b36c7844f1ab2f87a13b423968","created_at":"2026-10-09T10:11:08+09:00","状態":"running","slug":"recall-compounding-fitness-first","investigation_state":"complete","implementation_state":"in_progress","updated_at":"2026-10-09T10:50:05+09:00","base_commit":"da6b8e36","parent_plan":"2026-08-14_1846_autonomous-recall-offline-distillation.html"}
+</script>
+
+<header>
+<h1>Plan: <span id="plan-title">Recall の改善が積み上がる状態にする（8/14 蒸留計画への追加）</span></h1>
+<div class="meta-bar">
+<span class="badge" data-bind="状態" data-state="running">running · 実装・検証中</span>
+<span><code data-bind="task_id">plan_98a6d3b36c7844f1ab2f87a13b423968</code></span>
+<span data-bind="created_at">2026-10-09T10:11:08+09:00</span>
+<span>調査元 <code>da6b8e36</code></span>
+</div>
+</header>
+
+<section data-section="目的">
+<h2>目的と成功の定義</h2>
+<ul>
+<li>Recall の改善が、次の改善の土台になる状態にする。保存された変更の数では測らない。「前回までの採用を引き継いだ版が、最初からやり直した版に、同じ評価回数で勝つ」ことで確かめる（P7）。</li>
+<li>そのために、「良くなった」と判定する仕組みを先に信頼できる状態にする。判定が信頼できないまま学習を回すと、8 月のゲート較正のように退化した答えが採用される（下の「確定した事実」）。</li>
+<li>範囲は 3 つ。旧レーンの後始末（P0）、8/14 蒸留計画に足す項目（P1〜P4）、本線が通ったあとに積む項目（P5〜P7）。</li>
+</ul>
+</section>
+
+<section data-section="既存計画との関係">
+<h2>既存計画との関係</h2>
+<p>無人で学習して昇格する本線は <code>2026-08-14_1846_autonomous-recall-offline-distillation.html</code>（running）で、この Plan はそれを置き換えない。今日の調査で出た結論の多くは、本線が既に設計している。この Plan は、本線に無いものと、本線が止まっている間に旧レーンで起きていることだけを扱う。</p>
+<p><strong>本線の現状：</strong>R0〜R4 は完了。R5 は教師ラベルの下限（502 件、relevant と irrelevant が各 100 件以上）まで到達したが、blind repeat と反実仮想、時系列の validation と locked test、正式な受入が未完。R6（student 候補）と R7（shadow と canary）は未着手。最後の実行ログは 2026-08-29。<code>config.toml</code> の <code>recall.distillation.enabled</code> は false。</p>
+<div class="table-wrap"><table><thead><tr><th>この Plan の段階</th><th>本線（8/14 計画）に既にあるもの</th><th>この Plan で足すもの</th></tr></thead><tbody>
+<tr><td>P0 旧レーンの書き込み停止</td><td>「既存 feedback を学習の根拠から外す」「候補 policy が通る前に旧経路を削除しない。まず off か shadow にする」。削除は P9</td><td>旧ヒントレーンと旧較正レーンは、今も feedback から学習している。その off 化を前倒しする</td></tr>
+<tr><td>P1 判定の仕組み</td><td>R5 の残り。昇格 gate（全件棄却の拒否、coverage の維持、negative veto、recall と特異度の Wilson 下限 0.65）</td><td>わざと壊した対照が通らないことの確認。足りない gate だけ追加</td></tr>
+<tr><td>P2a ゲート</td><td>R6 の小さな student（閾値、棄却マージン、0〜3 枚）と R7 の canary</td><td>新しく作るものはない。R6 までの間のゲートの扱いを決める</td></tr>
+<tr><td>P2b 問いの日本語化</td><td>なし</td><td>全部。ただし問いは BM25 に入っていないので、本線の最初の本番経路に効かせるには索引側の変更も要る</td></tr>
+<tr><td>P3 合成プローブ</td><td>本線の probe は三教師の共通評価用で、作り方で正解が決まるものではない</td><td>全部</td></tr>
+<tr><td>P4 3 条件の再生</td><td>同じ生成器での A0 / A1 反実仮想、提示順を入れ替えた blind 判定</td><td>「正解を戻す」条件と、失敗原因の 5 分類</td></tr>
+<tr><td>P5〜P7</td><td>24 時間ごとの policy 更新ループ</td><td>検証つきのページ側の問い、規則の保存、引き継ぎとやり直しの比較</td></tr>
+</tbody></table></div>
+<p class="muted">判定が none のターンでもフックに約 2 秒かかる件は、<code>2026-08-13_1431_recall-precision-preserving-latency.html</code>（running）と <code>2026-09-05_1134_chronovisor-recall-reliability-relevance.html</code>（ready・本番未適用）の範囲。この Plan では実測値を渡すだけにする。</p>
+</section>
+
+<section data-section="確定事項">
+<h2>確定した事実（2026-10-09 にログとコードで確認）</h2>
+<h3>ゲートが「常に想起」から「ほぼ想起しない」に振れた</h3>
+<div class="table-wrap"><table><thead><tr><th>時期</th><th>起きたこと</th><th>根拠</th></tr></thead><tbody>
+<tr><td>8/2、8/11</td><td>旧較正レーンの較正が 2 回、自動承認で適用された。8/11 版は holdout 330 件の 93% が「想起すべき」ラベルで、全部に「想起」と答えただけで recall 1.0、正解率 0.806→0.930 になり、レビュアーが通した</td><td><code>recall/calibration.json</code>、<code>calibration-run-history.jsonl</code></td></tr>
+<tr><td>8/2〜9/23</td><td>8/11 版は最も弱い入力でも確信度が 0.745 で、read の閾値 0.65 を必ず超える。正常に終わったターンの約 9 割で注入されていた（8/11〜9/23 は 2,598 / 2,861）</td><td><code>recall-log.jsonl</code></td></tr>
+<tr><td>9/23 夜</td><td>最弱入力でも閾値を超える較正を無視するガードが入り、スコアの正規化も見直された。較正側のファイルも翌朝に更新されている</td><td><code>recall_runtime.py:1135-1177</code>、<code>recall_calibration.py</code></td></tr>
+<tr><td>9/24〜</td><td>素のスコアに戻り、正常ターン 1,967 件のうち閾値 0.35 に届くのは 84 件（4.3%）。全ターンでは注入は約 3%（83 / 2,804）。置き換える較正はなく、最後の実行は 8/11</td><td><code>recall-log.jsonl</code></td></tr>
+</tbody></table></div>
+<p><strong>原因：</strong>旧較正レーンの正例は監査役の <code>missed_candidate</code>（21,739 件）と <code>injection_used</code>（196 件）、負例は <code>injection_ignored</code>（1,180 件）と <code>false-positive</code>（3 件）で、正例が 95% を占める（<code>recall_calibration.py:428</code>）。この比率では「常に想起」が最も正解率の高い答えになる。本線は既に「feedback を学習の根拠にしない」と決めているが、旧レーンは残っていた。</p>
+<h3>そのほかの実測</h3>
+<div class="table-wrap"><table><thead><tr><th>項目</th><th>値</th></tr></thead><tbody>
+<tr><td>フックの所要時間（9/28 以降、全ターン）</td><td>p50 約 2.1 秒、p95 約 3.25 秒。検索が判定より先に走る（<code>recall_runtime.py</code> 4489 行 → 4592 行）。<code>reranker_shadow</code> は p50 766ms</td></tr>
+<tr><td>BM25 への退避</td><td>9/24 以降で 27%（755 / 2,804）。直近 30 日の理由は時間切れ 809、semantic サービス不通 409、ブレーカー 369</td></tr>
+<tr><td>監査役の feedback</td><td>6 月 16,189 / 7 月 7,144 / 8 月 71 / 9 月 19 / 10 月 5</td></tr>
+<tr><td>旧ヒントレーンの自動適用</td><td>10 月に 169 件。うち 167 件は 7 月の取りこぼしが元。有効なヒントは 1,782 件</td></tr>
+<tr><td>ヒントが本番の注入に効く条件</td><td>判定が none 以外のときだけ（<code>recall_runtime.py:4607</code>）。Recall Field も毎ターン照合するが、candidate モードで本番の判定のあとに走る（同 2727 行）</td></tr>
+<tr><td>ヒントの的中</td><td>別の発話に反応したのは 186 件、延べ 756 回。監査役の期待ページと一致したのは 100 回（13%）</td></tr>
+<tr><td>照合を検索側の bigram に変えた場合</td><td>延べ 46,428 回に増え、一致は 3.9% に下がる。照合の問題ではなく、発話 1 つをページ 1 つに結ぶ単位の問題</td></tr>
+<tr><td>使用の記録</td><td>注入のあった 1,192 エピソードのうち <code>exact_used_subset</code> があるのは 3</td></tr>
+<tr><td><code>recall_questions</code></td><td>9,781 ページ中 7,302 ページに付与（平均 4.7 問）。英語 6,601、日本語 701。日本語本文で英語の問いが 1,570 ページ。未付与 2,479 ページ。生成指示（<code>ingest.py:2839</code>）は英語で、言語と文体の指定がない</td></tr>
+<tr><td>問いの入り先</td><td>埋め込み側だけ。本文に連結（<code>semantic_index.py:184</code>）、問い単体の文書としても出力（同 210 行）、意味検索の結果を照合する根拠トークンにも入る（<code>page_evidence.py:143</code>）。BM25 の索引には入らない（<code>lexical_index.py:64</code> の anchor は題名・entity・keyword・tag で、本文のトークン化は frontmatter を外す）</td></tr>
+</tbody></table></div>
+</section>
+
+<section data-section="前提・仮定">
+<h2>前提・仮定（確かめていないこと）</h2>
+<ul>
+<li>9/24 以降に注入がほぼ止まっているのが意図どおりかは未確認。<code>_score_norm</code> のコメントには「専用の較正が置き換えるまで弱い信号のままにする」とある。</li>
+<li>10/4 に測った注入精度 8%（1,078 組中 88 組）が、どの期間の注入から取られたかは未確認。常に開いていた期間なら、記憶が要らないターンの割合を強く反映している。</li>
+<li>本線の student の特徴は、発話と候補の題名・抜粋の文字 3-gram の重なり 2 つ。発話が日本語で題名と抜粋が英語だと、関連していても重なりが出にくいはず。これは仮説で、P2b の再生で確かめる。問いは題名でも抜粋でもないので、問いを直すだけではこの特徴は変わらない。</li>
+<li>監査役の feedback が 8 月から激減した理由は未確認。本線は feedback を学習に使わないので、P0 のあとは学習に影響しない。</li>
+<li>根拠証明書の台帳は 73% が pass。8% と桁が違うので別のものを測っているはずだが、調べていない。</li>
+<li>Recall Field の <code>effective_rollout</code> が active を返す条件は読んでいない。ログ上は 9/24 以降ずっと candidate。</li>
+<li>候補にした論文の数値はどれも再現していない。日本語と M4 Max での効果は全候補で未計測。</li>
+<li>Astra（Codex）はモデル指定なしで起動した。設定の既定は <code>gpt-6-astra</code> だが、実行時のモデル名は記録から確認できていない。</li>
+<li>Astra への第 2 ラウンドでは、問いが「語彙側の根拠トークンにも入る」と伝えた。正しくは意味検索側の照合用で、BM25 には入らない。Astra が 4 条件の再生を提案したときの前提がここだけ違う。</li>
+<li>行番号は <code>da6b8e36</code> の時点。</li>
+</ul>
+</section>
+
+<section data-section="実行手順">
+<h2>実行手順</h2>
+<p class="muted">上から順に、前の段階が後の段階の前提になる。P2a と P2b は並行で進められる。手間は S / M / L の相対評価。</p>
+
+<div class="phase"><h3>P0 · 旧レーンの書き込みを止める（S）</h3>
+<p>引き継がれるもの：なし（これ以上の汚れを足さない）。</p>
+<ol class="checklist">
+<li><input type="checkbox"><span><code>recall_auto_apply</code> の <code>query_hint</code> の新規適用を止める方法を確認する。既存の停止設定があればそれを使い、なければ最小の設定を足す。<code>alias</code> と <code>page_tag</code> は同じ feedback が元なので、同じ扱いにするかをここで決める。</span></li>
+<li><input type="checkbox"><span>既存 1,782 件は削除しない。本番の注入経路（<code>recall_runtime.py:1638</code> の <code>query_hint_page_ids</code>）で読まれないようにする。Recall Field 側（<code>recall_field.py:181</code>）は観測のまま残す。</span></li>
+<li><input type="checkbox"><span>旧較正レーンが feedback ラベルで再び適用されない状態かを確認する（<code>recall_calibration.py:561</code> の hard_off が今の設定で効いているか）。</span></li>
+<li><input type="checkbox"><span>1 晩おいて、<code>auto-apply.jsonl</code> に <code>query_hint</code> の <code>applied</code> が増えていないことを確認する。</span></li>
+</ol>
+<p>受入：新規適用 0。<code>query-hints.json</code> の中身は不変。戻す手順を 1 行で書ける。</p>
+</div>
+
+<div class="phase"><h3>P1 · 判定の仕組みを信頼できる状態にする（M）</h3>
+<p>引き継がれるもの：封印した評価セットと、壊した対照の一式。中身の正本は本線の R5。</p>
+<ol class="checklist">
+<li><input type="checkbox" checked><span>本線の日次 lane が 9 月以降の Raw を取り込めているかを確認する（最後のログは 8/29、設定は enabled=false）。</span></li>
+<li><input type="checkbox"><span>本線 R5 の残りを進める：blind repeat と反実仮想の件数、時系列の validation と locked test、正式な受入。</span></li>
+<li><input type="checkbox"><span>わざと壊した対照を用意し、どれも昇格できないことを確認する。常に注入と常に棄却（<code>recall_distillation.py:6711</code> の Wilson 下限で弾かれるはず）、ページ対応の入れ替え、答えの漏れ、植えた値の差し替え。弾けないものがあれば gate を足す。</span></li>
+<li><input type="checkbox"><span>判定結果が、判定モデルの種類や回答の提示順で大きく変わらないことを確認する。</span></li>
+<li><input type="checkbox" checked><span><code>recall_improvement.py:252</code> の指標（recall@1、recall@3、MRR、無駄な注入率の加重）は、この判定の代わりにならないと記録する。</span></li>
+</ol>
+<p>受入：正しいと分かっている対照は通り、壊した対照は全部落ちる。対象になる実データが足りないときは「昇格待ち」とし、条件を緩めない。</p>
+</div>
+
+<div class="phase"><h3>P2a · ゲートを直す（M）</h3>
+<p>引き継がれるもの：版つきの閾値と、その較正の記録。中身の正本は本線の R6 と R7。</p>
+<ol class="checklist">
+<li><input type="checkbox"><span>本線 R6 の student 候補を作る（閾値、棄却マージン、カードの上限。本線の値は 0〜3 枚）。</span></li>
+<li><input type="checkbox"><span>候補を固定した再生で、誤注入率と拾えた割合の関係を現行と比べる。</span></li>
+<li><input type="checkbox"><span>「常に注入」「常に棄却」の両方と比べた混同行列を、昇格の記録に必ず残す。LLM の承認は、この機械チェックを上書きできない。</span></li>
+<li><input type="checkbox"><span>bge リランカーは本番の判定に入れない（本線の禁止事項）。今の shadow のまま計測を続け、student だけでは不足だと実測で示されるまで判定経路に足さない。</span></li>
+</ol>
+<p>受入：P1 の判定と、出典で確かめた小さな実データの再生（P4 の小さな版）で、同じ誤注入率のまま現行より多く拾う。両方の定数方針が弾かれる。本線の canary を通る。</p>
+</div>
+
+<div class="phase"><h3>P2b · <code>recall_questions</code> を日本語の話し言葉で作り直す（S。BM25 側にも入れるなら M）</h3>
+<p>引き継がれるもの：検証済みの問いと、索引の世代。準備は P1 と並行でよい。採用は P1 のあと。</p>
+<ol class="checklist">
+<li><input type="checkbox" checked><span><code>ingest.py:2839</code> の生成指示に、言語と文体の指定を足す。本文の言語にかかわらず日本語の話し言葉にし、技術的な識別子と役に立つ英語表記は残す。</span></li>
+<li><input type="checkbox"><span>既存 7,302 ページ分を別世代として作り直し、付いていない 2,479 ページを埋める。オフラインで行い、件数に上限を置く。今の索引は上書きしない。</span></li>
+<li><input type="checkbox"><span>5 条件で再生する。A 現行 / B 日本語化（同じページ、同じ問い数）/ C B に加えて未付与を埋める / D C に加えて、本文の埋め込みと問いの信号を分ける / E C に加えて、問いを BM25 の索引にも入れる。</span></li>
+<li><input type="checkbox"><span>同じ再生で、student の 2 特徴（文字 3-gram の重なり）の入力に問いを足した場合と足さない場合を比べる。</span></li>
+</ol>
+<p>受入：実際の発話の holdout で、検証済みの候補の再現率と有用な注入の範囲が上がり、誤注入と回答の有用性が悪化しない。<br>棄却：生成した問いでしか効かない。または、候補の雑音が実クエリでの利得を打ち消す。<br>注意：生成した問いは検索の鍵であって、事実の根拠にしない。問いは今、埋め込み側にしか入っていない。本線が最初に本番にする経路は BM25 と anchor だけなので、条件 E を採らない限り、日本語化の効果が出るのは今の hybrid 経路と、本線が semantic を足したあとに限られる。条件 E は索引の形を変えるので、別世代で試す。</p>
+</div>
+
+<div class="phase"><h3>P3 · 作り方で正解が決まる合成プローブ（M）</h3>
+<p>引き継がれるもの：事実の台帳と、取れなかったページの修理待ち一覧。</p>
+<ol class="checklist">
+<li><input type="checkbox"><span>ページから（対象、関係、値、有効期間、出典の範囲）を先に固定し、そのあとで話し言葉の日本語の問いを作る。答えられることと、問いに答えが漏れていないことを、別の役が確かめる。</span></li>
+<li><input type="checkbox"><span>対照を混ぜる：存在しない事実、古くなった事実、紛らわしいページ、話題の切り替え。架空の事実は、隔離した再生用コーパスにだけ植える。</span></li>
+<li><input type="checkbox"><span>取れなかったページを修理待ちの一覧に入れる（P2b と P5 の入力になる）。本線の ledger では、teacher-only とは別の層として記録する。</span></li>
+</ol>
+<p>受入：ある晩のプローブで直したものが、見ていない事実と問いの族、実データの基準の両方で効く。<br>注意：合成だけを根拠に昇格させない。訓練材料と対照に使う。</p>
+</div>
+
+<div class="phase"><h3>P4 · 実際のエピソードを 3 条件で再生する（L）</h3>
+<p>引き継がれるもの：検証済みの結果と、失敗原因の分類。小さな版は P2a と P2b の昇格条件として先に要る。</p>
+<ol class="checklist">
+<li><input type="checkbox"><span>本線の A0 / A1 反実仮想に、「検証済みの正解の根拠を戻す」条件を足す。監査役が推測したページを戻すのは不可（その推測の検証にならない）。</span></li>
+<li><input type="checkbox"><span>失敗を 5 つに分ける：候補に無い / 候補にあるが選ばれない / 要らないのに注入 / 正しく注入しても失敗（読み手の限界）/ 正解を戻すと成功（回収できる失敗）。</span></li>
+<li><input type="checkbox"><span>8/2〜9/23（ゲートが常に開いていた期間）から、注入 0 枚のターンも含めて一様に抜き出す。正常と劣化で層に分け、注入精度 8% が基準率の問題か候補取得の問題かを分ける。</span></li>
+<li><input type="checkbox"><span>当時の文脈とページの版で再生する。今の状態に session_id だけ戻すと、未来の情報が漏れる。<code>recall_eval.evaluate_examples</code> は session_id を空で渡す（257 行）ので、文脈に依存する評価には使わない。</span></li>
+</ol>
+<p>受入：独立した結果が良くならない修理は捨てる。</p>
+</div>
+
+<div class="phase"><h3>P5 · ヒントを、検証つきのページ側の問いに置き換える（M）</h3>
+<p>引き継がれるもの：検証済みの「クエリ→ページ」の対応。本線の canary 通過後に着手する。</p>
+<ol class="checklist">
+<li><input type="checkbox"><span>再生で確かめた対応だけを、ページ側の問いとして書く。ページの版と再生の証拠に紐づけ、ページが変わったら失効させて検証し直す。</span></li>
+<li><input type="checkbox"><span>1,782 件は仮説の待ち行列として扱う。一括で問いや正例に変換しない。</span></li>
+<li><input type="checkbox"><span>文脈に依存する発話（相づち、短い続き）はページ側の問いにせず、P6 の規則に回す。</span></li>
+</ol>
+<p>受入：元の取りこぼしが直り、見ていない言い換えでも効き、対照で悪化しない。</p>
+</div>
+
+<div class="phase"><h3>P6 · 教訓を規則として保存する（M）</h3>
+<p>引き継がれるもの：版つきの規則。</p>
+<ol class="checklist">
+<li><input type="checkbox"><span>規則に、適用条件、根拠になったケース、反例、廃止の条件を持たせる。最初はクエリの組み立て（<code>recall_runtime.py:901</code> の <code>build_queries</code>）と候補選択に限る。規則を無条件の注入にしない。</span></li>
+</ol>
+<p>受入：同じ短い発話が、話題や時間が違えば違う判定になる。話題の切り替え、古いセッション、明示的な新しい主語、記憶が要らない場面で試す。</p>
+</div>
+
+<div class="phase"><h3>P7 · 積み上がっているかの検証と、部品 1 つずつの探索（L）</h3>
+<p>引き継がれるもの：採用された設定と、実験の履歴。</p>
+<ol class="checklist">
+<li><input type="checkbox"><span>時系列で数回の学習ラウンドを回し、同じデータ量・同じ評価回数で比べる。凍結した基準 / 現行の追記型ヒント / 元の基準から累積の証拠で作り直した版 / 前回の採用を引き継いだ版。</span></li>
+<li><input type="checkbox"><span>探索は部品 1 つずつにする（監査役の診断文か、書き換え役のプロンプト）。評価器、テスト、正解は探索の対象から外す。seed と予算配分は複数取る。</span></li>
+<li><input type="checkbox"><span>種類別の評価セットで、能力ごとの退行を見る。</span></li>
+</ol>
+<p>受入：新しい期間が来るたびに、引き継いだ版がやり直した版に勝つ。勝てなければ「積み上がっていない」と記録する。</p>
+</div>
+</section>
+
+<section data-section="完了条件">
+<h2>完了条件</h2>
+<ul>
+<li>P7 の比較が 2 期間以上続けて成立し、その間、誤注入率の上側の信頼限界と、必要な記憶の回収率の下限を保っている。</li>
+<li>各段階の受入は、実行手順に書いたとおり。棄却は取りこぼしとして数え、全件棄却で誤注入率だけを良く見せる方針は不合格にする。</li>
+<li>データが足りない段階は「不合格」ではなく「昇格待ち」とする。人の承認に迂回しない（本線の原則）。</li>
+</ul>
+</section>
+
+<section data-section="検証手順">
+<h2>検証手順</h2>
+<ul>
+<li>再生は、ターン前の時点のコーパス、ページの版、セッションの前半、モデルと方針の識別子、候補の根拠を凍結して行う。当時の入力が残っていないケースは「再生不可」とし、今のページで代用しない。</li>
+<li>分割は、時間と、相関するセッション・クエリ・内容の群で行う。最後の test は調整に使わない。繰り返し見た評価セットは退行テストに格下げし、確認用には新しいデータを使う。</li>
+<li>別々に測るもの：候補の再現率、最終的に注入するカードの質、必要な記憶の取りこぼし、有害なカードと古いカード、回答の有用性、fallback を含むフックの実時間。</li>
+<li>今日の実測の再現：ヒントの反応は <code>_handoff/evidence/2026-10-09-recall-research/measure.py</code> と <code>measure_bigram.py</code>（読み取りのみ）。ゲートの推移は <code>recall-log.jsonl</code> の <code>decision</code>、<code>confidence</code>、<code>evidence_features.calibrated</code>、<code>context_items</code> を期間別に数える。</li>
+</ul>
+</section>
+
+<section data-section="やってはいけないこと">
+<h2>やってはいけないこと（必須）</h2>
+<ul>
+<li>本線（8/14 計画）の禁止事項をそのまま引き継ぐ。特に、本番の判定経路に教師・書き換え・judge・リランカーを入れない。使われた・無視された・モデルの多数決を正解にしない。全件棄却で誤注入率だけを良く見せない。候補 policy が通る前に旧経路を削除しない。人の承認に迂回しない。生の発話を外部へ出さない。</li>
+<li>監査役の <code>missed_candidate</code> と理由ラベル（<code>gate_missed</code> は理由不明のときの既定値）を、学習の正例にしない。</li>
+<li>ヒント 1,782 件を、一括で問いや正例に変換しない。汚れたラベルを別の形で残すだけになる。</li>
+<li>合成データだけを根拠に昇格させない。封印した評価セットで調整しない。</li>
+<li>スコアの分位点だけでゲートの閾値を決めない。注入量を戻すために閾値を下げない。</li>
+<li><code>query-hints.json</code> と今の索引を上書き・削除しない。作り直しは別世代で行う。</li>
+<li>LoRA などの重み更新、新しいリランカー、コードを自由に書き換える進化（DGM 系）、記憶操作の強化学習は、この Plan の範囲に入れない。</li>
+</ul>
+</section>
+
+<section data-section="検討経緯">
+<h2>Claude と Astra で意見が割れた点</h2>
+<div class="table-wrap"><table><thead><tr><th>論点</th><th>Claude</th><th>Astra</th><th>結果</th></tr></thead><tbody>
+<tr><td>合成プローブを判定の主役にするか</td><td>1 位に置いた</td><td>合成だけでは昇格させない。実データの小さな再生を必須に</td><td>Astra の案。合成は訓練材料と対照に使う</td></tr>
+<tr><td>LoRA</td><td>上位に入れない</td><td>第 1 ラウンドでは 5 位</td><td>Astra が撤回</td></tr>
+<tr><td>ゲートの応急処置</td><td>スコアの分位点で閾値を仮置き</td><td>却下。注入率は決まるが精度は決まらず、サービスが劣化すると挙動が変わる</td><td>Astra の案。過去参照の合図は「検索してよい」までにとどめる</td></tr>
+<tr><td>ゲートの較正に bge を使うか</td><td>—</td><td>今ある bge と student で棄却つきの較正</td><td>本線が判定経路へのリランカーを禁じているので、student だけにする（P2a）。Astra には未確認</td></tr>
+<tr><td>ヒント照合の bigram 化</td><td>学習の単位が問題で、照合ではない</td><td>学習より先に測るべき安い基準</td><td>測ったら悪化。Astra も「この閾値では却下」</td></tr>
+<tr><td>注入精度 8% の原因</td><td>記憶が要らないターンが多いだけかもしれない</td><td>8% は注入したカードの関連率で、要るターンの割合は分からない</td><td>未決。P4 の 3 番目の手順で分ける</td></tr>
+</tbody></table></div>
+<p class="muted">Astra との 3 往復は、本線の計画書を読ませずに行った。本線との対応づけ（「既存計画との関係」の表）は Claude が後から行ったもので、Astra の確認は受けていない。</p>
+</section>
+
+<section data-section="未決事項">
+<h2>ユーザーが決めること</h2>
+<ol>
+<li>P0 を実施してよいか。<code>alias</code> と <code>page_tag</code> も同じ扱いにするか。</li>
+<li>本線の student が出るまで、注入がほぼ止まった今の状態を続けるか。Claude と Astra の推奨は「続ける」（精度優先。応急の閾値は置かない）。</li>
+<li><code>recall_improvement</code> の自動適用を、P1 が終わるまで止めるか。7 月以降に 4 件を適用しているが、その採否の基準は P1 の判定ではない。</li>
+<li>本線 R5 の残りを再開する時期と、教師の経路。</li>
+<li>この Plan を別の Plan のまま進めるか、8/14 計画に統合するか。</li>
+<li>カードの上限。本線は 0〜3 枚、10/4 の精度優先の設計は 0〜2 枚。</li>
+</ol>
+</section>
+
+<section class="blockers" data-section="ブロッカー">
+<h2>ブロッカー（発生時のみ）</h2>
+<ul><li>P0 の翌朝確認待ち。P1/R5 は時系列の validation / locked test、独立した local teacher と generator/judge、probe / counterfactual / blind-repeat の正式証跡が不足。旧 external teacher は再開しない。P1 未受入のため後続の採用と canary は昇格待ち。</li><li>capture-only でも evidence_packet と source binding を欠く結果は再生不可。全 host の復旧を意味しない。過去の穴は今のページで埋めない。</li></ul>
+</section>
+
+<section data-section="受け渡しメモ">
+<h2>受け渡しメモ（次担当へ）</h2>
+<ul>
+<li>切り戻し：runtime.source を <code>da6b8e362441e0f21eac53bd86d1fc853fa42d2f</code> に戻し、private <code>~/.chronovisor/runtime/recall-fitness-rollout/2026-10-09/config-before.toml</code> から今回変更した停止設定だけ復元、capture_enabled を解除して同じ 5 サービスを安全な境界で再起動する（記録データは保持）。</li>
+<li>最初の実装単位は P0 と、P1 の最初の手順（本線の日次 lane の現状確認）。どちらも小さい。P1 が終わるまでは、何を入れても採否を決められない。</li>
+<li>最大の詰まりは本線の R5 → R6。P2a は新しい設計ではなく、R6 を進めることそのもの。</li>
+<li>調査の原資料は <code>_handoff/evidence/2026-10-09-recall-research/</code>。Astra との 3 往復の原文（<code>astra-round1〜3.md</code>）、作業メモ、ヒントの計測スクリプトがある。Codex 側は <code>codex resume 01a11e11-b8ab-71f2-8270-e1e336d3ee78</code> で続きが見られる。</li>
+<li>Astra には構成と集計値だけを渡した。生の発話、ヒントの本文、ページの中身は渡していない。この Plan 自体は Astra にまだ見せていない。</li>
+<li>第 3 ラウンドで Astra に「9/28 以降、閾値に届くターンは 0 件」と伝えたが、正しくは 84 / 1,967 件（4.3%）。none のターンだけを数えていた。Astra の答えは「ほぼ止まっている」ことを前提にしているので、結論への影響は小さいと見ている。</li>
+<li>調査で見た候補（約 100 件）は末尾の付録にある。</li>
+</ul>
+</section>
+
+<section class="rules" data-section="実行中更新ルール">
+<h2>実行中更新ルール</h2>
+<ul>
+<li>実行手順のチェックは、各手順の受入を満たした直後に更新する（まとめて更新しない）。</li>
+<li>チェックを更新したら、同時に <code>実行ログ</code> へ時刻付きで追記する。</li>
+<li>本線と重なる手順（P1 の R5、P2a の R6 と R7）は、本線の計画書のチェックを正とし、ここには結果だけを写す。</li>
+<li>中断時は <code>状態</code>（<code>plan-meta</code> の JSON および <code>.badge</code> の <code>data-state</code>）を <code>blocked</code> にし、理由を <code>ブロッカー</code> に記入する。</li>
+</ul>
+</section>
+
+<section data-section="実行ログ">
+<h2>実行ログ</h2>
+<ol class="log">
+<li><time>2026-10-09 10:50 JST</time><span>P1 の局所修正を commit <code>0e9e2dbe</code> に保存。capture_enabled を学習・serving から独立させ、sealed identity と source binding が有効な legacy card 観測だけを記録する。evidence_packet は正確なページ対応を持たないため記録を棄却する。per-route の同一 locked cohort に learned / always-inject / always-reject の混同行列と cohort hash を残し、定数方針が通らないことを検証。distillation 289 件、runtime 224 件、large-function・ruff・設定対象 mypy・import/architecture 検査が通過。生データの正式評価と配備は後続。</span></li>
+<li><time>2026-10-09 10:43 JST</time><span>P2b の候補生成経路を commit <code>82e1f842</code> に保存。日本語 prompt は明示 opt-in とし、本番生成の既定 bytes は維持。別世代・上限必須・local-only・source/config/model hash 固定の候補 bundle を追加。実 2 ページで同数 5 問ずつの日本語質問を生成（fallback 0 / failed 0 / source byte 変更 0）。全 9,781 ページ中 8 件は canonical/stable 要件外で除外。これは smoke であり、全ページ生成・A〜E 比較・P1 による採用は未完。旧 recall_improvement 指標は本 Plan の採否に使わず、同 lane は off にした。P0 source は commit <code>291223f8</code>、本番配備は後続。</span></li>
+<li><time>2026-10-09 10:35 JST</time><span>P1 の日次 lane 現状確認を完了。Raw 抽出 14,956 rally / 87 日、9 月以降 5,982 件のうち eligible 0（exact exposure 欠落 5,662、answer 欠落 320）。最新 training snapshot は 8/29 の 505 行、eligible 502 は train のみで probe・CF・validation・locked-test が無い。旧外部教師 contract は期限切れ。現在の local 教師と generator/judge は同一モデルで独立性要件未達。現在ページによる過去の穴埋めはせず、将来の exact exposure 保存経路を確認する。P0 設定は auto_apply と calibration/improvement decision lane を off にし、現行スコアの較正読み取りと閾値は保持した。</span></li>
+<li><time>2026-10-09 10:26 JST</time><span>ユーザーが本 Plan の実装・push・再起動を承認。P0 は同じ feedback 由来の alias・page_tag と旧 recall_improvement の自動適用も停止する。現行閾値とカード上限 0〜3 を維持し、別 Plan のまま本線へ結果を反映する。教師は local-only とし、過去の外部教師経路は再開しない。受入に必要な実データ・実時間が不足した段階は昇格待ちとし、後続の開始条件を飛ばさない。</span></li>
+<li><time>2026-10-09 10:11 JST</time><span>canonical generator で HTML Plan を生成。対象 project が明確なので chronovisor の <code>_handoff</code> に保存。</span></li>
+<li><time>2026-10-09 調査</time><span>Recall のログ（<code>recall-log.jsonl</code>、<code>feedback.jsonl</code>、<code>auto-apply.jsonl</code>、<code>answer-episodes.jsonl</code>、<code>calibration.json</code>）を読み取りで集計。コード・設定・データは未変更。</span></li>
+<li><time>2026-10-09 検討</time><span>Astra（Codex）と 3 往復。独立調査 60 候補、統合リストの批評と順位付け、ゲートの実測を踏まえた再確認。Astra の出典 13 件を抜き取りで確認し、すべて一致。</span></li>
+<li><time>2026-10-09 整理</time><span>8/14 蒸留計画を読み、本 Plan をその追加計画として位置づけた。調査完了、実装未着手、ユーザー未承認のため draft。</span></li>
+</ol>
+</section>
+
+<section data-section="付録">
+<h2>付録：調査で見た候補（約 100 件）</h2>
+<p class="muted">確認：C = Claude が要旨か README を開いた / A = Astra が開いた。判定：◎ 先にやる / ○ 有望 / △ 条件つき・後回し / × 今はやらない。「今の Chronovisor」と判定は、本線の計画書を読む前に付けたもの。本線との対応は「既存計画との関係」の表が正しい。</p>
+<details>
+<summary>候補一覧を開く</summary>
+<p>確認: C = Claude が要旨か README を開いた / A = Astra が開いた（うち 13 件は Claude が抜き取りで再確認し、すべて一致）。どれも論文の数値を再現したわけではない。</p>
+<p>判定: ◎ 先にやる / ○ 有望 / △ 条件つき・後回し / × 今はやらない。</p>
+<h3>1. 想起するかしないか（ゲート）</h3>
+<div class="table-wrap"><table><thead><tr><th>候補</th><th>何をするか</th><th>今の Chronovisor</th><th>確認</th><th>判定</th></tr></thead><tbody>
+<tr><td>RSCB-MC <a href="https://arxiv.org/abs/2604.27283">2604.27283</a>（2026-04）</td><td>「注入しない」を行動の 1 つに持つ文脈バンディット。誤注入を取りこぼしより重く罰する。判断 331µs</td><td>較正はあるが 2 値。棄却の学習なし</td><td>C</td><td>○（教師ありの較正から。ログに選択確率がないのでバンディット学習はまだ不可。0.0% は 200 件の代理評価）</td></tr>
+<tr><td>Proactive Memory Agent <a href="https://arxiv.org/abs/2607.08716">2607.08716</a>（2026-07）</td><td>注入するか黙るかを別役が決める。常時注入より +8.3pt</td><td>思想は同じ</td><td>C</td><td>○</td></tr>
+<tr><td>Knowledge Boundary Model（EMNLP 2025）</td><td>検索が要るかどうかを学習</td><td>一部</td><td>A</td><td>○</td></tr>
+<tr><td>C-RAG <a href="https://arxiv.org/abs/2402.03181">2402.03181</a> / CiteGuard（ICML 2026）</td><td>conformal で誤注入率の上限を証明</td><td>なし</td><td>C / 検索結果のみ</td><td>○（誤り 0 でも独立 94 件で上限 3.14%、1% 未満には 299 件要る）</td></tr>
+<tr><td>AutoSearch（ACL 2026）</td><td>検索の深さを報酬で学習</td><td>1 回検索で固定</td><td>A</td><td>△</td></tr>
+<tr><td>AIBL <a href="https://arxiv.org/abs/2610.03413">2610.03413</a>（2026-10-02）</td><td>記憶を active / forgotten / surprise に分け、繰り返す新規を昇格</td><td>Recall Field が近い</td><td>A・C</td><td>△</td></tr>
+</tbody></table></div>
+<h3>2. クエリ側（何で探すか）</h3>
+<div class="table-wrap"><table><thead><tr><th>候補</th><th>何をするか</th><th>今の Chronovisor</th><th>確認</th><th>判定</th></tr></thead><tbody>
+<tr><td>Learning User-Aware Recall <a href="https://arxiv.org/abs/2607.00017">2607.00017</a></td><td>記憶は固定し、書き換え役だけを強化学習</td><td>rewrite は無効</td><td>C</td><td>△</td></tr>
+<tr><td>ConvSearch-R1 <a href="https://arxiv.org/abs/2505.15776">2505.15776</a></td><td>会話の続きを検索報酬で書き換え学習</td><td>build_queries が手書きで対応</td><td>A</td><td>△</td></tr>
+<tr><td>RL-QR <a href="https://arxiv.org/abs/2507.23242">2507.23242</a></td><td>索引から作った合成例で書き換え学習</td><td>同上</td><td>A</td><td>△</td></tr>
+<tr><td>ReAL（ACL 2025）</td><td>拡張語のうち効くものの重みを学習</td><td>語の重みなし</td><td>A</td><td>○（軽い版）</td></tr>
+<tr><td>QuDAR（ACL 2026）</td><td>クエリごとに BM25 と埋め込みの配分を変える</td><td>配分は固定値</td><td>A・C</td><td>○</td></tr>
+<tr><td>Reranker relevance feedback（SIGIR 2025）</td><td>リランカーの結果でクエリ表現を直して再検索</td><td>なし</td><td>A</td><td>△（時間）</td></tr>
+<tr><td>Chronos <a href="https://arxiv.org/abs/2603.16862">2603.16862</a> / Hindsight の時間検索</td><td>発話の時間表現を期間に直して絞る</td><td><code>updated_after</code> はあるが Recall フックに経路なし</td><td>C</td><td>○</td></tr>
+<tr><td>音声入力の誤変換に強い別名辞書</td><td>固有名詞の誤変換を別名として持つ</td><td>alias レーンあり</td><td>—</td><td>○</td></tr>
+</tbody></table></div>
+<h3>3. 文書側（索引に何を書くか）</h3>
+<div class="table-wrap"><table><thead><tr><th>候補</th><th>何をするか</th><th>今の Chronovisor</th><th>確認</th><th>判定</th></tr></thead><tbody>
+<tr><td><code>recall_questions</code> を日本語の話し言葉で作り直す</td><td>既存の未来問い索引を、実際の発話の言語と文体に合わせる。未付与の 25% も埋める</td><td>90% が英語（<code>ingest.py:2839</code>）</td><td>実測</td><td>◎</td></tr>
+<tr><td>ERM <a href="https://arxiv.org/abs/2602.05152">2602.05152</a></td><td>正しかったと確認できた「クエリ→ページ」だけを文書側の鍵に書く</td><td>ヒントが未検証版</td><td>C</td><td>◎</td></tr>
+<tr><td>MemDream <a href="https://arxiv.org/abs/2609.34545">2609.34545</a>（2026-09-28）</td><td>夜間に将来の問いで自分を探り、取れないページを先に直す</td><td>なし</td><td>C</td><td>◎</td></tr>
+<tr><td>CCQGen <a href="https://arxiv.org/abs/2502.11181">2502.11181</a></td><td>まだ問いが触れていない概念を追って問いを足す</td><td>なし</td><td>A・C</td><td>○</td></tr>
+<tr><td>Doc2Query++ <a href="https://arxiv.org/abs/2510.09557">2510.09557</a></td><td>生成した問いを本文と別の索引に置いて融合</td><td>本文連結 + 問い単体の両方あり</td><td>A・C</td><td>○</td></tr>
+<tr><td>Sleep-time Compute <a href="https://arxiv.org/abs/2504.13171">2504.13171</a></td><td>空き時間に次の問いを予測して準備</td><td>prefetch が近い</td><td>A</td><td>○</td></tr>
+<tr><td>SQUARE（EMNLP 2025）</td><td>合成 QA を選別してリトリーバを微調整</td><td>なし</td><td>A</td><td>△</td></tr>
+<tr><td>late interaction 索引</td><td>トークン単位の照合</td><td>実験として既にある</td><td>—</td><td>△</td></tr>
+<tr><td>ruri-v3-reranker-310m</td><td>日本語特化のリランカー（JQaRA 86.9 対 67.3）</td><td>なし。方針は新規リランカーなし</td><td>C</td><td>△（言語またぎの数値なし）</td></tr>
+</tbody></table></div>
+<h3>4. 学習の単位を「発話」から「規則」へ</h3>
+<div class="table-wrap"><table><thead><tr><th>候補</th><th>何をするか</th><th>今の Chronovisor</th><th>確認</th><th>判定</th></tr></thead><tbody>
+<tr><td>ACE <a href="https://arxiv.org/abs/2510.04618">2510.04618</a></td><td>教訓を箇条書きの差分で積む。生成・反省・整理の 3 役</td><td>監査役と自動適用が近いが、保存は発話</td><td>C・A</td><td>◎</td></tr>
+<tr><td>MemSkill <a href="https://arxiv.org/abs/2602.02474">2602.02474</a></td><td>記憶操作のスキル自体を、失敗例から作り直す</td><td>なし</td><td>A・C</td><td>○</td></tr>
+<tr><td>Dynamic Cheatsheet <a href="https://arxiv.org/abs/2504.07952">2504.07952</a></td><td>使い回せる戦略のメモを保つ</td><td>なし</td><td>A</td><td>○</td></tr>
+<tr><td>ReasoningBank <a href="https://arxiv.org/abs/2509.25140">2509.25140</a></td><td>成功と失敗の両方から戦略を蒸留</td><td>なし</td><td>C</td><td>○</td></tr>
+<tr><td>ReMe <a href="https://arxiv.org/abs/2512.10696">2512.10696</a></td><td>手順を効用で索引・剪定</td><td>なし</td><td>A・C</td><td>○</td></tr>
+<tr><td>Memento-Skills <a href="https://arxiv.org/abs/2603.18743">2603.18743</a></td><td>外部スキルとその振り分けを進化</td><td>なし</td><td>A</td><td>○</td></tr>
+<tr><td>CODESKILL <a href="https://arxiv.org/abs/2605.25430">2605.25430</a> / AFTER <a href="https://arxiv.org/abs/2606.23127">2606.23127</a></td><td>手順記憶の磨き直し（1 回で +3.7〜6.7pt）</td><td>なし</td><td>C</td><td>○</td></tr>
+<tr><td>RIZZ <a href="https://arxiv.org/abs/2606.20638">2606.20638</a></td><td>作業の種類ごとに記憶を分け、干渉を防ぐ</td><td>cwd フィルタが近い</td><td>C</td><td>○</td></tr>
+<tr><td>SelfMem <a href="https://arxiv.org/abs/2607.03726">2607.03726</a></td><td>記憶が自分の戦略を探索</td><td>なし</td><td>C</td><td>△</td></tr>
+</tbody></table></div>
+<h3>5. 記憶の書き込みと統合</h3>
+<div class="table-wrap"><table><thead><tr><th>候補</th><th>何をするか</th><th>今の Chronovisor</th><th>確認</th><th>判定</th></tr></thead><tbody>
+<tr><td>Hindsight <a href="https://arxiv.org/abs/2512.12818">2512.12818</a></td><td>事実・経験・観察・意見を分け、観察は根拠つきで更新</td><td>claims が近い</td><td>C・A</td><td>○</td></tr>
+<tr><td>MERIT <a href="https://arxiv.org/abs/2609.05441">2609.05441</a></td><td>検索より「書くときに更新する構造化ファクト」が効く。正しく取れても使われるのは 55%</td><td>current-state が近い</td><td>C</td><td>○</td></tr>
+<tr><td>Claude Code Auto Dream</td><td>重複統合、矛盾解消、相対日付の絶対化、索引の剪定</td><td>sleep が近い</td><td>記事</td><td>○</td></tr>
+<tr><td>RIME <a href="https://arxiv.org/abs/2609.34438">2609.34438</a>（2026-09-28）</td><td>書くときに自問して根拠を集める</td><td>なし</td><td>A・C</td><td>△</td></tr>
+<tr><td>Auto-Dreamer <a href="https://arxiv.org/abs/2605.20616">2605.20616</a></td><td>統合器を学習（報酬はエージェントの成績）</td><td>なし</td><td>C</td><td>△</td></tr>
+<tr><td>A-MEM <a href="https://arxiv.org/abs/2502.12110">2502.12110</a> / EverMemOS <a href="https://arxiv.org/abs/2601.02163">2601.02163</a> / AMA <a href="https://arxiv.org/abs/2601.20352">2601.20352</a></td><td>メモ同士のリンクと再編成</td><td>グラフが既にある</td><td>A / A / C</td><td>△</td></tr>
+<tr><td>Zep / Graphiti <a href="https://arxiv.org/abs/2501.13956">2501.13956</a></td><td>時間つきグラフと事実の失効</td><td>claims に有効期間あり</td><td>A</td><td>△</td></tr>
+<tr><td>Memory-R1 <a href="https://arxiv.org/abs/2508.19828">2508.19828</a> / MemPO（ACL 2026）/ MGPO <a href="https://arxiv.org/abs/2609.37930">2609.37930</a> / HiMPO <a href="https://arxiv.org/abs/2606.16285">2606.16285</a></td><td>追加・更新・削除を強化学習</td><td>なし</td><td>A / A / C / C</td><td>×（試行回数が要る）</td></tr>
+<tr><td>SleepGate <a href="https://arxiv.org/abs/2603.14517">2603.14517</a></td><td>古い事実の干渉を学習で抑える</td><td>なし</td><td>A</td><td>△</td></tr>
+</tbody></table></div>
+<h3>6. 正解ラベルをどこから取るか</h3>
+<div class="table-wrap"><table><thead><tr><th>候補</th><th>何をするか</th><th>今の Chronovisor</th><th>確認</th><th>判定</th></tr></thead><tbody>
+<tr><td>Veracium <a href="https://arxiv.org/abs/2607.21962">2607.21962</a></td><td>事実を先に固定してから問いを作る。正解は作り方で決まる</td><td>なし（本人の masked-memory 設計が同じ発想）</td><td>C</td><td>◎</td></tr>
+<tr><td>restore counterfactual <a href="https://arxiv.org/abs/2609.08279">2609.08279</a></td><td>正解の根拠を戻して同じ読み手で再実行し、失敗の原因を分ける</td><td>設計はある。実データは 2 件の fixture</td><td>C</td><td>◎</td></tr>
+<tr><td>失敗分類の分離</td><td><code>gate_missed</code> を不明時の既定値にしない。ゲート・候補・順位・文脈・当時は無かった、を分ける</td><td>20,905 / 23,428 が <code>gate_missed</code></td><td>実測</td><td>◎</td></tr>
+<tr><td>較正ラベルの偏りを直す</td><td>監査役の「取りこぼし候補」をそのまま正例にしない。独立に確かめた負例を足す</td><td>正例 95%（<code>recall_calibration.py:428</code>）</td><td>実測</td><td>◎</td></tr>
+<tr><td>監査役そのものの採点</td><td>監査役のラベルを独立した正解と突き合わせる</td><td>なし</td><td>—</td><td>◎</td></tr>
+<tr><td>used の記録</td><td>実際に使われたページを記録</td><td>注入 1,192 回のうち記録は 3 回</td><td>実測</td><td>△（使われた ≠ 役に立った。調べる候補の目印にはなる）</td></tr>
+<tr><td>PrefCleanBench <a href="https://arxiv.org/abs/2509.23564">2509.23564</a></td><td>ラベル洗浄法の比較</td><td>label factory が近い</td><td>A</td><td>○</td></tr>
+<tr><td>ARHN <a href="https://arxiv.org/abs/2604.11092">2604.11092</a> / RLHN <a href="https://arxiv.org/abs/2505.16967">2505.16967</a></td><td>難しい負例の付け直し</td><td>なし</td><td>検索結果のみ</td><td>○</td></tr>
+<tr><td>Reliability without Validity <a href="https://arxiv.org/abs/2606.19544">2606.19544</a> / 多言語 judge <a href="https://arxiv.org/abs/2505.12201">2505.12201</a></td><td>判定器が安定でも偏る。順序入れ替えなどで検査</td><td>なし</td><td>A・C / A</td><td>○</td></tr>
+<tr><td>ConsJudge <a href="https://arxiv.org/abs/2502.18817">2502.18817</a> / TrustJudge <a href="https://arxiv.org/abs/2509.21117">2509.21117</a></td><td>判定器の一貫性を上げる</td><td>なし</td><td>A</td><td>△</td></tr>
+<tr><td>Counter-IF（NeurIPS 2025）</td><td>見せたものだけが正例になる偏りを補正</td><td>露出を正例にしない規則あり</td><td>A</td><td>△</td></tr>
+</tbody></table></div>
+<h3>7. 評価</h3>
+<div class="table-wrap"><table><thead><tr><th>候補</th><th>何をするか</th><th>今の Chronovisor</th><th>確認</th><th>判定</th></tr></thead><tbody>
+<tr><td>MemoryAgentBench <a href="https://arxiv.org/abs/2507.05257">2507.05257</a> / MemoryArena <a href="https://arxiv.org/abs/2602.16313">2602.16313</a> / EvoMemBench <a href="https://arxiv.org/abs/2605.18421">2605.18421</a> / SEA-Eval <a href="https://arxiv.org/abs/2604.08988">2604.08988</a></td><td>時系列で「前の改善が後に効くか」を測る型</td><td>lab/harness は 1 問ずつ</td><td>A（SEA-Eval は C も）</td><td>○（型だけ借りる）</td></tr>
+<tr><td>LongMemEval-V2 <a href="https://arxiv.org/abs/2605.12493">2605.12493</a></td><td>手順・落とし穴の記憶を問う。ファイル + コーディングエージェント 72.5% 対 RAG 48.5%</td><td>なし</td><td>C・A</td><td>○</td></tr>
+<tr><td>DreamBench-SWE <a href="https://arxiv.org/abs/2608.20664">2608.20664</a> / DolphinBench <a href="https://arxiv.org/abs/2609.24971">2609.24971</a> / BEAM</td><td>外部の物差し</td><td>なし</td><td>C / 検索結果のみ</td><td>△（英語）</td></tr>
+<tr><td>候補生成器の OPE（RecSys 2025）</td><td>ログから別方式の成績を推定</td><td>ログに選択確率がない</td><td>A</td><td>△</td></tr>
+<tr><td>datapace-ai/agent-memory-benchmark</td><td>記憶製品はどれもファイル検索に勝てず（10 問・seed 1 の試行）</td><td>7 月の自前計測でも探索型 1.0 対 0.33</td><td>C</td><td>参考</td></tr>
+</tbody></table></div>
+<h3>8. 採用と巻き戻し</h3>
+<div class="table-wrap"><table><thead><tr><th>候補</th><th>何をするか</th><th>今の Chronovisor</th><th>確認</th><th>判定</th></tr></thead><tbody>
+<tr><td>EvolveMem <a href="https://arxiv.org/abs/2605.13941">2605.13941</a></td><td>設定を探索し、退行したら自動で戻す。停滞したら探索に切り替え</td><td><code>recall_improvement</code> が 19 項目を探索（約 20 回、適用 4）</td><td>C</td><td>◎（既存を使う）</td></tr>
+<tr><td>PrisMem <a href="https://arxiv.org/abs/2610.06361">2610.06361</a>（2026-10-05）</td><td>能力ごとに分けて進化させ、改善と退行の相殺を防ぐ</td><td>種類別のコーパスあり</td><td>C</td><td>○</td></tr>
+<tr><td>学習した項目の有効期限</td><td>ページが変わったら検証し直す</td><td>ヒントに期限なし</td><td>—</td><td>○</td></tr>
+<tr><td>索引の世代切り替え</td><td>別世代を作って比べ、ポインタで切り替える</td><td>既にある</td><td>A</td><td>既存</td></tr>
+<tr><td>ALTK-Evolve <a href="https://arxiv.org/abs/2609.32091">2609.32091</a></td><td>記憶を中間層として分離</td><td>近い境界あり</td><td>C・A</td><td>△</td></tr>
+</tbody></table></div>
+<h3>9. 改善する仕組みを改善する</h3>
+<div class="table-wrap"><table><thead><tr><th>候補</th><th>何をするか</th><th>今の Chronovisor</th><th>確認</th><th>判定</th></tr></thead><tbody>
+<tr><td>karpathy/autoresearch</td><td>1 か所だけ編集 → 時間固定の実験 → 採否、を一晩回す</td><td>近い（上の改善ループ）</td><td>検索結果</td><td>○（型）</td></tr>
+<tr><td>GEPA <a href="https://arxiv.org/abs/2507.19457">2507.19457</a></td><td>失敗の記録を読んでプロンプトを直し、良い候補同士を掛け合わせる</td><td>なし</td><td>C・A</td><td>○（部品 1 つずつ）</td></tr>
+<tr><td>RoboPhD <a href="https://arxiv.org/abs/2604.04347">2604.04347</a></td><td>評価 1,500 回の予算で Elo 対戦</td><td>なし</td><td>C</td><td>○</td></tr>
+<tr><td>RecEvolve <a href="https://arxiv.org/abs/2609.01622">2609.01622</a></td><td>推薦の検索を 40 回超の自律サイクルで改善。報酬の抜け穴も見つけた</td><td>なし</td><td>C</td><td>○</td></tr>
+<tr><td>VISTA <a href="https://arxiv.org/abs/2603.18388">2603.18388</a></td><td>仮説と書き換えを分け、やり直しを入れる</td><td>なし</td><td>A・C</td><td>△</td></tr>
+<tr><td>MemEvolve <a href="https://arxiv.org/abs/2512.18746">2512.18746</a> / MemCodex <a href="https://arxiv.org/abs/2609.39765">2609.39765</a>（2026-09-30）</td><td>記憶の構造そのものを進化</td><td>challengers が近い</td><td>A（後者は C も）</td><td>△</td></tr>
+<tr><td>AlphaEvolve <a href="https://arxiv.org/abs/2506.13131">2506.13131</a> / OpenEvolve</td><td>プログラムの進化探索</td><td>なし</td><td>A</td><td>△</td></tr>
+<tr><td>DGM <a href="https://arxiv.org/abs/2505.22954">2505.22954</a> / Huxley-Gödel <a href="https://arxiv.org/abs/2510.21614">2510.21614</a> / Hyperagents <a href="https://arxiv.org/abs/2603.19461">2603.19461</a> / Mendel Gödel <a href="https://arxiv.org/abs/2608.07645">2608.07645</a></td><td>コードを自分で書き換える。改善手順も書き換え対象</td><td>なし</td><td>A（後 2 つは C も）</td><td>×（判定が信頼できてから）</td></tr>
+</tbody></table></div>
+<h3>10. モデルの重みを更新する</h3>
+<div class="table-wrap"><table><thead><tr><th>候補</th><th>何をするか</th><th>今の Chronovisor</th><th>確認</th><th>判定</th></tr></thead><tbody>
+<tr><td>MLX-LM の LoRA</td><td>手元での学習と差し替え</td><td><code>mlx-lm</code> は依存にある</td><td>A</td><td>×</td></tr>
+<tr><td>Beyond Inference-Only <a href="https://arxiv.org/abs/2605.24657">2605.24657</a></td><td>毎晩の LoRA。保持 80.4% 対 36.8%</td><td>なし</td><td>C</td><td>×</td></tr>
+<tr><td>Replay to Remember <a href="https://arxiv.org/abs/2504.17780">2504.17780</a> / SLoRA（ACL 2026）/ C-LoRA <a href="https://arxiv.org/abs/2502.17920">2502.17920</a> / GainLoRA <a href="https://arxiv.org/abs/2505.15424">2505.15424</a></td><td>続けて学習しても忘れない工夫</td><td>なし</td><td>A</td><td>×</td></tr>
+<tr><td>qTTT <a href="https://arxiv.org/abs/2512.13898">2512.13898</a> / TTT-E2E <a href="https://arxiv.org/abs/2512.23675">2512.23675</a> / Sleep 2 本 <a href="https://arxiv.org/abs/2605.26099">2605.26099</a>・<a href="https://arxiv.org/abs/2606.03979">2606.03979</a></td><td>推論中や睡眠中に重みを更新</td><td>なし</td><td>A</td><td>×</td></tr>
+<tr><td>LOCAL <a href="https://arxiv.org/abs/2608.15241">2608.15241</a></td><td>端末上でアダプタを継続学習（24GB GPU）</td><td>なし</td><td>C</td><td>×</td></tr>
+</tbody></table></div>
+<h3>11. 知っておく失敗の型</h3>
+<div class="table-wrap"><table><thead><tr><th>型</th><th>出典</th><th>確認</th></tr></thead><tbody>
+<tr><td>一緒に取り出されただけの記憶にも報酬が付いて居座る</td><td>RoMeRL <a href="https://arxiv.org/abs/2608.02508">2608.02508</a></td><td>C</td></tr>
+<tr><td>LLM の判定は関連度を高く付けがちで、提案役と同系統だと循環する</td><td><a href="https://arxiv.org/abs/2602.17170">2602.17170</a>、<a href="https://arxiv.org/abs/2412.17156">2412.17156</a></td><td>検索結果のみ</td></tr>
+<tr><td>進化探索の順位は seed と反復の配分で入れ替わる</td><td>Evolution or Illusion? <a href="https://arxiv.org/abs/2609.19799">2609.19799</a></td><td>C</td></tr>
+<tr><td>統合のときに出典の権限が消える</td><td>AuthMem-Bench <a href="https://arxiv.org/abs/2608.01679">2608.01679</a>、TMA-NM <a href="https://arxiv.org/abs/2606.24322">2606.24322</a></td><td>C / A</td></tr>
+<tr><td>質問だけで記憶を汚染できる</td><td>MINJA <a href="https://arxiv.org/abs/2503.03704">2503.03704</a>、InjecMEM <a href="https://arxiv.org/abs/2608.23471">2608.23471</a></td><td>A / 検索結果のみ</td></tr>
+</tbody></table></div>
+</details>
+</section>
+
+</body>
+</html>

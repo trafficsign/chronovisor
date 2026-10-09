@@ -619,6 +619,7 @@ user query ─► BM25/anchor
 <section data-section="実行ログ">
 <h2>実行ログ</h2>
 <ol class="log">
+<li><time>2026-10-09 10:43</time><span>承認済み追加 Plan <code>2026-10-09_1011_recall-compounding-fitness-first.html</code> から R5 状態を再確認。9 月以降の Raw 5,982 件は exact exposure 5,662 件欠落・answer 320 件欠落で eligible 0。8/29 materialization は eligible teacher label 502 の train のみで validation / locked test / probe / CF が不足。現在は local-only を優先し、期限切れ外部教師 cohort は再開しない。local 教師 3 枠と generator/judge は同一 model revision のため独立性契約未達。R5/R6/R7 は未checkのまま。probe hard floor の旧 config 1 を canonical 100 へ復帰し、training は disabled を維持して観測保存のみの分離を実装中。</span></li>
 <li><time>2026-08-14 18:46</time><span>正規 generator で plan を作成。ユーザー案、既存 Recall/Evidence/Raw/learning 調査、DeepSeek群の調査、Kimi K3 の反証を一つの自律設計へ統合。</span></li>
 <li><time>2026-08-14 19:05</time><span>実装整合レビューを反映。current index由来の未来漏洩を止めるhistorical FTS、user query/Evidence authority分離、closed predicates、cold-start hard floor、feature parity、single-writerをhard gateへ追加。</span></li>
 <li><time>2026-08-14 19:30</time><span>Kimi K3のconditional OKを受け、各ラリーを基本ケースに変更。RallyManifest、A0/A1 answer utility、session-group split、rally weight正規化、judge/order/attribution bias gateを追加。</span></li>
