@@ -94,13 +94,15 @@ def _load_encoder(snapshot: Path) -> tuple[_Encoder, _Tokenizer]:
     """Load the bidirectional encoder and tokenizer on the worker thread."""
 
     try:
-        import mlx.core as mx
-        from mlx_lm.models.ministral3 import (
+        import mlx.core as mx  # type: ignore[import-not-found, unused-ignore]
+        from mlx_lm.models.ministral3 import (  # type: ignore[import-not-found, unused-ignore]
             ModelArgs,
             TransformerBlock,
             _get_llama_4_attn_scale,
         )
-        from transformers import AutoTokenizer
+        from transformers import (  # type: ignore[import-not-found, unused-ignore]
+            AutoTokenizer,
+        )
     except ImportError as exc:
         raise SemanticModelError(
             "install mlx, mlx-lm, and transformers to run Nemotron MLX"
@@ -143,7 +145,7 @@ def _load_encoder(snapshot: Path) -> tuple[_Encoder, _Tokenizer]:
             pooled = (hidden * mask).sum(axis=1) / mask.sum(axis=1)
             return pooled / mx.linalg.norm(pooled, axis=-1, keepdims=True)
 
-    model = NemotronEmbedModel(ModelArgs.from_dict(config))  # type: ignore[no-untyped-call]
+    model = NemotronEmbedModel(ModelArgs.from_dict(config))  # type: ignore[no-untyped-call, unused-ignore]
     if "quantization" in config:
         raise SemanticModelError("pinned Nemotron MLX backend requires BF16 weights")
     model.load_weights(str(weights_path))
