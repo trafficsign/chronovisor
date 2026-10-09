@@ -117,6 +117,33 @@ def test_fallback_is_recorded_but_not_accepted(
     assert row["generation_success"] is False
 
 
+@pytest.mark.parametrize("failure", ["fallback", "exception"])
+def test_batch_stops_at_first_generation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    source = tmp_path / "pages"
+    source.mkdir()
+    _write_page(source / "first.md")
+    _write_page(source / "second.md")
+    monkeypatch.setattr(CANDIDATE, "_resolve_local_binding", _local_binding)
+    calls: list[str] = []
+
+    def unavailable(title: str, body: str, page_id: str, **_kwargs: object):
+        calls.append(page_id)
+        if failure == "exception":
+            raise TimeoutError
+        return CANDIDATE.ingest._fallback_recall_metadata(title, body, page_id)
+
+    monkeypatch.setattr(CANDIDATE.ingest, "_generate_recall_metadata", unavailable)
+    manifest = CANDIDATE.generate_candidates(source, tmp_path / "candidate", 2)
+
+    assert calls == ["first"]
+    assert manifest["status"] == "partial"
+    assert manifest["processed_count"] == 1
+    assert manifest["generated"] == 0
+    assert manifest["failed"] + manifest["fallback"] == 1
+
+
 def test_b_status_records_count_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

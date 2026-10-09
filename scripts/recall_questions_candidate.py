@@ -671,7 +671,9 @@ def _run_batch(
             next_hash=next_hash,
         )
         candidate_digest = next_digest
-        candidate_hash = next_hash
+        if result["generation_status"] != "generated":
+            # Stop at the first failed page so an unavailable model cannot drain the cohort.
+            break
     return manifest
 
 
