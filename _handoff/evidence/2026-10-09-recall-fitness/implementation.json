@@ -1,6 +1,6 @@
 {
   "schema": "chronovisor.recall-fitness-implementation.v1",
-  "updated_at": "2026-10-09T04:43:32.811652+00:00",
+  "updated_at": "2026-10-09T20:47:04.075715+09:00",
   "plan": "_handoff/2026-10-09_1011_recall-compounding-fitness-first.html",
   "base_commit": "da6b8e362441e0f21eac53bd86d1fc853fa42d2f",
   "promotion_status": "waiting_for_verified_temporal_data_and_local_teacher_contract",
@@ -147,18 +147,18 @@
     "scheduled_local_time": "2026-10-10T09:00:00+09:00"
   },
   "p2b_generation_preparation": {
-    "status": "partial",
+    "status": "paused_by_user_authorized_luna_handoff",
     "selected_pages": 9795,
     "limit": 10000,
-    "processed_count": 4,
-    "generated": 4,
+    "processed_count": 826,
+    "generated": 826,
     "fallback": 0,
     "failed": 0,
     "source_snapshot_sha256": "2032e4920ae6eacaef26564e15769708f12fec1caab58f824dbf0592dee88512",
     "generation_has_started": true,
     "production_index_changed": false,
     "private_bundle": "~/.chronovisor/runtime/recall-fitness-rollout/2026-10-09/questions-ja-full",
-    "script_commit": "ee66561c",
+    "script_commit": "e3fe32d5",
     "first_batch_limit": 32,
     "promotion_status": "blocked_until_p1"
   },
@@ -176,5 +176,51 @@
     "configured_local_generation_models": 1,
     "counterfactual_revision": "two-order-locked-v2",
     "old_revision_admission": "rejected; historical records preserved"
+  },
+  "p2b_luna_generation": {
+    "status": "generation_complete_pending_evaluation",
+    "generator": {
+      "agent_type": "luna_worker",
+      "configured_model": "gpt-5.6-luna",
+      "provider": "OpenAI Codex native subagent",
+      "reasoning_effort": "max",
+      "runtime_model_attestation": "tool configuration only"
+    },
+    "selected_pages": 9795,
+    "generated_at_observation": 9795,
+    "observed_at": "2026-10-09T11:46:06.162288+00:00",
+    "source_snapshot_sha256": "2032e4920ae6eacaef26564e15769708f12fec1caab58f824dbf0592dee88512",
+    "body_prefix_chars": 2500,
+    "user_authorized_native_luna_generation": true,
+    "local_generation_checkpoint_preserved": 826,
+    "model_change_confounds_language_only_comparison": true,
+    "promotion_status": "blocked_until_p1_and_model_change_evaluation",
+    "production_index_changed": false,
+    "private_bundle": "~/.chronovisor/runtime/recall-fitness-rollout/2026-10-09/questions-luna-parallel",
+    "helper_self_check": {
+      "invalid_outputs_rejected": 5,
+      "invalid_corrections_rejected": 5,
+      "immutable_commit": true
+    },
+    "automation_id": "recall-p2b",
+    "worker_count": 10,
+    "max_concurrent_workers": 10,
+    "questions": 46905,
+    "completed_at": "2026-10-09T11:45:30.802246+00:00",
+    "candidates_sha256": "bb91ce3032da79cfadbe5bad70724b558fb8187ba26a53f05a76a9549f861e8d",
+    "helper_sha256": "8854fcdea291895bcedad91f3dcd9e3d10639e4171734a2fd36c8223a529e952",
+    "source_pages_and_input_prefix_verified": 9795,
+    "batches": 1094,
+    "summary_corrections": 1,
+    "original_batches_preserved": true,
+    "generation_save_span_seconds": 3523.6,
+    "comparison_arms": {
+      "Luna_B_same_question_count": 7227,
+      "Luna_B_pending_unsupported_count": 94,
+      "Luna_C_missing_completion": 2474
+    },
+    "quality_evaluation": "pending; independent evidence and P1/R5 gates unchanged",
+    "private_completion": "completion.json",
+    "private_validation": "validation-final.json"
   }
 }

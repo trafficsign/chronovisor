@@ -70,8 +70,8 @@ summary{cursor:pointer;font-weight:600}
   "状態": "running",
   "slug": "recall-compounding-fitness-first",
   "investigation_state": "complete",
-  "implementation_state": "p2b_candidate_generation_running",
-  "updated_at": "2026-10-09T13:43:32.812281+09:00",
+  "implementation_state": "p2b_luna_generation_complete_pending_evaluation",
+  "updated_at": "2026-10-09T20:47:04.075715+09:00",
   "base_commit": "da6b8e36",
   "parent_plan": "2026-08-14_1846_autonomous-recall-offline-distillation.html"
 }</script>
@@ -79,7 +79,7 @@ summary{cursor:pointer;font-weight:600}
 <header>
 <h1>Plan: <span id="plan-title">Recall の改善が積み上がる状態にする（8/14 蒸留計画への追加）</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="running">running · P2bの別世代生成を継続</span>
+<span class="badge" data-bind="状態" data-state="running">running · P2bの候補生成完了、評価待ち</span>
 <span><code data-bind="task_id">plan_98a6d3b36c7844f1ab2f87a13b423968</code></span>
 <span data-bind="created_at">2026-10-09T10:11:08+09:00</span>
 <span>調査元 <code>da6b8e36</code></span>
@@ -192,9 +192,10 @@ summary{cursor:pointer;font-weight:600}
 
 <div class="phase"><h3>P2b · <code>recall_questions</code> を日本語の話し言葉で作り直す（S。BM25 側にも入れるなら M）</h3>
 <p>引き継がれるもの：検証済みの問いと、索引の世代。準備は P1 と並行でよい。採用は P1 のあと。</p>
+<p data-luna-generation="status">2026-10-09、ユーザーの指示でOpenAI native Luna（configured model <code>gpt-5.6-luna</code> / max）10体による生成を完了。凍結した9,795ページから46,905問を作り、入力との対応・欠落・質問数・保存hashを全件検証した。本文入力は従来と同じ冒頭2,500文字。既存のlocal生成826ページも保持。同数の問いを持つ7,227ページ、従来の問い数が規定外の94ページ、未付与2,474ページを分けて保存した。生成モデルと言語の変更を同時に含むため、日本語化だけの効果とは主張しない。生成は完了したが、A〜E再生・独立した正解による品質評価・P1/R5の受入は未完。本番索引へは採用せず、教師評価のlocal-only条件と採用gateを維持する。</p>
 <ol class="checklist">
 <li><input type="checkbox" checked><span><code>ingest.py:2839</code> の生成指示に、言語と文体の指定を足す。本文の言語にかかわらず日本語の話し言葉にし、技術的な識別子と役に立つ英語表記は残す。</span></li>
-<li><input type="checkbox"><span>既存 7,302 ページ分を別世代として作り直し、付いていない 2,479 ページを埋める。オフラインで行い、件数に上限を置く。今の索引は上書きしない。</span></li>
+<li><input type="checkbox" checked><span>凍結時点の9,795ページ（問いあり7,321／未付与2,474）を別世代として生成する。上限10,000件の候補データに46,905問を保存し、本番索引は上書きしない。</span></li>
 <li><input type="checkbox"><span>5 条件で再生する。A 現行 / B 日本語化（同じページ、同じ問い数）/ C B に加えて未付与を埋める / D C に加えて、本文の埋め込みと問いの信号を分ける / E C に加えて、問いを BM25 の索引にも入れる。</span></li>
 <li><input type="checkbox"><span>同じ再生で、student の 2 特徴（文字 3-gram の重なり）の入力に問いを足した場合と足さない場合を比べる。</span></li>
 </ol>
@@ -339,6 +340,8 @@ summary{cursor:pointer;font-weight:600}
 <section data-section="実行ログ">
 <h2>実行ログ</h2>
 <ol class="log">
+<li><time>2026-10-09 20:47 JST</time><span>native Luna 10体の全担当が完了。9,795ページ・46,905問を1,094個のbatchから統合し、source snapshot、各ページの元byte hash、冒頭2,500文字、入力hash、全ID・連番・質問数・生成モデルの対応を検証。最初と最後の保存時刻の間は58分44秒。要約の取り違え1件は本文へ照合して補正し、元batchと補正記録を保持。誤対象・旧値不一致・二重補正など5種を拒否するself-checkも通過。旧local生成826件のhashは不変。候補hashは <code>bb91ce3032da79cfadbe5bad70724b558fb8187ba26a53f05a76a9549f861e8d</code>。生の本文・質問・補正記録はprivateなbundleだけに保存し、ここには件数と検証結果を記録する。P2bの生成準備だけを完了とし、P0翌朝確認、P1/R5、A〜Eとstudent特徴の再生、採用判断は未完のまま。</span></li>
+<li><time>2026-10-09 19:50 JST</time><span>ユーザーがLunaの大量並列による質問生成を指示。native luna_worker 10体を起動し、同じ9,795ページを重複のないshardへ分配。新しい候補世代は現時点で812ページを保存済み。ID・質問数・日本語・文字数・単一writer・atomic保存・再開cursorを検査し、形式不正5種と保存済みbatchの上書きを拒否するself-checkを通過。旧localジョブは826件・fallback 0・failed 0で停止しhashを保存。OpenAI側での処理は今回の質問生成に対する新しい承認であり、relevance labelやP1/R5の正式受入へ拡張しない。完了確認automationは新しい世代へ切替済み。</span></li>
 <li><time>2026-10-09 13:43 JST</time><span>P2bの全件準備を開始。9,795ページをprivateな別世代snapshotへ凍結（上限10,000件）、batch／resume、単一writer lock、atomic checkpoint、durable prefix hashを検証して最初の32件を処理中。実回答の本文がutility judgeへ渡る経路と、その長さが文脈の切詰めに影響する経路を除去し、旧counterfactual v1を昇格に使えないv2契約へ変更。実回答refの出典は保持する。機械的な入力分離は回帰で確認済みだが、page mappingの意味・独立sourceのplanted value・判定モデル間の安定性は未測定。全teacher/generator/judge roleが同じlocal modelのため正式P1受入は保留。自然なClaude利用のexact receiptは配備後16件を確認。P0翌朝確認と本番索引への採用条件は維持する。</span></li>
 <li><time>2026-10-09 13:32 JST</time><span>ユーザーの継続指摘を受け、P1の正式受入待ちと独立に進められるP2b準備を再開。前の2ページsmokeで全体を止めた判断を修正し、全ページの凍結snapshotと件数上限付きbatch・安全なresumeを使う別世代生成へ進む。P1のpage mapping／answer leak／planted-value対照も、今実装できる機械検査と独立データ待ちを分けて監査する。<code>8d7e9d0c</code> のQuality／Python3.14 CIは各6,687 passed、5サービスとhook cacheの配備・health検証は完了。P0翌朝確認・P1/R5の正式受入・本番採用の条件は保持する。</span></li>
 <li><time>2026-10-09 11:20 JST</time><span>配備後の自然な観測 4 件は page receipt へ fallback していた。実索引の read-only 再現で anchor/BM25 の union が最大 24 件になる一方、exact receipt 契約は 12 件までという不整合を確認。commit <code>a9a18137</code> で共通候補生成を dedupe・score 順の 12 件に制限し、保存側 validator を維持した。24→12 件と exact writer 到達を回帰テストで固定（runtime 225 tests passed）。Linux CI で発見した Git fixture の identity、大型 Node script の引数上限、Dashboard の mtime 日付判定のホスト TZ 依存は <code>19a27aae</code> で修正。日付の既存 flow 6 件は UTC / Asia-Tokyo の双方で通過。最終 SHA の CI と再配備の結果は private deployment receipt に記録する。P0 翌朝・P1 正式受入の待機条件は変更しない。</span></li>
