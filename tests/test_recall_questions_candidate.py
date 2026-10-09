@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import fcntl
 import importlib.util
 import json
+import os
 import stat
 import sys
 from pathlib import Path
@@ -34,7 +36,11 @@ def _write_page(path: Path, *, questions: str = "['既存の質問?']") -> None:
 
 
 def _local_binding() -> dict[str, object]:
-    return {"binding": {"model": "test-local", "location": "local"}, "sha256": "a" * 64}
+    binding = {"model": "test-local", "location": "local"}
+    return {
+        "binding": binding,
+        "sha256": CANDIDATE._sha256(CANDIDATE._canonical_json(binding)),
+    }
 
 
 def test_candidate_bundle_is_frozen_private_and_never_patches_source(
@@ -160,7 +166,7 @@ def test_missing_questions_are_c_arm_and_pending(
     assert row["b_status"] == "pending_missing_completion"
 
 
-def test_route_change_fails_closed_and_records_failed_manifest(
+def test_route_change_fails_closed_and_preserves_resume_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "pages"
@@ -173,7 +179,7 @@ def test_route_change_fails_closed_and_records_failed_manifest(
     with pytest.raises(RuntimeError, match="route/config changed"):
         CANDIDATE.generate_candidates(source, output, 1)
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["status"] == "failed"
+    assert manifest["status"] == "running"
 
 
 def test_candidate_requires_positive_limit(tmp_path: Path) -> None:
@@ -211,3 +217,245 @@ def test_candidate_refuses_source_output_overlap(
 
     with pytest.raises(ValueError, match="must not overlap"):
         CANDIDATE.generate_candidates(source, source / "candidate", 1)
+
+
+def _write_pages(source: Path, count: int) -> None:
+    for index in range(1, count + 1):
+        _write_page(source / f"page-{index}.md")
+
+
+def _install_generator(
+    monkeypatch: pytest.MonkeyPatch, calls: list[str]
+) -> None:
+    monkeypatch.setattr(CANDIDATE, "_resolve_local_binding", _local_binding)
+
+    def generate(title: str, body: str, page_id: str, **_kwargs: object) -> dict[str, object]:
+        del title, body
+        calls.append(page_id)
+        return {
+            "summary": f"candidate {page_id}",
+            "recall_questions": [f"{page_id} の質問1?"],
+        }
+
+    monkeypatch.setattr(CANDIDATE.ingest, "_generate_recall_metadata", generate)
+
+
+def test_resume_processes_only_unfinished_frozen_pages_without_duplicates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "pages"
+    source.mkdir()
+    _write_pages(source, 3)
+    output = tmp_path / "candidate"
+    calls: list[str] = []
+    _install_generator(monkeypatch, calls)
+
+    first = CANDIDATE.generate_candidates(source, output, 3, max_pages=1)
+    snapshot_before = (output / "source.jsonl").read_bytes()
+    (source / "page-2.md").write_text("changed after freeze\n", encoding="utf-8")
+    second = CANDIDATE.generate_candidates(
+        source, output, 3, max_pages=1, resume=True
+    )
+
+    assert first["status"] == "partial"
+    assert second["processed_count"] == 2
+    assert calls == ["page-1", "page-2"]
+    assert (output / "source.jsonl").read_bytes() == snapshot_before
+    rows = [
+        json.loads(line)
+        for line in (output / "candidates.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["page_id"] for row in rows] == ["page-1", "page-2"]
+    final = CANDIDATE.generate_candidates(
+        source, output, 3, max_pages=2, resume=True
+    )
+    assert final["status"] == "complete"
+    assert calls == ["page-1", "page-2", "page-3"]
+
+
+def test_resume_finalizes_a_durable_row_after_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "pages"
+    source.mkdir()
+    _write_pages(source, 2)
+    output = tmp_path / "candidate"
+    calls: list[str] = []
+    _install_generator(monkeypatch, calls)
+    original_write = CANDIDATE._write_json
+
+    def interrupt_after_append(path: Path, value: object) -> None:
+        if (
+            path.name == "manifest.json"
+            and isinstance(value, dict)
+            and value.get("status") == "partial"
+        ):
+            raise KeyboardInterrupt
+        original_write(path, value)
+
+    monkeypatch.setattr(CANDIDATE, "_write_json", interrupt_after_append)
+    with pytest.raises(KeyboardInterrupt):
+        CANDIDATE.generate_candidates(source, output, 2, max_pages=1)
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "pending_commit"
+    assert len((output / "candidates.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+
+    monkeypatch.setattr(CANDIDATE, "_write_json", original_write)
+    resumed = CANDIDATE.generate_candidates(
+        source, output, 2, max_pages=1, resume=True
+    )
+    assert resumed["status"] == "complete"
+    assert calls == ["page-1", "page-2"]
+    rows = [
+        json.loads(line)
+        for line in (output / "candidates.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["page_id"] for row in rows] == ["page-1", "page-2"]
+
+
+def test_resume_refuses_a_concurrent_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "pages"
+    source.mkdir()
+    _write_pages(source, 2)
+    output = tmp_path / "candidate"
+    calls: list[str] = []
+    _install_generator(monkeypatch, calls)
+    CANDIDATE.generate_candidates(source, output, 2, max_pages=1)
+
+    descriptor = os.open(output / ".lock", os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(RuntimeError, match="locked by another writer"):
+            CANDIDATE.generate_candidates(
+                source, output, 2, max_pages=1, resume=True
+            )
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    assert calls == ["page-1"]
+
+
+def test_manifest_replacement_is_atomic_across_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "pages"
+    source.mkdir()
+    _write_pages(source, 2)
+    output = tmp_path / "candidate"
+    calls: list[str] = []
+    _install_generator(monkeypatch, calls)
+    CANDIDATE.generate_candidates(source, output, 2, max_pages=1)
+    manifest_path = output / "manifest.json"
+    before = manifest_path.read_bytes()
+    original_replace = os.replace
+
+    def interrupt_before_replace(_source: object, _destination: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(CANDIDATE.os, "replace", interrupt_before_replace)
+    with pytest.raises(KeyboardInterrupt):
+        CANDIDATE._write_json(manifest_path, {"marker": "before"})
+    assert manifest_path.read_bytes() == before
+    assert not list(output.glob(".manifest.json.*.tmp"))
+
+    def interrupt_after_replace(source_path: object, destination: object) -> None:
+        original_replace(source_path, destination)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(CANDIDATE.os, "replace", interrupt_after_replace)
+    with pytest.raises(KeyboardInterrupt):
+        CANDIDATE._write_json(manifest_path, {"marker": "after"})
+    assert manifest_path.read_bytes() == b'{"marker":"after"}\n'
+    assert not list(output.glob(".manifest.json.*.tmp"))
+
+
+def test_resume_rejects_snapshot_or_candidate_modification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "pages"
+    source.mkdir()
+    _write_pages(source, 2)
+    output = tmp_path / "candidate"
+    calls: list[str] = []
+    _install_generator(monkeypatch, calls)
+    CANDIDATE.generate_candidates(source, output, 2, max_pages=1)
+
+    snapshot = output / "source.jsonl"
+    snapshot.write_bytes(snapshot.read_bytes().replace(b"MLX Sushi", b"tampered"))
+    with pytest.raises(ValueError, match="source snapshot hash"):
+        CANDIDATE.generate_candidates(source, output, 2, max_pages=1, resume=True)
+
+    # Restore the exact snapshot, then tamper with the durable candidate prefix.
+    snapshot.write_bytes(snapshot.read_bytes().replace(b"tampered", b"MLX Sushi"))
+    candidates = output / "candidates.jsonl"
+    candidate_row = json.loads(candidates.read_text(encoding="utf-8"))
+    candidate_row["page_id"] = "wrong"
+    candidates.write_text(json.dumps(candidate_row) + "\n", encoding="utf-8")
+    candidates.chmod(0o600)
+    with pytest.raises(ValueError, match="candidate artifact hash"):
+        CANDIDATE.generate_candidates(source, output, 2, max_pages=1, resume=True)
+    assert calls == ["page-1"]
+
+
+def test_resume_rejects_binding_change_and_partial_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "pages"
+    source.mkdir()
+    _write_pages(source, 2)
+    output = tmp_path / "candidate"
+    calls: list[str] = []
+    _install_generator(monkeypatch, calls)
+    CANDIDATE.generate_candidates(source, output, 2, max_pages=1)
+
+    monkeypatch.setattr(
+        CANDIDATE,
+        "_resolve_local_binding",
+        lambda: {
+            "binding": {"model": "changed", "location": "local"},
+            "sha256": CANDIDATE._sha256(
+                CANDIDATE._canonical_json(
+                    {"model": "changed", "location": "local"}
+                )
+            ),
+        },
+    )
+    with pytest.raises(RuntimeError, match="does not match frozen manifest"):
+        CANDIDATE.generate_candidates(source, output, 2, max_pages=1, resume=True)
+
+    # Restore the route and append an incomplete line. A partial tail is never
+    # treated as a successful durable row.
+    monkeypatch.setattr(CANDIDATE, "_resolve_local_binding", _local_binding)
+    candidates = output / "candidates.jsonl"
+    with candidates.open("ab") as handle:
+        handle.write(b"{\"page_id\":\"partial\"")
+    with pytest.raises(ValueError, match="incomplete tail"):
+        CANDIDATE.generate_candidates(source, output, 2, max_pages=1, resume=True)
+    assert calls == ["page-1"]
+
+
+def test_max_pages_bounds_each_run_and_artifacts_start_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "pages"
+    source.mkdir()
+    _write_pages(source, 3)
+    output = tmp_path / "candidate"
+    calls: list[str] = []
+    _install_generator(monkeypatch, calls)
+
+    first = CANDIDATE.generate_candidates(source, output, 3, max_pages=1)
+    assert first["processed_count"] == 1
+    assert calls == ["page-1"]
+    assert stat.S_IMODE(output.stat().st_mode) == 0o700
+    for name in (".gitignore", "source.jsonl", "candidates.jsonl", "manifest.json"):
+        assert stat.S_IMODE((output / name).stat().st_mode) == 0o600
+
+    second = CANDIDATE.generate_candidates(
+        source, output, 3, max_pages=2, resume=True
+    )
+    assert second["processed_count"] == 3
+    assert second["status"] == "complete"
+    assert calls == ["page-1", "page-2", "page-3"]
