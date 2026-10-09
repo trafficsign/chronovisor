@@ -2833,11 +2833,31 @@ def _generate_recall_metadata(
     page_id: str,
     *,
     transport: ChatTransport | None = None,
+    japanese_questions: bool = False,
+    question_count: int | None = None,
+    require_local_route: bool = False,
 ) -> dict[str, Any]:
+    if question_count is not None and question_count not in {3, 4, 5}:
+        raise ValueError("question_count must be between 3 and 5")
     fallback = _fallback_recall_metadata(title, body, page_id)
     try:
+        question_request = (
+            f"The summary must be one short line. Provide exactly {question_count} "
+            "questions a user may ask later."
+            if question_count is not None
+            else "The summary must be one short line. Provide 3 to 5 questions a user may ask later."
+        )
+        question_instructions = ""
+        if japanese_questions:
+            question_instructions = """
+Write every question in natural, conversational Japanese, even when the page body
+is written in another language. Preserve product names, code symbols, filenames,
+model names, URLs, and other useful identifiers in their original spelling when
+they improve retrieval. Questions are retrieval keys only: stay grounded in the
+page's topic, do not invent facts, and never treat a question as evidence.
+"""
         prompt_text = f"""Create retrievability metadata for this wiki page.
-The summary must be one short line. Provide 3 to 5 questions a user may ask later.
+{question_request}{question_instructions}
 
 Page ID: {page_id}
 Title: {title}
@@ -2865,13 +2885,16 @@ Page body:
             transport is None
             and _generate_with_progress is _DEFAULT_GENERATE_WITH_PROGRESS
         )
-        route = (
-            ollama_runtime.runtime_generation_routes(
+        route = None
+        if live_transport or require_local_route:
+            routes = ollama_runtime.runtime_generation_routes(
                 (ollama_runtime.INGEST_GENERATION_RUNTIME_ROLE,)
-            )[0]
-            if live_transport
-            else None
-        )
+            )
+            if len(routes) != 1:
+                raise RuntimeError("recall metadata requires one ingest route")
+            route = routes[0]
+            if require_local_route and route.location != "local":
+                raise RuntimeError("recall metadata requires a local ingest route")
         local_ollama = (
             route is not None
             and route.provider == "ollama"
@@ -2897,7 +2920,11 @@ Page body:
                 ),
                 role="ingest_recall_metadata",
                 runtime_role=ollama_runtime.INGEST_GENERATION_RUNTIME_ROLE,
-                runtime_location=route.location if route is not None else None,
+                runtime_location=(
+                    "local"
+                    if require_local_route
+                    else route.location if route is not None else None
+                ),
                 source_data_class="derived_snippet",
                 source_sensitivity="high",
                 resource_managed=local_ollama,
@@ -2935,6 +2962,8 @@ Page body:
                     "recall_questions": cleaned_questions,
                 }
     except Exception:
+        if require_local_route:
+            raise
         pass
     return fallback
 

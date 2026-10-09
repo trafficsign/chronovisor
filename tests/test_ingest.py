@@ -14440,7 +14440,7 @@ class TestRecallMetadataStructuredSession:
         )
 
         result = ingest._generate_recall_metadata(
-            "Title", "Body", "page-id", transport=transport
+            "Title", "Body", "page-id", transport=transport, japanese_questions=True
         )
 
         assert result == {
@@ -14452,6 +14452,117 @@ class TestRecallMetadataStructuredSession:
         assert "plain-text record" in system
         assert "Do not return JSON" in system
         assert "JSON Schema" not in system
+        prompt = transport.requests[0].messages[-1]["content"]
+        assert "natural, conversational Japanese" in prompt
+        assert "even when the page body" in prompt
+        assert "Preserve product names, code symbols, filenames" in prompt
+        assert "Questions are retrieval keys only" in prompt
+
+    def test_japanese_question_prompt_is_opt_in(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.ingest import ingest
+
+        monkeypatch.setattr(ingest, "is_available", lambda: True)
+        transport = _QueueStructuredTransport(
+            "SUMMARY | short summary\nQUESTION | What changed?\nQUESTION | What next?"
+        )
+
+        ingest._generate_recall_metadata("Title", "Body", "page-id", transport=transport)
+
+        prompt = transport.requests[0].messages[-1]["content"]
+        assert prompt == (
+            "Create retrievability metadata for this wiki page.\n"
+            "The summary must be one short line. Provide 3 to 5 questions a user may ask later.\n"
+            "\n"
+            "Page ID: page-id\n"
+            "Title: Title\n"
+            "Page body:\n"
+            "---\n"
+            "Body\n"
+            "---"
+        )
+        assert "natural, conversational Japanese" not in prompt
+        assert "Questions are retrieval keys only" not in prompt
+
+    def test_candidate_metadata_requires_local_route(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        del isolated_wiki
+        from chronovisor.ingest import ingest
+
+        monkeypatch.setattr(
+            ingest.ollama_runtime,
+            "runtime_generation_routes",
+            lambda _roles: (
+                SimpleNamespace(
+                    provider="test-remote",
+                    model="remote",
+                    location="remote",
+                    role="ingest.generation",
+                    protocol="test",
+                    endpoint_sha256=None,
+                    revision=None,
+                ),
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="local ingest route"):
+            ingest._generate_recall_metadata(
+                "Title",
+                "Body",
+                "page-id",
+                transport=_QueueStructuredTransport("unused"),
+                japanese_questions=True,
+                require_local_route=True,
+            )
+
+    def test_candidate_metadata_pins_local_runtime_location(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        del isolated_wiki
+        from chronovisor.decision.local_structured import LocalStructuredResult
+        from chronovisor.ingest import ingest
+
+        monkeypatch.setattr(
+            ingest.ollama_runtime,
+            "runtime_generation_routes",
+            lambda _roles: (
+                SimpleNamespace(
+                    provider="test-local",
+                    model="local",
+                    location="local",
+                    role="ingest.generation",
+                    protocol="test",
+                    endpoint_sha256=None,
+                    revision=None,
+                ),
+            ),
+        )
+        captured: dict[str, object] = {}
+
+        class FakeSession:
+            def __init__(self, **kwargs: object) -> None:
+                captured.update(kwargs)
+
+            def run(self, *_args: object, **_kwargs: object) -> LocalStructuredResult:
+                return LocalStructuredResult(
+                    ok=True,
+                    model="local",
+                    value={"summary": "要約", "recall_questions": ["質問?"]},
+                )
+
+        monkeypatch.setattr(ingest, "LocalStructuredSession", FakeSession)
+        result = ingest._generate_recall_metadata(
+            "Title",
+            "Body",
+            "page-id",
+            transport=_QueueStructuredTransport("unused"),
+            require_local_route=True,
+        )
+
+        assert result["recall_questions"] == ["質問?"]
+        assert captured["runtime_location"] == "local"
 
     def test_malformed_plain_metadata_is_repaired_in_same_session(
         self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
