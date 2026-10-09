@@ -1,6 +1,6 @@
 {
   "schema": "chronovisor.recall-fitness-implementation.v1",
-  "updated_at": "2026-10-09T11:20:33+09:00",
+  "updated_at": "2026-10-09T04:43:32.811652+00:00",
   "plan": "_handoff/2026-10-09_1011_recall-compounding-fitness-first.html",
   "base_commit": "da6b8e362441e0f21eac53bd86d1fc853fa42d2f",
   "promotion_status": "waiting_for_verified_temporal_data_and_local_teacher_contract",
@@ -56,7 +56,10 @@
     "0e9e2dbe",
     "355c1142",
     "a9a18137",
-    "19a27aae"
+    "19a27aae",
+    "aef711ac",
+    "ee66561c",
+    "8070fad6"
   ],
   "capture_contract": {
     "opt_in_setting": "recall.distillation.capture_enabled",
@@ -69,7 +72,11 @@
       "cause": "anchor and BM25 union exceeded the 12-candidate exact receipt limit",
       "regression": "24 candidate union bounded to 12; exact writer reached",
       "validator_relaxed": false
-    }
+    },
+    "natural_exact_receipts_after_final_restart": 16,
+    "verified_hosts": [
+      "claude-code"
+    ]
   },
   "deployment": {
     "status": "final_result_recorded_locally",
@@ -96,7 +103,31 @@
       "node_scenario": "stdin replaces oversized argv",
       "dashboard_date": "explicit DASHBOARD_TIMEZONE; 6 flow tests passed in UTC and Asia/Tokyo"
     },
-    "functional_ci": "final revision result recorded in private deployment receipt"
+    "functional_ci": "final revision result recorded in private deployment receipt",
+    "final_quality_ci": {
+      "run": 37874121371,
+      "passed": 6687,
+      "skipped": 4,
+      "deselected": 57
+    },
+    "final_python314_ci": {
+      "run": 37874121242,
+      "passed": 6687,
+      "skipped": 4,
+      "deselected": 57
+    },
+    "continuation": {
+      "distillation": 291,
+      "worker_r5_r6": 210,
+      "formal_model_evaluation_run": false,
+      "local_workset": 73,
+      "r5": 73,
+      "r6": 129,
+      "candidate_and_related": 27,
+      "mypy_files": 97,
+      "import_contracts": "passed",
+      "architecture": "passed"
+    }
   },
   "p0_immediate": {
     "query_hint_reading": false,
@@ -114,5 +145,36 @@
     "overnight_status": "scheduled",
     "automation_id": "recall-p0",
     "scheduled_local_time": "2026-10-10T09:00:00+09:00"
+  },
+  "p2b_generation_preparation": {
+    "status": "partial",
+    "selected_pages": 9795,
+    "limit": 10000,
+    "processed_count": 4,
+    "generated": 4,
+    "fallback": 0,
+    "failed": 0,
+    "source_snapshot_sha256": "2032e4920ae6eacaef26564e15769708f12fec1caab58f824dbf0592dee88512",
+    "generation_has_started": true,
+    "production_index_changed": false,
+    "private_bundle": "~/.chronovisor/runtime/recall-fitness-rollout/2026-10-09/questions-ja-full",
+    "script_commit": "ee66561c",
+    "first_batch_limit": 32,
+    "promotion_status": "blocked_until_p1"
+  },
+  "p1_control_audit": {
+    "row_source_mapping_integrity": "existing official rederivation and hash binding reject mismatches",
+    "page_mapping_semantics": "unmeasured; independent page/version mapping required",
+    "actual_answer_model_input_separation": {
+      "status": "implemented_and_regression_tested",
+      "commit": "aef711ac",
+      "behavior": "actual body excluded from model payload and byte budget; query/context retained; original answer refs kept only in provenance"
+    },
+    "planted_value_source_truth": "unmeasured; independent source-backed fact cohort required",
+    "formal_acceptance": false,
+    "distinct_local_teacher_models": false,
+    "configured_local_generation_models": 1,
+    "counterfactual_revision": "two-order-locked-v2",
+    "old_revision_admission": "rejected; historical records preserved"
   }
 }
