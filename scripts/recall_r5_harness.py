@@ -2164,16 +2164,24 @@ def validate_dataset(
         if isinstance(preflight.get("hard_floor"), Mapping)
         else {}
     )
+    # Raw v2 extraction verifies commit receipts and excludes archived legacy
+    # records.  Re-derive those bytes instead of requiring an invented flag.
+    native_rallies: Sequence[Mapping[str, Any]] = ()
+    if root is not None and distill is not None:
+        try:
+            extracted = distill.extract_rallies(root / "raw", root=root)
+            if list(rallies) == extracted:
+                native_rallies = extracted
+        except Exception:
+            pass  # An unreadable or changed source cannot certify the floor.
     native = {
         str(row.get("rally_id"))
-        for row in rallies
-        if isinstance(row.get("rally_id"), str)
-        and isinstance(row.get("eligibility"), Mapping)
-        and row["eligibility"].get("native_rally") is True
+        for row in native_rallies
+        if _is_id(row.get("rally_id"))
     }
     native_dates = [
         datetime.fromtimestamp(int(row["as_of_us"]) / 1_000_000, UTC).date()
-        for row in rallies
+        for row in native_rallies
         if str(row.get("rally_id") or "") in native
         and isinstance(row.get("as_of_us"), int)
         and not isinstance(row.get("as_of_us"), bool)

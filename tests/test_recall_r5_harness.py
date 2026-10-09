@@ -150,6 +150,69 @@ def test_missing_native_metric_and_fake_flag_decline() -> None:
     assert "eligible_native_predicate_missing_or_empty" in result["reasons"]
 
 
+def test_native_floor_rederives_committed_raw_instead_of_producer_flags(
+    tmp_path: Path,
+) -> None:
+    from chronovisor.core.raw_segment import append_capture
+    from chronovisor.core.store import RuntimeContext, init_chronovisor
+    from chronovisor.recall import recall_distillation as distill
+
+    init_chronovisor(RuntimeContext(tmp_path))
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    events = [
+        {
+            "type": "response_item",
+            "timestamp": (started + timedelta(hours=index)).isoformat(),
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": f"Query {index}"}],
+            },
+        }
+        for index in range(HARNESS.MIN_RALLIES)
+    ]
+    payload = b"".join(json.dumps(event).encode() + b"\n" for event in events)
+    source = tmp_path / "session.jsonl"
+    source.write_bytes(payload)
+    append_capture(
+        raw_dir=tmp_path / "raw",
+        raw_id="save-codex-r5-contract.md",
+        idempotency_key="codex-r5-contract",
+        host="codex",
+        session_key="a" * 24,
+        session_id="r5-contract",
+        source_file=source,
+        after_line=0,
+        until_line=len(events),
+        source_bytes=payload,
+        record_count=len(events),
+        now=started + timedelta(hours=len(events)),
+    )
+    rallies = distill.extract_rallies(tmp_path / "raw", root=tmp_path)
+    assert all("native_rally" not in row["eligibility"] for row in rallies)
+    assert all(row["eligibility"]["answer_utility"] is False for row in rallies)
+
+    def validate(candidate_rallies: list[dict[str, Any]]) -> dict[str, Any]:
+        return HARNESS.validate_dataset(
+            rows=[], labels=[], rallies=candidate_rallies, preflight={}, gate={},
+            workset={}, root=tmp_path, distill=distill,
+        )
+
+    result = validate(rallies)
+    assert sum(result["metrics"]["age_bands"].values()) == HARNESS.MIN_RALLIES
+    assert not any(reason.startswith("eligible_native_") for reason in result["reasons"])
+    assert result["passed"] is False  # Counting native records does not certify labels.
+    assert "sealed_counterfactual_pairs_below_floor_or_duplicate" in result["reasons"]
+
+    forged = json.loads(json.dumps(rallies))
+    forged[0]["eligibility"]["native_rally"] = True
+    assert sum(validate(forged)["metrics"]["age_bands"].values()) == 0
+    assert sum(validate(rallies[:-1])["metrics"]["age_bands"].values()) == 0
+    source_ref = rallies[0]["query_ref"]
+    source_ref["raw_sha256"] = _id(9999)
+    assert sum(validate(rallies)["metrics"]["age_bands"].values()) == 0
+
+
 def test_crafted_floor_counts_cannot_pass_without_exact_label_age_and_workset_bindings() -> (
     None
 ):
