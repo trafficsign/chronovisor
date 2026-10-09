@@ -67,11 +67,11 @@ summary{cursor:pointer;font-weight:600}
 <script type="application/json" id="plan-meta">{
   "task_id": "plan_98a6d3b36c7844f1ab2f87a13b423968",
   "created_at": "2026-10-09T10:11:08+09:00",
-  "状態": "running",
+  "状態": "blocked",
   "slug": "recall-compounding-fitness-first",
   "investigation_state": "complete",
-  "implementation_state": "p2b_luna_generation_complete_pending_evaluation",
-  "updated_at": "2026-10-09T20:47:04.075715+09:00",
+  "implementation_state": "evaluation_preparation_implemented_formal_acceptance_blocked",
+  "updated_at": "2026-10-09T22:38:19.660148+09:00",
   "base_commit": "da6b8e36",
   "parent_plan": "2026-08-14_1846_autonomous-recall-offline-distillation.html"
 }</script>
@@ -79,7 +79,7 @@ summary{cursor:pointer;font-weight:600}
 <header>
 <h1>Plan: <span id="plan-title">Recall の改善が積み上がる状態にする（8/14 蒸留計画への追加）</span></h1>
 <div class="meta-bar">
-<span class="badge" data-bind="状態" data-state="running">running · P2bの候補生成完了、評価待ち</span>
+<span class="badge" data-bind="状態" data-state="blocked">blocked · 生成・評価準備実装済み、正式受入の根拠待ち</span>
 <span><code data-bind="task_id">plan_98a6d3b36c7844f1ab2f87a13b423968</code></span>
 <span data-bind="created_at">2026-10-09T10:11:08+09:00</span>
 <span>調査元 <code>da6b8e36</code></span>
@@ -193,6 +193,7 @@ summary{cursor:pointer;font-weight:600}
 <div class="phase"><h3>P2b · <code>recall_questions</code> を日本語の話し言葉で作り直す（S。BM25 側にも入れるなら M）</h3>
 <p>引き継がれるもの：検証済みの問いと、索引の世代。準備は P1 と並行でよい。採用は P1 のあと。</p>
 <p data-luna-generation="status">2026-10-09、ユーザーの指示でOpenAI native Luna（configured model <code>gpt-5.6-luna</code> / max）10体による生成を完了。凍結した9,795ページから46,905問を作り、入力との対応・欠落・質問数・保存hashを全件検証した。本文入力は従来と同じ冒頭2,500文字。既存のlocal生成826ページも保持。同数の問いを持つ7,227ページ、従来の問い数が規定外の94ページ、未付与2,474ページを分けて保存した。生成モデルと言語の変更を同時に含むため、日本語化だけの効果とは主張しない。生成は完了したが、A〜E再生・独立した正解による品質評価・P1/R5の受入は未完。本番索引へは採用せず、教師評価のlocal-only条件と採用gateを維持する。</p>
+<p data-finish-status="p2b">A〜Eの5構成を9,795ページすべてについて別世代へ準備し、実行可能なsemantic / lexical / student入力の投影を元byteから再導出して検証した。A/Bは34,214問、C/D/Eは46,905問。Bで問い数が規定外の94ページは元の問いを保持し、C以降は全ページにLuna候補を用いる。独立した実クエリの比較は0件で、精度向上や採用は未判定。</p>
 <ol class="checklist">
 <li><input type="checkbox" checked><span><code>ingest.py:2839</code> の生成指示に、言語と文体の指定を足す。本文の言語にかかわらず日本語の話し言葉にし、技術的な識別子と役に立つ英語表記は残す。</span></li>
 <li><input type="checkbox" checked><span>凍結時点の9,795ページ（問いあり7,321／未付与2,474）を別世代として生成する。上限10,000件の候補データに46,905問を保存し、本番索引は上書きしない。</span></li>
@@ -204,6 +205,7 @@ summary{cursor:pointer;font-weight:600}
 
 <div class="phase"><h3>P3 · 作り方で正解が決まる合成プローブ（M）</h3>
 <p>引き継がれるもの：事実の台帳と、取れなかったページの修理待ち一覧。</p>
+<p data-finish-status="p3">隔離コーパスで事実の出典を固定し、4種の対照を作る準備コードを追加。形式・hashの一致は事実や意味の独立検証にはならないため、外部から渡された verified の主張も未認証として保持し、正式な修理待ち一覧へ入れない。独立した意味検査と実データでの受入は未完。</p>
 <ol class="checklist">
 <li><input type="checkbox"><span>ページから（対象、関係、値、有効期間、出典の範囲）を先に固定し、そのあとで話し言葉の日本語の問いを作る。答えられることと、問いに答えが漏れていないことを、別の役が確かめる。</span></li>
 <li><input type="checkbox"><span>対照を混ぜる：存在しない事実、古くなった事実、紛らわしいページ、話題の切り替え。架空の事実は、隔離した再生用コーパスにだけ植える。</span></li>
@@ -214,6 +216,7 @@ summary{cursor:pointer;font-weight:600}
 
 <div class="phase"><h3>P4 · 実際のエピソードを 3 条件で再生する（L）</h3>
 <p>引き継がれるもの：検証済みの結果と、失敗原因の分類。小さな版は P2a と P2b の昇格条件として先に要る。</p>
+<p data-finish-status="p4">on / off / 正解根拠を戻す3条件と5分類を扱う隔離診断を実装し、10テストと永続する合成fixtureで検証。過去のページbyte範囲・時点・文脈・状態を固定し、注入0枚を含む層別抽出を用意した。これは保存済み候補の診断準備であり、本線の回答評価器への統合、当時の索引を使う候補再取得、実エピソードの評価は未完。</p>
 <ol class="checklist">
 <li><input type="checkbox"><span>本線の A0 / A1 反実仮想に、「検証済みの正解の根拠を戻す」条件を足す。監査役が推測したページを戻すのは不可（その推測の検証にならない）。</span></li>
 <li><input type="checkbox"><span>失敗を 5 つに分ける：候補に無い / 候補にあるが選ばれない / 要らないのに注入 / 正しく注入しても失敗（読み手の限界）/ 正解を戻すと成功（回収できる失敗）。</span></li>
@@ -311,7 +314,7 @@ summary{cursor:pointer;font-weight:600}
 
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
-<ul><li>P0 の翌朝確認待ち。P1/R5 は時系列の validation / locked test、独立した local teacher と generator/judge、probe / counterfactual / blind-repeat の正式証跡が不足。旧 external teacher は再開しない。P1 未受入のため後続の採用と canary は昇格待ち。</li><li>capture-only でも evidence_packet と source binding を欠く結果は再生不可。全 host の復旧を意味しない。過去の穴は今のページで埋めない。</li></ul>
+<ul><li>P0の翌朝確認は10/10 09:00 JST。P1/R5は独立した3つのlocal teacher契約、source-boundな有効label、probe / counterfactual / blind repeat、時系列validation / locked testが不足。現行の5教師roleは同じ1モデル。8/29の505 training行は期限切れ502・旧route不整合3で現在の正式受入には使えない。</li><li>再監査時点のRawは15,092 rally、exact exposureと実回答を備えるutility候補は50件。30日を超えるRaw自体は既存だが、独立性・ラベル・CFの条件は満たさない。第三のモデルを加えるだけでは解消しない。</li><li>過去の文脈・ページ版・stateが残らないケースは再生不可。現在のページで埋めず、P3/P4の診断fixtureを実精度や本線受入に数えない。P2bの5構成も正式比較は未測定。</li><li>R6受入後のR7は4段階それぞれ7日以上の実観測と件数を要するため、最低28日間は実時間が必要。P5〜P7の開始条件は保持する。毎朝09:15の継続確認で新しい根拠が揃った段階を進め、変化のない待機は通知しない。</li></ul>
 </section>
 
 <section data-section="受け渡しメモ">
@@ -340,6 +343,7 @@ summary{cursor:pointer;font-weight:600}
 <section data-section="実行ログ">
 <h2>実行ログ</h2>
 <ol class="log">
+<li><time>2026-10-09 22:38 JST</time><span>全完了の指示を受け、未実装・producer/validator不整合・実データ待ちを再監査。R5は正規Raw v2からnative floorを再導出するよう修正（171 tests）、R6は現行workerのlocal/OX identityを検証できるよう修正（74 tests）。P2bのA〜E全件準備とstudent入力、P3の隔離合成プローブ準備、P4の3条件診断を追加した。実クエリの品質比較と正式な修理・昇格は未実施。依存7パッケージの更新で監査34件→0、履歴のSHA digest誤検知4件はcommit/path/行に限定した例外で0を確認。最終CI・push・安全なleaseでの5サービス配備結果はprivate <code>deployment-fitness-finish.json</code>へ記録する。旧世代のreceiptは保持し、報告だけの追加commit/restartを繰り返さない。P0の翌朝確認を維持し、生成完了用automationを毎朝09:15のfitness継続確認へ更新した。Plan全体は正式受入の根拠待ち。</span></li>
 <li><time>2026-10-09 20:47 JST</time><span>native Luna 10体の全担当が完了。9,795ページ・46,905問を1,094個のbatchから統合し、source snapshot、各ページの元byte hash、冒頭2,500文字、入力hash、全ID・連番・質問数・生成モデルの対応を検証。最初と最後の保存時刻の間は58分44秒。要約の取り違え1件は本文へ照合して補正し、元batchと補正記録を保持。誤対象・旧値不一致・二重補正など5種を拒否するself-checkも通過。旧local生成826件のhashは不変。候補hashは <code>bb91ce3032da79cfadbe5bad70724b558fb8187ba26a53f05a76a9549f861e8d</code>。生の本文・質問・補正記録はprivateなbundleだけに保存し、ここには件数と検証結果を記録する。P2bの生成準備だけを完了とし、P0翌朝確認、P1/R5、A〜Eとstudent特徴の再生、採用判断は未完のまま。</span></li>
 <li><time>2026-10-09 19:50 JST</time><span>ユーザーがLunaの大量並列による質問生成を指示。native luna_worker 10体を起動し、同じ9,795ページを重複のないshardへ分配。新しい候補世代は現時点で812ページを保存済み。ID・質問数・日本語・文字数・単一writer・atomic保存・再開cursorを検査し、形式不正5種と保存済みbatchの上書きを拒否するself-checkを通過。旧localジョブは826件・fallback 0・failed 0で停止しhashを保存。OpenAI側での処理は今回の質問生成に対する新しい承認であり、relevance labelやP1/R5の正式受入へ拡張しない。完了確認automationは新しい世代へ切替済み。</span></li>
 <li><time>2026-10-09 13:43 JST</time><span>P2bの全件準備を開始。9,795ページをprivateな別世代snapshotへ凍結（上限10,000件）、batch／resume、単一writer lock、atomic checkpoint、durable prefix hashを検証して最初の32件を処理中。実回答の本文がutility judgeへ渡る経路と、その長さが文脈の切詰めに影響する経路を除去し、旧counterfactual v1を昇格に使えないv2契約へ変更。実回答refの出典は保持する。機械的な入力分離は回帰で確認済みだが、page mappingの意味・独立sourceのplanted value・判定モデル間の安定性は未測定。全teacher/generator/judge roleが同じlocal modelのため正式P1受入は保留。自然なClaude利用のexact receiptは配備後16件を確認。P0翌朝確認と本番索引への採用条件は維持する。</span></li>

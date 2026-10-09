@@ -1,28 +1,10 @@
 {
   "schema": "chronovisor.recall-fitness-implementation.v1",
-  "updated_at": "2026-10-09T20:47:04.075715+09:00",
+  "updated_at": "2026-10-09T22:38:19.660148+09:00",
   "plan": "_handoff/2026-10-09_1011_recall-compounding-fitness-first.html",
   "base_commit": "da6b8e362441e0f21eac53bd86d1fc853fa42d2f",
   "promotion_status": "waiting_for_verified_temporal_data_and_local_teacher_contract",
   "production_promoted": false,
-  "p1_inventory": {
-    "native_rallies": 14956,
-    "days": 87,
-    "eligible": 15,
-    "post_september_rallies": 5982,
-    "post_september_eligible": 0,
-    "post_september_missing_exact_exposure": 5662,
-    "post_september_missing_answer": 320,
-    "latest_training_rows": 505,
-    "eligible_teacher_labels": 502,
-    "teacher_relevant": 202,
-    "teacher_irrelevant": 300,
-    "validation_rows": 0,
-    "locked_test_rows": 0,
-    "probe_pairs": 0,
-    "counterfactual_pairs": 0,
-    "local_teacher_models_distinct": false
-  },
   "p2b_local_smoke": {
     "status": "complete",
     "promotion_status": "blocked_until_p1",
@@ -41,14 +23,15 @@
     "live_page_or_index_writes": 0
   },
   "not_accepted": [
-    "P0 overnight stability",
-    "P1 independent blind repeats and counterfactuals",
-    "P1 semantic answer-leak and planted-value controls",
-    "R5 formal acceptance",
-    "R6 real candidate",
-    "R7 real-time canary",
-    "P2b real-query five-arm comparison",
-    "P3-P7 future phase entry conditions"
+    "P0 overnight stability scheduled for 2026-10-10 09:00 JST",
+    "P1/R5 current independent local teacher contract, source-backed labels, blind repeats, counterfactuals and temporal holdouts",
+    "P1 semantic page-mapping, answer-leak and planted-value controls",
+    "R6 real candidate from accepted R5",
+    "R7 real-time shadow/5/25/100 canary and forced rollback",
+    "P2b real-query five-arm and student-feature comparison",
+    "P3 independent semantic verification, unseen families and real-query repair validation",
+    "P4 actual historical source/state replay and formal answer-evaluator integration",
+    "P5-P7 entry conditions and multi-period evidence"
   ],
   "implementation_commits": [
     "291223f8",
@@ -59,7 +42,14 @@
     "19a27aae",
     "aef711ac",
     "ee66561c",
-    "8070fad6"
+    "8070fad6",
+    "417ba17e",
+    "54274566",
+    "0ed677aa",
+    "a1b64c83",
+    "fac1f05d",
+    "2fd5f01d",
+    "90238758"
   ],
   "capture_contract": {
     "opt_in_setting": "recall.distillation.capture_enabled",
@@ -79,9 +69,12 @@
     ]
   },
   "deployment": {
-    "status": "final_result_recorded_locally",
-    "receipt": "~/.chronovisor/runtime/recall-fitness-rollout/2026-10-09/deployment-final.json",
-    "private_receipt_contains_no_replayed_user_bodies": true
+    "status": "awaiting_final_ci_and_safe_boundary",
+    "previous_runtime_commit": "7cf450056226fa3e82942b1940908ebd70cd0fba",
+    "receipt": "~/.chronovisor/runtime/recall-fitness-rollout/2026-10-09/deployment-fitness-finish.json",
+    "prior_receipts_preserved": true,
+    "private_receipt_contains_no_replayed_user_bodies": true,
+    "runtime_dependency_constraint_fix": "Four service constraints pin PyJWT 2.13.0; replace only that pin with audited 2.15.1 at safe deployment boundary, then verify installed versions. Other dependencies/model routes remain pinned."
   },
   "verification": {
     "isolated_full_tests": 6685,
@@ -93,10 +86,12 @@
     "architecture": "passed",
     "import_contracts": "passed",
     "dependency_audit": {
-      "status": "preexisting_failure",
-      "packages": 7,
-      "reported_findings": 34,
-      "lock_changed": false
+      "status": "passed_locally_final_ci_pending",
+      "packages_updated": 7,
+      "reported_findings_before": 34,
+      "reported_findings_after": 0,
+      "lock_changed": true,
+      "commit": "417ba17e"
     },
     "linux_portability_fixes": {
       "git_merge_fixture": "repository-local identity",
@@ -127,6 +122,26 @@
       "mypy_files": 97,
       "import_contracts": "passed",
       "architecture": "passed"
+    },
+    "secret_scan": {
+      "status": "passed_locally_final_ci_pending",
+      "history_findings_after": 0,
+      "previous_false_positive_digest_findings": 4,
+      "exception_scope": "AND exact commit, path, generic-api-key rule, canonical_keys SHA256 line"
+    },
+    "finish": {
+      "r5_catalog": 171,
+      "r6": 74,
+      "p2b": 5,
+      "p4": 10,
+      "architecture_and_refactor": 36,
+      "configured_mypy_files": 97,
+      "ruff": "passed",
+      "import_contracts": "passed",
+      "full_final_ci": "pending; final results will be in private deployment-fitness-finish.json",
+      "darwin_contract_tests": 57,
+      "p3": 7,
+      "combined_p2b_p3_p4": 22
     }
   },
   "p0_immediate": {
@@ -173,9 +188,22 @@
     "planted_value_source_truth": "unmeasured; independent source-backed fact cohort required",
     "formal_acceptance": false,
     "distinct_local_teacher_models": false,
-    "configured_local_generation_models": 1,
+    "configured_local_generation_models": 2,
     "counterfactual_revision": "two-order-locked-v2",
-    "old_revision_admission": "rejected; historical records preserved"
+    "old_revision_admission": "rejected; historical records preserved",
+    "configured_distillation_model_fingerprints": 1,
+    "native_floor_fix": {
+      "commit": "54274566",
+      "basis": "independent re-extraction from committed Raw v2; exact supplied rally list equality",
+      "fake_native_flag_accepted": false,
+      "r5_and_catalog_tests_passed": 171
+    },
+    "candidate_worker_contract_fix": {
+      "commit": "a1b64c83",
+      "basis": "current producer local/OX identity fields rederived; unknown or changed identity rejected",
+      "tests_passed": 74,
+      "formal_candidate_accepted": false
+    }
   },
   "p2b_luna_generation": {
     "status": "generation_complete_pending_evaluation",
@@ -222,5 +250,172 @@
     "quality_evaluation": "pending; independent evidence and P1/R5 gates unchanged",
     "private_completion": "completion.json",
     "private_validation": "validation-final.json"
+  },
+  "implementation_status": "evaluation_preparation_implemented_formal_acceptance_blocked",
+  "p1_inventory_previous": {
+    "native_rallies": 14956,
+    "days": 87,
+    "eligible": 15,
+    "post_september_rallies": 5982,
+    "post_september_eligible": 0,
+    "post_september_missing_exact_exposure": 5662,
+    "post_september_missing_answer": 320,
+    "latest_training_rows": 505,
+    "eligible_teacher_labels": 502,
+    "teacher_relevant": 202,
+    "teacher_irrelevant": 300,
+    "validation_rows": 0,
+    "locked_test_rows": 0,
+    "probe_pairs": 0,
+    "counterfactual_pairs": 0,
+    "local_teacher_models_distinct": false
+  },
+  "p1_inventory": {
+    "counterfactual_training_pairs": 0,
+    "label_counterfactual_records": 1,
+    "label_ledger_records": 2291,
+    "label_teacher_records": 2290,
+    "latest_label_as_of": "2026-08-31",
+    "probe_or_repeat_pairs": 0,
+    "raw_date_end": "2026-10-09",
+    "raw_date_start": "2026-02-11",
+    "raw_exact_answer_utility_rallies": 50,
+    "raw_missing_answer": 874,
+    "raw_missing_exact_exposure": 14168,
+    "raw_rallies": 15092,
+    "raw_rallies_after_2026_09_01": 6118,
+    "raw_rallies_after_2026_10_01": 1475,
+    "state_workset_projection": {
+      "ox_completed": 140,
+      "ox_quarantined": 63044,
+      "ox_ready": 31094,
+      "ox_total": 94278
+    },
+    "training_snapshot": {
+      "artifact": "15a71aa589abcb2ba86518aa4540c238a5b2df863af1bf3b8354b46acd83708b",
+      "counterfactual_rows": 0,
+      "deepseek_rows": 502,
+      "expired_deepseek_rows": 502,
+      "integrity_bad_rows": 505,
+      "irrelevant_rows": 302,
+      "old_ox_alpha_route_binding_bad_rows": 3,
+      "old_ox_alpha_rows": 3,
+      "probe_rows": 0,
+      "relevant_rows": 203,
+      "rows": 505,
+      "test_rows": 0,
+      "validation_rows": 0
+    },
+    "workset_inventory_scan": {
+      "local_ready": 401,
+      "local_receipt_rows": 1189,
+      "local_total": 401,
+      "ox_completed": 684,
+      "ox_quarantined": 94350,
+      "ox_ready": 30538,
+      "ox_receipt_rows": 452,
+      "ox_total": 125572
+    },
+    "observed_at": "2026-10-09T13:18:43.915208Z",
+    "local_teacher_distinct_fingerprints": 1,
+    "local_teacher_required_fingerprints": 3,
+    "old_training_snapshot_formally_eligible_rows": 0,
+    "snapshot_rejection_reasons": {
+      "expired_external_contract": 502,
+      "old_route_binding": 3
+    },
+    "live_workset_counts_are_time_varying": true
+  },
+  "p2b_arm_preparation": {
+    "status": "prepared_and_verified",
+    "private_bundle": "~/.chronovisor/runtime/recall-fitness-rollout/2026-10-09/p2b-arm-bundle-v2",
+    "source_pages": 9795,
+    "arms": {
+      "A": {
+        "questions": 34214
+      },
+      "B": {
+        "questions": 34214,
+        "luna_same_count_pages": 7227,
+        "original_unsupported_count_pages": 94,
+        "still_missing_pages": 2474
+      },
+      "C": {
+        "questions": 46905,
+        "all_luna_pages": 9795
+      },
+      "D": {
+        "questions": 46905,
+        "page_semantic_excludes_questions": true,
+        "separate_question_documents": true
+      },
+      "E": {
+        "questions": 46905,
+        "questions_added_to_lexical_projection": true
+      }
+    },
+    "student_feature_inputs": "exact title plus snippet projection with and without question lines",
+    "production_page_or_index_writes": 0,
+    "source_and_projection_hashes_verified": true,
+    "formal_comparison": "not_measured",
+    "independent_cases": 0,
+    "manual_unsupported_count_holdout_pages": 94
+  },
+  "p3_preparation": {
+    "status": "isolated_diagnostic_preparation_verified",
+    "script": "scripts/recall_synthetic_probes.py",
+    "independent_verification": "required; self-asserted verified never accepted",
+    "formal_repair_queue_count": 0,
+    "formal_acceptance": false,
+    "private_sources_sent_to_models": false,
+    "private_fixture": "~/.chronovisor/runtime/recall-fitness-rollout/2026-10-09/p3-fixture-v2",
+    "private_bundle": "~/.chronovisor/runtime/recall-fitness-rollout/2026-10-09/p3-probe-contract-v2",
+    "facts": 3,
+    "questions": 3,
+    "controls": 12,
+    "ready_controls": 11,
+    "not_ready_controls": 1,
+    "tests_passed": 7,
+    "commit": "902387583fe01e18f810842e6a37779c6508ecdd"
+  },
+  "p4_preparation": {
+    "status": "isolated_contract_diagnostic_verified",
+    "script": "scripts/recall_stateful_replay.py",
+    "private_fixture": "~/.chronovisor/runtime/recall-fitness-rollout/2026-10-09/p4-stateful-contract-v1",
+    "arms": [
+      "on",
+      "off",
+      "restore_gold"
+    ],
+    "checks": [
+      "pre-turn history and captured state",
+      "source SHA and byte spans",
+      "snapshot path containment",
+      "identical state per arm",
+      "five failure categories",
+      "healthy/degraded uniform sampling including zero cards"
+    ],
+    "tests_passed": 10,
+    "model_calls": 0,
+    "real_episodes_evaluated": 0,
+    "integrated_with_formal_answer_evaluator": false,
+    "candidate_search_reexecuted": false,
+    "formal_acceptance": false
+  },
+  "continuation_automation": {
+    "id": "recall-p2b",
+    "name": "Recall fitness 継続確認",
+    "status": "ACTIVE",
+    "schedule_local": "daily 09:15 Asia/Tokyo",
+    "quiet_when_unchanged": true,
+    "p0_monitor_preserved": true
+  },
+  "r7_path_audit": {
+    "runtime_gate": "recall_distillation._automatic_rollout_evaluation -> recall_distillation_rollout.evaluate_and_advance",
+    "independent_evidence_certifier": "recall_r7_evidence.validate_collector",
+    "legacy_receipt_harness": "scripts/recall_r7_harness.py is not called by production rollout; consumed by future R8 offline readiness",
+    "legacy_bundle_format_gap": "not a current serving blocker; future R8 must derive missing evidence rather than synthesize true flags",
+    "new_adapter_written": false,
+    "real_time_or_quality_gates_relaxed": false
   }
 }
