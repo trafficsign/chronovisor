@@ -149,6 +149,14 @@ def _distillation_single_writer_active() -> bool:
         return True
 
 
+def _automatic_writer_block_reason() -> str | None:
+    if _distillation_single_writer_active():
+        return "distillation_single_writer"
+    if decision_authority.decision_lane_mode(RECALL_IMPROVEMENT_DECISION_LANE) == "off":
+        return "decision_policy_off"
+    return None
+
+
 def _quarantine_retry_seconds() -> int:
     try:
         return max(
@@ -1300,12 +1308,12 @@ def run_improvement(
     frontier_audit_dir: Path = FRONTIER_AUDIT_DIR,
     frontier_reviewer: Any | None = None,
 ) -> dict[str, Any]:
-    if apply and _distillation_single_writer_active():
+    if apply and (blocked_reason := _automatic_writer_block_reason()):
         return {
             "schema_version": 1,
             "status": "hard_off",
             "applied": False,
-            "reason": "distillation_single_writer",
+            "reason": blocked_reason,
         }
     (
         run_id,
@@ -1946,12 +1954,12 @@ def run_due(
     lock_file: Path = RUN_DUE_LOCK_FILE,
     frontier_budget: Any | None = None,
 ) -> dict[str, Any]:
-    if not dry_run and _distillation_single_writer_active():
+    if not dry_run and (blocked_reason := _automatic_writer_block_reason()):
         return {
             "schema_version": 1,
             "checked_at": _now_iso(),
             "status": "hard_off",
-            "reason": "distillation_single_writer",
+            "reason": blocked_reason,
             "dry_run": False,
         }
     lock_handle = None

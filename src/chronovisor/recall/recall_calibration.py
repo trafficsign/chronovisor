@@ -78,6 +78,14 @@ def _distillation_single_writer_active() -> bool:
         return True
 
 
+def _automatic_writer_block_reason() -> str | None:
+    if _distillation_single_writer_active():
+        return "distillation_single_writer"
+    if decision_authority.decision_lane_mode(CALIBRATION_DECISION_LANE) == "off":
+        return "decision_policy_off"
+    return None
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp: Path | None = None
@@ -558,10 +566,10 @@ def calibrate(
     budget: Any | None = None,
     review_dir: Path | None = None,
 ) -> dict[str, Any]:
-    if not dry_run and _distillation_single_writer_active():
+    if not dry_run and (blocked_reason := _automatic_writer_block_reason()):
         return {
             "status": "hard_off",
-            "reason": "distillation_single_writer",
+            "reason": blocked_reason,
             "dry_run": False,
         }
     rows, early_result = _calibration_input_rows(
@@ -1097,10 +1105,10 @@ def run_due(
     frontier_mode: str = "auto",
     budget: Any | None = None,
 ) -> dict[str, Any]:
-    if not dry_run and _distillation_single_writer_active():
+    if not dry_run and (blocked_reason := _automatic_writer_block_reason()):
         return {
             "status": "hard_off",
-            "reason": "distillation_single_writer",
+            "reason": blocked_reason,
             "dry_run": False,
         }
     if policy is None:

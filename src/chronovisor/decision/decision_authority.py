@@ -327,6 +327,14 @@ def session_audit_is_safe(
     )
 
 
+def decision_lane_mode(lane: str) -> str:
+    """Read the canonical lane switch without resolving model authority."""
+
+    from chronovisor.decision.decision_policy import resolve_decision_policy
+
+    return resolve_decision_policy(lane)[1]
+
+
 def base_semantic_authority(
     lane: str,
     *,

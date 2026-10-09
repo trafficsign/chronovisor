@@ -431,6 +431,11 @@ def _apply_config(policy: RecallPolicy, data: dict[str, Any]) -> None:
         policy.judge_mode = recall_root["judge_mode"]
     if isinstance(recall_root.get("session_ttl_seconds"), int):
         policy.session_ttl_seconds = max(3600, recall_root["session_ttl_seconds"])
+    query_hints_enabled = recall_root.get(
+        "query_hints_enabled", data.get("query_hints_enabled")
+    )
+    if isinstance(query_hints_enabled, bool):
+        policy.query_hints_enabled = query_hints_enabled
 
     gate = section("gate")
     if gate:
@@ -1635,7 +1640,9 @@ def collect_context(
     items: list[ContextItem] = []
     seen: set[str] = set()
     _require_remaining_budget(deadline_at, "context hints")
-    for page_id in query_hint_page_ids(queries, limit=policy.max_pages):
+    for page_id in query_hint_page_ids(
+        queries, limit=policy.max_pages, enabled=policy.query_hints_enabled
+    ):
         _require_remaining_budget(deadline_at, "context hint")
         if page_id in seen:
             continue
@@ -1835,7 +1842,11 @@ def observe_processor_shadow(
         }
 
 
-def query_hint_page_ids(queries: list[str], *, limit: int) -> list[str]:
+def query_hint_page_ids(
+    queries: list[str], *, limit: int, enabled: bool = False
+) -> list[str]:
+    if not enabled:
+        return []
     try:
         from chronovisor.ingest.recall_hints import matching_hint_page_ids
 

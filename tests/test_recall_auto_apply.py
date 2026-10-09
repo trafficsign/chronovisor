@@ -197,7 +197,7 @@ def test_query_hint_auto_apply_feeds_runtime_context(tmp_path, monkeypatch) -> N
     context = collect_context(
         ["昨日の recall hook の続き"],
         "read",
-        RecallPolicy(max_pages=1, semantic=False),
+        RecallPolicy(max_pages=1, semantic=False, query_hints_enabled=True),
     )
 
     assert [item.page_id for item in context] == [

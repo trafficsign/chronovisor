@@ -109,6 +109,28 @@ def test_disabled_calibration_does_not_load_training_data(monkeypatch) -> None:
     assert result["status"] == "disabled"
 
 
+def test_off_lane_stops_feedback_calibration_without_changing_live_gate(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_CALIBRATION", "off")
+    monkeypatch.setattr(
+        recall_calibration, "_distillation_single_writer_active", lambda: False
+    )
+    monkeypatch.setattr(
+        recall_calibration,
+        "load_labeled_rows",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not load labels")),
+    )
+    artifact = tmp_path / "calibration.json"
+    artifact.write_text('{"weights":{"top1_score_norm":4},"bias":-3}')
+    before = artifact.read_bytes()
+    for result in (recall_calibration.calibrate(), recall_calibration.run_due()):
+        assert result["status"] == "hard_off"
+        assert result["reason"] == "decision_policy_off"
+    assert recall_calibration.load_calibration(artifact)["bias"] == -3
+    assert artifact.read_bytes() == before
+
+
 def test_rollback_last_restores_exact_applied_preimage_under_nested_locks(
     monkeypatch,
     tmp_path,

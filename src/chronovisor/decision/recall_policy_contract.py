@@ -73,6 +73,9 @@ class RecallPolicy:
     fusion_graph: float = 0.3
     fusion_context: float = 0.25
     fusion_usage_prior: float = 0.0
+    # Legacy query hints stay readable by Recall Field but are not injected by
+    # the synchronous runtime unless explicitly enabled in [recall].
+    query_hints_enabled: bool = False
     fusion_bm25_score_bonus: float = 0.005
     fusion_bm25_rank_bonus: float = 0.006
     fusion_bm25_rank_decay: float = 0.006

@@ -2027,6 +2027,33 @@ def test_improvement_writers_are_hard_off_for_distillation_single_writer(
     assert not registry_file.exists()
 
 
+def test_off_lane_stops_improvement_before_feedback_or_model_work(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("CHRONOVISOR_DECISION_POLICY_RECALL_IMPROVEMENT", "off")
+    monkeypatch.setattr(
+        recall_improvement, "_distillation_single_writer_active", lambda: False
+    )
+    monkeypatch.setattr(
+        recall_improvement,
+        "_improvement_inputs",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not load labels")),
+    )
+    schedule = tmp_path / "schedule.json"
+    lock = tmp_path / "run.lock"
+    for result in (
+        recall_improvement.run_improvement(),
+        recall_improvement.run_due(
+            schedule_file=schedule, lock_file=lock
+        ),
+    ):
+        assert result["status"] == "hard_off"
+        assert result["reason"] == "decision_policy_off"
+        assert result.get("applied", False) is False
+    assert not schedule.exists()
+    assert not lock.exists()
+
+
 def test_improvement_evaluation_stays_available_for_distillation_single_writer(
     tmp_path,
     monkeypatch,

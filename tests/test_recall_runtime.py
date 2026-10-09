@@ -55,6 +55,7 @@ from chronovisor.recall.recall_runtime import (
     main,
     merge_context_blocks,
     processor_authority_for_request,
+    query_hint_page_ids,
     render_output,
     request_from_hook_payload,
     run_local_judge,
@@ -2001,6 +2002,33 @@ def test_gate_defaults_keep_runtime_resident_and_rewrite_timeout_longer(
     assert policy.judge_keep_alive == "24h"
     assert policy.warmup_timeout_ms == 15000
     assert policy.rewrite_timeout_ms == 3000
+
+
+def test_query_hints_default_off_and_config_can_restore_legacy_runtime(tmp_path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text("[recall]\nquery_hints_enabled = true\n", encoding="utf-8")
+
+    assert RecallPolicy().query_hints_enabled is False
+    assert load_policy(config).query_hints_enabled is True
+
+
+def test_query_hint_page_ids_is_fail_closed_until_explicitly_enabled(monkeypatch) -> None:
+    from chronovisor.ingest import recall_hints
+
+    calls: list[tuple[list[str], int]] = []
+
+    def matching(queries: list[str], *, limit: int) -> list[str]:
+        calls.append((queries, limit))
+        return ["legacy-page"]
+
+    monkeypatch.setattr(recall_hints, "matching_hint_page_ids", matching)
+
+    assert query_hint_page_ids(["legacy query"], limit=1) == []
+    assert calls == []
+    assert query_hint_page_ids(["legacy query"], limit=1, enabled=True) == [
+        "legacy-page"
+    ]
+    assert calls == [(["legacy query"], 1)]
 
 
 def test_fusion_config_reads_channel_weights_and_bm25_bonus(tmp_path) -> None:
