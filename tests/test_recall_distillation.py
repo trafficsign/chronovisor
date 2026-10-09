@@ -5237,7 +5237,7 @@ def test_configured_local_route_binding_rejects_evil_canonical_identities(
         "request_revision": "local-blind-counterfactual-v1",
         "assignment_revision": distill.ASSIGNMENT_REVISION,
         "counterfactual_producer": "chronovisor-local-blind-v1",
-        "counterfactual_revision": "two-order-locked-v1",
+        "counterfactual_revision": "two-order-locked-v2",
         "blind_orders": ["a0_first", "a1_first"],
         "generator_route_identity": identities[roles[-2]],
         "judge_route_identity": identities[roles[-1]],
@@ -9401,7 +9401,7 @@ def test_offline_gate_uses_route_stability_and_agreed_counterfactuals(
                     "a0_sha256": "b" * 64,
                     "a1_sha256": "c" * 64,
                     "counterfactual_producer": "chronovisor-local-blind-v1",
-                    "counterfactual_revision": "two-order-locked-v1",
+                    "counterfactual_revision": "two-order-locked-v2",
                     "blind_orders": ["a0_first", "a1_first"],
                     "profile": distill.LOCAL_TRIAD_PROFILE,
                     "cohort": distill.LOCAL_TRIAD_PROFILE,
@@ -9547,6 +9547,18 @@ def test_offline_gate_uses_route_stability_and_agreed_counterfactuals(
     assert set(recovered["model_cohort"]["teacher_model_digests"].values()) == set(
         next_digests.values()
     )
+
+    legacy_revision = [dict(row) for row in complete_update]
+    next(
+        row
+        for row in legacy_revision
+        if row.get("source") == "counterfactual-label"
+    )["counterfactual_revision"] = "two-order-locked-v1"
+    legacy_gate = distill._offline_training_gate(
+        legacy_revision, config, root=tmp_path
+    )
+    assert legacy_gate["passed"] is False
+    assert "row_integrity_failed" in legacy_gate["reasons"]
 
     def constant_policy(bias: float) -> dict[str, object]:
         return {
@@ -9780,6 +9792,100 @@ def test_counterfactual_judge_input_is_answer_independent(
         }
         assert payload["query"] == "point-in-time query"
         assert payload["context"] == ["point-in-time context"]
+
+
+def test_counterfactual_claim_payload_excludes_answer_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rally = {
+        "rally_id": "rally",
+        "session_cluster_id": "session",
+        "as_of": "2026-01-01T00:00:00Z",
+        "query_sha256": "query",
+        "context_refs": [{"semantic_sha256": "context"}],
+        "actual_answer_refs": [{"semantic_sha256": "answer"}],
+    }
+    snapshot = {
+        "snapshot_sha256": "snapshot",
+        "candidates": [{"candidate_id": "candidate", "text_sha256": "candidate"}],
+    }
+    payloads: list[dict[str, object]] = []
+    provenance: list[tuple[str, str]] = []
+
+    def fake_snapshot_inputs(**kwargs: object) -> tuple[
+        dict[str, object],
+        dict[str, object],
+        dict[str, object],
+        dict[str, str],
+        list[dict[str, object]],
+    ]:
+        assert kwargs["rally"] == rally
+        return {}, {}, {}, {"existing": "point-in-time evidence"}, []
+
+    def fake_additions(**_kwargs: object) -> list[dict[str, object]]:
+        return [{"candidate_id": "candidate", "rendered_context": "candidate evidence"}]
+
+    def capture_compare(**kwargs: object) -> distill._CounterfactualBlockResult:
+        payload = kwargs["payload"]
+        assert isinstance(payload, dict)
+        payloads.append(dict(payload))
+        return distill._CounterfactualBlockResult(
+            pending=True, written=0, model_calls=0
+        )
+
+    monkeypatch.setattr(distill, "_counterfactual_snapshot_inputs", fake_snapshot_inputs)
+    monkeypatch.setattr(distill, "_counterfactual_additions", fake_additions)
+    monkeypatch.setattr(
+        distill, "_compare_and_commit_counterfactual", capture_compare
+    )
+
+    class NoModel:
+        local = True
+
+        def compare(self, _payload: object) -> dict[str, object]:
+            raise AssertionError("claim assembly must not call a model")
+
+    for answer_body in ("short answer", "answer " * 20_000):
+        items, _keys = distill._prepare_counterfactual_work(
+            root=tmp_path,
+            snapshots={"rally": snapshot},
+            rally_by_id={"rally": rally},
+        )
+        assert len(items) == 1
+        item = items[0]
+        provenance.append((str(item["payload_digest"]), str(item["work_id"])))
+        claim = SimpleNamespace(
+            attempt=1,
+            work_id=item["work_id"],
+            payload_digest=item["payload_digest"],
+            temporal_split=item["temporal_split"],
+        )
+        result = distill._run_counterfactual_claim(
+            workset=object(),
+            claim=claim,
+            target=("rally", "candidate"),
+            root=tmp_path,
+            raw_dir=tmp_path / "raw",
+            config=distill.DistillationConfig(enabled=True, max_input_bytes=512),
+            counterfactual=NoModel(),
+            snapshots={"rally": snapshot},
+            rally_by_id={"rally": rally},
+            texts={
+                "query": "point-in-time query",
+                "context": "point-in-time context",
+                "answer": answer_body,
+            },
+            label_path=tmp_path / "label-ledger.jsonl",
+        )
+        assert result.model_calls == 0
+
+    assert provenance[0] == provenance[1]
+    assert rally["actual_answer_refs"] == [{"semantic_sha256": "answer"}]
+    assert len(payloads) == 2
+    assert payloads[0] == payloads[1]
+    assert "actual_answer" not in payloads[0]
+    assert payloads[0]["query"] == "point-in-time query"
+    assert payloads[0]["context"] == ["point-in-time context"]
 
 
 def test_cold_start_api_uses_fixed_split_and_nonblocking_writer_lock(

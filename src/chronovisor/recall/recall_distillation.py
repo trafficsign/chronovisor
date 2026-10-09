@@ -6356,7 +6356,7 @@ def _configured_local_route_binding(row: Mapping[str, Any]) -> bool:
             )
         )
         and row.get("counterfactual_producer") == "chronovisor-local-blind-v1"
-        and row.get("counterfactual_revision") == "two-order-locked-v1"
+        and row.get("counterfactual_revision") == "two-order-locked-v2"
         and set(row.get("blind_orders") or []) == {"a0_first", "a1_first"}
         and row.get("generator_route_identity") == expected[generator]
         and row.get("judge_route_identity") == expected[judge]
@@ -6511,7 +6511,7 @@ def _materialized_row_integrity(
             and bool(row["judge_route_identity"].get("model"))
             and row["generator_route_identity"] != row["judge_route_identity"]
             and row.get("counterfactual_producer") == "chronovisor-local-blind-v1"
-            and row.get("counterfactual_revision") == "two-order-locked-v1"
+            and row.get("counterfactual_revision") == "two-order-locked-v2"
             and set(row.get("blind_orders") or []) == {"a0_first", "a1_first"}
             and (
                 row.get("split") != "test"
@@ -6677,7 +6677,7 @@ def _offline_training_gate(
             and row.get("generator_route_identity")
             and row.get("judge_route_identity")
             and row.get("counterfactual_producer") == "chronovisor-local-blind-v1"
-            and row.get("counterfactual_revision") == "two-order-locked-v1"
+            and row.get("counterfactual_revision") == "two-order-locked-v2"
             and set(row.get("blind_orders") or []) == {"a0_first", "a1_first"}
             and row.get("profile") == OX_SINGLE_PROFILE
             and row.get("cohort") == OX_SINGLE_COHORT
@@ -14647,7 +14647,7 @@ def _compare_and_commit_counterfactual(
             "as_of": str(claim.temporal_split.get("as_of") or ""),
             "group_id": str(claim.temporal_split.get("group_id") or ""),
             "counterfactual_producer": "chronovisor-local-blind-v1",
-            "counterfactual_revision": "two-order-locked-v1",
+            "counterfactual_revision": "two-order-locked-v2",
             # This producer is intentionally local; only its stable route
             # fingerprints are retained, never generated text or provider body.
             "profile": config.teacher_profile,
@@ -14789,10 +14789,6 @@ def _run_counterfactual_claim(
                 "candidate_id": candidate_id,
                 "query": texts.get(str(rally["query_sha256"]), ""),
                 "context": context,
-                "actual_answer": "\n".join(
-                    texts.get(str(ref["semantic_sha256"]), "")
-                    for ref in rally.get("actual_answer_refs", [])
-                ),
                 "a0_evidence": [
                     value
                     for key, value in original_evidence.items()

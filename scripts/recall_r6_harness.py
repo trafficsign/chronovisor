@@ -2560,7 +2560,7 @@ def _assert_replay_rows_schema(
             if (
                 not row["counterfactual_ref"] or not row["a0_sha256"] or not row["a1_sha256"]
                 or row["counterfactual_producer"] != "chronovisor-local-blind-v1"
-                or row["counterfactual_revision"] != "two-order-locked-v1"
+                or row["counterfactual_revision"] != "two-order-locked-v2"
                 or row["order_agreement"] is not True
                 or set(row["blind_orders"]) != {"a0_first", "a1_first"}
                 or len(row["blind_orders"]) != 2
