@@ -1,6 +1,6 @@
 {
   "schema": "chronovisor.recall-fitness-implementation.v1",
-  "updated_at": "2026-10-09T22:38:19.660148+09:00",
+  "updated_at": "2026-10-10T09:04:29.410505+09:00",
   "plan": "_handoff/2026-10-09_1011_recall-compounding-fitness-first.html",
   "base_commit": "da6b8e362441e0f21eac53bd86d1fc853fa42d2f",
   "promotion_status": "waiting_for_verified_temporal_data_and_local_teacher_contract",
@@ -23,7 +23,6 @@
     "live_page_or_index_writes": 0
   },
   "not_accepted": [
-    "P0 overnight stability scheduled for 2026-10-10 09:00 JST",
     "P1/R5 current independent local teacher contract, source-backed labels, blind repeats, counterfactuals and temporal holdouts",
     "P1 semantic page-mapping, answer-leak and planted-value controls",
     "R6 real candidate from accepted R5",
@@ -160,9 +159,11 @@
       "alias": 1,
       "page_tag": 27
     },
-    "overnight_status": "scheduled",
+    "overnight_status": "passed",
     "automation_id": "recall-p0",
-    "scheduled_local_time": "2026-10-10T09:00:00+09:00"
+    "automation_status": "deleted_after_completion",
+    "scheduled_local_time": "2026-10-10T09:00:00+09:00",
+    "overnight_observed_at": "2026-10-10T09:04:29.410505+09:00"
   },
   "p2b_generation_preparation": {
     "status": "paused_by_user_authorized_luna_handoff",
@@ -411,7 +412,8 @@
     "status": "ACTIVE",
     "schedule_local": "daily 09:15 Asia/Tokyo",
     "quiet_when_unchanged": true,
-    "p0_monitor_preserved": true
+    "p0_monitor_preserved": false,
+    "p0_monitor_completed": true
   },
   "r7_path_audit": {
     "runtime_gate": "recall_distillation._automatic_rollout_evaluation -> recall_distillation_rollout.evaluate_and_advance",
@@ -420,5 +422,39 @@
     "legacy_bundle_format_gap": "not a current serving blocker; future R8 must derive missing evidence rather than synthesize true flags",
     "new_adapter_written": false,
     "real_time_or_quality_gates_relaxed": false
+  },
+  "p0_overnight": {
+    "status": "passed",
+    "observed_at": "2026-10-10T09:04:29.410505+09:00",
+    "applied_counts": {
+      "query_hint": 1371,
+      "alias": 1,
+      "page_tag": 27
+    },
+    "new_applied_counts": {
+      "query_hint": 0,
+      "alias": 0,
+      "page_tag": 0
+    },
+    "protected_files_unchanged": true,
+    "stop_settings_preserved": true,
+    "capture_only": true,
+    "exposure_since_final_deployment": {
+      "receipts": 21,
+      "kinds": {
+        "prospective-exact-exposure-v1": 21
+      },
+      "hosts": {
+        "claude-code": 20,
+        "codex": 1
+      },
+      "exact_verified": 21,
+      "invalid_binding_or_artifact": 0,
+      "page_only_missing_exact": 0,
+      "latest_observed_at": "2026-10-09T22:39:28.379057+00:00"
+    },
+    "private_receipt": "~/.chronovisor/runtime/recall-fitness-rollout/2026-10-09/p0-overnight-2026-10-10.json",
+    "receipt_sha256": "e522997d1d800114202f1dfed555e89f95cc51e98ffe640db2c9fb3ca9449789",
+    "formal_relevance_evaluation": false
   }
 }

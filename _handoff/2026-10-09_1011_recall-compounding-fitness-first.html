@@ -71,9 +71,10 @@ summary{cursor:pointer;font-weight:600}
   "slug": "recall-compounding-fitness-first",
   "investigation_state": "complete",
   "implementation_state": "evaluation_preparation_implemented_formal_acceptance_blocked",
-  "updated_at": "2026-10-09T22:38:19.660148+09:00",
+  "updated_at": "2026-10-10T09:04:29.410505+09:00",
   "base_commit": "da6b8e36",
-  "parent_plan": "2026-08-14_1846_autonomous-recall-offline-distillation.html"
+  "parent_plan": "2026-08-14_1846_autonomous-recall-offline-distillation.html",
+  "p0_overnight_state": "passed"
 }</script>
 
 <header>
@@ -162,7 +163,7 @@ summary{cursor:pointer;font-weight:600}
 <li><input type="checkbox" checked><span><code>recall_auto_apply</code> の <code>query_hint</code> の新規適用を止める方法を確認する。既存の停止設定があればそれを使い、なければ最小の設定を足す。<code>alias</code> と <code>page_tag</code> は同じ feedback が元なので、同じ扱いにするかをここで決める。</span></li>
 <li><input type="checkbox" checked><span>既存 1,782 件は削除しない。本番の注入経路（<code>recall_runtime.py:1638</code> の <code>query_hint_page_ids</code>）で読まれないようにする。Recall Field 側（<code>recall_field.py:181</code>）は観測のまま残す。</span></li>
 <li><input type="checkbox" checked><span>旧較正レーンが feedback ラベルで再び適用されない状態かを確認する（<code>recall_calibration.py:561</code> の hard_off が今の設定で効いているか）。</span></li>
-<li><input type="checkbox"><span>1 晩おいて、<code>auto-apply.jsonl</code> に <code>query_hint</code> の <code>applied</code> が増えていないことを確認する。</span></li>
+<li><input type="checkbox" checked><span>1 晩おいて、<code>auto-apply.jsonl</code> に <code>query_hint</code> の <code>applied</code> が増えていないことを確認する。</span></li>
 </ol>
 <p>受入：新規適用 0。<code>query-hints.json</code> の中身は不変。戻す手順を 1 行で書ける。</p>
 </div>
@@ -314,7 +315,7 @@ summary{cursor:pointer;font-weight:600}
 
 <section class="blockers" data-section="ブロッカー">
 <h2>ブロッカー（発生時のみ）</h2>
-<ul><li>P0の翌朝確認は10/10 09:00 JST。P1/R5は独立した3つのlocal teacher契約、source-boundな有効label、probe / counterfactual / blind repeat、時系列validation / locked testが不足。現行の5教師roleは同じ1モデル。8/29の505 training行は期限切れ502・旧route不整合3で現在の正式受入には使えない。</li><li>再監査時点のRawは15,092 rally、exact exposureと実回答を備えるutility候補は50件。30日を超えるRaw自体は既存だが、独立性・ラベル・CFの条件は満たさない。第三のモデルを加えるだけでは解消しない。</li><li>過去の文脈・ページ版・stateが残らないケースは再生不可。現在のページで埋めず、P3/P4の診断fixtureを実精度や本線受入に数えない。P2bの5構成も正式比較は未測定。</li><li>R6受入後のR7は4段階それぞれ7日以上の実観測と件数を要するため、最低28日間は実時間が必要。P5〜P7の開始条件は保持する。毎朝09:15の継続確認で新しい根拠が揃った段階を進め、変化のない待機は通知しない。</li></ul>
+<ul><li>P1/R5は独立した3つのlocal teacher契約、source-boundな有効label、probe / counterfactual / blind repeat、時系列validation / locked testが不足。現行の5教師roleは同じ1モデル。8/29の505 training行は期限切れ502・旧route不整合3で現在の正式受入には使えない。</li><li>再監査時点のRawは15,092 rally、exact exposureと実回答を備えるutility候補は50件。30日を超えるRaw自体は既存だが、独立性・ラベル・CFの条件は満たさない。第三のモデルを加えるだけでは解消しない。</li><li>過去の文脈・ページ版・stateが残らないケースは再生不可。現在のページで埋めず、P3/P4の診断fixtureを実精度や本線受入に数えない。P2bの5構成も正式比較は未測定。</li><li>R6受入後のR7は4段階それぞれ7日以上の実観測と件数を要するため、最低28日間は実時間が必要。P5〜P7の開始条件は保持する。毎朝09:15の継続確認で新しい根拠が揃った段階を進め、変化のない待機は通知しない。</li></ul>
 </section>
 
 <section data-section="受け渡しメモ">
@@ -343,6 +344,7 @@ summary{cursor:pointer;font-weight:600}
 <section data-section="実行ログ">
 <h2>実行ログ</h2>
 <ol class="log">
+<li><time>2026-10-10 09:04 JST</time><span>P0の翌朝実測を完了。query_hint / alias / page_tag の applied は 1,371 / 1 / 27、開始時からの増加はすべて0件。query-hints・calibration・active-policyのSHAは開始時と一致。3 decision lanesとauto_applyはoff、query_hints_enabled=false、distillation.enabled=false / capture_enabled=true、閾値0.35 / 0.65を確認。exposure ledgerのhash chainとsealed artifact対応を検証し、最終配備後の新規21件はすべてexact記録、対応不整合0件。これは形式と出典対応の確認であり、relevanceの正解判定ではない。実行版754f0754のhealthはok、runtime drift=false。private証跡 <code>p0-overnight-2026-10-10.json</code> に時刻・件数・hashを保存。P0のみ受入完了とし、P1以降の正式受入条件は維持する。一回限りのrecall-p0はこの確認をもって終了。</span></li>
 <li><time>2026-10-09 22:38 JST</time><span>全完了の指示を受け、未実装・producer/validator不整合・実データ待ちを再監査。R5は正規Raw v2からnative floorを再導出するよう修正（171 tests）、R6は現行workerのlocal/OX identityを検証できるよう修正（74 tests）。P2bのA〜E全件準備とstudent入力、P3の隔離合成プローブ準備、P4の3条件診断を追加した。実クエリの品質比較と正式な修理・昇格は未実施。依存7パッケージの更新で監査34件→0、履歴のSHA digest誤検知4件はcommit/path/行に限定した例外で0を確認。最終CI・push・安全なleaseでの5サービス配備結果はprivate <code>deployment-fitness-finish.json</code>へ記録する。旧世代のreceiptは保持し、報告だけの追加commit/restartを繰り返さない。P0の翌朝確認を維持し、生成完了用automationを毎朝09:15のfitness継続確認へ更新した。Plan全体は正式受入の根拠待ち。</span></li>
 <li><time>2026-10-09 20:47 JST</time><span>native Luna 10体の全担当が完了。9,795ページ・46,905問を1,094個のbatchから統合し、source snapshot、各ページの元byte hash、冒頭2,500文字、入力hash、全ID・連番・質問数・生成モデルの対応を検証。最初と最後の保存時刻の間は58分44秒。要約の取り違え1件は本文へ照合して補正し、元batchと補正記録を保持。誤対象・旧値不一致・二重補正など5種を拒否するself-checkも通過。旧local生成826件のhashは不変。候補hashは <code>bb91ce3032da79cfadbe5bad70724b558fb8187ba26a53f05a76a9549f861e8d</code>。生の本文・質問・補正記録はprivateなbundleだけに保存し、ここには件数と検証結果を記録する。P2bの生成準備だけを完了とし、P0翌朝確認、P1/R5、A〜Eとstudent特徴の再生、採用判断は未完のまま。</span></li>
 <li><time>2026-10-09 19:50 JST</time><span>ユーザーがLunaの大量並列による質問生成を指示。native luna_worker 10体を起動し、同じ9,795ページを重複のないshardへ分配。新しい候補世代は現時点で812ページを保存済み。ID・質問数・日本語・文字数・単一writer・atomic保存・再開cursorを検査し、形式不正5種と保存済みbatchの上書きを拒否するself-checkを通過。旧localジョブは826件・fallback 0・failed 0で停止しhashを保存。OpenAI側での処理は今回の質問生成に対する新しい承認であり、relevance labelやP1/R5の正式受入へ拡張しない。完了確認automationは新しい世代へ切替済み。</span></li>
