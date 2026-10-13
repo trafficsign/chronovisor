@@ -320,10 +320,15 @@ def _active_capture_progress(
     bulk_root = root / "runtime" / "recall-luna-bulk"
     if bulk_root.name != "recall-luna-bulk" or not bulk_root.is_dir():
         return requested, progress
+    try:
+        relative = requested.relative_to(bulk_root)
+        receipt_suffix = Path(*relative.parts[1:])
+    except ValueError:
+        receipt_suffix = Path(requested.name)
     for day_root in sorted(bulk_root.iterdir(), reverse=True):
         if not day_root.is_dir() or day_root.is_symlink():
             continue
-        candidate = day_root / requested.name
+        candidate = day_root / receipt_suffix
         if candidate == requested:
             continue
         candidate_progress = _capture_progress(candidate)
@@ -1469,7 +1474,7 @@ def _start_candidate_capture(
             **_error_fields(exc),
         }
     current = _capture_progress(progress_path)
-    if current is None:
+    if current is None or current.get("pid") != int(process.pid):
         _write_private_json(
             progress_path,
             {

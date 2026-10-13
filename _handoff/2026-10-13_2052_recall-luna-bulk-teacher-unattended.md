@@ -135,3 +135,4 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-13 22:55 JST　最新 catalog の answer_utility eligible は全期間 468、承認境界 10/9 JST 以降は 453。以降の非適格 314 件の内訳は exact exposure 不足 270、回答不足 44。過去分を現在の本文で補完せず、sealed exposure と当時候補が結び付く分だけ CF 対象にする。
 - 2026-10-13 22:55 JST　別モデル比較は固定 32K context が完全な repair history を含めると長文入力を拒否した。本文の切り詰め・上限引上げはせず、全入力と既存 preflight が通る 300 独立 rally を出力非参照で再凍結（旧 sample は推論成功 0 のまま private に保持）。実 local verdict の保存を確認。適用範囲を限定して一致率を報告する。
 - 2026-10-13 22:55 JST　候補 capture が agent turn 終了時に停止したことを PID と progress の不一致で検知。append 済み分を保持し、独立 session の repo/private capture process として再開。以後は parent PID 1 と更新進捗を確認し、agent 生存に依存させない。日次 runner の capture も start_new_session を使用する。
+- 2026-10-13 23:11 JST　日次の実保存パス inventory をまたぐ前日 capture の探索漏れと、再開時に旧 complete receipt が残る不具合を再現。相対パスを保持して探索し、新しい PID の starting を公開する修正を追加。失敗する 2 回帰を先に確認し、修正後の関連 17 tests と Ruff が通過。既存 09:15 の TOML は ACTIVE を確認。Codex アプリ画面の読取は Computer Use のアプリ制限で拒否されたため、アプリ側の再読込・次回起動実績は未確認として継続監視する。

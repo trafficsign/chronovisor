@@ -186,6 +186,45 @@ def test_run_advances_catalog_and_starts_capture_before_prepare(
     assert _read(receipt)["capture"]["started"] is True
 
 
+def test_capture_resumes_previous_day_inventory_before_starting_another_writer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "root"
+    bulk = root / "runtime" / "recall-luna-bulk"
+    previous = bulk / "2026-10-13" / "inventory" / "candidate-capture-progress.json"
+    requested = bulk / "2026-10-14" / "inventory" / previous.name
+    daily._write_private_json(previous, {"status": "running", "updated_at_unix": 1000})
+    monkeypatch.setattr(daily.time, "time", lambda: 1001)
+    monkeypatch.setattr(daily, "_capture_lock_busy", lambda _: False)
+    monkeypatch.setattr(
+        daily.subprocess, "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("second writer")),
+    )
+
+    path, progress = daily._active_capture_progress(root, requested)
+    assert path == previous
+    assert progress["status"] == "running"
+    result = daily._start_candidate_capture(root=root, progress_path=requested)
+    assert result == {
+        "started": False, "status": "running", "reason": "capture_already_running"
+    }
+
+
+def test_capture_restart_replaces_completed_receipt_with_new_starting_pid(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "root"
+    progress = tmp_path / "inventory" / "candidate-capture-progress.json"
+    daily._write_private_json(progress, {"status": "complete", "pid": 111})
+    monkeypatch.setattr(daily.subprocess, "Popen", lambda *_args, **_kwargs: SimpleNamespace(pid=222))
+
+    result = daily._start_candidate_capture(root=root, progress_path=progress)
+
+    assert result["started"] is True
+    assert _read(progress)["status"] == "starting"
+    assert _read(progress)["pid"] == 222
+
+
 def test_repo_owned_capture_without_private_helper_reaches_bundle(
     tmp_path: Path, monkeypatch
 ) -> None:
