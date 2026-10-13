@@ -14,7 +14,20 @@ from chronovisor.recall.recall_distillation_luna import (
     LunaBulkBundle,
     native_output_sha256,
 )
-from scripts.recall_luna_worker_io import bind_decisions
+from scripts.recall_luna_worker_io import bind_decisions, display_request
+
+
+def test_worker_display_keeps_every_input_byte_and_omits_only_bound_metadata() -> None:
+    payload = {"query": "synthetic query", "context": ["first", "", "last"], "candidate": "whole text"}
+    request = {"prompt": "frozen prompt", "records": [{
+        "task_id": "a" * 64, "input_sha256": "b" * 64, "input": payload,
+        "context_sha256": ["c" * 64] * 10_000,
+    }]}
+    displayed = display_request(request)
+    assert displayed["prompt"] == request["prompt"]
+    assert displayed["records"][0] == {"task_id": "a" * 64, "input_sha256": "b" * 64, "input": payload}
+    assert len(request["records"][0]["context_sha256"]) == 10_000
+    assert len(json.dumps(displayed)) < 1000
 
 
 def test_native_decisions_are_bound_to_exact_frozen_ids() -> None:

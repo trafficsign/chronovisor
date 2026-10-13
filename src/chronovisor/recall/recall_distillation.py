@@ -9042,18 +9042,34 @@ def _teacher_payload(
         "context": context,
         "candidate": candidate_text,
     }
-    if len(canonical_json.canonical_json_bytes_strict(payload)) > max_input_bytes:
+    base_payload_bytes = len(
+        canonical_json.canonical_json_bytes_strict(payload)
+    )
+    if base_payload_bytes > max_input_bytes:
         return None
     if not include_context:
         return payload
+    accepted_context: list[str] = []
+    accepted_context_bytes = 0
     for ref in reversed(rally.get("context_refs", [])):
         context_text = texts.get(str(ref["semantic_sha256"]), "")
         if len(context_text) > max_input_bytes:
             break
-        context.insert(0, context_text)
-        if len(canonical_json.canonical_json_bytes_strict(payload)) > max_input_bytes:
-            context.pop(0)
+        context_text_bytes = len(
+            canonical_json.canonical_json_bytes_strict(context_text)
+        )
+        comma_bytes = 1 if accepted_context else 0
+        if (
+            base_payload_bytes
+            + accepted_context_bytes
+            + comma_bytes
+            + context_text_bytes
+            > max_input_bytes
+        ):
             break
+        accepted_context.append(context_text)
+        accepted_context_bytes += comma_bytes + context_text_bytes
+    context.extend(reversed(accepted_context))
     return payload
 
 

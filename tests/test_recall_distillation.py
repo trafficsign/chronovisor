@@ -8165,6 +8165,178 @@ def test_teacher_payload_keeps_multibyte_and_escape_context_boundary(
     )
 
 
+def test_teacher_payload_context_accounting_is_linear_and_preserves_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context_values = ["", "あ", 'quote " and \\ slash\n', "tail"] * 32
+    context_ids = [f"context-{index}" for index in range(len(context_values))]
+    rally = {
+        "rally_id": "rally-context-linear",
+        "query_sha256": "query",
+        "context_refs": [
+            {"semantic_sha256": context_id} for context_id in context_ids
+        ],
+    }
+    candidate = {"candidate_id": "candidate", "text_sha256": "candidate"}
+    texts = {
+        "query": "question",
+        "candidate": "answer",
+        **dict(zip(context_ids, context_values, strict=True)),
+    }
+    expected = {
+        "schema": "chronovisor.recall-distill-teacher-input.v1",
+        "rally_id": "rally-context-linear",
+        "candidate_id": "candidate",
+        "query": "question",
+        "context": context_values,
+        "candidate": "answer",
+    }
+    limit = len(canonical_json.canonical_json_bytes_strict(expected))
+    calls: list[object] = []
+    original = distill.canonical_json.canonical_json_bytes_strict
+
+    def counting_bytes(value: object) -> bytes:
+        calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(
+        distill.canonical_json, "canonical_json_bytes_strict", counting_bytes
+    )
+
+    payload = distill._teacher_payload(
+        rally,
+        candidate,
+        texts,
+        max_input_bytes=limit,
+    )
+
+    assert payload == expected
+    assert len(calls) == len(context_values) + 1
+    assert isinstance(calls[0], dict)
+    assert all(isinstance(value, str) for value in calls[1:])
+
+
+def test_teacher_payload_context_accounting_matches_legacy_boundaries() -> None:
+    context_values = ["", "あ", 'quote " and \\ slash\n', "tail"]
+    context_ids = [f"context-{index}" for index in range(len(context_values))]
+    rally = {
+        "rally_id": "rally-context-boundaries",
+        "query_sha256": "query",
+        "context_refs": [
+            {"semantic_sha256": context_id} for context_id in context_ids
+        ],
+    }
+    candidate = {"candidate_id": "candidate", "text_sha256": "candidate"}
+    texts = {
+        "query": "question",
+        "candidate": "answer",
+        **dict(zip(context_ids, context_values, strict=True)),
+    }
+
+    def legacy_payload(max_input_bytes: int) -> dict[str, object] | None:
+        query = texts[rally["query_sha256"]]
+        candidate_text = texts[candidate["text_sha256"]]
+        if not query or not candidate_text:
+            return None
+        context: list[str] = []
+        payload = {
+            "schema": "chronovisor.recall-distill-teacher-input.v1",
+            "rally_id": rally["rally_id"],
+            "candidate_id": candidate["candidate_id"],
+            "query": query,
+            "context": context,
+            "candidate": candidate_text,
+        }
+        if len(canonical_json.canonical_json_bytes_strict(payload)) > max_input_bytes:
+            return None
+        for ref in reversed(rally["context_refs"]):
+            context_text = texts[ref["semantic_sha256"]]
+            if len(context_text) > max_input_bytes:
+                break
+            context.insert(0, context_text)
+            if (
+                len(canonical_json.canonical_json_bytes_strict(payload))
+                > max_input_bytes
+            ):
+                context.pop(0)
+                break
+        return payload
+
+    base_payload = legacy_payload(10_000)
+    assert base_payload is not None
+    limits = {
+        len(canonical_json.canonical_json_bytes_strict(base_payload)),
+    }
+    for index in range(1, len(context_values) + 1):
+        suffix_payload = dict(base_payload)
+        suffix_payload["context"] = context_values[-index:]
+        suffix_size = len(canonical_json.canonical_json_bytes_strict(suffix_payload))
+        limits.update({suffix_size - 1, suffix_size})
+
+    for limit in sorted(value for value in limits if value >= 0):
+        assert distill._teacher_payload(
+            rally,
+            candidate,
+            texts,
+            max_input_bytes=limit,
+        ) == legacy_payload(limit)
+
+
+def test_teacher_payload_without_context_skips_context_encoding_and_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TrackingTexts(dict[str, str]):
+        def __init__(self) -> None:
+            super().__init__(
+                query="question",
+                candidate="answer",
+                context="should not be read",
+            )
+            self.reads: list[str] = []
+
+        def get(self, key: str, default: str = "") -> str:
+            self.reads.append(key)
+            return super().get(key, default)
+
+    texts = TrackingTexts()
+    rally = {
+        "rally_id": "rally-no-context",
+        "query_sha256": "query",
+        "context_refs": [{"semantic_sha256": "context"}],
+    }
+    candidate = {"candidate_id": "candidate", "text_sha256": "candidate"}
+    expected = {
+        "schema": "chronovisor.recall-distill-teacher-input.v1",
+        "rally_id": "rally-no-context",
+        "candidate_id": "candidate",
+        "query": "question",
+        "context": [],
+        "candidate": "answer",
+    }
+    limit = len(canonical_json.canonical_json_bytes_strict(expected))
+    calls = 0
+    original = distill.canonical_json.canonical_json_bytes_strict
+
+    def counting_bytes(value: object) -> bytes:
+        nonlocal calls
+        calls += 1
+        return original(value)
+
+    monkeypatch.setattr(
+        distill.canonical_json, "canonical_json_bytes_strict", counting_bytes
+    )
+
+    assert distill._teacher_payload(
+        rally,
+        candidate,
+        texts,
+        max_input_bytes=limit,
+        include_context=False,
+    ) == expected
+    assert texts.reads == ["query", "candidate"]
+    assert calls == 1
+
+
 def test_remote_teacher_payload_omits_context_and_binds_local_context_hashes(
     tmp_path: Path,
 ) -> None:

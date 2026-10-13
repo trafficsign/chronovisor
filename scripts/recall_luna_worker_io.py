@@ -74,6 +74,23 @@ def bind_decisions(
     return labels
 
 
+def display_request(request: Mapping[str, Any]) -> dict[str, Any]:
+    """Display the full frozen input without redundant provenance arrays.
+
+    Long source-context hash lists are verified by the bundle, not judged by
+    Luna. Keep them in the internal request and durable source; transmitting
+    them beside the complete input can truncate the tool output before the
+    model sees that input. No input field or text is removed here.
+    """
+    return {
+        **request,
+        "records": [
+            {key: record[key] for key in ("task_id", "input_sha256", "input")}
+            for record in request["records"]
+        ],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, required=True)
@@ -123,7 +140,7 @@ def _serve_shard(bundle: LunaBulkBundle, args: argparse.Namespace) -> int:
             )
             return 0
         print(
-            json.dumps(request, ensure_ascii=False, separators=(",", ":")), flush=True
+            json.dumps(display_request(request), ensure_ascii=False, separators=(",", ":")), flush=True
         )
         while True:
             if args.idle_timeout > 0 and not select.select([sys.stdin], [], [], args.idle_timeout)[0]:
