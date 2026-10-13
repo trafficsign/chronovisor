@@ -568,6 +568,9 @@ def _safe_assignment(source: Mapping[str, Any]) -> dict[str, Any]:
         "order_variant",
         "candidate_position",
     }
+    unexpected = set(value) - allowed
+    if unexpected:
+        raise NativeDistillationError("native assignment metadata is unknown")
     result = {key: value[key] for key in allowed if key in value}
     for key in result:
         if key in {"probe", "fixed_repeat", "order_swap"}:
@@ -713,6 +716,29 @@ def _row_from_label(
             "+00:00", "Z"
         )
     assignment = _safe_assignment(source)
+    if assignment:
+        if any(
+            assignment.get(key) != expected
+            for key, expected in {
+                "revision": NATIVE_ASSIGNMENT_REVISION,
+                "profile": NATIVE_LUNA_SINGLE_PROFILE,
+                "split": split,
+                "owner": "native-luna",
+            }.items()
+            if key in assignment
+        ):
+            raise NativeDistillationError("native assignment identity is inconsistent")
+        expected_probe = bool(source.get("repeat_pair_id"))
+        if "probe" in assignment and assignment["probe"] is not expected_probe:
+            raise NativeDistillationError("native assignment probe is inconsistent")
+        for key in ("repeat_pair_id", "fixed_repeat", "order_swap", "blind_order"):
+            expected = (
+                source.get(key) is True
+                if key in {"fixed_repeat", "order_swap"}
+                else source.get(key, "")
+            )
+            if key in assignment and assignment[key] != expected:
+                raise NativeDistillationError("native assignment repeat metadata is inconsistent")
     if not assignment:
         assignment = {
             "revision": NATIVE_ASSIGNMENT_REVISION,

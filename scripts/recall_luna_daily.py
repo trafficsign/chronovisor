@@ -658,6 +658,18 @@ def _bundle_metadata(path: Path) -> dict[str, Any] | None:
         except DailyError:
             marker_imported = False
     imported = bool(manifest_value.get("production_ledger_written")) or marker_imported
+    completion_value: dict[str, Any] = {}
+    completion_path = path / "completion.json"
+    if completion_path.exists():
+        try:
+            completion_value = _private_json(completion_path)
+        except DailyError:
+            completion_value = {}
+    blind_repeat = completion_value.get("blind_repeat")
+    if not isinstance(blind_repeat, Mapping):
+        blind_repeat = {}
+    pairs = int(blind_repeat.get("pairs") or 0)
+    stable = int(blind_repeat.get("stable") or 0)
     return {
         "status": str(status.get("status") or "unknown"),
         "record_count": int(status.get("record_count") or 0),
@@ -666,6 +678,12 @@ def _bundle_metadata(path: Path) -> dict[str, Any] | None:
         "source_snapshot_sha256": str(status.get("source_snapshot_sha256") or ""),
         "class_ratio": dict(status.get("class_ratio") or {}),
         "verdicts": dict(status.get("verdicts") or {}),
+        "blind_repeat": {
+            "pairs": pairs,
+            "stable": stable,
+            "unstable": int(blind_repeat.get("unstable") or 0),
+        },
+        "agreement_rate": (stable / pairs) if pairs else None,
         "truth_authority": str(status.get("truth_authority") or ""),
         "production_ledger_written": imported,
         "import_pending": bool(status.get("remaining") == 0)
