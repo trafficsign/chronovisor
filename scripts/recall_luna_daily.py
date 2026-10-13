@@ -322,7 +322,7 @@ def _blind_payload(
         if blind_order == "a_first"
         else (target, target_payload)
     )
-    return {
+    result = {
         **dict(target_payload),
         "target_candidate_id": str(target["candidate_id"]),
         "candidates": [
@@ -334,6 +334,11 @@ def _blind_payload(
             for position, (candidate, payload) in enumerate((ordered, second))
         ],
     }
+    if len(
+        json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ) > MAX_INPUT_BYTES:
+        return None
+    return result
 
 
 def _base_row(
