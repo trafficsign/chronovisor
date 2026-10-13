@@ -453,6 +453,45 @@ def test_run_sleep_cycle_coordinates_safe_steps(monkeypatch) -> None:
     assert payload["snapshot_after"]["status"] == "clean"
 
 
+def test_sleep_priority_queues_run_before_late_cycle_budget_exhaustion(
+    monkeypatch,
+) -> None:
+    """A late graph timeout must not starve lint and search queue consumers."""
+
+    _patch_sleep_dependencies(monkeypatch)
+    original_run_lane = sleep_cycle._run_lane
+    seen: list[str] = []
+
+    def run_lane_before_expiring_deadline(
+        name: str,
+        fn,
+        *,
+        max_elapsed_seconds: float = sleep_cycle.DEFAULT_LANE_MAX_ELAPSED_SECONDS,
+    ) -> dict:
+        seen.append(name)
+        if name == "typed_graph":
+            monkeypatch.setenv(
+                "CHRONOVISOR_CYCLE_DEADLINE_MONOTONIC",
+                str(sleep_cycle.time.monotonic() - 1),
+            )
+        return original_run_lane(
+            name,
+            fn,
+            max_elapsed_seconds=max_elapsed_seconds,
+        )
+
+    monkeypatch.setattr(sleep_cycle, "_run_lane", run_lane_before_expiring_deadline)
+
+    payload = sleep_cycle.run_sleep_cycle(raw_limit=1, eval_limit=1, duplicate_limit=0)
+
+    assert seen.index("lint_repair") < seen.index("typed_graph")
+    assert seen.index("search_label_review") < seen.index("typed_graph")
+    assert payload["lint_repair"]["status"] == "ok"
+    assert payload["search_labels"]["status"] == "ok"
+    assert payload["search_label_review"]["status"] == "ok"
+    assert payload["typed_graph"]["status"] == "budget_deferred"
+
+
 def test_sleep_cycle_runs_distillation_as_the_only_recall_writer(monkeypatch) -> None:
     _patch_sleep_dependencies(monkeypatch)
     calls: list[bool] = []

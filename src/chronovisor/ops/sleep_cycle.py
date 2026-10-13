@@ -695,6 +695,117 @@ def _run_sleep_cycle(
             dry_run=dry_run,
         ),
     )
+
+    # Keep the bounded queue consumers ahead of the long artifact lanes below.
+    # The cycle deadline is shared by every lane; when graph/hub/raw work uses
+    # it up, a late queue lane can be deferred for every nightly cycle.  These
+    # are the existing per-lane budgets and gates, scheduled earlier so the
+    # queues receive a fair attempt without reviving any retired lane.
+    lane_budgets = {
+        "lint": cycle_budget.slice(
+            max_local_calls=10, max_frontier_calls=per_lane_frontier, max_mutations=6
+        ),
+        "read_back_repair": cycle_budget.slice(
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+        ),
+        "labels": cycle_budget.slice(
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+        ),
+        "recall_auto_apply": cycle_budget.slice(
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+        ),
+        "self_heal": cycle_budget.slice(
+            max_local_calls=per_lane_frontier,
+            max_frontier_calls=per_lane_frontier,
+            max_mutations=per_lane_frontier,
+        ),
+        "recall_improve": cycle_budget.slice(
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+        ),
+        "calibration": cycle_budget.slice(
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+        ),
+        "self_tune": cycle_budget.slice(
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+        ),
+        "duplicates": cycle_budget.slice(
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+        ),
+        "orphans": cycle_budget.slice(
+            max_local_calls=8,
+            max_frontier_calls=per_lane_frontier,
+            max_mutations=per_lane_frontier,
+        ),
+        "raw": cycle_budget.slice(
+            max_frontier_calls=per_lane_frontier,
+            max_mutations=per_lane_frontier,
+            max_raw_bytes=2_000_000,
+        ),
+        "autonomy_duplicates": cycle_budget.slice(max_mutations=1),
+        "autonomy_retention": cycle_budget.slice(
+            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
+        ),
+    }
+
+    if dry_run:
+        import chronovisor.ingest.orchestrator as ingest_orchestrator
+
+        lint_due = _run_lane(
+            "lint_due",
+            lambda: ingest_orchestrator.run_lint_if_due(dry_run=True),
+        )
+    else:
+        lint_allowed, lint_reason = lane_budgets["lint"].consume("mutation")
+        if lint_allowed:
+            import chronovisor.ingest.orchestrator as ingest_orchestrator
+
+            lint_due = _run_lane(
+                "lint_due",
+                lambda: ingest_orchestrator.run_lint_if_due(dry_run=False),
+            )
+        else:
+            lint_due = {
+                "status": "budget_deferred",
+                "lane": "lint_due",
+                "reason": lint_reason,
+            }
+    import chronovisor.ops.lint_repair as lint_repair_ops
+
+    lint_repair = _run_lane(
+        "lint_repair",
+        lambda: lint_repair_ops.run_lint_repair(
+            max_items=5,
+            budget=lane_budgets["lint"],
+            dry_run=dry_run,
+        ),
+    )
+
+    if eval_limit > 0:
+        import chronovisor.search.search_eval as search_eval
+
+        search_labels = _run_lane(
+            "search_label_queue",
+            lambda: search_eval.build_label_queue(
+                limit=eval_limit,
+                dry_run=dry_run,
+                budget=lane_budgets["labels"],
+            ),
+        )
+        import chronovisor.search.search_eval as search_eval_review
+
+        search_label_review = _run_lane(
+            "search_label_review",
+            lambda: search_eval_review.review_label_queue_with_frontier(
+                limit=min(2, eval_limit),
+                max_attempts=3,
+                dry_run=dry_run,
+                budget=lane_budgets["labels"],
+            ),
+        )
+    else:
+        search_labels = {"status": "skipped", "reason": "eval_limit_zero"}
+        search_label_review = {"status": "skipped", "reason": "eval_limit_zero"}
+
     graph_artifacts = _graph_artifact_lanes(artifact_lane, build_cofire_graph, dry_run=dry_run)
     (
         distillation_active,
@@ -802,83 +913,6 @@ def _run_sleep_cycle(
         if eval_limit > 0
         else {"status": "skipped", "reason": "eval_limit_zero"}
     )
-    lane_budgets = {
-        "lint": cycle_budget.slice(
-            max_local_calls=10, max_frontier_calls=per_lane_frontier, max_mutations=6
-        ),
-        "read_back_repair": cycle_budget.slice(
-            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
-        ),
-        "labels": cycle_budget.slice(
-            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
-        ),
-        "recall_auto_apply": cycle_budget.slice(
-            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
-        ),
-        "self_heal": cycle_budget.slice(
-            max_local_calls=per_lane_frontier,
-            max_frontier_calls=per_lane_frontier,
-            max_mutations=per_lane_frontier,
-        ),
-        "recall_improve": cycle_budget.slice(
-            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
-        ),
-        "calibration": cycle_budget.slice(
-            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
-        ),
-        "self_tune": cycle_budget.slice(
-            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
-        ),
-        "duplicates": cycle_budget.slice(
-            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
-        ),
-        "orphans": cycle_budget.slice(
-            max_local_calls=8,
-            max_frontier_calls=per_lane_frontier,
-            max_mutations=per_lane_frontier,
-        ),
-        "raw": cycle_budget.slice(
-            max_frontier_calls=per_lane_frontier,
-            max_mutations=per_lane_frontier,
-            max_raw_bytes=2_000_000,
-        ),
-        "autonomy_duplicates": cycle_budget.slice(max_mutations=1),
-        "autonomy_retention": cycle_budget.slice(
-            max_frontier_calls=per_lane_frontier, max_mutations=per_lane_frontier
-        ),
-    }
-    if dry_run:
-        import chronovisor.ingest.orchestrator as ingest_orchestrator
-
-        lint_due = _run_lane(
-            "lint_due",
-            lambda: ingest_orchestrator.run_lint_if_due(dry_run=True),
-        )
-    else:
-        lint_allowed, lint_reason = lane_budgets["lint"].consume("mutation")
-        if lint_allowed:
-            import chronovisor.ingest.orchestrator as ingest_orchestrator
-
-            lint_due = _run_lane(
-                "lint_due",
-                lambda: ingest_orchestrator.run_lint_if_due(dry_run=False),
-            )
-        else:
-            lint_due = {
-                "status": "budget_deferred",
-                "lane": "lint_due",
-                "reason": lint_reason,
-            }
-    import chronovisor.ops.lint_repair as lint_repair_ops
-
-    lint_repair = _run_lane(
-        "lint_repair",
-        lambda: lint_repair_ops.run_lint_repair(
-            max_items=5,
-            budget=lane_budgets["lint"],
-            dry_run=dry_run,
-        ),
-    )
     import chronovisor.ingest.read_back_repair as read_back_repair_ops
 
     read_back_repair = _run_lane(
@@ -929,31 +963,6 @@ def _run_sleep_cycle(
         ),
     )
 
-    if eval_limit > 0:
-        import chronovisor.search.search_eval as search_eval
-
-        search_labels = _run_lane(
-            "search_label_queue",
-            lambda: search_eval.build_label_queue(
-                limit=eval_limit,
-                dry_run=dry_run,
-                budget=lane_budgets["labels"],
-            ),
-        )
-        import chronovisor.search.search_eval as search_eval_review
-
-        search_label_review = _run_lane(
-            "search_label_review",
-            lambda: search_eval_review.review_label_queue_with_frontier(
-                limit=min(2, eval_limit),
-                max_attempts=3,
-                dry_run=dry_run,
-                budget=lane_budgets["labels"],
-            ),
-        )
-    else:
-        search_labels = {"status": "skipped", "reason": "eval_limit_zero"}
-        search_label_review = {"status": "skipped", "reason": "eval_limit_zero"}
     import chronovisor.recall.recall_auto_apply as recall_auto_apply_ops
 
     recall_auto_apply = _run_lane(
