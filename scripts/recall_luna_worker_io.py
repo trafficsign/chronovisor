@@ -117,6 +117,7 @@ def main() -> int:
         except BlockingIOError:
             print(json.dumps({"status": "shard_busy", "shard": args.shard}), flush=True)
             return 2
+        bundle.refresh_checkpoint(args.shard)
         return _serve_shard(bundle, args)
     finally:
         os.close(descriptor)

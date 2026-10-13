@@ -102,6 +102,44 @@ def test_bundle_freezes_snapshot_and_resumes_per_shard(tmp_path: Path) -> None:
         bundle.submit(0, cursor=0, records=[label])
 
 
+def test_observers_never_rewrite_another_shards_checkpoint(tmp_path: Path) -> None:
+    first = LunaBulkBundle.create(tmp_path / "bundle", _rows(4), shard_count=2)
+    checkpoints = sorted(first.root.glob("shards/*/checkpoint.json"))
+    before = {path: path.read_bytes() for path in checkpoints}
+    second = LunaBulkBundle.open(first.root)
+    second.status()
+    second.next_batch(1, limit=1)
+    assert {path: path.read_bytes() for path in checkpoints} == before
+
+    request = second.next_batch(1, limit=1)
+    second.submit(1, cursor=0, records=[_label(
+        request["records"][0], verdict="relevant", assignment="second", run="second",
+    )])
+    other_before = checkpoints[1].read_bytes()
+    request = first.next_batch(0, limit=1)
+    first.submit(0, cursor=0, records=[_label(
+        request["records"][0], verdict="irrelevant", assignment="first", run="first",
+    )])
+    assert checkpoints[1].read_bytes() == other_before
+    assert json.loads(checkpoints[0].read_text())["cursor"] == 1
+
+
+def test_writer_recovers_a_checkpoint_from_a_batch_committed_before_a_crash(tmp_path: Path) -> None:
+    bundle = LunaBulkBundle.create(tmp_path / "bundle", _rows(1), shard_count=1)
+    checkpoint = bundle.root / "shards/00/checkpoint.json"
+    before = checkpoint.read_bytes()
+    request = bundle.next_batch(0, limit=1)
+    bundle.submit(0, cursor=0, records=[_label(
+        request["records"][0], verdict="relevant", assignment="writer", run="writer",
+    )])
+    checkpoint.write_bytes(before)
+    resumed = LunaBulkBundle.open(bundle.root)
+    assert checkpoint.read_bytes() == before
+    resumed.refresh_checkpoint(0)
+    assert json.loads(checkpoint.read_text())["cursor"] == 1
+    assert resumed.next_batch(0, limit=1)["records"] == []
+
+
 def test_bundle_rejects_non_native_or_wrong_profile_output(tmp_path: Path) -> None:
     bundle = LunaBulkBundle.create(tmp_path / "bundle", _rows(1), shard_count=1)
     request = bundle.next_batch(0)

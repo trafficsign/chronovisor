@@ -854,6 +854,7 @@ class LunaBulkBundle:
                 raise ResumeMismatch("shard first task ID changed")
             if spec.get("last_task_id") != shard_rows[-1]["task_id"]:
                 raise ResumeMismatch("shard last task ID changed")
+            self._source_cache[expected_shard] = shard_rows
             flattened.extend(shard_rows)
         source_order = {str(row["task_id"]): index for index, row in enumerate(source)}
         flattened.sort(key=lambda row: source_order[str(row["task_id"])])
@@ -891,7 +892,6 @@ class LunaBulkBundle:
         batches_root = self.root / "shards" / f"{shard:02d}" / "batches"
         completed = self._completed_cache.setdefault(shard, [])
         cursor = len(completed)
-        advanced = False
         bootstrap_paths = iter(sorted(batches_root.glob("batch-*.json")))
         while True:
             if bootstrap:
@@ -925,7 +925,6 @@ class LunaBulkBundle:
                 self._validate_label(source[batch_cursor + index], label)
                 completed.append(label)
                 self._verdict_counts[str(label["verdict"])] += 1
-            advanced = True
             cursor = len(completed)
             self._batch_chain[shard] = _sha256_json(
                 {
@@ -933,12 +932,17 @@ class LunaBulkBundle:
                     "batch_sha256": _sha256_bytes(_read_bytes(path)),
                 }
             )
-        if bootstrap or advanced:
-            self._write_checkpoint(shard)
 
     def _completed(self, shard: int) -> list[dict[str, Any]]:
         self._refresh_completed(shard)
         return self._completed_cache[shard]
+
+    def refresh_checkpoint(self, shard: int) -> None:
+        """Reconcile a writer's cursor after a crash, under its shard lock."""
+        self._shard_spec(shard)
+        with _writer_lock(self.root / "shards" / f"{shard:02d}" / ".lock"):
+            self._refresh_completed(shard)
+            self._write_checkpoint(shard)
 
     def _write_checkpoint(self, shard: int) -> None:
         spec = self._shard_spec(shard)
@@ -1117,6 +1121,8 @@ class LunaBulkBundle:
                 / f"batch-{cursor:06d}.json"
             )
             _publish_immutable(batch_path, _json_bytes(batch) + b"\n")
+            self._refresh_completed(shard)
+            self._write_checkpoint(shard)
             result = {
                 "shard": shard,
                 "accepted": len(accepted),
