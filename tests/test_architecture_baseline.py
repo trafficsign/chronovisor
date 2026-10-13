@@ -1919,6 +1919,11 @@ DASHBOARD_RAW_COLLECTION_RETIRED_SITE_IDS = (
     "arch:60ce2a1d9dfaef1371e40df6ca9c194671f1f13a83e880e6e248b314515039af",
     "arch:c0b2152c08a933c8992a36259e614522217617fd1c9e39a27552e5ed673fe2eb",
 )
+RECALL_HEALTH_REFACTOR_RETIRED_SITE_IDS = (
+    # Helper extraction changed the occurrence identity of this recall->core
+    # import; keep the prior site in the monotonic retirement history.
+    "arch:69cf23633ba36a83787a08311c75248caee7dcd8f7ed07fc9b4d9b5e7f1b8254",
+)
 C2_RETIRED_TRIAGE_NATIVE_SITE_IDS = (
     "arch:16ff10dace60e57610441edf83d3adf2c0c54bdfc6c5ba8d2e1afe901e7f4b4e",
     "arch:4a25416288260ad2586b4ddf78a504bc1ff61a79fb65c31bec4367910dd09657",
@@ -2198,6 +2203,7 @@ RETIREMENT_HISTORY = {
                 *C2_RETIRED_TRIAGE_NATIVE_SITE_IDS,
                 *PI_RETIRED_EVIDENCE_RECONSTRUCTION_SITE_IDS,
                 *DASHBOARD_RAW_COLLECTION_RETIRED_SITE_IDS,
+                *RECALL_HEALTH_REFACTOR_RETIRED_SITE_IDS,
             )
         )
     ),
@@ -2950,7 +2956,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 44
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1549
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1558
     assert {
         field: counts[field]
         for field in (
@@ -2963,7 +2969,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 44,
-        "cross_domain_sites": 1549,
+        "cross_domain_sites": 1558,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
