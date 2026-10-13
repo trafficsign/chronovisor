@@ -68,6 +68,7 @@ _LOCAL_ROLES = frozenset({
 _OX_ROLE = "recall.distill.teacher.ox-alpha"
 MAX_FILE_BYTES = 32 * 1024 * 1024
 _SHA = set("0123456789abcdef")
+_NATIVE_IDENTIFIER = __import__("re").compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 _CLONE_TARGETS = (Path("config.toml"), Path("raw"), Path("runtime/recall-distillation"))
 # Paths live on the sealed read-only system volume; content hashes would break on every OS update.
 _TRUSTED_EXECUTABLES = frozenset({"/usr/bin/git", "/bin/cp"})
@@ -2564,7 +2565,9 @@ def _assert_native_receipt(value: object, field: str, *, contract_id: str) -> No
         return
     expected = {
         "receipt_schema", "profile_contract_id", "source_snapshot_sha256",
-        "source_record_sha256", "task_id", "input_sha256", "output_sha256",
+        "source_record_sha256", "rally_key", "candidate_id",
+        "candidate_snapshot_sha256", "query_sha256", "context_sha256",
+        "candidate_text_sha256", "task_id", "input_sha256", "output_sha256",
         "assignment_id", "run_id", "batch_sha256", "receipt_binding",
         "receipt_sha256",
     }
@@ -2577,8 +2580,22 @@ def _assert_native_receipt(value: object, field: str, *, contract_id: str) -> No
     for key in (
         "source_snapshot_sha256", "source_record_sha256", "input_sha256",
         "output_sha256", "batch_sha256", "receipt_sha256",
+        "candidate_snapshot_sha256", "query_sha256", "candidate_text_sha256",
     ):
         _artifact_id(value[key])
+    for key in ("rally_key", "candidate_id"):
+        if not isinstance(value[key], str) or _NATIVE_IDENTIFIER.fullmatch(value[key]) is None:
+            raise R6Error(f"{field}.{key} identity is invalid")
+    if (
+        not isinstance(value["context_sha256"], list)
+        or len(value["context_sha256"]) > 256
+    ):
+        raise R6Error(f"{field}.context_sha256 schema is invalid")
+    for index, item in enumerate(value["context_sha256"]):
+        try:
+            _artifact_id(item)
+        except R6Error as exc:
+            raise R6Error(f"{field}.context_sha256[{index}] identity is invalid") from exc
     _artifact_id(value["task_id"])
     for key in ("assignment_id", "run_id", "receipt_binding"):
         _strict_text(value[key], f"{field}.{key}", allow_empty=False)
@@ -2688,7 +2705,9 @@ def _assert_replay_rows_schema(
             raise R6Error(f"{prefix}.payload_source type is invalid")
         if is_native:
             native_payload_keys = {
-                "schema", "task_id", "input_sha256", "source_record_sha256",
+                "schema", "task_id", "rally_key", "candidate_id",
+                "candidate_snapshot_sha256", "query_sha256", "context_sha256",
+                "candidate_text_sha256", "input_sha256", "source_record_sha256",
                 "source_snapshot_sha256",
             }
             if set(payload_source) != native_payload_keys:
@@ -2697,10 +2716,33 @@ def _assert_replay_rows_schema(
                 raise R6Error(f"{prefix}.native payload_source schema is invalid")
             for field in (
                 "task_id", "input_sha256", "source_record_sha256", "source_snapshot_sha256",
+                "candidate_snapshot_sha256", "query_sha256", "candidate_text_sha256",
             ):
                 _artifact_id(payload_source[field])
+            for field in ("rally_key", "candidate_id"):
+                if (
+                    not isinstance(payload_source[field], str)
+                    or _NATIVE_IDENTIFIER.fullmatch(payload_source[field]) is None
+                ):
+                    raise R6Error(f"{prefix}.native payload {field} identity is invalid")
+            if not isinstance(payload_source["context_sha256"], list) or len(payload_source["context_sha256"]) > 256:
+                raise R6Error(f"{prefix}.native payload context schema is invalid")
+            for context_index, context_sha in enumerate(payload_source["context_sha256"]):
+                try:
+                    _artifact_id(context_sha)
+                except R6Error as exc:
+                    raise R6Error(
+                        f"{prefix}.native payload context[{context_index}] identity is invalid"
+                    ) from exc
             if payload_source["task_id"] != row["work_id"]:
                 raise R6Error(f"{prefix}.native payload task binding is invalid")
+            if (
+                payload_source["rally_key"] != row["rally_id"]
+                or payload_source["candidate_id"] != row["candidate_id"]
+            ):
+                raise R6Error(f"{prefix}.native payload candidate binding is invalid")
+            if _digest(payload_source) != row["payload_digest"]:
+                raise R6Error(f"{prefix}.native payload digest is invalid")
         else:
             payload_keys = {"rally_id", "candidate_id", "snapshot_sha256", "query_sha256", "candidate_text_sha256", "context_sha256"}
             if set(payload_source) not in (set(), payload_keys, payload_keys | {"assignment"}):
@@ -2823,6 +2865,23 @@ def _assert_replay_rows_schema(
                     )
                 ):
                     raise R6Error(f"{prefix} native receipt projection is inconsistent")
+                payload_source = row["payload_source"]
+                if any(
+                    receipt.get(receipt_key) != payload_source.get(source_key)
+                    for receipt_key, source_key in (
+                        ("source_snapshot_sha256", "source_snapshot_sha256"),
+                        ("source_record_sha256", "source_record_sha256"),
+                        ("rally_key", "rally_key"),
+                        ("candidate_id", "candidate_id"),
+                        ("candidate_snapshot_sha256", "candidate_snapshot_sha256"),
+                        ("query_sha256", "query_sha256"),
+                        ("context_sha256", "context_sha256"),
+                        ("candidate_text_sha256", "candidate_text_sha256"),
+                        ("task_id", "task_id"),
+                        ("input_sha256", "input_sha256"),
+                    )
+                ):
+                    raise R6Error(f"{prefix} native receipt source projection is inconsistent")
     if not {"train", "validation", "test"}.issubset(seen_splits):
         raise R6Error("locked replay split plan is incomplete")
     if any(orders != {"a_first", "b_first"} for orders in probe_pairs.values()):

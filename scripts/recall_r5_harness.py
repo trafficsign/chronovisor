@@ -65,6 +65,7 @@ SUPERVISOR_SCHEDULER_TOLERANCE_MS = 100
 _HEX = __import__("re").compile(r"[0-9a-f]{64}\Z")
 _REASON_CODE = __import__("re").compile(r"[a-z][a-z0-9_]{0,95}\Z")
 _SAFE_IDENTIFIER = __import__("re").compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z")
+_NATIVE_IDENTIFIER = __import__("re").compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 _SAFE_METADATA_KEY = __import__("re").compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}\Z")
 _SAFE_METADATA_VALUE = __import__("re").compile(r"[A-Za-z0-9][A-Za-z0-9_.:+,@-]{0,255}\Z")
 _SENSITIVE_METADATA_MARKERS = (
@@ -1905,13 +1906,15 @@ def _native_contract_binding(
             for receipt in receipts
             if isinstance(receipt, Mapping)
         }
-        if len(by_receipt) != len(receipts) or not receipts:
+        if len(by_receipt) != len(receipts) or not receipts or len(receipts) != len(native_rows):
             return False
         expected_receipt_keys = {
             "schema", "namespace", "previous_sha256", "receipt_schema", "record_sha256",
             "profile_contract_id", "source_snapshot_sha256", "source_record_sha256",
-            "task_id", "input_sha256", "output_sha256", "assignment_id", "run_id",
-            "batch_sha256", "receipt_binding", "receipt_sha256",
+            "rally_key", "candidate_id", "candidate_snapshot_sha256", "query_sha256",
+            "context_sha256", "candidate_text_sha256", "task_id", "input_sha256",
+            "output_sha256", "assignment_id", "run_id", "batch_sha256", "receipt_binding",
+            "receipt_sha256",
         }
         if any(
             set(receipt) != expected_receipt_keys
@@ -1922,6 +1925,13 @@ def _native_contract_binding(
             or not _is_id(receipt.get("receipt_sha256"))
             or not _is_id(receipt.get("source_snapshot_sha256"))
             or not _is_id(receipt.get("source_record_sha256"))
+            or not _NATIVE_IDENTIFIER.fullmatch(str(receipt.get("rally_key") or ""))
+            or not _NATIVE_IDENTIFIER.fullmatch(str(receipt.get("candidate_id") or ""))
+            or not _is_id(receipt.get("candidate_snapshot_sha256"))
+            or not _is_id(receipt.get("query_sha256"))
+            or not isinstance(receipt.get("context_sha256"), list)
+            or any(not _is_id(item) for item in receipt.get("context_sha256", []))
+            or not _is_id(receipt.get("candidate_text_sha256"))
             or not _is_id(receipt.get("input_sha256"))
             or not _is_id(receipt.get("output_sha256"))
             or not _is_id(receipt.get("batch_sha256"))
@@ -1947,6 +1957,14 @@ def _native_contract_binding(
                 or row.get("native_batch_sha256") != receipt.get("batch_sha256")
                 or row.get("profile_contract_id") != contract_id
                 or row.get("payload_source", {}).get("input_sha256") != receipt.get("input_sha256")
+                or row.get("payload_source", {}).get("rally_key") != receipt.get("rally_key")
+                or row.get("payload_source", {}).get("candidate_id") != receipt.get("candidate_id")
+                or row.get("payload_source", {}).get("candidate_snapshot_sha256")
+                != receipt.get("candidate_snapshot_sha256")
+                or row.get("payload_source", {}).get("query_sha256") != receipt.get("query_sha256")
+                or row.get("payload_source", {}).get("context_sha256") != receipt.get("context_sha256")
+                or row.get("payload_source", {}).get("candidate_text_sha256")
+                != receipt.get("candidate_text_sha256")
             ):
                 return False
         return True

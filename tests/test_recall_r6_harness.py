@@ -674,10 +674,26 @@ def test_native_luna_replay_rows_require_native_receipt_identity() -> None:
     for index, split in enumerate(("train", "validation", "test"), start=1):
         digest = f"{index:064x}"
         receipt = f"{index + 10:064x}"
+        rally_id = f"{index + 20:064x}"
+        candidate_id = f"{index + 30:064x}"
+        task_id = f"{index + 70:064x}"
+        payload_source = {
+            "schema": "chronovisor.recall-native-luna-payload-ref.v1",
+            "task_id": task_id,
+            "rally_key": rally_id,
+            "candidate_id": candidate_id,
+            "candidate_snapshot_sha256": f"{index + 101:064x}",
+            "query_sha256": f"{index + 102:064x}",
+            "context_sha256": [f"{index + 103:064x}"],
+            "candidate_text_sha256": f"{index + 104:064x}",
+            "input_sha256": f"{index + 80:064x}",
+            "source_record_sha256": f"{index + 90:064x}",
+            "source_snapshot_sha256": f"{index + 100:064x}",
+        }
         rows.append(
             {
-                "rally_id": f"{index + 20:064x}",
-                "candidate_id": f"{index + 30:064x}",
+                "rally_id": rally_id,
+                "candidate_id": candidate_id,
                 "session_cluster_id": f"{index + 40:064x}",
                 "as_of": "2026-01-01T00:00:00+00:00",
                 "dimension": "relevance",
@@ -718,15 +734,9 @@ def test_native_luna_replay_rows_require_native_receipt_identity() -> None:
                 "label_split_plan_id": split_plan,
                 "order_agreement": False,
                 "label_record_sha256": f"{index + 60:064x}",
-                "payload_digest": digest,
-                "payload_source": {
-                    "schema": "chronovisor.recall-native-luna-payload-ref.v1",
-                    "task_id": f"{index + 70:064x}",
-                    "input_sha256": f"{index + 80:064x}",
-                    "source_record_sha256": f"{index + 90:064x}",
-                    "source_snapshot_sha256": f"{index + 100:064x}",
-                },
-                "work_id": f"{index + 70:064x}",
+                "payload_digest": HARNESS._digest(payload_source),
+                "payload_source": payload_source,
+                "work_id": task_id,
                 "negative_veto_conflict": False,
                 "feature_parity": True,
                 "future_leakage": False,
