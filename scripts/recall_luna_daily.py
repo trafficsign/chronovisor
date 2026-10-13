@@ -221,7 +221,8 @@ def _safe_candidate_ids(snapshot: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return [
         candidate
         for candidate in candidates
-        if isinstance(candidate, Mapping) and candidate.get("candidate_id")
+        if isinstance(candidate, Mapping)
+        and _IDENTIFIER.fullmatch(str(candidate.get("candidate_id") or ""))
     ]
 
 
