@@ -92,3 +92,51 @@ def test_worker_tty_accepts_json_larger_than_canonical_input_buffer(tmp_path: Pa
             process.kill()
             process.wait()
         os.close(master)
+
+
+def test_worker_presents_one_complete_input_before_accepting_its_decision(tmp_path: Path) -> None:
+    inputs = [
+        {"query": f"synthetic-{index}", "context": ["first-context", "final-context"],
+         "candidate": {"text": "whole-candidate"}}
+        for index in range(2)
+    ]
+    bundle = LunaBulkBundle.create(
+        tmp_path / "bundle",
+        [{"rally_id": f"rally-{index}", "candidate_id": f"candidate-{index}",
+          "as_of_us": 1000 + index, "input": value, "split": "train", "group_id": "group"}
+         for index, value in enumerate(inputs)],
+        shard_count=1, batch_size=10,
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-u", str(Path(__file__).parents[1] / "scripts/recall_luna_worker_io.py"),
+         "--bundle", str(bundle.root), "--shard", "0", "--assignment-id", "full-input",
+         "--run-id", "full-input-run"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert process.stdout is not None and process.stdin is not None
+        request = json.loads(process.stdout.readline())
+        assert len(request["records"]) == 1
+        assert request["records"][0]["input"] == inputs[0]
+        duplicate = subprocess.run(
+            process.args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10
+        )
+        assert duplicate.returncode == 2
+        assert json.loads(duplicate.stdout) == {"status": "shard_busy", "shard": 0}
+        process.stdin.write(json.dumps([{
+            "task_id": request["records"][0]["task_id"], "verdict": "uncertain",
+            "confidence": 0.5, "reason_code": "synthetic_only",
+        }]) + "\n")
+        process.stdin.flush()
+        assert json.loads(process.stdout.readline())["count"] == 1
+        second = json.loads(process.stdout.readline())
+        assert second["cursor"] == 1
+        assert len(second["records"]) == 1
+        assert second["records"][0]["input"] == inputs[1]
+        _stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, stderr
+        assert LunaBulkBundle.open(bundle.root).status()["completed"] == 1
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()

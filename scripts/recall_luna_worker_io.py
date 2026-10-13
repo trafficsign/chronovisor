@@ -10,7 +10,9 @@ bundle and every committed response is bound to its exact source identity.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
 import sys
 import termios
 from collections.abc import Mapping
@@ -87,8 +89,26 @@ def main() -> int:
         settings[6][termios.VTIME] = 0
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, settings)
     bundle = LunaBulkBundle.open(args.bundle)
+    path = bundle.root / "shards" / f"{args.shard:02d}" / ".native-worker.lock"
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(json.dumps({"status": "shard_busy", "shard": args.shard}), flush=True)
+            return 2
+        return _serve_shard(bundle, args)
+    finally:
+        os.close(descriptor)
+
+
+def _serve_shard(bundle: LunaBulkBundle, args: argparse.Namespace) -> int:
     while True:
-        request = bundle.next_batch(args.shard)
+        # Show the complete query, context and candidate together. Ten full
+        # inputs exceed common tool-output limits and invite partial reading.
+        # The frozen batch size is an upper bound, so single-record commits
+        # retain the same identities, hash validation and resume contract.
+        request = bundle.next_batch(args.shard, limit=1)
         if not request["records"]:
             print(
                 json.dumps({"status": "shard_complete", "shard": args.shard}),
