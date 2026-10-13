@@ -105,6 +105,11 @@ every inner exec_command/write_stdin call. Every functions.exec cell MUST start
 with this exact first line (an inner limit does not set the outer limit):
 // @exec: {{"max_output_tokens": 20000}}
 Forward the result with text(result), without double JSON serialization.
+Start the helper exactly once. Preserve its original session_id and keep polling
+that session while frozen-source validation starts; startup may take minutes.
+Do not start a second helper or confuse a command's session_id with a process PID.
+If the helper exits before any request, report the failure to the parent and stop;
+only the durable supervisor may retry with a fresh child.
 I/O command:
 {sys.executable} -u {REPO / 'scripts/recall_luna_worker_io.py'} --bundle {bundle}
   --shard SHARD --assignment-id {round_id}-SHARD --run-id {round_id}-SHARD

@@ -572,3 +572,5 @@ def test_worker_prompt_keeps_the_per_child_cap_at_one_hundred(tmp_path: Path) ->
     assert '"records_per_worker": 100' in prompt
     assert "--max-records 100" in prompt
     assert '// @exec: {"max_output_tokens": 20000}' in prompt
+    assert "Start the helper exactly once." in prompt
+    assert "only the durable supervisor may retry with a fresh child." in prompt
