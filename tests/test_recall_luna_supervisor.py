@@ -4,7 +4,9 @@ import argparse
 import fcntl
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -98,3 +100,39 @@ def test_idle_supervisor_does_not_recapture_the_whole_catalog_each_tick(tmp_path
     supervisor.supervise(args)
     supervisor.supervise(args)
     assert calls == ["run"]
+
+
+@pytest.mark.parametrize("elapsed", [1, 1801])
+def test_stale_progress_allows_a_fresh_retry_but_still_bounds_a_stalled_round(
+    tmp_path: Path, monkeypatch, elapsed: int,
+) -> None:
+    private = tmp_path / "runtime/recall-luna-bulk"
+    private.mkdir(parents=True)
+    status = private / "supervisor-status.json"
+    status.write_text(json.dumps({"last_progress_at": "2000-01-01T00:00:00Z"}))
+    start = datetime(2026, 10, 14, tzinfo=UTC)
+    ticks = iter([start, start, start + timedelta(seconds=elapsed)])
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return next(ticks)
+
+    class Child:
+        pid = 12345
+        returncode = 0
+        polls = 0
+
+        def poll(self):
+            self.polls += 1
+            return None if self.polls == 1 else self.returncode
+
+    monkeypatch.setattr(supervisor, "datetime", Clock)
+    monkeypatch.setattr(supervisor, "cli_command", lambda *_: ["synthetic"])
+    monkeypatch.setattr(supervisor.subprocess, "Popen", lambda *_args, **_kwargs: Child())
+    monkeypatch.setattr(supervisor.time, "sleep", lambda _: None)
+    monkeypatch.setattr(supervisor.daily.distill, "load_distillation_config", lambda _: SimpleNamespace(enabled=True, native_luna_enabled=True))
+    args = argparse.Namespace(root=tmp_path, records_per_round=1, codex_home=tmp_path, codex="synthetic", poll_seconds=1)
+    result = supervisor.run_round(args, {"path": str(tmp_path / "bundle")}, [0], lambda *_args, **_kwargs: None)
+    assert result == (0 if elapsed == 1 else 124)
+    assert json.loads(status.read_text())["last_progress_at"] == "2000-01-01T00:00:00Z"

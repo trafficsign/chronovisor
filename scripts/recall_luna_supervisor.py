@@ -146,6 +146,7 @@ def cli_command(codex: str, codex_home: Path, result: Path) -> list[str]:
 
 
 def run_round(args: argparse.Namespace, bundle: dict[str, Any], shards: list[int], publish: Any) -> int:
+    started_at = datetime.now(UTC)
     round_id = datetime.now(UTC).strftime("luna-%Y%m%dT%H%M%S")
     directory = args.root / "runtime/recall-luna-bulk/supervisor-runs" / round_id
     directory.mkdir(mode=0o700, parents=True)
@@ -166,7 +167,10 @@ def run_round(args: argparse.Namespace, bundle: dict[str, Any], shards: list[int
                 return 125
             state = daily._private_json(args.root / "runtime/recall-luna-bulk/supervisor-status.json")
             progress = datetime.fromisoformat(state["last_progress_at"].replace("Z", "+00:00"))
-            if (datetime.now(UTC) - progress).total_seconds() > 1800:
+            # A fresh attempt needs its own startup window. Keep the durable
+            # label watermark unchanged for health, but do not let yesterday's
+            # stalled timestamp instantly kill every subsequent retry.
+            if (datetime.now(UTC) - max(progress, started_at)).total_seconds() > 1800:
                 return 124
             time.sleep(args.poll_seconds)
     finally:
