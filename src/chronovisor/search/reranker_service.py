@@ -149,6 +149,7 @@ class RerankerServiceState:
         self._requests = 0
         self._errors = 0
         self._last_error = ""
+        self._status_file = SERVICE_STATUS_FILE
         self._runtime_identity = runtime_identity()
         self._warm = self._warm_route()
         self._publish_status()
@@ -241,9 +242,9 @@ class RerankerServiceState:
         }
 
     def _publish_status(self) -> None:
-        SERVICE_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self._status_file.parent.mkdir(parents=True, exist_ok=True)
         atomic_write(
-            SERVICE_STATUS_FILE,
+            self._status_file,
             json.dumps(
                 self._status_payload(),
                 ensure_ascii=False,

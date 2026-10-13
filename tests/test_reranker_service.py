@@ -402,6 +402,22 @@ def test_service_socket_and_status_never_expose_backend_details(
     assert json.loads(status_text)["last_error"] == "backend_error"
 
 
+def test_existing_state_does_not_publish_into_a_later_states_status_file(
+    tmp_path, monkeypatch
+) -> None:
+    first, first_status, *_ = prepare_state(
+        tmp_path / "first", monkeypatch, config(tmp_path / "first.sock")
+    )
+    _second, second_status, *_ = prepare_state(
+        tmp_path / "second", monkeypatch, config(tmp_path / "second.sock")
+    )
+
+    first.note_error(RuntimeError("synthetic-backend-detail"))
+
+    assert json.loads(first_status.read_text())["last_error"] == "reranker_unavailable"
+    assert json.loads(second_status.read_text())["last_error"] == ""
+
+
 def test_service_rejects_duplicate_page_ids(tmp_path, monkeypatch) -> None:
     cfg = config(tmp_path / "reranker.sock")
     state, _status_file, _backend, _runtime, _controls = prepare_state(
