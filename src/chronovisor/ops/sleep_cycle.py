@@ -696,11 +696,8 @@ def _run_sleep_cycle(
         ),
     )
 
-    # Keep the bounded queue consumers ahead of the long artifact lanes below.
-    # The cycle deadline is shared by every lane; when graph/hub/raw work uses
-    # it up, a late queue lane can be deferred for every nightly cycle.  These
-    # are the existing per-lane budgets and gates, scheduled earlier so the
-    # queues receive a fair attempt without reviving any retired lane.
+    # Run bounded queue consumers before long artifact lanes; retain each
+    # existing budget and gate without reviving retired lanes.
     lane_budgets = {
         "lint": cycle_budget.slice(
             max_local_calls=10, max_frontier_calls=per_lane_frontier, max_mutations=6
