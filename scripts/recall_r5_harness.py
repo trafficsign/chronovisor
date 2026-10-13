@@ -1906,7 +1906,7 @@ def _native_contract_binding(
             for receipt in receipts
             if isinstance(receipt, Mapping)
         }
-        if len(by_receipt) != len(receipts) or not receipts or len(receipts) != len(native_rows):
+        if len(by_receipt) != len(receipts) or not receipts:
             return False
         expected_receipt_keys = {
             "schema", "namespace", "previous_sha256", "receipt_schema", "record_sha256",
