@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import termios
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,14 @@ def main() -> int:
     parser.add_argument("--assignment-id", required=True)
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
+    # macOS canonical TTY input truncates long JSON lines before Python reads
+    # them. Pipes need no adjustment; the dedicated worker TTY must be raw.
+    if sys.stdin.isatty():
+        settings = termios.tcgetattr(sys.stdin.fileno())
+        settings[3] &= ~(termios.ICANON | termios.ECHO)
+        settings[6][termios.VMIN] = 1
+        settings[6][termios.VTIME] = 0
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, settings)
     bundle = LunaBulkBundle.open(args.bundle)
     while True:
         request = bundle.next_batch(args.shard)

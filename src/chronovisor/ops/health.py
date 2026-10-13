@@ -55,13 +55,11 @@ def _recall_distillation_fallback(
     }
 
 
-def recall_distillation_kpi() -> dict[str, Any]:
+def recall_distillation_kpi(root: Path | None = None) -> dict[str, Any]:
     """Expose the distillation worker's public, privacy-safe status.
 
-    Distillation is an optional background path.  Its absence (including the
-    capture-only cold start) must never turn the foreground Recall health red.
-    The distillation snapshot owns pointer validation, so this layer does not
-    read private ledgers or policy artifacts itself.
+    The distillation snapshot owns pointer validation. The health classifier
+    adds actionable stop reasons without reading private label text.
     """
 
     try:
@@ -69,7 +67,7 @@ def recall_distillation_kpi() -> dict[str, Any]:
     except ImportError:
         return _recall_distillation_fallback("unavailable", alert=False)
     try:
-        value = snapshot(CHRONOVISOR_ROOT)
+        value = snapshot(root or CHRONOVISOR_ROOT)
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return _recall_distillation_fallback("unavailable", alert=False)
     if not isinstance(value, dict):
@@ -457,7 +455,9 @@ def recall_distillation_health(root: Path | None = None) -> dict[str, Any]:
     """Return the lightweight distillation diagnosis used by health and init."""
 
     effective_root = root or CHRONOVISOR_ROOT
-    snapshot = recall_distillation_kpi()
+    snapshot = (
+        recall_distillation_kpi() if root is None else recall_distillation_kpi(root)
+    )
     diagnostic, _ = _distillation_alerts(snapshot, root=effective_root)
     return diagnostic
 

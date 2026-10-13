@@ -114,12 +114,14 @@ def _read_labels(
             raise SourceBindingError("label rally identity is missing")
         candidate_id = row.get("candidate_id")
         if candidate_id is not None and (
-            not isinstance(candidate_id, str) or not candidate_id
+            isinstance(candidate_id, bool)
+            or not isinstance(candidate_id, (str, int))
+            or candidate_id == ""
         ):
             raise SourceBindingError("label candidate identity is invalid")
         labels_by_record[record] = dict(row)
         rally_ids.add(rally_id)
-        claims.add((rally_id, "" if candidate_id is None else candidate_id))
+        claims.add((rally_id, "" if candidate_id is None else str(candidate_id)))
     return (
         labels_by_record,
         tuple(sorted(rally_ids)),

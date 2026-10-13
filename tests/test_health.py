@@ -118,9 +118,9 @@ def test_recall_distillation_kpi_reads_real_sealed_state_and_pointers(
         )
         policy_ids.append(policy_id)
         store.write_pointer(chronovisor_root, kind, policy_id)
-    monkeypatch.setattr(health, "CHRONOVISOR_ROOT", chronovisor_root)
+    monkeypatch.setattr(health, "CHRONOVISOR_ROOT", tmp_path / "unrelated-root")
 
-    payload = health.recall_distillation_kpi()
+    payload = health.recall_distillation_kpi(chronovisor_root)
 
     assert payload["status"] == "idle"
     assert payload["worker_status"] == "idle"
@@ -170,7 +170,7 @@ def test_recall_distillation_health_explains_disabled_capture_as_human_wait(
         "[recall.distillation]\nenabled = false\ncapture_enabled = true\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda *_args: {
         "status": "capture_only",
         "worker_status": "capture_only",
         "hold_reason": "blind_repeat_pairs_below_floor",
@@ -199,7 +199,7 @@ def test_recall_distillation_health_does_not_treat_legacy_success_as_label_progr
         "teacher_profile = \"local-triad-v1\"\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda *_args: {
         "status": "capture_only",
         "worker_status": "capture_only",
         "hold_reason": "counterfactual_pairs_below_floor",
@@ -232,7 +232,7 @@ def test_recall_distillation_health_reports_missing_and_expired_teacher_contract
         "ox_expires_at = \"2020-01-01T00:00:00Z\"\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda *_args: {
         "status": "deferred",
         "worker_status": "deferred",
         "hold_reason": "",
@@ -266,7 +266,7 @@ def test_recall_distillation_health_uses_only_the_native_contract_path(
         "native_luna_enabled = true\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda *_args: {
         "status": "ready",
         "worker_status": "idle",
         "hold_reason": "",
@@ -306,7 +306,7 @@ def test_recall_distillation_health_rejects_partial_native_profile_name(
         "native_luna_enabled = true\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda *_args: {
         "status": "ready",
         "worker_status": "idle",
         "hold_reason": "",
@@ -332,7 +332,7 @@ def test_recall_distillation_health_distinguishes_teacher_stop_from_missing(
         "teacher_profile = \"local-triad-v1\"\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda *_args: {
         "status": "deferred",
         "worker_status": "deferred",
         "error_code": "ox_teacher_stopped",
@@ -359,7 +359,7 @@ def test_recall_distillation_health_surfaces_native_teacher_unavailable(
         "native_luna_enabled = true\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda *_args: {
         "status": "deferred",
         "worker_status": "deferred",
         "capture_only_reasons": ["native_luna_teacher_unavailable"],
@@ -384,7 +384,7 @@ def test_recall_distillation_health_prefers_label_progress_over_last_success(
         "teacher_profile = \"local-triad-v1\"\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda *_args: {
         "status": "capture_only",
         "worker_status": "capture_only",
         "last_success_at": datetime.now(UTC).isoformat(),

@@ -113,6 +113,10 @@ def test_chronovisor_init_reports_deferred_counts_in_parallel_bootstrap_status(
     from chronovisor.ingest import orchestrator
 
     raw_dir = _seed_raws(tmp_path)
+    (tmp_path / "config.toml").write_text(
+        "[recall.distillation]\nenabled = false\ncapture_enabled = true\n",
+        encoding="utf-8",
+    )
     system_dir = tmp_path / "system"
     system_dir.mkdir()
     for page_id in ("user-profile", "current-state", "lessons-learned"):
@@ -174,7 +178,11 @@ def test_chronovisor_init_reports_deferred_counts_in_parallel_bootstrap_status(
     assert status["health"]["status"] == "alert"
     assert status["health"]["alerts"][0]["category"] == "human_wait"
     assert status["health"]["alerts"][0]["reason"] == "enabled_false"
-    assert status["health"]["alerts"][1]["reason"] == "search_labels_late_lane"
+    assert [item["reason"] for item in status["health"]["alerts"]] == [
+        "enabled_false",
+        "distillation_state_unavailable",
+        "search_labels_late_lane",
+    ]
     assert status["recall_distillation"]["stop_reason"]["reason"] == "enabled_false"
     assert status["queues"]["alert"] is True
     assert payload["status"]["librarian"]["state"] == "NOT_READY"
