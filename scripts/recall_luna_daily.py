@@ -24,8 +24,10 @@ import sys
 import tempfile
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -56,7 +58,9 @@ NATIVE_COHORT = "native-luna-backfill-v1"
 MAX_INPUT_BYTES = 12_000
 PROBE_CAP = 100
 DEFAULT_ROOT = Path.home() / ".chronovisor"
-DEFAULT_DAY_ROOT = DEFAULT_ROOT / "runtime" / "recall-luna-bulk" / "2026-10-13"
+DEFAULT_BULK_ROOT = DEFAULT_ROOT / "runtime" / "recall-luna-bulk"
+DEFAULT_DAY = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d")
+DEFAULT_DAY_ROOT = DEFAULT_BULK_ROOT / DEFAULT_DAY
 DEFAULT_BUNDLE = DEFAULT_DAY_ROOT / "bundle"
 DEFAULT_RECEIPT = DEFAULT_DAY_ROOT / "daily-status.json"
 DEFAULT_CAPTURE_PROGRESS = (
@@ -701,10 +705,24 @@ def _bundle_candidates(requested: Path) -> list[Path]:
     """Find immutable bundles in one private daily directory."""
 
     parent = requested.expanduser().parent
+    search_roots = [parent]
+    bulk_root = parent.parent
+    if bulk_root.name == "recall-luna-bulk" and bulk_root.is_dir():
+        search_roots.extend(
+            path
+            for path in sorted(bulk_root.iterdir())
+            if path.is_dir() and not path.is_symlink() and path != parent
+        )
     candidates: list[Path] = []
-    for path in (requested.expanduser(), *sorted(parent.glob("bundle*"))):
-        if path.is_dir() and path not in candidates:
-            candidates.append(path)
+    for root_path in search_roots:
+        paths = (
+            (requested.expanduser(), *sorted(root_path.glob("bundle*")))
+            if root_path == parent
+            else tuple(sorted(root_path.glob("bundle*")))
+        )
+        for path in paths:
+            if path.is_dir() and path not in candidates:
+                candidates.append(path)
     return candidates
 
 
@@ -750,25 +768,31 @@ def _existing_labeled_pairs(root: Path) -> set[tuple[str, str]]:
     # source pair out of the next daily bundle even if an idempotent importer
     # was interrupted after writing its private marker but before the ledger
     # checkpoint became visible.
-    day_root = root / "runtime" / "recall-luna-bulk" / "2026-10-13"
-    for bundle_path in sorted(day_root.glob("bundle*")):
-        metadata = _bundle_metadata(bundle_path)
-        if not metadata or not metadata.get("production_ledger_written"):
-            continue
-        source_path = bundle_path / "snapshot" / "source.jsonl"
-        if not source_path.is_file() or source_path.is_symlink():
-            continue
-        try:
-            for line in source_path.read_bytes().splitlines():
-                source = json.loads(line.decode("utf-8"))
-                if isinstance(source, Mapping) and source.get("rally_id") and source.get(
-                    "candidate_id"
-                ):
-                    pairs.add(
-                        (str(source["rally_id"]), str(source["candidate_id"]))
-                    )
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise DailyError("completed_bundle_source_invalid") from exc
+    bulk_root = root / "runtime" / "recall-luna-bulk"
+    day_roots = [
+        path
+        for path in sorted(bulk_root.iterdir())
+        if path.is_dir() and not path.is_symlink()
+    ] if bulk_root.is_dir() else []
+    for day_root in day_roots:
+        for bundle_path in sorted(day_root.glob("bundle*")):
+            metadata = _bundle_metadata(bundle_path)
+            if not metadata or not metadata.get("production_ledger_written"):
+                continue
+            source_path = bundle_path / "snapshot" / "source.jsonl"
+            if not source_path.is_file() or source_path.is_symlink():
+                continue
+            try:
+                for line in source_path.read_bytes().splitlines():
+                    source = json.loads(line.decode("utf-8"))
+                    if isinstance(source, Mapping) and source.get("rally_id") and source.get(
+                        "candidate_id"
+                    ):
+                        pairs.add(
+                            (str(source["rally_id"]), str(source["candidate_id"]))
+                        )
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise DailyError("completed_bundle_source_invalid") from exc
     return pairs
 
 
