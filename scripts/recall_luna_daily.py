@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Prepare, inspect, and import the private daily native-Luna bundle.
+"""Capture, prepare, inspect, and import the private daily native-Luna bundle.
 
 The daily Codex automation owns the native worker calls.  This script owns the
-metadata-only boundary around those calls: it freezes the current catalog and
-candidate ledger, reuses the current grouped split plan, creates an immutable
-private bundle when the source is complete, and imports a completed bundle into
-the teacher-only ledger.  Source text is resolved only in memory while a
-private bundle is built; all durable receipts and stdout contain counts and
-hashes, never utterances, questions, or rationales.
+private source boundary and the repository-owned candidate writer: it advances
+the catalog, freezes the current candidate ledger, reuses the current grouped
+split plan, creates an immutable private bundle when the source is complete,
+and imports a completed bundle into the teacher-only ledger.  Source text is
+resolved only in memory while capture or bundle work runs; all durable receipts
+and stdout contain counts and hashes, never utterances, questions, or
+rationales.
 """
 
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import math
@@ -22,6 +24,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -66,13 +69,12 @@ DEFAULT_RECEIPT = DEFAULT_DAY_ROOT / "daily-status.json"
 DEFAULT_CAPTURE_PROGRESS = (
     DEFAULT_DAY_ROOT / "inventory" / "candidate-capture-progress.json"
 )
-DEFAULT_CAPTURE_SCRIPTS = (
-    DEFAULT_DAY_ROOT / "inventory" / "capture_missing.py",
-    DEFAULT_DAY_ROOT / "inventory" / "capture_candidates.py",
-)
 _SOURCE_SPLITS = frozenset({"train", "validation", "test", "embargo"})
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
+_CAPTURE_STALE_AFTER_SECONDS = 15 * 60
+_CAPTURE_PROFILE = "native-luna-single-v1"
+_CAPTURE_BACKFILL_REVISION = "age-bands-v1"
 
 
 class DailyError(RuntimeError):
@@ -204,7 +206,14 @@ def _capture_progress(path: Path) -> dict[str, Any] | None:
         return None
     value = _private_json(path)
     status = str(value.get("status") or "unknown")
-    if status not in {"starting", "running", "complete", "error"}:
+    if status not in {
+        "starting",
+        "running",
+        "complete",
+        "error",
+        "stalled",
+        "blocked_lock",
+    }:
         status = "unknown"
     result: dict[str, Any] = {
         "status": status,
@@ -213,9 +222,86 @@ def _capture_progress(path: Path) -> dict[str, Any] | None:
         "remaining": int(value.get("remaining") or 0),
         "candidate_index_count": int(value.get("candidate_index_count") or 0),
     }
-    if "error_class" in value:
-        result["error_class"] = str(value.get("error_class") or "")
+    for key in (
+        "pid",
+        "started_at_unix",
+        "updated_at_unix",
+        "finished_at_unix",
+        "error_class",
+        "reason",
+    ):
+        if key in value:
+            result[key] = value[key]
     return result
+
+
+def _capture_pid_alive(pid: object) -> bool:
+    try:
+        value = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if value <= 0:
+        return False
+    try:
+        os.kill(value, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _capture_lock_busy(root: Path) -> bool | None:
+    """Check the authoritative writer lock without retaining it."""
+
+    try:
+        handle = store.acquire_nonblocking_lock(
+            store.distillation_dir(root) / "distillation-worker.lock"
+        )
+    except (OSError, store.DistillationStoreError):
+        # A lock that cannot be inspected is treated as active.  Starting a
+        # second writer is less recoverable than waiting for the next tick.
+        return None
+    if handle is None:
+        return True
+    store.release_lock(handle)
+    return False
+
+
+def _capture_owner_alive(root: Path, path: Path, progress: Mapping[str, Any]) -> bool:
+    """Validate both the recorded PID and the append-only writer lock."""
+
+    lock_busy = _capture_lock_busy(root)
+    if lock_busy is True or lock_busy is None:
+        return True
+    # A running capture must retain the lock.  A live PID with a released lock
+    # is an orphaned receipt (or a process that has already stopped writing).
+    if progress.get("status") == "starting" and _capture_pid_alive(progress.get("pid")):
+        return True
+    # Older receipts did not carry a PID.  Give a fresh receipt a short grace
+    # period for process startup, but make an old orphan visible and resumable.
+    timestamp = progress.get("updated_at_unix") or progress.get("started_at_unix")
+    try:
+        updated_at = float(timestamp)
+    except (TypeError, ValueError):
+        try:
+            updated_at = path.stat().st_mtime
+        except OSError:
+            updated_at = 0.0
+    return (time.time() - updated_at) < _CAPTURE_STALE_AFTER_SECONDS
+
+
+def _mark_capture_stalled(path: Path, progress: Mapping[str, Any]) -> dict[str, Any]:
+    stalled = {
+        **dict(progress),
+        "status": "stalled",
+        "reason": "capture_owner_stale",
+        "finished_at_unix": time.time(),
+    }
+    _write_private_json(path, stalled)
+    return _capture_progress(path) or stalled
 
 
 def _active_capture_progress(
@@ -225,8 +311,12 @@ def _active_capture_progress(
 
     requested = requested.expanduser()
     progress = _capture_progress(requested)
+    stalled_path: Path | None = None
     if progress and progress.get("status") in {"starting", "running"}:
-        return requested, progress
+        if _capture_owner_alive(root, requested, progress):
+            return requested, progress
+        progress = _mark_capture_stalled(requested, progress)
+        stalled_path = requested
     bulk_root = root / "runtime" / "recall-luna-bulk"
     if bulk_root.name != "recall-luna-bulk" or not bulk_root.is_dir():
         return requested, progress
@@ -241,8 +331,11 @@ def _active_capture_progress(
             "starting",
             "running",
         }:
-            return candidate, candidate_progress
-    return requested, progress
+            if _capture_owner_alive(root, candidate, candidate_progress):
+                return candidate, candidate_progress
+            progress = _mark_capture_stalled(candidate, candidate_progress)
+            stalled_path = candidate
+    return stalled_path or requested, progress
 
 
 def _safe_candidate_ids(snapshot: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -1003,15 +1096,314 @@ def _advance_catalog(root: Path) -> dict[str, Any]:
     }
 
 
-def _capture_script_for(progress_path: Path, capture_script: Path | None) -> Path | None:
-    if capture_script is not None:
-        path = capture_script.expanduser()
-        return path if path.is_file() else None
-    for path in DEFAULT_CAPTURE_SCRIPTS:
-        candidate = progress_path.expanduser().parent / path.name
-        if candidate.is_file():
-            return candidate
-    return None
+def _capture_manifest_row(rally: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the text-free identity used by a capture progress digest."""
+
+    return {
+        key: rally.get(key)
+        for key in (
+            "rally_id",
+            "as_of",
+            "as_of_us",
+            "host",
+            "session_cluster_id",
+            "source_index",
+            "query_sha256",
+        )
+    }
+
+
+def _capture_manifest_digest(rallies: Sequence[Mapping[str, Any]]) -> str:
+    return canonical_json_sha256_strict(
+        [_capture_manifest_row(rally) for rally in rallies]
+    )
+
+
+def _capture_checkpoint_identity(root: Path) -> dict[str, Any]:
+    checkpoint = catalog._read_catalog_checkpoint(root)  # type: ignore[attr-defined]
+    if checkpoint is None:
+        raise DailyError("catalog_checkpoint_missing")
+    return {
+        "catalog_watermark": str(checkpoint.get("catalog_watermark") or ""),
+        "catalog_event_rowid": int(checkpoint.get("event_rowid") or 0),
+        "catalog_lineage": str(checkpoint.get("catalog_lineage") or ""),
+    }
+
+
+def _capture_index_identity(root: Path) -> dict[str, Any]:
+    path = catalog.historical_index_path(root)
+    checkpoint = catalog._read_index_checkpoint(path)  # type: ignore[attr-defined]
+    if checkpoint is None:
+        raise DailyError("historical_index_checkpoint_missing")
+    return {
+        "content_sha256": str(checkpoint.get("content_sha256") or ""),
+        "catalog_watermark": str(checkpoint.get("catalog_watermark") or ""),
+        "catalog_event_rowid": int(checkpoint.get("catalog_event_rowid") or 0),
+    }
+
+
+def _capture_assert_checkpoint(
+    root: Path,
+    expected_catalog: Mapping[str, Any],
+    expected_index: Mapping[str, Any],
+) -> None:
+    if _capture_checkpoint_identity(root) != dict(expected_catalog):
+        raise DailyError("catalog_identity_changed")
+    if _capture_index_identity(root) != dict(expected_index):
+        raise DailyError("historical_index_identity_changed")
+
+
+def _capture_one(
+    *, root: Path, rally: Mapping[str, Any], index_path: Path
+) -> dict[str, Any]:
+    texts = catalog.CatalogTextCache(root / "raw", root)
+    query_sha = str(rally.get("query_sha256") or "")
+    if not _SHA256.fullmatch(query_sha):
+        raise DailyError("query_text_missing")
+    texts.prefetch((query_sha,))
+    query_text = texts[query_sha]
+    if not query_text:
+        raise DailyError("query_text_empty")
+    snapshot = distill.candidate_snapshot(
+        index_path,
+        rally,
+        query_text,
+        limit=200,
+        candidate_texts=texts,
+    )
+    if not isinstance(snapshot.get("candidates"), list):
+        raise DailyError("candidate_snapshot_shape_invalid")
+    return snapshot
+
+
+def _capture_progress_payload(
+    *,
+    root: Path,
+    candidate_path: Path,
+    manifest_sha256: str,
+    catalog_identity: Mapping[str, Any],
+    index_identity: Mapping[str, Any],
+    total_rallies: int,
+    initial_missing: int,
+) -> dict[str, Any]:
+    return {
+        "schema": "chronovisor.recall-luna-bulk.candidate-capture.v1",
+        "status": "starting",
+        "profile": _CAPTURE_PROFILE,
+        "backfill_revision": _CAPTURE_BACKFILL_REVISION,
+        "candidate_ledger": str(candidate_path),
+        "catalog_watermark": catalog_identity["catalog_watermark"],
+        "catalog_event_rowid": catalog_identity["catalog_event_rowid"],
+        "catalog_lineage": catalog_identity["catalog_lineage"],
+        "historical_index_sha256": index_identity["content_sha256"],
+        "historical_index_catalog_event_rowid": index_identity[
+            "catalog_event_rowid"
+        ],
+        "manifest_sha256": manifest_sha256,
+        "total_rallies": total_rallies,
+        "initial_missing": initial_missing,
+        "captured": 0,
+        "new_candidate_pairs": 0,
+        "zero_candidate_snapshots": 0,
+        "last_cursor": 0,
+        "candidate_index_count": 0,
+        "pid": os.getpid(),
+        "started_at_unix": time.time(),
+    }
+
+
+def _capture(
+    *,
+    root: Path,
+    private_dir: Path,
+    progress_path: Path,
+    chunk_size: int = 100,
+    max_rallies: int | None = None,
+    read_workers: int = 8,
+) -> int:
+    """Capture missing point-in-time candidate snapshots as the sole writer."""
+
+    if chunk_size < 1 or chunk_size > 500:
+        raise ValueError("chunk_size must be between 1 and 500")
+    if read_workers < 1 or read_workers > 32:
+        raise ValueError("read_workers must be between 1 and 32")
+    root = root.expanduser().resolve()
+    private_dir = private_dir.expanduser()
+    progress_path = progress_path.expanduser()
+    private_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
+    lock = store.acquire_nonblocking_lock(
+        store.distillation_dir(root) / "distillation-worker.lock"
+    )
+    if lock is None:
+        _write_private_json(
+            progress_path,
+            {
+                "schema": "chronovisor.recall-luna-bulk.candidate-capture.v1",
+                "status": "blocked_lock",
+                "profile": _CAPTURE_PROFILE,
+                "pid": os.getpid(),
+                "reason": "distillation_worker_lock_busy",
+                "finished_at_unix": time.time(),
+            },
+        )
+        return 2
+
+    try:
+        # The lock covers catalog/index synchronization and every candidate
+        # append.  Raw is read at its current committed boundary; rally as_of
+        # values are never rewritten during backfill.
+        _advance_catalog(root)
+        catalog.sync_historical_index(root / "raw", root)
+        index_state = catalog.sync_candidate_index(root, candidate_path)
+        rallies = catalog.rallies(root)
+        rallies.sort(key=lambda row: (int(row["as_of_us"]), str(row["rally_id"])))
+        catalog_identity = _capture_checkpoint_identity(root)
+        historical_identity = _capture_index_identity(root)
+        manifest_sha256 = _capture_manifest_digest(rallies)
+        known = catalog.candidate_rally_ids(root)
+        missing = [
+            rally
+            for rally in rallies
+            if str(rally.get("rally_id") or "") not in known
+        ]
+        if max_rallies is not None:
+            missing = missing[:max_rallies]
+        progress = _capture_progress_payload(
+            root=root,
+            candidate_path=candidate_path,
+            manifest_sha256=manifest_sha256,
+            catalog_identity=catalog_identity,
+            index_identity=historical_identity,
+            total_rallies=len(rallies),
+            initial_missing=len(missing),
+        )
+        progress.update(
+            {
+                "status": "running",
+                "candidate_index_count": int(index_state.get("record_count", 0)),
+                "chunk_size": chunk_size,
+                "read_workers": read_workers,
+                "age_boundary_utc": distill._source_age_boundary(rallies),
+            }
+        )
+        _write_private_json(progress_path, progress)
+
+        cursor = 0
+        captured = 0
+        new_pairs = 0
+        zero_candidates = 0
+        while cursor < len(missing):
+            _capture_assert_checkpoint(root, catalog_identity, historical_identity)
+            batch = missing[cursor : cursor + chunk_size]
+            index_path = catalog.historical_index_path(root)
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(read_workers, len(batch))
+            ) as pool:
+                snapshots = list(
+                    pool.map(
+                        lambda rally, index_path=index_path: _capture_one(
+                            root=root, rally=rally, index_path=index_path
+                        ),
+                        batch,
+                    )
+                )
+            payloads: list[dict[str, Any]] = []
+            batch_pairs = 0
+            batch_zero = 0
+            age_bands = distill._source_age_bands(rallies)
+            age_boundary = distill._source_age_boundary(rallies)
+            for rally, snapshot in zip(batch, snapshots, strict=True):
+                candidates = snapshot.get("candidates")
+                if not isinstance(candidates, list):
+                    raise DailyError("candidate_snapshot_shape_invalid")
+                batch_pairs += len(candidates)
+                batch_zero += int(not candidates)
+                payloads.append(
+                    {
+                        "kind": "candidate-snapshot",
+                        "rally_id": str(rally["rally_id"]),
+                        "backfill_revision": _CAPTURE_BACKFILL_REVISION,
+                        "backfill_profile": _CAPTURE_PROFILE,
+                        "backfill_band": age_bands.get(
+                            str(rally["rally_id"]), "old-history"
+                        ),
+                        "age_boundary_utc": age_boundary,
+                        "snapshot": snapshot,
+                    }
+                )
+            if len(payloads) != len(batch):
+                raise DailyError("capture_batch_incomplete")
+            store.append_chain_batch(candidate_path, payloads)
+            index_state = catalog.sync_candidate_index(root, candidate_path)
+            _capture_assert_checkpoint(root, catalog_identity, historical_identity)
+            cursor += len(batch)
+            captured += len(batch)
+            new_pairs += batch_pairs
+            zero_candidates += batch_zero
+            progress.update(
+                {
+                    "status": "running",
+                    "captured": captured,
+                    "new_candidate_pairs": new_pairs,
+                    "zero_candidate_snapshots": zero_candidates,
+                    "last_cursor": cursor,
+                    "candidate_index_count": int(index_state.get("record_count", 0)),
+                    "last_rally_as_of_us": int(batch[-1]["as_of_us"]),
+                    "updated_at_unix": time.time(),
+                }
+            )
+            _write_private_json(progress_path, progress)
+
+        final_known = catalog.candidate_rally_ids(root)
+        remaining = sum(
+            str(rally.get("rally_id") or "") not in final_known for rally in missing
+        )
+        if remaining:
+            raise DailyError("candidate_index_missing_after_capture")
+        progress.update(
+            {
+                "status": "complete",
+                "remaining": 0,
+                "finished_at_unix": time.time(),
+            }
+        )
+        _write_private_json(progress_path, progress)
+        return 0
+    except BaseException as error:
+        prior: dict[str, Any] = {}
+        try:
+            if progress_path.exists():
+                prior = _private_json(progress_path)
+        except DailyError:
+            prior = {}
+        prior.update(
+            {
+                "status": "error",
+                "error_class": type(error).__name__,
+                "error_message_sha256": _sha256_bytes(
+                    str(error).encode("utf-8", "replace")
+                ),
+                "finished_at_unix": time.time(),
+            }
+        )
+        _write_private_json(progress_path, prior)
+        raise
+    finally:
+        store.release_lock(lock)
+
+
+def _capture_script_for(
+    progress_path: Path | None = None, capture_script: Path | None = None
+) -> Path:
+    """Resolve the repository-owned capture entrypoint only."""
+
+    script = Path(__file__).resolve()
+    if capture_script is not None and capture_script.expanduser().resolve() != script:
+        raise DailyError("capture_script_must_be_repo_owned")
+    if not script.is_file():
+        raise DailyError("capture_script_missing")
+    return script
 
 
 def _start_candidate_capture(
@@ -1020,30 +1412,32 @@ def _start_candidate_capture(
     progress_path: Path,
     capture_script: Path | None = None,
 ) -> dict[str, Any]:
-    """Start the authoritative private capture helper, if it is available."""
+    """Start this repository script as the authoritative private capture writer."""
 
     _active_path, progress = _active_capture_progress(root, progress_path)
     if progress and progress.get("status") in {"starting", "running"}:
         return {"started": False, "status": "running", "reason": "capture_already_running"}
-    script = _capture_script_for(progress_path, capture_script)
-    if script is None:
-        return {
-            "started": False,
-            "status": "in_progress",
-            "reason": "capture_helper_missing",
-            "resumable": True,
-        }
+    stalled_previous = (
+        dict(progress) if progress and progress.get("status") == "stalled" else None
+    )
+    try:
+        script = _capture_script_for(capture_script=capture_script)
+    except DailyError as exc:
+        return {"started": False, "status": "error", **_error_fields(exc)}
     progress_path.expanduser().parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     command = [
         sys.executable,
         str(script),
+        "capture",
         "--root",
         str(root),
         "--private-dir",
         str(progress_path.expanduser().parent),
+        "--capture-progress",
+        str(progress_path.expanduser()),
     ]
     try:
-        subprocess.Popen(
+        process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -1059,7 +1453,26 @@ def _start_candidate_capture(
             "resumable": True,
             **_error_fields(exc),
         }
-    return {"started": True, "status": "starting", "resumable": True}
+    current = _capture_progress(progress_path)
+    if current is None:
+        _write_private_json(
+            progress_path,
+            {
+                "schema": "chronovisor.recall-luna-bulk.candidate-capture.v1",
+                "status": "starting",
+                "profile": _CAPTURE_PROFILE,
+                "pid": int(process.pid),
+                "started_at_unix": time.time(),
+            },
+        )
+    result: dict[str, Any] = {
+        "started": True,
+        "status": "starting",
+        "resumable": True,
+    }
+    if stalled_previous is not None:
+        result["stalled_previous"] = stalled_previous
+    return result
 
 
 def run_daily(
@@ -1072,13 +1485,32 @@ def run_daily(
     split_plan_path: Path | None = None,
     allow_split_write: bool = False,
 ) -> dict[str, Any]:
-    """Advance catalog, start capture, then run the resumable prepare step."""
+    """Resume pending work before starting the repository-owned capture writer."""
 
     root = root.expanduser().resolve()
     receipt_path = receipt_path.expanduser()
     result = _base_result("run")
     try:
-        result["catalog"] = _advance_catalog(root)
+        # A pending bundle is the durable work queue.  Resume it before any
+        # catalog/index write so a candidate writer cannot race an export.
+        if _select_resumable_bundle(bundle_path) is not None:
+            prepared = prepare(
+                root=root,
+                bundle_path=bundle_path,
+                receipt_path=receipt_path,
+                capture_progress_path=capture_progress_path,
+                split_plan_path=split_plan_path,
+                allow_split_write=allow_split_write,
+            )
+            result["prepare"] = prepared
+            result.update(
+                {
+                    "status": prepared.get("status", "in_progress"),
+                    "reason": prepared.get("reason", "pending_bundle"),
+                }
+            )
+            _write_private_json(receipt_path, result)
+            return result
         result["capture"] = _start_candidate_capture(
             root=root,
             progress_path=capture_progress_path,
@@ -1095,6 +1527,15 @@ def run_daily(
                 "capture": result["capture"],
             }
             _write_private_json(receipt_path, prepared)
+        elif result["capture"].get("status") == "running":
+            prepared = prepare(
+                root=root,
+                bundle_path=bundle_path,
+                receipt_path=receipt_path,
+                capture_progress_path=capture_progress_path,
+                split_plan_path=split_plan_path,
+                allow_split_write=allow_split_write,
+            )
         else:
             prepared = prepare(
                 root=root,
@@ -1454,6 +1895,12 @@ def _parser() -> argparse.ArgumentParser:
     run_command.add_argument("--capture-script", type=Path, default=None)
     run_command.add_argument("--split-plan", type=Path, default=None)
     run_command.add_argument("--allow-split-write", action="store_true")
+    capture_command = commands.add_parser("capture")
+    runtime_options(capture_command)
+    capture_command.add_argument("--private-dir", type=Path, default=None)
+    capture_command.add_argument("--chunk-size", type=int, default=100)
+    capture_command.add_argument("--max-rallies", type=int, default=None)
+    capture_command.add_argument("--read-workers", type=int, default=8)
     status_command = commands.add_parser("status")
     runtime_options(status_command)
     import_command = commands.add_parser("import")
@@ -1482,6 +1929,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             split_plan_path=args.split_plan,
             allow_split_write=args.allow_split_write,
         )
+    elif args.command == "capture":
+        private_dir = args.private_dir or args.capture_progress.parent
+        try:
+            exit_code = _capture(
+                root=args.root,
+                private_dir=private_dir,
+                progress_path=args.capture_progress,
+                chunk_size=args.chunk_size,
+                max_rallies=args.max_rallies,
+                read_workers=args.read_workers,
+            )
+            result = {
+                **_base_result("capture"),
+                "status": "complete" if exit_code == 0 else "in_progress",
+                "progress_path": str(args.capture_progress),
+            }
+        except Exception as exc:
+            result = {**_base_result("capture"), "status": "error", **_error_fields(exc)}
     elif args.command == "status":
         result = status(
             root=args.root,

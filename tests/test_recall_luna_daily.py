@@ -149,6 +149,143 @@ def test_run_advances_catalog_and_starts_capture_before_prepare(
     assert _read(receipt)["capture"]["started"] is True
 
 
+def test_repo_owned_capture_without_private_helper_reaches_bundle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A fresh day can capture and prepare without an inventory helper file."""
+
+    root = tmp_path / "root"
+    root.mkdir()
+    private_dir = tmp_path / "next-day" / "inventory"
+    progress = private_dir / "candidate-capture-progress.json"
+    rally = {
+        "rally_id": "rally-capture",
+        "as_of": "1970-01-01T00:00:00.000001Z",
+        "as_of_us": 1,
+        "host": "test-host",
+        "session_cluster_id": "group-capture",
+        "source_index": 1,
+        "query_sha256": "1" * 64,
+        "context_refs": [],
+    }
+    snapshot = {
+        "schema": "chronovisor.recall-candidate-snapshot.v1",
+        "rally_id": rally["rally_id"],
+        "as_of": rally["as_of"],
+        "retriever_revision": "historical-fts-v1",
+        "feature_revision": "text-features-v1",
+        "query_feature_text_sha256": "2" * 64,
+        "candidates": [
+            {
+                "candidate_id": "candidate-capture",
+                "rank": 0,
+                "text_sha256": "3" * 64,
+                "features": {"lexical_overlap": 1.0},
+            }
+        ],
+        "snapshot_sha256": "4" * 64,
+    }
+    checkpoint = {
+        "catalog_watermark": "5" * 64,
+        "catalog_event_rowid": 1,
+        "catalog_lineage": "6" * 64,
+    }
+    index_checkpoint = {
+        "content_sha256": "7" * 64,
+        "catalog_watermark": checkpoint["catalog_watermark"],
+        "catalog_event_rowid": checkpoint["catalog_event_rowid"],
+    }
+    captured = {"done": False}
+
+    monkeypatch.setattr(daily, "_advance_catalog", lambda _: {"status": "noop"})
+    monkeypatch.setattr(daily.catalog, "sync_historical_index", lambda *_: "7" * 64)
+    monkeypatch.setattr(
+        daily.catalog,
+        "sync_candidate_index",
+        lambda *_args: {"status": "advanced", "record_count": int(captured["done"])},
+    )
+    monkeypatch.setattr(daily.catalog, "rallies", lambda _: [rally])
+    monkeypatch.setattr(
+        daily.catalog,
+        "candidate_rally_ids",
+        lambda _: {rally["rally_id"]} if captured["done"] else set(),
+    )
+    monkeypatch.setattr(daily, "_capture_checkpoint_identity", lambda _: checkpoint)
+    monkeypatch.setattr(daily, "_capture_index_identity", lambda _: index_checkpoint)
+    monkeypatch.setattr(daily, "_capture_one", lambda **_kwargs: snapshot)
+    monkeypatch.setattr(daily.distill, "_source_age_boundary", lambda _: None)
+    monkeypatch.setattr(daily.distill, "_source_age_bands", lambda _: {})
+
+    original_append = daily.store.append_chain_batch
+
+    def append_and_mark(path: Path, payloads: object) -> list[dict[str, object]]:
+        result = original_append(path, payloads)  # type: ignore[arg-type]
+        captured["done"] = True
+        return result
+
+    monkeypatch.setattr(daily.store, "append_chain_batch", append_and_mark)
+    assert daily._capture(
+        root=root,
+        private_dir=private_dir,
+        progress_path=progress,
+        chunk_size=1,
+        read_workers=1,
+    ) == 0
+    assert _read(progress)["status"] == "complete"
+
+    plan = {
+        "artifact_id": "8" * 64,
+        "model_cohort_sha256": "9" * 64,
+        "raw_watermark": checkpoint["catalog_watermark"],
+        "assignments": {rally["rally_id"]: "embargo"},
+    }
+    monkeypatch.setattr(daily, "_native_model_cohort_sha256", lambda *_: "9" * 64)
+    monkeypatch.setattr(daily, "_read_current_split_plan", lambda _: plan)
+    monkeypatch.setattr(
+        daily,
+        "_catalog_identity",
+        lambda _: {
+            "sha256": "a" * 64,
+            "bytes": 1,
+            "watermark": checkpoint["catalog_watermark"],
+            "event_rowid": 1,
+            "lineage": checkpoint["catalog_lineage"],
+        },
+    )
+    monkeypatch.setattr(
+        daily,
+        "_candidate_identity",
+        lambda _: {
+            "sha256": "b" * 64,
+            "bytes": 1,
+            "record_count": 1,
+            "head_sha256": "c" * 64,
+            "mtime_ns": 1,
+            "ctime_ns": 1,
+        },
+    )
+    monkeypatch.setattr(
+        daily.catalog,
+        "read_candidate_snapshots",
+        lambda *_args: {rally["rally_id"]: snapshot},
+    )
+    monkeypatch.setattr(daily, "_payload", lambda *_args: {"query": "q", "candidate": "c", "context": []})
+    class FakeTextCache(dict[str, str]):
+        def prefetch(self, _hashes: object) -> None:
+            return None
+
+    monkeypatch.setattr(daily.catalog, "CatalogTextCache", lambda *_args: FakeTextCache())
+
+    prepared = daily.prepare(
+        root=root,
+        bundle_path=tmp_path / "bundle",
+        receipt_path=tmp_path / "daily.json",
+        capture_progress_path=progress,
+    )
+    assert prepared["status"] == "pending"
+    assert Path(str(prepared["bundle_path"])).is_dir()
+
+
 def test_prepare_waits_for_native_split_plan_without_reassigning_test(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "root"
     monkeypatch.setattr(
