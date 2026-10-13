@@ -161,6 +161,245 @@ def test_recall_distillation_kpi_marks_tampered_real_state_visible(
     assert payload["alert"] is True
 
 
+def test_recall_distillation_health_explains_disabled_capture_as_human_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    (root / "config.toml").write_text(
+        "[recall.distillation]\nenabled = false\ncapture_enabled = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+        "status": "capture_only",
+        "worker_status": "capture_only",
+        "hold_reason": "blind_repeat_pairs_below_floor",
+        "alert": False,
+    })
+
+    payload = health.recall_distillation_health(root)
+
+    assert payload["alert"] is True
+    assert payload["stop_reason"] == {
+        "category": "human_wait",
+        "reason": "enabled_false",
+        "message": "人の判断待ち: 蒸留が無効です (enabled=false)",
+    }
+
+
+def test_recall_distillation_health_does_not_treat_legacy_success_as_label_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    (root / "config.toml").write_text(
+        "[recall.distillation]\n"
+        "enabled = true\n"
+        "capture_enabled = true\n"
+        "teacher_profile = \"local-triad-v1\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+        "status": "capture_only",
+        "worker_status": "capture_only",
+        "hold_reason": "counterfactual_pairs_below_floor",
+        "last_success_at": "2020-01-01T00:00:00Z",
+        "alert": False,
+    })
+
+    payload = health.recall_distillation_health(root)
+    reasons = {item["reason"] for item in payload["alerts"]}
+
+    assert payload["progress_stale"] is False
+    assert payload["progress_source"] == "missing"
+    assert "counterfactual_pairs_below_floor" in reasons
+    assert "durable_progress_missing" in reasons
+    assert all(item["category"] == "data_wait" for item in payload["alerts"])
+
+
+def test_recall_distillation_health_reports_missing_and_expired_teacher_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    (root / "config.toml").write_text(
+        "[recall.distillation]\n"
+        "enabled = true\n"
+        "capture_enabled = true\n"
+        "teacher_profile = \"native-luna-single-v1\"\n"
+        "native_luna_enabled = true\n"
+        "ox_enabled = true\n"
+        "ox_expires_at = \"2020-01-01T00:00:00Z\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+        "status": "deferred",
+        "worker_status": "deferred",
+        "hold_reason": "",
+        "alert": False,
+    })
+
+    payload = health.recall_distillation_health(root)
+    reasons = {item["reason"] for item in payload["alerts"]}
+
+    assert "teacher_contract_missing" in reasons
+    assert "teacher_contract_expired" in reasons
+    assert all(
+        item["category"] == "human_wait"
+        for item in payload["alerts"]
+        if item["reason"] in {"teacher_contract_missing", "teacher_contract_expired"}
+    )
+
+
+def test_recall_distillation_health_uses_only_the_native_contract_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_distillation_store as store
+
+    root = tmp_path / "wiki"
+    root.mkdir()
+    (root / "config.toml").write_text(
+        "[recall.distillation]\n"
+        "enabled = true\n"
+        "capture_enabled = true\n"
+        "teacher_profile = \"native-luna-single-v1\"\n"
+        "native_luna_enabled = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+        "status": "ready",
+        "worker_status": "idle",
+        "hold_reason": "",
+        "alert": False,
+    })
+    old_contract = root / "runtime" / "recall-distillation" / "ox-profile-contract.json"
+    store.write_sealed_state(old_contract, {"expires_at": ""})
+
+    missing = health.recall_distillation_health(root)
+    assert "teacher_contract_missing" in missing["reason_codes"]
+
+    native_contract = (
+        root / "runtime" / "recall-distillation" / "native-luna-profile-contract.json"
+    )
+    store.write_sealed_state(native_contract, {"expires_at": ""})
+    tampered = health.recall_distillation_health(root)
+    assert "teacher_contract_missing" in tampered["reason_codes"]
+    from chronovisor.recall import recall_distillation_native as native
+
+    monkeypatch.setattr(native, "read_contract", lambda _root: {"expires_at": ""})
+    present = health.recall_distillation_health(root)
+    assert "teacher_contract_missing" not in present["reason_codes"]
+    assert "teacher_contract_expiry_warning" not in present["reason_codes"]
+    assert present["teacher_contract_expires_at"] is None
+
+
+def test_recall_distillation_health_rejects_partial_native_profile_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    (root / "config.toml").write_text(
+        "[recall.distillation]\n"
+        "enabled = true\n"
+        "capture_enabled = true\n"
+        "teacher_profile = \"native-luna-single-v1-canary\"\n"
+        "native_luna_enabled = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+        "status": "ready",
+        "worker_status": "idle",
+        "hold_reason": "",
+        "alert": False,
+    })
+
+    payload = health.recall_distillation_health(root)
+    reasons = set(payload["reason_codes"])
+
+    assert "native_luna_profile_mismatch" in reasons
+    assert "teacher_contract_missing" in reasons
+
+
+def test_recall_distillation_health_distinguishes_teacher_stop_from_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    (root / "config.toml").write_text(
+        "[recall.distillation]\n"
+        "enabled = true\n"
+        "capture_enabled = true\n"
+        "teacher_profile = \"local-triad-v1\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+        "status": "deferred",
+        "worker_status": "deferred",
+        "error_code": "ox_teacher_stopped",
+        "hold_reason": "",
+        "alert": False,
+    })
+
+    payload = health.recall_distillation_health(root)
+
+    assert "teacher_stopped" in payload["reason_codes"]
+    assert "teacher_missing" not in payload["reason_codes"]
+
+
+def test_recall_distillation_health_surfaces_native_teacher_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    (root / "config.toml").write_text(
+        "[recall.distillation]\n"
+        "enabled = true\n"
+        "capture_enabled = true\n"
+        "teacher_profile = \"native-luna-single-v1\"\n"
+        "native_luna_enabled = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+        "status": "deferred",
+        "worker_status": "deferred",
+        "capture_only_reasons": ["native_luna_teacher_unavailable"],
+        "hold_reason": "",
+        "alert": False,
+    })
+
+    payload = health.recall_distillation_health(root)
+
+    assert "teacher_missing" in payload["reason_codes"]
+
+
+def test_recall_distillation_health_prefers_label_progress_over_last_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    root.mkdir()
+    (root / "config.toml").write_text(
+        "[recall.distillation]\n"
+        "enabled = true\n"
+        "capture_enabled = true\n"
+        "teacher_profile = \"local-triad-v1\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(health, "recall_distillation_kpi", lambda: {
+        "status": "capture_only",
+        "worker_status": "capture_only",
+        "last_success_at": datetime.now(UTC).isoformat(),
+        "last_label_at": "2020-01-01T00:00:00Z",
+        "hold_reason": "counterfactual_pairs_below_floor",
+        "alert": False,
+    })
+
+    payload = health.recall_distillation_health(root)
+
+    assert payload["last_label_at"] == "2020-01-01T00:00:00+00:00"
+    assert payload["progress_stale"] is True
+    assert "durable_progress_stale" in payload["reason_codes"]
+
+
 def test_semantic_index_kpi_is_inactive_when_rollout_is_off(
     monkeypatch,
 ) -> None:
@@ -279,6 +518,87 @@ def test_lint_queue_kpi_counts_only_unresolved_issue_keys(tmp_path: Path) -> Non
         "untracked": 2,
         "handled": 1,
     }
+
+
+def test_queue_health_alerts_only_stale_active_lanes_and_keeps_quarantine_history(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wiki"
+    label_path = root / "recall" / "search-label-queue.jsonl"
+    lint_state = root / "runtime" / "convergence" / "state.json"
+    replay_path = root / "review" / "raw-replay-queue.jsonl"
+    label_path.parent.mkdir(parents=True)
+    lint_state.parent.mkdir(parents=True)
+    replay_path.parent.mkdir(parents=True)
+    label_path.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in (
+                {
+                    "queue_status": "pending_review",
+                    "preregistered_at": "2020-01-01T00:00:00Z",
+                },
+                {
+                    "queue_status": "pending_frontier_review",
+                    "preregistered_at": "2020-01-01T00:00:00Z",
+                },
+                {"queue_status": "completed", "ts": "2020-01-01T00:00:00Z"},
+            )
+        ),
+        encoding="utf-8",
+    )
+    recent = datetime.now(UTC).isoformat()
+    lint_state.write_text(
+        json.dumps(
+            {
+                "items": {
+                    "local": {
+                        "lane": "lint_repair",
+                        "status": "pending_local",
+                        "created_at": "2020-01-01T00:00:00Z",
+                        "updated_at": recent,
+                        "last_attempt_at": recent,
+                    },
+                    "local_route": {
+                        "lane": "lint_repair",
+                        "status": "local_route_provenance_invalid",
+                        "created_at": "2020-01-01T00:00:00Z",
+                    },
+                    "frontier": {
+                        "lane": "lint_repair",
+                        "status": "pending_frontier",
+                        "created_at": "2020-01-01T00:00:00Z",
+                        "updated_at": "2020-01-01T00:00:00Z",
+                        "human_required": True,
+                    },
+                    "quarantine": {
+                        "lane": "lint_repair",
+                        "status": "quarantined",
+                        "created_at": "2020-01-01T00:00:00Z",
+                        "updated_at": "2020-01-01T00:00:00Z",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    replay_path.write_text(
+        json.dumps(
+            {"status": "pending", "created_at": "2020-01-01T00:00:00Z"}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = health.queue_health_snapshot(root)
+    reasons = {item["reason"] for item in payload["alerts"]}
+
+    assert "search_labels_late_lane" in reasons
+    assert "search_labels_authority_wait" in reasons
+    assert "lint_repair_authority_wait" in reasons
+    assert "raw_replay_late_lane" in reasons
+    assert payload["lint_repair"]["quarantined"] == 1
+    assert all(item["queue"] != "quarantine" for item in payload["alerts"])
 
 
 def test_capture_kpi_counts_raw_claim_coverage(tmp_path: Path, monkeypatch) -> None:

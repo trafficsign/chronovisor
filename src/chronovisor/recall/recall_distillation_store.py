@@ -1593,6 +1593,8 @@ def snapshot(chronovisor_root: Path) -> dict[str, Any]:
             for value in (manifest_backlog, candidate_backlog)
         ):
             raise DistillationStoreError("cold-start backlog is invalid")
+        last_label_at = state.get("last_label_at")
+        teacher_profile = state.get("teacher_profile")
         return {
             "schema": "chronovisor.recall-distillation-health.v1",
             "status": worker_status,
@@ -1605,6 +1607,12 @@ def snapshot(chronovisor_root: Path) -> dict[str, Any]:
             "candidate_policy_id": pointers["candidate"],
             "lkg_policy_id": pointers["lkg"],
             "last_success_at": str(state.get("last_success_at") or ""),
+            "last_label_at": (
+                last_label_at[:80] if isinstance(last_label_at, str) else ""
+            ),
+            "teacher_profile": (
+                teacher_profile[:80] if isinstance(teacher_profile, str) else ""
+            ),
             "error_code": error_code[:80],
             "feature_revision": "recall-distill-text-v2",
             "teacher_only": teacher_only,
@@ -1632,6 +1640,8 @@ def snapshot(chronovisor_root: Path) -> dict[str, Any]:
             "candidate_policy_id": "",
             "lkg_policy_id": "",
             "last_success_at": "",
+            "last_label_at": "",
+            "teacher_profile": "",
             "error_code": "missing_state" if missing else "invalid_state",
             "feature_revision": "recall-distill-text-v2",
             "teacher_only": 0,

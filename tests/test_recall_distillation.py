@@ -9163,13 +9163,39 @@ def test_counterfactual_uses_exact_arms_and_copies_live_features(
 
 
 def test_snapshot_distinguishes_missing_from_tampering(tmp_path: Path) -> None:
-    assert store.snapshot(tmp_path)["error_code"] == "missing_state"
+    missing = store.snapshot(tmp_path)
+    assert missing["error_code"] == "missing_state"
+    assert missing["last_label_at"] == ""
+    assert missing["teacher_profile"] == ""
     path = store.distillation_dir(tmp_path) / store.STATE_FILE
     path.parent.mkdir(parents=True)
     path.write_text('{"schema":"broken"}\n')
     snapshot = store.snapshot(tmp_path)
     assert snapshot["status"] == "tampered"
     assert snapshot["error_code"] == "invalid_state"
+
+
+def test_snapshot_projects_label_progress_and_teacher_profile_only(
+    tmp_path: Path,
+) -> None:
+    store.write_sealed_state(
+        store.distillation_dir(tmp_path) / store.STATE_FILE,
+        {
+            "kind": "worker-state",
+            "status": "ready",
+            "worker_status": "ready",
+            "last_success_at": "2026-08-01T00:00:00Z",
+            "last_label_at": "2026-10-13T00:00:00Z",
+            "teacher_profile": "native-luna-single-v1",
+            "private_payload": "opaque-sentinel",
+        },
+    )
+
+    snapshot = store.snapshot(tmp_path)
+
+    assert snapshot["last_label_at"] == "2026-10-13T00:00:00Z"
+    assert snapshot["teacher_profile"] == "native-luna-single-v1"
+    assert "private_payload" not in snapshot
 
 
 def test_text_feature_v2_is_identical_for_historical_and_live_jp_en() -> None:

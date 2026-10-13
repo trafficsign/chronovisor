@@ -130,11 +130,37 @@ def test_chronovisor_init_reports_deferred_counts_in_parallel_bootstrap_status(
         lambda: [raw_dir / "pending-a.md", raw_dir / "pending-b.md"],
     )
     monkeypatch.setattr(ollama, "is_available", lambda: False)
+    monkeypatch.setattr(
+        server,
+        "_session_queue_health",
+        lambda: {
+            "alert": True,
+            "alerts": [
+                {
+                    "component": "queues.search_labels",
+                    "category": "data_wait",
+                    "reason": "search_labels_late_lane",
+                    "message": "データ待ち: search labels の lane が進んでいません",
+                }
+            ],
+        },
+    )
 
     payload = json.loads(server.chronovisor_init())
 
     assert scans == [["operational.md", "pending-a.md", "pending-b.md", "semantic.md"]]
-    assert payload["status"] | {"librarian": None} == {
+    status = payload["status"]
+    assert {key: (None if key == "librarian" else status[key]) for key in (
+        "page_count",
+        "raw_total",
+        "raw_pending",
+        "semantic_deferred",
+        "operational_deferred",
+        "raw_outstanding",
+        "ollama_status",
+        "chronovisor_root",
+        "librarian",
+    )} == {
         "page_count": 2,
         "raw_total": 4,
         "raw_pending": 2,
@@ -145,6 +171,12 @@ def test_chronovisor_init_reports_deferred_counts_in_parallel_bootstrap_status(
         "chronovisor_root": str(tmp_path),
         "librarian": None,
     }
+    assert status["health"]["status"] == "alert"
+    assert status["health"]["alerts"][0]["category"] == "human_wait"
+    assert status["health"]["alerts"][0]["reason"] == "enabled_false"
+    assert status["health"]["alerts"][1]["reason"] == "search_labels_late_lane"
+    assert status["recall_distillation"]["stop_reason"]["reason"] == "enabled_false"
+    assert status["queues"]["alert"] is True
     assert payload["status"]["librarian"]["state"] == "NOT_READY"
     assert (
         payload["status"]["librarian"]["authority"]["reason"]

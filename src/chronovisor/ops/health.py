@@ -21,6 +21,8 @@ from chronovisor.decision.semantic_hold import (
 )
 
 INGEST_LIVENESS_TTL_SECONDS = 5 * 60
+DISTILLATION_PROGRESS_STALE_SECONDS = 24 * 60 * 60
+DISTILLATION_EXPIRY_WARNING_SECONDS = 7 * 24 * 60 * 60
 
 
 def _jsonl_count(path: Path) -> int:
@@ -89,6 +91,375 @@ def recall_distillation_kpi() -> dict[str, Any]:
         "rollout_percent": rollout_percent,
         "alert": status in {"stale", "tampered", "invalid", "error"},
     }
+
+
+def _distillation_config(root: Path) -> dict[str, Any]:
+    """Read only the public distillation switches needed for health alerts."""
+
+    from chronovisor.core import runtime_config
+
+    config_path = root / "config.toml"
+    if not config_path.exists():
+        config_path = runtime_config.CONFIG_FILE
+    data = runtime_config.load_toml_file(config_path)
+    recall = data.get("recall") if isinstance(data, dict) else None
+    table = recall.get("distillation") if isinstance(recall, dict) else None
+    table = table if isinstance(table, dict) else {}
+    enabled_value = table.get("enabled")
+    enabled = enabled_value is True
+    override = os.environ.get("CHRONOVISOR_RECALL_DISTILLATION")
+    if override is not None:
+        normalized = override.strip().lower()
+        if normalized in {"0", "false", "no", "off"}:
+            enabled = False
+        elif normalized in {"1", "true", "yes", "on"}:
+            enabled = True
+        else:
+            return {
+                "enabled": enabled,
+                "capture_enabled": table.get("capture_enabled") is True,
+                "teacher_profile": str(table.get("teacher_profile") or ""),
+                "native_luna_enabled": table.get("native_luna_enabled") is True,
+                "ox_enabled": table.get("ox_enabled") is True,
+                "ox_expires_at": table.get("ox_expires_at"),
+                "config_error": "invalid_enabled_override",
+            }
+    return {
+        "enabled": enabled,
+        "capture_enabled": table.get("capture_enabled") is True,
+        "teacher_profile": str(table.get("teacher_profile") or ""),
+        "native_luna_enabled": table.get("native_luna_enabled") is True,
+        "ox_enabled": table.get("ox_enabled") is True,
+        "ox_expires_at": table.get("ox_expires_at"),
+        "config_error": "" if isinstance(enabled_value, (bool, type(None))) else "invalid_enabled",
+    }
+
+
+def _distillation_state(root: Path) -> dict[str, Any]:
+    """Read sealed state metadata without exposing private ledgers or text."""
+
+    try:
+        from chronovisor.recall import recall_distillation_store as store
+
+        return store.read_sealed(
+            store.distillation_dir(root) / store.STATE_FILE,
+            schema=store.DISTILLATION_SCHEMA,
+        )
+    except Exception:
+        return {}
+
+
+def _parse_utc_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _distillation_contract_expiry(root: Path, config: dict[str, Any]) -> tuple[str, bool]:
+    """Return a contract expiry and whether an expected sealed contract exists."""
+
+    expiry = config.get("ox_expires_at")
+    teacher_profile = str(config.get("teacher_profile") or "")
+    native_profile = teacher_profile == "native-luna-single-v1"
+    native_required = native_profile or config.get("native_luna_enabled") is True
+    ox_required = bool(config.get("ox_enabled")) or expiry not in {None, ""}
+    if native_required:
+        contract_path = (
+            root
+            / "runtime"
+            / "recall-distillation"
+            / "native-luna-profile-contract.json"
+        )
+    elif ox_required:
+        contract_path = (
+            root / "runtime" / "recall-distillation" / "ox-profile-contract.json"
+        )
+    else:
+        return str(expiry or ""), False
+    if not contract_path.exists():
+        return str(expiry or ""), False
+    if native_required:
+        # The native lane owns strict pointer, immutable-artifact, and closed
+        # identity validation in its small contract module.  Do not accept the
+        # generic legacy sealed-state reader here: a native contract must prove
+        # its fixed profile identity and immutable artifact binding.
+        try:
+            from chronovisor.recall import recall_distillation_native as native
+            contract = native.read_contract(root)
+        except Exception:
+            return "", False
+        # ``read_contract`` fails closed with an empty mapping for a missing,
+        # mismatched, or tampered pointer.  Do not mistake that sentinel for a
+        # valid no-expiry contract.
+        if not isinstance(contract, dict) or not contract:
+            return "", False
+        contract_expiry = contract.get("expires_at")
+        if isinstance(contract_expiry, str):
+            expiry = contract_expiry
+        return str(expiry or ""), True
+    try:
+        from chronovisor.recall import recall_distillation_store as store
+
+        contract = store.read_sealed(
+            contract_path,
+            schema=store.DISTILLATION_SCHEMA,
+        )
+        contract_expiry = contract.get("expires_at")
+        # An empty expires_at explicitly means that the contract has no expiry.
+        if isinstance(contract_expiry, str):
+            expiry = contract_expiry
+    except Exception:
+        return "", False
+    return str(expiry or ""), True
+
+
+def _distillation_alerts(
+    snapshot: dict[str, Any],
+    *,
+    root: Path,
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Classify a stopped worker without weakening any distillation gate."""
+
+    config = _distillation_config(root)
+    state = _distillation_state(root)
+    alerts: list[dict[str, str]] = []
+
+    def add(category: str, reason: str, message: str) -> None:
+        if not any(item["reason"] == reason for item in alerts):
+            alerts.append(
+                {"category": category, "reason": reason, "message": message}
+            )
+
+    if config.get("config_error"):
+        add(
+            "human_wait",
+            str(config["config_error"]),
+            "人の判断待ち: 蒸留設定を確認してください",
+        )
+
+    enabled = bool(config.get("enabled"))
+    capture_enabled = bool(config.get("capture_enabled"))
+    if not enabled and capture_enabled:
+        add(
+            "human_wait",
+            "enabled_false",
+            "人の判断待ち: 蒸留が無効です (enabled=false)",
+        )
+
+    teacher_profile = str(config.get("teacher_profile") or "")
+    native_profile = teacher_profile == "native-luna-single-v1"
+    native_luna_enabled = config.get("native_luna_enabled") is True
+    if enabled and not teacher_profile:
+        add(
+            "human_wait",
+            "teacher_config_missing",
+            "人の判断待ち: 教師設定がありません",
+        )
+    if enabled and native_luna_enabled and not native_profile:
+        add(
+            "human_wait",
+            "native_luna_profile_mismatch",
+            "人の判断待ち: native Luna の教師 profile が一致しません",
+        )
+    if enabled and native_profile and not native_luna_enabled:
+        add(
+            "human_wait",
+            "native_luna_disabled",
+            "人の判断待ち: native Luna 教師が無効です (native_luna_enabled=false)",
+        )
+
+    error_code = str(snapshot.get("error_code") or state.get("error_code") or "")
+    worker_status = str(
+        snapshot.get("worker_status")
+        or snapshot.get("status")
+        or state.get("worker_status")
+        or state.get("status")
+        or ""
+    )
+    state_reasons: list[object] = []
+    for source in (snapshot, state):
+        reasons = source.get("capture_only_reasons")
+        if isinstance(reasons, list):
+            state_reasons.extend(reasons)
+    state_reason_set = {str(reason) for reason in state_reasons}
+    teacher_stopped_reasons = {
+        "ox_teacher_stopped",
+        "teacher_stopped",
+        "native_luna_stopped",
+    }
+    teacher_missing_reasons = {
+        "local_teachers_unavailable",
+        "ox_teacher_unavailable",
+        "teacher_unavailable",
+        "teacher_missing",
+        "native_luna_unavailable",
+        "native_luna_teacher_unavailable",
+    }
+    contract_missing_reasons = {
+        "profile_contract_unavailable",
+    }
+    contract_expired_reasons = {"profile_contract_expired"}
+    if error_code in teacher_stopped_reasons or state_reason_set & teacher_stopped_reasons:
+        add(
+            "human_wait",
+            "teacher_stopped",
+            "人の判断待ち: 教師モデルが停止しています",
+        )
+    if error_code in teacher_missing_reasons or state_reason_set & teacher_missing_reasons:
+        add(
+            "human_wait",
+            "teacher_missing",
+            "人の判断待ち: 教師が利用できません",
+        )
+    if error_code in contract_missing_reasons or state_reason_set & contract_missing_reasons:
+        add(
+            "human_wait",
+            "teacher_contract_missing",
+            "人の判断待ち: 教師の契約がありません",
+        )
+    if error_code in contract_expired_reasons or state_reason_set & contract_expired_reasons:
+        add(
+            "human_wait",
+            "teacher_contract_expired",
+            "人の判断待ち: 教師の契約が期限切れです",
+        )
+    if snapshot.get("status") in {"unavailable", "tampered", "invalid", "error"}:
+        add(
+            "human_wait",
+            "distillation_state_unavailable",
+            "人の判断待ち: 蒸留の状態を確認できません",
+        )
+
+    expiry, contract_present = _distillation_contract_expiry(root, config)
+    contract_required = (
+        native_profile
+        or native_luna_enabled
+        or bool(config.get("ox_enabled"))
+        or expiry not in {None, ""}
+    )
+    if enabled and contract_required and not contract_present:
+        add(
+            "human_wait",
+            "teacher_contract_missing",
+            "人の判断待ち: 教師の契約がありません",
+        )
+    expires_at = _parse_utc_timestamp(expiry)
+    if expires_at is not None:
+        remaining = (expires_at - datetime.now(UTC)).total_seconds()
+        if remaining <= 0:
+            add(
+                "human_wait",
+                "teacher_contract_expired",
+                "人の判断待ち: 教師の契約が期限切れです",
+            )
+        elif remaining <= DISTILLATION_EXPIRY_WARNING_SECONDS:
+            add(
+                "human_wait",
+                "teacher_contract_expiry_warning",
+                "人の判断待ち: 教師の契約がまもなく期限切れです",
+            )
+
+    hold_reason = str(snapshot.get("hold_reason") or state.get("hold_reason") or "")
+    if enabled and hold_reason and not alerts:
+        add(
+            "data_wait",
+            hold_reason,
+            f"データ待ち: 蒸留の受入条件が未達です ({hold_reason})",
+        )
+
+    progress_values: list[dict[str, Any]] = []
+    for source in (snapshot, state):
+        progress = source.get("progress")
+        if isinstance(progress, dict):
+            progress_values.append(progress)
+    last_label_value: object = snapshot.get("last_label_at") or state.get(
+        "last_label_at"
+    )
+    if not last_label_value:
+        for progress in progress_values:
+            last_label_value = progress.get("last_label_at")
+            if last_label_value:
+                break
+    last_label_at = _parse_utc_timestamp(last_label_value)
+    last_success_value = snapshot.get("last_success_at") or state.get(
+        "last_success_at"
+    )
+    # A production profile's last_success_at can advance for capture-only or
+    # maintenance work.  Once labeling is configured, only the explicit label
+    # boundary proves teacher progress; do not present the older success time
+    # as a fresh label watermark.  Legacy states without a configured profile
+    # retain the conservative fallback for backward compatibility.
+    legacy_success_at = _parse_utc_timestamp(last_success_value)
+    production_labeling = enabled and bool(
+        str(config.get("teacher_profile") or "")
+        or str(snapshot.get("teacher_profile") or "")
+        or str(state.get("teacher_profile") or "")
+    )
+    last_success = (
+        last_label_at
+        if production_labeling
+        else last_label_at or legacy_success_at
+    )
+    progress_source = (
+        "last_label_at"
+        if last_label_at is not None
+        else "missing"
+        if production_labeling
+        else "last_success_at_legacy"
+        if legacy_success_at is not None
+        else "missing"
+    )
+    progress_age = None
+    if last_success is not None:
+        progress_age = max(0, int((datetime.now(UTC) - last_success).total_seconds()))
+    progress_stale = bool(enabled and progress_age is not None and progress_age > DISTILLATION_PROGRESS_STALE_SECONDS)
+    if enabled and progress_stale:
+        add(
+            "data_wait",
+            "durable_progress_stale",
+            "データ待ち: 蒸留のdurable progressが stale です",
+        )
+    if enabled and not last_success and worker_status not in {"ready", "idle"}:
+        add(
+            "data_wait",
+            "durable_progress_missing",
+            "データ待ち: 蒸留のdurable progressがありません",
+        )
+
+    diagnostic = {
+        **snapshot,
+        "enabled": enabled,
+        "capture_enabled": capture_enabled,
+        "teacher_profile": str(config.get("teacher_profile") or ""),
+        "native_luna_enabled": native_luna_enabled,
+        "teacher_contract_expires_at": expiry or None,
+        "last_label_at": last_label_at.isoformat() if last_label_at else None,
+        "progress_source": progress_source,
+        "progress_age_seconds": progress_age,
+        "progress_stale": progress_stale,
+        "alert": bool(snapshot.get("alert")) or bool(alerts),
+        "alerts": alerts,
+        "reason_codes": [item["reason"] for item in alerts],
+        "wait_category": alerts[0]["category"] if alerts else "",
+        "detail": alerts[0]["message"] if alerts else "",
+        "stop_reason": alerts[0] if alerts else None,
+    }
+    return diagnostic, alerts
+
+
+def recall_distillation_health(root: Path | None = None) -> dict[str, Any]:
+    """Return the lightweight distillation diagnosis used by health and init."""
+
+    effective_root = root or CHRONOVISOR_ROOT
+    snapshot = recall_distillation_kpi()
+    diagnostic, _ = _distillation_alerts(snapshot, root=effective_root)
+    return diagnostic
 
 
 def summary_coverage() -> dict[str, Any]:
@@ -1010,6 +1381,22 @@ _LINT_ACTIVE_STATUSES = {
     "frontier_running",
 }
 
+QUEUE_PROGRESS_STALE_SECONDS = 24 * 60 * 60
+_SEARCH_LABEL_REVIEW_STATUSES = {"pending_review", "unknown"}
+_SEARCH_LABEL_FRONTIER_STATUSES = {
+    "pending_frontier_review",
+    "frontier_retry",
+    "frontier_uncertain",
+}
+_RAW_REPLAY_ACTIVE_STATUSES = {"pending", "retry", "retry_wait"}
+_LINT_LOCAL_AUTHORITY_STATUSES = {
+    "local_route_provenance_invalid",
+    "local_route_uncertain",
+    "local_route_lease_expired",
+    "local_lease_expired",
+    "lease_expired",
+}
+
 
 def _lint_queue_kpi(queue_path: Path, convergence_path: Path) -> dict[str, int]:
     """Count current unresolved lint issues instead of append-only history.
@@ -1072,6 +1459,357 @@ def _lint_queue_kpi(queue_path: Path, convergence_path: Path) -> dict[str, int]:
     }
 
 
+def _queue_timestamp(value: object) -> datetime | None:
+    """Parse queue timestamps, treating legacy naive values as UTC."""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _queue_group_progress(
+    rows: list[dict[str, Any]],
+    *,
+    status_field: str,
+    statuses: set[str],
+    created_fields: tuple[str, ...],
+    progress_fields: tuple[str, ...],
+) -> dict[str, Any]:
+    selected = [
+        row for row in rows if str(row.get(status_field) or "unknown") in statuses
+    ]
+    status_counts: dict[str, int] = {}
+    for row in selected:
+        status = str(row.get(status_field) or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+    created: list[datetime] = []
+    progress: list[datetime] = []
+    for row in selected:
+        for field in created_fields:
+            timestamp = _queue_timestamp(row.get(field))
+            if timestamp is not None:
+                created.append(timestamp)
+                break
+        for field in progress_fields:
+            timestamp = _queue_timestamp(row.get(field))
+            if timestamp is not None:
+                progress.append(timestamp)
+                break
+    oldest = min(created) if created else None
+    last_progress = max(progress) if progress else None
+    now = datetime.now(UTC)
+    oldest_age = (now - oldest).total_seconds() if oldest else None
+    progress_age = (now - last_progress).total_seconds() if last_progress else None
+    stale = bool(
+        selected
+        and oldest_age is not None
+        and oldest_age > QUEUE_PROGRESS_STALE_SECONDS
+        and (progress_age is None or progress_age > QUEUE_PROGRESS_STALE_SECONDS)
+    )
+    return {
+        "active": len(selected),
+        "status_counts": dict(sorted(status_counts.items())),
+        "oldest_at": oldest.isoformat() if oldest else None,
+        "oldest_age_seconds": round(max(0.0, oldest_age), 3)
+        if oldest_age is not None
+        else None,
+        "last_progress_at": last_progress.isoformat() if last_progress else None,
+        "last_progress_age_seconds": round(max(0.0, progress_age), 3)
+        if progress_age is not None
+        else None,
+        "stale": stale,
+    }
+
+
+def _queue_stall_alert(
+    *,
+    queue: str,
+    lane: str,
+    diagnostic: dict[str, Any],
+    category: str,
+    reason: str,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "component": f"queues.{queue}",
+        "category": category,
+        "reason": reason,
+        "message": message,
+        "queue": queue,
+        "lane": lane,
+        "active": diagnostic["active"],
+        "statuses": diagnostic["status_counts"],
+        "oldest_at": diagnostic["oldest_at"],
+        "last_progress_at": diagnostic["last_progress_at"],
+        "oldest_age_seconds": diagnostic["oldest_age_seconds"],
+        "last_progress_age_seconds": diagnostic["last_progress_age_seconds"],
+    }
+
+
+def _queue_health_snapshot(root: Path) -> dict[str, Any]:
+    """Return privacy-safe queue progress and stall diagnostics.
+
+    Queue presence alone is not an alert: a lane is stale only when its active
+    rows have exceeded the progress TTL.  Quarantined and terminal rows remain
+    visible as historical counters and never make the current health red.
+    """
+
+    recall_root = root / "recall"
+    review_root = root / "review"
+    runtime_root = root / "runtime"
+    label_path = recall_root / "search-label-queue.jsonl"
+    convergence_path = runtime_root / "convergence" / "state.json"
+    replay_path = review_root / "raw-replay-queue.jsonl"
+    label_rows = _read_jsonl(label_path, limit=100000)
+    label_counts = _queue_status_counts(label_path, "queue_status")
+    alerts: list[dict[str, Any]] = []
+    search_summary: dict[str, Any] = {
+        "status_counts": label_counts,
+        "active": sum(label_counts.get(status, 0) for status in (
+            _SEARCH_LABEL_REVIEW_STATUSES | _SEARCH_LABEL_FRONTIER_STATUSES
+        )),
+        "lanes": {},
+    }
+    for lane, statuses in (
+        ("review", _SEARCH_LABEL_REVIEW_STATUSES),
+        ("frontier", _SEARCH_LABEL_FRONTIER_STATUSES),
+    ):
+        diagnostic = _queue_group_progress(
+            label_rows,
+            status_field="queue_status",
+            statuses=statuses,
+            created_fields=("preregistered_at", "ts"),
+            progress_fields=("reviewed_at", "last_attempt_at"),
+        )
+        search_summary["lanes"][lane] = diagnostic
+        if not diagnostic["stale"]:
+            continue
+        # A frontier lane is explicitly delegated to authority review.  Keep
+        # that distinction visible even when an older row lacks the optional
+        # decision_authority_error marker.
+        authority_wait = lane == "frontier" or any(
+            isinstance(row.get("decision_authority_error"), str)
+            and row.get("decision_authority_error")
+            for row in label_rows
+            if str(row.get("queue_status") or "unknown") in statuses
+        )
+        if authority_wait:
+            alerts.append(
+                _queue_stall_alert(
+                    queue="search_labels",
+                    lane=lane,
+                    diagnostic=diagnostic,
+                    category="human_wait",
+                    reason="search_labels_authority_wait",
+                    message="人の判断待ち: search labels の frontier authority が停滞しています",
+                )
+            )
+        else:
+            alerts.append(
+                _queue_stall_alert(
+                    queue="search_labels",
+                    lane=lane,
+                    diagnostic=diagnostic,
+                    category="data_wait",
+                    reason="search_labels_late_lane",
+                    message="データ待ち: search labels の lane が進んでいません",
+                )
+            )
+
+    try:
+        convergence_payload = json.loads(convergence_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        convergence_payload = {}
+    convergence_items = (
+        convergence_payload.get("items")
+        if isinstance(convergence_payload, dict)
+        else None
+    )
+    lint_rows = [
+        dict(item)
+        for item in (
+            convergence_items.values()
+            if isinstance(convergence_items, dict)
+            else ()
+        )
+        if isinstance(item, dict) and item.get("lane") == "lint_repair"
+    ]
+    lint_summary: dict[str, Any] = {
+        "status_counts": {},
+        "active": 0,
+        "quarantined": 0,
+        "lanes": {},
+    }
+    for row in lint_rows:
+        status = str(row.get("status") or "unknown")
+        lint_summary["status_counts"][status] = (
+            lint_summary["status_counts"].get(status, 0) + 1
+        )
+    lint_summary["quarantined"] = lint_summary["status_counts"].get("quarantined", 0)
+    for lane, statuses in (
+        (
+            "local",
+            {
+                "pending_local",
+                "local_retry",
+                "local_running",
+                *_LINT_LOCAL_AUTHORITY_STATUSES,
+            },
+        ),
+        ("frontier", {"pending_frontier", "frontier_retry", "frontier_running"}),
+    ):
+        diagnostic = _queue_group_progress(
+            lint_rows,
+            status_field="status",
+            statuses=statuses,
+            created_fields=("created_at", "updated_at"),
+            # Updated-at changes when a row is reclassified or leased; an
+            # actual attempt is the durable progress boundary for this lane.
+            progress_fields=("last_attempt_at",),
+        )
+        lint_summary["lanes"][lane] = diagnostic
+        lint_summary["active"] += diagnostic["active"]
+        if not diagnostic["stale"]:
+            continue
+        # Frontier work always requires the authority lane.  Local rows that
+        # explicitly report route provenance, uncertainty, or an expired lease
+        # are also human-wait states; a plain pending_local row remains a
+        # data-wait scheduler stall.
+        authority_wait = lane == "frontier" or any(
+            row.get("human_required") is True
+            or any(
+                marker in str(row.get(field) or "").casefold()
+                for field in ("last_failure_class", "quarantine_reason")
+                for marker in ("authority", "lease", "provenance", "uncertain")
+            )
+            or str(row.get("status") or "unknown") in _LINT_LOCAL_AUTHORITY_STATUSES
+            for row in lint_rows
+            if str(row.get("status") or "unknown") in statuses
+        )
+        alerts.append(
+            _queue_stall_alert(
+                queue="lint_repair",
+                lane=lane,
+                diagnostic=diagnostic,
+                category="human_wait" if authority_wait else "data_wait",
+                reason=(
+                    "lint_repair_authority_wait"
+                    if authority_wait
+                    else "lint_repair_late_lane"
+                ),
+                message=(
+                    "人の判断待ち: lint repair の frontier authority が停滞しています"
+                    if authority_wait
+                    else "データ待ち: lint repair の lane が進んでいません"
+                ),
+            )
+        )
+
+    replay_rows = _read_jsonl(replay_path, limit=100000)
+    replay_counts = _queue_status_counts(replay_path, "status")
+    replay_summary: dict[str, Any] = {
+        "status_counts": replay_counts,
+        "active": sum(replay_counts.get(status, 0) for status in _RAW_REPLAY_ACTIVE_STATUSES),
+    }
+    replay_diagnostic = _queue_group_progress(
+        replay_rows,
+        status_field="status",
+        statuses=_RAW_REPLAY_ACTIVE_STATUSES,
+        created_fields=("created_at", "updated_at"),
+        progress_fields=("updated_at", "last_attempt_at", "started_at"),
+    )
+    replay_summary.update(replay_diagnostic)
+    if replay_diagnostic["stale"]:
+        alerts.append(
+            _queue_stall_alert(
+                queue="raw_replay",
+                lane="replay",
+                diagnostic=replay_diagnostic,
+                category="data_wait",
+                reason="raw_replay_late_lane",
+                message="データ待ち: raw replay の lane が進んでいません",
+            )
+        )
+
+    sweeper_path = runtime_root / "session-sweeper-latest.json"
+    try:
+        sweeper = json.loads(sweeper_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        sweeper = {}
+    sweeper_summary = {
+        "status": str(sweeper.get("status") or "missing")
+        if isinstance(sweeper, dict)
+        else "invalid",
+        "pending": sweeper.get("pending") if isinstance(sweeper, dict) else None,
+        "last_progress_at": sweeper.get("ts") if isinstance(sweeper, dict) else None,
+    }
+    if isinstance(sweeper, dict) and sweeper:
+        sweeper_age = _queue_timestamp(sweeper.get("ts"))
+        pending = sweeper.get("pending")
+        sweeper_stale = (
+            sweeper_age is not None
+            and (datetime.now(UTC) - sweeper_age).total_seconds()
+            > QUEUE_PROGRESS_STALE_SECONDS
+        )
+        if sweeper.get("status") not in {"ok", "clean"} or (
+            isinstance(pending, int)
+            and pending > 0
+            and (sweeper_stale or sweeper_age is None)
+        ):
+            alerts.append(
+                _queue_stall_alert(
+                    queue="session_sweeper",
+                    lane="sweeper",
+                    diagnostic={
+                        "active": int(pending or 0),
+                        "status_counts": {str(sweeper.get("status") or "missing"): 1},
+                        "oldest_at": sweeper.get("ts"),
+                        "last_progress_at": sweeper.get("ts"),
+                        "oldest_age_seconds": (
+                            round((datetime.now(UTC) - sweeper_age).total_seconds(), 3)
+                            if sweeper_age
+                            else None
+                        ),
+                        "last_progress_age_seconds": (
+                            round((datetime.now(UTC) - sweeper_age).total_seconds(), 3)
+                            if sweeper_age
+                            else None
+                        ),
+                    },
+                    category="human_wait",
+                    reason="session_sweeper_attention",
+                    message="人の判断待ち: session sweeper の現在状態を確認してください",
+                )
+            )
+
+    return {
+        "alert": bool(alerts),
+        "alerts": alerts,
+        "search_labels": search_summary,
+        "lint_repair": lint_summary,
+        "raw_replay": replay_summary,
+        "session_sweeper": sweeper_summary,
+    }
+
+
+def queue_health_snapshot(root: Path | None = None) -> dict[str, Any]:
+    """Return queue progress and stall diagnostics without queue payloads."""
+
+    return _queue_health_snapshot(root or CHRONOVISOR_ROOT)
+
+
+def queue_health_alerts(root: Path | None = None) -> list[dict[str, Any]]:
+    """Return only current queue alerts for lightweight session bootstrap."""
+
+    return list(queue_health_snapshot(root).get("alerts", []))
+
+
 def health_snapshot() -> dict[str, Any]:
     from chronovisor.core.runtime_config import runtime_identity
     from chronovisor.recall.librarian_status import build_librarian_status
@@ -1091,11 +1829,27 @@ def health_snapshot() -> dict[str, Any]:
     ingest_liveness = ingest_liveness_kpi()
     runtime_status = runtime_status_kpi()
     semantic_index = semantic_index_kpi()
-    overall_alert = bool(ingest_liveness.get("alert")) or bool(runtime_status.get("alert")) or (
-        semantic_index.get("status") == "alert"
+    recall_distillation = recall_distillation_health()
+    queue_health = queue_health_snapshot()
+    overall_alert = (
+        bool(ingest_liveness.get("alert"))
+        or bool(runtime_status.get("alert"))
+        or semantic_index.get("status") == "alert"
+        or bool(recall_distillation.get("alert"))
+        or recall_distillation.get("status") == "alert"
+        or bool(queue_health.get("alert"))
+        or queue_health.get("status") == "alert"
     )
+    alerts: list[dict[str, Any]] = []
+    for item in recall_distillation.get("alerts", []):
+        if isinstance(item, dict):
+            alerts.append({"component": "recall_distillation", **item})
+    for item in queue_health.get("alerts", []):
+        if isinstance(item, dict):
+            alerts.append(dict(item))
     return {
         "status": "alert" if overall_alert else "ok",
+        "alerts": alerts,
         "runtime": runtime_identity(),
         "coverage": coverage,
         "capture": capture_kpi(),
@@ -1106,7 +1860,7 @@ def health_snapshot() -> dict[str, Any]:
         "read_back": read_back_kpi(),
         "autonomy_hardening": autonomy_hardening_kpi(),
         "recall_feedback": recall_feedback_kpi(),
-        "recall_distillation": recall_distillation_kpi(),
+        "recall_distillation": recall_distillation,
         "convergence": convergence_kpi(),
         "capture_pipeline": capture_pipeline_kpi(),
         "ingest_liveness": ingest_liveness,
@@ -1143,6 +1897,7 @@ def health_snapshot() -> dict[str, Any]:
             ),
             "search_label_statuses": label_statuses,
             "raw_replay_statuses": replay_statuses,
+            "health": queue_health,
         },
         "paths": {
             "duplicate_queue": str(duplicate_queue),

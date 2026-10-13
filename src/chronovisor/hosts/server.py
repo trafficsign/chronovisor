@@ -804,6 +804,53 @@ def _session_librarian_summary(librarian: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def _session_recall_distillation_health() -> dict[str, Any]:
+    """Return the lightweight distillation alert used during session bootstrap."""
+
+    try:
+        from chronovisor.ops.health import recall_distillation_health
+
+        return recall_distillation_health(CHRONOVISOR_ROOT)
+    except Exception:
+        return {
+            "status": "unavailable",
+            "alert": True,
+            "alerts": [
+                {
+                    "category": "human_wait",
+                    "reason": "health_unavailable",
+                    "message": "人の判断待ち: 蒸留のhealthを確認できません",
+                }
+            ],
+            "stop_reason": {
+                "category": "human_wait",
+                "reason": "health_unavailable",
+                "message": "人の判断待ち: 蒸留のhealthを確認できません",
+            },
+        }
+
+
+def _session_queue_health() -> dict[str, Any]:
+    """Return current queue stall metadata for session bootstrap."""
+
+    try:
+        from chronovisor.ops.health import queue_health_snapshot
+
+        return queue_health_snapshot(CHRONOVISOR_ROOT)
+    except Exception:
+        return {
+            "alert": True,
+            "alerts": [
+                {
+                    "component": "queues",
+                    "category": "human_wait",
+                    "reason": "queue_health_unavailable",
+                    "message": "人の判断待ち: queue healthを確認できません",
+                }
+            ],
+        }
+
+
 @mcp.tool()
 def chronovisor_init() -> str:
     """Initialize session: returns system pages + status in a single call.
@@ -820,16 +867,21 @@ def chronovisor_init() -> str:
 
     # Run the index refresh, raw-dir count, and Ollama health probe in
     # parallel. The Ollama probe is the heaviest (network) so doing it
-    # alongside the on-disk scans hides its latency.
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    # alongside the on-disk scans hides its latency. The distillation health
+    # probe only reads sealed metadata and config; it does not run a model.
+    with ThreadPoolExecutor(max_workers=6) as ex:
         f_refresh = ex.submit(store.refresh)
         f_raw = ex.submit(_raw_defer_counts)
         f_pending = ex.submit(lambda: len(get_pending_raw_files()))
         f_ollama = ex.submit(is_available)
+        f_recall_health = ex.submit(_session_recall_distillation_health)
+        f_queue_health = ex.submit(_session_queue_health)
         f_refresh.result()
         raw_total, semantic_deferred, operational_deferred = f_raw.result()
         raw_pending = f_pending.result()
         ollama_status = "running" if f_ollama.result() else "stopped"
+        recall_health = f_recall_health.result()
+        queue_health = f_queue_health.result()
 
     page_count = store.page_count(include_system=False)
     try:
@@ -869,6 +921,22 @@ def chronovisor_init() -> str:
                 "ollama_status": ollama_status,
                 "chronovisor_root": str(CHRONOVISOR_ROOT),
                 "librarian": _session_librarian_summary(librarian),
+                "health": {
+                    "status": "alert"
+                    if (
+                        recall_health.get("alert")
+                        or recall_health.get("status") == "alert"
+                        or queue_health.get("alert")
+                        or queue_health.get("status") == "alert"
+                    )
+                    else "ok",
+                    "alerts": [
+                        *recall_health.get("alerts", []),
+                        *queue_health.get("alerts", []),
+                    ],
+                },
+                "recall_distillation": recall_health,
+                "queues": queue_health,
             },
             "system_pages": system_pages,
         },
