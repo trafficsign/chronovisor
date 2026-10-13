@@ -4,6 +4,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ import pytest
 from chronovisor.ops.health import _native_luna_supervisor_health
 from chronovisor.recall.recall_distillation_luna import LunaBulkBundle
 from scripts import recall_luna_supervisor as supervisor
+from scripts.recall_luna_worker_io import bind_decisions
 
 
 def make_bundle(root: Path) -> LunaBulkBundle:
@@ -82,6 +84,30 @@ def test_cli_role_must_keep_the_native_luna_identity(tmp_path: Path) -> None:
     role.write_text('model="other-model"\nmodel_reasoning_effort="max"\n')
     with pytest.raises(ValueError, match="native_luna_role_identity_mismatch"):
         supervisor.cli_command("codex", tmp_path, tmp_path / "result.json")
+
+
+def test_scheduled_blind_workers_have_independent_run_receipts(tmp_path: Path) -> None:
+    bundle = LunaBulkBundle.create(tmp_path / "bundle", [{
+        "rally_id": "rally", "candidate_id": "candidate", "as_of_us": 1000,
+        "input": {"query": "synthetic same evidence"}, "repeat_pair_id": "pair",
+        "fixed_repeat": True, "order_swap": True, "blind_order": order,
+    } for order in ("a_first", "b_first")], shard_count=2)
+    prompt = supervisor.worker_prompt(bundle.root, [0, 1], "round-a", 1)
+    flags = re.search(r"--assignment-id (\S+) --run-id (\S+)", prompt)
+    assert flags is not None
+    for shard in range(2):
+        request = bundle.next_batch(shard, limit=1)
+        decision = {
+            "task_id": request["records"][0]["task_id"], "verdict": "relevant",
+            "confidence": 0.9, "reason_code": "direct_match",
+        }
+        labels = bind_decisions(
+            request, [decision],
+            assignment_id=flags[1].replace("SHARD", str(shard)),
+            run_id=flags[2].replace("SHARD", str(shard)),
+        )
+        bundle.submit(shard, cursor=0, records=labels)
+    assert bundle.finalize()["blind_repeat"] == {"pairs": 1, "stable": 1, "unstable": 0}
 
 
 def test_idle_supervisor_does_not_recapture_the_whole_catalog_each_tick(tmp_path: Path, monkeypatch) -> None:

@@ -100,7 +100,7 @@ The child is the ONLY writer for its assigned shard. Run this repository I/O hel
 with a TTY and output limit 20000 both on the outer functions.exec (if used) and on
 every inner exec_command/write_stdin call:
 {sys.executable} -u {REPO / 'scripts/recall_luna_worker_io.py'} --bundle {bundle}
-  --shard SHARD --assignment-id {round_id}-SHARD --run-id {round_id}
+  --shard SHARD --assignment-id {round_id}-SHARD --run-id {round_id}-SHARD
   --max-records {records} --idle-timeout 900
 The helper is pure I/O; it must never generate a verdict. It emits one complete
 request at a time. Read and follow its fixed teacher prompt/schema. Read EVERY
