@@ -94,6 +94,43 @@ def test_build_rows_keeps_embargo_and_adds_blind_repeat_pairs(monkeypatch) -> No
     assert all(daily._row_has_native_source_identity(row) for row in rows)
 
 
+def test_blind_payload_fits_context_after_complete_candidate_display(monkeypatch) -> None:
+    target = {"candidate_id": "target"}
+    alternate = {"candidate_id": "alternate"}
+    target_payload = {"query": "query", "context": ["old" * 3_000, "recent"], "candidate": "t" * 1_000}
+    monkeypatch.setattr(daily, "_payload", lambda *_: {"candidate": "a" * 1_000})
+    pair = [daily._blind_payload({}, target, alternate, target_payload, {}, blind_order=order)
+            for order in ("a_first", "b_first")]
+    assert all(value is not None for value in pair)
+    for value in pair:
+        assert value["context"] == ["recent"]
+        assert value["query"] == "query"
+        assert value["candidate"] == "t" * 1_000
+        assert {item["evidence"] for item in value["candidates"]} == {"t" * 1_000, "a" * 1_000}
+        assert len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()) <= daily.MAX_INPUT_BYTES
+    assert pair[0]["candidates"][0]["candidate_id"] != pair[1]["candidates"][0]["candidate_id"]
+
+
+def test_probe_cap_counts_complete_rallies_after_payload_validation(monkeypatch) -> None:
+    monkeypatch.setattr(daily, "PROBE_CAP", 1)
+    monkeypatch.setattr(daily, "_payload", lambda rally, *_: {
+        "query": "query", "context": [],
+        "candidate": "x" * (6_000 if rally["rally_id"] == "oversized" else 10),
+    })
+    rallies = [{"rally_id": name, "as_of_us": index, "query_sha256": "a" * 64}
+               for index, name in enumerate(("oversized", "eligible"), 1)]
+    snapshots = {row["rally_id"]: {
+        "snapshot_sha256": "b" * 64,
+        "candidates": [{"candidate_id": f"candidate-{index}", "text_sha256": "c" * 64}
+                       for index in range(2)],
+    } for row in rallies}
+    rows, skipped = daily._build_rows(rallies, snapshots, {row["rally_id"]: "test" for row in rallies}, {})
+    probes = [row for row in rows if row.get("repeat_pair_id")]
+    assert len(probes) == 4
+    assert {row["rally_id"] for row in probes} == {"eligible"}
+    assert skipped["probe_payload_over_limit_or_text_missing"] == 4
+
+
 def test_prepare_reports_authoritative_capture_writer_and_is_resumable(tmp_path: Path) -> None:
     progress = tmp_path / "capture.json"
     progress.write_text(

@@ -459,10 +459,16 @@ def _blind_payload(
             for position, (candidate, payload) in enumerate((ordered, second))
         ],
     }
-    if len(
+    # Reserve the complete two-candidate display before fitting recent context.
+    # Both orders remove the same oldest context entries; query and candidate
+    # text are never truncated to manufacture an eligible probe.
+    result["context"] = list(target_payload.get("context") or [])
+    while len(
         json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     ) > MAX_INPUT_BYTES:
-        return None
+        if not result["context"]:
+            return None
+        result["context"].pop(0)
     return result
 
 
@@ -603,7 +609,9 @@ def _build_rows(
     probe_candidates.sort(
         key=lambda item: (int(item[0]["as_of_us"]), str(item[0]["rally_id"]))
     )
-    for rally, snapshot, candidates in probe_candidates[:PROBE_CAP]:
+    probe_rallies = 0
+    for rally, snapshot, candidates in probe_candidates:
+        rally_probes: list[dict[str, Any]] = []
         assignment = str(assignments[str(rally["rally_id"])])
         rally_id = str(rally["rally_id"])
         if len(candidates) < 2:
@@ -642,7 +650,7 @@ def _build_rows(
                     skipped["probe_payload_over_limit_or_text_missing"] += 1
                     continue
                 display_position = 0 if blind_order == "a_first" else 1
-                rows.append(
+                rally_probes.append(
                     _base_row(
                         rally,
                         candidate,
@@ -658,6 +666,13 @@ def _build_rows(
                         candidate_position=display_position,
                     )
                 )
+        if len(rally_probes) == 4:
+            rows.extend(rally_probes)
+            probe_rallies += 1
+            if probe_rallies >= PROBE_CAP:
+                break
+        else:
+            skipped["probe_incomplete_rally_discarded"] += len(rally_probes)
     return rows, skipped
 
 
