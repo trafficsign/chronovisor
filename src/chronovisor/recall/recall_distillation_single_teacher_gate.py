@@ -9,32 +9,132 @@ import re
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from chronovisor.core import canonical_json
+from chronovisor.recall.recall_distillation_luna import (
+    NATIVE_IDENTITY_REVISION,
+    NATIVE_MODEL,
+    NATIVE_OUTPUT_SCHEMA_SHA256,
+    NATIVE_REQUEST_REVISION,
+    NATIVE_TEACHER_PROMPT_SHA256,
+)
 from chronovisor.recall.recall_distillation_remote_teacher import (
     OX_ALPHA_FIXED_IDENTITY,
     OX_ALPHA_ROUTE_MODEL,
 )
 
+DEEPSEEK_SINGLE_PROFILE = "deepseek-v4-flash-single-v1"
+NATIVE_LUNA_SINGLE_PROFILE = "native-luna-single-v1"
+NATIVE_LUNA_WORKER_KIND = "luna_worker"
+NATIVE_LUNA_ROUTE = "native/luna_worker"
+NATIVE_LUNA_MODEL = NATIVE_MODEL
+NATIVE_LUNA_FIXED_IDENTITY_REVISION = NATIVE_IDENTITY_REVISION
+# Keep the existing DeepSeek/OX request contract stable.  Native Luna has its
+# own worker prompt/schema revision and must never silently reuse the remote
+# teacher's revision.
+TEACHER_REQUEST_REVISION = "json-schema-core-label-abstain-16k-600s-v8"
+NATIVE_LUNA_REQUEST_REVISION = NATIVE_REQUEST_REVISION
 
-def expected_ox_request_sha256(*, profile_contract_id: str, payload_digest: str) -> str:
+
+def _sha256_json(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+_NATIVE_LUNA_ROUTE_IDENTITY = {
+    "provider": "openai",
+    "model": NATIVE_LUNA_MODEL,
+    "location": "native",
+}
+NATIVE_LUNA_FIXED_IDENTITY = {
+    "revision": NATIVE_LUNA_FIXED_IDENTITY_REVISION,
+    "route": NATIVE_LUNA_ROUTE,
+    "route_identity": dict(_NATIVE_LUNA_ROUTE_IDENTITY),
+    "runtime_role": NATIVE_LUNA_WORKER_KIND,
+    "native_luna": True,
+    "model_digest": hashlib.sha256(NATIVE_LUNA_MODEL.encode("utf-8")).hexdigest(),
+    "route_digest": _sha256_json(_NATIVE_LUNA_ROUTE_IDENTITY),
+    "prompt_template_sha256": NATIVE_TEACHER_PROMPT_SHA256,
+    "schema_revision_sha256": NATIVE_OUTPUT_SCHEMA_SHA256,
+    "request_revision": NATIVE_LUNA_REQUEST_REVISION,
+}
+
+
+def teacher_identity_for_profile(profile: str) -> dict[str, Any]:
+    """Return the immutable identity contract for one supported teacher profile."""
+
+    if profile == NATIVE_LUNA_SINGLE_PROFILE:
+        identity = NATIVE_LUNA_FIXED_IDENTITY
+    elif profile == DEEPSEEK_SINGLE_PROFILE:
+        identity = {
+            **OX_ALPHA_FIXED_IDENTITY,
+            "route": OX_ALPHA_ROUTE_MODEL,
+            "request_revision": TEACHER_REQUEST_REVISION,
+        }
+    else:
+        raise ValueError("unsupported single-teacher profile")
+    # Return a detached value so a caller cannot mutate the gate's closed map.
+    return cast(
+        dict[str, Any],
+        json.loads(json.dumps(identity, ensure_ascii=False, sort_keys=True)),
+    )
+
+
+def validate_teacher_contract(
+    profile: str, supplied: Mapping[str, Any] | None
+) -> bool:
+    """Accept only the exact closed identity contract for ``profile``."""
+
+    if not isinstance(supplied, Mapping):
+        return False
+    try:
+        expected = teacher_identity_for_profile(profile)
+    except ValueError:
+        return False
+    return dict(supplied) == expected
+
+
+def expected_teacher_request_sha256(
+    *,
+    profile_contract_id: str,
+    payload_digest: str,
+    profile: str = DEEPSEEK_SINGLE_PROFILE,
+) -> str:
     """Bind a label to its sealed contract and non-sensitive request payload."""
+
+    identity = teacher_identity_for_profile(profile)
 
     return hashlib.sha256(
         json.dumps(
             {
-                "identity_revision": OX_ALPHA_FIXED_IDENTITY["revision"],
+                "identity_revision": identity["revision"],
                 "payload_digest": payload_digest,
                 "profile_contract_id": profile_contract_id,
-                "request_revision": "json-schema-core-label-abstain-16k-600s-v8",
-                "route_digest": OX_ALPHA_FIXED_IDENTITY["route_digest"],
+                "request_revision": identity["request_revision"],
+                "route_digest": identity["route_digest"],
             },
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def expected_ox_request_sha256(*, profile_contract_id: str, payload_digest: str) -> str:
+    """Backward-compatible DeepSeek request binding."""
+
+    return expected_teacher_request_sha256(
+        profile_contract_id=profile_contract_id,
+        payload_digest=payload_digest,
+    )
 
 
 def expected_ox_provider_request_sha256(
@@ -46,17 +146,37 @@ def expected_ox_provider_request_sha256(
 ) -> str:
     """Hash the non-sensitive envelope that uniquely binds one OX request."""
 
+    return expected_teacher_provider_request_sha256(
+        profile_contract_id=profile_contract_id,
+        payload_digest=payload_digest,
+        work_id=work_id,
+        expires_at=expires_at,
+    )
+
+
+def expected_teacher_provider_request_sha256(
+    *,
+    profile_contract_id: str,
+    payload_digest: str,
+    work_id: str,
+    expires_at: str,
+    profile: str = DEEPSEEK_SINGLE_PROFILE,
+) -> str:
+    """Hash the envelope binding one request to a closed teacher identity."""
+
+    identity = teacher_identity_for_profile(profile)
+
     return hashlib.sha256(
         json.dumps(
             {
                 "contract": profile_contract_id,
                 "expires_at": expires_at,
-                "identity_revision": OX_ALPHA_FIXED_IDENTITY["revision"],
-                "model_digest": OX_ALPHA_FIXED_IDENTITY["model_digest"],
+                "identity_revision": identity["revision"],
+                "model_digest": identity["model_digest"],
                 "payload_digest": payload_digest,
-                "prompt_sha256": OX_ALPHA_FIXED_IDENTITY["prompt_template_sha256"],
-                "route_digest": OX_ALPHA_FIXED_IDENTITY["route_digest"],
-                "schema_sha256": OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"],
+                "prompt_sha256": identity["prompt_template_sha256"],
+                "route_digest": identity["route_digest"],
+                "schema_sha256": identity["schema_revision_sha256"],
                 "work_id": work_id,
             },
             ensure_ascii=False,
@@ -120,6 +240,87 @@ def _one(values: Sequence[str], name: str, reasons: list[str]) -> str:
     return next(iter(distinct))
 
 
+def _validate_identity_contract(
+    completed: Sequence[Mapping[str, Any]],
+    *,
+    profile: str,
+    profile_contract_id: str,
+    expected_identity: Mapping[str, Any] | None,
+    identities: Mapping[str, str],
+    reasons: list[str],
+) -> None:
+    """Check closed teacher identity and request bindings without changing floors."""
+
+    if identities["profile"] and identities["profile"] != profile:
+        reasons.append("profile_identity_mismatch")
+    if profile_contract_id and identities["profile_contract_id"] != profile_contract_id:
+        reasons.append("profile_contract_mismatch")
+    if expected_identity is None:
+        return
+    expected_route = _text(expected_identity.get("route"))
+    if not expected_route:
+        route_identity = expected_identity.get("route_identity")
+        if isinstance(route_identity, Mapping):
+            expected_route = _text(route_identity.get("model"))
+    if identities["route"] and expected_route and identities["route"] != expected_route:
+        reasons.append("route_mismatch")
+    for name, expected in (
+        ("model_digest", expected_identity["model_digest"]),
+        ("prompt_sha256", expected_identity["prompt_template_sha256"]),
+        ("schema_sha256", expected_identity["schema_revision_sha256"]),
+        ("route_digest", expected_identity["route_digest"]),
+    ):
+        if identities[name] != expected:
+            reasons.append(f"{name}_contract_mismatch")
+    if any(
+        expected_teacher_request_sha256(
+            profile_contract_id=_text(row.get("profile_contract_id")),
+            payload_digest=_text(row.get("payload_digest")),
+            profile=profile,
+        )
+        != _text(row.get("request_sha256"))
+        for row in completed
+    ):
+        reasons.append("request_sha256_contract_mismatch")
+    if any(
+        expected_teacher_provider_request_sha256(
+            profile_contract_id=_text(row.get("profile_contract_id")),
+            payload_digest=_text(row.get("payload_digest")),
+            work_id=_text(row.get("work_id")),
+            expires_at=_text(row.get("expires_at")),
+            profile=profile,
+        )
+        != _text(row.get("provider_request_sha256"))
+        for row in completed
+    ):
+        reasons.append("provider_request_sha256_contract_mismatch")
+
+
+def _validate_expiry(
+    completed: Sequence[Mapping[str, Any]], *, profile: str, reasons: list[str]
+) -> None:
+    """Keep remote expiry strict while allowing the sealed native contract's empty expiry."""
+
+    if profile == NATIVE_LUNA_SINGLE_PROFILE:
+        if any(row.get("expires_at") != "" for row in completed):
+            reasons.append("expiry_invalid")
+        return
+
+    def future_utc(value: object) -> bool:
+        text = _text(value)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", text) is None:
+            return False
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")) > datetime.now(
+                UTC
+            )
+        except ValueError:
+            return False
+
+    if any(not future_utc(row.get("expires_at")) for row in completed):
+        reasons.append("expiry_missing")
+
+
 def evaluate_single_teacher_gate(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -131,6 +332,7 @@ def evaluate_single_teacher_gate(
     min_repeat_pairs: int = 100,
     min_repeat_stability: float = 0.60,
     row_validator: Callable[[Mapping[str, Any]], bool] | None = None,
+    teacher_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate sealed-like rows without granting them verified-truth authority.
 
@@ -157,6 +359,16 @@ def evaluate_single_teacher_gate(
         reasons.append("minimum_argument_invalid")
     if not 0.0 <= min_repeat_stability <= 1.0:
         reasons.append("repeat_stability_argument_invalid")
+    expected_identity: dict[str, Any] | None = None
+    if isinstance(profile, str) and profile:
+        try:
+            expected_identity = teacher_identity_for_profile(profile)
+        except ValueError:
+            reasons.append("profile_contract_unknown")
+    if teacher_contract is not None and not validate_teacher_contract(
+        profile, teacher_contract
+    ):
+        reasons.append("teacher_contract_mismatch")
 
     current_rows = [
         row
@@ -219,42 +431,16 @@ def evaluate_single_teacher_gate(
             "route_digest",
         )
     }
-    if identities["profile"] and identities["profile"] != profile:
-        reasons.append("profile_identity_mismatch")
     if identities["cohort"] and identities["cohort"] != cohort:
         reasons.append("cohort_identity_mismatch")
-    if profile_contract_id and identities["profile_contract_id"] != profile_contract_id:
-        reasons.append("profile_contract_mismatch")
-    if identities["route"] and identities["route"] != OX_ALPHA_ROUTE_MODEL:
-        reasons.append("route_mismatch")
-    for name, expected in (
-        ("model_digest", OX_ALPHA_FIXED_IDENTITY["model_digest"]),
-        ("prompt_sha256", OX_ALPHA_FIXED_IDENTITY["prompt_template_sha256"]),
-        ("schema_sha256", OX_ALPHA_FIXED_IDENTITY["schema_revision_sha256"]),
-        ("route_digest", OX_ALPHA_FIXED_IDENTITY["route_digest"]),
-    ):
-        if identities[name] != expected:
-            reasons.append(f"{name}_contract_mismatch")
-    if any(
-        expected_ox_request_sha256(
-            profile_contract_id=_text(row.get("profile_contract_id")),
-            payload_digest=_text(row.get("payload_digest")),
-        )
-        != _text(row.get("request_sha256"))
-        for row in completed
-    ):
-        reasons.append("request_sha256_contract_mismatch")
-    if any(
-        expected_ox_provider_request_sha256(
-            profile_contract_id=_text(row.get("profile_contract_id")),
-            payload_digest=_text(row.get("payload_digest")),
-            work_id=_text(row.get("work_id")),
-            expires_at=_text(row.get("expires_at")),
-        )
-        != _text(row.get("provider_request_sha256"))
-        for row in completed
-    ):
-        reasons.append("provider_request_sha256_contract_mismatch")
+    _validate_identity_contract(
+        completed,
+        profile=profile,
+        profile_contract_id=profile_contract_id,
+        expected_identity=expected_identity,
+        identities=identities,
+        reasons=reasons,
+    )
     if any(
         re.fullmatch(r"[0-9a-f]{64}", _text(row.get("payload_digest"))) is None
         or not isinstance(row.get("payload_source"), Mapping)
@@ -264,19 +450,7 @@ def evaluate_single_teacher_gate(
     ):
         reasons.append("payload_source_digest_mismatch")
 
-    def future_utc(value: object) -> bool:
-        text = _text(value)
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", text) is None:
-            return False
-        try:
-            return datetime.fromisoformat(text.replace("Z", "+00:00")) > datetime.now(
-                UTC
-            )
-        except ValueError:
-            return False
-
-    if any(not future_utc(row.get("expires_at")) for row in completed):
-        reasons.append("expiry_missing")
+    _validate_expiry(completed, profile=profile, reasons=reasons)
     for name in (
         "model_digest",
         "prompt_sha256",
@@ -287,10 +461,27 @@ def evaluate_single_teacher_gate(
     ):
         if identities[name] and re.fullmatch(r"[0-9a-f]{64}", identities[name]) is None:
             reasons.append(f"{name}_identity_invalid")
-    if identities["identity_revision"] != OX_ALPHA_FIXED_IDENTITY["revision"]:
+    expected_identity_revision = (
+        _text(expected_identity.get("revision"))
+        if expected_identity is not None
+        else ""
+    )
+    expected_request_revision = (
+        _text(expected_identity.get("request_revision"))
+        if expected_identity is not None
+        else ""
+    )
+    if expected_identity is not None and identities["identity_revision"] != expected_identity_revision:
         reasons.append("identity_revision_mismatch")
-    if identities["request_revision"] != "json-schema-core-label-abstain-16k-600s-v8":
+    if expected_identity is not None and identities["request_revision"] != expected_request_revision:
         reasons.append("request_revision_mismatch")
+    if profile == NATIVE_LUNA_SINGLE_PROFILE:
+        if any(row.get("native_luna") is not True for row in completed):
+            reasons.append("native_luna_attestation_missing")
+        if any(
+            row.get("teacher_role") != NATIVE_LUNA_WORKER_KIND for row in completed
+        ):
+            reasons.append("native_luna_role_mismatch")
     if any(row.get("route_identity_exact") is not True for row in completed):
         reasons.append("route_identity_mismatch")
     if any(row.get("fixed_split_plan") is not True for row in completed):

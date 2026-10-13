@@ -8,9 +8,16 @@ from chronovisor.recall.recall_distillation_remote_teacher import (
     OX_ALPHA_FIXED_IDENTITY,
 )
 from chronovisor.recall.recall_distillation_single_teacher_gate import (
+    NATIVE_LUNA_FIXED_IDENTITY,
+    NATIVE_LUNA_SINGLE_PROFILE,
+    NATIVE_LUNA_WORKER_KIND,
     evaluate_single_teacher_gate,
     expected_ox_provider_request_sha256,
     expected_ox_request_sha256,
+    expected_teacher_provider_request_sha256,
+    expected_teacher_request_sha256,
+    teacher_identity_for_profile,
+    validate_teacher_contract,
 )
 
 PROFILE = "deepseek-v4-flash-single-v1"
@@ -134,6 +141,48 @@ def _gate(rows: list[dict[str, object]]) -> dict[str, object]:
     )
 
 
+def _native_luna_rows() -> list[dict[str, object]]:
+    rows = _passing_rows()
+    for row in rows:
+        payload_digest = str(row["payload_digest"])
+        profile_contract_id = str(row["profile_contract_id"])
+        work_id = str(row["work_id"])
+        expires_at = ""
+        row.update(
+            {
+                "profile": NATIVE_LUNA_SINGLE_PROFILE,
+                "route": str(NATIVE_LUNA_FIXED_IDENTITY["route"]),
+                "model_digest": NATIVE_LUNA_FIXED_IDENTITY["model_digest"],
+                "prompt_sha256": NATIVE_LUNA_FIXED_IDENTITY[
+                    "prompt_template_sha256"
+                ],
+                "schema_sha256": NATIVE_LUNA_FIXED_IDENTITY[
+                    "schema_revision_sha256"
+                ],
+                "identity_revision": NATIVE_LUNA_FIXED_IDENTITY["revision"],
+                "request_revision": NATIVE_LUNA_FIXED_IDENTITY["request_revision"],
+                "route_digest": NATIVE_LUNA_FIXED_IDENTITY["route_digest"],
+                "request_sha256": expected_teacher_request_sha256(
+                    profile=NATIVE_LUNA_SINGLE_PROFILE,
+                    profile_contract_id=profile_contract_id,
+                    payload_digest=payload_digest,
+                ),
+                "provider_request_sha256": expected_teacher_provider_request_sha256(
+                    profile=NATIVE_LUNA_SINGLE_PROFILE,
+                    profile_contract_id=profile_contract_id,
+                    payload_digest=payload_digest,
+                    work_id=work_id,
+                    expires_at=expires_at,
+                ),
+                "native_luna": True,
+                "teacher_role": NATIVE_LUNA_WORKER_KIND,
+                "cohort": "native-luna-backfill-v1",
+                "expires_at": "",
+            }
+        )
+    return rows
+
+
 def test_single_teacher_gate_accepts_fixed_chronological_cohort() -> None:
     gate = _gate(_passing_rows())
 
@@ -146,6 +195,56 @@ def test_single_teacher_gate_accepts_fixed_chronological_cohort() -> None:
         "evidence_refs": [f"split-plan:{'d' * 64}"],
     }
     assert gate["blind_repeat"]["complete_pairs"] == 2
+
+
+def test_single_teacher_gate_accepts_closed_native_luna_identity() -> None:
+    rows = _native_luna_rows()
+
+    gate = evaluate_single_teacher_gate(
+        rows,
+        profile=NATIVE_LUNA_SINGLE_PROFILE,
+        cohort="native-luna-backfill-v1",
+        min_labels=4,
+        min_per_class=2,
+        min_repeat_pairs=2,
+        min_repeat_stability=0.10,
+        teacher_contract=teacher_identity_for_profile(NATIVE_LUNA_SINGLE_PROFILE),
+    )
+
+    assert gate["passed"] is True
+    assert gate["identity"]["route"] == "native/luna_worker"
+
+
+def test_native_luna_gate_rejects_false_worker_attestation() -> None:
+    rows = _native_luna_rows()
+    rows[0]["native_luna"] = False
+
+    gate = evaluate_single_teacher_gate(
+        rows,
+        profile=NATIVE_LUNA_SINGLE_PROFILE,
+        cohort=COHORT,
+        min_labels=4,
+        min_per_class=2,
+        min_repeat_pairs=2,
+        min_repeat_stability=0.10,
+    )
+
+    assert gate["passed"] is False
+    assert "native_luna_attestation_missing" in gate["reasons"]
+
+
+def test_teacher_identity_contract_is_closed_and_detached() -> None:
+    identity = teacher_identity_for_profile(NATIVE_LUNA_SINGLE_PROFILE)
+    assert validate_teacher_contract(NATIVE_LUNA_SINGLE_PROFILE, identity)
+    identity["route_identity"]["model"] = "forged-model"
+    assert validate_teacher_contract(
+        NATIVE_LUNA_SINGLE_PROFILE,
+        teacher_identity_for_profile(NATIVE_LUNA_SINGLE_PROFILE),
+    )
+    assert not validate_teacher_contract(
+        NATIVE_LUNA_SINGLE_PROFILE,
+        {"route": "native/luna_worker", "model": "gpt-5.6-luna"},
+    )
 
 
 def test_single_teacher_gate_applies_authority_validator_to_every_row() -> None:
