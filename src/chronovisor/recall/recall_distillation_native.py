@@ -62,10 +62,10 @@ _CONTRACT_KIND = "native-luna-profile"
 _RECEIPTS_LEDGER = "native-teacher-receipts.jsonl"
 _LABEL_LEDGER = store.LABEL_LEDGER_FILE
 _RECEIPT_INDEX_CACHE: dict[
-    str, tuple[tuple[int, int, int, int], dict[str, dict[str, Any]]]
+    str, tuple[tuple[int, int, int, int, int], dict[str, dict[str, Any]]]
 ] = {}
 _LABEL_INDEX_CACHE: dict[
-    str, tuple[tuple[int, int, int, int], dict[str, dict[str, Any]]]
+    str, tuple[tuple[int, int, int, int, int], dict[str, dict[str, Any]]]
 ] = {}
 # These fields are deterministically copied from the frozen source by
 # ``LunaBulkBundle.submit`` after the worker response is received.  They are
@@ -868,16 +868,21 @@ def _receipt_index(root: Path) -> dict[str, dict[str, Any]] | None:
     path = _receipt_path(root)
     try:
         state = path.lstat()
-        if stat.S_ISLNK(state.st_mode) or not stat.S_ISREG(state.st_mode):
+        if (
+            stat.S_ISLNK(state.st_mode)
+            or not stat.S_ISREG(state.st_mode)
+            or stat.S_IMODE(state.st_mode) != 0o600
+        ):
             return None
         signature = (
             state.st_dev,
             state.st_ino,
             state.st_size,
             state.st_mtime_ns,
+            stat.S_IMODE(state.st_mode),
         )
     except FileNotFoundError:
-        signature = (0, 0, 0, 0)
+        signature = (0, 0, 0, 0, 0)
     except OSError:
         return None
     cache_key = str(path)
@@ -906,16 +911,21 @@ def _label_index(root: Path) -> dict[str, dict[str, Any]] | None:
     path = _label_path(root)
     try:
         state = path.lstat()
-        if stat.S_ISLNK(state.st_mode) or not stat.S_ISREG(state.st_mode):
+        if (
+            stat.S_ISLNK(state.st_mode)
+            or not stat.S_ISREG(state.st_mode)
+            or stat.S_IMODE(state.st_mode) != 0o600
+        ):
             return None
         signature = (
             state.st_dev,
             state.st_ino,
             state.st_size,
             state.st_mtime_ns,
+            stat.S_IMODE(state.st_mode),
         )
     except FileNotFoundError:
-        signature = (0, 0, 0, 0)
+        signature = (0, 0, 0, 0, 0)
     except OSError:
         return None
     cache_key = str(path)

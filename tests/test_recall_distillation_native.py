@@ -183,3 +183,7 @@ def test_row_integrity_rejects_raw_fields_and_tampering(tmp_path: Path) -> None:
     assert not row_integrity(raw_row, root=root)
     tampered = {**row, "payload_source": {**row["payload_source"], "input_sha256": "c" * 64}}
     assert not row_integrity(tampered, root=root)
+
+    receipt_path = store.distillation_dir(root) / NATIVE_RECEIPTS_FILE
+    receipt_path.chmod(0o644)
+    assert not validate_label(root, row)
