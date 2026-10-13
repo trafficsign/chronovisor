@@ -23,6 +23,26 @@ from chronovisor.decision.semantic_hold import (
 INGEST_LIVENESS_TTL_SECONDS = 5 * 60
 DISTILLATION_PROGRESS_STALE_SECONDS = 24 * 60 * 60
 DISTILLATION_EXPIRY_WARNING_SECONDS = 7 * 24 * 60 * 60
+NATIVE_LUNA_SUPERVISOR_SCHEMA = "chronovisor.recall-luna-supervisor.v1"
+NATIVE_LUNA_SUPERVISOR_HEARTBEAT_STALE_SECONDS = 15 * 60
+NATIVE_LUNA_SUPERVISOR_PROGRESS_STALE_SECONDS = 30 * 60
+_NATIVE_LUNA_SUPERVISOR_STATUSES = {
+    "starting",
+    "running",
+    "retrying",
+    "idle",
+    "disabled",
+}
+_NATIVE_LUNA_SUPERVISOR_UNSAFE_KEYS = {
+    "child_pid",
+    "error",
+    "last_error_code",
+    "last_exit_code",
+    "path",
+    "pid",
+    "reason",
+    "updated_at",
+}
 
 
 def _jsonl_count(path: Path) -> int:
@@ -159,6 +179,162 @@ def _parse_utc_timestamp(value: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _native_luna_supervisor_counts(value: object) -> dict[str, Any] | None:
+    """Keep supervisor bundle metadata to non-negative integer counts only."""
+
+    if not isinstance(value, dict):
+        return None
+    counts: dict[str, Any] = {}
+    for key, item in value.items():
+        if (
+            not isinstance(key, str)
+            or not key
+            or key.lower() in _NATIVE_LUNA_SUPERVISOR_UNSAFE_KEYS
+        ):
+            return None
+        if isinstance(item, bool):
+            return None
+        if isinstance(item, int):
+            if item < 0:
+                return None
+            counts[key] = item
+            continue
+        nested = _native_luna_supervisor_counts(item)
+        if nested is None:
+            return None
+        counts[key] = nested
+    return counts
+
+
+def _native_luna_supervisor_health(
+    root: Path,
+) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
+    """Read the native Luna supervisor state without exposing private fields."""
+
+    path = root / "runtime" / "recall-luna-bulk" / "supervisor-status.json"
+    if not path.exists():
+        return None, []
+
+    invalid = {
+        "status": "invalid",
+        "completed_total": 0,
+        "pending_total": 0,
+        "bundles": {},
+        "last_progress_at": None,
+    }
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return invalid, [
+            {
+                "category": "human_wait",
+                "reason": "executor_state_invalid",
+                "message": "人の判断待ち: native Luna executor の状態を確認できません",
+            }
+        ]
+    if not isinstance(raw, dict) or raw.get("schema") != NATIVE_LUNA_SUPERVISOR_SCHEMA:
+        return invalid, [
+            {
+                "category": "human_wait",
+                "reason": "executor_state_invalid",
+                "message": "人の判断待ち: native Luna executor の状態を確認できません",
+            }
+        ]
+
+    status = raw.get("status")
+    updated_at = _parse_utc_timestamp(raw.get("updated_at"))
+    last_progress_value = raw.get("last_progress_at")
+    last_progress_at = (
+        _parse_utc_timestamp(last_progress_value)
+        if isinstance(last_progress_value, str) and last_progress_value
+        else None
+    )
+    if (
+        last_progress_value is not None
+        and last_progress_value != ""
+        and last_progress_at is None
+    ):
+        return invalid, [
+            {
+                "category": "human_wait",
+                "reason": "executor_state_invalid",
+                "message": "人の判断待ち: native Luna executor の状態を確認できません",
+            }
+        ]
+    completed_total = raw.get("completed_total")
+    pending_total = raw.get("pending_total")
+    bundles = _native_luna_supervisor_counts(raw.get("bundles", {}))
+    if (
+        not isinstance(status, str)
+        or status not in _NATIVE_LUNA_SUPERVISOR_STATUSES
+        or updated_at is None
+        or isinstance(completed_total, bool)
+        or not isinstance(completed_total, int)
+        or completed_total < 0
+        or isinstance(pending_total, bool)
+        or not isinstance(pending_total, int)
+        or pending_total < 0
+        or bundles is None
+    ):
+        return invalid, [
+            {
+                "category": "human_wait",
+                "reason": "executor_state_invalid",
+                "message": "人の判断待ち: native Luna executor の状態を確認できません",
+            }
+        ]
+
+    diagnostic = {
+        "status": status,
+        "completed_total": completed_total,
+        "pending_total": pending_total,
+        "bundles": bundles,
+        "last_progress_at": last_progress_at.isoformat()
+        if last_progress_at is not None
+        else None,
+    }
+    alerts: list[dict[str, str]] = []
+
+    def add(category: str, reason: str, message: str) -> None:
+        alerts.append({"category": category, "reason": reason, "message": message})
+
+    if status == "retrying" and bool(str(raw.get("last_error_code") or "").strip()):
+        add(
+            "human_wait",
+            "native_luna_executor_error",
+            "人の判断待ち: native Luna executor が retrying です",
+        )
+    if status == "disabled":
+        add(
+            "human_wait",
+            "executor_disabled",
+            "人の判断待ち: native Luna executor が無効です",
+        )
+
+    now = datetime.now(UTC)
+    heartbeat_age = max(0, int((now - updated_at).total_seconds()))
+    progress_age = (
+        max(0, int((now - last_progress_at).total_seconds()))
+        if last_progress_at is not None
+        else None
+    )
+    stalled = status != "disabled" and (
+        heartbeat_age > NATIVE_LUNA_SUPERVISOR_HEARTBEAT_STALE_SECONDS
+        or (
+            pending_total > 0
+            and progress_age is not None
+            and progress_age > NATIVE_LUNA_SUPERVISOR_PROGRESS_STALE_SECONDS
+        )
+    )
+    if stalled:
+        add(
+            "data_wait",
+            "native_luna_executor_stalled",
+            "データ待ち: native Luna executor の進捗が stale です",
+        )
+    return diagnostic, alerts
+
+
 def _distillation_contract_expiry(root: Path, config: dict[str, Any]) -> tuple[str, bool]:
     """Return a contract expiry and whether an expected sealed contract exists."""
 
@@ -253,6 +429,10 @@ def _distillation_alerts(
     teacher_profile = str(config.get("teacher_profile") or "")
     native_profile = teacher_profile == "native-luna-single-v1"
     native_luna_enabled = config.get("native_luna_enabled") is True
+    native_luna_supervisor: dict[str, Any] | None = None
+    if enabled and native_profile:
+        native_luna_supervisor, supervisor_alerts = _native_luna_supervisor_health(root)
+        alerts.extend(supervisor_alerts)
     if enabled and not teacher_profile:
         add(
             "human_wait",
@@ -448,6 +628,8 @@ def _distillation_alerts(
         "detail": alerts[0]["message"] if alerts else "",
         "stop_reason": alerts[0] if alerts else None,
     }
+    if native_luna_supervisor is not None:
+        diagnostic["native_luna_supervisor"] = native_luna_supervisor
     return diagnostic, alerts
 
 

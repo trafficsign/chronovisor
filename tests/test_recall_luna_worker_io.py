@@ -140,3 +140,44 @@ def test_worker_presents_one_complete_input_before_accepting_its_decision(tmp_pa
         if process.poll() is None:
             process.kill()
             process.wait()
+
+
+def test_worker_idle_timeout_releases_lease_without_writing_a_label(tmp_path: Path) -> None:
+    bundle = LunaBulkBundle.create(tmp_path / "bundle", [{
+        "rally_id": "rally", "candidate_id": "candidate", "as_of_us": 1000,
+        "input": {"query": "synthetic"}, "split": "train", "group_id": "group",
+    }], shard_count=1)
+    command = [sys.executable, "-u", str(Path(__file__).parents[1] / "scripts/recall_luna_worker_io.py"),
+               "--bundle", str(bundle.root), "--shard", "0", "--assignment-id", "timeout-test",
+               "--run-id", "timeout-run", "--idle-timeout", "0.05"]
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert process.stdout is not None
+    assert json.loads(process.stdout.readline())["cursor"] == 0
+    assert json.loads(process.stdout.readline())["status"] == "worker_input_timeout"
+    process.wait(timeout=5)
+    assert process.returncode == 3
+    assert LunaBulkBundle.open(bundle.root).status()["completed"] == 0
+    restarted = subprocess.run(command, input="", capture_output=True, text=True, timeout=5)
+    assert restarted.returncode == 0
+    assert json.loads(restarted.stdout.splitlines()[0])["cursor"] == 0
+
+
+def test_worker_round_limit_preserves_the_next_unread_record(tmp_path: Path) -> None:
+    bundle = LunaBulkBundle.create(tmp_path / "bundle", [{
+        "rally_id": f"rally-{i}", "candidate_id": f"candidate-{i}", "as_of_us": 1000 + i,
+        "input": {"query": "synthetic"}, "split": "train", "group_id": "group",
+    } for i in range(2)], shard_count=1)
+    process = subprocess.Popen([
+        sys.executable, "-u", str(Path(__file__).parents[1] / "scripts/recall_luna_worker_io.py"),
+        "--bundle", str(bundle.root), "--shard", "0", "--assignment-id", "round-test",
+        "--run-id", "round-run", "--max-records", "1",
+    ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert process.stdout is not None
+    request = json.loads(process.stdout.readline())
+    stdout, stderr = process.communicate(json.dumps([{
+        "task_id": request["records"][0]["task_id"], "verdict": "uncertain",
+        "confidence": 0.5, "reason_code": "synthetic_only",
+    }]) + "\n", timeout=5)
+    assert process.returncode == 0, stderr
+    assert [json.loads(line)["status"] for line in stdout.splitlines()] == ["committed", "round_complete"]
+    assert LunaBulkBundle.open(bundle.root).next_batch(0, limit=1)["cursor"] == 1

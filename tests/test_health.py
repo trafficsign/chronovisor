@@ -15,6 +15,56 @@ from chronovisor.ops import autonomy, health
 from tests.semantic_hold_support import semantic_authority
 
 
+def _enable_native_luna_health(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "config.toml").write_text(
+        "[recall.distillation]\n"
+        "enabled = true\n"
+        "capture_enabled = true\n"
+        "teacher_profile = \"native-luna-single-v1\"\n"
+        "native_luna_enabled = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        health,
+        "recall_distillation_kpi",
+        lambda *_args: {
+            "status": "ready",
+            "worker_status": "idle",
+            "hold_reason": "",
+            "alert": False,
+        },
+    )
+    monkeypatch.setattr(
+        health,
+        "_distillation_contract_expiry",
+        lambda *_args: ("", True),
+    )
+
+
+def _write_native_luna_supervisor_status(
+    root: Path, *, status: str = "running", **overrides: object
+) -> None:
+    payload: dict[str, object] = {
+        "schema": health.NATIVE_LUNA_SUPERVISOR_SCHEMA,
+        "status": status,
+        "pid": 123,
+        "child_pid": 456,
+        "updated_at": datetime.now(UTC).isoformat(),
+        "last_progress_at": datetime.now(UTC).isoformat(),
+        "completed_total": 3,
+        "pending_total": 2,
+        "last_exit_code": 0,
+        "last_error_code": "",
+        "bundles": {"bundle-A": {"completed": 3, "pending": 2}},
+        "reason": "private detail",
+    }
+    payload.update(overrides)
+    path = root / "runtime" / "recall-luna-bulk" / "supervisor-status.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def test_recall_distillation_kpi_uses_public_snapshot_without_raw_content(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -398,6 +448,146 @@ def test_recall_distillation_health_prefers_label_progress_over_last_success(
     assert payload["last_label_at"] == "2020-01-01T00:00:00+00:00"
     assert payload["progress_stale"] is True
     assert "durable_progress_stale" in payload["reason_codes"]
+
+
+def test_native_luna_supervisor_absence_preserves_existing_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    _enable_native_luna_health(root, monkeypatch)
+
+    payload = health.recall_distillation_health(root)
+
+    assert "native_luna_supervisor" not in payload
+    assert "native_luna_executor_error" not in payload["reason_codes"]
+    assert "native_luna_executor_stalled" not in payload["reason_codes"]
+
+
+def test_native_luna_supervisor_retrying_error_is_human_wait_and_redacts_private_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    _enable_native_luna_health(root, monkeypatch)
+    now = datetime.now(UTC).isoformat()
+    _write_native_luna_supervisor_status(
+        root,
+        status="retrying",
+        updated_at=now,
+        last_progress_at=now,
+        last_error_code="child_failed",
+        path="/private/raw-path",
+        reason="private reason",
+    )
+
+    payload = health.recall_distillation_health(root)
+    supervisor = payload["native_luna_supervisor"]
+
+    assert "native_luna_executor_error" in payload["reason_codes"]
+    assert payload["alerts"][0]["category"] == "human_wait"
+    assert supervisor == {
+        "status": "retrying",
+        "completed_total": 3,
+        "pending_total": 2,
+        "bundles": {"bundle-A": {"completed": 3, "pending": 2}},
+        "last_progress_at": now,
+    }
+    assert "pid" not in supervisor
+    assert "child_pid" not in supervisor
+    assert "last_error_code" not in supervisor
+    assert "reason" not in supervisor
+    assert "path" not in supervisor
+
+
+def test_native_luna_supervisor_disabled_is_human_wait_without_stall_alert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    _enable_native_luna_health(root, monkeypatch)
+    old = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    _write_native_luna_supervisor_status(
+        root,
+        status="disabled",
+        updated_at=old,
+        last_progress_at=old,
+        pending_total=7,
+    )
+
+    payload = health.recall_distillation_health(root)
+
+    assert "executor_disabled" in payload["reason_codes"]
+    assert "native_luna_executor_stalled" not in payload["reason_codes"]
+
+
+def test_native_luna_supervisor_stale_progress_is_data_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    _enable_native_luna_health(root, monkeypatch)
+    old_heartbeat = (datetime.now(UTC) - timedelta(minutes=16)).isoformat()
+    old_progress = (datetime.now(UTC) - timedelta(minutes=31)).isoformat()
+    _write_native_luna_supervisor_status(
+        root,
+        status="running",
+        updated_at=old_heartbeat,
+        last_progress_at=old_progress,
+    )
+
+    payload = health.recall_distillation_health(root)
+
+    assert "native_luna_executor_stalled" in payload["reason_codes"]
+    stalled = next(
+        item
+        for item in payload["alerts"]
+        if item["reason"] == "native_luna_executor_stalled"
+    )
+    assert stalled["category"] == "data_wait"
+
+
+@pytest.mark.parametrize("status", ["running", "idle"])
+def test_native_luna_supervisor_fresh_heartbeat_has_no_alert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    root = tmp_path / "wiki"
+    _enable_native_luna_health(root, monkeypatch)
+    now = datetime.now(UTC).isoformat()
+    _write_native_luna_supervisor_status(
+        root,
+        status=status,
+        updated_at=now,
+        last_progress_at=now,
+        pending_total=0,
+    )
+
+    payload = health.recall_distillation_health(root)
+
+    assert "native_luna_executor_error" not in payload["reason_codes"]
+    assert "native_luna_executor_stalled" not in payload["reason_codes"]
+
+
+def test_native_luna_supervisor_invalid_state_is_human_wait_without_raw_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    _enable_native_luna_health(root, monkeypatch)
+    _write_native_luna_supervisor_status(
+        root,
+        pending_total="not-a-count",
+        error="private error text",
+        path="/private/raw-path",
+    )
+
+    payload = health.recall_distillation_health(root)
+
+    assert "executor_state_invalid" in payload["reason_codes"]
+    assert payload["native_luna_supervisor"] == {
+        "status": "invalid",
+        "completed_total": 0,
+        "pending_total": 0,
+        "bundles": {},
+        "last_progress_at": None,
+    }
+    assert "private error text" not in json.dumps(payload)
+    assert "/private/raw-path" not in json.dumps(payload)
 
 
 def test_semantic_index_kpi_is_inactive_when_rollout_is_off(

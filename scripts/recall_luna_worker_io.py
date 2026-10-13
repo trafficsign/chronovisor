@@ -13,6 +13,7 @@ import argparse
 import fcntl
 import json
 import os
+import select
 import sys
 import termios
 from collections.abc import Mapping
@@ -79,6 +80,8 @@ def main() -> int:
     parser.add_argument("--shard", type=int, required=True)
     parser.add_argument("--assignment-id", required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--max-records", type=int, default=0)
+    parser.add_argument("--idle-timeout", type=float, default=900)
     args = parser.parse_args()
     # macOS canonical TTY input truncates long JSON lines before Python reads
     # them. Pipes need no adjustment; the dedicated worker TTY must be raw.
@@ -103,7 +106,11 @@ def main() -> int:
 
 
 def _serve_shard(bundle: LunaBulkBundle, args: argparse.Namespace) -> int:
+    committed = 0
     while True:
+        if args.max_records > 0 and committed >= args.max_records:
+            print(json.dumps({"status": "round_complete", "committed": committed}), flush=True)
+            return 0
         # Show the complete query, context and candidate together. Ten full
         # inputs exceed common tool-output limits and invite partial reading.
         # The frozen batch size is an upper bound, so single-record commits
@@ -119,6 +126,9 @@ def _serve_shard(bundle: LunaBulkBundle, args: argparse.Namespace) -> int:
             json.dumps(request, ensure_ascii=False, separators=(",", ":")), flush=True
         )
         while True:
+            if args.idle_timeout > 0 and not select.select([sys.stdin], [], [], args.idle_timeout)[0]:
+                print(json.dumps({"status": "worker_input_timeout"}), flush=True)
+                return 3
             response = sys.stdin.readline()
             if not response:
                 return 0
@@ -151,6 +161,7 @@ def _serve_shard(bundle: LunaBulkBundle, args: argparse.Namespace) -> int:
                 ),
                 flush=True,
             )
+            committed += len(labels)
             break
 
 
