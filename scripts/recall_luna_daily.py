@@ -218,6 +218,33 @@ def _capture_progress(path: Path) -> dict[str, Any] | None:
     return result
 
 
+def _active_capture_progress(
+    root: Path, requested: Path
+) -> tuple[Path, dict[str, Any] | None]:
+    """Find an active capture receipt across a midnight/date-root rotation."""
+
+    requested = requested.expanduser()
+    progress = _capture_progress(requested)
+    if progress and progress.get("status") in {"starting", "running"}:
+        return requested, progress
+    bulk_root = root / "runtime" / "recall-luna-bulk"
+    if bulk_root.name != "recall-luna-bulk" or not bulk_root.is_dir():
+        return requested, progress
+    for day_root in sorted(bulk_root.iterdir(), reverse=True):
+        if not day_root.is_dir() or day_root.is_symlink():
+            continue
+        candidate = day_root / requested.name
+        if candidate == requested:
+            continue
+        candidate_progress = _capture_progress(candidate)
+        if candidate_progress and candidate_progress.get("status") in {
+            "starting",
+            "running",
+        }:
+            return candidate, candidate_progress
+    return requested, progress
+
+
 def _safe_candidate_ids(snapshot: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     candidates = snapshot.get("candidates")
     if not isinstance(candidates, list):
@@ -927,13 +954,16 @@ def status(
                 "path": str(bundle_path),
                 **(_bundle_metadata(bundle_path) or {}),
             }
-        progress = _capture_progress(capture_progress_path)
+        active_progress_path, progress = _active_capture_progress(
+            root, capture_progress_path
+        )
         if progress and progress.get("status") in {"starting", "running"}:
             result.update(
                 {
                     "status": "in_progress",
                     "reason": "authoritative_candidate_writer_active",
                     "capture_progress": progress,
+                    "capture_progress_path": str(active_progress_path),
                     "bundle": bundle_view,
                 }
             )
@@ -992,7 +1022,7 @@ def _start_candidate_capture(
 ) -> dict[str, Any]:
     """Start the authoritative private capture helper, if it is available."""
 
-    progress = _capture_progress(progress_path)
+    _active_path, progress = _active_capture_progress(root, progress_path)
     if progress and progress.get("status") in {"starting", "running"}:
         return {"started": False, "status": "running", "reason": "capture_already_running"}
     script = _capture_script_for(progress_path, capture_script)
@@ -1222,13 +1252,16 @@ def prepare(
                 result["reason"] = "existing_bundle_imported"
             _write_private_json(receipt_path, result)
             return result
-        progress = _capture_progress(capture_progress_path)
+        active_progress_path, progress = _active_capture_progress(
+            root, capture_progress_path
+        )
         if progress and progress.get("status") in {"starting", "running"}:
             result.update(
                 {
                     "status": "in_progress",
                     "reason": "authoritative_candidate_writer_active",
                     "capture_progress": progress,
+                    "capture_progress_path": str(active_progress_path),
                 }
             )
             _write_private_json(receipt_path, result)
