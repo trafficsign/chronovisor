@@ -79,7 +79,8 @@ def _create_sweep_state_db(path: Path) -> None:
                 content TEXT,
                 timestamp REAL NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1,
-                compacted INTEGER NOT NULL DEFAULT 0
+                compacted INTEGER NOT NULL DEFAULT 0,
+                display_identity BLOB
             );
             """
         )
@@ -92,13 +93,17 @@ def _create_sweep_state_db(path: Path) -> None:
             ],
         )
         conn.executemany(
-            "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
+            """
+            INSERT INTO messages
+                (id, session_id, role, content, timestamp, active, compacted, display_identity)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             [
-                (1, "cli-old", "user", "alpha", now - 2000, 1, 0),
-                (2, "cli-old", "assistant", "beta", now - 1999, 1, 0),
-                (3, "cli-fresh", "user", "gamma", now - 10, 1, 0),
-                (4, "cli-fresh", "assistant", "delta", now - 9, 1, 0),
-                (5, "sub-agent", "user", "epsilon", now - 2000, 1, 0),
+                (1, "cli-old", "user", "alpha", now - 2000, 1, 0, sqlite3.Binary(b"\x00\xff")),
+                (2, "cli-old", "assistant", "beta", now - 1999, 1, 0, None),
+                (3, "cli-fresh", "user", "gamma", now - 10, 1, 0, None),
+                (4, "cli-fresh", "assistant", "delta", now - 9, 1, 0, None),
+                (5, "sub-agent", "user", "epsilon", now - 2000, 1, 0, None),
             ],
         )
 
@@ -384,6 +389,9 @@ def test_save_pending_sessions_captures_all_and_reports_errors(
     assert result["session_results"][0]["status"] == "saved"
     assert len(published) == 1
     assert published[0]["host"] == "hermes"
+    source_bytes = published[0]["source_bytes"]
+    assert isinstance(source_bytes, bytes)
+    assert b'"__chronovisor_bytes_hex__": "00ff"' in source_bytes
     # A second sweep has nothing left to publish.
     again = hermes_record.save_pending_sessions(
         state_db=state_db,

@@ -219,7 +219,8 @@ def _write_hermes_db(path: Path) -> None:
                 content TEXT,
                 timestamp REAL NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1,
-                compacted INTEGER NOT NULL DEFAULT 0
+                compacted INTEGER NOT NULL DEFAULT 0,
+                display_identity BLOB
             );
             """
         )
@@ -231,11 +232,15 @@ def _write_hermes_db(path: Path) -> None:
             ],
         )
         conn.executemany(
-            "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
+            """
+            INSERT INTO messages
+                (id, session_id, role, content, timestamp, active, compacted, display_identity)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             [
-                (1, "hermes-main", "user", "hello", now - 3600, 1, 0),
-                (2, "hermes-main", "assistant", "world", now - 3599, 1, 0),
-                (3, "hermes-sub", "user", "sub only", now - 3600, 1, 0),
+                (1, "hermes-main", "user", "hello", now - 3600, 1, 0, sqlite3.Binary(b"\x00\xff")),
+                (2, "hermes-main", "assistant", "world", now - 3599, 1, 0, None),
+                (3, "hermes-sub", "user", "sub only", now - 3600, 1, 0, None),
             ],
         )
 

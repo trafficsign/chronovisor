@@ -69,6 +69,13 @@ def _row_dict(row: sqlite3.Row) -> dict[str, Any]:
     return dict(row)
 
 
+def _json_default(value: object) -> Any:
+    """Encode SQLite BLOB values losslessly at JSON serialization boundaries."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return {"__chronovisor_bytes_hex__": bytes(value).hex()}
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def _timestamp(value: object) -> str | None:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return datetime.fromtimestamp(float(value), UTC).isoformat()
@@ -80,7 +87,7 @@ def _semantic_text(value: object) -> str:
         return value
     if value is None:
         return ""
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=_json_default)
 
 
 def extract_transcript_delta(
@@ -173,7 +180,7 @@ def _serialized_records(delta: HermesTranscriptDelta) -> str:
         }
         for record in delta.records
     ]
-    return json.dumps(rows, ensure_ascii=False, indent=2)
+    return json.dumps(rows, ensure_ascii=False, indent=2, default=_json_default)
 
 
 def build_raw_content(
@@ -262,7 +269,13 @@ def _write_cursor(
 
 def _source_bytes(delta: HermesTranscriptDelta) -> bytes:
     return b"".join(
-        json.dumps(record.event, ensure_ascii=False, sort_keys=True).encode("utf-8") + b"\n"
+        json.dumps(
+            record.event,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=_json_default,
+        ).encode("utf-8")
+        + b"\n"
         for record in delta.records
     )
 
