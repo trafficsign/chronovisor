@@ -456,9 +456,9 @@ tests = ["tests/test_recall_distillation.py", "tests/test_recall_distillation_re
 path = "src/chronovisor/recall/recall_distillation.py"
 qualname = "_offline_training_gate"
 baseline_lines = 317
-disposition = "retained"
+disposition = "decomposed"
 max_lines = 317
-rationale = "One offline admission boundary binds dataset identity, split evidence, teacher receipts, counterfactual coverage, and promotion eligibility before training starts."
+rationale = "The admission boundary retains identity and promotion checks while a focused helper selects source-bound counterfactual pairs for the active single-teacher cohort."
 tests = ["tests/test_recall_distillation.py"]
 
 [[functions]]

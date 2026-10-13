@@ -63,6 +63,8 @@ from chronovisor.recall.recall_distillation_remote_teacher import (
     validate_ox_alpha_labels,
 )
 from chronovisor.recall.recall_distillation_single_teacher_gate import (
+    NATIVE_LUNA_FIXED_IDENTITY,
+    NATIVE_LUNA_SINGLE_PROFILE,
     evaluate_single_teacher_gate,
     expected_ox_provider_request_sha256,
     expected_ox_request_sha256,
@@ -90,7 +92,11 @@ OX_SINGLE_PROFILE = "deepseek-v4-flash-single-v1"
 OX_SINGLE_COHORT = "deepseek-v4-flash-backfill-v1"
 OX_PROBE_REVISION = "deepseek-single-teacher-repeat-v1"
 OX_RAMP_REQUEST_REVISION = "json-schema-core-label-abstain-16k-600s-v8"
-TEACHER_PROFILES = frozenset({LOCAL_TRIAD_PROFILE, OX_SINGLE_PROFILE})
+SINGLE_TEACHER_PROFILES = frozenset({OX_SINGLE_PROFILE, NATIVE_LUNA_SINGLE_PROFILE})
+TEACHER_PROFILES = frozenset({LOCAL_TRIAD_PROFILE, *SINGLE_TEACHER_PROFILES})
+NATIVE_LUNA_COHORT = "native-luna-backfill-v1"
+# Exact-exposure counterfactuals are authorized only from 2026-10-09 JST.
+NATIVE_COUNTERFACTUAL_NOT_BEFORE = datetime(2026, 10, 8, 15, tzinfo=UTC)
 OX_ALPHA_ENDPOINT = "https://opencode.ai/zen/go/v1"
 OX_ALPHA_CREDENTIAL_REF = "oskeyring:codex-router-opencode-go/default"
 OX_PROFILE_SCHEMA = "chronovisor.recall-distill-remote-profile.v2"
@@ -587,12 +593,59 @@ def _worker_call(
     }
 
 
+def _default_counterfactual_worker(
+    config: DistillationConfig, deadline_ms: int
+) -> CounterfactualGenerator | None:
+    try:
+        from chronovisor.core import ollama
+
+        roles = (
+            "recall.distill.answer_generator",
+            "recall.distill.utility_judge",
+        )
+        routes = ollama.runtime_generation_routes(roles)
+        digests = ollama.runtime_generation_route_fingerprints(routes)
+        identities = {
+            route.role: {
+                "role": route.role,
+                "provider": route.provider,
+                "model": route.model,
+                "location": route.location,
+            }
+            for route in routes
+        }
+        counterfactual = (
+            _WorkerCounterfactual(
+                config.max_input_bytes,
+                identities,
+                digests,
+                deadline_ms,
+            )
+            if tuple(route.role for route in routes) == roles
+            and all(
+                route.location == "local" and route.structured_output
+                for route in routes
+            )
+            and digests[roles[0]] != digests[roles[1]]
+            else None
+        )
+    except Exception:
+        counterfactual = None
+    return counterfactual
+
+
 def _default_workers(
     config: DistillationConfig,
     *,
     teacher_deadline_ms: int = 60_000,
     counterfactual_deadline_ms: int = 60_000,
 ) -> tuple[dict[str, Teacher], CounterfactualGenerator | None]:
+    if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE:
+        return {}, (
+            _default_counterfactual_worker(config, counterfactual_deadline_ms)
+            if config.native_luna_enabled
+            else None
+        )
     if config.teacher_profile == OX_SINGLE_PROFILE:
         if not config.ox_enabled or config.ox_free_only:
             return {}, None
@@ -627,44 +680,9 @@ def _default_workers(
             )
         except Exception:
             return {}, None
-        # Counterfactuals remain local even while OX supplies the temporary
-        # relevance teacher.  They never receive the remote backend.
-        try:
-            from chronovisor.core import ollama
-
-            roles = (
-                "recall.distill.answer_generator",
-                "recall.distill.utility_judge",
-            )
-            routes = ollama.runtime_generation_routes(roles)
-            digests = ollama.runtime_generation_route_fingerprints(routes)
-            identities = {
-                route.role: {
-                    "role": route.role,
-                    "provider": route.provider,
-                    "model": route.model,
-                    "location": route.location,
-                }
-                for route in routes
-            }
-            counterfactual = (
-                _WorkerCounterfactual(
-                    config.max_input_bytes,
-                    identities,
-                    digests,
-                    counterfactual_deadline_ms,
-                )
-                if tuple(route.role for route in routes) == roles
-                and all(
-                    route.location == "local" and route.structured_output
-                    for route in routes
-                )
-                and digests[roles[0]] != digests[roles[1]]
-                else None
-            )
-        except Exception:
-            counterfactual = None
-        return {teacher.role: teacher}, counterfactual
+        return {teacher.role: teacher}, _default_counterfactual_worker(
+            config, counterfactual_deadline_ms
+        )
 
     from chronovisor.core import ollama
 
@@ -738,6 +756,8 @@ class DistillationConfig:
     ox_enabled: bool = False
     ox_free_only: bool = False
     ox_expires_at: str = "2099-01-01T00:00:00Z"
+    native_luna_enabled: bool = False
+    native_luna_bundle: str = ""
 
 
 def _ox_expiry(value: object) -> str:
@@ -895,6 +915,28 @@ def _current_ox_profile_contract_id(root: Path) -> str:
         return ""
     contract_id = str(pointer.get("profile_contract_id") or "")
     return contract_id if re.fullmatch(r"[0-9a-f]{64}", contract_id) else ""
+
+
+def _profile_cohort(profile: str) -> str:
+    if profile == NATIVE_LUNA_SINGLE_PROFILE:
+        return NATIVE_LUNA_COHORT
+    return OX_SINGLE_COHORT if profile == OX_SINGLE_PROFILE else LOCAL_TRIAD_PROFILE
+
+
+def _current_profile_contract_id(root: Path, profile: str) -> str:
+    if profile == NATIVE_LUNA_SINGLE_PROFILE:
+        from chronovisor.recall.recall_distillation_native import current_contract_id
+
+        return current_contract_id(root)
+    return _current_ox_profile_contract_id(root) if profile == OX_SINGLE_PROFILE else ""
+
+
+def _ensure_profile_contract(root: Path, config: DistillationConfig) -> dict[str, Any]:
+    if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE:
+        from chronovisor.recall.recall_distillation_native import ensure_contract
+
+        return ensure_contract(root, config)
+    return _ensure_ox_profile_contract(root, config)
 
 
 def _validate_ox_profile_contract(
@@ -1144,7 +1186,7 @@ def _ox_eligibility_guard(
             or any(contract.get(key) != value for key, value in source.items())
         ):
             raise DistillationError("OX egress eligibility changed")
-    except (DistillationError, ValueError, TypeError):
+    except DistillationError, ValueError, TypeError:
         raise DispatchGuardDenied("OX egress eligibility changed") from None
 
 
@@ -1289,7 +1331,7 @@ def _r4_critical_module_sha256() -> dict[str, str]:
             installed_path = Path(str(installed.__file__)).resolve(strict=True)
             source = source_path.read_bytes()
             deployed = installed_path.read_bytes()
-        except (ImportError, OSError, TypeError, ValueError):
+        except ImportError, OSError, TypeError, ValueError:
             return {}
         if source != deployed:
             return {}
@@ -1711,7 +1753,7 @@ def _r4_runtime_identity_projection(
         critical_modules = _r4_critical_module_sha256()
         if not critical_modules:
             return {}
-    except (OSError, store.DistillationStoreError, ValueError):
+    except OSError, store.DistillationStoreError, ValueError:
         # A partially written runtime must not fabricate a compatible receipt.
         return {}
     # R4 authority is rooted in the managed runtime, never in a checkout
@@ -1760,7 +1802,7 @@ def _r4_runtime_identity_projection(
             != critical_modules
         ):
             return {}
-    except (OSError, store.DistillationStoreError, TypeError, ValueError):
+    except OSError, store.DistillationStoreError, TypeError, ValueError:
         return {}
     try:
         installed = runtime_config.runtime_identity()
@@ -1773,7 +1815,7 @@ def _r4_runtime_identity_projection(
         direct_url_copy = json.loads(
             canonical_json.canonical_json_bytes_strict(direct_url)
         )
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return {}
     return {
         "root": str(root.absolute()),
@@ -2664,7 +2706,7 @@ def _ox_event_projection(
             )
             is not None
         )
-    except (KeyError, store.DistillationStoreError, DistillationError):
+    except KeyError, store.DistillationStoreError, DistillationError:
         pass
     quality_gates: dict[str, Any] = {
         "negative_veto": {
@@ -2876,6 +2918,8 @@ _OPTIONAL_PROFILE_CONFIG = frozenset(
         "ox_enabled",
         "ox_free_only",
         "ox_expires_at",
+        "native_luna_enabled",
+        "native_luna_bundle",
     }
 )
 
@@ -2934,6 +2978,12 @@ def load_distillation_config(config_path: Path | None = None) -> DistillationCon
     teacher_profile = table.get("teacher_profile", LOCAL_TRIAD_PROFILE)
     if teacher_profile not in TEACHER_PROFILES:
         raise DistillationError("recall.distillation.teacher_profile is invalid")
+    native_luna_enabled = table.get("native_luna_enabled", False)
+    native_luna_bundle = table.get("native_luna_bundle", "")
+    if not isinstance(native_luna_enabled, bool) or not isinstance(
+        native_luna_bundle, str
+    ):
+        raise DistillationError("recall.distillation native Luna config is invalid")
     ox_enabled = table.get("ox_enabled", False)
     ox_free_only = table.get("ox_free_only", False)
     if not isinstance(ox_enabled, bool) or ox_free_only is not False:
@@ -2972,6 +3022,8 @@ def load_distillation_config(config_path: Path | None = None) -> DistillationCon
         ox_enabled=ox_enabled,
         ox_free_only=False,
         ox_expires_at=str(ox_expires_at),
+        native_luna_enabled=native_luna_enabled,
+        native_luna_bundle=native_luna_bundle,
     )
 
 
@@ -3828,13 +3880,13 @@ def load_capture_policy_identity(root: Path | None = None) -> str:
         policy_id = str(_stable_pointer_read(root, "active")["policy_id"])
         _validate_exposure_policy_identity(root, policy_id)
         return policy_id
-    except (KeyError, store.DistillationStoreError, DistillationError):
+    except KeyError, store.DistillationStoreError, DistillationError:
         pass
     try:
         state = _read_worker_state(root)
         policy_id = str(state.get("baseline_artifact_id") or "")
         _validate_exposure_policy_identity(root, policy_id)
-    except (store.DistillationStoreError, DistillationError):
+    except store.DistillationStoreError, DistillationError:
         return ""
     return policy_id
 
@@ -4849,7 +4901,7 @@ def _resolve_closed_outcome(
             / f"{receipt['outcome_artifact_id']}.json",
             schema=OUTCOME_SCHEMA,
         )
-    except (KeyError, store.DistillationStoreError):
+    except KeyError, store.DistillationStoreError:
         return None
     binding = {
         key: receipt.get(key)
@@ -5015,7 +5067,7 @@ def _load_serving_policy(root: Path, *, allow_lkg: bool) -> dict[str, Any]:
         try:
             pointer = _stable_pointer_read(root, kind)
             return _load_policy(str(pointer["policy_id"]), root)
-        except (store.DistillationStoreError, DistillationError, KeyError):
+        except store.DistillationStoreError, DistillationError, KeyError:
             continue
     return {}
 
@@ -5064,7 +5116,7 @@ def load_policy_for_session(
         return {}
     try:
         return _non_bootstrap_policy(_load_policy(policy_id, root))
-    except (store.DistillationStoreError, DistillationError):
+    except store.DistillationStoreError, DistillationError:
         return {}
 
 
@@ -5162,7 +5214,7 @@ def load_policy_observation_context(
                 "candidate_policy": _non_bootstrap_policy(candidate),
                 "incumbent_policy": _non_bootstrap_policy(incumbent),
             }
-    except (KeyError, store.DistillationStoreError, DistillationError):
+    except KeyError, store.DistillationStoreError, DistillationError:
         return {}
 
 
@@ -5482,6 +5534,39 @@ def _training_assignment_authority(assignment: object) -> dict[str, Any]:
     }
 
 
+def _native_label_source_matches(
+    root: Path,
+    label: Mapping[str, Any],
+    rally: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+) -> bool:
+    """Join a native receipt to the exact historical query and candidate bytes."""
+
+    from chronovisor.recall.recall_distillation_native import validate_label
+
+    if not validate_label(root, label):
+        return False
+    source = label.get("payload_source")
+    candidate_texts = snapshot.get("candidate_text_sha256", {})
+    if not isinstance(source, Mapping) or not isinstance(candidate_texts, Mapping):
+        return False
+    expected = {
+        "rally_key": rally.get("rally_id"),
+        "candidate_id": label.get("candidate_id"),
+        "candidate_snapshot_sha256": snapshot.get("snapshot_sha256"),
+        "query_sha256": rally.get("query_sha256"),
+        "context_sha256": [
+            ref.get("semantic_sha256")
+            for ref in rally.get("context_refs", [])
+            if isinstance(ref, Mapping)
+        ],
+        "candidate_text_sha256": candidate_texts.get(
+            str(label.get("candidate_id") or "")
+        ),
+    }
+    return all(source.get(key) == value for key, value in expected.items())
+
+
 def _materialization_label_row(
     label: Mapping[str, Any],
     root: Path,
@@ -5494,6 +5579,12 @@ def _materialization_label_row(
     candidate_id = str(label.get("candidate_id") or "")
     rally_row = rallies.get(rally_id)
     if rally_row is None:
+        return None
+    if (
+        label.get("profile") == NATIVE_LUNA_SINGLE_PROFILE
+        and label.get("kind") == "counterfactual-label"
+        and not _native_counterfactual_since_approval(rally_row)
+    ):
         return None
     rally_as_of = str(rally_row.get("as_of") or "")
     session_cluster_id = str(rally_row.get("session_cluster_id") or "")
@@ -5537,7 +5628,18 @@ def _materialization_label_row(
         return None
     assignment = label.get("assignment")
     probe = isinstance(assignment, Mapping) and assignment.get("probe") is True
-    is_ox = label.get("profile") == OX_SINGLE_PROFILE
+    is_ox = (
+        label.get("profile") == OX_SINGLE_PROFILE
+        and label.get("kind") == "teacher-label"
+    )
+    is_native = (
+        label.get("profile") == NATIVE_LUNA_SINGLE_PROFILE
+        and label.get("kind") == "teacher-label"
+    )
+    if is_native and not _native_label_source_matches(
+        root, label, rally_row, snapshot_contracts.get(rally_id, {})
+    ):
+        return None
     if is_ox and label.get("profile_contract_id") != current_ox_contract_id:
         return None
     if is_ox:
@@ -5671,11 +5773,15 @@ def _materialization_label_row(
                 "request_revision": str(label.get("request_revision") or ""),
                 "route_digest": str(label.get("route_digest") or ""),
                 "route_identity_exact": label.get("route_identity")
-                == {
-                    "provider": "opencode-go",
-                    "model": OX_ALPHA_ROUTE_MODEL,
-                    "location": "remote",
-                },
+                == (
+                    NATIVE_LUNA_FIXED_IDENTITY["route_identity"]
+                    if is_native
+                    else {
+                        "provider": "opencode-go",
+                        "model": OX_ALPHA_ROUTE_MODEL,
+                        "location": "remote",
+                    }
+                ),
                 "prompt_sha256": str(label.get("prompt_sha256") or ""),
                 "schema_sha256": str(label.get("schema_sha256") or ""),
                 "request_sha256": str(label.get("request_sha256") or ""),
@@ -5714,7 +5820,28 @@ def _materialization_label_row(
                 if isinstance(assignment, Mapping)
                 else "",
             }
-            if is_ox
+            if is_ox or is_native
+            else {}
+        ),
+        **(
+            {
+                "native_luna": True,
+                "truth_authority": str(label.get("truth_authority") or ""),
+                "confidence": label.get("confidence"),
+                "reason_code": str(label.get("reason_code") or ""),
+                "rationale_sha256": str(label.get("rationale_sha256") or ""),
+                "rationale_chars": label.get("rationale_chars"),
+                **{
+                    key: str(label.get(key) or "")
+                    for key in (
+                        "native_receipt_sha256",
+                        "native_assignment_id",
+                        "native_run_id",
+                        "native_batch_sha256",
+                    )
+                },
+            }
+            if is_native
             else {}
         ),
     }
@@ -5804,7 +5931,7 @@ def _finalize_materialized_training_rows(
         } - {split_plan_id, ""}:
             try:
                 prior = _read_split_plan_artifact(root, prior_plan_id)
-            except (DistillationError, store.DistillationStoreError):
+            except DistillationError, store.DistillationStoreError:
                 continue
             if (
                 prior.get("feature_revision") == split_plan.get("feature_revision")
@@ -5815,19 +5942,19 @@ def _finalize_materialized_training_rows(
                 )
             ):
                 compatible_split_plan_ids.add(prior_plan_id)
-    except (KeyError, DistillationError, store.DistillationStoreError):
+    except KeyError, DistillationError, store.DistillationStoreError:
         split = grouped_rolling_split(materialized) if materialized else {}
     rows = []
     for row in materialized:
         row_split = split.get(row["rally_id"], "embargo")
         split_bound = (
-            row.get("profile") == OX_SINGLE_PROFILE
+            row.get("profile") in SINGLE_TEACHER_PROFILES
             and row.get("label_split_plan_id") in compatible_split_plan_ids
             and bool(split_plan_id)
             and row_split == "test"
         )
         fixed_split_plan = (
-            row.get("profile") == OX_SINGLE_PROFILE
+            row.get("profile") in SINGLE_TEACHER_PROFILES
             and row.get("label_split_plan_id") in compatible_split_plan_ids
             and bool(split_plan_id)
             and row_split in {"train", "validation", "test"}
@@ -5851,7 +5978,7 @@ def _finalize_materialized_training_rows(
                             f"split-plan:{split_plan_id}" if split_bound else ""
                         ),
                     }
-                    if row.get("profile") == OX_SINGLE_PROFILE
+                    if row.get("profile") in SINGLE_TEACHER_PROFILES
                     else {}
                 ),
             }
@@ -5964,8 +6091,7 @@ def _control_confusion_matrix(
     recall = _wilson_lower(true_positive, len(relevant))
     specificity = _wilson_lower(true_negative, len(irrelevant))
     eligible = (
-        len(relevant) >= _CONTROL_MIN_CLASS
-        and len(irrelevant) >= _CONTROL_MIN_CLASS
+        len(relevant) >= _CONTROL_MIN_CLASS and len(irrelevant) >= _CONTROL_MIN_CLASS
     )
     return {
         "cohort_sha256": cohort_sha256,
@@ -5995,9 +6121,9 @@ def _control_fold_evidence(
         "learned": _control_confusion_matrix(
             test,
             lambda row: (
-                policy_decision(
-                    score_fast_features(row["features"], policy), policy
-                )["decision"]
+                policy_decision(score_fast_features(row["features"], policy), policy)[
+                    "decision"
+                ]
                 == "read"
             ),
             cohort_sha256=cohort_sha256,
@@ -6078,20 +6204,20 @@ def _authoritative_materialized_row_binding(
     record_sha256 = str(row.get("label_record_sha256") or "")
     if re.fullmatch(r"[0-9a-f]{64}", record_sha256) is None:
         return False
-    labels = _read_chain(store.distillation_dir(root) / "label-ledger.jsonl")
-    labels_by_record = {
-        str(label.get("record_sha256") or ""): label
-        for label in labels
-        if isinstance(label, Mapping)
-    }
+    from chronovisor.recall.recall_distillation_validation import (
+        SourceBindingError,
+        binding_inputs,
+    )
+
+    try:
+        labels_by_record, rallies, features_by_pair, snapshot_contracts = (
+            binding_inputs(root)
+        )
+    except SourceBindingError:
+        return False
     label = labels_by_record.get(record_sha256)
     if label is None:
         return False
-    rallies = _materialization_rallies(root, None)
-    snapshots = _materialization_snapshots(root, None)
-    features_by_pair, snapshot_contracts = _materialization_feature_pairs(
-        root, rallies, snapshots
-    )
     canonical = _materialization_label_row(
         label,
         root,
@@ -6118,7 +6244,7 @@ def _authoritative_materialized_row_binding(
             expected_plan = _read_split_plan_artifact(
                 root, str(row.get("split_plan_id") or "")
             )
-        except (DistillationError, store.DistillationStoreError):
+        except DistillationError, store.DistillationStoreError:
             return False
     plan_id = str(expected_plan.get("artifact_id") or "")
     rally_id = str(row.get("rally_id") or "")
@@ -6209,7 +6335,7 @@ def _sealed_counterfactual_exposure_binding(
             store.distillation_dir(root) / "exposures" / f"{reference}.json",
             schema="chronovisor.recall-exact-exposure.v1",
         )
-    except (KeyError, TypeError, store.DistillationStoreError):
+    except KeyError, TypeError, store.DistillationStoreError:
         return False
     receipt = next(
         (
@@ -6262,7 +6388,7 @@ def _sealed_counterfactual_exposure_binding(
                     str(row.get("rally_id") or ""), {}
                 )
                 candidates = snapshot.get("candidates", [])
-            except (AttributeError, KeyError, TypeError, store.DistillationStoreError):
+            except AttributeError, KeyError, TypeError, store.DistillationStoreError:
                 return False
             candidate_hashes = {
                 str(candidate.get("text_sha256") or "")
@@ -6283,7 +6409,7 @@ def _configured_local_route_binding(row: Mapping[str, Any]) -> bool:
     source = str(row.get("source") or "")
     if source not in {"teacher-label", "counterfactual-label"}:
         return True
-    if source == "teacher-label" and row.get("profile") == OX_SINGLE_PROFILE:
+    if source == "teacher-label" and row.get("profile") in SINGLE_TEACHER_PROFILES:
         return True
     try:
         from chronovisor.core import ollama
@@ -6330,13 +6456,8 @@ def _configured_local_route_binding(row: Mapping[str, Any]) -> bool:
     generator = "recall.distill.answer_generator"
     judge = "recall.distill.utility_judge"
     return (
-        row.get("profile") in {LOCAL_TRIAD_PROFILE, OX_SINGLE_PROFILE}
-        and row.get("cohort")
-        == (
-            OX_SINGLE_COHORT
-            if row.get("profile") == OX_SINGLE_PROFILE
-            else LOCAL_TRIAD_PROFILE
-        )
+        row.get("profile") in TEACHER_PROFILES
+        and row.get("cohort") == _profile_cohort(str(row.get("profile") or ""))
         and row.get("assignment_revision") == ASSIGNMENT_REVISION
         and row.get("identity_revision") == "local-blind-counterfactual-v1"
         and row.get("request_revision") == "local-blind-counterfactual-v1"
@@ -6347,12 +6468,23 @@ def _configured_local_route_binding(row: Mapping[str, Any]) -> bool:
                 and row.get("expires_at") == ""
             )
             or (
-                row.get("profile") == OX_SINGLE_PROFILE
+                row.get("profile") in SINGLE_TEACHER_PROFILES
                 and re.fullmatch(
                     r"[0-9a-f]{64}", str(row.get("profile_contract_id") or "")
                 )
                 is not None
-                and _same_future_ox_expiry(row.get("expires_at"), row.get("expires_at"))
+                and (
+                    (
+                        row.get("profile") == NATIVE_LUNA_SINGLE_PROFILE
+                        and row.get("expires_at") == ""
+                    )
+                    or (
+                        row.get("profile") == OX_SINGLE_PROFILE
+                        and _same_future_ox_expiry(
+                            row.get("expires_at"), row.get("expires_at")
+                        )
+                    )
+                )
             )
         )
         and row.get("counterfactual_producer") == "chronovisor-local-blind-v1"
@@ -6377,6 +6509,12 @@ def _materialized_row_integrity(
     if re.fullmatch(r"[0-9a-f]{64}", str(row.get("label_record_sha256") or "")) is None:
         return False
     if (
+        row.get("profile") == NATIVE_LUNA_SINGLE_PROFILE
+        and row.get("source") == "counterfactual-label"
+        and not _native_counterfactual_since_approval(row)
+    ):
+        return False
+    if (
         row.get("future_leakage") is not False
         or row.get("feature_parity") is not True
         or row.get("negative_veto_conflict") is True
@@ -6385,7 +6523,11 @@ def _materialized_row_integrity(
     ):
         return False
     if row.get("source") != "counterfactual-label":
-        if row.get("profile") == OX_SINGLE_PROFILE:
+        if row.get("profile") == NATIVE_LUNA_SINGLE_PROFILE:
+            from chronovisor.recall.recall_distillation_native import row_integrity
+
+            semantic = row_integrity(row, root=root)
+        elif row.get("profile") == OX_SINGLE_PROFILE:
             payload = str(row.get("payload_digest") or "")
             source = row.get("payload_source")
             contract = (
@@ -6456,13 +6598,8 @@ def _materialized_row_integrity(
             semantic = True
     else:
         semantic = (
-            row.get("profile") in {LOCAL_TRIAD_PROFILE, OX_SINGLE_PROFILE}
-            and row.get("cohort")
-            == (
-                OX_SINGLE_COHORT
-                if row.get("profile") == OX_SINGLE_PROFILE
-                else LOCAL_TRIAD_PROFILE
-            )
+            row.get("profile") in TEACHER_PROFILES
+            and row.get("cohort") == _profile_cohort(str(row.get("profile") or ""))
             and row.get("assignment_revision") == ASSIGNMENT_REVISION
             and row.get("assignment_authority")
             == _training_assignment_authority(
@@ -6477,14 +6614,23 @@ def _materialized_row_integrity(
                     and row.get("expires_at") == ""
                 )
                 or (
-                    row.get("profile") == OX_SINGLE_PROFILE
+                    row.get("profile") in SINGLE_TEACHER_PROFILES
                     and re.fullmatch(
                         r"[0-9a-f]{64}",
                         str(row.get("profile_contract_id") or ""),
                     )
                     is not None
-                    and _same_future_ox_expiry(
-                        row.get("expires_at"), row.get("expires_at")
+                    and (
+                        (
+                            row.get("profile") == NATIVE_LUNA_SINGLE_PROFILE
+                            and row.get("expires_at") == ""
+                        )
+                        or (
+                            row.get("profile") == OX_SINGLE_PROFILE
+                            and _same_future_ox_expiry(
+                                row.get("expires_at"), row.get("expires_at")
+                            )
+                        )
                     )
                 )
             )
@@ -6535,22 +6681,22 @@ def _active_training_cohort(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Select the latest coherent local-model cohort and resplit only it."""
 
-    if teacher_profile == OX_SINGLE_PROFILE:
+    if teacher_profile in SINGLE_TEACHER_PROFILES:
         single_rows = [
             dict(row)
             for row in rows
-            if row.get("profile") == OX_SINGLE_PROFILE
-            and row.get("cohort") == OX_SINGLE_COHORT
+            if row.get("profile") == teacher_profile
+            and row.get("cohort") == _profile_cohort(teacher_profile)
             and row.get("profile_contract_id") == profile_contract_id
         ]
         single_cohort = {
             "revision": "single-teacher-cohort-v1",
-            "profile": OX_SINGLE_PROFILE,
-            "cohort": OX_SINGLE_COHORT,
+            "profile": teacher_profile,
+            "cohort": _profile_cohort(teacher_profile),
             "profile_contract_id": profile_contract_id,
-            "model_digests": sorted(
-                {str(row.get("model_digest") or "") for row in single_rows}
-            ),
+            "model_digests": [NATIVE_LUNA_FIXED_IDENTITY["model_digest"]]
+            if teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+            else sorted({str(row.get("model_digest") or "") for row in single_rows}),
         }
         return single_rows, {
             **single_cohort,
@@ -6612,6 +6758,46 @@ def _active_training_cohort(
     }
 
 
+def _single_teacher_counterfactual_pairs(
+    rows: Sequence[Mapping[str, Any]],
+    config: DistillationConfig,
+    current_contract_id: str,
+) -> list[Mapping[str, Any]]:
+    """Select the locked, source-bound utility pairs for the active teacher cohort."""
+
+    return [
+        row
+        for row in rows
+        if row.get("source") == "counterfactual-label"
+        and row.get("split") == "test"
+        and row.get("verdict") in {"helpful", "harmful"}
+        and re.fullmatch(r"[0-9a-f]{64}", str(row.get("counterfactual_ref") or ""))
+        and re.fullmatch(r"[0-9a-f]{64}", str(row.get("a0_sha256") or ""))
+        and re.fullmatch(r"[0-9a-f]{64}", str(row.get("a1_sha256") or ""))
+        and isinstance(row.get("generator_route_identity"), Mapping)
+        and isinstance(row.get("judge_route_identity"), Mapping)
+        and row.get("generator_route_identity")
+        and row.get("judge_route_identity")
+        and row.get("counterfactual_producer") == "chronovisor-local-blind-v1"
+        and row.get("counterfactual_revision") == "two-order-locked-v2"
+        and set(row.get("blind_orders") or []) == {"a0_first", "a1_first"}
+        and row.get("profile") == config.teacher_profile
+        and row.get("cohort") == _profile_cohort(config.teacher_profile)
+        and row.get("profile_contract_id") == current_contract_id
+        and row.get("identity_revision") == "local-blind-counterfactual-v1"
+        and (
+            (
+                config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+                and row.get("expires_at") == ""
+            )
+            or (
+                config.teacher_profile == OX_SINGLE_PROFILE
+                and _same_future_ox_expiry(row.get("expires_at"), config.ox_expires_at)
+            )
+        )
+    ]
+
+
 def _offline_training_gate(
     rows: Sequence[Mapping[str, Any]],
     config: DistillationConfig,
@@ -6621,10 +6807,14 @@ def _offline_training_gate(
     """Qualify untrusted local-model data without calling it verified truth."""
 
     integrity_failed = any(
-        isinstance(row, Mapping) and not _materialized_row_integrity(row)
+        isinstance(row, Mapping)
+        and not _materialized_row_integrity(
+            row,
+            root=root if config.teacher_profile in SINGLE_TEACHER_PROFILES else None,
+        )
         for row in rows
     )
-    if config.teacher_profile == OX_SINGLE_PROFILE:
+    if config.teacher_profile in SINGLE_TEACHER_PROFILES:
         invalid_input_rows = any(not isinstance(row, Mapping) for row in rows)
         current_contract_id = ""
         reasons: list[str] = []
@@ -6635,19 +6825,19 @@ def _offline_training_gate(
         else:
             try:
                 current_contract_id = str(
-                    _ensure_ox_profile_contract(root, config)["artifact_id"]
+                    _ensure_profile_contract(root, config)["artifact_id"]
                 )
-            except (DistillationError, store.DistillationStoreError, KeyError):
+            except ValueError, store.DistillationStoreError, KeyError:
                 reasons.append("profile_contract_unavailable")
         single_rows = [
             row
             for row in rows
-            if isinstance(row, Mapping) and row.get("profile") == OX_SINGLE_PROFILE
+            if isinstance(row, Mapping) and row.get("profile") == config.teacher_profile
         ]
         gate = evaluate_single_teacher_gate(
             single_rows,
-            profile=OX_SINGLE_PROFILE,
-            cohort=OX_SINGLE_COHORT,
+            profile=config.teacher_profile,
+            cohort=_profile_cohort(config.teacher_profile),
             profile_contract_id=current_contract_id,
             min_labels=config.hard_floor_teacher_labels,
             min_per_class=config.hard_floor_teacher_per_class,
@@ -6661,30 +6851,19 @@ def _offline_training_gate(
         reasons.extend(gate["reasons"])
         if invalid_input_rows:
             reasons.append("input_row_invalid")
-        if config.ox_enabled is not True:
-            reasons.append("ox_profile_disabled")
-        counterfactual_pairs = [
-            row
-            for row in single_rows
-            if row.get("source") == "counterfactual-label"
-            and row.get("split") == "test"
-            and row.get("verdict") in {"helpful", "harmful"}
-            and re.fullmatch(r"[0-9a-f]{64}", str(row.get("counterfactual_ref") or ""))
-            and re.fullmatch(r"[0-9a-f]{64}", str(row.get("a0_sha256") or ""))
-            and re.fullmatch(r"[0-9a-f]{64}", str(row.get("a1_sha256") or ""))
-            and isinstance(row.get("generator_route_identity"), Mapping)
-            and isinstance(row.get("judge_route_identity"), Mapping)
-            and row.get("generator_route_identity")
-            and row.get("judge_route_identity")
-            and row.get("counterfactual_producer") == "chronovisor-local-blind-v1"
-            and row.get("counterfactual_revision") == "two-order-locked-v2"
-            and set(row.get("blind_orders") or []) == {"a0_first", "a1_first"}
-            and row.get("profile") == OX_SINGLE_PROFILE
-            and row.get("cohort") == OX_SINGLE_COHORT
-            and row.get("profile_contract_id") == current_contract_id
-            and row.get("identity_revision") == "local-blind-counterfactual-v1"
-            and _same_future_ox_expiry(row.get("expires_at"), config.ox_expires_at)
-        ]
+        if not (
+            config.native_luna_enabled
+            if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+            else config.ox_enabled
+        ):
+            reasons.append(
+                "native_luna_profile_disabled"
+                if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+                else "ox_profile_disabled"
+            )
+        counterfactual_pairs = _single_teacher_counterfactual_pairs(
+            single_rows, config, current_contract_id
+        )
         if len(counterfactual_pairs) < max(100, config.hard_floor_counterfactual_pairs):
             reasons.append("counterfactual_pairs_below_floor")
         if current_contract_id:
@@ -6692,12 +6871,12 @@ def _offline_training_gate(
                 reasons.append("profile_contract_mismatch")
             try:
                 split_plan = _read_split_plan(root)
-            except (DistillationError, store.DistillationStoreError, KeyError):
+            except ValueError, store.DistillationStoreError, KeyError:
                 reasons.append("split_plan_unavailable")
             else:
                 _, model_cohort = _active_training_cohort(
                     single_rows,
-                    teacher_profile=OX_SINGLE_PROFILE,
+                    teacher_profile=config.teacher_profile,
                     profile_contract_id=current_contract_id,
                 )
                 if (
@@ -6805,7 +6984,7 @@ def _offline_training_gate(
     fixed_ids = {str(row.get("split_plan_id") or "") for row in rows}
     try:
         split_plan = _read_split_plan(root) if root is not None else {}
-    except (DistillationError, store.DistillationStoreError):
+    except DistillationError, store.DistillationStoreError:
         split_plan = {}
     assignments = split_plan.get("assignments")
     fixed_split_valid = (
@@ -6927,13 +7106,13 @@ def _ensure_bootstrap_policy(root: Path, baseline: Mapping[str, Any]) -> dict[st
             active = _load_policy(
                 str(_stable_pointer_read(root, "active")["policy_id"]), root
             )
-        except (KeyError, store.DistillationStoreError, DistillationError):
+        except KeyError, store.DistillationStoreError, DistillationError:
             pass
         try:
             lkg = _load_policy(
                 str(_stable_pointer_read(root, "lkg")["policy_id"]), root
             )
-        except (KeyError, store.DistillationStoreError, DistillationError):
+        except KeyError, store.DistillationStoreError, DistillationError:
             pass
         if active and lkg:
             return active
@@ -7024,14 +7203,19 @@ def _verify_candidate_lineage(
             schema=BASELINE_SCHEMA,
         )
         split_plan = _read_split_plan_artifact(root, str(lineage["split_plan_id"]))
-    except (DistillationError, store.DistillationStoreError, KeyError):
+    except DistillationError, store.DistillationStoreError, KeyError:
         return "candidate_lineage_incomplete"
     rows = snapshot.get("rows")
     replay_rows = replay.get("training_rows")
     expected_rows: list[dict[str, Any]] = []
+    profile = ""
     if isinstance(rows, list) and all(isinstance(row, Mapping) for row in rows):
         profile = (
-            OX_SINGLE_PROFILE
+            NATIVE_LUNA_SINGLE_PROFILE
+            if lineage.get("profile_contract_id")
+            == _current_profile_contract_id(root, NATIVE_LUNA_SINGLE_PROFILE)
+            and any(row.get("profile") == NATIVE_LUNA_SINGLE_PROFILE for row in rows)
+            else OX_SINGLE_PROFILE
             if any(row.get("profile") == OX_SINGLE_PROFILE for row in rows)
             else LOCAL_TRIAD_PROFILE
         )
@@ -7059,14 +7243,14 @@ def _verify_candidate_lineage(
         for row in rows or []
         if isinstance(row, Mapping) and row.get("profile") == OX_SINGLE_PROFILE
     ]
-    if ox_rows:
+    if ox_rows and profile == OX_SINGLE_PROFILE:
         current_contract_id = _current_ox_profile_contract_id(root)
         try:
             current_contract = _read_ox_profile_contract(root, current_contract_id)
             if not current_contract:
                 raise DistillationError("OX profile contract is invalid")
             expiry_valid = _ox_expiry(current_contract.get("expires_at"))
-        except (DistillationError, store.DistillationStoreError):
+        except DistillationError, store.DistillationStoreError:
             return "candidate_lineage_incomplete"
         if (
             not current_contract_id
@@ -7078,6 +7262,19 @@ def _verify_candidate_lineage(
                 for row in [*ox_rows, *(replay_rows or [])]
                 if isinstance(row, Mapping) and row.get("profile") == OX_SINGLE_PROFILE
             )
+        ):
+            return "candidate_lineage_incomplete"
+    if profile == NATIVE_LUNA_SINGLE_PROFILE:
+        from chronovisor.recall.recall_distillation_native import row_integrity
+
+        native_rows = [row for row in replay_rows or [] if isinstance(row, Mapping)]
+        if not native_rows or any(
+            row.get("profile_contract_id") != lineage.get("profile_contract_id")
+            or (
+                row.get("source") == "teacher-label"
+                and not row_integrity(row, root=root)
+            )
+            for row in native_rows
         ):
             return "candidate_lineage_incomplete"
     if (
@@ -7164,7 +7361,7 @@ def _maybe_publish_candidate(
         if reason:
             return {"status": "held", "reason": reason}
         return {"status": "candidate", "policy_id": candidate["policy_id"]}
-    except (store.DistillationStoreError, DistillationError, KeyError):
+    except store.DistillationStoreError, DistillationError, KeyError:
         pass
     training = materialize_training_rows(root)
     rows = training["rows"]
@@ -7176,8 +7373,8 @@ def _maybe_publish_candidate(
         rows,
         teacher_profile=config.teacher_profile,
         profile_contract_id=(
-            _current_ox_profile_contract_id(root)
-            if config.teacher_profile == OX_SINGLE_PROFILE
+            _current_profile_contract_id(root, config.teacher_profile)
+            if config.teacher_profile in SINGLE_TEACHER_PROFILES
             else ""
         ),
     )
@@ -7204,8 +7401,10 @@ def _maybe_publish_candidate(
             "candidate_head": store.chain_head(
                 store.distillation_dir(root) / "candidate-ledger.jsonl"
             )["head_sha256"],
-            "profile_contract_id": _current_ox_profile_contract_id(root)
-            if config.teacher_profile == OX_SINGLE_PROFILE
+            "profile_contract_id": _current_profile_contract_id(
+                root, config.teacher_profile
+            )
+            if config.teacher_profile in SINGLE_TEACHER_PROFILES
             else "",
             "offline_gate_sha256": canonical_json.canonical_json_sha256_strict(
                 offline_gate
@@ -7238,8 +7437,10 @@ def _maybe_publish_candidate(
             "candidate_head": store.chain_head(
                 store.distillation_dir(root) / "candidate-ledger.jsonl"
             )["head_sha256"],
-            "profile_contract_id": _current_ox_profile_contract_id(root)
-            if config.teacher_profile == OX_SINGLE_PROFILE
+            "profile_contract_id": _current_profile_contract_id(
+                root, config.teacher_profile
+            )
+            if config.teacher_profile in SINGLE_TEACHER_PROFILES
             else "",
         },
         root=root,
@@ -7247,7 +7448,7 @@ def _maybe_publish_candidate(
     try:
         candidate = _stable_pointer_read(root, "candidate")
         reason = _verify_candidate_lineage(root, candidate, artifact, baseline)
-    except (store.DistillationStoreError, DistillationError, KeyError):
+    except store.DistillationStoreError, DistillationError, KeyError:
         reason = "candidate_lineage_incomplete"
     if reason:
         return {"status": "held", "reason": reason}
@@ -7387,7 +7588,7 @@ def _operational_rollout_sources(
             baseline_artifact_id=baseline_artifact_id,
         )
         receipts = rollout._shadow_receipt_index(root)
-    except (DistillationError, store.DistillationStoreError, ValueError):
+    except DistillationError, store.DistillationStoreError, ValueError:
         return []
     sources: list[tuple[str, Mapping[str, Any], Mapping[str, Any]]] = []
     for artifact_id, receipt in receipts.items():
@@ -7511,7 +7712,7 @@ def _operational_rollout_metrics(
                     "incumbent_selected_candidate_ids", []
                 ),
             )
-        except (DistillationError, TypeError, ValueError):
+        except DistillationError, TypeError, ValueError:
             return False
         return (
             isinstance(value["deadline_ms"], int)
@@ -7572,7 +7773,7 @@ def _operational_rollout_metrics(
             qualified_run_id=qualified_run_id,
             stage_name=stage,
         )
-    except (DistillationError, store.DistillationStoreError, ValueError):
+    except DistillationError, store.DistillationStoreError, ValueError:
         validated_sources = []
     validated_source_ids = [source[0] for source in validated_sources]
     if source_ids is not None:
@@ -7614,7 +7815,7 @@ def _operational_rollout_metrics(
                 ),
                 receipt=receipt,
             )
-        except (rollout.RolloutError, DistillationError, ValueError):
+        except rollout.RolloutError, DistillationError, ValueError:
             continue
         observation = artifact.get("runtime_observation")
         candidate_selected = artifact.get("selected_candidate_ids")
@@ -7644,7 +7845,7 @@ def _operational_rollout_metrics(
         try:
             latency_ms = float(observation["latency_ms"])
             timed_out = observation["timed_out"]
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             continue
         if (
             not math.isfinite(latency_ms)
@@ -7670,7 +7871,7 @@ def _operational_rollout_metrics(
                 datetime.fromisoformat(str(row["observed_at"]).replace("Z", "+00:00"))
                 for row in pairs
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return metrics
         if any(item.tzinfo is None for item in observed) or observed[-1] - observed[
             0
@@ -7784,7 +7985,7 @@ def _automatic_rollout_evaluation(
         candidate_id = str(_stable_pointer_read(root, "candidate")["policy_id"])
         incumbent_id = str(_stable_pointer_read(root, "active")["policy_id"])
         policy = _load_policy(candidate_id, root)
-    except (KeyError, store.DistillationStoreError, DistillationError):
+    except KeyError, store.DistillationStoreError, DistillationError:
         return {"status": "held", "reason": "rollout_identity_unavailable"}
     if candidate_id == incumbent_id:
         return {"status": "held", "reason": "rollout_policy_identity_collision"}
@@ -7849,7 +8050,7 @@ def _automatic_rollout_evaluation(
             baseline_artifact_id=baseline_artifact_id,
             split_artifact_id=split_hint,
         )
-    except (DistillationError, rollout.RolloutError, store.DistillationStoreError):
+    except DistillationError, rollout.RolloutError, store.DistillationStoreError:
         return {"status": "held", "reason": "replay_observation_unavailable"}
     pair_count = replay_observation.get("pair_count")
     if (
@@ -8071,7 +8272,7 @@ def publish_policy(
         try:
             active = _stable_pointer_read(root, "active")
             store.write_pointer(root, "lkg", str(active["policy_id"]))
-        except (store.DistillationStoreError, KeyError):
+        except store.DistillationStoreError, KeyError:
             pass
         store.write_pointer(root, "candidate", policy_id)
         try:
@@ -8226,7 +8427,7 @@ def _ensure_split_plan(
     rally_ids = {str(rally["rally_id"]) for rally in rallies}
     try:
         prior = _read_split_plan(root)
-    except (DistillationError, store.DistillationStoreError, KeyError):
+    except DistillationError, store.DistillationStoreError, KeyError:
         prior = {}
     if (
         prior.get("feature_revision") == TEXT_FEATURE_REVISION
@@ -8370,12 +8571,12 @@ def _automatic_baseline_metrics(root: Path) -> dict[str, Any]:
     try:
         with log_path.open(encoding="utf-8") as handle:
             lines = deque(handle, maxlen=10_000)
-    except (OSError, UnicodeError):
+    except OSError, UnicodeError:
         lines = deque()
     for line in lines:
         try:
             row = json.loads(line)
-        except (json.JSONDecodeError, UnicodeError):
+        except json.JSONDecodeError, UnicodeError:
             continue
         if not isinstance(row, dict):
             continue
@@ -8434,7 +8635,7 @@ def _automatic_baseline_metrics(root: Path) -> dict[str, Any]:
         try:
             latency = float(observation["latency_ms"])
             timed_out = observation["timed_out"]
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             continue
         if (
             not math.isfinite(latency)
@@ -8487,7 +8688,7 @@ def _automatic_baseline_metrics(root: Path) -> dict[str, Any]:
             )
             latency = float(observation["latency_ms"])
             timed_out = observation["timed_out"]
-        except (KeyError, TypeError, ValueError, DistillationError):
+        except KeyError, TypeError, ValueError, DistillationError:
             continue
         selected = receipt.get("candidate_ids")
         if (
@@ -8508,7 +8709,7 @@ def _automatic_baseline_metrics(root: Path) -> dict[str, Any]:
         from chronovisor.recall import recall_distillation_rollout as rollout
 
         shadow_receipts = list(rollout._shadow_receipt_index(root).values())
-    except (DistillationError, store.DistillationStoreError, ValueError):
+    except DistillationError, store.DistillationStoreError, ValueError:
         shadow_receipts = []
     for receipt in shadow_receipts:
         binding = {
@@ -8648,7 +8849,21 @@ def preflight(
         "max_load_skew": 0.10,
         "order_bias_max": 0.05,
     }
-    if config.teacher_profile == OX_SINGLE_PROFILE and config.ox_enabled:
+    if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE:
+        contract_id = _current_profile_contract_id(root, config.teacher_profile)
+        if config.native_luna_enabled:
+            contract_id = str(_ensure_profile_contract(root, config)["artifact_id"])
+        teacher_contract = {
+            "profile": NATIVE_LUNA_SINGLE_PROFILE,
+            "cohort": NATIVE_LUNA_COHORT,
+            "profile_contract_id": contract_id,
+            "routes": ["luna_worker"],
+            "local_only": False,
+            "native_luna_enabled": config.native_luna_enabled,
+            "max_input_bytes": config.max_input_bytes,
+            "max_candidates": config.max_candidates,
+        }
+    elif config.teacher_profile == OX_SINGLE_PROFILE and config.ox_enabled:
         if re.fullmatch(r"[0-9a-f]{64}", _profile_contract_id):
             try:
                 profile_contract = _read_ox_profile_contract(root, _profile_contract_id)
@@ -8838,9 +9053,7 @@ def _ox_select_remote_probe_rallies(
     ],
     texts: Mapping[str, str],
     preflight: Callable[[Mapping[str, Any]], bool],
-) -> list[
-    tuple[str, Mapping[str, Any], Mapping[str, Any], list[Mapping[str, Any]]]
-]:
+) -> list[tuple[str, Mapping[str, Any], Mapping[str, Any], list[Mapping[str, Any]]]]:
     ordered = sorted(
         eligible,
         key=lambda item: (_source_epoch(item[2]), item[0]),
@@ -8853,7 +9066,10 @@ def _ox_select_remote_probe_rallies(
                 for _rally_id, _snapshot, rally, candidates in ordered
                 for value in (
                     str(rally.get("query_sha256") or ""),
-                    *(str(candidate.get("text_sha256") or "") for candidate in candidates),
+                    *(
+                        str(candidate.get("text_sha256") or "")
+                        for candidate in candidates
+                    ),
                 )
                 if value
             }
@@ -8894,7 +9110,9 @@ def _ox_select_remote_probe_rallies(
             if accepted(single):
                 safe.append(
                     (
-                        len(canonical_json.canonical_json_bytes_strict(candidate_input)),
+                        len(
+                            canonical_json.canonical_json_bytes_strict(candidate_input)
+                        ),
                         str(candidate["candidate_id"]),
                         candidate,
                         candidate_input,
@@ -10712,7 +10930,7 @@ def _run_ox_teacher_batch(
         assignments = split_plan["assignments"]
         split_plan_id = _scheduling_split_plan_id(split_plan)
         age_bands = _scheduling_age_bands(root, split_plan)
-    except (DistillationError, store.DistillationStoreError, KeyError):
+    except DistillationError, store.DistillationStoreError, KeyError:
         assignments = {}
         split_plan_id = ""
         age_bands = {}
@@ -10982,6 +11200,35 @@ def _run_teacher_batch(
         [Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]], str | None
     ],
 ) -> _TeacherBatchResult:
+    if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE:
+        from chronovisor.recall.recall_distillation_luna import bundle_status
+        from chronovisor.recall.recall_distillation_native import import_bundle
+
+        if not config.native_luna_enabled or not config.native_luna_bundle:
+            return _TeacherBatchResult(deferred=True)
+        bundle_path = Path(config.native_luna_bundle)
+        progress = bundle_status(bundle_path)
+        if progress["remaining"]:
+            # Native workers advance this immutable bundle independently. A
+            # pending response is not a failed local-model attempt, and must
+            # not prevent eligible counterfactuals from running in this chunk.
+            return _TeacherBatchResult(
+                workset_status={
+                    "backlog": int(progress["remaining"]),
+                    "completed": int(progress["completed"]),
+                },
+                profile_contract_id=_current_profile_contract_id(
+                    root, config.teacher_profile
+                ),
+            )
+        imported = import_bundle(root, bundle_path)
+        return _TeacherBatchResult(
+            labels_written=int(imported.get("labels_written", 0)),
+            deferred=bool(imported.get("remaining", 0)),
+            profile_contract_id=_current_profile_contract_id(
+                root, config.teacher_profile
+            ),
+        )
     if config.teacher_profile == OX_SINGLE_PROFILE:
         return _run_ox_teacher_batch(
             root=root,
@@ -11036,7 +11283,7 @@ def _local_workset_watermark(
     try:
         split_plan = _read_split_plan(root)
         split_plan_id = _scheduling_split_plan_id(split_plan)
-    except (DistillationError, store.DistillationStoreError):
+    except DistillationError, store.DistillationStoreError:
         split_plan_id = ""
     return {
         "progress_kind": progress_kind,
@@ -12442,7 +12689,7 @@ def _write_r4_local_failure_receipts(
                     schema=R4_RECEIPT_SCHEMA,
                     expected_directory_identity=directory_identity,
                 )
-            except (OSError, store.DistillationStoreError):
+            except OSError, store.DistillationStoreError:
                 continue
         return False
 
@@ -12701,7 +12948,7 @@ def _write_r4_local_receipts(
                     schema=R4_RECEIPT_SCHEMA,
                     expected_directory_identity=directory_identity,
                 )
-            except (OSError, store.DistillationStoreError):
+            except OSError, store.DistillationStoreError:
                 continue
         return False
 
@@ -13138,7 +13385,7 @@ def _local_r4_pending_receipt_is_sealed(
             schema=R4_RECEIPT_SCHEMA,
             expected_directory_identity=directory_identity,
         )
-    except (OSError, store.DistillationStoreError):
+    except OSError, store.DistillationStoreError:
         return False
     receipt_captured_at = receipt.get("captured_at")
     if (
@@ -13691,7 +13938,7 @@ def _commit_local_teacher_labels(
             source_stable = (
                 _validate_ox_source_binding(ox_alpha_source_binding()) == source_binding
             )
-        except (DistillationError, ValueError):
+        except DistillationError, ValueError:
             source_stable = False
         if not source_stable:
             workset.commit(
@@ -13926,7 +14173,7 @@ def _run_local_teacher_route(
     if isinstance(teacher, _WorkerTeacher):
         try:
             source_binding = _validate_ox_source_binding(ox_alpha_source_binding())
-        except (DistillationError, ValueError):
+        except DistillationError, ValueError:
             workset.release_unattempted([item["claim"] for item in batch])
             return _TeacherBatchResult(
                 deferred=True, workset_status=workset.status(include_timing=True)
@@ -14131,7 +14378,7 @@ def _run_local_teacher_batch(
         split_plan_id = _scheduling_split_plan_id(split_plan)
         split_assignments = split_plan.get("assignments", {})
         age_bands = _scheduling_age_bands(root, split_plan)
-    except (DistillationError, store.DistillationStoreError, KeyError):
+    except DistillationError, store.DistillationStoreError, KeyError:
         split_plan_id = ""
         split_assignments = {}
         age_bands = {}
@@ -14197,7 +14444,7 @@ def _prepare_counterfactual_work(
         split_plan_id = _scheduling_split_plan_id(split_plan)
         split_assignments = split_plan.get("assignments", {})
         age_bands = _scheduling_age_bands(root, split_plan)
-    except (DistillationError, store.DistillationStoreError, KeyError):
+    except DistillationError, store.DistillationStoreError, KeyError:
         split_plan_id = ""
         split_assignments = {}
         age_bands = {}
@@ -14251,7 +14498,7 @@ def _prepare_counterfactual_work(
                     if isinstance(candidate, Mapping)
                     and candidate.get("selected") is False
                 )
-            except (KeyError, store.DistillationStoreError):
+            except KeyError, store.DistillationStoreError:
                 pass
         for candidate in candidates:
             candidate_id = str(candidate.get("candidate_id") or "")
@@ -14400,7 +14647,7 @@ def _counterfactual_snapshot_inputs(
             store.distillation_dir(root) / "exposures" / f"{exposure_id}.json",
             schema="chronovisor.recall-exact-exposure.v1",
         )
-    except (KeyError, store.DistillationStoreError):
+    except KeyError, store.DistillationStoreError:
         raise DistillationDeferred(
             "sealed counterfactual exposure receipt is unavailable",
             failure_class="counterfactual_exposure_unavailable",
@@ -14608,7 +14855,7 @@ def _compare_and_commit_counterfactual(
             ],
         )
         return _CounterfactualBlockResult(pending=True, deferred=True)
-    except (TimeoutError, DistillationError):
+    except TimeoutError, DistillationError:
         workset.commit(
             [claim],
             [
@@ -14622,12 +14869,8 @@ def _compare_and_commit_counterfactual(
         return _CounterfactualBlockResult(pending=True, deferred=True)
     candidate_id_raw = candidate["candidate_id"]
     candidate_id = str(candidate_id_raw)
-    ox_contract_id = (
-        _current_ox_profile_contract_id(root)
-        if config.teacher_profile == OX_SINGLE_PROFILE
-        else ""
-    )
-    if config.teacher_profile == OX_SINGLE_PROFILE and not ox_contract_id:
+    ox_contract_id = _current_profile_contract_id(root, config.teacher_profile)
+    if config.teacher_profile in SINGLE_TEACHER_PROFILES and not ox_contract_id:
         workset.release_unattempted([claim])
         return _CounterfactualBlockResult(pending=True, deferred=True)
     appended = store.append_chain(
@@ -14651,9 +14894,7 @@ def _compare_and_commit_counterfactual(
             # This producer is intentionally local; only its stable route
             # fingerprints are retained, never generated text or provider body.
             "profile": config.teacher_profile,
-            "cohort": OX_SINGLE_COHORT
-            if config.teacher_profile == OX_SINGLE_PROFILE
-            else LOCAL_TRIAD_PROFILE,
+            "cohort": _profile_cohort(config.teacher_profile),
             "profile_contract_id": ox_contract_id,
             "identity_revision": "local-blind-counterfactual-v1",
             "request_revision": "local-blind-counterfactual-v1",
@@ -14845,6 +15086,18 @@ def _run_counterfactual_claim(
     return _CounterfactualBlockResult(pending=True, deferred=True)
 
 
+def _native_counterfactual_since_approval(rally: Mapping[str, Any]) -> bool:
+    """Require a real dated source since the approved exact-exposure boundary."""
+
+    try:
+        timestamp = datetime.fromisoformat(str(rally.get("as_of") or ""))
+    except ValueError:
+        return False
+    return (
+        timestamp.tzinfo is not None and timestamp >= NATIVE_COUNTERFACTUAL_NOT_BEFORE
+    )
+
+
 def _run_counterfactual_block(
     *,
     execute: bool,
@@ -14860,6 +15113,15 @@ def _run_counterfactual_block(
 ) -> _CounterfactualBlockResult:
     if counterfactual is None or not counterfactual.local:
         return _CounterfactualBlockResult()
+    if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE:
+        rally_by_id = {
+            key: rally
+            for key, rally in rally_by_id.items()
+            if _native_counterfactual_since_approval(rally)
+        }
+        snapshots = {
+            key: snapshot for key, snapshot in snapshots.items() if key in rally_by_id
+        }
     from chronovisor.recall.recall_distillation_workset import DistillationWorkset
 
     workset = DistillationWorkset(
@@ -15037,7 +15299,7 @@ def _capture_candidate_snapshots(
 ) -> _CandidateCaptureResult:
     candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
     snapshots: dict[str, Mapping[str, Any]]
-    if config.teacher_profile == OX_SINGLE_PROFILE:
+    if config.teacher_profile in SINGLE_TEACHER_PROFILES:
         from chronovisor.recall import recall_distillation_catalog as catalog
 
         try:
@@ -15078,8 +15340,8 @@ def _capture_candidate_snapshots(
             training["rows"],
             teacher_profile=config.teacher_profile,
             profile_contract_id=(
-                _current_ox_profile_contract_id(root)
-                if config.teacher_profile == OX_SINGLE_PROFILE
+                _current_profile_contract_id(root, config.teacher_profile)
+                if config.teacher_profile in SINGLE_TEACHER_PROFILES
                 else ""
             ),
         )
@@ -15126,7 +15388,7 @@ def _capture_candidate_snapshots(
         snapshots[str(rally["rally_id"])] = snapshot
         work.append(rally)
     store.append_chain_batch(candidate_path, payloads)
-    if config.teacher_profile == OX_SINGLE_PROFILE and payloads:
+    if config.teacher_profile in SINGLE_TEACHER_PROFILES and payloads:
         try:
             catalog.sync_candidate_index(root, candidate_path)
         except catalog.CatalogError as exc:
@@ -15217,6 +15479,13 @@ def _prepare_distillation_chunk(
         if config.teacher_profile == OX_SINGLE_PROFILE and config.ox_enabled
         else ""
     )
+    if (
+        config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+        and config.native_luna_enabled
+    ):
+        ox_profile_contract_id = str(
+            _ensure_profile_contract(root, config)["artifact_id"]
+        )
     try:
         scheduler_state = _read_worker_state(root)
     except store.DistillationStoreError:
@@ -15260,7 +15529,16 @@ def _prepare_distillation_chunk(
         and teachers is not None
         and teachers[OX_TEACHER_ROLE].local is False
     )
-    teachers_available = local_teachers or ox_teacher_available
+    teachers_available = (
+        local_teachers
+        or ox_teacher_available
+        or (
+            config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+            and config.native_luna_enabled
+            and bool(config.native_luna_bundle)
+            and (Path(config.native_luna_bundle) / "manifest.json").is_file()
+        )
+    )
     if dry_run:
         return {
             "early": {
@@ -15390,7 +15668,7 @@ def _prepare_distillation_training(
     current_labels = _read_chain(label_path)
     training_snapshots: Mapping[str, Mapping[str, Any]] = snapshots
     candidate_index_state: Mapping[str, Any] = {}
-    if config.teacher_profile == OX_SINGLE_PROFILE:
+    if config.teacher_profile in SINGLE_TEACHER_PROFILES:
         try:
             catalog.sync_candidate_index(root, candidate_path)
             candidate_index_state = catalog.candidate_index_state(root)
@@ -15419,8 +15697,8 @@ def _prepare_distillation_training(
             training_snapshot["rows"],
             teacher_profile=config.teacher_profile,
             profile_contract_id=(
-                _current_ox_profile_contract_id(root)
-                if config.teacher_profile == OX_SINGLE_PROFILE
+                _current_profile_contract_id(root, config.teacher_profile)
+                if config.teacher_profile in SINGLE_TEACHER_PROFILES
                 else ""
             ),
         )
@@ -15667,12 +15945,20 @@ def _persist_distillation_chunk(
                 []
                 if teachers_available
                 else [
-                    "ox_teacher_unavailable"
+                    "native_luna_teacher_unavailable"
+                    if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+                    else "ox_teacher_unavailable"
                     if config.teacher_profile == OX_SINGLE_PROFILE
                     else "local_teachers_unavailable"
                 ]
             ),
             "last_success_at": transition["last_success_at"],
+            "last_label_at": (
+                datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                if teacher_result.labels_written or counterfactual_written
+                else str(scheduler_state.get("last_label_at") or "")
+            ),
+            "teacher_profile": config.teacher_profile,
             "error_code": (
                 "ox_teacher_stopped"
                 if teacher_result.profile_stopped
