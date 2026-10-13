@@ -745,6 +745,7 @@ def _row_from_label(
             "profile": NATIVE_LUNA_SINGLE_PROFILE,
             "split": split,
             "probe": bool(source.get("repeat_pair_id")),
+            "owner": "native-luna",
             "repeat_pair_id": _text(source.get("repeat_pair_id")),
             "fixed_repeat": source.get("fixed_repeat") is True,
             "order_swap": source.get("order_swap") is True,
