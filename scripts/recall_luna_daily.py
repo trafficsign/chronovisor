@@ -1127,6 +1127,7 @@ def _export_bundle(
     before_candidate: Mapping[str, Any],
     excluded_pairs: set[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
+    excluded_pairs = excluded_pairs or set()
     candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
     rally_ids = {str(rally["rally_id"]) for rally in rallies}
     candidate_ids = catalog.candidate_rally_ids(root)
@@ -1149,6 +1150,11 @@ def _export_bundle(
     for rally in rallies:
         snapshot = snapshots[str(rally["rally_id"])]
         for candidate in _safe_candidate_ids(snapshot):
+            if (
+                str(rally["rally_id"]),
+                str(candidate["candidate_id"]),
+            ) in excluded_pairs:
+                continue
             if rally.get("query_sha256"):
                 requested.add(str(rally["query_sha256"]))
             if candidate.get("text_sha256"):

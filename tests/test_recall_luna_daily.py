@@ -184,6 +184,7 @@ def test_prepare_waits_for_native_split_plan_without_reassigning_test(tmp_path: 
 
 def test_native_cohort_growth_preserves_plan_and_embargoes_only_new_groups(monkeypatch) -> None:
     native_cohort = daily._native_model_cohort_sha256()
+    monkeypatch.setattr(daily, "_native_model_cohort_sha256", lambda *_: native_cohort)
     old_plan = {
         "artifact_id": "a" * 64,
         "model_cohort_sha256": native_cohort,
