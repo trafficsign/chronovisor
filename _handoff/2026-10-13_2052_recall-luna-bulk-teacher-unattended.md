@@ -71,14 +71,14 @@ created_at: 2026-10-13T20:52:29+09:00
 ### Phase 3：本線の再開と日次運転
 - [ ] 3-1 `recall.distillation.enabled = true` にして本線を再開する。R5 の残り（blind repeat、反実仮想、validation、locked test、壊した対照が通らないこと）を受入まで進める。反実仮想が下限に届かない間は、その理由を「データ待ち」として表示する。
 - [ ] 3-2 日々の増分をローカル教師で処理する経路を動かす。2-4 の一致率が低くてローカルに任せられないときは、日次も Luna で回し、その判断を記録する。
-- [ ] 3-3 R6（student 候補）と R7（shadow → canary 5 / 25 / 100、自動ロールバック）を、本線の設計どおり無人で進むところまで実装して配備する。昇格するかどうかは既存のゲートだけで決める。
+- [x] 3-3 R6（student 候補）と R7（shadow → canary 5 / 25 / 100、自動ロールバック）を、本線の設計どおり無人で進むところまで実装して配備する。昇格するかどうかは既存のゲートだけで決める。
 
 ### Phase 4：止まったら知らせる
-- [ ] 4-1 蒸留が進んでいないことを、health の全体判定に入れる（`ops/health.py:1094`）。
-- [ ] 4-2 止まった理由を「データ待ち」と「人の判断待ち」に分けて出す。判断待ち（教師の契約切れ、承認の範囲、enabled=false、教師がいない）は、それと分かる理由にする。今回の表示は `blind_repeat_pairs_below_floor` で、真因（教師がいない）が見えなかった。
-- [ ] 4-3 判断待ちを `chronovisor_init` の結果に出す。セッション開始時に必ず読まれる場所である。
-- [ ] 4-4 期限のあるもの（教師の contract など）は、切れる前に 4-3 の経路で知らせる。
-- [ ] 4-5 同じ「止まっているのに ok」が他に無いか調べる。分かっている候補は、search_labels の待ち行列 68,241 件（ほぼ `pending_review`）、lint_repair 444 件、session_sweeper の attention。原因と扱いを記録し、直せるものは直す。
+- [x] 4-1 蒸留が進んでいないことを、health の全体判定に入れる（`ops/health.py:1094`）。
+- [x] 4-2 止まった理由を「データ待ち」と「人の判断待ち」に分けて出す。判断待ち（教師の契約切れ、承認の範囲、enabled=false、教師がいない）は、それと分かる理由にする。今回の表示は `blind_repeat_pairs_below_floor` で、真因（教師がいない）が見えなかった。
+- [x] 4-3 判断待ちを `chronovisor_init` の結果に出す。セッション開始時に必ず読まれる場所である。
+- [x] 4-4 期限のあるもの（教師の contract など）は、切れる前に 4-3 の経路で知らせる。
+- [x] 4-5 同じ「止まっているのに ok」が他に無いか調べる。分かっている候補は、search_labels の待ち行列 68,241 件（ほぼ `pending_review`）、lint_repair 444 件、session_sweeper の attention。原因と扱いを記録し、直せるものは直す。
 
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
@@ -154,3 +154,15 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-14 01:45 JST　独立local比較はQwen 300/300完了。Ornithは0件のままresearch lane待ちに加えてinvalid_requestを反復。実MTPLXのgrammar compilerで教師schemaのuniqueItems未対応を再現した。MTPLXへの通信schemaだけから未対応keywordを除き、元のprompt/schemaと返答のuniqueItems検査は維持する修正を実施。重複atomを従来どおり拒否する回帰を含む16 tests/Ruff通過。反実仮想のutility judgeも同じschemaを使うため、この共通原因を修正してから最終配備する。
 - 2026-10-14 01:54 JST　Ornithのschema受付後にもoutput_truncatedを再現。実サービスのserver_max_response_tokens=256が要求3,072を切り詰めるため、元の返答検査を維持してnative settingsと正本LaunchAgentを3,072へ変更。既存resource lease取得・active_requests=0の境界で再登録し、起動直後のbootstrap終了待ちを再試行してready/live cap=3,072を確認。別モデルの有効label保存が0→7へ進んだ。既存callerの個別出力budgetとgate閾値は変更しない。
 - 2026-10-14 01:54 JST　blind repeatの自動運転も既存finalize gateで検証。別shardでも親roundのrun_idを共有するpromptを使うと独立run条件で拒否されることを回帰で再現し、子shardごとのrun_idへ修正。gate自体は維持、26 tests/Ruff通過。実bundle Aにblind taskは無く、bundle Bは未着手なので、既存有効labelの書換え・再利用変更はない。常駐の第1回1,000件は保存完了（合計3,534）。
+- 2026-10-14 02:04 JST　常駐第1回は全10 shard各100件・exit 0で終了し、人手なしで次のCLI親を起動。第2回も保存が増え、native有効labelは3,800件を超えた。local Bは複数件応答で重複atomによるuniqueItems違反を確認したため、同じ凍結inputを単件ずつ評価し、品質失敗は3回で未採点として残して次へ進む。validator・ラベル値は補正しない。19件まで有効保存、technical failure未採点0件の時点を確認。
+- 2026-10-14 02:04 JST　01:46の記述を補足訂正。uniqueItemsの未対応を再現したのはteacher schemaであり、utility schemaの同原因失敗は未実測。共通に影響するのはserver出力上限256で、teacher/utility双方の要求budgetを許容する3,072へ変更した。現在の対話に紐付いた旧MCPのinitにはhealth欄が無いため、最終受入は更新後に実際の設定から新規起動したMCP stdioで行う。他の作業中セッションのMCPを強制終了しない。
+- 2026-10-14 02:30 JST　4-1 完了。05262943のQuality/Python 3.14/Security成功後、10/10成功のingest境界でleaseを取得し、5 serviceを再起動。convergeはactive claims=0・state bytes不変の境界で更新。実HTTP /api/healthはruntime commit=expected=05262943、drift=false、全体alert、Recallのblind_repeat_pairs_below_floor/durable_progress_missingをdata_waitで表示。起動直後の初回25秒timeout後、再読取0.09秒で復帰し続くHTTPでも同じ正しい表示を確認。LAN TLSの401を維持。
+- 2026-10-14 02:31 JST　4-2 完了。実際にnative_luna_enabled=falseへ故障注入し、HTTPと新規MCPの両方がnative_luna_disabledをhuman_waitとして報告。blind floorだけで真因を隠さないことを確認。 private fault-probe receipt=passed、config SHA256 c02fdcc8b1156283aeeab9676ba9eb792e170ce5a88af227b438afe8fd46d132。
+- 2026-10-14 02:31 JST　4-3 完了。実際のGitHub配備版05262943からMCP stdioを新規起動し、chronovisor_initの全体alertと人の判断待ち表示を確認。停止中に常駐supervisorを最新版へ更新後、configをbyte一致で復帰し、HTTP/initから停止理由が消えた。 private fault-probe receipt=passed、config SHA256 c02fdcc8b1156283aeeab9676ba9eb792e170ce5a88af227b438afe8fd46d132。
+- 2026-10-14 02:35 JST　4-4 完了。期限切れ・契約欠落の既存回帰に加え、検証済契約の読取境界を置き換えた隔離fixtureで期限1時間前のteacher_contract_expiry_warning/human_waitを確認。現在の承認済native契約は期限なしで、明示stop flagだけが停止を決める。
+- 2026-10-14 02:35 JST　4-5 完了。実HTTPにsearch_labels 68,091 review/150 frontier、lint_repair 434 local/12 frontier、raw_replay 1の停止理由が表示された。旧search較正/P0レーンは再開せず、frontier authority待ちを明示。lintの112MB state反復読取の原因修正を配備し、converge再開とRecall last_success_at更新を確認。session_sweeperのBLOB修理も完了済み。待ち行列が空になったとは扱わない。
+- 2026-10-14 02:35 JST　3-3 完了。R6 candidateの学習・locked replay・publishからR7 shadow/canary/negative-veto rollbackまでの既存内部経路を、新GitHub archiveのconverge/sleepへ配備。convergeをidle claim境界で更新し、17:28 UTCの本線実行をlast_success_atで確認。候補/rolloutは0のまま、blind/CF/temporal等の既存gateだけが昇格を決定する。
+- 2026-10-14 02:55 JST　実際のCodex設定に登録されたcommand/argsから新規MCPを起動し、chronovisor_initのhealth=alert・native進捗・data_wait表示を確認（configured-init-receipt=passed）。既存接続は旧プロセスのため表示更新の対象外。常駐supervisorはPID 1241 / PPID 1、native CLI親は1251、最大10 Lunaで継続。故障注入前4,486件から復帰後5,246件へ増加し、会話側のagent生存に依存しない実保存を確認した。全6稼働serviceのarchiveは052629436c880402e5c8d61dbe1ca0e930262d41、HTTPも同SHA・drift=false。Quality/Python 3.14/Securityは全て成功。
+- 2026-10-14 02:55 JST　02:54:36のprivate batch集計は有効5,246/61,884件（A 5,246 / B 0）、relevant 1,362 / irrelevant 3,501 / uncertain 383、確定判定内の正例28.01%。旧未読8,260件は引き続き隔離。本線未importのためformal teacher_only=2,103 / verified_truth=0を維持。blind repeat完了0/200 pairs、反実仮想paired_denominator=0。Qwenはlocal 300件完了・Lunaとの同一input突合38件中25一致（65.79%）、Ornithはlocal有効60件・技術失敗未採点2件、突合7件中5一致（71.43%）。これは少数の暫定比較であり、モデル不変性の受入・日次localへの切替根拠にはしない。source/hash/分母と内訳はprivate final-progress receiptへ保存。
+- 2026-10-14 02:55 JST　0-3の所要時間を実測で補正。常駐開始時2,534件から約2時間で5,246件、起動・全文読取を含む約1,300件/時。残り56,638件は同速度なら40時間強であり、当初の「数時間」は撤回する。本文長・モデル応答・再試行で変わる概算として、最大10 Lunaの常駐処理を維持する。停止・30分無進捗はhealth/initで可視化し、supervisorが保存cursorから再試行する。
+- 2026-10-14 02:55 JST　残りは一括完走・blind/temporal受入・300件の完全突合・R5/反実仮想・日次増分と実時間7日確認。既存09:15 automationはACTIVEで監視/再開/実行ログ更新の指示を保存済みだが、アプリ側の再読込と次回実行実績は未確認。主処理は独立launchdなのでその確認を待たず継続する。現在のholdはblind_repeat_pairs_below_floor / durable_progress_missing（data_wait）、候補/rollout=0。ゲート・P0停止条件を変えず、Planはrunning、未達checkboxは未チェックのままとする。最後の実運転記録だけをlocal commitし、配備済みコード05262943への不要な再起動を避けるため、この記録だけのcommitはpushしない。
