@@ -731,7 +731,7 @@ def _existing_labeled_pairs(root: Path) -> set[tuple[str, str]]:
         rows = store.read_chain(path)
     except store.DistillationStoreError as exc:
         raise DailyError("native_label_ledger_invalid") from exc
-    return {
+    pairs = {
         (str(row.get("rally_id") or ""), str(row.get("candidate_id") or ""))
         for row in rows
         if isinstance(row, Mapping)
@@ -740,6 +740,30 @@ def _existing_labeled_pairs(root: Path) -> set[tuple[str, str]]:
         and row.get("rally_id")
         and row.get("candidate_id")
     }
+    # A completed private bundle is also an immutable label boundary.  Keep a
+    # source pair out of the next daily bundle even if an idempotent importer
+    # was interrupted after writing its private marker but before the ledger
+    # checkpoint became visible.
+    day_root = root / "runtime" / "recall-luna-bulk" / "2026-10-13"
+    for bundle_path in sorted(day_root.glob("bundle*")):
+        metadata = _bundle_metadata(bundle_path)
+        if not metadata or not metadata.get("production_ledger_written"):
+            continue
+        source_path = bundle_path / "snapshot" / "source.jsonl"
+        if not source_path.is_file() or source_path.is_symlink():
+            continue
+        try:
+            for line in source_path.read_bytes().splitlines():
+                source = json.loads(line.decode("utf-8"))
+                if isinstance(source, Mapping) and source.get("rally_id") and source.get(
+                    "candidate_id"
+                ):
+                    pairs.add(
+                        (str(source["rally_id"]), str(source["candidate_id"]))
+                    )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise DailyError("completed_bundle_source_invalid") from exc
+    return pairs
 
 
 def _new_bundle_path(requested: Path, *, seed: str) -> Path:
