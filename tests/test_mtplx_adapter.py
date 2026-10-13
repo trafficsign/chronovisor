@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from copy import deepcopy
 
 import httpx
 import pytest
@@ -18,6 +19,8 @@ from chronovisor.core.llm_runtime import (
     SourceSensitivity,
 )
 from chronovisor.core.mtplx_adapter import MTPLX_BASE_URL, MTPLXAdapter
+from chronovisor.decision.local_structured import validate_json
+from chronovisor.recall.recall_distillation_worker import _schema
 
 
 def test_structured_transport_preserves_prompt_and_input_schema() -> None:
@@ -102,6 +105,39 @@ def test_mtplx_route_is_local_generation_only() -> None:
     payload["llm"]["roles"]["recall.gate"]["capability"] = "embedding"
     with pytest.raises(LLMConfigError):
         parse_llm_config(payload)
+
+
+def test_teacher_wire_schema_preserves_strict_response_validation() -> None:
+    schema = _schema("teacher", candidate_ids=("candidate-a",))
+    original = deepcopy(schema)
+    wire = MTPLXAdapter._response_format(schema)["json_schema"]["schema"]
+    fields = wire["properties"]["labels"]["items"]["properties"]
+    assert "uniqueItems" not in fields["minimal_atom_ids"]
+    assert "uniqueItems" not in fields["missing_slots"]
+    assert fields["minimal_atom_ids"]["maxItems"] == 8
+    assert schema == original
+    label = {
+        "candidate_id": "candidate-a", "verdict": "relevant", "confidence": 0.9,
+        "rationale": "Exact matching evidence", "minimal_atom_ids": ["atom-a"],
+        "missing_slots": [], "changing_claim": "",
+    }
+    assert validate_json({"labels": [label]}, schema) == []
+    label["minimal_atom_ids"] = ["atom-a", "atom-a"]
+    assert [issue.keyword for issue in validate_json({"labels": [label]}, schema)] == [
+        "uniqueItems"
+    ]
+
+
+def test_wire_schema_keeps_property_names_and_literal_values() -> None:
+    literal = {"type": "array", "uniqueItems": True}
+    schema = {
+        "type": "object",
+        "properties": {"uniqueItems": {"const": literal}},
+        "additionalProperties": {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
+    }
+    wire = MTPLXAdapter._response_format(schema)["json_schema"]["schema"]
+    assert wire["properties"]["uniqueItems"]["const"] == literal
+    assert schema["additionalProperties"]["uniqueItems"] is True
 
 
 @pytest.mark.parametrize(
