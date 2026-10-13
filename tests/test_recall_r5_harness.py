@@ -102,6 +102,76 @@ def test_contract_constants_and_root_boundary(tmp_path: Path) -> None:
         HARNESS.assert_root_matrix(production, link, output)
 
 
+def test_native_policy_and_receipt_inventory_are_profile_specific(tmp_path: Path) -> None:
+    policy = {
+        "schema": HARNESS.R5_FLOOR_POLICY_SCHEMA,
+        "training_schema": HARNESS.CANONICAL_TRAINING_SCHEMA,
+        "gate_schema": HARNESS.CANONICAL_GATE_SCHEMA,
+        "truth_authority": "teacher_only_not_verified",
+        "profile": HARNESS.NATIVE_LUNA_PROFILE,
+        "cohort": HARNESS.NATIVE_LUNA_COHORT,
+        "profile_contract_id": _id(10),
+        "split_plan_id": _id(11),
+        "hard_floors": {
+            "rallies": 1, "days": 1, "windows": 1, "labels": 1,
+            "per_class": 1, "probes": 1, "counterfactuals": 1,
+        },
+        "backlog": {"ready": 0, "leased": 0, "manifest": 0, "candidate": 0},
+        "rows_profile_bound": True,
+    }
+    assert HARNESS._policy_is_canonical(policy)
+    assert not HARNESS._policy_is_canonical({**policy, "cohort": "local-triad-v1"})
+    assert not HARNESS._policy_is_canonical({**policy, "profile_contract_id": ""})
+
+    from chronovisor.recall import recall_distillation_store as store
+
+    base = tmp_path / "runtime" / "recall-distillation"
+    label_path = base / "label-ledger.jsonl"
+    receipt_path = base / HARNESS.NATIVE_RECEIPTS_FILE
+    store.append_chain(
+        label_path,
+        {
+            "kind": "teacher-label",
+            "source": "teacher-label",
+            "profile": HARNESS.NATIVE_LUNA_PROFILE,
+            "native_luna": True,
+        },
+    )
+    store.append_chain(
+        receipt_path,
+        {
+            "receipt_schema": HARNESS.NATIVE_RECEIPT_SCHEMA,
+            "receipt_sha256": _id(12),
+        },
+    )
+    inventory = HARNESS._workset_inventory(tmp_path, profile=HARNESS.NATIVE_LUNA_PROFILE)
+    assert inventory["kind"] == "native-receipt-ledger"
+    assert inventory["counts"] == {"ready": 0, "leased": 0, "completed": 1, "quarantined": 0}
+    assert inventory["receipt_count"] == 1
+    assert inventory["completed_refs"][0]["ref"].startswith("label-ledger:")
+
+
+def test_native_workset_rejects_unattested_label(tmp_path: Path) -> None:
+    from chronovisor.recall import recall_distillation_store as store
+
+    base = tmp_path / "runtime" / "recall-distillation"
+    store.append_chain(
+        base / "label-ledger.jsonl",
+        {
+            "kind": "teacher-label",
+            "source": "teacher-label",
+            "profile": HARNESS.NATIVE_LUNA_PROFILE,
+            "native_luna": False,
+        },
+    )
+    store.append_chain(
+        base / HARNESS.NATIVE_RECEIPTS_FILE,
+        {"receipt_schema": HARNESS.NATIVE_RECEIPT_SCHEMA},
+    )
+    with pytest.raises(HARNESS.R5Error, match="un-attested"):
+        HARNESS._workset_inventory(tmp_path, profile=HARNESS.NATIVE_LUNA_PROFILE)
+
+
 def test_source_state_rejects_non_git_source(tmp_path: Path) -> None:
     source = tmp_path / "not-git"
     source.mkdir()

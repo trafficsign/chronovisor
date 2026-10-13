@@ -42,9 +42,24 @@ R5_FLOOR_POLICY_SCHEMA = "chronovisor.recall-r5-floor-policy.v2"
 R5_TRAINING_SCHEMA = "chronovisor.recall-distill-training.v2"
 R5_GATE_SCHEMA = "chronovisor.recall-offline-training-gate.v2"
 _LOCAL_PROFILE = "local-triad-v1"
+# Legacy OX names remain accepted for old receipts; current single-teacher
+# receipts use the deepseek profile below.
 _OX_PROFILE = "ox-alpha-single-v1"
 _LOCAL_COHORT = "local-triad-v1"
 _OX_COHORT = "ox-alpha-backfill-v1"
+_DEEPSEEK_PROFILE = "deepseek-v4-flash-single-v1"
+_DEEPSEEK_COHORT = "deepseek-v4-flash-backfill-v1"
+_DEEPSEEK_ROUTE = "opencode-go/deepseek-v4-flash"
+_DEEPSEEK_ROLE = "recall.distill.teacher.deepseek-v4-flash"
+_NATIVE_PROFILE = "native-luna-single-v1"
+_NATIVE_COHORT = "native-luna-backfill-v1"
+_NATIVE_ROUTE = "native/luna_worker"
+_NATIVE_ROLE = "luna_worker"
+_NATIVE_MODEL = "gpt-5.6-luna"
+_NATIVE_RECEIPT_SCHEMA = "chronovisor.recall-native-teacher-receipt.v1"
+_NATIVE_RECEIPTS_FILE = "native-teacher-receipts.jsonl"
+_NATIVE_CONTRACT_POINTER = "native-luna-profile-contract.json"
+_NATIVE_CONTRACT_DIRECTORY = "native-luna-profile-contracts"
 _LOCAL_ROLES = frozenset({
     "recall.distill.teacher.a",
     "recall.distill.teacher.b",
@@ -362,7 +377,9 @@ def _assert_r5_floor_policy(policy: object) -> None:
         or policy.get("training_schema") != R5_TRAINING_SCHEMA
         or policy.get("gate_schema") != R5_GATE_SCHEMA
         or policy.get("truth_authority") != "teacher_only_not_verified"
-        or policy.get("profile") not in {_LOCAL_PROFILE, _OX_PROFILE}
+        or policy.get("profile") not in {
+            _LOCAL_PROFILE, _OX_PROFILE, _DEEPSEEK_PROFILE, _NATIVE_PROFILE,
+        }
         or not isinstance(policy.get("cohort"), str)
         or not isinstance(policy.get("profile_contract_id"), str)
         or policy.get("rows_profile_bound") is not True
@@ -371,6 +388,14 @@ def _assert_r5_floor_policy(policy: object) -> None:
     if policy["profile"] == _LOCAL_PROFILE:
         if policy["cohort"] != _LOCAL_COHORT or policy["profile_contract_id"] != "":
             raise R6Error("R5 local dataset policy binding is invalid")
+    elif policy["profile"] == _NATIVE_PROFILE:
+        if policy["cohort"] != _NATIVE_COHORT:
+            raise R6Error("R5 native dataset policy cohort is invalid")
+        _artifact_id(policy["profile_contract_id"])
+    elif policy["profile"] == _DEEPSEEK_PROFILE:
+        if policy["cohort"] != _DEEPSEEK_COHORT:
+            raise R6Error("R5 deepseek dataset policy cohort is invalid")
+        _artifact_id(policy["profile_contract_id"])
     elif policy["cohort"] != _OX_COHORT:
         raise R6Error("R5 OX dataset policy cohort is invalid")
     _artifact_id(policy["split_plan_id"])
@@ -435,7 +460,14 @@ def _bind_r5_preflight(
     load_config = getattr(module, "load_distillation_config", None)
     if callable(load_config) and "profile_contract_id" in preflight and "split_plan_id" in preflight:
         config = load_config(clone / "config.toml")
-        expected_profile = _OX_PROFILE if getattr(config, "teacher_profile", "") == _OX_PROFILE else _LOCAL_PROFILE
+        configured_profile = str(getattr(config, "teacher_profile", ""))
+        expected_profile = (
+            configured_profile
+            if configured_profile in {
+                _OX_PROFILE, _DEEPSEEK_PROFILE, _NATIVE_PROFILE, _LOCAL_PROFILE,
+            }
+            else _LOCAL_PROFILE
+        )
         if (
             policy["profile"] != expected_profile
             or policy["profile_contract_id"] != preflight["profile_contract_id"]
@@ -1280,11 +1312,7 @@ def _r5_preflight(module: Any, clone: Path, source: Mapping[str, Any]) -> dict[s
         rows = training.get("rows")
         if not isinstance(rows, list):
             raise R6Error("official training rows are unavailable")
-        profile_contract = (
-            module._current_ox_profile_contract_id(clone)
-            if config.teacher_profile == module.OX_SINGLE_PROFILE
-            else ""
-        )
+        profile_contract = _current_profile_contract_id(module, clone, str(config.teacher_profile))
         _, cohort = module._active_training_cohort(
             rows,
             teacher_profile=config.teacher_profile,
@@ -1313,6 +1341,29 @@ def _r5_preflight(module: Any, clone: Path, source: Mapping[str, Any]) -> dict[s
         }
     except (module.DistillationError, module.store.DistillationStoreError, KeyError, OSError, R6Error) as exc:
         return {"passed": False, "reason": str(exc).split(":", 1)[0], "baseline_id": ""}
+
+
+def _current_profile_contract_id(module: Any, root: Path, profile: str) -> str:
+    """Read the current contract for the configured profile without cross-wiring OX."""
+    helper = getattr(module, "_current_profile_contract_id", None)
+    if callable(helper):
+        try:
+            value = helper(root, profile)
+        except Exception as exc:
+            raise R6Error("profile contract read failed") from exc
+        return str(value or "")
+    if profile == _NATIVE_PROFILE:
+        try:
+            native = importlib.import_module("chronovisor.recall.recall_distillation_native")
+            return str(native.current_contract_id(root) or "")
+        except Exception as exc:
+            raise R6Error("native profile contract read failed") from exc
+    if profile in {_OX_PROFILE, _DEEPSEEK_PROFILE}:
+        try:
+            return str(module._current_ox_profile_contract_id(root) or "")
+        except Exception as exc:
+            raise R6Error("remote profile contract read failed") from exc
+    return ""
 
 
 def _target_identity(root: Path) -> str:
@@ -2289,6 +2340,16 @@ _REPLAY_ROW_OX_V1_KEYS = _REPLAY_ROW_BASE_KEYS | frozenset(
     }
 )
 _REPLAY_ROW_OX_KEYS = _REPLAY_ROW_OX_V2_KEYS | _REPLAY_ROW_OX_V1_KEYS
+_REPLAY_ROW_NATIVE_KEYS = _REPLAY_ROW_OX_V2_KEYS | frozenset(
+    {
+        "native_luna",
+        "native_receipt",
+        "native_receipt_sha256",
+        "native_assignment_id",
+        "native_run_id",
+        "native_batch_sha256",
+    }
+)
 
 
 def _strict_int(value: object, field: str, *, maximum: int | None = None) -> int:
@@ -2495,6 +2556,36 @@ def _assert_route_identity(value: object, field: str, *, local: bool | None = No
         raise R6Error(f"{field} is not remote")
 
 
+def _assert_native_receipt(value: object, field: str, *, contract_id: str) -> None:
+    """Validate only the hash/provenance projection of a sealed native receipt."""
+    if not isinstance(value, Mapping):
+        raise R6Error(f"{field} type is invalid")
+    if value == {}:
+        return
+    expected = {
+        "receipt_schema", "profile_contract_id", "source_snapshot_sha256",
+        "source_record_sha256", "task_id", "input_sha256", "output_sha256",
+        "assignment_id", "run_id", "batch_sha256", "receipt_binding",
+        "receipt_sha256",
+    }
+    if set(value) != expected:
+        raise R6Error(f"{field} schema is not closed")
+    if value.get("receipt_schema") != _NATIVE_RECEIPT_SCHEMA:
+        raise R6Error(f"{field} schema is invalid")
+    if value.get("profile_contract_id") != contract_id:
+        raise R6Error(f"{field} contract is not bound")
+    for key in (
+        "source_snapshot_sha256", "source_record_sha256", "input_sha256",
+        "output_sha256", "batch_sha256", "receipt_sha256",
+    ):
+        _artifact_id(value[key])
+    _artifact_id(value["task_id"])
+    for key in ("assignment_id", "run_id", "receipt_binding"):
+        _strict_text(value[key], f"{field}.{key}", allow_empty=False)
+    if value["receipt_binding"] != "native-worker-output-and-batch-v1":
+        raise R6Error(f"{field} binding is invalid")
+
+
 def _assert_replay_rows_schema(
     rows: object,
     *,
@@ -2511,9 +2602,13 @@ def _assert_replay_rows_schema(
         if not isinstance(row, Mapping):
             raise R6Error(f"locked replay row {index} schema is not closed")
         row_keys = set(row)
-        if row_keys not in {_REPLAY_ROW_BASE_KEYS, _REPLAY_ROW_OX_V1_KEYS, _REPLAY_ROW_OX_V2_KEYS}:
+        if row_keys not in {
+            _REPLAY_ROW_BASE_KEYS, _REPLAY_ROW_OX_V1_KEYS,
+            _REPLAY_ROW_OX_V2_KEYS, _REPLAY_ROW_NATIVE_KEYS,
+        }:
             raise R6Error(f"locked replay row {index} schema is not closed")
         is_ox = row_keys in {_REPLAY_ROW_OX_V1_KEYS, _REPLAY_ROW_OX_V2_KEYS}
+        is_native = row_keys == _REPLAY_ROW_NATIVE_KEYS
         is_legacy = row_keys == _REPLAY_ROW_OX_V1_KEYS
         legacy_noncertifying |= is_legacy
         prefix = f"locked replay row {index}"
@@ -2554,7 +2649,24 @@ def _assert_replay_rows_schema(
         if row["profile_contract_id"] != lineage["profile_contract_id"]:
             raise R6Error(f"{prefix}.profile_contract_id is not bound to lineage")
         if lineage["profile_contract_id"]:
-            if row["profile"] != _OX_PROFILE or row["cohort"] != _OX_COHORT or row["route"] != "opencode-go/ox-alpha-free":
+            if row["profile"] == _NATIVE_PROFILE:
+                if (
+                    row["profile"] != _NATIVE_PROFILE
+                    or row["cohort"] != _NATIVE_COHORT
+                    or (
+                        row["source"] == "teacher-label"
+                        and row["route"] != _NATIVE_ROUTE
+                    )
+                ):
+                    raise R6Error(f"{prefix}.profile/cohort is not bound to the native profile")
+            elif row["profile"] == _DEEPSEEK_PROFILE:
+                if row["cohort"] != _DEEPSEEK_COHORT or (
+                    row["source"] == "teacher-label" and row["route"] != _DEEPSEEK_ROUTE
+                ):
+                    raise R6Error(f"{prefix}.profile/cohort is not bound to the deepseek profile")
+            elif row["profile"] != _OX_PROFILE or row["cohort"] != _OX_COHORT or (
+                row["source"] == "teacher-label" and row["route"] != "opencode-go/ox-alpha-free"
+            ):
                 raise R6Error(f"{prefix}.profile/cohort is not bound to the R5 OX profile")
         elif row["profile"] != _LOCAL_PROFILE or row["cohort"] != _LOCAL_COHORT:
             raise R6Error(f"{prefix}.profile/cohort is not bound to the R5 local profile")
@@ -2564,15 +2676,35 @@ def _assert_replay_rows_schema(
             feature = row["features"][field]
             if isinstance(feature, bool) or not isinstance(feature, (int, float)) or not 0 <= feature <= 1:
                 raise R6Error(f"{prefix}.features type is invalid")
-        _assert_route_identity(row["route_identity"], f"{prefix}.route_identity", local=not bool(lineage["profile_contract_id"]))
+        _assert_route_identity(
+            row["route_identity"],
+            f"{prefix}.route_identity",
+            local=None if is_native else not bool(lineage["profile_contract_id"]),
+        )
         _assert_route_identity(row["generator_route_identity"], f"{prefix}.generator_route_identity")
         _assert_route_identity(row["judge_route_identity"], f"{prefix}.judge_route_identity")
         payload_source = row["payload_source"]
         if not isinstance(payload_source, Mapping):
             raise R6Error(f"{prefix}.payload_source type is invalid")
-        payload_keys = {"rally_id", "candidate_id", "snapshot_sha256", "query_sha256", "candidate_text_sha256", "context_sha256"}
-        if set(payload_source) not in (set(), payload_keys, payload_keys | {"assignment"}):
-            raise R6Error(f"{prefix}.payload_source schema is not closed")
+        if is_native:
+            native_payload_keys = {
+                "schema", "task_id", "input_sha256", "source_record_sha256",
+                "source_snapshot_sha256",
+            }
+            if set(payload_source) != native_payload_keys:
+                raise R6Error(f"{prefix}.native payload_source schema is not closed")
+            if payload_source.get("schema") != "chronovisor.recall-native-luna-payload-ref.v1":
+                raise R6Error(f"{prefix}.native payload_source schema is invalid")
+            for field in (
+                "task_id", "input_sha256", "source_record_sha256", "source_snapshot_sha256",
+            ):
+                _artifact_id(payload_source[field])
+            if payload_source["task_id"] != row["work_id"]:
+                raise R6Error(f"{prefix}.native payload task binding is invalid")
+        else:
+            payload_keys = {"rally_id", "candidate_id", "snapshot_sha256", "query_sha256", "candidate_text_sha256", "context_sha256"}
+            if set(payload_source) not in (set(), payload_keys, payload_keys | {"assignment"}):
+                raise R6Error(f"{prefix}.payload_source schema is not closed")
         _strict_string_list(row["blind_orders"], f"{prefix}.blind_orders")
         for field in ("probe", "order_agreement", "negative_veto_conflict", "feature_parity", "future_leakage", "locked_test_read_only"):
             _strict_bool(row[field], f"{prefix}.{field}")
@@ -2619,17 +2751,38 @@ def _assert_replay_rows_schema(
                 pair_id = row["assignment_authority"]["repeat_pair_id"]
                 probe_pairs.setdefault(pair_id, set()).add(row["assignment_authority"]["blind_order"])
             if lineage["profile_contract_id"]:
-                if row["route_identity"] != {"provider": "opencode-go", "model": "opencode-go/ox-alpha-free", "location": "remote"}:
-                    raise R6Error(f"{prefix} OX route identity is invalid")
-                if row["teacher_role"] != _OX_ROLE:
-                    raise R6Error(f"{prefix} OX teacher role is invalid")
+                if is_native:
+                    expected_identity = {
+                        "provider": "openai",
+                        "model": _NATIVE_MODEL,
+                        "location": "native",
+                    }
+                    if row["route_identity"] != expected_identity:
+                        raise R6Error(f"{prefix} native Luna route identity is invalid")
+                    if row["teacher_role"] != _NATIVE_ROLE:
+                        raise R6Error(f"{prefix} native Luna teacher role is invalid")
+                elif row["profile"] == _DEEPSEEK_PROFILE:
+                    expected_identity = {
+                        "provider": "opencode-go",
+                        "model": _DEEPSEEK_ROUTE,
+                        "location": "remote",
+                    }
+                    if row["route_identity"] != expected_identity:
+                        raise R6Error(f"{prefix} deepseek route identity is invalid")
+                    if row["teacher_role"] != _DEEPSEEK_ROLE:
+                        raise R6Error(f"{prefix} deepseek teacher role is invalid")
+                else:
+                    if row["route_identity"] != {"provider": "opencode-go", "model": "opencode-go/ox-alpha-free", "location": "remote"}:
+                        raise R6Error(f"{prefix} OX route identity is invalid")
+                    if row["teacher_role"] != _OX_ROLE:
+                        raise R6Error(f"{prefix} OX teacher role is invalid")
                 if not is_legacy and not row.get("provider_receipt_sha256"):
-                    raise R6Error(f"{prefix} OX provider receipt is missing")
+                    raise R6Error(f"{prefix} provider receipt is missing")
             elif row["route_identity"].get("location") != "local":
                 raise R6Error(f"{prefix} local route identity is invalid")
             elif row["route"] not in _LOCAL_ROLES or set(row["route_identity"]) != {"role", "provider", "model", "location"} or row["route_identity"].get("role") != row["route"]:
                 raise R6Error(f"{prefix} local route role identity is invalid")
-        if is_ox:
+        if is_ox or is_native:
             for field in ("route_identity_exact", "group_identity_exact", "fixed_repeat", "fixed_split_plan", "order_swap"):
                 _strict_bool(row[field], f"{prefix}.{field}")
             if row["error_class"] is not None:
@@ -2642,6 +2795,34 @@ def _assert_replay_rows_schema(
                 _strict_id_or_empty(row["provider_receipt_sha256"], f"{prefix}.provider_receipt_sha256")
                 if row["provider_receipt_sha256"] and row["provider_receipt_sha256"] == row["provider_request_sha256"]:
                     raise R6Error(f"{prefix} provider receipt is not distinct from request")
+        if is_native:
+            if row.get("native_luna") is not True:
+                raise R6Error(f"{prefix} native_luna attestation is missing")
+            _assert_native_receipt(
+                row.get("native_receipt"),
+                f"{prefix}.native_receipt",
+                contract_id=str(lineage["profile_contract_id"]),
+            )
+            for field in (
+                "native_receipt_sha256", "native_batch_sha256",
+            ):
+                _artifact_id(row[field])
+            for field in ("native_assignment_id", "native_run_id"):
+                _strict_text(row[field], f"{prefix}.{field}", allow_empty=False)
+            if row["native_receipt_sha256"] != row["provider_receipt_sha256"]:
+                raise R6Error(f"{prefix} native receipt is not bound to provider receipt")
+            if row.get("native_receipt"):
+                receipt = row["native_receipt"]
+                if any(
+                    receipt.get(key) != row.get(row_key)
+                    for key, row_key in (
+                        ("receipt_sha256", "native_receipt_sha256"),
+                        ("assignment_id", "native_assignment_id"),
+                        ("run_id", "native_run_id"),
+                        ("batch_sha256", "native_batch_sha256"),
+                    )
+                ):
+                    raise R6Error(f"{prefix} native receipt projection is inconsistent")
     if not {"train", "validation", "test"}.issubset(seen_splits):
         raise R6Error("locked replay split plan is incomplete")
     if any(orders != {"a_first", "b_first"} for orders in probe_pairs.values()):
@@ -2718,13 +2899,16 @@ def _assert_producer_identity_shape(value: Mapping[str, Any], owner: str) -> boo
     ox_contract = value.get("ox_profile_contract_id")
     _strict_id_or_empty(contract, f"{owner} profile contract")
     _strict_id_or_empty(ox_contract, f"{owner} OX profile contract")
-    if contract != ox_contract:
-        raise R6Error(f"{owner} profile contract is not producer-bound")
     _strict_id_or_empty(value["ox_quality_gate_id"], f"{owner} OX quality gate")
     if not isinstance(value["runtime_identity"], Mapping):
         raise R6Error(f"{owner} runtime identity is not an object")
-    has_ox = bool(contract)
     optional = set(value).intersection(_PRODUCER_OX_KEYS)
+    native_projection = bool(contract) and not optional and not value["ox_quality_gate_id"] and value["runtime_identity"] == {}
+    if contract != ox_contract and not native_projection:
+        raise R6Error(f"{owner} profile contract is not producer-bound")
+    if native_projection:
+        return True
+    has_ox = bool(contract)
     if has_ox:
         if optional != set(_PRODUCER_OX_KEYS):
             raise R6Error(f"{owner} OX producer fields are incomplete")
@@ -2776,6 +2960,34 @@ def _assert_producer_identity_derivation(
     if not value.get("profile_contract_id"):
         return
     contract_id = str(value["profile_contract_id"])
+    try:
+        native = importlib.import_module("chronovisor.recall.recall_distillation_native")
+        native_contract = native.read_contract(root, contract_id)
+    except Exception:
+        native_contract = {}
+    if isinstance(native_contract, Mapping) and native_contract:
+        if (
+            native_contract.get("artifact_id") != contract_id
+            or native_contract.get("profile") != _NATIVE_PROFILE
+            or native_contract.get("cohort") != _NATIVE_COHORT
+            or native_contract.get("route") != _NATIVE_ROUTE
+            or native_contract.get("teacher_role") != _NATIVE_ROLE
+            or native_contract.get("configured_model") != _NATIVE_MODEL
+            or native_contract.get("expires_at") != ""
+        ):
+            raise R6Error(f"{owner} native profile contract is invalid")
+        if _current_profile_contract_id(module, root, _NATIVE_PROFILE) != contract_id:
+            raise R6Error(f"{owner} native profile contract is not current")
+        receipt_path = root / "runtime" / "recall-distillation" / _NATIVE_RECEIPTS_FILE
+        try:
+            receipt_head = module.store.chain_head(receipt_path)
+        except Exception as exc:
+            raise R6Error(f"{owner} native receipt chain is unavailable") from exc
+        if not isinstance(receipt_head, Mapping) or int(receipt_head.get("records") or 0) <= 0:
+            raise R6Error(f"{owner} native receipt chain is empty")
+        if not isinstance(receipt_head.get("head_sha256"), str) or len(receipt_head["head_sha256"]) != 64:
+            raise R6Error(f"{owner} native receipt chain head is invalid")
+        return
     source_fn = getattr(module, "_ox_contract_source_binding", None)
     heads_fn = getattr(module, "_ox_event_heads", None)
     runtime_fn = getattr(module, "_r4_runtime_identity_projection", None)

@@ -46,6 +46,16 @@ R5_FLOOR_POLICY_SCHEMA = "chronovisor.recall-r5-floor-policy.v2"
 CANONICAL_TRAINING_SCHEMA = "chronovisor.recall-distill-training.v1"
 CANONICAL_GATE_SCHEMA = "chronovisor.recall-offline-training-gate.v2"
 NAMESPACE = "recall-distillation"
+NATIVE_LUNA_PROFILE = "native-luna-single-v1"
+NATIVE_LUNA_COHORT = "native-luna-backfill-v1"
+NATIVE_LUNA_ROUTE = "native/luna_worker"
+NATIVE_LUNA_ROLE = "luna_worker"
+NATIVE_LUNA_MODEL = "gpt-5.6-luna"
+NATIVE_PROFILE_SCHEMA = "chronovisor.recall-distill-native-profile.v1"
+NATIVE_RECEIPT_SCHEMA = "chronovisor.recall-native-teacher-receipt.v1"
+NATIVE_RECEIPTS_FILE = "native-teacher-receipts.jsonl"
+NATIVE_CONTRACT_POINTER = "native-luna-profile-contract.json"
+NATIVE_CONTRACT_DIRECTORY = "native-luna-profile-contracts"
 MIN_RALLIES, MIN_DAYS, MIN_WINDOWS = 1000, 30, 3
 MIN_LABELS, MIN_PER_CLASS, MIN_PROBES, MIN_COUNTERFACTUALS = 500, 100, 100, 100
 MAX_FILES, MAX_FILE_BYTES = 200_000, 2 * 1024 * 1024 * 1024
@@ -1607,6 +1617,8 @@ def _rederive_workset_receipts(
 def _workset_inventory(
     root: Path, runtime: Any | None = None, *, profile: str = "deepseek-v4-flash-single-v1"
 ) -> dict[str, Any]:
+    if profile == NATIVE_LUNA_PROFILE:
+        return _native_workset_inventory(root)
     filename = (
         "local-workset.sqlite3" if profile == "local-triad-v1" else "ox-workset.sqlite3"
     )
@@ -1676,6 +1688,82 @@ def _workset_inventory(
     }
 
 
+def _native_workset_inventory(root: Path) -> dict[str, Any]:
+    """Derive native completion state from the sealed label/receipt ledgers.
+
+    Native Luna imports are a private, resumable bundle rather than a provider
+    queue.  Treating them as the OX SQLite workset would silently certify the
+    wrong authority, so the harness derives a read-only completion projection
+    from the two native chains instead.
+    """
+    base = root / "runtime" / "recall-distillation"
+    label_path = base / "label-ledger.jsonl"
+    receipt_path = base / NATIVE_RECEIPTS_FILE
+    try:
+        labels = _read_rows(_native_store_module(root), root)
+    except Exception as exc:
+        raise R5Error("native label ledger unavailable") from exc
+    try:
+        receipts = _native_store_module(root).read_chain(receipt_path)
+    except Exception as exc:
+        raise R5Error("native receipt ledger unavailable") from exc
+    native_teacher_labels = [
+        row for row in labels
+        if row.get("profile") == NATIVE_LUNA_PROFILE
+        and row.get("source") == "teacher-label"
+    ]
+    if any(row.get("native_luna") is not True for row in native_teacher_labels):
+        raise R5Error("native label ledger contains an un-attested row")
+    completed_labels = [
+        row for row in labels
+        if row.get("source") in {"teacher-label", "counterfactual-label"}
+    ]
+    counts = {
+        "ready": 0,
+        "leased": 0,
+        "completed": len(completed_labels),
+        "quarantined": 0,
+    }
+    completed_refs = [
+        {
+            "ref": f"label-ledger:{row.get('record_sha256')}",
+            "digest": str(row.get("record_sha256") or ""),
+        }
+        for row in completed_labels
+    ]
+    receipt_head = _native_store_module(root).chain_head(receipt_path)
+    head = str(receipt_head.get("head_sha256") or "")
+    receipt_count = int(receipt_head.get("records") or 0)
+    if receipt_count != len(receipts) or (receipt_count and not _is_id(head)):
+        raise R5Error("native receipt chain head is invalid")
+    return {
+        "present": True,
+        "kind": "native-receipt-ledger",
+        "counts": counts,
+        "completed_refs": completed_refs,
+        "receipt_head": head or None,
+        "receipt_count": receipt_count,
+        "audit": {
+            "status": "verified" if receipt_count else "verified-empty",
+            "generation": receipt_count,
+            "head_sha256": head,
+            "counts": counts,
+        },
+        "label_chain_head": _native_store_module(root).chain_head(label_path).get("head_sha256", ""),
+    }
+
+
+def _native_store_module(root: Path) -> Any:
+    """Return the loaded official store module without importing a host copy."""
+    module = sys.modules.get("chronovisor.recall.recall_distillation_store")
+    if module is not None and getattr(module, "distillation_dir", None) is not None:
+        return module
+    try:
+        return importlib.import_module("chronovisor.recall.recall_distillation_store")
+    except Exception as exc:
+        raise R5Error("native store module unavailable") from exc
+
+
 def _inventory_state(path: Path) -> dict[str, Any]:
     return {"present": True, "state": _file_state(path)} if path.exists() else {"present": False}
 
@@ -1698,8 +1786,8 @@ def _evidence_inventory(
     """Capture only the immutable evidence that must predate this verifier."""
     base = root / "runtime" / "recall-distillation"
     directories = (
-        "training-snapshots", "baselines", "ox-profile-contracts", "split-plans",
-        "exposures",
+        "training-snapshots", "baselines", "ox-profile-contracts",
+        "native-luna-profile-contracts", "split-plans", "exposures",
     )
     paths = [
         base / "label-ledger.jsonl",
@@ -1709,14 +1797,18 @@ def _evidence_inventory(
         base / "exposure-receipts.jsonl",
         base / "exposure-receipts.jsonl.checkpoint.json",
         base / "ox-profile-contract.json",
+        base / NATIVE_CONTRACT_POINTER,
+        base / NATIVE_RECEIPTS_FILE,
+        base / f"{NATIVE_RECEIPTS_FILE}.checkpoint.json",
         base / "split-plan.json",
         base / "rally-manifest.jsonl",
         base / "rally-manifest.jsonl.checkpoint.json",
     ]
-    workset_name = (
-        "local-workset.sqlite3" if profile == "local-triad-v1" else "ox-workset.sqlite3"
-    )
-    paths.extend(base / f"{workset_name}{suffix}" for suffix in ("", "-wal", "-shm", "-journal"))
+    if profile != NATIVE_LUNA_PROFILE:
+        workset_name = (
+            "local-workset.sqlite3" if profile == "local-triad-v1" else "ox-workset.sqlite3"
+        )
+        paths.extend(base / f"{workset_name}{suffix}" for suffix in ("", "-wal", "-shm", "-journal"))
     for directory in directories:
         path = base / directory
         if path.exists():
@@ -1744,6 +1836,122 @@ def _stable_sealed(
     if before != after or not isinstance(value, dict):
         raise R5Error("official evidence changed during stable read")
     return value
+
+
+def _native_module() -> Any:
+    """Resolve the source-bound native helper loaded by the official runtime."""
+    module = sys.modules.get("chronovisor.recall.recall_distillation_native")
+    if module is not None:
+        return module
+    try:
+        return importlib.import_module("chronovisor.recall.recall_distillation_native")
+    except Exception as exc:
+        raise R5Error("native Luna helper unavailable") from exc
+
+
+def _native_contract_binding(
+    *,
+    root: Path,
+    store: Any,
+    rows: Sequence[Mapping[str, Any]],
+    inventory: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    """Re-derive native contract, sealed receipts, and materialized rows."""
+    native_rows = [
+        row for row in rows
+        if row.get("profile") == NATIVE_LUNA_PROFILE
+        and row.get("source") == "teacher-label"
+    ]
+    if not native_rows:
+        return True
+    try:
+        native = _native_module()
+        contract_id = str(native.current_contract_id(root) or "")
+        if not _is_id(contract_id):
+            return False
+        contract = _stable_sealed(
+            store,
+            root,
+            Path("runtime/recall-distillation") / NATIVE_CONTRACT_DIRECTORY / f"{contract_id}.json",
+            schema=NATIVE_PROFILE_SCHEMA,
+            inventory=inventory,
+        )
+        pointer = _stable_sealed(
+            store,
+            root,
+            Path("runtime/recall-distillation") / NATIVE_CONTRACT_POINTER,
+            schema=store.DISTILLATION_SCHEMA,
+            inventory=inventory,
+        )
+        if (
+            pointer.get("kind") != "native-luna-profile-contract-pointer"
+            or pointer.get("profile_contract_id") != contract_id
+            or contract.get("artifact_id") != contract_id
+            or contract.get("profile") != NATIVE_LUNA_PROFILE
+            or contract.get("cohort") != NATIVE_LUNA_COHORT
+            or contract.get("route") != NATIVE_LUNA_ROUTE
+            or contract.get("teacher_role") != NATIVE_LUNA_ROLE
+            or contract.get("configured_model") != NATIVE_LUNA_MODEL
+            or contract.get("expires_at") != ""
+            or contract.get("native_luna_enabled") is not True
+        ):
+            return False
+        if not all(native.row_integrity(row, root=root) for row in native_rows):
+            return False
+        receipt_path = root / "runtime" / "recall-distillation" / NATIVE_RECEIPTS_FILE
+        receipts = store.read_chain(receipt_path)
+        by_receipt = {
+            str(receipt.get("receipt_sha256")): receipt
+            for receipt in receipts
+            if isinstance(receipt, Mapping)
+        }
+        if len(by_receipt) != len(receipts) or not receipts:
+            return False
+        expected_receipt_keys = {
+            "schema", "namespace", "previous_sha256", "receipt_schema", "record_sha256",
+            "profile_contract_id", "source_snapshot_sha256", "source_record_sha256",
+            "task_id", "input_sha256", "output_sha256", "assignment_id", "run_id",
+            "batch_sha256", "receipt_binding", "receipt_sha256",
+        }
+        if any(
+            set(receipt) != expected_receipt_keys
+            or receipt.get("receipt_schema") != NATIVE_RECEIPT_SCHEMA
+            or receipt.get("profile_contract_id") != contract_id
+            or receipt.get("receipt_binding") != "native-worker-output-and-batch-v1"
+            or not _is_id(receipt.get("record_sha256"))
+            or not _is_id(receipt.get("receipt_sha256"))
+            or not _is_id(receipt.get("source_snapshot_sha256"))
+            or not _is_id(receipt.get("source_record_sha256"))
+            or not _is_id(receipt.get("input_sha256"))
+            or not _is_id(receipt.get("output_sha256"))
+            or not _is_id(receipt.get("batch_sha256"))
+            or not _SAFE_IDENTIFIER.fullmatch(str(receipt.get("assignment_id") or ""))
+            or not _SAFE_IDENTIFIER.fullmatch(str(receipt.get("run_id") or ""))
+            for receipt in receipts
+        ):
+            return False
+        if any(
+            _sha({key: value for key, value in receipt.items() if key != "record_sha256"})
+            != receipt.get("record_sha256")
+            for receipt in receipts
+        ):
+            return False
+        for row in native_rows:
+            receipt_id = str(row.get("provider_receipt_sha256") or "")
+            receipt = by_receipt.get(receipt_id)
+            if (
+                receipt is None
+                or row.get("native_receipt_sha256") != receipt_id
+                or row.get("native_assignment_id") != receipt.get("assignment_id")
+                or row.get("native_run_id") != receipt.get("run_id")
+                or row.get("native_batch_sha256") != receipt.get("batch_sha256")
+                or row.get("profile_contract_id") != contract_id
+                or row.get("payload_source", {}).get("input_sha256") != receipt.get("input_sha256")
+            ):
+                return False
+        return True
+    except Exception:
+        return False
 
 
 def _independent_dataset_binding(
@@ -1796,6 +2004,10 @@ def _independent_dataset_binding(
         # split-plan, feature bytes, blind order, and CF exposure bindings.
         if not rows or not all(
             distill._materialized_row_integrity(row, root=root) for row in rows
+        ):
+            return False
+        if not _native_contract_binding(
+            root=root, store=store, rows=rows, inventory=inventory
         ):
             return False
         config = distill.load_distillation_config(root / "config.toml")
@@ -1888,14 +2100,15 @@ def _independent_dataset_binding(
             return False
         if any(not _inventory_matches(root, relative, expected) for relative, expected in inventory.items()):
             return False
-        selected_workset = (
-            "local-workset.sqlite3"
-            if policy["profile"] == "local-triad-v1"
-            else "ox-workset.sqlite3"
-        )
-        expected = inventory.get(f"runtime/recall-distillation/{selected_workset}")
-        if not isinstance(expected, Mapping) or not _inventory_matches(root, f"runtime/recall-distillation/{selected_workset}", expected):
-            return False
+        if policy["profile"] != NATIVE_LUNA_PROFILE:
+            selected_workset = (
+                "local-workset.sqlite3"
+                if policy["profile"] == "local-triad-v1"
+                else "ox-workset.sqlite3"
+            )
+            expected = inventory.get(f"runtime/recall-distillation/{selected_workset}")
+            if not isinstance(expected, Mapping) or not _inventory_matches(root, f"runtime/recall-distillation/{selected_workset}", expected):
+                return False
         rallies = distill.extract_rallies(root / "raw", root=root)
         manifest_rows = store.read_chain(
             store.distillation_dir(root) / "rally-manifest.jsonl"
@@ -2119,7 +2332,9 @@ def _policy_is_canonical(policy: object) -> bool:
         or policy.get("training_schema") != CANONICAL_TRAINING_SCHEMA
         or policy.get("gate_schema") != CANONICAL_GATE_SCHEMA
         or policy.get("truth_authority") != "teacher_only_not_verified"
-        or policy.get("profile") not in {"local-triad-v1", "deepseek-v4-flash-single-v1"}
+        or policy.get("profile") not in {
+            "local-triad-v1", "deepseek-v4-flash-single-v1", NATIVE_LUNA_PROFILE,
+        }
         or not isinstance(policy.get("cohort"), str)
         or not isinstance(policy.get("profile_contract_id"), str)
         or not _is_id(policy.get("split_plan_id"))
@@ -2134,6 +2349,11 @@ def _policy_is_canonical(policy: object) -> bool:
         return False
     if policy["profile"] == "local-triad-v1":
         return policy["cohort"] == "local-triad-v1" and policy["profile_contract_id"] == ""
+    if policy["profile"] == NATIVE_LUNA_PROFILE:
+        return (
+            policy["cohort"] == NATIVE_LUNA_COHORT
+            and _is_id(policy["profile_contract_id"])
+        )
     return _is_id(policy["profile_contract_id"]) and bool(policy["cohort"])
 
 
@@ -2278,6 +2498,25 @@ def validate_dataset(
         }
         for routes in probes.values()
     )
+    native_probe_orders: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
+    for row in rows:
+        if (
+            row.get("profile") == NATIVE_LUNA_PROFILE
+            and row.get("source") == "teacher-label"
+            and row.get("probe") is True
+            and row.get("verdict") in {"relevant", "irrelevant"}
+            and row.get("fixed_repeat") is True
+            and row.get("order_swap") is True
+            and row.get("repeat_pair_id")
+            and row.get("blind_order")
+        ):
+            native_probe_orders[
+                (str(row.get("rally_id")), str(row.get("candidate_id")))
+            ].add(str(row.get("blind_order")))
+    native_pairs = sum(
+        orders in ({"a_first", "b_first"}, {"a0_first", "a1_first"})
+        for orders in native_probe_orders.values()
+    )
     blind_pairs = {
         (str(row.get("rally_id")), str(row.get("candidate_id")))
         for row in rows
@@ -2285,7 +2524,9 @@ def validate_dataset(
     }
     _reason(
         reasons,
-        local_pairs >= MIN_PROBES or len(blind_pairs) >= MIN_PROBES,
+        local_pairs >= MIN_PROBES
+        or native_pairs >= MIN_PROBES
+        or len(blind_pairs) >= MIN_PROBES,
         "probe_or_blind_repeat_below_floor",
     )
     cf = [
@@ -2328,6 +2569,17 @@ def validate_dataset(
     canonical_policy = _policy_is_canonical(policy)
     _reason(reasons, canonical_policy, "canonical_dataset_policy_missing")
     profile = str(policy.get("profile") or "") if canonical_policy else ""
+    gate_identity = gate.get("identity") if isinstance(gate.get("identity"), Mapping) else {}
+    native_gate_identity = (
+        profile == NATIVE_LUNA_PROFILE
+        and gate_identity.get("route") == NATIVE_LUNA_ROUTE
+        and gate_identity.get("teacher_role") == NATIVE_LUNA_ROLE
+        and gate_identity.get("profile_contract_id") == policy.get("profile_contract_id")
+        and gate_identity.get("native_luna") is True
+        and isinstance(gate.get("blind_repeat"), Mapping)
+        and isinstance(gate["blind_repeat"].get("complete_pairs"), int)
+        and gate["blind_repeat"]["complete_pairs"] >= MIN_PROBES
+    )
     _reason(
         reasons,
         (
@@ -2336,7 +2588,8 @@ def validate_dataset(
             and gate.get("truth_authority") == "teacher_only_not_verified"
             and hard.get("p5_allowed") is True
             and (
-                profile == "local-triad-v1"
+            profile == "local-triad-v1"
+                or native_gate_identity
                 or (
                     isinstance(gate.get("identity"), Mapping)
                     and gate["identity"].get("route") == "opencode-go/deepseek-v4-flash"

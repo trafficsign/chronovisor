@@ -667,6 +667,107 @@ def test_nested_replay_row_extra_key_is_rejected() -> None:
         )
 
 
+def test_native_luna_replay_rows_require_native_receipt_identity() -> None:
+    contract = "a" * 64
+    split_plan = "b" * 64
+    rows: list[dict[str, object]] = []
+    for index, split in enumerate(("train", "validation", "test"), start=1):
+        digest = f"{index:064x}"
+        receipt = f"{index + 10:064x}"
+        rows.append(
+            {
+                "rally_id": f"{index + 20:064x}",
+                "candidate_id": f"{index + 30:064x}",
+                "session_cluster_id": f"{index + 40:064x}",
+                "as_of": "2026-01-01T00:00:00+00:00",
+                "dimension": "relevance",
+                "verdict": "relevant",
+                "authority": "teacher-only",
+                "features": {"query_chargram_coverage": 0.5, "candidate_chargram_precision": 0.5},
+                "route": HARNESS._NATIVE_ROUTE,
+                "route_identity": {"provider": "openai", "model": HARNESS._NATIVE_MODEL, "location": "native"},
+                "teacher_role": HARNESS._NATIVE_ROLE,
+                "model_digest": digest,
+                "generator_model_digest": "",
+                "judge_model_digest": "",
+                "generator_route_identity": {},
+                "judge_route_identity": {},
+                "counterfactual_ref": "",
+                "a0_sha256": "",
+                "a1_sha256": "",
+                "blind_orders": [],
+                "counterfactual_producer": "",
+                "counterfactual_revision": "",
+                "probe": False,
+                "source": "teacher-label",
+                "profile": HARNESS._NATIVE_PROFILE,
+                "cohort": HARNESS._NATIVE_COHORT,
+                "assignment_revision": "native-luna-bulk-v1",
+                "assignment_authority": {
+                    "revision": "native-luna-bulk-v1", "kind": "teacher-label", "profile": HARNESS._NATIVE_PROFILE,
+                    "split": split, "probe": False, "owner": "", "routes": [],
+                    "probe_revision": "", "repeat_pair_id": "", "fixed_repeat": False,
+                    "order_swap": False, "blind_order": "", "probe_batch_id": "",
+                    "order_variant": 0, "candidate_position": -1,
+                },
+                "profile_contract_id": contract,
+                "expires_at": "",
+                "identity_revision": "native-luna-single-v1-fixed-identity-v1",
+                "request_revision": "json-schema-core-label-abstain-16k-600s-v8",
+                "group_id": f"{index + 50:064x}",
+                "label_split_plan_id": split_plan,
+                "order_agreement": False,
+                "label_record_sha256": f"{index + 60:064x}",
+                "payload_digest": digest,
+                "payload_source": {
+                    "schema": "chronovisor.recall-native-luna-payload-ref.v1",
+                    "task_id": f"{index + 70:064x}",
+                    "input_sha256": f"{index + 80:064x}",
+                    "source_record_sha256": f"{index + 90:064x}",
+                    "source_snapshot_sha256": f"{index + 100:064x}",
+                },
+                "work_id": f"{index + 70:064x}",
+                "negative_veto_conflict": False,
+                "feature_parity": True,
+                "future_leakage": False,
+                "split": split,
+                "split_plan_id": split_plan,
+                "locked_test_read_only": split == "test",
+                "locked_test_evidence_ref": f"split-plan:{split_plan}" if split == "test" else "",
+                "source_commit": "",
+                "source_tree_sha256": "",
+                "source_ox_identity_sha256": "",
+                "status": "completed",
+                "error_class": None,
+                "route_digest": digest,
+                "route_identity_exact": True,
+                "prompt_sha256": digest,
+                "schema_sha256": digest,
+                "request_sha256": digest,
+                "provider_request_sha256": f"{index + 110:064x}",
+                "provider_receipt_sha256": receipt,
+                "group_identity_exact": True,
+                "future_leakage_evidence_ref": "",
+                "repeat_pair_id": "",
+                "fixed_repeat": False,
+                "fixed_split_plan": True,
+                "order_swap": False,
+                "blind_order": "",
+                "native_luna": True,
+                "native_receipt": {},
+                "native_receipt_sha256": receipt,
+                "native_assignment_id": "assignment-1",
+                "native_run_id": "run-1",
+                "native_batch_sha256": f"{index + 120:064x}",
+            }
+        )
+    lineage = {"split_plan_id": split_plan, "profile_contract_id": contract}
+    assert HARNESS._assert_replay_rows_schema(rows, lineage=lineage) is False
+    rows[0]["route_identity"] = {"provider": "openai", "model": HARNESS._NATIVE_MODEL, "location": "remote"}
+    with pytest.raises(HARNESS.R6Error, match="native Luna route identity"):
+        HARNESS._assert_replay_rows_schema(rows, lineage=lineage)
+
+
 def test_nested_artifact_seal_and_content_id_are_recomputed() -> None:
     module, pointer, policy, replay, run, state, r5, heads = _closed_candidate_fixture()
     policy["threshold"] = -1.0
