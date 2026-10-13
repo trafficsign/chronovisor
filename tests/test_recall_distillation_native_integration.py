@@ -152,7 +152,7 @@ def _native_fixture(
             "verdict": "relevant" if index % 2 == 0 else "irrelevant",
             "confidence": 0.9,
             "reason_code": "synthetic_match" if index % 2 == 0 else "synthetic_miss",
-            "rationale": "synthetic integration result",
+            "rationale": None,
         }
         label["native_receipt"] = {
             "task_id": source["task_id"],
