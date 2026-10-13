@@ -110,6 +110,11 @@ that session while frozen-source validation starts; startup may take minutes.
 Do not start a second helper or confuse a command's session_id with a process PID.
 If the helper exits before any request, report the failure to the parent and stop;
 only the durable supervisor may retry with a fresh child.
+For every nonempty write_stdin verdict submission, set yield_time_ms=1000.
+The helper emits the next request immediately; waiting 10000 or 30000 milliseconds
+on each submission wastes that time on every record. Empty startup polls may wait
+longer. If a response is incomplete, poll the same session until the WHOLE request
+has been read before judging it; a shorter tool wait never permits partial reading.
 I/O command:
 {sys.executable} -u {REPO / 'scripts/recall_luna_worker_io.py'} --bundle {bundle}
   --shard SHARD --assignment-id {round_id}-SHARD --run-id {round_id}-SHARD

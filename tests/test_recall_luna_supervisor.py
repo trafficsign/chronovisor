@@ -574,3 +574,5 @@ def test_worker_prompt_keeps_the_per_child_cap_at_one_hundred(tmp_path: Path) ->
     assert '// @exec: {"max_output_tokens": 20000}' in prompt
     assert "Start the helper exactly once." in prompt
     assert "only the durable supervisor may retry with a fresh child." in prompt
+    assert "For every nonempty write_stdin verdict submission, set yield_time_ms=1000." in prompt
+    assert "a shorter tool wait never permits partial reading." in prompt
