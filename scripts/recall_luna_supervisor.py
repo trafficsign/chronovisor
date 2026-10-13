@@ -212,7 +212,7 @@ def supervise(args: argparse.Namespace) -> int:
     state: dict[str, Any] = {"schema": SCHEMA, "pid": os.getpid(), "last_progress_at": now(), "completed_total": 0}
     if status_path.exists():
         previous = daily._private_json(status_path)
-        state.update({key: previous[key] for key in ("completed_total", "last_progress_at") if key in previous})
+        state.update({key: previous[key] for key in ("completed_total", "last_progress_at", "next_capture_after_unix") if key in previous})
 
     def publish(status: str, **fields: Any) -> list[dict[str, Any]]:
         rows = inventory(args.root)
@@ -262,11 +262,19 @@ def supervise(args: argparse.Namespace) -> int:
                     publish("running", reason="bundle_imported")
                     continue
                 else:
+                    if float(state.get("next_capture_after_unix") or 0) > time.time():
+                        publish("idle", reason="waiting_for_incremental_capture")
+                        if args.once:
+                            return 0
+                        time.sleep(args.poll_seconds)
+                        continue
                     day = datetime.now(daily.ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d")
                     day_root = args.root / "runtime/recall-luna-bulk" / day
                     result = run_daily_operation(args, "run", day_root / "bundle", publish)
                     if result.get("status") == "error":
                         raise RuntimeError("daily_prepare_failed")
+                    if result.get("status") in {"ready", "complete"}:
+                        state["next_capture_after_unix"] = time.time() + 900
                     publish("idle", reason=str(result.get("reason") or "daily_prepare"))
         except Exception as exc:
             state.update(status="retrying", updated_at=now(), child_pid=0,

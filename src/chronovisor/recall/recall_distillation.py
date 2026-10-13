@@ -9020,6 +9020,19 @@ def _teacher_payload(
 ) -> dict[str, Any] | None:
     query = texts.get(str(rally["query_sha256"]), "")
     candidate_text = texts.get(str(candidate["text_sha256"]), "")
+    # UTF-8 uses at least one byte per code point, and the canonical payload
+    # adds keys, quotes, and separators.  These lower bounds therefore reject
+    # oversized text without allocating its JSON representation.  Keep the
+    # actual canonical check below for boundary cases (escaping and multibyte
+    # characters can only increase the encoded size).
+    if (
+        not query
+        or not candidate_text
+        or len(query) > max_input_bytes
+        or len(candidate_text) > max_input_bytes
+        or len(query) + len(candidate_text) > max_input_bytes
+    ):
+        return None
     context: list[str] = []
     payload = {
         "schema": "chronovisor.recall-distill-teacher-input.v1",
@@ -9029,16 +9042,15 @@ def _teacher_payload(
         "context": context,
         "candidate": candidate_text,
     }
-    if (
-        not query
-        or not candidate_text
-        or len(canonical_json.canonical_json_bytes_strict(payload)) > max_input_bytes
-    ):
+    if len(canonical_json.canonical_json_bytes_strict(payload)) > max_input_bytes:
         return None
     if not include_context:
         return payload
     for ref in reversed(rally.get("context_refs", [])):
-        context.insert(0, texts.get(str(ref["semantic_sha256"]), ""))
+        context_text = texts.get(str(ref["semantic_sha256"]), "")
+        if len(context_text) > max_input_bytes:
+            break
+        context.insert(0, context_text)
         if len(canonical_json.canonical_json_bytes_strict(payload)) > max_input_bytes:
             context.pop(0)
             break

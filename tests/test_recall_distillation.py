@@ -8009,6 +8009,162 @@ def test_teacher_payload_does_not_resolve_context_older_than_bounded_suffix() ->
     assert texts.reads == ["query", "candidate", "new", "old"]
 
 
+@pytest.mark.parametrize(
+    ("query", "candidate"),
+    [
+        ("q" * 20_000, "answer"),
+        ("question", "a" * 20_000),
+        ("q" * 7_000, "a" * 6_000),
+    ],
+)
+def test_teacher_payload_rejects_oversize_before_json_encoding(
+    monkeypatch: pytest.MonkeyPatch, query: str, candidate: str
+) -> None:
+    rally = {
+        "rally_id": "rally-oversize",
+        "query_sha256": "query",
+        "context_refs": [],
+    }
+    candidate_row = {"candidate_id": "candidate-oversize", "text_sha256": "candidate"}
+    texts = {"query": query, "candidate": candidate}
+    calls = 0
+    original = distill.canonical_json.canonical_json_bytes_strict
+
+    def counting_bytes(value: object) -> bytes:
+        nonlocal calls
+        calls += 1
+        return original(value)
+
+    monkeypatch.setattr(
+        distill.canonical_json, "canonical_json_bytes_strict", counting_bytes
+    )
+
+    assert (
+        distill._teacher_payload(
+            rally,
+            candidate_row,
+            texts,
+            max_input_bytes=12_000,
+        )
+        is None
+    )
+    assert calls == 0
+
+
+def test_teacher_payload_rejects_oversize_context_without_second_json_encoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rally = {
+        "rally_id": "rally-context-oversize",
+        "query_sha256": "query",
+        "context_refs": [{"semantic_sha256": "context"}],
+    }
+    candidate_row = {"candidate_id": "candidate", "text_sha256": "candidate"}
+    texts = {"query": "question", "candidate": "answer", "context": "x" * 20_000}
+    calls = 0
+    original = distill.canonical_json.canonical_json_bytes_strict
+
+    def counting_bytes(value: object) -> bytes:
+        nonlocal calls
+        calls += 1
+        return original(value)
+
+    monkeypatch.setattr(
+        distill.canonical_json, "canonical_json_bytes_strict", counting_bytes
+    )
+
+    payload = distill._teacher_payload(
+        rally,
+        candidate_row,
+        texts,
+        max_input_bytes=12_000,
+    )
+
+    assert payload is not None
+    assert payload["context"] == []
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    ("query", "candidate"),
+    [
+        ("ordinary query", "ordinary candidate"),
+        ("日本語の質問", "日本語の候補"),
+        ('escape "quotes" and \n newline', "candidate"),
+    ],
+)
+def test_teacher_payload_preserves_utf8_and_escape_size_boundaries(
+    query: str, candidate: str
+) -> None:
+    rally = {
+        "rally_id": "rally-boundary",
+        "query_sha256": "query",
+        "context_refs": [],
+    }
+    candidate_row = {"candidate_id": "candidate", "text_sha256": "candidate"}
+    texts = {"query": query, "candidate": candidate}
+    expected = {
+        "schema": "chronovisor.recall-distill-teacher-input.v1",
+        "rally_id": "rally-boundary",
+        "candidate_id": "candidate",
+        "query": query,
+        "context": [],
+        "candidate": candidate,
+    }
+    exact_limit = len(canonical_json.canonical_json_bytes_strict(expected))
+
+    assert (
+        distill._teacher_payload(
+            rally,
+            candidate_row,
+            texts,
+            max_input_bytes=exact_limit,
+        )
+        == expected
+    )
+    assert (
+        distill._teacher_payload(
+            rally,
+            candidate_row,
+            texts,
+            max_input_bytes=exact_limit - 1,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("context", ["あ" * 256, '"' * 256])
+def test_teacher_payload_keeps_multibyte_and_escape_context_boundary(
+    context: str,
+) -> None:
+    rally = {
+        "rally_id": "rally-context-boundary",
+        "query_sha256": "query",
+        "context_refs": [{"semantic_sha256": "context"}],
+    }
+    candidate_row = {"candidate_id": "candidate", "text_sha256": "candidate"}
+    texts = {"query": "question", "candidate": "answer", "context": context}
+    expected = {
+        "schema": "chronovisor.recall-distill-teacher-input.v1",
+        "rally_id": "rally-context-boundary",
+        "candidate_id": "candidate",
+        "query": "question",
+        "context": [],
+        "candidate": "answer",
+    }
+    limit = len(canonical_json.canonical_json_bytes_strict(expected))
+
+    assert (
+        distill._teacher_payload(
+            rally,
+            candidate_row,
+            texts,
+            max_input_bytes=limit,
+        )
+        == expected
+    )
+
+
 def test_remote_teacher_payload_omits_context_and_binds_local_context_hashes(
     tmp_path: Path,
 ) -> None:

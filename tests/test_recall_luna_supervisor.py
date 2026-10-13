@@ -80,3 +80,21 @@ def test_cli_role_must_keep_the_native_luna_identity(tmp_path: Path) -> None:
     role.write_text('model="other-model"\nmodel_reasoning_effort="max"\n')
     with pytest.raises(ValueError, match="native_luna_role_identity_mismatch"):
         supervisor.cli_command("codex", tmp_path, tmp_path / "result.json")
+
+
+def test_idle_supervisor_does_not_recapture_the_whole_catalog_each_tick(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "config.toml").write_text(
+        '[recall.distillation]\nenabled=true\nnative_luna_enabled=true\nteacher_profile="native-luna-single-v1"\n'
+    )
+    monkeypatch.setattr(supervisor, "inventory", lambda _root: [])
+    calls = []
+
+    def no_new_source(*args):
+        calls.append(args[1])
+        return {"status": "ready", "reason": "no_unlabeled_source"}
+
+    monkeypatch.setattr(supervisor, "run_daily_operation", no_new_source)
+    args = argparse.Namespace(root=tmp_path, max_workers=10, once=True, poll_seconds=1)
+    supervisor.supervise(args)
+    supervisor.supervise(args)
+    assert calls == ["run"]
