@@ -79,6 +79,7 @@ from chronovisor.ops.decision_trace_projection import project_decision_trace
 from chronovisor.ops.health import (
     health_snapshot,
     ingest_liveness_kpi,
+    recall_distillation_health,
 )
 from chronovisor.ops.health import runtime_status_kpi as health_runtime_status_kpi
 from chronovisor.ops.model_lab import snapshot as model_lab_snapshot
@@ -7562,11 +7563,26 @@ def _health_with_live_truth(cached_value: Any) -> dict[str, Any]:
     cached = cached_value if isinstance(cached_value, dict) else {}
     ingest_liveness = ingest_liveness_kpi()
     runtime_health = health_runtime_status_kpi()
+    recall_health = recall_distillation_health(CHRONOVISOR_ROOT)
+    queues = cached.get("queues")
+    queue_health = queues.get("health") if isinstance(queues, dict) else None
     result = {
         **cached,
         "runtime": runtime_identity(),
         "ingest_liveness": ingest_liveness,
         "runtime_status": runtime_health,
+        "recall_distillation": recall_health,
+        "alerts": [
+            *[
+                item for item in cached.get("alerts", [])
+                if isinstance(item, dict) and item.get("component") != "recall_distillation"
+            ],
+            *[
+                {"component": "recall_distillation", **item}
+                for item in recall_health.get("alerts", [])
+                if isinstance(item, dict)
+            ],
+        ],
     }
     try:
         built_at = float(cached.get("materialized_at_epoch") or 0.0)
@@ -7599,6 +7615,10 @@ def _health_with_live_truth(cached_value: Any) -> dict[str, Any]:
             or runtime_health.get("alert")
             or isinstance(semantic_index, dict)
             and semantic_index.get("status") == "alert"
+            or recall_health.get("alert")
+            or recall_health.get("status") == "alert"
+            or isinstance(queue_health, dict)
+            and (queue_health.get("alert") or queue_health.get("status") == "alert")
             else "ok"
         )
     authority = None

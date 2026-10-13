@@ -697,6 +697,34 @@ def test_read_helpers_return_call_owned_fresh_state_snapshots(tmp_path: Path) ->
     assert "mutated" not in store.list_items()[0]["metadata"]
 
 
+def test_repeated_item_reads_parse_once_and_notice_other_writers(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    store = _store(tmp_path)
+    key = _merge(store)["key"]
+    load = store._load_unlocked
+    calls = []
+
+    def counted_load():
+        calls.append(1)
+        return load()
+
+    monkeypatch.setattr(store, "_load_unlocked", counted_load)
+    for _ in range(100):
+        assert store.get(key)["status"] == "pending_local"
+    assert len(calls) == 1
+
+    other = _store(tmp_path)
+    other.complete(key, "rejected", result={"reason": "synthetic"}, now=NOW)
+    assert store.get(key)["status"] == "rejected"
+    assert len(calls) == 2
+    store.state_file.write_text("{corrupt", encoding="utf-8")
+    with pytest.raises(ConvergenceStateError):
+        store.get(key)
+    store.state_file.unlink()
+    assert store.get(key) is None
+
+
 def test_corrupt_state_fails_closed_without_overwrite(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.state_file.parent.mkdir(parents=True)

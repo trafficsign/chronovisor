@@ -53,6 +53,9 @@ def isolate_live_runtime_routes(
         "load_decision_router_config",
         lambda: SimpleNamespace(is_single_model=False),
     )
+    monkeypatch.setattr(
+        dashboard, "recall_distillation_health", lambda _root: {"alert": False, "alerts": []},
+    )
 
 
 def _reset_processing_activity_cache() -> None:
@@ -5449,6 +5452,39 @@ def test_health_live_truth_overlays_cached_authority_liveness_and_age(
 
     failed = {**cached, "status": "error", "error": "health build failed"}
     assert dashboard._health_with_live_truth(failed)["status"] == "error"
+
+
+@pytest.mark.parametrize("component", ["recall_distillation", "queues"])
+def test_health_live_truth_preserves_recall_and_queue_alerts_until_resolved(
+    tmp_path: Path, monkeypatch, component: str,
+) -> None:
+    monkeypatch.setattr(dashboard, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "runtime_identity", lambda: {})
+    monkeypatch.setattr(dashboard, "ingest_liveness_kpi", lambda: {"alert": False})
+    monkeypatch.setattr(dashboard, "health_runtime_status_kpi", lambda: {"alert": False})
+    reason = "native_luna_disabled" if component == "recall_distillation" else "search_labels_stalled"
+    alert = {"component": component, "category": "human_wait", "reason": reason}
+    recall = {"alert": component == "recall_distillation", "alerts": [alert] if component == "recall_distillation" else []}
+    monkeypatch.setattr(dashboard, "recall_distillation_health", lambda _root: recall)
+    cached = {
+        "status": "ok", "alerts": [alert],
+        "recall_distillation": {"alert": False},
+        "queues": {"health": {"alert": component == "queues"}},
+    }
+
+    health = dashboard._health_with_live_truth(cached)
+
+    assert health["status"] == "alert"
+    assert health["alerts"] == [alert]
+    if component == "recall_distillation":
+        assert health["recall_distillation"] == recall
+        recall.update(alert=False, alerts=[])
+        recovered = dashboard._health_with_live_truth(cached)
+        assert recovered["status"] == "ok"
+        assert recovered["alerts"] == []
+    else:
+        cached["queues"]["health"] = {"status": "alert"}
+        assert dashboard._health_with_live_truth(cached)["status"] == "alert"
 
 
 def test_snapshot_live_status_overlay_reflects_idle_to_active_next_response(

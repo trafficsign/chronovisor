@@ -502,6 +502,9 @@ class ConvergenceStore:
         self.events_file = events_file or (self.state_file.parent / "events.jsonl")
         self.lock_file = lock_file or (self.state_file.parent / "state.lock")
         self.policy = policy or RetryPolicy()
+        self._get_lock = threading.Lock()
+        self._get_version: tuple[int, int, int, int, int] | None = None
+        self._get_items: dict[str, Any] | None = None
 
     def _empty_state(self) -> dict[str, Any]:
         return {"schema_version": SCHEMA_VERSION, "items": {}}
@@ -595,8 +598,20 @@ class ConvergenceStore:
         return self._load_unlocked()
 
     def get(self, key: str) -> dict[str, Any] | None:
-        item = self._load_unlocked()["items"].get(key)
-        return item if isinstance(item, dict) else None
+        # Queue scans can ask for thousands of terminal items. Reparse only
+        # after the atomic state file changes; all transitions still reload
+        # under the exclusive lock and never write from this read cache.
+        with self._get_lock:
+            try:
+                stat = self.state_file.stat()
+                version = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            except FileNotFoundError:
+                version = None
+            if self._get_items is None or version != self._get_version:
+                self._get_items = self._load_unlocked()["items"]
+                self._get_version = version
+            item = self._get_items.get(key)
+            return copy.deepcopy(item) if isinstance(item, dict) else None
 
     def list_items(
         self,
