@@ -4287,10 +4287,51 @@ def test_native_counterfactual_lane_does_not_wait_for_teacher_model_call_counter
     assert setup["model_deferred"] is (native and budget < 220)
 
 
+def test_deferred_native_counterfactual_turn_keeps_supervised_import_separate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw_dir = _raw(tmp_path)
+    config = distill.DistillationConfig(
+        enabled=True, teacher_profile=distill.NATIVE_LUNA_SINGLE_PROFILE,
+        native_luna_enabled=True,
+    )
+    monkeypatch.setattr(distill, "load_distillation_config", lambda _path: config)
+    monkeypatch.setattr(distill, "_ensure_profile_contract", lambda *_args: {"artifact_id": "a" * 64})
+    monkeypatch.setattr(distill, "_capture_candidate_snapshots", lambda **_kwargs: distill._CandidateCaptureResult({}, [], {}, False))
+    monkeypatch.setattr(distill, "_run_counterfactual_block", lambda **_kwargs: distill._CounterfactualBlockResult(pending=True, deferred=True))
+    setup = distill._prepare_distillation_chunk(
+        root=tmp_path, raw_dir=raw_dir, config_path=None,
+        teachers={}, counterfactual=None, structural_verifier=None,
+        dry_run=False, cold_start=True, max_elapsed_seconds=300,
+    )
+    setup["teachers_available"] = True
+    monkeypatch.setattr(distill, "_prepare_distillation_chunk", lambda **_kwargs: setup)
+
+    def forbidden(**_kwargs: Any) -> None:
+        raise AssertionError("CF turn must not repeat the supervised bulk import")
+
+    class Prepared(Exception):
+        pass
+
+    def training(**kwargs: Any) -> None:
+        assert kwargs["model_deferred"] is True
+        raise Prepared
+
+    monkeypatch.setattr(distill, "_run_teacher_batch", forbidden)
+    monkeypatch.setattr(distill, "_prepare_distillation_training", training)
+    with pytest.raises(Prepared):
+        distill._run_distillation_chunk_impl(
+            root=tmp_path, raw_dir=raw_dir, config_path=None,
+            teachers={}, counterfactual=None, structural_verifier=None,
+            dry_run=False, cold_start=True, max_elapsed_seconds=300,
+        )
+
+
 @pytest.mark.parametrize("new_label", [False, True])
 @pytest.mark.parametrize("split_changed", [False, True])
+@pytest.mark.parametrize("native", [False, True])
 def test_training_reuses_verified_snapshots_but_loads_new_labels_and_rebinds_split(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_label: bool, split_changed: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_label: bool, split_changed: bool, native: bool
 ) -> None:
     labels = [{"rally_id": "seen"}] + ([{"rally_id": "new"}] if new_label else [])
     supplied = {"seen": {"snapshot_sha256": "a" * 64}}
@@ -4304,7 +4345,7 @@ def test_training_reuses_verified_snapshots_but_loads_new_labels_and_rebinds_spl
         return fresh
 
     def materialize(_root: Path, **kwargs: Any) -> dict:
-        materialized.append(dict(kwargs["_snapshots"]))
+        materialized.append(dict(kwargs))
         return {"rows": [], "label_chain_head": ""}
 
     class Prepared(Exception):
@@ -4329,16 +4370,19 @@ def test_training_reuses_verified_snapshots_but_loads_new_labels_and_rebinds_spl
     with pytest.raises(Prepared):
         distill._prepare_distillation_training(
             root=tmp_path, raw_dir=tmp_path / "raw", config_path=None,
-            config=distill.DistillationConfig(teacher_profile=distill.NATIVE_LUNA_SINGLE_PROFILE),
+            config=distill.DistillationConfig(teacher_profile=distill.NATIVE_LUNA_SINGLE_PROFILE if native else distill.OX_SINGLE_PROFILE),
             catalog=fake_catalog, candidate_path=tmp_path / "candidates", label_path=tmp_path / "labels",
             rallies=[], snapshots=supplied, split_plan={"artifact_id": "old"}, scheduler_state={},
             existing=set(), pending=[], candidate_work=[], teachers_available=True,
             model_deferred=False, cold_start=True, profile_contract_id="c" * 64,
         )
     assert checked == ["sync"]
-    assert reads == ([{"new"}] if new_label else [])
+    assert reads == ([{"new"}] if new_label and not native else [])
     assert len(materialized) == (2 if split_changed else 1)
-    assert all(rows == {**supplied, **(fresh if new_label else {})} for rows in materialized)
+    if native:
+        assert all(kwargs == {"_validated_sources": True} for kwargs in materialized)
+    else:
+        assert all(kwargs["_snapshots"] == {**supplied, **(fresh if new_label else {})} for kwargs in materialized)
 
 
 def test_timeout_after_atomic_batch_resumes_without_duplicate_or_cursor_advance(
@@ -5393,6 +5437,18 @@ def test_authoritative_row_binding_rejects_recomputed_cross_source(
         distill._materialized_row_integrity(forged, root=tmp_path, split_plan=plan)
         is False
     )
+
+    retired = {
+        key: value for key, value in store.read_chain(label_path)[0].items()
+        if key not in {"schema", "namespace", "previous_sha256", "record_sha256"}
+    }
+    retired.update(profile="ox-alpha-single-v1", route="opencode-go/ox-alpha-free")
+    store.append_chain(label_path, retired)
+    ledger_before = label_path.read_bytes()
+    current = distill.materialize_training_rows(tmp_path)
+    assert current["rows"] == rows
+    assert current["excluded_unsupported_profile_rows"] == 1
+    assert label_path.read_bytes() == ledger_before
 
 
 def test_configured_local_route_binding_rejects_evil_canonical_identities(

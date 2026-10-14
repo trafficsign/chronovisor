@@ -883,10 +883,21 @@ def required_structured_context_tokens(
     num_predict: int,
     max_output_chars: int,
     max_feedback_chars: int,
+    repair_turns: int = MAX_REPAIR_TURNS,
     plain_choice_field: str | None = None,
     plain_text_contract: str | None = None,
 ) -> int:
     """Return the fail-closed context requirement used by a full repair session."""
+
+    if (
+        isinstance(repair_turns, bool)
+        or not isinstance(repair_turns, int)
+        or not 0 <= repair_turns <= MAX_REPAIR_TURNS
+    ):
+        raise ValueError(
+            "repair_turns must be an integer between 0 and "
+            f"{MAX_REPAIR_TURNS}"
+        )
 
     schema_copy = json.loads(_canonical_json(schema))
     structured_system = _output_system_prompt(
@@ -902,10 +913,21 @@ def required_structured_context_tokens(
     ]
     return (
         _estimated_message_tokens(messages)
-        + MAX_REPAIR_TURNS * (64 + max_output_chars + max_feedback_chars)
+        + repair_turns * (64 + max_output_chars + max_feedback_chars)
         + num_predict
         + CONTEXT_SAFETY_TOKENS
     )
+
+
+def _session_repair_turns(
+    max_responses: int,
+    *,
+    plain_choice: bool,
+) -> int:
+    """Return the repair turns the response loop can actually execute."""
+
+    response_limit = min(max_responses, 2) if plain_choice else max_responses
+    return response_limit - 1
 
 
 @dataclass(frozen=True)
@@ -959,6 +981,7 @@ def _default_transport_resource_request(
     num_predict: int,
     max_output_chars: int,
     max_feedback_chars: int,
+    repair_turns: int,
     plain_choice_field: str | None = None,
     plain_text_contract: str | None = None,
     min_num_ctx_override: int | None,
@@ -1037,6 +1060,7 @@ def _default_transport_resource_request(
         num_predict=num_predict,
         max_output_chars=max_output_chars,
         max_feedback_chars=max_feedback_chars,
+        repair_turns=repair_turns,
         plain_choice_field=plain_choice_field,
         plain_text_contract=plain_text_contract,
     )
@@ -2860,11 +2884,13 @@ class LocalStructuredSession:
         messages: Sequence[Mapping[str, Any]],
         *,
         effective_num_ctx: int,
+        plain_choice: bool,
     ) -> LocalStructuredResult | None:
         """Reject requests whose complete bounded repair history cannot fit."""
 
+        repair_turns = _session_repair_turns(self.max_responses, plain_choice=plain_choice)
         base_input_tokens = _estimated_message_tokens(messages)
-        worst_case_history_tokens = base_input_tokens + MAX_REPAIR_TURNS * (
+        worst_case_history_tokens = base_input_tokens + repair_turns * (
             64 + self.max_output_chars + self.max_feedback_chars
         )
         reserved_num_predict = self._output_reservation()
@@ -2873,9 +2899,12 @@ class LocalStructuredSession:
             <= effective_num_ctx
         ):
             return None
+        repair_count = {0: "no", 1: "one", 2: "two"}[repair_turns]
+        repair_noun = "history" if repair_turns == 1 else "histories"
         return self._failure(
             "context_window_exceeded",
-            "initial input plus two fixed UTF-8 byte-bounded repair histories "
+            "initial input plus "
+            f"{repair_count} fixed UTF-8 byte-bounded repair {repair_noun} "
             "and output reservation exceed num_ctx "
             f"({worst_case_history_tokens}+{reserved_num_predict}+"
             f"{CONTEXT_SAFETY_TOKENS}>{effective_num_ctx})",
@@ -3093,7 +3122,7 @@ class LocalStructuredSession:
             else dict(format_schema)
         )
         context_failure = self._initial_context_failure(
-            messages, effective_num_ctx=effective_num_ctx
+            messages, effective_num_ctx=effective_num_ctx, plain_choice=bool(choice_values)
         )
         if context_failure is not None:
             return context_failure
@@ -3486,6 +3515,22 @@ class LocalStructuredSession:
             "repair_exhausted", "structured session exhausted", attempts
         )
 
+    def _context_request_options(
+        self, plain_choice_field: str | None, plain_text_contract: str | None
+    ) -> dict[str, Any]:
+        """Keep initial admission and resource requests on one repair budget."""
+
+        return {
+            "num_predict": self._output_reservation(),
+            "max_output_chars": self.max_output_chars,
+            "max_feedback_chars": self.max_feedback_chars,
+            "repair_turns": _session_repair_turns(
+                self.max_responses, plain_choice=plain_choice_field is not None
+            ),
+            "plain_choice_field": plain_choice_field,
+            "plain_text_contract": plain_text_contract,
+        }
+
     def run(
         self,
         prompt: str,
@@ -3505,6 +3550,9 @@ class LocalStructuredSession:
         )
         if format_schema is None and plain_choice_field is None and not plain_text_mode:
             plain_choice_field = _automatic_plain_choice_field(schema)
+        context_options = self._context_request_options(
+            plain_choice_field, plain_text_contract
+        )
         if (plain_text_contract is None) != (plain_text_decoder is None):
             format_schema_error = (
                 "plain_text_contract and plain_text_decoder must be provided together"
@@ -3564,11 +3612,7 @@ class LocalStructuredSession:
                 prompt,
                 schema,
                 system=system,
-                num_predict=self._output_reservation(),
-                max_output_chars=self.max_output_chars,
-                max_feedback_chars=self.max_feedback_chars,
-                plain_choice_field=plain_choice_field,
-                plain_text_contract=plain_text_contract,
+                **context_options,
             )
         except (TypeError, ValueError):
             required_num_ctx = None
@@ -3645,11 +3689,7 @@ class LocalStructuredSession:
                     prompt=prompt,
                     schema=schema,
                     system=system,
-                    num_predict=self._output_reservation(),
-                    max_output_chars=self.max_output_chars,
-                    max_feedback_chars=self.max_feedback_chars,
-                    plain_choice_field=plain_choice_field,
-                    plain_text_contract=plain_text_contract,
+                    **context_options,
                     min_num_ctx_override=self.resource_min_num_ctx,
                     max_num_ctx_override=self.resource_max_num_ctx,
                     memory_reserve_gib_override=(self.resource_memory_reserve_gib),

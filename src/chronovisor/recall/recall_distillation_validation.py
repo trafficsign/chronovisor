@@ -9,6 +9,7 @@ closed without publishing a cache entry.
 
 from __future__ import annotations
 
+import re
 import stat
 import threading
 from collections.abc import Mapping, Sequence
@@ -40,6 +41,7 @@ class _CacheEntry:
 
 
 _CACHE: dict[Path, _CacheEntry] = {}
+_SPLIT_CACHE: dict[tuple[Path, str], tuple[_FileSignature, Mapping[str, Any]]] = {}
 _CACHE_LOCK = threading.RLock()
 
 
@@ -246,11 +248,44 @@ def binding_inputs(root: Path) -> _BindingInputs:
         return values
 
 
+def split_plan(root: Path, plan_id: str) -> Mapping[str, Any]:
+    """Reuse a sealed plan only while its regular-file identity is unchanged."""
+
+    from chronovisor.recall import recall_distillation as distill
+
+    if re.fullmatch(r"[0-9a-f]{64}", plan_id) is None:
+        raise SourceBindingError("split plan identity is invalid")
+    canonical_root = root.expanduser().resolve(strict=False)
+    key = (canonical_root, plan_id)
+    path = store.distillation_dir(canonical_root) / "split-plans" / f"{plan_id}.json"
+    with _CACHE_LOCK:
+        before = _file_signature(path)
+        cached = _SPLIT_CACHE.get(key)
+        if cached is not None and cached[0] == before:
+            return cached[1]
+        _SPLIT_CACHE.pop(key, None)
+        try:
+            value = distill._read_split_plan_artifact(canonical_root, plan_id)
+        except (distill.DistillationError, store.DistillationStoreError) as exc:
+            raise SourceBindingError("split plan validation failed") from exc
+        if before is None or before != _file_signature(path):
+            raise SourceBindingError("split plan changed during validation")
+        if len(_SPLIT_CACHE) >= 16:
+            _SPLIT_CACHE.pop(next(iter(_SPLIT_CACHE)))
+        _SPLIT_CACHE[key] = (before, value)
+        return value
+
+
 def clear_cache(root: Path | None = None) -> None:
     """Clear validation cache entries; intended for tests and process shutdown."""
 
     with _CACHE_LOCK:
         if root is None:
             _CACHE.clear()
+            _SPLIT_CACHE.clear()
         else:
-            _CACHE.pop(root.expanduser().resolve(strict=False), None)
+            canonical_root = root.expanduser().resolve(strict=False)
+            _CACHE.pop(canonical_root, None)
+            for key in tuple(_SPLIT_CACHE):
+                if key[0] == canonical_root:
+                    _SPLIT_CACHE.pop(key)

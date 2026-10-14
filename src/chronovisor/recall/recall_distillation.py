@@ -5576,6 +5576,13 @@ def _same_utc_instant(left: str, right: str) -> bool:
     return first.tzinfo is not None and second.tzinfo is not None and first == second
 
 
+def _unsupported_materialization_profile(label: Mapping[str, Any]) -> bool:
+    profile = label.get("profile")
+    return profile not in (None, "") and (
+        not isinstance(profile, str) or profile not in TEACHER_PROFILES
+    )
+
+
 def _materialization_label_row(
     label: Mapping[str, Any],
     root: Path,
@@ -5584,6 +5591,9 @@ def _materialization_label_row(
     snapshot_contracts: Mapping[str, Mapping[str, Any]],
     current_ox_contract_id: str,
 ) -> dict[str, Any] | None:
+    if _unsupported_materialization_profile(label):
+        # Retired remote producers cannot become generic local teacher rows.
+        return None
     rally_id = str(label.get("rally_id") or "")
     candidate_id = str(label.get("candidate_id") or "")
     rally_row = rallies.get(rally_id)
@@ -5935,6 +5945,7 @@ def _finalize_materialized_training_rows(
     limit: int,
     *,
     excluded_prior_contract_rows: int = 0,
+    excluded_unsupported_profile_rows: int = 0,
 ) -> dict[str, Any]:
     split_plan_id = ""
     split: dict[str, str] = {}
@@ -6021,6 +6032,7 @@ def _finalize_materialized_training_rows(
             "feature_revision": TEXT_FEATURE_REVISION,
             "rows": rows,
             "excluded_prior_contract_rows": excluded_prior_contract_rows,
+            "excluded_unsupported_profile_rows": excluded_unsupported_profile_rows,
             "label_chain_head": store.chain_head(
                 store.distillation_dir(root) / "label-ledger.jsonl"
             )["head_sha256"],
@@ -6037,27 +6049,42 @@ def materialize_training_rows(
     _rallies: Sequence[Mapping[str, Any]] | None = None,
     _snapshots: Mapping[str, Mapping[str, Any]] | None = None,
     _label_rows: Sequence[Mapping[str, Any]] | None = None,
+    _validated_sources: bool = False,
 ) -> dict[str, Any]:
     """Join labels only to byte-identical prospective live feature snapshots."""
 
     if limit <= 0 or limit > 10_000:
         raise DistillationError("training materialization limit is invalid")
     root = root or CHRONOVISOR_ROOT
-    rallies = _materialization_rallies(root, _rallies)
-    snapshots = _materialization_snapshots(root, _snapshots)
-    features_by_pair, snapshot_contracts = _materialization_feature_pairs(
-        root, rallies, snapshots
-    )
-    labels = (
-        _label_rows
-        if _label_rows is not None
-        else _read_chain(store.distillation_dir(root) / "label-ledger.jsonl")
-    )
+    if _validated_sources:
+        if any(value is not None for value in (_rallies, _snapshots, _label_rows)):
+            raise DistillationError("validated materialization cannot accept supplied sources")
+        from chronovisor.recall.recall_distillation_validation import binding_inputs
+
+        # Read canonical sources through the same signature-checked view used
+        # by preflight. This never seeds validation with caller-supplied data.
+        labels_by_record, rallies, features_by_pair, snapshot_contracts = binding_inputs(root)
+        labels: Sequence[Mapping[str, Any]] = list(labels_by_record.values())
+    else:
+        rallies = _materialization_rallies(root, _rallies)
+        snapshots = _materialization_snapshots(root, _snapshots)
+        features_by_pair, snapshot_contracts = _materialization_feature_pairs(
+            root, rallies, snapshots
+        )
+        labels = (
+            _label_rows
+            if _label_rows is not None
+            else _read_chain(store.distillation_dir(root) / "label-ledger.jsonl")
+        )
     current_ox_contract_id = _current_ox_profile_contract_id(root)
     excluded_prior_contract_rows = sum(
         isinstance(label, Mapping)
         and label.get("profile") == OX_SINGLE_PROFILE
         and label.get("profile_contract_id") != current_ox_contract_id
+        for label in labels
+    )
+    excluded_unsupported_profile_rows = sum(
+        isinstance(label, Mapping) and _unsupported_materialization_profile(label)
         for label in labels
     )
     materialized = _materialization_rows(
@@ -6073,6 +6100,7 @@ def materialize_training_rows(
         materialized,
         limit,
         excluded_prior_contract_rows=excluded_prior_contract_rows,
+        excluded_unsupported_profile_rows=excluded_unsupported_profile_rows,
     )
 
 
@@ -6238,6 +6266,9 @@ def _authoritative_materialized_row_binding(
         SourceBindingError,
         binding_inputs,
     )
+    from chronovisor.recall.recall_distillation_validation import (
+        split_plan as validated_split_plan,
+    )
 
     try:
         labels_by_record, rallies, features_by_pair, snapshot_contracts = (
@@ -6271,10 +6302,10 @@ def _authoritative_materialized_row_binding(
     expected_plan = split_plan
     if expected_plan is None:
         try:
-            expected_plan = _read_split_plan_artifact(
+            expected_plan = validated_split_plan(
                 root, str(row.get("split_plan_id") or "")
             )
-        except DistillationError, store.DistillationStoreError:
+        except SourceBindingError:
             return False
     plan_id = str(expected_plan.get("artifact_id") or "")
     rally_id = str(row.get("rally_id") or "")
@@ -15766,7 +15797,8 @@ def _prepare_distillation_training(
     cold_start: bool,
     profile_contract_id: str,
 ) -> dict[str, Any]:
-    current_labels = _read_chain(label_path)
+    native_sources = config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+    current_labels = [] if native_sources else _read_chain(label_path)
     training_snapshots: Mapping[str, Mapping[str, Any]] = snapshots
     candidate_index_state: Mapping[str, Any] = {}
     if config.teacher_profile in SINGLE_TEACHER_PROFILES:
@@ -15792,12 +15824,12 @@ def _prepare_distillation_training(
                 )
         except catalog.CatalogError as exc:
             raise DistillationError("OX training snapshots are unavailable") from exc
-    training_snapshot = materialize_training_rows(
-        root,
-        _rallies=rallies,
-        _snapshots=training_snapshots,
-        _label_rows=current_labels,
+    materialization_sources: dict[str, Any] = (
+        {"_validated_sources": True}
+        if native_sources
+        else {"_rallies": rallies, "_snapshots": training_snapshots, "_label_rows": current_labels}
     )
+    training_snapshot = materialize_training_rows(root, **materialization_sources)
     if cold_start:
         prior_split_id = str(split_plan.get("artifact_id") or "")
         _, current_cohort = _active_training_cohort(
@@ -15821,12 +15853,7 @@ def _prepare_distillation_training(
             or training_snapshot.get("label_chain_head")
             != store.chain_head(label_path)["head_sha256"]
         ):
-            training_snapshot = materialize_training_rows(
-                root,
-                _rallies=rallies,
-                _snapshots=training_snapshots,
-                _label_rows=current_labels,
-            )
+            training_snapshot = materialize_training_rows(root, **materialization_sources)
     baseline = preflight(
         raw_dir=raw_dir,
         root=root,
@@ -16191,7 +16218,12 @@ def _run_distillation_chunk_impl(
             label_rows=label_rows,
         )
         counterfactual_attempted = True
-        prefer_counterfactual = counterfactual_result.written > 0
+        # Native bundle import has its own supervised operation. Do not spend
+        # this CF turn revalidating the same bulk bundle after a deferred model.
+        prefer_counterfactual = (
+            counterfactual_result.written > 0
+            or config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+        )
     teacher_result = _TeacherBatchResult()
     if teachers_available and not prefer_counterfactual and not model_deferred:
         teacher_result = _run_teacher_batch(

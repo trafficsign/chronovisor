@@ -384,6 +384,39 @@ def test_plain_choice_fails_closed_after_one_repair() -> None:
     assert len(transport.requests) == 2
 
 
+def test_plain_choice_context_requirement_matches_one_repair_limit() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["selection_id"],
+        "properties": {
+            "selection_id": {
+                "type": "string",
+                "enum": ["apply_available", "confirmed_noop"],
+            }
+        },
+    }
+    required_one = required_structured_context_tokens(
+        "decide",
+        schema,
+        system=None,
+        num_predict=256,
+        max_output_chars=1_000,
+        max_feedback_chars=2_000,
+        repair_turns=1,
+        plain_choice_field="selection_id",
+    )
+
+    result = _session(
+        QueueTransport("apply_available"),
+        max_responses=3,
+        num_ctx=required_one,
+    ).run("decide", schema, plain_choice_field="selection_id")
+
+    assert result.ok is True
+    assert result.required_num_ctx == required_one
+
+
 def test_single_enum_object_automatically_uses_plain_choice() -> None:
     schema = {
         "type": "object",
@@ -1928,6 +1961,71 @@ def test_context_preflight_reserves_two_maximum_repair_histories() -> None:
     assert result.failure_class == "context_window_exceeded"
     assert "two fixed UTF-8 byte-bounded repair histories" in result.failure_reason
     assert transport.requests == []
+
+
+@pytest.mark.parametrize(
+    ("max_responses", "repair_turns"),
+    [(1, 0), (2, 1), (3, 2)],
+)
+def test_required_context_matches_actual_response_limit(
+    max_responses: int,
+    repair_turns: int,
+) -> None:
+    required = required_structured_context_tokens(
+        "decide",
+        SCHEMA,
+        system=None,
+        num_predict=256,
+        max_output_chars=1_000,
+        max_feedback_chars=2_000,
+        repair_turns=repair_turns,
+    )
+    result = _session(
+        QueueTransport('{"decision":"apply","summary":"ok"}'),
+        max_responses=max_responses,
+    ).run("decide", SCHEMA)
+
+    assert result.ok is True
+    assert result.required_num_ctx == required
+
+
+def test_context_boundaries_fit_one_and_two_repair_histories() -> None:
+    common = {
+        "system": None,
+        "num_predict": 256,
+        "max_output_chars": 1_000,
+        "max_feedback_chars": 2_000,
+    }
+    required_one = required_structured_context_tokens(
+        "decide", SCHEMA, repair_turns=1, **common
+    )
+    one_repair = _session(
+        QueueTransport('{"decision":"apply","summary":"ok"}'),
+        max_responses=2,
+        num_ctx=required_one,
+    ).run("decide", SCHEMA)
+    assert one_repair.ok is True
+    assert one_repair.required_num_ctx == required_one
+
+    required_two = required_structured_context_tokens(
+        "decide", SCHEMA, repair_turns=2, **common
+    )
+    two_repairs = _session(
+        QueueTransport('{"decision":"apply","summary":"ok"}'),
+        max_responses=3,
+        num_ctx=required_two,
+    ).run("decide", SCHEMA)
+    assert two_repairs.ok is True
+    assert two_repairs.required_num_ctx == required_two
+
+    for responses, required in ((2, required_one), (3, required_two)):
+        transport = QueueTransport('{"decision":"apply","summary":"ok"}')
+        rejected = _session(
+            transport, max_responses=responses, num_ctx=required - 1
+        ).run("decide", SCHEMA)
+        assert rejected.ok is False
+        assert rejected.failure_class == "context_window_exceeded"
+        assert transport.requests == []
 
 
 def test_production_112k_policy_retains_largest_bounded_prompt_and_two_repairs() -> (

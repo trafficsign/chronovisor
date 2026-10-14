@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -190,3 +191,85 @@ def test_binding_inputs_does_not_cache_invalid_label_chain(
     calls = _stub_sources(monkeypatch, tmp_path, catalog_enabled=True)
     validation.binding_inputs(tmp_path)
     assert calls["labels"] == 1
+
+
+def test_materialization_shares_authoritative_view_and_invalidates_on_source_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _source_files(tmp_path)
+    calls = _stub_sources(monkeypatch, tmp_path, catalog_enabled=True)
+    observed: list[list[dict[str, Any]]] = []
+
+    def rows(labels: Any, *_args: Any) -> list:
+        observed.append(list(labels))
+        return []
+
+    monkeypatch.setattr(distill, "_materialization_rows", rows)
+    monkeypatch.setattr(distill, "_finalize_materialized_training_rows", lambda *_args, **_kwargs: {"rows": []})
+    distill.materialize_training_rows(tmp_path, _validated_sources=True)
+    validation.binding_inputs(tmp_path)
+    assert observed == [_labels()]
+    assert calls == {"labels": 1, "rallies": 1, "snapshots": 1, "features": 1}
+
+    paths[0].write_bytes(b"changed source")
+    validation.binding_inputs(tmp_path)
+    assert calls == {"labels": 2, "rallies": 2, "snapshots": 2, "features": 2}
+    with pytest.raises(distill.DistillationError, match="cannot accept supplied"):
+        distill.materialize_training_rows(tmp_path, _validated_sources=True, _label_rows=[])
+
+
+def test_split_plan_cache_revalidates_tampering_replacement_and_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan_id, path, _ = store.write_immutable(
+        store.distillation_dir(tmp_path) / "split-plans",
+        {"assignments": {"rally": "train"}}, schema=distill.SPLIT_PLAN_SCHEMA,
+    )
+    original = path.read_bytes()
+    reads: list[Path] = []
+    read = store.read_sealed
+
+    def counted(path: Path, **kwargs: Any) -> dict:
+        reads.append(path)
+        return read(path, **kwargs)
+
+    monkeypatch.setattr(store, "read_sealed", counted)
+    first = validation.split_plan(tmp_path, plan_id)
+    assert validation.split_plan(tmp_path, plan_id) is first
+    assert len(reads) == 1
+
+    changed = json.loads(original)
+    changed["assignments"]["rally"] = "test"
+    path.write_text(json.dumps(changed))
+    with pytest.raises(validation.SourceBindingError, match="validation failed"):
+        validation.split_plan(tmp_path, plan_id)
+    path.unlink()
+    path.write_bytes(original)
+    assert validation.split_plan(tmp_path, plan_id) == first
+    assert len(reads) == 3
+
+    other = path.with_suffix(".original")
+    path.rename(other)
+    path.symlink_to(other)
+    with pytest.raises(validation.SourceBindingError, match="not a regular file"):
+        validation.split_plan(tmp_path, plan_id)
+
+
+def test_split_plan_cache_rejects_change_during_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan_id, path, _ = store.write_immutable(
+        store.distillation_dir(tmp_path) / "split-plans",
+        {"assignments": {"rally": "train"}}, schema=distill.SPLIT_PLAN_SCHEMA,
+    )
+    read = store.read_sealed
+
+    def changed(path: Path, **kwargs: Any) -> dict:
+        value = read(path, **kwargs)
+        path.write_bytes(path.read_bytes() + b" ")
+        return value
+
+    monkeypatch.setattr(store, "read_sealed", changed)
+    with pytest.raises(validation.SourceBindingError, match="changed during"):
+        validation.split_plan(tmp_path, plan_id)
+    assert (tmp_path.resolve(), plan_id) not in validation._SPLIT_CACHE
