@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
-from chronovisor.core import ollama
-from chronovisor.decision.local_structured import preflight_structured_request
+from chronovisor.core import llm_config, ollama
+from chronovisor.core.llm_runtime import GenerationRoute, LLMRuntime, RouteLocation
+from chronovisor.decision.local_structured import (
+    LocalStructuredSession,
+    preflight_structured_request,
+)
 from chronovisor.recall import recall_distillation_worker as worker
 
 
@@ -112,6 +118,7 @@ def test_worker_resolves_fixed_local_route_and_hides_input(monkeypatch) -> None:
         "max_output_chars": worker.MAX_OUTPUT_CHARS,
         "max_feedback_chars": 1_024,
         "max_responses": 2,
+        "resource_lease_timeout_ms": 0,
         "require_returned_model": True,
     }
     assert worker.MAX_OUTPUT_CHARS == 8_000
@@ -187,6 +194,86 @@ def test_worker_resolves_revision_pinned_local_omlx_without_ollama(
 
     assert resolved == route
     assert len(fingerprint) == 64
+
+
+def test_worker_busy_resource_fails_before_transport_and_preserves_claim_budget(
+    tmp_path: Path, monkeypatch
+) -> None:
+    role = "recall.distill.utility_judge"
+    route = ollama.RuntimeGenerationRoute(
+        role=role,
+        provider="mtplx",
+        model="ornith:test",
+        location="local",
+        structured_output=True,
+        protocol="openai-compatible",
+        endpoint_sha256="e" * 64,
+        revision="ornith-test-v1",
+    )
+    monkeypatch.setattr(
+        worker.ollama, "runtime_generation_routes", lambda _roles: (route,)
+    )
+
+    transport_calls: list[object] = []
+    lease_calls: list[tuple[str, bool, int | None]] = []
+
+    class Backend:
+        provider = "mtplx"
+        location = RouteLocation.LOCAL
+
+        def generate(self, request: object, *, model: str) -> object:
+            transport_calls.append((request, model))
+            raise AssertionError("busy resource must fail before transport")
+
+    class BusyControl:
+        @contextmanager
+        def resource_lease(
+            self, *, exclusive: bool, timeout_ms: int | None = None
+        ):
+            lease_calls.append((role, exclusive, timeout_ms))
+            raise TimeoutError("resource busy")
+            yield  # pragma: no cover
+
+    runtime = LLMRuntime(
+        generation={role: GenerationRoute(Backend(), route.model)},
+        local_controls={role: BusyControl()},
+    )
+    monkeypatch.setattr(llm_config, "load_default_llm_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        worker,
+        "LocalStructuredSession",
+        lambda **kwargs: LocalStructuredSession(
+            audit_root=tmp_path / "audit", **kwargs
+        ),
+    )
+
+    result = worker.run(
+        _payload(
+            operation="utility",
+            role=role,
+            input={
+                "rally_id": "rally-1",
+                "candidate_id": "candidate-1",
+                "query": "q",
+                "context": "c",
+                "answer_a": "a",
+                "answer_b": "b",
+                "blind_order": "a_first",
+            },
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["failure_class"] == "capacity_unavailable"
+    assert result["route_identity"] == {
+        "role": role,
+        "provider": "mtplx",
+        "model": "ornith:test",
+        "location": "local",
+    }
+    assert lease_calls == [(role, True, 0)]
+    assert transport_calls == []
+    assert result["result"] == {}
 
 
 def test_worker_hides_structured_failure(monkeypatch) -> None:

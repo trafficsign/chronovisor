@@ -2753,6 +2753,14 @@ def test_local_worker_metadata_and_transient_failure_classification(
             expected_route=identity,
             expected_digest="d" * 64,
         )
+    failure["value"] = "capacity_unavailable"
+    with pytest.raises(distill.DistillationDeferred) as busy:
+        distill._worker_call(
+            "teacher", route.role, {"candidates": []},
+            max_input_bytes=12_000, expected_route=identity, expected_digest="d" * 64,
+        )
+    assert busy.value.failure_class == "capacity_unavailable"
+    assert busy.value.attempted is False
     failure["value"] = "output_invalid"
     with pytest.raises(distill.DistillationError, match="output"):
         distill._worker_call(
@@ -4693,9 +4701,9 @@ def test_counterfactual_failure_survives_wait_and_clears_only_after_success(
             assert state["last_success_at"] != previous_success
 
 
-@pytest.mark.parametrize("attempted", [False, True])
+@pytest.mark.parametrize("attempted,failure_class", [(False, "resource_busy"), (False, "capacity_unavailable"), (True, "timeout")])
 def test_counterfactual_attempt_failure_differs_from_unattempted_wait(
-    tmp_path: Path, attempted: bool,
+    tmp_path: Path, attempted: bool, failure_class: str,
 ) -> None:
     commits: list[Any] = []
     releases: list[Any] = []
@@ -4706,7 +4714,7 @@ def test_counterfactual_attempt_failure_differs_from_unattempted_wait(
         def compare(self, _payload: object) -> dict:
             raise distill.DistillationDeferred(
                 "private model input", attempted=attempted,
-                failure_class="timeout" if attempted else "resource_busy",
+                failure_class=failure_class,
             )
 
     result = distill._compare_and_commit_counterfactual(

@@ -336,6 +336,11 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
             num_predict=3_072,
             keep_alive="0",
             read_timeout_ms=deadline_ms,
+            # Opportunistic workers must never occupy their watchdog waiting
+            # for another local runner.  The existing exclusive lease remains
+            # mandatory; a busy resource is returned as capacity_unavailable
+            # so the parent releases this claim without consuming an attempt.
+            resource_lease_timeout_ms=0,
             max_input_chars=MAX_SESSION_INPUT_BYTES,
             max_output_chars=MAX_OUTPUT_CHARS,
             max_feedback_chars=1_024,
