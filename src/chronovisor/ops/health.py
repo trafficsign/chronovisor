@@ -73,6 +73,7 @@ _DISTILLATION_WORKER_FAILURE_CODES = {
     "distillation_run_failed",
     "distillation_run_timeout",
 }
+_DISTILLATION_WORKER_FAILURE_STAGES = {"counterfactual", "mainline"}
 _NATIVE_LUNA_WAITING_PROGRESS_REASONS = {
     "daily_capture_in_progress",
     "daily_run_in_progress",
@@ -394,6 +395,12 @@ def _distillation_worker_failure(value: object) -> dict[str, Any] | None:
     public: dict[str, Any] = {
         "worker_failure_count": count,
         "error_code": code,
+        "worker_error_stage": (
+            value.get("worker_error_stage")
+            if isinstance(value.get("worker_error_stage"), str)
+            and value.get("worker_error_stage") in _DISTILLATION_WORKER_FAILURE_STAGES
+            else "mainline"
+        ),
     }
     error_type = _native_luna_safe_identifier(value.get("worker_error_type"))
     if error_type is not None:
@@ -789,10 +796,11 @@ def _distillation_alerts(
         and mainline_failure is not None
         and mainline_failure["worker_failure_count"] >= 2
     ):
+        failure_stage = mainline_failure["worker_error_stage"]
         add(
             "human_wait",
             "distillation_run_repeated_failure",
-            "人の判断待ち: 蒸留の mainline 実行が同じエラーで繰り返し失敗しています",
+            f"人の判断待ち: 蒸留の {failure_stage} 実行が同じエラーで繰り返し失敗しています",
         )
     if enabled and not teacher_profile:
         add(

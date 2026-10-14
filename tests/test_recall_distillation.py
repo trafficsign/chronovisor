@@ -4653,6 +4653,79 @@ def test_chunk_failure_does_not_mutate_dry_run_or_corrupt_state(
     assert path.read_text() == "corrupt sealed state"
 
 
+def test_counterfactual_failure_survives_wait_and_clears_only_after_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw_dir = _raw(tmp_path)
+    config = _config(tmp_path)
+    state_path = store.distillation_dir(tmp_path) / store.STATE_FILE
+    previous_success = "2026-10-13T21:52:30Z"
+    store.write_sealed_state(state_path, {
+        "kind": "worker-state", "teacher_model_calls": 1,
+        "last_success_at": previous_success,
+    })
+    result = distill._CounterfactualBlockResult(pending=True)
+
+    def counterfactual(**kwargs: Any) -> distill._CounterfactualBlockResult:
+        return result if kwargs["execute"] else distill._CounterfactualBlockResult(pending=True)
+
+    monkeypatch.setattr(distill, "_run_counterfactual_block", counterfactual)
+    for failure, written, expected_count in (
+        ("counterfactual_timeout", 0, 1), ("", 0, 1),
+        ("counterfactual_timeout", 0, 2), ("", 1, 0),
+    ):
+        result = distill._CounterfactualBlockResult(
+            pending=True, deferred=not written, written=written, failure_class=failure,
+        )
+        chunk = distill.run_distillation_chunk(
+            root=tmp_path, raw_dir=raw_dir, config_path=config, teachers={},
+        )
+        state = store.read_sealed(state_path)
+        assert state["worker_failure_count"] == expected_count
+        if expected_count:
+            assert chunk["status"] == "deferred"
+            assert state["worker_error_stage"] == "counterfactual"
+            assert state["worker_error_type"] == "CounterfactualTimeout"
+            assert state["error_code"] == "distillation_run_failed"
+            assert state["last_success_at"] == previous_success
+        else:
+            assert state["worker_error_sha256"] == state["worker_error_stage"] == ""
+            assert state["last_success_at"] != previous_success
+
+
+@pytest.mark.parametrize("attempted", [False, True])
+def test_counterfactual_attempt_failure_differs_from_unattempted_wait(
+    tmp_path: Path, attempted: bool,
+) -> None:
+    commits: list[Any] = []
+    releases: list[Any] = []
+    queue = SimpleNamespace(commit=lambda *args: commits.append(args), release_unattempted=releases.append)
+    claim = SimpleNamespace(attempt=2)
+
+    class DeferredCounterfactual:
+        def compare(self, _payload: object) -> dict:
+            raise distill.DistillationDeferred(
+                "private model input", attempted=attempted,
+                failure_class="timeout" if attempted else "resource_busy",
+            )
+
+    result = distill._compare_and_commit_counterfactual(
+        workset=queue, claim=claim, counterfactual=DeferredCounterfactual(),  # type: ignore[arg-type]
+        payload={}, label_path=tmp_path / "labels", root=tmp_path, raw_dir=tmp_path,
+        snapshots={}, exposure={}, exact_features={}, rally_id="rally", candidate={},
+        mode="full", config=distill.DistillationConfig(),
+    )
+    assert result.deferred
+    assert result.failure_class == ("counterfactual_timeout" if attempted else "")
+    assert bool(commits) is attempted
+    assert bool(releases) is not attempted
+    if commits:
+        assert commits[0][1] == [{
+            "status": "retry", "error_class": "counterfactual_timeout", "retry_after_seconds": 60,
+        }]
+    assert not (tmp_path / "labels").exists()
+
+
 def test_timeout_workset_observation_marks_missing_and_corrupt_queue(
     tmp_path: Path,
 ) -> None:

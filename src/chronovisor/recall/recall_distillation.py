@@ -9312,6 +9312,7 @@ class _CounterfactualBlockResult:
     written: int = 0
     model_calls: int = 0
     deferred: bool = False
+    failure_class: str = ""
 
 
 @dataclass(frozen=True)
@@ -14944,7 +14945,7 @@ def _compare_and_commit_counterfactual(
                 }
             ],
         )
-        return _CounterfactualBlockResult(pending=True, deferred=True)
+        return _CounterfactualBlockResult(pending=True, deferred=True, failure_class="counterfactual_timeout")
     except OSError:
         workset.commit(
             [claim],
@@ -14956,7 +14957,7 @@ def _compare_and_commit_counterfactual(
                 }
             ],
         )
-        return _CounterfactualBlockResult(pending=True, deferred=True)
+        return _CounterfactualBlockResult(pending=True, deferred=True, failure_class="counterfactual_transport")
     except TimeoutError, DistillationError:
         workset.commit(
             [claim],
@@ -14968,7 +14969,7 @@ def _compare_and_commit_counterfactual(
                 }
             ],
         )
-        return _CounterfactualBlockResult(pending=True, deferred=True)
+        return _CounterfactualBlockResult(pending=True, deferred=True, failure_class="counterfactual_invalid")
     candidate_id_raw = candidate["candidate_id"]
     candidate_id = str(candidate_id_raw)
     ox_contract_id = _current_profile_contract_id(root, config.teacher_profile)
@@ -15923,6 +15924,7 @@ def _persist_distillation_chunk(
     teacher_model_calls: int,
     counterfactual_model_calls: int,
     model_deferred: bool,
+    counterfactual_failure: str = "",
 ) -> dict[str, Any]:
     root = setup["root"]
     config = setup["config"]
@@ -16099,8 +16101,6 @@ def _persist_distillation_chunk(
                 else str(scheduler_state.get("last_label_at") or "")
             ),
             "teacher_profile": config.teacher_profile,
-            "worker_failure_count": 0,
-            "worker_error_sha256": "",
             "error_code": (
                 "ox_teacher_stopped"
                 if teacher_result.profile_stopped
@@ -16108,6 +16108,7 @@ def _persist_distillation_chunk(
                 if model_deferred
                 else ""
             ),
+            **_counterfactual_failure_fields(scheduler_state, counterfactual_failure, counterfactual_written),
         },
     )
     return {
@@ -16360,6 +16361,7 @@ def _run_distillation_chunk_impl(
         teacher_model_calls=teacher_model_calls,
         counterfactual_model_calls=counterfactual_model_calls,
         model_deferred=model_deferred,
+        counterfactual_failure=counterfactual_result.failure_class,
     )
 
 
@@ -16408,6 +16410,40 @@ def _timeout_workset_statuses(root: Path) -> dict[str, dict[str, Any]]:
     return statuses
 
 
+def _counterfactual_failure_fields(
+    previous: Mapping[str, Any], failure_class: str, written: int
+) -> dict[str, Any]:
+    """Keep attempted model failures visible until this stage actually succeeds."""
+    error_types = {
+        "counterfactual_timeout": "CounterfactualTimeout",
+        "counterfactual_transport": "CounterfactualTransport",
+        "counterfactual_invalid": "CounterfactualInvalid",
+    }
+    if failure_class in error_types:
+        digest = hashlib.sha256(failure_class.encode()).hexdigest()
+        same = (
+            previous.get("worker_error_stage") == "counterfactual"
+            and previous.get("worker_error_sha256") == digest
+        )
+        return {
+            "error_code": "distillation_run_failed",
+            "worker_error_stage": "counterfactual",
+            "worker_error_type": error_types[failure_class],
+            "worker_error_sha256": digest,
+            "worker_failure_count": int(previous.get("worker_failure_count") or 0) + 1 if same else 1,
+            "last_failure_at": datetime.now(UTC).isoformat(),
+        }
+    if previous.get("worker_error_stage") == "counterfactual" and not written:
+        return {key: previous[key] for key in (
+            "error_code", "worker_error_stage", "worker_error_type", "worker_error_sha256",
+            "worker_failure_count", "last_failure_at",
+        ) if key in previous}
+    return {
+        "worker_failure_count": 0, "worker_error_sha256": "",
+        "worker_error_type": "", "worker_error_stage": "",
+    }
+
+
 def _record_worker_failure(root: Path, error: Exception, *, timeout: bool = False) -> None:
     """Persist a failed attempt under the existing worker lease, without text."""
     path = store.distillation_dir(root) / store.STATE_FILE
@@ -16415,11 +16451,16 @@ def _record_worker_failure(root: Path, error: Exception, *, timeout: bool = Fals
         previous = _read_worker_state(root) if path.exists() else {"kind": "worker-state"}
         code = "distillation_run_timeout" if timeout else "distillation_run_failed"
         digest = hashlib.sha256(str(error).encode("utf-8", "replace")).hexdigest()
-        same = previous.get("error_code") == code and previous.get("worker_error_sha256") == digest
+        same = (
+            previous.get("error_code") == code
+            and previous.get("worker_error_sha256") == digest
+            and previous.get("worker_error_stage", "mainline") == "mainline"
+        )
         store.write_sealed_state(path, {
             **previous,
             "worker_status": "error",
             "error_code": code,
+            "worker_error_stage": "mainline",
             "worker_error_type": type(error).__name__,
             "worker_error_sha256": digest,
             "worker_failure_count": int(previous.get("worker_failure_count") or 0) + 1 if same else 1,

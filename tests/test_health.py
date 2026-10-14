@@ -532,11 +532,53 @@ def test_repeated_mainline_failure_is_human_wait_without_replacing_supervisor_al
     assert repeated == {
         "worker_failure_count": 2,
         "error_code": "distillation_run_failed",
+        "worker_error_stage": "mainline",
         "worker_error_type": "RuntimeError",
         "worker_error_sha256": "e" * 64,
         "last_failure_at": now,
     }
     assert "/private/raw-error" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    ("worker_error_stage", "expected_stage"),
+    [("counterfactual", "counterfactual"), ("/private/raw-stage", "mainline"), (["private-stage"], "mainline")],
+)
+def test_repeated_mainline_failure_stage_is_allowlisted_and_sanitized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_error_stage: object,
+    expected_stage: str,
+) -> None:
+    root = tmp_path / "wiki"
+    _enable_native_luna_health(root, monkeypatch)
+    now = datetime.now(UTC).isoformat()
+    _write_native_luna_supervisor_status(root, status="running")
+    monkeypatch.setattr(
+        health,
+        "_distillation_state",
+        lambda _root: {
+            "worker_failure_count": 2,
+            "error_code": "distillation_run_failed",
+            "worker_error_stage": worker_error_stage,
+            "worker_error_type": "RuntimeError",
+            "worker_error_sha256": "e" * 64,
+            "last_failure_at": now,
+        },
+    )
+
+    payload = health.recall_distillation_health(root)
+
+    repeated = payload["distillation_mainline_failure"]
+    assert repeated["worker_error_stage"] == expected_stage
+    alert = next(
+        item
+        for item in payload["alerts"]
+        if item["reason"] == "distillation_run_repeated_failure"
+    )
+    assert f"蒸留の {expected_stage} 実行" in alert["message"]
+    if expected_stage == "mainline":
+        assert "private" not in json.dumps(payload)
 
 
 def test_native_luna_supervisor_disabled_is_human_wait_without_stall_alert(
