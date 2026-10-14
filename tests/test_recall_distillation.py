@@ -4395,6 +4395,50 @@ def test_chunk_accepts_bounded_production_sized_watchdog(
         distill.run_distillation_chunk(root=tmp_path, max_elapsed_seconds=1_801)
 
 
+def test_chunk_failure_preserves_success_and_records_repeated_safe_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = store.distillation_dir(tmp_path) / store.STATE_FILE
+    store.write_sealed_state(path, {
+        "kind": "worker-state", "last_success_at": "2026-10-13T21:52:30Z",
+        "teacher_labels_total": 2,
+    })
+
+    def fail(**_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("private question must not appear in worker state")
+
+    monkeypatch.setattr(distill, "_run_distillation_chunk_impl", fail)
+    for count in (1, 2):
+        with pytest.raises(RuntimeError, match="private question"):
+            distill.run_distillation_chunk(root=tmp_path, max_elapsed_seconds=60)
+        state = distill._read_worker_state(tmp_path)
+        assert state["worker_status"] == "error"
+        assert state["error_code"] == "distillation_run_failed"
+        assert state["worker_failure_count"] == count
+        assert state["last_success_at"] == "2026-10-13T21:52:30Z"
+        assert state["teacher_labels_total"] == 2
+        assert len(state["worker_error_sha256"]) == 64
+        assert "private question" not in path.read_text()
+
+
+def test_chunk_failure_does_not_mutate_dry_run_or_corrupt_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = store.distillation_dir(tmp_path) / store.STATE_FILE
+
+    def fail(**_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("injected")
+
+    monkeypatch.setattr(distill, "_run_distillation_chunk_impl", fail)
+    with pytest.raises(RuntimeError, match="injected"):
+        distill.run_distillation_chunk(root=tmp_path, dry_run=True)
+    assert not path.exists()
+    path.write_text("corrupt sealed state")
+    with pytest.raises(RuntimeError, match="injected"):
+        distill.run_distillation_chunk(root=tmp_path)
+    assert path.read_text() == "corrupt sealed state"
+
+
 def test_timeout_workset_observation_marks_missing_and_corrupt_queue(
     tmp_path: Path,
 ) -> None:
@@ -10146,6 +10190,36 @@ def test_counterfactual_judge_input_is_answer_independent(
         }
         assert payload["query"] == "point-in-time query"
         assert payload["context"] == ["point-in-time context"]
+
+
+@pytest.mark.parametrize("candidate_id", ["candidate", "token-guide", "page:日本語/guide"])
+def test_counterfactual_queue_uses_safe_reference_without_changing_target(
+    tmp_path: Path, candidate_id: str
+) -> None:
+    rally = {
+        "rally_id": "rally", "session_cluster_id": "session",
+        "as_of": "2026-10-10T00:00:00Z",
+        "actual_answer_refs": [{"semantic_sha256": "a" * 64}],
+    }
+    snapshot = {"snapshot_sha256": "b" * 64, "candidates": [
+        {"candidate_id": candidate_id, "text_sha256": "c" * 64},
+    ]}
+    items, keys = distill._prepare_counterfactual_work(
+        root=tmp_path, snapshots={"rally": snapshot}, rally_by_id={"rally": rally}
+    )
+    queue = workset.DistillationWorkset(tmp_path / "queue.sqlite3")
+    queue.advance(items, {"source": "regression"})
+    queue.advance(items, {"source": "regression"})
+    claims = queue.claim("local-counterfactual", 1, "counterfactual", 300)
+    assert len(claims) == 1
+    assert keys[("rally", candidate_id)] == claims[0].work_id
+    assert claims[0].payload_digest == items[0]["payload_digest"]
+    if candidate_id == "candidate":
+        assert claims[0].payload_ref == "candidate-snapshot:rally:candidate"
+    else:
+        assert claims[0].payload_ref == f"candidate-snapshot:{items[0]['payload_digest']}"
+        with pytest.raises(workset.DistillationWorksetError, match="safe ledger reference"):
+            workset._reference(f"candidate-snapshot:rally:{candidate_id}", "payload_ref")
 
 
 def test_counterfactual_claim_payload_excludes_answer_body(

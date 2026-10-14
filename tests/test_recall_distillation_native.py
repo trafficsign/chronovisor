@@ -60,11 +60,15 @@ def _source_rows(count: int = 2) -> list[dict[str, object]]:
 
 
 def _complete_bundle(
-    root: Path, *, count: int = 2, output_hash: str | None = None
+    root: Path, *, count: int = 2, output_hash: str | None = None,
+    assignment_overrides: dict[str, object] | None = None,
 ) -> LunaBulkBundle:
+    sources = _source_rows(count)
+    for source in sources:
+        source["assignment"].update(assignment_overrides or {})
     bundle = LunaBulkBundle.create(
         root,
-        _source_rows(count),
+        sources,
         cohort=NATIVE_COHORT,
         split_plan_id="a" * 64,
         shard_count=1,
@@ -156,7 +160,9 @@ def test_import_is_idempotent_by_work_and_receipt_identity(tmp_path: Path) -> No
     first = import_bundle(root, bundle.root)
     second = import_bundle(root, bundle.root)
     assert first["receipts_appended"] == first["labels_appended"] == 1
+    assert first["last_label_at"]
     assert second["receipts_appended"] == second["labels_appended"] == 0
+    assert second["last_label_at"] == ""
     assert second["label_chain_head_sha256"] == first["label_chain_head_sha256"]
     assert second["receipt_chain_head_sha256"] == first["receipt_chain_head_sha256"]
 
@@ -187,3 +193,60 @@ def test_row_integrity_rejects_raw_fields_and_tampering(tmp_path: Path) -> None:
     receipt_path = store.distillation_dir(root) / NATIVE_RECEIPTS_FILE
     receipt_path.chmod(0o644)
     assert not validate_label(root, row)
+
+
+def test_explicit_assignment_repair_preserves_original_and_native_responses(tmp_path: Path) -> None:
+    from scripts.recall_luna_repair_assignment import (
+        _frozen_hashes,
+        repair_assignment_bundle,
+    )
+
+    root = tmp_path / "root"
+    ensure_contract(root, _config())
+    original = _complete_bundle(tmp_path / "original", assignment_overrides={
+        "revision": "native-luna-assignment-v1",
+    })
+    before = _frozen_hashes(original.root)
+    with pytest.raises(NativeDistillationError, match="assignment identity"):
+        import_bundle(root, original.root)
+    repaired_path = tmp_path / "repaired"
+    proof = repair_assignment_bundle(original.root, repaired_path)
+    repaired = LunaBulkBundle.open(repaired_path)
+    assert _frozen_hashes(original.root) == before
+    assert original.labels() == repaired.labels()
+    assert proof["records"] == 2 and proof["quarantined"] == 0
+    assert proof["original_source_snapshot_sha256"] != proof["repaired_source_snapshot_sha256"]
+    result = import_bundle(root, repaired_path)
+    assert result["labels_appended"] == 2
+    assert result["truth_authority"] == "teacher_only_not_verified"
+    assert import_bundle(root, repaired_path)["labels_appended"] == 0
+    with pytest.raises(NativeDistillationError, match="assignment identity"):
+        import_bundle(root, original.root)
+
+
+@pytest.mark.parametrize("invalid", [
+    {"revision": "unknown"}, {"owner": "other"}, {"profile": "other"},
+    {"split": "test"}, {"probe": True}, {"extra": "unexpected"},
+])
+def test_assignment_repair_refuses_other_identity_changes(tmp_path: Path, invalid: dict) -> None:
+    from scripts.recall_luna_repair_assignment import repair_assignment_bundle
+
+    original = _complete_bundle(tmp_path / "original", assignment_overrides={
+        "revision": "native-luna-assignment-v1", **invalid,
+    })
+    with pytest.raises(ValueError, match="exact legacy assignment repair"):
+        repair_assignment_bundle(original.root, tmp_path / "repaired")
+    assert not (tmp_path / "repaired").exists()
+
+
+def test_assignment_repair_refuses_changed_frozen_input(tmp_path: Path) -> None:
+    from scripts.recall_luna_repair_assignment import repair_assignment_bundle
+
+    original = _complete_bundle(tmp_path / "original", assignment_overrides={
+        "revision": "native-luna-assignment-v1",
+    })
+    path = original.root / "snapshot/source.jsonl"
+    path.write_text(path.read_text().replace('"token":0', '"token":9'))
+    with pytest.raises(ValueError, match="hash changed"):
+        repair_assignment_bundle(original.root, tmp_path / "repaired")
+    assert not (tmp_path / "repaired").exists()

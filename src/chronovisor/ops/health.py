@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -42,6 +43,42 @@ _NATIVE_LUNA_SUPERVISOR_UNSAFE_KEYS = {
     "pid",
     "reason",
     "updated_at",
+}
+_NATIVE_LUNA_OPERATION_NAMES = {"import", "run", "capture", "idle"}
+_NATIVE_LUNA_OPERATION_STATES = {
+    "running",
+    "backoff",
+    "waiting",
+    "succeeded",
+    "failed",
+}
+_NATIVE_LUNA_OPERATION_PUBLIC_KEYS = {
+    "name",
+    "state",
+    "status",
+    "bundle",
+    "source_snapshot_sha256",
+    "failure_count",
+    "next_retry_at",
+    "started_at",
+    "updated_at",
+    "reason",
+    "last_error_code",
+    "last_error_message_sha256",
+}
+_NATIVE_LUNA_SAFE_IDENTIFIER_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
+)
+_DISTILLATION_WORKER_FAILURE_CODES = {
+    "distillation_run_failed",
+    "distillation_run_timeout",
+}
+_NATIVE_LUNA_WAITING_PROGRESS_REASONS = {
+    "daily_capture_in_progress",
+    "daily_run_in_progress",
+    "distillation_worker_lock_busy",
+    "authoritative_candidate_writer_starting",
+    "authoritative_candidate_writer_active",
 }
 
 
@@ -206,6 +243,170 @@ def _native_luna_supervisor_counts(value: object) -> dict[str, Any] | None:
     return counts
 
 
+def _native_luna_safe_identifier(value: object, *, allow_empty: bool = False) -> str | None:
+    """Return a bounded identifier suitable for public health diagnostics."""
+
+    if not isinstance(value, str) or len(value) > 128:
+        return None
+    if not value:
+        return "" if allow_empty else None
+    if any(char not in _NATIVE_LUNA_SAFE_IDENTIFIER_CHARS for char in value):
+        return None
+    return value
+
+
+def _native_luna_sha256(value: object, *, allow_empty: bool = False) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if not value:
+        return "" if allow_empty else None
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        return None
+    return value
+
+
+def _native_luna_supervisor_operation(value: object) -> dict[str, Any] | None:
+    """Validate and redact one durable post-bulk operation entry."""
+
+    if not isinstance(value, dict):
+        return None
+    name = value.get("name")
+    state = value.get("state")
+    status = value.get("status")
+    bundle = value.get("bundle")
+    failure_count = value.get("failure_count")
+    updated_at = _parse_utc_timestamp(value.get("updated_at"))
+    if (
+        not isinstance(name, str)
+        or name not in _NATIVE_LUNA_OPERATION_NAMES
+        or not isinstance(state, str)
+        or state not in _NATIVE_LUNA_OPERATION_STATES
+        or not isinstance(status, str)
+        or status not in _NATIVE_LUNA_OPERATION_STATES
+        or not isinstance(bundle, str)
+        or not bundle
+        or Path(bundle).name != bundle
+        or _native_luna_safe_identifier(bundle) is None
+        or isinstance(failure_count, bool)
+        or not isinstance(failure_count, int)
+        or failure_count < 0
+        or updated_at is None
+    ):
+        return None
+
+    public: dict[str, Any] = {
+        "name": name,
+        "state": state,
+        "status": status,
+        "bundle": bundle,
+        "failure_count": failure_count,
+        "updated_at": updated_at.isoformat(),
+    }
+    for key in ("source_snapshot_sha256", "last_error_message_sha256"):
+        if key in value:
+            digest = _native_luna_sha256(value[key], allow_empty=True)
+            if digest is None:
+                return None
+            if digest:
+                public[key] = digest
+    for key in ("started_at", "next_retry_at"):
+        if key in value:
+            timestamp = _parse_utc_timestamp(value[key])
+            if timestamp is None:
+                return None
+            public[key] = timestamp.isoformat()
+    for key in ("reason", "last_error_code"):
+        if key in value:
+            identifier = _native_luna_safe_identifier(value[key], allow_empty=True)
+            if identifier is None:
+                return None
+            if identifier:
+                public[key] = identifier
+    if state == "backoff" and (
+        failure_count < 1 or "next_retry_at" not in public
+    ):
+        return None
+    return public
+
+
+def _native_luna_import_waiting(value: object) -> dict[str, Any] | None:
+    """Validate import-waiting counters while dropping bundle/path details."""
+
+    if not isinstance(value, dict):
+        return None
+    bundles = value.get("bundles")
+    labels = value.get("labels")
+    if (
+        isinstance(bundles, bool)
+        or not isinstance(bundles, int)
+        or bundles < 0
+        or isinstance(labels, bool)
+        or not isinstance(labels, int)
+        or labels < 0
+    ):
+        return None
+    oldest_values = [
+        value[key]
+        for key in ("oldest_at", "oldest_waiting_at")
+        if key in value
+    ]
+    if len(oldest_values) > 1 and oldest_values[0] != oldest_values[1]:
+        return None
+    oldest_at: str | None = None
+    if oldest_values and oldest_values[0] is not None:
+        parsed = _parse_utc_timestamp(oldest_values[0])
+        if parsed is None:
+            return None
+        oldest_at = parsed.isoformat()
+    return {"bundles": bundles, "labels": labels, "oldest_at": oldest_at}
+
+
+def _native_luna_invalid_state() -> tuple[dict[str, Any], list[dict[str, str]]]:
+    return (
+        {
+            "status": "invalid",
+            "completed_total": 0,
+            "pending_total": 0,
+            "bundles": {},
+            "last_progress_at": None,
+        },
+        [
+            {
+                "category": "human_wait",
+                "reason": "executor_state_invalid",
+                "message": "人の判断待ち: native Luna executor の状態を確認できません",
+            }
+        ],
+    )
+
+
+def _distillation_worker_failure(value: object) -> dict[str, Any] | None:
+    """Sanitize a durable mainline failure without exposing exception text."""
+
+    if not isinstance(value, dict):
+        return None
+    count = value.get("worker_failure_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        return None
+    code = value.get("error_code")
+    if code not in _DISTILLATION_WORKER_FAILURE_CODES:
+        return None
+    public: dict[str, Any] = {
+        "worker_failure_count": count,
+        "error_code": code,
+    }
+    error_type = _native_luna_safe_identifier(value.get("worker_error_type"))
+    if error_type is not None:
+        public["worker_error_type"] = error_type
+    error_sha256 = _native_luna_sha256(value.get("worker_error_sha256"))
+    if error_sha256 is not None:
+        public["worker_error_sha256"] = error_sha256
+    failure_at = _parse_utc_timestamp(value.get("last_failure_at"))
+    if failure_at is not None:
+        public["last_failure_at"] = failure_at.isoformat()
+    return public
+
+
 def _native_luna_supervisor_health(
     root: Path,
 ) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
@@ -214,32 +415,12 @@ def _native_luna_supervisor_health(
     path = root / "runtime" / "recall-luna-bulk" / "supervisor-status.json"
     if not path.exists():
         return None, []
-
-    invalid = {
-        "status": "invalid",
-        "completed_total": 0,
-        "pending_total": 0,
-        "bundles": {},
-        "last_progress_at": None,
-    }
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
-        return invalid, [
-            {
-                "category": "human_wait",
-                "reason": "executor_state_invalid",
-                "message": "人の判断待ち: native Luna executor の状態を確認できません",
-            }
-        ]
+        return _native_luna_invalid_state()
     if not isinstance(raw, dict) or raw.get("schema") != NATIVE_LUNA_SUPERVISOR_SCHEMA:
-        return invalid, [
-            {
-                "category": "human_wait",
-                "reason": "executor_state_invalid",
-                "message": "人の判断待ち: native Luna executor の状態を確認できません",
-            }
-        ]
+        return _native_luna_invalid_state()
 
     status = raw.get("status")
     updated_at = _parse_utc_timestamp(raw.get("updated_at"))
@@ -249,18 +430,24 @@ def _native_luna_supervisor_health(
         if isinstance(last_progress_value, str) and last_progress_value
         else None
     )
+    last_imported_label_value = raw.get("last_imported_label_at")
+    last_imported_label_at = (
+        _parse_utc_timestamp(last_imported_label_value)
+        if isinstance(last_imported_label_value, str) and last_imported_label_value
+        else None
+    )
+    if (
+        last_imported_label_value is not None
+        and last_imported_label_value != ""
+        and last_imported_label_at is None
+    ):
+        return _native_luna_invalid_state()
     if (
         last_progress_value is not None
         and last_progress_value != ""
         and last_progress_at is None
     ):
-        return invalid, [
-            {
-                "category": "human_wait",
-                "reason": "executor_state_invalid",
-                "message": "人の判断待ち: native Luna executor の状態を確認できません",
-            }
-        ]
+        return _native_luna_invalid_state()
     completed_total = raw.get("completed_total")
     pending_total = raw.get("pending_total")
     bundles = _native_luna_supervisor_counts(raw.get("bundles", {}))
@@ -276,13 +463,39 @@ def _native_luna_supervisor_health(
         or pending_total < 0
         or bundles is None
     ):
-        return invalid, [
-            {
-                "category": "human_wait",
-                "reason": "executor_state_invalid",
-                "message": "人の判断待ち: native Luna executor の状態を確認できません",
-            }
-        ]
+        return _native_luna_invalid_state()
+
+    operation: dict[str, Any] | None = None
+    if "operation" in raw:
+        operation = _native_luna_supervisor_operation(raw.get("operation"))
+        if operation is None:
+            return _native_luna_invalid_state()
+    operation_history: list[dict[str, Any]] = []
+    if "operations" in raw:
+        raw_operations = raw.get("operations")
+        if not isinstance(raw_operations, dict):
+            return _native_luna_invalid_state()
+        for key, value in raw_operations.items():
+            if not isinstance(key, str) or not key:
+                return _native_luna_invalid_state()
+            parsed_operation = _native_luna_supervisor_operation(value)
+            if parsed_operation is None:
+                return _native_luna_invalid_state()
+            operation_history.append(parsed_operation)
+    import_waiting: dict[str, Any] | None = None
+    if "import_waiting" in raw:
+        import_waiting = _native_luna_import_waiting(raw.get("import_waiting"))
+        if import_waiting is None:
+            return _native_luna_invalid_state()
+    next_capture_after_unix: float | None = None
+    if "next_capture_after_unix" in raw:
+        value = raw.get("next_capture_after_unix")
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return _native_luna_invalid_state()
+            next_capture_after_unix = float(value)
+            if not math.isfinite(next_capture_after_unix):
+                return _native_luna_invalid_state()
 
     diagnostic = {
         "status": status,
@@ -293,17 +506,20 @@ def _native_luna_supervisor_health(
         if last_progress_at is not None
         else None,
     }
+    if last_imported_label_at is not None:
+        diagnostic["last_imported_label_at"] = last_imported_label_at.isoformat()
+    if operation is not None:
+        diagnostic["operation"] = operation
+    if "operations" in raw:
+        diagnostic["operations"] = operation_history
+    if import_waiting is not None:
+        diagnostic["import_waiting"] = import_waiting
     alerts: list[dict[str, str]] = []
 
     def add(category: str, reason: str, message: str) -> None:
-        alerts.append({"category": category, "reason": reason, "message": message})
+        if not any(item["reason"] == reason for item in alerts):
+            alerts.append({"category": category, "reason": reason, "message": message})
 
-    if status == "retrying" and bool(str(raw.get("last_error_code") or "").strip()):
-        add(
-            "human_wait",
-            "native_luna_executor_error",
-            "人の判断待ち: native Luna executor が retrying です",
-        )
     if status == "disabled":
         add(
             "human_wait",
@@ -318,6 +534,140 @@ def _native_luna_supervisor_health(
         if last_progress_at is not None
         else None
     )
+
+    operation_candidates = [*operation_history]
+    if operation is not None and operation not in operation_candidates:
+        operation_candidates.append(operation)
+    specialized_operation_alert = False
+    for candidate in operation_candidates:
+        candidate_failure = bool(
+            candidate["failure_count"] > 0
+            and (
+                candidate["state"] != "succeeded"
+                or candidate["status"] != "succeeded"
+            )
+        )
+        candidate_updated_at = _parse_utc_timestamp(candidate.get("updated_at"))
+        candidate_started_at = _parse_utc_timestamp(candidate.get("started_at"))
+        candidate_waiting_stalled = bool(
+            candidate["state"] == "waiting"
+            and candidate.get("reason") in _NATIVE_LUNA_WAITING_PROGRESS_REASONS
+            and candidate_started_at is not None
+            and (now - candidate_started_at).total_seconds()
+            > NATIVE_LUNA_SUPERVISOR_PROGRESS_STALE_SECONDS
+        )
+        candidate_stalled = bool(
+            (
+                candidate["state"] == "running"
+                and candidate_updated_at is not None
+                and (now - candidate_updated_at).total_seconds()
+                > NATIVE_LUNA_SUPERVISOR_PROGRESS_STALE_SECONDS
+            )
+            or candidate_waiting_stalled
+        )
+        if not (candidate_failure or candidate_stalled):
+            continue
+        operation_name = candidate["name"]
+        if operation_name == "import":
+            add(
+                "human_wait",
+                "native_luna_import_failed",
+                (
+                    "人の判断待ち: native Luna の import が stale です"
+                    if candidate_stalled
+                    else "人の判断待ち: native Luna の import が停止しています"
+                ),
+            )
+            specialized_operation_alert = True
+        elif operation_name == "run":
+            add(
+                "human_wait",
+                "native_luna_daily_run_failed",
+                (
+                    "人の判断待ち: native Luna の日次 run が stale です"
+                    if candidate_stalled
+                    else "人の判断待ち: native Luna の日次 run が停止しています"
+                ),
+            )
+            specialized_operation_alert = True
+        elif operation_name == "capture":
+            operation_text = " ".join(
+                str(candidate.get(key) or "")
+                for key in ("reason", "last_error_code")
+            )
+            capture_reason = (
+                "native_luna_daily_capture_stalled"
+                if candidate_stalled
+                or "stale" in operation_text
+                or "stalled" in operation_text
+                else "native_luna_daily_capture_failed"
+            )
+            capture_message = (
+                "人の判断待ち: native Luna の日次 capture が stale です"
+                if capture_reason.endswith("stalled")
+                else "人の判断待ち: native Luna の日次 capture が停止しています"
+            )
+            add("human_wait", capture_reason, capture_message)
+            specialized_operation_alert = True
+        elif operation_name == "idle":
+            add(
+                "human_wait",
+                "native_luna_daily_schedule_stalled",
+                "人の判断待ち: 日次実行の予定時刻を過ぎても開始されていません",
+            )
+            specialized_operation_alert = True
+
+    import_pending = False
+    if import_waiting is not None:
+        oldest_at = _parse_utc_timestamp(import_waiting.get("oldest_at"))
+        import_pending = bool(
+            import_waiting["bundles"] > 0
+            and oldest_at is not None
+            and (now - oldest_at).total_seconds()
+            > NATIVE_LUNA_SUPERVISOR_PROGRESS_STALE_SECONDS
+        )
+    legacy_import_pending = bool(
+        import_waiting is None
+        and pending_total == 0
+        and raw.get("reason") == "daily_import"
+        and (
+            heartbeat_age > NATIVE_LUNA_SUPERVISOR_PROGRESS_STALE_SECONDS
+            or (
+                progress_age is not None
+                and progress_age > NATIVE_LUNA_SUPERVISOR_PROGRESS_STALE_SECONDS
+            )
+        )
+    )
+    if import_pending or legacy_import_pending:
+        add(
+            "human_wait",
+            "native_luna_import_pending",
+            "人の判断待ち: labeling は完了していますが native Luna の import が待機中です",
+        )
+
+    idle_schedule_stalled = bool(
+        status == "idle"
+        and next_capture_after_unix is not None
+        and datetime.now(UTC).timestamp() - next_capture_after_unix
+        > NATIVE_LUNA_SUPERVISOR_PROGRESS_STALE_SECONDS
+    )
+    if idle_schedule_stalled:
+        add(
+            "human_wait",
+            "native_luna_daily_schedule_stalled",
+            "人の判断待ち: 日次実行の予定時刻を過ぎても開始されていません",
+        )
+
+    if (
+        status == "retrying"
+        and bool(str(raw.get("last_error_code") or "").strip())
+        and not specialized_operation_alert
+    ):
+        add(
+            "human_wait",
+            "native_luna_executor_error",
+            "人の判断待ち: native Luna executor が retrying です",
+        )
     stalled = status != "disabled" and (
         heartbeat_age > NATIVE_LUNA_SUPERVISOR_HEARTBEAT_STALE_SECONDS
         or (
@@ -325,7 +675,7 @@ def _native_luna_supervisor_health(
             and progress_age is not None
             and progress_age > NATIVE_LUNA_SUPERVISOR_PROGRESS_STALE_SECONDS
         )
-    )
+    ) and not import_pending and not legacy_import_pending
     if stalled:
         add(
             "data_wait",
@@ -433,6 +783,17 @@ def _distillation_alerts(
     if enabled and native_profile:
         native_luna_supervisor, supervisor_alerts = _native_luna_supervisor_health(root)
         alerts.extend(supervisor_alerts)
+    mainline_failure = _distillation_worker_failure(state)
+    if (
+        enabled
+        and mainline_failure is not None
+        and mainline_failure["worker_failure_count"] >= 2
+    ):
+        add(
+            "human_wait",
+            "distillation_run_repeated_failure",
+            "人の判断待ち: 蒸留の mainline 実行が同じエラーで繰り返し失敗しています",
+        )
     if enabled and not teacher_profile:
         add(
             "human_wait",
@@ -556,15 +917,16 @@ def _distillation_alerts(
         progress = source.get("progress")
         if isinstance(progress, dict):
             progress_values.append(progress)
-    last_label_value: object = snapshot.get("last_label_at") or state.get(
-        "last_label_at"
-    )
-    if not last_label_value:
-        for progress in progress_values:
-            last_label_value = progress.get("last_label_at")
-            if last_label_value:
-                break
-    last_label_at = _parse_utc_timestamp(last_label_value)
+    label_timestamps: list[datetime] = []
+    label_sources = [snapshot.get("last_label_at"), state.get("last_label_at")]
+    label_sources.extend(progress.get("last_label_at") for progress in progress_values)
+    if native_luna_supervisor is not None:
+        label_sources.append(native_luna_supervisor.get("last_imported_label_at"))
+    for label_value in label_sources:
+        parsed = _parse_utc_timestamp(label_value)
+        if parsed is not None:
+            label_timestamps.append(parsed)
+    last_label_at = max(label_timestamps) if label_timestamps else None
     last_success_value = snapshot.get("last_success_at") or state.get(
         "last_success_at"
     )
@@ -630,6 +992,8 @@ def _distillation_alerts(
     }
     if native_luna_supervisor is not None:
         diagnostic["native_luna_supervisor"] = native_luna_supervisor
+    if mainline_failure is not None:
+        diagnostic["distillation_mainline_failure"] = mainline_failure
     return diagnostic, alerts
 
 

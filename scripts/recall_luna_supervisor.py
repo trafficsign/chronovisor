@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import signal
@@ -31,9 +32,336 @@ from scripts import recall_luna_daily as daily  # noqa: E402
 
 SCHEMA = "chronovisor.recall-luna-supervisor.v1"
 
+# A daily import/capture is expected to make a durable receipt before the
+# process exits.  Keep the grace period generous for cold starts, then fail a
+# process whose receipt has stopped changing so the durable retry state can
+# make the stall visible and back off.
+DAILY_OPERATION_STALE_SECONDS = 30 * 60
+OPERATION_BACKOFF_BASE_SECONDS = 60
+OPERATION_BACKOFF_MAX_SECONDS = 15 * 60
+
 
 def now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _sha256_text(value: object) -> str:
+    return hashlib.sha256(str(value).encode("utf-8", "replace")).hexdigest()
+
+
+def _iso_from_unix(value: float | int | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(value), UTC).isoformat().replace(
+            "+00:00", "Z"
+        )
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def _error_hash(value: object) -> str:
+    if isinstance(value, str) and len(value) == 64:
+        try:
+            int(value, 16)
+        except ValueError:
+            pass
+        else:
+            return value
+    return _sha256_text(value)
+
+
+def _bundle_identity(bundle: Path | dict[str, Any]) -> dict[str, str]:
+    if isinstance(bundle, dict):
+        path = Path(str(bundle.get("path") or "bundle"))
+        source = str(bundle.get("source_snapshot_sha256") or "")
+    else:
+        path = bundle
+        source = ""
+        manifest_path = path / "manifest.json"
+        try:
+            manifest = daily._private_json(manifest_path)
+        except Exception:
+            manifest = {}
+        source = str(manifest.get("source_snapshot_sha256") or "")
+    bundle_name = path.name
+    parent_name = path.parent.name
+    if (
+        bundle_name == "bundle"
+        and len(parent_name) == 10
+        and parent_name[4] == "-"
+        and parent_name[7] == "-"
+        and parent_name.replace("-", "").isdigit()
+    ):
+        bundle_name = f"{parent_name}-{bundle_name}"
+    return {
+        "bundle": bundle_name,
+        "source_snapshot_sha256": source,
+    }
+
+
+class DailyOperationError(RuntimeError):
+    """A receipt-backed operation failure without carrying private text."""
+
+    def __init__(
+        self,
+        code: str,
+        message_sha256: str,
+        *,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(code)
+        self.code = code
+        self.message_sha256 = _error_hash(message_sha256)
+        self.result = result or {}
+
+
+def _receipt_error(
+    command: str,
+    result: dict[str, Any] | None,
+    returncode: int | None = None,
+) -> DailyOperationError | None:
+    if result and result.get("status") == "error":
+        code = str(result.get("error_type") or result.get("reason") or f"daily_{command}_failed")
+        digest = _error_hash(result.get("error_message_sha256") or code)
+        return DailyOperationError(code, digest, result=result)
+    if returncode not in (None, 0):
+        code = f"daily_{command}_failed"
+        return DailyOperationError(code, _sha256_text(code), result=result)
+    return None
+
+
+def _read_receipt(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        value = daily._private_json(path)
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _capture_progress_path(root: Path, day_root: Path) -> Path:
+    return day_root / "inventory" / "candidate-capture-progress.json"
+
+
+def _read_capture_progress(root: Path, requested: Path) -> tuple[Path, dict[str, Any] | None]:
+    """Read capture progress through the daily owner's active-state resolver."""
+    try:
+        active_path, active_progress = daily._active_capture_progress(root, requested)
+    except Exception:
+        active_path, active_progress = requested, None
+    if active_progress and active_progress.get("status") in {"starting", "running"}:
+        return active_path, active_progress
+    # A stale/error receipt from a prior date is evidence for the daily
+    # resolver's recovery path, not a current capture failure.  Only retain a
+    # terminal receipt owned by the current requested day; otherwise the next
+    # daily run gets one chance to recover it.
+    if active_path == requested and active_progress and active_progress.get("status") in {
+        "complete",
+        "stalled",
+        "error",
+    }:
+        return active_path, active_progress
+    return requested, None
+
+
+def _capture_error(progress: dict[str, Any] | None) -> DailyOperationError | None:
+    if not progress or progress.get("status") not in {"stalled", "error"}:
+        return None
+    status = str(progress.get("status"))
+    code = str(progress.get("reason") or f"daily_capture_{status}")
+    return DailyOperationError(
+        code,
+        _error_hash(progress.get("error_message_sha256") or code),
+        result=progress,
+    )
+
+
+def _operation_key(name: str, identity: dict[str, str]) -> str:
+    return f"{name}:{identity.get('bundle', '')}:{identity.get('source_snapshot_sha256', '')}"
+
+
+def _operation_entry(
+    state: dict[str, Any], name: str, identity: dict[str, str]
+) -> dict[str, Any] | None:
+    entries = state.setdefault("operations", {})
+    if not isinstance(entries, dict):
+        entries = {}
+        state["operations"] = entries
+    key = _operation_key(name, identity)
+    item = entries.get(key)
+    return item if isinstance(item, dict) else None
+
+
+def _publish_operation(state: dict[str, Any], entry: dict[str, Any]) -> None:
+    """Mirror the active operation for health while retaining all histories."""
+    state["operation"] = dict(entry)
+
+
+def _start_operation(
+    state: dict[str, Any], name: str, bundle: Path | dict[str, Any]
+) -> dict[str, Any]:
+    identity = _bundle_identity(bundle)
+    previous = _operation_entry(state, name, identity) or {}
+    attempt = int(previous.get("attempt") or 0) + 1
+    started_at = (
+        previous.get("started_at")
+        if previous.get("state") == "waiting"
+        and isinstance(previous.get("started_at"), str)
+        else now()
+    )
+    entry = {
+        "name": name,
+        "state": "running",
+        "status": "running",
+        **identity,
+        "attempt": attempt,
+        "failure_count": int(previous.get("failure_count") or 0),
+        "started_at": started_at,
+        "updated_at": now(),
+    }
+    if previous.get("last_error_code"):
+        entry["last_error_code"] = str(previous["last_error_code"])
+    if previous.get("last_error_message_sha256"):
+        entry["last_error_message_sha256"] = str(previous["last_error_message_sha256"])
+    state.setdefault("operations", {})[_operation_key(name, identity)] = entry
+    _publish_operation(state, entry)
+    return entry
+
+
+def _operation_backoff_until(
+    state: dict[str, Any], name: str, bundle: Path | dict[str, Any]
+) -> float:
+    identity = _bundle_identity(bundle)
+    entry = _operation_entry(state, name, identity)
+    if not entry:
+        return 0.0
+    try:
+        return float(entry.get("next_retry_at_unix") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _sleep_for_operation_backoff(poll_seconds: int, retry_at: float) -> None:
+    """Sleep toward a retry deadline without letting the heartbeat go stale."""
+
+    remaining = max(0.0, retry_at - time.time())
+    if remaining <= 0:
+        return
+    time.sleep(min(max(float(poll_seconds), 1.0), 60.0, remaining))
+
+
+def _record_operation_failure(
+    state: dict[str, Any],
+    name: str,
+    bundle: Path | dict[str, Any],
+    error: BaseException,
+) -> dict[str, Any]:
+    identity = _bundle_identity(bundle)
+    previous = _operation_entry(state, name, identity) or {}
+    code = str(getattr(error, "code", "") or type(error).__name__)
+    digest = _error_hash(getattr(error, "message_sha256", "") or code)
+    same = (
+        previous.get("last_error_code") == code
+        and previous.get("last_error_message_sha256") == digest
+    )
+    failure_count = int(previous.get("failure_count") or 0) + 1 if same else 1
+    delay = min(
+        OPERATION_BACKOFF_MAX_SECONDS,
+        OPERATION_BACKOFF_BASE_SECONDS * (2 ** max(0, failure_count - 1)),
+    )
+    retry_at = time.time() + delay
+    entry = {
+        "name": name,
+        "state": "backoff",
+        "status": "failed",
+        **identity,
+        "attempt": int(previous.get("attempt") or 0),
+        "failure_count": failure_count,
+        "last_error_code": code,
+        "last_error_message_sha256": digest,
+        "next_retry_at_unix": retry_at,
+        "next_retry_at": _iso_from_unix(retry_at),
+        "updated_at": now(),
+    }
+    state.setdefault("operations", {})[_operation_key(name, identity)] = entry
+    _publish_operation(state, entry)
+    return entry
+
+
+def _complete_operation(
+    state: dict[str, Any],
+    name: str,
+    bundle: Path | dict[str, Any],
+    *,
+    status: str = "succeeded",
+    reason: str = "",
+) -> dict[str, Any]:
+    identity = _bundle_identity(bundle)
+    previous = _operation_entry(state, name, identity) or {}
+    entry = {
+        "name": name,
+        "state": status,
+        "status": status,
+        **identity,
+        "attempt": int(previous.get("attempt") or 0),
+        "failure_count": 0,
+        "updated_at": now(),
+        "last_success_at": now(),
+    }
+    if reason:
+        entry["reason"] = reason
+    state.setdefault("operations", {})[_operation_key(name, identity)] = entry
+    _publish_operation(state, entry)
+    return entry
+
+
+def _set_waiting_operation(
+    state: dict[str, Any], name: str, bundle: Path | dict[str, Any], *, reason: str,
+    reset_started_at: bool = False,
+    started_at_override: str | None = None,
+) -> dict[str, Any]:
+    identity = _bundle_identity(bundle)
+    previous = _operation_entry(state, name, identity) or {}
+    if reset_started_at:
+        started_at = (
+            started_at_override
+            if isinstance(started_at_override, str) and started_at_override
+            else None
+        )
+    else:
+        started_at = previous.get("started_at")
+    if not isinstance(started_at, str) or not started_at:
+        started_at = now()
+    entry = {
+        "name": name,
+        "state": "waiting",
+        "status": "waiting",
+        **identity,
+        "attempt": int(previous.get("attempt") or 0),
+        "failure_count": (
+            0
+            if reset_started_at
+            else int(previous.get("failure_count") or 0)
+        ),
+        "reason": reason,
+        "started_at": started_at,
+        "updated_at": now(),
+    }
+    # A lock-busy/in-progress wait is the same operation attempt.  Preserve
+    # its deterministic failure identity until that operation succeeds so a
+    # heartbeat cannot hide a repeated failure from health diagnostics.
+    if not reset_started_at:
+        if previous.get("last_error_code"):
+            entry["last_error_code"] = str(previous["last_error_code"])
+        if previous.get("last_error_message_sha256"):
+            entry["last_error_message_sha256"] = str(
+                previous["last_error_message_sha256"]
+            )
+    state.setdefault("operations", {})[_operation_key(name, identity)] = entry
+    _publish_operation(state, entry)
+    return entry
 
 
 def inventory(root: Path) -> list[dict[str, Any]]:
@@ -45,6 +373,7 @@ def inventory(root: Path) -> list[dict[str, Any]]:
             continue
         manifest = daily._private_json(manifest_path)
         shards = []
+        checkpoint_updated_at: list[str] = []
         for spec in manifest["shards"]:
             shard = int(spec["shard"])
             checkpoint = daily._private_json(path / "shards" / f"{shard:02d}" / "checkpoint.json")
@@ -53,13 +382,22 @@ def inventory(root: Path) -> list[dict[str, Any]]:
             completed, total = int(checkpoint["cursor"]), int(spec["records"])
             if not 0 <= completed <= total:
                 raise ValueError("checkpoint_cursor_invalid")
+            updated_at = checkpoint.get("updated_at")
+            if isinstance(updated_at, str) and updated_at:
+                checkpoint_updated_at.append(updated_at)
             shards.append({"shard": shard, "completed": completed, "remaining": total - completed})
         marker = path / "import-receipt.json"
         imported = marker.exists() and daily._private_json(marker).get("status") == "imported"
         rows.append({
             "path": str(path), "completed": sum(x["completed"] for x in shards),
             "remaining": sum(x["remaining"] for x in shards), "imported": imported,
-            "source_snapshot_sha256": manifest["source_snapshot_sha256"], "shards": shards,
+            "source_snapshot_sha256": manifest["source_snapshot_sha256"],
+            "created_at": str(manifest.get("created_at") or ""), "shards": shards,
+            "labels_done_at": (
+                max(checkpoint_updated_at)
+                if checkpoint_updated_at and all(not item["remaining"] for item in shards)
+                else ""
+            ),
         })
     return rows
 
@@ -256,8 +594,15 @@ def poll_rounds(
 
 
 def run_daily_operation(args: argparse.Namespace, command: str, bundle: Path, publish: Any) -> dict[str, Any]:
-    """Keep the heartbeat alive while a large source export or import runs."""
-    receipt = args.root / "runtime/recall-luna-bulk" / f"supervisor-{command}.json"
+    """Keep the heartbeat alive while a daily operation runs.
+
+    The child receipt is authoritative for semantic failures.  A live child
+    with a receipt that never appears or stops changing is terminated so the
+    supervisor can persist a retry identity and back off.
+    """
+    receipt = args.root / "runtime/recall-luna-bulk" / (
+        f"supervisor-{command}-{uuid4().hex}.json"
+    )
     log = args.root / "runtime/recall-luna-bulk" / f"supervisor-{command}.log"
     argv = [sys.executable, str(REPO / "scripts/recall_luna_daily.py"), command,
             "--root", str(args.root), "--bundle", str(bundle), "--receipt", str(receipt),
@@ -265,9 +610,43 @@ def run_daily_operation(args: argparse.Namespace, command: str, bundle: Path, pu
     with log.open("ab") as output:
         log.chmod(0o600)
         child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=output, stderr=output)
+    started = time.monotonic()
+    receipt_signature: tuple[int, int] | None = None
+    last_receipt_change = started
+    operation_error: DailyOperationError | None = None
     try:
         while child.poll() is None:
-            publish("running", reason=f"daily_{command}", child_pid=child.pid)
+            current = _read_receipt(receipt)
+            if current is not None:
+                try:
+                    signature = (receipt.stat().st_mtime_ns, receipt.stat().st_size)
+                except OSError:
+                    signature = None
+                if signature is not None and signature != receipt_signature:
+                    receipt_signature = signature
+                    last_receipt_change = time.monotonic()
+                operation_error = _receipt_error(command, current)
+                if operation_error is not None:
+                    break
+            elif time.monotonic() - started > DAILY_OPERATION_STALE_SECONDS:
+                operation_error = DailyOperationError(
+                    f"daily_{command}_receipt_missing",
+                    _sha256_text(f"daily_{command}_receipt_missing"),
+                )
+                break
+            if time.monotonic() - last_receipt_change > DAILY_OPERATION_STALE_SECONDS:
+                operation_error = DailyOperationError(
+                    f"daily_{command}_receipt_stale",
+                    _sha256_text(f"daily_{command}_receipt_stale"),
+                )
+                break
+            publish(
+                "running",
+                reason=f"daily_{command}",
+                child_pid=child.pid,
+                operation_name=command,
+                operation_bundle=bundle.name,
+            )
             time.sleep(args.poll_seconds)
     finally:
         if child.poll() is None:
@@ -277,23 +656,85 @@ def run_daily_operation(args: argparse.Namespace, command: str, bundle: Path, pu
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait()
-    if child.returncode:
-        raise RuntimeError(f"daily_{command}_failed")
-    return daily._private_json(receipt)
+    result = _read_receipt(receipt)
+    if operation_error is None:
+        operation_error = _receipt_error(command, result, child.returncode)
+    if operation_error is not None:
+        raise operation_error
+    if result is None:
+        raise DailyOperationError(
+            f"daily_{command}_receipt_missing",
+            _sha256_text(f"daily_{command}_receipt_missing"),
+        )
+    if command == "import" and result.get("status") != "imported":
+        raise DailyOperationError(
+            "daily_import_unexpected_status",
+            _sha256_text(str(result.get("status") or "missing")),
+            result=result,
+        )
+    return result
 
 
 def supervise(args: argparse.Namespace) -> int:
     status_path = args.root / "runtime/recall-luna-bulk/supervisor-status.json"
-    state: dict[str, Any] = {"schema": SCHEMA, "pid": os.getpid(), "last_progress_at": now(), "completed_total": 0}
+    state: dict[str, Any] = {
+        "schema": SCHEMA,
+        "pid": os.getpid(),
+        "last_progress_at": now(),
+        "completed_total": 0,
+        "operations": {},
+    }
     if status_path.exists():
         previous = daily._private_json(status_path)
-        state.update({key: previous[key] for key in ("completed_total", "last_progress_at", "next_capture_after_unix") if key in previous})
+        state.update({
+            key: previous[key]
+            for key in (
+                "completed_total",
+                "last_progress_at",
+                "next_capture_after_unix",
+                "operations",
+                "operation",
+                "import_waiting",
+                "import_waiting_since",
+                "last_import",
+                "last_imported_label_at",
+            )
+            if key in previous
+        })
 
     def publish(status: str, **fields: Any) -> list[dict[str, Any]]:
         rows = inventory(args.root)
         completed = sum(row["completed"] for row in rows)
         if completed > int(state.get("completed_total") or 0):
             state["last_progress_at"] = now()
+        waiting = [
+            row for row in rows
+            if not row.get("imported") and not int(row.get("remaining") or 0)
+        ]
+        observed_waiting = state.get("import_waiting_since")
+        if not isinstance(observed_waiting, dict):
+            observed_waiting = {}
+        current_waiting: dict[str, str] = {}
+        waiting_times: list[str] = []
+        for row in waiting:
+            identity = _bundle_identity(row)
+            key = _operation_key("import", identity)
+            labels_done_at = str(row.get("labels_done_at") or "")
+            first_observed = str(observed_waiting.get(key) or "")
+            if not labels_done_at and not first_observed:
+                first_observed = str(state.get("last_progress_at") or now())
+            if first_observed:
+                current_waiting[key] = first_observed
+            waiting_times.append(labels_done_at or first_observed)
+        state["import_waiting_since"] = current_waiting
+        oldest_waiting_at = min(waiting_times) if waiting_times else None
+        state["import_waiting"] = {
+            "bundles": len(waiting),
+            "labels": sum(int(row.get("completed") or 0) for row in waiting),
+            "oldest_at": oldest_waiting_at,
+            "oldest_waiting_at": oldest_waiting_at,
+            "bundle_names": [Path(str(row["path"])).name for row in waiting],
+        }
         state.update(status=status, updated_at=now(), completed_total=completed,
                      pending_total=sum(row["remaining"] for row in rows),
                      bundles={f"bundle-{i}": {"completed": row["completed"], "pending": row["remaining"]}
@@ -310,6 +751,7 @@ def supervise(args: argparse.Namespace) -> int:
     publish("starting", child_pid=0, active_workers=0, last_error_code="", reason="starting")
     try:
         while True:
+            operation_context: tuple[str, Path] | None = None
             try:
                 config = daily.distill.load_distillation_config(args.root / "config.toml")
                 rows = inventory(args.root)
@@ -349,29 +791,409 @@ def supervise(args: argparse.Namespace) -> int:
                             last_error_code=next(iter(failures.values()), ""),
                             reason="native_workers_active" if active else "checking_pending")
                     if not candidates and not active:
-                        complete = [row for row in rows if not row["imported"]]
+                        complete = [
+                            row for row in rows
+                            if not row.get("imported") and not int(row.get("remaining") or 0)
+                        ]
                         if complete:
-                            result = run_daily_operation(args, "import", Path(complete[0]["path"]), publish)
-                            if result.get("status") != "imported":
-                                raise RuntimeError("complete_bundle_import_failed")
-                            continue
-                        if float(state.get("next_capture_after_unix") or 0) > time.time():
+                            eligible = [
+                                Path(row["path"])
+                                for row in complete
+                                if _operation_backoff_until(
+                                    state, "import", Path(row["path"])
+                                ) <= time.time()
+                            ]
+                            if eligible:
+                                target = eligible[0]
+                            else:
+                                # If every bundle is backing off, wake for the
+                                # earliest deadline so one failed bundle cannot
+                                # delay a different bundle's recovery.
+                                target = min(
+                                    (Path(row["path"]) for row in complete),
+                                    key=lambda path: _operation_backoff_until(
+                                        state, "import", path
+                                    ),
+                                )
+                            operation_context = ("import", target)
+                            if _operation_backoff_until(state, "import", target) > time.time():
+                                entry = _operation_entry(state, "import", _bundle_identity(target)) or {}
+                                if entry:
+                                    _publish_operation(state, entry)
+                                publish(
+                                    "retrying",
+                                    child_pid=0,
+                                    active_workers=0,
+                                    last_error_code=str(entry.get("last_error_code") or "daily_import_failed"),
+                                    reason="daily_import_backoff",
+                                    operation_name="import",
+                                    operation_bundle=target.name,
+                                    next_retry_at=entry.get("next_retry_at"),
+                                )
+                                if args.once and not active:
+                                    return 1
+                                _sleep_for_operation_backoff(
+                                    args.poll_seconds,
+                                    _operation_backoff_until(state, "import", target),
+                                )
+                                continue
+                            else:
+                                _start_operation(state, "import", target)
+                                result = run_daily_operation(args, "import", target, publish)
+                                if result.get("status") != "imported":
+                                    raise DailyOperationError(
+                                        "daily_import_unexpected_status",
+                                        _sha256_text(str(result.get("status") or "missing")),
+                                        result=result,
+                                    )
+                                labels_written = int(result.get("labels_written") or 0)
+                                last_import = {
+                                    "bundle": target.name,
+                                    "labels": int(result.get("labels") or 0),
+                                    "relevant": int(result.get("relevant") or 0),
+                                    "irrelevant": int(result.get("irrelevant") or 0),
+                                    "uncertain": int(result.get("uncertain") or 0),
+                                    "quarantined": int(result.get("quarantined") or 0),
+                                    "labels_written": labels_written,
+                                    "completed_at": now(),
+                                }
+                                if labels_written > 0:
+                                    label_at = str(result.get("last_label_at") or now())
+                                    state["last_imported_label_at"] = label_at
+                                    last_import["last_label_at"] = label_at
+                                state["last_import"] = last_import
+                                _complete_operation(state, "import", target, reason="imported")
+                                publish(
+                                    "running",
+                                    child_pid=0,
+                                    active_workers=0,
+                                    last_error_code="",
+                                    reason="import_complete",
+                                    operation_name="import",
+                                    operation_bundle=target.name,
+                                )
+                                continue
+                        day = datetime.now(daily.ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d")
+                        day_root = args.root / "runtime/recall-luna-bulk" / day
+                        daily_bundle = day_root / "bundle"
+                        progress_path = _capture_progress_path(args.root, day_root)
+                        _observed_progress_path, progress = _read_capture_progress(
+                            args.root, progress_path
+                        )
+                        capture_entry = _operation_entry(
+                            state, "capture", _bundle_identity(day_root)
+                        ) or {}
+                        if (
+                            progress
+                            and progress.get("status") == "complete"
+                            and capture_entry
+                            and (
+                                capture_entry.get("state") != "succeeded"
+                                or int(capture_entry.get("failure_count") or 0) > 0
+                            )
+                        ):
+                            _complete_operation(
+                                state,
+                                "capture",
+                                day_root,
+                                reason="capture_complete",
+                            )
+                        capture_failure = _capture_error(progress)
+                        run_entry = _operation_entry(
+                            state, "run", _bundle_identity(daily_bundle)
+                        ) or {}
+                        if (
+                            capture_failure is not None
+                            and run_entry.get("state") == "waiting"
+                            and run_entry.get("reason")
+                            in {
+                                "distillation_worker_lock_busy",
+                                "daily_run_in_progress",
+                                "authoritative_candidate_writer_starting",
+                                "authoritative_candidate_writer_active",
+                            }
+                        ) or (
+                            capture_failure is not None
+                            and capture_entry.get("state") == "waiting"
+                            and capture_entry.get("reason") == "daily_capture_in_progress"
+                            and int(capture_entry.get("failure_count") or 0) == 0
+                        ):
+                            # The daily command already owns recovery of the
+                            # terminal capture receipt.  Its in_progress
+                            # result is a wait boundary, not a new capture
+                            # failure to back off here.
+                            capture_failure = None
+                            progress = None
+                        progress_timestamp = (
+                            progress.get("updated_at_unix") or progress.get("started_at_unix")
+                            if progress
+                            else None
+                        )
+                        progress_stale = False
+                        if progress and progress.get("status") in {"starting", "running"}:
+                            try:
+                                progress_stale = (
+                                    time.time() - float(progress_timestamp)
+                                    > DAILY_OPERATION_STALE_SECONDS
+                                )
+                            except (TypeError, ValueError):
+                                progress_stale = False
+                        if capture_failure is not None or progress_stale:
+                            operation_context = ("capture", day_root)
+                            capture_entry = _operation_entry(
+                                state, "capture", _bundle_identity(day_root)
+                            ) or {}
+                            capture_backoff_until = _operation_backoff_until(
+                                state, "capture", day_root
+                            )
+                            if capture_backoff_until > time.time():
+                                entry = _operation_entry(
+                                    state, "capture", _bundle_identity(day_root)
+                                ) or {}
+                                publish(
+                                    "retrying",
+                                    child_pid=0,
+                                    active_workers=0,
+                                    last_error_code=str(
+                                        entry.get("last_error_code") or "daily_capture_failed"
+                                    ),
+                                    reason="daily_capture_backoff",
+                                    operation_name="capture",
+                                    operation_bundle=day_root.name,
+                                    next_retry_at=entry.get("next_retry_at"),
+                                )
+                                if args.once and not active:
+                                    return 1
+                                _sleep_for_operation_backoff(
+                                    args.poll_seconds,
+                                    _operation_backoff_until(state, "capture", day_root),
+                                )
+                                continue
+                            if not (
+                                int(capture_entry.get("failure_count") or 0) > 0
+                                and capture_entry.get("state") == "backoff"
+                            ):
+                                if progress_stale and capture_failure is None:
+                                    capture_failure = DailyOperationError(
+                                        "daily_capture_receipt_stale",
+                                        _sha256_text("daily_capture_receipt_stale"),
+                                        result=progress,
+                                    )
+                                raise capture_failure or RuntimeError("daily_capture_failed")
+                            # A terminal/stale receipt has already been
+                            # recorded for this capture identity.  Once its
+                            # retry deadline passes, let the existing daily
+                            # run recovery start a fresh capture attempt.  If
+                            # that attempt fails, the run operation records
+                            # the new receipt-backed error instead.
+                            capture_failure = None
+                            progress_stale = False
+                            progress = None
+                        if progress and progress.get("status") in {"starting", "running"}:
+                            reset_capture_wait = (
+                                capture_entry.get("state") == "backoff"
+                                or int(capture_entry.get("failure_count") or 0) > 0
+                            )
+                            capture_started_at = None
+                            if reset_capture_wait:
+                                try:
+                                    capture_started_at = _iso_from_unix(
+                                        float(progress.get("started_at_unix"))
+                                    )
+                                except (TypeError, ValueError):
+                                    capture_started_at = None
+                            _set_waiting_operation(
+                                state,
+                                "capture",
+                                day_root,
+                                reason="daily_capture_in_progress",
+                                reset_started_at=reset_capture_wait,
+                                started_at_override=capture_started_at,
+                            )
+                            state["next_capture_after_unix"] = time.time() + args.poll_seconds
+                            publish(
+                                "running",
+                                child_pid=int(progress.get("pid") or 0),
+                                active_workers=0,
+                                last_error_code="",
+                                reason="daily_capture_in_progress",
+                                operation_name="capture",
+                                operation_bundle=day_root.name,
+                            )
+                        elif float(state.get("next_capture_after_unix") or 0) > time.time():
+                            _set_waiting_operation(
+                                state,
+                                "idle",
+                                day_root,
+                                reason="waiting_for_incremental_capture",
+                            )
                             publish("idle", reason="waiting_for_incremental_capture")
                         else:
-                            day = datetime.now(daily.ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d")
-                            day_root = args.root / "runtime/recall-luna-bulk" / day
-                            result = run_daily_operation(args, "run", day_root / "bundle", publish)
-                            if result.get("status") == "error":
-                                raise RuntimeError("daily_prepare_failed")
-                            if result.get("status") in {"ready", "complete"}:
-                                state["next_capture_after_unix"] = time.time() + 900
-                            publish("idle", reason=str(result.get("reason") or "daily_prepare"))
+                            operation_context = ("run", daily_bundle)
+                            if _operation_backoff_until(state, "run", daily_bundle) > time.time():
+                                entry = _operation_entry(state, "run", _bundle_identity(daily_bundle)) or {}
+                                publish(
+                                    "retrying",
+                                    child_pid=0,
+                                    active_workers=0,
+                                    last_error_code=str(entry.get("last_error_code") or "daily_run_failed"),
+                                    reason="daily_run_backoff",
+                                    operation_name="run",
+                                    operation_bundle=day_root.name,
+                                    next_retry_at=entry.get("next_retry_at"),
+                                )
+                                if args.once and not active:
+                                    return 1
+                                _sleep_for_operation_backoff(
+                                    args.poll_seconds,
+                                    _operation_backoff_until(state, "run", daily_bundle),
+                                )
+                                continue
+                            else:
+                                _start_operation(state, "run", daily_bundle)
+                                result = run_daily_operation(args, "run", daily_bundle, publish)
+                                if result.get("status") == "error":
+                                    raise DailyOperationError(
+                                        str(result.get("error_type") or "daily_prepare_failed"),
+                                        _error_hash(result.get("error_message_sha256") or "daily_prepare_failed"),
+                                        result=result,
+                                    )
+                                result_status = str(result.get("status") or "")
+                                result_reason = str(result.get("reason") or "daily_prepare")
+                                if result_status not in {
+                                    "ready",
+                                    "complete",
+                                    "in_progress",
+                                    "pending",
+                                }:
+                                    raise DailyOperationError(
+                                        "daily_run_unexpected_status",
+                                        _sha256_text(result_status or "missing"),
+                                        result=result,
+                                    )
+                                if result_status == "pending":
+                                    _complete_operation(
+                                        state,
+                                        "run",
+                                        daily_bundle,
+                                        reason=result_reason,
+                                    )
+                                    state["next_capture_after_unix"] = (
+                                        time.time() + args.poll_seconds
+                                    )
+                                    publish(
+                                        "running",
+                                        child_pid=0,
+                                        active_workers=0,
+                                        last_error_code="",
+                                        reason="daily_bundle_pending",
+                                        operation_name="run",
+                                        operation_bundle=day_root.name,
+                                    )
+                                    continue
+                                capture = result.get("capture")
+                                capture_active = (
+                                    isinstance(capture, dict)
+                                    and str(capture.get("status") or "") in {"starting", "running"}
+                                ) or result_reason in {
+                                    "authoritative_candidate_writer_starting",
+                                    "capture_already_running",
+                                }
+                                if capture_active or result_status == "in_progress":
+                                    if capture_active:
+                                        _complete_operation(
+                                            state,
+                                            "run",
+                                            daily_bundle,
+                                            reason="capture_started",
+                                        )
+                                        _set_waiting_operation(
+                                            state,
+                                            "capture",
+                                            day_root,
+                                            reason="daily_capture_in_progress",
+                                            reset_started_at=True,
+                                        )
+                                        state["next_capture_after_unix"] = time.time() + args.poll_seconds
+                                        publish(
+                                            "running",
+                                            child_pid=0,
+                                            active_workers=0,
+                                            last_error_code="",
+                                            reason="daily_capture_in_progress",
+                                            operation_name="capture",
+                                            operation_bundle=day_root.name,
+                                        )
+                                    else:
+                                        _set_waiting_operation(
+                                            state,
+                                            "run",
+                                            daily_bundle,
+                                            reason=result_reason,
+                                        )
+                                        state["next_capture_after_unix"] = time.time() + args.poll_seconds
+                                        publish(
+                                            "running",
+                                            child_pid=0,
+                                            active_workers=0,
+                                            last_error_code="",
+                                            reason="daily_run_in_progress",
+                                            operation_name="run",
+                                            operation_bundle=day_root.name,
+                                        )
+                                else:
+                                    capture_entry = _operation_entry(
+                                        state, "capture", _bundle_identity(day_root)
+                                    )
+                                    if capture_entry and (
+                                        capture_entry.get("state") != "succeeded"
+                                        or int(capture_entry.get("failure_count") or 0) > 0
+                                    ):
+                                        _complete_operation(
+                                            state,
+                                            "capture",
+                                            day_root,
+                                            reason="capture_complete",
+                                        )
+                                    _complete_operation(
+                                        state,
+                                        "run",
+                                        daily_bundle,
+                                        reason=result_reason,
+                                    )
+                                    state["next_capture_after_unix"] = time.time() + (
+                                        900 if result_status in {"ready", "complete"} else args.poll_seconds
+                                    )
+                                    _set_waiting_operation(
+                                        state,
+                                        "idle",
+                                        day_root,
+                                        reason=result_reason,
+                                    )
+                                    publish("idle", reason=result_reason)
             except Exception as exc:
                 for job in active.values():
                     stop_round(job)
                 active.clear()
+                operation_fields: dict[str, Any] = {}
+                if operation_context is not None:
+                    operation_name, operation_bundle = operation_context
+                    entry = _record_operation_failure(
+                        state, operation_name, operation_bundle, exc
+                    )
+                    operation_fields = {
+                        "operation_name": operation_name,
+                        "operation_bundle": operation_bundle.name,
+                        "next_retry_at": entry.get("next_retry_at"),
+                        "last_error_message_sha256": entry.get("last_error_message_sha256"),
+                    }
+                    error_code = str(entry.get("last_error_code") or type(exc).__name__)
+                    reason = f"{operation_name}_failed_backoff"
+                else:
+                    error_code = type(exc).__name__
+                    reason = "retry_after_backoff"
                 state.update(status="retrying", updated_at=now(), child_pid=0, active_workers=0,
-                             last_error_code=type(exc).__name__, reason="retry_after_backoff")
+                             last_error_code=error_code, reason=reason, **operation_fields)
                 daily._write_private_json(status_path, state)
             if args.once and not active:
                 return 1

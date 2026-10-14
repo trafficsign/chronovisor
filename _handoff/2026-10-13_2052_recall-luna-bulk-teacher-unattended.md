@@ -63,9 +63,9 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] 1-2 Luna を教師とする profile と contract を用意する。既存の single-teacher の経路を使う。期限を設けるなら、切れる前に 4-4 の経路で知らせる。
 
 ### Phase 2：過去分の一括ラベル付け
-- [ ] 2-1 過去の全 rally に当時時点の索引で候補を作り、Luna で relevance を判定する。native Luna worker を並列で、使えるだけ使う。凍結 snapshot・batch・resume cursor で再開できる形にする。10/9 の生成と同じ検査（ID、件数、hash、単一 writer、atomic 保存）を通す。
+- [x] 2-1 過去の全 rally に当時時点の索引で候補を作り、Luna で relevance を判定する。native Luna worker を並列で、使えるだけ使う。凍結 snapshot・batch・resume cursor で再開できる形にする。10/9 の生成と同じ検査（ID、件数、hash、単一 writer、atomic 保存）を通す。
 - [ ] 2-2 blind repeat（順序を入れ替えた 2 回）と、時系列の train / validation / locked test を、既存の single-teacher gate が受け取れる形で揃える。
-- [ ] 2-3 relevant / irrelevant の比を記録する。8 月の較正は正例が 93% で「常に想起」を学習した。同じ偏りが無いことを確かめる。偏っていたら、学習に使う前に対処を決めて記録する。
+- [x] 2-3 relevant / irrelevant の比を記録する。8 月の較正は正例が 93% で「常に想起」を学習した。同じ偏りが無いことを確かめる。偏っていたら、学習に使う前に対処を決めて記録する。
 - [ ] 2-4 数百件を別モデル（ローカル教師。可能ならもう一つ）にも判定させ、Luna との一致率を記録する。P1 の「判定モデルの種類で変わらないこと」の根拠にする。
 
 ### Phase 3：本線の再開と日次運転
@@ -79,6 +79,12 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] 4-3 判断待ちを `chronovisor_init` の結果に出す。セッション開始時に必ず読まれる場所である。
 - [x] 4-4 期限のあるもの（教師の contract など）は、切れる前に 4-3 の経路で知らせる。
 - [x] 4-5 同じ「止まっているのに ok」が他に無いか調べる。分かっている候補は、search_labels の待ち行列 68,241 件（ほぼ `pending_review`）、lint_repair 444 件、session_sweeper の attention。原因と扱いを記録し、直せるものは直す。
+
+### 2026-10-14 post-bulk 停滞の追加修復
+- [x] 修復1：import 拒否の原因を検証し、検査・凍結入力を維持して両 bundle の受入結果と隔離数を確定する。
+- [ ] 修復2：formal last_success_at の停止理由を解決し、本線実行と gate の受入・待機理由を記録する。
+- [ ] 修復3：import / daily capture / run / idle の停止を health / chronovisor_init に表示し、同一失敗を backoff する。
+- [ ] 修復4：安全な境界で配備し、live fault injection・復帰・drift=false と 09:15 automation の整合を確認する。
 
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
@@ -185,3 +191,10 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-14 09:32 JST　09:15 automationの実行を確認（trigger 09:18:03）。maintenance markerは無し。09:29:01〜06の保存batch集計は27,391/61,884件（A 17,128 / B 10,263、08:38記録比+6,428、残り34,493）。relevant 6,118 / irrelevant 19,867 / uncertain 1,406、確定判定内の正例23.54%。last_label_at=09:29:03 JST、formal last_success_at=06:52:30 JST。全20shardで件数とcursorが一致し、最終保存は4分未満、退行・重複task ID・source参照hash不一致は0。PID22584/PPID1、launchd Standard/KeepAlive、上限20、supervisorのOS lease占有とheartbeat 11秒以内を確認。観測時はhelper 19 / lease 13、同一shardの重複helperは0で、refillを継続している。
 - 2026-10-14 09:32 JST　実session metadataでは各CLIのspawn上限1、取得できた18子は全てOpenAI gpt-5.6-luna/max、luna_workerで100件上限。2 roundは新しい子の起動待ちの瞬間だった。静的I/O検査は明示されたouter/inner 20,000、nonempty送信1,000msを確認した範囲の記録で、全labelの全文読取監査を再実施した扱いにはしない。helper二重起動に見えた2件は、実行前のJS構文拒否とps診断の文字列一致で、実helper起動はいずれも1回。manifest A/BのSHAは既存基準と同一、P0の3 protected SHA、auto-apply 1,371/1/27、旧3レーンoff、query hints offを維持。HTTP runtimeは05262943・drift=false。memory pressureはwarning、swap used約15,975MiBで、保存進捗は継続中。
 - 2026-10-14 09:32 JST　blind repeatは0/200 pairs、CF paired denominator=0、本線teacher_only=2,103 / verified_truth=0。gateはblind_repeat_pairs_below_floor等のデータ待ちで、旧ledger由来のgate snapshotを未importのnative bulkの受入結果と混同しない。同一input hashでQwen 145件中110一致（75.86%）、Ornith 26件中19一致（73.08%）。Ornithのlocal有効60件・技術失敗未採点2件は前回同様で比較未完、日次local切替とP2b A-Eはholdを維持する。保存実日付は10/13・10/14の2日だけで、7日連続の無人日次増分を実証したものではない。旧未読8,260件を有効数へ戻さず、2-1/2-2/2-3/2-4/3-1/3-2とPlan runningを保持。private counts/hash receipt: /Users/trafficsign/.chronovisor/runtime/recall-luna-bulk/2026-10-14-heartbeat/091803-receipt.json。本回のworker起動・capture/run/import・設定変更・再起動・shard/label/checkpoint/lock変更は0。常駐supervisorの正常進行のため通知せず継続する。
+
+- 2026-10-14 18:15 JST　post-bulk修復に着手。Planと実行ログを全文確認。現状は61,884/61,884、A32,332/B29,552、pending=0、worker=0、receipt両方無し。import-log 41件の同一hashをsource定数と照合し、native assignment identity is inconsistentと特定。A全件のassignment revisionだけがnative-luna-assignment-v1で、要求native-luna-bulk-v1に不一致、Bは同検査不一致0。別worktreeを作成し、maintenance markerで新規起動を止め、実行中importの終了境界を待つ。未知の入力を補正して通さず、原bundle/hashを保存して修復・隔離判断を行う。
+
+- 2026-10-14 18:36 JST　修復1／2-1／2-3 完了。根因はprivateな初回exporterがA全32,332行のassignment.revisionをnative-luna-assignment-v1として生成したこと。正規契約はnative-luna-bulk-v1であり、NativeDistillationErrorのerror_message_sha256 58397e2c4eb72e1d85fd00e6a4167c8a03f12f5f1ef6f7c5e61b8f770003ed95と一致した。B29,552行は正規revision。validatorを変更せず、全A行がこの5field非probe metadata誤記だけであると検証し、別private派生bundleへcanonical assignmentを生成した。入力・task ID・teacher prompt/schema・native回答・receiptは完全一致、原Aのmanifest/snapshot/shard source/batch/completion hashesも不変。派生manifest SHA a7389e8cd89f5b0acba492e229c5e6088bb5073e0369db77346609b4d7dce973、source SHA 1553b06d398595f8e75fa8f33be488b6a0bf157d0585a3d8955c2e0fe22f72e7。未知のmetadata補正や旧revision受入の一般化は行わず、明示repair scriptと回帰で限定した。
+- 2026-10-14 18:36 JST　A派生を18:27、Bを18:31に通常strict importerで取込完了。A labels32,332／relevant8,882／irrelevant21,984／uncertain1,466、B labels29,552／relevant5,842／irrelevant22,750／uncertain960。合計61,884／14,724／44,734／2,426、確定判定59,458内の正例24.76%で、旧93%正例偏重は観測しない。新規quarantine0、昨夜の未読8,260件は隔離継続。これは教師の正解認定ではなくteacher_onlyの取込である。各import-receiptを保存し、元Aのmutable markerには実際の派生取込と新旧source/proof SHAを参照させ、凍結原本の再importを防止した。OS distillation-worker lease解放境界でconfigのnative_luna_bundleだけを派生Aへ変更し、contract／P0／gate／floor／thresholdは不変。private evidenceは~/.chronovisor/runtime/recall-luna-bulk/2026-10-14-post-bulk-repair/。
+- 2026-10-14 18:36 JST　本線06:52:30以降の未更新は未scheduledではない。convergeは30分ごとに動き、候補収集の500件境界を進める間は300秒budgetでmodel_deferredとなり旧last_successを保持、backlog解消後は同じA importエラーで失敗していた。例外時に正式worker stateを更新しない問題を修正し、旧成功時刻・counterを保存しつつ安全なerror code/hash／連続回数／失敗時刻をsealed stateへ記録する。現在通常300秒の実chunkを実行し、正式gateの再評価を待っている。
+- 2026-10-14 18:36 JST　09:15 recall-p2b正本promptをpost-bulk statesへ更新。operation全失敗履歴／import_waiting／last_imported_label_at／backoff／daily captureとrun／idle期限／正式mainline failureを監視し、原A再importを禁止。ACTIVE・RRULE・target thread等の非prompt設定は一致、prompt SHA 1b4a10bd7006ab00e287286db7dfa10816e6315bd00716bc6412215e241265eb。次回アプリ実行は未到来であり、設定保存と実行実績を混同しない。

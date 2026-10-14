@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -576,3 +577,643 @@ def test_worker_prompt_keeps_the_per_child_cap_at_one_hundred(tmp_path: Path) ->
     assert "only the durable supervisor may retry with a fresh child." in prompt
     assert "For every nonempty write_stdin verdict submission, set yield_time_ms=1000." in prompt
     assert "a shorter tool wait never permits partial reading." in prompt
+
+
+def test_daily_operation_failure_keeps_receipt_identity_and_durable_backoff(
+    tmp_path: Path,
+) -> None:
+    state: dict[str, object] = {"operations": {}}
+    bundle = tmp_path / "bundle-A"
+    first = supervisor.DailyOperationError("NativeDistillationError", "a" * 64)
+    second = supervisor.DailyOperationError("NativeDistillationError", "a" * 64)
+
+    initial = supervisor._record_operation_failure(state, "import", bundle, first)
+    repeated = supervisor._record_operation_failure(state, "import", bundle, second)
+
+    assert initial["failure_count"] == 1
+    assert repeated["failure_count"] == 2
+    assert repeated["last_error_code"] == "NativeDistillationError"
+    assert repeated["last_error_message_sha256"] == "a" * 64
+    assert repeated["next_retry_at_unix"] > initial["next_retry_at_unix"]
+    assert supervisor._operation_backoff_until(state, "import", bundle) == repeated[
+        "next_retry_at_unix"
+    ]
+
+
+def test_waiting_operation_preserves_start_boundary_across_heartbeats(
+    tmp_path: Path,
+) -> None:
+    state: dict[str, object] = {"operations": {}}
+    bundle = tmp_path / "bundle-A"
+    first = supervisor._set_waiting_operation(
+        state, "run", bundle, reason="distillation_worker_lock_busy"
+    )
+    second = supervisor._set_waiting_operation(
+        state, "run", bundle, reason="daily_run_in_progress"
+    )
+
+    assert second["started_at"] == first["started_at"]
+    assert second["updated_at"] != ""
+    assert second["reason"] == "daily_run_in_progress"
+
+
+def test_supervise_keeps_lock_wait_age_across_repeated_in_progress_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "runtime/recall-luna-bulk"
+    private.mkdir(parents=True)
+    (tmp_path / "config.toml").write_text(
+        '[recall.distillation]\nenabled=true\nnative_luna_enabled=true\n'
+        'teacher_profile="native-luna-single-v1"\n'
+    )
+    monkeypatch.setattr(supervisor, "inventory", lambda _root: [])
+    old = (datetime.now(UTC) - timedelta(minutes=31)).isoformat()
+    fresh = {"value": False}
+    monkeypatch.setattr(
+        supervisor,
+        "now",
+        lambda: datetime.now(UTC).isoformat() if fresh["value"] else old,
+    )
+    calls: list[str] = []
+
+    def run_daily(_args, command, _bundle, _publish):
+        calls.append(command)
+        if len(calls) == 1:
+            fresh["value"] = True
+        return {
+            "status": "in_progress",
+            "reason": "distillation_worker_lock_busy",
+            "capture": {
+                "status": "in_progress",
+                "reason": "distillation_worker_lock_busy",
+            },
+        }
+
+    monkeypatch.setattr(supervisor, "run_daily_operation", run_daily)
+    original_write = supervisor.daily._write_private_json
+    writes = 0
+
+    class StopLoop(BaseException):
+        pass
+
+    def write_status(path: Path, value: object) -> None:
+        nonlocal writes
+        original_write(path, value)
+        if isinstance(value, dict) and value.get("reason") == "daily_run_in_progress":
+            writes += 1
+            if writes == 2:
+                raise StopLoop()
+
+    monkeypatch.setattr(supervisor.daily, "_write_private_json", write_status)
+    args = argparse.Namespace(
+        root=tmp_path,
+        max_workers=1,
+        poll_seconds=0,
+        once=False,
+    )
+
+    with pytest.raises(StopLoop):
+        supervisor.supervise(args)
+
+    assert calls == ["run", "run"]
+    state = json.loads((private / "supervisor-status.json").read_text())
+    assert state["operation"]["state"] == "waiting"
+    assert state["operation"]["started_at"] == old
+    _diagnosis, alerts = _native_luna_supervisor_health(tmp_path)
+    assert any(item["reason"] == "native_luna_daily_run_failed" for item in alerts)
+
+
+def test_daily_run_operation_identity_includes_day_without_a_manifest(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "runtime/recall-luna-bulk/2026-10-13/bundle"
+    second = tmp_path / "runtime/recall-luna-bulk/2026-10-14/bundle"
+
+    assert supervisor._bundle_identity(first)["bundle"] == "2026-10-13-bundle"
+    assert supervisor._operation_key("run", supervisor._bundle_identity(first)) != (
+        supervisor._operation_key("run", supervisor._bundle_identity(second))
+    )
+
+
+def test_daily_operation_uses_receipt_error_instead_of_generic_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "runtime/recall-luna-bulk"
+    private.mkdir(parents=True)
+    receipt = private / "supervisor-import.json"
+    receipt.write_text(
+        json.dumps({
+            "status": "error",
+            "error_type": "NativeDistillationError",
+            "error_message_sha256": "c" * 64,
+            "resumable": True,
+        })
+    )
+
+    class DoneChild:
+        pid = 9876
+        returncode = 1
+
+        def poll(self) -> int:
+            return self.returncode
+
+    def launch(argv, **_kwargs):
+        # The old fixed receipt must be ignored; the child writes its own
+        # attempt-scoped receipt selected by the supervisor.
+        attempt_receipt = Path(argv[argv.index("--receipt") + 1])
+        attempt_receipt.write_text(
+            json.dumps(
+                {
+                    "status": "error",
+                    "error_type": "NativeDistillationError",
+                    "error_message_sha256": "c" * 64,
+                    "resumable": True,
+                }
+            )
+        )
+        return DoneChild()
+
+    monkeypatch.setattr(supervisor.subprocess, "Popen", launch)
+    args = argparse.Namespace(root=tmp_path, poll_seconds=1)
+
+    with pytest.raises(supervisor.DailyOperationError) as raised:
+        supervisor.run_daily_operation(
+            args,
+            "import",
+            tmp_path / "bundle-A",
+            lambda *_args, **_kwargs: None,
+        )
+    assert raised.value.code == "NativeDistillationError"
+    assert raised.value.message_sha256 == "c" * 64
+
+
+def test_completed_labels_are_visible_and_import_failure_does_not_spin_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "runtime/recall-luna-bulk"
+    private.mkdir(parents=True)
+    (tmp_path / "config.toml").write_text(
+        '[recall.distillation]\nenabled=true\nnative_luna_enabled=true\nteacher_profile="native-luna-single-v1"\n'
+    )
+    bundle_path = tmp_path / "runtime/recall-luna-bulk/2026-10-13/bundle-A"
+    row = fake_row(bundle_path, 2)
+    row["completed"] = 2
+    row["remaining"] = 0
+    row["shards"] = [
+        {"shard": 0, "completed": 1, "remaining": 0},
+        {"shard": 1, "completed": 1, "remaining": 0},
+    ]
+    row["labels_done_at"] = "2026-10-14T07:00:00Z"
+    calls: list[str] = []
+
+    def fail_import(args, command, bundle, publish):
+        calls.append(command)
+        raise supervisor.DailyOperationError("NativeDistillationError", "b" * 64)
+
+    monkeypatch.setattr(supervisor, "inventory", lambda _root: [row])
+    monkeypatch.setattr(supervisor, "run_daily_operation", fail_import)
+    monkeypatch.setattr(supervisor.time, "sleep", lambda _seconds: None)
+    args = argparse.Namespace(root=tmp_path, max_workers=1, poll_seconds=1, once=True)
+
+    assert supervisor.supervise(args) == 1
+    first_state = json.loads((private / "supervisor-status.json").read_text())
+    assert calls == ["import"]
+    assert first_state["import_waiting"]["bundles"] == 1
+    assert first_state["import_waiting"]["labels"] == 2
+    assert first_state["import_waiting"]["oldest_at"] == "2026-10-14T07:00:00Z"
+    assert first_state["operation"]["state"] == "backoff"
+    assert first_state["operation"]["last_error_code"] == "NativeDistillationError"
+
+    # A restarted supervisor loads the same operation identity and respects
+    # its retry deadline instead of starting another two-minute import loop.
+    assert supervisor.supervise(args) == 1
+    second_state = json.loads((private / "supervisor-status.json").read_text())
+    assert calls == ["import"]
+    assert second_state["reason"] == "daily_import_backoff"
+    assert second_state["operation"]["failure_count"] == 1
+
+
+def test_import_backoff_wakes_for_earliest_bundle_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "runtime/recall-luna-bulk"
+    private.mkdir(parents=True)
+    (tmp_path / "config.toml").write_text(
+        '[recall.distillation]\nenabled=true\nnative_luna_enabled=true\n'
+        'teacher_profile="native-luna-single-v1"\n'
+    )
+    rows = [
+        fake_row(tmp_path / "bundle-A", 1, completed=1),
+        fake_row(tmp_path / "bundle-B", 1, completed=1),
+    ]
+    for row in rows:
+        row["remaining"] = 0
+        row["shards"] = [{"shard": 0, "completed": 1, "remaining": 0}]
+    updated = supervisor.now()
+    operations = {}
+    for bundle, retry_at in (("bundle-A", 100.0), ("bundle-B", 50.0)):
+        operations[f"import:{bundle}:"] = {
+            "name": "import",
+            "state": "backoff",
+            "status": "failed",
+            "bundle": bundle,
+            "failure_count": 1,
+            "last_error_code": "NativeDistillationError",
+            "last_error_message_sha256": "a" * 64,
+            "next_retry_at_unix": retry_at,
+            "next_retry_at": supervisor._iso_from_unix(retry_at),
+            "updated_at": updated,
+        }
+    (private / "supervisor-status.json").write_text(
+        json.dumps({
+            "schema": supervisor.SCHEMA,
+            "completed_total": 2,
+            "last_progress_at": updated,
+            "operations": operations,
+        })
+    )
+    monkeypatch.setattr(supervisor, "inventory", lambda _root: rows)
+    monkeypatch.setattr(supervisor.time, "time", lambda: 0.0)
+    monkeypatch.setattr(
+        supervisor,
+        "run_daily_operation",
+        lambda *_args: pytest.fail("all bundles are still in backoff"),
+    )
+    args = argparse.Namespace(root=tmp_path, max_workers=1, poll_seconds=1, once=True)
+
+    assert supervisor.supervise(args) == 1
+    state = json.loads((private / "supervisor-status.json").read_text())
+    assert state["reason"] == "daily_import_backoff"
+    assert state["operation"]["bundle"] == "bundle-B"
+
+
+def test_active_capture_is_reported_without_restarting_daily_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "runtime/recall-luna-bulk"
+    progress_path = private / "2026-10-14/inventory/candidate-capture-progress.json"
+    progress_path.parent.mkdir(parents=True)
+    now_unix = time.time()
+    old_capture_failure = {
+        "name": "capture",
+        "state": "backoff",
+        "status": "failed",
+        "bundle": "2026-10-14",
+        "failure_count": 2,
+        "last_error_code": "capture_owner_stale",
+        "last_error_message_sha256": "a" * 64,
+        "next_retry_at_unix": now_unix - 1,
+        "next_retry_at": supervisor._iso_from_unix(now_unix - 1),
+        "updated_at": supervisor.now(),
+    }
+    progress_path.write_text(
+        json.dumps({
+            "status": "running",
+            "pid": 4321,
+            "started_at_unix": now_unix - 5,
+            "updated_at_unix": now_unix,
+        })
+    )
+    (private / "supervisor-status.json").write_text(
+        json.dumps({
+            "schema": supervisor.SCHEMA,
+            "completed_total": 0,
+            "operations": {"capture:2026-10-14:": old_capture_failure},
+            "operation": old_capture_failure,
+        })
+    )
+    (tmp_path / "config.toml").write_text(
+        '[recall.distillation]\nenabled=true\nnative_luna_enabled=true\nteacher_profile="native-luna-single-v1"\n'
+    )
+    monkeypatch.setattr(supervisor, "inventory", lambda _root: [])
+    monkeypatch.setattr(
+        supervisor,
+        "run_daily_operation",
+        lambda *_args: pytest.fail("daily run was restarted while capture was active"),
+    )
+    args = argparse.Namespace(root=tmp_path, max_workers=1, poll_seconds=1, once=True)
+
+    assert supervisor.supervise(args) == 1
+    state = json.loads((private / "supervisor-status.json").read_text())
+    assert state["status"] == "running"
+    assert state["reason"] == "daily_capture_in_progress"
+    assert state["operation"]["name"] == "capture"
+    assert state["operation"]["failure_count"] == 0
+    started_at = supervisor._iso_from_unix(now_unix - 5)
+    assert state["operation"]["started_at"] == started_at
+
+    # A subsequent heartbeat keeps the new owner's age; it must not reset the
+    # boundary or resurrect the previous capture failure.
+    assert supervisor.supervise(args) == 1
+    repeated = json.loads((private / "supervisor-status.json").read_text())
+    assert repeated["operation"]["failure_count"] == 0
+    assert repeated["operation"]["started_at"] == started_at
+
+
+def test_stalled_capture_is_backed_off_and_remains_visible_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "runtime/recall-luna-bulk"
+    progress_path = private / "2026-10-14/inventory/candidate-capture-progress.json"
+    progress_path.parent.mkdir(parents=True)
+    progress_path.write_text(
+        json.dumps({
+            "status": "error",
+            "reason": "capture_owner_stale",
+            "error_message_sha256": "d" * 64,
+        })
+    )
+    (tmp_path / "config.toml").write_text(
+        '[recall.distillation]\nenabled=true\nnative_luna_enabled=true\nteacher_profile="native-luna-single-v1"\n'
+    )
+    monkeypatch.setattr(supervisor, "inventory", lambda _root: [])
+    monkeypatch.setattr(
+        supervisor,
+        "run_daily_operation",
+        lambda *_args: pytest.fail("daily run was started while capture was stalled"),
+    )
+    args = argparse.Namespace(root=tmp_path, max_workers=1, poll_seconds=1, once=True)
+
+    assert supervisor.supervise(args) == 1
+    first = json.loads((private / "supervisor-status.json").read_text())
+    assert first["operation"]["name"] == "capture"
+    assert first["operation"]["state"] == "backoff"
+    assert first["operation"]["last_error_code"] == "capture_owner_stale"
+
+    assert supervisor.supervise(args) == 1
+    second = json.loads((private / "supervisor-status.json").read_text())
+    assert second["reason"] == "daily_capture_backoff"
+    assert second["operation"]["failure_count"] == 1
+
+
+def test_old_capture_error_from_previous_day_does_not_block_daily_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "runtime/recall-luna-bulk"
+    old_progress = private / "2026-10-13/inventory/candidate-capture-progress.json"
+    old_progress.parent.mkdir(parents=True)
+    old_progress.write_text(
+        json.dumps({"status": "error", "reason": "capture_owner_stale"})
+    )
+    (tmp_path / "config.toml").write_text(
+        '[recall.distillation]\nenabled=true\nnative_luna_enabled=true\n'
+        'teacher_profile="native-luna-single-v1"\n'
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(supervisor, "inventory", lambda _root: [])
+
+    def recover(_args, command, _bundle, _publish):
+        calls.append(command)
+        return {"status": "ready", "reason": "no_unlabeled_source"}
+
+    monkeypatch.setattr(supervisor, "run_daily_operation", recover)
+    args = argparse.Namespace(root=tmp_path, max_workers=1, poll_seconds=1, once=True)
+
+    supervisor.supervise(args)
+
+    assert calls == ["run"]
+
+
+def test_capture_backoff_allows_one_daily_run_recovery_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "runtime/recall-luna-bulk"
+    progress_path = private / "2026-10-14/inventory/candidate-capture-progress.json"
+    progress_path.parent.mkdir(parents=True)
+    progress_path.write_text(
+        json.dumps({
+            "status": "error",
+            "reason": "capture_owner_stale",
+            "error_message_sha256": "e" * 64,
+        })
+    )
+    (tmp_path / "config.toml").write_text(
+        '[recall.distillation]\nenabled=true\nnative_luna_enabled=true\n'
+        'teacher_profile="native-luna-single-v1"\n'
+    )
+    monkeypatch.setattr(supervisor, "inventory", lambda _root: [])
+    args = argparse.Namespace(root=tmp_path, max_workers=1, poll_seconds=1, once=True)
+    monkeypatch.setattr(
+        supervisor,
+        "run_daily_operation",
+        lambda *_args: pytest.fail("capture error must be recorded before recovery"),
+    )
+
+    assert supervisor.supervise(args) == 1
+    status_path = private / "supervisor-status.json"
+    state = json.loads(status_path.read_text())
+    assert state["operation"]["name"] == "capture"
+    key = "capture:2026-10-14:"
+    state["operations"][key]["next_retry_at_unix"] = time.time() - 1
+    state["operations"][key]["next_retry_at"] = supervisor._iso_from_unix(
+        time.time() - 1
+    )
+    state["operation"]["next_retry_at_unix"] = state["operations"][key][
+        "next_retry_at_unix"
+    ]
+    state["operation"]["next_retry_at"] = state["operations"][key]["next_retry_at"]
+    status_path.write_text(json.dumps(state))
+
+    calls: list[str] = []
+
+    def recover(_args, command, _bundle, _publish):
+        calls.append(command)
+        return {"status": "ready", "reason": "no_unlabeled_source"}
+
+    monkeypatch.setattr(supervisor, "run_daily_operation", recover)
+    assert supervisor.supervise(args) == 1
+    assert calls == ["run"]
+    recovered = json.loads(status_path.read_text())
+    assert recovered["operations"]["capture:2026-10-14:"]["state"] == "succeeded"
+
+
+def test_daily_in_progress_lock_wait_does_not_backoff_capture_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "runtime/recall-luna-bulk"
+    progress_path = private / "2026-10-14/inventory/candidate-capture-progress.json"
+    progress_path.parent.mkdir(parents=True)
+    progress_path.write_text(
+        json.dumps({"status": "error", "reason": "capture_owner_stale"})
+    )
+    (tmp_path / "config.toml").write_text(
+        '[recall.distillation]\nenabled=true\nnative_luna_enabled=true\n'
+        'teacher_profile="native-luna-single-v1"\n'
+    )
+    run_entry = {
+        "name": "run",
+        "state": "waiting",
+        "status": "waiting",
+        "bundle": "2026-10-14-bundle",
+        "failure_count": 0,
+        "reason": "distillation_worker_lock_busy",
+        "updated_at": supervisor.now(),
+    }
+    (private / "supervisor-status.json").write_text(
+        json.dumps(
+            {
+                "schema": supervisor.SCHEMA,
+                "completed_total": 0,
+                "operations": {"run:2026-10-14-bundle:": run_entry},
+                "operation": run_entry,
+            }
+        )
+    )
+    monkeypatch.setattr(supervisor, "inventory", lambda _root: [])
+    calls: list[str] = []
+
+    def lock_wait(_args, command, _bundle, _publish):
+        calls.append(command)
+        return {
+            "status": "in_progress",
+            "reason": "distillation_worker_lock_busy",
+            "capture": {
+                "status": "in_progress",
+                "reason": "distillation_worker_lock_busy",
+            },
+        }
+
+    monkeypatch.setattr(supervisor, "run_daily_operation", lock_wait)
+    args = argparse.Namespace(root=tmp_path, max_workers=1, poll_seconds=1, once=True)
+
+    supervisor.supervise(args)
+
+    state = json.loads((private / "supervisor-status.json").read_text())
+    assert calls == ["run"]
+    assert state["operation"]["name"] == "run"
+    assert state["operation"]["state"] == "waiting"
+    assert not any(key.startswith("capture:") for key in state["operations"])
+
+
+def test_import_backoff_on_bundle_a_does_not_starve_bundle_b(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "runtime/recall-luna-bulk"
+    private.mkdir(parents=True)
+    (tmp_path / "config.toml").write_text(
+        '[recall.distillation]\nenabled=true\nnative_luna_enabled=true\n'
+        'teacher_profile="native-luna-single-v1"\n'
+    )
+    bundle_a = tmp_path / "runtime/recall-luna-bulk/2026-10-13/bundle-A"
+    bundle_b = tmp_path / "runtime/recall-luna-bulk/2026-10-14/bundle-B"
+    rows = [fake_row(bundle_a, 1, completed=1), fake_row(bundle_b, 1, completed=1)]
+    for row in rows:
+        row["remaining"] = 0
+        row["shards"] = [{"shard": 0, "completed": 1, "remaining": 0}]
+    monkeypatch.setattr(supervisor, "inventory", lambda _root: rows)
+    retry_at = time.time() + 3600
+    state = {
+        "schema": supervisor.SCHEMA,
+        "completed_total": 2,
+        "operations": {
+            "import:bundle-A:": {
+                "name": "import",
+                "state": "backoff",
+                "status": "failed",
+                "bundle": "bundle-A",
+                "failure_count": 2,
+                "last_error_code": "NativeDistillationError",
+                "last_error_message_sha256": "f" * 64,
+                "next_retry_at_unix": retry_at,
+                "next_retry_at": supervisor._iso_from_unix(retry_at),
+                "updated_at": supervisor.now(),
+            }
+        },
+    }
+    (private / "supervisor-status.json").write_text(json.dumps(state))
+    calls: list[str] = []
+
+    def import_b(args, command, bundle, _publish):
+        calls.append(bundle.name)
+        rows[1]["imported"] = True
+        return {"status": "imported", "labels": 1, "labels_written": 1}
+
+    monkeypatch.setattr(supervisor, "run_daily_operation", import_b)
+    args = argparse.Namespace(root=tmp_path, max_workers=1, poll_seconds=1, once=True)
+
+    supervisor.supervise(args)
+
+    assert calls == ["bundle-B"]
+    state_after = json.loads((private / "supervisor-status.json").read_text())
+    assert state_after["last_import"]["labels_written"] == 1
+    assert "last_label_at" in state_after["last_import"]
+    assert state_after["last_imported_label_at"] == state_after["last_import"][
+        "last_label_at"
+    ]
+
+
+def test_daily_pending_bundle_is_successful_preparation_for_worker_wave(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.toml").write_text(
+        '[recall.distillation]\nenabled=true\nnative_luna_enabled=true\n'
+        'teacher_profile="native-luna-single-v1"\n'
+    )
+    monkeypatch.setattr(supervisor, "inventory", lambda _root: [])
+    outcomes = iter(
+        [
+            {"status": "pending", "reason": "bundle_created"},
+            {"status": "ready", "reason": "no_unlabeled_source"},
+        ]
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "run_daily_operation",
+        lambda *_args: next(outcomes),
+    )
+    monkeypatch.setattr(supervisor.time, "sleep", lambda _seconds: None)
+    args = argparse.Namespace(root=tmp_path, max_workers=1, poll_seconds=1, once=True)
+
+    assert supervisor.supervise(args) == 1
+    state = json.loads(
+        (tmp_path / "runtime/recall-luna-bulk/supervisor-status.json").read_text()
+    )
+    assert state["reason"] == "waiting_for_incremental_capture"
+    assert state["operation"]["name"] == "idle"
+
+
+def test_idempotent_import_does_not_advance_label_watermark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "runtime/recall-luna-bulk"
+    private.mkdir(parents=True)
+    (tmp_path / "config.toml").write_text(
+        '[recall.distillation]\nenabled=true\nnative_luna_enabled=true\n'
+        'teacher_profile="native-luna-single-v1"\n'
+    )
+    bundle = tmp_path / "runtime/recall-luna-bulk/2026-10-14/bundle-A"
+    row = fake_row(bundle, 1, completed=1)
+    row["remaining"] = 0
+    row["shards"] = [{"shard": 0, "completed": 1, "remaining": 0}]
+    rows = [row]
+    old = "2026-10-14T00:00:00Z"
+    (private / "supervisor-status.json").write_text(
+        json.dumps(
+            {
+                "schema": supervisor.SCHEMA,
+                "completed_total": 1,
+                "last_imported_label_at": old,
+                "operations": {},
+            }
+        )
+    )
+    monkeypatch.setattr(supervisor, "inventory", lambda _root: rows)
+    calls: list[str] = []
+
+    def import_once(_args, command, _bundle, _publish):
+        calls.append(command)
+        if command == "import":
+            rows[0]["imported"] = True
+            return {"status": "imported", "labels": 1, "labels_written": 0}
+        return {"status": "ready", "reason": "no_unlabeled_source"}
+
+    monkeypatch.setattr(supervisor, "run_daily_operation", import_once)
+    args = argparse.Namespace(root=tmp_path, max_workers=1, poll_seconds=1, once=True)
+
+    supervisor.supervise(args)
+
+    state = json.loads((private / "supervisor-status.json").read_text())
+    assert calls == ["import", "run"]
+    assert state["last_imported_label_at"] == old
+    assert state["last_import"]["labels_written"] == 0
+    assert "last_label_at" not in state["last_import"]

@@ -186,6 +186,219 @@ def test_run_advances_catalog_and_starts_capture_before_prepare(
     assert _read(receipt)["capture"]["started"] is True
 
 
+def test_run_prepares_completed_capture_before_starting_another_writer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    progress = tmp_path / "capture.json"
+    daily._write_private_json(progress, {"status": "complete", "captured": 2})
+    prepared_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        daily,
+        "_advance_catalog_when_idle",
+        lambda _: {"status": "noop", "rallies": 2},
+    )
+
+    def prepare(**kwargs: object) -> dict[str, object]:
+        prepared_calls.append(kwargs)
+        return {
+            "schema": daily.SCHEMA,
+            "command": "prepare",
+            "resumable": True,
+            "status": "pending",
+            "reason": "bundle_ready_for_import",
+        }
+
+    monkeypatch.setattr(daily, "prepare", prepare)
+    monkeypatch.setattr(
+        daily,
+        "_start_candidate_capture",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError),
+    )
+    receipt = tmp_path / "daily.json"
+
+    result = daily.run_daily(
+        root=tmp_path / "root",
+        bundle_path=tmp_path / "bundle",
+        receipt_path=receipt,
+        capture_progress_path=progress,
+    )
+
+    assert result["status"] == "pending"
+    assert result["reason"] == "bundle_ready_for_import"
+    assert result["capture"]["status"] == "complete"
+    assert len(prepared_calls) == 1
+    assert _read(receipt)["status"] == "pending"
+
+
+def test_run_starts_capture_only_after_prepare_reports_missing_snapshots(
+    tmp_path: Path, monkeypatch
+) -> None:
+    progress = tmp_path / "capture.json"
+    daily._write_private_json(progress, {"status": "complete", "captured": 2})
+    monkeypatch.setattr(
+        daily,
+        "_advance_catalog_when_idle",
+        lambda _: {"status": "advanced", "rallies": 3},
+    )
+    monkeypatch.setattr(
+        daily,
+        "prepare",
+        lambda **_kwargs: {
+            "schema": daily.SCHEMA,
+            "command": "prepare",
+            "resumable": True,
+            "status": "in_progress",
+            "reason": "missing_candidate_snapshots",
+        },
+    )
+    starts: list[dict[str, object]] = []
+
+    def start(**kwargs: object) -> dict[str, object]:
+        starts.append(kwargs)
+        return {"started": True, "status": "starting", "resumable": True}
+
+    monkeypatch.setattr(daily, "_start_candidate_capture", start)
+    result = daily.run_daily(
+        root=tmp_path / "root",
+        bundle_path=tmp_path / "bundle",
+        receipt_path=tmp_path / "daily.json",
+        capture_progress_path=progress,
+    )
+
+    assert result["status"] == "in_progress"
+    assert result["reason"] == "authoritative_candidate_writer_starting"
+    assert result["capture"]["started"] is True
+    assert len(starts) == 1
+
+
+def test_run_does_not_hide_capture_start_error_behind_prepare(
+    tmp_path: Path, monkeypatch
+) -> None:
+    error_hash = "a" * 64
+    monkeypatch.setattr(
+        daily,
+        "_start_candidate_capture",
+        lambda **_kwargs: {
+            "started": False,
+            "status": "error",
+            "reason": "capture_start_failed",
+            "error_type": "OSError",
+            "error_message_sha256": error_hash,
+        },
+    )
+    monkeypatch.setattr(
+        daily,
+        "prepare",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError),
+    )
+    receipt = tmp_path / "daily.json"
+
+    result = daily.run_daily(
+        root=tmp_path / "root",
+        bundle_path=tmp_path / "bundle",
+        receipt_path=receipt,
+        capture_progress_path=tmp_path / "capture.json",
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "capture_start_failed"
+    assert result["error_type"] == "OSError"
+    assert result["error_message_sha256"] == error_hash
+    assert _read(receipt)["reason"] == "capture_start_failed"
+
+
+def test_capture_start_os_error_is_an_error_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        daily.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError),
+    )
+
+    result = daily._start_candidate_capture(
+        root=tmp_path / "root",
+        progress_path=tmp_path / "capture.json",
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "capture_start_failed"
+    assert result["error_type"] == "OSError"
+    assert len(str(result["error_message_sha256"])) == 64
+
+
+def test_run_retries_terminal_capture_error_after_owner_check(
+    tmp_path: Path, monkeypatch
+) -> None:
+    progress = tmp_path / "capture.json"
+    error_hash = "a" * 64
+    daily._write_private_json(
+        progress,
+        {
+            "status": "error",
+            "reason": "candidate_snapshot_shape_invalid",
+            "error_class": "DailyError",
+            "error_message_sha256": error_hash,
+            "finished_at_unix": 1,
+        },
+    )
+    monkeypatch.setattr(daily, "_capture_lock_busy", lambda _: False)
+    starts: list[dict[str, object]] = []
+
+    def start(**kwargs: object) -> dict[str, object]:
+        starts.append(kwargs)
+        return {"started": True, "status": "starting", "resumable": True}
+
+    monkeypatch.setattr(daily, "_start_candidate_capture", start)
+    monkeypatch.setattr(
+        daily,
+        "prepare",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError),
+    )
+
+    result = daily.run_daily(
+        root=tmp_path / "root",
+        bundle_path=tmp_path / "bundle",
+        receipt_path=tmp_path / "daily.json",
+        capture_progress_path=progress,
+    )
+
+    assert result["status"] == "in_progress"
+    assert result["reason"] == "authoritative_candidate_writer_starting"
+    assert len(starts) == 1
+    previous = result["capture"]["previous_capture"]
+    assert previous["status"] == "error"
+    assert previous["capture_progress"]["error_message_sha256"] == error_hash
+
+
+def test_run_waits_for_owner_before_retrying_blocked_capture(
+    tmp_path: Path, monkeypatch
+) -> None:
+    progress = tmp_path / "capture.json"
+    daily._write_private_json(
+        progress,
+        {"status": "blocked_lock", "reason": "distillation_worker_lock_busy"},
+    )
+    monkeypatch.setattr(daily, "_capture_lock_busy", lambda _: True)
+    monkeypatch.setattr(
+        daily,
+        "_start_candidate_capture",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError),
+    )
+
+    result = daily.run_daily(
+        root=tmp_path / "root",
+        bundle_path=tmp_path / "bundle",
+        receipt_path=tmp_path / "daily.json",
+        capture_progress_path=progress,
+    )
+
+    assert result["status"] == "in_progress"
+    assert result["reason"] == "distillation_worker_lock_busy"
+    assert result["capture"]["previous_capture"]["status"] == "blocked_lock"
+
+
 def test_capture_resumes_previous_day_inventory_before_starting_another_writer(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -537,6 +750,17 @@ def test_zero_label_import_does_not_publish_last_label_at(
     bundle.mkdir()
     (bundle / "manifest.json").write_text("{}\n", encoding="utf-8")
     monkeypatch.setattr(
+        daily,
+        "_bundle_metadata",
+        lambda _path: {
+            "status": "complete",
+            "record_count": 0,
+            "completed": 0,
+            "remaining": 0,
+            "import_pending": True,
+        },
+    )
+    monkeypatch.setattr(
         daily.distill,
         "load_distillation_config",
         lambda _: SimpleNamespace(
@@ -568,6 +792,95 @@ def test_zero_label_import_does_not_publish_last_label_at(
     assert result["status"] == "imported"
     assert result["labels_written"] == 0
     assert "last_label_at" not in result
+
+
+def test_import_explicit_bundle_wins_over_sibling_resumable_bundle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    day = tmp_path / "bulk" / "2026-10-14"
+    bundle_a = day / "bundle-A"
+    bundle_b = day / "bundle-B"
+    bundle_a.mkdir(parents=True)
+    bundle_b.mkdir()
+    (bundle_a / "manifest.json").write_text("{}\n", encoding="utf-8")
+    (bundle_b / "manifest.json").write_text("{}\n", encoding="utf-8")
+    metadata = {
+        "status": "complete",
+        "record_count": 1,
+        "completed": 1,
+        "remaining": 0,
+        "import_pending": True,
+    }
+    monkeypatch.setattr(daily, "_bundle_metadata", lambda _path: dict(metadata))
+    monkeypatch.setattr(
+        daily.distill,
+        "load_distillation_config",
+        lambda _: SimpleNamespace(
+            teacher_profile=daily.DEFAULT_TEACHER_PROFILE,
+            native_luna_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(
+        daily.native,
+        "ensure_contract",
+        lambda *_args: {"artifact_id": "a" * 64},
+    )
+    imported_paths: list[Path] = []
+
+    def fake_import(_root: Path, path: Path) -> dict[str, object]:
+        imported_paths.append(path)
+        return {
+            "labels": 1,
+            "labels_written": 1,
+            "labels_appended": 1,
+            "relevant": 1,
+            "irrelevant": 0,
+            "uncertain": 0,
+            "remaining": 0,
+            "source_snapshot_sha256": "b" * 64,
+            "label_chain_head_sha256": "c" * 64,
+        }
+
+    monkeypatch.setattr(daily.native, "import_bundle", fake_import)
+
+    result = daily.import_completed(
+        root=tmp_path / "root",
+        bundle_path=bundle_b,
+        receipt_path=tmp_path / "receipt.json",
+    )
+
+    assert result["status"] == "imported"
+    assert imported_paths == [bundle_b]
+    assert (bundle_b / "import-receipt.json").exists()
+    assert not (bundle_a / "import-receipt.json").exists()
+
+
+def test_import_rejects_malformed_requested_bundle_without_discovery(
+    tmp_path: Path, monkeypatch
+) -> None:
+    day = tmp_path / "bulk" / "2026-10-14"
+    sibling = day / "bundle-A"
+    requested = day / "bundle-B"
+    sibling.mkdir(parents=True)
+    requested.mkdir()
+    (sibling / "manifest.json").write_text("{}\n", encoding="utf-8")
+    (requested / "manifest.json").write_text("[]\n", encoding="utf-8")
+    monkeypatch.setattr(
+        daily,
+        "_select_resumable_bundle",
+        lambda _path: (_ for _ in ()).throw(AssertionError),
+    )
+
+    result = daily.import_completed(
+        root=tmp_path / "root",
+        bundle_path=requested,
+        receipt_path=tmp_path / "receipt.json",
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "bundle_invalid"
+    assert result["error_type"] == "DailyError"
+    assert len(str(result["error_message_sha256"])) == 64
 
 
 def test_native_bundle_pointer_is_added_to_enabled_config(tmp_path: Path, monkeypatch) -> None:

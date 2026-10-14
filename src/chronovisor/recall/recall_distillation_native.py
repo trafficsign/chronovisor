@@ -1332,6 +1332,12 @@ def import_bundle(root: Path, bundle_path: Path) -> dict[str, Any]:
             "labels_written": sum(
                 row["work_id"] not in existing_labels for row in rows
             ),
+            # This is the durable import boundary, not another teacher run.
+            "last_label_at": (
+                datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                if any(row["work_id"] not in existing_labels for row in rows)
+                else ""
+            ),
             "remaining": 0,
             "label_chain_head_sha256": label_head["head_sha256"],
             "receipt_chain_head_sha256": receipt_head["head_sha256"],

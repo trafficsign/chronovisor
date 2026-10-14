@@ -14467,6 +14467,11 @@ def _prepare_counterfactual_work(
     snapshots: Mapping[str, Mapping[str, Any]],
     rally_by_id: Mapping[str, Mapping[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[tuple[str, str], str]]:
+    from chronovisor.recall.recall_distillation_workset import (
+        DistillationWorksetError,
+        _reference,
+    )
+
     try:
         split_plan = _read_split_plan(root)
         split_plan_id = _scheduling_split_plan_id(split_plan)
@@ -14563,11 +14568,19 @@ def _prepare_counterfactual_work(
                 )
             )
             keys[(rally_id, candidate_id)] = work_id
+            payload_ref = f"candidate-snapshot:{rally_id}:{candidate_id}"
+            try:
+                _reference(payload_ref, "payload_ref")
+            except DistillationWorksetError:
+                # Exposure candidate IDs can contain descriptive page slugs.
+                # Keep them out of the payload-free queue; claims resolve via
+                # the digest-bound work ID and the unchanged private keys.
+                payload_ref = f"candidate-snapshot:{payload_digest}"
             items.append(
                 {
                     "work_id": work_id,
                     "kind": "local-counterfactual",
-                    "payload_ref": f"candidate-snapshot:{rally_id}:{candidate_id}",
+                    "payload_ref": payload_ref,
                     "payload_digest": payload_digest,
                     "priority": (
                         100 * int("page_content_sha256" in candidate)
@@ -15987,6 +16000,8 @@ def _persist_distillation_chunk(
                 else str(scheduler_state.get("last_label_at") or "")
             ),
             "teacher_profile": config.teacher_profile,
+            "worker_failure_count": 0,
+            "worker_error_sha256": "",
             "error_code": (
                 "ox_teacher_stopped"
                 if teacher_result.profile_stopped
@@ -16289,6 +16304,28 @@ def _timeout_workset_statuses(root: Path) -> dict[str, dict[str, Any]]:
     return statuses
 
 
+def _record_worker_failure(root: Path, error: Exception, *, timeout: bool = False) -> None:
+    """Persist a failed attempt under the existing worker lease, without text."""
+    path = store.distillation_dir(root) / store.STATE_FILE
+    try:
+        previous = _read_worker_state(root) if path.exists() else {"kind": "worker-state"}
+        code = "distillation_run_timeout" if timeout else "distillation_run_failed"
+        digest = hashlib.sha256(str(error).encode("utf-8", "replace")).hexdigest()
+        same = previous.get("error_code") == code and previous.get("worker_error_sha256") == digest
+        store.write_sealed_state(path, {
+            **previous,
+            "worker_status": "error",
+            "error_code": code,
+            "worker_error_type": type(error).__name__,
+            "worker_error_sha256": digest,
+            "worker_failure_count": int(previous.get("worker_failure_count") or 0) + 1 if same else 1,
+            "last_failure_at": datetime.now(UTC).isoformat(),
+        })
+    except (OSError, store.DistillationStoreError):
+        # Preserve corrupt state for diagnosis; never repair it by overwriting.
+        return
+
+
 def run_distillation_chunk(
     *,
     root: Path | None = None,
@@ -16337,9 +16374,11 @@ def run_distillation_chunk(
                     cold_start=cold_start,
                     max_elapsed_seconds=max_elapsed_seconds,
                 )
-        except RecallWallClockTimeout:
+        except RecallWallClockTimeout as exc:
             # ponytail: no cross-ledger transaction; completed atomic batches are
             # idempotent resume points and are never rolled back after timeout.
+            if not dry_run:
+                _record_worker_failure(resolved_root, exc, timeout=True)
             return {
                 "status": "deferred",
                 "processed": 0,
@@ -16347,6 +16386,10 @@ def run_distillation_chunk(
                 "atomic_progress_may_be_present": True,
                 **_timeout_workset_statuses(resolved_root),
             }
+        except Exception as exc:
+            if not dry_run:
+                _record_worker_failure(resolved_root, exc)
+            raise
     finally:
         store.release_lock(lock)
 

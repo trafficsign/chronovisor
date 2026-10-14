@@ -228,6 +228,7 @@ def _capture_progress(path: Path) -> dict[str, Any] | None:
         "updated_at_unix",
         "finished_at_unix",
         "error_class",
+        "error_message_sha256",
         "reason",
     ):
         if key in value:
@@ -885,6 +886,35 @@ def _select_resumable_bundle(requested: Path) -> tuple[Path, dict[str, Any]] | N
     return pending[0] if pending else None
 
 
+def _select_import_bundle(requested: Path) -> tuple[Path, dict[str, Any]] | None:
+    """Select the import target without replacing an explicit valid bundle.
+
+    The resumable selector is intentionally global: it can find an unfinished
+    bundle in a sibling day when the scheduled path is absent.  Import callers
+    that explicitly name a completed bundle need a narrower rule, though.  If
+    that path has a manifest, its status (including an import-pending status)
+    is authoritative and sibling discovery must not replace it.  Discovery is
+    allowed only when the requested directory has no manifest.  A file,
+    symlink, or malformed manifest is an unsafe request and fails closed.
+    """
+
+    requested = requested.expanduser()
+    if requested.is_symlink():
+        raise DailyError("requested_bundle_unsafe")
+    if requested.exists():
+        if not requested.is_dir():
+            raise DailyError("requested_bundle_invalid")
+        manifest = requested / "manifest.json"
+        if manifest.is_symlink():
+            raise DailyError("requested_bundle_unsafe")
+        if manifest.exists():
+            metadata = _bundle_metadata(requested)
+            if metadata is None:
+                raise DailyError("requested_bundle_invalid")
+            return requested, metadata
+    return _select_resumable_bundle(requested)
+
+
 def _existing_labeled_pairs(root: Path) -> set[tuple[str, str]]:
     """Read only source identities from the native teacher-only ledger."""
 
@@ -1114,6 +1144,24 @@ def _advance_catalog(root: Path) -> dict[str, Any]:
         "rallies": len(advanced.rally_ids),
         "deferred_sessions": len(advanced.deferred_session_keys),
     }
+
+
+def _advance_catalog_when_idle(root: Path) -> dict[str, Any]:
+    """Refresh source metadata before reusing a completed capture receipt."""
+
+    lock = store.acquire_nonblocking_lock(
+        store.distillation_dir(root) / "distillation-worker.lock"
+    )
+    if lock is None:
+        return {
+            "status": "in_progress",
+            "reason": "distillation_worker_lock_busy",
+            "resumable": True,
+        }
+    try:
+        return _advance_catalog(root)
+    finally:
+        store.release_lock(lock)
 
 
 def _capture_manifest_row(rally: Mapping[str, Any]) -> dict[str, Any]:
@@ -1468,7 +1516,7 @@ def _start_candidate_capture(
     except OSError as exc:
         return {
             "started": False,
-            "status": "in_progress",
+            "status": "error",
             "reason": "capture_start_failed",
             "resumable": True,
             **_error_fields(exc),
@@ -1510,6 +1558,39 @@ def run_daily(
     root = root.expanduser().resolve()
     receipt_path = receipt_path.expanduser()
     result = _base_result("run")
+
+    def write_and_return() -> dict[str, Any]:
+        _write_private_json(receipt_path, result)
+        return result
+
+    def promote_capture_failure(capture: Mapping[str, Any]) -> dict[str, Any]:
+        result["capture"] = dict(capture)
+        result.update(
+            {
+                "status": "error",
+                "reason": str(capture.get("reason") or "candidate_capture_failed"),
+            }
+        )
+        for key in ("error_type", "error_message_sha256"):
+            value = capture.get(key)
+            if isinstance(value, str) and value:
+                result[key] = value
+        return write_and_return()
+
+    def publish_prepared(
+        prepared: Mapping[str, Any], *, capture: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        if capture is not None:
+            result["capture"] = dict(capture)
+        result["prepare"] = dict(prepared)
+        result.update(
+            {
+                "status": str(prepared.get("status") or "in_progress"),
+                "reason": str(prepared.get("reason") or "daily_prepare"),
+            }
+        )
+        return write_and_return()
+
     try:
         # A pending bundle is the durable work queue.  Resume it before any
         # catalog/index write so a candidate writer cannot race an export.
@@ -1522,21 +1603,145 @@ def run_daily(
                 split_plan_path=split_plan_path,
                 allow_split_write=allow_split_write,
             )
-            result["prepare"] = prepared
-            result.update(
-                {
-                    "status": prepared.get("status", "in_progress"),
-                    "reason": prepared.get("reason", "pending_bundle"),
-                }
+            result["reason"] = prepared.get("reason", "pending_bundle")
+            return publish_prepared(prepared)
+
+        active_progress_path, progress = _active_capture_progress(
+            root, capture_progress_path
+        )
+        progress_status = str(progress.get("status") or "") if progress else ""
+        if progress is not None and progress_status in {
+            "error",
+            "blocked_lock",
+            "unknown",
+        }:
+            # Keep the terminal receipt as evidence, but do not let it become
+            # a permanent retry loop.  A blocked-lock result is recoverable
+            # once the authoritative writer releases the lock; an error or an
+            # unknown terminal receipt follows the same no-owner check before
+            # starting a fresh capture attempt.
+            previous_capture = {
+                "status": progress_status,
+                "capture_progress": progress,
+                "capture_progress_path": str(active_progress_path),
+            }
+            lock_busy = _capture_lock_busy(root)
+            if lock_busy is True or lock_busy is None:
+                result.update(
+                    {
+                        "status": "in_progress",
+                        "reason": "distillation_worker_lock_busy",
+                        "capture": {
+                            "started": False,
+                            "status": "in_progress",
+                            "reason": "distillation_worker_lock_busy",
+                            "previous_capture": previous_capture,
+                        },
+                    }
+                )
+                return write_and_return()
+            capture = _start_candidate_capture(
+                root=root,
+                progress_path=capture_progress_path,
+                capture_script=capture_script,
             )
-            _write_private_json(receipt_path, result)
-            return result
-        result["capture"] = _start_candidate_capture(
+            capture["previous_capture"] = previous_capture
+            if capture.get("started") is True:
+                prepared = {
+                    **_base_result("prepare"),
+                    "status": "in_progress",
+                    "reason": "authoritative_candidate_writer_starting",
+                    "capture": capture,
+                }
+                return publish_prepared(prepared, capture=capture)
+            if capture.get("status") == "error" or capture.get(
+                "reason"
+            ) == "capture_start_failed":
+                return promote_capture_failure(capture)
+            return publish_prepared(
+                {
+                    **_base_result("prepare"),
+                    "status": "in_progress",
+                    "reason": str(capture.get("reason") or "capture_in_progress"),
+                },
+                capture=capture,
+            )
+
+        if progress is not None:
+            # A completed (or stale) receipt is evidence that the previous
+            # writer reached a boundary.  Refresh the catalog while idle and
+            # prepare that boundary before considering another writer.
+            if progress_status in {"complete", "stalled"}:
+                catalog_result = _advance_catalog_when_idle(root)
+                result["catalog"] = catalog_result
+                if catalog_result.get("status") == "in_progress":
+                    result.update(
+                        {
+                            "status": "in_progress",
+                            "reason": str(
+                                catalog_result.get(
+                                    "reason", "catalog_refresh_in_progress"
+                                )
+                            ),
+                        }
+                    )
+                    result["capture"] = {
+                        "started": False,
+                        "status": progress_status,
+                        "reason": str(progress.get("reason") or progress_status),
+                        "capture_progress_path": str(active_progress_path),
+                    }
+                    return write_and_return()
+            capture = {
+                "started": False,
+                "status": progress_status,
+                "reason": str(progress.get("reason") or progress_status),
+                "capture_progress": progress,
+                "capture_progress_path": str(active_progress_path),
+            }
+            prepared = prepare(
+                root=root,
+                bundle_path=bundle_path,
+                receipt_path=receipt_path,
+                capture_progress_path=capture_progress_path,
+                split_plan_path=split_plan_path,
+                allow_split_write=allow_split_write,
+            )
+            if (
+                prepared.get("status") != "in_progress"
+                or prepared.get("reason") != "missing_candidate_snapshots"
+            ):
+                return publish_prepared(prepared, capture=capture)
+            capture = _start_candidate_capture(
+                root=root,
+                progress_path=capture_progress_path,
+                capture_script=capture_script,
+            )
+            if capture.get("started") is True:
+                prepared = {
+                    **_base_result("prepare"),
+                    "status": "in_progress",
+                    "reason": "authoritative_candidate_writer_starting",
+                    "capture": capture,
+                }
+                return publish_prepared(prepared, capture=capture)
+            if capture.get("status") == "error" or capture.get("reason") == "capture_start_failed":
+                return promote_capture_failure(capture)
+            return publish_prepared(
+                {
+                    **_base_result("prepare"),
+                    "status": "in_progress",
+                    "reason": str(capture.get("reason") or "capture_in_progress"),
+                },
+                capture=capture,
+            )
+
+        capture = _start_candidate_capture(
             root=root,
             progress_path=capture_progress_path,
             capture_script=capture_script,
         )
-        if result["capture"].get("started") is True:
+        if capture.get("started") is True:
             # The helper publishes its own ``starting`` receipt immediately
             # after process creation.  Avoid exporting while that first write
             # is in flight; the next unattended tick resumes prepare safely.
@@ -1544,38 +1749,23 @@ def run_daily(
                 **_base_result("prepare"),
                 "status": "in_progress",
                 "reason": "authoritative_candidate_writer_starting",
-                "capture": result["capture"],
+                "capture": capture,
             }
-            _write_private_json(receipt_path, prepared)
-        elif result["capture"].get("status") == "running":
-            prepared = prepare(
-                root=root,
-                bundle_path=bundle_path,
-                receipt_path=receipt_path,
-                capture_progress_path=capture_progress_path,
-                split_plan_path=split_plan_path,
-                allow_split_write=allow_split_write,
-            )
-        else:
-            prepared = prepare(
-                root=root,
-                bundle_path=bundle_path,
-                receipt_path=receipt_path,
-                capture_progress_path=capture_progress_path,
-                split_plan_path=split_plan_path,
-                allow_split_write=allow_split_write,
-            )
-        result["prepare"] = prepared
-        result.update(
-            {
-                "status": prepared.get("status", "in_progress"),
-                "reason": prepared.get("reason", "daily_prepare"),
-            }
+            return publish_prepared(prepared, capture=capture)
+        if capture.get("status") == "error" or capture.get("reason") == "capture_start_failed":
+            return promote_capture_failure(capture)
+        prepared = prepare(
+            root=root,
+            bundle_path=bundle_path,
+            receipt_path=receipt_path,
+            capture_progress_path=capture_progress_path,
+            split_plan_path=split_plan_path,
+            allow_split_write=allow_split_write,
         )
+        return publish_prepared(prepared, capture=capture)
     except Exception as exc:
         result.update({"status": "error", **_error_fields(exc)})
-    _write_private_json(receipt_path, result)
-    return result
+    return write_and_return()
 
 
 def _export_bundle(
@@ -1804,11 +1994,30 @@ def import_completed(
     receipt_path = receipt_path.expanduser()
     result = _base_result("import")
     try:
-        selected = _select_resumable_bundle(bundle_path)
+        selected = _select_import_bundle(bundle_path)
         if selected is not None:
             selected_path, selected_metadata = selected
             bundle_path = selected_path
             result["bundle_path"] = str(bundle_path)
+            if selected_metadata.get("status") == "error":
+                result.update(
+                    {
+                        "status": "error",
+                        "reason": str(
+                            selected_metadata.get("reason") or "bundle_invalid"
+                        ),
+                        **{
+                            key: selected_metadata[key]
+                            for key in (
+                                "error_type",
+                                "error_message_sha256",
+                            )
+                            if key in selected_metadata
+                        },
+                    }
+                )
+                _write_private_json(receipt_path, result)
+                return result
             if int(selected_metadata.get("remaining") or 0) > 0:
                 result.update(
                     {
@@ -1880,6 +2089,10 @@ def import_completed(
                     ),
                 },
             )
+    except DailyError as exc:
+        result.update(
+            {"status": "error", "reason": str(exc), **_error_fields(exc)}
+        )
     except Exception as exc:
         result.update({"status": "error", **_error_fields(exc)})
     _write_private_json(receipt_path, result)
