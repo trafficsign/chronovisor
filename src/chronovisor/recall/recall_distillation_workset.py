@@ -1888,8 +1888,22 @@ class DistillationWorkset:
                 raise
         return tuple(claims)
 
-    def release_unattempted(self, claims: Sequence[WorkClaim]) -> int:
-        """Return owned leases to ready without consuming an attempt."""
+    def release_unattempted(
+        self,
+        claims: Sequence[WorkClaim],
+        *,
+        retry_after_seconds: float = 0,
+    ) -> int:
+        """Return owned leases to ready without consuming an attempt.
+
+        A positive delay keeps a released claim out of selection until the
+        delay expires while preserving the claim's attempt budget.  The
+        default remains the historical immediate-release behavior.
+        """
+
+        retry_after = _finite(retry_after_seconds, "retry_after_seconds")
+        if retry_after < 0 or retry_after > 86_400:
+            raise DistillationWorksetError("retry_after_seconds is out of range")
 
         work_ids = [claim.work_id for claim in claims]
         lease_ids = [claim.lease_id for claim in claims]
@@ -1954,10 +1968,14 @@ class DistillationWorkset:
                         UPDATE work_items
                         SET state = 'ready', attempt_count = attempt_count - 1,
                             lease_id = NULL, lease_owner = NULL,
-                            lease_expires_at = NULL, next_attempt_at = NULL, updated_at = ?
+                            lease_expires_at = NULL, next_attempt_at = ?, updated_at = ?
                         WHERE work_id = ?
                         """,
-                        (now, claim.work_id),
+                        (
+                            now + retry_after if retry_after > 0 else None,
+                            now,
+                            claim.work_id,
+                        ),
                     )
                 after = self._snapshot(connection)
                 kinds = {claim.kind for claim in claims}

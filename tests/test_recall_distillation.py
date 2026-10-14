@@ -4183,6 +4183,164 @@ def test_chunk_reuses_loaded_candidates_for_preflight(
     assert candidate_reads == 1
 
 
+def test_native_capture_uses_closed_cohort_without_early_materialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract_id = "c" * 64
+    expected = distill._active_training_cohort(
+        [], teacher_profile=distill.NATIVE_LUNA_SINGLE_PROFILE,
+        profile_contract_id=contract_id,
+    )[1]["cohort_sha256"]
+    observed: list[str] = []
+    requested: list[set[str]] = []
+    rallies = [
+        {"rally_id": "old", "as_of": "2026-10-08T00:00:00Z", "actual_answer_refs": [1]},
+        {"rally_id": "recent", "as_of": "2026-10-10T00:00:00Z", "actual_answer_refs": [1]},
+        {"rally_id": "no-answer", "as_of": "2026-10-10T00:00:00Z"},
+    ]
+
+    def snapshots(_root: Path, _path: Path, ids: set[str]) -> dict:
+        requested.append(set(ids))
+        return {rally_id: {} for rally_id in ids}
+
+    def plan(_root: Path, _rallies: object, **kwargs: Any) -> dict:
+        observed.append(kwargs["model_cohort_sha256"])
+        return {"assignments": {}}
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("native cohort must not require early materialization")
+
+    monkeypatch.setattr(catalog, "sync_candidate_index", lambda *_args: None)
+    monkeypatch.setattr(catalog, "candidate_rally_ids", lambda *_args: {row["rally_id"] for row in rallies})
+    monkeypatch.setattr(catalog, "read_candidate_snapshots", snapshots)
+    monkeypatch.setattr(distill, "materialize_training_rows", forbidden)
+    monkeypatch.setattr(distill, "_current_profile_contract_id", lambda *_args: contract_id)
+    monkeypatch.setattr(distill, "_ensure_split_plan", plan)
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda *_args: "d" * 64)
+    distill._capture_candidate_snapshots(
+        root=tmp_path, raw_dir=tmp_path / "raw",
+        config=distill.DistillationConfig(teacher_profile=distill.NATIVE_LUNA_SINGLE_PROFILE),
+        rallies=rallies, texts={}, index_path=tmp_path / "index", label_rows=rallies,
+        cold_start=True, deadline=time.monotonic() + 300,
+    )
+    assert observed == [expected]
+    assert requested == [{"recent"}]
+
+
+@pytest.mark.parametrize("changed,always_fail,calls", [(True, False, 2), (False, False, 1), (True, True, 3)])
+def test_catalog_sync_retries_only_changed_raw_inventory_with_a_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    changed: bool, always_fail: bool, calls: int,
+) -> None:
+    raw_dir = _raw(tmp_path)
+    config = _config(tmp_path)
+    watermark = distill.committed_raw_watermark(raw_dir)
+    original_sync = catalog.sync_historical_index
+    observed: list[int] = []
+
+    class Prepared(Exception):
+        pass
+
+    def sync(*args: Any) -> str:
+        observed.append(1)
+        if len(observed) == 1 or always_fail:
+            raise catalog.CatalogError("historical catalog is not current")
+        return original_sync(*args)
+
+    def stop(_root: Path) -> list:
+        raise Prepared
+
+    monkeypatch.setattr(catalog, "sync_historical_index", sync)
+    monkeypatch.setattr(catalog, "rallies", stop)
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda _raw: "f" * 64 if changed else watermark)
+    with pytest.raises(Prepared if changed and not always_fail else catalog.CatalogError):
+        distill._prepare_distillation_chunk(
+            root=tmp_path, raw_dir=raw_dir, config_path=config,
+            teachers={}, counterfactual=None, structural_verifier=None,
+            dry_run=False, cold_start=True, max_elapsed_seconds=300,
+        )
+    assert len(observed) == calls
+
+
+@pytest.mark.parametrize("native,budget", [(True, 219), (True, 220), (False, 219)])
+def test_native_counterfactual_lane_does_not_wait_for_teacher_model_call_counter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native: bool, budget: int
+) -> None:
+    raw_dir = _raw(tmp_path)
+    config = distill.DistillationConfig(
+        enabled=True,
+        teacher_profile=distill.NATIVE_LUNA_SINGLE_PROFILE if native else distill.LOCAL_TRIAD_PROFILE,
+        native_luna_enabled=native,
+    )
+    monkeypatch.setattr(distill, "load_distillation_config", lambda _path: config)
+    monkeypatch.setattr(distill, "_ensure_profile_contract", lambda *_args: {"artifact_id": "a" * 64})
+    monkeypatch.setattr(distill, "_capture_candidate_snapshots", lambda **_kwargs: distill._CandidateCaptureResult({}, [], {}, False))
+    monkeypatch.setattr(distill, "_run_counterfactual_block", lambda **_kwargs: distill._CounterfactualBlockResult(pending=True))
+    monkeypatch.setattr(distill.time, "monotonic", lambda: 0.0)
+    setup = distill._prepare_distillation_chunk(
+        root=tmp_path, raw_dir=raw_dir, config_path=None,
+        teachers={}, counterfactual=None, structural_verifier=None,
+        dry_run=False, cold_start=True, max_elapsed_seconds=budget,
+    )
+    assert setup["teacher_model_calls"] == setup["counterfactual_model_calls"] == 0
+    assert setup["prefer_counterfactual"] is native
+    assert setup["model_deferred"] is (native and budget < 220)
+
+
+@pytest.mark.parametrize("new_label", [False, True])
+@pytest.mark.parametrize("split_changed", [False, True])
+def test_training_reuses_verified_snapshots_but_loads_new_labels_and_rebinds_split(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_label: bool, split_changed: bool
+) -> None:
+    labels = [{"rally_id": "seen"}] + ([{"rally_id": "new"}] if new_label else [])
+    supplied = {"seen": {"snapshot_sha256": "a" * 64}}
+    fresh = {"new": {"snapshot_sha256": "b" * 64}}
+    reads: list[set[str]] = []
+    materialized: list[dict] = []
+    checked: list[str] = []
+
+    def load(_root: Path, _path: Path, requested: set[str]) -> dict:
+        reads.append(set(requested))
+        return fresh
+
+    def materialize(_root: Path, **kwargs: Any) -> dict:
+        materialized.append(dict(kwargs["_snapshots"]))
+        return {"rows": [], "label_chain_head": ""}
+
+    class Prepared(Exception):
+        pass
+
+    def stop_at_preflight(**_kwargs: Any) -> dict:
+        raise Prepared
+
+    monkeypatch.setattr(distill, "_read_chain", lambda _path: labels)
+    monkeypatch.setattr(distill, "materialize_training_rows", materialize)
+    monkeypatch.setattr(distill, "_current_profile_contract_id", lambda *_args: "c" * 64)
+    monkeypatch.setattr(distill, "_active_training_cohort", lambda *_args, **_kwargs: ([], {"cohort_sha256": "d" * 64}))
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda _path: "e" * 64)
+    monkeypatch.setattr(distill, "_ensure_split_plan", lambda *_args, **_kwargs: {"artifact_id": "new" if split_changed else "old"})
+    monkeypatch.setattr(distill, "preflight", stop_at_preflight)
+    fake_catalog = SimpleNamespace(
+        sync_candidate_index=lambda *_args: checked.append("sync"),
+        candidate_index_state=lambda *_args: {"record_count": 2},
+        read_candidate_snapshots=load,
+        CatalogError=catalog.CatalogError,
+    )
+    with pytest.raises(Prepared):
+        distill._prepare_distillation_training(
+            root=tmp_path, raw_dir=tmp_path / "raw", config_path=None,
+            config=distill.DistillationConfig(teacher_profile=distill.NATIVE_LUNA_SINGLE_PROFILE),
+            catalog=fake_catalog, candidate_path=tmp_path / "candidates", label_path=tmp_path / "labels",
+            rallies=[], snapshots=supplied, split_plan={"artifact_id": "old"}, scheduler_state={},
+            existing=set(), pending=[], candidate_work=[], teachers_available=True,
+            model_deferred=False, cold_start=True, profile_contract_id="c" * 64,
+        )
+    assert checked == ["sync"]
+    assert reads == ([{"new"}] if new_label else [])
+    assert len(materialized) == (2 if split_changed else 1)
+    assert all(rows == {**supplied, **(fresh if new_label else {})} for rows in materialized)
+
+
 def test_timeout_after_atomic_batch_resumes_without_duplicate_or_cursor_advance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4258,9 +4416,11 @@ def test_final_state_is_last_commit_and_binds_completed_run(
             "cold_start_lane_turn": 4,
             "teacher_model_calls": 2,
             "counterfactual_model_calls": 1,
+            "last_success_at": "2026-10-13T21:52:30+00:00",
+            "run_id": "a" * 64,
         },
     )
-    before_state = state_path.read_bytes()
+    before_state = store.read_sealed(state_path)
     write_immutable = store.write_immutable
 
     def timeout_before_run_commit(
@@ -4280,7 +4440,17 @@ def test_final_state_is_last_commit_and_binds_completed_run(
     )
     assert deferred["status"] == "deferred"
     assert deferred["atomic_progress_may_be_present"] is True
-    assert state_path.read_bytes() == before_state
+    failed_state = store.read_sealed(state_path)
+    assert all(
+        failed_state[key] == value
+        for key, value in before_state.items()
+        if key != "seal_sha256"
+    )
+    assert failed_state["worker_status"] == "error"
+    assert failed_state["error_code"] == "distillation_run_timeout"
+    assert failed_state["worker_failure_count"] == 1
+    assert failed_state.get("last_success_at") == before_state.get("last_success_at")
+    assert failed_state["run_id"] == before_state["run_id"]
 
     monkeypatch.setattr(store, "write_immutable", write_immutable)
     setitimer = distill.signal.setitimer
@@ -10220,6 +10390,38 @@ def test_counterfactual_queue_uses_safe_reference_without_changing_target(
         assert claims[0].payload_ref == f"candidate-snapshot:{items[0]['payload_digest']}"
         with pytest.raises(workset.DistillationWorksetError, match="safe ledger reference"):
             workset._reference(f"candidate-snapshot:rally:{candidate_id}", "payload_ref")
+
+
+def test_missing_counterfactual_exposure_releases_head_with_delay(
+    tmp_path: Path,
+) -> None:
+    rallies = {key: {
+        "rally_id": key, "session_cluster_id": "session",
+        "as_of": "2026-10-10T00:00:00Z",
+        "actual_answer_refs": [{"semantic_sha256": "a" * 64}],
+    } for key in ("first", "second")}
+    snapshots = {key: {
+        "snapshot_sha256": "b" * 64,
+        "candidates": [{"candidate_id": "candidate", "text_sha256": "c" * 64}],
+    } for key in rallies}
+    items, keys = distill._prepare_counterfactual_work(
+        root=tmp_path, snapshots=snapshots, rally_by_id=rallies
+    )
+    queue = workset.DistillationWorkset(tmp_path / "queue.sqlite3")
+    queue.advance(items, {"source": "regression"})
+    claim = queue.claim("local-counterfactual", 1, "counterfactual", 300)[0]
+    target = next(pair for pair, work_id in keys.items() if work_id == claim.work_id)
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    result = distill._run_counterfactual_claim(
+        workset=queue, claim=claim, target=target,
+        root=tmp_path, raw_dir=tmp_path / "raw", config=distill.DistillationConfig(),
+        counterfactual=SimpleNamespace(local=True), snapshots=snapshots,
+        rally_by_id=rallies, texts={}, label_path=label_path,
+    )
+    assert result.deferred and result.model_calls == 0 and result.written == 0
+    assert queue.status(include_timing=True)["retry_wait"] == 1
+    assert queue.claim("local-counterfactual", 1, "counterfactual", 300)[0].work_id != claim.work_id
+    assert not label_path.exists()
 
 
 def test_counterfactual_claim_payload_excludes_answer_body(

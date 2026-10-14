@@ -525,6 +525,55 @@ def test_release_unattempted_preserves_attempt_budget(tmp_path: Path) -> None:
         workset.commit([original], [_completed()])
 
 
+def test_release_unattempted_delay_allows_later_claim_without_consuming_attempt(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3", clock=lambda: now[0])
+    workset.advance(
+        [_item("first", priority=1), _item("second", priority=0)],
+        {"source": 1},
+    )
+    first = workset.claim("label", 1, "worker-1", 60)[0]
+    assert first.work_id == "first"
+
+    assert workset.release_unattempted([first], retry_after_seconds=60) == 1
+    second = workset.claim("label", 1, "worker-2", 60)[0]
+    assert second.work_id == "second"
+    assert second.attempt == 1
+    workset.commit([second], [_completed()])
+
+    assert workset.claim("label", 1, "worker-3", 60) == ()
+    status = workset.status("label", include_timing=True)
+    assert status["retry_wait"] == 1
+    assert status["next_retry_in_seconds"] == 60
+
+    now[0] += 59
+    assert workset.claim("label", 1, "worker-4", 60) == ()
+    now[0] += 1
+    retried = workset.claim("label", 1, "worker-5", 60)[0]
+    assert retried.work_id == "first"
+    assert retried.attempt == 1
+
+
+@pytest.mark.parametrize(
+    "retry_after_seconds",
+    [-1, True, float("nan"), float("inf"), 86_400.1],
+)
+def test_release_unattempted_rejects_invalid_delay(
+    tmp_path: Path, retry_after_seconds: object
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance([_item("one")], 1)
+    claim = workset.claim("label", 1, "worker", 60)[0]
+
+    with pytest.raises(DistillationWorksetError):
+        workset.release_unattempted(
+            [claim], retry_after_seconds=retry_after_seconds  # type: ignore[arg-type]
+        )
+    assert workset.status("label")["leased"] == 1
+
+
 def test_concurrent_claims_are_exactly_once(tmp_path: Path) -> None:
     path = tmp_path / "workset.sqlite3"
     workset = DistillationWorkset(path)

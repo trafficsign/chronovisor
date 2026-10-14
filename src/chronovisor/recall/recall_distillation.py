@@ -5567,6 +5567,15 @@ def _native_label_source_matches(
     return all(source.get(key) == value for key, value in expected.items())
 
 
+def _same_utc_instant(left: str, right: str) -> bool:
+    try:
+        first = datetime.fromisoformat(left)
+        second = datetime.fromisoformat(right)
+    except ValueError:
+        return False
+    return first.tzinfo is not None and second.tzinfo is not None and first == second
+
+
 def _materialization_label_row(
     label: Mapping[str, Any],
     root: Path,
@@ -5703,9 +5712,21 @@ def _materialization_label_row(
     temporal_as_of = str(label.get("as_of") or rally_as_of)
     temporal_group_id = str(label.get("group_id") or session_cluster_id)
     feature_parity = features_by_pair.get((rally_id, candidate_id)) == features
+    temporal_match = temporal_as_of == rally_as_of
+    snapshot_match = snapshot_contract.get("as_of") == rally_as_of
+    if is_native:
+        # Native labels serialize UTC with microseconds; Raw may use a shorter
+        # precision or an explicit offset. Bind the same instant, not spelling.
+        temporal_match = (
+            _same_utc_instant(temporal_as_of, rally_as_of)
+            and label.get("as_of_us") == rally_row.get("as_of_us")
+        )
+        snapshot_match = _same_utc_instant(
+            str(snapshot_contract.get("as_of") or ""), rally_as_of
+        )
     future_safe = (
-        temporal_as_of == rally_as_of
-        and snapshot_contract.get("as_of") == rally_as_of
+        temporal_match
+        and snapshot_match
         and re.fullmatch(r"[0-9a-f]{64}", snapshot_contract.get("snapshot_sha256", ""))
         is not None
         and feature_parity
@@ -5714,7 +5735,7 @@ def _materialization_label_row(
         "rally_id": rally_id,
         "candidate_id": candidate_id,
         "session_cluster_id": session_cluster_id,
-        "as_of": rally_as_of,
+        "as_of": temporal_as_of if is_native else rally_as_of,
         "dimension": dimension,
         "verdict": verdict,
         "authority": label["authority"],
@@ -5947,6 +5968,15 @@ def _finalize_materialized_training_rows(
     rows = []
     for row in materialized:
         row_split = split.get(row["rally_id"], "embargo")
+        row_plan_id = split_plan_id
+        if (
+            row.get("profile") == NATIVE_LUNA_SINGLE_PROFILE
+            and row.get("source") != "counterfactual-label"
+            and row.get("label_split_plan_id") in compatible_split_plan_ids
+        ):
+            # Native receipts seal the original plan identity. An extension
+            # may preserve every assignment, but cannot rewrite that receipt.
+            row_plan_id = str(row["label_split_plan_id"])
         split_bound = (
             row.get("profile") in SINGLE_TEACHER_PROFILES
             and row.get("label_split_plan_id") in compatible_split_plan_ids
@@ -5963,10 +5993,10 @@ def _finalize_materialized_training_rows(
             {
                 **row,
                 "split": row_split,
-                "split_plan_id": split_plan_id,
+                "split_plan_id": row_plan_id,
                 "locked_test_read_only": bool(split_plan_id) and row_split == "test",
                 "locked_test_evidence_ref": (
-                    f"split-plan:{split_plan_id}"
+                    f"split-plan:{row_plan_id}"
                     if split_plan_id and row_split == "test"
                     else ""
                 ),
@@ -5975,7 +6005,7 @@ def _finalize_materialized_training_rows(
                         "fixed_split_plan": fixed_split_plan,
                         "locked_test_read_only": split_bound,
                         "locked_test_evidence_ref": (
-                            f"split-plan:{split_plan_id}" if split_bound else ""
+                            f"split-plan:{row_plan_id}" if split_bound else ""
                         ),
                     }
                     if row.get("profile") in SINGLE_TEACHER_PROFILES
@@ -15022,7 +15052,7 @@ def _run_counterfactual_claim(
                 # Receipt acquisition is outside this claim.  Preserve the
                 # claim and its attempt budget so a later sealed exposure can
                 # resume it without creating any label or training row.
-                workset.release_unattempted([claim])
+                workset.release_unattempted([claim], retry_after_seconds=60)
                 return _CounterfactualBlockResult(pending=True, deferred=True)
             continue
         if exposure and set(original_evidence) != {
@@ -15351,6 +15381,16 @@ def _capture_candidate_snapshots(
                 for row in label_rows
                 if isinstance(row.get("rally_id"), str) and row.get("rally_id")
             }
+            if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE:
+                # Native teacher work imports frozen bundles and needs no
+                # historical snapshot scan here. Load only the CF model lane;
+                # the training phase loads and verifies all remaining rows.
+                label_rally_ids.intersection_update(
+                    str(rally["rally_id"])
+                    for rally in rallies
+                    if rally.get("actual_answer_refs")
+                    and _native_counterfactual_since_approval(rally)
+                )
             snapshots = {
                 rally_id: snapshot
                 for rally_id, snapshot in catalog.read_candidate_snapshots(
@@ -15371,14 +15411,20 @@ def _capture_candidate_snapshots(
     planned = _age_aware_backfill(rallies=planned, profile=config.teacher_profile)
     split_plan: Mapping[str, Any] = {}
     if cold_start:
-        training = materialize_training_rows(
-            root,
-            _rallies=rallies,
-            _snapshots=snapshots,
-            _label_rows=label_rows,
+        # Native Luna's closed cohort uses its fixed model identity, not the
+        # observed label rows. Materialize once, after the model phase.
+        training_rows = (
+            []
+            if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+            else materialize_training_rows(
+                root,
+                _rallies=rallies,
+                _snapshots=snapshots,
+                _label_rows=label_rows,
+            )["rows"]
         )
         _, cohort = _active_training_cohort(
-            training["rows"],
+            training_rows,
             teacher_profile=config.teacher_profile,
             profile_contract_id=(
                 _current_profile_contract_id(root, config.teacher_profile)
@@ -15538,7 +15584,19 @@ def _prepare_distillation_chunk(
     # the current text-free projection and resolves text only on demand.
     from chronovisor.recall import recall_distillation_catalog as catalog
 
-    catalog.advance(raw_dir, root, config.max_input_bytes)
+    advanced = catalog.advance(raw_dir, root, config.max_input_bytes)
+    index_sha256 = ""
+    if not dry_run:
+        for attempt in range(3):
+            try:
+                index_sha256 = catalog.sync_historical_index(raw_dir, root)
+                break
+            except catalog.CatalogError:
+                # Ingest can append committed Raw between advance and sync.
+                # Retry only a changed inventory, never a corrupt same source.
+                if attempt == 2 or advanced.watermark == committed_raw_watermark(raw_dir):
+                    raise
+                advanced = catalog.advance(raw_dir, root, config.max_input_bytes)
     rallies = catalog.rallies(root)
     if teachers is None:
         teachers, default_counterfactual = _default_workers(
@@ -15593,7 +15651,6 @@ def _prepare_distillation_chunk(
         ({"kind": "rally-manifest", "manifest": rally} for rally in pending),
     )
     index_path = catalog.historical_index_path(root)
-    index_sha256 = catalog.sync_historical_index(raw_dir, root)
     texts = catalog.CatalogTextCache(raw_dir, root)
     rally_by_id = {str(rally["rally_id"]): rally for rally in rallies}
     candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
@@ -15636,10 +15693,13 @@ def _prepare_distillation_chunk(
         label_path=label_path,
         label_rows=label_rows,
     )
-    prefer_counterfactual = _is_counterfactual_turn(
-        teacher_model_calls,
-        counterfactual_model_calls,
-        available=counterfactual_probe.pending,
+    prefer_counterfactual = counterfactual_probe.pending and (
+        config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+        or _is_counterfactual_turn(
+            teacher_model_calls,
+            counterfactual_model_calls,
+            available=True,
+        )
     )
     minimum_model_seconds = 220 if prefer_counterfactual else 130
     model_work_available = teachers_available or counterfactual_probe.pending
@@ -15713,18 +15773,23 @@ def _prepare_distillation_training(
         try:
             catalog.sync_candidate_index(root, candidate_path)
             candidate_index_state = catalog.candidate_index_state(root)
-            training_snapshots = {
-                rally_id: snapshot
-                for rally_id, snapshot in catalog.read_candidate_snapshots(
-                    root,
-                    candidate_path,
-                    {
-                        str(row.get("rally_id") or "")
-                        for row in current_labels
-                        if isinstance(row.get("rally_id"), str) and row.get("rally_id")
-                    },
-                ).items()
+            required_rallies = {
+                str(row["rally_id"])
+                for row in current_labels
+                if isinstance(row.get("rally_id"), str) and row.get("rally_id")
             }
+            # The capture phase already verified these immutable snapshots
+            # under this worker lease. Re-read only newly imported rallies.
+            training_snapshots = {
+                rally_id: snapshots[rally_id]
+                for rally_id in required_rallies
+                if rally_id in snapshots
+            }
+            missing = required_rallies - training_snapshots.keys()
+            if missing:
+                training_snapshots.update(
+                    catalog.read_candidate_snapshots(root, candidate_path, missing)
+                )
         except catalog.CatalogError as exc:
             raise DistillationError("OX training snapshots are unavailable") from exc
     training_snapshot = materialize_training_rows(
@@ -15734,6 +15799,7 @@ def _prepare_distillation_training(
         _label_rows=current_labels,
     )
     if cold_start:
+        prior_split_id = str(split_plan.get("artifact_id") or "")
         _, current_cohort = _active_training_cohort(
             training_snapshot["rows"],
             teacher_profile=config.teacher_profile,
@@ -15749,12 +15815,18 @@ def _prepare_distillation_training(
             raw_watermark=committed_raw_watermark(raw_dir),
             model_cohort_sha256=current_cohort["cohort_sha256"],
         )
-        training_snapshot = materialize_training_rows(
-            root,
-            _rallies=rallies,
-            _snapshots=training_snapshots,
-            _label_rows=current_labels,
-        )
+        if (
+            not prior_split_id
+            or split_plan["artifact_id"] != prior_split_id
+            or training_snapshot.get("label_chain_head")
+            != store.chain_head(label_path)["head_sha256"]
+        ):
+            training_snapshot = materialize_training_rows(
+                root,
+                _rallies=rallies,
+                _snapshots=training_snapshots,
+                _label_rows=current_labels,
+            )
     baseline = preflight(
         raw_dir=raw_dir,
         root=root,

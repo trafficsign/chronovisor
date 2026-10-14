@@ -33,7 +33,17 @@ def _config(**overrides: object) -> dict[str, object]:
     }
 
 
-def _source_rows(count: int = 2) -> list[dict[str, object]]:
+def _source_rows(
+    count: int = 2, *, complete_features: bool = False
+) -> list[dict[str, object]]:
+    features = (
+        {
+            "query_chargram_coverage": 0.25,
+            "candidate_chargram_precision": 0.75,
+        }
+        if complete_features
+        else None
+    )
     return [
         {
             "rally_id": f"rally-{index}",
@@ -46,7 +56,7 @@ def _source_rows(count: int = 2) -> list[dict[str, object]]:
             "candidate_text_sha256": f"{index + 31:064x}",
             "split": "train" if index == 0 else "validation",
             "group_id": f"group-{index}",
-            "features": {"candidate_rank": index},
+            "features": features or {"candidate_rank": index},
             "assignment": {
                 "revision": "native-luna-bulk-v1",
                 "profile": "native-luna-single-v1",
@@ -62,8 +72,9 @@ def _source_rows(count: int = 2) -> list[dict[str, object]]:
 def _complete_bundle(
     root: Path, *, count: int = 2, output_hash: str | None = None,
     assignment_overrides: dict[str, object] | None = None,
+    complete_features: bool = False,
 ) -> LunaBulkBundle:
-    sources = _source_rows(count)
+    sources = _source_rows(count, complete_features=complete_features)
     for source in sources:
         source["assignment"].update(assignment_overrides or {})
     bundle = LunaBulkBundle.create(
@@ -193,6 +204,136 @@ def test_row_integrity_rejects_raw_fields_and_tampering(tmp_path: Path) -> None:
     receipt_path = store.distillation_dir(root) / NATIVE_RECEIPTS_FILE
     receipt_path.chmod(0o644)
     assert not validate_label(root, row)
+
+
+@pytest.mark.parametrize("compatible", [True, False])
+def test_materialization_preserves_sealed_native_plan_on_compatible_extension(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compatible: bool
+) -> None:
+    from chronovisor.recall import recall_distillation as distill
+
+    root = tmp_path / "root"
+    bundle = _complete_bundle(tmp_path / "bundle", count=1)
+    ensure_contract(root, _config())
+    import_bundle(root, bundle.root)
+    label = store.read_chain(store.distillation_dir(root) / store.LABEL_LEDGER_FILE)[0]
+    original_plan = {
+        "artifact_id": "a" * 64,
+        "feature_revision": distill.TEXT_FEATURE_REVISION,
+        "split_revision": "fixed-test",
+        "assignments": {label["rally_id"]: "train"},
+    }
+    current_plan = {
+        **original_plan,
+        "artifact_id": "b" * 64,
+        "assignments": {
+            label["rally_id"]: "train" if compatible else "test",
+            "new-rally": "test",
+        },
+    }
+    monkeypatch.setattr(distill, "_read_split_plan", lambda _root: current_plan)
+    monkeypatch.setattr(distill, "_read_split_plan_artifact", lambda _root, _id: original_plan)
+    projection = {
+        **label, "source": "teacher-label",
+        "label_split_plan_id": label["split_plan_id"],
+        "label_record_sha256": label["record_sha256"],
+    }
+    projection.pop("authority")
+    row = distill._finalize_materialized_training_rows(root, [projection], 10)["rows"][0]
+    assert row_integrity(row, root=root) is compatible
+    assert row["split_plan_id"] == (original_plan if compatible else current_plan)["artifact_id"]
+    assert row["fixed_split_plan"] is compatible
+    assert not row_integrity({**row, "split_plan_id": "c" * 64}, root=root)
+    assert store.read_chain(store.distillation_dir(root) / store.LABEL_LEDGER_FILE)[0] == label
+
+
+@pytest.mark.parametrize(
+    ("rally_as_of", "snapshot_as_of", "rally_as_of_us", "expected_leakage"),
+    [
+        (
+            "1970-01-01T00:00:00.001Z",
+            "1970-01-01T00:00:00.001+00:00",
+            1_000,
+            False,
+        ),
+        (
+            "1970-01-01T00:00:00.001001Z",
+            "1970-01-01T00:00:00.001001Z",
+            1_001,
+            True,
+        ),
+        (
+            "1970-01-01T00:00:00.001",
+            "1970-01-01T00:00:00.001",
+            1_000,
+            True,
+        ),
+        ("not-a-timestamp", "not-a-timestamp", 1_000, True),
+        (
+            "1970-01-01T00:00:00.001000Z",
+            "1970-01-01T00:00:00.001000Z",
+            1_001,
+            True,
+        ),
+    ],
+    ids=("same_instant", "one_microsecond_difference", "naive", "invalid", "as_of_us_difference"),
+)
+def test_materialization_binds_native_temporal_identity_without_mutating_label(
+    tmp_path: Path,
+    rally_as_of: str,
+    snapshot_as_of: str,
+    rally_as_of_us: int,
+    expected_leakage: bool,
+) -> None:
+    from chronovisor.recall import recall_distillation as distill
+
+    root = tmp_path / "root"
+    bundle = _complete_bundle(
+        tmp_path / "bundle", count=1, complete_features=True
+    )
+    ensure_contract(root, _config())
+    import_bundle(root, bundle.root)
+    label = store.read_chain(store.distillation_dir(root) / store.LABEL_LEDGER_FILE)[0]
+    original_label = json.loads(json.dumps(label))
+    payload_source = label["payload_source"]
+    rally_id = str(label["rally_id"])
+    candidate_id = str(label["candidate_id"])
+    features = {
+        "query_chargram_coverage": 0.25,
+        "candidate_chargram_precision": 0.75,
+    }
+    rally = {
+        "rally_id": rally_id,
+        "as_of": rally_as_of,
+        "as_of_us": rally_as_of_us,
+        "session_cluster_id": str(label["group_id"]),
+        "query_sha256": payload_source["query_sha256"],
+        "context_refs": [
+            {"semantic_sha256": value}
+            for value in payload_source["context_sha256"]
+        ],
+    }
+    snapshot_contract = {
+        "as_of": snapshot_as_of,
+        "snapshot_sha256": payload_source["candidate_snapshot_sha256"],
+        "candidate_text_sha256": {
+            candidate_id: payload_source["candidate_text_sha256"]
+        },
+    }
+
+    row = distill._materialization_label_row(
+        label,
+        root,
+        {rally_id: rally},
+        {(rally_id, candidate_id): features},
+        {rally_id: snapshot_contract},
+        "",
+    )
+
+    assert row is not None
+    assert row["future_leakage"] is expected_leakage
+    assert row["as_of"] == label["as_of"]
+    assert label == original_label
 
 
 def test_explicit_assignment_repair_preserves_original_and_native_responses(tmp_path: Path) -> None:
