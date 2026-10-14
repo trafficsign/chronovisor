@@ -82,9 +82,9 @@ created_at: 2026-10-13T20:52:29+09:00
 
 ### 2026-10-14 post-bulk 停滞の追加修復
 - [x] 修復1：import 拒否の原因を検証し、検査・凍結入力を維持して両 bundle の受入結果と隔離数を確定する。
-- [ ] 修復2：formal last_success_at の停止理由を解決し、本線実行と gate の受入・待機理由を記録する。
-- [ ] 修復3：import / daily capture / run / idle の停止を health / chronovisor_init に表示し、同一失敗を backoff する。
-- [ ] 修復4：安全な境界で配備し、live fault injection・復帰・drift=false と 09:15 automation の整合を確認する。
+- [x] 修復2：formal last_success_at の停止理由を解決し、本線実行と gate の受入・待機理由を記録する。
+- [x] 修復3：import / daily capture / run / idle の停止を health / chronovisor_init に表示し、同一失敗を backoff する。
+- [x] 修復4：安全な境界で配備し、live fault injection・復帰・drift=false と 09:15 automation の整合を確認する。
 
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
@@ -113,7 +113,8 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- なし
+- 品質受入待ち：blind repeatの5 incomplete pairs、凍結済みgroupの期間重複、CFの成立件数不足。CFはblind order不一致による実拒否があり、人の判断待ちとしてhealth/initへ表示する。日次運転は継続し、凍結入力・閾値・prompt/schemaは維持する。
+- 7日無人継続と別モデル300件の独立比較は未完。既存09:15確認で追跡する。
 
 ## 受け渡しメモ（次担当へ）
 - ユーザーは「前のも、作って結局動いていない。これを何回も繰り返している」と言っている。今回の成否は、実装とテストが通ることではなく、無人で回り続けることで決まる。
@@ -222,3 +223,18 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-14 20:24 JST　先の「server生成前待機」の原因表現を訂正・限定する。実workerの18145接続なし／ollama-resource.lock.admission FD保持、ingest PID98329の同admission/main lock保持とfcntl busyを突合した。LocalStructuredSessionは全local providerを共通exclusive brokerへ通し、workerがresource_lease_timeout_msを未指定のため無期限待機し、親deadline+5秒でkillされていた。これはモデルを未試行なのにattempted timeoutと数えてclaim retryを消費する実装不具合で、MTPLX再起動では直らない。保護leaseを迂回せず非blocking admissionで既存capacity_unavailable／release_unattemptedへ返す修正を追加する。推論45秒・親watchdog・gate/floor/quality threshold・prompt/schema/context/output枠は維持する。server restartは行っていない。
 - 2026-10-14 20:24 JST　比較ジョブを止めた単独runは244.3724秒でsealed stateへ到達し、worker_error_stage=counterfactual／CounterfactualTimeout／failure_count=1を保存した。PID80133はfinallyでSIGCONTされ、private pause receipt status=restoredを確認。続くtrace runはresearch lease未取得をattempted=falseで返しており、旧CF障害記録を消さないことを実運転でも確認中。最新39b858fcのQuality／Python3.14／Security全成功。6dabeff7のCIは継続中だが追加admission修正を最終版に含めるため、config変更前に自作配備watcherだけを停止した。
 - 2026-10-14 20:26 JST　workerに非blocking resource admissionを接続し、実LocalStructuredSession＋LLMRuntime＋busy controlの回帰でexclusive leaseを要求したままtransport呼出0／capacity_unavailableを確認。親worker応答はattempted=false、CF claimはrelease_unattemptedでattempt予算を消費しない。未知の実timeoutやinvalidは従来どおり失敗である。worker／mainline／structured／large-function関連455 tests、Ruff、mypy97 files、diff check通過。この変更は無期限資源待ちの接続不備を直すもので、メモリ保護mutexと推論期限、全品質受入条件を維持する。
+
+- 2026-10-14 21:02 JST　非blocking admissionを実機で受入。既存admission leaseだけを保持したsynthetic worker呼出は0.237秒でcapacity_unavailable／result空を返し、model transportは行わない。その後はingestの自然なbatch境界で既存leaseを取得し、別モデル比較jobをresearch lease解放・子process無しの境界で一時停止して通常300秒chunkを実行した。A0/A1生成14.599／7.677秒、両順序utility14.064／13.150秒が全て成功、chunkは207.782秒でsealed stateまで保存。ただしCF結果はCounterfactualInvalidとして拒否され、CF0・last_success06:52:30を維持した。品質拒否を成功に読み替えず、archiveで比較結果の安全なmetadataを追加確認する。比較jobはfinallyで復帰しPID80133の停止解除を確認。private safe-admission-acceptance-receipt status=restored。
+- 2026-10-14 21:02 JST　最終code commit27dd7cc41aa172e7aac525cfbcac6ebc4f913a1aをpushし、必須Quality／Python3.14／Securityは全成功。Quality full suiteは6,926 passed／4 skipped／57 deselected（1,304.79秒）、mypy97 files、architecture36、semantic smoke79、HNSW1も成功。09:15 recall-p2bはACTIVE・RRULE・target threadを維持し、promptとupdated_atだけを変更。prompt SHA256 43d93141f6d7e00b8f9a0f16f1b9099cc1ecb660f1c52019513562d982cfa735。実行中ingestがモデル応答を待ち、convergeも別のbounded run中だったため、判断としてhealthを提供するDashboard／LANだけを先に安全に更新し、残る4 serviceは自然な境界で更新する段階配備へ切替。Rawをforce-killせず、20:51:56にはingestが10件を処理してpending11→1へ進んだことを確認。Dashboard初回cold集計は20秒／30秒probeがtimeoutしたが、後続HTTPは0.116秒でcommit=expected=27dd7cc4・drift=falseを確認した。設定どおりのfresh MCPも同commitを実証。background service配備と8ケースfault injectionは進行中であり、まだ完了checkboxは付けない。
+
+- 2026-10-14 21:06 JST　修復3の実機受入完了。実CLIの不正private fixtureからimport／daily runの失敗を発生させ、実supervisorのdurable historyと再試行抑制を通し、live HTTP /api/healthと設定どおり新規起動したMCP chronovisor_initの両方で確認した。8ケース（反復import、labeling完了未import、反復run、capture停止、capture失敗、予定超過idle、本線例外反復、CF例外反復）が全てalert／human_waitと段階固有reasonを返した。各import/runで5回の同一失敗を論理時計だけ加速して作り、backoff60／120／240／480／900秒と期限前のchild再起動抑制、再読込後の履歴維持を確認。CFはstage=counterfactual／CounterfactualTimeoutを表示した。初回の補助scriptはsealed stateの予約fieldを再指定して検査に拒否され、case開始前に全復帰したため補助側だけを修正して再実施。製品の検査は緩めていない。
+- 2026-10-14 21:06 JST　live-fault-probe-receipt.json status=passed、8/8。state／supervisor status／maintenance／configを元のbytes・modeへ戻し、A/Bのmanifest・snapshot・全shard source、candidate/label ledgerの全body hash・size・head hash・records一致を検証。故障reasonはbaselineと同じ状態へ復帰し、既存の実CF失敗を隠していない。MCP statusも注入前後でcommit=expected=27dd7cc4／drift=false。faultのprivate fixtureは削除し、監査用receipt/logだけを保持する。HTTPとfresh MCPで同じ表示経路を実証したが、既存の長期接続MCPを強制killする操作は行わず、既存接続は次回再接続で新版となる。convergeの自然終了とRawのsafe boundary待ちは継続し、修復4は未完のままとする。
+
+- 2026-10-14 21:31 JST　canonical GitHub archive27dd7cc4の通常300秒chunkは170.3166秒でsealed stateへ到達し、candidate snapshots8件、candidate_backlog=0／manifest_backlog=0。実ingestが資源を使用中のworkerは0.324秒でcapacity_unavailable／attempted=falseとなり、失敗retryを消費しない。baseline7fa03ef8…ではruntime_identity_unavailableが消え、残るhard floorはblind_repeat_pair_incomplete／chronological_order_invalid／counterfactual_pairs_below_floorの3件。native適格9,605（relevant2,371／irrelevant7,234）、blind repeat195 complete／5 incomplete、188 stable・Wilson下限0.92776851、locked test3,333を確認。形式的last_successは06:52:30を保持する。
+- 2026-10-14 21:31 JST　旧convergeは21:14に自然終了し、active claim0を確認した。CLI exit0でも内部distillation errorを返すため、終了コードを成功証拠にせずsealed stateを正とする。残る配備はRawの既存lease解放待ち。ingestは21:09:55に10件完了しpending18→12、その後のsampleでもmodel応答後の文字列処理／atomic renameが進んでおりforce-killしない。判断として次の安全な境界で背景3 serviceを更新後、ingest leaseを保持した短い検証窓でcanonical CFを1 chunkだけ実行し、最後にconvergeを更新する。前回CFの4worker成功後拒否はblind order不一致が最有力だが証跡不足で断定せず、boolean／choice enum／digestのみ追加記録する。
+
+- 2026-10-14 21:40 JST　修復2完了（正式成功時刻の更新・品質gate合格を意味しない）。本線は未スケジュールでも無作業でもなく、旧import identity拒否、準備／validationの時間超過、無期限resource admissionが実行を妨げていた。修正済canonical archiveをingestの自然境界で実行し、205.4786秒でsealed stateまで完了。answer9.753／7.579秒、utility13.904／12.826秒が全て成功した一方、blind_orders=[a0_first,a1_first]に対してblind_choices=[a,a]、distinct route/model=true、order_agreement=false、verdict=uncertainを確認した。残るCounterfactualInvalidは順序反転で判定が変わる実際の品質拒否であり、モデル通信や資源待機の不具合ではない。CF0／既定floor100、正式last_success_at=2026-10-13T21:52:30.040495+00:00（10/14 06:52:30 JST）を偽更新しない。実失敗count2を保存し、HTTPにはdistillation_run_repeated_failure／human_waitが現れた。
+- 2026-10-14 21:40 JST　Rawの自然境界21:33で既存ingest／distillation leaseを取得し、背景service更新・socket ready後に短いCF検証窓を設けた。比較job PID80133はresearch lease解放／model_active=false／子process無しでのみ一時停止し、finallyでSIGCONT、ingest leaseも解放した。convergeを最後に更新し、全6 serviceのrestart exit0、各実processのarchive direct_url commit27dd7cc4一致を確認（deployment-archives-receipt status=passed）。21:38:47にmaintenance markerを除去してsupervisorをbootstrap、PID5056の新heartbeat、A/B未import0、当日run開始を確認。全品質条件・contract・P0・凍結hashを維持し、追加teacher labelをverified truthへ昇格しない。
+
+- 2026-10-14 21:41 JST　修復4完了。final-live-runtime-receipt status=passed。HTTP8765と設定どおりのfresh MCP statusはcommit=expected=27dd7cc4／drift=false、LAN192.168.100.3:8766はTLS・未認証401、semanticはready=true／2,048次元self-test／query3件中3hits、rerankerはready=true／warmup ready。HTTPとchronovisor_initの両方で実際のdistillation_run_repeated_failure／human_wait／stage=counterfactual／CounterfactualInvalid／count2を確認し、maintenance由来executor_stalledは消失した。最終補助scriptはinitの軽量healthにruntime fieldが有ると誤って仮定し初回assert失敗したため、同一MCP processのchronovisor_statusで版を照合するよう補助側を直して再実行した。製品・設定・gateの変更は無い。
+- 2026-10-14 21:41 JST　通常運転復帰後の日次runがcapture_startedを返し、次のcaptureは同時に動くconvergeのdistillation_worker_lock_busyで正規待機していることをreceiptで確認。failure_count0、heartbeat更新継続、A/Bの未import0。09:15 automationは同じACTIVE／RRULE／threadのまま新状態とbackoffを監視するpromptへ更新済み、次回時刻の実行と新しい日次bundle完走・7日継続は未観測のため完了扱いにしない。Plan全体はrunning、2-2／2-4／3-1／3-2の受入checkboxは維持する。8種類の故障注入の全復帰、6,926 testsと必須CI成功、原A/B hash不変、native新規隔離0、旧未読8,260と廃止profile152の隔離を証跡として保持する。
