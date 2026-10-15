@@ -12,11 +12,13 @@ from chronovisor.core.live_model_stream import (
 from chronovisor.ingest import ingest_transport
 
 
-def _wait_for_output(receiver: LiveModelStreamReceiver, expected: str) -> dict:
+def _wait_for_output(
+    receiver: LiveModelStreamReceiver, expected: str, *, output_tokens: int
+) -> dict:
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
         snapshot = receiver.snapshot()
-        if snapshot["output"] == expected:
+        if snapshot["output"] == expected and snapshot["output_tokens"] == output_tokens:
             return snapshot
         time.sleep(0.01)
     raise AssertionError(f"live stream did not reach {expected!r}")
@@ -61,8 +63,8 @@ def test_live_model_stream_fans_out_without_persisting_content(tmp_path: Path) -
             },
         )
 
-        local_snapshot = _wait_for_output(local, "answer")
-        lan_snapshot = _wait_for_output(lan, "answer")
+        local_snapshot = _wait_for_output(local, "answer", output_tokens=7)
+        lan_snapshot = _wait_for_output(lan, "answer", output_tokens=7)
         assert local_snapshot["thinking"] == "plan "
         assert lan_snapshot["thinking"] == "plan "
         assert local_snapshot["output_tokens"] == 7
