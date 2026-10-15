@@ -86,6 +86,12 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] 修復3：import / daily capture / run / idle の停止を health / chronovisor_init に表示し、同一失敗を backoff する。
 - [x] 修復4：安全な境界で配備し、live fault injection・復帰・drift=false と 09:15 automation の整合を確認する。
 
+### 2026-10-15 formal mainline の追加修復
+- [ ] 修復5：本番と隔離コピーの差を再現し、checkpoint検査を維持して原因を修正する。
+- [ ] 修復6：live mainlineの実成功、正式成功時刻、failure countとgate理由を確認する。
+- [ ] 修復7：日次runの旧履歴を保持し、実成功によるalert解除と新規障害の表示を確認する。
+- [ ] 修復8：canonical packageを安全に配備し、HTTP/MCPのdriftと09:15 automationを整合させる。
+
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
 - [x] 5-2 ingest：`apple-watch-band-material-tradeoffs/bandwork-leather-band-experience.md` が `missing_create_frontmatter` で失敗している（2026-10-13 19:45、1/3 回目）。再試行で直っていなければ原因を見る。
@@ -245,3 +251,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-15 10:07 JST　strict import済みnativeは63,521（relevant14,879／irrelevant46,144／uncertain2,498、decisive正例24.38%、重複衝突0）。A/B61,884から日次1,165＋472が増え、last_label/import=10/15 00:31:06 JST、正式last_success=10/14 06:52:30 JST。blindの正式baselineは195 complete／5 incomplete、188 stable・Wilson下限0.92776851、locked test3,333。別local identity突合は218/300=72.7%と37/60=61.7%（input hash不一致0）でlocal教師への切替は保留。CF0、verified_truth0、rollout0、blind_repeat_pair_incomplete／chronological_order_invalid／counterfactual_pairs_below_floorを維持。ラベル保存日は10/13・14・15の3日で、連続7日受入には読み替えない。P0 appliedはquery_hint1371／alias1／page_tag27、3 protected SHAとconfig SHAは開始時から不変。旧未読8,260件と廃止profile152件の隔離を戻していない。
 - 2026-10-15 10:07 JST　正式mainlineのCatalogErrorは09:41に14回目（hash1b26ff01…、checkpoint requires repair）を記録し、解消未確認。日次側は09:43に別のRaw inventory検査エラーを一度記録した後、既存ownerの再試行でcatalog修復とcaptureに進んだ。privateな隔離コピーではprepare／trainingの検証段階、および追加Raw31件の増分catalog更新が全て成功し、本番障害は再現できなかった。checkpointの物理stat検査、Raw検査、期限・gateを変更せず、本番のcheckpointを手で再sealしていない。fresh initとHTTPはstage=mainline／count14を表示し、旧10/14 runのbackoffと空source identityのrunning履歴も残るためnative_luna_daily_run_failedが継続している。履歴を手で消さず、次回は現行runの完了・旧履歴の扱い・正式ownerの再試行結果を区別して確認する。復旧後は常駐処理が動いているため監視とPlan記録のみとし、全体runningと未達checkboxを維持する。
 - 2026-10-15 10:07 JST　配備範囲はcheckoutのdaily scriptで、package srcは27dd7cc4と72db26dcの差分なし。HTTP archive/config pinは27dd7cc4、fresh MCP archiveは72db26dc。HTTPはexpected72db26dcとのcommit差をdrift=trueと表示しており、drift=falseとは報告しない。実行中Rawや常駐workerの再起動は行っていない。counts/hash証跡はprivateな2026-10-15-heartbeat/finish-receipt.json、metadata-observation.json、script-deployment-receipt.json、fresh-init-receipt.jsonへ保存。隔離コピーと一時worktree・metadata observerは使用終了を確認して片付け、証跡を保持した。
+
+- 2026-10-15 18:59 JST　Astraが追加修復に着手。Planと全実行ログ、09:32／10:07のautomation記録を確認。開始時last_success_at=2026-10-13T21:52:30.040495+00:00、worker_failure_count=23、stage=mainline／CatalogError／hash1b26ff01…。HTTPとinitはnative_luna_daily_run_failed／distillation_run_repeated_failure、HTTP drift=true。別worktreeで開発し、生データはprivateに保持する。canonical archiveの通常runで同hashを2.634秒で再現し、advanceのnoop後にcatalogのctimeのみ変化、size／inode／mtimeは不変と特定。診断runによる実失敗は隠さずcount24を記録。既存maintenance markerで新規scheduleを待機させ、現在のchild終了とworker leaseの自然解放を待つ。3品質holdと凍結入力・contract・閾値は変更しない。
+
+- 2026-10-15 19:30 JST　既存repairをworker lease内で実行し、Rawからの再構築204.185秒とcandidate offset再構築が完了。checkpointの手書き・再sealは行っていない。advanceはopen前のcheckpoint判定を保持するため、open中のmetadata/content変更を見逃してnoopとなることを2つの隔離回帰で再現し、BEGIN IMMEDIATE後の厳密な再検証へ移した。以後の本番advance/noopとsyncは通過するが、元のctime変更を発生させたsyscall／processは追跡中で、並行writer・SQLite recoveryを断定しない。診断instrumentの一時的TypeErrorも通常failure記録に残り、別hashのcount1となった。その後の正式runは196 manifest／8 snapshotを処理してmodel時間不足のdeferred、worker_failure_count=0だがlast_success_atは未更新。正式成功とは扱わない。旧日次run履歴は削除せず、terminal prepare成功だけを永続watermarkとして旧失敗と区別し、capture_startedや別importでは解除しない修正を追加。catalog43・mainline330・health/supervisor/daily/構造155 tests、Ruff、mypy97 modules、依存・architecture検査が通過。実run成功・配備・health受入は引き続き未完了。

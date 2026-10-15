@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -63,8 +64,21 @@ _NATIVE_LUNA_OPERATION_PUBLIC_KEYS = {
     "started_at",
     "updated_at",
     "reason",
+    "last_success_at",
+    "last_success_status",
+    "last_success_reason",
     "last_error_code",
     "last_error_message_sha256",
+}
+# ``capture_started`` is a successful hand-off to the candidate writer, but it
+# does not mean that the daily run itself completed.  Only terminal daily
+# preparation results may clear an older run failure from history.
+_NATIVE_LUNA_RUN_SUCCESS_REASONS = {
+    "daily_prepare",
+    "existing_bundle_resumable",
+    "bundle_ready_for_import",
+    "existing_bundle_imported",
+    "no_unlabeled_source",
 }
 _NATIVE_LUNA_SAFE_IDENTIFIER_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
@@ -310,24 +324,80 @@ def _native_luna_supervisor_operation(value: object) -> dict[str, Any] | None:
                 return None
             if digest:
                 public[key] = digest
-    for key in ("started_at", "next_retry_at"):
+    for key in ("started_at", "next_retry_at", "last_success_at"):
         if key in value:
             timestamp = _parse_utc_timestamp(value[key])
             if timestamp is None:
                 return None
             public[key] = timestamp.isoformat()
-    for key in ("reason", "last_error_code"):
+    for key in (
+        "reason",
+        "last_error_code",
+        "last_success_status",
+        "last_success_reason",
+    ):
         if key in value:
             identifier = _native_luna_safe_identifier(value[key], allow_empty=True)
             if identifier is None:
                 return None
             if identifier:
                 public[key] = identifier
+    if value.get("name") == "run":
+        has_success_metadata = any(
+            key in value
+            for key in ("last_success_at", "last_success_status", "last_success_reason")
+        )
+        if has_success_metadata and (
+            "last_success_at" not in public
+            or public.get("last_success_status") != "succeeded"
+            or public.get("last_success_reason") not in _NATIVE_LUNA_RUN_SUCCESS_REASONS
+        ):
+            # Older supervisor entries only carried an unqualified
+            # last_success_at.  Keep those states readable, but do not use
+            # them as a success boundary without the terminal reason.
+            if "last_success_status" not in value and "last_success_reason" not in value:
+                public.pop("last_success_at", None)
+            else:
+                return None
     if state == "backoff" and (
         failure_count < 1 or "next_retry_at" not in public
     ):
         return None
     return public
+
+
+def _native_luna_run_succeeded(value: Mapping[str, Any]) -> bool:
+    """Return whether an operation completed daily preparation, not a hand-off."""
+
+    return bool(
+        value.get("name") == "run"
+        and value.get("state") == "succeeded"
+        and value.get("status") == "succeeded"
+        and value.get("failure_count") == 0
+        and value.get("reason") in _NATIVE_LUNA_RUN_SUCCESS_REASONS
+    )
+
+
+def _native_luna_run_success_at(value: Mapping[str, Any]) -> datetime | None:
+    """Return the latest durable terminal prepare success for one run entry."""
+
+    if value.get("name") != "run":
+        return None
+    entry_updated_at = _parse_utc_timestamp(value.get("updated_at"))
+    now = datetime.now(UTC)
+    if entry_updated_at is None or entry_updated_at > now:
+        return None
+    durable = _parse_utc_timestamp(value.get("last_success_at"))
+    if durable is not None and (
+        durable <= entry_updated_at
+        and durable <= now
+        and value.get("last_success_status") == "succeeded"
+        and value.get("last_success_reason") in _NATIVE_LUNA_RUN_SUCCESS_REASONS
+    ):
+        return durable
+    if _native_luna_run_succeeded(value):
+        return entry_updated_at
+    return None
 
 
 def _native_luna_import_waiting(value: object) -> dict[str, Any] | None:
@@ -545,6 +615,14 @@ def _native_luna_supervisor_health(
     operation_candidates = [*operation_history]
     if operation is not None and operation not in operation_candidates:
         operation_candidates.append(operation)
+    latest_run_success_at: datetime | None = None
+    for candidate in operation_candidates:
+        candidate_success_at = _native_luna_run_success_at(candidate)
+        if candidate_success_at is not None and (
+            latest_run_success_at is None
+            or candidate_success_at > latest_run_success_at
+        ):
+            latest_run_success_at = candidate_success_at
     specialized_operation_alert = False
     for candidate in operation_candidates:
         candidate_failure = bool(
@@ -555,6 +633,12 @@ def _native_luna_supervisor_health(
             )
         )
         candidate_updated_at = _parse_utc_timestamp(candidate.get("updated_at"))
+        run_failure_superseded = bool(
+            candidate["name"] == "run"
+            and latest_run_success_at is not None
+            and candidate_updated_at is not None
+            and candidate_updated_at < latest_run_success_at
+        )
         candidate_started_at = _parse_utc_timestamp(candidate.get("started_at"))
         candidate_waiting_stalled = bool(
             candidate["state"] == "waiting"
@@ -572,7 +656,7 @@ def _native_luna_supervisor_health(
             )
             or candidate_waiting_stalled
         )
-        if not (candidate_failure or candidate_stalled):
+        if run_failure_superseded or not (candidate_failure or candidate_stalled):
             continue
         operation_name = candidate["name"]
         if operation_name == "import":

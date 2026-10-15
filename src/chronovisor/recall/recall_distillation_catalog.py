@@ -1027,12 +1027,12 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
     except RawSegmentCorrupt as exc:
         raise CatalogError("committed Raw inventory is invalid") from exc
     current = {unit.raw_id: unit for unit in units}
-    prior_checkpoint = (
-        _read_catalog_checkpoint(root) if catalog_path(root).exists() else None
-    )
     connection = _connect(root)
     try:
         connection.execute("BEGIN IMMEDIATE")
+        # Opening SQLite can change file metadata; validate under its writer
+        # lock so a pre-open checkpoint cannot bypass the existing repair path.
+        prior_checkpoint = _read_catalog_checkpoint(root)
         metadata = dict(connection.execute("SELECT key,value FROM metadata"))
         schema = metadata.get("schema")
         stored = {

@@ -328,6 +328,41 @@ def test_digest_conflict_fails_closed(tmp_path: Path) -> None:
         assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 2
 
 
+@pytest.mark.parametrize("mutate_content", [False, True])
+def test_advance_rechecks_checkpoint_after_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutate_content: bool
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [_message("user", "question", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    original = catalog._connect
+    changed = False
+
+    def connect(root: Path) -> sqlite3.Connection:
+        nonlocal changed
+        connection = original(root)
+        if not changed:
+            changed = True
+            if mutate_content:
+                connection.execute("UPDATE events SET source_index=999")
+                connection.commit()
+            else:
+                catalog.catalog_path(root).chmod(0o600)
+        return connection
+
+    monkeypatch.setattr(catalog, "_connect", connect)
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "repaired"
+    assert catalog._read_catalog_checkpoint(tmp_path) is not None
+    with original(tmp_path) as connection:
+        assert connection.execute("SELECT source_index FROM events").fetchone()[0] == 1
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "noop"
+
+
 def test_catalog_event_metadata_tamper_requires_repair(tmp_path: Path) -> None:
     init_chronovisor(RuntimeContext(tmp_path))
     raw_dir = _capture(

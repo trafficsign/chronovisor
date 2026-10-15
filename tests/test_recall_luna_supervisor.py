@@ -600,6 +600,52 @@ def test_daily_operation_failure_keeps_receipt_identity_and_durable_backoff(
     ]
 
 
+def test_non_run_completion_keeps_success_timestamp(tmp_path: Path) -> None:
+    state: dict[str, object] = {"operations": {}}
+    bundle = tmp_path / "bundle-A"
+
+    completed = supervisor._complete_operation(state, "import", bundle)
+
+    assert completed["last_success_at"]
+
+
+def test_daily_run_terminal_success_survives_next_attempt_and_failure(
+    tmp_path: Path,
+) -> None:
+    state: dict[str, object] = {"operations": {}}
+    bundle = tmp_path / "runtime/recall-luna-bulk/2026-10-15/bundle"
+
+    succeeded = supervisor._complete_operation(
+        state, "run", bundle, reason="daily_prepare"
+    )
+
+    assert succeeded["last_success_status"] == "succeeded"
+    assert succeeded["last_success_reason"] == "daily_prepare"
+    success_at = succeeded["last_success_at"]
+
+    running = supervisor._start_operation(state, "run", bundle)
+    assert running["last_success_at"] == success_at
+    assert running["last_success_status"] == "succeeded"
+    assert running["last_success_reason"] == "daily_prepare"
+
+    failed = supervisor._record_operation_failure(
+        state,
+        "run",
+        bundle,
+        supervisor.DailyOperationError("daily_prepare", "a" * 64),
+    )
+    assert failed["last_success_at"] == success_at
+    assert failed["last_success_status"] == "succeeded"
+    assert failed["last_success_reason"] == "daily_prepare"
+
+    handoff = supervisor._complete_operation(
+        state, "run", bundle, reason="capture_started"
+    )
+    assert handoff["last_success_at"] == success_at
+    assert handoff["last_success_status"] == "succeeded"
+    assert handoff["last_success_reason"] == "daily_prepare"
+
+
 def test_waiting_operation_preserves_start_boundary_across_heartbeats(
     tmp_path: Path,
 ) -> None:

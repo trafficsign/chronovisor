@@ -847,6 +847,234 @@ def test_native_luna_history_keeps_bundle_a_failure_when_bundle_b_succeeds(
     assert {entry["bundle"] for entry in history} == {"bundle-A", "bundle-B"}
 
 
+def test_native_luna_daily_run_history_uses_latest_real_success_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    _enable_native_luna_health(root, monkeypatch)
+    now = datetime.now(UTC)
+    old_failure_at = now - timedelta(hours=3)
+    empty_identity_running_at = now - timedelta(hours=2)
+    success_at = now - timedelta(hours=1)
+    old_failure = {
+        "name": "run",
+        "state": "backoff",
+        "status": "failed",
+        "bundle": "2026-10-14-bundle",
+        "source_snapshot_sha256": "a" * 64,
+        "failure_count": 2,
+        "last_error_code": "daily_prepare",
+        "last_error_message_sha256": "b" * 64,
+        "next_retry_at": (old_failure_at + timedelta(minutes=5)).isoformat(),
+        "updated_at": old_failure_at.isoformat(),
+    }
+    empty_identity_running = {
+        "name": "run",
+        "state": "running",
+        "status": "running",
+        "bundle": "2026-10-15-bundle",
+        "source_snapshot_sha256": "",
+        "failure_count": 0,
+        "started_at": empty_identity_running_at.isoformat(),
+        "updated_at": empty_identity_running_at.isoformat(),
+    }
+    running_after_success = {
+        "name": "run",
+        "state": "running",
+        "status": "running",
+        "bundle": "2026-10-15-bundle",
+        "source_snapshot_sha256": "c" * 64,
+        "failure_count": 0,
+        "last_success_at": success_at.isoformat(),
+        "last_success_status": "succeeded",
+        "last_success_reason": "daily_prepare",
+        "started_at": (now - timedelta(minutes=1)).isoformat(),
+        "updated_at": (now - timedelta(minutes=1)).isoformat(),
+    }
+    operations = {
+        "run:2026-10-14-bundle:a": old_failure,
+        "run:2026-10-15-bundle:": empty_identity_running,
+        "run:2026-10-15-bundle:c": running_after_success,
+    }
+    _write_native_luna_supervisor_status(
+        root,
+        status="running",
+        updated_at=now.isoformat(),
+        last_progress_at=now.isoformat(),
+        operation=running_after_success,
+        operations=operations,
+    )
+
+    after_success = health.recall_distillation_health(root)
+
+    assert "native_luna_daily_run_failed" not in after_success["reason_codes"]
+    assert len(after_success["native_luna_supervisor"]["operations"]) == 3
+
+    new_failure_at = now
+    new_failure = {
+        **running_after_success,
+        "state": "backoff",
+        "status": "failed",
+        "bundle": "2026-10-15-bundle",
+        "source_snapshot_sha256": "d" * 64,
+        "failure_count": 1,
+        "last_error_code": "daily_prepare",
+        "last_error_message_sha256": "b" * 64,
+        "updated_at": new_failure_at.isoformat(),
+        "next_retry_at": (new_failure_at + timedelta(minutes=5)).isoformat(),
+    }
+    operations["run:2026-10-15-bundle:c"] = new_failure
+    _write_native_luna_supervisor_status(
+        root,
+        status="retrying",
+        updated_at=now.isoformat(),
+        last_progress_at=now.isoformat(),
+        operation=new_failure,
+        operations=operations,
+    )
+
+    after_new_failure = health.recall_distillation_health(root)
+
+    assert "native_luna_daily_run_failed" in after_new_failure["reason_codes"]
+    assert len(after_new_failure["native_luna_supervisor"]["operations"]) == 3
+
+
+def test_native_luna_capture_handoff_does_not_clear_run_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    _enable_native_luna_health(root, monkeypatch)
+    now = datetime.now(UTC)
+    old_failure = {
+        "name": "run",
+        "state": "backoff",
+        "status": "failed",
+        "bundle": "2026-10-14-bundle",
+        "failure_count": 1,
+        "last_error_code": "daily_prepare",
+        "last_error_message_sha256": "a" * 64,
+        "next_retry_at": (now + timedelta(minutes=5)).isoformat(),
+        "updated_at": (now - timedelta(minutes=5)).isoformat(),
+    }
+    capture_handoff = {
+        "name": "run",
+        "state": "succeeded",
+        "status": "succeeded",
+        "bundle": "2026-10-15-bundle",
+        "source_snapshot_sha256": "b" * 64,
+        "failure_count": 0,
+        "reason": "capture_started",
+        "updated_at": now.isoformat(),
+    }
+    _write_native_luna_supervisor_status(
+        root,
+        status="running",
+        updated_at=now.isoformat(),
+        last_progress_at=now.isoformat(),
+        operation=capture_handoff,
+        operations={
+            "run:2026-10-14-bundle:": old_failure,
+            "run:2026-10-15-bundle:b": capture_handoff,
+        },
+    )
+
+    payload = health.recall_distillation_health(root)
+
+    assert "native_luna_daily_run_failed" in payload["reason_codes"]
+
+
+def test_native_luna_run_success_watermark_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime.now(UTC)
+    old_failure = {
+        "name": "run",
+        "state": "backoff",
+        "status": "failed",
+        "bundle": "2026-10-14-bundle",
+        "failure_count": 1,
+        "last_error_code": "daily_prepare",
+        "last_error_message_sha256": "a" * 64,
+        "next_retry_at": (now + timedelta(minutes=5)).isoformat(),
+        "updated_at": (now - timedelta(hours=3)).isoformat(),
+    }
+    cases = (
+        (
+            "import",
+            {
+                "name": "import",
+                "state": "succeeded",
+                "status": "succeeded",
+                "bundle": "2026-10-15-bundle",
+                "failure_count": 0,
+                "last_success_at": (now + timedelta(hours=1)).isoformat(),
+                "last_success_status": "succeeded",
+                "last_success_reason": "daily_prepare",
+                "updated_at": now.isoformat(),
+            },
+        ),
+        (
+            "run-future-success",
+            {
+                "name": "run",
+                "state": "backoff",
+                "status": "failed",
+                "bundle": "2026-10-15-bundle",
+                "source_snapshot_sha256": "b" * 64,
+                "failure_count": 1,
+                "last_error_code": "daily_prepare",
+                "last_error_message_sha256": "c" * 64,
+                "last_success_at": (now + timedelta(hours=1)).isoformat(),
+                "last_success_status": "succeeded",
+                "last_success_reason": "daily_prepare",
+                "next_retry_at": (now + timedelta(minutes=5)).isoformat(),
+                "updated_at": now.isoformat(),
+            },
+        ),
+        (
+            "run-success-after-entry",
+            {
+                "name": "run",
+                "state": "backoff",
+                "status": "failed",
+                "bundle": "2026-10-15-bundle",
+                "source_snapshot_sha256": "d" * 64,
+                "failure_count": 1,
+                "last_error_code": "daily_prepare",
+                "last_error_message_sha256": "e" * 64,
+                "last_success_at": (now - timedelta(hours=1)).isoformat(),
+                "last_success_status": "succeeded",
+                "last_success_reason": "daily_prepare",
+                "next_retry_at": (now + timedelta(minutes=5)).isoformat(),
+                "updated_at": (now - timedelta(hours=2)).isoformat(),
+            },
+        ),
+    )
+
+    for index, (label, marker) in enumerate(cases):
+        root = tmp_path / label
+        _enable_native_luna_health(root, monkeypatch)
+        marker_key = (
+            f"{marker['name']}:2026-10-15-bundle:"
+            f"{marker.get('source_snapshot_sha256', '')}"
+        )
+        _write_native_luna_supervisor_status(
+            root,
+            status="retrying",
+            updated_at=now.isoformat(),
+            last_progress_at=now.isoformat(),
+            operation=marker,
+            operations={
+                "run:2026-10-14-bundle:": old_failure,
+                marker_key: marker,
+            },
+        )
+
+        payload = health.recall_distillation_health(root)
+
+        assert "native_luna_daily_run_failed" in payload["reason_codes"], index
+
+
 def test_native_luna_running_retry_keeps_prior_failure_visible_until_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

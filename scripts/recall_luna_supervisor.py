@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import zip_longest
@@ -39,6 +40,20 @@ SCHEMA = "chronovisor.recall-luna-supervisor.v1"
 DAILY_OPERATION_STALE_SECONDS = 30 * 60
 OPERATION_BACKOFF_BASE_SECONDS = 60
 OPERATION_BACKOFF_MAX_SECONDS = 15 * 60
+_RUN_TERMINAL_SUCCESS_REASONS = frozenset(
+    {
+        "daily_prepare",
+        "existing_bundle_resumable",
+        "bundle_ready_for_import",
+        "existing_bundle_imported",
+        "no_unlabeled_source",
+    }
+)
+_RUN_SUCCESS_FIELDS = (
+    "last_success_at",
+    "last_success_status",
+    "last_success_reason",
+)
 
 
 def now() -> str:
@@ -199,6 +214,15 @@ def _publish_operation(state: dict[str, Any], entry: dict[str, Any]) -> None:
     state["operation"] = dict(entry)
 
 
+def _copy_run_success_fields(
+    entry: dict[str, Any], previous: Mapping[str, Any]
+) -> None:
+    for key in _RUN_SUCCESS_FIELDS:
+        value = previous.get(key)
+        if value is not None and value != "":
+            entry[key] = value
+
+
 def _start_operation(
     state: dict[str, Any], name: str, bundle: Path | dict[str, Any]
 ) -> dict[str, Any]:
@@ -221,6 +245,8 @@ def _start_operation(
         "started_at": started_at,
         "updated_at": now(),
     }
+    if name == "run":
+        _copy_run_success_fields(entry, previous)
     if previous.get("last_error_code"):
         entry["last_error_code"] = str(previous["last_error_code"])
     if previous.get("last_error_message_sha256"):
@@ -285,6 +311,8 @@ def _record_operation_failure(
         "next_retry_at": _iso_from_unix(retry_at),
         "updated_at": now(),
     }
+    if name == "run":
+        _copy_run_success_fields(entry, previous)
     state.setdefault("operations", {})[_operation_key(name, identity)] = entry
     _publish_operation(state, entry)
     return entry
@@ -300,6 +328,7 @@ def _complete_operation(
 ) -> dict[str, Any]:
     identity = _bundle_identity(bundle)
     previous = _operation_entry(state, name, identity) or {}
+    success_at = now()
     entry = {
         "name": name,
         "state": status,
@@ -307,11 +336,25 @@ def _complete_operation(
         **identity,
         "attempt": int(previous.get("attempt") or 0),
         "failure_count": 0,
-        "updated_at": now(),
-        "last_success_at": now(),
+        "updated_at": success_at,
+        "last_success_at": success_at,
     }
+    if name == "run":
+        _copy_run_success_fields(entry, previous)
     if reason:
         entry["reason"] = reason
+    if (
+        name == "run"
+        and status == "succeeded"
+        and reason in _RUN_TERMINAL_SUCCESS_REASONS
+    ):
+        entry.update(
+            {
+                "last_success_at": success_at,
+                "last_success_status": status,
+                "last_success_reason": reason,
+            }
+        )
     state.setdefault("operations", {})[_operation_key(name, identity)] = entry
     _publish_operation(state, entry)
     return entry
@@ -349,6 +392,8 @@ def _set_waiting_operation(
         "started_at": started_at,
         "updated_at": now(),
     }
+    if name == "run":
+        _copy_run_success_fields(entry, previous)
     # A lock-busy/in-progress wait is the same operation attempt.  Preserve
     # its deterministic failure identity until that operation succeeds so a
     # heartbeat cannot hide a repeated failure from health diagnostics.
