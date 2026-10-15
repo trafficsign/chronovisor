@@ -1618,6 +1618,25 @@ def sync_candidate_index(
 
     path = ledger_path.expanduser().resolve(strict=False)
     catalog_checkpoint = _read_catalog_checkpoint(root)
+    if not rebuild and catalog_checkpoint is not None:
+        # A no-op must not invalidate the catalog through a writable open.
+        with closing(_connect_readonly(root)) as readonly:
+            readonly.execute("BEGIN")
+            state = _candidate_index_state_row(readonly)
+            if state is not None and _read_catalog_checkpoint(root) is not None:
+                if state["ledger_path"] != str(path):
+                    raise CatalogError("candidate index ledger path conflicts")
+                count, head = _candidate_db_summary(readonly, state)
+                current = _candidate_file_state(path)
+                if current == {key: state[key] for key in current}:
+                    return {
+                        "status": "noop",
+                        "count": count,
+                        "record_count": count,
+                        "indexed_seq": count,
+                        "indexed_offset": int(current["ledger_size"]),
+                        "head_sha256": head,
+                    }
     connection = _connect(root)
     status = "noop"
     try:

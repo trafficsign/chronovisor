@@ -1597,6 +1597,13 @@ def test_catalog_readers_preserve_sealed_file_identity(
         ],
     )
     catalog.advance(raw_dir, root, 12000)
+    ledger = store.distillation_dir(root) / "candidate-ledger.jsonl"
+    snapshot = _candidate_snapshot("rally-1", ["c1"])
+    store.append_chain(
+        ledger,
+        {"kind": "candidate-snapshot", "rally_id": "rally-1", "snapshot": snapshot},
+    )
+    catalog.sync_candidate_index(root, ledger)
     path = catalog.catalog_path(root)
     before = path.read_bytes()
     original_connect = sqlite3.connect
@@ -1616,12 +1623,17 @@ def test_catalog_readers_preserve_sealed_file_identity(
         return connection
 
     monkeypatch.setattr(sqlite3, "connect", writable_open_changes_ctime)
+    assert catalog.sync_candidate_index(root, ledger)["status"] == "noop"
     rallies = catalog.rallies(root)
     assert len(rallies) == 1
     assert catalog.texts(raw_dir, root, [rallies[0]["query_sha256"]]) == {
         rallies[0]["query_sha256"]: "query"
     }
-    assert catalog.candidate_index_state(root)["count"] == 0
-    assert catalog.candidate_rally_ids(root) == set()
+    assert catalog.candidate_index_state(root)["count"] == 1
+    assert catalog.candidate_rally_ids(root) == {"rally-1"}
+    assert catalog.read_candidate_snapshots(root, ledger, ["rally-1"]) == {
+        "rally-1": snapshot
+    }
+    assert catalog.sync_candidate_index(root, ledger)["status"] == "noop"
     assert catalog._read_catalog_checkpoint(root) is not None
     assert path.read_bytes() == before
