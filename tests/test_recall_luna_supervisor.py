@@ -850,15 +850,16 @@ def test_import_backoff_wakes_for_earliest_bundle_deadline(
 def test_active_capture_is_reported_without_restarting_daily_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    day = datetime.now(supervisor.daily.ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d")
     private = tmp_path / "runtime/recall-luna-bulk"
-    progress_path = private / "2026-10-14/inventory/candidate-capture-progress.json"
+    progress_path = private / f"{day}/inventory/candidate-capture-progress.json"
     progress_path.parent.mkdir(parents=True)
     now_unix = time.time()
     old_capture_failure = {
         "name": "capture",
         "state": "backoff",
         "status": "failed",
-        "bundle": "2026-10-14",
+        "bundle": day,
         "failure_count": 2,
         "last_error_code": "capture_owner_stale",
         "last_error_message_sha256": "a" * 64,
@@ -878,7 +879,7 @@ def test_active_capture_is_reported_without_restarting_daily_run(
         json.dumps({
             "schema": supervisor.SCHEMA,
             "completed_total": 0,
-            "operations": {"capture:2026-10-14:": old_capture_failure},
+            "operations": {f"capture:{day}:": old_capture_failure},
             "operation": old_capture_failure,
         })
     )
@@ -913,8 +914,9 @@ def test_active_capture_is_reported_without_restarting_daily_run(
 def test_stalled_capture_is_backed_off_and_remains_visible_after_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    day = datetime.now(supervisor.daily.ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d")
     private = tmp_path / "runtime/recall-luna-bulk"
-    progress_path = private / "2026-10-14/inventory/candidate-capture-progress.json"
+    progress_path = private / f"{day}/inventory/candidate-capture-progress.json"
     progress_path.parent.mkdir(parents=True)
     progress_path.write_text(
         json.dumps({
@@ -977,8 +979,9 @@ def test_old_capture_error_from_previous_day_does_not_block_daily_recovery(
 def test_capture_backoff_allows_one_daily_run_recovery_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    day = datetime.now(supervisor.daily.ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d")
     private = tmp_path / "runtime/recall-luna-bulk"
-    progress_path = private / "2026-10-14/inventory/candidate-capture-progress.json"
+    progress_path = private / f"{day}/inventory/candidate-capture-progress.json"
     progress_path.parent.mkdir(parents=True)
     progress_path.write_text(
         json.dumps({
@@ -1003,7 +1006,7 @@ def test_capture_backoff_allows_one_daily_run_recovery_attempt(
     status_path = private / "supervisor-status.json"
     state = json.loads(status_path.read_text())
     assert state["operation"]["name"] == "capture"
-    key = "capture:2026-10-14:"
+    key = f"capture:{day}:"
     state["operations"][key]["next_retry_at_unix"] = time.time() - 1
     state["operations"][key]["next_retry_at"] = supervisor._iso_from_unix(
         time.time() - 1
@@ -1024,14 +1027,15 @@ def test_capture_backoff_allows_one_daily_run_recovery_attempt(
     assert supervisor.supervise(args) == 1
     assert calls == ["run"]
     recovered = json.loads(status_path.read_text())
-    assert recovered["operations"]["capture:2026-10-14:"]["state"] == "succeeded"
+    assert recovered["operations"][f"capture:{day}:"]["state"] == "succeeded"
 
 
 def test_daily_in_progress_lock_wait_does_not_backoff_capture_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    day = datetime.now(supervisor.daily.ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d")
     private = tmp_path / "runtime/recall-luna-bulk"
-    progress_path = private / "2026-10-14/inventory/candidate-capture-progress.json"
+    progress_path = private / f"{day}/inventory/candidate-capture-progress.json"
     progress_path.parent.mkdir(parents=True)
     progress_path.write_text(
         json.dumps({"status": "error", "reason": "capture_owner_stale"})
@@ -1044,7 +1048,7 @@ def test_daily_in_progress_lock_wait_does_not_backoff_capture_again(
         "name": "run",
         "state": "waiting",
         "status": "waiting",
-        "bundle": "2026-10-14-bundle",
+        "bundle": f"{day}-bundle",
         "failure_count": 0,
         "reason": "distillation_worker_lock_busy",
         "updated_at": supervisor.now(),
@@ -1054,7 +1058,7 @@ def test_daily_in_progress_lock_wait_does_not_backoff_capture_again(
             {
                 "schema": supervisor.SCHEMA,
                 "completed_total": 0,
-                "operations": {"run:2026-10-14-bundle:": run_entry},
+                "operations": {f"run:{day}-bundle:": run_entry},
                 "operation": run_entry,
             }
         )

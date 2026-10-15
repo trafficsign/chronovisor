@@ -1159,7 +1159,13 @@ def _advance_catalog_when_idle(root: Path) -> dict[str, Any]:
             "resumable": True,
         }
     try:
-        return _advance_catalog(root)
+        result = _advance_catalog(root)
+        # A catalog repair drops derived offsets, even when the immutable
+        # candidate ledger and its completed capture receipt are unchanged.
+        catalog.sync_candidate_index(
+            root, store.distillation_dir(root) / "candidate-ledger.jsonl"
+        )
+        return result
     finally:
         store.release_lock(lock)
 
@@ -1589,6 +1595,10 @@ def run_daily(
                 "reason": str(prepared.get("reason") or "daily_prepare"),
             }
         )
+        for key in ("error_type", "error_message_sha256"):
+            value = prepared.get(key)
+            if isinstance(value, str) and value:
+                result[key] = value
         return write_and_return()
 
     try:

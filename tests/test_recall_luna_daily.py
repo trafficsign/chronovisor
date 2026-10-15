@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from chronovisor.core.canonical_json import canonical_json_sha256_strict
+from chronovisor.core.store import RuntimeContext, init_chronovisor
 from chronovisor.recall.recall_distillation_luna import (
     LunaBulkBundle,
     native_output_sha256,
@@ -13,6 +15,62 @@ from scripts import recall_luna_daily as daily
 
 def _read(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_completed_capture_recovers_candidate_offsets_after_catalog_repair(
+    tmp_path: Path,
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    daily.catalog.advance(tmp_path / "raw", tmp_path, daily.MAX_INPUT_BYTES)
+    snapshot = {
+        "schema": daily.catalog.CANDIDATE_SNAPSHOT_SCHEMA,
+        "rally_id": "rally-existing",
+        "as_of": "2026-10-14T00:00:00Z",
+        "retriever_revision": "historical-fts-v1",
+        "feature_revision": "recall-distill-text-v2",
+        "query_feature_text_sha256": "a" * 64,
+        "candidates": [],
+    }
+    snapshot["snapshot_sha256"] = canonical_json_sha256_strict(snapshot)
+    ledger = daily.store.distillation_dir(tmp_path) / "candidate-ledger.jsonl"
+    daily.store.append_chain(
+        ledger,
+        {"kind": "candidate-snapshot", "rally_id": "rally-existing", "snapshot": snapshot},
+    )
+    daily.catalog.sync_candidate_index(tmp_path, ledger)
+    original = daily._candidate_identity(tmp_path)
+    original_bytes = ledger.read_bytes()
+    daily.catalog._catalog_checkpoint_path(tmp_path).unlink()
+
+    result = daily._advance_catalog_when_idle(tmp_path)
+
+    assert result["status"] == "repaired"
+    assert daily._candidate_identity(tmp_path) == original
+    assert ledger.read_bytes() == original_bytes
+    assert daily.catalog._read_catalog_checkpoint(tmp_path) is not None
+    assert daily._advance_catalog_when_idle(tmp_path)["status"] == "noop"
+
+
+def test_prepare_failure_preserves_error_identity_in_run_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    progress = tmp_path / "capture.json"
+    progress.write_text(json.dumps({"status": "complete"}), encoding="utf-8")
+    monkeypatch.setattr(daily, "_advance_catalog_when_idle", lambda _: {"status": "noop"})
+    error = daily._error_fields(daily.DailyError("candidate_index_state_missing"))
+    monkeypatch.setattr(daily, "prepare", lambda **_: {"status": "error", **error})
+
+    result = daily.run_daily(
+        root=tmp_path,
+        bundle_path=tmp_path / "bundle",
+        receipt_path=tmp_path / "receipt.json",
+        capture_progress_path=progress,
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "daily_prepare"
+    assert result["error_type"] == error["error_type"]
+    assert result["error_message_sha256"] == error["error_message_sha256"]
 
 
 def test_native_cohort_identity_is_stable_sha256() -> None:
