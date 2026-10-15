@@ -552,9 +552,7 @@ def _build_rows(
     rows: list[dict[str, Any]] = []
     skipped = Counter[str]()
     excluded_pairs = excluded_pairs or set()
-    probe_candidates: list[
-        tuple[Mapping[str, Any], Mapping[str, Any], list[Mapping[str, Any]]]
-    ] = []
+    probe_sources: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
     for rally in rallies:
         rally_id = str(rally["rally_id"])
         assignment = str(assignments.get(rally_id) or "")
@@ -576,48 +574,49 @@ def _build_rows(
                 continue
             rows.append(_base_row(rally, candidate, payload, snapshot, assignment))
         if assignment == "test":
-            safe: list[tuple[int, str, Mapping[str, Any], Mapping[str, Any]]] = []
-            for candidate in sorted(
-                _safe_candidate_ids(snapshot),
-                key=lambda item: str(item["candidate_id"]),
-            ):
-                candidate_id = str(candidate["candidate_id"])
-                if (rally_id, candidate_id) in excluded_pairs:
-                    continue
-                payload = _payload(rally, candidate, texts)
-                if payload is None:
-                    continue
-                candidate_input = {
-                    "candidate_id": candidate["candidate_id"],
-                    "rally_id": rally_id,
-                    "query": payload["query"],
-                    "context": [],
-                    "evidence": payload["candidate"],
-                }
-                encoded_size = len(
-                    json.dumps(
-                        candidate_input,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ).encode()
-                )
-                safe.append((encoded_size, str(candidate["candidate_id"]), candidate, payload))
-            if len(safe) >= 2:
-                safe.sort(key=lambda item: (item[0], item[1]))
-                probe_candidates.append(
-                    (rally, snapshot, [safe[0][2], safe[1][2]])
-                )
+            probe_sources.append((rally, snapshot))
 
-    probe_candidates.sort(
-        key=lambda item: (int(item[0]["as_of_us"]), str(item[0]["rally_id"]))
-    )
+    # Source validation/prefetch covers every candidate before this function.
+    # Build probe payloads only until the existing complete-rally cap is met;
+    # later payloads cannot contribute rows or skip counts.
     probe_rallies = 0
-    for rally, snapshot, candidates in probe_candidates:
-        rally_probes: list[dict[str, Any]] = []
-        assignment = str(assignments[str(rally["rally_id"])])
+    for rally, snapshot in sorted(
+        probe_sources,
+        key=lambda item: (int(item[0]["as_of_us"]), str(item[0]["rally_id"])),
+    ):
         rally_id = str(rally["rally_id"])
-        if len(candidates) < 2:
+        assignment = str(assignments[rally_id])
+        safe: list[tuple[int, str, Mapping[str, Any], Mapping[str, Any]]] = []
+        for candidate in sorted(
+            _safe_candidate_ids(snapshot),
+            key=lambda item: str(item["candidate_id"]),
+        ):
+            candidate_id = str(candidate["candidate_id"])
+            if (rally_id, candidate_id) in excluded_pairs:
+                continue
+            payload = _payload(rally, candidate, texts)
+            if payload is None:
+                continue
+            candidate_input = {
+                "candidate_id": candidate["candidate_id"],
+                "rally_id": rally_id,
+                "query": payload["query"],
+                "context": [],
+                "evidence": payload["candidate"],
+            }
+            encoded_size = len(
+                json.dumps(
+                    candidate_input,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode()
+            )
+            safe.append((encoded_size, str(candidate["candidate_id"]), candidate, payload))
+        if len(safe) < 2:
             continue
+        safe.sort(key=lambda item: (item[0], item[1]))
+        candidates = [safe[0][2], safe[1][2]]
+        rally_probes: list[dict[str, Any]] = []
         for target_index, candidate in enumerate(candidates):
             alternate = candidates[1 - target_index]
             payload = _payload(rally, candidate, texts)

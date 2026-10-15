@@ -212,6 +212,52 @@ def test_probe_cap_counts_complete_rallies_after_payload_validation(monkeypatch)
     assert skipped["probe_payload_over_limit_or_text_missing"] == 4
 
 
+def test_probe_cap_stops_unused_payloads_and_preserves_all_base_rows(monkeypatch) -> None:
+    monkeypatch.setattr(daily, "PROBE_CAP", 2)
+    calls: list[str] = []
+
+    def payload(rally, *_):
+        calls.append(rally["rally_id"])
+        return {
+            "query": "query", "context": [],
+            "candidate": "x" * (6_000 if rally["rally_id"] == "oversized" else 10),
+        }
+
+    monkeypatch.setattr(daily, "_payload", payload)
+    # Base rows retain input order; probes use time then rally ID, including ties.
+    rallies = [
+        {"rally_id": name, "as_of_us": timestamp, "query_sha256": "a" * 64}
+        for name, timestamp in [
+            ("later", 3), ("eligible-b", 2), ("oversized", 1),
+            ("eligible-a", 2), ("train", 4),
+        ]
+    ]
+    snapshots = {
+        row["rally_id"]: {
+            "snapshot_sha256": "b" * 64,
+            "candidates": [
+                {"candidate_id": f"candidate-{index}", "text_sha256": "c" * 64}
+                for index in range(5)
+            ],
+        }
+        for row in rallies
+    }
+    assignments = {
+        row["rally_id"]: "train" if row["rally_id"] == "train" else "test"
+        for row in rallies
+    }
+    rows, skipped = daily._build_rows(rallies, snapshots, assignments, {})
+    base = [row for row in rows if not row.get("repeat_pair_id")]
+    probes = [row for row in rows if row.get("repeat_pair_id")]
+    assert [row["rally_id"] for row in base] == [
+        rally["rally_id"] for rally in rallies for _ in range(4)
+    ]
+    assert [row["rally_id"] for row in probes] == ["eligible-a"] * 4 + ["eligible-b"] * 4
+    assert skipped["probe_payload_over_limit_or_text_missing"] == 4
+    assert calls.count("later") == 4
+    assert calls.count("train") == 4
+
+
 def test_prepare_reports_authoritative_capture_writer_and_is_resumable(tmp_path: Path) -> None:
     progress = tmp_path / "capture.json"
     progress.write_text(
