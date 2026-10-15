@@ -638,12 +638,102 @@ def test_daily_run_terminal_success_survives_next_attempt_and_failure(
     assert failed["last_success_status"] == "succeeded"
     assert failed["last_success_reason"] == "daily_prepare"
 
-    handoff = supervisor._complete_operation(
-        state, "run", bundle, reason="capture_started"
+    handoff = supervisor._set_waiting_operation(
+        state, "run", bundle, reason="daily_capture_in_progress"
     )
+    assert handoff["state"] == "waiting"
+    assert handoff["status"] == "waiting"
+    assert handoff["failure_count"] == failed["failure_count"]
+    assert handoff["last_error_code"] == failed["last_error_code"]
+    assert handoff["last_error_message_sha256"] == failed["last_error_message_sha256"]
+    assert handoff["reason"] == "daily_capture_in_progress"
     assert handoff["last_success_at"] == success_at
     assert handoff["last_success_status"] == "succeeded"
     assert handoff["last_success_reason"] == "daily_prepare"
+
+
+def test_capture_handoff_keeps_run_failure_visible_in_supervisor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = tmp_path / "runtime/recall-luna-bulk"
+    private.mkdir(parents=True)
+    (tmp_path / "config.toml").write_text(
+        '[recall.distillation]\nenabled=true\nnative_luna_enabled=true\n'
+        'teacher_profile="native-luna-single-v1"\n'
+    )
+    day = datetime.now(supervisor.daily.ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d")
+    daily_bundle = tmp_path / "runtime/recall-luna-bulk" / day / "bundle"
+    operation_key = f"run:{day}-bundle:"
+    state: dict[str, object] = {"operations": {}}
+    success = supervisor._complete_operation(
+        state, "run", daily_bundle, reason="daily_prepare"
+    )
+    success_at = success["last_success_at"]
+    failure = supervisor._record_operation_failure(
+        state,
+        "run",
+        daily_bundle,
+        supervisor.DailyOperationError("daily_prepare", "a" * 64),
+    )
+    # Make the pre-existing failure immediately eligible for this synthetic
+    # retry; the production supervisor normally waits for this backoff.
+    failure["next_retry_at_unix"] = time.time() - 1
+    (private / "supervisor-status.json").write_text(
+        json.dumps({
+            "schema": supervisor.SCHEMA,
+            "completed_total": 0,
+            "last_progress_at": supervisor.now(),
+            "operation": failure,
+            "operations": {operation_key: failure},
+        })
+    )
+    monkeypatch.setattr(supervisor, "inventory", lambda _root: [])
+    calls: list[str] = []
+
+    class StopLoop(BaseException):
+        pass
+
+    def run_daily(_args, command, _bundle, _publish):
+        calls.append(command)
+        if len(calls) == 1:
+            return {
+                "status": "ready",
+                "reason": "capture_already_running",
+                "capture": {"status": "running", "pid": 4321},
+            }
+        raise StopLoop()
+
+    monkeypatch.setattr(supervisor, "run_daily_operation", run_daily)
+    monkeypatch.setattr(supervisor.time, "sleep", lambda _seconds: None)
+    args = argparse.Namespace(root=tmp_path, max_workers=1, poll_seconds=0, once=False)
+
+    with pytest.raises(StopLoop):
+        supervisor.supervise(args)
+
+    assert calls == ["run", "run"]
+    state = json.loads((private / "supervisor-status.json").read_text())
+    run_entry = state["operations"][operation_key]
+    assert run_entry["state"] == "waiting"
+    assert run_entry["status"] == "waiting"
+    assert run_entry["reason"] == "daily_capture_in_progress"
+    assert run_entry["failure_count"] == 1
+    assert run_entry["last_error_code"] == "daily_prepare"
+    assert run_entry["last_error_message_sha256"] == "a" * 64
+    assert run_entry["last_success_at"] == success_at
+    assert run_entry["last_success_reason"] == "daily_prepare"
+
+    _diagnosis, alerts = _native_luna_supervisor_health(tmp_path)
+    assert any(item["reason"] == "native_luna_daily_run_failed" for item in alerts)
+
+    completed = supervisor._complete_operation(
+        state, "run", daily_bundle, reason="daily_prepare"
+    )
+    assert completed["failure_count"] == 0
+    state["status"] = "running"
+    state["updated_at"] = supervisor.now()
+    supervisor.daily._write_private_json(private / "supervisor-status.json", state)
+    _diagnosis, alerts = _native_luna_supervisor_health(tmp_path)
+    assert not any(item["reason"] == "native_luna_daily_run_failed" for item in alerts)
 
 
 def test_waiting_operation_preserves_start_boundary_across_heartbeats(

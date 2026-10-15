@@ -1146,11 +1146,11 @@ def supervise(args: argparse.Namespace) -> int:
                                 }
                                 if capture_active or result_status == "in_progress":
                                     if capture_active:
-                                        _complete_operation(
+                                        _set_waiting_operation(
                                             state,
                                             "run",
                                             daily_bundle,
-                                            reason="capture_started",
+                                            reason="daily_capture_in_progress",
                                         )
                                         _set_waiting_operation(
                                             state,
