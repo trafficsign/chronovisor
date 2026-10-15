@@ -9,6 +9,7 @@ import sqlite3
 import stat
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -357,6 +358,20 @@ def _connect(root: Path) -> sqlite3.Connection:
         );
         """
     )
+    return connection
+
+
+def _connect_readonly(root: Path) -> sqlite3.Connection:
+    """Keep readers from changing the catalog's sealed physical identity."""
+
+    path = catalog_path(root)
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise CatalogError("historical catalog path is unsafe")
+    try:
+        connection = sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        raise CatalogError("historical catalog is unavailable") from exc
+    connection.row_factory = sqlite3.Row
     return connection
 
 
@@ -1208,7 +1223,7 @@ def rallies(root: Path, ids: Iterable[str] | None = None) -> list[dict[str, Any]
 
     _require_catalog_checkpoint(root)
     selected = None if ids is None else tuple(ids)
-    with _connect(root) as connection:
+    with closing(_connect_readonly(root)) as connection:
         if selected is not None:
             if not selected:
                 return []
@@ -1788,9 +1803,10 @@ def sync_candidate_index(
 def candidate_index_state(root: Path) -> dict[str, Any]:
     """Return indexed count/head metadata without touching the ledger body."""
 
-    connection = _connect(root)
+    path = catalog_path(root)
+    connection = _connect_readonly(root) if path.exists() or path.is_symlink() else None
     try:
-        state = _candidate_index_state_row(connection)
+        state = _candidate_index_state_row(connection) if connection is not None else None
         if state is None:
             return {
                 "count": 0,
@@ -1801,6 +1817,7 @@ def candidate_index_state(root: Path) -> dict[str, Any]:
                 "ledger_ino": -1,
                 "head_sha256": "",
             }
+        assert connection is not None
         count, head = _candidate_db_summary(connection, state)
         return {
             **state,
@@ -1811,7 +1828,8 @@ def candidate_index_state(root: Path) -> dict[str, Any]:
             "head_sha256": head,
         }
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
 
 
 def candidate_rally_ids(root: Path, *, after_seq: int = 0) -> set[str]:
@@ -1819,7 +1837,10 @@ def candidate_rally_ids(root: Path, *, after_seq: int = 0) -> set[str]:
 
     if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
         raise CatalogError("candidate index sequence is invalid")
-    connection = _connect(root)
+    path = catalog_path(root)
+    if not path.exists() and not path.is_symlink():
+        return set()
+    connection = _connect_readonly(root)
     try:
         state = _candidate_index_state_row(connection)
         if state is None:
@@ -1892,7 +1913,7 @@ def read_candidate_snapshots(
             raise CatalogError("candidate rally id is invalid")
     if not requested:
         return {}
-    connection = _connect(root)
+    connection = _connect_readonly(root)
     try:
         state = _candidate_index_state_row(connection)
         if state is None or state["ledger_path"] != str(path):
@@ -2006,7 +2027,7 @@ def texts(
     _require_catalog_checkpoint(root)
     requested_hashes = set(hashes or ())
     requested_refs = list(refs or ())
-    with _connect(root) as connection:
+    with closing(_connect_readonly(root)) as connection:
         rows: dict[tuple[str, int], sqlite3.Row] = {}
         if requested_hashes:
             placeholders = ",".join("?" for _ in requested_hashes)

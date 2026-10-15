@@ -184,12 +184,8 @@ def _catalog_identity(root: Path) -> dict[str, Any]:
 
 def _candidate_identity(root: Path) -> dict[str, Any]:
     ledger = store.distillation_dir(root) / "candidate-ledger.jsonl"
-    connection = catalog._connect(root)  # type: ignore[attr-defined]
-    try:
-        state = catalog._candidate_index_state_row(connection)  # type: ignore[attr-defined]
-    finally:
-        connection.close()
-    if state is None:
+    state = catalog.candidate_index_state(root)
+    if not state.get("ledger_path"):
         raise DailyError("candidate_index_state_missing")
     return {
         "sha256": _sha256_file(ledger),

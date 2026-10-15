@@ -1579,3 +1579,49 @@ def test_candidate_offset_index_rejects_symlinked_catalog(tmp_path: Path) -> Non
 
     with pytest.raises(catalog.CatalogError, match="unsafe"):
         catalog.candidate_index_state(tmp_path)
+
+
+@pytest.mark.parametrize("directory", ["root", "space #?%"])
+def test_catalog_readers_preserve_sealed_file_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory: str
+) -> None:
+    root = tmp_path / directory
+    init_chronovisor(RuntimeContext(root))
+    raw_dir = _capture(
+        root,
+        "save-codex-open.md",
+        "a" * 24,
+        [
+            _message("user", "query", "2026-08-23T00:00:00Z"),
+            _message("assistant", "answer", "2026-08-23T00:00:01Z"),
+        ],
+    )
+    catalog.advance(raw_dir, root, 12000)
+    path = catalog.catalog_path(root)
+    before = path.read_bytes()
+    original_connect = sqlite3.connect
+
+    def writable_open_changes_ctime(
+        database: str | Path, *args: object, **kwargs: object
+    ) -> sqlite3.Connection:
+        connection = original_connect(database, *args, **kwargs)
+        is_catalog = str(database) == str(path) or str(database).startswith(
+            path.absolute().as_uri() + "?"
+        )
+        # Model the observed macOS writable-open side effect on an existing file.
+        if is_catalog and not (
+            kwargs.get("uri") and str(database).endswith("?mode=ro")
+        ):
+            path.chmod(0o600)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", writable_open_changes_ctime)
+    rallies = catalog.rallies(root)
+    assert len(rallies) == 1
+    assert catalog.texts(raw_dir, root, [rallies[0]["query_sha256"]]) == {
+        rallies[0]["query_sha256"]: "query"
+    }
+    assert catalog.candidate_index_state(root)["count"] == 0
+    assert catalog.candidate_rally_ids(root) == set()
+    assert catalog._read_catalog_checkpoint(root) is not None
+    assert path.read_bytes() == before

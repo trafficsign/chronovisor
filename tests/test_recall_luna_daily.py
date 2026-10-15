@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -49,6 +50,28 @@ def test_completed_capture_recovers_candidate_offsets_after_catalog_repair(
     assert ledger.read_bytes() == original_bytes
     assert daily.catalog._read_catalog_checkpoint(tmp_path) is not None
     assert daily._advance_catalog_when_idle(tmp_path)["status"] == "noop"
+
+
+def test_candidate_identity_does_not_invalidate_catalog(tmp_path: Path, monkeypatch) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    daily.catalog.advance(tmp_path / "raw", tmp_path, daily.MAX_INPUT_BYTES)
+    ledger = daily.store.distillation_dir(tmp_path) / "candidate-ledger.jsonl"
+    ledger.touch(mode=0o600)
+    daily.catalog.sync_candidate_index(tmp_path, ledger)
+    path = daily.catalog.catalog_path(tmp_path)
+    before = daily.catalog._read_catalog_checkpoint(tmp_path)
+    original_connect = sqlite3.connect
+
+    def writable_open_changes_ctime(database, *args, **kwargs):
+        connection = original_connect(database, *args, **kwargs)
+        if not (kwargs.get("uri") and str(database).endswith("?mode=ro")):
+            path.chmod(0o600)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", writable_open_changes_ctime)
+    assert daily._candidate_identity(tmp_path)["record_count"] == 0
+    assert daily.catalog._read_catalog_checkpoint(tmp_path) == before
+    assert before is not None
 
 
 def test_prepare_failure_preserves_error_identity_in_run_receipt(
