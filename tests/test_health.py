@@ -65,6 +65,17 @@ def _write_native_luna_supervisor_status(
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+@pytest.fixture
+def _asia_tokyo_timezone(monkeypatch: pytest.MonkeyPatch):
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("TZ", "Asia/Tokyo")
+            time.tzset()
+            yield
+    finally:
+        time.tzset()
+
+
 def test_recall_distillation_kpi_uses_public_snapshot_without_raw_content(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1824,6 +1835,58 @@ def test_queue_progress_uses_completed_same_lane_attempts_without_changing_count
     assert payload["lint_repair"]["active"] == 2
     assert payload["lint_repair"]["status_counts"]["completed"] == 2
     assert payload["lint_repair"]["lanes"]["local"]["last_progress_at"] == recent
+
+
+def test_search_queue_progress_normalizes_local_naive_terminal_attempts(
+    tmp_path: Path,
+    _asia_tokyo_timezone,
+) -> None:
+    root = tmp_path / "wiki"
+    label_path = root / "recall" / "search-label-queue.jsonl"
+    lint_state = root / "runtime" / "convergence" / "state.json"
+    replay_path = root / "review" / "raw-replay-queue.jsonl"
+    label_path.parent.mkdir(parents=True)
+    lint_state.parent.mkdir(parents=True)
+    replay_path.parent.mkdir(parents=True)
+    old = "2020-01-01T00:00:00Z"
+    recent_local = datetime.now().replace(microsecond=0).isoformat()
+    label_path.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in (
+                {
+                    "queue_status": "pending_frontier_review",
+                    "preregistered_at": old,
+                },
+                {
+                    "queue_status": "frontier_rejected",
+                    "preregistered_at": old,
+                    "last_attempt_lane": "frontier",
+                    "last_attempt_at": recent_local,
+                },
+                {
+                    "queue_status": "source_stale",
+                    "preregistered_at": old,
+                    "reviewed_at": recent_local,
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+    lint_state.write_text("{}", encoding="utf-8")
+    replay_path.write_text("", encoding="utf-8")
+
+    payload = health.queue_health_snapshot(root)
+    frontier = payload["search_labels"]["lanes"]["frontier"]
+    expected = datetime.fromisoformat(recent_local).astimezone(UTC).isoformat()
+
+    assert frontier["last_progress_at"] == expected
+    assert "search_labels_authority_wait" not in {
+        item["reason"] for item in payload["alerts"]
+    }
+    assert list(
+        health._search_lane_progress_at([{"reviewed_at": recent_local}], "frontier")
+    ) == []
 
 
 def test_queue_progress_rejects_other_lane_and_invalid_attempt_timestamps(

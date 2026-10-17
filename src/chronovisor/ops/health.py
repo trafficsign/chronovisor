@@ -2206,11 +2206,22 @@ def _queue_timestamp(value: object) -> datetime | None:
 def _search_lane_progress_at(
     rows: list[dict[str, Any]], lane: str
 ) -> Iterable[object]:
-    """Yield only explicitly lane-bound search attempts."""
+    """Yield explicitly lane-bound attempts in the health clock's UTC form."""
 
     for row in rows:
         if row.get("last_attempt_lane") == lane:
-            yield row.get("last_attempt_at")
+            value = row.get("last_attempt_at")
+            if isinstance(value, str) and value.strip():
+                try:
+                    parsed = datetime.fromisoformat(
+                        value.strip().replace("Z", "+00:00")
+                    ).astimezone(UTC)
+                except (ValueError, OverflowError, OSError):
+                    yield value
+                else:
+                    yield parsed.isoformat()
+                continue
+            yield value
 
 
 def _queue_group_progress(
