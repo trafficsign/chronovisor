@@ -1274,6 +1274,103 @@ def test_native_precompute_does_not_retry_noncapacity_failure(monkeypatch, tmp_p
     assert result[0][0]["frontier_failure"]["failure_class"] == "native_luna_execution"
 
 
+@pytest.mark.parametrize(
+    "timeout,deadline,failure_class,expected",
+    [
+        (300, 30, "native_luna_timeout", "native_luna_deadline"),
+        (None, 30, "native_luna_timeout", "native_luna_deadline"),
+        (1, 30, "native_luna_timeout", "native_luna_timeout"),
+        (1, None, "native_luna_timeout", "native_luna_timeout"),
+        (300, 30, "native_luna_provenance", "native_luna_provenance"),
+    ],
+)
+def test_native_timeout_only_defers_when_cycle_shortened_the_call(
+    monkeypatch, tmp_path, timeout, deadline, failure_class, expected,
+) -> None:
+    from chronovisor.decision import native_luna_authority as native
+
+    calls = []
+    execution = {"run_id": "native-search-" + "a" * 32, "error": "timeout"}
+
+    def review(_row, **kwargs):
+        calls.append(kwargs["timeout"])
+        return native._failure("fixture", failure_class, execution=execution)
+
+    monkeypatch.setenv("CHRONOVISOR_FRONTIER_TIMEOUT_SECONDS", "3600")
+    monkeypatch.setattr(search_eval, "run_frontier_label_review", review)
+    result = search_eval._precompute_native_label_reviews(
+        [{"queue_status": "pending_frontier_review"}], [0], votes=1,
+        repo_root=tmp_path, timeout=timeout,
+        deadline=time.monotonic() + deadline if deadline is not None else None,
+    )
+    assert len(calls) == 1
+    failure = result[0][0]["frontier_failure"]
+    assert failure["failure_class"] == expected
+    assert failure["execution"]["run_id"] == execution["run_id"]
+    if expected == "native_luna_deadline":
+        assert calls[0] < (timeout or 3600)
+        assert failure["execution_failure_class"] == "native_luna_timeout"
+
+
+def test_native_cycle_timeout_preserves_queue_and_semantic_attempts(monkeypatch, tmp_path) -> None:
+    from chronovisor.decision import native_luna_authority as native
+
+    queue_file, golden_file = tmp_path / "queue.jsonl", tmp_path / "golden.jsonl"
+    row = _recall_candidate_row(b"fixture", queue_status="pending_frontier_review")
+    row.update(frontier_attempts=2, next_attempt_at="2026-10-17T00:00:00")
+    write_jsonl(queue_file, [row])
+    golden_file.write_bytes(b"")
+    before = queue_file.read_bytes()
+    calls = []
+
+    def review(_row, **kwargs):
+        calls.append(kwargs["timeout"])
+        return native._failure("timeout", "native_luna_timeout")
+
+    monkeypatch.setenv("CHRONOVISOR_SEARCH_LABEL_AUTHORITY", "native_luna")
+    monkeypatch.setattr(search_eval, "run_frontier_label_review", review)
+    result = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file, golden_file=golden_file, limit=1, timeout=300,
+        budget=CycleBudget(max_frontier_calls=1, max_mutations=1, max_elapsed_seconds=30),
+        stale_limit=0, now=datetime(2026, 10, 17, 12),
+    )
+    assert len(calls) == 1 and calls[0] < 30
+    assert result["attempted"] == result["promoted"] == 0
+    assert result["status_counts"] == {"native_luna_deferred": 1}
+    assert queue_file.read_bytes() == before
+    assert golden_file.read_bytes() == b""
+
+
+def test_native_execution_failure_keeps_cause_without_authorizing_a_verdict(monkeypatch, tmp_path) -> None:
+    from chronovisor.decision import native_luna_authority as native
+
+    queue_file, golden_file = tmp_path / "queue.jsonl", tmp_path / "golden.jsonl"
+    write_jsonl(queue_file, [_recall_candidate_row(b"fixture")])
+    golden_file.write_bytes(b"")
+    execution = {"run_id": "native-search-" + "a" * 32, "error": "OSError"}
+    failure = native._failure("execution failed", "native_luna_execution", execution=execution)
+    authority = semantic_authority("search_label", schema_name="search_label")
+    monkeypatch.setenv("CHRONOVISOR_SEARCH_LABEL_AUTHORITY", "native_luna")
+    monkeypatch.setattr(native, "run_native_luna_review", lambda *_args, **_kwargs: failure)
+    monkeypatch.setattr(search_eval, "build_frontier_label_prompt", lambda _row: "fixture")
+    monkeypatch.setattr(
+        search_eval.decision_authority, "current_semantic_authority",
+        lambda *_args, **_kwargs: (authority, None),
+    )
+    result = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file, golden_file=golden_file, limit=1, timeout=1,
+        stale_limit=0, now=datetime(2026, 10, 17, 12),
+    )
+    stored = search_eval.read_jsonl(queue_file)[0]
+    assert result["promoted"] == 0
+    assert stored["queue_status"] == "frontier_retry"
+    assert stored["decision_authority_error"] == "decision verdict authority audit is missing"
+    assert stored["native_luna_failure"] == failure["frontier_failure"]
+    assert stored["review_note"] == "execution failed"
+    assert "decision_artifact" not in stored
+    assert golden_file.read_bytes() == b""
+
+
 def test_native_precompute_reserves_frontier_budget_sequentially(
     monkeypatch, tmp_path
 ) -> None:

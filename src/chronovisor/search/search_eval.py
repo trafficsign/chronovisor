@@ -1724,23 +1724,23 @@ def _precompute_native_label_reviews(
 
     max_workers = min(native_luna_authority.NATIVE_LUNA_GLOBAL_LIMIT, len(row_indices) * max(1, votes))
     tasks = [(index, vote) for index in row_indices for vote in range(max(1, votes))]
+    requested_timeout = timeout
+    if requested_timeout is None:
+        try:
+            requested_timeout = int(
+                os.environ.get("CHRONOVISOR_FRONTIER_TIMEOUT_SECONDS", "3600")
+            )
+        except (TypeError, ValueError):
+            requested_timeout = None
     capacity_deadline = deadline
-    if capacity_deadline is None:
-        capacity_timeout = timeout
-        if capacity_timeout is None:
-            try:
-                capacity_timeout = int(
-                    os.environ.get("CHRONOVISOR_FRONTIER_TIMEOUT_SECONDS", "3600")
-                )
-            except (TypeError, ValueError):
-                capacity_timeout = None
-        if capacity_timeout is not None:
-            capacity_deadline = time.monotonic() + max(1, capacity_timeout)
+    if capacity_deadline is None and requested_timeout is not None:
+        capacity_deadline = time.monotonic() + max(1, requested_timeout)
 
     def run_one(task: tuple[int, int]) -> tuple[int, dict[str, Any]]:
         index, _vote = task
         row = rows[index]
         while True:
+            batch_limited = False
             if capacity_deadline is None:
                 call_timeout = timeout
             else:
@@ -1759,9 +1759,11 @@ def _precompute_native_label_reviews(
                     )
                 available_timeout = max(1, int(remaining))
                 configured_timeout = (
-                    max(1, int(timeout)) if timeout is not None else available_timeout
+                    max(1, requested_timeout)
+                    if requested_timeout is not None else available_timeout
                 )
                 call_timeout = min(configured_timeout, available_timeout)
+                batch_limited = deadline is not None and call_timeout < configured_timeout
             try:
                 review = run_frontier_label_review(
                     row,
@@ -1774,6 +1776,20 @@ def _precompute_native_label_reviews(
                 )
             normalized = _normalize_frontier_label_result(review)
             failure = normalized.get("frontier_failure")
+            if (
+                batch_limited and isinstance(failure, Mapping)
+                and failure.get("failure_class") == "native_luna_timeout"
+            ):
+                # The call ran, but the enclosing cycle cut its allowed time.
+                # Keep its execution evidence without counting a model verdict.
+                return index, {
+                    **normalized,
+                    "frontier_failure": {
+                        **failure,
+                        "failure_class": "native_luna_deadline",
+                        "execution_failure_class": "native_luna_timeout",
+                    },
+                }
             if not isinstance(failure, Mapping) or failure.get(
                 "failure_class"
             ) != "native_luna_capacity":
@@ -2161,6 +2177,7 @@ def _authority_retry_row(
     *,
     reviewed_at: str,
     preserve_attempts: bool = True,
+    review: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     updated = dict(row)
     updated["queue_status"] = "frontier_retry"
@@ -2171,6 +2188,15 @@ def _authority_retry_row(
     updated.pop("next_attempt_at", None)
     if not preserve_attempts:
         updated["frontier_attempts"] = 0
+    failure = review.get("frontier_failure") if review is not None else None
+    if (
+        isinstance(failure, Mapping)
+        and str(failure.get("failure_class") or "").startswith("native_luna_")
+    ):
+        # Failure evidence is diagnostic, never a semantic verdict.
+        # Preserve the strict authority error and the original cause.
+        updated["native_luna_failure"] = dict(failure)
+        updated["review_note"] = str(review.get("summary") or "") if review else ""
     return updated
 
 
@@ -2999,7 +3025,7 @@ def review_label_queue_with_frontier(
             updated_rows[row_index] = _authority_retry_row(
                 attempt_row,
                 authority_error or "search label verdict authority invalid",
-                reviewed_at=reviewed_at,
+                reviewed_at=reviewed_at, review=combined if reviewer is None else None,
             )
             status_counts["frontier_retry"] = status_counts.get("frontier_retry", 0) + 1
             continue

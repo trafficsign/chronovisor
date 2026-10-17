@@ -501,7 +501,9 @@ def native_luna_capacity_lease(
     return NativeLunaCapacityLease(root, owner=owner, slots=slots)
 
 
-def _failure(summary: str, failure_class: str) -> dict[str, Any]:
+def _failure(
+    summary: str, failure_class: str, *, execution: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "decision": "needs_retry",
         "confidence": 0.0,
@@ -517,6 +519,12 @@ def _failure(summary: str, failure_class: str) -> dict[str, Any]:
             "summary": summary,
             "human_required": False,
             "notify_user": False,
+            **({"execution": {
+                key: execution.get(key) for key in (
+                    "run_id", "returncode", "error", "rollout_sha256",
+                    "execution_sha256", "elapsed_seconds", "timeout_seconds",
+                )
+            }} if execution is not None else {}),
         },
     }
 
@@ -977,6 +985,7 @@ def _execute_native_luna_process(
     run_id: str,
     capacity: NativeLunaCapacityLease,
 ) -> dict[str, Any]:
+    started = time.monotonic()
     record: dict[str, Any] = {
         "run_id": run_id,
         "returncode": None,
@@ -986,6 +995,7 @@ def _execute_native_luna_process(
         "session_evidence": None,
         "error": None,
         "rollout_sha256": None,
+        "timeout_seconds": timeout,
     }
     persisted = False
 
@@ -1001,6 +1011,19 @@ def _execute_native_luna_process(
             output=record["output"],
             codex_home=record.get("codex_home"),
             session_evidence=record["session_evidence"],
+        )
+        record["elapsed_seconds"] = round(time.monotonic() - started, 3)
+        # Diagnostic process evidence is separate from the immutable authority
+        # manifest: a failed process must never mint a successful verdict.
+        execution = {
+            key: record.get(key) for key in (
+                "run_id", "returncode", "error", "timeout_seconds",
+                "elapsed_seconds", "rollout_sha256",
+            )
+        }
+        record["execution_sha256"] = _write_private_rollout_file(
+            _prepare_rollout_directory(root, run_id) / "execution.json",
+            (json.dumps(execution, sort_keys=True, separators=(",", ":")) + "\n").encode(),
         )
         persisted = True
 
@@ -1113,24 +1136,25 @@ def run_native_luna_review(
 
     rollout_sha256 = execution.get("rollout_sha256")
     if not isinstance(rollout_sha256, str) or _SHA256_RE.fullmatch(rollout_sha256) is None:
-        return _failure("native Luna rollout evidence could not be persisted", "native_luna_receipt")
+        return _failure("native Luna rollout evidence could not be persisted", "native_luna_receipt", execution=execution)
     if execution.get("error") == "timeout":
-        return _failure("native Luna execution timed out", "native_luna_timeout")
+        return _failure("native Luna execution timed out", "native_luna_timeout", execution=execution)
     if execution.get("error") is not None:
-        return _failure("native Luna execution failed", "native_luna_execution")
+        return _failure("native Luna execution failed", "native_luna_execution", execution=execution)
     if execution.get("returncode") != 0:
-        return _failure("native Luna returned a nonzero status", "native_luna_execution")
+        return _failure("native Luna returned a nonzero status", "native_luna_execution", execution=execution)
     session_evidence = execution.get("session_evidence")
     if session_evidence is None:
         return _failure(
             "native Luna session provenance is missing or mismatched",
             "native_luna_provenance",
+            execution=execution,
         )
     session_id, session, _session_path = session_evidence
     output = execution["output"]
     parsed = _extract_json(output)
     if parsed is None or validate_json(parsed, dict(schema)):
-        return _failure("native Luna output failed the production schema", "native_luna_schema")
+        return _failure("native Luna output failed the production schema", "native_luna_schema", execution=execution)
     result = _normal_result(parsed)
     router_policy = {"source": NATIVE_LUNA_SOURCE, "error": None, "routes": [{key: value for key, value in route.items() if not key.startswith("_")}]}
     result["decision_policy"] = {

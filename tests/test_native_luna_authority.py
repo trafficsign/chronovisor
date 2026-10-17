@@ -479,6 +479,19 @@ def test_native_timeout_keeps_private_rollout_history(
     assert (run_dir / "stderr.log").read_text(encoding="utf-8") == "timed out"
     assert next(run_dir.glob("sessions/**/*.jsonl")).is_file()
     assert (run_dir / "manifest.json").is_file()
+    execution_bytes = (run_dir / "execution.json").read_bytes()
+    execution = json.loads(execution_bytes)
+    assert execution["error"] == "timeout"
+    assert execution["returncode"] is None
+    assert execution["timeout_seconds"] == 1
+    assert execution["run_id"] == record["run_id"]
+    assert execution["rollout_sha256"] == record["rollout_sha256"]
+    assert execution["elapsed_seconds"] >= 0
+    assert hashlib.sha256(execution_bytes).hexdigest() == record["execution_sha256"]
+    assert (run_dir / "execution.json").stat().st_mode & 0o777 == 0o600
+    assert "private prompt" not in execution_bytes.decode()
+    manifest = json.loads((run_dir / "manifest.json").read_bytes())
+    assert "execution.json" not in manifest["files"]
 
 
 def test_native_receipt_rejects_wrong_model_and_schema_provenance(
