@@ -1729,6 +1729,61 @@ def _queue_status_for_review(review: dict[str, Any], *, min_confidence: float) -
     return "frontier_uncertain"
 
 
+def _select_label_review_indices(
+    rows: list[dict[str, Any]],
+    *,
+    limit: int,
+    review_order: str,
+    retry_due: Callable[[dict[str, Any]], bool],
+) -> list[int]:
+    """Select due rows while keeping both active review buckets moving.
+
+    ``pending_review`` is the long-running search-evaluation cohort, while the
+    other pending statuses are frontier work (including retries). A plain
+    queue scan can spend every bounded invocation on the frontier prefix and
+    starve the evaluation cohort. The balanced order alternates one row from
+    each bucket and then drains whichever bucket remains. FIFO remains
+    available for callers that need the historical order.
+    """
+    if limit <= 0:
+        return []
+    if review_order not in {"balanced", "fifo"}:
+        raise ValueError("review_order must be 'balanced' or 'fifo'")
+
+    frontier_indices: list[int] = []
+    evaluation_indices: list[int] = []
+    for index, row in enumerate(rows):
+        if bool(row.get("promoted_to_golden")):
+            continue
+        status = str(row.get("queue_status") or "")
+        if status not in FRONTIER_PENDING_STATUSES or not retry_due(row):
+            continue
+        if status == "pending_review":
+            evaluation_indices.append(index)
+        else:
+            frontier_indices.append(index)
+
+    if review_order == "fifo":
+        return sorted([*frontier_indices, *evaluation_indices])[:limit]
+
+    selected: list[int] = []
+    frontier_position = 0
+    evaluation_position = 0
+    while len(selected) < limit and (
+        frontier_position < len(frontier_indices)
+        or evaluation_position < len(evaluation_indices)
+    ):
+        if frontier_position < len(frontier_indices):
+            selected.append(frontier_indices[frontier_position])
+            frontier_position += 1
+            if len(selected) >= limit:
+                break
+        if evaluation_position < len(evaluation_indices):
+            selected.append(evaluation_indices[evaluation_position])
+            evaluation_position += 1
+    return selected
+
+
 def review_label_queue_with_frontier(
     *,
     queue_file: Path = LABEL_QUEUE_FILE,
@@ -1744,6 +1799,7 @@ def review_label_queue_with_frontier(
     dry_run: bool = False,
     now: datetime | None = None,
     budget: Any | None = None,
+    review_order: str = "balanced",
 ) -> dict[str, Any]:
     def optional_bytes(path: Path) -> bytes | None:
         try:
@@ -2131,19 +2187,27 @@ def review_label_queue_with_frontier(
         except ValueError:
             return True
 
-    for row_index, row in enumerate(rows):
+    review_indices = _select_label_review_indices(
+        rows,
+        limit=limit,
+        review_order=review_order,
+        retry_due=retry_due,
+    )
+    # Keep the durable row positions stable while executing the selected
+    # indices in the fairness order. Unselected rows remain byte-for-byte
+    # equivalent objects until the final CAS write.
+    updated_rows = list(rows)
+    for row_index in review_indices:
+        row = rows[row_index]
         status = str(row.get("queue_status") or "")
         if (
-            attempted >= limit
-            or bool(row.get("promoted_to_golden"))
+            bool(row.get("promoted_to_golden"))
             or status not in FRONTIER_PENDING_STATUSES
             or not retry_due(row)
         ):
-            updated_rows.append(row)
             continue
 
         if dry_run:
-            updated_rows.append(row)
             attempted += 1
             continue
 
@@ -2158,7 +2222,6 @@ def review_label_queue_with_frontier(
             )
             if not frontier_allowed or not mutation_allowed:
                 budget_exhausted = True
-                updated_rows.append(row)
                 continue
             budget.consume("frontier", max_votes)
             if not mutation_reserved:
@@ -2171,10 +2234,8 @@ def review_label_queue_with_frontier(
                 injected_reviewer=injected_reviewer,
             )
         if authority_error is not None or authority is None:
-            updated_rows.append(
-                authority_retry(
-                    row, authority_error or "search label authority unavailable"
-                )
+            updated_rows[row_index] = authority_retry(
+                row, authority_error or "search label authority unavailable"
             )
             continue
 
@@ -2238,11 +2299,9 @@ def review_label_queue_with_frontier(
                 hold_error = str(exc)
             attempted += 1
             if hold is None:
-                updated_rows.append(
-                    authority_retry(
-                        row,
-                        hold_error or "search label semantic hold authority invalid",
-                    )
+                updated_rows[row_index] = authority_retry(
+                    row,
+                    hold_error or "search label semantic hold authority invalid",
                 )
                 status_counts["frontier_retry"] = (
                     status_counts.get("frontier_retry", 0) + 1
@@ -2256,7 +2315,7 @@ def review_label_queue_with_frontier(
             )
             updated["frontier_attempts"] = int(row.get("frontier_attempts") or 0) + 1
             updated["last_attempt_at"] = reviewed_at
-            updated_rows.append(updated)
+            updated_rows[row_index] = updated
             status_counts["semantic_hold"] = status_counts.get("semantic_hold", 0) + 1
             continue
         combined = _combine_frontier_label_reviews(
@@ -2305,10 +2364,8 @@ def review_label_queue_with_frontier(
             )
         if authority_error is not None or decision_artifact is None:
             attempted += 1
-            updated_rows.append(
-                authority_retry(
-                    row, authority_error or "search label verdict authority invalid"
-                )
+            updated_rows[row_index] = authority_retry(
+                row, authority_error or "search label verdict authority invalid"
             )
             status_counts["frontier_retry"] = status_counts.get("frontier_retry", 0) + 1
             continue
@@ -2365,7 +2422,7 @@ def review_label_queue_with_frontier(
             updated["reviewed_at"] = reviewed_at
         else:
             updated["promoted_to_golden"] = False
-        updated_rows.append(updated)
+        updated_rows[row_index] = updated
         effect_rows[row_index] = {
             "artifact": decision_artifact,
             "evidence": _label_candidate_payload(row),
@@ -2455,6 +2512,7 @@ def review_label_queue_with_frontier(
         "max_attempts": attempts_cap,
         "budget_exhausted": budget_exhausted,
         "recovered": 0 if commit_error else recovered_queue + recovered_golden,
+        "review_order": review_order,
         "reason": commit_error or "",
     }
 

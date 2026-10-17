@@ -902,6 +902,142 @@ def test_frontier_review_promotes_trusted_label_queue_rows(tmp_path) -> None:
     assert golden_rows[0]["decision_artifact"] == queue_rows[0]["decision_artifact"]
 
 
+def test_frontier_review_balances_frontier_and_pending_evaluation_rows(tmp_path) -> None:
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    rows = [
+        {
+            "query": "frontier-1",
+            "expected_pages": ["target-1"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "queue_status": "pending_frontier_review",
+            "promoted_to_golden": False,
+        },
+        {
+            "query": "frontier-2",
+            "expected_pages": ["target-2"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "queue_status": "frontier_retry",
+            "promoted_to_golden": False,
+        },
+        {
+            "query": "evaluation-1",
+            "expected_pages": ["target-3"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "queue_status": "pending_review",
+            "promoted_to_golden": False,
+        },
+        {
+            "query": "evaluation-2",
+            "expected_pages": ["target-4"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "queue_status": "pending_review",
+            "promoted_to_golden": False,
+        },
+    ]
+    write_jsonl(queue_file, rows)
+    golden_file.write_text("", encoding="utf-8")
+    seen: list[str] = []
+
+    def reviewer(row):
+        seen.append(row["query"])
+        return {
+            "decision": "approved",
+            "confidence": 0.9,
+            "expected_pages": row["expected_pages"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "trusted",
+            "notes": None,
+        }
+
+    payload = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        limit=2,
+        reviewer=reviewer,
+        review_order="balanced",
+    )
+
+    assert payload["attempted"] == 2
+    assert seen == ["frontier-1", "evaluation-1"]
+    stored = search_eval.read_jsonl(queue_file)
+    assert [row["queue_status"] for row in stored] == [
+        "frontier_approved",
+        "frontier_retry",
+        "frontier_approved",
+        "pending_review",
+    ]
+
+
+def test_frontier_review_budget_keeps_alternating_selection_order(tmp_path) -> None:
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    rows = []
+    for index in range(4):
+        rows.extend(
+            [
+                {
+                    "query": f"evaluation-{index}",
+                    "expected_pages": [f"target-e-{index}"],
+                    "negative_pages": [],
+                    "stale_pages": [],
+                    "queue_status": "pending_review",
+                    "promoted_to_golden": False,
+                },
+                {
+                    "query": f"frontier-{index}",
+                    "expected_pages": [f"target-f-{index}"],
+                    "negative_pages": [],
+                    "stale_pages": [],
+                    "queue_status": "pending_frontier_review",
+                    "promoted_to_golden": False,
+                },
+            ]
+        )
+    write_jsonl(queue_file, rows)
+    golden_file.write_text("", encoding="utf-8")
+    seen: list[str] = []
+
+    def reviewer(row):
+        seen.append(row["query"])
+        return {
+            "decision": "approved",
+            "confidence": 0.9,
+            "expected_pages": row["expected_pages"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "trusted",
+            "notes": None,
+        }
+
+    payload = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        limit=8,
+        reviewer=reviewer,
+        budget=CycleBudget(
+            max_frontier_calls=4,
+            max_mutations=1,
+            max_elapsed_seconds=10,
+        ),
+        review_order="balanced",
+    )
+
+    assert payload["attempted"] == 4
+    assert payload["budget_exhausted"] is True
+    assert seen == [
+        "frontier-0",
+        "evaluation-0",
+        "frontier-1",
+        "evaluation-1",
+    ]
+
+
 def test_frontier_review_reopens_when_callback_appends_to_queue(
     tmp_path, monkeypatch
 ) -> None:
