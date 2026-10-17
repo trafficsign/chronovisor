@@ -1236,6 +1236,52 @@ def _incremental_session_rallies(
     return materialized
 
 
+def _catalog_is_unchanged(
+    root: Path, current: Mapping[str, RawUnit], watermark: str
+) -> bool:
+    """Verify a no-op without opening the sealed catalog for writing."""
+
+    before = _read_catalog_checkpoint(root)
+    if (
+        before is None
+        or before["catalog_watermark"] != watermark
+        or _catalog_lineage(before) is None
+    ):
+        return False
+    try:
+        with closing(_connect_readonly(root)) as connection:
+            connection.execute("BEGIN")
+            metadata = dict(connection.execute("SELECT key,value FROM metadata"))
+            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(raw_units)")}
+            summary_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(rally_summaries)")
+            }
+            if (
+                metadata.get("schema") != CATALOG_SCHEMA
+                or metadata.get("watermark") != watermark
+                or metadata.get("rally_changes_schema") != RALLY_CHANGE_JOURNAL_SCHEMA
+                or {"source_after_line", "source_until_line"} - columns
+                or summary_columns != _RALLY_SUMMARY_COLUMNS
+                or not _summary_complete(connection)
+            ):
+                return False
+            stored = {
+                str(row["raw_id"]): (str(row["raw_sha256"]), str(row["receipt_sha256"]))
+                for row in connection.execute(
+                    "SELECT raw_id,raw_sha256,receipt_sha256 FROM raw_units"
+                )
+            }
+            if stored.keys() != current.keys() or any(
+                stored[raw_id] != _unit_identity(unit) for raw_id, unit in current.items()
+            ):
+                return False
+    except sqlite3.Error:
+        return False
+    # Include open, transaction and close in the physical identity check.
+    return _read_catalog_checkpoint(root) == before
+
+
 def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance:
     """Add newly committed Raw v2 units without duplicating transcript text."""
 
@@ -1247,6 +1293,8 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
     except RawSegmentCorrupt as exc:
         raise CatalogError("committed Raw inventory is invalid") from exc
     current = {unit.raw_id: unit for unit in units}
+    if _catalog_is_unchanged(root, current, watermark):
+        return CatalogAdvance("noop", watermark, (), (), (), ())
     connection = _connect(root)
     try:
         connection.execute("BEGIN IMMEDIATE")

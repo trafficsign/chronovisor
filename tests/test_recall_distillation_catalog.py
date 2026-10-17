@@ -406,6 +406,12 @@ def test_advance_rechecks_checkpoint_after_open(
         [_message("user", "question", "2026-08-01T00:00:00Z")],
     )
     catalog.advance(raw_dir, tmp_path, 4096)
+    _capture(
+        tmp_path,
+        "save-codex-two.md",
+        "b" * 24,
+        [_message("user", "new question", "2026-08-02T00:00:00Z")],
+    )
     original = catalog._connect
     changed = False
 
@@ -427,6 +433,88 @@ def test_advance_rechecks_checkpoint_after_open(
     with original(tmp_path) as connection:
         assert connection.execute("SELECT source_index FROM events").fetchone()[0] == 1
     assert catalog.advance(raw_dir, tmp_path, 4096).status == "noop"
+
+
+def test_unchanged_advance_never_opens_catalog_for_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path, "save-codex-one.md", "a" * 24,
+        [_message("user", "question", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    before = catalog._read_catalog_checkpoint(tmp_path)
+    assert before is not None
+    checkpoint_bytes = catalog._catalog_checkpoint_path(tmp_path).read_bytes()
+
+    def unexpected_write_open(root: Path) -> sqlite3.Connection:
+        raise AssertionError("unchanged catalog opened for writing")
+
+    monkeypatch.setattr(catalog, "_connect", unexpected_write_open)
+    for _ in range(3):
+        assert catalog.advance(raw_dir, tmp_path, 4096).status == "noop"
+        assert catalog._read_catalog_checkpoint(tmp_path) == before
+        assert catalog._catalog_checkpoint_path(tmp_path).read_bytes() == checkpoint_bytes
+
+
+@pytest.mark.parametrize("damage", ["marker", "row", "table"])
+def test_unchanged_advance_preserves_summary_migration(
+    tmp_path: Path, damage: str
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path, "save-codex-one.md", "a" * 24,
+        [_message("user", "question", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    checkpoint = catalog._read_catalog_checkpoint(tmp_path)
+    assert checkpoint is not None
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        if damage == "marker":
+            connection.execute("DELETE FROM metadata WHERE key='rally_summary_complete'")
+        elif damage == "row":
+            connection.execute("DELETE FROM rally_summaries")
+        else:
+            connection.execute("DROP TABLE rally_summaries")
+    # Model an older valid catalog whose additive summary needs migration.
+    catalog._write_catalog_checkpoint(
+        tmp_path, checkpoint["catalog_watermark"], checkpoint["event_rowid"],
+        catalog_lineage=checkpoint["catalog_lineage"],
+    )
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "noop"
+    with catalog._connect_readonly(tmp_path) as connection:
+        assert catalog._summary_complete(connection)
+    assert catalog._read_catalog_checkpoint(tmp_path) is not None
+
+
+def test_unchanged_advance_rechecks_readonly_close_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path, "save-codex-one.md", "a" * 24,
+        [_message("user", "question", "2026-08-01T00:00:00Z")],
+    )
+    catalog.advance(raw_dir, tmp_path, 4096)
+    original = catalog._connect_readonly
+
+    class ChangedOnClose:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self.connection = connection
+
+        def execute(self, statement: str) -> sqlite3.Cursor:
+            return self.connection.execute(statement)
+
+        def close(self) -> None:
+            self.connection.close()
+            catalog.catalog_path(tmp_path).chmod(0o600)
+
+    monkeypatch.setattr(
+        catalog, "_connect_readonly", lambda root: ChangedOnClose(original(root))
+    )
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "repaired"
+    assert catalog._read_catalog_checkpoint(tmp_path) is not None
 
 
 def test_catalog_event_metadata_tamper_requires_repair(tmp_path: Path) -> None:
