@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -89,6 +92,65 @@ def _receipt(review: dict[str, object]) -> dict[str, object]:
 
 
 def _persist_receipt(root: Path, receipt: dict[str, object]) -> None:
+    source = root / "session-source" / "sessions/2026/10/17/rollout.jsonl"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "\n".join(
+            (
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": receipt["session_id"],
+                            "model_provider": receipt["session_provider"],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "turn_context",
+                        "payload": {
+                            "model": receipt["session_model"],
+                            "effort": receipt["session_reasoning_effort"],
+                            "collaboration_mode": {
+                                "settings": {
+                                    "model": receipt["session_model"],
+                                    "reasoning_effort": receipt[
+                                        "session_reasoning_effort"
+                                    ],
+                                }
+                            },
+                        },
+                    }
+                ),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    receipt.pop("rollout_sha256", None)
+    receipt.pop("receipt_sha256", None)
+    receipt["rollout_sha256"] = native._persist_rollout_evidence(
+        root,
+        str(receipt["run_id"]),
+        stdout=json.dumps(
+            {"type": "thread.started", "thread_id": receipt["session_id"]}
+        )
+        + "\n",
+        stderr="",
+        output="{}\n",
+        codex_home=root / "session-source",
+        session_evidence=(
+            str(receipt["session_id"]),
+            {
+                "model": str(receipt["session_model"]),
+                "provider": str(receipt["session_provider"]),
+                "reasoning_effort": str(receipt["session_reasoning_effort"]),
+            },
+            source,
+        ),
+    )
+    receipt["receipt_sha256"] = canonical_json_sha256_strict(receipt)
     destination = root / "runtime/native-luna-authority/receipts"
     destination.mkdir(parents=True)
     (destination / f"{receipt['run_id']}.json").write_text(
@@ -196,6 +258,105 @@ def test_native_receipt_binds_result_and_session(
 
     review["summary"] = "tampered"
     assert native.validate_native_luna_review(review, _authority(), lane="search_label")
+
+
+def test_native_rollout_history_change_and_deletion_are_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(native, "_runtime_identity", lambda: _runtime_identity())
+    monkeypatch.setenv("CHRONOVISOR_ROOT", str(tmp_path))
+    review = _review()
+    receipt = _receipt(review)
+    _persist_receipt(tmp_path, receipt)
+    review["native_luna_receipt"] = receipt
+    assert native.validate_native_luna_review(review, _authority(), lane="search_label") is None
+
+    session_file = next(
+        (tmp_path / "runtime/native-luna-authority/runs" / receipt["run_id"])
+        .glob("sessions/**/*.jsonl")
+    )
+    original = session_file.read_text(encoding="utf-8")
+    assert native._validate_rollout_evidence(
+        {**receipt, "session_id": "another-session"}
+    ) == "native Luna rollout session does not match receipt"
+    session_file.write_text(original + "tampered\n", encoding="utf-8")
+    assert native.validate_native_luna_review(review, _authority(), lane="search_label")
+    session_file.unlink()
+    assert native.validate_native_luna_review(review, _authority(), lane="search_label")
+
+
+def test_native_timeout_keeps_private_rollout_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.decision import frontier_review
+
+    codex_home = tmp_path / "isolated-home"
+    session = codex_home / "sessions/2026/10/17/timeout.jsonl"
+    session.parent.mkdir(parents=True)
+    session.write_text(
+        "\n".join(
+            (
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "timeout-session", "model_provider": "openai"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "turn_context",
+                        "payload": {
+                            "model": native.NATIVE_LUNA_MODEL,
+                            "effort": "max",
+                            "collaboration_mode": {
+                                "settings": {
+                                    "model": native.NATIVE_LUNA_MODEL,
+                                    "reasoning_effort": "max",
+                                }
+                            },
+                        },
+                    }
+                ),
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    @contextmanager
+    def isolated_environment():
+        yield {"CODEX_HOME": str(codex_home)}
+
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd="codex",
+            timeout=1,
+            output=json.dumps(
+                {"type": "thread.started", "thread_id": "timeout-session"}
+            )
+            + "\n",
+            stderr="timed out",
+        )
+
+    monkeypatch.setattr(frontier_review, "_isolated_codex_environment", isolated_environment)
+    monkeypatch.setattr(native.subprocess, "run", timeout)
+    record = native._execute_native_luna_process(
+        codex=Path("/bin/codex"),
+        prompt="private prompt",
+        repo_root=tmp_path,
+        schema={"type": "object"},
+        timeout=1,
+        root=tmp_path,
+        run_id="native-search-" + "c" * 32,
+        capacity=SimpleNamespace(pass_fds=()),
+    )
+
+    assert record["error"] == "timeout"
+    run_dir = tmp_path / "runtime/native-luna-authority/runs" / record["run_id"]
+    assert (run_dir / "stdout.jsonl").is_file()
+    assert (run_dir / "stderr.log").read_text(encoding="utf-8") == "timed out"
+    assert next(run_dir.glob("sessions/**/*.jsonl")).is_file()
+    assert (run_dir / "manifest.json").is_file()
 
 
 def test_native_receipt_rejects_wrong_model_and_schema_provenance(

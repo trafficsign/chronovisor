@@ -51,6 +51,7 @@ LOCAL_AUTHORITY_VALUE = "local"
 SEARCH_LABEL_REVIEW_SECTION = "search_label_review"
 NATIVE_LUNA_GLOBAL_LIMIT = 10
 NATIVE_LUNA_RECEIPT_SCHEMA = "chronovisor.search-label-native-luna-receipt.v1"
+NATIVE_LUNA_ROLLOUT_SCHEMA = "chronovisor.search-label-native-luna-rollout.v1"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RUN_ID_RE = re.compile(r"^native-search-[0-9a-f]{32}$")
 _RECEIPT_FIELDS = frozenset(
@@ -78,6 +79,7 @@ _RECEIPT_FIELDS = frozenset(
         "session_reasoning_effort",
         "session_id",
         "session_provenance_sha256",
+        "rollout_sha256",
         "receipt_sha256",
     }
 )
@@ -535,6 +537,114 @@ def _review_without_receipt(review: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _rollout_relative_path_is_safe(value: object) -> bool:
+    if not isinstance(value, str) or not value or "\\" in value:
+        return False
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        return False
+    return value in {"stdout.jsonl", "stderr.log", "output.json"} or (
+        value.startswith("sessions/") and value.endswith(".jsonl")
+    )
+
+
+def _validate_rollout_evidence(receipt: Mapping[str, Any]) -> str | None:
+    run_id = receipt.get("run_id")
+    expected_digest = receipt.get("rollout_sha256")
+    if (
+        not isinstance(run_id, str)
+        or not _RUN_ID_RE.fullmatch(run_id)
+        or not isinstance(expected_digest, str)
+        or _SHA256_RE.fullmatch(expected_digest) is None
+    ):
+        return "native Luna rollout identity is invalid"
+    directory = _runtime_root() / "runtime" / "native-luna-authority" / "runs" / run_id
+    try:
+        manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError):
+        return "native Luna rollout manifest is not persisted"
+    if not isinstance(manifest, Mapping) or set(manifest) != {
+        "schema",
+        "run_id",
+        "session",
+        "session_file",
+        "files",
+    }:
+        return "native Luna rollout manifest is invalid"
+    if manifest.get("schema") != NATIVE_LUNA_ROLLOUT_SCHEMA or manifest.get("run_id") != run_id:
+        return "native Luna rollout manifest identity is invalid"
+    files = manifest.get("files")
+    if not isinstance(files, Mapping) or not {"stdout.jsonl", "stderr.log", "output.json"}.issubset(files):
+        return "native Luna rollout files are invalid"
+    actual_files: dict[str, dict[str, Any]] = {}
+    for relative, metadata in files.items():
+        if not _rollout_relative_path_is_safe(relative) or not isinstance(metadata, Mapping):
+            return "native Luna rollout files are invalid"
+        if set(metadata) != {"bytes", "sha256"}:
+            return "native Luna rollout file metadata is invalid"
+        size = metadata.get("bytes")
+        digest = metadata.get("sha256")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            return "native Luna rollout file metadata is invalid"
+        if not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None:
+            return "native Luna rollout file metadata is invalid"
+        try:
+            payload = (directory / relative).read_bytes()
+        except (OSError, UnicodeError):
+            return "native Luna rollout file is missing"
+        observed = {"bytes": len(payload), "sha256": _sha256_bytes(payload)}
+        if observed != dict(metadata):
+            return "native Luna rollout file changed"
+        actual_files[relative] = observed
+    session = manifest.get("session")
+    session_file = manifest.get("session_file")
+    if not isinstance(session, Mapping) or set(session) != {
+        "id",
+        "model",
+        "provider",
+        "reasoning_effort",
+    }:
+        return "native Luna rollout session is invalid"
+    if not isinstance(session_file, str) or session_file not in actual_files:
+        return "native Luna rollout session file is invalid"
+    session_id = session.get("id")
+    if not isinstance(session_id, str) or not session_id:
+        return "native Luna rollout session is invalid"
+    if dict(session) != {
+        "id": receipt.get("session_id"),
+        "model": receipt.get("session_model"),
+        "provider": receipt.get("session_provider"),
+        "reasoning_effort": receipt.get("session_reasoning_effort"),
+    }:
+        return "native Luna rollout session does not match receipt"
+    evidence = _isolated_session_evidence(directory, session_id)
+    if evidence is None:
+        return "native Luna rollout session is missing or changed"
+    observed_id, observed_session, observed_path = evidence
+    if (
+        observed_id != session_id
+        or observed_path.relative_to(directory).as_posix() != session_file
+        or observed_session != {
+            "model": session.get("model"),
+            "provider": session.get("provider"),
+            "reasoning_effort": session.get("reasoning_effort"),
+        }
+    ):
+        return "native Luna rollout session provenance changed"
+    canonical = {
+        "schema": NATIVE_LUNA_ROLLOUT_SCHEMA,
+        "run_id": run_id,
+        "session": {"id": observed_id, **observed_session},
+        "session_file": session_file,
+        "files": actual_files,
+    }
+    if dict(manifest) != canonical:
+        return "native Luna rollout manifest changed"
+    if canonical_json_sha256_strict(canonical) != expected_digest:
+        return "native Luna rollout digest changed"
+    return None
+
+
 def _write_receipt(receipt: Mapping[str, Any], root: Path) -> None:
     destination = root / "runtime" / "native-luna-authority" / "receipts"
     destination.mkdir(parents=True, exist_ok=True)
@@ -550,6 +660,123 @@ def _write_receipt(receipt: Mapping[str, Any], root: Path) -> None:
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def _prepare_rollout_directory(root: Path, run_id: str) -> Path:
+    if _RUN_ID_RE.fullmatch(run_id) is None:
+        raise ValueError("invalid native Luna rollout id")
+    directory = root / "runtime" / "native-luna-authority" / "runs" / run_id
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(directory, 0o700)
+    return directory
+
+
+def _write_private_rollout_file(path: Path, payload: bytes) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    return _sha256_bytes(payload)
+
+
+def _copy_session_rollout(
+    codex_home: Path | None,
+    rollout_directory: Path,
+) -> dict[str, dict[str, Any]]:
+    files: dict[str, dict[str, Any]] = {}
+    if codex_home is None:
+        return files
+    sessions = codex_home / "sessions"
+    if not sessions.is_dir() or sessions.is_symlink():
+        return files
+    for current, directories, names in os.walk(sessions, followlinks=False):
+        current_path = Path(current)
+        directories[:] = [
+            name
+            for name in directories
+            if not (current_path / name).is_symlink()
+        ]
+        for name in sorted(names):
+            source = current_path / name
+            if source.suffix != ".jsonl" or source.is_symlink() or not source.is_file():
+                continue
+            relative = source.relative_to(codex_home).as_posix()
+            payload = source.read_bytes()
+            digest = _write_private_rollout_file(
+                rollout_directory / relative,
+                payload,
+            )
+            files[relative] = {"bytes": len(payload), "sha256": digest}
+    return dict(sorted(files.items()))
+
+
+def _persist_rollout_evidence(
+    root: Path,
+    run_id: str,
+    *,
+    stdout: str,
+    stderr: str,
+    output: str,
+    codex_home: Path | None,
+    session_evidence: tuple[str, dict[str, str], Path] | None,
+) -> str:
+    directory = _prepare_rollout_directory(root, run_id)
+    files = {
+        "stdout.jsonl": {
+            "bytes": len(stdout.encode("utf-8")),
+            "sha256": _write_private_rollout_file(
+                directory / "stdout.jsonl", stdout.encode("utf-8")
+            ),
+        },
+        "stderr.log": {
+            "bytes": len(stderr.encode("utf-8")),
+            "sha256": _write_private_rollout_file(
+                directory / "stderr.log", stderr.encode("utf-8")
+            ),
+        },
+        "output.json": {
+            "bytes": len(output.encode("utf-8")),
+            "sha256": _write_private_rollout_file(
+                directory / "output.json", output.encode("utf-8")
+            ),
+        },
+    }
+    files.update(_copy_session_rollout(codex_home, directory))
+    session: dict[str, str] | None = None
+    session_file: str | None = None
+    if session_evidence is not None and codex_home is not None:
+        session_id, metadata, source = session_evidence
+        try:
+            session_file = source.relative_to(codex_home).as_posix()
+        except ValueError as exc:
+            raise OSError("native Luna session path escaped isolated home") from exc
+        if session_file not in files:
+            raise OSError("native Luna session transcript was not preserved")
+        session = {"id": session_id, **metadata}
+    manifest = {
+        "schema": NATIVE_LUNA_ROLLOUT_SCHEMA,
+        "run_id": run_id,
+        "session": session,
+        "session_file": session_file,
+        "files": files,
+    }
+    digest = canonical_json_sha256_strict(manifest)
+    _write_private_rollout_file(
+        directory / "manifest.json",
+        (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        ),
+    )
+    return digest
 
 
 def _build_command(
@@ -666,11 +893,11 @@ def _thread_started_id(output: str) -> str | None:
     return next(iter(thread_ids)) if len(thread_ids) == 1 else None
 
 
-def _isolated_session_metadata(
+def _isolated_session_evidence(
     codex_home: Path,
     thread_id: str,
-) -> tuple[str, dict[str, str]] | None:
-    matches: list[dict[str, str]] = []
+) -> tuple[str, dict[str, str], Path] | None:
+    matches: list[tuple[str, dict[str, str], Path]] = []
     for path in codex_home.glob("sessions/**/*.jsonl"):
         try:
             transcript = path.read_text(encoding="utf-8")
@@ -694,10 +921,119 @@ def _isolated_session_metadata(
             continue
         provenance = _session_provenance(transcript)
         if provenance is not None:
-            matches.append(provenance)
+            matches.append((thread_id, provenance, path))
     if len(matches) != 1:
         return None
-    return thread_id, matches[0]
+    return matches[0]
+
+
+def _isolated_session_metadata(
+    codex_home: Path,
+    thread_id: str,
+) -> tuple[str, dict[str, str]] | None:
+    evidence = _isolated_session_evidence(codex_home, thread_id)
+    return evidence[:2] if evidence is not None else None
+
+
+def _text_output(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value if isinstance(value, str) else ""
+
+
+def _execute_native_luna_process(
+    *,
+    codex: Path,
+    prompt: str,
+    repo_root: Path,
+    schema: Mapping[str, Any],
+    timeout: int,
+    root: Path,
+    run_id: str,
+    capacity: NativeLunaCapacityLease,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "run_id": run_id,
+        "returncode": None,
+        "stdout": "",
+        "stderr": "",
+        "output": "",
+        "session_evidence": None,
+        "error": None,
+        "rollout_sha256": None,
+    }
+    persisted = False
+
+    def persist() -> None:
+        nonlocal persisted
+        if persisted:
+            return
+        record["rollout_sha256"] = _persist_rollout_evidence(
+            root,
+            run_id,
+            stdout=record["stdout"],
+            stderr=record["stderr"],
+            output=record["output"],
+            codex_home=record.get("codex_home"),
+            session_evidence=record["session_evidence"],
+        )
+        persisted = True
+
+    try:
+        from chronovisor.decision.frontier_review import _isolated_codex_environment
+
+        with tempfile.TemporaryDirectory(prefix="chronovisor-native-luna-") as td:
+            directory = Path(td)
+            schema_path = directory / "search-label.schema.json"
+            output_path = directory / "search-label.output.json"
+            schema_path.write_text(
+                json.dumps(dict(schema), ensure_ascii=False, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with _isolated_codex_environment() as env:
+                record["codex_home"] = Path(env["CODEX_HOME"])
+                try:
+                    completed = subprocess.run(
+                        _build_command(
+                            codex,
+                            repo_root=repo_root,
+                            schema_path=schema_path,
+                            output_path=output_path,
+                        ),
+                        input=prompt,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        timeout=timeout,
+                        cwd=str(repo_root),
+                        env=env,
+                        pass_fds=capacity.pass_fds,
+                    )
+                    record["returncode"] = completed.returncode
+                    record["stdout"] = _text_output(completed.stdout)
+                    record["stderr"] = _text_output(completed.stderr)
+                except subprocess.TimeoutExpired as exc:
+                    record["error"] = "timeout"
+                    record["stdout"] = _text_output(exc.stdout)
+                    record["stderr"] = _text_output(exc.stderr)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    record["error"] = exc.__class__.__name__
+                finally:
+                    try:
+                        record["output"] = output_path.read_text(
+                            encoding="utf-8", errors="replace"
+                        )
+                    except OSError:
+                        record["output"] = record["stdout"]
+                    thread_id = _thread_started_id(record["stdout"])
+                    if thread_id is not None:
+                        record["session_evidence"] = _isolated_session_evidence(
+                            record["codex_home"], thread_id
+                        )
+                    persist()
+    finally:
+        persist()
+    return record
 
 
 def run_native_luna_review(
@@ -732,59 +1068,41 @@ def run_native_luna_review(
     except (NativeLunaIdentityError, TypeError, ValueError):
         return _failure("native Luna route identity is unavailable", "native_luna_identity")
 
+    run_id = f"native-search-{uuid.uuid4().hex}"
     try:
-        from chronovisor.decision.frontier_review import _isolated_codex_environment
-
         with native_luna_capacity_lease() as capacity:
-            with tempfile.TemporaryDirectory(prefix="chronovisor-native-luna-") as td:
-                directory = Path(td)
-                schema_path = directory / "search-label.schema.json"
-                output_path = directory / "search-label.output.json"
-                schema_path.write_text(
-                    json.dumps(dict(schema), ensure_ascii=False, sort_keys=True) + "\n",
-                    encoding="utf-8",
-                )
-                with _isolated_codex_environment() as env:
-                    completed = subprocess.run(
-                        _build_command(
-                            codex,
-                            repo_root=repo_root,
-                            schema_path=schema_path,
-                            output_path=output_path,
-                        ),
-                        input=prompt,
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                        timeout=timeout_seconds,
-                        cwd=str(repo_root),
-                        env=env,
-                        pass_fds=capacity.pass_fds,
-                    )
-                    output = (
-                        output_path.read_text(encoding="utf-8", errors="replace")
-                        if output_path.exists()
-                        else completed.stdout or ""
-                    )
-                    thread_id = _thread_started_id(completed.stdout or "")
-                    session_metadata = (
-                        _isolated_session_metadata(Path(env["CODEX_HOME"]), thread_id)
-                        if thread_id is not None
-                        else None
-                    )
+            execution = _execute_native_luna_process(
+                codex=codex,
+                prompt=prompt,
+                repo_root=repo_root,
+                schema=schema,
+                timeout=timeout_seconds,
+                root=_runtime_root(),
+                run_id=run_id,
+                capacity=capacity,
+            )
     except NativeLunaCapacityUnavailable:
         return _failure("native Luna capacity is unavailable", "native_luna_capacity")
     except (OSError, subprocess.SubprocessError, ValueError):
         return _failure("native Luna execution failed", "native_luna_execution")
 
-    if completed.returncode != 0:
+    rollout_sha256 = execution.get("rollout_sha256")
+    if not isinstance(rollout_sha256, str) or _SHA256_RE.fullmatch(rollout_sha256) is None:
+        return _failure("native Luna rollout evidence could not be persisted", "native_luna_receipt")
+    if execution.get("error") == "timeout":
+        return _failure("native Luna execution timed out", "native_luna_timeout")
+    if execution.get("error") is not None:
+        return _failure("native Luna execution failed", "native_luna_execution")
+    if execution.get("returncode") != 0:
         return _failure("native Luna returned a nonzero status", "native_luna_execution")
-    if session_metadata is None:
+    session_evidence = execution.get("session_evidence")
+    if session_evidence is None:
         return _failure(
             "native Luna session provenance is missing or mismatched",
             "native_luna_provenance",
         )
-    session_id, session = session_metadata
+    session_id, session, _session_path = session_evidence
+    output = execution["output"]
     parsed = _extract_json(output)
     if parsed is None or validate_json(parsed, dict(schema)):
         return _failure("native Luna output failed the production schema", "native_luna_schema")
@@ -798,7 +1116,6 @@ def run_native_luna_review(
         "error": policy_error,
         "router_policy": router_policy,
     }
-    run_id = f"native-search-{uuid.uuid4().hex}"
     receipt = {
         "schema": NATIVE_LUNA_RECEIPT_SCHEMA,
         "run_id": run_id,
@@ -825,6 +1142,7 @@ def run_native_luna_review(
         "session_provenance_sha256": canonical_json_sha256_strict(
             {"session_id": session_id, **session}
         ),
+        "rollout_sha256": rollout_sha256,
     }
     receipt["receipt_sha256"] = canonical_json_sha256_strict(receipt)
     try:
@@ -919,7 +1237,7 @@ def _validate_receipt(
         return "native Luna receipt is not persisted"
     if not isinstance(persisted, Mapping) or dict(persisted) != dict(receipt):
         return "native Luna persisted receipt changed"
-    return None
+    return _validate_rollout_evidence(receipt)
 
 
 def validate_native_luna_review(
