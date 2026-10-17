@@ -27,9 +27,7 @@ from tests.test_decision_authority import _vote_audit
 
 
 @pytest.fixture(autouse=True)
-def _valid_okf_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _valid_okf_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "okf-root"
     root.mkdir()
     for name in ("index.md", "log.md", "schema.md"):
@@ -123,9 +121,7 @@ def authority_review(lane: str, marker: str = "a", **values) -> dict:
             "conservative_veto_fired": False,
             "conservative_veto_bypassed_by_lane_policy": False,
             "dissent_effect_class": None,
-            "quorum_safety_policy_version": expected[
-                "quorum_safety_policy_version"
-            ],
+            "quorum_safety_policy_version": expected["quorum_safety_policy_version"],
             "agreement_sha256": marker * 64,
             "failure_class": None,
             "quarantine_reason": None,
@@ -133,9 +129,7 @@ def authority_review(lane: str, marker: str = "a", **values) -> dict:
             "residency": {},
             "votes": [
                 _vote_audit("primary", expected["router"]["routes"][0], marker * 64),
-                _vote_audit(
-                    "challenger", expected["router"]["routes"][1], marker * 64
-                ),
+                _vote_audit("challenger", expected["router"]["routes"][1], marker * 64),
             ],
         },
     }
@@ -970,7 +964,9 @@ def test_frontier_review_promotes_trusted_label_queue_rows(tmp_path) -> None:
     assert golden_rows[0]["decision_artifact"] == queue_rows[0]["decision_artifact"]
 
 
-def test_frontier_review_balances_frontier_and_pending_evaluation_rows(tmp_path) -> None:
+def test_frontier_review_balances_frontier_and_pending_evaluation_rows(
+    tmp_path,
+) -> None:
     queue_file = tmp_path / "label-queue.jsonl"
     golden_file = tmp_path / "search-golden.jsonl"
     rows = [
@@ -1076,9 +1072,10 @@ def test_stale_source_reconciliation_preserves_candidate_history_and_golden(
     assert stored["candidate_sha256"] == row["candidate_sha256"]
     assert "last_attempt_lane" not in stored
     assert stored["source_stale_metadata"]["reason"] == "source_content_sha256_mismatch"
-    assert stored["source_stale_metadata"]["current_content_sha256"] == hashlib.sha256(
-        source_path.read_bytes()
-    ).hexdigest()
+    assert (
+        stored["source_stale_metadata"]["current_content_sha256"]
+        == hashlib.sha256(source_path.read_bytes()).hexdigest()
+    )
     assert golden_file.read_bytes() == b""
 
 
@@ -1104,6 +1101,48 @@ def test_stale_source_reconciliation_handles_nonstable_and_retry_rows(
     assert stored["frontier_attempts"] == 2
     assert "next_attempt_at" not in stored
     assert stored["source_stale_metadata"]["reason"] == "source_page_not_stable"
+
+
+def test_stale_source_reconciliation_accepts_japanese_nonidentity_metadata(
+    tmp_path, monkeypatch
+) -> None:
+    source_path = tmp_path / "page.md"
+    old_content = "---\ntitle: 日本語の見出し\nstatus: stable\n---\nold\n".encode()
+    row = _recall_candidate_row(old_content)
+    source_path.write_bytes(old_content.replace(b"old\n", b"new\n"))
+    _patch_label_source(monkeypatch, source_path)
+    queue_file = tmp_path / "label-queue.jsonl"
+    write_jsonl(queue_file, [row])
+
+    result = search_eval.reconcile_stale_label_queue(queue_file=queue_file, limit=1)
+
+    assert result["reconciled"] == 1
+    assert search_eval.read_jsonl(queue_file)[0]["queue_status"] == "source_stale"
+
+
+def test_stale_source_reconciliation_retains_ambiguous_identity_and_reviewed_rows(
+    tmp_path, monkeypatch
+) -> None:
+    source_path = tmp_path / "page.md"
+    old_content = b"---\nstatus: stable\n---\nold\n"
+    row = _recall_candidate_row(old_content)
+    reviewed = {**row, "reviewed": True}
+    _patch_label_source(monkeypatch, source_path)
+    queue_file = tmp_path / "label-queue.jsonl"
+    write_jsonl(queue_file, [row, reviewed])
+    source_path.write_bytes(b"---\nstatus: stable\nstatus: deprecated\n---\nnew\n")
+
+    assert (
+        search_eval.reconcile_stale_label_queue(queue_file=queue_file)["reconciled"]
+        == 0
+    )
+    assert search_eval.read_jsonl(queue_file) == [row, reviewed]
+    source_path.write_bytes(b"---\nstatus: stable\n---\nnew\n")
+    assert (
+        search_eval.reconcile_stale_label_queue(queue_file=queue_file)["reconciled"]
+        == 1
+    )
+    assert search_eval.read_jsonl(queue_file)[1] == reviewed
 
 
 def test_stale_source_reconciliation_refuses_malformed_missing_or_judged_rows(

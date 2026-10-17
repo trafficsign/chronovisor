@@ -1827,17 +1827,21 @@ def _current_label_source_snapshot(page_id: str) -> dict[str, Any] | None:
         return None
     status = None
     page_uid = ""
+    identity_keys: set[bytes] = set()
     for line in frontmatter_bytes.splitlines():
         key, separator, value = line.partition(b":")
-        if not separator:
+        if not separator or key not in {b"status", b"uid"}:
             continue
+        if key in identity_keys:
+            return None
+        identity_keys.add(key)
         try:
             text_value = value.strip().strip(b"'\"").decode("ascii")
         except UnicodeDecodeError:
             return None
-        if key.strip() == b"status":
+        if key == b"status":
             status = text_value
-        elif key.strip() == b"uid":
+        elif key == b"uid":
             page_uid = text_value
     if status not in {"draft", "stable", "deprecated"}:
         return None
@@ -1859,6 +1863,7 @@ def _candidate_source_stale_metadata(
     if (
         status not in FRONTIER_PENDING_STATUSES
         or bool(row.get("promoted_to_golden"))
+        or bool(row.get("reviewed"))
         or not _candidate_preregistration_shape_is_valid(row)
     ):
         return None
@@ -1949,6 +1954,7 @@ def reconcile_stale_label_queue(
         if (
             str(row.get("queue_status") or "") not in FRONTIER_PENDING_STATUSES
             or bool(row.get("promoted_to_golden"))
+            or bool(row.get("reviewed"))
             or str(row.get("source") or "") not in _AUTO_CANDIDATE_SOURCES
         ):
             continue
