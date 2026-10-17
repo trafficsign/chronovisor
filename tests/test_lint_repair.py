@@ -1118,6 +1118,71 @@ def test_large_queue_preselection_skips_future_retries_and_keeps_pending_due(
     )
 
 
+def test_large_scoped_queue_preselection_filters_before_store_get(
+    tmp_path: Path, monkeypatch
+) -> None:
+    rows = [_row(f"scoped-{index}") for index in range(70)]
+    pages = {}
+    for row in rows:
+        page = tmp_path / "pages" / f"{row['page']}.md"
+        _page(page)
+        pages[str(row["page"])] = page
+    queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
+    _queue(queue_path, rows)
+    monkeypatch.setattr(
+        lint_repair.chronovisor_store,
+        "find_page",
+        lambda page_id: pages.get(page_id),
+    )
+    store = _store(tmp_path)
+    eligible_keys = set()
+    for row in rows:
+        page_text = pages[str(row["page"])].read_text(encoding="utf-8")
+        source_id, input_data = lint_repair._candidate_identity(row, page_text)
+        merged = store.merge_item(
+            lane="lint_repair",
+            source_id=source_id,
+            input_data=input_data,
+            resolver_version=lint_repair.REPAIR_RESOLVER_VERSION,
+            metadata=row,
+            now=NOW,
+        )
+        if str(row["page"]).endswith(("68", "69")):
+            eligible_keys.add(str(merged["item"]["key"]))
+
+    get_calls = 0
+    original_get = store.get
+
+    def counted_get(key: str):
+        nonlocal get_calls
+        get_calls += 1
+        return original_get(key)
+
+    monkeypatch.setattr(store, "get", counted_get)
+    result = lint_repair.run_lint_repair(
+        queue_file=queue_path,
+        store=store,
+        budget=_budget(),
+        max_items=2,
+        dry_run=True,
+        local_reviewer=_never,
+        frontier_reviewer=_never,
+        eligible_keys=eligible_keys,
+        now=NOW,
+    )
+
+    assert result["preselected"] is True
+    assert result["seen"] == 70
+    assert result["rows_scanned"] == 2
+    assert result["bounded"] == 2
+    assert result["out_of_scope"] == 0
+    assert get_calls == 2
+    assert [entry["page"] for entry in result["results"]] == [
+        "scoped-68",
+        "scoped-69",
+    ]
+
+
 def test_deterministic_rows_run_before_model_backed_rows(
     tmp_path: Path, monkeypatch
 ) -> None:

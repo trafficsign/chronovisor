@@ -715,6 +715,26 @@ def _candidate_identity(
     return source_id, input_data
 
 
+def _queue_row_key(row: Mapping[str, Any]) -> str:
+    """Derive a queue row's key without touching convergence state."""
+
+    page_id = str(row.get("page") or "")
+    page_path = chronovisor_store.find_page(page_id) if page_id else None
+    try:
+        page_text = (
+            page_path.read_text(encoding="utf-8") if page_path is not None else None
+        )
+    except OSError:
+        page_text = None
+    source_id, input_data = _candidate_identity(row, page_text)
+    return stable_item_key(
+        "lint_repair",
+        source_id,
+        input_data,
+        resolver_version=REPAIR_RESOLVER_VERSION,
+    )
+
+
 def _route_target(issue_type: str) -> str | None:
     if issue_type == "duplicate":
         return "duplicate_review"
@@ -1497,9 +1517,15 @@ def run_lint_repair(
     work_limit = max(0, max_items)
     preselected = False
     if (
-        eligible_keys is None
-        and queue_seen > max(_PRESELECTION_MIN_QUEUE, work_limit * _PRESELECTION_MULTIPLIER)
+        queue_seen > max(_PRESELECTION_MIN_QUEUE, work_limit * _PRESELECTION_MULTIPLIER)
     ):
+        if eligible_keys is not None:
+            # Convergence-scoped lanes provide an exact allowlist.  Filter
+            # by the stable queue key before the bounded state snapshot so
+            # terminal detector rows cannot consume ``store.get`` calls or
+            # work slots reserved for that scope.  The selected rows still
+            # recompute the key below and fail closed if the page changed.
+            rows = [row for row in rows if _queue_row_key(row) in eligible_keys]
         rows = _preselect_rows(
             rows,
             store=convergence,
