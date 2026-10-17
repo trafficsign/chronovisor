@@ -8,8 +8,13 @@ from types import SimpleNamespace
 import pytest
 
 from chronovisor.core.jobs import JobStatus
+from chronovisor.core.save_transaction import (
+    attach_save_transaction_marker,
+    make_save_transaction,
+)
 from chronovisor.ingest import raw_replay
 from chronovisor.ingest.convergence import CycleBudget
+from chronovisor.ingest.raw_semantic_projection import project_parent_raw
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -61,6 +66,81 @@ def _isolate_paths(tmp_path: Path, monkeypatch) -> dict[str, Path]:
         failure_supervisor, "operational_deferred_raw_files", lambda _paths=None: {}
     )
     return paths
+
+
+def test_replay_source_keywords_matches_frontmatter_precedence(tmp_path: Path) -> None:
+    raw = tmp_path / "ordinary.md"
+    content = "---\nraw_keywords: [current]\nkeywords: [legacy]\n---\nbody\n"
+    raw.write_text(content, encoding="utf-8")
+
+    assert raw_replay.replay_source_keywords(raw.name, raw, content) == ["current"]
+
+
+def test_replay_source_keywords_verifies_quarantined_projection_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "parent.md"
+    session_file = tmp_path / "session.jsonl"
+    transaction = make_save_transaction(
+        host="codex",
+        session_file=session_file,
+        session_id="session-1",
+        after_line=0,
+        until_line=1,
+    )
+    transcript = "\n".join(
+        [
+            "# Codex Session Transcript Delta",
+            "",
+            "- Source: Codex",
+            "- Capture mode: deterministic-lossless",
+            "",
+            "## Transcript Delta",
+            "",
+            "```json",
+            json.dumps([{"line": 1, "role": "user", "text": "remember this"}]),
+            "```",
+            "",
+        ]
+    )
+    parent.write_text(
+        attach_save_transaction_marker(transaction, transcript), encoding="utf-8"
+    )
+    artifact_dir = tmp_path / "runtime" / "raw-projections" / "artifacts"
+    projection = project_parent_raw(
+        parent,
+        output_dir=artifact_dir,
+        max_child_bytes=2_000,
+    )
+    child = projection.child_paths[0]
+    quarantine = tmp_path / "runtime" / "failures" / "quarantined-raw" / child.name
+    quarantine.parent.mkdir(parents=True)
+    quarantine.write_bytes(child.read_bytes())
+    monkeypatch.setattr(raw_replay, "CHRONOVISOR_ROOT", tmp_path)
+
+    manifest = projection.manifest_path
+    assert manifest is not None
+    before_child = child.read_bytes()
+    before_manifest = manifest.read_bytes()
+    assert raw_replay.replay_source_keywords(
+        child.name,
+        quarantine,
+        quarantine.read_text(encoding="utf-8"),
+    ) == ["transcript-semantic-projection"]
+    assert child.read_bytes() == before_child
+    assert manifest.read_bytes() == before_manifest
+
+
+def test_replay_source_keywords_rejects_unverified_projection_child(
+    tmp_path: Path,
+) -> None:
+    name = "semantic-" + "a" * 64 + "-child-00000001-" + "b" * 64 + ".md"
+    path = tmp_path / name
+    content = '{"not":"a projection child"}'
+    path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="projection child evidence"):
+        raw_replay.replay_source_keywords(name, path, content)
 
 
 class _FakeJobStore:

@@ -62,6 +62,11 @@ RUNTIME_STATUS_FILE = CHRONOVISOR_ROOT / "runtime" / "status.json"
 FAILURE_PACKETS_DIR = CHRONOVISOR_ROOT / "runtime" / "failures" / "packets"
 QUARANTINED_RAW_DIR = CHRONOVISOR_ROOT / "runtime" / "failures" / "quarantined-raw"
 
+_PROJECTION_CHILD_NAME_RE = re.compile(
+    r"^semantic-[0-9a-f]{64}-child-[0-9]{8}-[0-9a-f]{64}\.md$"
+)
+_PROJECTION_CHILD_KEYWORD = "transcript-semantic-projection"
+
 SCHEMA_VERSION = 2
 MAX_ATTEMPTS = 3
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
@@ -554,6 +559,101 @@ def _logical_raw_bytes(raw_name: str, path: Path) -> bytes:
         return path.read_bytes()
     unit = store.resolve(raw_name)
     return store.read_bytes(unit) if unit is not None else path.read_bytes()
+
+
+def _frontmatter_source_keywords(content: str) -> list[str]:
+    """Mirror the orchestrator's raw keyword precedence without mutation."""
+
+    metadata, _body = parse_frontmatter(content)
+    for field in ("raw_keywords", "keywords"):
+        value = metadata.get(field)
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            return list(value)
+    return []
+
+
+def _native_source_keywords(raw_name: str, path: Path) -> list[str]:
+    """Keep the v2 native source side channel used by the orchestrator."""
+
+    try:
+        store = RawStore(RAW_DIR)
+        unit = store.resolve_reference(path) or store.resolve(raw_name)
+    except (OSError, TypeError, ValueError):
+        return []
+    commit = getattr(unit, "commit", None) if unit is not None else None
+    host = getattr(commit, "host", None)
+    if not isinstance(host, str):
+        return []
+    host_label = "Claude Code" if host == "claude-code" else "Codex"
+    return [host_label, "transcript-delta", "source-native"]
+
+
+def _projection_child_is_verified(
+    raw_name: str,
+    path: Path,
+    content_bytes: bytes,
+) -> bool:
+    """Verify one immutable projection child and its durable manifest.
+
+    A quarantined child no longer has its manifest beside it, so the original
+    artifact directory is a second read-only candidate.  The candidate bytes
+    must match the replay input before the existing projection verifier is
+    trusted.  No marker is inferred from a filename alone.
+    """
+
+    if path.is_symlink():
+        raise ValueError("semantic projection child source is a symlink")
+    try:
+        if not path.is_file() or path.read_bytes() != content_bytes:
+            raise ValueError("semantic projection child source changed")
+    except OSError as exc:
+        raise ValueError("semantic projection child source is unreadable") from exc
+    artifact_path = (
+        CHRONOVISOR_ROOT / "runtime" / "raw-projections" / "artifacts" / raw_name
+    )
+    candidates: list[Path] = [path]
+    if artifact_path != path:
+        candidates.append(artifact_path)
+
+    from chronovisor.ingest import raw_semantic_projection
+
+    for candidate in candidates:
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        try:
+            if candidate.read_bytes() != content_bytes:
+                continue
+            raw_semantic_projection.verify_projection_child(candidate)
+        except (OSError, UnicodeError, ValueError, TypeError):
+            continue
+        return True
+    return False
+
+
+def replay_source_keywords(raw_name: str, path: Path, content: str) -> list[str]:
+    """Return the exact source-key side channel for one replay input.
+
+    Ordinary raws use the same frontmatter precedence as the orchestrator.
+    Verified semantic projection children receive the marker that the
+    orchestrator adds before ``run_ingest``.  A child-shaped input without a
+    matching canonical artifact is rejected instead of silently entering a
+    different proposal/source-key namespace.
+    """
+
+    if not isinstance(content, str):
+        raise TypeError("replay content must be text")
+    keywords = _native_source_keywords(raw_name, path)
+    if not keywords:
+        keywords = _frontmatter_source_keywords(content)
+
+    if _PROJECTION_CHILD_NAME_RE.fullmatch(raw_name) is None:
+        return keywords
+    content_bytes = content.encode("utf-8")
+    if not _projection_child_is_verified(raw_name, path, content_bytes):
+        raise ValueError("semantic projection child evidence is unavailable")
+    if _PROJECTION_CHILD_KEYWORD not in keywords:
+        keywords.append(_PROJECTION_CHILD_KEYWORD)
+    return keywords
 
 
 def _replay_ingest_content(
@@ -3160,6 +3260,9 @@ def _run_candidate(
                 record_processed()
             else:
                 metadata: dict[str, Any] = {"source_raw": f"replay:{raw}"}
+                replay_keywords = replay_source_keywords(raw, path, content)
+                if replay_keywords:
+                    metadata["raw_keywords"] = replay_keywords
                 if (projection_summary or {}).get("kind") != "legacy_passthrough":
                     metadata["semantic_projection"] = projection_summary
                 run_ingest(
