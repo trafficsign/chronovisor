@@ -64,6 +64,8 @@ from chronovisor.decision.local_structured import (
     LocalConsensusAuditStore,
     LocalStructuredResult,
     LocalStructuredSession,
+    RecordedValidationIssue,
+    StructuredAttempt,
     ValidationIssue,
     preflight_structured_request,
     production_reasoning_authority_matches,
@@ -2339,6 +2341,7 @@ class DecisionRouter:
         from chronovisor.decision.decision_artifact import (
             SINGLE_MODEL_DECISION_ARTIFACT_SCHEMA,
         )
+        from chronovisor.decision.decision_authority import _audit_attempt_is_safe
 
         if artifact.get("schema") == DECISION_ARTIFACT_SCHEMA:
             raise DecisionArtifactError(
@@ -2370,10 +2373,36 @@ class DecisionRouter:
             raise DecisionArtifactError(
                 "single-model artifact proof voter differs from current policy"
             )
+        stored_attempts = proof.get("attempts")
+        repairs = proof.get("repair_turns")
+        if (
+            isinstance(repairs, bool)
+            or not isinstance(repairs, int)
+            or not 0 <= repairs <= 2
+            or not isinstance(stored_attempts, list)
+            or len(stored_attempts) != repairs + 1
+            or not all(_audit_attempt_is_safe(item) for item in stored_attempts)
+        ):
+            raise DecisionArtifactError("single-model artifact repair history is invalid")
+        # Issue audits contain hashes, not the original validation text. Preserve
+        # those records exactly instead of hashing invented replacement values.
+        attempts = tuple(
+            StructuredAttempt(
+                index=item["index"],
+                valid=item["valid"],
+                output_sha256=item["output_sha256"],
+                output_chars=item["output_chars"],
+                normalized=item["normalized"],
+                error_fingerprint=item["error_fingerprint"],
+                issues=tuple(RecordedValidationIssue(issue) for issue in item["issues"]),
+            )
+            for item in stored_attempts
+        )
         result = LocalStructuredResult(
             ok=True,
             model=route.model,
             value=value,
+            attempts=attempts,
             returned_model=(
                 proof.get("returned_model")
                 if isinstance(proof.get("returned_model"), str)

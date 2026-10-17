@@ -583,6 +583,16 @@ def _completion_failure(
 
 
 @dataclass(frozen=True)
+class RecordedValidationIssue:
+    """Preserve a validated, redacted issue without inventing its original text."""
+
+    record: Mapping[str, Any]
+
+    def audit_record(self) -> dict[str, Any]:
+        return copy.deepcopy(dict(self.record))
+
+
+@dataclass(frozen=True)
 class StructuredAttempt:
     index: int
     valid: bool
@@ -590,7 +600,7 @@ class StructuredAttempt:
     output_chars: int
     normalized: bool
     error_fingerprint: str | None
-    issues: tuple[ValidationIssue, ...]
+    issues: tuple[ValidationIssue | RecordedValidationIssue, ...]
 
     def audit_record(self) -> dict[str, Any]:
         return {
