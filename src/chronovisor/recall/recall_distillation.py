@@ -3592,6 +3592,7 @@ def candidate_snapshot(
     *,
     limit: int = 200,
     candidate_texts: Mapping[str, str] | None = None,
+    root: Path | None = None,
 ) -> dict[str, Any]:
     candidates = store.search_historical_index(
         index_path,
@@ -3636,10 +3637,28 @@ def candidate_snapshot(
         "query_feature_text_sha256": hashlib.sha256(query_feature_bytes).hexdigest(),
         "candidates": feature_rows,
     }
-    return {
+    snapshot = {
         **unsigned,
         "snapshot_sha256": canonical_json.canonical_json_sha256_strict(unsigned),
     }
+    if root is not None:
+        from chronovisor.recall.recall_distillation_cf_capture import (
+            augment_candidate_snapshot,
+        )
+
+        return augment_candidate_snapshot(root, rally, snapshot)
+    return snapshot
+
+
+def teacher_candidate_rows(snapshot: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Preserve historical teacher selection when exact CF sources coexist."""
+
+    return [
+        candidate
+        for candidate in snapshot.get("candidates", [])
+        if isinstance(candidate, Mapping)
+        and candidate.get("source_kind") != "exact-exposure-page-v1"
+    ]
 
 
 def teacher_assignment(
@@ -7286,6 +7305,56 @@ def _ensure_bootstrap_policy(root: Path, baseline: Mapping[str, Any]) -> dict[st
         return artifact
 
 
+def _lineage_rows_integrity(
+    root: Path,
+    rows: object,
+    owner_plan: Mapping[str, Any],
+    lineage: Mapping[str, Any],
+) -> bool:
+    """Verify teacher ownership and every CF row's separately frozen plan."""
+
+    if not isinstance(rows, list) or not rows or any(
+        not isinstance(row, Mapping) for row in rows
+    ):
+        return False
+    owner_id = str(owner_plan.get("artifact_id") or "")
+    cf_ids = sorted({
+        str(row.get("split_plan_id") or "")
+        for row in rows if row.get("source") == "counterfactual-label"
+    })
+    declared = lineage.get("counterfactual_plan_ids")
+    if declared is None:
+        # Existing policies were restricted to the single owner plan.
+        if any(plan_id != owner_id for plan_id in cf_ids):
+            return False
+    elif (
+        declared != cf_ids
+        or lineage.get("counterfactual_plan_ids_sha256")
+        != canonical_json.canonical_json_sha256_strict(cf_ids)
+    ):
+        return False
+    plans = {owner_id: owner_plan}
+    try:
+        for plan_id in cf_ids:
+            if plan_id not in plans:
+                plans[plan_id] = _read_split_plan_artifact(root, plan_id)
+            if any(
+                plans[plan_id].get(key) != owner_plan.get(key)
+                for key in ("feature_revision", "model_cohort_sha256")
+            ):
+                return False
+    except DistillationError, store.DistillationStoreError, KeyError:
+        return False
+    return all(
+        _materialized_row_integrity(
+            row, root=root,
+            split_plan=plans[str(row.get("split_plan_id") or "")]
+            if row.get("source") == "counterfactual-label" else owner_plan,
+        )
+        for row in rows
+    )
+
+
 def _verify_candidate_lineage(
     root: Path,
     candidate: Mapping[str, Any],
@@ -7433,11 +7502,7 @@ def _verify_candidate_lineage(
         or len(set(replay_hashes)) != len(replay_hashes)
         or set(replay_hashes) - set(snapshot_hashes)
         or set(replay_hashes) != set(expected_hashes)
-        or any(
-            not isinstance(row, Mapping)
-            or not _materialized_row_integrity(row, root=root, split_plan=split_plan)
-            for row in rows
-        )
+        or not _lineage_rows_integrity(root, rows, split_plan, lineage)
         or {str(row.get("split") or "") for row in rows if isinstance(row, Mapping)}
         < {"train", "validation", "test"}
         or not all(
@@ -7457,6 +7522,9 @@ def _verify_candidate_lineage(
         or replay.get("baseline_artifact_id") != lineage["baseline_artifact_id"]
         or replay.get("model_cohort_sha256") != lineage["model_cohort_sha256"]
         or replay.get("split_revision") != "grouped-rolling-v1"
+        or replay.get("counterfactual_plan_ids") != lineage.get("counterfactual_plan_ids")
+        or replay.get("counterfactual_plan_ids_sha256")
+        != lineage.get("counterfactual_plan_ids_sha256")
         or split_plan.get("feature_revision") != TEXT_FEATURE_REVISION
         or split_plan.get("model_cohort_sha256") != lineage["model_cohort_sha256"]
         or sealed_baseline.get("raw_watermark") != lineage["raw_watermark"]
@@ -7524,6 +7592,21 @@ def _maybe_publish_candidate(
     except store.DistillationStoreError:
         return {"status": "held", "reason": "sealed_incumbent_missing"}
     policy = train_tiny_policy(active_rows)
+    owner_ids = {
+        str(row.get("split_plan_id") or "")
+        for row in active_rows if row.get("source") != "counterfactual-label"
+    }
+    if len(owner_ids) != 1:
+        return {"status": "held", "reason": "training_lineage_incomplete"}
+    owner_plan_id = next(iter(owner_ids))
+    cf_ids = sorted({
+        str(row.get("split_plan_id") or "")
+        for row in rows if row.get("source") == "counterfactual-label"
+    })
+    cf_lineage = {
+        "counterfactual_plan_ids": cf_ids,
+        "counterfactual_plan_ids_sha256": canonical_json.canonical_json_sha256_strict(cf_ids),
+    }
     training_rows_sha256 = canonical_json.canonical_json_sha256_strict(active_rows)
     replay_id, _, _ = store.write_immutable(
         store.distillation_dir(root) / "locked-replays",
@@ -7547,6 +7630,7 @@ def _maybe_publish_candidate(
             ),
             "model_cohort_sha256": model_cohort["cohort_sha256"],
             "split_revision": "grouped-rolling-v1",
+            **cf_lineage,
         },
         schema="chronovisor.recall-distill-locked-replay.v1",
     )
@@ -7560,12 +7644,8 @@ def _maybe_publish_candidate(
             "raw_watermark": baseline["raw_watermark"],
             "label_chain_head": training["label_chain_head"],
             "feature_revision": training["feature_revision"],
-            "split_plan_id": str(
-                next(
-                    iter({str(row.get("split_plan_id") or "") for row in active_rows}),
-                    "",
-                )
-            ),
+            "split_plan_id": owner_plan_id,
+            **cf_lineage,
             "offline_gate_sha256": canonical_json.canonical_json_sha256_strict(
                 offline_gate
             ),
@@ -8343,11 +8423,7 @@ def publish_policy(
         or snapshot.get("feature_revision") != TEXT_FEATURE_REVISION
         or not isinstance(rows, list)
         or not rows
-        or any(
-            not isinstance(row, Mapping)
-            or not _materialized_row_integrity(row, root=root, split_plan=split_plan)
-            for row in rows
-        )
+        or not _lineage_rows_integrity(root, rows, split_plan, lineage)
         or {str(row.get("split") or "") for row in rows if isinstance(row, Mapping)}
         < {"train", "validation", "test"}
         or baseline.get("raw_watermark") != lineage["raw_watermark"]
@@ -8361,6 +8437,9 @@ def publish_policy(
         or replay.get("baseline_artifact_id") != lineage["baseline_artifact_id"]
         or replay.get("model_cohort_sha256") != lineage["model_cohort_sha256"]
         or replay.get("split_revision") != "grouped-rolling-v1"
+        or replay.get("counterfactual_plan_ids") != lineage.get("counterfactual_plan_ids")
+        or replay.get("counterfactual_plan_ids_sha256")
+        != lineage.get("counterfactual_plan_ids_sha256")
         or replay.get("offline_gate_sha256") != lineage["offline_gate_sha256"]
         or split_plan.get("feature_revision") != TEXT_FEATURE_REVISION
         or split_plan.get("model_cohort_sha256") != lineage["model_cohort_sha256"]
@@ -9306,6 +9385,8 @@ def _teacher_payload(
     max_input_bytes: int,
     include_context: bool = True,
 ) -> dict[str, Any] | None:
+    if candidate.get("source_kind") == "exact-exposure-page-v1":
+        return None
     query = texts.get(str(rally["query_sha256"]), "")
     candidate_text = texts.get(str(candidate["text_sha256"]), "")
     # UTF-8 uses at least one byte per code point, and the canonical payload
@@ -9754,7 +9835,7 @@ def _ox_prepare_tasks(
             continue
         candidates = [
             candidate
-            for candidate in snapshot.get("candidates", [])
+            for candidate in teacher_candidate_rows(snapshot)
             if isinstance(candidate, Mapping)
             and str(candidate.get("candidate_id") or "")
         ]
@@ -9785,7 +9866,7 @@ def _ox_prepare_tasks(
             continue
         candidates = [
             candidate
-            for candidate in snapshot.get("candidates", [])
+            for candidate in teacher_candidate_rows(snapshot)
             if isinstance(candidate, Mapping)
         ]
         selected = candidates[:3]
@@ -11684,7 +11765,7 @@ def _prepare_local_teacher_work(
             and split_assignments.get(rally_id) not in {"train", "validation", "test"}
         ):
             continue
-        candidates = list(snapshot.get("candidates", []))
+        candidates = teacher_candidate_rows(snapshot)
         selected = candidates[:3]
         if candidates[3:]:
             selected.append(candidates[-1])
@@ -14756,6 +14837,7 @@ def _prepare_counterfactual_work(
     snapshots: Mapping[str, Mapping[str, Any]],
     rally_by_id: Mapping[str, Mapping[str, Any]],
     selected_work_ids: list[str] | None = None,
+    counterfactual_plans: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[tuple[str, str], str]]:
     from chronovisor.recall.recall_distillation_workset import (
         DistillationWorksetError,
@@ -14785,13 +14867,17 @@ def _prepare_counterfactual_work(
         key=lambda item: (_source_epoch(rally_by_id.get(item[0], {})), item[0]),
     ):
         rally = rally_by_id.get(rally_id)
+        own_plan = (counterfactual_plans or {}).get(rally_id)
+        plan_id = str(own_plan["artifact_id"]) if own_plan is not None else split_plan_id
+        assignment = (
+            own_plan["assignments"].get(rally_id)
+            if own_plan is not None else split_assignments.get(rally_id)
+        )
         if (
             rally is None
             or not rally.get("actual_answer_refs")
             or (
-                split_plan_id
-                and split_assignments.get(rally_id)
-                not in {"train", "validation", "test"}
+                plan_id and assignment not in {"train", "validation", "test"}
             )
         ):
             continue
@@ -14866,6 +14952,7 @@ def _prepare_counterfactual_work(
                         exposure.get("exposure_artifact_id") or ""
                     ),
                     "actual_answer_refs": rally.get("actual_answer_refs", []),
+                    **({"counterfactual_plan_id": plan_id} if own_plan is not None else {}),
                 }
             )
             work_id = (
@@ -14895,13 +14982,16 @@ def _prepare_counterfactual_work(
                     "payload_digest": payload_digest,
                     "priority": (
                         100 * int("page_content_sha256" in candidate)
-                        + _age_band_priority(age_bands.get(rally_id, "old-history"))
+                        + _age_band_priority(
+                            "locked-test" if own_plan is not None
+                            else age_bands.get(rally_id, "old-history")
+                        )
                     ),
                     "temporal_split": {
                         "as_of": str(rally.get("as_of") or ""),
                         "group_id": str(rally.get("session_cluster_id") or ""),
-                        "split": str(split_assignments.get(rally_id) or "embargo"),
-                        "split_plan_id": split_plan_id,
+                        "split": str(assignment or "embargo"),
+                        "split_plan_id": plan_id,
                     },
                     "provenance": {
                         "kind": "counterfactual",
@@ -15476,6 +15566,7 @@ def _run_counterfactual_block(
         snapshots = {
             key: snapshot for key, snapshot in snapshots.items() if key in rally_by_id
         }
+    from chronovisor.recall.recall_distillation_cf_schedule import read_plans
     from chronovisor.recall.recall_distillation_workset import DistillationWorkset
 
     workset = DistillationWorkset(
@@ -15488,6 +15579,9 @@ def _run_counterfactual_block(
         snapshots=snapshots,
         rally_by_id=rally_by_id,
         selected_work_ids=selected_work_ids,
+        counterfactual_plans=read_plans(
+            root, rallies=rally_by_id, snapshots=snapshots,
+        ) if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE else None,
     )
     _advance_local_workset(
         workset,
@@ -15692,6 +15786,12 @@ def _capture_candidate_snapshots(
                 if isinstance(row.get("rally_id"), str) and row.get("rally_id")
             }
             if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE:
+                from chronovisor.recall.recall_distillation_cf_schedule import (
+                    read_schedule,
+                )
+
+                schedule = read_schedule(root)
+                label_rally_ids.update((schedule or {}).get("rally_plan_ids", {}))
                 # Native teacher work imports frozen bundles and needs no
                 # historical snapshot scan here. Load only the CF model lane;
                 # the training phase loads and verifies all remaining rows.
@@ -15782,6 +15882,7 @@ def _capture_candidate_snapshots(
             texts.get(str(rally["query_sha256"]), ""),
             limit=config.max_candidates,
             candidate_texts=texts,
+            root=root if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE else None,
         )
         payloads.append(
             {
@@ -16023,10 +16124,14 @@ def _prepare_distillation_chunk(
         prioritize_test = int(scheduler_state.get("cold_start_lane_turn", 0)) % 4 != 3
         if prioritize_test:
             assignments = split_plan["assignments"]
+            from chronovisor.recall.recall_distillation_cf_schedule import read_schedule
+
+            schedule = read_schedule(root) if native_sources else None
+            counterfactual_ids = (schedule or {}).get("rally_plan_ids", {})
             model_snapshots = {
                 rally_id: snapshot
                 for rally_id, snapshot in snapshots.items()
-                if assignments.get(rally_id) == "test"
+                if assignments.get(rally_id) == "test" or rally_id in counterfactual_ids
             }
     counterfactual_probe = _run_counterfactual_block(
         execute=False,

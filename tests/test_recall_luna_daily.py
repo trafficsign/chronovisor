@@ -593,6 +593,22 @@ def test_repo_owned_capture_without_private_helper_reaches_bundle(
 ) -> None:
     """A fresh day can capture and prepare without an inventory helper file."""
 
+    from chronovisor.recall import recall_distillation_cf_schedule as schedule
+
+    schedule_calls = []
+
+    def ensure_schedule(root, rallies, snapshots, **kwargs):
+        # Daily export must own its normal worker lease at this seam.
+        lease = daily.store.acquire_nonblocking_lock(
+            daily.store.distillation_dir(root) / "distillation-worker.lock"
+        )
+        if lease is not None:
+            daily.store.release_lock(lease)
+        assert lease is None
+        schedule_calls.append((rallies, snapshots, kwargs))
+        return {}
+
+    monkeypatch.setattr(schedule, "ensure_counterfactual_schedule", ensure_schedule)
     root = tmp_path / "root"
     root.mkdir()
     private_dir = tmp_path / "next-day" / "inventory"
@@ -722,6 +738,7 @@ def test_repo_owned_capture_without_private_helper_reaches_bundle(
         capture_progress_path=progress,
     )
     assert prepared["status"] == "pending"
+    assert len(schedule_calls) == 1
     assert Path(str(prepared["bundle_path"])).is_dir()
 
 
@@ -1090,6 +1107,22 @@ def _finish_synthetic_bundle(path: Path) -> int:
 def test_new_rally_gets_new_bundle_and_import_count_increases(
     tmp_path: Path, monkeypatch
 ) -> None:
+    from chronovisor.recall import recall_distillation_cf_schedule as schedule
+
+    schedule_calls = []
+
+    def ensure_schedule(root, rallies, snapshots, **kwargs):
+        # Daily export must own its normal worker lease at this seam.
+        lease = daily.store.acquire_nonblocking_lock(
+            daily.store.distillation_dir(root) / "distillation-worker.lock"
+        )
+        if lease is not None:
+            daily.store.release_lock(lease)
+        assert lease is None
+        schedule_calls.append((rallies, snapshots, kwargs))
+        return {}
+
+    monkeypatch.setattr(schedule, "ensure_counterfactual_schedule", ensure_schedule)
     root = tmp_path / "root"
     root.mkdir()
     requested_bundle = tmp_path / "bundle"
@@ -1192,6 +1225,7 @@ def test_new_rally_gets_new_bundle_and_import_count_increases(
         capture_progress_path=tmp_path / "missing-progress.json",
     )
     assert first["status"] == "pending"
+    assert len(schedule_calls) == 1
     first_bundle = Path(str(first["bundle_path"]))
     assert _finish_synthetic_bundle(first_bundle) == 1
 

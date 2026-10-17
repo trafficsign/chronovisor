@@ -346,7 +346,7 @@ def _safe_candidate_ids(snapshot: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         return []
     return [
         candidate
-        for candidate in candidates
+        for candidate in distill.teacher_candidate_rows(snapshot)
         if isinstance(candidate, Mapping)
         and _IDENTIFIER.fullmatch(str(candidate.get("candidate_id") or ""))
     ]
@@ -1239,6 +1239,7 @@ def _capture_one(
         query_text,
         limit=200,
         candidate_texts=texts,
+        root=root,
     )
     if not isinstance(snapshot.get("candidates"), list):
         raise DailyError("candidate_snapshot_shape_invalid")
@@ -1782,6 +1783,7 @@ def _export_bundle(
     before_catalog: Mapping[str, Any],
     before_candidate: Mapping[str, Any],
     excluded_pairs: set[tuple[str, str]] | None = None,
+    allow_counterfactual_schedule_write: bool = False,
 ) -> dict[str, Any]:
     excluded_pairs = excluded_pairs or set()
     candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
@@ -1797,6 +1799,16 @@ def _export_bundle(
             "missing_candidate_snapshot_rallies": len(missing),
         }
     snapshots = catalog.read_candidate_snapshots(root, candidate_path, candidate_ids)
+    if allow_counterfactual_schedule_write:
+        from chronovisor.recall.recall_distillation_cf_schedule import (
+            ensure_counterfactual_schedule,
+        )
+
+        ensure_counterfactual_schedule(
+            root, rallies, snapshots,
+            model_cohort_sha256=_native_model_cohort_sha256(root),
+            raw_watermark=str(before_catalog["watermark"]),
+        )
     text_cache = catalog.CatalogTextCache(root / "raw", root)
     requested: set[str] = set()
     assignments = {
@@ -1990,6 +2002,7 @@ def prepare(
                 before_catalog=before_catalog,
                 before_candidate=before_candidate,
                 excluded_pairs=excluded_pairs,
+                allow_counterfactual_schedule_write=split_plan_path is None,
             )
             exported["bundle_path"] = str(output)
             if exported.get("status") == "pending":
