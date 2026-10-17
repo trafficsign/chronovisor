@@ -3610,6 +3610,105 @@ def _fast_candidate_pool_sources(
     }
 
 
+def _semantic_source_binding(item: Any) -> tuple[str, str] | None:
+    """Return one coherent full-source identity already verified for an item.
+
+    Semantic context hydration resolves each passage against the complete page
+    bytes before publication.  Its evidence therefore supplies a safe source
+    digest/UID pair for the same rendered item without re-reading the page.
+    A mixed, incomplete, or mismatched passage set is deliberately rejected;
+    the caller must preserve the ordinary page fallback in that case.
+    """
+
+    page_id = str(getattr(item, "page_id", "") or "")
+    passages = getattr(item, "source_passages", ())
+    if not page_id or not passages:
+        return None
+    bindings: set[tuple[str, str]] = set()
+    for passage in passages:
+        evidence = getattr(passage, "evidence", None)
+        evidence_page_id = str(getattr(evidence, "page_id", "") or "")
+        source_sha256 = str(getattr(evidence, "source_sha256", "") or "")
+        page_uid = str(getattr(evidence, "page_uid", "") or "")
+        if (
+            evidence_page_id != page_id
+            or not re.fullmatch(r"[0-9a-f]{64}", source_sha256)
+            or not page_uid
+        ):
+            return None
+        bindings.add((source_sha256, page_uid))
+    if len(bindings) != 1:
+        return None
+    source_sha256, page_uid = next(iter(bindings))
+    item_uid = str(getattr(item, "uid", "") or "")
+    if item_uid and item_uid != page_uid:
+        return None
+    return source_sha256, page_uid
+
+
+def _prepare_producer_capture_rows(
+    rows: list[tuple[Any, dict[str, float]]],
+    context_items: Iterable[Any],
+) -> tuple[list[tuple[Any, dict[str, float]]], dict[str, dict[str, str]]]:
+    """Complete producer bindings from verified semantic evidence and bound E_t.
+
+    Producer candidates remain the only source of feature text.  A selected
+    semantic item may safely fill an absent producer digest/UID from its
+    already-resolved evidence.  Unselected rows without a valid digest are
+    omitted from the bounded pool because they cannot become exact refs; a
+    selected row is retained so the exact recorder fails closed and uses the
+    page fallback instead of silently hiding the selection.
+    """
+
+    sources = _fast_candidate_pool_sources(rows)
+    selected_items = list(context_items)
+    selected_ids = {str(item.page_id) for item in selected_items if item.page_id}
+    for item in selected_items:
+        page_id = str(item.page_id)
+        source = sources.get(page_id)
+        binding = _semantic_source_binding(item)
+        if binding is None:
+            # Once semantic passages are present, an incoherent identity is
+            # evidence of a selected binding gap even if a stale producer hash
+            # happens to be available.  Clear it so exact capture fails closed.
+            if source is not None and getattr(item, "source_passages", ()):
+                source["content_sha256"] = ""
+                source["uid"] = ""
+            continue
+        if source is None:
+            continue
+        source_sha256, page_uid = binding
+        existing_sha256 = str(source.get("content_sha256") or "")
+        existing_uid = str(source.get("uid") or "")
+        if existing_sha256 and existing_sha256 != source_sha256:
+            source["content_sha256"] = ""
+            source["uid"] = ""
+            continue
+        if existing_uid and existing_uid != page_uid:
+            source["content_sha256"] = ""
+            source["uid"] = ""
+            continue
+        source["content_sha256"] = source_sha256
+        source["uid"] = page_uid
+
+    filtered: list[tuple[Any, dict[str, float]]] = []
+    for row in rows:
+        page, features = row
+        page_id = str(getattr(page, "page_id", "") or "")
+        source = sources.get(page_id)
+        content_sha256 = source.get("content_sha256") if source else ""
+        if page_id in selected_ids or re.fullmatch(
+            r"[0-9a-f]{64}", content_sha256 or ""
+        ):
+            filtered.append((page, features))
+    filtered_sources = {
+        page_id: sources[page_id]
+        for page_id in (str(getattr(page, "page_id", "") or "") for page, _ in filtered)
+        if page_id in sources
+    }
+    return filtered, filtered_sources
+
+
 def _private_candidate_pool_refs(
     candidate_feature_snapshot: Iterable[Mapping[str, Any]],
     candidate_pool_sources: Mapping[str, Mapping[str, str]],
@@ -3974,7 +4073,17 @@ def _capture_legacy_distillation_observation(
             {"candidate_id": page.page_id, "features": features}
             for page, features in rows
         ]
-        candidate_pool_sources = _fast_candidate_pool_sources(rows)
+        if producer_candidates is None:
+            candidate_pool_sources = _fast_candidate_pool_sources(rows)
+        else:
+            rows, candidate_pool_sources = _prepare_producer_capture_rows(
+                rows,
+                result.context_items,
+            )
+            feature_snapshot = [
+                {"candidate_id": page.page_id, "features": features}
+                for page, features in rows
+            ]
         if capture_error_code:
             feature_snapshot = []
             candidate_pool_sources = {}

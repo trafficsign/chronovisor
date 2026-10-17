@@ -31,7 +31,9 @@ from chronovisor.core.llm_runtime import (
 )
 from chronovisor.core.raw_segment import append_capture
 from chronovisor.core.search import ScoredPage
+from chronovisor.core.search_types import SemanticEvidence
 from chronovisor.core.semantic_client import SemanticServiceUnavailable
+from chronovisor.core.semantic_evidence import SourcePassage
 from chronovisor.core.store import RuntimeContext, init_chronovisor
 from chronovisor.hosts import evidence_composition
 from chronovisor.recall import recall_distillation, recall_runtime
@@ -7016,6 +7018,253 @@ def test_legacy_capture_rejects_producer_binding_anomalies(monkeypatch, anomaly)
         request=request,
         active_request=request,
         policy=RecallPolicy(log_decisions=False),
+        session_state=None,
+        queries=[request.prompt],
+        deadline_at=time.monotonic() + 1.0,
+        producer_candidates=[producer],
+    )
+
+    assert exact_receipts == []
+    assert len(page_receipts) == 1
+
+
+def _semantic_source_passage(
+    page_id: str,
+    source_sha256: str,
+    page_uid: str,
+    *,
+    doc_id: str | None = None,
+) -> SourcePassage:
+    evidence = SemanticEvidence(
+        page_id=page_id,
+        doc_id=doc_id or f"{page_uid}#c0",
+        kind="chunk",
+        ordinal=0,
+        source_sha256=source_sha256,
+        page_uid=page_uid,
+        generation_id="semantic-test-generation",
+        score=0.9,
+    )
+    return SourcePassage(
+        evidence=evidence,
+        byte_start=0,
+        byte_end=14,
+        text="semantic source",
+    )
+
+
+def test_legacy_capture_complements_verified_semantic_binding_and_drops_unbound(
+    monkeypatch,
+) -> None:
+    """A resolved semantic source can bind the selected card without lexical reread."""
+
+    exact_receipts: list[dict[str, object]] = []
+    page_receipts: list[dict[str, object]] = []
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.load_capture_policy_identity = lambda *, root: "a" * 64
+    module.build_text_features = lambda _query, _candidate: {
+        "query_chargram_coverage": 1.0,
+        "candidate_chargram_precision": 1.0,
+    }
+    module.record_exact_exposure = lambda **kwargs: exact_receipts.append(kwargs)
+    module.record_exposure = lambda **kwargs: page_receipts.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+    from chronovisor.recall import recall_field
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(recall_field, "queue_teacher_commits", lambda **_kwargs: {})
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_args: "")
+    monkeypatch.setattr(
+        recall_runtime,
+        "_readonly_fast_feature_rows",
+        lambda *_args, **_kwargs: pytest.fail("producer capture must not re-search"),
+    )
+    source_sha256 = "c" * 64
+    page_uid = "semantic-page-uid"
+    selected = ScoredPage(
+        "semantic-page",
+        "Semantic page",
+        "chronovisor",
+        "2026-10-17",
+        0.9,
+        snippet="semantic source",
+    )
+    unbound = ScoredPage(
+        "unbound-page",
+        "Unbound page",
+        "chronovisor",
+        "2026-10-17",
+        0.8,
+        snippet="unbound source",
+    )
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="semantic-only query",
+        session_id="session-1",
+        decision_id="semantic-evidence-complement",
+    )
+    result = recall_runtime._finalize_recall_result(
+        RecallResult(
+            status="ok",
+            decision="search",
+            confidence=0.9,
+            queries=[request.prompt],
+            reasons=["semantic"],
+            matched_terms={},
+            session_id=request.session_id,
+            context_items=[
+                ContextItem(
+                    "semantic-page",
+                    "Semantic page",
+                    "2026-10-17",
+                    0.9,
+                    uid=page_uid,
+                    snippets=["semantic source"],
+                    source_passages=(
+                        _semantic_source_passage(
+                            "semantic-page", source_sha256, page_uid
+                        ),
+                    ),
+                )
+            ],
+            decision_id=request.decision_id,
+        ),
+        request=request,
+        active_request=request,
+        policy=RecallPolicy(
+            log_decisions=False, max_context_chars=2_000, max_total_context_chars=2_402
+        ),
+        session_state=None,
+        queries=[request.prompt],
+        deadline_at=time.monotonic() + 1.0,
+        producer_candidates=[selected, unbound],
+    )
+
+    assert [item.page_id for item in result.context_items] == ["semantic-page"]
+    assert page_receipts == []
+    assert len(exact_receipts) == 1
+    assert [row["candidate_id"] for row in exact_receipts[0]["candidate_feature_snapshot"]] == [
+        "semantic-page"
+    ]
+    assert [row["candidate_id"] for row in exact_receipts[0]["candidate_pool_refs"]] == [
+        "semantic-page"
+    ]
+    assert exact_receipts[0]["candidate_refs"][0]["page_content_sha256"] == source_sha256
+
+
+@pytest.mark.parametrize("anomaly", ["different_sha", "different_uid", "ambiguous"])
+def test_legacy_capture_keeps_ambiguous_semantic_binding_on_page_fallback(
+    monkeypatch, anomaly: str
+) -> None:
+    """Conflicting semantic identities never mint an exact exposure receipt."""
+
+    exact_receipts: list[dict[str, object]] = []
+    page_receipts: list[dict[str, object]] = []
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.load_capture_policy_identity = lambda *, root: "a" * 64
+    module.build_text_features = lambda _query, _candidate: {
+        "query_chargram_coverage": 1.0,
+        "candidate_chargram_precision": 1.0,
+    }
+    module.record_exact_exposure = lambda **kwargs: exact_receipts.append(kwargs)
+    module.record_exposure = lambda **kwargs: page_receipts.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+    from chronovisor.recall import recall_field
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(recall_field, "queue_teacher_commits", lambda **_kwargs: {})
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_args: "")
+    monkeypatch.setattr(
+        recall_runtime,
+        "_readonly_fast_feature_rows",
+        lambda *_args, **_kwargs: pytest.fail("producer capture must not re-search"),
+    )
+    source_sha256 = "a" * 64
+    producer_uid = "semantic-page-uid"
+    evidence_sha256 = source_sha256
+    evidence_uid = producer_uid
+    selected_passages: tuple[SourcePassage, ...]
+    if anomaly == "different_sha":
+        producer = ScoredPage(
+            "semantic-page",
+            "Semantic page",
+            "chronovisor",
+            "2026-10-17",
+            0.9,
+            snippet="semantic source",
+            uid=producer_uid,
+            content_sha256=source_sha256,
+        )
+        evidence_sha256 = "b" * 64
+        selected_passages = (
+            _semantic_source_passage("semantic-page", evidence_sha256, evidence_uid),
+        )
+    elif anomaly == "different_uid":
+        producer = ScoredPage(
+            "semantic-page",
+            "Semantic page",
+            "chronovisor",
+            "2026-10-17",
+            0.9,
+            snippet="semantic source",
+            uid=producer_uid,
+            content_sha256=source_sha256,
+        )
+        evidence_uid = "other-page-uid"
+        selected_passages = (
+            _semantic_source_passage("semantic-page", evidence_sha256, evidence_uid),
+        )
+    else:
+        producer = ScoredPage(
+            "semantic-page",
+            "Semantic page",
+            "chronovisor",
+            "2026-10-17",
+            0.9,
+            snippet="semantic source",
+        )
+        selected_passages = (
+            _semantic_source_passage("semantic-page", "c" * 64, "uid-c"),
+            _semantic_source_passage("semantic-page", "d" * 64, "uid-d", doc_id="uid-d#c0"),
+        )
+        evidence_uid = "uid-c"
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="semantic-only query",
+        session_id="session-1",
+        decision_id=f"semantic-evidence-{anomaly}",
+    )
+    recall_runtime._finalize_recall_result(
+        RecallResult(
+            status="ok",
+            decision="search",
+            confidence=0.9,
+            queries=[request.prompt],
+            reasons=["semantic"],
+            matched_terms={},
+            session_id=request.session_id,
+            context_items=[
+                ContextItem(
+                    "semantic-page",
+                    "Semantic page",
+                    "2026-10-17",
+                    0.9,
+                    uid=evidence_uid,
+                    snippets=["semantic source"],
+                    source_passages=selected_passages,
+                )
+            ],
+            decision_id=request.decision_id,
+        ),
+        request=request,
+        active_request=request,
+        policy=RecallPolicy(
+            log_decisions=False, max_context_chars=2_000, max_total_context_chars=2_402
+        ),
         session_state=None,
         queries=[request.prompt],
         deadline_at=time.monotonic() + 1.0,
