@@ -94,7 +94,7 @@ created_at: 2026-10-13T20:52:29+09:00
 
 ### 2026-10-17 mainline timeout の追加修復
 - [x] 修復9：本番を妨げない隔離計測でmainline各段階と台帳読取の時間を確定する。
-- [ ] 修復10：chain検証を維持した増分読取・必要なprojectionを共通経路へ実装し、改変／切詰め／再開／並行appendの回帰と必須CIを通す。
+- [x] 修復10：chain検証を維持した増分読取・必要なprojectionを共通経路へ実装し、改変／切詰め／再開／並行appendの回帰と必須CIを通す。
 - [ ] 修復11：安全境界でcanonical packageを配備し、通常300秒runの正式成功時刻・failure count・gate・health/init・driftを確認する。
 - [ ] 修復12：前後計測、残る品質hold、automation整合と後片付けを記録する。
 
@@ -353,3 +353,5 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-17 12:24 JST: 最終CAS修正38f3b16ce3042875b2c8ec47b28eb7cf93f56529をpushし、store/store-fast/exposure/rollout/architecture合同143件（201.96秒）、Ruff/mypy/import contractを通過。packageの5依存環境は実wrapperと同じ引数で新archive・mcp1.30.0を解決済み。Quality／Python3.14／Securityの新commit CIは実行中であり配備は未開始。判断として、自然終了済みconvergeのworker leaseとidleを再確認し、既存SMAppService managerのunregister-oneで定期起動だけ一時待機させた。CI後の配備窓で長い保守処理が再開する競合を避けるためで、Luna supervisorはmaintenance無しで継続し、進捗128272・import待ち0。manager/plist SHAと復帰対象をprivate final-release/converge-schedule-hold.jsonへ保存、配備・正式run後に同じ登録を復帰する。
 
 - 2026-10-17 12:29 JST: 最終source38f3b16cを固定し、他のlocal test終了後に隔離計測を直列実行。初回cold289.215秒、別process warm56.077秒で、before237.679秒から約4.2倍に短縮。warm内訳はprepare11.775秒、CF stub8.753秒、materialize5.423秒（before172.173秒）、preflight29.286秒、training36.178秒、persist0.0014秒。projection差分build0.0357秒、rally summary0.118秒、manifest/label/receipt tail0.000187/0.000186/0.000257秒。coldの初回構築238.308秒は通常checkpointへ保存され、warmでは全再decode/全row更新なし。public materializerを再呼出し5.065秒、旧referenceの10,000行とsealed artifact全体が完全一致（8265ec10f5f5e23ef2b75f501840b5d38dc62f3126736596561a18cd00077882）。preflightがbefore22.574秒より長いのはpointer自己無効化による短絡を除去して既存検証を完走するため。private final5-cold/warm-profile.jsonとfinal5-parity.jsonを保存。これは実モデル非実行の測定で、正式成功とは区別する。Security・Semantic smoke・HNSWは成功、Quality/Python3.14の全suiteは継続中。
+
+- 2026-10-17 12:47 JST: 修復10完了。最終package source38f3b16ce3042875b2c8ec47b28eb7cf93f56529の必須CIが全成功。[Quality](https://github.com/trafficsign/chronovisor/actions/runs/38998426186)は7033 passed／4 skipped／57 deselected（1423.11秒）、[Python3.14](https://github.com/trafficsign/chronovisor/actions/runs/38998426181)も7033 passed／4 skipped／57 deselected（1315.17秒）。[Security](https://github.com/trafficsign/chronovisor/actions/runs/38998426175)の依存audit・secret scan・CodeQL、Semantic smoke79／HNSW1／architecture36も成功。rootが最終差分・共有caller・検証結果を確認し、srcは以後固定する。正式runでCounterfactualInvalidを再観測した場合の根拠を得るため、子workerのutility transport/parse/schema issueだけをprivate0600へ記録する一時診断hookを追加し、実archive38f3b16cと合成入力で返値/例外/prompt/schema/要求引数不変を確認。製品worker envelopeのprivacy契約と300秒期限は不変。配備は同じconverge登録待機とsupervisor/Rawの自然境界で行い、正式run後に全て復帰する。
