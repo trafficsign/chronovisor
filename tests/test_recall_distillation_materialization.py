@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -755,6 +756,71 @@ def test_source_change_during_completion_raises_deferred_boundary(
 
     assert source_calls == 3
     assert exc_info.value.reason == "materialization_source_changed"
+
+
+@pytest.mark.parametrize(
+    ("change", "registered"),
+    [("append", True), ("projection", True), ("none", True),
+     ("append", False), ("none", False)],
+)
+def test_preflight_publishes_gate_only_for_unchanged_validation_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, registered: bool,
+) -> None:
+    _append_label(tmp_path, "rally-a", "candidate-a")
+    _stub_build_dependencies(monkeypatch, materialize_calls=[])
+    label_path = store.distillation_dir(tmp_path) / store.LABEL_LEDGER_FILE
+    monkeypatch.setattr(
+        materialization, "_source_state",
+        lambda _root, _contracts: (ledger.file_state(label_path),),
+    )
+    view = materialization._build(tmp_path)
+    if registered:
+        materialization._VIEWS[tmp_path.resolve()] = view
+    config = replace(
+        distill.load_distillation_config(tmp_path / "config.toml"),
+        teacher_profile=distill.NATIVE_LUNA_SINGLE_PROFILE,
+        native_luna_enabled=False,
+    )
+    monkeypatch.setattr(distill, "load_distillation_config", lambda _path: config)
+    monkeypatch.setattr(distill, "_automatic_baseline_metrics", lambda _root: {})
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda _raw: "f" * 64)
+    monkeypatch.setattr(distill, "materialize_training_rows", lambda _root: {"rows": []})
+
+    def gate(*_args: object, **_kwargs: object) -> dict[str, object]:
+        if change == "append":
+            _append_label(tmp_path, "rally-b", "candidate-b")
+        elif change == "projection":
+            with sqlite3.connect(view.path) as connection:
+                connection.execute("UPDATE rows SET epoch=epoch+1")
+        return {
+            "reasons": ["row_authority_mismatch", "row_integrity_failed"],
+            "probe": {"pairs": 0}, "counterfactual_pairs": 0,
+        }
+
+    monkeypatch.setattr(distill, "_offline_training_gate", gate)
+
+    def preflight() -> dict[str, object]:
+        return distill.preflight(
+            root=tmp_path, raw_dir=tmp_path / "raw",
+            _rallies=[], _training_snapshot={"rows": []} if registered else None,
+        )
+
+    try:
+        if change == "append":
+            with pytest.raises(materialization.MaterializationSourceChanged):
+                preflight()
+        elif change == "projection":
+            with pytest.raises(store.DistillationStoreError) as exc_info:
+                preflight()
+            assert not isinstance(exc_info.value, materialization.MaterializationDeferred)
+        else:
+            result = preflight()
+            assert "row_integrity_failed" in result["hard_floor"]["reasons"]
+            assert result["hard_floor"]["p5_allowed"] is False
+        if change != "none":
+            assert not list((store.distillation_dir(tmp_path) / "baselines").glob("*.json"))
+    finally:
+        view.close()
 
 
 def test_failed_partial_batch_reuses_rows_already_cleaned(

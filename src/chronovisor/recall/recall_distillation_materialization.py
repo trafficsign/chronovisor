@@ -15,7 +15,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -669,6 +669,25 @@ def _materialize(root: Path, limit: int, *, deadline: float | None = None) -> di
 def materialize(root: Path, limit: int, *, deadline: float | None = None) -> dict[str, Any]:
     with _VIEW_LOCK:
         return _materialize(root, limit, deadline=deadline)
+
+
+def validation_snapshot(root: Path) -> Callable[[], None]:
+    """Pin a view or source signature for the complete gate calculation."""
+
+    root = root.expanduser().resolve(strict=False)
+    with _VIEW_LOCK:
+        view = _VIEWS.get(root)
+        if view is not None:
+            view.check(all_dependencies=True)
+        source_state = _source_state(root, {"files": {}})
+
+    def check() -> None:
+        if view is not None:
+            view.check(all_dependencies=True)
+        elif _source_state(root, {"files": {}}) != source_state:
+            raise MaterializationSourceChanged("preflight source changed during validation")
+
+    return check
 
 
 def canonical_binding(root: Path, record: str) -> tuple[dict[str, Any] | None, dict[str, Any], Mapping[str, Any]] | None:

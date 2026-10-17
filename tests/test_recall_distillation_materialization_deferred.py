@@ -24,12 +24,16 @@ from chronovisor.recall import recall_distillation_store as store
             ),
             "materialization_budget_exhausted",
         ),
+        (
+            store.DistillationStoreBusy("ledger changed during snapshot decode"),
+            "distillation_store_busy",
+        ),
     ],
 )
 def test_chunk_defers_verified_materialization_boundaries_without_failure_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    exception: materialization.MaterializationDeferred,
+    exception: Exception,
     reason: str,
 ) -> None:
     state_path = store.distillation_dir(tmp_path) / store.STATE_FILE

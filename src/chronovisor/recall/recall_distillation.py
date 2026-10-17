@@ -9188,6 +9188,14 @@ def preflight(
         if _training_snapshot is not None
         else materialize_training_rows(root)
     )
+    from chronovisor.recall.recall_distillation_materialization import (
+        validation_snapshot,
+    )
+
+    validation = (
+        validation_snapshot(root)
+        if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE else None
+    )
     offline_gate = _offline_training_gate(training_snapshot["rows"], config, root=root)
     supplied_metrics = dict(aggregate_metrics or {})
     automatic_metrics = _automatic_baseline_metrics(root)
@@ -9352,6 +9360,10 @@ def preflight(
             },
         },
     }
+    if validation is not None:
+        # Boolean row validators may reject a view invalidated by an import.
+        # That is neither a certified gate failure nor a publishable baseline.
+        validation()
     _, _, artifact = store.write_immutable(
         store.distillation_dir(root) / "baselines", payload, schema=BASELINE_SCHEMA
     )
@@ -16959,11 +16971,15 @@ def run_distillation_chunk(
                     cold_start=cold_start,
                     max_elapsed_seconds=max_elapsed_seconds,
                 )
-        except MaterializationDeferred as exc:
+        except (MaterializationDeferred, store.DistillationStoreBusy) as exc:
             # Native imports may advance source ledgers during a verified join.
             # Incomplete work never authorizes a snapshot or clears a prior error.
             return {
-                "status": "deferred", "processed": 0, "reason": exc.reason,
+                "status": "deferred", "processed": 0,
+                "reason": (
+                    exc.reason if isinstance(exc, MaterializationDeferred)
+                    else "distillation_store_busy"
+                ),
                 "atomic_progress_may_be_present": True,
                 "model_calls_may_be_present": True,
             }
