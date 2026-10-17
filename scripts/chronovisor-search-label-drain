@@ -42,9 +42,13 @@ PY_SOURCE
 HEAD=$(git -C "$CHRONOVISOR_REPO_ROOT" rev-parse --verify HEAD 2>/dev/null) \
   || skip repository_head_unavailable
 [ "$HEAD" = "$EXPECTED_COMMIT" ] || skip source_pin_drift
-CLEAN=$(git -C "$CHRONOVISOR_REPO_ROOT" status --porcelain=v1 --untracked-files=all 2>/dev/null) \
+if ! git -C "$CHRONOVISOR_REPO_ROOT" diff --quiet HEAD -- 2>/dev/null; then
+  skip repository_tracked_drift
+fi
+UNTRACKED_CODE=$(git -C "$CHRONOVISOR_REPO_ROOT" \
+  ls-files --others --exclude-standard -- src scripts 2>/dev/null) \
   || skip repository_status_unavailable
-[ -z "$CLEAN" ] || skip repository_dirty
+[ -z "$UNTRACKED_CODE" ] || skip repository_untracked_code
 SCRIPT_BLOB=$(git -C "$CHRONOVISOR_REPO_ROOT" rev-parse \
   "$EXPECTED_COMMIT:scripts/search_label_drain.py" 2>/dev/null) \
   || skip drain_script_not_in_pin

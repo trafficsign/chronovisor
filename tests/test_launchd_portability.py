@@ -167,7 +167,9 @@ def test_search_label_drain_wrapper_is_bounded_and_pin_guarded() -> None:
     source = (ROOT / "scripts" / "chronovisor-search-label-drain").read_text(
         encoding="utf-8"
     )
-    assert "status --porcelain=v1 --untracked-files=all" in source
+    assert 'git -C "$CHRONOVISOR_REPO_ROOT" diff --quiet HEAD --' in source
+    assert "ls-files --others --exclude-standard -- src scripts" in source
+    assert "repository_untracked_code" in source
     assert '"$EXPECTED_COMMIT:scripts/search_label_drain.py"' in source
     assert '"$SCRIPT_HASH" ] || skip drain_script_drift' in source
     assert '"--batch-size",\n    "20"' in source
