@@ -895,7 +895,7 @@ def test_budget_exhaustion_does_not_publish_training_artifact(
     assert tmp_path.resolve() not in materialization._VIEWS
 
 
-def test_budget_exhaustion_rolls_back_an_unsaved_batch(
+def test_budget_exhaustion_seals_completed_batch_before_defer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for index in range(101):
@@ -917,6 +917,7 @@ def test_budget_exhaustion_rolls_back_an_unsaved_batch(
         },
     )
     clock = {"value": 100.0}
+    real_monotonic = materialization.time.monotonic
     monkeypatch.setattr(materialization.time, "monotonic", lambda: clock["value"])
     checkpoint_before_batch: list[bytes] = []
     real_save = materialization._save
@@ -931,8 +932,28 @@ def test_budget_exhaustion_rolls_back_an_unsaved_batch(
     monkeypatch.setattr(materialization, "_save", capture_batch_boundary)
     real_materialize = materialization._materialize_batch
 
-    def expire_after_join(*args: object, **kwargs: object) -> None:
-        real_materialize(*args, **kwargs)
+    def expire_after_join(
+        connection: sqlite3.Connection,
+        _root: Path,
+        _labels: object,
+        rally_ids: list[str] | tuple[str, ...],
+        _ox: str,
+    ) -> None:
+        # Keep the fixture small on disk while forcing SQLite's rollback
+        # journal to spill pages for the unsaved batch. A budget defer must
+        # happen only after this validated batch has been committed and sealed;
+        # otherwise close() can leave a changed physical file_state and make
+        # the previous checkpoint unusable.
+        connection.execute("PRAGMA cache_size=2")
+        real_materialize(connection, _root, _labels, rally_ids, _ox)
+        padded = json.dumps(
+            {"rally_id": "synthetic", "padding": "x" * 32_768},
+            separators=(",", ":"),
+        )
+        connection.executemany(
+            "UPDATE rows SET row_json=? WHERE rally_id=?",
+            ((padded, str(rally_id)) for rally_id in rally_ids),
+        )
         clock["value"] = 106.0
 
     monkeypatch.setattr(materialization, "_materialize_batch", expire_after_join)
@@ -940,10 +961,75 @@ def test_budget_exhaustion_rolls_back_an_unsaved_batch(
         materialization._build(tmp_path, deadline=110.0)
 
     with sqlite3.connect(projection) as connection:
+        dirty_rows = connection.execute(
+            "SELECT rally_id FROM rows WHERE dirty=1 ORDER BY rally_id"
+        ).fetchall()
+    dirty = len(dirty_rows)
+    # The first 100-rally batch was committed and sealed before the budget
+    # defer; only the unstarted 101st rally remains dirty.
+    assert dirty == 1
+    assert dirty_rows == [("rally-100",)]
+    assert checkpoint_before_batch
+    checkpoint_path = projection.with_suffix(projection.suffix + ".checkpoint.json")
+    assert checkpoint_path.read_bytes() != checkpoint_before_batch[0]
+    saved = ledger.checkpoint(projection)
+    assert saved is not None
+    assert saved["metadata"]
+    assert saved["file_state"] == ledger.file_state(projection)
+
+    monkeypatch.setattr(materialization.time, "monotonic", real_monotonic)
+    resumed = materialization._build(tmp_path)
+    resumed.close()
+    assert calls[-1] == {"rally-100"}
+
+
+def test_budget_exhaustion_seals_synced_inputs_before_defer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(101):
+        rally_id = f"rally-{index:03d}"
+        _append_label(tmp_path, rally_id, f"candidate-{index:03d}")
+    calls: list[set[str]] = []
+    _stub_build_dependencies(monkeypatch, materialize_calls=calls)
+    first = materialization._build(tmp_path)
+    first.close()
+    projection = materialization._path(tmp_path)
+    monkeypatch.setattr(
+        materialization,
+        "_contract_dependencies",
+        lambda _root, _labels: {
+            "code": "changed-code",
+            "native": "native",
+            "ox": "ox",
+            "files": {},
+        },
+    )
+    clock = {"value": 100.0}
+    real_monotonic = materialization.time.monotonic
+    monkeypatch.setattr(materialization.time, "monotonic", lambda: clock["value"])
+    real_sync = materialization._sync_inputs
+
+    def expire_after_sync(*args: object, **kwargs: object) -> dict[str, object]:
+        metadata = real_sync(*args, **kwargs)
+        clock["value"] = 106.0
+        return metadata
+
+    monkeypatch.setattr(materialization, "_sync_inputs", expire_after_sync)
+    with pytest.raises(materialization.MaterializationBudgetExhausted):
+        materialization._build(tmp_path, deadline=110.0)
+
+    with sqlite3.connect(projection) as connection:
         dirty = connection.execute("SELECT COUNT(*) FROM rows WHERE dirty=1").fetchone()[0]
     assert dirty == 101
-    assert checkpoint_before_batch
-    assert projection.with_suffix(projection.suffix + ".checkpoint.json").read_bytes() == checkpoint_before_batch[0]
+    saved = ledger.checkpoint(projection)
+    assert saved is not None
+    assert saved["metadata"]
+    assert saved["file_state"] == ledger.file_state(projection)
+
+    monkeypatch.setattr(materialization.time, "monotonic", real_monotonic)
+    resumed = materialization._build(tmp_path)
+    resumed.close()
+    assert calls[-2:] == [{f"rally-{index:03d}" for index in range(100)}, {"rally-100"}]
 
 
 def test_validated_sources_route_uses_canonical_materialization(
