@@ -214,6 +214,7 @@ def _sync_inputs(
         "lineage": journal["catalog_lineage"], "revision": journal["revision"],
         "candidate_count": candidates["record_count"], "candidate_ino": candidates.get("ledger_ino"),
         "candidate_head": candidates["head_sha256"],
+        "selection": metadata.get("selection", {}),
     }
 
 
@@ -379,6 +380,66 @@ class Projection:
         return (json.loads(value[1]) if value[1] is not None else None, label, self.rallies.get(rally_id, {}))
 
 
+def _update_selection_tables(
+    connection: sqlite3.Connection, assignments: Mapping[str, str], compatible: set[str],
+) -> None:
+    old_assignments = dict(connection.execute("SELECT rally_id,split FROM assignments"))
+    changed = {
+        rally_id for rally_id in old_assignments.keys() | assignments.keys()
+        if old_assignments.get(rally_id) != assignments.get(rally_id)
+    }
+    old_compatible = {str(row[0]) for row in connection.execute("SELECT plan_id FROM compatible")}
+    connection.executemany("INSERT INTO changed_rallies VALUES(?)", ((value,) for value in changed))
+    connection.executemany(
+        "INSERT INTO changed_plans VALUES(?)", ((value,) for value in old_compatible ^ compatible),
+    )
+    connection.executemany("DELETE FROM assignments WHERE rally_id=?", ((value,) for value in changed))
+    connection.executemany(
+        "INSERT INTO assignments VALUES(?,?)", ((value, assignments[value]) for value in changed if value in assignments),
+    )
+    connection.executemany("DELETE FROM compatible WHERE plan_id=?", ((value,) for value in old_compatible - compatible))
+    connection.executemany("INSERT INTO compatible VALUES(?)", ((value,) for value in compatible - old_compatible))
+
+
+def _classify_locked_rows(
+    view: Projection, plan_id: str, assignments: Mapping[str, str], compatible: set[str],
+) -> None:
+    from chronovisor.recall import recall_distillation as distill
+
+    profiles = tuple(sorted(distill.SINGLE_TEACHER_PROFILES))
+    context = hashlib.sha256(_encoded(
+        [plan_id, assignments, sorted(compatible), profiles]
+    ).encode()).hexdigest()
+    rules = _encoded(["locked-selection-v1", bool(plan_id), profiles])
+    last = int(view.connection.execute("SELECT COALESCE(MAX(sequence),0) FROM rows").fetchone()[0])
+    previous = view.metadata.get("selection", {})
+    after = previous.get("sequence", -1) if isinstance(previous, Mapping) else -1
+    reusable = (
+        isinstance(previous, Mapping) and previous.get("rules") == rules
+        and isinstance(after, int) and not isinstance(after, bool) and 0 <= after <= last
+    )
+    if reusable and previous.get("context") == context and after == last:
+        return
+    with closing(ledger.connect(view.path)) as connection:
+        connection.execute("CREATE TEMP TABLE changed_rallies(rally_id TEXT PRIMARY KEY)")
+        connection.execute("CREATE TEMP TABLE changed_plans(plan_id TEXT PRIMARY KEY)")
+        if not reusable or previous.get("context") != context:
+            _update_selection_tables(connection, assignments, compatible)
+        connection.execute(
+            "UPDATE rows SET locked=CASE WHEN ?<>'' AND EXISTS "
+            "(SELECT 1 FROM assignments WHERE assignments.rally_id=rows.rally_id AND split='test') "
+            f"AND (profile NOT IN ({','.join('?' for _ in profiles)}) OR label_plan IN "
+            "(SELECT plan_id FROM compatible)) THEN 1 ELSE 0 END WHERE sequence>? "
+            "OR rally_id IN (SELECT rally_id FROM changed_rallies) "
+            "OR label_plan IN (SELECT plan_id FROM changed_plans)",
+            (plan_id, *profiles, after if reusable else 0),
+        )
+        updated = {**view.metadata, "selection": {"context": context, "rules": rules, "sequence": last}}
+        _save(connection, view.path, updated)
+    view.metadata = updated
+    view.state = ledger.file_state(view.path)
+
+
 def _selection(view: Projection, limit: int) -> list[dict[str, Any]]:
     from chronovisor.recall import recall_distillation as distill
 
@@ -391,21 +452,7 @@ def _selection(view: Projection, limit: int) -> list[dict[str, Any]]:
         # Legacy snapshots without a sealed split use the original full-cohort
         # grouped split; the normal fixed-plan path always stays bounded.
         return [json.loads(row[0]) for row in view.connection.execute("SELECT row_json FROM rows WHERE row_json IS NOT NULL ORDER BY sequence")]
-    with closing(ledger.connect(view.path)) as connection:
-        with connection:
-            connection.execute("DELETE FROM assignments")
-            connection.execute("DELETE FROM compatible")
-            connection.executemany("INSERT INTO assignments VALUES(?,?)", assignments.items())
-            connection.executemany("INSERT INTO compatible VALUES(?)", ((value,) for value in compatible))
-            profiles = tuple(sorted(distill.SINGLE_TEACHER_PROFILES))
-            connection.execute(
-                "UPDATE rows SET locked=CASE WHEN ?<>'' AND EXISTS "
-                "(SELECT 1 FROM assignments WHERE assignments.rally_id=rows.rally_id AND split='test') "
-                f"AND (profile NOT IN ({','.join('?' for _ in profiles)}) OR label_plan IN "
-                "(SELECT plan_id FROM compatible)) THEN 1 ELSE 0 END", (plan_id, *profiles),
-            )
-        ledger.seal_checkpoint(view.path, kind=_VERSION, metadata=view.metadata)
-    view.state = ledger.file_state(view.path)
+    _classify_locked_rows(view, plan_id, assignments, compatible)
     count = int(view.connection.execute("SELECT COUNT(*) FROM rows WHERE row_json IS NOT NULL").fetchone()[0])
     if count <= limit:
         return [json.loads(row[0]) for row in view.connection.execute("SELECT row_json FROM rows WHERE row_json IS NOT NULL ORDER BY sequence")]

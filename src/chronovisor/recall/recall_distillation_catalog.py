@@ -36,6 +36,7 @@ HISTORICAL_INDEX_DIGEST_SCHEMA = "historical-fts-multiset-v2"
 CANDIDATE_SNAPSHOT_SCHEMA = "chronovisor.recall-candidate-snapshot.v1"
 CANDIDATE_INDEX_SCHEMA = "chronovisor.recall-candidate-offset-index.v1"
 RALLY_CHANGE_JOURNAL_SCHEMA = "v1"
+RALLY_SUMMARY_SCHEMA = "v1"
 
 
 class CatalogError(ValueError):
@@ -368,6 +369,184 @@ def _connect(root: Path) -> sqlite3.Connection:
     return connection
 
 
+_RALLY_SUMMARY_COLUMNS = {
+    "rally_id",
+    "as_of_us",
+    "summary_json",
+    "source_rally_sha256",
+}
+_RALLY_SUMMARY_FIELDS = (
+    "rally_id",
+    "as_of",
+    "as_of_us",
+    "host",
+    "session_key",
+    "session_cluster_id",
+    "session_id_sha256",
+    "source_index",
+    "query_sha256",
+    "eligibility",
+    "task_id",
+    "entity_id",
+    "locked_test_read_only",
+)
+
+
+def _summary_table_exists(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='rally_summaries'"
+    ).fetchone()
+    return row is not None
+
+
+def _ensure_summary_table(connection: sqlite3.Connection) -> bool:
+    """Create the additive summary table without changing catalog schema."""
+
+    existed = _summary_table_exists(connection)
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rally_summaries(
+            rally_id TEXT PRIMARY KEY,
+            as_of_us INTEGER NOT NULL,
+            summary_json TEXT NOT NULL,
+            source_rally_sha256 TEXT NOT NULL
+        )
+        """
+    )
+    columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(rally_summaries)")
+    }
+    if columns != _RALLY_SUMMARY_COLUMNS:
+        raise CatalogError("rally summary schema is invalid")
+    return not existed
+
+
+def _summary_projection(row: Mapping[str, Any]) -> tuple[str, int, str, str]:
+    rally_id = row.get("rally_id")
+    as_of_us = row.get("as_of_us")
+    if not isinstance(rally_id, str) or not rally_id:
+        raise CatalogError("rally summary source is invalid")
+    if isinstance(as_of_us, bool) or not isinstance(as_of_us, int):
+        raise CatalogError("rally summary source is invalid")
+    summary: dict[str, Any] = {
+        key: row[key] for key in _RALLY_SUMMARY_FIELDS if key in row
+    }
+    summary["has_actual_answer"] = bool(row.get("actual_answer_refs"))
+    try:
+        summary_json = json.dumps(
+            summary,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        source_rally_sha256 = canonical_json_sha256_strict(dict(row))
+    except (TypeError, ValueError) as exc:
+        raise CatalogError("rally summary source is invalid") from exc
+    return rally_id, as_of_us, summary_json, source_rally_sha256
+
+
+def _store_rally_summary(connection: sqlite3.Connection, row: Mapping[str, Any]) -> None:
+    rally_id, as_of_us, summary_json, source_rally_sha256 = _summary_projection(row)
+    connection.execute(
+        """
+        INSERT INTO rally_summaries(rally_id,as_of_us,summary_json,source_rally_sha256)
+        VALUES(?,?,?,?)
+            ON CONFLICT(rally_id) DO UPDATE SET
+                as_of_us=excluded.as_of_us,
+                summary_json=excluded.summary_json,
+                source_rally_sha256=excluded.source_rally_sha256
+        """,
+        (rally_id, as_of_us, summary_json, source_rally_sha256),
+    )
+
+
+def _summary_complete(connection: sqlite3.Connection) -> bool:
+    metadata = dict(connection.execute("SELECT key,value FROM metadata"))
+    if (
+        metadata.get("rally_summary_schema") != RALLY_SUMMARY_SCHEMA
+        or metadata.get("rally_summary_complete") != "1"
+    ):
+        return False
+    try:
+        expected_count = int(metadata.get("rally_summary_count", "-1"))
+        expected_revision = int(metadata.get("rally_summary_revision", "-1"))
+    except (TypeError, ValueError):
+        return False
+    if expected_count < 0 or expected_revision < 0:
+        return False
+    summary_count = int(
+        connection.execute("SELECT COUNT(*) FROM rally_summaries").fetchone()[0]
+    )
+    rally_count = int(connection.execute("SELECT COUNT(*) FROM rallies").fetchone()[0])
+    revision = int(
+        connection.execute(
+            "SELECT COALESCE(MAX(revision),0) FROM rally_changes"
+        ).fetchone()[0]
+    )
+    if (summary_count, rally_count, revision) != (
+        expected_count,
+        expected_count,
+        expected_revision,
+    ):
+        return False
+    missing = connection.execute(
+        """
+        SELECT 1
+        FROM rallies AS rallies
+        LEFT JOIN rally_summaries AS summaries
+          ON summaries.rally_id = rallies.rally_id
+        WHERE summaries.rally_id IS NULL
+        LIMIT 1
+        """
+    ).fetchone()
+    return missing is None
+
+
+def _mark_summary_complete(connection: sqlite3.Connection) -> None:
+    count = int(connection.execute("SELECT COUNT(*) FROM rallies").fetchone()[0])
+    revision = int(
+        connection.execute(
+            "SELECT COALESCE(MAX(revision),0) FROM rally_changes"
+        ).fetchone()[0]
+    )
+    connection.executemany(
+        "INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)",
+        (
+            ("rally_summary_schema", RALLY_SUMMARY_SCHEMA),
+            ("rally_summary_complete", "1"),
+            ("rally_summary_count", str(count)),
+            ("rally_summary_revision", str(revision)),
+        ),
+    )
+
+
+def _migrate_summary(connection: sqlite3.Connection) -> None:
+    connection.execute("DELETE FROM rally_summaries")
+    rows = connection.execute(
+        "SELECT row_json FROM rallies ORDER BY as_of_us,rally_id"
+    )
+    for raw in rows:
+        try:
+            row = json.loads(str(raw[0]))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise CatalogError("rally summary source cannot be decoded") from exc
+        if not isinstance(row, Mapping):
+            raise CatalogError("rally summary source is invalid")
+        _store_rally_summary(connection, row)
+    _mark_summary_complete(connection)
+
+
+def _prepare_summary(connection: sqlite3.Connection, *, existing: bool) -> bool:
+    """Ensure summary storage, migrating valid catalogs without reading Raw."""
+
+    changed = _ensure_summary_table(connection)
+    if existing and not _summary_complete(connection):
+        _migrate_summary(connection)
+        changed = True
+    return changed
+
+
 def _connect_readonly(root: Path) -> sqlite3.Connection:
     """Keep readers from changing the catalog's sealed physical identity."""
 
@@ -534,7 +713,7 @@ def _reset_catalog_for_repair(connection: sqlite3.Connection) -> None:
     for name in ("source_after_line", "source_until_line"):
         if name not in columns:
             connection.execute(f"ALTER TABLE raw_units ADD COLUMN {name} INTEGER")
-    for table in (
+    tables = (
         "candidate_index_state",
         "candidate_records",
         "rally_changes",
@@ -542,8 +721,11 @@ def _reset_catalog_for_repair(connection: sqlite3.Connection) -> None:
         "events",
         "raw_units",
         "metadata",
-    ):
+    )
+    for table in tables:
         connection.execute(f"DELETE FROM {table}")
+    if _summary_table_exists(connection):
+        connection.execute("DELETE FROM rally_summaries")
     connection.execute("DELETE FROM sqlite_sequence WHERE name='rally_changes'")
 
 
@@ -583,7 +765,8 @@ def _store_rallies(
     connection: sqlite3.Connection, rows: Iterable[Mapping[str, Any]]
 ) -> tuple[str, ...]:
     values = sorted(rows, key=lambda row: str(row["rally_id"]))
-    encoded: dict[str, tuple[int, str]] = {}
+    summary_enabled = _summary_table_exists(connection)
+    encoded: dict[str, tuple[int, str, Mapping[str, Any]]] = {}
     for row in values:
         rally_id = str(row["rally_id"])
         value = (
@@ -591,10 +774,10 @@ def _store_rallies(
             json.dumps(row, sort_keys=True, separators=(",", ":")),
         )
         prior = encoded.get(rally_id)
-        if prior is not None and prior != value:
+        if prior is not None and prior[:2] != value:
             raise CatalogError("rally duplicate conflicts within delta")
-        encoded[rally_id] = value
-    for rally_id, (as_of_us, row_json) in encoded.items():
+        encoded[rally_id] = (*value, row)
+    for rally_id, (as_of_us, row_json, row) in encoded.items():
         stored = connection.execute(
             "SELECT as_of_us,row_json FROM rallies WHERE rally_id=?",
             (rally_id,),
@@ -615,6 +798,8 @@ def _store_rallies(
             connection.execute(
                 "INSERT INTO rally_changes(rally_id) VALUES(?)", (rally_id,)
             )
+            if summary_enabled:
+                _store_rally_summary(connection, row)
     return tuple(encoded)
 
 
@@ -1098,6 +1283,7 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
             _reset_catalog_for_repair(connection)
             schema = None
             stored = {}
+        summary_changed = _prepare_summary(connection, existing=schema is not None)
         if schema is not None and set(stored) - set(current):
             raise CatalogError("committed Raw inventory removed from catalog")
         new_units: list[RawUnit] = []
@@ -1114,7 +1300,23 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
         if schema is not None and not new_units:
             if metadata.get("watermark") != watermark:
                 raise CatalogError("catalog watermark conflicts with committed Raw")
-            connection.rollback()
+            if summary_changed:
+                _mark_summary_complete(connection)
+                event_rowid = int(
+                    connection.execute(
+                        "SELECT COALESCE(MAX(rowid),0) FROM events"
+                    ).fetchone()[0]
+                )
+                catalog_lineage = cast(str, _catalog_lineage(prior_checkpoint))
+                connection.commit()
+                connection.close()
+                connection = None
+                _ensure_private_file(catalog_path(root))
+                _write_catalog_checkpoint(
+                    root, watermark, event_rowid, catalog_lineage=catalog_lineage
+                )
+            else:
+                connection.rollback()
             return CatalogAdvance("noop", watermark, (), (), (), ())
 
         indexed: list[str] = []
@@ -1213,6 +1415,7 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
                 ("rally_changes_schema", RALLY_CHANGE_JOURNAL_SCHEMA),
             ),
         )
+        _mark_summary_complete(connection)
         event_rowid = int(
             connection.execute("SELECT COALESCE(MAX(rowid),0) FROM events").fetchone()[0]
         )
@@ -1223,10 +1426,12 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
         )
         connection.commit()
     except Exception:
-        connection.rollback()
+        if connection is not None:
+            connection.rollback()
         raise
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
     _ensure_private_file(catalog_path(root))
     _write_catalog_checkpoint(
         root, watermark, event_rowid, catalog_lineage=catalog_lineage
@@ -1266,6 +1471,117 @@ def rallies(root: Path, ids: Iterable[str] | None = None) -> list[dict[str, Any]
                 "SELECT row_json FROM rallies ORDER BY as_of_us,rally_id"
             )
         return [json.loads(row[0]) for row in rows]
+
+
+def _valid_sha256(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
+
+
+def _decode_summary_json(value: object) -> dict[str, Any]:
+    try:
+        decoded = json.loads(str(value))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise CatalogError("rally summary is invalid") from exc
+    if not isinstance(decoded, dict):
+        raise CatalogError("rally summary is invalid")
+    return decoded
+
+
+def rally_summaries(root: Path) -> list[dict[str, Any]]:
+    """Read the sealed, scalar-only rally projection without row JSON decode."""
+
+    before = _read_catalog_checkpoint(root)
+    if before is None or _catalog_lineage(before) is None:
+        raise CatalogError("rally summary checkpoint requires repair")
+    try:
+        with closing(_connect_readonly(root)) as connection:
+            metadata = dict(connection.execute("SELECT key,value FROM metadata"))
+            if (
+                metadata.get("schema") != CATALOG_SCHEMA
+                or metadata.get("rally_changes_schema") != RALLY_CHANGE_JOURNAL_SCHEMA
+                or metadata.get("rally_summary_schema") != RALLY_SUMMARY_SCHEMA
+                or metadata.get("rally_summary_complete") != "1"
+            ):
+                raise CatalogError("rally summary requires migration")
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(rally_summaries)")
+            }
+            if columns != _RALLY_SUMMARY_COLUMNS or not _summary_complete(connection):
+                raise CatalogError("rally summary coverage is invalid")
+            rows = connection.execute(
+                """
+                SELECT rally_id,as_of_us,summary_json,source_rally_sha256
+                FROM rally_summaries ORDER BY as_of_us,rally_id
+                """
+            )
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                if not _valid_sha256(row["source_rally_sha256"]):
+                    raise CatalogError("rally summary source digest is invalid")
+                item = _decode_summary_json(row["summary_json"])
+                if (
+                    item.get("rally_id") != row["rally_id"]
+                    or item.get("as_of_us") != row["as_of_us"]
+                    or not isinstance(item.get("has_actual_answer"), bool)
+                ):
+                    raise CatalogError("rally summary scalar is invalid")
+                item["source_rally_sha256"] = str(row["source_rally_sha256"])
+                result.append(item)
+    except CatalogError:
+        raise
+    except (sqlite3.DatabaseError, TypeError, ValueError) as exc:
+        raise CatalogError("rally summary is unreadable") from exc
+    after = _read_catalog_checkpoint(root)
+    if after != before:
+        raise CatalogError("catalog changed during rally summary read")
+    return result
+
+
+def resolve_rally_summaries(
+    root: Path, summaries: Iterable[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Resolve summary rows to full manifests only after digest verification."""
+
+    requested = list(summaries)
+    ids: list[str] = []
+    digests: dict[str, str] = {}
+    for summary in requested:
+        if not isinstance(summary, Mapping):
+            raise CatalogError("rally summary is invalid")
+        rally_id = summary.get("rally_id")
+        digest = summary.get("source_rally_sha256")
+        if not isinstance(rally_id, str) or not rally_id or not _valid_sha256(digest):
+            raise CatalogError("rally summary source digest is invalid")
+        if rally_id in digests:
+            raise CatalogError("rally summary contains duplicate rally")
+        ids.append(rally_id)
+        digests[rally_id] = digest
+    before = _read_catalog_checkpoint(root)
+    if before is None or _catalog_lineage(before) is None:
+        raise CatalogError("rally summary checkpoint requires repair")
+    rows = rallies(root, ids)
+    after = _read_catalog_checkpoint(root)
+    if after != before:
+        raise CatalogError("catalog changed during rally summary resolve")
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        rally_id = row.get("rally_id")
+        if not isinstance(rally_id, str) or rally_id in by_id:
+            raise CatalogError("catalog rally identity is invalid")
+        by_id[rally_id] = row
+    if set(by_id) != set(ids):
+        raise CatalogError("catalog rally summary coverage is incomplete")
+    for rally_id, digest in digests.items():
+        try:
+            actual = canonical_json_sha256_strict(by_id[rally_id])
+        except (TypeError, ValueError) as exc:
+            raise CatalogError("catalog rally identity is invalid") from exc
+        if actual != digest:
+            raise CatalogError("catalog rally changed during summary resolve")
+    return [by_id[rally_id] for rally_id in ids]
 
 
 def rally_changes(root: Path, *, after_revision: int = 0) -> dict[str, Any]:

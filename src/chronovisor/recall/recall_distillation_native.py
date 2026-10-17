@@ -227,10 +227,13 @@ def ensure_contract(root: Path, config: object) -> dict[str, Any]:
     artifact_id, _path, artifact = store.write_immutable(
         _contract_dir(root), payload, schema=NATIVE_PROFILE_SCHEMA
     )
-    store.write_sealed_state(
-        _contract_pointer_path(root),
-        {"kind": _CONTRACT_POINTER_KIND, "profile_contract_id": artifact_id},
-    )
+    # Gate evaluation ensures the same contract again. Preserve its physical
+    # identity so a canonical source view does not invalidate itself mid-run.
+    if _pointer_contract_id(root) != artifact_id:
+        store.write_sealed_state(
+            _contract_pointer_path(root),
+            {"kind": _CONTRACT_POINTER_KIND, "profile_contract_id": artifact_id},
+        )
     checked = _validate_contract(artifact, artifact_id)
     if not checked:
         raise NativeDistillationError("native profile contract failed read-back")

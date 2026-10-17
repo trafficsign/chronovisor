@@ -655,3 +655,75 @@ def test_selection_tie_breaks_by_rally_then_sequence(
         row["record_sha256"] for row in expected
     ]
     view.connection.close()
+
+
+def test_locked_classification_survives_restart_and_only_updates_new_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _append_label(tmp_path, "rally-a", "candidate-a")
+    calls: list[set[str]] = []
+    _stub_build_dependencies(monkeypatch, materialize_calls=calls)
+    view = materialization._build(tmp_path)
+    materialization._classify_locked_rows(view, "plan", {"rally-a": "test"}, {"plan"})
+    assert view.connection.execute("SELECT locked FROM rows").fetchone()[0] == 1
+    view.close()
+
+    reopened = materialization._build(tmp_path)
+    before = ledger.file_state(reopened.path)
+    materialization._classify_locked_rows(reopened, "plan", {"rally-a": "test"}, {"plan"})
+    assert ledger.file_state(reopened.path) == before
+    reopened.close()
+
+    _append_label(tmp_path, "rally-a", "candidate-b")
+    appended = materialization._build(tmp_path)
+    with ledger.connect(appended.path) as connection:
+        connection.execute("CREATE TABLE observed(sequence INTEGER)")
+        connection.execute(
+            "CREATE TRIGGER observe_locked AFTER UPDATE OF locked ON rows "
+            "BEGIN INSERT INTO observed VALUES(new.sequence); END"
+        )
+    materialization._classify_locked_rows(appended, "plan", {"rally-a": "test"}, {"plan"})
+    assert [tuple(row) for row in appended.connection.execute("SELECT sequence,locked FROM rows")] == [(1, 1), (2, 1)]
+    assert [row[0] for row in appended.connection.execute("SELECT sequence FROM observed")] == [2]
+    appended.close()
+
+
+@pytest.mark.parametrize("changed", ["assignment", "compatibility", "regressed_cursor"])
+def test_locked_classification_recomputes_when_its_verified_context_changes(
+    tmp_path: Path, changed: str,
+) -> None:
+    view = _selection_view(tmp_path, _selection_rows())
+    assignments = {"locked-a": "test"}
+    materialization._classify_locked_rows(view, "plan", assignments, {"plan"})
+    assert view.connection.execute("SELECT locked FROM rows WHERE rally_id='locked-a'").fetchone()[0] == 1
+    if changed == "assignment":
+        assignments = {"old-a": "test"}
+    elif changed == "regressed_cursor":
+        view.metadata["selection"]["sequence"] = 100
+    materialization._classify_locked_rows(
+        view, "plan", assignments, set() if changed == "compatibility" else {"plan"},
+    )
+    actual = {row[0] for row in view.connection.execute("SELECT rally_id FROM rows WHERE locked=1")}
+    assert actual == ({"old-a"} if changed == "assignment" else set() if changed == "compatibility" else {"locked-a"})
+    view.connection.close()
+
+
+def test_split_growth_does_not_rewrite_existing_label_classifications(tmp_path: Path) -> None:
+    view = _selection_view(tmp_path, _selection_rows())
+    assignments = {"locked-a": "test", "old-a": "train"}
+    materialization._classify_locked_rows(view, "plan", assignments, {"plan"})
+    with ledger.connect(view.path) as connection:
+        connection.execute("CREATE TABLE observed(rally_id TEXT)")
+        connection.execute(
+            "CREATE TRIGGER observe_locked AFTER UPDATE OF locked ON rows "
+            "BEGIN INSERT INTO observed VALUES(new.rally_id); END"
+        )
+    assignments = {**assignments, "new-rally": "embargo"}
+    materialization._classify_locked_rows(view, "growth", assignments, {"plan", "growth"})
+    assert view.connection.execute("SELECT COUNT(*) FROM observed").fetchone()[0] == 0
+    materialization._classify_locked_rows(
+        view, "growth", {**assignments, "old-a": "test"}, {"plan", "growth"},
+    )
+    assert [row[0] for row in view.connection.execute("SELECT rally_id FROM observed")] == ["old-a"]
+    assert view.connection.execute("SELECT locked FROM rows WHERE rally_id='old-a'").fetchone()[0] == 1
+    view.connection.close()

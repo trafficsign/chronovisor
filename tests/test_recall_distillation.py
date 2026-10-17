@@ -4191,8 +4191,9 @@ def test_chunk_reuses_loaded_candidates_for_preflight(
     assert candidate_reads == 1
 
 
+@pytest.mark.parametrize("summaries", [False, True])
 def test_native_capture_uses_closed_cohort_without_early_materialization(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, summaries: bool,
 ) -> None:
     contract_id = "c" * 64
     expected = distill._active_training_cohort(
@@ -4206,6 +4207,12 @@ def test_native_capture_uses_closed_cohort_without_early_materialization(
         {"rally_id": "recent", "as_of": "2026-10-10T00:00:00Z", "actual_answer_refs": [1]},
         {"rally_id": "no-answer", "as_of": "2026-10-10T00:00:00Z"},
     ]
+    if summaries:
+        rallies = [
+            {"rally_id": row["rally_id"], "as_of": row["as_of"],
+             "has_actual_answer": bool(row.get("actual_answer_refs"))}
+            for row in rallies
+        ]
 
     def snapshots(_root: Path, _path: Path, ids: set[str]) -> dict:
         requested.append(set(ids))
@@ -4230,9 +4237,93 @@ def test_native_capture_uses_closed_cohort_without_early_materialization(
         config=distill.DistillationConfig(teacher_profile=distill.NATIVE_LUNA_SINGLE_PROFILE),
         rallies=rallies, texts={}, index_path=tmp_path / "index", label_rows=rallies,
         cold_start=True, deadline=time.monotonic() + 300,
+        rally_loader=(lambda selected: selected) if summaries else None,
     )
     assert observed == [expected]
     assert requested == [{"recent"}]
+
+
+def test_native_prepare_reads_payloads_only_for_pending_and_selected_rallies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_dir = _raw(tmp_path)
+    catalog.advance(raw_dir, tmp_path, 4096)
+    expected = catalog.rallies(tmp_path)
+    store.append_chain_batch(
+        store.distillation_dir(tmp_path) / "rally-manifest.jsonl",
+        ({"kind": "rally-manifest", "manifest": row} for row in expected[:-1]),
+    )
+    config = distill.DistillationConfig(
+        enabled=True, teacher_profile=distill.NATIVE_LUNA_SINGLE_PROFILE,
+        native_luna_enabled=True, max_input_bytes=4096,
+    )
+    original = catalog.rallies
+    requested: list[set[str]] = []
+
+    def targeted(root: Path, ids: Iterable[str] | None = None) -> list[dict[str, Any]]:
+        assert ids is not None, "historical payloads must not be decoded for scheduling"
+        selected = set(ids)
+        requested.append(selected)
+        return original(root, selected)
+
+    monkeypatch.setattr(catalog, "rallies", targeted)
+    monkeypatch.setattr(distill, "load_distillation_config", lambda _path: config)
+    monkeypatch.setattr(distill, "_ensure_profile_contract", lambda *_args: {"artifact_id": "a" * 64})
+    monkeypatch.setattr(
+        distill, "_capture_candidate_snapshots",
+        lambda **_kwargs: distill._CandidateCaptureResult({expected[0]["rally_id"]: {}}, [], {}, False),
+    )
+    monkeypatch.setattr(distill, "_run_counterfactual_block", lambda **_kwargs: distill._CounterfactualBlockResult())
+    setup = distill._prepare_distillation_chunk(
+        root=tmp_path, raw_dir=raw_dir, config_path=None, teachers={},
+        counterfactual=None, structural_verifier=None, dry_run=False,
+        cold_start=True, max_elapsed_seconds=300,
+    )
+    assert [ids for ids in requested if ids] == [
+        {expected[-1]["rally_id"]}, {expected[0]["rally_id"]},
+    ]
+    manifests = store.read_chain(store.distillation_dir(tmp_path) / "rally-manifest.jsonl")
+    assert [row["manifest"] for row in manifests] == expected
+    assert setup["rally_by_id"][expected[0]["rally_id"]] == expected[0]
+    assert all("context_refs" not in row for row in setup["rallies"])
+    assert distill.grouped_rolling_split(setup["rallies"]) == distill.grouped_rolling_split(expected)
+    assert distill._source_age_bands(setup["rallies"]) == distill._source_age_bands(expected)
+
+
+def test_native_capture_resolves_payloads_after_the_existing_candidate_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    summaries = [
+        {"rally_id": f"rally-{index:03}", "as_of": "2026-10-10T00:00:00Z",
+         "query_sha256": str(index), "has_actual_answer": True}
+        for index in range(101)
+    ]
+    resolved: list[str] = []
+
+    def load(selected: Any) -> list[dict[str, Any]]:
+        resolved.extend(row["rally_id"] for row in selected)
+        return [{**row, "actual_answer_refs": [{"semantic_sha256": "a" * 64}]} for row in selected]
+
+    def snapshot(_index: Path, rally: Mapping[str, Any], _text: str, **_kwargs: Any) -> dict:
+        assert rally["actual_answer_refs"]
+        return {"rally_id": rally["rally_id"]}
+
+    monkeypatch.setattr(catalog, "sync_candidate_index", lambda *_args: None)
+    monkeypatch.setattr(catalog, "candidate_rally_ids", lambda *_args: set())
+    monkeypatch.setattr(catalog, "read_candidate_snapshots", lambda *_args: {})
+    monkeypatch.setattr(distill, "_current_profile_contract_id", lambda *_args: "a" * 64)
+    monkeypatch.setattr(distill, "_ensure_split_plan", lambda *_args, **_kwargs: {"assignments": {}})
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda *_args: "b" * 64)
+    monkeypatch.setattr(distill, "candidate_snapshot", snapshot)
+    result = distill._capture_candidate_snapshots(
+        root=tmp_path, raw_dir=tmp_path / "raw",
+        config=distill.DistillationConfig(teacher_profile=distill.NATIVE_LUNA_SINGLE_PROFILE),
+        rallies=summaries, texts={}, index_path=tmp_path / "index", label_rows=[],
+        cold_start=True, deadline=time.monotonic() + 300, rally_loader=load,
+    )
+    assert resolved == [row["rally_id"] for row in summaries[:100]]
+    assert len(result.work) == 100
+    assert len(store.read_chain(store.distillation_dir(tmp_path) / "candidate-ledger.jsonl")) == 100
 
 
 @pytest.mark.parametrize("changed,always_fail,calls", [(True, False, 2), (False, False, 1), (True, True, 3)])

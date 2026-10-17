@@ -15428,6 +15428,9 @@ def _capture_candidate_snapshots(
     cold_start: bool,
     deadline: float,
     labeled_rally_ids: set[str] | None = None,
+    rally_loader: (
+        Callable[[Sequence[Mapping[str, Any]]], Sequence[Mapping[str, Any]]] | None
+    ) = None,
 ) -> _CandidateCaptureResult:
     candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
     snapshots: dict[str, Mapping[str, Any]]
@@ -15449,7 +15452,10 @@ def _capture_candidate_snapshots(
                 label_rally_ids.intersection_update(
                     str(rally["rally_id"])
                     for rally in rallies
-                    if rally.get("actual_answer_refs")
+                    if (
+                        rally.get("has_actual_answer")
+                        if rally_loader is not None else rally.get("actual_answer_refs")
+                    )
                     and _native_counterfactual_since_approval(rally)
                 )
             snapshots = {
@@ -15508,6 +15514,15 @@ def _capture_candidate_snapshots(
             )
         )
     planned = planned[:candidate_limit]
+    if rally_loader is not None:
+        planned = [
+            {
+                **full,
+                "_backfill_band": summary["_backfill_band"],
+                "_age_boundary_utc": summary["_age_boundary_utc"],
+            }
+            for summary, full in zip(planned, rally_loader(planned), strict=True)
+        ]
     work: list[Mapping[str, Any]] = []
     payloads: list[dict[str, Any]] = []
     deferred = False
@@ -15658,7 +15673,10 @@ def _prepare_distillation_chunk(
                 if attempt == 2 or advanced.watermark == committed_raw_watermark(raw_dir):
                     raise
                 advanced = catalog.advance(raw_dir, root, config.max_input_bytes)
-    rallies = catalog.rallies(root)
+    native_sources = config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+    rallies = (
+        catalog.rally_summaries(root) if native_sources else catalog.rallies(root)
+    )
     if teachers is None:
         teachers, default_counterfactual = _default_workers(
             config,
@@ -15705,6 +15723,8 @@ def _prepare_distillation_chunk(
                 "teachers_available": teachers_available,
             }
         }
+    if native_sources:
+        pending = catalog.resolve_rally_summaries(root, pending)
     store.append_chain_batch(
         ledger_path,
         ({"kind": "rally-manifest", "manifest": rally} for rally in pending),
@@ -15733,8 +15753,22 @@ def _prepare_distillation_chunk(
             ledger_index(label_path).distinct("rally_id")
             if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE else None
         ),
+        rally_loader=(
+            lambda selected: catalog.resolve_rally_summaries(root, selected)
+        ) if native_sources else None,
     )
     snapshots = capture.snapshots
+    if native_sources:
+        # Scheduling uses small metadata. Payload consumers only visit these
+        # snapshots; bind their full manifests to the same source summaries.
+        try:
+            selected = [rally_by_id[rally_id] for rally_id in snapshots]
+        except KeyError as exc:
+            raise DistillationError("candidate rally disappeared from catalog") from exc
+        rally_by_id.update(
+            (str(rally["rally_id"]), rally)
+            for rally in catalog.resolve_rally_summaries(root, selected)
+        )
     candidate_work = capture.work
     split_plan = capture.split_plan
     deadline_deferred = capture.deadline_deferred
