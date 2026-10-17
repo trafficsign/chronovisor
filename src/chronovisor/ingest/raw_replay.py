@@ -2423,6 +2423,152 @@ def _job_status(job: object) -> str:
     return str(getattr(status, "value", status or "missing"))
 
 
+def _ingest_continuation_from_job(
+    job: object,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Classify the exact bounded ingest continuation result, if present.
+
+    The ingest orchestrator deliberately reports a bounded shard chunk as a
+    completed *job* while the raw remains pending.  Reuse its strict envelope
+    validator here so a partial or fabricated result can never be mistaken for
+    whole-raw completion.
+    """
+
+    result = getattr(job, "result", None)
+    if not isinstance(result, dict):
+        return None, None
+    continuation = result.get("ingest_continuation")
+    consensus = result.get("local_consensus")
+    has_continuation_hint = "ingest_continuation" in result or (
+        isinstance(consensus, dict)
+        and consensus.get("status") == "shard_continuation_pending"
+    )
+    if not has_continuation_hint:
+        return None, None
+
+    from chronovisor.ingest.orchestrator import (
+        _valid_ingest_review_shard_continuation,
+    )
+
+    if not _valid_ingest_review_shard_continuation(continuation):
+        return None, "ingest shard continuation result is invalid"
+    if not isinstance(consensus, dict) or (
+        consensus.get("status") != "shard_continuation_pending"
+    ):
+        return None, "ingest shard continuation result status is invalid"
+    return dict(continuation), None
+
+
+def _record_replay_completion(
+    *,
+    row: Mapping[str, Any],
+    raw: str,
+    active_job_id: str,
+    now: datetime,
+    completions_file: Path,
+) -> tuple[bool, bool, str | None, dict[str, Any] | None, str | None]:
+    """Persist one terminal replay marker unless the job is a shard chunk."""
+
+    finished_job = job_store.get(active_job_id)
+    continuation, continuation_error = _ingest_continuation_from_job(finished_job)
+    if continuation_error is not None or continuation is not None:
+        return False, False, None, continuation, continuation_error
+    result = (
+        getattr(finished_job, "result", None) if finished_job is not None else None
+    )
+    callback_failed_ops = result.get("failed_ops") if isinstance(result, dict) else None
+    completion_status = (
+        "completed_partial"
+        if isinstance(callback_failed_ops, list) and callback_failed_ops
+        else "completed"
+    )
+    completion_record = {
+        "ts": _iso(now),
+        "schema_version": SCHEMA_VERSION,
+        "type": FULL_REPLAY_CLAIM_TYPE,
+        "key": row.get("key"),
+        "raw": raw,
+        "source_raw": f"replay:{raw}",
+        "status": completion_status,
+        "completion_scope": "full_raw",
+        "attempt_id": row.get("attempt_id"),
+        "job_id": active_job_id,
+        "raw_sha256": row.get("raw_sha256"),
+        "failed_ops": callback_failed_ops or [],
+        # Success is durable before supervisor cleanup starts.  A second
+        # journal row acknowledges cleanup, making a crash or transient I/O
+        # error recoverable without replaying the raw or downgrading the job.
+        "failure_reset_pending": True,
+    }
+    _append_completion(completion_record, completions_file)
+    failure_reset_pending = False
+    failure_reset_error: str | None = None
+    from chronovisor.ingest.failure_supervisor import reset_raw_failure
+
+    try:
+        reset_raw_failure(_raw_name(dict(row)) or Path(raw).name)
+    except Exception as exc:  # durable marker owns the retry
+        failure_reset_pending = True
+        failure_reset_error = f"{exc.__class__.__name__}: {exc}"
+    else:
+        reset_completed_at = _iso(_now())
+        _append_completion(
+            {
+                **completion_record,
+                "ts": reset_completed_at,
+                "failure_reset_pending": False,
+                "failure_reset_completed_at": reset_completed_at,
+            },
+            completions_file,
+        )
+    return True, failure_reset_pending, failure_reset_error, None, None
+
+
+def _apply_pending_ingest_continuation(
+    updated: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    row: Mapping[str, Any],
+    continuation: Mapping[str, Any],
+    active_job_id: str,
+    attempts: int,
+    now: datetime,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return queue/history projections for a successful bounded shard chunk."""
+
+    continuation_job_id = active_job_id or None
+    continuation_attempt_id = row.get("attempt_id")
+    continuation_started_at = row.get("started_at")
+    updated["status"] = "pending"
+    # A successful bounded chunk must not consume one ordinary replay failure
+    # attempt. Keep the prior count and resume the durable continuation next run.
+    updated["attempts"] = max(0, attempts - 1)
+    updated["next_retry_at"] = None
+    updated["last_error"] = row.get("last_error")
+    updated["continuation_job_id"] = continuation_job_id
+    updated["continuation_attempt_id"] = continuation_attempt_id
+    updated["continuation_started_at"] = continuation_started_at
+    updated["continuation_completed_at"] = _iso(now)
+    updated["continuation"] = dict(continuation)
+    updated.pop("job_id", None)
+    updated.pop("attempt_id", None)
+    updated.pop("started_at", None)
+    record.update(
+        {
+            "status": "pending",
+            "attempts": updated["attempts"],
+            "next_retry_at": None,
+            "continuation_pending": True,
+            "continuation": dict(continuation),
+            "continuation_job_id": continuation_job_id,
+            "continuation_attempt_id": continuation_attempt_id,
+            "continuation_started_at": continuation_started_at,
+            "attempt_id": continuation_attempt_id,
+        }
+    )
+    return updated, record
+
+
 def _failure_text(job: object, status: str) -> str:
     result = getattr(job, "result", None)
     error = getattr(job, "error", None)
@@ -3159,6 +3305,8 @@ def _run_candidate(
     failure_reset_pending = False
     failure_reset_error: str | None = None
     semantic_defer: dict[str, Any] | None = None
+    continuation: dict[str, Any] | None = None
+    continuation_error: str | None = None
     content: str | None = None
     projection_summary: dict[str, Any] | None = None
     if _raw_name(row) in _deferred_raw_names_for_rows([row]):
@@ -3181,66 +3329,21 @@ def _run_candidate(
                 active_job_id = job.job_id
 
             def record_processed() -> None:
-                nonlocal completion_written, failure_reset_error
-                nonlocal failure_reset_pending
-                finished_job = job_store.get(active_job_id)
-                result = (
-                    getattr(finished_job, "result", None)
-                    if finished_job is not None
-                    else None
+                nonlocal completion_written, failure_reset_error, failure_reset_pending
+                nonlocal continuation, continuation_error
+                (
+                    completion_written,
+                    failure_reset_pending,
+                    failure_reset_error,
+                    continuation,
+                    continuation_error,
+                ) = _record_replay_completion(
+                    row=row,
+                    raw=raw,
+                    active_job_id=active_job_id,
+                    now=now,
+                    completions_file=completions_file,
                 )
-                callback_failed_ops = (
-                    result.get("failed_ops") if isinstance(result, dict) else None
-                )
-                completion_status = (
-                    "completed_partial"
-                    if isinstance(callback_failed_ops, list) and callback_failed_ops
-                    else "completed"
-                )
-                completion_record = {
-                    "ts": _iso(now),
-                    "schema_version": SCHEMA_VERSION,
-                    "type": FULL_REPLAY_CLAIM_TYPE,
-                    "key": row.get("key"),
-                    "raw": raw,
-                    "source_raw": f"replay:{raw}",
-                    "status": completion_status,
-                    "completion_scope": "full_raw",
-                    "attempt_id": row.get("attempt_id"),
-                    "job_id": active_job_id,
-                    "raw_sha256": row.get("raw_sha256"),
-                    "failed_ops": callback_failed_ops or [],
-                    # Success is durable before supervisor cleanup starts.  A
-                    # second journal row acknowledges cleanup, making a crash
-                    # or transient I/O error recoverable without replaying the
-                    # raw or downgrading the completed job.
-                    "failure_reset_pending": True,
-                }
-                _append_completion(completion_record, completions_file)
-                completion_written = True
-                # Raw replay bypasses orchestrator, whose success path normally
-                # retires failure-supervisor state.  Release the actual source
-                # only after the durable completion marker exists, so an old
-                # semantic packet cannot re-hold a successfully replayed raw if
-                # authority resolution later fails or rolls back.
-                from chronovisor.ingest.failure_supervisor import reset_raw_failure
-
-                try:
-                    reset_raw_failure(_raw_name(row) or Path(raw).name)
-                except Exception as exc:  # durable marker owns the retry
-                    failure_reset_pending = True
-                    failure_reset_error = f"{exc.__class__.__name__}: {exc}"
-                else:
-                    reset_completed_at = _iso(_now())
-                    _append_completion(
-                        {
-                            **completion_record,
-                            "ts": reset_completed_at,
-                            "failure_reset_pending": False,
-                            "failure_reset_completed_at": reset_completed_at,
-                        },
-                        completions_file,
-                    )
 
             # Failure state can change after queue selection and even after the
             # durable running marker. This is the last instruction before
@@ -3281,13 +3384,26 @@ def _run_candidate(
                 pages_created = list(getattr(finished, "pages_created", []) or [])
                 pages_updated = list(getattr(finished, "pages_updated", []) or [])
             result = getattr(finished, "result", None) if finished is not None else None
+            continuation, continuation_error = _ingest_continuation_from_job(finished)
             result_failed_ops = (
                 result.get("failed_ops") if isinstance(result, dict) else None
             )
             failed_ops = (
                 result_failed_ops if isinstance(result_failed_ops, list) else []
             )
-            if job_status != JobStatus.COMPLETED.value:
+            continuation_pending = (
+                continuation is not None
+                and continuation_error is None
+                and job_status == JobStatus.COMPLETED.value
+            )
+            if continuation_error is not None:
+                error = continuation_error
+            elif continuation_pending:
+                # The job is COMPLETED only because this bounded shard chunk
+                # was durably recorded.  The raw must remain retryable until
+                # all shards have reached the terminal apply/quorum proof.
+                pass
+            elif job_status != JobStatus.COMPLETED.value:
                 error = _failure_text(finished, job_status)
             elif not completion_written:
                 record_processed()
@@ -3297,18 +3413,36 @@ def _run_candidate(
             observed_status = _job_status(finished)
             if observed_status == JobStatus.COMPLETED.value:
                 job_status = observed_status
-                result = (
-                    getattr(finished, "result", None) if finished is not None else None
+                continuation, continuation_error = _ingest_continuation_from_job(
+                    finished
                 )
-                result_failed_ops = (
-                    result.get("failed_ops") if isinstance(result, dict) else None
-                )
-                failed_ops = (
-                    result_failed_ops if isinstance(result_failed_ops, list) else []
-                )
-                completion_uncertain = True
+                if continuation_error is not None:
+                    error = continuation_error
+                elif continuation is not None:
+                    error = ""
+                    completion_uncertain = False
+                    # Preserve the bounded continuation as pending even if an
+                    # adapter raised after persisting its completed job.
+                    pass
+                else:
+                    result = (
+                        getattr(finished, "result", None) if finished is not None else None
+                    )
+                    result_failed_ops = (
+                        result.get("failed_ops") if isinstance(result, dict) else None
+                    )
+                    failed_ops = (
+                        result_failed_ops if isinstance(result_failed_ops, list) else []
+                    )
+                    completion_uncertain = True
             else:
                 job_status = "error"
+
+    continuation_pending = (
+        continuation is not None
+        and continuation_error is None
+        and job_status == JobStatus.COMPLETED.value
+    )
 
     if error and path is not None and content is not None:
         semantic_defer = _publish_semantic_no_quorum_defer(
@@ -3330,6 +3464,10 @@ def _run_candidate(
             evidence=semantic_defer,
             now=now,
         )
+    elif continuation_pending:
+        # The bounded continuation projection is applied after the common
+        # history record is assembled below.
+        pass
     elif completion_uncertain:
         updated["status"] = "indeterminate"
         updated["next_retry_at"] = None
@@ -3388,6 +3526,16 @@ def _run_candidate(
         "failure_reset_pending": failure_reset_pending,
         "failure_reset_error": failure_reset_error,
     }
+    if continuation_pending and continuation is not None:
+        updated, record = _apply_pending_ingest_continuation(
+            updated,
+            record,
+            row=row,
+            continuation=continuation,
+            active_job_id=active_job_id,
+            attempts=attempts,
+            now=now,
+        )
     if semantic_defer is not None:
         record.update(
             {
@@ -3973,7 +4121,6 @@ def run_pending_queue(
                             "raw_sha256": raw_hash,
                             "attempt_id": f"{active_job_id}:{attempts}:{raw_hash[:16]}",
                             "next_retry_at": None,
-                            "last_error": None,
                         }
                     )
                     if requires_semantic_authorization:

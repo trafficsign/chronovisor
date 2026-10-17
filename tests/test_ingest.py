@@ -2965,6 +2965,14 @@ class TestIngestFrontierGate:
         before = {path: path.read_bytes() for path in new_manifest_path.parent.glob("*")
                   if path.is_file()}
         assert ready(raw, []) is True
+        # A stale-proposal retry must prove page drift before the failure
+        # supervisor releases the raw.  The historical manifest-only path
+        # remains valid for its original producer-drift error.
+        assert ready(raw, [], require_page_drift=True) is False
+        drifted_page = isolated_wiki / "pages" / "memory" / "sharded-0.md"
+        drifted_page.parent.mkdir(parents=True, exist_ok=True)
+        drifted_page.write_text("external page edit\n", encoding="utf-8")
+        assert ready(raw, [], require_page_drift=True) is True
         assert ready(raw + " changed", []) is False
         assert ready(raw, ["wrong-source-key"]) is False
         assert {path: path.read_bytes() for path in before} == before
@@ -2992,6 +3000,21 @@ class TestIngestFrontierGate:
             "raw_bytes": len(raw.encode()), "packet_path": str(packet_path),
         }
         assert failure_supervisor._code_drift_source_is_ready(raw_path, entry)
+        stale_entry = {
+            **entry,
+            "last_error": "pre-triage shard continuation proposal is missing",
+        }
+        packet_path.write_text(
+            json.dumps({
+                **packet,
+                "error": stale_entry["last_error"],
+            }),
+            encoding="utf-8",
+        )
+        assert failure_supervisor._code_drift_source_is_ready(raw_path, stale_entry)
+        drifted_page.unlink()
+        assert not failure_supervisor._code_drift_source_is_ready(raw_path, stale_entry)
+        packet_path.write_text(json.dumps(packet), encoding="utf-8")
         failure_supervisor._save_state({"failures": {raw_path.name: entry}})
         failure_state_before = failure_supervisor._load_state()
         assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {}
@@ -3038,6 +3061,365 @@ class TestIngestFrontierGate:
         assert continuation is not None
         assert continuation.approved_shards == 0
         assert json.loads(marker_path.read_text(encoding="utf-8"))["state"] == "claimed"
+
+    def test_regenerated_continuation_readiness_requires_archived_drift_and_progress(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A fresh partial epoch may release only with intact predecessor proof."""
+        from copy import deepcopy
+        from dataclasses import replace
+
+        from chronovisor.ingest import ingest, ingest_recovery_runtime
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+        authority = self._production_authority("a")
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            lambda **_kwargs: (authority, None),
+        )
+        raw = "A regenerated continuation must retain its stale predecessor."
+        old_operations = self._oversized_create_ops(body_bytes=30_000)
+        old_dry = ingest._review_and_apply_ingest_operations(
+            old_operations,
+            raw_content=raw,
+            reviewer=lambda _proposal: pytest.fail("dry run must not review"),
+            dry_run=True,
+        )
+        source_key = old_dry["source_key"]
+        proposal_path, _review_path = ingest._ingest_artifact_paths(source_key)
+        ingest._write_ingest_artifact(
+            proposal_path,
+            {
+                "schema_version": ingest.INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
+                "kind": "ingest_frontier_proposal_artifact",
+                "source_key": source_key,
+                "proposal_sha256": old_dry["proposal_sha256"],
+                "proposal": old_dry["proposal"],
+            },
+        )
+        original_builder = ingest._build_ingest_review_shard_plan
+        historical_plan = original_builder(old_dry["proposal"], force_review_unit=True)
+        assert historical_plan is not None
+        assert (
+            ingest._persist_ingest_review_shard_manifest(
+                historical_plan,
+                source_key=source_key,
+            )
+            is None
+        )
+        old_manifest_path = ingest._ingest_review_shard_manifest_path(historical_plan)
+
+        def drifted_builder(proposal, *, config=None, force_review_unit=False):
+            plan = original_builder(
+                proposal,
+                config=config,
+                force_review_unit=force_review_unit,
+            )
+            assert plan is not None
+            manifest = deepcopy(plan.manifest)
+            manifest["shards"][0]["effective_input_chars"] += 1
+            return replace(
+                plan,
+                manifest=manifest,
+                manifest_sha256=ingest._canonical_json_sha256(manifest),
+            )
+
+        monkeypatch.setattr(ingest, "_build_ingest_review_shard_plan", drifted_builder)
+        reseeded = ingest._reseed_pretriage_ingest_shard_for_code_drift(
+            raw,
+            None,
+            reviewer=lambda _proposal: {},
+            previous_manifest_path=old_manifest_path,
+        )
+        assert reseeded["status"] == "reseeded_code_drift"
+
+        # The old create preimage becomes stale when a valid current page is
+        # introduced.  The loader archives the proposal and code-drift marker
+        # before returning to ordinary generation.
+        _seed_page(
+            isolated_wiki,
+            "memory/sharded-0.md",
+            "---\ntitle: Sharded 0\nupdated: 2026-07-14\n"
+            "status: stable\ntype: knowledge\n---\nexternal drift\n",
+        )
+        assert (
+            ingest._load_pretriage_ingest_shard_continuation(
+                raw,
+                None,
+                reviewer=lambda _proposal: {},
+            )
+            is None
+        )
+        history = proposal_path.parent / "history" / source_key
+        archived_proposals = list(history.glob(f"{proposal_path.name}.*.json"))
+        marker_path = ingest._ingest_review_continuation_marker_path(source_key)
+        archived_markers = list(history.glob(f"{marker_path.name}.*.json"))
+        assert len(archived_proposals) == 1
+        assert len(archived_markers) == 1
+
+        # A changed current proposal is generated from the current page, and a
+        # bounded first quorum approval is enough to prove resumable progress.
+        new_operations = deepcopy(old_operations)
+        new_operations[0]["content"] += "\nFresh current-page proposal.\n"
+        fresh = ingest._review_and_apply_ingest_operations(
+            new_operations,
+            raw_content=raw,
+            reviewer=lambda _proposal: self._authority_review(
+                authority,
+                summary="fresh partial quorum",
+            ),
+            frontier_budget=ingest._FrontierCallBudget(limit=2),
+        )
+        assert fresh["status"] == "shard_continuation_pending", fresh
+        assert 0 < fresh["shard_continuation"]["approved_shards"] < fresh[
+            "shard_continuation"
+        ]["total_shards"]
+        assert fresh["proposal_sha256"] != old_dry["proposal_sha256"]
+
+        tracked = {
+            path: path.read_bytes()
+            for path in proposal_path.parent.rglob("*")
+            if path.is_file()
+        }
+        assert ingest_recovery_runtime.regenerated_continuation_is_ready(raw, []) is True
+        assert {
+            path: path.read_bytes()
+            for path in proposal_path.parent.rglob("*")
+            if path.is_file()
+        } == tracked
+
+        # The readiness proof is fail-closed for tampered predecessor/current
+        # bytes, missing current progress, and a different raw source.
+        current_bytes = proposal_path.read_bytes()
+        prior_proposal = archived_proposals[0]
+        prior_proposal_bytes = prior_proposal.read_bytes()
+        prior_marker = archived_markers[0]
+        prior_marker_bytes = prior_marker.read_bytes()
+        proposal_path.write_bytes(
+            current_bytes.replace(
+                b"Fresh current-page proposal.",
+                b"Tampered current-page proposal.",
+            )
+        )
+        assert ingest_recovery_runtime.regenerated_continuation_is_ready(raw, []) is False
+        proposal_path.write_bytes(current_bytes)
+        prior_proposal.write_bytes(prior_proposal_bytes + b"\n")
+        assert ingest_recovery_runtime.regenerated_continuation_is_ready(raw, []) is False
+        prior_proposal.write_bytes(prior_proposal_bytes)
+
+        current_plan = ingest._build_ingest_review_shard_plan(
+            json.loads(current_bytes)["proposal"],
+            force_review_unit=True,
+        )
+        assert current_plan is not None
+        current_reviews: dict[Path, bytes] = {}
+        for index, shard in enumerate(current_plan.shards):
+            _shard_source, review_path = ingest._ingest_review_shard_review_identity(
+                current_plan,
+                shard_index=index,
+                shard=shard,
+            )
+            if review_path.exists():
+                current_reviews[review_path] = review_path.read_bytes()
+                review_path.unlink()
+        assert current_reviews
+        assert ingest_recovery_runtime.regenerated_continuation_is_ready(raw, []) is False
+        for review_path, review_bytes in current_reviews.items():
+            review_path.write_bytes(review_bytes)
+
+        assert ingest_recovery_runtime.regenerated_continuation_is_ready(
+            raw + " source mismatch",
+            [],
+        ) is False
+        assert prior_marker.read_bytes() == prior_marker_bytes
+        assert {
+            path: path.read_bytes()
+            for path in proposal_path.parent.rglob("*")
+            if path.is_file()
+        } == tracked
+
+    def test_stale_shard_continuation_archives_evidence_and_regenerates_from_current_page(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Page drift must retire only the stale continuation proof.
+
+        The old proposal, marker, repair transition, and stall are retained as
+        byte-exact history.  A normal producer attempt then writes a fresh
+        proposal against the externally changed page before applying it.
+        """
+        from chronovisor.ingest import ingest
+
+        monkeypatch.setattr(
+            ingest,
+            "_ingest_review_router_config",
+            lambda: self._fixed_review_config(),
+        )
+        authority = self._production_authority("a")
+        other_authority = self._production_authority("b")
+        monkeypatch.setattr(
+            ingest,
+            "_current_ingest_review_authority",
+            lambda **_kwargs: (authority, None),
+        )
+        page = _seed_page(
+            isolated_wiki,
+            "memory/stale-continuation.md",
+            "---\ntitle: Stale continuation\nupdated: 2026-07-14\n"
+            "status: stable\ntype: knowledge\n---\noriginal\n",
+        )
+        raw = "A stale continuation must regenerate from the current page."
+        old_operations = [
+            {
+                "type": "update",
+                "filename": "memory/stale-continuation.md",
+                "content": "legacy postimage\n",
+            }
+        ]
+        dry = ingest._review_and_apply_ingest_operations(
+            old_operations,
+            raw_content=raw,
+            reviewer=lambda _proposal: pytest.fail("dry run must not review"),
+            dry_run=True,
+        )
+        source_key = dry["source_key"]
+        proposal_path, _review_path = ingest._ingest_artifact_paths(source_key)
+        ingest._write_ingest_artifact(
+            proposal_path,
+            {
+                "schema_version": ingest.INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
+                "kind": "ingest_frontier_proposal_artifact",
+                "source_key": source_key,
+                "proposal_sha256": dry["proposal_sha256"],
+                "proposal": dry["proposal"],
+            },
+        )
+        plan = ingest._build_ingest_review_shard_plan(
+            dry["proposal"],
+            force_review_unit=True,
+        )
+        assert plan is not None
+        assert (
+            ingest._persist_ingest_review_shard_manifest(
+                plan,
+                source_key=source_key,
+            )
+            is None
+        )
+        assert (
+            ingest._persist_ingest_review_continuation_marker(
+                source_key=source_key,
+                plan=plan,
+                reason="exact_repair_reseed",
+                previous_full_proposal_sha256="f" * 64,
+                previous_authority=authority,
+                current_authority=authority,
+            )
+            is None
+        )
+        assert (
+            ingest._seal_ingest_review_repair_transition(
+                source_key=source_key,
+                previous_full_proposal_sha256="f" * 64,
+                repaired_operations_sha256="e" * 64,
+            )
+            is None
+        )
+        assert (
+            ingest._persist_ingest_review_stall(
+                source_key=source_key,
+                plan=plan,
+                authority=other_authority,
+                approved_indices=(),
+            )
+            is None
+        )
+        marker_path = ingest._ingest_review_continuation_marker_path(source_key)
+        active_paths = (
+            proposal_path,
+            marker_path,
+            ingest._ingest_review_repair_transition_path(source_key),
+            ingest._ingest_review_stall_path(source_key),
+        )
+        valid_continuation = ingest._load_pretriage_ingest_shard_continuation(
+            raw,
+            None,
+            reviewer=lambda _proposal: {},
+        )
+        assert valid_continuation is not None
+        # Re-arm through the normal validated writer so the stale branch must
+        # archive the available marker before it would claim it.
+        assert (
+            ingest._persist_ingest_review_continuation_marker(
+                source_key=source_key,
+                plan=plan,
+                reason="exact_repair_reseed",
+                previous_full_proposal_sha256="f" * 64,
+                previous_authority=authority,
+                current_authority=authority,
+            )
+            is None
+        )
+        before = {path: path.read_bytes() for path in active_paths}
+
+        # Drift the page after the proposal was sealed.  The old postimage is
+        # no longer a safe CAS preimage, so no continuation may be returned.
+        page.write_text(page.read_text(encoding="utf-8") + "external edit\n")
+        with pytest.raises(
+            IngestApplyError,
+            match="pre-triage shard continuation page preimages changed",
+        ):
+            ingest._review_and_apply_ingest_operations(
+                old_operations,
+                raw_content=raw,
+                reviewer=lambda _proposal: pytest.fail("stale continuation must not review"),
+                shard_continuation=valid_continuation,
+            )
+        assert (
+            ingest._load_pretriage_ingest_shard_continuation(
+                raw,
+                None,
+                reviewer=lambda _proposal: {},
+            )
+            is None
+        )
+
+        history = proposal_path.parent / "history" / source_key
+        assert history.is_dir()
+        archived = {
+            path.name: [candidate.read_bytes() for candidate in history.glob(path.name + ".*.json")]
+            for path in active_paths
+        }
+        for path, payload in before.items():
+            assert payload in archived[path.name]
+
+        fresh_operations = [
+            {
+                "type": "update",
+                "filename": "memory/stale-continuation.md",
+                "content": "fresh postimage\n",
+            }
+        ]
+        result = ingest._review_and_apply_ingest_operations(
+            fresh_operations,
+            raw_content=raw,
+            reviewer=lambda _proposal: self._authority_review(
+                authority,
+                summary="fresh current-page proposal",
+            ),
+        )
+        assert result["status"] == "apply_available", result
+        assert "external edit" in page.read_text(encoding="utf-8")
+        assert "fresh postimage" in page.read_text(encoding="utf-8")
+        assert proposal_path.read_bytes() != before[proposal_path]
 
     def test_exact_repair_transition_is_idempotent_but_bounded_to_one_per_raw(
         self,
@@ -16029,3 +16411,22 @@ class TestLinkFixProtectedRegions:
 
         assert count == 2
         assert new_content == "See visible name and ghost."
+
+
+def test_ingest_artifact_archive_preserves_encoded_bytes(tmp_path):
+    from chronovisor.ingest.ingest_review_store import write_ingest_artifact
+
+    original = '{"unicode":"\u8a3c\u8de1"}\r\n'.encode("utf-8")
+    archive = tmp_path / "history" / "original.json"
+    write_ingest_artifact(archive, original)
+    assert archive.read_bytes() == original
+
+
+def test_ingest_artifact_archive_rejects_non_utf8_without_replacement(tmp_path):
+    from chronovisor.ingest.ingest_review_store import write_ingest_artifact
+
+    archive = tmp_path / "existing.json"
+    archive.write_bytes(b"existing evidence\n")
+    with pytest.raises(UnicodeDecodeError):
+        write_ingest_artifact(archive, b"\xff")
+    assert archive.read_bytes() == b"existing evidence\n"

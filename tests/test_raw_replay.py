@@ -1170,6 +1170,171 @@ def test_partial_replay_is_terminal_and_does_not_repeat_successful_operations(
     assert row["attempts"] == 1
 
 
+def test_shard_continuation_stays_pending_until_terminal_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.ingest import failure_supervisor
+
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    raw = paths["raw"] / "20260701-shard-continuation.md"
+    raw.write_text("body", encoding="utf-8")
+    raw_replay.build_queue(path=paths["queue"], include_auto_signals=False)
+    [queue_row] = _read_jsonl(paths["queue"])
+    queue_row.update({"attempts": 2, "last_error": "prior failure"})
+    _write_jsonl(paths["queue"], [queue_row])
+
+    store = _FakeJobStore(result_status=JobStatus.COMPLETED)
+    monkeypatch.setattr(raw_replay, "job_store", store)
+    reset_calls: list[str] = []
+    monkeypatch.setattr(failure_supervisor, "reset_raw_failure", reset_calls.append)
+    continuation = {
+        "schema_version": 1,
+        "kind": "ingest_review_shard_continuation",
+        "full_proposal_sha256": "a" * 64,
+        "manifest_sha256": "b" * 64,
+        "approved_shards": 1,
+        "total_shards": 2,
+        "remaining_shards": 1,
+        "review_calls_used": 1,
+        "review_call_limit": 2,
+    }
+    calls = 0
+
+    def replay_with_continuation(
+        _content: str, job_id: str, on_complete=None, metadata=None
+    ) -> None:
+        del metadata
+        nonlocal calls
+        calls += 1
+        job = store.get(job_id)
+        assert job is not None
+        job.status = JobStatus.COMPLETED
+        job.result = (
+            {
+                "ingest_continuation": continuation,
+                "local_consensus": {
+                    "status": "shard_continuation_pending",
+                    "proposal_sha256": "a" * 64,
+                    "source_key": "source-key",
+                },
+            }
+            if calls == 1
+            else {}
+        )
+        if calls == 1 and on_complete is not None:
+            on_complete()
+
+    monkeypatch.setattr(
+        "chronovisor.ingest.ingest.run_ingest", replay_with_continuation
+    )
+    started = datetime(2026, 7, 10, 10, 0, tzinfo=UTC)
+
+    first = raw_replay.run_pending_queue(
+        path=paths["queue"],
+        history_file=paths["history"],
+        claims_file=paths["claims"],
+        completions_file=paths["completions"],
+        max_runs=1,
+        max_bytes=100,
+        now=started,
+    )
+
+    assert first["runs"][0]["status"] == "pending"
+    assert first["runs"][0]["job_status"] == "completed"
+    assert first["runs"][0]["attempts"] == 2
+    assert not paths["completions"].exists()
+    assert reset_calls == []
+    [after_continuation] = _read_jsonl(paths["queue"])
+    assert after_continuation["status"] == "pending"
+    assert after_continuation["attempts"] == 2
+    assert after_continuation["last_error"] == "prior failure"
+    assert "job_id" not in after_continuation
+    assert after_continuation["continuation"] == continuation
+    [continuation_history] = _read_jsonl(paths["history"])
+    assert continuation_history["status"] == "pending"
+    assert continuation_history["continuation_pending"] is True
+    assert continuation_history["continuation_job_id"] == "job-1"
+    assert continuation_history["continuation_attempt_id"]
+
+    second = raw_replay.run_pending_queue(
+        path=paths["queue"],
+        history_file=paths["history"],
+        claims_file=paths["claims"],
+        completions_file=paths["completions"],
+        max_runs=1,
+        max_bytes=100,
+        now=started + timedelta(minutes=1),
+    )
+
+    assert second["runs"][0]["status"] == "completed"
+    assert calls == 2
+    assert reset_calls == [raw.name]
+    [after_terminal] = _read_jsonl(paths["queue"])
+    assert after_terminal["status"] == "completed"
+    assert after_terminal["attempts"] == 3
+    assert _read_jsonl(paths["completions"])[-1]["status"] == "completed"
+
+
+def test_malformed_shard_continuation_fails_closed_without_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.ingest import failure_supervisor
+
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    raw = paths["raw"] / "20260701-malformed-continuation.md"
+    raw.write_text("body", encoding="utf-8")
+    raw_replay.build_queue(path=paths["queue"], include_auto_signals=False)
+    store = _FakeJobStore(result_status=JobStatus.COMPLETED)
+    monkeypatch.setattr(raw_replay, "job_store", store)
+    reset_calls: list[str] = []
+    monkeypatch.setattr(failure_supervisor, "reset_raw_failure", reset_calls.append)
+
+    malformed = {
+        "schema_version": 1,
+        "kind": "ingest_review_shard_continuation",
+        "full_proposal_sha256": "a" * 64,
+        "manifest_sha256": "b" * 64,
+        "approved_shards": 2,
+        "total_shards": 2,
+        "remaining_shards": 0,
+        "review_calls_used": 1,
+        "review_call_limit": 2,
+    }
+
+    def replay_with_malformed_continuation(
+        _content: str, job_id: str, on_complete=None, metadata=None
+    ) -> None:
+        del on_complete, metadata
+        job = store.get(job_id)
+        assert job is not None
+        job.status = JobStatus.COMPLETED
+        job.result = {
+            "ingest_continuation": malformed,
+            "local_consensus": {"status": "shard_continuation_pending"},
+        }
+
+    monkeypatch.setattr(
+        "chronovisor.ingest.ingest.run_ingest",
+        replay_with_malformed_continuation,
+    )
+    result = raw_replay.run_pending_queue(
+        path=paths["queue"],
+        history_file=paths["history"],
+        claims_file=paths["claims"],
+        completions_file=paths["completions"],
+        max_runs=1,
+        max_bytes=100,
+    )
+
+    assert result["runs"][0]["status"] == "failed"
+    assert "continuation result is invalid" in result["runs"][0]["error"]
+    assert reset_calls == []
+    assert not paths["completions"].exists()
+    [queue_row] = _read_jsonl(paths["queue"])
+    assert queue_row["status"] == "failed"
+    assert queue_row["attempts"] == 1
+
+
 def test_replay_persists_running_marker_before_ingest(
     tmp_path: Path, monkeypatch
 ) -> None:

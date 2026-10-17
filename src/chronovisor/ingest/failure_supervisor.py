@@ -1876,15 +1876,18 @@ def source_host_capability_is_now_available(entry: dict[str, Any]) -> bool:
 def _code_drift_source_is_ready(raw_path: Path | None, entry: dict[str, Any]) -> bool:
     """Release only a repaired manifest cause; keep the failure history intact."""
 
-    expected_error = (
+    manifest_error = (
         "pre-triage shard continuation prior manifest is invalid: "
         "ingest shard historical manifest is not an exact recomputation"
     )
+    stale_proposal_error = "pre-triage shard continuation proposal is missing"
+    expected_error = entry.get("last_error")
     if (
         raw_path is None or raw_path.is_symlink()
         or entry.get("terminal_deferred") is not True
         or entry.get("failure_class") != "unknown"
-        or entry.get("last_error") != expected_error
+        or not isinstance(expected_error, str)
+        or expected_error not in {manifest_error, stale_proposal_error}
         or not isinstance(entry.get("packet_path"), str)
     ):
         return False
@@ -1911,13 +1914,16 @@ def _code_drift_source_is_ready(raw_path: Path | None, entry: dict[str, Any]) ->
             return False
         from chronovisor.ingest.ingest_recovery_runtime import (
             code_drift_reseed_is_ready,
+            regenerated_continuation_is_ready,
         )
         from chronovisor.ingest.raw_replay import replay_source_keywords
 
         content = raw.decode("utf-8")
+        keywords = replay_source_keywords(raw_path.name, raw_path, content)
         return code_drift_reseed_is_ready(
-            content, replay_source_keywords(raw_path.name, raw_path, content),
-        )
+            content, keywords,
+            require_page_drift=expected_error == stale_proposal_error,
+        ) or regenerated_continuation_is_ready(content, keywords)
     except (OSError, UnicodeError, ValueError, TypeError):
         return False
 

@@ -13,6 +13,7 @@ from typing import Any
 from chronovisor.core.jobs import JobStatus
 from chronovisor.decision import decision_authority
 from chronovisor.ingest import ingest_readback
+from chronovisor.ingest.ingest_review_store import write_ingest_artifact
 
 
 def _runtime():
@@ -40,6 +41,7 @@ _ingest_source_key = _runtime_call("_ingest_source_key")
 _load_ingest_review_artifact = _runtime_call("_load_ingest_review_artifact")
 _normalize_ingest_frontier_review = _runtime_call("_normalize_ingest_frontier_review")
 _prepared_plan_is_fully_applied = _runtime_call("_prepared_plan_is_fully_applied")
+_prepared_plan_is_recoverable = _runtime_call("_prepared_plan_is_recoverable")
 _prepared_plan_targets_reserved_system_page = _runtime_call("_prepared_plan_targets_reserved_system_page")
 _ingest_review_shard_review_identity = _runtime_call("_ingest_review_shard_review_identity")
 _stored_ingest_review_shard_manifest_error = _runtime_call("_stored_ingest_review_shard_manifest_error")
@@ -484,6 +486,68 @@ def inspect_ingest_review_shard_plan_state(
     )
 
 
+def _recoverable_continuation_or_regenerate(
+    continuation: _IngestReviewShardContinuation,
+    *,
+    source_key: str,
+    marker: dict[str, Any] | None,
+) -> _IngestReviewShardContinuation | None:
+    """Preserve stale evidence before returning to ordinary triage/generation.
+
+    All continuation proofs have already passed their existing validators.
+    Page drift authorizes no effect: fresh generation must produce new page
+    preimages, a new proposal, and fresh quorum before the normal CAS apply.
+    """
+    if _prepared_plan_is_recoverable(continuation.planned):
+        if marker is not None and marker.get("state") == "available" and (
+            consume_error := _consume_ingest_review_continuation_marker(source_key, marker)
+        ):
+            raise IngestApplyError(
+                "pre-triage zero-approval continuation marker was not claimed: "
+                + consume_error
+            )
+        return continuation
+    proposal_path, _review_path = _ingest_artifact_paths(source_key)
+    history = proposal_path.parent / "history" / source_key
+    if history.is_symlink() or history.parent.is_symlink():
+        raise IngestApplyError("stale proposal history path is a symlink")
+    paths = (
+        proposal_path,
+        _ingest_review_continuation_marker_path(source_key),
+        _ingest_review_repair_transition_path(source_key),
+        _ingest_review_stall_path(source_key),
+    )
+    try:
+        snapshots = {}
+        for path in paths:
+            if path.is_symlink():
+                raise IngestApplyError("stale proposal evidence path is a symlink")
+            if path.exists():
+                snapshots[path] = path.read_bytes()
+        envelope = json.loads(snapshots[proposal_path])
+        if not isinstance(envelope, dict) or (
+            envelope.get("proposal") != continuation.proposal
+            or envelope.get("source_key") != source_key
+            or envelope.get("proposal_sha256") != continuation.plan.full_proposal_sha256
+        ):
+            raise IngestApplyError("stale proposal changed before archival")
+        for path, raw in snapshots.items():
+            digest = hashlib.sha256(raw).hexdigest()
+            destination = history / f"{path.name}.{digest}.json"
+            if destination.is_symlink():
+                raise IngestApplyError("stale proposal archive is a symlink")
+            if destination.exists():
+                if destination.read_bytes() != raw:
+                    raise IngestApplyError("stale proposal archive digest mismatch")
+            else:
+                write_ingest_artifact(destination, raw)
+        if any(path.read_bytes() != raw for path, raw in snapshots.items()):
+            raise IngestApplyError("stale proposal evidence changed during archival")
+    except (OSError, ValueError, KeyError) as exc:
+        raise IngestApplyError("stale proposal evidence could not be archived") from exc
+    return None
+
+
 def load_pretriage_ingest_shard_continuation(
     raw_content: str,
     raw_keywords: list[str] | None,
@@ -670,6 +734,7 @@ def load_pretriage_ingest_shard_continuation(
         raise IngestApplyError(
             "pre-triage shard continuation is stalled: " + stall_error
         )
+    marker = None
     if shard_state.approved_shards == 0:
         marker, marker_error = _load_ingest_review_continuation_marker(
             source_key=source_key,
@@ -739,21 +804,11 @@ def load_pretriage_ingest_shard_continuation(
                 )
         if marker is None:
             return None
-        if marker.get("state") == "available" and (
-            consume_error := _consume_ingest_review_continuation_marker(
-                source_key,
-                marker,
-            )
-        ):
-            raise IngestApplyError(
-                "pre-triage zero-approval continuation marker was not claimed: "
-                + consume_error
-            )
-    return _IngestReviewShardContinuation(
-        proposal=proposal,
-        planned=tuple(planned),
-        plan=plan,
-        approved_shards=shard_state.approved_shards,
+    return _recoverable_continuation_or_regenerate(
+        _IngestReviewShardContinuation(
+            proposal=proposal, planned=tuple(planned), plan=plan,
+            approved_shards=shard_state.approved_shards,
+        ), source_key=source_key, marker=marker,
     )
 
 
@@ -942,7 +997,9 @@ def _verified_historical_code_drift_manifest(
     return old_path, old_manifest_sha256
 
 
-def code_drift_reseed_is_ready(raw_content: str, raw_keywords: list[str]) -> bool:
+def code_drift_reseed_is_ready(
+    raw_content: str, raw_keywords: list[str], *, require_page_drift: bool = False,
+) -> bool:
     """Recheck the resolved failure condition without claiming or granting a vote.
 
     A new manifest does not approve a mutation. It only lets the original raw
@@ -950,13 +1007,31 @@ def code_drift_reseed_is_ready(raw_content: str, raw_keywords: list[str]) -> boo
     failure row remain untouched until durable replay completion.
     """
 
+    source_key = _ingest_source_key(raw_content, raw_keywords)
+    proposal_path, _review_path = _ingest_artifact_paths(source_key)
+    return _code_drift_evidence_is_ready(
+        raw_content, raw_keywords, proposal_path=proposal_path,
+        marker_path=_ingest_review_continuation_marker_path(source_key),
+        require_page_drift=require_page_drift,
+    )
+
+
+def _code_drift_evidence_is_ready(
+    raw_content: str, raw_keywords: list[str], *,
+    proposal_path: Path, marker_path: Path, require_page_drift: bool,
+) -> bool:
+    from chronovisor.ingest.ingest_review_recovery import (
+        load_ingest_review_continuation_marker,
+    )
+
     try:
         source_key = _ingest_source_key(raw_content, raw_keywords)
-        proposal_path, _review_path = _ingest_artifact_paths(source_key)
-        proposal, _planned = _load_strict_ingest_proposal_for_recovery(
+        proposal, planned = _load_strict_ingest_proposal_for_recovery(
             proposal_path, source_key=source_key,
             raw_content=raw_content, raw_keywords=raw_keywords,
         )
+        if require_page_drift and _prepared_plan_is_recoverable(planned):
+            return False
         authority, authority_error = _current_ingest_review_authority(reviewer=None)
         if authority_error is not None or not isinstance(authority, dict):
             return False
@@ -965,8 +1040,8 @@ def code_drift_reseed_is_ready(raw_content: str, raw_keywords: list[str]) -> boo
             plan, source_key=source_key,
         ) is not None:
             return False
-        marker, marker_error = _load_ingest_review_continuation_marker(
-            source_key=source_key, plan=plan, authority=authority,
+        marker, marker_error = load_ingest_review_continuation_marker(
+            marker_path, source_key=source_key, plan=plan, authority=authority,
         )
         if (
             marker_error is not None or not isinstance(marker, dict)
@@ -1000,6 +1075,74 @@ def code_drift_reseed_is_ready(raw_content: str, raw_keywords: list[str]) -> boo
         )
     except (OSError, UnicodeError, ValueError, TypeError, KeyError, IngestApplyError):
         return False
+
+
+def _archived_artifact_bytes_match(path: Path, original_name: str) -> bool:
+    if path.is_symlink() or path.parent.is_symlink() or path.parent.parent.is_symlink():
+        return False
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return path.name == f"{original_name}.{digest}.json"
+
+
+def regenerated_continuation_is_ready(raw_content: str, raw_keywords: list[str]) -> bool:
+    """Resume fresh shard progress while retaining its predecessor's failure.
+
+    The old code-drift proof must be intact in the archival history.  The new
+    proposal must bind the same raw, differ from that predecessor, have current
+    page preimages, and have independently verified current shard progress.
+    No completion or failure reset is granted by this readiness check.
+    """
+    try:
+        source_key = _ingest_source_key(raw_content, raw_keywords)
+        proposal_path, _review_path = _ingest_artifact_paths(source_key)
+        proposal, planned = _load_strict_ingest_proposal_for_recovery(
+            proposal_path, source_key=source_key,
+            raw_content=raw_content, raw_keywords=raw_keywords,
+        )
+        if not _prepared_plan_is_recoverable(planned):
+            return False
+        authority, error = _current_ingest_review_authority(reviewer=None)
+        if error is not None or not isinstance(authority, dict):
+            return False
+        plan = _build_ingest_review_shard_plan(proposal, force_review_unit=True)
+        if plan is None or _stored_ingest_review_shard_manifest_error(
+            plan, source_key=source_key,
+        ) is not None:
+            return False
+        state = _inspect_ingest_review_shard_plan_state(
+            plan, source_key=source_key, authority=authority,
+        )
+        if state.invalid_reason or _matching_ingest_review_stall_error(
+            source_key=source_key, plan=plan, authority=authority,
+            approved_indices=state.current_approved_indices,
+        ):
+            return False
+        marker, marker_error = _load_ingest_review_continuation_marker(
+            source_key=source_key, plan=plan, authority=authority,
+        )
+        if marker_error or (not state.current_approved_indices and marker is None):
+            return False
+        history = proposal_path.parent / "history" / source_key
+        marker_name = _ingest_review_continuation_marker_path(source_key).name
+        for predecessor in history.glob(f"{proposal_path.name}.*.json"):
+            if not _archived_artifact_bytes_match(predecessor, proposal_path.name):
+                continue
+            prior = json.loads(predecessor.read_bytes())
+            if not isinstance(prior, dict) or (
+                prior.get("proposal_sha256") == plan.full_proposal_sha256
+            ):
+                continue
+            for prior_marker in history.glob(f"{marker_name}.*.json"):
+                if _archived_artifact_bytes_match(prior_marker, marker_name) and (
+                    _code_drift_evidence_is_ready(
+                        raw_content, raw_keywords, proposal_path=predecessor,
+                        marker_path=prior_marker, require_page_drift=True,
+                    )
+                ):
+                    return True
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError, IngestApplyError):
+        return False
+    return False
 
 
 def _historical_manifest_shape_error(

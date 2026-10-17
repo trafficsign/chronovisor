@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -84,6 +85,52 @@ the page excerpt is insufficient; never invent facts to justify a tag.
 
 StructuredReviewer = Callable[[str, dict[str, Any]], Mapping[str, Any] | str]
 
+_DECISION_EXECUTION_FIELDS = frozenset(
+    {"execution_fingerprint", "decision_artifact_seal_sha256"}
+)
+_ROUTINE_REVIEW_REVIEWERS = frozenset(
+    {"local_consensus", "local_consensus_shadow", "local_policy"}
+)
+_DECISION_EXECUTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "execution_fingerprint": {"type": ["string", "null"]},
+        "decision_artifact_seal_sha256": {"type": ["string", "null"]},
+    },
+    "required": sorted(_DECISION_EXECUTION_FIELDS),
+    "additionalProperties": False,
+}
+
+
+def _decision_execution_error(value: object) -> str | None:
+    """Validate the host execution provenance added by routine_review.
+
+    Keep this boundary in lock-step with routine_review's semantic-cache
+    validator: the envelope is an exact object and each digest is either null
+    or a lowercase SHA-256 string.  The caller separately verifies that the
+    surrounding host audit fields are present, so a model cannot smuggle this
+    field in as an arbitrary decision property.
+    """
+
+    if (
+        routine_review._structured_validation_error(
+            value,
+            _DECISION_EXECUTION_SCHEMA,
+            path="decision_execution",
+        )
+        is not None
+    ):
+        return "invalid decision execution provenance"
+    if any(
+        digest is not None
+        and (
+            not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        )
+        for digest in value.values()
+    ):
+        return "invalid decision execution provenance"
+    return None
+
 
 def _read_jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
     try:
@@ -147,6 +194,7 @@ def normalize_tag_decision(value: Mapping[str, Any] | str) -> dict[str, Any]:
         "human_required",
         "decision_policy",
         "local_consensus",
+        "decision_execution",
     }
     extra = sorted(set(parsed) - allowed)
     decision = parsed.get("decision")
@@ -155,6 +203,19 @@ def normalize_tag_decision(value: Mapping[str, Any] | str) -> dict[str, Any]:
     errors: list[str] = []
     if extra:
         errors.append("unexpected fields: " + ", ".join(extra))
+    decision_execution = parsed.get("decision_execution")
+    if "decision_execution" in parsed:
+        execution_error = _decision_execution_error(decision_execution)
+        if execution_error is None and (
+            not isinstance(parsed.get("decision_policy"), Mapping)
+            or not parsed.get("decision_policy")
+            or not isinstance(parsed.get("local_consensus"), Mapping)
+            or not parsed.get("local_consensus")
+            or parsed.get("reviewer") not in _ROUTINE_REVIEW_REVIEWERS
+        ):
+            execution_error = "invalid decision execution provenance"
+        if execution_error is not None:
+            errors.append(execution_error)
     if decision not in {"approved", "rejected", "uncertain", "needs_retry"}:
         errors.append("invalid decision")
         decision = "needs_retry"
@@ -193,6 +254,10 @@ def normalize_tag_decision(value: Mapping[str, Any] | str) -> dict[str, Any]:
     for key in ("decision_policy", "local_consensus"):
         if isinstance(parsed.get(key), Mapping):
             out[key] = dict(parsed[key])
+    if "decision_execution" in parsed and not any(
+        error == "invalid decision execution provenance" for error in errors
+    ):
+        out["decision_execution"] = dict(decision_execution)
     if "human_required" in parsed or "frontier_failure" in parsed:
         out["human_required"] = is_human_required_result(parsed)
     return out

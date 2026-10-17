@@ -56,6 +56,7 @@ _ingest_source_key = _runtime_call("_ingest_source_key")
 _inspect_ingest_review_shard_plan_state = _runtime_call("_inspect_ingest_review_shard_plan_state")
 _invalid_sharded_review_result = _runtime_call("_invalid_sharded_review_result")
 _load_ingest_proposal = _runtime_call("_load_ingest_proposal")
+_prepared_plan_is_recoverable = _runtime_call("_prepared_plan_is_recoverable")
 _load_ingest_review = _runtime_call("_load_ingest_review")
 _load_ingest_review_artifact = _runtime_call("_load_ingest_review_artifact")
 _normalize_ingest_frontier_review = _runtime_call("_normalize_ingest_frontier_review")
@@ -244,6 +245,14 @@ def _apply_authorized_ingest_review(
     }
 
 
+def _continuation_recovery_error(
+    continuation: _IngestReviewShardContinuation,
+) -> IngestApplyError:
+    if not _prepared_plan_is_recoverable(continuation.planned):
+        return IngestApplyError("pre-triage shard continuation page preimages changed")
+    return IngestApplyError("pre-triage shard continuation proposal is missing")
+
+
 def review_and_apply_ingest_operations(
     operations: list[dict],
     *,
@@ -314,7 +323,7 @@ def review_and_apply_ingest_operations(
                 "pre-triage shard continuation unexpectedly has a parent review"
             )
     elif shard_continuation is not None:
-        raise IngestApplyError("pre-triage shard continuation proposal is missing")
+        raise _continuation_recovery_error(shard_continuation)
     if recovered is None:
         planned, totals = _prepare_operations(operations, read_only=dry_run)
         proposal = _build_ingest_frontier_proposal(

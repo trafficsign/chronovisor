@@ -287,6 +287,29 @@ def test_prepare_reports_authoritative_capture_writer_and_is_resumable(tmp_path:
     assert _read(receipt)["status"] == "in_progress"
 
 
+def test_prepare_defers_while_distillation_worker_owns_export_lease(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    lock = daily.store.acquire_nonblocking_lock(
+        daily.store.distillation_dir(root) / "distillation-worker.lock"
+    )
+    assert lock is not None
+    try:
+        receipt = tmp_path / "daily-status.json"
+        result = daily.prepare(
+            root=root,
+            bundle_path=tmp_path / "bundle",
+            receipt_path=receipt,
+            capture_progress_path=tmp_path / "missing-progress.json",
+        )
+    finally:
+        daily.store.release_lock(lock)
+
+    assert result["status"] == "in_progress"
+    assert result["reason"] == "distillation_worker_lock_busy"
+    assert result["resumable"] is True
+    assert _read(receipt)["reason"] == "distillation_worker_lock_busy"
+
+
 def test_run_advances_catalog_and_starts_capture_before_prepare(
     tmp_path: Path, monkeypatch
 ) -> None:

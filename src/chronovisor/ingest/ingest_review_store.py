@@ -42,23 +42,28 @@ def review_stall_path(pages_dir: Path, source_key: str) -> Path:
     return ingest_artifact_root(pages_dir) / f"{source_key}.stalled.json"
 
 
-def write_ingest_artifact(path: Path, payload: dict[str, Any]) -> None:
-    """Persist the exact historical pretty-JSON artifact contract atomically."""
+def write_ingest_artifact(path: Path, payload: dict[str, Any] | bytes) -> None:
+    """Persist a new JSON artifact or an exact UTF-8 archival copy atomically."""
 
     from chronovisor.core.link_fix import atomic_write
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write(
-        path,
-        json.dumps(
+    content = (
+        payload.decode("utf-8")
+        if isinstance(payload, bytes)
+        else json.dumps(
             payload,
             ensure_ascii=False,
             indent=2,
             sort_keys=True,
             default=str,
         )
-        + "\n",
+        + "\n"
     )
+    atomic_write(path, content)
+    expected = payload if isinstance(payload, bytes) else content.encode("utf-8")
+    if path.read_bytes() != expected:
+        raise OSError("ingest artifact durable read-back mismatch")
 
 
 def load_ingest_proposal[PreparedT](

@@ -297,6 +297,86 @@ def test_normalize_tag_decision_preserves_local_consensus_authority_audit() -> N
     assert normalized["local_consensus"]["status"] == "agreed"
 
 
+def test_normalize_tag_decision_accepts_routine_review_execution_provenance() -> None:
+    authority = _semantic_authority("a" * 64)
+    decision = _authority_bound_tag_decision("approved", authority)
+    decision.update(
+        {
+            "reviewer": "local_consensus",
+            "decision_execution": {
+                "execution_fingerprint": "b" * 64,
+                "decision_artifact_seal_sha256": "c" * 64,
+            },
+        }
+    )
+
+    normalized = lint_repair.normalize_tag_decision(decision)
+
+    assert normalized["decision"] == "approved"
+    assert normalized["valid"] is True
+    assert normalized["decision_execution"] == decision["decision_execution"]
+
+
+def test_normalize_tag_decision_rejects_fake_or_malformed_execution_provenance() -> (
+    None
+):
+    authority = _semantic_authority("a" * 64)
+    malformed = _authority_bound_tag_decision("approved", authority)
+    malformed.update(
+        {
+            "reviewer": "local_consensus",
+            "decision_execution": {
+                "execution_fingerprint": "not-a-sha256",
+                "decision_artifact_seal_sha256": "c" * 64,
+            },
+        }
+    )
+    model_fake = {
+        "decision": "approved",
+        "tags": VALID_TAGS,
+        "reason": "model supplied a host-only field",
+        "decision_execution": {
+            "execution_fingerprint": "b" * 64,
+            "decision_artifact_seal_sha256": "c" * 64,
+        },
+    }
+
+    malformed_result = lint_repair.normalize_tag_decision(malformed)
+    fake_result = lint_repair.normalize_tag_decision(model_fake)
+
+    assert malformed_result["decision"] == "needs_retry"
+    assert malformed_result["valid"] is False
+    assert (
+        "invalid decision execution provenance" in malformed_result["validation_errors"]
+    )
+    assert fake_result["decision"] == "needs_retry"
+    assert fake_result["valid"] is False
+    assert "invalid decision execution provenance" in fake_result["validation_errors"]
+
+
+def test_exact_frontier_gate_preserves_valid_execution_provenance() -> None:
+    authority = _semantic_authority("a" * 64)
+    decision = _authority_bound_tag_decision("approved", authority)
+    decision.update(
+        {
+            "reviewer": "local_consensus",
+            "decision_execution": {
+                "execution_fingerprint": "b" * 64,
+                "decision_artifact_seal_sha256": "c" * 64,
+            },
+        }
+    )
+
+    gated = lint_repair._gate_tag_review_to_exact_proposal(
+        decision,
+        {"decision": "approved", "tags": VALID_TAGS, "reason": "local proposal"},
+    )
+
+    assert gated["decision"] == "approved"
+    assert gated["valid"] is True
+    assert gated["decision_execution"] == decision["decision_execution"]
+
+
 def test_local_approved_tags_require_frontier_approval_before_apply(
     tmp_path: Path,
     monkeypatch,

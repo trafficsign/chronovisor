@@ -1928,60 +1928,82 @@ def prepare(
             )
             _write_private_json(receipt_path, result)
             return result
-        before_catalog = _catalog_identity(root)
-        before_candidate = _candidate_identity(root)
-        rallies = catalog.rallies(root)
-        plan, plan_result = _resolve_split_plan(
-            root,
-            rallies,
-            explicit_path=split_plan_path,
-            allow_write=allow_split_write,
+        # Candidate and catalog projections are SQLite-backed and are also
+        # updated by the bounded distillation worker.  Hold the existing
+        # single-writer lease across the complete export so a writer cannot
+        # replace candidate_index_state between the identity and snapshot
+        # reads.  A busy lease is a normal resumable boundary for the
+        # supervisor; it must not be reported as catalog corruption.
+        export_lock = store.acquire_nonblocking_lock(
+            store.distillation_dir(root) / "distillation-worker.lock"
         )
-        if plan is None:
-            result.update(plan_result)
+        if export_lock is None:
             result.update(
                 {
-                    "catalog": {**before_catalog, "rallies": len(rallies)},
-                    "candidate": before_candidate,
+                    "status": "in_progress",
+                    "reason": "distillation_worker_lock_busy",
+                    "resumable": True,
                 }
             )
             _write_private_json(receipt_path, result)
             return result
-        excluded_pairs = _existing_labeled_pairs(root)
-        requested_metadata = _bundle_metadata(bundle_path)
-        output = bundle_path
-        if requested_metadata is not None and not requested_metadata.get(
-            "import_pending"
-        ) and not requested_metadata.get("remaining"):
-            seed = canonical_json_sha256_strict(
+        try:
+            before_catalog = _catalog_identity(root)
+            before_candidate = _candidate_identity(root)
+            rallies = catalog.rallies(root)
+            plan, plan_result = _resolve_split_plan(
+                root,
+                rallies,
+                explicit_path=split_plan_path,
+                allow_write=allow_split_write,
+            )
+            if plan is None:
+                result.update(plan_result)
+                result.update(
+                    {
+                        "catalog": {**before_catalog, "rallies": len(rallies)},
+                        "candidate": before_candidate,
+                    }
+                )
+                _write_private_json(receipt_path, result)
+                return result
+            excluded_pairs = _existing_labeled_pairs(root)
+            requested_metadata = _bundle_metadata(bundle_path)
+            output = bundle_path
+            if requested_metadata is not None and not requested_metadata.get(
+                "import_pending"
+            ) and not requested_metadata.get("remaining"):
+                seed = canonical_json_sha256_strict(
+                    {
+                        "catalog_sha256": before_catalog["sha256"],
+                        "candidate_sha256": before_candidate["sha256"],
+                        "split_plan_id": str(plan.get("artifact_id") or ""),
+                        "excluded_pairs": len(excluded_pairs),
+                    }
+                )
+                output = _new_bundle_path(bundle_path, seed=seed)
+            exported = _export_bundle(
+                root=root,
+                rallies=rallies,
+                plan=plan,
+                output=output,
+                before_catalog=before_catalog,
+                before_candidate=before_candidate,
+                excluded_pairs=excluded_pairs,
+            )
+            exported["bundle_path"] = str(output)
+            if exported.get("status") == "pending":
+                exported["config_pointer"] = _update_native_bundle_pointer(root, output)
+            result.update(
                 {
-                    "catalog_sha256": before_catalog["sha256"],
-                    "candidate_sha256": before_candidate["sha256"],
-                    "split_plan_id": str(plan.get("artifact_id") or ""),
-                    "excluded_pairs": len(excluded_pairs),
+                    **exported,
+                    "catalog": {**before_catalog, "rallies": len(rallies)},
+                    "candidate": before_candidate,
+                    "split_plan": plan_result.get("split_plan"),
                 }
             )
-            output = _new_bundle_path(bundle_path, seed=seed)
-        exported = _export_bundle(
-            root=root,
-            rallies=rallies,
-            plan=plan,
-            output=output,
-            before_catalog=before_catalog,
-            before_candidate=before_candidate,
-            excluded_pairs=excluded_pairs,
-        )
-        exported["bundle_path"] = str(output)
-        if exported.get("status") == "pending":
-            exported["config_pointer"] = _update_native_bundle_pointer(root, output)
-        result.update(
-            {
-                **exported,
-                "catalog": {**before_catalog, "rallies": len(rallies)},
-                "candidate": before_candidate,
-                "split_plan": plan_result.get("split_plan"),
-            }
-        )
+        finally:
+            store.release_lock(export_lock)
     except Exception as exc:
         result.update({"status": "error", **_error_fields(exc)})
     _write_private_json(receipt_path, result)
