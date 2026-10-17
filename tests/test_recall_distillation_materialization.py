@@ -443,8 +443,9 @@ def test_materialize_rejects_exposure_mutation_during_finalize(
         return {"rows": rows}
 
     monkeypatch.setattr(distill, "_finalize_materialized_training_rows", mutate_finalize)
-    with pytest.raises(store.DistillationStoreError, match="canonical materialization projection changed"):
+    with pytest.raises(store.DistillationStoreError, match="canonical materialization projection changed") as exc_info:
         materialization._materialize(tmp_path, limit=1)
+    assert not isinstance(exc_info.value, materialization.MaterializationDeferred)
 
 
 def test_materialize_rejects_split_change_during_finalize(
@@ -472,8 +473,9 @@ def test_materialize_rejects_split_change_during_finalize(
         "_finalize_materialized_training_rows",
         lambda _root, rows, _limit, **_kwargs: {"rows": rows},
     )
-    with pytest.raises(store.DistillationStoreError, match="split changed during selection"):
+    with pytest.raises(store.DistillationStoreError, match="split changed during selection") as exc_info:
         materialization._materialize(tmp_path, limit=1)
+    assert not isinstance(exc_info.value, materialization.MaterializationDeferred)
 
 
 def test_materialize_selection_uses_registered_projection_for_source_binding(
@@ -537,13 +539,13 @@ def test_materialize_selection_rejects_projection_source_drift(
         return [row]
 
     monkeypatch.setattr(materialization, "_selection", select)
-    with pytest.raises(
-        store.DistillationStoreError,
-        match="canonical materialization projection changed",
-    ):
+    with pytest.raises(materialization.MaterializationSourceChanged) as exc_info:
         materialization._materialize(tmp_path, limit=1)
 
     assert seen
+    assert exc_info.value.reason == "materialization_source_changed"
+    assert isinstance(exc_info.value, materialization.MaterializationDeferred)
+    assert isinstance(exc_info.value, store.DistillationStoreError)
     with pytest.raises(sqlite3.ProgrammingError):
         seen[0].connection.execute("SELECT 1")
     assert tmp_path.resolve() not in materialization._VIEWS
@@ -631,6 +633,36 @@ def test_source_change_during_sync_rolls_back_dirty_marks(
             "SELECT dirty,row_json FROM rows WHERE rally_id='rally-a'"
         ).fetchone()
 
+    state = ["source"]
+    monkeypatch.setattr(materialization, "_source_state", lambda _root, _contracts: (state[0],))
+    original_sync = materialization._sync_inputs
+
+    def mutate_after_sync(*args: object, **kwargs: object) -> dict[str, object]:
+        result = original_sync(*args, **kwargs)
+        state[0] = "changed"
+        return result
+
+    monkeypatch.setattr(materialization, "_sync_inputs", mutate_after_sync)
+    with pytest.raises(materialization.MaterializationSourceChanged) as exc_info:
+        materialization._build(tmp_path)
+
+    with sqlite3.connect(projection) as connection:
+        after = connection.execute(
+            "SELECT dirty,row_json FROM rows WHERE rally_id='rally-a'"
+        ).fetchone()
+    assert after == before
+    assert projection.with_suffix(projection.suffix + ".checkpoint.json").read_bytes() == checkpoint
+    assert exc_info.value.reason == "materialization_source_changed"
+
+
+def test_low_level_ledger_projection_error_stays_strict_store_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _append_label(tmp_path, "rally-a", "candidate-a")
+    calls: list[set[str]] = []
+    _stub_build_dependencies(monkeypatch, materialize_calls=calls)
+    first = materialization._build(tmp_path)
+    first.close()
     label_path = store.distillation_dir(tmp_path) / store.LABEL_LEDGER_FILE
     original_current = ledger.LedgerIndex.current
 
@@ -640,15 +672,9 @@ def test_source_change_during_sync_rolls_back_dirty_marks(
         return original_current(self)
 
     monkeypatch.setattr(ledger.LedgerIndex, "current", changed_source)
-    with pytest.raises(store.DistillationStoreError, match="source changed"):
+    with pytest.raises(store.DistillationStoreError) as exc_info:
         materialization._build(tmp_path)
-
-    with sqlite3.connect(projection) as connection:
-        after = connection.execute(
-            "SELECT dirty,row_json FROM rows WHERE rally_id='rally-a'"
-        ).fetchone()
-    assert after == before
-    assert projection.with_suffix(projection.suffix + ".checkpoint.json").read_bytes() == checkpoint
+    assert not isinstance(exc_info.value, materialization.MaterializationDeferred)
 
 
 def test_source_change_during_batch_does_not_publish_partial_projection(
@@ -683,7 +709,7 @@ def test_source_change_during_batch_does_not_publish_partial_projection(
         state[0] = "changed"
 
     monkeypatch.setattr(materialization, "_materialize_batch", mutate_after_batch)
-    with pytest.raises(store.DistillationStoreError, match="source changed"):
+    with pytest.raises(materialization.MaterializationSourceChanged) as exc_info:
         materialization._build(tmp_path)
 
     with sqlite3.connect(projection) as connection:
@@ -693,6 +719,7 @@ def test_source_change_during_batch_does_not_publish_partial_projection(
     # The synchronization marker is a committed, resumable pending state.  The
     # attempted join itself must not publish its changed row_json.
     assert after == (1, before[1])
+    assert exc_info.value.reason == "materialization_source_changed"
 
     state[0] = "source"
     monkeypatch.setattr(materialization, "_materialize_batch", real_materialize)
@@ -704,6 +731,30 @@ def test_source_change_during_batch_does_not_publish_partial_projection(
         ).fetchone()
     assert clean[0] == 0
     assert clean[1] != before[1]
+
+
+def test_source_change_during_completion_raises_deferred_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _append_label(tmp_path, "rally-a", "candidate-a")
+    calls: list[set[str]] = []
+    _stub_build_dependencies(monkeypatch, materialize_calls=calls)
+    first = materialization._build(tmp_path)
+    first.close()
+
+    source_calls = 0
+
+    def drift_on_completion(_root: Path, _contracts: object) -> tuple[str]:
+        nonlocal source_calls
+        source_calls += 1
+        return ("changed" if source_calls >= 3 else "source",)
+
+    monkeypatch.setattr(materialization, "_source_state", drift_on_completion)
+    with pytest.raises(materialization.MaterializationSourceChanged) as exc_info:
+        materialization._build(tmp_path)
+
+    assert source_calls == 3
+    assert exc_info.value.reason == "materialization_source_changed"
 
 
 def test_failed_partial_batch_reuses_rows_already_cleaned(
@@ -761,6 +812,140 @@ def test_failed_partial_batch_reuses_rows_already_cleaned(
     assert calls[-1] == {"rally-100"}
 
 
+def test_budget_exhaustion_keeps_sealed_batches_and_resumes_dirty_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(101):
+        rally_id = f"rally-{index:03d}"
+        _append_label(tmp_path, rally_id, f"candidate-{index:03d}")
+    calls: list[set[str]] = []
+    _stub_build_dependencies(monkeypatch, materialize_calls=calls)
+    first = materialization._build(tmp_path)
+    first.close()
+    monkeypatch.setattr(
+        materialization,
+        "_contract_dependencies",
+        lambda _root, _labels: {
+            "code": "changed-code",
+            "native": "native",
+            "ox": "ox",
+            "files": {},
+        },
+    )
+    real_monotonic = materialization.time.monotonic
+    clock = {"value": 100.0}
+    monkeypatch.setattr(materialization.time, "monotonic", lambda: clock["value"])
+    real_save = materialization._save
+    save_count = 0
+
+    def save_after_first_batch(*args: object, **kwargs: object) -> None:
+        nonlocal save_count
+        real_save(*args, **kwargs)
+        save_count += 1
+        if save_count == 2:
+            clock["value"] = 106.0
+
+    monkeypatch.setattr(materialization, "_save", save_after_first_batch)
+
+    with pytest.raises(materialization.MaterializationBudgetExhausted) as exc_info:
+        materialization._build(tmp_path, deadline=110.0)
+
+    assert exc_info.value.reason == "materialization_budget_exhausted"
+    assert isinstance(exc_info.value, materialization.MaterializationDeferred)
+    with sqlite3.connect(materialization._path(tmp_path)) as connection:
+        state = {
+            row[0]: row[1]
+            for row in connection.execute("SELECT rally_id,dirty FROM rows ORDER BY rally_id")
+        }
+    assert sum(value == 0 for value in state.values()) == 100
+    assert state["rally-100"] == 1
+
+    monkeypatch.setattr(materialization.time, "monotonic", real_monotonic)
+    resumed = materialization._build(tmp_path)
+    resumed.close()
+    assert calls[-1] == {"rally-100"}
+
+
+def test_budget_exhaustion_does_not_publish_training_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _canonical_projection_fixture(tmp_path, monkeypatch)
+    finalized: list[object] = []
+    monkeypatch.setattr(
+        distill,
+        "_finalize_materialized_training_rows",
+        lambda *args: finalized.append(args) or {"rows": [row]},
+    )
+    clock = {"value": 100.0}
+    monkeypatch.setattr(materialization.time, "monotonic", lambda: clock["value"])
+    real_selection = materialization._selection
+
+    def expire_after_selection(view: materialization.Projection, limit: int) -> list[dict[str, object]]:
+        selected = real_selection(view, limit)
+        clock["value"] = 106.0
+        return selected
+
+    monkeypatch.setattr(materialization, "_selection", expire_after_selection)
+
+    with pytest.raises(materialization.MaterializationBudgetExhausted) as exc_info:
+        materialization._materialize(tmp_path, limit=1, deadline=110.0)
+
+    assert exc_info.value.reason == "materialization_budget_exhausted"
+    assert finalized == []
+    assert tmp_path.resolve() not in materialization._VIEWS
+
+
+def test_budget_exhaustion_rolls_back_an_unsaved_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(101):
+        rally_id = f"rally-{index:03d}"
+        _append_label(tmp_path, rally_id, f"candidate-{index:03d}")
+    calls: list[set[str]] = []
+    _stub_build_dependencies(monkeypatch, materialize_calls=calls)
+    first = materialization._build(tmp_path)
+    first.close()
+    projection = materialization._path(tmp_path)
+    monkeypatch.setattr(
+        materialization,
+        "_contract_dependencies",
+        lambda _root, _labels: {
+            "code": "changed-code",
+            "native": "native",
+            "ox": "ox",
+            "files": {},
+        },
+    )
+    clock = {"value": 100.0}
+    monkeypatch.setattr(materialization.time, "monotonic", lambda: clock["value"])
+    checkpoint_before_batch: list[bytes] = []
+    real_save = materialization._save
+
+    def capture_batch_boundary(*args: object, **kwargs: object) -> None:
+        real_save(*args, **kwargs)
+        if not checkpoint_before_batch:
+            checkpoint_before_batch.append(
+                projection.with_suffix(projection.suffix + ".checkpoint.json").read_bytes()
+            )
+
+    monkeypatch.setattr(materialization, "_save", capture_batch_boundary)
+    real_materialize = materialization._materialize_batch
+
+    def expire_after_join(*args: object, **kwargs: object) -> None:
+        real_materialize(*args, **kwargs)
+        clock["value"] = 106.0
+
+    monkeypatch.setattr(materialization, "_materialize_batch", expire_after_join)
+    with pytest.raises(materialization.MaterializationBudgetExhausted):
+        materialization._build(tmp_path, deadline=110.0)
+
+    with sqlite3.connect(projection) as connection:
+        dirty = connection.execute("SELECT COUNT(*) FROM rows WHERE dirty=1").fetchone()[0]
+    assert dirty == 101
+    assert checkpoint_before_batch
+    assert projection.with_suffix(projection.suffix + ".checkpoint.json").read_bytes() == checkpoint_before_batch[0]
+
+
 def test_validated_sources_route_uses_canonical_materialization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -768,21 +953,80 @@ def test_validated_sources_route_uses_canonical_materialization(
     monkeypatch.setattr(catalog, "_read_catalog_checkpoint", lambda _root: {"ready": True})
     monkeypatch.setattr(catalog, "_catalog_lineage", lambda _checkpoint: "lineage")
 
-    def canonical(root: Path, limit: int) -> dict[str, object]:
-        called.append((root, limit))
+    def canonical(root: Path, limit: int, *, deadline: float | None = None) -> dict[str, object]:
+        called.append((root, limit, deadline))
         return {"rows": []}
 
     monkeypatch.setattr(materialization, "materialize", canonical)
     assert distill.materialize_training_rows(tmp_path, limit=17, _validated_sources=True) == {
         "rows": []
     }
-    assert called == [(tmp_path.resolve(), 17)]
+    assert called == [(tmp_path.resolve(), 17, None)]
+    monkeypatch.setattr(materialization.time, "monotonic", lambda: 0.0)
+    assert distill.materialize_training_rows(
+        tmp_path, limit=19, _validated_sources=True, _deadline=123.0
+    ) == {"rows": []}
+    assert called[-1] == (tmp_path.resolve(), 19, 123.0)
     with pytest.raises(distill.DistillationError, match="cannot accept supplied"):
         distill.materialize_training_rows(
             tmp_path,
             _validated_sources=True,
             _label_rows=[],
         )
+
+
+def test_validated_fallback_budget_expiry_skips_binding_and_finalize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(catalog, "_read_catalog_checkpoint", lambda _root: None)
+    binding_calls: list[Path] = []
+    finalize_calls: list[object] = []
+
+    def forbidden_binding(root: Path) -> tuple[dict, dict, dict, dict]:
+        binding_calls.append(root)
+        raise AssertionError("expired fallback must not read canonical bindings")
+
+    monkeypatch.setattr(validation, "binding_inputs", forbidden_binding)
+    monkeypatch.setattr(
+        distill,
+        "_finalize_materialized_training_rows",
+        lambda *args: finalize_calls.append(args) or {"rows": []},
+    )
+    monkeypatch.setattr(materialization.time, "monotonic", lambda: 100.0)
+
+    with pytest.raises(materialization.MaterializationBudgetExhausted):
+        distill.materialize_training_rows(
+            tmp_path, _validated_sources=True, _deadline=100.0
+        )
+
+    assert binding_calls == []
+    assert finalize_calls == []
+
+
+def test_validated_fallback_with_budget_reads_and_finalizes_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(catalog, "_read_catalog_checkpoint", lambda _root: None)
+    binding_calls: list[Path] = []
+    finalize_calls: list[object] = []
+    monkeypatch.setattr(
+        validation,
+        "binding_inputs",
+        lambda root: (binding_calls.append(root) or ({}, {}, {}, {})),
+    )
+    monkeypatch.setattr(distill, "_current_ox_profile_contract_id", lambda _root: "ox")
+    monkeypatch.setattr(
+        distill,
+        "_finalize_materialized_training_rows",
+        lambda *args, **kwargs: finalize_calls.append((args, kwargs)) or {"rows": []},
+    )
+    monkeypatch.setattr(materialization.time, "monotonic", lambda: 100.0)
+
+    assert distill.materialize_training_rows(
+        tmp_path, _validated_sources=True, _deadline=110.0
+    ) == {"rows": []}
+    assert binding_calls == [tmp_path]
+    assert len(finalize_calls) == 1
 
 
 def test_selection_matches_legacy_old_recent_locked_order(

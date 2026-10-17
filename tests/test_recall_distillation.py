@@ -4429,8 +4429,14 @@ def test_deferred_native_counterfactual_turn_keeps_supervised_import_separate(
 @pytest.mark.parametrize("new_label", [False, True])
 @pytest.mark.parametrize("split_changed", [False, True])
 @pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("deadline", [None, 300.0])
 def test_training_reuses_verified_snapshots_but_loads_new_labels_and_rebinds_split(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_label: bool, split_changed: bool, native: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    new_label: bool,
+    split_changed: bool,
+    native: bool,
+    deadline: float | None,
 ) -> None:
     labels = [{"rally_id": "seen"}] + ([{"rally_id": "new"}] if new_label else [])
     supplied = {"seen": {"snapshot_sha256": "a" * 64}}
@@ -4474,12 +4480,16 @@ def test_training_reuses_verified_snapshots_but_loads_new_labels_and_rebinds_spl
             rallies=[], snapshots=supplied, split_plan={"artifact_id": "old"}, scheduler_state={},
             existing=set(), pending=[], candidate_work=[], teachers_available=True,
             model_deferred=False, cold_start=True, profile_contract_id="c" * 64,
+            deadline=deadline,
         )
     assert checked == ["sync"]
     assert reads == ([{"new"}] if new_label and not native else [])
     assert len(materialized) == (2 if split_changed else 1)
     if native:
-        assert all(kwargs == {"_validated_sources": True} for kwargs in materialized)
+        expected = {"_validated_sources": True}
+        if deadline is not None:
+            expected["_deadline"] = 285.0
+        assert all(kwargs == expected for kwargs in materialized)
     else:
         assert all(kwargs["_snapshots"] == {**supplied, **(fresh if new_label else {})} for kwargs in materialized)
 

@@ -5924,10 +5924,14 @@ def _materialization_rows(
     features_by_pair: Mapping[tuple[str, str], Mapping[str, float]],
     snapshot_contracts: Mapping[str, Mapping[str, str]],
     current_ox_contract_id: str,
+    deadline: float | None = None,
 ) -> list[dict[str, Any]]:
+    from chronovisor.recall.recall_distillation_materialization import _require_budget
+
     rows: list[dict[str, Any]] = []
     previous = ""
     for label in labels:
+        _require_budget(deadline)
         if not isinstance(label, Mapping):
             continue
         # A direct list is not trusted merely because it carries a digest: its
@@ -6134,21 +6138,27 @@ def materialize_training_rows(
     _snapshots: Mapping[str, Mapping[str, Any]] | None = None,
     _label_rows: Sequence[Mapping[str, Any]] | None = None,
     _validated_sources: bool = False,
+    _deadline: float | None = None,
 ) -> dict[str, Any]:
     """Join labels only to byte-identical prospective live feature snapshots."""
 
     if limit <= 0 or limit > 10_000:
         raise DistillationError("training materialization limit is invalid")
+    from chronovisor.recall.recall_distillation_materialization import _require_budget
+
+    if _validated_sources and any(value is not None for value in (_rallies, _snapshots, _label_rows)):
+        raise DistillationError("validated materialization cannot accept supplied sources")
+    _require_budget(_deadline)
     root = root or CHRONOVISOR_ROOT
     if _validated_sources:
-        if any(value is not None for value in (_rallies, _snapshots, _label_rows)):
-            raise DistillationError("validated materialization cannot accept supplied sources")
         from chronovisor.recall import recall_distillation_catalog as catalog
         from chronovisor.recall.recall_distillation_materialization import materialize
         from chronovisor.recall.recall_distillation_validation import binding_inputs
 
         checkpoint = catalog._read_catalog_checkpoint(root)
         if checkpoint is not None and catalog._catalog_lineage(checkpoint) is not None:
+            if _deadline is not None:
+                return materialize(root, limit, deadline=_deadline)
             return materialize(root, limit)
         # Read canonical sources through the same signature-checked view used
         # by preflight. This never seeds validation with caller-supplied data.
@@ -6166,6 +6176,7 @@ def materialize_training_rows(
             else _read_chain(store.distillation_dir(root) / "label-ledger.jsonl")
         )
     current_ox_contract_id = _current_ox_profile_contract_id(root)
+    _require_budget(_deadline)
     excluded_prior_contract_rows = sum(
         isinstance(label, Mapping)
         and label.get("profile") == OX_SINGLE_PROFILE
@@ -6183,7 +6194,9 @@ def materialize_training_rows(
         features_by_pair,
         snapshot_contracts,
         current_ox_contract_id,
+        _deadline,
     )
+    _require_budget(_deadline)
     return _finalize_materialized_training_rows(
         root,
         materialized,
@@ -16217,6 +16230,7 @@ def _prepare_distillation_training(
     model_deferred: bool,
     cold_start: bool,
     profile_contract_id: str,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     native_sources = config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
     current_labels = [] if native_sources else _read_chain(label_path)
@@ -16250,6 +16264,9 @@ def _prepare_distillation_training(
         if native_sources
         else {"_rallies": rallies, "_snapshots": training_snapshots, "_label_rows": current_labels}
     )
+    if native_sources and deadline is not None:
+        # Leave time for final preflight and state persistence within the same cap.
+        materialization_sources["_deadline"] = deadline - 15
     training_snapshot = materialize_training_rows(root, **materialization_sources)
     if cold_start:
         prior_split_id = str(split_plan.get("artifact_id") or "")
@@ -16768,7 +16785,7 @@ def _run_distillation_chunk_impl(
         teachers_available=teachers_available,
         model_deferred=model_deferred,
         cold_start=cold_start,
-        profile_contract_id=ox_profile_contract_id,
+        profile_contract_id=ox_profile_contract_id, deadline=deadline,
     )
     return _persist_distillation_chunk(
         setup=setup,
@@ -16914,6 +16931,9 @@ def run_distillation_chunk(
         or not 60 <= max_elapsed_seconds <= 1_800
     ):
         raise DistillationError("distillation elapsed limit is invalid")
+    from chronovisor.recall.recall_distillation_materialization import (
+        MaterializationDeferred,
+    )
     from chronovisor.recall.recall_runtime import (
         RecallWallClockTimeout,
         recall_wall_clock_deadline,
@@ -16939,6 +16959,14 @@ def run_distillation_chunk(
                     cold_start=cold_start,
                     max_elapsed_seconds=max_elapsed_seconds,
                 )
+        except MaterializationDeferred as exc:
+            # Native imports may advance source ledgers during a verified join.
+            # Incomplete work never authorizes a snapshot or clears a prior error.
+            return {
+                "status": "deferred", "processed": 0, "reason": exc.reason,
+                "atomic_progress_may_be_present": True,
+                "model_calls_may_be_present": True,
+            }
         except RecallWallClockTimeout as exc:
             # ponytail: no cross-ledger transaction; completed atomic batches are
             # idempotent resume points and are never rolled back after timeout.

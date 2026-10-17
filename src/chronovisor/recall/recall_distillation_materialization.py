@@ -13,6 +13,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+import time
 from collections import deque
 from collections.abc import Mapping, Sequence
 from contextlib import closing
@@ -29,6 +30,25 @@ from chronovisor.recall.recall_distillation_single_teacher_gate import (
 _VERSION = "canonical-materialization-v1"
 _VIEWS: dict[Path, Projection] = {}
 _VIEW_LOCK = threading.RLock()
+
+
+class MaterializationDeferred(store.DistillationStoreError):
+    """A source change or exhausted budget requires a new verified cycle."""
+
+    reason = "materialization_deferred"
+
+
+class MaterializationSourceChanged(MaterializationDeferred):
+    reason = "materialization_source_changed"
+
+
+class MaterializationBudgetExhausted(MaterializationDeferred):
+    reason = "materialization_budget_exhausted"
+
+
+def _require_budget(deadline: float | None) -> None:
+    if deadline is not None and deadline - time.monotonic() <= 5:
+        raise MaterializationBudgetExhausted("materialization cycle budget exhausted")
 
 
 def _path(root: Path) -> Path:
@@ -291,12 +311,15 @@ def _source_state(root: Path, contracts: Mapping[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _build(root: Path) -> Projection:
+def _build(root: Path, *, deadline: float | None = None) -> Projection:
     from chronovisor.recall import recall_distillation_native as native
 
+    _require_budget(deadline)
     path = _path(root)
     labels = ledger.ledger_index(store.distillation_dir(root) / store.LABEL_LEDGER_FILE)
+    _require_budget(deadline)
     receipts = ledger.ledger_index(native._receipt_path(root))
+    _require_budget(deadline)
     with store._locked(path.with_suffix(".lock")), closing(ledger.connect(path)) as connection:
         saved = ledger.checkpoint(path)
         _schema(connection)
@@ -308,10 +331,12 @@ def _build(root: Path) -> Projection:
             metadata = {}
         contracts = _contract_dependencies(root, labels)
         before = _source_state(root, contracts)
+        _require_budget(deadline)
         metadata = _sync_inputs(connection, root, metadata, labels, receipts, contracts)
         if (before != _source_state(root, contracts) or not labels.current() or not receipts.current()):
             connection.rollback()
-            raise store.DistillationStoreError("materialization source changed during synchronization")
+            raise MaterializationSourceChanged("materialization source changed during synchronization")
+        _require_budget(deadline)
         _save(connection, path, metadata)
         while True:
             ids = [str(row[0]) for row in connection.execute(
@@ -319,14 +344,18 @@ def _build(root: Path) -> Projection:
             )]
             if not ids:
                 break
+            # Only stop between durable, sealed batches. No partial projection
+            # is allowed to reach selection or certify a training snapshot.
+            _require_budget(deadline)
             _materialize_batch(connection, root, labels, ids, metadata["contracts"]["ox"])
             if (before != _source_state(root, metadata["contracts"])
                     or not labels.current() or not receipts.current()):
                 connection.rollback()
-                raise store.DistillationStoreError("materialization source changed during join")
+                raise MaterializationSourceChanged("materialization source changed during join")
+            _require_budget(deadline)
             _save(connection, path, metadata)
         if before != _source_state(root, metadata["contracts"]):
-            raise store.DistillationStoreError("materialization source changed during completion")
+            raise MaterializationSourceChanged("materialization source changed during completion")
     return Projection(root, metadata, before)
 
 
@@ -355,10 +384,11 @@ class Projection:
         if (
             ledger.file_state(self.path) != self.state or saved is None
             or saved.get("metadata") != self.metadata
-            or _source_state(self.root, self.metadata["contracts"]) != self.source_state
             or any(ledger.file_state(path) != state for path, state in dependencies)
         ):
             raise store.DistillationStoreError("canonical materialization projection changed")
+        if _source_state(self.root, self.metadata["contracts"]) != self.source_state:
+            raise MaterializationSourceChanged("canonical materialization projection changed")
 
     def close(self) -> None:
         self.connection.close()
@@ -583,16 +613,17 @@ def _selection(view: Projection, limit: int) -> list[dict[str, Any]]:
     return selected
 
 
-def _materialize(root: Path, limit: int) -> dict[str, Any]:
+def _materialize(root: Path, limit: int, *, deadline: float | None = None) -> dict[str, Any]:
     from chronovisor.recall import recall_distillation as distill
 
     if isinstance(limit, bool) or not isinstance(limit, int) or not 0 < limit <= 10_000:
         raise distill.DistillationError("training materialization limit is invalid")
     root = root.expanduser().resolve(strict=False)
-    view = _build(root)
+    view = _build(root) if deadline is None else _build(root, deadline=deadline)
     try:
         with store._locked(view.path.with_suffix(".lock")):
             view.check(all_dependencies=True)
+            _require_budget(deadline)
             # The caller holds _VIEW_LOCK; selection must bind rows through
             # this verified projection instead of rebuilding all source inputs.
             prior = _VIEWS.get(root)
@@ -608,6 +639,7 @@ def _materialize(root: Path, limit: int) -> dict[str, Any]:
                 "SELECT COALESCE(SUM(excluded_prior),0),COALESCE(SUM(excluded_unsupported),0) FROM rows"
             ).fetchone()
             view.check(all_dependencies=True)
+            _require_budget(deadline)
             artifact = distill._finalize_materialized_training_rows(
                 root, selected, limit, excluded_prior_contract_rows=int(excluded[0]),
                 excluded_unsupported_profile_rows=int(excluded[1]),
@@ -619,6 +651,7 @@ def _materialize(root: Path, limit: int) -> dict[str, Any]:
             ids = sorted({str(row["rally_id"]) for row in selected})
             view.rallies.update((str(row["rally_id"]), row) for row in catalog.rallies(root, ids))
             view.check(all_dependencies=True)
+            _require_budget(deadline)
         previous = _VIEWS.pop(root, None)
         if previous is not None:
             previous.close()
@@ -631,9 +664,9 @@ def _materialize(root: Path, limit: int) -> dict[str, Any]:
         raise
 
 
-def materialize(root: Path, limit: int) -> dict[str, Any]:
+def materialize(root: Path, limit: int, *, deadline: float | None = None) -> dict[str, Any]:
     with _VIEW_LOCK:
-        return _materialize(root, limit)
+        return _materialize(root, limit, deadline=deadline)
 
 
 def canonical_binding(root: Path, record: str) -> tuple[dict[str, Any] | None, dict[str, Any], Mapping[str, Any]] | None:
