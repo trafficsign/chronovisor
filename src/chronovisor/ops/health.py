@@ -80,6 +80,10 @@ _NATIVE_LUNA_RUN_SUCCESS_REASONS = {
     "existing_bundle_imported",
     "no_unlabeled_source",
 }
+# A capture receipt is terminal only after the candidate writer has completed.
+# ``capture_started`` and other hand-off/wait reasons must not retire an older
+# capture failure from the retained operation history.
+_NATIVE_LUNA_CAPTURE_SUCCESS_REASONS = {"capture_complete"}
 _NATIVE_LUNA_SAFE_IDENTIFIER_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
 )
@@ -400,6 +404,57 @@ def _native_luna_run_success_at(value: Mapping[str, Any]) -> datetime | None:
     return None
 
 
+def _native_luna_capture_succeeded(value: Mapping[str, Any]) -> bool:
+    """Return whether a capture entry records a qualified terminal receipt."""
+
+    return bool(
+        value.get("name") == "capture"
+        and value.get("state") == "succeeded"
+        and value.get("status") == "succeeded"
+        and value.get("failure_count") == 0
+        and value.get("reason") in _NATIVE_LUNA_CAPTURE_SUCCESS_REASONS
+    )
+
+
+def _native_luna_capture_success_at(value: Mapping[str, Any]) -> datetime | None:
+    """Return the latest durable terminal capture success for one entry."""
+
+    if value.get("name") != "capture":
+        return None
+    entry_updated_at = _parse_utc_timestamp(value.get("updated_at"))
+    now = datetime.now(UTC)
+    if entry_updated_at is None or entry_updated_at > now:
+        return None
+
+    # A qualified watermark survives running/waiting/failure transitions.  A
+    # malformed, future, or post-entry watermark must never become a success
+    # boundary.  Older terminal capture entries only carried last_success_at;
+    # retain those entries and use their terminal state/reason below.
+    has_success_metadata = any(
+        key in value
+        for key in ("last_success_at", "last_success_status", "last_success_reason")
+    )
+    if has_success_metadata:
+        durable = _parse_utc_timestamp(value.get("last_success_at"))
+        if durable is None or durable > entry_updated_at or durable > now:
+            return None
+        qualified = any(
+            key in value for key in ("last_success_status", "last_success_reason")
+        )
+        if qualified:
+            if (
+                value.get("last_success_status") != "succeeded"
+                or value.get("last_success_reason")
+                not in _NATIVE_LUNA_CAPTURE_SUCCESS_REASONS
+            ):
+                return None
+            return durable
+
+    if _native_luna_capture_succeeded(value):
+        return entry_updated_at
+    return None
+
+
 def _native_luna_import_waiting(value: object) -> dict[str, Any] | None:
     """Validate import-waiting counters while dropping bundle/path details."""
 
@@ -616,6 +671,7 @@ def _native_luna_supervisor_health(
     if operation is not None and operation not in operation_candidates:
         operation_candidates.append(operation)
     latest_run_success_at: datetime | None = None
+    latest_capture_success_at: datetime | None = None
     for candidate in operation_candidates:
         candidate_success_at = _native_luna_run_success_at(candidate)
         if candidate_success_at is not None and (
@@ -623,6 +679,12 @@ def _native_luna_supervisor_health(
             or candidate_success_at > latest_run_success_at
         ):
             latest_run_success_at = candidate_success_at
+        candidate_capture_success_at = _native_luna_capture_success_at(candidate)
+        if candidate_capture_success_at is not None and (
+            latest_capture_success_at is None
+            or candidate_capture_success_at > latest_capture_success_at
+        ):
+            latest_capture_success_at = candidate_capture_success_at
     specialized_operation_alert = False
     for candidate in operation_candidates:
         candidate_failure = bool(
@@ -638,6 +700,12 @@ def _native_luna_supervisor_health(
             and latest_run_success_at is not None
             and candidate_updated_at is not None
             and candidate_updated_at < latest_run_success_at
+        )
+        capture_failure_superseded = bool(
+            candidate["name"] == "capture"
+            and latest_capture_success_at is not None
+            and candidate_updated_at is not None
+            and candidate_updated_at < latest_capture_success_at
         )
         candidate_started_at = _parse_utc_timestamp(candidate.get("started_at"))
         candidate_waiting_stalled = bool(
@@ -656,7 +724,11 @@ def _native_luna_supervisor_health(
             )
             or candidate_waiting_stalled
         )
-        if run_failure_superseded or not (candidate_failure or candidate_stalled):
+        if (
+            run_failure_superseded
+            or capture_failure_superseded
+            or not (candidate_failure or candidate_stalled)
+        ):
             continue
         operation_name = candidate["name"]
         if operation_name == "import":

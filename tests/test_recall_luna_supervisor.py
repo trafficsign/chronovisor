@@ -652,6 +652,121 @@ def test_daily_run_terminal_success_survives_next_attempt_and_failure(
     assert handoff["last_success_reason"] == "daily_prepare"
 
 
+def test_daily_capture_terminal_success_survives_wait_failure_and_resolves_health(
+    tmp_path: Path,
+) -> None:
+    private = tmp_path / "runtime/recall-luna-bulk"
+    private.mkdir(parents=True)
+    state: dict[str, object] = {"operations": {}}
+    old_day = private / "2026-10-16"
+    today = private / "2026-10-17"
+
+    old_failure = supervisor._record_operation_failure(
+        state,
+        "capture",
+        old_day,
+        supervisor.DailyOperationError("daily_capture_receipt_stale", "a" * 64),
+    )
+    old_failure_at = datetime.now(UTC) - timedelta(hours=3)
+    old_failure["updated_at"] = old_failure_at.isoformat()
+    old_failure["next_retry_at"] = (old_failure_at + timedelta(minutes=5)).isoformat()
+    old_failure["next_retry_at_unix"] = old_failure_at.timestamp() + 300
+
+    def publish_health_state(operation: dict[str, object]) -> None:
+        payload = {
+            "schema": supervisor.SCHEMA,
+            "status": "running",
+            "updated_at": supervisor.now(),
+            "last_progress_at": supervisor.now(),
+            "completed_total": 0,
+            "pending_total": 0,
+            "bundles": {},
+            "operation": operation,
+            "operations": state["operations"],
+        }
+        supervisor.daily._write_private_json(private / "supervisor-status.json", payload)
+
+    succeeded = supervisor._complete_operation(
+        state, "capture", today, reason="capture_complete"
+    )
+    assert succeeded["last_success_status"] == "succeeded"
+    assert succeeded["last_success_reason"] == "capture_complete"
+    publish_health_state(succeeded)
+    _diagnosis, alerts = _native_luna_supervisor_health(tmp_path)
+    assert not any(
+        item["reason"] == "native_luna_daily_capture_stalled" for item in alerts
+    )
+
+    running = supervisor._start_operation(state, "capture", today)
+    assert running["last_success_at"] == succeeded["last_success_at"]
+    assert running["last_success_status"] == "succeeded"
+    assert running["last_success_reason"] == "capture_complete"
+    publish_health_state(running)
+    _diagnosis, alerts = _native_luna_supervisor_health(tmp_path)
+    assert not any(
+        item["reason"] == "native_luna_daily_capture_stalled" for item in alerts
+    )
+
+    waiting = supervisor._set_waiting_operation(
+        state, "capture", today, reason="daily_capture_in_progress"
+    )
+    assert waiting["last_success_at"] == succeeded["last_success_at"]
+    assert waiting["last_success_status"] == "succeeded"
+    assert waiting["last_success_reason"] == "capture_complete"
+    publish_health_state(waiting)
+    _diagnosis, alerts = _native_luna_supervisor_health(tmp_path)
+    assert not any(
+        item["reason"] == "native_luna_daily_capture_stalled" for item in alerts
+    )
+
+    failed = supervisor._record_operation_failure(
+        state,
+        "capture",
+        today,
+        supervisor.DailyOperationError("daily_capture_receipt_stale", "b" * 64),
+    )
+    assert failed["last_success_at"] == succeeded["last_success_at"]
+    assert failed["last_success_status"] == "succeeded"
+    assert failed["last_success_reason"] == "capture_complete"
+    publish_health_state(failed)
+    _diagnosis, alerts = _native_luna_supervisor_health(tmp_path)
+    assert any(
+        item["reason"] == "native_luna_daily_capture_stalled" for item in alerts
+    )
+
+    recovered = supervisor._complete_operation(
+        state, "capture", today, reason="capture_complete"
+    )
+    assert recovered["failure_count"] == 0
+    assert recovered["last_success_status"] == "succeeded"
+    assert recovered["last_success_reason"] == "capture_complete"
+    publish_health_state(recovered)
+    _diagnosis, alerts = _native_luna_supervisor_health(tmp_path)
+    assert not any(
+        item["reason"] == "native_luna_daily_capture_stalled" for item in alerts
+    )
+
+
+def test_legacy_capture_terminal_success_is_promoted_on_next_transition(
+    tmp_path: Path,
+) -> None:
+    state: dict[str, object] = {"operations": {}}
+    bundle = tmp_path / "runtime/recall-luna-bulk/2026-10-16"
+    legacy = supervisor._complete_operation(
+        state, "capture", bundle, reason="capture_complete"
+    )
+    legacy.pop("last_success_status")
+    legacy.pop("last_success_reason")
+
+    waiting = supervisor._set_waiting_operation(
+        state, "capture", bundle, reason="daily_capture_in_progress"
+    )
+
+    assert waiting["last_success_at"] == legacy["last_success_at"]
+    assert waiting["last_success_status"] == "succeeded"
+    assert waiting["last_success_reason"] == "capture_complete"
+
+
 def test_capture_handoff_keeps_run_failure_visible_in_supervisor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

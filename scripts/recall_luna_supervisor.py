@@ -49,7 +49,8 @@ _RUN_TERMINAL_SUCCESS_REASONS = frozenset(
         "no_unlabeled_source",
     }
 )
-_RUN_SUCCESS_FIELDS = (
+_CAPTURE_TERMINAL_SUCCESS_REASONS = frozenset({"capture_complete"})
+_OPERATION_SUCCESS_FIELDS = (
     "last_success_at",
     "last_success_status",
     "last_success_reason",
@@ -214,13 +215,27 @@ def _publish_operation(state: dict[str, Any], entry: dict[str, Any]) -> None:
     state["operation"] = dict(entry)
 
 
-def _copy_run_success_fields(
+def _copy_operation_success_fields(
     entry: dict[str, Any], previous: Mapping[str, Any]
 ) -> None:
-    for key in _RUN_SUCCESS_FIELDS:
+    for key in _OPERATION_SUCCESS_FIELDS:
         value = previous.get(key)
         if value is not None and value != "":
             entry[key] = value
+    # Older supervisor versions recorded capture_complete with only
+    # last_success_at.  Promote that terminal receipt when the operation next
+    # transitions so a waiting/running heartbeat can carry a qualified
+    # watermark without treating capture_started as success.
+    if (
+        previous.get("name") == "capture"
+        and previous.get("state") == "succeeded"
+        and previous.get("status") == "succeeded"
+        and previous.get("failure_count") == 0
+        and previous.get("reason") in _CAPTURE_TERMINAL_SUCCESS_REASONS
+        and entry.get("last_success_at")
+    ):
+        entry.setdefault("last_success_status", "succeeded")
+        entry.setdefault("last_success_reason", "capture_complete")
 
 
 def _start_operation(
@@ -245,8 +260,8 @@ def _start_operation(
         "started_at": started_at,
         "updated_at": now(),
     }
-    if name == "run":
-        _copy_run_success_fields(entry, previous)
+    if name in {"run", "capture"}:
+        _copy_operation_success_fields(entry, previous)
     if previous.get("last_error_code"):
         entry["last_error_code"] = str(previous["last_error_code"])
     if previous.get("last_error_message_sha256"):
@@ -311,8 +326,8 @@ def _record_operation_failure(
         "next_retry_at": _iso_from_unix(retry_at),
         "updated_at": now(),
     }
-    if name == "run":
-        _copy_run_success_fields(entry, previous)
+    if name in {"run", "capture"}:
+        _copy_operation_success_fields(entry, previous)
     state.setdefault("operations", {})[_operation_key(name, identity)] = entry
     _publish_operation(state, entry)
     return entry
@@ -339,14 +354,26 @@ def _complete_operation(
         "updated_at": success_at,
         "last_success_at": success_at,
     }
-    if name == "run":
-        _copy_run_success_fields(entry, previous)
+    if name in {"run", "capture"}:
+        _copy_operation_success_fields(entry, previous)
     if reason:
         entry["reason"] = reason
     if (
         name == "run"
         and status == "succeeded"
         and reason in _RUN_TERMINAL_SUCCESS_REASONS
+    ):
+        entry.update(
+            {
+                "last_success_at": success_at,
+                "last_success_status": status,
+                "last_success_reason": reason,
+            }
+        )
+    if (
+        name == "capture"
+        and status == "succeeded"
+        and reason in _CAPTURE_TERMINAL_SUCCESS_REASONS
     ):
         entry.update(
             {
@@ -392,8 +419,8 @@ def _set_waiting_operation(
         "started_at": started_at,
         "updated_at": now(),
     }
-    if name == "run":
-        _copy_run_success_fields(entry, previous)
+    if name in {"run", "capture"}:
+        _copy_operation_success_fields(entry, previous)
     # A lock-busy/in-progress wait is the same operation attempt.  Preserve
     # its deterministic failure identity until that operation succeeds so a
     # heartbeat cannot hide a repeated failure from health diagnostics.

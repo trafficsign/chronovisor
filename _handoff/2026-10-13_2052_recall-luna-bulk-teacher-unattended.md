@@ -98,6 +98,16 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] 修復11：安全境界でcanonical packageを配備し、通常300秒runの正式成功時刻・failure count・gate・health/init・driftを確認する。
 - [x] 修復12：前後計測、残る品質hold、automation整合と後片付けを記録する。
 
+### 2026-10-17 残件の自律解消
+- [ ] 残件A1：blind repeat の不足を正規の独立判定・import で解消する。
+- [ ] 残件A2：固定 split identity、時系列、割当、row integrity の producer と実証データを整える。
+- [ ] 残件A3：10/9 以降の記録から gate 適格 counterfactual を正規 pipeline で蓄積する。
+- [ ] 残件B1：旧 capture 履歴を保持し、現在の障害と区別して health を修正する。
+- [ ] 残件B2：search_labels review/frontier の根因を直し、正規 drain または設計廃止を完了する。
+- [ ] 残件B3：lint_repair local/frontier の根因を直し、検証済み apply または設計廃止を完了する。
+- [ ] 残件B4：raw_replay replay の根因を直し、正規 drain または設計廃止を完了する。
+- [ ] 残件C：必須CI・安全配備・drift=false・無人運転・09:15 automation の整合を確認する。
+
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
 - [x] 5-2 ingest：`apple-watch-band-material-tradeoffs/bandwork-leather-band-experience.md` が `missing_create_frontmatter` で失敗している（2026-10-13 19:45、1/3 回目）。再試行で直っていなければ原因を見る。
@@ -125,7 +135,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 品質受入待ち：blind repeatの5 incomplete pairs、凍結済みgroupの期間重複、CFの成立件数不足。CFはblind order不一致による実拒否があり、人の判断待ちとしてhealth/initへ表示する。日次運転は継続し、凍結入力・閾値・prompt/schemaは維持する。
+- 品質受入待ち：blind repeat、固定splitと時系列／row integrity、gate適格CFの残件を2026-10-17の追加承認で自律修復中。過去の「ユーザー判断待ち」は今回の範囲に限り解除し、品質条件そのものは維持する。
 - 7日無人継続と別モデル300件の独立比較は未完。既存09:15確認で追跡する。
 
 ## 受け渡しメモ（次担当へ）
@@ -410,3 +420,9 @@ created_at: 2026-10-13T20:52:29+09:00
 
 - 2026-10-17 15:14 JST: 修復12完了。healthのcapture staleは、旧2026-10-16-bundleのwaiting／daily_capture_in_progress（開始2026-10-16T14:52:44.897875Z・更新15:03:59.118342Z）を含む既存materialization/historyに由来する。現在のsupervisorは2026-10-17-bundleの新operationで、15:13:33のheartbeatもrunning／daily_capture_in_progress、pending0／import_waiting0。古い別operationの履歴を今回の成功で消さない。15:13:39再読でも正式last_success_at=2026-10-17T06:05:28.141760+00:00、failure_count0、worker_error_type空、P5=falseを確認。四holdは未解決のままユーザー判断待ち、Plan全体の未達checkboxは保持する。
 - 2026-10-17 15:14 JST: 後片付け完了。controlled formal process／ingest lease／比較process／converge登録／supervisor maintenanceを全復帰し、全6 archiveとHTTP/fresh MCPの9d3aa35f／drift=false受入を保持。別worktreeの変更は5d6a2538へcommitし、liveへPlanだけfast-forward（src/tests/scriptsは9d3aa35fと同一）。終わったread-only監査のrg process groupだけをargv/PGID照合後に停止し、Luna shardやRawには触れていない。open file参照0・git clean・mainlineへmerge済みを確認して今回のworktreeと専用branchを削除。元からある4 untracked pathと既存indexを保持。private隔離clone・profile・全artifact parity・CI・実機run・診断・復帰receiptは再検証用証拠として保存し、不要なlive設定や一時環境変数は残していない。package変更に必要な9d3aa35fまでpush済み、最終Planのみのcommitはpushしない。最終判断は性能回復と正式mainline成功の受入であり、ゲート合格／truth昇格／7日継続の受入ではない。
+
+- 2026-10-17 15:21 JST: Astraが全残件の自律解消へ着手。Plan全文414行と全実行ログを読了。2026-10-17のowner明示承認により、従来判断待ちだったgate holdと停止laneも対象とし、追加質問なしで原因修正・必要判定・正規drain／設計廃止・検証・配備まで進める。Lunaの内容処理と使用量無制限は承認済み。gate／floor／validator／teacher prompt・schema／契約・凍結入力を維持し、履歴・queue・ledger・wiki削除、ledger/checkpoint/lock手編集、raw変更は行わない。live HEAD085a0204／package9d3aa35fから別worktree chronovisor-leftovers-20261017を作成、無関係な未追跡4項目を保持。初期HTTPをprivate 2026-10-17-leftovers/before-health.jsonへ保存。正式last_success_at=2026-10-17T06:05:28.141760+00:00、capture旧履歴alertと5停止laneを再確認。Luna日次shardは継続中、live tree／supervisor変更なし。capture health、queue根因、split、CFの独立調査をnative Lunaへ委譲し、rootが最終差分と検証を担当する。
+
+- 2026-10-17 15:25 JST: 残件A1の根因を最新training snapshotとread-only label projectionで照合。6 incomplete pairsは全て片側completed、反対側abstained／uncertainであり、保存漏れや10,000行上限による切断ではない。旧結果を成功へ上書きせず、独立した再判定と固定cohortの再生成経路を検討する。既存dailyはprobe／uncertainも既処理pairに数えるため再判定へ進まない。task identityはsplit planを含まず、同一入力の新planでの正規再取得にも衝突する。private blind-pair-diagnosis.json／blind-pair-ledger.jsonにhash・enumのみ保存。固定split整合の修復と合わせ、判定結果を見て合格標本だけ選ぶ処理は採用しない。
+
+- 2026-10-17 15:32 JST — B1 実装修正・隔離検証: capture history は削除せず、capture_complete の qualified success watermark を running/waiting/failure 遷移へ保持し、それより古い capture failure/stall だけを superseded と判定する。legacy terminal receipt は終端状態・理由・時刻整合を検証して移行し、future/malformed/unqualified watermark は成功根拠にしない。health + supervisor 102 tests、refactor inventory 1 test、Ruff/diff-check 通過。新しい失敗は引き続き alert になる回帰例も確認。まだ live package 未配備のため B1 checkbox は未完のまま。

@@ -939,6 +939,238 @@ def test_native_luna_daily_run_history_uses_latest_real_success_boundary(
     assert len(after_new_failure["native_luna_supervisor"]["operations"]) == 3
 
 
+def test_native_luna_daily_capture_history_uses_latest_real_success_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "wiki"
+    _enable_native_luna_health(root, monkeypatch)
+    now = datetime.now(UTC)
+    old_failure_at = now - timedelta(hours=3)
+    success_at = now - timedelta(hours=1)
+    old_failure = {
+        "name": "capture",
+        "state": "backoff",
+        "status": "failed",
+        "bundle": "2026-10-16",
+        "failure_count": 1,
+        "last_error_code": "daily_capture_receipt_stale",
+        "last_error_message_sha256": "a" * 64,
+        "next_retry_at": (old_failure_at + timedelta(minutes=5)).isoformat(),
+        "updated_at": old_failure_at.isoformat(),
+    }
+    success = {
+        "name": "capture",
+        "state": "succeeded",
+        "status": "succeeded",
+        "bundle": "2026-10-17",
+        "failure_count": 0,
+        "last_success_at": success_at.isoformat(),
+        "reason": "capture_complete",
+        "updated_at": success_at.isoformat(),
+    }
+    operations = {
+        "capture:2026-10-16:": old_failure,
+        "capture:2026-10-17:": success,
+    }
+    _write_native_luna_supervisor_status(
+        root,
+        status="running",
+        updated_at=now.isoformat(),
+        last_progress_at=now.isoformat(),
+        operation=success,
+        operations=operations,
+    )
+
+    after_success = health.recall_distillation_health(root)
+
+    assert "native_luna_daily_capture_stalled" not in after_success["reason_codes"]
+    assert len(after_success["native_luna_supervisor"]["operations"]) == 2
+
+    new_failure_at = datetime.now(UTC) - timedelta(seconds=1)
+    new_failure = {
+        **success,
+        "state": "backoff",
+        "status": "failed",
+        "failure_count": 1,
+        "last_error_code": "daily_capture_receipt_stale",
+        "last_error_message_sha256": "b" * 64,
+        "next_retry_at": (new_failure_at + timedelta(minutes=5)).isoformat(),
+        "updated_at": new_failure_at.isoformat(),
+    }
+    operations["capture:2026-10-17:"] = new_failure
+    _write_native_luna_supervisor_status(
+        root,
+        status="retrying",
+        updated_at=now.isoformat(),
+        last_progress_at=now.isoformat(),
+        operation=new_failure,
+        operations=operations,
+    )
+
+    after_new_failure = health.recall_distillation_health(root)
+
+    assert "native_luna_daily_capture_stalled" in after_new_failure["reason_codes"]
+    assert len(after_new_failure["native_luna_supervisor"]["operations"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("label", "marker"),
+    [
+        (
+            "malformed-success",
+            {
+                "name": "capture",
+                "state": "succeeded",
+                "status": "succeeded",
+                "bundle": "2026-10-17",
+                "failure_count": 0,
+                "last_success_at": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+                "last_success_status": "succeeded",
+                "last_success_reason": "capture_started",
+                "reason": "capture_complete",
+                "updated_at": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+            },
+        ),
+        (
+            "future-success",
+            {
+                "name": "capture",
+                "state": "succeeded",
+                "status": "succeeded",
+                "bundle": "2026-10-17",
+                "failure_count": 0,
+                "last_success_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                "last_success_status": "succeeded",
+                "last_success_reason": "capture_complete",
+                "reason": "capture_complete",
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+        ),
+        (
+            "post-entry-success",
+            {
+                "name": "capture",
+                "state": "succeeded",
+                "status": "succeeded",
+                "bundle": "2026-10-17",
+                "failure_count": 0,
+                "last_success_at": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+                "last_success_status": "succeeded",
+                "last_success_reason": "capture_complete",
+                "reason": "capture_complete",
+                "updated_at": (datetime.now(UTC) - timedelta(hours=2)).isoformat(),
+            },
+        ),
+    ],
+)
+def test_native_luna_capture_malformed_or_future_success_does_not_clear_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    marker: dict[str, object],
+) -> None:
+    root = tmp_path / label
+    _enable_native_luna_health(root, monkeypatch)
+    now = datetime.now(UTC)
+    old_failure_at = now - timedelta(hours=3)
+    old_failure = {
+        "name": "capture",
+        "state": "backoff",
+        "status": "failed",
+        "bundle": "2026-10-16",
+        "failure_count": 1,
+        "last_error_code": "daily_capture_receipt_stale",
+        "last_error_message_sha256": "c" * 64,
+        "next_retry_at": (old_failure_at + timedelta(minutes=5)).isoformat(),
+        "updated_at": old_failure_at.isoformat(),
+    }
+    _write_native_luna_supervisor_status(
+        root,
+        status="running",
+        updated_at=now.isoformat(),
+        last_progress_at=now.isoformat(),
+        operation=marker,
+        operations={
+            "capture:2026-10-16:": old_failure,
+            "capture:2026-10-17:": marker,
+        },
+    )
+
+    payload = health.recall_distillation_health(root)
+
+    assert "native_luna_daily_capture_stalled" in payload["reason_codes"]
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        {
+            "name": "capture",
+            "state": "succeeded",
+            "status": "succeeded",
+            "bundle": "2026-10-17",
+            "failure_count": 0,
+            "reason": "capture_started",
+            "updated_at": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+        },
+        {
+            "name": "import",
+            "state": "succeeded",
+            "status": "succeeded",
+            "bundle": "2026-10-17",
+            "failure_count": 0,
+            "reason": "imported",
+            "updated_at": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+        },
+        {
+            "name": "capture",
+            "state": "running",
+            "status": "running",
+            "bundle": "2026-10-17",
+            "failure_count": 0,
+            "reason": "daily_capture_in_progress",
+            "updated_at": datetime.now(UTC).isoformat(),
+        },
+    ],
+)
+def test_native_luna_capture_unqualified_progress_does_not_clear_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    marker: dict[str, object],
+) -> None:
+    root = tmp_path / "wiki"
+    _enable_native_luna_health(root, monkeypatch)
+    now = datetime.now(UTC)
+    old_failure_at = now - timedelta(hours=3)
+    old_failure = {
+        "name": "capture",
+        "state": "backoff",
+        "status": "failed",
+        "bundle": "2026-10-16",
+        "failure_count": 1,
+        "last_error_code": "daily_capture_receipt_stale",
+        "last_error_message_sha256": "d" * 64,
+        "next_retry_at": (old_failure_at + timedelta(minutes=5)).isoformat(),
+        "updated_at": old_failure_at.isoformat(),
+    }
+    marker_key = f"{marker['name']}:{marker['bundle']}:"
+    _write_native_luna_supervisor_status(
+        root,
+        status="running",
+        updated_at=now.isoformat(),
+        last_progress_at=now.isoformat(),
+        operation=marker,
+        operations={
+            "capture:2026-10-16:": old_failure,
+            marker_key: marker,
+        },
+    )
+
+    payload = health.recall_distillation_health(root)
+
+    assert "native_luna_daily_capture_stalled" in payload["reason_codes"]
+
+
 def test_native_luna_capture_handoff_does_not_clear_run_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
