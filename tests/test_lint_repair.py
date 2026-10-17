@@ -1121,6 +1121,63 @@ def test_max_items_bounds_queue_work(tmp_path: Path, monkeypatch) -> None:
     assert len(store.list_items()) == 2
 
 
+def test_new_detector_issues_progress_past_terminal_source_history(
+    tmp_path: Path, monkeypatch
+) -> None:
+    rows = [
+        _row(f"observed-{index}", lane="monitor", issue_type="stale")
+        for index in range(70)
+    ]
+    monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _id: None)
+    store = _store(tmp_path)
+    old_keys = []
+    for row in rows:
+        source_id, input_data = lint_repair._candidate_identity(row, None)
+        item = store.merge_item(
+            lane="lint_repair",
+            source_id=source_id,
+            input_data=input_data,
+            resolver_version=lint_repair.REPAIR_RESOLVER_VERSION,
+            metadata=row,
+            now=NOW,
+        )["item"]
+        old_keys.append(item["key"])
+        store.complete(
+            item["key"], "applied", result={"action": "observed"}, now=NOW
+        )
+
+    # The same pages now have distinct detector issues and input identities.
+    # Their old source history must not keep them behind the terminal prefix.
+    for index in range(66, 70):
+        rows[index] = {
+            **rows[index],
+            "issue_key": f"new-issue-{index}",
+            "detail": "new stale observation",
+        }
+    queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
+    queue_before = _queue(queue_path, rows)
+    for expected in (["observed-66", "observed-67"], ["observed-68", "observed-69"]):
+        result = lint_repair.run_lint_repair(
+            queue_file=queue_path,
+            store=store,
+            budget=_budget(),
+            max_items=2,
+            local_reviewer=_never,
+            frontier_reviewer=_never,
+            now=NOW + timedelta(days=1),
+        )
+        assert result["preselected"] is True
+        assert result["observed"] == result["processed"] == 2
+        assert [entry["page"] for entry in result["results"]] == expected
+        assert result["budget"]["used"]["local"] == 0
+        assert result["budget"]["used"]["frontier"] == 0
+
+    items = store.load()["items"]
+    assert len(items) == 74
+    assert all(items[key]["status"] == "applied" for key in old_keys)
+    assert queue_path.read_bytes() == queue_before
+
+
 def test_large_queue_preselection_skips_future_retries_and_keeps_pending_due(
     tmp_path: Path, monkeypatch
 ) -> None:

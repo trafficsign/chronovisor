@@ -1396,8 +1396,9 @@ def _snapshot_row_class(
             if isinstance(item.get("metadata"), Mapping)
             and item["metadata"].get("issue_key") == issue_key
         ]
-        if exact:
-            candidates = exact
+        # A terminal result for a previous detector issue cannot acknowledge
+        # this new issue. The normal merge still verifies its current input.
+        candidates = exact
     active = [
         item
         for item in candidates
