@@ -88,6 +88,125 @@ def _signature(root: Path) -> _Signature:
     )
 
 
+def _label_source_claim(row: Mapping[str, Any]) -> dict[str, str]:
+    """Keep the source authority needed to resolve one verified label."""
+
+    rally_id = row.get("rally_id")
+    if not isinstance(rally_id, str) or not rally_id:
+        raise SourceBindingError("label rally identity is missing")
+    candidate_id = row.get("candidate_id")
+    if candidate_id is not None and (
+        isinstance(candidate_id, bool)
+        or not isinstance(candidate_id, (str, int))
+        or candidate_id == ""
+    ):
+        raise SourceBindingError("label candidate identity is invalid")
+    claim = {"rally_id": rally_id}
+    if candidate_id is not None:
+        claim["candidate_id"] = str(candidate_id)
+    if row.get("kind") == "counterfactual-label":
+        claim.update(
+            kind="counterfactual-label",
+            mode=str(row.get("mode") or ""),
+            exposure_artifact_id=str(row.get("exposure_artifact_id") or ""),
+            label_features_sha256=store.canonical_json_sha256_strict(row.get("features")),
+        )
+    return claim
+
+
+def _exposure_source_claim(
+    root: Path, rally: Mapping[str, Any], claim: Mapping[str, str]
+) -> bool:
+    """Bind live CF candidates to their captured exposure, not a later search."""
+
+    reference = claim.get("exposure_artifact_id", "")
+    if (
+        claim.get("kind") != "counterfactual-label"
+        or claim.get("mode") not in {"add", "remove"}
+        or re.fullmatch(r"[0-9a-f]{64}", reference) is None
+    ):
+        return False
+    receipts = rally.get("exposure_receipts")
+    if not isinstance(receipts, list):
+        return False
+    matches = [
+        row for row in receipts
+        if isinstance(row, Mapping) and row.get("exposure_artifact_id") == reference
+    ]
+    if len(matches) != 1:
+        return False
+    path = store.distillation_dir(root) / "exposures" / f"{reference}.json"
+    try:
+        before = _file_signature(path)
+        artifact = store.read_sealed(path, schema="chronovisor.recall-exact-exposure.v1")
+        if before is None or before != _file_signature(path):
+            return False
+        if (
+            artifact.get("artifact_id") != reference
+            or store.canonical_json_sha256_strict({
+                key: value for key, value in artifact.items()
+                if key not in {"artifact_id", "seal_sha256"}
+            }) != reference
+            or artifact.get("kind") != "exact-rendered-exposure"
+        ):
+            return False
+        if any(
+            not isinstance(artifact.get(key), str)
+            or not artifact[key]
+            or artifact[key] != rally.get(rally_key)
+            for key, rally_key in (
+                ("host", "host"),
+                ("session_id_sha256", "session_id_sha256"),
+                ("query_semantic_sha256", "query_sha256"),
+            )
+        ):
+            return False
+        if any(
+            re.fullmatch(r"[0-9a-f]{64}", str(artifact.get(key) or "")) is None
+            or artifact.get(key) != matches[0].get(key)
+            for key in ("candidate_snapshot_sha256", "candidate_feature_snapshot_sha256")
+        ):
+            return False
+        source_key = "candidate_pool_refs" if claim["mode"] == "add" else "candidate_refs"
+        features = artifact.get("candidate_feature_snapshot")
+        candidates = artifact.get(source_key)
+        if not isinstance(features, list) or not isinstance(candidates, list):
+            return False
+        if (
+            store.canonical_json_sha256_strict(features)
+            != artifact.get("candidate_feature_snapshot_sha256")
+            or store.canonical_json_sha256_strict(candidates) != artifact.get(source_key + "_sha256")
+        ):
+            return False
+        candidate_id = claim.get("candidate_id", "")
+        selected_features = [
+            row for row in features
+            if isinstance(row, Mapping) and str(row.get("candidate_id") or "") == candidate_id
+        ]
+        selected_candidates = [
+            row for row in candidates
+            if isinstance(row, Mapping) and str(row.get("candidate_id") or "") == candidate_id
+        ]
+        if (
+            not candidate_id
+            or len(selected_features) != 1
+            or len(selected_candidates) != 1
+            or not isinstance(selected_features[0].get("features"), Mapping)
+            or store.canonical_json_sha256_strict(selected_features[0]["features"])
+            != claim.get("label_features_sha256")
+        ):
+            return False
+        candidate_ids = artifact.get("candidate_ids")
+        if not isinstance(candidate_ids, list) or candidate_ids != matches[0].get("candidate_ids"):
+            return False
+        selected_ids = {str(value) for value in candidate_ids}
+        if claim["mode"] == "add":
+            return selected_candidates[0].get("selected") is False and candidate_id not in selected_ids
+        return candidate_id in selected_ids
+    except (TypeError, ValueError, store.DistillationStoreError, SourceBindingError):
+        return False
+
+
 def _read_labels(
     root: Path,
 ) -> tuple[dict[str, dict[str, Any]], tuple[str, ...], tuple[dict[str, str], ...]]:
@@ -98,7 +217,7 @@ def _read_labels(
         raise SourceBindingError("label ledger is not a validated chain") from exc
     labels_by_record: dict[str, dict[str, Any]] = {}
     rally_ids: set[str] = set()
-    claims: set[tuple[str, str]] = set()
+    claims: set[tuple[tuple[str, str], ...]] = set()
     for row in rows:
         if not isinstance(row, Mapping):
             raise SourceBindingError("label ledger row is not an object")
@@ -111,26 +230,14 @@ def _read_labels(
             raise SourceBindingError("label ledger record identity is missing")
         if record in labels_by_record:
             raise SourceBindingError("label ledger record identity is duplicated")
-        rally_id = row.get("rally_id")
-        if not isinstance(rally_id, str) or not rally_id:
-            raise SourceBindingError("label rally identity is missing")
-        candidate_id = row.get("candidate_id")
-        if candidate_id is not None and (
-            isinstance(candidate_id, bool)
-            or not isinstance(candidate_id, (str, int))
-            or candidate_id == ""
-        ):
-            raise SourceBindingError("label candidate identity is invalid")
+        claim = _label_source_claim(row)
         labels_by_record[record] = dict(row)
-        rally_ids.add(rally_id)
-        claims.add((rally_id, "" if candidate_id is None else str(candidate_id)))
+        rally_ids.add(claim["rally_id"])
+        claims.add(tuple(sorted(claim.items())))
     return (
         labels_by_record,
         tuple(sorted(rally_ids)),
-        tuple(
-            {"rally_id": rally_id, **({"candidate_id": candidate} if candidate else {})}
-            for rally_id, candidate in sorted(claims)
-        ),
+        tuple(dict(claim) for claim in sorted(claims)),
     )
 
 
@@ -187,7 +294,12 @@ def _catalog_sources(
         snapshots = catalog.read_candidate_snapshots(
             root,
             store.distillation_dir(root) / "candidate-ledger.jsonl",
-            claims,
+            [
+                {key: value for key, value in claim.items() if key != "candidate_id"}
+                if _exposure_source_claim(root, rallies[claim["rally_id"]], claim)
+                else claim
+                for claim in claims
+            ],
         )
         if set(snapshots) != set(rally_ids):
             raise SourceBindingError("candidate index is missing a label rally")

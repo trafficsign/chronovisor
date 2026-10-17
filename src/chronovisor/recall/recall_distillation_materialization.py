@@ -87,6 +87,7 @@ def _code_identity() -> str:
         "recall_distillation.py", "recall_distillation_native.py",
         "recall_distillation_catalog.py", "recall_distillation_store.py",
         "recall_distillation_ledger.py", "recall_distillation_materialization.py",
+        "recall_distillation_validation.py",
     ):
         digest.update(Path(__file__).with_name(name).read_bytes())
     return digest.hexdigest()
@@ -225,7 +226,10 @@ def _materialize_batch(
     rally_ids: Sequence[str], ox: str,
 ) -> None:
     from chronovisor.recall import recall_distillation as distill
-    from chronovisor.recall.recall_distillation_validation import _catalog_sources
+    from chronovisor.recall.recall_distillation_validation import (
+        _catalog_sources,
+        _label_source_claim,
+    )
 
     pending = []
     for rally_id in rally_ids:
@@ -236,12 +240,7 @@ def _materialize_batch(
     if any(row is None for row in source_rows):
         raise store.DistillationStoreError("materialization label disappeared")
     rows = [row for row in source_rows if row is not None]
-    claims = [
-        {"rally_id": str(row["rally_id"]), **(
-            {"candidate_id": str(row["candidate_id"])} if row.get("candidate_id") is not None else {}
-        )}
-        for row in rows
-    ]
+    claims = [_label_source_claim(row) for row in rows]
     sources = _catalog_sources(root, rally_ids, claims)
     if sources is None:
         raise store.DistillationStoreError("materialization catalog is unavailable")
