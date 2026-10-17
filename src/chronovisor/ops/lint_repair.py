@@ -843,6 +843,7 @@ def _apply_reviewed_tags(
             owner=owner,
             error=budget_reason,
             failure_class="cycle_budget_exhausted",
+            consume_attempt=False,
             now=now,
         )
         return {

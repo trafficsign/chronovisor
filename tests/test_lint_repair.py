@@ -507,9 +507,11 @@ def test_local_approval_cannot_mutate_when_frontier_rejects(
     assert lint_repair._review_artifact_path(store, str(item["key"])).exists()
 
 
+@pytest.mark.parametrize("budget_kind", ["mutation", "elapsed"])
 def test_durable_frontier_verdict_is_reused_after_pre_apply_budget_failure(
     tmp_path: Path,
     monkeypatch,
+    budget_kind: str,
 ) -> None:
     page_id = "durable-frontier"
     page_path = tmp_path / "pages" / f"{page_id}.md"
@@ -519,10 +521,13 @@ def test_durable_frontier_verdict_is_reused_after_pre_apply_budget_failure(
     monkeypatch.setattr(lint_repair.chronovisor_store, "find_page", lambda _page_id: page_path)
     store = _store(tmp_path)
     frontier_calls = 0
+    clock = [0.0]
 
     def frontier_review(_prompt, _schema):
         nonlocal frontier_calls
         frontier_calls += 1
+        if budget_kind == "elapsed":
+            clock[0] = 61.0
         return {
             "decision": "approved",
             "tags": VALID_TAGS,
@@ -535,8 +540,9 @@ def test_durable_frontier_verdict_is_reused_after_pre_apply_budget_failure(
         budget=CycleBudget(
             max_local_calls=1,
             max_frontier_calls=1,
-            max_mutations=0,
+            max_mutations=1 if budget_kind == "elapsed" else 0,
             max_elapsed_seconds=60,
+            clock=lambda: clock[0],
         ),
         local_reviewer=lambda _prompt, _schema: {
             "decision": "approved",
@@ -550,7 +556,11 @@ def test_durable_frontier_verdict_is_reused_after_pre_apply_budget_failure(
     item = store.list_items()[0]
     artifact = lint_repair._review_artifact_path(store, str(item["key"]))
     assert first["results"][0]["status"] == "budget_exhausted"
-    assert item["status"] == "frontier_retry"
+    assert item["status"] == "pending_frontier"
+    assert item["frontier_attempts"] == 0
+    assert item["next_attempt_at"] is None
+    assert item["lease_owner"] is None
+    assert first["results"][0]["reason"] == f"{budget_kind}_budget_exhausted"
     assert artifact.exists()
     artifact_payload = json.loads(artifact.read_text(encoding="utf-8"))
     assert artifact_payload["schema_version"] == 2
@@ -561,6 +571,30 @@ def test_durable_frontier_verdict_is_reused_after_pre_apply_budget_failure(
     }
     assert page_path.read_text(encoding="utf-8") == original
     assert frontier_calls == 1
+    artifact_bytes = artifact.read_bytes()
+
+    for cycle in range(1, store.policy.max_frontier_attempts + 2):
+        deferred = lint_repair.run_lint_repair(
+            queue_file=queue_path,
+            store=store,
+            budget=CycleBudget(
+                max_local_calls=0,
+                max_frontier_calls=0,
+                max_mutations=0,
+                max_elapsed_seconds=60,
+            ),
+            local_reviewer=_never,
+            frontier_reviewer=_never,
+            now=NOW + timedelta(seconds=cycle),
+        )
+        pending = store.get(str(item["key"]))
+        assert deferred["results"][0]["status"] == "budget_exhausted"
+        assert pending["status"] == "pending_frontier"
+        assert pending["frontier_attempts"] == 0
+        assert pending["next_attempt_at"] is None
+        assert pending["lease_owner"] is None
+        assert artifact.read_bytes() == artifact_bytes
+        assert page_path.read_text(encoding="utf-8") == original
 
     second = lint_repair.run_lint_repair(
         queue_file=queue_path,
