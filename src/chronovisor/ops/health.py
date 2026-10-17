@@ -2203,6 +2203,18 @@ def _queue_timestamp(value: object) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _search_lane_progress_at(
+    rows: list[dict[str, Any]], lane: str
+) -> Iterable[object]:
+    """Yield only lane-bound search attempts, with a legacy fallback."""
+
+    for row in rows:
+        if "last_attempt_lane" not in row:
+            yield row.get("reviewed_at")
+        elif row.get("last_attempt_lane") == lane:
+            yield row.get("last_attempt_at")
+
+
 def _queue_group_progress(
     rows: list[dict[str, Any]],
     *,
@@ -2320,8 +2332,8 @@ def _queue_health_snapshot(root: Path) -> dict[str, Any]:
             status_field="queue_status",
             statuses=statuses,
             created_fields=("preregistered_at", "ts"),
-            progress_fields=("reviewed_at",),
-            additional_progress_at=(row.get("last_attempt_at") for row in label_rows if row.get("last_attempt_lane") == lane),
+            progress_fields=(),
+            additional_progress_at=_search_lane_progress_at(label_rows, lane),
         )
         search_summary["lanes"][lane] = diagnostic
         if not diagnostic["stale"]:

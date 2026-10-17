@@ -1873,6 +1873,7 @@ def test_queue_progress_rejects_other_lane_and_invalid_attempt_timestamps(
                 "preregistered_at": old,
                 "last_attempt_lane": "frontier",
                 "last_attempt_at": recent,
+                "reviewed_at": recent,
             }
         )
         + "\n"
