@@ -581,52 +581,76 @@ class NativeRound:
     completed: int
     initial_completed: int
     last_progress: float
+    capacity_lease: Any | None = None
 
 
 def start_round(args: argparse.Namespace, bundle: dict[str, Any], shard: int) -> NativeRound:
     """Give one shard a fresh, bounded native child, independently of its peers."""
+    from chronovisor.decision import native_luna_authority
+
+    capacity_lease = native_luna_authority.native_luna_capacity_lease(
+        args.root,
+        owner="supervisor",
+    )
+    capacity_lease.__enter__()
     round_id = datetime.now(UTC).strftime("luna-%Y%m%dT%H%M%S") + "-" + uuid4().hex[:12]
-    directory = args.root / "runtime/recall-luna-bulk/supervisor-runs" / round_id
-    directory.mkdir(mode=0o700, parents=True)
-    prompt_path = directory / "prompt.txt"
-    prompt_path.write_text(worker_prompt(Path(bundle["path"]), [shard], round_id, args.records_per_round))
-    prompt_path.chmod(0o600)
-    environment = dict(os.environ, CODEX_HOME=str(args.codex_home))
-    command = cli_command(args.codex, args.codex_home, directory / "result.json")
-    with prompt_path.open("rb") as source, (directory / "events.jsonl").open("wb") as events, (directory / "stderr.log").open("wb") as errors:
-        os.chmod(directory / "events.jsonl", 0o600)
-        os.chmod(directory / "stderr.log", 0o600)
-        child = subprocess.Popen(command, stdin=source, stdout=events, stderr=errors, env=environment, start_new_session=True)
-    completed = next(row["completed"] for row in bundle["shards"] if row["shard"] == shard)
-    return NativeRound(child, bundle["path"], shard, round_id, completed, completed, time.monotonic())
+    try:
+        directory = args.root / "runtime/recall-luna-bulk/supervisor-runs" / round_id
+        directory.mkdir(mode=0o700, parents=True)
+        prompt_path = directory / "prompt.txt"
+        prompt_path.write_text(worker_prompt(Path(bundle["path"]), [shard], round_id, args.records_per_round))
+        prompt_path.chmod(0o600)
+        environment = dict(os.environ, CODEX_HOME=str(args.codex_home))
+        command = cli_command(args.codex, args.codex_home, directory / "result.json")
+        with prompt_path.open("rb") as source, (directory / "events.jsonl").open("wb") as events, (directory / "stderr.log").open("wb") as errors:
+            os.chmod(directory / "events.jsonl", 0o600)
+            os.chmod(directory / "stderr.log", 0o600)
+            child = subprocess.Popen(
+                command,
+                stdin=source,
+                stdout=events,
+                stderr=errors,
+                env=environment,
+                start_new_session=True,
+                pass_fds=capacity_lease.pass_fds,
+            )
+        completed = next(row["completed"] for row in bundle["shards"] if row["shard"] == shard)
+        return NativeRound(child, bundle["path"], shard, round_id, completed, completed, time.monotonic(), capacity_lease)
+    except BaseException:
+        capacity_lease.__exit__(None, None, None)
+        raise
 
 
 def stop_round(job: NativeRound) -> None:
     """Include TTY helpers, which have their own process group, in cancellation."""
-    descendants = {job.child.pid}
-    processes = subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True)
-    pairs = [tuple(map(int, line.split())) for line in processes.splitlines() if line.strip()]
-    while True:
-        found = {pid for pid, parent in pairs if parent in descendants}
-        if found <= descendants:
-            break
-        descendants.update(found)
-    # Snapshot descendants before the CLI exits and they are reparented to PID 1.
-    if job.child.poll() is None:
-        for pid in sorted(descendants, reverse=True):
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        try:
-            job.child.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            for pid in descendants:
+    try:
+        descendants = {job.child.pid}
+        processes = subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True)
+        pairs = [tuple(map(int, line.split())) for line in processes.splitlines() if line.strip()]
+        while True:
+            found = {pid for pid, parent in pairs if parent in descendants}
+            if found <= descendants:
+                break
+            descendants.update(found)
+        # Snapshot descendants before the CLI exits and they are reparented to PID 1.
+        if job.child.poll() is None:
+            for pid in sorted(descendants, reverse=True):
                 try:
-                    os.kill(pid, signal.SIGKILL)
+                    os.kill(pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
-            job.child.wait()
+            try:
+                job.child.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                for pid in descendants:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                job.child.wait()
+    finally:
+        if job.capacity_lease is not None:
+            job.capacity_lease.__exit__(None, None, None)
 
 
 def pending_shards(rows: list[dict[str, Any]]) -> list[tuple[dict[str, Any], int]]:
@@ -748,6 +772,8 @@ def run_daily_operation(args: argparse.Namespace, command: str, bundle: Path, pu
 
 
 def supervise(args: argparse.Namespace) -> int:
+    from chronovisor.decision import native_luna_authority
+
     status_path = args.root / "runtime/recall-luna-bulk/supervisor-status.json"
     state: dict[str, Any] = {
         "schema": SCHEMA,
@@ -851,7 +877,10 @@ def supervise(args: argparse.Namespace) -> int:
                             continue
                         if shard not in available_shards(row, len(row["shards"])):
                             continue
-                        active[key] = start_round(args, row, shard)
+                        try:
+                            active[key] = start_round(args, row, shard)
+                        except native_luna_authority.NativeLunaCapacityUnavailable:
+                            break
                         last_scheduled[key] = max(last_scheduled.values(), default=0) + 1
                     attempted = attempted or bool(active)
                     publish("retrying" if failures else "running",

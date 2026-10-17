@@ -7,13 +7,19 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from chronovisor.decision.native_luna_authority import (
+    NativeLunaCapacityUnavailable,
+    native_luna_capacity_lease,
+)
 from chronovisor.ops.health import _native_luna_supervisor_health
 from chronovisor.recall.recall_distillation_luna import LunaBulkBundle
 from scripts import recall_luna_supervisor as supervisor
@@ -91,6 +97,244 @@ def test_supervisor_never_selects_a_shard_owned_by_another_worker(tmp_path: Path
         os.close(descriptor)
     assert supervisor.available_shards(row, 10) == [0, 1]
     assert path.exists()
+
+
+def test_native_capacity_is_shared_between_supervisor_and_authority(tmp_path: Path) -> None:
+    supervisor_lease = native_luna_capacity_lease(
+        tmp_path,
+        owner="supervisor",
+        slots=10,
+    )
+    supervisor_lease.__enter__()
+    try:
+        with pytest.raises(NativeLunaCapacityUnavailable):
+            with native_luna_capacity_lease(tmp_path, owner="authority"):
+                pass
+    finally:
+        supervisor_lease.__exit__(None, None, None)
+
+    with native_luna_capacity_lease(tmp_path, owner="authority"):
+        assert list(
+            (tmp_path / "runtime/native-luna-authority").glob("slot-*.json")
+        )
+
+
+def test_native_capacity_honors_supervisor_status_without_tokens(tmp_path: Path) -> None:
+    status_dir = tmp_path / "runtime/recall-luna-bulk"
+    status_dir.mkdir(parents=True)
+    holder = _supervisor_lock_holder(tmp_path)
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "ready"
+        status = {"active_workers": 10, "pid": holder.pid}
+        (status_dir / "supervisor-status.json").write_text(json.dumps(status))
+        with pytest.raises(NativeLunaCapacityUnavailable):
+            with native_luna_capacity_lease(tmp_path, owner="authority"):
+                pass
+    finally:
+        if holder.stdin is not None:
+            holder.stdin.close()
+        holder.wait(timeout=5)
+
+
+def test_native_capacity_missing_status_fails_closed_when_supervisor_is_live(
+    tmp_path: Path,
+) -> None:
+    holder = _supervisor_lock_holder(tmp_path)
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "ready"
+        with pytest.raises(NativeLunaCapacityUnavailable):
+            with native_luna_capacity_lease(tmp_path, owner="authority"):
+                pass
+    finally:
+        if holder.stdin is not None:
+            holder.stdin.close()
+        holder.wait(timeout=5)
+
+
+def _supervisor_lock_holder(root: Path) -> subprocess.Popen[str]:
+    script = "\n".join(
+        (
+            "import fcntl",
+            "import os",
+            "import sys",
+            "from pathlib import Path",
+            "path = Path(sys.argv[1])",
+            "path.parent.mkdir(parents=True, exist_ok=True)",
+            "fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)",
+            "fcntl.flock(fd, fcntl.LOCK_EX)",
+            "print('ready', flush=True)",
+            "sys.stdin.read()",
+        )
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    return subprocess.Popen(
+        [sys.executable, "-c", script, str(root / "runtime/recall-luna-bulk/supervisor.lock")],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+
+
+def test_native_capacity_ignores_stale_supervisor_status(tmp_path: Path) -> None:
+    status_dir = tmp_path / "runtime/recall-luna-bulk"
+    status_dir.mkdir(parents=True)
+    (status_dir / "supervisor-status.json").write_text(
+        json.dumps({"active_workers": 10})
+    )
+    with native_luna_capacity_lease(tmp_path, owner="authority"):
+        pass
+
+
+def test_native_capacity_registry_allows_ten_concurrent_reservations(
+    tmp_path: Path,
+) -> None:
+    barrier = threading.Barrier(10)
+    entered = threading.Event()
+    release = threading.Event()
+    guard = threading.Lock()
+    entered_count = 0
+
+    def worker() -> bool:
+        nonlocal entered_count
+        barrier.wait(timeout=5)
+        try:
+            with native_luna_capacity_lease(tmp_path, owner="authority"):
+                with guard:
+                    entered_count += 1
+                    if entered_count == 10:
+                        entered.set()
+                entered.wait(timeout=5)
+                release.wait(timeout=5)
+            return True
+        except (NativeLunaCapacityUnavailable, TimeoutError):
+            return False
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(worker) for _ in range(10)]
+        assert entered.wait(timeout=5)
+        with pytest.raises(NativeLunaCapacityUnavailable):
+            with native_luna_capacity_lease(tmp_path, owner="authority"):
+                pass
+        release.set()
+        assert all(future.result(timeout=5) for future in futures)
+
+
+def _capacity_holder(root: Path, owner: str, slots: int) -> subprocess.Popen[str]:
+    script = "\n".join(
+        (
+            "from pathlib import Path",
+            "import sys",
+            "from chronovisor.decision.native_luna_authority import native_luna_capacity_lease",
+            "root = Path(sys.argv[1])",
+            "owner = sys.argv[2]",
+            "slots = int(sys.argv[3])",
+            "with native_luna_capacity_lease(root, owner=owner, slots=slots):",
+            "    print('ready', flush=True)",
+            "    sys.stdin.read()",
+        )
+    )
+    environment = dict(os.environ)
+    environment["CHRONOVISOR_ROOT"] = str(root)
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    return subprocess.Popen(
+        [sys.executable, "-c", script, str(root), owner, str(slots)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+
+
+def test_native_capacity_allows_ten_across_processes_and_rejects_eleven(
+    tmp_path: Path,
+) -> None:
+    holder = _capacity_holder(tmp_path, "supervisor", 9)
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "ready"
+        with native_luna_capacity_lease(tmp_path, owner="authority", slots=1):
+            with pytest.raises(NativeLunaCapacityUnavailable):
+                with native_luna_capacity_lease(tmp_path, owner="authority"):
+                    pass
+    finally:
+        if holder.stdin is not None:
+            holder.stdin.close()
+        holder.wait(timeout=5)
+        assert holder.returncode == 0
+
+
+def test_native_capacity_ignores_tokens_after_holder_process_dies(tmp_path: Path) -> None:
+    holder = _capacity_holder(tmp_path, "authority", 10)
+    assert holder.stdout is not None
+    assert holder.stdout.readline().strip() == "ready"
+    try:
+        holder.kill()
+        holder.wait(timeout=5)
+        with native_luna_capacity_lease(tmp_path, owner="supervisor", slots=10):
+            pass
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(timeout=5)
+
+
+def test_native_capacity_lock_follows_child_after_parent_dies(tmp_path: Path) -> None:
+    parent_code = "\n".join(
+        (
+            "import os",
+            "import subprocess",
+            "import sys",
+            "import time",
+            "from pathlib import Path",
+            "from chronovisor.decision.native_luna_authority import native_luna_capacity_lease",
+            "root = Path(sys.argv[1])",
+            "child = 'import time; time.sleep(30)'",
+            "with native_luna_capacity_lease(root, owner='supervisor', slots=10) as lease:",
+            "    process = subprocess.Popen([sys.executable, '-c', child], pass_fds=lease.pass_fds)",
+            "    print(process.pid, flush=True)",
+            "    os._exit(0)",
+        )
+    )
+    environment = dict(os.environ)
+    environment["CHRONOVISOR_ROOT"] = str(tmp_path)
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    parent = subprocess.Popen(
+        [sys.executable, "-c", parent_code, str(tmp_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    child_pid: int | None = None
+    try:
+        assert parent.stdout is not None
+        child_pid = int(parent.stdout.readline().strip())
+        assert parent.wait(timeout=5) == 0
+        with pytest.raises(NativeLunaCapacityUnavailable):
+            with native_luna_capacity_lease(tmp_path, owner="authority"):
+                pass
+    finally:
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, 15)
+            except ProcessLookupError:
+                pass
+        parent.wait(timeout=5)
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            with native_luna_capacity_lease(tmp_path, owner="supervisor", slots=10):
+                break
+        except NativeLunaCapacityUnavailable:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def test_supervisor_retries_a_failed_native_process_and_publishes_the_hold(tmp_path: Path, monkeypatch) -> None:

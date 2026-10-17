@@ -17,6 +17,7 @@ import statistics
 import tempfile
 import time
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1549,6 +1550,8 @@ def _normalize_frontier_label_result(
         "local_consensus",
         "schema_valid",
         "validation_errors",
+        "native_luna_receipt",
+        "native_luna_receipts",
     ):
         if key in raw:
             normalized[key] = raw[key]
@@ -1574,12 +1577,32 @@ def run_frontier_label_review(
     repo_root: Path = REPO_ROOT,
     timeout: int | None = None,
 ) -> dict[str, Any]:
-    from chronovisor.decision import routine_review
+    from chronovisor.decision import native_luna_authority, routine_review
 
     prompt = build_frontier_label_prompt(row)
     timeout_seconds = timeout or int(
         os.environ.get("CHRONOVISOR_FRONTIER_TIMEOUT_SECONDS", "3600")
     )
+    if native_luna_authority.native_luna_enabled_for_lane(SEARCH_LABEL_LANE):
+        raw = native_luna_authority.run_native_luna_review(
+            prompt,
+            FRONTIER_LABEL_SCHEMA,
+            repo_root=repo_root,
+            lane=SEARCH_LABEL_LANE,
+            timeout=timeout_seconds,
+        )
+        normalized = _normalize_frontier_label_result(raw)
+        receipt = normalized.get("native_luna_receipt")
+        if normalized.get("decision") != "needs_retry" and isinstance(receipt, Mapping):
+            request_error = native_luna_authority.validate_native_luna_request(
+                receipt,
+                prompt,
+                FRONTIER_LABEL_SCHEMA,
+                lane=SEARCH_LABEL_LANE,
+            )
+            if request_error is not None:
+                return _frontier_label_failure(request_error)
+        return normalized
     raw = routine_review.run_structured_review(
         prompt,
         FRONTIER_LABEL_SCHEMA,
@@ -1605,6 +1628,17 @@ def _combine_frontier_label_reviews(
     if len(reviews) == 1:
         return reviews[0]
 
+    native_receipts = [
+        review.get("native_luna_receipt")
+        for review in reviews
+        if isinstance(review.get("native_luna_receipt"), Mapping)
+    ]
+    native_receipt_metadata = (
+        {"native_luna_receipts": native_receipts}
+        if len(native_receipts) == len(reviews)
+        else {}
+    )
+
     if any(is_human_required_result(review) for review in reviews):
         first = next(review for review in reviews if is_human_required_result(review))
         return {
@@ -1618,6 +1652,7 @@ def _combine_frontier_label_reviews(
             **retry[0],
             "summary": f"frontier label consensus needs retry: {retry[0].get('summary', '')}",
             "votes": reviews,
+            **native_receipt_metadata,
         }
 
     approvals = [review for review in reviews if review.get("decision") == "approved"]
@@ -1629,6 +1664,7 @@ def _combine_frontier_label_reviews(
             "reviewer": "frontier_consensus",
             "summary": f"frontier consensus approved: {agreed.get('summary', '')}",
             "votes": reviews,
+            **native_receipt_metadata,
         }
 
     if any(review.get("decision") == "rejected" for review in reviews):
@@ -1639,6 +1675,7 @@ def _combine_frontier_label_reviews(
             "reviewer": "frontier_consensus",
             "summary": "frontier consensus rejected or disagreed on labels",
             "votes": reviews,
+            **native_receipt_metadata,
         }
 
     return {
@@ -1651,6 +1688,7 @@ def _combine_frontier_label_reviews(
         "notes": None,
         "reviewer": "frontier_consensus",
         "votes": reviews,
+        **native_receipt_metadata,
         **(
             {"decision_policy": reviews[0]["decision_policy"]}
             if isinstance(reviews[0].get("decision_policy"), Mapping)
@@ -1661,6 +1699,170 @@ def _combine_frontier_label_reviews(
             if isinstance(reviews[0].get("local_consensus"), Mapping)
             else {}
         ),
+    }
+
+
+def _precompute_native_label_reviews(
+    rows: list[dict[str, Any]],
+    row_indices: list[int],
+    *,
+    votes: int,
+    repo_root: Path,
+    timeout: int | None,
+    deadline: float | None = None,
+) -> dict[int, list[dict[str, Any]]]:
+    """Run independent native reviews before the single-writer CAS phase.
+
+    The returned reviews are still revalidated by the existing authority and
+    artifact checks below. This helper only overlaps model latency; it never
+    writes queue or golden files.
+    """
+    if not row_indices:
+        return {}
+    from chronovisor.decision import native_luna_authority
+
+    max_workers = min(native_luna_authority.NATIVE_LUNA_GLOBAL_LIMIT, len(row_indices) * max(1, votes))
+    tasks = [(index, vote) for index in row_indices for vote in range(max(1, votes))]
+
+    def run_one(task: tuple[int, int]) -> tuple[int, dict[str, Any]]:
+        index, _vote = task
+        row = rows[index]
+        call_timeout = timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining < 1:
+                return index, _frontier_label_failure(
+                    "native Luna batch deadline reached",
+                    failure={
+                        "failure_class": "native_luna_deadline",
+                        "rescue_status": "frontier_retry",
+                    },
+                )
+            call_timeout = min(timeout or int(remaining), max(1, int(remaining)))
+        try:
+            review = run_frontier_label_review(
+                row,
+                repo_root=repo_root,
+                timeout=call_timeout,
+            )
+            return index, _normalize_frontier_label_result(review)
+        except Exception as exc:  # pragma: no cover - defensive worker boundary
+            return index, _frontier_label_failure(
+                f"frontier label reviewer raised {exc.__class__.__name__}: {exc}"
+            )
+
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for index, review in executor.map(run_one, tasks):
+            grouped.setdefault(index, []).append(review)
+    return grouped
+
+
+def _prepare_native_label_reviews(
+    rows: list[dict[str, Any]],
+    review_indices: list[int],
+    *,
+    max_votes: int,
+    retry_due: Callable[[dict[str, Any]], bool],
+    budget: Any | None,
+    mutation_reserved: bool,
+    repo_root: Path,
+    timeout: int | None,
+) -> tuple[dict[int, list[dict[str, Any]]], bool]:
+    from chronovisor.decision import native_luna_authority
+
+    if not native_luna_authority.native_luna_enabled_for_lane(SEARCH_LABEL_LANE):
+        return {}, mutation_reserved
+    candidates = [
+        index
+        for index in review_indices
+        if not bool(rows[index].get("promoted_to_golden"))
+        and str(rows[index].get("queue_status") or "") in FRONTIER_PENDING_STATUSES
+        and retry_due(rows[index])
+    ]
+    if budget is not None:
+        if candidates and not mutation_reserved:
+            mutation_allowed, _mutation_reason = budget.can_consume("mutation")
+            if mutation_allowed:
+                budget.consume("mutation")
+                mutation_reserved = True
+            else:
+                candidates = []
+        reserved: list[int] = []
+        for index in candidates:
+            allowed, _frontier_reason = budget.can_consume("frontier", max_votes)
+            if not allowed:
+                break
+            consumed, _consume_reason = budget.consume("frontier", max_votes)
+            if not consumed:
+                break
+            reserved.append(index)
+        candidates = reserved
+    reviews = _precompute_native_label_reviews(
+        rows,
+        candidates,
+        votes=max_votes,
+        repo_root=repo_root,
+        timeout=timeout,
+        deadline=(time.monotonic() + budget.remaining_elapsed_seconds)
+        if budget is not None
+        else None,
+    )
+    return reviews, mutation_reserved
+
+
+def _collect_label_reviews(
+    row: dict[str, Any],
+    row_index: int,
+    *,
+    max_votes: int,
+    reviewer: FrontierLabelReviewer | None,
+    precomputed: dict[int, list[dict[str, Any]]],
+    repo_root: Path,
+    timeout: int | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    if row_index in precomputed:
+        reviews = precomputed[row_index]
+        return reviews, next(
+            (review for review in reviews if is_local_semantic_no_quorum(review)),
+            None,
+        )
+    reviews: list[dict[str, Any]] = []
+    semantic_review: dict[str, Any] | None = None
+    try:
+        for _idx in range(max_votes):
+            review = (
+                reviewer(row)
+                if reviewer is not None
+                else run_frontier_label_review(row, repo_root=repo_root, timeout=timeout)
+            )
+            normalized_review = (
+                dict(review)
+                if is_local_semantic_no_quorum(review)
+                else (
+                    _normalize_frontier_label_result(review)
+                    if "decision" in review
+                    else review
+                )
+            )
+            reviews.append(normalized_review)
+            if is_local_semantic_no_quorum(normalized_review):
+                semantic_review = normalized_review
+                break
+    except Exception as exc:
+        reviews = [
+            _frontier_label_failure(
+                f"frontier label reviewer raised {exc.__class__.__name__}: {exc}"
+            )
+        ]
+    return reviews, semantic_review
+
+
+def _native_review_deferred(review: Mapping[str, Any]) -> bool:
+    failure = review.get("frontier_failure")
+    return isinstance(failure, Mapping) and failure.get("failure_class") in {
+        "native_luna_capacity",
+        "native_luna_deadline",
     }
 
 
@@ -2574,6 +2776,23 @@ def review_label_queue_with_frontier(
         retry_due=retry_due,
         now=current_time,
     )
+    native_precomputed: dict[int, list[dict[str, Any]]] = {}
+    from chronovisor.decision import native_luna_authority
+    if (
+        not dry_run
+        and reviewer is None
+        and native_luna_authority.native_luna_enabled_for_lane(SEARCH_LABEL_LANE)
+    ):
+        native_precomputed, mutation_reserved = _prepare_native_label_reviews(
+            rows,
+            review_indices,
+            max_votes=max_votes,
+            retry_due=retry_due,
+            budget=budget,
+            mutation_reserved=mutation_reserved,
+            repo_root=repo_root,
+            timeout=timeout,
+        )
     # Keep the durable row positions stable while executing the selected
     # indices in the fairness order. Unselected rows remain byte-for-byte
     # equivalent objects until the final CAS write.
@@ -2591,7 +2810,7 @@ def review_label_queue_with_frontier(
         if dry_run:
             attempted += 1
             continue
-        if budget is not None:
+        if budget is not None and row_index not in native_precomputed:
             frontier_allowed, _frontier_reason = budget.can_consume(
                 "frontier", max_votes
             )
@@ -2625,36 +2844,20 @@ def review_label_queue_with_frontier(
                 reviewed_at=reviewed_at,
             )
             continue
-        reviews: list[dict[str, Any]] = []
-        semantic_review: dict[str, Any] | None = None
-        try:
-            for _idx in range(max_votes):
-                review = (
-                    reviewer(row)
-                    if reviewer is not None
-                    else run_frontier_label_review(
-                        row, repo_root=repo_root, timeout=timeout
-                    )
-                )
-                normalized_review = (
-                    dict(review)
-                    if is_local_semantic_no_quorum(review)
-                    else (
-                        _normalize_frontier_label_result(review)
-                        if "decision" in review
-                        else review
-                    )
-                )
-                reviews.append(normalized_review)
-                if is_local_semantic_no_quorum(normalized_review):
-                    semantic_review = normalized_review
-                    break
-        except Exception as exc:
-            reviews = [
-                _frontier_label_failure(
-                    f"frontier label reviewer raised {exc.__class__.__name__}: {exc}"
-                )
-            ]
+        reviews, semantic_review = _collect_label_reviews(
+            row,
+            row_index,
+            max_votes=max_votes,
+            reviewer=reviewer,
+            precomputed=native_precomputed,
+            repo_root=repo_root,
+            timeout=timeout,
+        )
+        if reviewer is None and any(_native_review_deferred(review) for review in reviews):
+            status_counts["native_luna_deferred"] = (
+                status_counts.get("native_luna_deferred", 0) + 1
+            )
+            continue
         if semantic_review is not None:
             hold: dict[str, Any] | None = None
             hold_error: str | None = None

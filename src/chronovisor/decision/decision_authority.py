@@ -377,6 +377,36 @@ def base_semantic_authority(
         policy, mode, policy_error = resolve_decision_policy(lane)
         if policy is None or policy_error is not None or mode != "enabled":
             return None, policy_error or f"decision_lane_not_enabled:{lane}:{mode}"
+        from chronovisor.decision import native_luna_authority
+
+        if native_luna_authority.native_luna_enabled_for_lane(lane):
+            try:
+                route = native_luna_authority.native_luna_route_identity()
+            except Exception as exc:
+                return None, f"native_luna_authority_unavailable:{exc.__class__.__name__}"
+            return {
+                "source": native_luna_authority.NATIVE_LUNA_SOURCE,
+                "authority_version": AUTHORITY_VERSION,
+                "authority_kind": native_luna_authority.NATIVE_LUNA_AUTHORITY_KIND,
+                "lane": lane,
+                "lane_contract_sha256": lane_contract_sha256(lane),
+                "lane_contract_manifest_sha256": lane_contract_manifest_sha256(),
+                "lane_contract_case_manifest_sha256": (
+                    decision_lane_contract_case_manifest_sha256()
+                ),
+                "quorum_safety_policy_version": QUORUM_SAFETY_POLICY_VERSION,
+                "policy": {
+                    "kind": policy.kind,
+                    "schema_name": policy.schema_name,
+                    "mode": mode,
+                    "error": policy_error,
+                },
+                "router": {
+                    "source": native_luna_authority.NATIVE_LUNA_SOURCE,
+                    "error": None,
+                    "routes": [route],
+                },
+            }, None
         resolved_router = router or DecisionRouter(
             config=router_config,
             audit_role=lane,
@@ -458,8 +488,13 @@ def semantic_authority_shape_error(
         if set(authority) != {"source", "authority_version", "lane"}:
             return "injected decision authority identity is invalid"
         return None
-    if source != RUNTIME_ROUTE_SOURCE:
+    from chronovisor.decision import native_luna_authority
+
+    native_source = source == native_luna_authority.NATIVE_LUNA_SOURCE
+    if source not in {RUNTIME_ROUTE_SOURCE, native_luna_authority.NATIVE_LUNA_SOURCE}:
         return "decision authority source is invalid"
+    if native_source and lane != native_luna_authority.NATIVE_LUNA_LANE:
+        return "native Luna authority lane is invalid"
     base_expected_fields = {
         "source",
         "authority_version",
@@ -472,7 +507,15 @@ def semantic_authority_shape_error(
         "router",
     }
     authority_kind = authority.get("authority_kind", QUORUM_AUTHORITY_KIND)
-    if authority_kind not in {SINGLE_MODEL_AUTHORITY_KIND, QUORUM_AUTHORITY_KIND}:
+    if authority_kind not in {
+        SINGLE_MODEL_AUTHORITY_KIND,
+        QUORUM_AUTHORITY_KIND,
+        native_luna_authority.NATIVE_LUNA_AUTHORITY_KIND,
+    }:
+        return "decision authority kind is invalid"
+    if native_source and authority_kind != native_luna_authority.NATIVE_LUNA_AUTHORITY_KIND:
+        return "native Luna authority kind is invalid"
+    if not native_source and authority_kind == native_luna_authority.NATIVE_LUNA_AUTHORITY_KIND:
         return "decision authority kind is invalid"
     expected_fields = base_expected_fields | (
         {"authority_kind"}
@@ -510,17 +553,26 @@ def semantic_authority_shape_error(
         return "decision authority policy is invalid"
     router = authority.get("router")
     routes = router.get("routes") if isinstance(router, Mapping) else None
-    if (
-        not isinstance(router, Mapping)
-        or set(router) != {"source", "error", "routes"}
-        or router.get("source") != "runtime_role_mapping"
-        or router.get("error") is not None
-        or (
+    expected_router_source = (
+        native_luna_authority.NATIVE_LUNA_SOURCE
+        if native_source
+        else "runtime_role_mapping"
+    )
+    route_error = (
+        native_luna_authority.native_luna_route_provenance_error(routes)
+        if native_source
+        else (
             single_route_provenance_error(routes)
             if authority_kind == SINGLE_MODEL_AUTHORITY_KIND
             else route_provenance_error(routes)
         )
-        is not None
+    )
+    if (
+        not isinstance(router, Mapping)
+        or set(router) != {"source", "error", "routes"}
+        or router.get("source") != expected_router_source
+        or router.get("error") is not None
+        or route_error is not None
     ):
         return "decision authority router identity is invalid"
     return None
@@ -576,6 +628,14 @@ def semantic_verdict_authority_error(
     assert isinstance(authority, Mapping)
     if authority.get("source") == INJECTED_REVIEWER_SOURCE:
         return None
+    if authority.get("source") == "native_luna_runtime":
+        from chronovisor.decision import native_luna_authority
+
+        return native_luna_authority.validate_native_luna_review(
+            review,
+            authority,
+            lane=lane,
+        )
     assert isinstance(review, Mapping)
     router = authority.get("router")
     router_routes = router.get("routes") if isinstance(router, Mapping) else None

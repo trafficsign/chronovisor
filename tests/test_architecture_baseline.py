@@ -2037,6 +2037,12 @@ Y_RETIRED_CAMPAIGN_SITE_IDS = (
     "arch:e906f5696a16c9449d809988af7bfc8781814dbc9dc10cf754c8ef1a61d14093",
     "arch:f3f5580fe6b56f80da7d83b5fb5c3595894e4f966fd27bb0bc76f6d83e8881c0",
 )
+# The search reviewer import now also identifies the native Luna adapter.
+NATIVE_LUNA_RETIRED_SEARCH_REVIEW_SITE_ID = (
+    "arch:19b8592d429fa6f6d94e18999666f995f6c156c680243314ec7de15d4022d4ee"
+)
+
+
 RETIREMENT_HISTORY = {
     "exception_semantic_ids": tuple(
         sorted(
@@ -2091,6 +2097,7 @@ RETIREMENT_HISTORY = {
     "cross_domain_site_semantic_ids": tuple(
         sorted(
             (
+                NATIVE_LUNA_RETIRED_SEARCH_REVIEW_SITE_ID,
                 *P2_RETIRED_SITE_IDS,
                 "arch:17dfff912265720f618d2e861f60fe4190e22e31b97fec8600bd4dc73e8764ed",
                 P3_RETIRED_PROVIDER_SITE_ID,
@@ -2956,7 +2963,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
     assert detected_ids == ledger_ids == set(seed["exception_semantic_ids"]["active"])
     _assert_exact_retirement_history(architecture, seed)
     assert len(edge_rows) == current["worktree_architecture"]["edge_count"] == 44
-    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1561
+    assert sum(len(row["sites"]) for row in edge_rows) == len(raw_cross_sites) == 1566
     assert {
         field: counts[field]
         for field in (
@@ -2969,7 +2976,7 @@ def test_current_exception_ledger_seed_and_schema_inventory_are_exact(
         )
     } == {
         "exceptions": 44,
-        "cross_domain_sites": 1561,
+        "cross_domain_sites": 1566,
         "production_to_lab_edges": 0,
         "production_to_lab_static_sites": 0,
         "production_to_lab_dynamic_sites": 0,
