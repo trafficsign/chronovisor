@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -455,6 +455,130 @@ def _native_luna_capture_success_at(value: Mapping[str, Any]) -> datetime | None
     return None
 
 
+def _native_luna_supervisor_operation_alerts(
+    operation_candidates: list[dict[str, Any]], now: datetime
+) -> tuple[list[dict[str, str]], bool]:
+    """Classify operation history while retaining qualified success boundaries."""
+
+    latest_run_success_at: datetime | None = None
+    latest_capture_success_at: datetime | None = None
+    for candidate in operation_candidates:
+        candidate_success_at = _native_luna_run_success_at(candidate)
+        if candidate_success_at is not None and (
+            latest_run_success_at is None
+            or candidate_success_at > latest_run_success_at
+        ):
+            latest_run_success_at = candidate_success_at
+        candidate_capture_success_at = _native_luna_capture_success_at(candidate)
+        if candidate_capture_success_at is not None and (
+            latest_capture_success_at is None
+            or candidate_capture_success_at > latest_capture_success_at
+        ):
+            latest_capture_success_at = candidate_capture_success_at
+
+    alerts: list[dict[str, str]] = []
+    specialized_operation_alert = False
+
+    def add(category: str, reason: str, message: str) -> None:
+        if not any(item["reason"] == reason for item in alerts):
+            alerts.append({"category": category, "reason": reason, "message": message})
+
+    for candidate in operation_candidates:
+        candidate_failure = bool(
+            candidate["failure_count"] > 0
+            and (
+                candidate["state"] != "succeeded"
+                or candidate["status"] != "succeeded"
+            )
+        )
+        candidate_updated_at = _parse_utc_timestamp(candidate.get("updated_at"))
+        run_failure_superseded = bool(
+            candidate["name"] == "run"
+            and latest_run_success_at is not None
+            and candidate_updated_at is not None
+            and candidate_updated_at < latest_run_success_at
+        )
+        capture_failure_superseded = bool(
+            candidate["name"] == "capture"
+            and latest_capture_success_at is not None
+            and candidate_updated_at is not None
+            and candidate_updated_at < latest_capture_success_at
+        )
+        candidate_started_at = _parse_utc_timestamp(candidate.get("started_at"))
+        candidate_waiting_stalled = bool(
+            candidate["state"] == "waiting"
+            and candidate.get("reason") in _NATIVE_LUNA_WAITING_PROGRESS_REASONS
+            and candidate_started_at is not None
+            and (now - candidate_started_at).total_seconds()
+            > NATIVE_LUNA_SUPERVISOR_PROGRESS_STALE_SECONDS
+        )
+        candidate_stalled = bool(
+            (
+                candidate["state"] == "running"
+                and candidate_updated_at is not None
+                and (now - candidate_updated_at).total_seconds()
+                > NATIVE_LUNA_SUPERVISOR_PROGRESS_STALE_SECONDS
+            )
+            or candidate_waiting_stalled
+        )
+        if (
+            run_failure_superseded
+            or capture_failure_superseded
+            or not (candidate_failure or candidate_stalled)
+        ):
+            continue
+        operation_name = candidate["name"]
+        if operation_name == "import":
+            add(
+                "human_wait",
+                "native_luna_import_failed",
+                (
+                    "人の判断待ち: native Luna の import が stale です"
+                    if candidate_stalled
+                    else "人の判断待ち: native Luna の import が停止しています"
+                ),
+            )
+            specialized_operation_alert = True
+        elif operation_name == "run":
+            add(
+                "human_wait",
+                "native_luna_daily_run_failed",
+                (
+                    "人の判断待ち: native Luna の日次 run が stale です"
+                    if candidate_stalled
+                    else "人の判断待ち: native Luna の日次 run が停止しています"
+                ),
+            )
+            specialized_operation_alert = True
+        elif operation_name == "capture":
+            operation_text = " ".join(
+                str(candidate.get(key) or "")
+                for key in ("reason", "last_error_code")
+            )
+            capture_reason = (
+                "native_luna_daily_capture_stalled"
+                if candidate_stalled
+                or "stale" in operation_text
+                or "stalled" in operation_text
+                else "native_luna_daily_capture_failed"
+            )
+            capture_message = (
+                "人の判断待ち: native Luna の日次 capture が stale です"
+                if capture_reason.endswith("stalled")
+                else "人の判断待ち: native Luna の日次 capture が停止しています"
+            )
+            add("human_wait", capture_reason, capture_message)
+            specialized_operation_alert = True
+        elif operation_name == "idle":
+            add(
+                "human_wait",
+                "native_luna_daily_schedule_stalled",
+                "人の判断待ち: 日次実行の予定時刻を過ぎても開始されていません",
+            )
+            specialized_operation_alert = True
+    return alerts, specialized_operation_alert
+
+
 def _native_luna_import_waiting(value: object) -> dict[str, Any] | None:
     """Validate import-waiting counters while dropping bundle/path details."""
 
@@ -670,115 +794,11 @@ def _native_luna_supervisor_health(
     operation_candidates = [*operation_history]
     if operation is not None and operation not in operation_candidates:
         operation_candidates.append(operation)
-    latest_run_success_at: datetime | None = None
-    latest_capture_success_at: datetime | None = None
-    for candidate in operation_candidates:
-        candidate_success_at = _native_luna_run_success_at(candidate)
-        if candidate_success_at is not None and (
-            latest_run_success_at is None
-            or candidate_success_at > latest_run_success_at
-        ):
-            latest_run_success_at = candidate_success_at
-        candidate_capture_success_at = _native_luna_capture_success_at(candidate)
-        if candidate_capture_success_at is not None and (
-            latest_capture_success_at is None
-            or candidate_capture_success_at > latest_capture_success_at
-        ):
-            latest_capture_success_at = candidate_capture_success_at
-    specialized_operation_alert = False
-    for candidate in operation_candidates:
-        candidate_failure = bool(
-            candidate["failure_count"] > 0
-            and (
-                candidate["state"] != "succeeded"
-                or candidate["status"] != "succeeded"
-            )
-        )
-        candidate_updated_at = _parse_utc_timestamp(candidate.get("updated_at"))
-        run_failure_superseded = bool(
-            candidate["name"] == "run"
-            and latest_run_success_at is not None
-            and candidate_updated_at is not None
-            and candidate_updated_at < latest_run_success_at
-        )
-        capture_failure_superseded = bool(
-            candidate["name"] == "capture"
-            and latest_capture_success_at is not None
-            and candidate_updated_at is not None
-            and candidate_updated_at < latest_capture_success_at
-        )
-        candidate_started_at = _parse_utc_timestamp(candidate.get("started_at"))
-        candidate_waiting_stalled = bool(
-            candidate["state"] == "waiting"
-            and candidate.get("reason") in _NATIVE_LUNA_WAITING_PROGRESS_REASONS
-            and candidate_started_at is not None
-            and (now - candidate_started_at).total_seconds()
-            > NATIVE_LUNA_SUPERVISOR_PROGRESS_STALE_SECONDS
-        )
-        candidate_stalled = bool(
-            (
-                candidate["state"] == "running"
-                and candidate_updated_at is not None
-                and (now - candidate_updated_at).total_seconds()
-                > NATIVE_LUNA_SUPERVISOR_PROGRESS_STALE_SECONDS
-            )
-            or candidate_waiting_stalled
-        )
-        if (
-            run_failure_superseded
-            or capture_failure_superseded
-            or not (candidate_failure or candidate_stalled)
-        ):
-            continue
-        operation_name = candidate["name"]
-        if operation_name == "import":
-            add(
-                "human_wait",
-                "native_luna_import_failed",
-                (
-                    "人の判断待ち: native Luna の import が stale です"
-                    if candidate_stalled
-                    else "人の判断待ち: native Luna の import が停止しています"
-                ),
-            )
-            specialized_operation_alert = True
-        elif operation_name == "run":
-            add(
-                "human_wait",
-                "native_luna_daily_run_failed",
-                (
-                    "人の判断待ち: native Luna の日次 run が stale です"
-                    if candidate_stalled
-                    else "人の判断待ち: native Luna の日次 run が停止しています"
-                ),
-            )
-            specialized_operation_alert = True
-        elif operation_name == "capture":
-            operation_text = " ".join(
-                str(candidate.get(key) or "")
-                for key in ("reason", "last_error_code")
-            )
-            capture_reason = (
-                "native_luna_daily_capture_stalled"
-                if candidate_stalled
-                or "stale" in operation_text
-                or "stalled" in operation_text
-                else "native_luna_daily_capture_failed"
-            )
-            capture_message = (
-                "人の判断待ち: native Luna の日次 capture が stale です"
-                if capture_reason.endswith("stalled")
-                else "人の判断待ち: native Luna の日次 capture が停止しています"
-            )
-            add("human_wait", capture_reason, capture_message)
-            specialized_operation_alert = True
-        elif operation_name == "idle":
-            add(
-                "human_wait",
-                "native_luna_daily_schedule_stalled",
-                "人の判断待ち: 日次実行の予定時刻を過ぎても開始されていません",
-            )
-            specialized_operation_alert = True
+    operation_alerts, specialized_operation_alert = (
+        _native_luna_supervisor_operation_alerts(operation_candidates, now)
+    )
+    for alert in operation_alerts:
+        add(alert["category"], alert["reason"], alert["message"])
 
     import_pending = False
     if import_waiting is not None:
@@ -2190,6 +2210,7 @@ def _queue_group_progress(
     statuses: set[str],
     created_fields: tuple[str, ...],
     progress_fields: tuple[str, ...],
+    additional_progress_at: Iterable[object] = (),
 ) -> dict[str, Any]:
     selected = [
         row for row in rows if str(row.get(status_field) or "unknown") in statuses
@@ -2198,6 +2219,7 @@ def _queue_group_progress(
     for row in selected:
         status = str(row.get(status_field) or "unknown")
         status_counts[status] = status_counts.get(status, 0) + 1
+    now = datetime.now(UTC)
     created: list[datetime] = []
     progress: list[datetime] = []
     for row in selected:
@@ -2208,12 +2230,15 @@ def _queue_group_progress(
                 break
         for field in progress_fields:
             timestamp = _queue_timestamp(row.get(field))
-            if timestamp is not None:
+            if timestamp is not None and timestamp <= now:
                 progress.append(timestamp)
                 break
+    for value in additional_progress_at:
+        timestamp = _queue_timestamp(value)
+        if timestamp is not None and timestamp <= now:
+            progress.append(timestamp)
     oldest = min(created) if created else None
     last_progress = max(progress) if progress else None
-    now = datetime.now(UTC)
     oldest_age = (now - oldest).total_seconds() if oldest else None
     progress_age = (now - last_progress).total_seconds() if last_progress else None
     stale = bool(
@@ -2295,7 +2320,8 @@ def _queue_health_snapshot(root: Path) -> dict[str, Any]:
             status_field="queue_status",
             statuses=statuses,
             created_fields=("preregistered_at", "ts"),
-            progress_fields=("reviewed_at", "last_attempt_at"),
+            progress_fields=("reviewed_at",),
+            additional_progress_at=(row.get("last_attempt_at") for row in label_rows if row.get("last_attempt_lane") == lane),
         )
         search_summary["lanes"][lane] = diagnostic
         if not diagnostic["stale"]:
@@ -2379,9 +2405,8 @@ def _queue_health_snapshot(root: Path) -> dict[str, Any]:
             status_field="status",
             statuses=statuses,
             created_fields=("created_at", "updated_at"),
-            # Updated-at changes when a row is reclassified or leased; an
-            # actual attempt is the durable progress boundary for this lane.
-            progress_fields=("last_attempt_at",),
+            progress_fields=(),
+            additional_progress_at=(row.get("last_local_attempt_at" if lane == "local" else "last_frontier_attempt_at") for row in lint_rows),
         )
         lint_summary["lanes"][lane] = diagnostic
         lint_summary["active"] += diagnostic["active"]

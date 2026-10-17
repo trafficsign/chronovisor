@@ -1743,6 +1743,180 @@ def test_queue_health_alerts_only_stale_active_lanes_and_keeps_quarantine_histor
     assert all(item["queue"] != "quarantine" for item in payload["alerts"])
 
 
+def test_queue_progress_uses_completed_same_lane_attempts_without_changing_counters(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "wiki"
+    label_path = root / "recall" / "search-label-queue.jsonl"
+    lint_state = root / "runtime" / "convergence" / "state.json"
+    replay_path = root / "review" / "raw-replay-queue.jsonl"
+    label_path.parent.mkdir(parents=True)
+    lint_state.parent.mkdir(parents=True)
+    replay_path.parent.mkdir(parents=True)
+    old = "2020-01-01T00:00:00Z"
+    recent = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    label_path.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in (
+                {"queue_status": "pending_review", "preregistered_at": old},
+                {
+                    "queue_status": "completed",
+                    "ts": old,
+                    "last_attempt_lane": "review",
+                    "last_attempt_at": recent,
+                },
+                {"queue_status": "pending_frontier_review", "preregistered_at": old},
+                {
+                    "queue_status": "completed",
+                    "ts": old,
+                    "last_attempt_lane": "frontier",
+                    "last_attempt_at": recent,
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+    lint_state.write_text(
+        json.dumps(
+            {
+                "items": {
+                    "local-active": {
+                        "lane": "lint_repair",
+                        "status": "pending_local",
+                        "created_at": old,
+                    },
+                    "local-done": {
+                        "lane": "lint_repair",
+                        "status": "completed",
+                        "created_at": old,
+                        "last_local_attempt_at": recent,
+                    },
+                    "frontier-active": {
+                        "lane": "lint_repair",
+                        "status": "pending_frontier",
+                        "created_at": old,
+                    },
+                    "frontier-done": {
+                        "lane": "lint_repair",
+                        "status": "completed",
+                        "created_at": old,
+                        "last_frontier_attempt_at": recent,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    replay_path.write_text("", encoding="utf-8")
+
+    payload = health.queue_health_snapshot(root)
+    reasons = {item["reason"] for item in payload["alerts"]}
+
+    assert "search_labels_late_lane" not in reasons
+    assert "lint_repair_late_lane" not in reasons
+    assert payload["search_labels"]["active"] == 2
+    assert payload["search_labels"]["status_counts"]["completed"] == 2
+    assert payload["search_labels"]["lanes"]["review"]["oldest_at"].startswith(
+        "2020-01-01"
+    )
+    assert payload["search_labels"]["lanes"]["review"]["last_progress_at"] == recent
+    assert payload["lint_repair"]["active"] == 2
+    assert payload["lint_repair"]["status_counts"]["completed"] == 2
+    assert payload["lint_repair"]["lanes"]["local"]["last_progress_at"] == recent
+
+
+def test_queue_progress_rejects_other_lane_and_invalid_attempt_timestamps(
+    tmp_path: Path,
+) -> None:
+    old = "2020-01-01T00:00:00Z"
+    recent = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    future = (datetime.now(UTC) + timedelta(days=2)).isoformat()
+    rows = [{"queue_status": "pending_review", "preregistered_at": old}]
+
+    diagnostic = health._queue_group_progress(
+        rows,
+        status_field="queue_status",
+        statuses={"pending_review"},
+        created_fields=("preregistered_at",),
+        progress_fields=(),
+        additional_progress_at=(future, "not-a-timestamp"),
+    )
+
+    assert diagnostic["active"] == 1
+    assert diagnostic["oldest_at"].startswith("2020-01-01")
+    assert diagnostic["last_progress_at"] is None
+    assert diagnostic["stale"] is True
+
+    aged_progress = health._queue_group_progress(
+        rows,
+        status_field="queue_status",
+        statuses={"pending_review"},
+        created_fields=("preregistered_at",),
+        progress_fields=(),
+        additional_progress_at=(old,),
+    )
+    assert aged_progress["last_progress_at"].startswith("2020-01-01")
+    assert aged_progress["stale"] is True
+
+    root = tmp_path / "wiki"
+    label_path = root / "recall" / "search-label-queue.jsonl"
+    lint_state = root / "runtime" / "convergence" / "state.json"
+    replay_path = root / "review" / "raw-replay-queue.jsonl"
+    label_path.parent.mkdir(parents=True)
+    lint_state.parent.mkdir(parents=True)
+    replay_path.parent.mkdir(parents=True)
+    label_path.write_text(
+        json.dumps(
+            {
+                "queue_status": "pending_review",
+                "preregistered_at": old,
+                "last_attempt_lane": "frontier",
+                "last_attempt_at": recent,
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "queue_status": "completed",
+                "ts": old,
+                "last_attempt_lane": "frontier",
+                "last_attempt_at": future,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    lint_state.write_text(
+        json.dumps(
+            {
+                "items": {
+                    "local-active": {
+                        "lane": "lint_repair",
+                        "status": "pending_local",
+                        "created_at": old,
+                        "last_frontier_attempt_at": recent,
+                    },
+                    "frontier-done": {
+                        "lane": "lint_repair",
+                        "status": "completed",
+                        "created_at": old,
+                        "last_frontier_attempt_at": future,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    replay_path.write_text("", encoding="utf-8")
+
+    payload = health.queue_health_snapshot(root)
+    reasons = {item["reason"] for item in payload["alerts"]}
+
+    assert "search_labels_late_lane" in reasons
+    assert "lint_repair_late_lane" in reasons
+
+
 def test_capture_kpi_counts_raw_claim_coverage(tmp_path: Path, monkeypatch) -> None:
     chronovisor_root = tmp_path / "wiki"
     raw_dir = chronovisor_root / "raw"
