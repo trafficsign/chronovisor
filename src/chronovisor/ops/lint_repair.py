@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -62,6 +62,7 @@ from chronovisor.decision.semantic_hold import (
 )
 from chronovisor.ingest.convergence import (
     FRONTIER_STATUSES,
+    LOCAL_STATUSES,
     TERMINAL_STATUSES,
     ConvergenceStore,
     CycleBudget,
@@ -1270,6 +1271,185 @@ def _process_tag_candidate(
     )
 
 
+_PRESELECTION_MIN_QUEUE = 64
+_PRESELECTION_MULTIPLIER = 4
+
+
+def _parse_retry_at(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _snapshot_row_class(
+    row: Mapping[str, Any],
+    *,
+    items_by_source: Mapping[str, list[Mapping[str, Any]]],
+    now: datetime,
+) -> str:
+    """Classify a queue row from one state snapshot before the work loop.
+
+    The classification only narrows a bounded cycle.  Every selected row is
+    still read and merged through the current ``ConvergenceStore`` under its
+    normal transition locks, so a stale snapshot cannot authorize a mutation.
+    """
+
+    issue_type = str(row.get("issue_type") or "unknown")
+    page_id = str(row.get("page") or "")
+    source_id = f"{issue_type}:{page_id or 'no-page'}"
+    candidates = items_by_source.get(source_id, [])
+    issue_key = row.get("issue_key")
+    if issue_key is not None:
+        exact = [
+            item
+            for item in candidates
+            if isinstance(item.get("metadata"), Mapping)
+            and item["metadata"].get("issue_key") == issue_key
+        ]
+        if exact:
+            candidates = exact
+    active = [
+        item
+        for item in candidates
+        if str(item.get("status") or "") not in TERMINAL_STATUSES
+    ]
+    item = active[-1] if len(active) == 1 else None
+    if item is None and len(active) > 1:
+        # Ambiguous source history is intentionally kept eligible.  The live
+        # merge path will resolve the exact input identity and fail closed if
+        # an out-of-scope predecessor would be superseded.
+        return "unknown"
+    if item is None:
+        if candidates:
+            # Keep terminal predecessors in a low-priority bucket.  The live
+            # merge must still see them eventually because the page input may
+            # have changed and therefore derive a new stable key.
+            return "terminal"
+        return "new"
+
+    status = str(item.get("status") or "")
+    if status.endswith("_running"):
+        lease_expires = _parse_retry_at(item.get("lease_expires_at"))
+        if lease_expires is not None and lease_expires > now:
+            return "leased"
+        stage = "local" if status.startswith("local_") else "frontier"
+    elif status in LOCAL_STATUSES:
+        stage = "local"
+    elif status in FRONTIER_STATUSES:
+        stage = "frontier"
+    else:
+        return "unknown"
+    next_attempt = _parse_retry_at(item.get("next_attempt_at"))
+    if next_attempt is not None and next_attempt > now:
+        return "backoff"
+    return stage
+
+
+def _preselect_rows(
+    rows: list[dict[str, Any]],
+    *,
+    store: ConvergenceStore,
+    max_items: int,
+    now: datetime | None,
+) -> list[dict[str, Any]]:
+    """Choose bounded, due work before repeatedly reparsing large state.
+
+    The convergence state is loaded once.  Deterministic observations/routing
+    retain first priority, then due local/frontier work is round-robined so a
+    large retry backlog cannot starve pending items.  Future retries and
+    already-terminal rows stay in the append-only queue for a later ordinary
+    inventory pass.
+    """
+
+    if max_items <= 0:
+        return []
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    else:
+        current = current.astimezone(UTC)
+    snapshot = store.load().get("items", {})
+    items_by_source: dict[str, list[Mapping[str, Any]]] = {}
+    if isinstance(snapshot, Mapping):
+        for item in snapshot.values():
+            if not isinstance(item, Mapping):
+                continue
+            source_id = str(item.get("source_id") or "")
+            if source_id:
+                items_by_source.setdefault(source_id, []).append(item)
+
+    deterministic: list[dict[str, Any]] = []
+    local: list[dict[str, Any]] = []
+    frontier: list[dict[str, Any]] = []
+    unknown: list[dict[str, Any]] = []
+    terminal: list[dict[str, Any]] = []
+    for row in rows:
+        lane = str(row.get("lane") or "")
+        issue_type = str(row.get("issue_type") or "unknown")
+        deterministic_row = (
+            lane == "monitor"
+            and issue_type == "stale"
+        ) or (
+            lane == "review"
+            and _route_target(issue_type) is not None
+        )
+        classification = _snapshot_row_class(
+            row,
+            items_by_source=items_by_source,
+            now=current,
+        )
+        if deterministic_row:
+            if classification == "terminal":
+                bucket = terminal
+            elif classification in {"leased", "backoff"}:
+                continue
+            else:
+                bucket = deterministic
+        else:
+            if classification == "local":
+                bucket = local
+            elif classification == "frontier":
+                bucket = frontier
+            elif classification == "terminal":
+                bucket = terminal
+            elif classification in {"leased", "backoff"}:
+                continue
+            else:
+                bucket = unknown
+        bucket.append(row)
+
+    selected: list[dict[str, Any]] = []
+    for bucket in (deterministic,):
+        take = min(max_items - len(selected), len(bucket))
+        selected.extend(bucket[:take])
+        if len(selected) >= max_items:
+            return selected
+
+    # Round-robin the model-backed lanes.  This is deliberately independent of
+    # model outcome and therefore cannot turn a reviewer result into a label.
+    buckets = [local, frontier, unknown, terminal]
+    indexes = [0, 0, 0, 0]
+    while len(selected) < max_items:
+        added = False
+        for index, bucket in enumerate(buckets):
+            if indexes[index] >= len(bucket):
+                continue
+            selected.append(bucket[indexes[index]])
+            indexes[index] += 1
+            added = True
+            if len(selected) >= max_items:
+                break
+        if not added:
+            break
+    return selected
+
+
 def run_lint_repair(
     *,
     queue_file: Path | None = None,
@@ -1313,7 +1493,20 @@ def run_lint_repair(
             else 1,
         )
     )
+    queue_seen = len(rows)
     work_limit = max(0, max_items)
+    preselected = False
+    if (
+        eligible_keys is None
+        and queue_seen > max(_PRESELECTION_MIN_QUEUE, work_limit * _PRESELECTION_MULTIPLIER)
+    ):
+        rows = _preselect_rows(
+            rows,
+            store=convergence,
+            max_items=work_limit,
+            now=now,
+        )
+        preselected = True
     work_items = 0
     rows_scanned = 0
     results: list[dict[str, Any]] = []
@@ -1621,11 +1814,12 @@ def run_lint_repair(
     return {
         "status": "dry_run" if dry_run else "ok",
         "queue_file": str(path),
-        "seen": len(rows),
+        "seen": queue_seen,
         "invalid_rows": invalid_rows,
         "bounded": work_items,
         "rows_scanned": rows_scanned,
-        "remaining_unseen": max(0, len(rows) - rows_scanned),
+        "remaining_unseen": max(0, queue_seen - rows_scanned),
+        "preselected": preselected,
         **counts,
         "budget": cycle_budget.snapshot(),
         "results": results,

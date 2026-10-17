@@ -1041,6 +1041,83 @@ def test_max_items_bounds_queue_work(tmp_path: Path, monkeypatch) -> None:
     assert len(store.list_items()) == 2
 
 
+def test_large_queue_preselection_skips_future_retries_and_keeps_pending_due(
+    tmp_path: Path, monkeypatch
+) -> None:
+    rows = [_row(f"bulk-{index}") for index in range(70)]
+    pages = {}
+    for row in rows:
+        page = tmp_path / "pages" / f"{row['page']}.md"
+        _page(page)
+        pages[str(row["page"])] = page
+    queue_path = tmp_path / "review" / "lint-repair-queue.jsonl"
+    _queue(queue_path, rows)
+    monkeypatch.setattr(
+        lint_repair.chronovisor_store,
+        "find_page",
+        lambda page_id: pages.get(page_id),
+    )
+    store = _store(tmp_path)
+    for row in rows:
+        page_text = pages[str(row["page"])].read_text(encoding="utf-8")
+        source_id, input_data = lint_repair._candidate_identity(row, page_text)
+        store.merge_item(
+            lane="lint_repair",
+            source_id=source_id,
+            input_data=input_data,
+            resolver_version=lint_repair.REPAIR_RESOLVER_VERSION,
+            metadata=row,
+            now=NOW,
+        )
+
+    # Leave only the last two rows due.  The first 68 have a real persisted
+    # retry backoff and must not consume this bounded cycle's work slots.
+    for row in rows[:68]:
+        page_text = pages[str(row["page"])].read_text(encoding="utf-8")
+        source_id, input_data = lint_repair._candidate_identity(row, page_text)
+        key = store.merge_item(
+            lane="lint_repair",
+            source_id=source_id,
+            input_data=input_data,
+            resolver_version=lint_repair.REPAIR_RESOLVER_VERSION,
+            metadata=row,
+            now=NOW,
+        )["item"]["key"]
+        claim = store.claim_attempt(key, "local", now=NOW)
+        store.fail_attempt(
+            key,
+            "local",
+            owner=claim["owner"],
+            error="temporary reviewer outage",
+            failure_class="local_model_error",
+            now=NOW,
+        )
+
+    result = lint_repair.run_lint_repair(
+        queue_file=queue_path,
+        store=store,
+        budget=_budget(),
+        max_items=2,
+        local_reviewer=_never,
+        frontier_reviewer=_never,
+        now=NOW + timedelta(seconds=1),
+    )
+
+    assert result["preselected"] is True
+    assert result["seen"] == 70
+    assert result["rows_scanned"] == 2
+    assert result["bounded"] == 2
+    assert result["remaining_unseen"] == 68
+    assert [entry["page"] for entry in result["results"]] == [
+        "bulk-68",
+        "bulk-69",
+    ]
+    assert all(
+        item["status"] == "local_retry"
+        for item in store.list_items(lane="lint_repair")
+    )
+
+
 def test_deterministic_rows_run_before_model_backed_rows(
     tmp_path: Path, monkeypatch
 ) -> None:
