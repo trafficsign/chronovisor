@@ -702,6 +702,10 @@ def test_repeated_item_reads_parse_once_and_notice_other_writers(
 ) -> None:
     store = _store(tmp_path)
     key = _merge(store)["key"]
+    # Start from a cold read cache so this test still exercises the first
+    # parse, then verifies repeated reads reuse it.
+    store._get_items = None
+    store._get_version = None
     load = store._load_unlocked
     calls = []
 
@@ -723,6 +727,45 @@ def test_repeated_item_reads_parse_once_and_notice_other_writers(
         store.get(key)
     store.state_file.unlink()
     assert store.get(key) is None
+
+
+def test_successful_save_refreshes_get_cache_and_failed_save_does_not(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    store = _store(tmp_path)
+    key = _merge(store)["key"]
+    load = store._load_unlocked
+    calls = []
+
+    def counted_load():
+        calls.append(1)
+        return load()
+
+    monkeypatch.setattr(store, "_load_unlocked", counted_load)
+    completed = store.complete(key, "rejected", result={"reason": "synthetic"}, now=NOW)
+    assert completed["item"]["status"] == "rejected"
+    completed["item"]["status"] = "caller_mutation_must_not_leak"
+    assert calls == [1]
+    assert store.get(key)["status"] == "rejected"
+    # The successful save seeded the private read cache, so this read did not
+    # parse the full state a second time.
+    assert calls == [1]
+
+    def failed_save(_state):
+        raise OSError("synthetic save failure")
+
+    monkeypatch.setattr(store, "_save_unlocked", failed_save)
+    with pytest.raises(OSError, match="synthetic save failure"):
+        store.merge_item(
+            lane="test",
+            source_id="item-2",
+            input_data={"value": 2},
+            resolver_version="v1",
+            now=NOW,
+        )
+    # The failed projection never replaced the persisted file or the cache.
+    assert store.get(key)["status"] == "rejected"
+    assert calls == [1, 1]
 
 
 def test_corrupt_state_fails_closed_without_overwrite(tmp_path: Path) -> None:

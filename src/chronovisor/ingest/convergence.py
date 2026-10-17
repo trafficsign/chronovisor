@@ -547,6 +547,26 @@ class ConvergenceStore:
 
     def _save_unlocked(self, state: dict[str, Any]) -> None:
         _atomic_write_json(self.state_file, state)
+        # A successful atomic replacement makes this process's parsed item
+        # view current.  Keep the internal mapping private: ``get`` returns a
+        # defensive copy, while every write transaction still reloads fresh
+        # state under ``_exclusive_lock`` before it projects a transition.
+        try:
+            stat = self.state_file.stat()
+        except OSError:
+            with self._get_lock:
+                self._get_items = None
+                self._get_version = None
+        else:
+            with self._get_lock:
+                self._get_items = state["items"]
+                self._get_version = (
+                    stat.st_dev,
+                    stat.st_ino,
+                    stat.st_size,
+                    stat.st_mtime_ns,
+                    stat.st_ctime_ns,
+                )
 
     def _append_event_unlocked(self, event: dict[str, Any]) -> None:
         self._append_events_unlocked([event])
