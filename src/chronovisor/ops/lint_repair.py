@@ -1469,6 +1469,47 @@ def _preselect_rows(
     return selected
 
 
+def _prepare_queue_rows(
+    path: Path,
+    *,
+    store: ConvergenceStore,
+    max_items: int,
+    eligible_keys: set[str] | None,
+    now: datetime | None,
+) -> tuple[list[dict[str, Any]], int, int, bool]:
+    rows, invalid_rows = _read_jsonl(path)
+    # Clear deterministic observations/routing before spending scarce model
+    # budget on semantic tag repair. The detector emits rows in page order,
+    # so a cluster of tag violations near the head used to make cheap rows
+    # wait behind frontier calls.
+    rows.sort(
+        key=lambda row: (
+            0
+            if (
+                (str(row.get("lane") or "") == "monitor"
+                 and str(row.get("issue_type") or "") == "stale")
+                or (
+                    str(row.get("lane") or "") == "review"
+                    and _route_target(str(row.get("issue_type") or ""))
+                )
+            )
+            else 1,
+        )
+    )
+    queue_seen = len(rows)
+    work_limit = max(0, max_items)
+    preselected = False
+    if queue_seen > max(_PRESELECTION_MIN_QUEUE, work_limit * _PRESELECTION_MULTIPLIER):
+        if eligible_keys is not None:
+            # Convergence-scoped lanes provide an exact allowlist. Filter by
+            # stable queue key before the bounded state snapshot so terminal
+            # detector rows cannot consume work slots reserved for that scope.
+            rows = [row for row in rows if _queue_row_key(row) in eligible_keys]
+        rows = _preselect_rows(rows, store=store, max_items=work_limit, now=now)
+        preselected = True
+    return rows, invalid_rows, queue_seen, preselected
+
+
 def run_lint_repair(
     *,
     queue_file: Path | None = None,
@@ -1493,45 +1534,14 @@ def run_lint_repair(
     local = local_reviewer or _default_local_reviewer
     frontier = frontier_reviewer or _default_frontier_reviewer
     injected_frontier_reviewer = frontier_reviewer is not None
-    rows, invalid_rows = _read_jsonl(path)
-    # Clear deterministic observations/routing before spending scarce model
-    # budget on semantic tag repair.  The detector emits rows in page order,
-    # so a cluster of tag violations near the head used to make hundreds of
-    # cheap monitor/review rows wait behind frontier calls.
-    rows.sort(
-        key=lambda row: (
-            0
-            if (
-                (str(row.get("lane") or "") == "monitor"
-                 and str(row.get("issue_type") or "") == "stale")
-                or (
-                    str(row.get("lane") or "") == "review"
-                    and _route_target(str(row.get("issue_type") or ""))
-                )
-            )
-            else 1,
-        )
+    rows, invalid_rows, queue_seen, preselected = _prepare_queue_rows(
+        path,
+        store=convergence,
+        max_items=max_items,
+        eligible_keys=eligible_keys,
+        now=now,
     )
-    queue_seen = len(rows)
     work_limit = max(0, max_items)
-    preselected = False
-    if (
-        queue_seen > max(_PRESELECTION_MIN_QUEUE, work_limit * _PRESELECTION_MULTIPLIER)
-    ):
-        if eligible_keys is not None:
-            # Convergence-scoped lanes provide an exact allowlist.  Filter
-            # by the stable queue key before the bounded state snapshot so
-            # terminal detector rows cannot consume ``store.get`` calls or
-            # work slots reserved for that scope.  The selected rows still
-            # recompute the key below and fail closed if the page changed.
-            rows = [row for row in rows if _queue_row_key(row) in eligible_keys]
-        rows = _preselect_rows(
-            rows,
-            store=convergence,
-            max_items=work_limit,
-            now=now,
-        )
-        preselected = True
     work_items = 0
     rows_scanned = 0
     results: list[dict[str, Any]] = []
