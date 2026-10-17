@@ -209,7 +209,7 @@ def test_launchd_template_renders_portable_absolute_paths(
         ]
     if plist_name == "com.trafficsign.chronovisor-search-label-drain.plist":
         assert payload["RunAtLoad"] is False
-        assert payload["StartInterval"] == 300
+        assert payload["StartInterval"] == 60
         assert payload["ThrottleInterval"] == 60
         assert payload["LowPriorityIO"] is True
         assert payload["ProcessType"] == "Background"

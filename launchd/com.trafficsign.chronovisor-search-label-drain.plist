@@ -32,7 +32,7 @@
   <false/>
 
   <key>StartInterval</key>
-  <integer>300</integer>
+  <integer>60</integer>
 
   <key>ThrottleInterval</key>
   <integer>60</integer>
