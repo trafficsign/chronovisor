@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import stat
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -148,6 +149,72 @@ def authority_review(lane: str, marker: str = "a", **values) -> dict:
     for vote in review["local_consensus"]["votes"]:
         vote["signature_sha256"] = agreement_sha256
     return review
+
+
+def _recall_candidate_row(
+    content: bytes,
+    *,
+    page_id: str = "page",
+    page_uid: str = "uid",
+    queue_status: str = "pending_review",
+) -> dict:
+    content_sha256 = hashlib.sha256(content).hexdigest()
+    row = {
+        "query": "query",
+        "expected_pages": [page_id],
+        "negative_pages": [],
+        "stale_pages": [],
+        "split": "dev",
+        "language": "en",
+        "kind": "short",
+        "source": "recall_questions",
+        "source_page": page_id,
+        "queue_status": queue_status,
+        "promoted_to_golden": False,
+        "preregistered_at": "2026-10-17T00:00:00Z",
+        "page_uid": page_uid,
+        "content_sha256": content_sha256,
+        "content_byte_length": len(content),
+        "projection_policy_sha256": search_eval.RQ_PROJECTION_POLICY_SHA256,
+        "split_role": "search_eval_only_not_answer_benchmark",
+    }
+    identity = {
+        "query": row["query"],
+        "expected_pages": row["expected_pages"],
+        "source": row["source"],
+        "page_uid": row["page_uid"],
+        "content_sha256": row["content_sha256"],
+        "content_byte_length": row["content_byte_length"],
+        "projection_policy_sha256": row["projection_policy_sha256"],
+        "search_eval_split": row["split"],
+    }
+    row["candidate_sha256"] = search_eval._canonical_json_sha256(identity)
+    return row
+
+
+def _patch_label_source(
+    monkeypatch: pytest.MonkeyPatch,
+    source_path: Path | None,
+    *,
+    page_uid: str = "uid",
+) -> None:
+    monkeypatch.setattr(
+        search_eval,
+        "find_page",
+        lambda _page_id: source_path,
+    )
+    monkeypatch.setattr(
+        search_eval._search_label_contract,
+        "find_page",
+        lambda _page_id: source_path,
+    )
+    from chronovisor.recall import recall_runtime
+
+    monkeypatch.setattr(
+        recall_runtime,
+        "page_uid_for_id",
+        lambda _page_id: page_uid,
+    )
 
 
 def label_artifact(row: dict, review: dict) -> dict:
@@ -977,6 +1044,186 @@ def test_frontier_review_balances_frontier_and_pending_evaluation_rows(tmp_path)
     assert "last_attempt_lane" not in stored[1]
     assert stored[2]["last_attempt_lane"] == "review"
     assert "last_attempt_lane" not in stored[3]
+
+
+def test_stale_source_reconciliation_preserves_candidate_history_and_golden(
+    tmp_path, monkeypatch
+) -> None:
+    source_path = tmp_path / "page.md"
+    old_content = b"---\nstatus: stable\n---\nold\n"
+    source_path.write_bytes(old_content)
+    row = _recall_candidate_row(old_content)
+    row["frontier_attempts"] = 2
+    source_path.write_bytes(b"---\nstatus: stable\n---\nnew\n")
+    _patch_label_source(monkeypatch, source_path)
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    write_jsonl(queue_file, [row])
+    golden_file.write_text("", encoding="utf-8")
+
+    result = search_eval.reconcile_stale_label_queue(
+        queue_file=queue_file,
+        limit=1,
+        now=datetime(2026, 10, 17, 12, 0, 0),
+    )
+
+    stored = search_eval.read_jsonl(queue_file)[0]
+    assert result["reconciled"] == 1
+    assert stored["queue_status"] == search_eval.SOURCE_STALE_STATUS
+    assert stored["promoted_to_golden"] is False
+    assert stored["reviewed"] is False
+    assert stored["frontier_attempts"] == 2
+    assert stored["candidate_sha256"] == row["candidate_sha256"]
+    assert "last_attempt_lane" not in stored
+    assert stored["source_stale_metadata"]["reason"] == "source_content_sha256_mismatch"
+    assert stored["source_stale_metadata"]["current_content_sha256"] == hashlib.sha256(
+        source_path.read_bytes()
+    ).hexdigest()
+    assert golden_file.read_bytes() == b""
+
+
+def test_stale_source_reconciliation_handles_nonstable_and_retry_rows(
+    tmp_path, monkeypatch
+) -> None:
+    source_path = tmp_path / "page.md"
+    old_content = b"---\nstatus: stable\n---\nold\n"
+    source_path.write_bytes(old_content)
+    row = _recall_candidate_row(old_content, queue_status="frontier_retry")
+    row["frontier_attempts"] = 2
+    row["next_attempt_at"] = "2099-01-01T00:00:00"
+    source_path.write_bytes(b"---\nstatus: deprecated\n---\nold\n")
+    _patch_label_source(monkeypatch, source_path)
+    queue_file = tmp_path / "label-queue.jsonl"
+    write_jsonl(queue_file, [row])
+
+    result = search_eval.reconcile_stale_label_queue(queue_file=queue_file, limit=1)
+
+    stored = search_eval.read_jsonl(queue_file)[0]
+    assert result["reconciled"] == 1
+    assert stored["queue_status"] == search_eval.SOURCE_STALE_STATUS
+    assert stored["frontier_attempts"] == 2
+    assert "next_attempt_at" not in stored
+    assert stored["source_stale_metadata"]["reason"] == "source_page_not_stable"
+
+
+def test_stale_source_reconciliation_refuses_malformed_missing_or_judged_rows(
+    tmp_path, monkeypatch
+) -> None:
+    source_path = tmp_path / "page.md"
+    old_content = b"---\nstatus: stable\n---\nold\n"
+    source_path.write_bytes(old_content)
+    malformed = _recall_candidate_row(old_content)
+    malformed["candidate_sha256"] = "bad"
+    judged = _recall_candidate_row(old_content)
+    judged["queue_status"] = "frontier_approved"
+    source_path.write_bytes(b"---\nstatus: stable\n---\nnew\n")
+    _patch_label_source(monkeypatch, source_path)
+    queue_file = tmp_path / "label-queue.jsonl"
+    write_jsonl(queue_file, [malformed, judged])
+
+    result = search_eval.reconcile_stale_label_queue(queue_file=queue_file, limit=10)
+
+    stored = search_eval.read_jsonl(queue_file)
+    assert result["reconciled"] == 0
+    assert stored == [malformed, judged]
+    _patch_label_source(monkeypatch, None)
+    missing_file = tmp_path / "missing-queue.jsonl"
+    valid = _recall_candidate_row(old_content)
+    write_jsonl(missing_file, [valid])
+    missing_result = search_eval.reconcile_stale_label_queue(
+        queue_file=missing_file, limit=1
+    )
+    assert missing_result["reconciled"] == 0
+    assert search_eval.read_jsonl(missing_file) == [valid]
+
+
+def test_stale_source_reconciliation_dry_run_and_source_race_are_read_only(
+    tmp_path, monkeypatch
+) -> None:
+    source_path = tmp_path / "page.md"
+    old_content = b"---\nstatus: stable\n---\nold\n"
+    new_content = b"---\nstatus: stable\n---\nnew\n"
+    source_path.write_bytes(old_content)
+    row = _recall_candidate_row(old_content)
+    source_path.write_bytes(new_content)
+    _patch_label_source(monkeypatch, source_path)
+    queue_file = tmp_path / "label-queue.jsonl"
+    write_jsonl(queue_file, [row])
+    before = queue_file.read_bytes()
+
+    dry_run = search_eval.reconcile_stale_label_queue(
+        queue_file=queue_file, limit=1, dry_run=True
+    )
+    assert dry_run["would_reconcile"] == 1
+    assert dry_run["reconciled"] == 0
+    assert queue_file.read_bytes() == before
+
+    real_snapshot = search_eval._candidate_source_stale_metadata
+    calls = 0
+
+    def source_race(current_row, *, checked_at):
+        nonlocal calls
+        calls += 1
+        result = real_snapshot(current_row, checked_at=checked_at)
+        if calls == 1:
+            source_path.write_bytes(old_content)
+        return result
+
+    monkeypatch.setattr(search_eval, "_candidate_source_stale_metadata", source_race)
+    raced = search_eval.reconcile_stale_label_queue(queue_file=queue_file, limit=1)
+    assert raced["reconciled"] == 0
+    assert search_eval.read_jsonl(queue_file) == [row]
+
+
+def test_frontier_review_reconciles_stale_rows_before_model_budget(
+    tmp_path, monkeypatch
+) -> None:
+    source_path = tmp_path / "page.md"
+    old_content = b"---\nstatus: stable\n---\nold\n"
+    source_path.write_bytes(old_content)
+    stale = _recall_candidate_row(old_content)
+    source_path.write_bytes(b"---\nstatus: stable\n---\nnew\n")
+    _patch_label_source(monkeypatch, source_path)
+    active = {
+        "query": "active",
+        "expected_pages": ["target"],
+        "negative_pages": [],
+        "stale_pages": [],
+        "queue_status": "pending_frontier_review",
+        "promoted_to_golden": False,
+    }
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    write_jsonl(queue_file, [stale, active])
+    golden_file.write_text("", encoding="utf-8")
+    reviewed: list[str] = []
+
+    def reviewer(row):
+        reviewed.append(row["query"])
+        return {
+            "decision": "rejected",
+            "confidence": 0.9,
+            "expected_pages": [],
+            "negative_pages": row["expected_pages"],
+            "stale_pages": [],
+            "summary": "safe",
+            "notes": None,
+        }
+
+    result = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        limit=1,
+        stale_limit=1,
+        reviewer=reviewer,
+    )
+
+    stored = search_eval.read_jsonl(queue_file)
+    assert result["source_stale_reconciled"] == 1
+    assert result["attempted"] == 1
+    assert reviewed == ["active"]
+    assert stored[0]["queue_status"] == search_eval.SOURCE_STALE_STATUS
+    assert stored[1]["queue_status"] == "frontier_rejected"
 
 
 def test_frontier_review_budget_keeps_alternating_selection_order(tmp_path) -> None:

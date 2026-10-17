@@ -136,11 +136,14 @@ FRONTIER_PENDING_STATUSES = {
     "frontier_uncertain",
 }
 
+SOURCE_STALE_STATUS = "source_stale"
+_AUTO_CANDIDATE_SOURCES = frozenset({"recall_questions", "auto", "generated"})
 FRONTIER_TERMINAL_STATUSES = {
     "frontier_approved",
     "frontier_rejected",
     "frontier_quarantined",
     "human_required",
+    SOURCE_STALE_STATUS,
 }
 DEFAULT_QUARANTINE_RETRY_SECONDS = 6 * 60 * 60
 SEARCH_LABEL_PROMPT_POLICY_VERSION = (
@@ -1332,6 +1335,7 @@ def build_label_queue(
                         "next_attempt_at",
                         "reviewed",
                         "reviewed_at",
+                        "source_stale_metadata",
                     }
                 },
             }
@@ -1343,6 +1347,7 @@ def build_label_queue(
         row
         for row in rows
         if str(row.get("queue_status") or "") in FRONTIER_TERMINAL_STATUSES
+        and row.get("queue_status") != SOURCE_STALE_STATUS
         and not (
             isinstance(row.get("authority_recovery"), Mapping)
             and row["authority_recovery"].get("kind") == ALREADY_APPLIED_RECOVERY
@@ -1385,6 +1390,7 @@ def build_label_queue(
                         for row in existing_rows
                         if str(row.get("queue_status") or "")
                         in FRONTIER_TERMINAL_STATUSES
+                        and row.get("queue_status") != SOURCE_STALE_STATUS
                     ),
                     "preserved": len(existing_rows),
                     "dry_run": False,
@@ -1405,6 +1411,7 @@ def build_label_queue(
                         for row in existing_rows
                         if str(row.get("queue_status") or "")
                         in FRONTIER_TERMINAL_STATUSES
+                        and row.get("queue_status") != SOURCE_STALE_STATUS
                     ),
                     "preserved": len(existing_rows),
                     "dry_run": False,
@@ -1413,6 +1420,7 @@ def build_label_queue(
                 row
                 for row in rows
                 if str(row.get("queue_status") or "") in FRONTIER_TERMINAL_STATUSES
+                and row.get("queue_status") != SOURCE_STALE_STATUS
                 and not (
                     isinstance(row.get("authority_recovery"), Mapping)
                     and row["authority_recovery"].get("kind")
@@ -1448,6 +1456,7 @@ def build_label_queue(
             1
             for row in rows
             if str(row.get("queue_status") or "") in FRONTIER_TERMINAL_STATUSES
+            and row.get("queue_status") != SOURCE_STALE_STATUS
         ),
         "preserved": len(existing_rows),
         "dry_run": dry_run,
@@ -1733,6 +1742,339 @@ def _last_attempt_lane_for_status(status: str) -> str:
     return "review" if status == "pending_review" else "frontier"
 
 
+def _candidate_preregistration_shape_is_valid(row: Mapping[str, Any]) -> bool:
+    """Reject malformed candidate evidence before classifying source staleness."""
+
+    source = str(row.get("source") or "")
+    if source not in _AUTO_CANDIDATE_SOURCES:
+        return False
+    query = str(row.get("query") or "")
+    source_page = str(row.get("source_page") or "")
+    raw_expected = row.get("expected_pages")
+    expected = _str_list(raw_expected)
+    if (
+        not query
+        or not source_page
+        or not isinstance(raw_expected, list)
+        or raw_expected != [source_page]
+        or expected != [source_page]
+    ):
+        return False
+    content_sha = row.get("content_sha256")
+    if (
+        not isinstance(content_sha, str)
+        or len(content_sha) != 64
+        or any(character not in "0123456789abcdef" for character in content_sha)
+    ):
+        return False
+    content_length = row.get("content_byte_length")
+    if (
+        isinstance(content_length, bool)
+        or not isinstance(content_length, int)
+        or content_length <= 0
+    ):
+        return False
+    page_uid = row.get("page_uid")
+    if not isinstance(page_uid, str) or not page_uid:
+        return False
+    if row.get("projection_policy_sha256") != RQ_PROJECTION_POLICY_SHA256:
+        return False
+    if row.get("split_role") != "search_eval_only_not_answer_benchmark":
+        return False
+    try:
+        preregistered = datetime.fromisoformat(
+            str(row.get("preregistered_at") or "").replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return False
+    if preregistered.tzinfo is None or preregistered.utcoffset() is None:
+        return False
+    identity = {
+        "query": query,
+        "expected_pages": expected,
+        "source": source,
+        "page_uid": page_uid,
+        "content_sha256": content_sha,
+        "content_byte_length": content_length,
+        "projection_policy_sha256": str(row.get("projection_policy_sha256") or ""),
+        "search_eval_split": str(row.get("split") or ""),
+    }
+    try:
+        candidate_sha = _canonical_json_sha256(identity)
+    except (TypeError, ValueError):
+        return False
+    return row.get("candidate_sha256") == candidate_sha
+
+
+def _current_label_source_snapshot(page_id: str) -> dict[str, Any] | None:
+    """Read one source page and return only bounded identity metadata."""
+
+    path = find_page(page_id)
+    if path is None:
+        return None
+    try:
+        content = path.read_bytes()
+        stat = path.stat()
+    except OSError:
+        return None
+    if not content:
+        return None
+    header, separator, _body = content.partition(b"---\n")
+    if header or not separator:
+        return None
+    frontmatter_bytes, separator, _body = _body.partition(b"---\n")
+    if not separator:
+        return None
+    status = None
+    page_uid = ""
+    for line in frontmatter_bytes.splitlines():
+        key, separator, value = line.partition(b":")
+        if not separator:
+            continue
+        try:
+            text_value = value.strip().strip(b"'\"").decode("ascii")
+        except UnicodeDecodeError:
+            return None
+        if key.strip() == b"status":
+            status = text_value
+        elif key.strip() == b"uid":
+            page_uid = text_value
+    if status not in {"draft", "stable", "deprecated"}:
+        return None
+    return {
+        "current_content_sha256": hashlib.sha256(content).hexdigest(),
+        "current_content_byte_length": len(content),
+        "current_page_uid": page_uid,
+        "current_page_status": str(status),
+        "current_source_mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _candidate_source_stale_metadata(
+    row: Mapping[str, Any], *, checked_at: str
+) -> dict[str, Any] | None:
+    """Return a durable stale-source receipt only for a confirmed mismatch."""
+
+    status = str(row.get("queue_status") or "")
+    if (
+        status not in FRONTIER_PENDING_STATUSES
+        or bool(row.get("promoted_to_golden"))
+        or not _candidate_preregistration_shape_is_valid(row)
+    ):
+        return None
+    try:
+        validator_error = auto_candidate_preregistration_error(row)
+    except Exception:
+        return None
+    if not isinstance(validator_error, str):
+        return None
+    source_page = str(row.get("source_page") or "")
+    current = _current_label_source_snapshot(source_page)
+    if current is None:
+        return None
+    current_status = str(current["current_page_status"])
+    if current_status != "stable":
+        reason = "source_page_not_stable"
+    else:
+        mismatches: list[str] = []
+        if current["current_content_sha256"] != str(row.get("content_sha256") or ""):
+            mismatches.append("content_sha256")
+        if current["current_content_byte_length"] != row.get("content_byte_length"):
+            mismatches.append("content_byte_length")
+        current_uid = str(current.get("current_page_uid") or "")
+        if current_uid and current_uid != str(row.get("page_uid") or ""):
+            mismatches.append("page_uid")
+        if not mismatches:
+            return None
+        reason = "source_" + "_and_".join(mismatches) + "_mismatch"
+    return {
+        "reason": reason,
+        "checked_at": checked_at,
+        **current,
+    }
+
+
+def _source_stale_row(
+    row: Mapping[str, Any], metadata: Mapping[str, Any]
+) -> dict[str, Any]:
+    updated = dict(row)
+    updated["queue_status"] = SOURCE_STALE_STATUS
+    updated["promoted_to_golden"] = False
+    updated["reviewed"] = False
+    updated["source_stale_metadata"] = dict(metadata)
+    updated.pop("next_attempt_at", None)
+    return updated
+
+
+def _authority_retry_row(
+    row: Mapping[str, Any],
+    error: str,
+    *,
+    reviewed_at: str,
+    preserve_attempts: bool = True,
+) -> dict[str, Any]:
+    updated = dict(row)
+    updated["queue_status"] = "frontier_retry"
+    updated["promoted_to_golden"] = False
+    updated["decision_authority_error"] = error
+    updated["last_authority_error_at"] = reviewed_at
+    updated.pop("decision_artifact", None)
+    updated.pop("next_attempt_at", None)
+    if not preserve_attempts:
+        updated["frontier_attempts"] = 0
+    return updated
+
+
+def reconcile_stale_label_queue(
+    *,
+    queue_file: Path = LABEL_QUEUE_FILE,
+    limit: int = 100,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Retire only confirmed stale source candidates under the queue CAS path."""
+
+    try:
+        queue_preimage = queue_file.read_bytes()
+    except FileNotFoundError:
+        queue_preimage = None
+    rows = read_jsonl(queue_file)
+    checked_at = (now or datetime.now()).isoformat(timespec="seconds")
+    max_items = max(0, int(limit))
+    checked = 0
+    candidates: dict[int, dict[str, Any]] = {}
+    for index, row in enumerate(rows):
+        if checked >= max_items:
+            break
+        if (
+            str(row.get("queue_status") or "") not in FRONTIER_PENDING_STATUSES
+            or bool(row.get("promoted_to_golden"))
+            or str(row.get("source") or "") not in _AUTO_CANDIDATE_SOURCES
+        ):
+            continue
+        checked += 1
+        metadata = _candidate_source_stale_metadata(row, checked_at=checked_at)
+        if metadata is not None:
+            candidates[index] = metadata
+    if dry_run or not candidates:
+        return {
+            "status": "ok",
+            "queue_file": str(queue_file),
+            "checked": checked,
+            "matched": len(candidates),
+            "reconciled": 0,
+            "would_reconcile": len(candidates) if dry_run else 0,
+            "dry_run": dry_run,
+        }
+    with _search_label_queue_lock(queue_file):
+        try:
+            current_preimage = queue_file.read_bytes()
+        except FileNotFoundError:
+            current_preimage = None
+        if current_preimage != queue_preimage:
+            return {
+                "status": "concurrent_update_deferred",
+                "reason": "search label queue changed before stale reconciliation",
+                "queue_file": str(queue_file),
+                "checked": checked,
+                "matched": len(candidates),
+                "reconciled": 0,
+                "would_reconcile": len(candidates),
+                "dry_run": False,
+            }
+        latest_rows = read_jsonl(queue_file)
+        updated_rows = list(latest_rows)
+        reconciled = 0
+        for index in candidates:
+            if index >= len(latest_rows):
+                continue
+            metadata = _candidate_source_stale_metadata(
+                latest_rows[index], checked_at=checked_at
+            )
+            if metadata is None:
+                continue
+            updated_rows[index] = _source_stale_row(latest_rows[index], metadata)
+            reconciled += 1
+        if updated_rows != latest_rows:
+            write_jsonl(queue_file, updated_rows)
+    return {
+        "status": "ok",
+        "queue_file": str(queue_file),
+        "checked": checked,
+        "matched": len(candidates),
+        "reconciled": reconciled,
+        "would_reconcile": 0,
+        "dry_run": False,
+    }
+
+
+def _optional_file_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _load_label_review_snapshot(
+    queue_file: Path,
+    golden_file: Path,
+    *,
+    stale_limit: int,
+    dry_run: bool,
+    now: datetime | None,
+) -> tuple[
+    datetime,
+    dict[str, Any],
+    bytes | None,
+    bytes | None,
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    set[tuple[Any, ...]],
+]:
+    current_time = now or datetime.now()
+    stale_reconciliation = reconcile_stale_label_queue(
+        queue_file=queue_file,
+        limit=stale_limit,
+        dry_run=dry_run,
+        now=current_time,
+    )
+    queue_preimage = _optional_file_bytes(queue_file)
+    golden_preimage = _optional_file_bytes(golden_file)
+    rows = read_jsonl(queue_file)
+    original_rows = json.loads(json.dumps(rows, ensure_ascii=False, default=str))
+    golden_rows = read_jsonl(golden_file)
+    golden_keys = {_golden_key(row) for row in golden_rows}
+    return (
+        current_time,
+        stale_reconciliation,
+        queue_preimage,
+        golden_preimage,
+        rows,
+        original_rows,
+        golden_rows,
+        golden_keys,
+    )
+
+
+def _label_artifact_error_for_review(
+    artifact: object,
+    *,
+    current_authority: object | None = None,
+    evidence: Mapping[str, Any] | None = None,
+) -> str | None:
+    return _label_review_artifact_error(
+        artifact,
+        evidence=evidence,
+        current_authority=current_authority,
+    )
+
+
+def _artifact_review_value(artifact: object) -> dict[str, Any] | None:
+    review_value = artifact.get("review") if isinstance(artifact, Mapping) else None
+    return dict(review_value) if isinstance(review_value, Mapping) else None
+
+
 def _select_label_review_indices(
     rows: list[dict[str, Any]],
     *,
@@ -1804,24 +2146,31 @@ def review_label_queue_with_frontier(
     now: datetime | None = None,
     budget: Any | None = None,
     review_order: str = "balanced",
+    stale_limit: int = 100,
 ) -> dict[str, Any]:
-    def optional_bytes(path: Path) -> bytes | None:
-        try:
-            return path.read_bytes()
-        except FileNotFoundError:
-            return None
-
-    queue_preimage = optional_bytes(queue_file)
-    golden_preimage = optional_bytes(golden_file)
-    rows = read_jsonl(queue_file)
-    original_rows = json.loads(json.dumps(rows, ensure_ascii=False, default=str))
-    golden_rows = read_jsonl(golden_file)
-    golden_keys = {_golden_key(row) for row in golden_rows}
-    current_time = now or datetime.now()
+    (
+        current_time,
+        stale_reconciliation,
+        queue_preimage,
+        golden_preimage,
+        rows,
+        original_rows,
+        golden_rows,
+        golden_keys,
+    ) = _load_label_review_snapshot(
+        queue_file,
+        golden_file,
+        stale_limit=stale_limit,
+        dry_run=dry_run,
+        now=now,
+    )
     reviewed_at = current_time.isoformat(timespec="seconds")
     attempted = 0
     promoted = 0
     status_counts: dict[str, int] = {}
+    stale_reconciled = int(stale_reconciliation.get("reconciled") or 0)
+    if stale_reconciled:
+        status_counts[SOURCE_STALE_STATUS] = stale_reconciled
     updated_rows: list[dict[str, Any]] = []
     max_votes = max(1, votes)
     attempts_cap = max(1, max_attempts)
@@ -1833,36 +2182,6 @@ def review_label_queue_with_frontier(
     )
     effect_rows: dict[int, dict[str, Any]] = {}
     staged_golden: list[tuple[int, dict[str, Any], bool]] = []
-
-    def authority_retry(
-        row: dict[str, Any], error: str, *, preserve_attempts: bool = True
-    ) -> dict[str, Any]:
-        updated = dict(row)
-        updated["queue_status"] = "frontier_retry"
-        updated["promoted_to_golden"] = False
-        updated["decision_authority_error"] = error
-        updated["last_authority_error_at"] = reviewed_at
-        updated.pop("decision_artifact", None)
-        updated.pop("next_attempt_at", None)
-        if not preserve_attempts:
-            updated["frontier_attempts"] = 0
-        return updated
-
-    def label_artifact_error(
-        artifact: object,
-        *,
-        current_authority: object | None = None,
-        evidence: Mapping[str, Any] | None = None,
-    ) -> str | None:
-        return _label_review_artifact_error(
-            artifact,
-            evidence=evidence,
-            current_authority=current_authority,
-        )
-
-    def artifact_review(artifact: object) -> dict[str, Any] | None:
-        review_value = artifact.get("review") if isinstance(artifact, Mapping) else None
-        return dict(review_value) if isinstance(review_value, Mapping) else None
 
     semantic_rows = [row for row in rows if _has_semantic_no_quorum_marker(row)]
     semantic_authority: dict[str, Any] | None = None
@@ -1993,6 +2312,7 @@ def review_label_queue_with_frontier(
         index
         for index, row in enumerate(rows)
         if str(row.get("queue_status") or "") in FRONTIER_TERMINAL_STATUSES
+        and row.get("queue_status") != SOURCE_STALE_STATUS
         and row.get("queue_status") != "frontier_approved"
         and not _has_semantic_no_quorum_marker(row)
         and not (
@@ -2011,13 +2331,15 @@ def review_label_queue_with_frontier(
         for row_index in stale_terminal_indices:
             row = rows[row_index]
             artifact = row.get("decision_artifact")
-            authority_error = terminal_authority_error or label_artifact_error(
+            authority_error = terminal_authority_error or _label_artifact_error_for_review(
                 artifact,
                 current_authority=terminal_authority,
                 evidence=_label_candidate_payload(row),
             )
             if authority_error is not None:
-                rows[row_index] = authority_retry(row, authority_error)
+                rows[row_index] = _authority_retry_row(
+                    row, authority_error, reviewed_at=reviewed_at
+                )
 
     # Golden-first recovery is bookkeeping only: the exact semantic postimage
     # is already durable. It may therefore acknowledge a queue row even after
@@ -2029,12 +2351,12 @@ def review_label_queue_with_frontier(
         if golden_row.get("reviewed") is not True:
             continue
         artifact = golden_row.get("decision_artifact")
-        review_value = artifact_review(artifact)
+        review_value = _artifact_review_value(artifact)
         evidence = artifact.get("evidence") if isinstance(artifact, Mapping) else None
         if (
             review_value is None
             or review_value.get("decision") != "approved"
-            or label_artifact_error(artifact) is not None
+            or _label_artifact_error_for_review(artifact) is not None
             or not isinstance(evidence, Mapping)
             or str(evidence.get("query") or "") != str(golden_row.get("query") or "")
             or _label_tuple_from_review(review_value)
@@ -2066,7 +2388,7 @@ def review_label_queue_with_frontier(
         if golden_match is None:
             continue
         artifact = golden_match.get("decision_artifact")
-        review = artifact_review(artifact)
+        review = _artifact_review_value(artifact)
         evidence = artifact.get("evidence") if isinstance(artifact, Mapping) else None
         if (
             review is None
@@ -2107,18 +2429,22 @@ def review_label_queue_with_frontier(
         ):
             continue
         artifact = row.get("decision_artifact")
-        review = artifact_review(artifact) or row.get("frontier_review")
+        review = _artifact_review_value(artifact) or row.get("frontier_review")
         if not isinstance(review, dict):
-            rows[row_index] = authority_retry(
-                row, "approved queue row has no sealed semantic verdict"
+            rows[row_index] = _authority_retry_row(
+                row,
+                "approved queue row has no sealed semantic verdict",
+                reviewed_at=reviewed_at,
             )
             continue
         if (
             _queue_status_for_review(review, min_confidence=min_confidence)
             != "frontier_approved"
         ):
-            rows[row_index] = authority_retry(
-                row, "approved queue row has no approved semantic verdict"
+            rows[row_index] = _authority_retry_row(
+                row,
+                "approved queue row has no approved semantic verdict",
+                reviewed_at=reviewed_at,
             )
             continue
         with decision_authority_lock():
@@ -2128,13 +2454,15 @@ def review_label_queue_with_frontier(
                     injected_reviewer=injected_reviewer,
                 )
             )
-        authority_error = current_error or label_artifact_error(
+        authority_error = current_error or _label_artifact_error_for_review(
             artifact,
             current_authority=current_authority,
             evidence=_label_candidate_payload(row),
         )
         if authority_error is not None:
-            rows[row_index] = authority_retry(row, authority_error)
+            rows[row_index] = _authority_retry_row(
+                row, authority_error, reviewed_at=reviewed_at
+            )
             continue
         golden_row = _golden_row_from_review(
             row,
@@ -2176,6 +2504,8 @@ def review_label_queue_with_frontier(
                 "dry_run": False,
                 "budget_exhausted": True,
                 "recovered": 0,
+                "status_counts": dict(sorted(status_counts.items())),
+                "source_stale_reconciled": stale_reconciled,
             }
         mutation_reserved = True
     def retry_due(row: dict[str, Any]) -> bool:
@@ -2238,8 +2568,10 @@ def review_label_queue_with_frontier(
                 injected_reviewer=injected_reviewer,
             )
         if authority_error is not None or authority is None:
-            updated_rows[row_index] = authority_retry(
-                attempt_row, authority_error or "search label authority unavailable"
+            updated_rows[row_index] = _authority_retry_row(
+                attempt_row,
+                authority_error or "search label authority unavailable",
+                reviewed_at=reviewed_at,
             )
             continue
         reviews: list[dict[str, Any]] = []
@@ -2302,9 +2634,10 @@ def review_label_queue_with_frontier(
                 hold_error = str(exc)
             attempted += 1
             if hold is None:
-                updated_rows[row_index] = authority_retry(
+                updated_rows[row_index] = _authority_retry_row(
                     attempt_row,
                     hold_error or "search label semantic hold authority invalid",
+                    reviewed_at=reviewed_at,
                 )
                 status_counts["frontier_retry"] = (
                     status_counts.get("frontier_retry", 0) + 1
@@ -2367,8 +2700,10 @@ def review_label_queue_with_frontier(
             )
         if authority_error is not None or decision_artifact is None:
             attempted += 1
-            updated_rows[row_index] = authority_retry(
-                attempt_row, authority_error or "search label verdict authority invalid"
+            updated_rows[row_index] = _authority_retry_row(
+                attempt_row,
+                authority_error or "search label verdict authority invalid",
+                reviewed_at=reviewed_at,
             )
             status_counts["frontier_retry"] = status_counts.get("frontier_retry", 0) + 1
             continue
@@ -2437,8 +2772,8 @@ def review_label_queue_with_frontier(
         # model returned is reopened and cannot mutate either durable file.
         with decision_authority_lock(), _search_label_queue_lock(queue_file):
             if (
-                optional_bytes(queue_file) != queue_preimage
-                or optional_bytes(golden_file) != golden_preimage
+                _optional_file_bytes(queue_file) != queue_preimage
+                or _optional_file_bytes(golden_file) != golden_preimage
             ):
                 commit_error = "search label files changed before effect"
             current_authority: dict[str, Any] | None = None
@@ -2455,7 +2790,7 @@ def review_label_queue_with_frontier(
                 error = (
                     commit_error
                     or current_error
-                    or label_artifact_error(
+                    or _label_artifact_error_for_review(
                         effect["artifact"],
                         current_authority=current_authority,
                         evidence=effect["evidence"],
@@ -2476,8 +2811,8 @@ def review_label_queue_with_frontier(
                     for staged_index, _golden_row, new_promotion in staged_golden
                     if staged_index == row_index and not new_promotion
                 )
-                updated_rows[row_index] = authority_retry(
-                    updated_rows[row_index], error
+                updated_rows[row_index] = _authority_retry_row(
+                    updated_rows[row_index], error, reviewed_at=reviewed_at
                 )
                 status_counts["frontier_retry"] = (
                     status_counts.get("frontier_retry", 0) + 1
@@ -2514,6 +2849,11 @@ def review_label_queue_with_frontier(
         "budget_exhausted": budget_exhausted,
         "recovered": 0 if commit_error else recovered_queue + recovered_golden,
         "review_order": review_order,
+        "source_stale_reconciled": stale_reconciled,
+        "source_stale_checked": int(stale_reconciliation.get("checked") or 0),
+        "source_stale_would_reconcile": int(
+            stale_reconciliation.get("would_reconcile") or 0
+        ),
         "reason": commit_error or "",
     }
 
