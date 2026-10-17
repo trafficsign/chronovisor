@@ -336,8 +336,10 @@ def _build(root: Path, *, deadline: float | None = None) -> Projection:
         if (before != _source_state(root, contracts) or not labels.current() or not receipts.current()):
             connection.rollback()
             raise MaterializationSourceChanged("materialization source changed during synchronization")
-        _require_budget(deadline)
+        # A validated transaction must be sealed before a budget defer. Rolling
+        # back spilled SQLite pages can invalidate the previous file checkpoint.
         _save(connection, path, metadata)
+        _require_budget(deadline)
         while True:
             ids = [str(row[0]) for row in connection.execute(
                 "SELECT DISTINCT rally_id FROM rows WHERE dirty=1 ORDER BY rally_id LIMIT 100"
@@ -352,8 +354,8 @@ def _build(root: Path, *, deadline: float | None = None) -> Projection:
                     or not labels.current() or not receipts.current()):
                 connection.rollback()
                 raise MaterializationSourceChanged("materialization source changed during join")
-            _require_budget(deadline)
             _save(connection, path, metadata)
+            _require_budget(deadline)
         if before != _source_state(root, metadata["contracts"]):
             raise MaterializationSourceChanged("materialization source changed during completion")
     return Projection(root, metadata, before)

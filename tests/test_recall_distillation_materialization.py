@@ -977,10 +977,11 @@ def test_budget_exhaustion_seals_completed_batch_before_defer(
     assert saved["metadata"]
     assert saved["file_state"] == ledger.file_state(projection)
 
+    resume_start = len(calls)
     monkeypatch.setattr(materialization.time, "monotonic", real_monotonic)
     resumed = materialization._build(tmp_path)
     resumed.close()
-    assert calls[-1] == {"rally-100"}
+    assert calls[resume_start:] == [{"rally-100"}]
 
 
 def test_budget_exhaustion_seals_synced_inputs_before_defer(
@@ -1026,10 +1027,11 @@ def test_budget_exhaustion_seals_synced_inputs_before_defer(
     assert saved["metadata"]
     assert saved["file_state"] == ledger.file_state(projection)
 
+    resume_start = len(calls)
     monkeypatch.setattr(materialization.time, "monotonic", real_monotonic)
     resumed = materialization._build(tmp_path)
     resumed.close()
-    assert calls[-2:] == [{f"rally-{index:03d}" for index in range(100)}, {"rally-100"}]
+    assert calls[resume_start:] == [{f"rally-{index:03d}" for index in range(100)}, {"rally-100"}]
 
 
 def test_validated_sources_route_uses_canonical_materialization(
