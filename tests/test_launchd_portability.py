@@ -80,7 +80,9 @@ def _git_commit(repo: Path, message: str) -> None:
     )
 
 
-def _search_label_wrapper_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, str], Path]:
+def _search_label_wrapper_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, dict[str, str], Path]:
     repo = tmp_path / "repo"
     scripts = repo / "scripts"
     source = repo / "src" / "chronovisor"
@@ -91,7 +93,9 @@ def _search_label_wrapper_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str,
     shutil.copy2(ROOT / "scripts" / "search_label_drain.py", scripts)
     (source / "__init__.py").write_text("", encoding="utf-8")
     (source / "core.py").write_text("fixture = True\n", encoding="utf-8")
-    (repo / "pyproject.toml").write_text("[project]\nname = 'fixture'\n", encoding="utf-8")
+    (repo / "pyproject.toml").write_text(
+        "[project]\nname = 'fixture'\n", encoding="utf-8"
+    )
     (repo / "uv.lock").write_text("version = 1\n", encoding="utf-8")
     _git(repo, "init", "-q")
     _git(repo, "add", ".")
@@ -107,7 +111,7 @@ def _search_label_wrapper_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str,
     uvx = tmp_path / "uvx"
     uvx.write_text(
         "#!/bin/sh\n"
-        'printf \'called\' > "$UVX_MARKER"\n'
+        "printf 'called' > \"$UVX_MARKER\"\n"
         "printf '%s\\n' '{\"status\":\"stubbed\"}'\n",
         encoding="utf-8",
     )
@@ -324,7 +328,9 @@ def test_search_label_drain_wrapper_source_pin_gate(
         )
     elif scenario == "scripts_commit":
         script = repo / "scripts" / "search_label_drain.py"
-        script.write_text(script.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
+        script.write_text(
+            script.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8"
+        )
         _git(repo, "add", "scripts/search_label_drain.py")
         _git_commit(repo, "script change")
     elif scenario == "pyproject_commit":
@@ -337,11 +343,15 @@ def test_search_label_drain_wrapper_source_pin_gate(
         _git_commit(repo, "package metadata change")
     elif scenario == "uv_lock_commit":
         lockfile = repo / "uv.lock"
-        lockfile.write_text(lockfile.read_text(encoding="utf-8") + "revision = 2\n", encoding="utf-8")
+        lockfile.write_text(
+            lockfile.read_text(encoding="utf-8") + "revision = 2\n", encoding="utf-8"
+        )
         _git(repo, "add", "uv.lock")
         _git_commit(repo, "lockfile change")
     elif scenario == "untracked_code":
-        (repo / "src" / "untracked.py").write_text("untracked = True\n", encoding="utf-8")
+        (repo / "src" / "untracked.py").write_text(
+            "untracked = True\n", encoding="utf-8"
+        )
 
     result, payload = _run_search_label_wrapper(wrapper, environment)
     assert result.returncode == 0
