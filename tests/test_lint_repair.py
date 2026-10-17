@@ -5,6 +5,7 @@ import json
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -190,6 +191,61 @@ def test_default_local_reviewer_rejects_oversized_input_before_transport(
         )
 
     assert calls == 0
+
+
+@pytest.mark.parametrize(
+    ("max_num_ctx", "should_fit"),
+    [(114_688, True), (32_768, False)],
+    ids=["fits-configured-maximum", "exceeds-configured-maximum"],
+)
+def test_default_local_reviewer_honors_configured_context_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    max_num_ctx: int,
+    should_fit: bool,
+) -> None:
+    monkeypatch.setattr(
+        lint_repair,
+        "load_ingest_config",
+        lambda: SimpleNamespace(
+            num_ctx=32_768,
+            max_num_ctx=max_num_ctx,
+            num_predict=8_192,
+            keep_alive="20m",
+            read_timeout_ms=660_000,
+        ),
+    )
+    prompt = "page " * 5_000
+    requests = []
+
+    def transport(request):
+        requests.append(request)
+        return json.dumps(
+            {"decision": "approved", "tags": VALID_TAGS, "reason": "matches page"}
+        )
+
+    if not should_fit:
+        with pytest.raises(ValueError, match="context_window_exceeded"):
+            lint_repair._default_local_reviewer(
+                prompt,
+                lint_repair.TAG_REPAIR_SCHEMA,
+                transport=transport,
+                audit_root=tmp_path / "audit",
+            )
+        assert requests == []
+        return
+
+    result = lint_repair._default_local_reviewer(
+        prompt,
+        lint_repair.TAG_REPAIR_SCHEMA,
+        transport=transport,
+        audit_root=tmp_path / "audit",
+    )
+    assert result["tags"] == VALID_TAGS
+    assert len(requests) == 1
+    assert requests[0].num_ctx == 114_688
+    assert 32_768 < requests[0].required_num_ctx <= 114_688
+    assert requests[0].messages[-1]["content"] == prompt
 
 
 def _store(tmp_path: Path, *, policy: RetryPolicy | None = None) -> ConvergenceStore:

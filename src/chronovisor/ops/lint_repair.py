@@ -3,8 +3,8 @@
 ``lint.py`` remains the detector and safe deterministic fixer.  This module
 drains the remaining queue with explicit boundaries:
 
-* missing/count-invalid tags are proposed by local Ollama, then every semantic
-  tag decision is finalized by a bounded frontier structured review;
+* missing/count-invalid tags are proposed by the configured local model, then
+  every semantic tag decision is finalized by a bounded frontier review;
 * a frontier approval/rejection is durably bound to the exact page preimage
   before any mutation, so crash recovery never falls back to local authority;
 * stale monitor rows terminate as observed facts; and
@@ -374,7 +374,8 @@ def _default_local_reviewer(
         source_data_class="page",
         source_sensitivity="high",
         audit_root=audit_root,
-        num_ctx=config.num_ctx,
+        # Admit the complete repair envelope within the configured ceiling.
+        num_ctx=config.max_num_ctx,
         num_predict=min(config.num_predict, 2_048),
         keep_alive=config.keep_alive,
         read_timeout_ms=config.read_timeout_ms,
