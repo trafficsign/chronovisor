@@ -817,6 +817,56 @@ def reseed_pretriage_ingest_shard_for_code_drift(
                 "code-drift reseed current manifest is invalid: " + existing_error
             )
 
+    old_path, old_manifest_sha256 = _verified_historical_code_drift_manifest(
+        proposal, source_key=source_key, previous_manifest_path=previous_manifest_path,
+    )
+    proposal_sha256 = _canonical_json_sha256(proposal)
+    persist_error = _persist_ingest_review_shard_manifest(
+        plan,
+        source_key=source_key,
+    )
+    if persist_error is not None:
+        raise IngestApplyError(
+            "code-drift reseed current manifest write failed: " + persist_error
+        )
+    marker_error = _persist_ingest_review_continuation_marker(
+        source_key=source_key,
+        plan=plan,
+        reason="code_drift_reseed",
+        previous_full_proposal_sha256=proposal_sha256,
+        previous_authority=authority,
+        current_authority=authority,
+        previous_manifest_sha256=old_manifest_sha256,
+    )
+    if marker_error is not None:
+        raise IngestApplyError(
+            "code-drift reseed continuation marker failed: " + marker_error
+        )
+    return {
+        "status": (
+            "current_manifest_marked_code_drift"
+            if current_manifest_exists
+            else "reseeded_code_drift"
+        ),
+        "source_key": source_key,
+        "previous_manifest_path": str(old_path),
+        "previous_manifest_sha256": old_manifest_sha256,
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": plan.manifest_sha256,
+        "continuation_marker": str(_ingest_review_continuation_marker_path(source_key)),
+        "reseeded": not current_manifest_exists,
+        "fresh_quorum_required": True,
+    }
+
+
+def _verified_historical_code_drift_manifest(
+    proposal: dict[str, Any],
+    *,
+    source_key: str,
+    previous_manifest_path: Path,
+) -> tuple[Path, str]:
+    """Verify immutable producer-drift evidence without changing any artifact."""
+
     proposal_sha256 = _canonical_json_sha256(proposal)
     requested = previous_manifest_path.expanduser().resolve(strict=False)
     candidates = [requested]
@@ -889,42 +939,67 @@ def reseed_pretriage_ingest_shard_for_code_drift(
             "code-drift reseed requires exactly one verified historical manifest"
         )
     old_path, _old_manifest, old_manifest_sha256 = matched[0]
-    persist_error = _persist_ingest_review_shard_manifest(
-        plan,
-        source_key=source_key,
-    )
-    if persist_error is not None:
-        raise IngestApplyError(
-            "code-drift reseed current manifest write failed: " + persist_error
+    return old_path, old_manifest_sha256
+
+
+def code_drift_reseed_is_ready(raw_content: str, raw_keywords: list[str]) -> bool:
+    """Recheck the resolved failure condition without claiming or granting a vote.
+
+    A new manifest does not approve a mutation. It only lets the original raw
+    return to the ordinary fresh-quorum path. Historical evidence and the
+    failure row remain untouched until durable replay completion.
+    """
+
+    try:
+        source_key = _ingest_source_key(raw_content, raw_keywords)
+        proposal_path, _review_path = _ingest_artifact_paths(source_key)
+        proposal, _planned = _load_strict_ingest_proposal_for_recovery(
+            proposal_path, source_key=source_key,
+            raw_content=raw_content, raw_keywords=raw_keywords,
         )
-    marker_error = _persist_ingest_review_continuation_marker(
-        source_key=source_key,
-        plan=plan,
-        reason="code_drift_reseed",
-        previous_full_proposal_sha256=proposal_sha256,
-        previous_authority=authority,
-        current_authority=authority,
-        previous_manifest_sha256=old_manifest_sha256,
-    )
-    if marker_error is not None:
-        raise IngestApplyError(
-            "code-drift reseed continuation marker failed: " + marker_error
+        authority, authority_error = _current_ingest_review_authority(reviewer=None)
+        if authority_error is not None or not isinstance(authority, dict):
+            return False
+        plan = _build_ingest_review_shard_plan(proposal, force_review_unit=True)
+        if plan is None or _stored_ingest_review_shard_manifest_error(
+            plan, source_key=source_key,
+        ) is not None:
+            return False
+        marker, marker_error = _load_ingest_review_continuation_marker(
+            source_key=source_key, plan=plan, authority=authority,
         )
-    return {
-        "status": (
-            "current_manifest_marked_code_drift"
-            if current_manifest_exists
-            else "reseeded_code_drift"
-        ),
-        "source_key": source_key,
-        "previous_manifest_path": str(old_path),
-        "previous_manifest_sha256": old_manifest_sha256,
-        "manifest_path": str(manifest_path),
-        "manifest_sha256": plan.manifest_sha256,
-        "continuation_marker": str(_ingest_review_continuation_marker_path(source_key)),
-        "reseeded": not current_manifest_exists,
-        "fresh_quorum_required": True,
-    }
+        if (
+            marker_error is not None or not isinstance(marker, dict)
+            or marker.get("reason") != "code_drift_reseed"
+            or marker.get("previous_full_proposal_sha256") != plan.full_proposal_sha256
+            or marker.get("previous_authority_sha256") != _canonical_json_sha256(authority)
+            or marker.get("previous_manifest_sha256") == plan.manifest_sha256
+        ):
+            return False
+        old_identity = _canonical_json_sha256({
+            "kind": "ingest_review_shard_manifest_artifact",
+            "full_proposal_sha256": plan.full_proposal_sha256,
+            "manifest_sha256": marker["previous_manifest_sha256"],
+        })
+        old_path = _ingest_review_shard_manifest_path(plan).parent / (
+            f"review-shard-manifest-{old_identity}.json"
+        )
+        if old_path.is_symlink():
+            return False
+        _old_path, old_sha256 = _verified_historical_code_drift_manifest(
+            proposal, source_key=source_key, previous_manifest_path=old_path,
+        )
+        if old_sha256 != marker["previous_manifest_sha256"]:
+            return False
+        state = _inspect_ingest_review_shard_plan_state(
+            plan, source_key=source_key, authority=authority,
+        )
+        return state.invalid_reason is None and not _matching_ingest_review_stall_error(
+            source_key=source_key, plan=plan, authority=authority,
+            approved_indices=state.current_approved_indices,
+        )
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError, IngestApplyError):
+        return False
 
 
 def _historical_manifest_shape_error(

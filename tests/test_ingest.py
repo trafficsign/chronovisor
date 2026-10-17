@@ -2931,6 +2931,19 @@ class TestIngestFrontierGate:
             force_review_unit=True,
         )
         assert current_plan is not None
+        old_review_paths = {
+            ingest._ingest_review_shard_review_identity(
+                historical_plan, shard_index=index, shard=shard,
+            )[1]
+            for index, shard in enumerate(historical_plan.shards)
+        }
+        new_review_paths = {
+            ingest._ingest_review_shard_review_identity(
+                current_plan, shard_index=index, shard=shard,
+            )[1]
+            for index, shard in enumerate(current_plan.shards)
+        }
+        assert old_review_paths.isdisjoint(new_review_paths)
         assert (
             ingest._stored_ingest_review_shard_manifest_error(
                 current_plan,
@@ -2938,6 +2951,84 @@ class TestIngestFrontierGate:
             )
             is None
         )
+
+        from chronovisor.ingest import failure_supervisor, ingest_recovery_runtime
+
+        authority, error = ingest._current_ingest_review_authority(
+            reviewer=lambda _proposal: {},
+        )
+        assert error is None and authority is not None
+        monkeypatch.setattr(
+            ingest, "_current_ingest_review_authority", lambda **_kwargs: (authority, None)
+        )
+        ready = ingest_recovery_runtime.code_drift_reseed_is_ready
+        before = {path: path.read_bytes() for path in new_manifest_path.parent.glob("*")
+                  if path.is_file()}
+        assert ready(raw, []) is True
+        assert ready(raw + " changed", []) is False
+        assert ready(raw, ["wrong-source-key"]) is False
+        assert {path: path.read_bytes() for path in before} == before
+
+        # Real source/packet bindings keep generic unknown terminal holds closed.
+        raw_path = isolated_wiki / "raw" / "code-drift.md"
+        raw_path.parent.mkdir(exist_ok=True)
+        raw_path.write_text(raw, encoding="utf-8")
+        packet_path = isolated_wiki / "runtime/failures/packets/code-drift.json"
+        packet_path.parent.mkdir(parents=True, exist_ok=True)
+        failure_error = (
+            "pre-triage shard continuation prior manifest is invalid: "
+            "ingest shard historical manifest is not an exact recomputation"
+        )
+        packet = {
+            "raw_file": raw_path.name, "failure_class": "unknown",
+            "fingerprint": "unknown:code-drift", "error": failure_error,
+            "status": "local_quarantined",
+        }
+        packet_path.write_text(json.dumps(packet), encoding="utf-8")
+        entry = {
+            "terminal_deferred": True, "failure_class": "unknown",
+            "fingerprint": packet["fingerprint"], "last_error": failure_error,
+            "raw_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+            "raw_bytes": len(raw.encode()), "packet_path": str(packet_path),
+        }
+        assert failure_supervisor._code_drift_source_is_ready(raw_path, entry)
+        failure_supervisor._save_state({"failures": {raw_path.name: entry}})
+        failure_state_before = failure_supervisor._load_state()
+        assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {}
+        assert failure_supervisor._load_state() == failure_state_before
+        for field, invalid in (
+            ("failure_class", "ingest.semantic_no_quorum"),
+            ("last_error", "unrelated unknown failure"),
+            ("raw_sha256", "0" * 64), ("raw_bytes", True),
+            ("raw_bytes", None), ("fingerprint", "different"),
+        ):
+            assert not failure_supervisor._code_drift_source_is_ready(
+                raw_path, {**entry, field: invalid},
+            )
+        assert json.loads(packet_path.read_text()) == packet
+
+        marker_bytes = marker_path.read_bytes()
+        for field, invalid in (
+            ("previous_manifest_sha256", "0" * 64),
+            ("manifest_sha256", "0" * 64),
+            ("current_authority_sha256", "0" * 64),
+            ("source_key", "0" * 64), ("state", "invalid"),
+            ("reason", "router_config_reseed"),
+        ):
+            marker_path.write_text(json.dumps({**marker, field: invalid}))
+            assert ready(raw, []) is False
+        marker_path.write_bytes(marker_bytes)
+        new_bytes = new_manifest_path.read_bytes()
+        new_manifest_path.write_text("{}")
+        assert ready(raw, []) is False
+        assert failure_supervisor.operational_deferred_raw_files([raw_path]) == {
+            raw_path.name: "unknown",
+        }
+        new_manifest_path.write_bytes(new_bytes)
+        old_manifest_path.write_text("{}")
+        assert ready(raw, []) is False
+        old_manifest_path.write_bytes(old_manifest_bytes)
+        assert ready(raw, []) is True
 
         continuation = ingest._load_pretriage_ingest_shard_continuation(
             raw,

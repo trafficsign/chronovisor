@@ -1873,6 +1873,55 @@ def source_host_capability_is_now_available(entry: dict[str, Any]) -> bool:
     return match.group(1) in SUPPORTED_NATIVE_TRANSCRIPT_HOSTS
 
 
+def _code_drift_source_is_ready(raw_path: Path | None, entry: dict[str, Any]) -> bool:
+    """Release only a repaired manifest cause; keep the failure history intact."""
+
+    expected_error = (
+        "pre-triage shard continuation prior manifest is invalid: "
+        "ingest shard historical manifest is not an exact recomputation"
+    )
+    if (
+        raw_path is None or raw_path.is_symlink()
+        or entry.get("terminal_deferred") is not True
+        or entry.get("failure_class") != "unknown"
+        or entry.get("last_error") != expected_error
+        or not isinstance(entry.get("packet_path"), str)
+    ):
+        return False
+    try:
+        packet_path = Path(entry["packet_path"])
+        packet_root = chronovisor_store.CHRONOVISOR_ROOT / "runtime/failures/packets"
+        if packet_path.is_symlink() or packet_path.resolve().parent != packet_root.resolve():
+            return False
+        packet = _read_packet_object(packet_path)
+        if (
+            packet is None or packet.get("raw_file") != raw_path.name
+            or packet.get("failure_class") != "unknown"
+            or packet.get("fingerprint") != entry.get("fingerprint")
+            or packet.get("error") != expected_error
+            or packet.get("status") != "local_quarantined"
+        ):
+            return False
+        raw = raw_path.read_bytes()
+        if (
+            entry.get("raw_sha256") != hashlib.sha256(raw).hexdigest()
+            or isinstance(entry.get("raw_bytes"), bool)
+            or entry.get("raw_bytes") != len(raw)
+        ):
+            return False
+        from chronovisor.ingest.ingest_recovery_runtime import (
+            code_drift_reseed_is_ready,
+        )
+        from chronovisor.ingest.raw_replay import replay_source_keywords
+
+        content = raw.decode("utf-8")
+        return code_drift_reseed_is_ready(
+            content, replay_source_keywords(raw_path.name, raw_path, content),
+        )
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return False
+
+
 def operational_deferred_raw_files(
     raw_paths: Iterable[Path] | None = None,
 ) -> dict[str, str]:
@@ -1949,6 +1998,8 @@ def _operational_deferred_raw_files_unlocked(
             # the immutable raw for automatic re-evaluation.
             continue
         if source_host_capability_is_now_available(value):
+            continue
+        if _code_drift_source_is_ready(available_paths.get(raw_file), value):
             continue
         if value.get("terminal_deferred") is True:
             deferred[raw_file] = str(
