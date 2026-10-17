@@ -289,6 +289,7 @@ def test_search_label_drain_wrapper_is_bounded_and_pin_guarded() -> None:
         ("pinned", None, True),
         ("docs_commit", None, True),
         ("handoff_untracked", None, True),
+        ("ignored_bytecode", None, True),
         ("tracked_source_edit", "repository_tracked_drift", False),
         ("scripts_commit", "source_input_drift", False),
         ("pyproject_commit", "source_input_drift", False),
@@ -313,6 +314,10 @@ def test_search_label_drain_wrapper_source_pin_gate(
         handoff = repo / "_handoff"
         handoff.mkdir()
         (handoff / "evidence.md").write_text("metadata-only\n", encoding="utf-8")
+    elif scenario == "ignored_bytecode":
+        cache = repo / "src" / "chronovisor" / "__pycache__"
+        cache.mkdir()
+        (cache / "fixture.cpython-314.pyc").write_bytes(b"bytecode")
     elif scenario == "tracked_source_edit":
         (repo / "src" / "chronovisor" / "core.py").write_text(
             "fixture = False\n", encoding="utf-8"

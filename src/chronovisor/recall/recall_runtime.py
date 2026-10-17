@@ -3595,7 +3595,7 @@ def _fast_candidate_source(page: Any) -> dict[str, str]:
             str(page.snippet or page.title or page.page_id), limit=600
         ),
         "content_sha256": str(getattr(page, "content_sha256", "")),
-        "uid": str(getattr(page, "uid", "")),
+        "uid": str(getattr(page, "uid", "") or ""),
     }
 
 

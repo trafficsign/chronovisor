@@ -48,7 +48,22 @@ fi
 UNTRACKED_CODE=$(git -C "$CHRONOVISOR_REPO_ROOT" \
   ls-files --others -- src scripts 2>/dev/null) \
   || skip repository_status_unavailable
-[ -z "$UNTRACKED_CODE" ] || skip repository_untracked_code
+FILTERED_UNTRACKED_CODE=
+if [ -n "$UNTRACKED_CODE" ]; then
+  while IFS= read -r path; do
+    case "$path" in
+      */__pycache__/*.pyc)
+        :
+        ;;
+      *)
+        FILTERED_UNTRACKED_CODE="${FILTERED_UNTRACKED_CODE}${path}:"
+        ;;
+    esac
+  done <<EOF_UNTRACKED_CODE
+$UNTRACKED_CODE
+EOF_UNTRACKED_CODE
+fi
+[ -z "$FILTERED_UNTRACKED_CODE" ] || skip repository_untracked_code
 for input_path in src scripts pyproject.toml uv.lock; do
   PINNED_INPUT=$(git -C "$CHRONOVISOR_REPO_ROOT" rev-parse \
     "$EXPECTED_COMMIT:$input_path" 2>/dev/null) \
