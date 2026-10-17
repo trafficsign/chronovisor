@@ -705,7 +705,7 @@ def test_counterfactual_preserves_raw_candidate_id_in_label(
     monkeypatch.setattr(
         distill,
         "_materialization_snapshots",
-        lambda _root, _supplied: snapshots,
+        lambda _root, _supplied, *, rally_ids=None: snapshots,
     )
     materialized = distill.materialize_training_rows(tmp_path)["rows"]
     assert materialized[0]["assignment_revision"] == distill.ASSIGNMENT_REVISION

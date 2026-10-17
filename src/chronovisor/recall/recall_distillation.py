@@ -5380,14 +5380,27 @@ def _materialization_rallies(
 
 
 def _materialization_snapshots(
-    root: Path, supplied: Mapping[str, Mapping[str, Any]] | None
+    root: Path,
+    supplied: Mapping[str, Mapping[str, Any]] | None,
+    *,
+    rally_ids: Sequence[str] | None = None,
 ) -> Mapping[str, Mapping[str, Any]]:
     if supplied is not None:
         return supplied
+    from chronovisor.recall import recall_distillation_catalog as catalog
+
+    path = store.distillation_dir(root) / "candidate-ledger.jsonl"
+    if rally_ids is not None and catalog._read_catalog_checkpoint(root) is not None:
+        try:
+            return catalog.read_candidate_snapshots(root, path, rally_ids)
+        except catalog.CatalogError as exc:
+            raise store.DistillationStoreError(str(exc)) from exc
+    selected = set(rally_ids) if rally_ids is not None else None
     return {
         str(row.get("rally_id") or ""): row["snapshot"]
-        for row in _read_chain(store.distillation_dir(root) / "candidate-ledger.jsonl")
+        for row in _read_chain(path)
         if isinstance(row.get("snapshot"), Mapping)
+        and (selected is None or str(row.get("rally_id") or "") in selected)
     }
 
 
@@ -6467,7 +6480,9 @@ def _sealed_counterfactual_exposure_binding(
         }
         if declared_hashes:
             try:
-                snapshot = _materialization_snapshots(root, None).get(
+                snapshot = _materialization_snapshots(
+                    root, None, rally_ids=(str(row.get("rally_id") or ""),)
+                ).get(
                     str(row.get("rally_id") or ""), {}
                 )
                 candidates = snapshot.get("candidates", [])
