@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
@@ -74,6 +75,11 @@ from chronovisor.ingest.ingest_review_plan import (  # noqa: E402
 from chronovisor.ingest.ingest_schemas import (  # noqa: E402
     INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
     INGEST_FRONTIER_REVIEW_ARTIFACT_SCHEMA_VERSION,
+    INGEST_REVIEW_LIMIT_FIELDS,
+    INGEST_REVIEW_SHARD_POLICY_VERSION,
+    INGEST_REVIEW_SHARD_ROW_FIELDS,
+    INGEST_REVIEW_SHARD_SCHEMA_VERSION,
+    MAX_INGEST_REVIEW_SHARDS,
 )
 
 
@@ -749,6 +755,278 @@ def load_pretriage_ingest_shard_continuation(
         plan=plan,
         approved_shards=shard_state.approved_shards,
     )
+
+
+def reseed_pretriage_ingest_shard_for_code_drift(
+    raw_content: str,
+    raw_keywords: list[str] | None,
+    *,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    previous_manifest_path: Path | None = None,
+) -> dict[str, Any]:
+    """Start a fresh shard epoch after an explicitly verified producer drift.
+
+    A historical manifest is immutable evidence.  This targeted recovery seam
+    validates its source/proposal/limits and artifact identity, proves that the
+    current producer cannot reproduce it, then writes a new manifest under its
+    own content-addressed name.  Historical manifests and shard verdicts are
+    never rewritten or reused; the continuation marker requires a fresh quorum.
+    Callers must opt into this seam for a known code-drift incident.
+    """
+
+    if previous_manifest_path is None:
+        raise IngestApplyError(
+            "code-drift reseed requires an explicit historical manifest path"
+        )
+    source_key = _ingest_source_key(raw_content, raw_keywords)
+    proposal_path, review_path = _ingest_artifact_paths(source_key)
+    if not proposal_path.exists():
+        raise IngestApplyError("code-drift reseed proposal artifact is missing")
+    if review_path.exists():
+        return {
+            "status": "terminal_review_exists",
+            "source_key": source_key,
+            "reseeded": False,
+        }
+    proposal, _planned = _load_strict_ingest_proposal_for_recovery(
+        proposal_path,
+        source_key=source_key,
+        raw_content=raw_content,
+        raw_keywords=raw_keywords,
+    )
+    authority, authority_error = _current_ingest_review_authority(reviewer=reviewer)
+    if authority_error is not None or authority is None:
+        raise IngestApplyError(
+            "code-drift reseed authority is unavailable: "
+            + (authority_error or "authority is missing")
+        )
+    plan = _build_ingest_review_shard_plan(proposal, force_review_unit=True)
+    if plan is None:
+        raise IngestApplyError(
+            "code-drift reseed requires a bounded sharded review proposal"
+        )
+    manifest_path = _ingest_review_shard_manifest_path(plan)
+    current_manifest_exists = manifest_path.exists()
+    if manifest_path.exists():
+        existing_error = _stored_ingest_review_shard_manifest_error(
+            plan,
+            source_key=source_key,
+        )
+        if existing_error is not None:
+            raise IngestApplyError(
+                "code-drift reseed current manifest is invalid: " + existing_error
+            )
+
+    proposal_sha256 = _canonical_json_sha256(proposal)
+    requested = previous_manifest_path.expanduser().resolve(strict=False)
+    candidates = [requested]
+    matched: list[tuple[Path, dict[str, Any], str]] = []
+    for path in candidates:
+        try:
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(artifact, dict):
+            continue
+        if artifact.get("source_key") != source_key:
+            continue
+        if artifact.get("full_proposal_sha256") != proposal_sha256:
+            continue
+        manifest = artifact.get("manifest")
+        manifest_sha256 = artifact.get("manifest_sha256")
+        if (
+            artifact.get("schema_version") != INGEST_REVIEW_SHARD_SCHEMA_VERSION
+            or artifact.get("kind") != "ingest_review_shard_manifest_artifact"
+            or not isinstance(manifest, dict)
+            or not isinstance(manifest_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256)
+            or manifest_sha256 != _canonical_json_sha256(manifest)
+            or manifest.get("source_key") != source_key
+            or manifest.get("full_proposal_sha256") != proposal_sha256
+        ):
+            raise IngestApplyError(
+                "code-drift reseed historical manifest envelope is invalid"
+            )
+        shape_error = _historical_manifest_shape_error(
+            manifest,
+            source_key=source_key,
+            proposal_sha256=proposal_sha256,
+        )
+        if shape_error is not None:
+            raise IngestApplyError(
+                "code-drift reseed historical manifest is malformed: " + shape_error
+            )
+        expected_identity = _canonical_json_sha256(
+            {
+                "kind": "ingest_review_shard_manifest_artifact",
+                "full_proposal_sha256": proposal_sha256,
+                "manifest_sha256": manifest_sha256,
+            }
+        )
+        if path.name != f"review-shard-manifest-{expected_identity}.json":
+            raise IngestApplyError(
+                "code-drift reseed historical manifest filename is invalid"
+            )
+        try:
+            _ingest_review_shard_plan_from_sealed_manifest(proposal, manifest)
+        except ValueError as exc:
+            if str(exc) != "ingest shard historical manifest is not an exact recomputation":
+                raise IngestApplyError(
+                    "code-drift reseed historical manifest is invalid: " + str(exc)
+                ) from exc
+        except (IngestReviewShardCapacityError, TypeError) as exc:
+            raise IngestApplyError(
+                "code-drift reseed historical manifest is invalid: " + str(exc)
+            ) from exc
+        else:
+            raise IngestApplyError(
+                "code-drift reseed requested but historical manifest recomputes exactly"
+            )
+        matched.append((path, manifest, manifest_sha256))
+
+    if len(matched) != 1:
+        raise IngestApplyError(
+            "code-drift reseed requires exactly one verified historical manifest"
+        )
+    old_path, _old_manifest, old_manifest_sha256 = matched[0]
+    persist_error = _persist_ingest_review_shard_manifest(
+        plan,
+        source_key=source_key,
+    )
+    if persist_error is not None:
+        raise IngestApplyError(
+            "code-drift reseed current manifest write failed: " + persist_error
+        )
+    marker_error = _persist_ingest_review_continuation_marker(
+        source_key=source_key,
+        plan=plan,
+        reason="code_drift_reseed",
+        previous_full_proposal_sha256=proposal_sha256,
+        previous_authority=authority,
+        current_authority=authority,
+        previous_manifest_sha256=old_manifest_sha256,
+    )
+    if marker_error is not None:
+        raise IngestApplyError(
+            "code-drift reseed continuation marker failed: " + marker_error
+        )
+    return {
+        "status": (
+            "current_manifest_marked_code_drift"
+            if current_manifest_exists
+            else "reseeded_code_drift"
+        ),
+        "source_key": source_key,
+        "previous_manifest_path": str(old_path),
+        "previous_manifest_sha256": old_manifest_sha256,
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": plan.manifest_sha256,
+        "continuation_marker": str(_ingest_review_continuation_marker_path(source_key)),
+        "reseeded": not current_manifest_exists,
+        "fresh_quorum_required": True,
+    }
+
+
+def _historical_manifest_shape_error(
+    manifest: object,
+    *,
+    source_key: str,
+    proposal_sha256: str,
+) -> str | None:
+    """Reject malformed sealed evidence before classifying producer drift.
+
+    The reseed seam is intentionally narrower than the ordinary historical
+    recovery path.  A content-addressed wrapper alone is not enough: an
+    attacker or a damaged writer could re-seal a malformed inner manifest and
+    otherwise make it look like a harmless producer change.  Validate the
+    immutable manifest contract first, then compare it with the current
+    producer below.
+    """
+
+    if not isinstance(manifest, dict) or set(manifest) != {
+        "schema_version",
+        "policy_version",
+        "kind",
+        "source_key",
+        "full_proposal_sha256",
+        "full_operation_count",
+        "review_limits",
+        "shards",
+    }:
+        return "manifest schema is invalid"
+    if (
+        manifest.get("schema_version") != INGEST_REVIEW_SHARD_SCHEMA_VERSION
+        or manifest.get("policy_version") != INGEST_REVIEW_SHARD_POLICY_VERSION
+        or manifest.get("kind") != "ingest_review_shard_manifest"
+        or manifest.get("source_key") != source_key
+        or manifest.get("full_proposal_sha256") != proposal_sha256
+    ):
+        return "manifest identity is invalid"
+    operation_count = manifest.get("full_operation_count")
+    limits = manifest.get("review_limits")
+    shards = manifest.get("shards")
+    if (
+        not isinstance(operation_count, int)
+        or isinstance(operation_count, bool)
+        or operation_count < 1
+        or not isinstance(limits, dict)
+        or set(limits) != INGEST_REVIEW_LIMIT_FIELDS
+        or not all(
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value > 0
+            for value in limits.values()
+        )
+        or limits.get("min_num_ctx", 0) > limits.get("num_ctx", 0)
+        or not isinstance(shards, list)
+        or not shards
+        or len(shards) > MAX_INGEST_REVIEW_SHARDS
+    ):
+        return "manifest limits or shard envelope is invalid"
+    flattened: list[int] = []
+    for expected_index, row in enumerate(shards):
+        if (
+            not isinstance(row, dict)
+            or set(row) != INGEST_REVIEW_SHARD_ROW_FIELDS
+            or row.get("shard_index") != expected_index
+            or not isinstance(row.get("proposal_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", str(row.get("proposal_sha256")))
+            is None
+            or not isinstance(row.get("effective_request_sha256"), str)
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(row.get("effective_request_sha256"))
+            )
+            is None
+            or not isinstance(row.get("original_operation_indices"), list)
+            or not row.get("original_operation_indices")
+            or not all(
+                isinstance(index, int)
+                and not isinstance(index, bool)
+                and index >= 0
+                for index in row.get("original_operation_indices", [])
+            )
+            or not all(
+                isinstance(row.get(field), int)
+                and not isinstance(row.get(field), bool)
+                and row.get(field) > 0
+                for field in (
+                    "effective_input_chars",
+                    "effective_input_bytes",
+                    "required_num_ctx",
+                    "selected_num_ctx",
+                )
+            )
+            or row.get("effective_input_bytes", 0)
+            > limits.get("max_input_chars", 0)
+            or row.get("required_num_ctx", 0) > row.get("selected_num_ctx", 0)
+            or row.get("selected_num_ctx", 0) > limits.get("num_ctx", 0)
+            or row.get("selected_num_ctx", 0) < limits.get("min_num_ctx", 0)
+        ):
+            return "manifest shard row is invalid"
+        flattened.extend(row["original_operation_indices"])
+    if flattened != list(range(operation_count)) or len(flattened) != len(set(flattened)):
+        return "manifest shard coverage is invalid"
+    return None
 
 
 # Preserve the original intra-module spellings in the mechanically moved code.

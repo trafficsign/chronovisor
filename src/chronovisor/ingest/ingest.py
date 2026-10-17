@@ -3221,6 +3221,7 @@ def _persist_ingest_review_continuation_marker(
     previous_full_proposal_sha256: str,
     previous_authority: dict[str, Any] | str,
     current_authority: dict[str, Any],
+    previous_manifest_sha256: str | None = None,
 ) -> str | None:
     return _persist_ingest_review_continuation_marker_core(
         _ingest_review_continuation_marker_path(source_key),
@@ -3230,6 +3231,7 @@ def _persist_ingest_review_continuation_marker(
         previous_full_proposal_sha256=previous_full_proposal_sha256,
         previous_authority=previous_authority,
         current_authority=current_authority,
+        previous_manifest_sha256=previous_manifest_sha256,
     )
 
 
@@ -4126,6 +4128,25 @@ def _load_pretriage_ingest_shard_continuation(
         raw_content,
         raw_keywords,
         reviewer=reviewer,
+    )
+
+
+def _reseed_pretriage_ingest_shard_for_code_drift(
+    raw_content: str,
+    raw_keywords: list[str] | None,
+    *,
+    reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    previous_manifest_path: Path | None = None,
+) -> dict[str, Any]:
+    from chronovisor.ingest.ingest_recovery_runtime import (
+        reseed_pretriage_ingest_shard_for_code_drift,
+    )
+
+    return reseed_pretriage_ingest_shard_for_code_drift(
+        raw_content,
+        raw_keywords,
+        reviewer=reviewer,
+        previous_manifest_path=previous_manifest_path,
     )
 
 

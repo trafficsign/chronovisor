@@ -2812,6 +2812,142 @@ class TestIngestFrontierGate:
         assert crash_recovery is not None
         assert crash_recovery.plan.manifest_sha256 == first.plan.manifest_sha256
 
+    def test_code_drift_reseed_preserves_old_manifest_and_starts_fresh_quorum(
+        self,
+        isolated_wiki: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from copy import deepcopy
+        from dataclasses import replace
+
+        from chronovisor.ingest import ingest
+
+        config = self._fixed_review_config()
+        monkeypatch.setattr(ingest, "_ingest_review_router_config", lambda: config)
+        raw = "A producer drift starts a fresh exact shard epoch."
+        operations = self._oversized_create_ops(body_bytes=30_000)
+        dry = ingest._review_and_apply_ingest_operations(
+            operations,
+            raw_content=raw,
+            reviewer=lambda _proposal: pytest.fail("dry run must not review"),
+            dry_run=True,
+        )
+        proposal_path, _review_path = ingest._ingest_artifact_paths(dry["source_key"])
+        ingest._write_ingest_artifact(
+            proposal_path,
+            {
+                "schema_version": ingest.INGEST_FRONTIER_ARTIFACT_SCHEMA_VERSION,
+                "kind": "ingest_frontier_proposal_artifact",
+                "source_key": dry["source_key"],
+                "proposal_sha256": dry["proposal_sha256"],
+                "proposal": dry["proposal"],
+            },
+        )
+        original_builder = ingest._build_ingest_review_shard_plan
+        historical_plan = original_builder(dry["proposal"], force_review_unit=True)
+        assert historical_plan is not None
+        assert (
+            ingest._persist_ingest_review_shard_manifest(
+                historical_plan,
+                source_key=dry["source_key"],
+            )
+            is None
+        )
+        old_manifest_path = ingest._ingest_review_shard_manifest_path(historical_plan)
+        old_manifest_bytes = old_manifest_path.read_bytes()
+        with pytest.raises(IngestApplyError, match="recomputes exactly"):
+            ingest._reseed_pretriage_ingest_shard_for_code_drift(
+                raw,
+                None,
+                reviewer=lambda _proposal: {},
+                previous_manifest_path=old_manifest_path,
+            )
+
+        # Re-sealing a malformed inner manifest must remain a hold.  The
+        # wrapper and filename are rebuilt here to prove the inner contract,
+        # rather than relying on the outer content-address check alone.
+        tampered = json.loads(old_manifest_bytes)
+        tampered["manifest"]["kind"] = "tampered_manifest"
+        tampered["manifest_sha256"] = ingest._canonical_json_sha256(
+            tampered["manifest"]
+        )
+        tampered_identity = ingest._canonical_json_sha256(
+            {
+                "kind": "ingest_review_shard_manifest_artifact",
+                "full_proposal_sha256": dry["proposal_sha256"],
+                "manifest_sha256": tampered["manifest_sha256"],
+            }
+        )
+        tampered_path = old_manifest_path.parent / (
+            f"review-shard-manifest-{tampered_identity}.json"
+        )
+        old_manifest_path.unlink()
+        tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+        with pytest.raises(IngestApplyError, match="manifest is malformed"):
+            ingest._reseed_pretriage_ingest_shard_for_code_drift(
+                raw,
+                None,
+                reviewer=lambda _proposal: {},
+                previous_manifest_path=tampered_path,
+            )
+        tampered_path.unlink()
+        old_manifest_path.write_bytes(old_manifest_bytes)
+
+        def drifted_builder(proposal, *, config=None, force_review_unit=False):
+            plan = original_builder(
+                proposal,
+                config=config,
+                force_review_unit=force_review_unit,
+            )
+            if plan is None:
+                return None
+            manifest = deepcopy(plan.manifest)
+            manifest["shards"][0]["effective_input_chars"] += 1
+            return replace(
+                plan,
+                manifest=manifest,
+                manifest_sha256=ingest._canonical_json_sha256(manifest),
+            )
+
+        monkeypatch.setattr(ingest, "_build_ingest_review_shard_plan", drifted_builder)
+        reseeded = ingest._reseed_pretriage_ingest_shard_for_code_drift(
+            raw,
+            None,
+            reviewer=lambda _proposal: {},
+            previous_manifest_path=old_manifest_path,
+        )
+        assert reseeded["status"] == "reseeded_code_drift"
+        assert reseeded["fresh_quorum_required"] is True
+        assert old_manifest_path.read_bytes() == old_manifest_bytes
+        new_manifest_path = Path(reseeded["manifest_path"])
+        assert new_manifest_path != old_manifest_path
+        assert new_manifest_path.exists()
+        marker_path = ingest._ingest_review_continuation_marker_path(dry["source_key"])
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        assert marker["reason"] == "code_drift_reseed"
+        assert marker["previous_manifest_sha256"] == historical_plan.manifest_sha256
+        current_plan = ingest._build_ingest_review_shard_plan(
+            dry["proposal"],
+            force_review_unit=True,
+        )
+        assert current_plan is not None
+        assert (
+            ingest._stored_ingest_review_shard_manifest_error(
+                current_plan,
+                source_key=dry["source_key"],
+            )
+            is None
+        )
+
+        continuation = ingest._load_pretriage_ingest_shard_continuation(
+            raw,
+            None,
+            reviewer=lambda _proposal: {},
+        )
+        assert continuation is not None
+        assert continuation.approved_shards == 0
+        assert json.loads(marker_path.read_text(encoding="utf-8"))["state"] == "claimed"
+
     def test_exact_repair_transition_is_idempotent_but_bounded_to_one_per_raw(
         self,
         isolated_wiki: Path,

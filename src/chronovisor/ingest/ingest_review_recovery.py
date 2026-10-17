@@ -86,6 +86,7 @@ def persist_ingest_review_continuation_marker(
     previous_full_proposal_sha256: str,
     previous_authority: dict[str, Any] | str,
     current_authority: dict[str, Any],
+    previous_manifest_sha256: str | None = None,
 ) -> str | None:
     """Seal the one exceptional zero-approval resume permission."""
 
@@ -93,6 +94,7 @@ def persist_ingest_review_continuation_marker(
         "exact_repair_reseed",
         "authority_epoch_reseed",
         "router_config_reseed",
+        "code_drift_reseed",
     }:
         return "ingest review continuation marker reason is invalid"
     if re.fullmatch(r"[0-9a-f]{64}", previous_full_proposal_sha256) is None or (
@@ -100,6 +102,11 @@ def persist_ingest_review_continuation_marker(
         and previous_full_proposal_sha256 == plan.full_proposal_sha256
     ):
         return "ingest review continuation marker transition is invalid"
+    if reason == "code_drift_reseed" and (
+        re.fullmatch(r"[0-9a-f]{64}", str(previous_manifest_sha256)) is None
+        or str(previous_manifest_sha256) == plan.manifest_sha256
+    ):
+        return "ingest review code-drift marker identity is invalid"
     if isinstance(previous_authority, str):
         if re.fullmatch(r"[0-9a-f]{64}", previous_authority) is None:
             return "ingest review continuation previous authority is invalid"
@@ -119,6 +126,8 @@ def persist_ingest_review_continuation_marker(
             current_authority
         ),
     }
+    if reason == "code_drift_reseed":
+        transition["previous_manifest_sha256"] = str(previous_manifest_sha256)
     payload = {
         "schema_version": INGEST_REVIEW_SHARD_SCHEMA_VERSION,
         "kind": "ingest_review_zero_progress_continuation",
@@ -163,6 +172,11 @@ def load_ingest_review_continuation_marker(
         "transition_sha256",
         "state",
     }
+    has_code_drift_identity = isinstance(payload, dict) and (
+        "previous_manifest_sha256" in payload
+    )
+    if has_code_drift_identity:
+        expected_fields.add("previous_manifest_sha256")
     if (
         not isinstance(payload, dict)
         or set(payload) != expected_fields
@@ -179,8 +193,23 @@ def load_ingest_review_continuation_marker(
             "exact_repair_reseed",
             "authority_epoch_reseed",
             "router_config_reseed",
+            "code_drift_reseed",
         }
         or payload.get("state") not in {"available", "claimed"}
+        or (
+            payload.get("reason") == "code_drift_reseed"
+            and (
+                not has_code_drift_identity
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", str(payload.get("previous_manifest_sha256"))
+                )
+                is None
+            )
+        )
+        or (
+            payload.get("reason") != "code_drift_reseed"
+            and has_code_drift_identity
+        )
     ):
         return None, "continuation marker schema is invalid"
     transition = {
@@ -195,6 +224,10 @@ def load_ingest_review_continuation_marker(
             "current_authority_sha256",
         )
     }
+    if has_code_drift_identity:
+        transition["previous_manifest_sha256"] = payload.get(
+            "previous_manifest_sha256"
+        )
     if (
         not isinstance(payload.get("previous_authority_sha256"), str)
         or not isinstance(payload.get("current_authority_sha256"), str)

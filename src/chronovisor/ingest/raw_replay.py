@@ -175,7 +175,9 @@ def _quarantine_retry_seconds() -> int:
         return DEFAULT_QUARANTINE_RETRY_SECONDS
 
 
-def _active_terminal_semantic_deferred_raw_names() -> frozenset[str]:
+def _active_terminal_semantic_deferred_raw_names(
+    rows: Iterable[Mapping[str, Any]] | None = None,
+) -> frozenset[str]:
     """Return every raw held by the failure supervisor.
 
     The legacy private name is retained for compatibility with existing tests
@@ -185,7 +187,14 @@ def _active_terminal_semantic_deferred_raw_names() -> frozenset[str]:
 
     from chronovisor.ingest.failure_supervisor import operational_deferred_raw_files
 
-    deferred = operational_deferred_raw_files()
+    raw_paths: list[Path] | None = None
+    if rows is not None:
+        raw_paths = [
+            Path(value)
+            for row in rows
+            if isinstance((value := row.get("path")), str) and value
+        ]
+    deferred = operational_deferred_raw_files(raw_paths)
     return frozenset(deferred)
 
 
@@ -218,6 +227,23 @@ def _scoped_operational_deferred_raw_statuses(
     """Call the scoped provider while retaining zero-argument test adapters."""
 
     provider = _active_operational_deferred_raw_statuses
+    if not inspect.signature(provider).parameters:
+        return provider()  # type: ignore[call-arg]
+    return provider(rows)
+
+
+def _deferred_raw_names_for_rows(
+    rows: Iterable[Mapping[str, Any]],
+) -> frozenset[str]:
+    """Resolve active holds without scanning the complete Raw archive.
+
+    Tests and repair tools historically replace the zero-argument provider, so
+    retain that adapter while production calls pass the queue rows being
+    considered. The failure supervisor remains fail-closed for every scoped
+    row; this only bounds the lookup's archive traversal.
+    """
+
+    provider = _active_terminal_semantic_deferred_raw_names
     if not inspect.signature(provider).parameters:
         return provider()  # type: ignore[call-arg]
     return provider(rows)
@@ -2007,8 +2033,10 @@ def _build_queue_unlocked(
     include_auto_signals: bool = True,
 ) -> dict[str, Any]:
     now = _now()
-    semantic_deferred_raws = _active_terminal_semantic_deferred_raw_names()
-    deferred_statuses = _active_operational_deferred_raw_statuses()
+    # Scope failure-supervisor lookups to queue rows below. An unscoped lookup
+    # materializes every Raw unit and can consume the entire sleep-cycle lane.
+    semantic_deferred_raws = frozenset()
+    deferred_statuses: dict[str, str] = {}
     history_states = _history_lifecycle_states()
     existing_by_key: dict[str, dict[str, Any]] = {}
     for raw_row in _read_jsonl(path):
@@ -2023,11 +2051,6 @@ def _build_queue_unlocked(
     for key, row in existing_by_key.items():
         existing_by_key[key] = _merge_history_lifecycle(row, history_states.get(key))
         _coerce_exhausted(existing_by_key[key], now=now)
-        _resume_due_autonomous_terminal(
-            existing_by_key[key],
-            now=now,
-            semantic_deferred_raws=semantic_deferred_raws,
-        )
 
     incoming: list[dict[str, Any]] = []
     if include_auto_signals:
@@ -2042,14 +2065,19 @@ def _build_queue_unlocked(
         key = str(row["key"])
         row = _merge_history_lifecycle(row, history_states.get(key))
         _coerce_exhausted(row, now=now)
+        current = incoming_by_key.get(key)
+        incoming_by_key[key] = (
+            row if current is None else _merge_durable_rows(current, row, now=now)
+        )
+
+    scoped_rows = [*existing_by_key.values(), *incoming_by_key.values()]
+    semantic_deferred_raws = _deferred_raw_names_for_rows(scoped_rows)
+    deferred_statuses = _scoped_operational_deferred_raw_statuses(scoped_rows)
+    for row in [*existing_by_key.values(), *incoming_by_key.values()]:
         _resume_due_autonomous_terminal(
             row,
             now=now,
             semantic_deferred_raws=semantic_deferred_raws,
-        )
-        current = incoming_by_key.get(key)
-        incoming_by_key[key] = (
-            row if current is None else _merge_durable_rows(current, row, now=now)
         )
 
     auto_signal_keys = {
@@ -3029,7 +3057,7 @@ def _run_candidate(
     semantic_defer: dict[str, Any] | None = None
     content: str | None = None
     projection_summary: dict[str, Any] | None = None
-    if _raw_name(row) in _active_terminal_semantic_deferred_raw_names():
+    if _raw_name(row) in _deferred_raw_names_for_rows([row]):
         return _operational_deferred_candidate_result(
             row,
             now=now,
@@ -3113,7 +3141,7 @@ def _run_candidate(
             # Failure state can change after queue selection and even after the
             # durable running marker. This is the last instruction before
             # inference; a newly published hold wins and consumes no replay.
-            if _raw_name(row) in _active_terminal_semantic_deferred_raw_names():
+            if _raw_name(row) in _deferred_raw_names_for_rows([row]):
                 return _operational_deferred_candidate_result(
                     row,
                     now=now,
@@ -3538,7 +3566,7 @@ def run_pending_queue(
         # A normal ingest may publish a semantic defer while this runner waits
         # for its queue lease.  Preserve any earlier hold and add newly active
         # ones before crash reconciliation can invoke a reviewer.
-        semantic_deferred_raws = _active_terminal_semantic_deferred_raw_names()
+        semantic_deferred_raws = _deferred_raw_names_for_rows(scoped_rows)
         semantic_reserved_bytes = sum(
             _nonnegative_int(row.get("bytes"))
             for row, _candidate in semantic_plan
@@ -3594,7 +3622,7 @@ def run_pending_queue(
             row["recovery_kind"] = "exact_already_applied"
         for row in ordinary_rows:
             _coerce_exhausted(row, now=current_time)
-        semantic_deferred_raws = _active_terminal_semantic_deferred_raw_names()
+        semantic_deferred_raws = _deferred_raw_names_for_rows(ordinary_rows)
         replayable_rows = [
             row
             for row in replayable_rows
@@ -3683,7 +3711,7 @@ def run_pending_queue(
 
         def operational_hold_is_active(row: dict[str, Any]) -> bool:
             raw_name = _raw_name(row)
-            if raw_name not in _active_terminal_semantic_deferred_raw_names():
+            if raw_name not in _deferred_raw_names_for_rows([row]):
                 return False
             status = _scoped_operational_deferred_raw_statuses([row]).get(raw_name)
             reason = status or "semantic_no_quorum"

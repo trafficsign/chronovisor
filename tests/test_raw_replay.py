@@ -147,6 +147,42 @@ def test_build_queue_distinguishes_operational_hold_and_resumes_after_release(
     assert released["skipped_operational_deferred"] == 0
 
 
+def test_build_queue_scopes_failure_hold_lookup_to_candidate_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large live Raw archive must not be materialized for one queue row."""
+
+    from chronovisor.ingest import failure_supervisor
+
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    raw = paths["raw"] / "20260714-scoped-hold.md"
+    raw.write_text("immutable operational source", encoding="utf-8")
+    calls: list[object] = []
+
+    def scoped_holds(raw_paths=None):
+        calls.append(raw_paths)
+        assert raw_paths is not None
+        names = {Path(path).name for path in raw_paths}
+        return {raw.name: "pending_local_repair"} if raw.name in names else {}
+
+    monkeypatch.setattr(
+        failure_supervisor,
+        "operational_deferred_raw_files",
+        scoped_holds,
+    )
+
+    held = raw_replay.build_queue(
+        path=paths["queue"],
+        include_migration=True,
+        include_auto_signals=False,
+    )
+
+    assert held["candidates"] == 0
+    assert held["skipped_operational_deferred"] == 1
+    assert calls and all(call is not None for call in calls)
+
+
 def test_operational_hold_blocks_existing_queue_selection_until_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
