@@ -1739,13 +1739,32 @@ def _register_replay_pairs(root: Path, observation: Mapping[str, Any]) -> None:
     source_set_sha256 = _replay_source_set_sha256(pairs)
     if not pairs:
         return
+    try:
+        store.prepare_unique_index(
+            ledger,
+            unique_field="pair_id",
+            binding_field="observation_artifact_id",
+        )
+        existing, saved_head, saved_state = store._read_chain_snapshot_with_state(
+            ledger, strict=True
+        )
+    except (
+        OSError,
+        store.DistillationStoreBusy,
+        store.DistillationStoreError,
+    ) as exc:
+        raise RolloutError("replay pair registry snapshot failed") from exc
     lock_path = ledger.with_suffix(ledger.suffix + ".lock")
     base = store.distillation_dir(root)
     base_identity = _path_identity(base)
     ledger_identity = _path_identity(ledger) if ledger.exists() else None
     try:
         with store._locked(lock_path):
-            existing = store._read_chain_locked(ledger)
+            if (
+                store._ledger_file_state(ledger) != saved_state
+                or store._read_chain_checkpoint(ledger) != saved_head
+            ):
+                raise RolloutError("replay pair registry changed during snapshot")
             snapshot = _registry_snapshot(
                 (
                     ledger,
@@ -1826,21 +1845,21 @@ def _replay_pair_conflict_preflight(
     if not pairs:
         return
     ledger = _registry_path(root)
-    lock_path = ledger.with_suffix(ledger.suffix + ".lock")
     try:
-        with store._locked(lock_path):
-            existing = store._read_chain_locked(ledger)
-            known = {
-                row.get("pair_id"): row.get("observation_artifact_id")
-                for row in existing
-                if isinstance(row, Mapping)
-            }
-            for row in pairs:
-                pair_id = _require_hex(row.get("pair_id"), "replay pair id")
-                prior = known.get(pair_id)
-                if prior is not None and prior != artifact_id:
-                    raise RolloutError("replay observation pair was already registered")
-    except (OSError, store.DistillationStoreError) as exc:
+        existing, _head, _state = store._read_chain_snapshot_with_state(
+            ledger, strict=True
+        )
+        known = {
+            row.get("pair_id"): row.get("observation_artifact_id")
+            for row in existing
+            if isinstance(row, Mapping)
+        }
+        for row in pairs:
+            pair_id = _require_hex(row.get("pair_id"), "replay pair id")
+            prior = known.get(pair_id)
+            if prior is not None and prior != artifact_id:
+                raise RolloutError("replay observation pair was already registered")
+    except (OSError, store.DistillationStoreBusy, store.DistillationStoreError) as exc:
         raise RolloutError("replay pair registry preflight failed") from exc
 
 

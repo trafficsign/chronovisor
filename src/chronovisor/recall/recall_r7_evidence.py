@@ -827,35 +827,19 @@ def _readonly_chain_snapshot(path: Path) -> tuple[list[dict[str, Any]], dict[str
     if _has_symlink_component(path) or _has_symlink_component(lock_path):
         raise EvidenceError("runtime chain lock is symlinked")
     try:
-        flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        descriptor = os.open(lock_path, flags)
+        lock_path.lstat()
     except OSError as exc:
         raise EvidenceError("runtime chain lock is unavailable") from exc
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        head = store._read_chain_checkpoint(path)
-        if head is None:
-            raise EvidenceError("runtime chain checkpoint is absent")
-        rows = store._read_chain_locked(path, head)
-        previous = ""
-        for index, row in enumerate(rows):
-            unsigned = {
-                key: value for key, value in row.items() if key != "record_sha256"
-            }
-            if row.get("previous_sha256") != previous or row.get(
-                "record_sha256"
-            ) != _digest(unsigned):
-                raise EvidenceError(f"runtime chain mismatch at row {index}")
-            previous = str(row["record_sha256"])
-        if len(rows) != head["records"] or previous != head["head_sha256"]:
-            raise EvidenceError("runtime chain checkpoint mismatch")
+        rows, head, _state = store._read_chain_snapshot_with_state(
+            path,
+            strict=True,
+            readonly=True,
+            nonblocking=True,
+        )
         return rows, dict(head)
-    except store.DistillationStoreError as exc:
+    except (OSError, store.DistillationStoreBusy, store.DistillationStoreError) as exc:
         raise EvidenceError("runtime chain snapshot is invalid") from exc
-    finally:
-        os.close(descriptor)
 
 
 def _protected_file_state(root: Path) -> str:

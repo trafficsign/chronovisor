@@ -579,6 +579,8 @@ def _body_guard(
     allowed = list(allowed_ranges or [])
     original_open = Path.open
     original_read_bytes = Path.read_bytes
+    original_pread = os.pread
+    target_stat = path.stat()
     if allowed:
         prefix_bytes = min(offset for offset, _size in allowed)
     elif allow_full:
@@ -601,8 +603,21 @@ def _body_guard(
         reads.append((0, len(value)))
         return value
 
+    def guarded_pread(descriptor: int, length: int, offset: int) -> bytes:
+        current = os.fstat(descriptor)
+        value = original_pread(descriptor, length, offset)
+        if (current.st_dev, current.st_ino) == (target_stat.st_dev, target_stat.st_ino) and value:
+            if not allow_full and not any(
+                offset >= start and offset + len(value) <= start + size
+                for start, size in allowed
+            ):
+                raise R1Error("ledger read escaped allowed range")
+            reads.append((offset, len(value)))
+        return value
+
     Path.open = guarded_open  # type: ignore[method-assign]
     Path.read_bytes = guarded_read_bytes  # type: ignore[method-assign]
+    os.pread = guarded_pread
     try:
         yield {
             "allowed": allowed,
@@ -612,6 +627,7 @@ def _body_guard(
     finally:
         Path.open = original_open  # type: ignore[method-assign]
         Path.read_bytes = original_read_bytes  # type: ignore[method-assign]
+        os.pread = original_pread
 
 
 def _guard_evidence(guard: Mapping[str, Any]) -> dict[str, Any]:

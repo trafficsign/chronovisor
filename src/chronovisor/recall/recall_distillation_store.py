@@ -776,15 +776,42 @@ def _chain_tail_cursor(
     }
 
 
+@contextlib.contextmanager
+def _snapshot_lock(
+    path: Path, *, readonly: bool = False, nonblocking: bool = False,
+) -> Iterator[None]:
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    if not readonly and not nonblocking:
+        with _locked(lock_path):
+            yield
+        return
+    if readonly:
+        descriptor = os.open(lock_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | (fcntl.LOCK_NB if nonblocking else 0))
+            yield
+        finally:
+            os.close(descriptor)
+    else:
+        handle = acquire_nonblocking_lock(lock_path)
+        if handle is None:
+            raise DistillationStoreBusy("ledger snapshot is busy")
+        try:
+            yield
+        finally:
+            release_lock(handle)
+
+
 def _capture_ledger_snapshot(
-    path: Path,
+    path: Path, *, readonly: bool = False, nonblocking: bool = False,
 ) -> tuple[int | None, dict[str, int] | None, dict[str, Any] | None]:
     """Pin a ledger descriptor and its verified writer checkpoint briefly."""
 
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    with _locked(lock_path):
+    with _snapshot_lock(path, readonly=readonly, nonblocking=nonblocking):
         state = _ledger_file_state(path)
         head = _read_chain_checkpoint_details(path)
+        if readonly and head is None:
+            raise DistillationStoreError("ledger checkpoint is unavailable")
         if state is None:
             return None, None, head
         try:
@@ -893,9 +920,11 @@ def _decode_verified_snapshot(
 
 
 def _read_chain_snapshot_with_state(
-    path: Path, *, strict: bool = False
+    path: Path, *, strict: bool = False, readonly: bool = False, nonblocking: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, int] | None]:
-    descriptor, state, checkpoint = _capture_ledger_snapshot(path)
+    descriptor, state, checkpoint = _capture_ledger_snapshot(
+        path, readonly=readonly, nonblocking=nonblocking,
+    )
     if descriptor is None or state is None:
         if checkpoint is None:
             return [], {"records": 0, "head_sha256": ""}, state
@@ -921,16 +950,16 @@ def _read_chain_snapshot(
 
 
 def _read_chain_snapshot_recovering_final_fragment(
-    path: Path, *, strict: bool = False
+    path: Path, *, strict: bool = False, nonblocking: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, int] | None]:
     """Verify outside the lock and repair only an invalid final fragment."""
 
     try:
-        return _read_chain_snapshot_with_state(path, strict=strict)
+        return _read_chain_snapshot_with_state(path, strict=strict, nonblocking=nonblocking)
     except DistillationStoreError as exc:
         snapshot_error = exc
 
-    descriptor, state, checkpoint = _capture_ledger_snapshot(path)
+    descriptor, state, checkpoint = _capture_ledger_snapshot(path, nonblocking=nonblocking)
     if descriptor is None or state is None:
         raise snapshot_error
     data = _read_pinned_ledger(descriptor, path, state)
@@ -972,8 +1001,7 @@ def _read_chain_snapshot_recovering_final_fragment(
     if checkpoint_head is not None and checkpoint_head != prefix_head:
         raise DistillationStoreError("ledger checkpoint does not match decoded rows")
 
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    with _locked(lock_path):
+    with _snapshot_lock(path, nonblocking=nonblocking):
         if _ledger_file_state(path) != state:
             raise DistillationStoreBusy("ledger changed during final-fragment repair")
         with path.open("r+b") as writable:
@@ -995,59 +1023,9 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _recover_chain_tail(path: Path) -> dict[str, Any]:
-    """Verify a ledger and discard only an interrupted final record."""
-
-    previous = ""
-    count = 0
-    last_good_offset = 0
-    try:
-        with path.open("rb") as handle:
-            for index, line in enumerate(iter(handle.readline, b"")):
-                end_offset = handle.tell()
-                try:
-                    row = json.loads(line)
-                except (UnicodeError, json.JSONDecodeError) as exc:
-                    if not line.endswith(b"\n") or (
-                        line == b"\n"
-                        and end_offset == os.fstat(handle.fileno()).st_size
-                    ):
-                        with path.open("r+b") as writable:
-                            writable.truncate(last_good_offset)
-                            writable.flush()
-                            os.fsync(writable.fileno())
-                        _fsync_directory(path)
-                        return {"records": count, "head_sha256": previous}
-                    raise DistillationStoreError(
-                        f"ledger row {index} is invalid"
-                    ) from exc
-                if not isinstance(row, dict):
-                    raise DistillationStoreError(f"ledger row {index} is not an object")
-                _require_chain_metadata(row, index)
-                digest = row.get("record_sha256")
-                unsigned = {
-                    key: value for key, value in row.items() if key != "record_sha256"
-                }
-                if row.get(
-                    "previous_sha256"
-                ) != previous or digest != canonical_json_sha256_strict(unsigned):
-                    if not line.endswith(b"\n"):
-                        with path.open("r+b") as writable:
-                            writable.truncate(last_good_offset)
-                            writable.flush()
-                            os.fsync(writable.fileno())
-                        _fsync_directory(path)
-                        return {"records": count, "head_sha256": previous}
-                    raise DistillationStoreError(
-                        f"ledger chain mismatch at row {index}"
-                    )
-                previous = str(digest)
-                count += 1
-                last_good_offset = end_offset
-    except FileNotFoundError:
-        return {"records": 0, "head_sha256": ""}
-    except OSError as exc:
-        raise DistillationStoreError("ledger is unreadable") from exc
-    return {"records": count, "head_sha256": previous}
+    """Verify/recover through the shared snapshot path outside the ledger lock."""
+    _rows, head, _state = _read_chain_snapshot_recovering_final_fragment(path, strict=True)
+    return head
 
 
 def _append_fsynced(path: Path, data: bytes) -> None:
@@ -1075,9 +1053,11 @@ def chain_head(path: Path) -> dict[str, Any]:
         head = _read_chain_checkpoint(path)
         if head is not None:
             return head
-        head = _recover_chain_tail(path)
-        _write_chain_checkpoint(path, head)
-        return head
+    rows = read_chain(path)
+    return {
+        "records": len(rows),
+        "head_sha256": rows[-1]["record_sha256"] if rows else "",
+    }
 
 
 def append_chain(path: Path, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1105,6 +1085,9 @@ def append_chain_batch(
     }
     for payload in values:
         _reject_reserved(payload, reserved)
+    chain_head(path)
+    if path.name == LABEL_LEDGER_FILE:
+        label_health_projection(path, repair=True)
     lock_path = path.with_suffix(path.suffix + ".lock")
     with _locked(lock_path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1113,16 +1096,13 @@ def append_chain_batch(
             head = _checkpoint_head(checkpoint)
             generation = checkpoint.get("generation") or _new_chain_generation()
         else:
-            head = _recover_chain_tail(path)
-            generation = _new_chain_generation()
+            raise DistillationStoreBusy("ledger changed after append preparation")
         label_counts: dict[str, int] | None = None
         if path.name == LABEL_LEDGER_FILE:
             projection = _read_label_health_projection(path, head)
-            label_counts = (
-                dict(projection["counts"])
-                if projection is not None
-                else _label_health_counts(_read_chain_locked(path, head))
-            )
+            if projection is None:
+                raise DistillationStoreBusy("label health changed after append preparation")
+            label_counts = dict(projection["counts"])
         # The checkpoint is a write-ahead recovery point for an interrupted append.
         _write_chain_checkpoint(path, head, generation=generation)
         previous = str(head["head_sha256"])
@@ -1191,14 +1171,17 @@ def append_chain_unique(
 ) -> dict[str, Any]:
     """Append once by a stable identity while holding the ledger lock."""
 
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    with _locked(lock_path):
-        return append_chain_unique_locked(
-            path,
-            payload,
-            unique_field=unique_field,
-            binding_field=binding_field,
-        )
+    for attempt in range(3):
+        prepare_unique_index(path, unique_field=unique_field, binding_field=binding_field)
+        try:
+            with _locked(path.with_suffix(path.suffix + ".lock")):
+                return append_chain_unique_locked(
+                    path, payload, unique_field=unique_field, binding_field=binding_field,
+                )
+        except DistillationStoreBusy:
+            if attempt == 2:
+                raise
+    raise DistillationStoreBusy("unique ledger changed during append")
 
 
 def _unique_index_path(path: Path) -> Path:
@@ -1266,19 +1249,63 @@ def _open_unique_index(path: Path) -> sqlite3.Connection:
     return connection
 
 
+def prepare_unique_index(
+    path: Path, *, unique_field: str, binding_field: str, nonblocking: bool = False,
+) -> None:
+    """Verify/rebuild a derived index before acquiring a ledger writer lock."""
+
+    with _snapshot_lock(path, nonblocking=nonblocking):
+        head = _read_chain_checkpoint(path)
+        index_path = _unique_index_path(path)
+        if head is not None and _unique_index_checkpoint_matches(index_path):
+            try:
+                with contextlib.closing(_open_unique_index(index_path)) as connection:
+                    if _unique_index_matches(
+                        connection, path, head,
+                        unique_field=unique_field, binding_field=binding_field,
+                    ):
+                        return
+            except (OSError, sqlite3.Error):
+                pass
+    _head, connection = _rebuild_unique_index(
+        path, unique_field=unique_field, binding_field=binding_field,
+        nonblocking=nonblocking,
+    )
+    connection.close()
+
+
 def _rebuild_unique_index(
     path: Path,
     *,
     unique_field: str,
     binding_field: str,
+    nonblocking: bool = False,
 ) -> tuple[dict[str, Any], sqlite3.Connection]:
     """Recover the ledger once, then atomically replace its derived index."""
 
-    head = _recover_chain_tail(path)
-    separator = _chain_separator(path)
-    if separator:
-        _append_fsynced(path, separator)
-    _write_chain_checkpoint(path, head)
+    rows, head, expected_state = _read_chain_snapshot_recovering_final_fragment(
+        path, strict=True, nonblocking=nonblocking,
+    )
+    with _snapshot_lock(path, nonblocking=nonblocking):
+        if _ledger_file_state(path) != expected_state:
+            raise DistillationStoreBusy("unique ledger changed during verification")
+        separator = _chain_separator(path)
+        if separator:
+            _append_fsynced(path, separator)
+        if _read_chain_checkpoint(path) != head:
+            _write_chain_checkpoint(path, head)
+        expected_state = _ledger_file_state(path)
+    descriptor, captured_state, _checkpoint = _capture_ledger_snapshot(
+        path, nonblocking=nonblocking,
+    )
+    if captured_state != expected_state:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise DistillationStoreBusy("unique ledger changed before indexing")
+    data = (
+        _read_pinned_ledger(descriptor, path, captured_state)
+        if descriptor is not None and captured_state is not None else b""
+    )
     index_path = _unique_index_path(path)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{index_path.name}.", suffix=".tmp", dir=index_path.parent
@@ -1306,52 +1333,48 @@ def _rebuild_unique_index(
                 );
                 """
             )
-            with path.open("rb") if path.exists() else contextlib.nullcontext() as handle:
-                if handle is not None:
-                    while line := handle.readline():
-                        offset = handle.tell() - len(line)
-                        row = json.loads(line)
-                        if not isinstance(row, dict):
-                            raise DistillationStoreError("ledger row is not an object")
-                        connection.execute(
-                            "INSERT INTO rows VALUES (?, ?, ?)",
-                            (offset, len(line), str(row.get("record_sha256") or "")),
-                        )
-                        connection.execute(
-                            "INSERT INTO entries VALUES (?, ?, ?, ?, ?)",
-                            (
-                                unique_field,
-                                binding_field,
-                                sqlite3.Binary(
-                                    canonical_json_bytes_strict(row.get(unique_field))
-                                ),
-                                sqlite3.Binary(
-                                    canonical_json_bytes_strict(row.get(binding_field))
-                                ),
-                                offset,
-                            ),
-                        )
+            offset = 0
+            for line, row in zip(data.splitlines(keepends=True), rows, strict=True):
+                connection.execute(
+                    "INSERT INTO rows VALUES (?, ?, ?)",
+                    (offset, len(line), str(row["record_sha256"])),
+                )
+                connection.execute(
+                    "INSERT INTO entries VALUES (?, ?, ?, ?, ?)",
+                    (
+                        unique_field, binding_field,
+                        sqlite3.Binary(canonical_json_bytes_strict(row.get(unique_field))),
+                        sqlite3.Binary(canonical_json_bytes_strict(row.get(binding_field))),
+                        offset,
+                    ),
+                )
+                offset += len(line)
             connection.executemany(
                 "INSERT INTO metadata VALUES (?, ?)",
-                _unique_index_metadata(
-                    path,
-                    head,
-                    unique_field=unique_field,
-                    binding_field=binding_field,
-                ).items(),
+                {
+                    **_unique_index_metadata(
+                        path, head, unique_field=unique_field, binding_field=binding_field,
+                    ),
+                    "file_state": projection_json(expected_state),
+                }.items(),
             )
             connection.commit()
         finally:
             connection.close()
         with temporary.open("rb") as handle:
             os.fsync(handle.fileno())
-        os.replace(temporary, index_path)
-        _fsync_directory(index_path)
-        _write_unique_index_checkpoint(index_path)
-        return head, _open_unique_index(index_path)
+        with _snapshot_lock(path, nonblocking=nonblocking):
+            if _ledger_file_state(path) != expected_state or _read_chain_checkpoint(path) != head:
+                raise DistillationStoreBusy("unique ledger changed during index build")
+            os.replace(temporary, index_path)
+            _fsync_directory(index_path)
+            _write_unique_index_checkpoint(index_path)
+            return head, _open_unique_index(index_path)
     except (OSError, sqlite3.Error, ValueError, UnicodeError) as exc:
         temporary.unlink(missing_ok=True)
         raise DistillationStoreError("unique ledger index rebuild failed") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _unique_index_matches(
@@ -1542,14 +1565,7 @@ def append_chain_unique_locked(
             if connection is not None:
                 connection.close()
                 connection = None
-            head, connection = _rebuild_unique_index(
-                path, unique_field=unique_field, binding_field=binding_field
-            )
-            checkpoint = _read_chain_checkpoint_details(path)
-            if checkpoint is None:
-                raise DistillationStoreError("unique ledger checkpoint rebuild failed")
-            head = _checkpoint_head(checkpoint)
-            generation = checkpoint.get("generation")
+            raise DistillationStoreBusy("unique ledger index requires preparation")
         existing_rows = _indexed_unique_rows(
             connection,
             path,
@@ -1558,25 +1574,7 @@ def append_chain_unique_locked(
             binding_field=binding_field,
         )
         if existing_rows is None:
-            connection.close()
-            connection = None
-            head, connection = _rebuild_unique_index(
-                path, unique_field=unique_field, binding_field=binding_field
-            )
-            checkpoint = _read_chain_checkpoint_details(path)
-            if checkpoint is None:
-                raise DistillationStoreError("unique ledger checkpoint rebuild failed")
-            head = _checkpoint_head(checkpoint)
-            generation = checkpoint.get("generation")
-            existing_rows = _indexed_unique_rows(
-                connection,
-                path,
-                identity,
-                unique_field=unique_field,
-                binding_field=binding_field,
-            )
-        if existing_rows is None:
-            raise DistillationStoreError("unique ledger index does not match ledger")
+            raise DistillationStoreBusy("unique ledger index requires verification")
         label_projection = (
             _read_label_health_projection(path, head)
             if path.name == LABEL_LEDGER_FILE
@@ -1637,39 +1635,6 @@ def append_chain_unique_locked(
     finally:
         if connection is not None:
             connection.close()
-
-
-def _read_chain_locked(
-    path: Path, head: Mapping[str, Any] | None = None
-) -> list[dict[str, Any]]:
-    if head is None:
-        head = _read_chain_checkpoint(path)
-        if head is None:
-            head = _recover_chain_tail(path)
-            _write_chain_checkpoint(path, head)
-    try:
-        lines = path.read_bytes().splitlines()
-    except FileNotFoundError:
-        lines = []
-    except OSError as exc:
-        raise DistillationStoreError("ledger is unreadable") from exc
-    rows: list[dict[str, Any]] = []
-    for index, line in enumerate(lines):
-        try:
-            row = json.loads(line)
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise DistillationStoreError(f"ledger row {index} is invalid") from exc
-        if not isinstance(row, dict):
-            raise DistillationStoreError(f"ledger row {index} is not an object")
-        _require_chain_metadata(row, index)
-        rows.append(row)
-    if (
-        len(rows) != head["records"]
-        or (rows[-1].get("record_sha256") if rows else "")
-        != head["head_sha256"]
-    ):
-        raise DistillationStoreError("ledger checkpoint does not match decoded rows")
-    return rows
 
 
 def read_chain(path: Path) -> list[dict[str, Any]]:

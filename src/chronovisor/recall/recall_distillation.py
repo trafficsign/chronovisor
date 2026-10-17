@@ -3744,6 +3744,13 @@ def _append_unique_receipt(
             unique_field="decision_id",
             binding_field="idempotency_sha256",
         )
+    try:
+        store.prepare_unique_index(
+            path, unique_field="decision_id", binding_field="idempotency_sha256",
+            nonblocking=True,
+        )
+    except store.DistillationStoreBusy:
+        return {"status": "deferred", "reason": "receipt_ledger_busy"}
     lock = store.acquire_nonblocking_lock(path.with_suffix(path.suffix + ".lock"))
     if lock is None:
         return {"status": "deferred", "reason": "receipt_ledger_busy"}

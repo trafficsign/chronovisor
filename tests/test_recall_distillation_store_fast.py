@@ -172,28 +172,21 @@ def test_chain_head_recovers_checkpoint_mismatch_and_torn_tail(
 ) -> None:
     path = tmp_path / "ledger.jsonl"
     row = store.append_chain(path, {"index": 0})
-    recover = store._recover_chain_tail
-    calls = 0
-
-    def tracked_recovery(recovery_path: Path) -> dict[str, object]:
-        nonlocal calls
-        calls += 1
-        return recover(recovery_path)
 
     with path.open("ab") as handle:
         handle.write(b'{"index":')
         handle.flush()
-    monkeypatch.setattr(store, "_recover_chain_tail", tracked_recovery)
+    decode_calls = _install_decode_lock_probe(path, monkeypatch)
 
     assert store.chain_head(path) == {
         "records": 1,
         "head_sha256": row["record_sha256"],
     }
-    assert calls == 1
     assert store.verify_chain(path) == {
         "records": 1,
         "head_sha256": row["record_sha256"],
     }
+    assert decode_calls() > 0
 
 
 def test_chain_head_recovers_an_invalid_checkpoint(
@@ -202,21 +195,62 @@ def test_chain_head_recovers_an_invalid_checkpoint(
     path = tmp_path / "ledger.jsonl"
     row = store.append_chain(path, {"index": 0})
     store._chain_checkpoint_path(path).write_text("{}", encoding="utf-8")
-    recover = store._recover_chain_tail
-    calls = 0
-
-    def tracked_recovery(recovery_path: Path) -> dict[str, object]:
-        nonlocal calls
-        calls += 1
-        return recover(recovery_path)
-
-    monkeypatch.setattr(store, "_recover_chain_tail", tracked_recovery)
+    decode_calls = _install_decode_lock_probe(path, monkeypatch)
 
     assert store.chain_head(path) == {
         "records": 1,
         "head_sha256": row["record_sha256"],
     }
-    assert calls == 1
+    assert store.verify_chain(path) == {
+        "records": 1,
+        "head_sha256": row["record_sha256"],
+    }
+    assert decode_calls() > 0
+
+
+def test_append_label_batch_repairs_missing_projection_without_locked_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / store.LABEL_LEDGER_FILE
+    store.append_chain(path, {"authority": "teacher-only"})
+    store._label_health_projection_path(path).unlink()
+    decode_calls = _install_decode_lock_probe(path, monkeypatch)
+
+    appended = store.append_chain(path, {"authority": "verified"})
+
+    assert appended["authority"] == "verified"
+    assert store.verify_chain(path)["records"] == 2
+    assert store.label_health_projection(path)["counts"] == {
+        "teacher_only": 1,
+        "verified_truth": 1,
+        "probe_not_truth": 0,
+    }
+    assert decode_calls() > 0
+
+
+def test_append_label_batch_fails_closed_on_source_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / store.LABEL_LEDGER_FILE
+    store.append_chain(path, {"authority": "teacher-only"})
+    store._label_health_projection_path(path).unlink()
+    rewritten = path.read_bytes().replace(b'"teacher-only"', b'"teacher_only"', 1)
+    original_decode = store._decode_chain_bytes
+    mutated = False
+
+    def rewrite_once(data: bytes, **kwargs: object) -> object:
+        nonlocal mutated
+        if not mutated:
+            path.write_bytes(rewritten)
+            mutated = True
+        return original_decode(data, **kwargs)
+
+    monkeypatch.setattr(store, "_decode_chain_bytes", rewrite_once)
+    with pytest.raises(store.DistillationStoreBusy, match="changed during snapshot"):
+        store.append_chain(path, {"authority": "verified"})
+
+    assert mutated
+    assert b'"verified"' not in path.read_bytes()
 
 
 def test_read_chain_uses_checkpoint_without_rehashing(
@@ -231,6 +265,27 @@ def test_read_chain_uses_checkpoint_without_rehashing(
     monkeypatch.setattr(store, "_recover_chain_tail", unexpected_recovery)
 
     assert [row["index"] for row in store.read_chain(path)] == [0, 1]
+
+
+def _install_decode_lock_probe(
+    path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Callable[[], int]:
+    """Assert every strict ledger decode runs after releasing its lock."""
+
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    original_decode = store._decode_chain_bytes
+    calls = 0
+
+    def probe(data: bytes, **kwargs: object) -> object:
+        nonlocal calls
+        handle = store.acquire_nonblocking_lock(lock_path)
+        assert handle is not None, "ledger lock was held during decode"
+        store.release_lock(handle)
+        calls += 1
+        return original_decode(data, **kwargs)
+
+    monkeypatch.setattr(store, "_decode_chain_bytes", probe)
+    return lambda: calls
 
 
 def test_read_chain_repairs_stale_checkpoint_after_unlocked_verification(
@@ -778,6 +833,92 @@ def test_unique_index_preserves_duplicate_and_conflict_behavior(tmp_path: Path) 
         )
 
 
+@pytest.mark.parametrize("state", ["missing", "stale"])
+def test_unique_index_preparation_decodes_without_holding_ledger_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    path = tmp_path / "receipts.jsonl"
+    if state == "missing":
+        store.append_chain(
+            path,
+            {"decision_id": "decision-1", "idempotency_sha256": "binding-1"},
+        )
+    else:
+        store.append_chain_unique(
+            path,
+            _unique_payload("decision-1", "binding-1"),
+            unique_field="decision_id",
+            binding_field="idempotency_sha256",
+        )
+        store.append_chain(
+            path,
+            {"decision_id": "decision-2", "idempotency_sha256": "binding-2"},
+        )
+    decode_calls = _install_decode_lock_probe(path, monkeypatch)
+
+    appended = store.append_chain_unique(
+        path,
+        _unique_payload("decision-3", "binding-3"),
+        unique_field="decision_id",
+        binding_field="idempotency_sha256",
+    )
+
+    assert appended["decision_id"] == "decision-3"
+    assert store.verify_chain(path)["records"] == (2 if state == "missing" else 3)
+    assert decode_calls() > 0
+
+
+def test_append_chain_unique_locked_requires_prepared_index(tmp_path: Path) -> None:
+    path = tmp_path / "receipts.jsonl"
+    store.append_chain(
+        path,
+        {"decision_id": "decision-1", "idempotency_sha256": "binding-1"},
+    )
+
+    with store._locked(path.with_suffix(path.suffix + ".lock")):
+        with pytest.raises(store.DistillationStoreBusy, match="requires preparation"):
+            store.append_chain_unique_locked(
+                path,
+                _unique_payload("decision-2", "binding-2"),
+                unique_field="decision_id",
+                binding_field="idempotency_sha256",
+            )
+
+
+def test_unique_index_preparation_fails_closed_on_source_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "receipts.jsonl"
+    store.append_chain(
+        path,
+        {"decision_id": "decision-1", "idempotency_sha256": "binding-1"},
+    )
+    before = path.read_bytes()
+    rewritten = before.replace(b'"decision-1"', b'"decision-2"', 1)
+    assert rewritten != before and len(rewritten) == len(before)
+    original_decode = store._decode_chain_bytes
+    mutated = False
+
+    def rewrite_once(data: bytes, **kwargs: object) -> object:
+        nonlocal mutated
+        if not mutated:
+            path.write_bytes(rewritten)
+            mutated = True
+        return original_decode(data, **kwargs)
+
+    monkeypatch.setattr(store, "_decode_chain_bytes", rewrite_once)
+    with pytest.raises(store.DistillationStoreBusy, match="changed during snapshot"):
+        store.append_chain_unique(
+            path,
+            _unique_payload("decision-3", "binding-3"),
+            unique_field="decision_id",
+            binding_field="idempotency_sha256",
+        )
+
+    assert mutated
+    assert b'"decision-3"' not in path.read_bytes()
+
+
 @pytest.mark.parametrize(
     "failure",
     [
@@ -819,15 +960,7 @@ def test_unique_index_recovers_and_rebuilds(
         path.write_bytes(path.read_bytes().removesuffix(b"\n"))
     elif failure == "batch_stale":
         store.append_chain_batch(path, [{"index": 2}])
-    recover = store._recover_chain_tail
-    calls = 0
-
-    def tracked_recovery(recovery_path: Path) -> dict[str, object]:
-        nonlocal calls
-        calls += 1
-        return recover(recovery_path)
-
-    monkeypatch.setattr(store, "_recover_chain_tail", tracked_recovery)
+    decode_calls = _install_decode_lock_probe(path, monkeypatch)
     store.append_chain_unique(
         path,
         _unique_payload("decision-2", "binding-2"),
@@ -835,7 +968,7 @@ def test_unique_index_recovers_and_rebuilds(
         binding_field="idempotency_sha256",
     )
 
-    assert calls == 1
+    assert decode_calls() > 0
     assert store.verify_chain(path)["records"] == (3 if failure == "batch_stale" else 2)
 
 
@@ -875,15 +1008,7 @@ def test_unique_index_rebuilds_after_logical_row_deletion(
     )
     with sqlite3.connect(store._unique_index_path(path)) as connection:
         connection.execute("DELETE FROM entries")
-    recover = store._recover_chain_tail
-    calls = 0
-
-    def tracked_recovery(recovery_path: Path) -> dict[str, object]:
-        nonlocal calls
-        calls += 1
-        return recover(recovery_path)
-
-    monkeypatch.setattr(store, "_recover_chain_tail", tracked_recovery)
+    decode_calls = _install_decode_lock_probe(path, monkeypatch)
 
     assert (
         store.append_chain_unique(
@@ -894,7 +1019,7 @@ def test_unique_index_rebuilds_after_logical_row_deletion(
         )
         == first
     )
-    assert calls == 1
+    assert decode_calls() > 0
     assert store.verify_chain(path)["records"] == 1
 
 
