@@ -239,6 +239,128 @@ def test_native_config_errors_fail_closed(
     assert native.native_luna_enabled_for_lane("frontier") is False
 
 
+def _codex_executable(root: Path, name: str) -> Path:
+    path = root / name
+    path.write_text(f"#!/bin/sh\n# {name}\n", encoding="utf-8")
+    path.chmod(0o700)
+    return path
+
+
+def test_configured_executable_keeps_authority_stable_across_service_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wrapper = _codex_executable(tmp_path, "wrapper")
+    direct = _codex_executable(tmp_path, "direct")
+    monkeypatch.setenv("CHRONOVISOR_ROOT", str(tmp_path))
+    monkeypatch.delenv("CHRONOVISOR_CODEX_EXECUTABLE", raising=False)
+    (tmp_path / "config.toml").write_text(
+        f"[search_label_review]\ncodex_executable = {json.dumps(str(wrapper))}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(native, "_read_role", lambda _path: ({}, "a" * 64))
+    monkeypatch.setattr(native, "_codex_version", lambda _path: "codex test")
+    try:
+        routes = []
+        for executable in (wrapper, direct):
+            native.clear_native_luna_runtime_identity_cache()
+            monkeypatch.setattr(
+                native.shutil, "which", lambda _name, path=executable: str(path)
+            )
+            routes.append(native.native_luna_route_identity())
+            assert native._runtime_identity()["_codex_path"] == str(wrapper)
+        assert routes[0] == routes[1]
+        assert routes[0]["endpoint_sha256"] == hashlib.sha256(wrapper.read_bytes()).hexdigest()
+    finally:
+        native.clear_native_luna_runtime_identity_cache()
+
+
+@pytest.mark.parametrize("value", ('""', '"codex"', "42", "[]"))
+def test_invalid_executable_pin_does_not_fall_back_to_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    fallback = _codex_executable(tmp_path, "fallback")
+    monkeypatch.setenv("CHRONOVISOR_ROOT", str(tmp_path))
+    monkeypatch.delenv("CHRONOVISOR_CODEX_EXECUTABLE", raising=False)
+    monkeypatch.setattr(native.shutil, "which", lambda _name: str(fallback))
+    (tmp_path / "config.toml").write_text(
+        f"[search_label_review]\ncodex_executable = {value}\n", encoding="utf-8"
+    )
+    with pytest.raises(native.NativeLunaIdentityError, match="config_executable_invalid"):
+        native._resolve_codex()
+
+
+@pytest.mark.parametrize("kind", ("missing", "directory", "not_executable", "symlink_loop"))
+def test_unavailable_executable_pin_does_not_fall_back_to_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    fallback = _codex_executable(tmp_path, "fallback")
+    configured = tmp_path / "configured"
+    if kind == "directory":
+        configured.mkdir()
+    elif kind == "not_executable":
+        configured.write_text("not executable", encoding="utf-8")
+        configured.chmod(0o600)
+    elif kind == "symlink_loop":
+        configured.symlink_to(configured)
+    monkeypatch.setenv("CHRONOVISOR_ROOT", str(tmp_path))
+    monkeypatch.delenv("CHRONOVISOR_CODEX_EXECUTABLE", raising=False)
+    if kind == "symlink_loop":
+        monkeypatch.setenv("CHRONOVISOR_CODEX_EXECUTABLE", str(configured))
+    monkeypatch.setattr(native.shutil, "which", lambda _name: str(fallback))
+    (tmp_path / "config.toml").write_text(
+        f"[search_label_review]\ncodex_executable = {json.dumps(str(configured))}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(native.NativeLunaIdentityError, match="codex_unavailable"):
+        native._resolve_codex()
+
+
+def test_executable_environment_cannot_override_canonical_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured = _codex_executable(tmp_path, "configured")
+    other = _codex_executable(tmp_path, "other")
+    monkeypatch.setenv("CHRONOVISOR_ROOT", str(tmp_path))
+    monkeypatch.setenv("CHRONOVISOR_CODEX_EXECUTABLE", str(other))
+    assert native._resolve_codex() == other
+    (tmp_path / "config.toml").write_text(
+        f"[search_label_review]\ncodex_executable = {json.dumps(str(configured))}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(native.NativeLunaIdentityError, match="override_conflict"):
+        native._resolve_codex()
+    monkeypatch.setenv("CHRONOVISOR_CODEX_EXECUTABLE", str(configured))
+    assert native._resolve_codex() == configured
+
+
+def test_changed_executable_pin_invalidates_cached_path_choice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _codex_executable(tmp_path, "first")
+    second = _codex_executable(tmp_path, "second")
+    monkeypatch.setenv("CHRONOVISOR_ROOT", str(tmp_path))
+    monkeypatch.delenv("CHRONOVISOR_CODEX_EXECUTABLE", raising=False)
+    monkeypatch.setattr(native, "_read_role", lambda _path: ({}, "a" * 64))
+    monkeypatch.setattr(native, "_codex_version", lambda _path: "codex test")
+    config = tmp_path / "config.toml"
+    try:
+        native.clear_native_luna_runtime_identity_cache()
+        routes = []
+        for path in (first, second):
+            config.write_text(
+                f"[search_label_review]\ncodex_executable = {json.dumps(str(path))}\n",
+                encoding="utf-8",
+            )
+            routes.append(native.native_luna_route_identity())
+            assert native._runtime_identity()["_codex_path"] == str(path)
+        assert routes[0] != routes[1]
+        config.write_text("[search_label_review]\ncodex_executable = 42\n", encoding="utf-8")
+        with pytest.raises(native.NativeLunaIdentityError, match="config_executable_invalid"):
+            native.native_luna_route_identity()
+    finally:
+        native.clear_native_luna_runtime_identity_cache()
+
+
 def test_native_receipt_binds_result_and_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

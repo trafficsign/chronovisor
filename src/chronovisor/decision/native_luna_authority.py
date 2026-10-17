@@ -113,22 +113,27 @@ def _parse_authority_value(value: object, *, source: str) -> str:
     return normalized
 
 
-def _configured_search_label_authority(root: Path | None = None) -> str:
+def _search_label_review_config(root: Path | None = None) -> Mapping[str, Any]:
     path = _runtime_root(root) / "config.toml"
     try:
         snapshot = path.read_bytes()
         data = tomllib.loads(snapshot.decode("utf-8"))
     except FileNotFoundError:
-        return LOCAL_AUTHORITY_VALUE
+        return {}
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise NativeLunaIdentityError(
             "native_luna_config_unavailable"
         ) from exc
     section = data.get(SEARCH_LABEL_REVIEW_SECTION)
     if section is None:
-        return LOCAL_AUTHORITY_VALUE
+        return {}
     if not isinstance(section, Mapping):
         raise NativeLunaIdentityError("native_luna_config_section_invalid")
+    return section
+
+
+def _configured_search_label_authority(root: Path | None = None) -> str:
+    section = _search_label_review_config(root)
     if "authority" not in section:
         return LOCAL_AUTHORITY_VALUE
     return _parse_authority_value(section["authority"], source="config")
@@ -203,11 +208,27 @@ def _read_role(path: Path) -> tuple[dict[str, Any], str]:
 
 
 def _resolve_codex() -> Path:
-    configured = os.environ.get("CHRONOVISOR_CODEX_EXECUTABLE", "").strip()
-    path = Path(configured).expanduser() if configured else Path(shutil.which("codex") or "")
-    if not path or not path.is_file() or not os.access(path, os.X_OK):
-        raise NativeLunaIdentityError("native_luna_codex_unavailable")
-    return path.resolve()
+    section = _search_label_review_config()
+    override = os.environ.get("CHRONOVISOR_CODEX_EXECUTABLE", "").strip()
+    try:
+        if "codex_executable" in section:
+            configured = section["codex_executable"]
+            if not isinstance(configured, str) or not configured.strip():
+                raise NativeLunaIdentityError("native_luna_config_executable_invalid")
+            path = Path(configured.strip()).expanduser()
+            if not path.is_absolute():
+                raise NativeLunaIdentityError("native_luna_config_executable_invalid")
+            if override and Path(override).expanduser().resolve() != path.resolve():
+                raise NativeLunaIdentityError("native_luna_executable_override_conflict")
+        else:
+            path = Path(override).expanduser() if override else Path(shutil.which("codex") or "")
+        if not path or not path.is_file() or not os.access(path, os.X_OK):
+            raise NativeLunaIdentityError("native_luna_codex_unavailable")
+        return path.resolve()
+    except NativeLunaIdentityError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise NativeLunaIdentityError("native_luna_codex_unavailable") from exc
 
 
 def _codex_version(path: Path) -> str:
@@ -229,12 +250,16 @@ def _codex_version(path: Path) -> str:
     return value
 
 
-@lru_cache(maxsize=1)
 def _runtime_identity() -> dict[str, Any]:
     """Return the current route identity without exposing credentials."""
 
-    codex = _resolve_codex()
-    role_path = _role_path()
+    # Resolve before consulting the cache so a changed or invalid canonical
+    # pin cannot leave a long-lived process using its previous PATH choice.
+    return _cached_runtime_identity(_resolve_codex(), _role_path())
+
+
+@lru_cache(maxsize=1)
+def _cached_runtime_identity(codex: Path, role_path: Path) -> dict[str, Any]:
     _role, role_sha256 = _read_role(role_path)
     version = _codex_version(codex)
     return {
@@ -269,7 +294,7 @@ def native_luna_route_identity() -> dict[str, Any]:
 
 
 def clear_native_luna_runtime_identity_cache() -> None:
-    _runtime_identity.cache_clear()
+    _cached_runtime_identity.cache_clear()
 
 
 def native_luna_route_provenance_error(routes: object) -> str | None:
