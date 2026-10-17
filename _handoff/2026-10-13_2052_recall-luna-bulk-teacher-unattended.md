@@ -105,7 +105,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] 残件B1：旧 capture 履歴を保持し、現在の障害と区別して health を修正する。
 - [ ] 残件B2：search_labels review/frontier の根因を直し、正規 drain または設計廃止を完了する。
 - [ ] 残件B3：lint_repair local/frontier の根因を直し、検証済み apply または設計廃止を完了する。
-- [ ] 残件B4：raw_replay replay の根因を直し、正規 drain または設計廃止を完了する。
+- [x] 残件B4：raw_replay replay の根因を直し、正規 drain または設計廃止を完了する。
 - [ ] 残件C：必須CI・安全配備・drift=false・無人運転・09:15 automation の整合を確認する。
 
 ### Phase 5：別件の修理
@@ -135,7 +135,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 品質受入待ち：blind repeat、固定splitと時系列／row integrity、gate適格CFの残件を2026-10-17の追加承認で自律修復中。過去の「ユーザー判断待ち」は今回の範囲に限り解除し、品質条件そのものは維持する。
+- 品質受入待ち：A2の固定split identity・時系列・assignment・row integrityは実baselineで解消済み。残る固定blindの片側uncertain12組は現immutable契約下で再判定できず、自動解消日は未定。gate適格CFは0/100で、10/9以降の実selected/exact exposureと有効な独立比較の蓄積待ち（実合格率未観測のため予定日未定）。過去の「ユーザー判断待ち」は今回の範囲では解除済みで、品質条件は維持する。
 - 7日無人継続と別モデル300件の独立比較は未完。既存09:15確認で追跡する。
 
 ## 受け渡しメモ（次担当へ）
@@ -510,3 +510,33 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-17 21:12 JST — 166f3d68運転復帰: 全6serviceの実archive/direct_urlとMCP1.30.0を照合し、21:02–21:03に独立比較の一時停止、保有ingest lease、Converge/searchの所有schedule hold、自分のmaintenanceを全て解除した。supervisor・日次処理・両queue workerは通常運転へ復帰。B3の保存proof producer修正に対応する1件だけを正規resume APIでpending_frontierへ戻し、他133 quarantineは保持。最初の通常drainはprocessed3/applied2、active443→441、新quarantine0、raw変更なし。
 
 - 2026-10-17 21:13 JST — Projection修正の検証完了: 専用CHRONOVISOR_ROOTでmaterialization/validation/native/distillationとarchitecture/refactorの関連424 testsが32.65秒で成功。新materialization回帰単独27 tests、全src/scripts/testsのRuff、mypy97files、import contract、architecture baseline、diff-checkを通過した。最初の合同コマンドは存在しないtraining test名を指定して収集前終了したため、実在するdistillation suiteへ修正して上記を実行した。rootがsource/test最終差分を確認し、検証条件・artifact内容・データ選択規則に変更なし。配備を必要とするpackage修正としてcommitし、B4のexact origin guardを使う既存復旧の終了後にpushする。
+
+- 2026-10-17 21:19 JST — B4のguard調査: live HEADがdocs-only a71427b3、実package/originが166f3d68であったため、正規release APIのrepair_commit_not_current_headで拒否されていた。新しいclean detached 166f3d68 checkoutを正規repo rootとして使用すると、同じAPI dry-runはaccepted=true/local_repair_appliedとなり、raw SHA・full_raw completion・現page postimageも一致した。実applyは稼働ingestの共有leaseでdeferred。約6分の自然境界待機中も現jobのtriage進捗とliveness正常を確認し、停止させず自分の待機だけ終了、FD解放・mutation0。新packageのCIと並行化するため、復旧は次の配備でlive HEAD=実package=originを揃えた保有境界内へ移す判断とした。
+- 2026-10-17 21:19 JST — B2の新package実進捗: 復帰した正規search serviceの21:08–21:13周期でfrontier3/review2を実試行し、approved4/rejected1、両laneの進捗を確認した。全68241行を保持し、pending_review33228/pending_frontier124/frontier_retry1、残33353。323.9秒には実ingestと共有するモデルlease待ちが含まれ、local authorityは正常に直列化している。まだ全件排出は未完。healthはstale=trueの旧snapshotを返しており、queue原本の新attemptと区別して更新経路を追加確認中。
+- 2026-10-17 21:19 JST — 追加package ee4c0c1924083641002c4808ede45c272593615cをpushし、quality 39031875266、Python3.14 39031875288、Security39031875263の必須CIを開始。静的・architecture・semantic smoke/HNSWは通過し、full suite継続中。5依存環境のGitHub archive/direct_urlとMCP1.30.0は事前解決済み。まだlive tree/package/稼働supervisorは切り替えていない。
+- 2026-10-17 21:19 JST — 09:15 automationはACTIVE/schedule/threadを維持し、selection中の検証済みProjection再利用と、model_deferredから予算不足を推測せず実claim/モデル呼出し/品質失敗/段階時間を照合する手順を追記。変更はprompt/updated_atのみ、旧設定をprivate backup、file SHA4d59033a.../prompt SHA4bd0a866...を読戻し照合した。
+
+- 2026-10-17 21:27 JST — B3修正版の実適用完了: 保存済み正当なattempt履歴からauthority proofを復元した対象1件は、通常resume→pending_frontier→rejectedのterminalへ到達。専用drain3周期のprivate receiptsをrootも読戻し確認し、合計applied5/rejected2、active443→441→439→436、新quarantine0、raw_touched=false。既存133件のlocal_semantic_no_quorumは保持し、decision_authority_changedによる隔離は0。残るlocal392/frontier44は通常Convergeの継続対象であり、全排出のcheckboxは未完を維持する。
+- 2026-10-17 21:27 JST — 無人運転の追加確認: search第2周期は共有モデルlease待ち後に1件を通常承認し、残33352（review33228/frontier124）へ前進、worker正常exit0。HTTP healthの古い件数はstale明示のsnapshotキャッシュで、disk更新後にmaterialized_at11:56→12:09→12:18と追随しており、無限invalidateの証拠は無い。現日次attempt95は旧CatalogError履歴を保持したまま実candidate writer/prepare中で、新規エラーは未観測。新Raw watermarkに対する正規catalog repairとcandidate capture1600件/remaining0を確認し、単なるoperation開始を成功に数えていない。
+- 2026-10-17 21:27 JST — 次回配備準備: Securityと静的/semantic checksが成功、両full suiteは継続中。定期Convergeが稼働中のため、所有receiptを新しく分けた待機helperで自然終了後の次回scheduleだけを保留する。実行中worker/Raw/Lunaは継続し、searchとsupervisorは現時点で保留していない。全登録は今回の配備受入後に同じmanager/plistで必ず復帰する。
+
+- 2026-10-17 21:45 JST — 必須CI通過: ee4c0c1924083641002c4808ede45c272593615cのquality 39031875266、Python3.14 39031875288、Security39031875263は全成功。両full suiteは7166 passed/4 skipped/57 deselected、1368.23秒/1366.02秒。関連424 testsと合わせてsource/test差分の受入を確認した。live配備は実supervisorとingestの自然idle境界を待機中で、まだ切り替えていない。
+- 2026-10-17 21:45 JST — B4の8/11 legacy failed行は正規run_pending_queueで完了。ingest共有lease競合54回は試行数を増やさず、最初のnon-busy実行1回（max_runs1、既定10MiB、対象key厳密限定、reviewer overrideなし）でfull_raw completed、attempts1→2、job91cd58a3。現Raw2496 bytes/SHA17fbe801...は不変、failed→completedの履歴2行と正規completionを保持した。rootもprivate receiptを読戻し確認。別の完了済みRawの旧並走failure packetについては次の保有配備境界で正規CAS releaseを行うため、B4全体はまだ未完。
+- 2026-10-17 21:45 JST — 第四配備の保留状態: Convergeは21:30:23、searchは21:36:02に実worker自然終了後のscheduleだけを所有receipt付きで保留。21:36にsupervisor maintenanceを設定し、実行中daily childは自然終了を待った。最新の正規daily成功は12:30:07 UTC、completed labels136458（+432）、failure_count0。21:44時点でsupervisorはmaintenance/active_workers0/children0。稼働Rawは停止せず、既存OS leaseの空きを待機する。受入後は両scheduleと自分のmarkerを全て復帰する。
+- 2026-10-17 21:45 JST — A3の診断精度を補足: 過去のCounterfactualInvalid行は詳細predicateを保存しておらず、現在の6 quarantineをorder disagreement・schema・route違反のいずれかに断定できない。次の実formalに限り、既存_WorkerCounterfactual.compareとcommit境界の戻り値を一時観測し、enum/boolean/hash/長さ/時刻だけprivate保存する。最初のhelper案は通常factory/引数を変えたため実行前に却下し、既存classと通常entrypointのroot/config/cold_start/300秒呼出しを厳密維持する形へ修正。rootが差分、実クラスstub、deadline例外伝播、通常I/O失敗のみ無視、finally復帰を確認。teacher prompt/schema、判定、model呼出し回数、ledger/checkpointは観測層から変更しない。
+
+- 2026-10-17 21:55 JST — ee4c0c19を21:54:08の自然境界で配備。supervisor idle、稼働ingestのbatch終了、distillation leaseを確認し、live HEAD=runtime package=originを一致させた。5serviceのarchive/direct_url/MCP1.30.0を確認し、保有ingest lease内で正式run17の受入を開始。Convergeとsearchは受入後復帰のため保留中。
+- 2026-10-17 21:55 JST — B2の排出速度をtrace/auditのrequest SHA重複除外で実測。21:20–21:36のsearch10試行は生成合計120.2秒、resource待ち391.1秒（平均39.1秒/最大224.4秒）。受入3周期の減少は5/1/9、残33343。StartInterval300は実行中の発火を捨てるため、実323–346秒runでは約600秒ごとの開始になっていた。待ち時間を増幅する不要な間隔を減らすため、source plistのStartIntervalだけ60へ変更し、20件/通常300秒/Throttle60/Background/単一writer/authority契約は維持する判断。render・pin guard等の既存28 testsが専用rootで4.93秒、diff-check成功。まだlive plistへ反映しておらず、B4 guardの完了後に自然境界で正規installerから適用する。
+- 2026-10-17 21:55 JST — A1の契約境界を再確認。教師prompt/schema/identityやfloorsを保った別世代の評価を設計する余地はあるが、現singleton certification登録は判定後の別bundle再登録とpointer置換を正規API/既存回帰で拒否する。新世代を選択して旧12組をgateから外す操作を今回の「不足解消」とは認めず、既存frozen cohortと全結果を維持する。uncertainは正常な終端abstentionであり、現条件のままの自動解消日は未定／自動解消不可。これは追加のユーザー回答待ちにはしない。
+
+- 2026-10-17 22:05 JST — 正式run17は12:57:14 UTC開始後、通常300秒でwall_clock_timeout/processed0。実remove比較は54.55秒でDistillationError→counterfactual_invalidとなった。research schedulerは3回のworker subprocess完了を記録するが、これは3回目のresponse受入を証明せず、4回目未呼出しとpre-lane失敗をまだ区別できない。品質不合格と断定せず、原文を保存しないworker ordinal/operation/input bytes/固定例外enumの観測を次run用に追加中。
+- 2026-10-17 22:05 JST — run17の正規materializationは138752行中126998 clean/11754 dirty、dirty rally1767まで前進。source/checkpointは手編集せず通常再joinの続きを次runで実行する。shadowed selectionの旧全source fallback解消の実機時間は、joinが完了してから測る。wrapper exit0/completedを正式成功と扱わず、last_success更新を受入条件に維持する。
+- 2026-10-17 22:05 JST — 21:57のHTTP再確認で全queueのstale/authority/late alertはfalse、raw_replay_pending0（completed5、indeterminate3を保持）、search33343/lint436は通常処理の残件として存続。残る全体alertは旧正式runのrepeated failureのみ。HTTPのruntime commit/expected commit=ee4c0c19、drift=false。177 bundleの宣言hashと先行凍結1872 files/P0保護3項目も全一致、変更0。
+
+- 2026-10-17 22:21 JST — A3の正式run18は115.14秒で通常処理を終了し、138752行のmaterialization dirty0を確認。run19は79.07秒で終了し、旧selection全source再読と300秒timeoutは再発しなかった。一方、両runはCF未成立でdeferred/processed0、last_success_atは06:05:28 UTCのまま。wrapper完了を本線成功と取り違えず、最終受入条件を維持する。最新baseline a92e6922...でもA2の5理由は解消済み、blind incomplete12とgate適格CF0/100だけが残る。
+- 2026-10-17 22:21 JST — A3の形式失敗を本文非保存で確定。run17の既存auditはutility judgeのfeedback_too_large、run19のworker child観測はbasis_atom_idsのindex1–7にuniqueItems違反7件、修正feedback2170 bytes/固定上限1024、修正試行0。回答生成2回は形式・route/digestとも有効、3回目のutilityだけが拒否され、4回目は未呼出し。入力11897 bytes以下のため12000 bytes上限超過ではない。重複IDの削除、validatorの省略、feedback上限変更は行わない。既存worksetの有限再試行と次候補への進行を通常formal run20で確認中。
+- 2026-10-17 22:21 JST — 診断層はprivate runnerと厳密なworker child bootstrapだけ。通常root/config/cold_start/300秒呼出しを保持し、childに一時環境を設定してfinally復帰、観測するのはenum/既知schema pointerまたはSHA/件数/byte数のみ。rootが0 model call fixtureで引数・戻り値・例外identityとdeadline例外伝播を再確認した。補助receipt writerの変数名誤り1件は観測層書込後に生じ、receiptのみ修復、実entrypointや判定処理は変更していない。
+
+- 2026-10-17 22:25 JST — 正式run22が108.50秒で成功。通常選択されたpost-cutoff selected/remove候補を、異なるgenerator/judgeの2順序比較と既存validatorで検証し、有害1件を正規commit（counterfactuals_written1）した。2回目judgeは初回completionMetadata違反を既存1回修正で解消し、両順序一致。手動候補選択・再queue・prompt/schema/契約変更は行っていない。last_success_atは2026-10-17T13:24:03.915034+00:00へ前進、worker_failure_count0/error空、status=capture_only、P5は既存品質holdを維持。最新baseline3fbe851b...のgate適格CFはまだ0のため、この1件をfloorへ加算せず正規除外理由を追加監査する。
+- 2026-10-17 22:25 JST — B4完了。保有ingest/distillation/OKF lease内で、ee4c0c19の実archive・live HEAD・origin一致、旧full_raw成功、全Raw group SHA、現page postimage、旧並走failureの因果を再検証し、既存release_operational_failure_after_local_repair CASがaccepted/local_repair_applied。通常reset_raw_failureとnormal ingestのcurrent completion照合まで成功（released_and_completion_reconciled/full_raw_completion_valid=true/normal_ingest_suppressed=true）。旧packet/history/queue/completionは保持し、Raw本文変更なし。8/11 legacy行の正規full completionと合わせてB4を完了扱いにした。private最終receiptはb4-fourth-deploy-release-retry-20261017T222420.json。
+- 2026-10-17 22:25 JST — 正式session終了で独立比較の一時停止を解除、保有ingest leaseを解放した。B4のexact HEAD guardを完了してから、検証済みsearch60秒cadenceの正規installer反映とConverge/search/supervisor所有holdの復帰を開始。Cはfresh HTTP/MCP・6archive・無人実進捗の最終検証後に判定する。
