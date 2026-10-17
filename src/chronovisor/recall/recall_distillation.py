@@ -5962,13 +5962,19 @@ def _allocate_materialized_rows(
 def _materialization_split_context(
     root: Path, prior_plan_ids: set[str]
 ) -> tuple[str, dict[str, str], set[str]]:
-    split_plan = _read_split_plan(root)
+    certification = _read_certification_split_plan(root)
+    split_plan = certification or _read_split_plan(root)
     split_plan_id = str(split_plan["artifact_id"])
     split = {
         str(rally_id): str(value)
         for rally_id, value in split_plan["assignments"].items()
     }
     compatible = {split_plan_id}
+    if certification:
+        # A fixed certification inventory is registered before judgments.
+        # Older receipts remain in the audit projection, never relabelled as
+        # evidence for this new plan.
+        return split_plan_id, split, compatible
     for prior_plan_id in prior_plan_ids - {split_plan_id, ""}:
         try:
             prior = _read_split_plan_artifact(root, prior_plan_id)
@@ -5994,6 +6000,8 @@ def _finalize_materialized_training_rows(
     excluded_prior_contract_rows: int = 0,
     excluded_unsupported_profile_rows: int = 0,
 ) -> dict[str, Any]:
+    certification = _read_certification_split_plan(root)
+    registration = _read_certification_registration(root) if certification else None
     split_plan_id = ""
     split: dict[str, str] = {}
     compatible_split_plan_ids: set[str] = set()
@@ -6005,7 +6013,20 @@ def _finalize_materialized_training_rows(
         split = grouped_rolling_split(materialized) if materialized else {}
     rows = []
     for row in materialized:
+        if certification and row.get("source") != "counterfactual-label" and (
+            row.get("label_split_plan_id") != split_plan_id
+        ):
+            continue
         row_split = split.get(row["rally_id"], "embargo")
+        if certification and row.get("source") != "counterfactual-label" and (
+            row_split not in {"train", "validation", "test"}
+        ):
+            raise DistillationError("certification source assignment is invalid")
+        if registration and row.get("source") != "counterfactual-label" and (
+            row.get("payload_source", {}).get("source_snapshot_sha256")
+            != registration["source_snapshot_sha256"]
+        ):
+            raise DistillationError("certification row is outside the registered inventory")
         row_plan_id = split_plan_id
         if (
             row.get("profile") == NATIVE_LUNA_SINGLE_PROFILE
@@ -6015,16 +6036,31 @@ def _finalize_materialized_training_rows(
             # Native receipts seal the original plan identity. An extension
             # may preserve every assignment, but cannot rewrite that receipt.
             row_plan_id = str(row["label_split_plan_id"])
+        row_plan_compatible = row.get("label_split_plan_id") in compatible_split_plan_ids
+        if row.get("source") == "counterfactual-label":
+            # Counterfactual provenance also seals its own plan. The teacher
+            # certification cohort cannot reassign that historical exposure.
+            row_plan_id = str(row.get("label_split_plan_id") or "")
+            try:
+                source_plan = _read_split_plan_artifact(root, row_plan_id)
+            except KeyError, DistillationError, store.DistillationStoreError:
+                source_plan = {}
+            row_split = source_plan.get("assignments", {}).get(row["rally_id"], "embargo")
+            row_plan_compatible = bool(source_plan)
+            if certification and row_split == "test" and split.get(row["rally_id"]) in {
+                "train", "validation"
+            }:
+                raise DistillationError("certification would reuse a counterfactual test group")
         split_bound = (
             row.get("profile") in SINGLE_TEACHER_PROFILES
-            and row.get("label_split_plan_id") in compatible_split_plan_ids
-            and bool(split_plan_id)
+            and row_plan_compatible
+            and bool(row_plan_id)
             and row_split == "test"
         )
         fixed_split_plan = (
             row.get("profile") in SINGLE_TEACHER_PROFILES
-            and row.get("label_split_plan_id") in compatible_split_plan_ids
-            and bool(split_plan_id)
+            and row_plan_compatible
+            and bool(row_plan_id)
             and row_split in {"train", "validation", "test"}
         )
         rows.append(
@@ -6051,6 +6087,8 @@ def _finalize_materialized_training_rows(
                 ),
             }
         )
+    if certification and len(rows) > limit:
+        raise DistillationError("certification inventory exceeds training snapshot limit")
     rows = _allocate_materialized_rows(rows, limit)
     _, _, artifact = store.write_immutable(
         store.distillation_dir(root) / "training-snapshots",
@@ -8484,6 +8522,152 @@ def _read_split_plan(root: Path) -> dict[str, Any]:
     )
     plan_id = str(pointer.get("split_plan_id") or "")
     return _read_split_plan_artifact(root, plan_id)
+
+
+def _read_certification_registration(root: Path) -> dict[str, Any] | None:
+    path = store.distillation_dir(root) / "certification-plan.json"
+    if not path.exists():
+        return None
+    pointer = store.read_sealed(path, schema=store.DISTILLATION_SCHEMA)
+    if (
+        pointer.get("kind") != "fixed-certification-cohort"
+        or any(re.fullmatch(r"[0-9a-f]{64}", str(pointer.get(key) or "")) is None
+               for key in ("split_plan_id", "source_snapshot_sha256", "task_ids_sha256"))
+        or not isinstance(pointer.get("record_count"), int)
+        or isinstance(pointer.get("record_count"), bool)
+        or not 1 <= pointer["record_count"] <= 10_000
+    ):
+        raise DistillationError("certification pointer identity is invalid")
+    return pointer
+
+
+def _read_certification_split_plan(root: Path) -> dict[str, Any] | None:
+    """Read the separately registered fixed teacher cohort, if configured."""
+
+    pointer = _read_certification_registration(root)
+    if pointer is None:
+        return None
+    plan = _read_split_plan_artifact(root, str(pointer.get("split_plan_id") or ""))
+    if (
+        pointer.get("kind") != "fixed-certification-cohort"
+        or plan.get("kind") != "fixed-certification-cohort"
+        or plan.get("split_revision") != "fixed-certification-v1"
+        or plan.get("feature_revision") != TEXT_FEATURE_REVISION
+    ):
+        raise DistillationError("certification plan identity is invalid")
+    return plan
+
+
+def certification_task_id(row: Mapping[str, Any], plan_id: str) -> str:
+    """Bind a fresh certification task to its unchanged input and fixed plan."""
+
+    if re.fullmatch(r"[0-9a-f]{64}", plan_id) is None or row.get("input") is None:
+        raise DistillationError("certification task source is invalid")
+    return canonical_json.canonical_json_sha256_strict({
+        "schema": "chronovisor.recall-luna-certification-task-id.v1",
+        "split_plan_id": plan_id,
+        "rally_id": row["rally_id"],
+        "candidate_id": row["candidate_id"],
+        "as_of_us": row["as_of_us"],
+        "input_sha256": canonical_json.canonical_json_sha256_strict(row["input"]),
+        "repeat_pair_id": str(row.get("repeat_pair_id") or ""),
+        "repeat_base_sha256": str(row.get("repeat_base_sha256") or ""),
+        "blind_order": str(row.get("blind_order") or ""),
+    })
+
+
+def _certification_mandatory_inputs(plan: Mapping[str, Any]) -> dict[tuple[str, ...], str]:
+    required = {}
+    plan_id = str(plan["artifact_id"])
+    for row in plan.get("mandatory_repeat_pairs", []):
+        input_sha = str(row.get("input_sha256") or "")
+        if re.fullmatch(r"[0-9a-f]{64}", input_sha) is None:
+            raise DistillationError("certification mandatory input is not bound")
+        pair_id = canonical_json.canonical_json_sha256_strict({
+            "schema": "chronovisor.recall-luna-certification-repeat.v1",
+            "source_repeat_pair_id": row["repeat_pair_id"],
+            "split_plan_id": plan_id,
+        })
+        key = (pair_id, row["blind_order"], row["rally_id"], row["candidate_id"])
+        if key in required:
+            raise DistillationError("certification mandatory order is duplicated")
+        required[key] = input_sha
+    return required
+
+
+def activate_certification_plan(root: Path, bundle_path: Path) -> dict[str, Any]:
+    """Register a frozen cohort before its first judgment, retaining history.
+
+    The rolling capture plan continues to collect daily data. Certification
+    uses one independently frozen plan, so later growth receipts cannot mix
+    teacher identities or change this inventory after outcomes are known.
+    """
+
+    from chronovisor.recall.recall_distillation_luna import LunaBulkBundle, _writer_lock
+    from chronovisor.recall.recall_distillation_native import current_contract_id
+
+    bundle = LunaBulkBundle.open(bundle_path)
+    plan_id = str(bundle.manifest.get("split_plan_id") or "")
+    plan = _read_split_plan_artifact(root, plan_id)
+    _, cohort = _active_training_cohort(
+        [], teacher_profile=NATIVE_LUNA_SINGLE_PROFILE,
+        profile_contract_id=current_contract_id(root),
+    )
+    if (
+        plan.get("kind") != "fixed-certification-cohort"
+        or plan.get("split_revision") != "fixed-certification-v1"
+        or plan.get("feature_revision") != TEXT_FEATURE_REVISION
+        or plan.get("model_cohort_sha256") != cohort["cohort_sha256"]
+        or not 1 <= int(bundle.manifest["cardinality"]["records"]) <= 10_000
+    ):
+        raise DistillationError("certification bundle plan is invalid")
+    required = _certification_mandatory_inputs(plan)
+    observed = {}
+    for spec in bundle.manifest["shards"]:
+        for row in bundle._source_rows(int(spec["shard"])):
+            if (
+                row.get("split") not in {"train", "validation", "test"}
+                or plan["assignments"].get(row["rally_id"]) != row.get("split")
+            ):
+                raise DistillationError("certification bundle assignment is invalid")
+            if row.get("task_id") != certification_task_id(row, plan_id):
+                raise DistillationError("certification task identity is invalid")
+            key = (str(row.get("repeat_pair_id") or ""),
+                   str(row.get("blind_order") or ""), row["rally_id"], row["candidate_id"])
+            if key in required:
+                observed[key] = row["input_sha256"]
+    if observed != required:
+        raise DistillationError("certification mandatory source input is missing or changed")
+    pointer_path = store.distillation_dir(root) / "certification-plan.json"
+    with store._locked(pointer_path.with_suffix(".lock")), ExitStack() as guards:
+        # Submit uses these same locks. Recheck the durable cursor while all
+        # shards are held so registration cannot race the first result.
+        for spec in bundle.manifest["shards"]:
+            guards.enter_context(_writer_lock(
+                bundle.root / "shards" / f"{int(spec['shard']):02d}" / ".lock"
+            ))
+        if pointer_path.exists():
+            pointer = _read_certification_registration(root)
+            assert pointer is not None
+            if (
+                pointer.get("split_plan_id") != plan_id
+                or pointer.get("source_snapshot_sha256")
+                != bundle.manifest["source_snapshot_sha256"]
+                or pointer.get("task_ids_sha256") != bundle.manifest["task_ids_sha256"]
+                or pointer.get("record_count") != bundle.manifest["cardinality"]["records"]
+            ):
+                raise DistillationError("certification cohort is already registered")
+            return pointer
+        if int(bundle.status()["completed"]) != 0:
+            raise DistillationError("certification must be registered before judgments")
+        return store.write_sealed_state(pointer_path, {
+            "kind": "fixed-certification-cohort",
+            "split_plan_id": plan_id,
+            "source_snapshot_sha256": bundle.manifest["source_snapshot_sha256"],
+            "task_ids_sha256": bundle.manifest["task_ids_sha256"],
+            "record_count": bundle.manifest["cardinality"]["records"],
+            "registered_at": datetime.now(UTC).isoformat(),
+        })
 
 
 def _scheduling_split_plan_id(plan: Mapping[str, Any]) -> str:
@@ -14571,6 +14755,7 @@ def _prepare_counterfactual_work(
     root: Path,
     snapshots: Mapping[str, Mapping[str, Any]],
     rally_by_id: Mapping[str, Mapping[str, Any]],
+    selected_work_ids: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[tuple[str, str], str]]:
     from chronovisor.recall.recall_distillation_workset import (
         DistillationWorksetError,
@@ -14615,6 +14800,7 @@ def _prepare_counterfactual_work(
             for candidate in snapshot.get("candidates", [])[:3]
             if isinstance(candidate, Mapping)
         ]
+        selected_candidate_ids: set[str] = set()
         exposure = rally.get("exposure_receipts", [{}])
         exposure = exposure[0] if isinstance(exposure, list) and exposure else {}
         if isinstance(exposure, Mapping) and exposure.get("exposure_artifact_id"):
@@ -14625,6 +14811,26 @@ def _prepare_counterfactual_work(
                     / f"{exposure['exposure_artifact_id']}.json",
                     schema="chronovisor.recall-exact-exposure.v1",
                 )
+                candidate_ids = artifact.get("candidate_ids")
+                candidate_refs = artifact.get("candidate_refs")
+                if (
+                    isinstance(candidate_ids, list)
+                    and candidate_ids
+                    and isinstance(candidate_refs, list)
+                    and candidate_refs
+                ):
+                    declared_ids = {
+                        str(value)
+                        for value in candidate_ids
+                        if not isinstance(value, bool)
+                    }
+                    ref_ids = {
+                        str(item.get("candidate_id") or "")
+                        for item in candidate_refs
+                        if isinstance(item, Mapping)
+                        and item.get("candidate_id") is not None
+                    }
+                    selected_candidate_ids = declared_ids & ref_ids
                 candidates.extend(
                     candidate
                     for candidate in artifact.get("candidate_refs", [])
@@ -14703,6 +14909,8 @@ def _prepare_counterfactual_work(
                     },
                 }
             )
+            if selected_work_ids is not None and candidate_id in selected_candidate_ids:
+                selected_work_ids.append(work_id)
     return items, keys
 
 
@@ -15274,8 +15482,12 @@ def _run_counterfactual_block(
         store.distillation_dir(root) / "local-workset.sqlite3"
     )
     raw_dir = raw_dir or root / "raw"  # compatibility for direct test callers
+    selected_work_ids: list[str] = []
     items, keys = _prepare_counterfactual_work(
-        root=root, snapshots=snapshots, rally_by_id=rally_by_id
+        root=root,
+        snapshots=snapshots,
+        rally_by_id=rally_by_id,
+        selected_work_ids=selected_work_ids,
     )
     _advance_local_workset(
         workset,
@@ -15291,12 +15503,31 @@ def _run_counterfactual_block(
     pending = bool(workset.status("local-counterfactual")["backlog"])
     if not execute:
         return _CounterfactualBlockResult(pending=pending)
+    remove_work_ids = tuple(dict.fromkeys(selected_work_ids))
+    claim_kwargs = (
+        {"eligible_work_ids": remove_work_ids} if remove_work_ids else {}
+    )
     claims = _reconcile_counterfactual_claims(
         workset=workset,
-        claims=list(workset.claim("local-counterfactual", 1, "counterfactual", 300)),
+        claims=list(
+            workset.claim(
+                "local-counterfactual", 1, "counterfactual", 300, **claim_kwargs
+            )
+        ),
         keys=keys,
         label_rows=label_rows,
     )
+    if not claims and remove_work_ids:
+        # Selected work may have been leased or completed by a concurrent
+        # worker.  Fall back to the normal queue only after the targeted lane
+        # has no claim, so additions continue to make progress without
+        # bypassing the selected/remove lane.
+        claims = _reconcile_counterfactual_claims(
+            workset=workset,
+            claims=list(workset.claim("local-counterfactual", 1, "counterfactual", 300)),
+            keys=keys,
+            label_rows=label_rows,
+        )
     if not claims:
         return _CounterfactualBlockResult(
             pending=bool(workset.status("local-counterfactual")["backlog"])

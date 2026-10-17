@@ -88,7 +88,7 @@ def _selection_view(tmp_path: Path, rows: list[dict[str, object]]) -> _Selection
                     "",
                     str(row["profile"]),
                     "contract",
-                    "plan",
+                    str(row.get("label_split_plan_id") or "plan"),
                     float(row["epoch"]),
                     json.dumps(row, separators=(",", ":")),
                 )
@@ -774,3 +774,32 @@ def test_split_growth_does_not_rewrite_existing_label_classifications(tmp_path: 
     assert [row[0] for row in view.connection.execute("SELECT rally_id FROM observed")] == ["old-a"]
     assert view.connection.execute("SELECT locked FROM rows WHERE rally_id='old-a'").fetchone()[0] == 1
     view.connection.close()
+
+
+def test_certification_selection_precedes_limit_and_keeps_adverse_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = _selection_rows()
+    for row in rows:
+        row.update(source="teacher-label", verdict="relevant")
+    rows[-2].update(label_split_plan_id="certification", verdict="irrelevant")
+    rows[-1].update(label_split_plan_id="certification", probe=True, repeat_pair_id="incomplete")
+    assignments = {str(row["rally_id"]): "test" for row in rows[-2:]}
+    monkeypatch.setattr(distill, "_read_certification_split_plan", lambda _root: {
+        "artifact_id": "certification", "assignments": assignments,
+    })
+    monkeypatch.setattr(distill, "_materialization_split_context", lambda _root, _plans: (
+        "certification", assignments, {"certification"},
+    ))
+    view = _selection_view(tmp_path, rows)
+    try:
+        selected = materialization._selection(view, limit=3)
+        assert [row["rally_id"] for row in selected] == ["locked-b", "locked-c"]
+        assert selected[0]["verdict"] == "irrelevant"
+        assert selected[1]["repeat_pair_id"] == "incomplete"
+        # Selection must neither alter nor remove historical audit rows.
+        assert view.connection.execute("SELECT COUNT(*) FROM rows").fetchone()[0] == len(rows)
+        with pytest.raises(distill.DistillationError, match="exceeds training snapshot limit"):
+            materialization._selection(view, limit=1)
+    finally:
+        view.connection.close()

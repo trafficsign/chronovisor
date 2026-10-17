@@ -456,6 +456,8 @@ def _counterfactual_reservations(
 
     from chronovisor.recall import recall_distillation as distill
 
+    if limit <= 0:
+        return []
     try:
         source_rows = view.connection.execute(
             "SELECT row_json FROM rows WHERE row_json IS NOT NULL "
@@ -524,16 +526,32 @@ def _counterfactual_reservations(
 def _selection(view: Projection, limit: int) -> list[dict[str, Any]]:
     from chronovisor.recall import recall_distillation as distill
 
+    certification = distill._read_certification_split_plan(view.root)
     plans = {str(row[0]) for row in view.connection.execute("SELECT DISTINCT label_plan FROM rows WHERE row_json IS NOT NULL")}
     try:
         plan_id, assignments, compatible = distill._materialization_split_context(view.root, plans)
         view.selection_plans = plans
         view.split_context = (plan_id, assignments, compatible)
     except (KeyError, distill.DistillationError, store.DistillationStoreError):
+        if certification:
+            raise
         # Legacy snapshots without a sealed split use the original full-cohort
         # grouped split; the normal fixed-plan path always stays bounded.
         return [json.loads(row[0]) for row in view.connection.execute("SELECT row_json FROM rows WHERE row_json IS NOT NULL ORDER BY sequence")]
     _classify_locked_rows(view, plan_id, assignments, compatible)
+    if certification:
+        # Apply the preregistered plan identity before bounding the snapshot.
+        # Every projected teacher row in this cohort is retained; neither its
+        # verdict nor the gate result participates in selection.
+        teachers = [json.loads(row[0]) for row in view.connection.execute(
+            "SELECT row_json FROM rows WHERE row_json IS NOT NULL AND label_plan=? "
+            "AND json_extract(row_json, '$.source') <> 'counterfactual-label' "
+            "ORDER BY sequence LIMIT ?", (plan_id, limit + 1),
+        )]
+        if len(teachers) > limit:
+            raise distill.DistillationError("certification inventory exceeds training snapshot limit")
+        reserved = _counterfactual_reservations(view, limit - len(teachers))
+        return [*teachers, *reserved]
     count = int(view.connection.execute("SELECT COUNT(*) FROM rows WHERE row_json IS NOT NULL").fetchone()[0])
     if count <= limit:
         return [json.loads(row[0]) for row in view.connection.execute("SELECT row_json FROM rows WHERE row_json IS NOT NULL ORDER BY sequence")]

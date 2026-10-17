@@ -1221,6 +1221,23 @@ def import_bundle(root: Path, bundle_path: Path) -> dict[str, Any]:
             or not _is_sha(manifest.get("split_plan_id"))
         ):
             raise NativeDistillationError("native Luna bundle contract mismatch")
+        # Certification is a preregistered inventory, not an opportunity to
+        # choose a new bundle after seeing its judgments. Ordinary rolling
+        # bundles retain their existing import contract.
+        from chronovisor.recall import recall_distillation as distill
+
+        plan_path = (
+            _distillation_dir(root) / "split-plans" / f"{manifest['split_plan_id']}.json"
+        )
+        if plan_path.exists():
+            plan = distill._read_split_plan_artifact(root, manifest["split_plan_id"])
+            if plan.get("kind") == "fixed-certification-cohort":
+                registration = distill._read_certification_registration(root)
+                if registration is None or any(
+                    registration.get(key) != manifest.get(key)
+                    for key in ("split_plan_id", "source_snapshot_sha256", "task_ids_sha256")
+                ):
+                    raise NativeDistillationError("native certification inventory is not registered")
         status = bundle.status()
         if status.get("remaining") != 0:
             raise NativeDistillationError("native Luna bundle is incomplete")
