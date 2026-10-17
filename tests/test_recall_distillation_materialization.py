@@ -12,6 +12,7 @@ from chronovisor.recall import recall_distillation_ledger as ledger
 from chronovisor.recall import recall_distillation_materialization as materialization
 from chronovisor.recall import recall_distillation_native as native
 from chronovisor.recall import recall_distillation_store as store
+from chronovisor.recall import recall_distillation_validation as validation
 
 
 class _SelectionView:
@@ -186,6 +187,55 @@ def _append_label(
             "provider_receipt_sha256": receipt_sha256,
         },
     )
+
+
+def _canonical_projection_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, object]:
+    """Create a real sealed projection whose row can be source-bound."""
+
+    label = _append_label(tmp_path, "rally-a", "candidate-a")
+    calls: list[set[str]] = []
+    _stub_build_dependencies(monkeypatch, materialize_calls=calls)
+    monkeypatch.setattr(
+        catalog,
+        "rallies",
+        lambda _root, rally_ids: [{"rally_id": rally_id} for rally_id in rally_ids],
+    )
+    record = str(label["record_sha256"])
+    row: dict[str, object] = {
+        "rally_id": "rally-a",
+        "candidate_id": "candidate-a",
+        "source": "teacher-label",
+        "profile": distill.NATIVE_LUNA_SINGLE_PROFILE,
+        "label_record_sha256": record,
+        "split_plan_id": "plan",
+        "split": "train",
+        "locked_test_read_only": False,
+        "locked_test_evidence_ref": "",
+    }
+
+    def write_projection(
+        connection: object,
+        _root: Path,
+        _labels: object,
+        rally_ids: list[str] | tuple[str, ...],
+        _ox: str,
+    ) -> None:
+        for rally_id in rally_ids:
+            entries = connection.execute(
+                "SELECT sequence FROM rows WHERE rally_id=? AND dirty=1", (rally_id,)
+            ).fetchall()
+            for (sequence,) in entries:
+                connection.execute(
+                    "UPDATE rows SET epoch=1,row_json=?,dirty=0 WHERE sequence=?",
+                    (json.dumps(row, separators=(",", ":")), sequence),
+                )
+
+    monkeypatch.setattr(materialization, "_materialize_batch", write_projection)
+    initial = materialization._build(tmp_path)
+    initial.close()
+    return row
 
 
 def test_build_reuses_clean_projection_without_rematerializing(
@@ -424,6 +474,146 @@ def test_materialize_rejects_split_change_during_finalize(
     )
     with pytest.raises(store.DistillationStoreError, match="split changed during selection"):
         materialization._materialize(tmp_path, limit=1)
+
+
+def test_materialize_selection_uses_registered_projection_for_source_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _canonical_projection_fixture(tmp_path, monkeypatch)
+    root = tmp_path.resolve()
+    fallback_calls: list[Path] = []
+
+    def forbidden_fallback(root: Path) -> object:
+        fallback_calls.append(root)
+        raise AssertionError("selection must use the registered projection")
+
+    monkeypatch.setattr(validation, "binding_inputs", forbidden_fallback)
+    plan = {"artifact_id": "plan", "assignments": {"rally-a": "train"}}
+    selected_views: list[materialization.Projection] = []
+
+    def select(view: materialization.Projection, limit: int) -> list[dict[str, object]]:
+        assert limit == 1
+        selected_views.append(view)
+        assert materialization._VIEWS[root] is view
+        assert distill._authoritative_materialized_row_binding(tmp_path, row, plan)
+        assert materialization.canonical_binding(
+            tmp_path, str(row["label_record_sha256"])
+        ) is not None
+        return [row]
+
+    monkeypatch.setattr(materialization, "_selection", select)
+    monkeypatch.setattr(
+        distill,
+        "_finalize_materialized_training_rows",
+        lambda _root, rows, _limit, **_kwargs: {"rows": rows},
+    )
+
+    artifact = materialization._materialize(tmp_path, limit=1)
+
+    assert artifact["rows"] == [row]
+    assert len(selected_views) == 1
+    assert fallback_calls == []
+    published = materialization._VIEWS[root]
+    assert published is selected_views[0]
+    published.close()
+
+
+def test_materialize_selection_rejects_projection_source_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _canonical_projection_fixture(tmp_path, monkeypatch)
+    state = ["source"]
+    monkeypatch.setattr(
+        materialization, "_source_state", lambda _root, _contracts: (state[0],)
+    )
+    seen: list[materialization.Projection] = []
+
+    def select(view: materialization.Projection, _limit: int) -> list[dict[str, object]]:
+        seen.append(view)
+        state[0] = "changed"
+        # This is the same source check used by the authoritative binding
+        # path; it must reject before any legacy source rebuild can occur.
+        materialization.canonical_binding(tmp_path, str(row["label_record_sha256"]))
+        return [row]
+
+    monkeypatch.setattr(materialization, "_selection", select)
+    with pytest.raises(
+        store.DistillationStoreError,
+        match="canonical materialization projection changed",
+    ):
+        materialization._materialize(tmp_path, limit=1)
+
+    assert seen
+    with pytest.raises(sqlite3.ProgrammingError):
+        seen[0].connection.execute("SELECT 1")
+    assert tmp_path.resolve() not in materialization._VIEWS
+
+
+@pytest.mark.parametrize("with_prior", [False, True])
+def test_materialize_selection_exception_restores_previous_view_and_closes_new_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_prior: bool,
+) -> None:
+    _canonical_projection_fixture(tmp_path, monkeypatch)
+    old_view = materialization._build(tmp_path) if with_prior else None
+    new_view = materialization._build(tmp_path)
+    root = tmp_path.resolve()
+    if old_view is not None:
+        materialization._VIEWS[root] = old_view
+
+    monkeypatch.setattr(materialization, "_build", lambda _root: new_view)
+
+    def fail(view: materialization.Projection, _limit: int) -> list[dict[str, object]]:
+        assert materialization._VIEWS[root] is view
+        raise RuntimeError("selection failed")
+
+    monkeypatch.setattr(materialization, "_selection", fail)
+    try:
+        with pytest.raises(RuntimeError, match="selection failed"):
+            materialization._materialize(tmp_path, limit=1)
+        with pytest.raises(sqlite3.ProgrammingError):
+            new_view.connection.execute("SELECT 1")
+        if old_view is None:
+            assert root not in materialization._VIEWS
+        else:
+            assert materialization._VIEWS[root] is old_view
+            old_view.connection.execute("SELECT 1").fetchone()
+    finally:
+        if old_view is not None:
+            old_view.close()
+
+
+def test_materialize_success_closes_previous_view_and_publishes_new_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _canonical_projection_fixture(tmp_path, monkeypatch)
+    old_view = materialization._build(tmp_path)
+    new_view = materialization._build(tmp_path)
+    root = tmp_path.resolve()
+    materialization._VIEWS[root] = old_view
+    selected_during_selection: list[materialization.Projection] = []
+
+    def select(view: materialization.Projection, _limit: int) -> list[dict[str, object]]:
+        selected_during_selection.append(view)
+        assert materialization._VIEWS[root] is view
+        return []
+
+    monkeypatch.setattr(materialization, "_build", lambda _root: new_view)
+    monkeypatch.setattr(materialization, "_selection", select)
+    monkeypatch.setattr(
+        distill,
+        "_finalize_materialized_training_rows",
+        lambda _root, rows, _limit, **_kwargs: {"rows": rows},
+    )
+
+    try:
+        assert materialization._materialize(tmp_path, limit=1) == {"rows": []}
+        assert selected_during_selection == [new_view]
+        assert materialization._VIEWS[root] is new_view
+        with pytest.raises(sqlite3.ProgrammingError):
+            old_view.connection.execute("SELECT 1")
+        assert tuple(new_view.connection.execute("SELECT 1").fetchone()) == (1,)
+    finally:
+        new_view.close()
 
 
 def test_source_change_during_sync_rolls_back_dirty_marks(

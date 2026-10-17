@@ -593,7 +593,17 @@ def _materialize(root: Path, limit: int) -> dict[str, Any]:
     try:
         with store._locked(view.path.with_suffix(".lock")):
             view.check(all_dependencies=True)
-            selected = _selection(view, limit)
+            # The caller holds _VIEW_LOCK; selection must bind rows through
+            # this verified projection instead of rebuilding all source inputs.
+            prior = _VIEWS.get(root)
+            _VIEWS[root] = view
+            try:
+                selected = _selection(view, limit)
+            finally:
+                if prior is None:
+                    _VIEWS.pop(root, None)
+                else:
+                    _VIEWS[root] = prior
             excluded = view.connection.execute(
                 "SELECT COALESCE(SUM(excluded_prior),0),COALESCE(SUM(excluded_unsupported),0) FROM rows"
             ).fetchone()
