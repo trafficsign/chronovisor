@@ -188,6 +188,40 @@ def test_refresh_only_reenrolls_registered_service(
     assert launchctl_commands == []
 
 
+def test_refresh_registers_new_service_when_app_lacks_previous_plist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    app = tmp_path / module.APP_NAME
+    app.mkdir()
+    events: list[str] = []
+    lookup_count = 0
+
+    def managed_service(_app, _suffix):
+        nonlocal lookup_count
+        lookup_count += 1
+        if lookup_count == 1:
+            raise FileNotFoundError("new service is not in the existing bundle")
+        return "search-label-drain.plist", "search-label-drain.managed-v2"
+
+    monkeypatch.setattr(module, "_managed_service", managed_service)
+    monkeypatch.setattr(module, "build_app", lambda *_args: events.append("build") or {})
+    monkeypatch.setattr(
+        module,
+        "_manager",
+        lambda _app, command, *_args: events.append(command)
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(module, "_verify_managed_service", lambda *_args: None)
+    monkeypatch.setattr(module, "_retire_legacy_service", lambda *_args: None)
+
+    result = module.refresh_service(tmp_path, app, "search-label-drain")
+
+    assert result["status"] == "ok"
+    assert events == ["build", "register-one"]
+
+
 def test_refresh_retires_standalone_legacy_service_after_managed_registration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
