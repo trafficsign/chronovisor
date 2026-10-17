@@ -1086,6 +1086,194 @@ def test_native_precompute_overlaps_independent_reviews(monkeypatch, tmp_path) -
     assert maximum == 2
 
 
+def test_native_precompute_waits_for_capacity_and_progresses_all_rows(
+    monkeypatch, tmp_path
+) -> None:
+    rows = [{"queue_status": "pending_frontier_review"} for _ in range(100)]
+    slots = threading.BoundedSemaphore(4)  # six supervisor slots are occupied
+    guard = threading.Lock()
+    stats = {"attempted": 0, "capacity": 0, "success": 0, "active": 0, "maximum": 0}
+
+    def review(_row, *, repo_root, timeout):
+        del repo_root, timeout
+        with guard:
+            stats["attempted"] += 1
+        if not slots.acquire(blocking=False):
+            with guard:
+                stats["capacity"] += 1
+            return search_eval._frontier_label_failure(
+                "capacity",
+                failure={
+                    "failure_class": "native_luna_capacity",
+                    "rescue_status": "frontier_retry",
+                },
+            )
+        with guard:
+            stats["success"] += 1
+            stats["active"] += 1
+            stats["maximum"] = max(stats["maximum"], stats["active"])
+        try:
+            time.sleep(0.005)
+            return {
+                "decision": "uncertain",
+                "confidence": 0.0,
+                "expected_pages": [],
+                "negative_pages": [],
+                "stale_pages": [],
+                "summary": "fixture",
+            }
+        finally:
+            with guard:
+                stats["active"] -= 1
+            slots.release()
+
+    monkeypatch.setattr(search_eval, "run_frontier_label_review", review)
+    monkeypatch.setattr(search_eval, "NATIVE_CAPACITY_RETRY_SECONDS", 0.001)
+    result = search_eval._precompute_native_label_reviews(
+        rows,
+        list(range(100)),
+        votes=1,
+        repo_root=tmp_path,
+        timeout=1,
+        deadline=time.monotonic() + 2,
+    )
+
+    assert set(result) == set(range(100))
+    assert stats["success"] == 100
+    assert stats["capacity"] > 0
+    assert stats["maximum"] <= 4
+    assert all(review[0]["decision"] == "uncertain" for review in result.values())
+
+
+def test_native_capacity_deadline_defers_without_attempt_or_backoff(
+    monkeypatch, tmp_path
+) -> None:
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    row = _recall_candidate_row(
+        b"capacity-fixture",
+        queue_status="pending_frontier_review",
+    )
+    row["frontier_attempts"] = 2
+    row["next_attempt_at"] = "2026-10-17T00:00:00"
+    write_jsonl(queue_file, [row])
+    golden_file.write_text("", encoding="utf-8")
+    queue_before = queue_file.read_bytes()
+    calls = 0
+
+    def review(_row, *, repo_root, timeout):
+        del repo_root, timeout
+        nonlocal calls
+        calls += 1
+        return search_eval._frontier_label_failure(
+            "capacity",
+            failure={
+                "failure_class": "native_luna_capacity",
+                "rescue_status": "frontier_retry",
+            },
+        )
+
+    monkeypatch.setenv("CHRONOVISOR_SEARCH_LABEL_AUTHORITY", "native_luna")
+    monkeypatch.setattr(search_eval, "run_frontier_label_review", review)
+    monkeypatch.setattr(search_eval, "NATIVE_CAPACITY_RETRY_SECONDS", 0.001)
+    result = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        limit=1,
+        timeout=1,
+        budget=CycleBudget(
+            max_frontier_calls=1,
+            max_mutations=1,
+            max_elapsed_seconds=1.2,
+        ),
+        stale_limit=0,
+        now=datetime(2026, 10, 17, 12, 0, 0),
+    )
+
+    assert calls > 1
+    assert result["attempted"] == 0
+    assert result["status_counts"] == {"native_luna_deferred": 1}
+    assert queue_file.read_bytes() == queue_before
+    stored = search_eval.read_jsonl(queue_file)
+    assert stored[0]["frontier_attempts"] == 2
+    assert stored[0]["next_attempt_at"] == "2026-10-17T00:00:00"
+
+
+def test_native_capacity_wait_uses_remaining_timeout_without_batch_deadline(
+    monkeypatch, tmp_path
+) -> None:
+    rows = [{"queue_status": "pending_frontier_review"}]
+    calls = 0
+    timeouts: list[int | None] = []
+
+    def review(_row, *, repo_root, timeout):
+        del repo_root
+        nonlocal calls
+        calls += 1
+        timeouts.append(timeout)
+        if calls == 1:
+            return search_eval._frontier_label_failure(
+                "capacity",
+                failure={
+                    "failure_class": "native_luna_capacity",
+                    "rescue_status": "frontier_retry",
+                },
+            )
+        return {
+            "decision": "uncertain",
+            "confidence": 0.0,
+            "expected_pages": [],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "fixture",
+        }
+
+    monkeypatch.setattr(search_eval, "run_frontier_label_review", review)
+    monkeypatch.setattr(search_eval, "NATIVE_CAPACITY_RETRY_SECONDS", 1.1)
+    result = search_eval._precompute_native_label_reviews(
+        rows,
+        [0],
+        votes=1,
+        repo_root=tmp_path,
+        timeout=3,
+    )
+
+    assert result[0][0]["decision"] == "uncertain"
+    assert calls == 2
+    assert timeouts[0] is not None and timeouts[1] is not None
+    assert timeouts[1] < timeouts[0]
+
+
+def test_native_precompute_does_not_retry_noncapacity_failure(monkeypatch, tmp_path) -> None:
+    rows = [{"queue_status": "pending_frontier_review"}]
+    calls = 0
+
+    def review(_row, *, repo_root, timeout):
+        del repo_root, timeout
+        nonlocal calls
+        calls += 1
+        return search_eval._frontier_label_failure(
+            "execution failure",
+            failure={
+                "failure_class": "native_luna_execution",
+                "rescue_status": "frontier_retry",
+            },
+        )
+
+    monkeypatch.setattr(search_eval, "run_frontier_label_review", review)
+    result = search_eval._precompute_native_label_reviews(
+        rows,
+        [0],
+        votes=1,
+        repo_root=tmp_path,
+        timeout=1,
+        deadline=time.monotonic() + 2,
+    )
+
+    assert calls == 1
+    assert result[0][0]["frontier_failure"]["failure_class"] == "native_luna_execution"
+
+
 def test_native_precompute_reserves_frontier_budget_sequentially(
     monkeypatch, tmp_path
 ) -> None:

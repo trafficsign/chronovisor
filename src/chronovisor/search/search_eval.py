@@ -147,6 +147,7 @@ FRONTIER_TERMINAL_STATUSES = {
     SOURCE_STALE_STATUS,
 }
 DEFAULT_QUARANTINE_RETRY_SECONDS = 6 * 60 * 60
+NATIVE_CAPACITY_RETRY_SECONDS = 0.1
 SEARCH_LABEL_PROMPT_POLICY_VERSION = (
     _decision_lane_prompts.SEARCH_LABEL_PROMPT_POLICY_VERSION
 )
@@ -1723,33 +1724,74 @@ def _precompute_native_label_reviews(
 
     max_workers = min(native_luna_authority.NATIVE_LUNA_GLOBAL_LIMIT, len(row_indices) * max(1, votes))
     tasks = [(index, vote) for index in row_indices for vote in range(max(1, votes))]
+    capacity_deadline = deadline
+    if capacity_deadline is None:
+        capacity_timeout = timeout
+        if capacity_timeout is None:
+            try:
+                capacity_timeout = int(
+                    os.environ.get("CHRONOVISOR_FRONTIER_TIMEOUT_SECONDS", "3600")
+                )
+            except (TypeError, ValueError):
+                capacity_timeout = None
+        if capacity_timeout is not None:
+            capacity_deadline = time.monotonic() + max(1, capacity_timeout)
 
     def run_one(task: tuple[int, int]) -> tuple[int, dict[str, Any]]:
         index, _vote = task
         row = rows[index]
-        call_timeout = timeout
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining < 1:
+        while True:
+            if capacity_deadline is None:
+                call_timeout = timeout
+            else:
+                remaining = capacity_deadline - time.monotonic()
+                if (deadline is not None and remaining < 1) or (
+                    deadline is None and remaining <= 0
+                ):
+                    return index, _frontier_label_failure(
+                        "native Luna batch deadline reached"
+                        if deadline is not None
+                        else "native Luna capacity wait reached its deadline",
+                        failure={
+                            "failure_class": "native_luna_deadline",
+                            "rescue_status": "frontier_retry",
+                        },
+                    )
+                available_timeout = max(1, int(remaining))
+                configured_timeout = (
+                    max(1, int(timeout)) if timeout is not None else available_timeout
+                )
+                call_timeout = min(configured_timeout, available_timeout)
+            try:
+                review = run_frontier_label_review(
+                    row,
+                    repo_root=repo_root,
+                    timeout=call_timeout,
+                )
+            except Exception as exc:  # pragma: no cover - defensive worker boundary
                 return index, _frontier_label_failure(
-                    "native Luna batch deadline reached",
+                    f"frontier label reviewer raised {exc.__class__.__name__}: {exc}"
+                )
+            normalized = _normalize_frontier_label_result(review)
+            failure = normalized.get("frontier_failure")
+            if not isinstance(failure, Mapping) or failure.get(
+                "failure_class"
+            ) != "native_luna_capacity":
+                return index, normalized
+            if capacity_deadline is None:
+                return index, normalized
+            remaining = capacity_deadline - time.monotonic()
+            if (deadline is not None and remaining < 1) or (
+                deadline is None and remaining <= 0
+            ):
+                return index, _frontier_label_failure(
+                    "native Luna capacity wait reached its deadline",
                     failure={
                         "failure_class": "native_luna_deadline",
                         "rescue_status": "frontier_retry",
                     },
                 )
-            call_timeout = min(timeout or int(remaining), max(1, int(remaining)))
-        try:
-            review = run_frontier_label_review(
-                row,
-                repo_root=repo_root,
-                timeout=call_timeout,
-            )
-            return index, _normalize_frontier_label_result(review)
-        except Exception as exc:  # pragma: no cover - defensive worker boundary
-            return index, _frontier_label_failure(
-                f"frontier label reviewer raised {exc.__class__.__name__}: {exc}"
-            )
+            time.sleep(min(NATIVE_CAPACITY_RETRY_SECONDS, remaining))
 
     grouped: dict[int, list[dict[str, Any]]] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
