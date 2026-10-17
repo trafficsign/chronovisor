@@ -6853,3 +6853,174 @@ def test_capture_only_distillation_observes_legacy_result_without_changing_it(
     assert [row["selected"] for row in receipts[0]["candidate_pool_refs"]] == (
         [True] if with_item else []
     )
+
+
+def test_legacy_capture_uses_producer_candidates_for_nonlexical_exact(monkeypatch) -> None:
+    """Capture must bind a selected semantic candidate without a lexical re-search."""
+
+    exact_receipts: list[dict[str, object]] = []
+    page_receipts: list[dict[str, object]] = []
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.load_capture_policy_identity = lambda *, root: "a" * 64
+    module.build_text_features = lambda _query, _candidate: {
+        "query_chargram_coverage": 1.0,
+        "candidate_chargram_precision": 1.0,
+    }
+    module.record_exact_exposure = lambda **kwargs: exact_receipts.append(kwargs)
+    module.record_exposure = lambda **kwargs: page_receipts.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+    from chronovisor.recall import recall_field
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(recall_field, "queue_teacher_commits", lambda **_kwargs: {})
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_args: "")
+    monkeypatch.setattr(
+        recall_runtime,
+        "_readonly_fast_feature_rows",
+        lambda *_args, **_kwargs: pytest.fail("producer capture must not re-search"),
+    )
+    producer = ScoredPage(
+        "semantic-page",
+        "Semantic page",
+        "chronovisor",
+        "2026-10-17",
+        0.9,
+        snippet="semantic source",
+        uid="semantic-page-uid",
+        content_sha256="a" * 64,
+    )
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="nonlexical semantic query",
+        session_id="session-1",
+        decision_id="producer-exact",
+    )
+    result = recall_runtime._finalize_recall_result(
+        RecallResult(
+            status="ok",
+            decision="search",
+            confidence=0.9,
+            queries=[request.prompt],
+            reasons=["semantic"],
+            matched_terms={},
+            session_id=request.session_id,
+            context_items=[
+                ContextItem(
+                    "semantic-page",
+                    "Semantic page",
+                    "2026-10-17",
+                    0.9,
+                    uid="semantic-page-uid",
+                    snippets=["semantic source"],
+                )
+            ],
+            decision_id=request.decision_id,
+        ),
+        request=request,
+        active_request=request,
+        policy=RecallPolicy(log_decisions=False),
+        session_state=None,
+        queries=[request.prompt],
+        deadline_at=time.monotonic() + 1.0,
+        producer_candidates=[producer],
+    )
+
+    assert [item.page_id for item in result.context_items] == ["semantic-page"]
+    assert len(exact_receipts) == 1
+    assert page_receipts == []
+    assert [ref["candidate_id"] for ref in exact_receipts[0]["candidate_refs"]] == [
+        "semantic-page"
+    ]
+    assert [row["candidate_id"] for row in exact_receipts[0]["candidate_feature_snapshot"]] == [
+        "semantic-page"
+    ]
+
+
+@pytest.mark.parametrize("anomaly", ["sha", "uid", "render"])
+def test_legacy_capture_rejects_producer_binding_anomalies(monkeypatch, anomaly) -> None:
+    """A source/version or render mismatch must remain a page fallback."""
+
+    exact_receipts: list[dict[str, object]] = []
+    page_receipts: list[dict[str, object]] = []
+    module = ModuleType("chronovisor.recall.recall_distillation")
+    module.load_capture_policy_identity = lambda *, root: "a" * 64
+    module.build_text_features = lambda _query, _candidate: {
+        "query_chargram_coverage": 1.0,
+        "candidate_chargram_precision": 1.0,
+    }
+    module.record_exact_exposure = lambda **kwargs: exact_receipts.append(kwargs)
+    module.record_exposure = lambda **kwargs: page_receipts.append(kwargs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    import chronovisor.recall as recall_package
+    from chronovisor.recall import recall_field
+
+    monkeypatch.setattr(recall_package, "recall_distillation", module, raising=False)
+    monkeypatch.setattr(recall_field, "queue_teacher_commits", lambda **_kwargs: {})
+    monkeypatch.setattr(recall_runtime, "state_context_for_request", lambda *_args: "")
+    monkeypatch.setattr(
+        recall_runtime,
+        "_readonly_fast_feature_rows",
+        lambda *_args, **_kwargs: pytest.fail("producer capture must not re-search"),
+    )
+    producer = ScoredPage(
+        "semantic-page",
+        "Semantic page",
+        "chronovisor",
+        "2026-10-17",
+        0.9,
+        snippet="semantic source",
+        uid="semantic-page-uid",
+        content_sha256="a" * 64,
+    )
+    item_uid = "semantic-page-uid"
+    if anomaly == "sha":
+        producer.content_sha256 = "b" * 63
+    elif anomaly == "uid":
+        item_uid = "different-page-uid"
+    elif anomaly == "render":
+        monkeypatch.setattr(
+            recall_runtime,
+            "_render_final_context",
+            lambda *_args, **_kwargs: ("", "", "malformed render"),
+        )
+    request = RecallRequest(
+        host="codex",
+        event="UserPromptSubmit",
+        prompt="nonlexical semantic query",
+        session_id="session-1",
+        decision_id=f"producer-{anomaly}",
+    )
+    recall_runtime._finalize_recall_result(
+        RecallResult(
+            status="ok",
+            decision="search",
+            confidence=0.9,
+            queries=[request.prompt],
+            reasons=["semantic"],
+            matched_terms={},
+            session_id=request.session_id,
+            context_items=[
+                ContextItem(
+                    "semantic-page",
+                    "Semantic page",
+                    "2026-10-17",
+                    0.9,
+                    uid=item_uid,
+                    snippets=["semantic source"],
+                )
+            ],
+            decision_id=request.decision_id,
+        ),
+        request=request,
+        active_request=request,
+        policy=RecallPolicy(log_decisions=False),
+        session_state=None,
+        queries=[request.prompt],
+        deadline_at=time.monotonic() + 1.0,
+        producer_candidates=[producer],
+    )
+
+    assert exact_receipts == []
+    assert len(page_receipts) == 1

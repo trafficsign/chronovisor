@@ -2490,6 +2490,7 @@ def _finalize_recall_result(
     queries: list[str],
     deadline_at: float | None = None,
     telemetry: dict[str, Any] | None = None,
+    producer_candidates: list[Any] | None = None,
 ) -> RecallResult:
     """Attach bounded context, advance session state, and append one decision log."""
 
@@ -2593,6 +2594,7 @@ def _finalize_recall_result(
         result,
         request=active_request,
         deadline_at=deadline_at,
+        producer_candidates=producer_candidates,
     )
     return result
 
@@ -3376,12 +3378,19 @@ def _record_distilled_exposure_unbounded(
         json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     try:
+        if result.context and not isinstance(payload, dict):
+            raise OSError("rendered context is unavailable")
+        if payload is not None and set(candidate_ids) != set(rendered_items):
+            raise OSError("rendered context selection is unavailable")
         from chronovisor.recall import recall_distillation
 
         candidate_refs = []
         for item in result.context_items:
             rendered_context = rendered_items.get(item.page_id)
             source = (candidate_pool_sources or {}).get(item.page_id)
+            source_uid = str(source.get("uid") or "") if source else ""
+            if source_uid and str(getattr(item, "uid", "") or "") != source_uid:
+                raise OSError("selected page identity is unavailable")
             content_sha256 = (
                 (selected_content_hashes or {}).get(item.page_id)
                 or (source.get("content_sha256") if source else "")
@@ -3539,6 +3548,43 @@ def _readonly_fast_feature_rows(
     return rows
 
 
+def _producer_fast_feature_rows(
+    request: RecallRequest,
+    candidates: Iterable[Any],
+    *,
+    deadline_at: float,
+) -> list[tuple[Any, dict[str, float]]]:
+    """Build bounded feature rows from the producer's already searched candidates.
+
+    The legacy capture path historically re-ran lexical search after rendering.
+    That can omit a page selected by semantic/graph retrieval.  This helper keeps
+    the exact feature contract while using only the producer-owned candidate
+    objects that were available to the live selection path.
+    """
+
+    _require_remaining_budget(deadline_at, "distilled producer features")
+    from chronovisor.recall.recall_distillation import build_text_features
+
+    rows: list[tuple[Any, dict[str, float]]] = []
+    seen: set[str] = set()
+    for page in candidates:
+        _require_remaining_budget(deadline_at, "distilled producer feature")
+        page_id = str(getattr(page, "page_id", "") or "")
+        if not page_id or page_id in seen:
+            continue
+        if getattr(page, "superseded_by", "") or should_filter_sensitive_result(
+            page, request
+        ):
+            continue
+        seen.add(page_id)
+        source = _fast_candidate_source(page)
+        candidate_text = f"{source['title'].strip()}\n{source['snippet'].strip()}"
+        rows.append((page, build_text_features(request.prompt, candidate_text)))
+        if len(rows) >= _DISTILLED_FAST_PATH_MAX_CANDIDATES:
+            break
+    return rows
+
+
 def _fast_candidate_source(page: Any) -> dict[str, str]:
     """Return the bounded canonical text shared by live and historical rows."""
 
@@ -3549,6 +3595,7 @@ def _fast_candidate_source(page: Any) -> dict[str, str]:
             str(page.snippet or page.title or page.page_id), limit=600
         ),
         "content_sha256": str(getattr(page, "content_sha256", "")),
+        "uid": str(getattr(page, "uid", "")),
     }
 
 
@@ -3864,6 +3911,7 @@ def _capture_legacy_distillation_observation(
     *,
     request: RecallRequest,
     deadline_at: float | None,
+    producer_candidates: list[Any] | None = None,
 ) -> None:
     """Bind a legacy result for offline training without changing live Recall."""
 
@@ -3905,11 +3953,18 @@ def _capture_legacy_distillation_observation(
         if not capture_timed_out:
             try:
                 with recall_wall_clock_deadline(remaining_ms):
-                    rows = _readonly_fast_feature_rows(
-                        request,
-                        result.matched_terms,
-                        deadline_at=observation_deadline,
-                    )
+                    if producer_candidates is None:
+                        rows = _readonly_fast_feature_rows(
+                            request,
+                            result.matched_terms,
+                            deadline_at=observation_deadline,
+                        )
+                    else:
+                        rows = _producer_fast_feature_rows(
+                            request,
+                            producer_candidates,
+                            deadline_at=observation_deadline,
+                        )
             except (RecallBudgetExhausted, RecallWallClockTimeout):
                 capture_timed_out = True
                 capture_error_code = "deadline"
@@ -4428,6 +4483,7 @@ def _finalize_legacy_recall_pipeline(
         queries=queries,
         deadline_at=final_deadline_at,
         telemetry=telemetry,
+        producer_candidates=pre_results,
     )
     if telemetry is not None:
         telemetry.pop("_stage_timers", None)
