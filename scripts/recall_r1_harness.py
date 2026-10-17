@@ -1474,14 +1474,16 @@ def _unique_crash(store: Any, root: Path) -> dict[str, Any]:
     original = store._write_chain_checkpoint
     crashed = {"value": False}
 
-    def fail_after_data(path_value: Path, head: Mapping[str, Any]) -> None:
+    def fail_after_data(
+        path_value: Path, head: Mapping[str, Any], *, generation: str | None = None
+    ) -> None:
         if (
             int(head["records"]) == int(before_head["records"]) + 1
             and not crashed["value"]
         ):
             crashed["value"] = True
             raise RuntimeError("r1 injected checkpoint crash")
-        original(path_value, head)
+        original(path_value, head, generation=generation)
 
     store._write_chain_checkpoint = fail_after_data
     try:

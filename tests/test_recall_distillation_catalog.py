@@ -203,6 +203,70 @@ def test_steady_state_same_watermark_reads_no_raw_and_new_session_is_delta(
     assert reads == ["save-codex-two.md"]
 
 
+def test_rally_changes_bootstrap_and_noop_are_stable(tmp_path: Path) -> None:
+    init_chronovisor(RuntimeContext(tmp_path))
+    raw_dir = _capture(
+        tmp_path,
+        "save-codex-one.md",
+        "a" * 24,
+        [_message("user", "first", "2026-08-01T00:00:00Z")],
+    )
+
+    result = catalog.advance(raw_dir, tmp_path, 4096)
+    initial = catalog.rally_changes(tmp_path)
+
+    assert (
+        initial["catalog_lineage"]
+        == catalog._read_catalog_checkpoint(tmp_path)["catalog_lineage"]
+    )
+    assert initial["revision"] > 0
+    assert set(initial["rally_ids"]) == set(result.rally_ids)
+    assert catalog.advance(raw_dir, tmp_path, 4096).status == "noop"
+    assert catalog.rally_changes(tmp_path) == initial
+
+
+def test_store_rallies_does_not_journal_identical_rows() -> None:
+    rows = [
+        {
+            "rally_id": "rally-1",
+            "as_of_us": 1,
+            "query_sha256": "q",
+        }
+    ]
+    with sqlite3.connect(":memory:") as connection:
+        connection.executescript(
+            """
+            CREATE TABLE rallies(
+                rally_id TEXT PRIMARY KEY,
+                as_of_us INTEGER NOT NULL,
+                row_json TEXT NOT NULL
+            );
+            CREATE TABLE rally_changes(
+                revision INTEGER PRIMARY KEY AUTOINCREMENT,
+                rally_id TEXT NOT NULL
+            );
+            """
+        )
+        catalog._store_rallies(connection, rows)
+        first = connection.execute(
+            "SELECT COUNT(*), COALESCE(MAX(revision),0) FROM rally_changes"
+        ).fetchone()
+        catalog._store_rallies(connection, rows)
+        second = connection.execute(
+            "SELECT COUNT(*), COALESCE(MAX(revision),0) FROM rally_changes"
+        ).fetchone()
+
+    assert first == second == (1, 1)
+
+
+@pytest.mark.parametrize("revision", [True, -1, "1", 1.0])
+def test_rally_changes_rejects_invalid_revision(
+    tmp_path: Path, revision: object
+) -> None:
+    with pytest.raises(catalog.CatalogError, match="revision is invalid"):
+        catalog.rally_changes(tmp_path, after_revision=revision)  # type: ignore[arg-type]
+
+
 def test_warm_catalog_and_fts_reuse_raw_snapshot_watermark(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -323,6 +387,8 @@ def test_digest_conflict_fails_closed(tmp_path: Path) -> None:
         connection.execute("UPDATE raw_units SET raw_sha256='conflict'")
 
     assert catalog.advance(raw_dir, tmp_path, 4096).status == "repaired"
+    migrated_changes = catalog.rally_changes(tmp_path)
+    assert migrated_changes["revision"] > 0
     with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
         assert connection.execute("SELECT COUNT(*) FROM raw_units").fetchone()[0] == 2
         assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 2
@@ -493,6 +559,7 @@ def test_legacy_catalog_and_checkpoint_loss_rebuild_once(tmp_path: Path) -> None
         )
         connection.execute("INSERT INTO metadata VALUES('watermark','legacy')")
     assert catalog.advance(raw_dir, tmp_path, 4096).status == "repaired"
+    assert catalog.rally_changes(tmp_path)["revision"] > 0
 
 
 def test_existing_session_delta_is_deferred_without_false_rally_boundary(
@@ -507,6 +574,7 @@ def test_existing_session_delta_is_deferred_without_false_rally_boundary(
     )
     catalog.advance(raw_dir, tmp_path, 4096)
     initial = catalog.rallies(tmp_path)
+    before_changes = catalog.rally_changes(tmp_path)
     _capture(
         tmp_path,
         "save-codex-two.md",
@@ -525,6 +593,11 @@ def test_existing_session_delta_is_deferred_without_false_rally_boundary(
     assert [ref["raw_id"] for ref in rows[0]["actual_answer_refs"]] == [
         "save-codex-two.md"
     ]
+    after_changes = catalog.rally_changes(
+        tmp_path, after_revision=before_changes["revision"]
+    )
+    assert after_changes["revision"] > before_changes["revision"]
+    assert after_changes["rally_ids"] == [initial[0]["rally_id"]]
 
 
 def test_warm_existing_session_uses_metadata_tail_and_matches_full_replay(
@@ -1321,6 +1394,153 @@ def _candidate_snapshot(rally_id: str, candidate_ids: list[str]) -> dict[str, ob
     return snapshot
 
 
+def _candidate_prefix_fixture(root: Path) -> tuple[Path, list[dict[str, object]]]:
+    init_chronovisor(RuntimeContext(root))
+    catalog.advance(root / "raw", root, 4096)
+    ledger = store.distillation_dir(root) / "candidate-ledger.jsonl"
+    claims = [
+        {
+            "kind": "candidate-snapshot",
+            "rally_id": "rally-prefix-1",
+            "snapshot": _candidate_snapshot("rally-prefix-1", ["c1"]),
+        },
+        {
+            "kind": "candidate-snapshot",
+            "rally_id": "rally-prefix-2",
+            "snapshot": _candidate_snapshot("rally-prefix-2", ["c2"]),
+        },
+    ]
+    for claim in claims:
+        store.append_chain(ledger, claim)
+    catalog.sync_candidate_index(root, ledger)
+    return ledger, list(store.read_chain(ledger))
+
+
+def test_candidate_prefix_matches_verifies_indexed_prefix_without_writes(
+    tmp_path: Path,
+) -> None:
+    ledger, rows = _candidate_prefix_fixture(tmp_path)
+    first_head = str(rows[0]["record_sha256"])
+    second_head = str(rows[1]["record_sha256"])
+    path = catalog.catalog_path(tmp_path)
+    before = path.read_bytes()
+    before_ctime = path.stat().st_ctime_ns
+    ledger_ctime = ledger.stat().st_ctime_ns
+
+    assert catalog.candidate_prefix_matches(
+        tmp_path, records=0, head_sha256=""
+    )
+    assert catalog.candidate_prefix_matches(
+        tmp_path, records=1, head_sha256=first_head
+    )
+    assert catalog.candidate_prefix_matches(
+        tmp_path, records=2, head_sha256=second_head
+    )
+    assert not catalog.candidate_prefix_matches(
+        tmp_path, records=1, head_sha256=second_head
+    )
+    assert not catalog.candidate_prefix_matches(
+        tmp_path, records=3, head_sha256="c" * 64
+    )
+    assert path.read_bytes() == before
+    assert path.stat().st_ctime_ns == before_ctime
+    assert ledger.stat().st_ctime_ns == ledger_ctime
+
+
+@pytest.mark.parametrize(
+    ("records", "head_sha256"),
+    [
+        (True, ""),
+        (-1, ""),
+        ("1", ""),
+        (1.0, ""),
+        (0, "a" * 64),
+        (1, ""),
+        (1, "A" * 64),
+        (1, "x" * 64),
+        (1, None),
+    ],
+)
+def test_candidate_prefix_matches_rejects_invalid_inputs(
+    tmp_path: Path, records: object, head_sha256: object
+) -> None:
+    with pytest.raises(catalog.CatalogError):
+        catalog.candidate_prefix_matches(
+            tmp_path,
+            records=records,  # type: ignore[arg-type]
+            head_sha256=head_sha256,  # type: ignore[arg-type]
+        )
+
+
+def test_candidate_prefix_matches_requires_stable_catalog_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, rows = _candidate_prefix_fixture(tmp_path)
+    original = catalog._read_catalog_checkpoint
+    calls = 0
+
+    def changing_checkpoint(root: Path) -> dict[str, object] | None:
+        nonlocal calls
+        calls += 1
+        current = original(root)
+        if calls == 1:
+            return current
+        assert current is not None
+        return {**current, "catalog_watermark": "changed"}
+
+    monkeypatch.setattr(catalog, "_read_catalog_checkpoint", changing_checkpoint)
+    with pytest.raises(catalog.CatalogError, match="changed during candidate prefix"):
+        catalog.candidate_prefix_matches(
+            tmp_path, records=1, head_sha256=str(rows[0]["record_sha256"])
+        )
+
+
+def test_candidate_prefix_matches_rejects_nonempty_ledger_without_index_state(
+    tmp_path: Path,
+) -> None:
+    ledger, _ = _candidate_prefix_fixture(tmp_path)
+    checkpoint = catalog._read_catalog_checkpoint(tmp_path)
+    assert checkpoint is not None
+    current = catalog._candidate_file_state(ledger)
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        connection.execute("DELETE FROM candidate_records")
+        connection.execute(
+            """
+            UPDATE candidate_index_state
+            SET ledger_exists=?, ledger_size=?, ledger_dev=?, ledger_ino=?,
+                ledger_mtime_ns=?, ledger_ctime_ns=?, record_count=0,
+                head_sha256=''
+            """,
+            tuple(current[key] for key in (
+                "ledger_exists",
+                "ledger_size",
+                "ledger_dev",
+                "ledger_ino",
+                "ledger_mtime_ns",
+                "ledger_ctime_ns",
+            )),
+        )
+    catalog._write_catalog_checkpoint(
+        tmp_path,
+        str(checkpoint["catalog_watermark"]),
+        int(checkpoint["event_rowid"]),
+        catalog_lineage=str(checkpoint["catalog_lineage"]),
+    )
+    with pytest.raises(catalog.CatalogError, match="empty candidate index"):
+        catalog.candidate_prefix_matches(tmp_path, records=0, head_sha256="")
+
+    with sqlite3.connect(catalog.catalog_path(tmp_path)) as connection:
+        connection.execute("DELETE FROM candidate_index_state")
+    catalog._write_catalog_checkpoint(
+        tmp_path,
+        str(checkpoint["catalog_watermark"]),
+        int(checkpoint["event_rowid"]),
+        catalog_lineage=str(checkpoint["catalog_lineage"]),
+    )
+    with pytest.raises(catalog.CatalogError, match="candidate index state is missing"):
+        catalog.candidate_prefix_matches(tmp_path, records=0, head_sha256="")
+
+
 def test_candidate_offset_index_bootstrap_tail_noop_and_random_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1606,6 +1826,7 @@ def test_catalog_readers_preserve_sealed_file_identity(
     catalog.sync_candidate_index(root, ledger)
     path = catalog.catalog_path(root)
     before = path.read_bytes()
+    before_ctime = path.stat().st_ctime_ns
     original_connect = sqlite3.connect
 
     def writable_open_changes_ctime(
@@ -1634,6 +1855,8 @@ def test_catalog_readers_preserve_sealed_file_identity(
     assert catalog.read_candidate_snapshots(root, ledger, ["rally-1"]) == {
         "rally-1": snapshot
     }
+    assert catalog.rally_changes(root)["revision"] > 0
     assert catalog.sync_candidate_index(root, ledger)["status"] == "noop"
     assert catalog._read_catalog_checkpoint(root) is not None
     assert path.read_bytes() == before
+    assert path.stat().st_ctime_ns == before_ctime

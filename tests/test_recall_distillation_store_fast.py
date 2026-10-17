@@ -233,6 +233,409 @@ def test_read_chain_uses_checkpoint_without_rehashing(
     assert [row["index"] for row in store.read_chain(path)] == [0, 1]
 
 
+def test_read_chain_repairs_stale_checkpoint_after_unlocked_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "stale.jsonl"
+    expected = store.append_chain_batch(path, ({"index": 0}, {"index": 1}))
+    store._chain_checkpoint_path(path).write_bytes(b"invalid checkpoint")
+    original_decode = store._decode_chain_bytes
+    lock_path = path.with_suffix(path.suffix + ".lock")
+
+    def probe_lock(data: bytes, **kwargs: object) -> object:
+        handle = store.acquire_nonblocking_lock(lock_path)
+        assert handle is not None
+        store.release_lock(handle)
+        return original_decode(data, **kwargs)
+
+    monkeypatch.setattr(store, "_decode_chain_bytes", probe_lock)
+    assert store.read_chain(path) == expected
+    assert store._read_chain_checkpoint(path) == store.chain_head(path)
+
+
+def test_read_chain_repairs_a_torn_final_row_after_unlocked_attempt(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "torn.jsonl"
+    expected = store.append_chain(path, {"index": 0})
+    with path.open("ab") as handle:
+        handle.write(b'{"index":')
+        handle.flush()
+
+    assert store.read_chain(path) == [expected]
+    assert store.verify_chain(path) == {
+        "records": 1,
+        "head_sha256": expected["record_sha256"],
+    }
+
+
+def test_read_chain_accepts_a_valid_final_row_without_newline(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-no-newline.jsonl"
+    expected = store.append_chain(path, {"index": 0})
+    path.write_bytes(path.read_bytes().removesuffix(b"\n"))
+    before = path.read_bytes()
+
+    assert store.read_chain(path) == [expected]
+    assert path.read_bytes() == before
+    assert store.chain_head(path) == {
+        "records": 1,
+        "head_sha256": expected["record_sha256"],
+    }
+
+
+def test_read_chain_fails_closed_on_middle_corruption_without_locked_rescan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "middle-corruption.jsonl"
+    rows = store.append_chain_batch(path, ({"index": 0}, {"index": 1}))
+    first = dict(rows[0])
+    first["index"] = 9
+    unsigned = {key: value for key, value in first.items() if key != "record_sha256"}
+    first["record_sha256"] = canonical_json_sha256_strict(unsigned)
+    raw = path.read_bytes().splitlines(keepends=True)
+    path.write_bytes(canonical_json_bytes_strict(first) + b"\n" + raw[1])
+
+    monkeypatch.setattr(
+        store,
+        "_recover_chain_tail",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("middle corruption must not rescan under lock")
+        ),
+    )
+    with pytest.raises(store.DistillationStoreError, match="chain"):
+        store.read_chain(path)
+
+
+def _tail_cursor(path: Path) -> dict[str, object]:
+    rows, cursor, reset = store.read_chain_tail(path)
+    assert reset is True
+    assert len(rows) == cursor["records"]
+    return cursor
+
+
+def test_read_chain_tail_returns_cold_suffix_and_unchanged_snapshot(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "tail.jsonl"
+    store.append_chain_batch(path, ({"index": 0}, {"index": 1}))
+
+    rows, head, reset = store.read_chain_tail(path)
+    assert [row["index"] for row in rows] == [0, 1]
+    assert set(head) == {
+        "ledger_path",
+        "file_state",
+        "offset",
+        "records",
+        "head_sha256",
+        "generation",
+    }
+    assert head["records"] == store.chain_head(path)["records"]
+    assert isinstance(head["generation"], str)
+    assert reset is True
+
+    cursor = _tail_cursor(path)
+    assert store.read_chain_tail(path, cursor) == ([], head, False)
+    store.append_chain(path, {"index": 2})
+    rows, head, reset = store.read_chain_tail(path, cursor)
+    assert [row["index"] for row in rows] == [2]
+    assert head["records"] == store.chain_head(path)["records"]
+    assert head["generation"] == cursor["generation"]
+    assert reset is False
+
+
+def test_read_chain_tail_resets_after_rewrite_and_new_writer_generation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "tail.jsonl"
+    original = store.append_chain_batch(path, ({"index": 0}, {"index": 1}))
+    cursor = _tail_cursor(path)
+
+    # Rebuild a valid chain after changing the already-cursor-covered prefix,
+    # then append a valid suffix without using the normal writer checkpoint path.
+    rewritten: list[dict[str, Any]] = []
+    previous = ""
+    for index, source in enumerate(original):
+        unsigned = {
+            key: value for key, value in source.items() if key != "record_sha256"
+        }
+        if index == 0:
+            unsigned["index"] = 9
+        unsigned["previous_sha256"] = previous
+        row = {
+            **unsigned,
+            "record_sha256": canonical_json_sha256_strict(unsigned),
+        }
+        rewritten.append(row)
+        previous = row["record_sha256"]
+    path.write_bytes(
+        b"".join(canonical_json_bytes_strict(row) + b"\n" for row in rewritten)
+    )
+    payload = {
+        "schema": store.DISTILLATION_SCHEMA,
+        "namespace": "recall-distillation",
+        "previous_sha256": previous,
+        "index": 2,
+    }
+    suffix = {
+        **payload,
+        "record_sha256": canonical_json_sha256_strict(payload),
+    }
+    store._append_fsynced(path, canonical_json_bytes_strict(suffix) + b"\n")
+    resealed_head = store._recover_chain_tail(path)
+    store._write_chain_checkpoint(path, resealed_head)
+
+    rows, current, reset = store.read_chain_tail(path, cursor)
+    assert [row["index"] for row in rows] == [9, 1, 2]
+    assert reset is True
+    assert current["generation"] != cursor["generation"]
+
+
+def test_legacy_checkpoint_generation_forces_one_tail_reset(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy.jsonl"
+    store.append_chain(path, {"index": 0})
+    cursor = _tail_cursor(path)
+    checkpoint = store._chain_checkpoint_path(path)
+    payload = store.read_sealed(checkpoint, schema=store.DISTILLATION_SCHEMA)
+    payload.pop("generation", None)
+    payload = store._sealed(payload)
+    checkpoint.write_bytes(store.canonical_json_bytes_strict(payload))
+
+    store.append_chain(path, {"index": 1})
+    rows, migrated, reset = store.read_chain_tail(path, cursor)
+    assert [row["index"] for row in rows] == [0, 1]
+    assert reset is True
+    assert isinstance(migrated["generation"], str)
+
+    store.append_chain(path, {"index": 2})
+    rows, current, reset = store.read_chain_tail(path, migrated)
+    assert [row["index"] for row in rows] == [2]
+    assert reset is False
+    assert current["generation"] == migrated["generation"]
+
+
+def test_read_chain_tail_reads_only_the_verified_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "tail.jsonl"
+    store.append_chain_batch(path, ({"index": index} for index in range(25)))
+    cursor = _tail_cursor(path)
+    store.append_chain(path, {"index": 25})
+    calls: list[tuple[int, int]] = []
+    original_pread = store.os.pread
+
+    def tracking_pread(fd: int, size: int, offset: int) -> bytes:
+        calls.append((size, offset))
+        return original_pread(fd, size, offset)
+
+    monkeypatch.setattr(store.os, "pread", tracking_pread)
+    rows, _current, reset = store.read_chain_tail(path, cursor)
+
+    assert [row["index"] for row in rows] == [25]
+    assert reset is False
+    assert calls[0] == (1, cursor["offset"] - 1)
+    assert all(offset >= cursor["offset"] - 1 for _size, offset in calls)
+    assert sum(size for size, _offset in calls) < cursor["offset"]
+
+
+def test_read_chain_tail_decodes_without_holding_ledger_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "unlocked.jsonl"
+    store.append_chain(path, {"index": 0})
+    original_decode = store._decode_chain_bytes
+    lock_path = path.with_suffix(path.suffix + ".lock")
+
+    def probe_lock(data: bytes, **kwargs: object) -> object:
+        handle = store.acquire_nonblocking_lock(lock_path)
+        assert handle is not None
+        store.release_lock(handle)
+        return original_decode(data, **kwargs)
+
+    monkeypatch.setattr(store, "_decode_chain_bytes", probe_lock)
+    rows, _cursor, reset = store.read_chain_tail(path)
+    assert [row["index"] for row in rows] == [0]
+    assert reset is True
+
+
+def test_read_chain_tail_fails_closed_on_clean_truncation(tmp_path: Path) -> None:
+    path = tmp_path / "tail.jsonl"
+    store.append_chain_batch(path, ({"index": 0}, {"index": 1}))
+    cursor = _tail_cursor(path)
+    first_end = path.read_bytes().find(b"\n") + 1
+    path.write_bytes(path.read_bytes()[:first_end])
+
+    with pytest.raises(store.DistillationStoreError, match="truncated"):
+        store.read_chain_tail(path, cursor)
+
+
+def test_read_chain_tail_treats_absent_nonzero_checkpoint_as_reset(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "missing.jsonl"
+    store.write_sealed_state(
+        store._chain_checkpoint_path(path),
+        {
+            "kind": "ledger-chain-checkpoint",
+            "ledger_name": path.name,
+            "records": 1,
+            "head_sha256": "a" * 64,
+            "file_state": None,
+        },
+    )
+
+    rows, cursor, reset = store.read_chain_tail(path)
+    assert rows == []
+    assert cursor["records"] == 0
+    assert cursor["head_sha256"] == ""
+    assert reset is True
+
+
+def test_read_chain_tail_resets_when_absent_cursor_ledger_is_created(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "created.jsonl"
+    rows, cursor, reset = store.read_chain_tail(path)
+    assert rows == []
+    assert cursor["file_state"] is None
+    assert reset is True
+
+    appended = store.append_chain(path, {"index": 0})
+    rows, current, reset = store.read_chain_tail(path, cursor)
+    assert rows == [appended]
+    assert reset is True
+    assert isinstance(current["generation"], str)
+
+
+def test_read_chain_tail_resets_on_corrupt_checkpoint_without_resealing(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "tail.jsonl"
+    store.append_chain(path, {"index": 0})
+    cursor = _tail_cursor(path)
+    checkpoint = store._chain_checkpoint_path(path)
+    checkpoint.write_bytes(b"corrupt")
+
+    rows, head, reset = store.read_chain_tail(path, cursor)
+    assert [row["index"] for row in rows] == [0]
+    assert head["records"] == 1
+    assert reset is True
+    assert checkpoint.read_bytes() == b"corrupt"
+
+
+@pytest.mark.parametrize("mutation", ["rewrite", "append"])
+def test_read_chain_tail_rejects_mutation_during_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    path = tmp_path / "tail.jsonl"
+    store.append_chain_batch(path, ({"index": 0}, {"index": 1}))
+    original_pread = store.os.pread
+    mutated = False
+
+    def mutating_pread(fd: int, size: int, offset: int) -> bytes:
+        nonlocal mutated
+        data = original_pread(fd, size, offset)
+        if not mutated:
+            mutated = True
+            if mutation == "rewrite":
+                raw = path.read_bytes()
+                path.write_bytes(raw.replace(b'"index":1', b'"index":2'))
+            else:
+                store.append_chain(path, {"index": 2})
+        return data
+
+    monkeypatch.setattr(store.os, "pread", mutating_pread)
+    with pytest.raises(store.DistillationStoreBusy, match="changed"):
+        store.read_chain_tail(path)
+
+
+def test_read_chain_tail_rejects_mutation_after_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "tail.jsonl"
+    store.append_chain_batch(path, ({"index": 0}, {"index": 1}))
+    original_hash = store.canonical_json_sha256_strict
+    calls = 0
+    mutated = False
+
+    def mutating_hash(value: object) -> str:
+        nonlocal calls, mutated
+        digest = original_hash(value)
+        calls += 1
+        if calls >= 3 and not mutated:
+            mutated = True
+            raw = path.read_bytes()
+            path.write_bytes(raw.replace(b'"index":1', b'"index":2'))
+        return digest
+
+    monkeypatch.setattr(store, "canonical_json_sha256_strict", mutating_hash)
+    with pytest.raises(store.DistillationStoreBusy, match="during snapshot decode"):
+        store.read_chain_tail(path)
+
+
+def test_snapshot_closes_descriptor_when_pin_races(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "race.jsonl"
+    store.append_chain(path, {"index": 0})
+    opened: list[int] = []
+    closed: list[int] = []
+    original_open = store.os.open
+    original_close = store.os.close
+    original_state = store._ledger_file_state_from_stat
+
+    def tracking_open(*args: object, **kwargs: object) -> int:
+        descriptor = original_open(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    def tracking_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        original_close(descriptor)
+
+    def fail_state(_value: object) -> dict[str, int]:
+        raise store.DistillationStoreError("injected pin race")
+
+    monkeypatch.setattr(store.os, "open", tracking_open)
+    monkeypatch.setattr(store.os, "close", tracking_close)
+    monkeypatch.setattr(store, "_ledger_file_state_from_stat", fail_state)
+    with pytest.raises(store.DistillationStoreBusy, match="cannot be pinned"):
+        store.read_chain_tail(path)
+
+    assert opened
+    assert opened[-1] in closed
+    monkeypatch.setattr(store, "_ledger_file_state_from_stat", original_state)
+
+
+def test_unique_label_append_updates_existing_health_projection(tmp_path: Path) -> None:
+    path = tmp_path / store.LABEL_LEDGER_FILE
+    store.append_chain_unique(
+        path,
+        {"decision_id": "one", "idempotency_sha256": "binding-one", "authority": "teacher-only"},
+        unique_field="decision_id",
+        binding_field="idempotency_sha256",
+    )
+    assert store.label_health_projection(path, repair=True)["counts"] == {
+        "teacher_only": 1,
+        "verified_truth": 0,
+        "probe_not_truth": 0,
+    }
+    store.append_chain_unique(
+        path,
+        {"decision_id": "two", "idempotency_sha256": "binding-two", "authority": "verified"},
+        unique_field="decision_id",
+        binding_field="idempotency_sha256",
+    )
+    assert store.label_health_projection(path)["counts"] == {
+        "teacher_only": 1,
+        "verified_truth": 1,
+        "probe_not_truth": 0,
+    }
+
+
 def test_sealed_checkpoint_rejects_non_digest_head(tmp_path: Path) -> None:
     path = tmp_path / "ledger.jsonl"
     row = store.append_chain(path, {"index": 0})

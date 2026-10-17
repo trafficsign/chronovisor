@@ -35,6 +35,7 @@ LEGACY_HISTORICAL_INDEX_DIGEST_SCHEMA = "historical-fts-chain-v1"
 HISTORICAL_INDEX_DIGEST_SCHEMA = "historical-fts-multiset-v2"
 CANDIDATE_SNAPSHOT_SCHEMA = "chronovisor.recall-candidate-snapshot.v1"
 CANDIDATE_INDEX_SCHEMA = "chronovisor.recall-candidate-offset-index.v1"
+RALLY_CHANGE_JOURNAL_SCHEMA = "v1"
 
 
 class CatalogError(ValueError):
@@ -331,6 +332,12 @@ def _connect(root: Path) -> sqlite3.Connection:
             as_of_us INTEGER NOT NULL,
             row_json TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS rally_changes(
+            revision INTEGER PRIMARY KEY AUTOINCREMENT,
+            rally_id TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS rally_changes_rally_id
+            ON rally_changes(rally_id, revision);
         CREATE TABLE IF NOT EXISTS candidate_records(
             record_index INTEGER PRIMARY KEY,
             rally_id TEXT NOT NULL UNIQUE,
@@ -530,12 +537,14 @@ def _reset_catalog_for_repair(connection: sqlite3.Connection) -> None:
     for table in (
         "candidate_index_state",
         "candidate_records",
+        "rally_changes",
         "rallies",
         "events",
         "raw_units",
         "metadata",
     ):
         connection.execute(f"DELETE FROM {table}")
+    connection.execute("DELETE FROM sqlite_sequence WHERE name='rally_changes'")
 
 
 def _store_events(
@@ -586,6 +595,13 @@ def _store_rallies(
             raise CatalogError("rally duplicate conflicts within delta")
         encoded[rally_id] = value
     for rally_id, (as_of_us, row_json) in encoded.items():
+        stored = connection.execute(
+            "SELECT as_of_us,row_json FROM rallies WHERE rally_id=?",
+            (rally_id,),
+        ).fetchone()
+        changed = stored is None or (
+            int(stored[0]) != as_of_us or str(stored[1]) != row_json
+        )
         connection.execute(
             """
             INSERT INTO rallies(rally_id,as_of_us,row_json) VALUES(?,?,?)
@@ -595,6 +611,10 @@ def _store_rallies(
             """,
             (rally_id, as_of_us, row_json),
         )
+        if changed:
+            connection.execute(
+                "INSERT INTO rally_changes(rally_id) VALUES(?)", (rally_id,)
+            )
     return tuple(encoded)
 
 
@@ -1068,6 +1088,10 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
                     or _catalog_lineage(prior_checkpoint) is None
                 )
             )
+            or (
+                schema == CATALOG_SCHEMA
+                and metadata.get("rally_changes_schema") != RALLY_CHANGE_JOURNAL_SCHEMA
+            )
             or bool({"source_after_line", "source_until_line"} - columns)
         )
         if repairing:
@@ -1183,7 +1207,11 @@ def advance(raw_dir: Path, root: Path, max_context_bytes: int) -> CatalogAdvance
             status = "advanced"
         connection.executemany(
             "INSERT OR REPLACE INTO metadata VALUES(?,?)",
-            (("schema", CATALOG_SCHEMA), ("watermark", watermark)),
+            (
+                ("schema", CATALOG_SCHEMA),
+                ("watermark", watermark),
+                ("rally_changes_schema", RALLY_CHANGE_JOURNAL_SCHEMA),
+            ),
         )
         event_rowid = int(
             connection.execute("SELECT COALESCE(MAX(rowid),0) FROM events").fetchone()[0]
@@ -1238,6 +1266,59 @@ def rallies(root: Path, ids: Iterable[str] | None = None) -> list[dict[str, Any]
                 "SELECT row_json FROM rallies ORDER BY as_of_us,rally_id"
             )
         return [json.loads(row[0]) for row in rows]
+
+
+def rally_changes(root: Path, *, after_revision: int = 0) -> dict[str, Any]:
+    """Return rally ids journaled after one catalog revision."""
+
+    if (
+        isinstance(after_revision, bool)
+        or not isinstance(after_revision, int)
+        or after_revision < 0
+    ):
+        raise CatalogError("rally change revision is invalid")
+    before = _read_catalog_checkpoint(root)
+    if before is None:
+        raise CatalogError("catalog checkpoint requires repair")
+    lineage = _catalog_lineage(before)
+    if lineage is None:
+        raise CatalogError("catalog checkpoint requires repair")
+    try:
+        with closing(_connect_readonly(root)) as connection:
+            metadata = dict(connection.execute("SELECT key,value FROM metadata"))
+            if (
+                metadata.get("schema") != CATALOG_SCHEMA
+                or metadata.get("rally_changes_schema") != RALLY_CHANGE_JOURNAL_SCHEMA
+            ):
+                raise CatalogError("rally change journal requires repair")
+            current = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(revision),0) FROM rally_changes"
+                ).fetchone()[0]
+            )
+            rows = connection.execute(
+                """
+                SELECT rally_id, MIN(revision) AS first_revision
+                FROM rally_changes
+                WHERE revision > ?
+                GROUP BY rally_id
+                ORDER BY first_revision, rally_id
+                """,
+                (after_revision,),
+            )
+            rally_ids = [str(row[0]) for row in rows]
+    except CatalogError:
+        raise
+    except (sqlite3.DatabaseError, TypeError, ValueError) as exc:
+        raise CatalogError("rally change journal is unreadable") from exc
+    after = _read_catalog_checkpoint(root)
+    if after != before:
+        raise CatalogError("catalog changed during rally change read")
+    return {
+        "catalog_lineage": lineage,
+        "revision": current,
+        "rally_ids": rally_ids,
+    }
 
 
 def _candidate_file_state(path: Path) -> dict[str, int]:
@@ -1524,6 +1605,8 @@ def _candidate_db_summary(
     head = "" if row is None else str(row["record_sha256"])
     if count != int(state["record_count"]) or head != state["head_sha256"]:
         raise CatalogError("candidate index state conflicts with records")
+    if count == 0 and int(state["ledger_size"]) != 0:
+        raise CatalogError("empty candidate index conflicts with ledger")
     if row is not None and int(row["record_index"]) != count - 1:
         raise CatalogError("candidate index sequence is invalid")
     if row is not None and (
@@ -1849,6 +1932,91 @@ def candidate_index_state(root: Path) -> dict[str, Any]:
     finally:
         if connection is not None:
             connection.close()
+
+
+def candidate_prefix_matches(
+    root: Path, *, records: int, head_sha256: str
+) -> bool:
+    """Check a persisted candidate prefix without decoding snapshot bodies.
+
+    The catalog checkpoint and candidate ledger identity are both checked so a
+    caller never treats a stale offset row as a verified prefix.  ``records``
+    is a count, therefore the corresponding index row is ``records - 1``.
+    """
+
+    if isinstance(records, bool) or not isinstance(records, int) or records < 0:
+        raise CatalogError("candidate prefix record count is invalid")
+    _candidate_sha(head_sha256, allow_empty=True)
+    if (records == 0) != (head_sha256 == ""):
+        raise CatalogError("candidate prefix count/head mismatch")
+
+    before = _read_catalog_checkpoint(root)
+    if before is None:
+        raise CatalogError("catalog checkpoint requires repair")
+    try:
+        with closing(_connect_readonly(root)) as connection:
+            state = _candidate_index_state_row(connection)
+            if state is None:
+                orphaned = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM candidate_records"
+                    ).fetchone()[0]
+                )
+                if orphaned:
+                    raise CatalogError("candidate index state is missing")
+                candidate_path = (
+                    store.distillation_dir(root) / "candidate-ledger.jsonl"
+                )
+                current = _candidate_file_state(candidate_path)
+                if current["ledger_exists"] and current["ledger_size"]:
+                    raise CatalogError("candidate index state is missing")
+                if _candidate_file_state(candidate_path) != current:
+                    raise CatalogError("candidate ledger changed during prefix read")
+                matched = records == 0
+            else:
+                _candidate_db_summary(connection, state)
+                candidate_path = Path(str(state["ledger_path"]))
+                stored = {
+                    key: state[key]
+                    for key in (
+                        "ledger_exists",
+                        "ledger_size",
+                        "ledger_dev",
+                        "ledger_ino",
+                        "ledger_mtime_ns",
+                        "ledger_ctime_ns",
+                    )
+                }
+                current = _candidate_file_state(candidate_path)
+                if current != stored:
+                    raise CatalogError("candidate ledger changed after indexing")
+                if records > int(state["record_count"]):
+                    matched = False
+                elif records == 0:
+                    matched = True
+                else:
+                    raw_row = connection.execute(
+                        "SELECT * FROM candidate_records WHERE record_index=?",
+                        (records - 1,),
+                    ).fetchone()
+                    if raw_row is None:
+                        matched = False
+                    else:
+                        row = _verify_candidate_index_row(raw_row)
+                        if row.get("record_index") != records - 1:
+                            raise CatalogError("candidate index sequence is invalid")
+                        _candidate_sha(row.get("record_sha256"))
+                        matched = row["record_sha256"] == head_sha256
+                if _candidate_file_state(candidate_path) != current:
+                    raise CatalogError("candidate ledger changed during prefix read")
+    except CatalogError:
+        raise
+    except (sqlite3.DatabaseError, KeyError, TypeError, ValueError) as exc:
+        raise CatalogError("candidate index is unreadable") from exc
+    after = _read_catalog_checkpoint(root)
+    if after != before:
+        raise CatalogError("catalog changed during candidate prefix read")
+    return matched
 
 
 def candidate_rally_ids(root: Path, *, after_seq: int = 0) -> set[str]:

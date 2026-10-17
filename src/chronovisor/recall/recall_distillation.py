@@ -5939,6 +5939,33 @@ def _allocate_materialized_rows(
     )
 
 
+def _materialization_split_context(
+    root: Path, prior_plan_ids: set[str]
+) -> tuple[str, dict[str, str], set[str]]:
+    split_plan = _read_split_plan(root)
+    split_plan_id = str(split_plan["artifact_id"])
+    split = {
+        str(rally_id): str(value)
+        for rally_id, value in split_plan["assignments"].items()
+    }
+    compatible = {split_plan_id}
+    for prior_plan_id in prior_plan_ids - {split_plan_id, ""}:
+        try:
+            prior = _read_split_plan_artifact(root, prior_plan_id)
+        except KeyError, DistillationError, store.DistillationStoreError:
+            continue
+        if (
+            prior.get("feature_revision") == split_plan.get("feature_revision")
+            and prior.get("split_revision") == split_plan.get("split_revision")
+            and all(
+                split.get(str(rally_id)) == str(value)
+                for rally_id, value in prior["assignments"].items()
+            )
+        ):
+            compatible.add(prior_plan_id)
+    return split_plan_id, split, compatible
+
+
 def _finalize_materialized_training_rows(
     root: Path,
     materialized: list[dict[str, Any]],
@@ -5951,29 +5978,9 @@ def _finalize_materialized_training_rows(
     split: dict[str, str] = {}
     compatible_split_plan_ids: set[str] = set()
     try:
-        split_plan = _read_split_plan(root)
-        split_plan_id = str(split_plan["artifact_id"])
-        split = {
-            str(rally_id): str(value)
-            for rally_id, value in split_plan["assignments"].items()
-        }
-        compatible_split_plan_ids.add(split_plan_id)
-        for prior_plan_id in {
-            str(row.get("label_split_plan_id") or "") for row in materialized
-        } - {split_plan_id, ""}:
-            try:
-                prior = _read_split_plan_artifact(root, prior_plan_id)
-            except DistillationError, store.DistillationStoreError:
-                continue
-            if (
-                prior.get("feature_revision") == split_plan.get("feature_revision")
-                and prior.get("split_revision") == split_plan.get("split_revision")
-                and all(
-                    split.get(str(rally_id)) == str(value)
-                    for rally_id, value in prior["assignments"].items()
-                )
-            ):
-                compatible_split_plan_ids.add(prior_plan_id)
+        split_plan_id, split, compatible_split_plan_ids = _materialization_split_context(
+            root, {str(row.get("label_split_plan_id") or "") for row in materialized}
+        )
     except KeyError, DistillationError, store.DistillationStoreError:
         split = grouped_rolling_split(materialized) if materialized else {}
     rows = []
@@ -6059,8 +6066,13 @@ def materialize_training_rows(
     if _validated_sources:
         if any(value is not None for value in (_rallies, _snapshots, _label_rows)):
             raise DistillationError("validated materialization cannot accept supplied sources")
+        from chronovisor.recall import recall_distillation_catalog as catalog
+        from chronovisor.recall.recall_distillation_materialization import materialize
         from chronovisor.recall.recall_distillation_validation import binding_inputs
 
+        checkpoint = catalog._read_catalog_checkpoint(root)
+        if checkpoint is not None and catalog._catalog_lineage(checkpoint) is not None:
+            return materialize(root, limit)
         # Read canonical sources through the same signature-checked view used
         # by preflight. This never seeds validation with caller-supplied data.
         labels_by_record, rallies, features_by_pair, snapshot_contracts = binding_inputs(root)
@@ -6271,22 +6283,25 @@ def _authoritative_materialized_row_binding(
     )
 
     try:
-        labels_by_record, rallies, features_by_pair, snapshot_contracts = (
-            binding_inputs(root)
+        from chronovisor.recall.recall_distillation_materialization import (
+            canonical_binding,
         )
-    except SourceBindingError:
+
+        projected = canonical_binding(root, record_sha256)
+        if projected is None:
+            labels_by_record, rallies, features_by_pair, snapshot_contracts = binding_inputs(root)
+            label = labels_by_record.get(record_sha256)
+            if label is None:
+                return False
+            canonical = _materialization_label_row(
+                label, root, rallies, features_by_pair, snapshot_contracts,
+                _current_ox_profile_contract_id(root),
+            )
+        else:
+            canonical, label, canonical_rally = projected
+            rallies = {str(canonical_rally.get("rally_id") or ""): canonical_rally}
+    except SourceBindingError, store.DistillationStoreError:
         return False
-    label = labels_by_record.get(record_sha256)
-    if label is None:
-        return False
-    canonical = _materialization_label_row(
-        label,
-        root,
-        rallies,
-        features_by_pair,
-        snapshot_contracts,
-        _current_ox_profile_contract_id(root),
-    )
     if canonical is None or any(
         row.get(key) != value for key, value in canonical.items()
     ):
@@ -8544,10 +8559,15 @@ def _ensure_split_plan(
 
 
 def _verified_counts(root: Path) -> dict[str, int]:
+    from chronovisor.recall.recall_distillation_ledger import ledger_index
+
     counts = {label: 0 for label in ("helpful", "neutral", "harmful")}
-    for row in _read_chain(store.distillation_dir(root) / "label-ledger.jsonl"):
-        if row.get("authority") == "verified" and row.get("verdict") in counts:
-            counts[str(row["verdict"])] += 1
+    index = ledger_index(store.distillation_dir(root) / store.LABEL_LEDGER_FILE)
+    for row in index.query(
+        "SELECT verdict,COUNT(*) FROM rows WHERE authority='verified' "
+        "AND verdict IN ('helpful','neutral','harmful') GROUP BY verdict"
+    ):
+        counts[str(row[0])] = int(row[1])
     return counts
 
 
@@ -8825,16 +8845,17 @@ def _automatic_baseline_metrics(root: Path) -> dict[str, Any]:
                 "timeout_rate": sum(bool(row["timed_out"]) for row in rows) / len(rows),
             }
         )
+    from chronovisor.recall.recall_distillation_ledger import ledger_index
+
     try:
-        labels = _read_chain(store.distillation_dir(root) / "label-ledger.jsonl")
+        index = ledger_index(store.distillation_dir(root) / store.LABEL_LEDGER_FILE)
+        predicates = tuple(sorted(RELEVANCE_CLOSED_PREDICATES))
+        metrics["exact_structural_links"] = int(index.query(
+            "SELECT COUNT(*) FROM rows WHERE authority='verified' AND dimension='relevance' "
+            f"AND closed_predicate IN ({','.join('?' for _ in predicates)})", predicates,
+        )[0][0])
     except store.DistillationStoreError:
-        labels = []
-    metrics["exact_structural_links"] = sum(
-        row.get("authority") == "verified"
-        and row.get("dimension") == "relevance"
-        and row.get("closed_predicate") in RELEVANCE_CLOSED_PREDICATES
-        for row in labels
-    )
+        metrics["exact_structural_links"] = 0
     return metrics
 
 
@@ -15399,6 +15420,7 @@ def _capture_candidate_snapshots(
     label_rows: Sequence[Mapping[str, Any]],
     cold_start: bool,
     deadline: float,
+    labeled_rally_ids: set[str] | None = None,
 ) -> _CandidateCaptureResult:
     candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
     snapshots: dict[str, Mapping[str, Any]]
@@ -15408,7 +15430,7 @@ def _capture_candidate_snapshots(
         try:
             catalog.sync_candidate_index(root, candidate_path)
             known_rally_ids = catalog.candidate_rally_ids(root)
-            label_rally_ids = {
+            label_rally_ids = set(labeled_rally_ids) if labeled_rally_ids is not None else {
                 str(row.get("rally_id") or "")
                 for row in label_rows
                 if isinstance(row.get("rally_id"), str) and row.get("rally_id")
@@ -15640,11 +15662,9 @@ def _prepare_distillation_chunk(
             counterfactual = default_counterfactual
     structural_verifier = structural_verifier or _default_structural_verifier
     ledger_path = store.distillation_dir(root) / "rally-manifest.jsonl"
-    existing = {
-        manifest.get("rally_id")
-        for row in _read_chain(ledger_path)
-        if isinstance((manifest := row.get("manifest")), dict)
-    }
+    from chronovisor.recall.recall_distillation_ledger import ledger_index
+
+    existing = ledger_index(ledger_path).distinct("rally_id")
     manifest_limit = 500 if cold_start else config.chunk_size
     pending = [row for row in rallies if row["rally_id"] not in existing][
         :manifest_limit
@@ -15687,7 +15707,11 @@ def _prepare_distillation_chunk(
     rally_by_id = {str(rally["rally_id"]): rally for rally in rallies}
     candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
     label_path = store.distillation_dir(root) / "label-ledger.jsonl"
-    label_rows = _read_chain(label_path)
+    label_rows = (
+        ledger_index(label_path).rows(kind="counterfactual-label")
+        if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+        else _read_chain(label_path)
+    )
     capture = _capture_candidate_snapshots(
         root=root,
         raw_dir=raw_dir,
@@ -15698,6 +15722,10 @@ def _prepare_distillation_chunk(
         label_rows=label_rows,
         cold_start=cold_start,
         deadline=deadline,
+        labeled_rally_ids=(
+            ledger_index(label_path).distinct("rally_id")
+            if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE else None
+        ),
     )
     snapshots = capture.snapshots
     candidate_work = capture.work

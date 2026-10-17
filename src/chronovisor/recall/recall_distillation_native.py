@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import re
+import sqlite3
 import stat
 from collections import Counter
 from collections.abc import Iterator, Mapping
@@ -24,6 +25,10 @@ from typing import Any, cast
 from chronovisor.core import canonical_json
 from chronovisor.core.durable_state import file_lock
 from chronovisor.recall import recall_distillation_store as store
+from chronovisor.recall.recall_distillation_ledger import (
+    LedgerMapping,
+    ledger_index,
+)
 from chronovisor.recall.recall_distillation_luna import (
     BATCH_SCHEMA,
     NATIVE_MODEL,
@@ -61,12 +66,6 @@ _CONTRACT_POINTER_KIND = "native-luna-profile-contract-pointer"
 _CONTRACT_KIND = "native-luna-profile"
 _RECEIPTS_LEDGER = "native-teacher-receipts.jsonl"
 _LABEL_LEDGER = store.LABEL_LEDGER_FILE
-_RECEIPT_INDEX_CACHE: dict[
-    str, tuple[tuple[int, int, int, int, int], dict[str, dict[str, Any]]]
-] = {}
-_LABEL_INDEX_CACHE: dict[
-    str, tuple[tuple[int, int, int, int, int], dict[str, dict[str, Any]]]
-] = {}
 # These fields are deterministically copied from the frozen source by
 # ``LunaBulkBundle.submit`` after the worker response is received.  They are
 # provenance, not part of the native response bytes covered by its receipt.
@@ -845,7 +844,16 @@ def _receipt_matches_row(
         receipts = _receipt_index(root)
         if receipts is None:
             return False
-    item = receipts.get(receipt_id)
+    try:
+        item = receipts.get(receipt_id)
+    except (
+        OSError,
+        TypeError,
+        ValueError,
+        sqlite3.Error,
+        store.DistillationStoreError,
+    ):
+        return False
     matches = [item] if item is not None else []
     if len(matches) != 1 or not isinstance(matches[0], Mapping):
         return False
@@ -889,89 +897,86 @@ def _receipt_matches_row(
     )
 
 
-def _receipt_index(root: Path) -> dict[str, dict[str, Any]] | None:
-    """Read and cache the verified receipt chain by immutable file signature."""
+def _ledger_mapping(path: Path, field: str) -> LedgerMapping | None:
+    """Open one verified projection while preserving native ledger checks."""
 
-    path = _receipt_path(root)
     try:
         state = path.lstat()
-        if (
-            stat.S_ISLNK(state.st_mode)
-            or not stat.S_ISREG(state.st_mode)
-            or stat.S_IMODE(state.st_mode) != 0o600
-        ):
-            return None
-        signature = (
-            state.st_dev,
-            state.st_ino,
-            state.st_size,
-            state.st_mtime_ns,
-            stat.S_IMODE(state.st_mode),
-        )
     except FileNotFoundError:
-        signature = (0, 0, 0, 0, 0)
+        return None
     except OSError:
         return None
-    cache_key = str(path)
-    cached = _RECEIPT_INDEX_CACHE.get(cache_key)
-    if cached is not None and cached[0] == signature:
-        return cached[1]
-    try:
-        rows = store.read_chain(path)
-    except store.DistillationStoreError:
+    if (
+        stat.S_ISLNK(state.st_mode)
+        or not stat.S_ISREG(state.st_mode)
+        or stat.S_IMODE(state.st_mode) != 0o600
+    ):
         return None
-    index = {
-        _text(item.get("receipt_sha256")): item
-        for item in rows
-        if _is_sha(item.get("receipt_sha256"))
-    }
-    _RECEIPT_INDEX_CACHE[cache_key] = (signature, index)
-    # Keep this process-local cache bounded when tests/imports use many roots.
-    if len(_RECEIPT_INDEX_CACHE) > 16:
-        del _RECEIPT_INDEX_CACHE[next(iter(_RECEIPT_INDEX_CACHE))]
-    return index
-
-
-def _label_index(root: Path) -> dict[str, dict[str, Any]] | None:
-    """Read the verified label chain once for materialized-row projections."""
-
-    path = _label_path(root)
     try:
-        state = path.lstat()
-        if (
-            stat.S_ISLNK(state.st_mode)
-            or not stat.S_ISREG(state.st_mode)
-            or stat.S_IMODE(state.st_mode) != 0o600
-        ):
-            return None
-        signature = (
-            state.st_dev,
-            state.st_ino,
-            state.st_size,
-            state.st_mtime_ns,
-            stat.S_IMODE(state.st_mode),
-        )
+        return LedgerMapping(ledger_index(path), field)
+    except (
+        OSError,
+        TypeError,
+        ValueError,
+        sqlite3.Error,
+        store.DistillationStoreError,
+    ):
+        return None
+
+
+def _receipt_index(root: Path) -> Mapping[str, dict[str, Any]] | None:
+    """Return a verified receipt mapping backed by an incremental projection."""
+
+    return _ledger_mapping(_receipt_path(root), "receipt_sha256")
+
+
+def _label_index(root: Path) -> Mapping[str, dict[str, Any]] | None:
+    """Return a verified label mapping backed by an incremental projection."""
+
+    return _ledger_mapping(_label_path(root), "record_sha256")
+
+
+def _label_work_index(root: Path) -> Mapping[str, dict[str, Any]] | None:
+    """Return labels keyed by work id for bounded import idempotency checks."""
+
+    return _ledger_mapping(_label_path(root), "work_id")
+
+
+def _existing_ledger_mapping(
+    path: Path,
+    mapping: Mapping[str, dict[str, Any]] | None,
+    message: str,
+) -> Mapping[str, dict[str, Any]] | None:
+    """Treat a missing ledger as empty, but reject an invalid existing one."""
+
+    if mapping is not None:
+        return mapping
+    try:
+        path.lstat()
     except FileNotFoundError:
-        signature = (0, 0, 0, 0, 0)
-    except OSError:
         return None
-    cache_key = str(path)
-    cached = _LABEL_INDEX_CACHE.get(cache_key)
-    if cached is not None and cached[0] == signature:
-        return cached[1]
+    except OSError as exc:
+        raise NativeDistillationError(message) from exc
+    raise NativeDistillationError(message)
+
+
+def _mapping_has(
+    mapping: Mapping[str, dict[str, Any]] | None,
+    key: str,
+    message: str,
+) -> bool:
+    if mapping is None:
+        return False
     try:
-        rows = store.read_chain(path)
-    except store.DistillationStoreError:
-        return None
-    index = {
-        _text(item.get("record_sha256")): item
-        for item in rows
-        if _is_sha(item.get("record_sha256"))
-    }
-    _LABEL_INDEX_CACHE[cache_key] = (signature, index)
-    if len(_LABEL_INDEX_CACHE) > 16:
-        del _LABEL_INDEX_CACHE[next(iter(_LABEL_INDEX_CACHE))]
-    return index
+        return mapping.get(key) is not None
+    except (
+        OSError,
+        TypeError,
+        ValueError,
+        sqlite3.Error,
+        store.DistillationStoreError,
+    ) as exc:
+        raise NativeDistillationError(message) from exc
 
 
 def _row_integrity_with_state(
@@ -1145,7 +1150,16 @@ def row_integrity(row: Mapping[str, Any], root: Path | None = None) -> bool:
     labels = _label_index(root)
     if labels is None:
         return False
-    source = labels.get(record_id)
+    try:
+        source = labels.get(record_id)
+    except (
+        OSError,
+        TypeError,
+        ValueError,
+        sqlite3.Error,
+        store.DistillationStoreError,
+    ):
+        return False
     if source is None:
         return False
     contract_id = _text(source.get("profile_contract_id"))
@@ -1256,20 +1270,31 @@ def import_bundle(root: Path, bundle_path: Path) -> dict[str, Any]:
             rows.append(row)
             receipts.append(receipt)
         receipt_path = _receipt_path(root)
-        try:
-            existing_receipts = {
-                _text(item.get("receipt_sha256"))
-                for item in store.read_chain(receipt_path)
-            }
-        except store.DistillationStoreError as exc:
-            raise NativeDistillationError("native receipt ledger is invalid") from exc
-        try:
-            existing_labels = {
-                _text(item.get("work_id"))
-                for item in store.read_chain(_label_path(root))
-            }
-        except store.DistillationStoreError as exc:
-            raise NativeDistillationError("label ledger is invalid") from exc
+        receipt_view = _existing_ledger_mapping(
+            receipt_path,
+            _receipt_index(root),
+            "native receipt ledger is invalid",
+        )
+        label_path = _label_path(root)
+        label_view = _existing_ledger_mapping(
+            label_path,
+            _label_work_index(root),
+            "label ledger is invalid",
+        )
+        existing_receipts = {
+            receipt["receipt_sha256"]
+            for receipt in receipts
+            if _mapping_has(
+                receipt_view,
+                receipt["receipt_sha256"],
+                "native receipt ledger is invalid",
+            )
+        }
+        existing_labels = {
+            row["work_id"]
+            for row in rows
+            if _mapping_has(label_view, row["work_id"], "label ledger is invalid")
+        }
         for receipt in receipts:
             store.append_chain_unique(
                 receipt_path,
@@ -1279,20 +1304,14 @@ def import_bundle(root: Path, bundle_path: Path) -> dict[str, Any]:
             )
         for row in rows:
             store.append_chain_unique(
-                _label_path(root),
+                label_path,
                 row,
                 unique_field="work_id",
                 binding_field="provider_receipt_sha256",
             )
-        try:
-            receipt_rows = store.read_chain(receipt_path)
-        except store.DistillationStoreError as exc:
-            raise NativeDistillationError("native receipt ledger is invalid") from exc
-        receipt_index = {
-            _text(item.get("receipt_sha256")): item
-            for item in receipt_rows
-            if _is_sha(item.get("receipt_sha256"))
-        }
+        receipt_index = _receipt_index(root)
+        if receipt_index is None:
+            raise NativeDistillationError("native receipt ledger is invalid")
         if any(
             not _row_integrity_with_state(
                 row,
@@ -1303,7 +1322,7 @@ def import_bundle(root: Path, bundle_path: Path) -> dict[str, Any]:
             for row in rows
         ):
             raise NativeDistillationError("native ledger receipt binding failed")
-        label_head = store.chain_head(_label_path(root))
+        label_head = store.chain_head(label_path)
         receipt_head = store.chain_head(receipt_path)
         counts = Counter(_text(row.get("verdict")) for row in rows)
         return {

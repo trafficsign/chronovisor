@@ -40,6 +40,12 @@ class DistillationStoreBusy(RuntimeError):
     """A nonblocking private-store write could not acquire its lock."""
 
 
+def projection_json(value: Any) -> str:
+    """Encode projection metadata through the store's canonical JSON boundary."""
+
+    return canonical_json_bytes_strict(value).decode("utf-8")
+
+
 def _validate_artifact_id(value: object) -> str:
     if (
         not isinstance(value, str)
@@ -589,7 +595,35 @@ def _ledger_file_state(path: Path) -> dict[str, int] | None:
     }
 
 
-def _write_chain_checkpoint(path: Path, head: Mapping[str, Any]) -> None:
+_CHAIN_GENERATION_LENGTH = 32
+
+
+def _new_chain_generation() -> str:
+    return uuid.uuid4().hex
+
+
+def _valid_chain_generation(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == _CHAIN_GENERATION_LENGTH
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _checkpoint_head(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "records": checkpoint["records"],
+        "head_sha256": checkpoint["head_sha256"],
+    }
+
+
+def _write_chain_checkpoint(
+    path: Path, head: Mapping[str, Any], *, generation: str | None = None
+) -> None:
+    if generation is None:
+        generation = _new_chain_generation()
+    if not _valid_chain_generation(generation):
+        raise DistillationStoreError("invalid ledger chain generation")
     write_sealed_state(
         _chain_checkpoint_path(path),
         {
@@ -598,17 +632,20 @@ def _write_chain_checkpoint(path: Path, head: Mapping[str, Any]) -> None:
             "records": head["records"],
             "head_sha256": head["head_sha256"],
             "file_state": _ledger_file_state(path),
+            "generation": generation,
         },
     )
 
 
-def _read_chain_checkpoint(path: Path) -> dict[str, Any] | None:
+def _read_chain_checkpoint_details(path: Path) -> dict[str, Any] | None:
     try:
         checkpoint = read_sealed(
             _chain_checkpoint_path(path), schema=DISTILLATION_SCHEMA
         )
     except DistillationStoreError:
         return None
+    current_state = _ledger_file_state(path)
+    generation = checkpoint.get("generation")
     if (
         checkpoint.get("kind") != "ledger-chain-checkpoint"
         or checkpoint.get("ledger_name") != path.name
@@ -627,13 +664,326 @@ def _read_chain_checkpoint(path: Path) -> dict[str, Any] | None:
             )
         )
         or (checkpoint["records"] == 0) != (checkpoint["head_sha256"] == "")
-        or checkpoint.get("file_state") != _ledger_file_state(path)
+        or checkpoint.get("file_state") != current_state
+        or (current_state is None and checkpoint["records"] != 0)
+        or ("generation" in checkpoint and not _valid_chain_generation(generation))
     ):
         return None
     return {
         "records": checkpoint["records"],
         "head_sha256": checkpoint["head_sha256"],
+        "generation": generation,
     }
+
+
+def _read_chain_checkpoint(path: Path) -> dict[str, Any] | None:
+    checkpoint = _read_chain_checkpoint_details(path)
+    return _checkpoint_head(checkpoint) if checkpoint is not None else None
+
+
+_LEDGER_STATE_KEYS = (
+    "size_bytes",
+    "st_dev",
+    "st_ino",
+    "st_mtime_ns",
+    "st_ctime_ns",
+)
+
+
+def _ledger_file_state_from_stat(value: os.stat_result) -> dict[str, int]:
+    return {
+        "size_bytes": value.st_size,
+        "st_dev": value.st_dev,
+        "st_ino": value.st_ino,
+        "st_mtime_ns": value.st_mtime_ns,
+        "st_ctime_ns": value.st_ctime_ns,
+    }
+
+
+def _validate_chain_tail_cursor(
+    path: Path, cursor: Mapping[str, Any] | None
+) -> tuple[dict[str, int] | None, int, int, str, str | None] | None:
+    if not isinstance(cursor, Mapping):
+        return None
+    if cursor.get("ledger_path") != str(path.expanduser().absolute()):
+        return None
+    generation = cursor.get("generation")
+    if generation is not None and not _valid_chain_generation(generation):
+        return None
+    raw_state = cursor.get("file_state")
+    if raw_state is None:
+        offset = cursor.get("offset")
+        records = cursor.get("records")
+        head = cursor.get("head_sha256")
+        if (
+            offset == 0
+            and records == 0
+            and not isinstance(offset, bool)
+            and not isinstance(records, bool)
+            and head == ""
+        ):
+            return None, 0, 0, "", generation
+        return None
+    if not isinstance(raw_state, Mapping):
+        return None
+    if set(raw_state) != set(_LEDGER_STATE_KEYS):
+        return None
+    state: dict[str, int] = {}
+    for key in _LEDGER_STATE_KEYS:
+        value = raw_state.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None
+        state[key] = value
+    offset = cursor.get("offset")
+    records = cursor.get("records")
+    if (
+        not isinstance(offset, int)
+        or isinstance(offset, bool)
+        or offset < 0
+        or not isinstance(records, int)
+        or isinstance(records, bool)
+        or records < 0
+        or state["size_bytes"] != offset
+    ):
+        return None
+    head = cursor.get("head_sha256")
+    if not isinstance(head, str):
+        return None
+    if head and (
+        len(head) != 64 or any(character not in "0123456789abcdef" for character in head)
+    ):
+        return None
+    if (records == 0) != (head == ""):
+        return None
+    return state, offset, records, head, generation
+
+
+def _chain_tail_cursor(
+    path: Path,
+    state: Mapping[str, int] | None,
+    head: Mapping[str, Any],
+    *,
+    generation: str | None = None,
+) -> dict[str, Any]:
+    size = int(state["size_bytes"]) if state is not None else 0
+    return {
+        "ledger_path": str(path.expanduser().absolute()),
+        "file_state": dict(state) if state is not None else None,
+        "offset": size,
+        "records": int(head["records"]),
+        "head_sha256": str(head["head_sha256"]),
+        "generation": generation,
+    }
+
+
+def _capture_ledger_snapshot(
+    path: Path,
+) -> tuple[int | None, dict[str, int] | None, dict[str, Any] | None]:
+    """Pin a ledger descriptor and its verified writer checkpoint briefly."""
+
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with _locked(lock_path):
+        state = _ledger_file_state(path)
+        head = _read_chain_checkpoint_details(path)
+        if state is None:
+            return None, None, head
+        try:
+            descriptor = os.open(path, os.O_RDONLY)
+        except OSError as exc:
+            raise DistillationStoreBusy("ledger cannot be pinned") from exc
+        try:
+            descriptor_state = _ledger_file_state_from_stat(os.fstat(descriptor))
+            if descriptor_state != state or _ledger_file_state(path) != state:
+                raise DistillationStoreBusy("ledger changed while pinning snapshot")
+        except Exception as exc:
+            os.close(descriptor)
+            if isinstance(exc, DistillationStoreBusy):
+                raise
+            raise DistillationStoreBusy("ledger cannot be pinned") from exc
+        return descriptor, state, head
+
+
+def _read_pinned_ledger(
+    descriptor: int,
+    path: Path,
+    state: Mapping[str, int],
+    *,
+    start: int = 0,
+) -> bytes:
+    """Read one pinned file range, outside the ledger lock."""
+
+    try:
+        before = _ledger_file_state_from_stat(os.fstat(descriptor))
+        if before != dict(state) or _ledger_file_state(path) != dict(state):
+            raise DistillationStoreBusy("ledger changed before snapshot read")
+        size = int(state["size_bytes"])
+        if start < 0 or start > size:
+            raise DistillationStoreError("ledger cursor offset is out of bounds")
+        if start and os.pread(descriptor, 1, start - 1) != b"\n":
+            raise DistillationStoreError("ledger cursor offset is not a row boundary")
+        chunks: list[bytes] = []
+        offset = start
+        while offset < size:
+            chunk = os.pread(descriptor, min(1024 * 1024, size - offset), offset)
+            if not chunk:
+                raise DistillationStoreBusy("ledger shortened during snapshot read")
+            chunks.append(chunk)
+            offset += len(chunk)
+        after = _ledger_file_state_from_stat(os.fstat(descriptor))
+        if after != dict(state) or _ledger_file_state(path) != dict(state):
+            raise DistillationStoreBusy("ledger changed during snapshot read")
+        return b"".join(chunks)
+    except OSError as exc:
+        raise DistillationStoreBusy("ledger changed during snapshot read") from exc
+    finally:
+        os.close(descriptor)
+
+
+def _decode_chain_bytes(
+    data: bytes,
+    *,
+    records: int = 0,
+    previous: str = "",
+    strict: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, line in enumerate(data.splitlines(keepends=True), start=records):
+        if not line.endswith(b"\n"):
+            raise DistillationStoreError(f"ledger row {index} is incomplete")
+        try:
+            row = json.loads(line)
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise DistillationStoreError(f"ledger row {index} is invalid") from exc
+        if not isinstance(row, dict):
+            raise DistillationStoreError(f"ledger row {index} is not an object")
+        _require_chain_metadata(row, index)
+        if strict:
+            unsigned = {
+                key: value for key, value in row.items() if key != "record_sha256"
+            }
+            if row.get("previous_sha256") != previous or row.get(
+                "record_sha256"
+            ) != canonical_json_sha256_strict(unsigned):
+                raise DistillationStoreError(f"ledger chain mismatch at row {index}")
+            previous = str(row["record_sha256"])
+        else:
+            previous = str(row.get("record_sha256") or "")
+        rows.append(row)
+    return rows, {"records": records + len(rows), "head_sha256": previous}
+
+
+def _decode_verified_snapshot(
+    path: Path,
+    state: Mapping[str, int],
+    data: bytes,
+    *,
+    records: int = 0,
+    previous: str = "",
+    strict: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows, head = _decode_chain_bytes(
+        data,
+        records=records,
+        previous=previous,
+        strict=strict,
+    )
+    if _ledger_file_state(path) != dict(state):
+        raise DistillationStoreBusy("ledger changed during snapshot decode")
+    return rows, head
+
+
+def _read_chain_snapshot_with_state(
+    path: Path, *, strict: bool = False
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, int] | None]:
+    descriptor, state, checkpoint = _capture_ledger_snapshot(path)
+    if descriptor is None or state is None:
+        if checkpoint is None:
+            return [], {"records": 0, "head_sha256": ""}, state
+        return [], _checkpoint_head(checkpoint), state
+    data = _read_pinned_ledger(descriptor, path, state)
+    rows, decoded = _decode_verified_snapshot(
+        path,
+        state,
+        data,
+        strict=strict or checkpoint is None,
+    )
+    checkpoint_head = _checkpoint_head(checkpoint) if checkpoint is not None else None
+    if checkpoint_head is not None and decoded != checkpoint_head:
+        raise DistillationStoreError("ledger checkpoint does not match decoded rows")
+    return rows, checkpoint_head or decoded, state
+
+
+def _read_chain_snapshot(
+    path: Path, *, strict: bool = False
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows, head, _state = _read_chain_snapshot_with_state(path, strict=strict)
+    return rows, head
+
+
+def _read_chain_snapshot_recovering_final_fragment(
+    path: Path, *, strict: bool = False
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, int] | None]:
+    """Verify outside the lock and repair only an invalid final fragment."""
+
+    try:
+        return _read_chain_snapshot_with_state(path, strict=strict)
+    except DistillationStoreError as exc:
+        snapshot_error = exc
+
+    descriptor, state, checkpoint = _capture_ledger_snapshot(path)
+    if descriptor is None or state is None:
+        raise snapshot_error
+    data = _read_pinned_ledger(descriptor, path, state)
+    lines = data.splitlines(keepends=True)
+    if not lines:
+        raise snapshot_error
+    final_line = lines[-1]
+    if final_line.endswith(b"\n") and final_line != b"\n":
+        raise snapshot_error
+    prefix_data = b"".join(lines[:-1])
+    prefix_rows, prefix_head = _decode_chain_bytes(prefix_data, strict=True)
+    checkpoint_head = _checkpoint_head(checkpoint) if checkpoint is not None else None
+
+    if final_line != b"\n" and not final_line.endswith(b"\n"):
+        try:
+            final_row = json.loads(final_line)
+        except (UnicodeError, json.JSONDecodeError):
+            final_row = None
+        if final_row is not None:
+            if not isinstance(final_row, dict):
+                raise snapshot_error
+            _require_chain_metadata(final_row, len(prefix_rows))
+            unsigned = {
+                key: value
+                for key, value in final_row.items()
+                if key != "record_sha256"
+            }
+            if final_row.get("previous_sha256") == prefix_head["head_sha256"] and (
+                final_row.get("record_sha256")
+                == canonical_json_sha256_strict(unsigned)
+            ):
+                rows, head = _decode_chain_bytes(data + b"\n", strict=True)
+                if checkpoint_head is not None and checkpoint_head != head:
+                    raise DistillationStoreError(
+                        "ledger checkpoint does not match decoded rows"
+                    )
+                return rows, head, state
+
+    if checkpoint_head is not None and checkpoint_head != prefix_head:
+        raise DistillationStoreError("ledger checkpoint does not match decoded rows")
+
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with _locked(lock_path):
+        if _ledger_file_state(path) != state:
+            raise DistillationStoreBusy("ledger changed during final-fragment repair")
+        with path.open("r+b") as writable:
+            writable.truncate(len(prefix_data))
+            writable.flush()
+            os.fsync(writable.fileno())
+        _fsync_directory(path)
+        _write_chain_checkpoint(path, prefix_head)
+        repaired_state = _ledger_file_state(path)
+    return prefix_rows, prefix_head, repaired_state
 
 
 def _fsync_directory(path: Path) -> None:
@@ -758,7 +1108,13 @@ def append_chain_batch(
     lock_path = path.with_suffix(path.suffix + ".lock")
     with _locked(lock_path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        head = _read_chain_checkpoint(path) or _recover_chain_tail(path)
+        checkpoint = _read_chain_checkpoint_details(path)
+        if checkpoint is not None:
+            head = _checkpoint_head(checkpoint)
+            generation = checkpoint.get("generation") or _new_chain_generation()
+        else:
+            head = _recover_chain_tail(path)
+            generation = _new_chain_generation()
         label_counts: dict[str, int] | None = None
         if path.name == LABEL_LEDGER_FILE:
             projection = _read_label_health_projection(path, head)
@@ -768,7 +1124,7 @@ def append_chain_batch(
                 else _label_health_counts(_read_chain_locked(path, head))
             )
         # The checkpoint is a write-ahead recovery point for an interrupted append.
-        _write_chain_checkpoint(path, head)
+        _write_chain_checkpoint(path, head, generation=generation)
         previous = str(head["head_sha256"])
         rows: list[dict[str, Any]] = []
         encoded = bytearray()
@@ -791,7 +1147,7 @@ def append_chain_batch(
             "records": head["records"] + len(rows),
             "head_sha256": previous,
         }
-        _write_chain_checkpoint(path, updated_head)
+        _write_chain_checkpoint(path, updated_head, generation=generation)
         if label_counts is not None:
             additions = _label_health_counts(rows)
             try:
@@ -1164,7 +1520,9 @@ def append_chain_unique_locked(
     if not isinstance(identity, str) or not identity or not isinstance(binding, str):
         raise DistillationStoreError("unique ledger identity is invalid")
     path.parent.mkdir(parents=True, exist_ok=True)
-    head = _read_chain_checkpoint(path)
+    checkpoint = _read_chain_checkpoint_details(path)
+    head = _checkpoint_head(checkpoint) if checkpoint is not None else None
+    generation = checkpoint.get("generation") if checkpoint is not None else None
     connection: sqlite3.Connection | None = None
     try:
         if head is not None:
@@ -1187,6 +1545,11 @@ def append_chain_unique_locked(
             head, connection = _rebuild_unique_index(
                 path, unique_field=unique_field, binding_field=binding_field
             )
+            checkpoint = _read_chain_checkpoint_details(path)
+            if checkpoint is None:
+                raise DistillationStoreError("unique ledger checkpoint rebuild failed")
+            head = _checkpoint_head(checkpoint)
+            generation = checkpoint.get("generation")
         existing_rows = _indexed_unique_rows(
             connection,
             path,
@@ -1200,6 +1563,11 @@ def append_chain_unique_locked(
             head, connection = _rebuild_unique_index(
                 path, unique_field=unique_field, binding_field=binding_field
             )
+            checkpoint = _read_chain_checkpoint_details(path)
+            if checkpoint is None:
+                raise DistillationStoreError("unique ledger checkpoint rebuild failed")
+            head = _checkpoint_head(checkpoint)
+            generation = checkpoint.get("generation")
             existing_rows = _indexed_unique_rows(
                 connection,
                 path,
@@ -1207,8 +1575,13 @@ def append_chain_unique_locked(
                 unique_field=unique_field,
                 binding_field=binding_field,
             )
-            if existing_rows is None:
-                raise DistillationStoreError("unique ledger index does not match ledger")
+        if existing_rows is None:
+            raise DistillationStoreError("unique ledger index does not match ledger")
+        label_projection = (
+            _read_label_health_projection(path, head)
+            if path.name == LABEL_LEDGER_FILE
+            else None
+        )
         for existing in existing_rows:
             if existing.get(binding_field) == binding:
                 return existing
@@ -1230,7 +1603,11 @@ def append_chain_unique_locked(
             "records": head["records"] + 1,
             "head_sha256": row["record_sha256"],
         }
-        _write_chain_checkpoint(path, updated_head)
+        _write_chain_checkpoint(
+            path,
+            updated_head,
+            generation=generation or _new_chain_generation(),
+        )
         _update_unique_index(
             connection,
             path,
@@ -1241,6 +1618,21 @@ def append_chain_unique_locked(
             unique_field=unique_field,
             binding_field=binding_field,
         )
+        if label_projection is not None:
+            additions = _label_health_counts((row,))
+            try:
+                _write_label_health_projection(
+                    path,
+                    updated_head,
+                    {
+                        key: int(label_projection["counts"][key]) + additions[key]
+                        for key in additions
+                    },
+                )
+            except (OSError, DistillationStoreError):
+                # The ledger and unique index are durable; health is rebuilt
+                # from the exact chain if this optimization is interrupted.
+                pass
         return row
     finally:
         if connection is not None:
@@ -1281,39 +1673,215 @@ def _read_chain_locked(
 
 
 def read_chain(path: Path) -> list[dict[str, Any]]:
-    """Decode a stable ledger snapshot after checkpoint-backed verification."""
+    """Decode a stable ledger snapshot without holding the ledger lock."""
 
-    with _locked(path.with_suffix(path.suffix + ".lock")):
-        return _read_chain_locked(path)
+    rows, head, expected_state = _read_chain_snapshot_recovering_final_fragment(path)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with _locked(lock_path):
+        if _ledger_file_state(path) != expected_state:
+            raise DistillationStoreBusy("ledger changed during checkpoint repair")
+        checkpoint = _read_chain_checkpoint(path)
+        if checkpoint != head:
+            _write_chain_checkpoint(path, head)
+    return rows
+
+
+def read_chain_tail(
+    path: Path, cursor: Mapping[str, Any] | None = None
+) -> tuple[list[dict[str, Any]], dict[str, Any], bool]:
+    """Read a verified complete ledger or only rows appended after ``cursor``.
+
+    The cursor is a sealed projection's exact byte boundary.  A state mismatch
+    never reuses its prefix: the full ledger is verified and ``reset`` is true.
+    A valid writer checkpoint lets an append-only suffix be verified without
+    decoding the old rows.
+    """
+
+    descriptor, state, checkpoint = _capture_ledger_snapshot(path)
+    parsed = _validate_chain_tail_cursor(path, cursor)
+    if descriptor is None or state is None:
+        if parsed is not None and parsed[1] > 0:
+            raise DistillationStoreError("ledger was truncated after the cursor")
+        rows, head = _decode_chain_bytes(b"", strict=True)
+        checkpoint_head = _checkpoint_head(checkpoint) if checkpoint is not None else None
+        if checkpoint_head is not None and checkpoint_head != head:
+            raise DistillationStoreError("ledger checkpoint does not match decoded rows")
+        current = _chain_tail_cursor(
+            path,
+            state,
+            checkpoint_head or head,
+            generation=checkpoint.get("generation") if checkpoint is not None else None,
+        )
+        unchanged = (
+            parsed is not None
+            and parsed[0] is None
+            and parsed[2:4] == (0, "")
+            and parsed[4] == current.get("generation")
+        )
+        return rows, current, not unchanged
+    if (
+        parsed is not None
+        and parsed[0] is not None
+        and parsed[0]["st_dev"] == state["st_dev"]
+        and parsed[0]["st_ino"] == state["st_ino"]
+        and state["size_bytes"] < parsed[1]
+    ):
+        os.close(descriptor)
+        raise DistillationStoreError("ledger was truncated after the cursor")
+    if checkpoint is None or parsed is None:
+        data = _read_pinned_ledger(descriptor, path, state)
+        rows, decoded = _decode_verified_snapshot(path, state, data, strict=True)
+        checkpoint_head = _checkpoint_head(checkpoint) if checkpoint is not None else None
+        if checkpoint_head is not None and checkpoint_head != decoded:
+            raise DistillationStoreError("ledger checkpoint does not match decoded rows")
+        return (
+            rows,
+            _chain_tail_cursor(
+                path,
+                state,
+                checkpoint_head or decoded,
+                generation=checkpoint.get("generation") if checkpoint is not None else None,
+            ),
+            True,
+        )
+
+    checkpoint_head = _checkpoint_head(checkpoint)
+    current_generation = checkpoint.get("generation")
+    cursor_state, offset, records, previous, cursor_generation = parsed
+    same_identity = (
+        cursor_state is not None
+        and cursor_state["st_dev"] == state["st_dev"]
+        and cursor_state["st_ino"] == state["st_ino"]
+    )
+    if (
+        not same_identity
+        or state["size_bytes"] < offset
+        or checkpoint["records"] < records
+        or (
+            checkpoint["records"] == records
+            and checkpoint_head["head_sha256"] != previous
+        )
+        or cursor_generation != current_generation
+    ):
+        data = _read_pinned_ledger(descriptor, path, state)
+        rows, decoded = _decode_verified_snapshot(path, state, data, strict=True)
+        if decoded != checkpoint_head:
+            raise DistillationStoreError("ledger checkpoint does not match decoded rows")
+        return (
+            rows,
+            _chain_tail_cursor(
+                path, state, checkpoint_head, generation=current_generation
+            ),
+            True,
+        )
+
+    if checkpoint["records"] == records:
+        if state != cursor_state or state["size_bytes"] != offset:
+            data = _read_pinned_ledger(descriptor, path, state)
+            rows, decoded = _decode_verified_snapshot(path, state, data, strict=True)
+            if decoded != checkpoint_head:
+                raise DistillationStoreError(
+                    "ledger checkpoint does not match decoded rows"
+                )
+            return (
+                rows,
+                _chain_tail_cursor(
+                    path, state, checkpoint_head, generation=current_generation
+                ),
+                True,
+            )
+        os.close(descriptor)
+        return (
+            [],
+            _chain_tail_cursor(
+                path, state, checkpoint_head, generation=current_generation
+            ),
+            False,
+        )
+
+    if state["size_bytes"] <= offset:
+        data = _read_pinned_ledger(descriptor, path, state)
+        rows, decoded = _decode_verified_snapshot(path, state, data, strict=True)
+        if decoded != checkpoint_head:
+            raise DistillationStoreError("ledger checkpoint does not match decoded rows")
+        return (
+            rows,
+            _chain_tail_cursor(
+                path, state, checkpoint_head, generation=current_generation
+            ),
+            True,
+        )
+    if current_generation is None or cursor_generation is None:
+        data = _read_pinned_ledger(descriptor, path, state)
+        rows, decoded = _decode_verified_snapshot(path, state, data, strict=True)
+        if decoded != checkpoint_head:
+            raise DistillationStoreError("ledger checkpoint does not match decoded rows")
+        return (
+            rows,
+            _chain_tail_cursor(
+                path, state, checkpoint_head, generation=current_generation
+            ),
+            True,
+        )
+    suffix = _read_pinned_ledger(descriptor, path, state, start=offset)
+    tail, decoded = _decode_verified_snapshot(
+        path,
+        state,
+        suffix,
+        records=records,
+        previous=previous,
+        strict=True,
+    )
+    if decoded != checkpoint_head:
+        raise DistillationStoreError("ledger checkpoint does not match decoded rows")
+    return (
+        tail,
+        _chain_tail_cursor(path, state, checkpoint_head, generation=current_generation),
+        False,
+    )
 
 
 def label_health_projection(
     path: Path, *, repair: bool = False
 ) -> dict[str, Any]:
-    """Read exact label health counts under the ledger lock."""
+    """Read exact label health counts without decoding under the ledger lock."""
 
     with _locked(path.with_suffix(path.suffix + ".lock")):
         head = _read_chain_checkpoint(path)
-        if head is None:
-            head = _recover_chain_tail(path)
-            _write_chain_checkpoint(path, head)
-        projection = _read_label_health_projection(path, head)
-        if projection is not None:
-            return projection
-        counts = _label_health_counts(_read_chain_locked(path, head))
-        projection = {
-            "label_chain_head": head["head_sha256"],
-            "label_records": head["records"],
-            "counts": counts,
-        }
-        if repair:
-            try:
-                _write_label_health_projection(path, head, counts)
-            except (OSError, DistillationStoreError):
-                # ponytail: the projection is an optimization; retry repair on
-                # the next read instead of failing exact health reporting.
-                pass
+        projection = (
+            _read_label_health_projection(path, head) if head is not None else None
+        )
+    if projection is not None:
         return projection
+
+    rows, decoded_head, expected_state = _read_chain_snapshot_recovering_final_fragment(
+        path, strict=True
+    )
+    with _locked(path.with_suffix(path.suffix + ".lock")):
+        if _ledger_file_state(path) != expected_state:
+            raise DistillationStoreBusy("ledger changed during health read")
+        current = _read_chain_checkpoint(path)
+        if current is None:
+            _write_chain_checkpoint(path, decoded_head)
+        elif current != decoded_head:
+            raise DistillationStoreBusy("label checkpoint changed during health read")
+    counts = _label_health_counts(rows)
+    projection = {
+        "label_chain_head": decoded_head["head_sha256"],
+        "label_records": decoded_head["records"],
+        "counts": counts,
+    }
+    if repair:
+        with _locked(path.with_suffix(path.suffix + ".lock")):
+            current = _read_chain_checkpoint(path)
+            if current == decoded_head and _read_label_health_projection(path, current) is None:
+                try:
+                    _write_label_health_projection(path, decoded_head, counts)
+                except (OSError, DistillationStoreError):
+                    # ponytail: the projection is an optimization; retry repair
+                    # on the next read instead of failing exact health reporting.
+                    pass
+    return projection
 
 
 def write_pointer(

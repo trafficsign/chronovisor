@@ -178,6 +178,28 @@ def test_import_is_idempotent_by_work_and_receipt_identity(tmp_path: Path) -> No
     assert second["receipt_chain_head_sha256"] == first["receipt_chain_head_sha256"]
 
 
+def test_hot_native_reads_use_incremental_ledger_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.recall import recall_distillation_native as native
+
+    root = tmp_path / "root"
+    bundle = _complete_bundle(tmp_path / "bundle", count=1)
+    ensure_contract(root, _config())
+    import_bundle(root, bundle.root)
+    row = store.read_chain(store.distillation_dir(root) / store.LABEL_LEDGER_FILE)[0]
+
+    assert native._receipt_index(root) is not None
+    assert native._label_index(root) is not None
+
+    def unexpected_full_read(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        raise AssertionError("hot native validation decoded a complete ledger")
+
+    monkeypatch.setattr(store, "read_chain", unexpected_full_read)
+    assert row_integrity(row, root=root)
+    assert import_bundle(root, bundle.root)["labels_appended"] == 0
+
+
 def test_import_rejects_self_reported_native_output_hash(tmp_path: Path) -> None:
     root = tmp_path / "root"
     bundle = _complete_bundle(tmp_path / "bundle", count=1, output_hash="b" * 64)
