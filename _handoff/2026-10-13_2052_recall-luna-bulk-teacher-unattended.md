@@ -100,7 +100,7 @@ created_at: 2026-10-13T20:52:29+09:00
 
 ### 2026-10-17 残件の自律解消
 - [ ] 残件A1：blind repeat の不足を正規の独立判定・import で解消する。
-- [ ] 残件A2：固定 split identity、時系列、割当、row integrity の producer と実証データを整える。
+- [x] 残件A2：固定 split identity、時系列、割当、row integrity の producer と実証データを整える。
 - [ ] 残件A3：10/9 以降の記録から gate 適格 counterfactual を正規 pipeline で蓄積する。
 - [x] 残件B1：旧 capture 履歴を保持し、現在の障害と区別して health を修正する。
 - [ ] 残件B2：search_labels review/frontier の根因を直し、正規 drain または設計廃止を完了する。
@@ -471,3 +471,9 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-17 18:12 JST — daily/mainline競合: 17:40からのdaily catalog advanceはcheckpointのsource watermark変更に伴う通常full repairで17:51に完了し、次のdaily prepareも18:05に正常終了した。一方17:53頃のdaily exportはmainlineのcandidate-index writerと競合してSQLite stateの読取エラーとなった。exportのidentity/snapshot/bundle/config-pointerまで既存distillation-worker leaseで囲み、busyはresumable waitingとして自動再開させる。captureのlease設計やgate判定は変えない。現在supervisorは自分のmaintenance下でactive_workers0/child_pid0、進行中workerを停止していない。正式300秒runは通常checkpointのcold構築を再開中で、08:58 UTCのtimeout後の正式成功はまだ未確認。
 - 2026-10-17 18:12 JST — A1/A2とB2の実数: 固定2394判定は1740 irrelevant/481 relevant/173 uncertain。旧不足6組の12判定は全件完了したが、固定blind200組の内訳はdecisive171（stable161/unstable10、Wilson0.8957）、片側uncertain12、両側uncertain17。既存gateの片側uncertain12 holdが実際に残る。判定後にcohortを作り直す、都合のよい判定まで再実行する、uncertainをdecisive扱いする操作はせず、既存結果を全保存する判断とした。これは日付を約束できる単なるデータ蓄積待ちではない。identity/class/chronology/locked-test/row-integrityのpure gateは正規固定planで通過したが、live materialization受入までA2は未完のまま。B2は全68083件の現source照合を正規API/lease/CASで完走し34848件をsource_staleへ正規遷移、全68241行とgoldenは保持。残りpending_review33235/pending_frontier_review131は正規authority workerによる審査対象として維持し、未drainを完了扱いしない。
 - 2026-10-17 18:12 JST — 追加検証: 関連ingest/raw replay/semantic defer/lint/frontier/daily/architecture/refactorの合同721件を通過、追加のUTF-8/CRLF archival byte preservationとinvalid-byte非置換2件も通過。Ruff、mypy97files、import契約、compileall、diff check通過。新規cross-domain durable writer依存をarchitectureが拒否したため、既存ingest artifact writerのfsync/rename/readback経路で正確なUTF-8 bytesを保存する形に整理し、baseline/閾値/例外は緩めなかった。追加sourceの必須CIと新packageの実受入はこれから行う。
+
+- 2026-10-17 18:24 JST — A2の実受入完了: 通常300秒のlive-08は184.85秒で全段階/state保存まで完走し、新baseline 9ed395c2...のsingle plan identityはd5eebad4...、chronological grouped/test-read-only/assignment/row integrityを通過した。旧7理由のうちA2に属する5理由は消え、offline_training_gateの残理由はblind_repeat_pair_incomplete（12組）とcounterfactual_pairs_below_floor（0組）の2つ。CFはCounterfactualInvalidでありlast_success_atは06:05:28 UTCのまま、正式成功とは数えない。hard_floorのruntime_identity_driftは追加package75d9ab6fをoriginへpush済み・live/config84f57dfaという配備待ちの差であり、新package受入で解消を確認する。初回materializationは136224行のdirty joinとselection cursorを通常checkpointで完了し、timeoutを繰り返すcold再構築は前進した。
+- 2026-10-17 18:24 JST — 独立比較の無限retry修正: 旧比較は60判定・技術失敗2件で止まり、モデル応答後のfeedback_too_largeが既存hard failure集合に無いため同じ候補を2125回再試行していた。completed worker応答の当該失敗だけを既存3回technical_failureへ含めるprivate runner修正を隔離fixtureで確認し、capacity/deferred/cancelledは未試行扱いを維持。teacher prompt/schema・sample・model bindingは変更せず、failed判定からlabels/uncertain/passを生成しない。PID80133は自分が確保したresearch idle境界で停止中・子0・model_activeなしを再検証し、SIGTERMで終了してcontrol scriptのみ正規置換、元scriptをprivate保存。sample/result/statusのbytesは前後一致。新packageの正式受入後に同一引数で必ず再起動するため、この時点はrestart_pending。
+- 2026-10-17 18:24 JST — automation: 09:15のACTIVE/schedule/target threadを維持し、promptだけを新CF/固定blindの状態、export busyの自動再開、stale pageからのfresh proposal、partial shardをpendingとする経路へ更新した。旧設定をprivate backupし、TOML読戻しで変更がprompt/updated_atだけと確認。必須CI75d9ab6fはSecurity成功、Quality/Python3.14はstatic/architecture/semantic checks成功後のfull suite中。
+
+- 2026-10-17 18:24 JST — 凍結保全: 以前から固定されている1872 source/manifestファイルとP0保護3項目のSHAを再照合して変更0。現在171 bundleのsnapshot/shard source SHAもmanifest宣言と全一致。private frozen-verification receiptへ保存し、履歴を上書きしていない。
