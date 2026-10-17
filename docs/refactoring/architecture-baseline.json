@@ -90146,6 +90146,14 @@
       ]
     },
     {
+      "path": "launchd/com.trafficsign.chronovisor-search-label-drain.plist",
+      "sha256": "c6d6baa0e296db4c93dd29ed0fea0b8ff95d81dd58249960babda7ebe54d7118",
+      "label": "@@LAUNCHD_LABEL_PREFIX@@search-label-drain",
+      "program_arguments": [
+        "@@PROJECT_ROOT@@/scripts/chronovisor-search-label-drain"
+      ]
+    },
+    {
       "path": "launchd/com.trafficsign.chronovisor-searxng.plist",
       "sha256": "0977b3e8cf171ca83a560cf9f165348c35edf0c6db2a8a46acbb4ce0062cdaa0",
       "label": "@@LAUNCHD_LABEL_PREFIX@@searxng",

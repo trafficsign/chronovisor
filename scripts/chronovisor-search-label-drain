@@ -1,0 +1,164 @@
+#!/bin/sh
+set -eu
+
+CHRONOVISOR_WRAPPER_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+. "$CHRONOVISOR_WRAPPER_DIR/chronovisor-runtime-env"
+
+readonly SEARCH_LABEL_DRAIN_SCRIPT="$CHRONOVISOR_REPO_ROOT/scripts/search_label_drain.py"
+readonly SEARCH_LABEL_QUEUE="$CHRONOVISOR_ROOT/recall/search-label-queue.jsonl"
+readonly SEARCH_GOLDEN_FILE="$CHRONOVISOR_ROOT/recall/search-golden.jsonl"
+readonly SEARCH_LABEL_CONSTRAINTS="$CHRONOVISOR_ROOT/runtime/dependency-constraints/chronovisor-converge.txt"
+
+skip() {
+  "$CHRONOVISOR_PYTHON" - "$1" <<'PY_SKIP'
+import json
+import sys
+
+print(json.dumps({"status": "skipped", "reason": sys.argv[1]}, sort_keys=True))
+PY_SKIP
+  exit 0
+}
+
+[ -f "$SEARCH_LABEL_DRAIN_SCRIPT" ] && [ ! -L "$SEARCH_LABEL_DRAIN_SCRIPT" ] \
+  || skip drain_script_unavailable
+[ -f "$SEARCH_LABEL_QUEUE" ] && [ ! -L "$SEARCH_LABEL_QUEUE" ] \
+  || skip queue_unavailable
+[ -f "$SEARCH_GOLDEN_FILE" ] && [ ! -L "$SEARCH_GOLDEN_FILE" ] \
+  || skip golden_unavailable
+
+EXPECTED_COMMIT=$(
+  "$CHRONOVISOR_PYTHON" - "$RUNTIME_SOURCE" <<'PY_SOURCE'
+import re
+import sys
+
+source = sys.argv[1]
+match = re.search(r"@([0-9a-f]{40})$", source)
+if match is None:
+    raise SystemExit(65)
+print(match.group(1))
+PY_SOURCE
+) || skip runtime_source_unpinned
+
+HEAD=$(git -C "$CHRONOVISOR_REPO_ROOT" rev-parse --verify HEAD 2>/dev/null) \
+  || skip repository_head_unavailable
+[ "$HEAD" = "$EXPECTED_COMMIT" ] || skip source_pin_drift
+CLEAN=$(git -C "$CHRONOVISOR_REPO_ROOT" status --porcelain=v1 --untracked-files=all 2>/dev/null) \
+  || skip repository_status_unavailable
+[ -z "$CLEAN" ] || skip repository_dirty
+SCRIPT_BLOB=$(git -C "$CHRONOVISOR_REPO_ROOT" rev-parse \
+  "$EXPECTED_COMMIT:scripts/search_label_drain.py" 2>/dev/null) \
+  || skip drain_script_not_in_pin
+SCRIPT_HASH=$(git -C "$CHRONOVISOR_REPO_ROOT" hash-object "$SEARCH_LABEL_DRAIN_SCRIPT" 2>/dev/null) \
+  || skip drain_script_hash_unavailable
+[ "$SCRIPT_BLOB" = "$SCRIPT_HASH" ] || skip drain_script_drift
+
+export CHRONOVISOR_EXPECTED_COMMIT="$EXPECTED_COMMIT"
+
+run_uvx() {
+  if [ -f "$SEARCH_LABEL_CONSTRAINTS" ] && [ ! -L "$SEARCH_LABEL_CONSTRAINTS" ]; then
+    exec "$CHRONOVISOR_UVX" --constraints "$SEARCH_LABEL_CONSTRAINTS" "$@"
+  fi
+  exec "$CHRONOVISOR_UVX" "$@"
+}
+
+run_uvx \
+  --python "$CHRONOVISOR_PYTHON" \
+  --refresh-package chronovisor \
+  --from "$RUNTIME_SOURCE" \
+  python - "$SEARCH_LABEL_DRAIN_SCRIPT" "$SEARCH_LABEL_QUEUE" \
+  "$SEARCH_GOLDEN_FILE" "$EXPECTED_COMMIT" <<'PY_RUNNER'
+from __future__ import annotations
+
+import importlib.metadata
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def emit(status: str, reason: str) -> int:
+    print(json.dumps({"status": status, "reason": reason}, sort_keys=True))
+    return 0 if status == "skipped" else 1
+
+
+def package_commit() -> str | None:
+    try:
+        raw = importlib.metadata.distribution("chronovisor").read_text("direct_url.json")
+        payload = json.loads(raw or "")
+        vcs_info = payload.get("vcs_info") if isinstance(payload, dict) else None
+        commit = vcs_info.get("commit_id") if isinstance(vcs_info, dict) else None
+        return commit if isinstance(commit, str) else None
+    except (
+        importlib.metadata.PackageNotFoundError,
+        OSError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        return None
+
+
+script_path, queue_path, golden_path = map(Path, sys.argv[1:4])
+expected_commit = sys.argv[4]
+if package_commit() != expected_commit:
+    raise SystemExit(emit("skipped", "native_package_commit_drift"))
+
+try:
+    from chronovisor.core import store
+except (ImportError, OSError):
+    raise SystemExit(emit("error", "chronovisor_import_failed"))
+
+configured_root = Path(os.environ.get("CHRONOVISOR_ROOT", "")).expanduser().resolve(
+    strict=False
+)
+if configured_root != store.CHRONOVISOR_ROOT.expanduser().resolve(strict=False):
+    raise SystemExit(emit("skipped", "runtime_root_drift"))
+
+spec = importlib.util.spec_from_file_location(
+    "chronovisor_search_label_drain", script_path
+)
+if spec is None or spec.loader is None:
+    raise SystemExit(emit("skipped", "drain_script_unloadable"))
+module = importlib.util.module_from_spec(spec)
+try:
+    spec.loader.exec_module(module)
+except (ImportError, OSError, SyntaxError, ValueError):
+    raise SystemExit(emit("error", "drain_script_import_failed"))
+
+arguments = [
+    "--queue-file",
+    str(queue_path),
+    "--golden-file",
+    str(golden_path),
+    "--batch-size",
+    "20",
+    "--max-elapsed-seconds",
+    "300",
+    "--frontier-min-confidence",
+    "0.8",
+    "--frontier-votes",
+    "1",
+    "--max-attempts",
+    "3",
+    "--backoff-base-seconds",
+    str(6 * 60 * 60),
+    "--review-order",
+    "balanced",
+]
+try:
+    code = module.main(arguments)
+except Exception as exc:  # pragma: no cover - last-resort worker boundary
+    print(
+        json.dumps(
+            {
+                "status": "error",
+                "error_class": exc.__class__.__name__,
+                "reason": "runner_exception",
+            },
+            sort_keys=True,
+        )
+    )
+    raise SystemExit(1)
+raise SystemExit(int(code or 0))
+PY_RUNNER

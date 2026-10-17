@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>@@LAUNCHD_LABEL_PREFIX@@search-label-drain</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@PROJECT_ROOT@@/scripts/chronovisor-search-label-drain</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>@@PROJECT_ROOT@@</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@@HOME@@</string>
+    <key>PATH</key>
+    <string>@@PATH@@</string>
+    <key>CHRONOVISOR_UVX</key>
+    <string>@@UVX@@</string>
+    <key>CHRONOVISOR_PYTHON</key>
+    <string>@@PYTHON@@</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>@@HOME@@/.chronovisor/logs/search-label-drain.launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>@@HOME@@/.chronovisor/logs/search-label-drain.launchd.err.log</string>
+</dict>
+</plist>

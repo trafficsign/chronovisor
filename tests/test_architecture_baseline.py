@@ -2602,7 +2602,7 @@ def test_baseline_records_complete_pre_campaign_inventory(
         for component in baseline["architecture"]["strongly_connected_components"]
     )
     assert len(baseline["console_entrypoints"]) == 51
-    assert len(baseline["tracked_launchd_plists"]) == 8
+    assert len(baseline["tracked_launchd_plists"]) == 9
     assets = baseline["source"]["tracked_non_python_assets"]
     assert assets["file_count"] > 0
     assert assets["total_bytes"] > 0

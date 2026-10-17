@@ -26,6 +26,9 @@ SERVICES = {
     ),
     "com.trafficsign.chronovisor-reranker.plist": "chronovisor-reranker-service",
     "com.trafficsign.chronovisor-searxng.plist": "chronovisor-searxng",
+    "com.trafficsign.chronovisor-search-label-drain.plist": (
+        "chronovisor-search-label-drain"
+    ),
     "com.trafficsign.chronovisor-semantic.plist": "chronovisor-semantic-service",
 }
 GENERIC_SERVICES = {
@@ -33,6 +36,7 @@ GENERIC_SERVICES = {
     "lan-dashboard": "chronovisor-dashboard",
     "ingest-drain": "chronovisor-ingest-drain",
     "librarian-review": "chronovisor-librarian-review",
+    "search-label-drain": "chronovisor-search-label-drain",
 }
 UVX_SERVICES = set(SERVICES) - {"com.trafficsign.chronovisor-searxng.plist"}
 PERSONAL_HOME = re.compile(rb"/Users/trafficsign(?:/|$)")
@@ -108,6 +112,12 @@ def test_launchd_template_renders_portable_absolute_paths(
             str(project_root / "scripts" / wrapper),
             "--lan",
         ]
+    if plist_name == "com.trafficsign.chronovisor-search-label-drain.plist":
+        assert payload["RunAtLoad"] is False
+        assert payload["StartInterval"] == 300
+        assert payload["ThrottleInterval"] == 60
+        assert payload["LowPriorityIO"] is True
+        assert payload["ProcessType"] == "Background"
 
 
 def test_launchd_label_prefix_reads_runtime_config(tmp_path: Path) -> None:
@@ -151,6 +161,19 @@ def test_launchd_sources_and_installers_have_no_personal_checkout_path() -> None
         source = path.read_text(encoding="utf-8")
         assert "/Users/trafficsign" not in source
         assert "/projects/personal/chronovisor" not in source
+
+
+def test_search_label_drain_wrapper_is_bounded_and_pin_guarded() -> None:
+    source = (ROOT / "scripts" / "chronovisor-search-label-drain").read_text(
+        encoding="utf-8"
+    )
+    assert "status --porcelain=v1 --untracked-files=all" in source
+    assert '"$EXPECTED_COMMIT:scripts/search_label_drain.py"' in source
+    assert '"$SCRIPT_HASH" ] || skip drain_script_drift' in source
+    assert '"--batch-size",\n    "20"' in source
+    assert '"--max-elapsed-seconds",\n    "300"' in source
+    assert '"--review-order",\n    "balanced"' in source
+    assert "native_package_commit_drift" in source
 
     for name in (
         "install-reranker-service",

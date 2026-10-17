@@ -36,6 +36,7 @@ SERVICE_SUFFIXES = (
     "librarian-review",
     "reranker",
     "searxng",
+    "search-label-drain",
     "semantic",
     "sleep",
     "watchdog",
