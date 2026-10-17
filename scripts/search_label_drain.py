@@ -13,12 +13,15 @@ import argparse
 import json
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 # Make the package importable when run directly from a checkout.
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from chronovisor.core import store
+from chronovisor.core.okf_cutover import OKFStartupBlocked
 from chronovisor.ingest.convergence import CycleBudget
 from chronovisor.search import search_eval
 
@@ -257,7 +260,26 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    result = run_drain(
+    maintenance = store.CHRONOVISOR_ROOT / "runtime/recall-luna-bulk/supervisor-maintenance.json"
+    if not args.dry_run and maintenance.exists():
+        print(json.dumps({"status": "deferred", "reason": "maintenance", "attempted": 0}))
+        return 0
+    operation = (
+        nullcontext() if args.dry_run
+        else store.okf_runtime_operation(store.CHRONOVISOR_ROOT, blocking=False)
+    )
+    try:
+        with operation:
+            result = _run_arguments(args)
+    except OKFStartupBlocked:
+        print(json.dumps({"status": "deferred", "reason": "okf_startup_blocked", "attempted": 0}))
+        return 0
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0 if result.get("status") not in {"error"} else 1
+
+
+def _run_arguments(args: argparse.Namespace) -> dict[str, Any]:
+    return run_drain(
         queue_file=args.queue_file,
         golden_file=args.golden_file,
         batch_size=args.batch_size,
@@ -272,8 +294,6 @@ def main(argv: list[str] | None = None) -> int:
         review_order=args.review_order,
         dry_run=args.dry_run,
     )
-    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0 if result.get("status") not in {"error"} else 1
 
 
 if __name__ == "__main__":

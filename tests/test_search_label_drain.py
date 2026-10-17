@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+from contextlib import contextmanager
 from pathlib import Path
 
+from chronovisor.core.okf_cutover import OKFStartupDecision
 from scripts import search_label_drain
 
 
@@ -97,3 +100,52 @@ def test_run_drain_hides_reviewer_exception_details(monkeypatch) -> None:
     assert result["status"] == "error"
     assert result["error_class"] == "RuntimeError"
     assert "candidate payload" not in str(result)
+
+
+def test_scheduled_drain_defers_maintenance_and_busy_writer(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(search_label_drain.store, "CHRONOVISOR_ROOT", tmp_path)
+    marker = tmp_path / "runtime/recall-luna-bulk/supervisor-maintenance.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}")
+    calls = []
+    monkeypatch.setattr(search_label_drain, "run_drain", lambda **kw: calls.append(kw))
+    assert search_label_drain.main([]) == 0
+    assert json.loads(capsys.readouterr().out)["reason"] == "maintenance"
+    marker.unlink()
+
+    @contextmanager
+    def busy(root, *, blocking):
+        assert root == tmp_path and blocking is False
+        raise search_label_drain.OKFStartupBlocked(
+            OKFStartupDecision(False, "blocked", "blocked", "writer_lease_unavailable")
+        )
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(search_label_drain.store, "okf_runtime_operation", busy)
+    assert search_label_drain.main([]) == 0
+    assert json.loads(capsys.readouterr().out)["reason"] == "okf_startup_blocked"
+    assert calls == []
+
+
+def test_scheduled_drain_holds_writer_lease_during_review(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(search_label_drain.store, "CHRONOVISOR_ROOT", tmp_path)
+    held = []
+
+    @contextmanager
+    def operation(root, *, blocking):
+        assert root == tmp_path and blocking is False
+        held.append(True)
+        try:
+            yield
+        finally:
+            held.pop()
+
+    def review(**kwargs):
+        assert held and kwargs["batch_size"] == 20
+        return {"status": "bounded", "attempted": 20}
+
+    monkeypatch.setattr(search_label_drain.store, "okf_runtime_operation", operation)
+    monkeypatch.setattr(search_label_drain, "run_drain", review)
+    assert search_label_drain.main([]) == 0
+    assert json.loads(capsys.readouterr().out)["attempted"] == 20
+    assert held == []
