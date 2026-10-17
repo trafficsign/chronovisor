@@ -92,12 +92,12 @@ def _valid_ingest_review_shard_continuation(value: object) -> bool:
 
 
 @contextmanager
-def _cross_process_ingest_lease():
+def _cross_process_ingest_lease(*, root: Path | None = None):
     """Fail closed when another process already owns the ingest batch."""
 
     global _INGEST_PROCESS_LEASE_ACTIVE
 
-    lock_path = CHRONOVISOR_ROOT / "runtime" / "ingest-orchestrator.lock"
+    lock_path = (root or CHRONOVISOR_ROOT) / "runtime" / "ingest-orchestrator.lock"
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         handle = lock_path.open("a+")
@@ -287,14 +287,68 @@ def _save_state(state: dict) -> None:
     atomic_write(STATE_FILE, json.dumps(state, indent=2, ensure_ascii=False) + "\n")
 
 
+def _raw_replay_completion_is_current(
+    raw_path: Path,
+    completion_records: list[dict[str, Any]],
+) -> bool:
+    """Accept replay retirement only when no newer normal failure is active."""
+
+    from chronovisor.ingest import raw_replay
+
+    marker = raw_replay.validated_full_raw_completion(
+        raw_path.name,
+        path=raw_path,
+        records=completion_records,
+    )
+    if marker is None:
+        return False
+    state = _load_state()
+    if state.get("current_job_id"):
+        try:
+            current_raw = runtime_status.read_status().get("current_raw")
+        except Exception:
+            return False
+        if isinstance(current_raw, str) and Path(current_raw).name == raw_path.name:
+            return False
+    try:
+        from chronovisor.ingest import failure_supervisor
+
+        failure_state = failure_supervisor._load_state()
+    except Exception:
+        return False
+    failures = failure_state.get("failures")
+    failure = failures.get(raw_path.name) if isinstance(failures, dict) else None
+    if not isinstance(failure, dict):
+        return True
+    marker_at = _parse_iso_datetime(
+        marker.get("failure_reset_completed_at") or marker.get("ts")
+    )
+    failure_at = max(
+        (
+            parsed.timestamp()
+            for parsed in (
+                _parse_iso_datetime(failure.get(field))
+                for field in ("last_seen_at", "updated_at", "last_attempt_at")
+            )
+            if parsed is not None
+        ),
+        default=None,
+    )
+    if failure_at is None:
+        return False
+    if marker_at is None:
+        return False
+    return failure_at <= marker_at.timestamp()
+
+
 def get_pending_raw_files() -> list[Path]:
     """Get active raw files that haven't been processed yet.
 
     A raw with ``raw_status: retracted`` remains on disk as audit evidence,
     but is never offered to normal ingest.
     """
+    from chronovisor.ingest import raw_replay
     from chronovisor.ingest.failure_supervisor import operational_deferred_raw_files
-    from chronovisor.ingest.raw_replay import is_raw_retracted
 
     state = _load_state()
     processed = set(state.get("processed_raw_files", []))
@@ -316,12 +370,27 @@ def get_pending_raw_files() -> list[Path]:
         raw_paths.extend(sorted(artifact_dir.glob("*.md")))
         raw_paths = sorted(dict.fromkeys(raw_paths), key=lambda path: path.name)
     operational_deferred = operational_deferred_raw_files(raw_paths)
+    completion_file = raw_replay.COMPLETIONS_FILE
+    try:
+        completion_file.resolve().relative_to(CHRONOVISOR_ROOT.resolve())
+    except ValueError:
+        completion_file = CHRONOVISOR_ROOT / "runtime" / "raw-replay-completions.jsonl"
+    completion_records = raw_replay._read_jsonl(completion_file)
+    completion_names = {
+        raw_replay._raw_name(record)
+        for record in completion_records
+        if isinstance(record, dict)
+    }
     pending = []
     for f in raw_paths:
         if (
             f.name not in processed
             and f.name not in operational_deferred
-            and not is_raw_retracted(f)
+            and not raw_replay.is_raw_retracted(f)
+            and (
+                f.name not in completion_names
+                or not _raw_replay_completion_is_current(f, completion_records)
+            )
         ):
             pending.append(f)
     return pending

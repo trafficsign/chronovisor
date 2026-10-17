@@ -1234,8 +1234,10 @@ def test_oversized_legacy_semantic_reconcile_is_read_only_and_fully_uncharged(
     )
     monkeypatch.setattr(
         raw_replay,
-        "_sha256_path",
-        lambda _path: pytest.fail("public byte denial must precede raw hashing"),
+        "_run_selected_candidate",
+        lambda *_args, **_kwargs: pytest.fail(
+            "public byte denial must precede replay reservation and launch"
+        ),
     )
     monkeypatch.setattr(
         failure_supervisor,

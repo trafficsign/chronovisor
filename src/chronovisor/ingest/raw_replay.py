@@ -17,13 +17,13 @@ import json
 import os
 import re
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import nullcontext, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from chronovisor.core.durable_state import sidecar_exclusive_lock as _queue_lock
-from chronovisor.core.hashutil import sha256_file as _sha256_path
+from chronovisor.core.hashutil import sha256_file as _sha256_path  # noqa: F401
 from chronovisor.core.jobs import JobStatus, job_store
 from chronovisor.core.legacy_frontmatter import parse as parse_frontmatter
 from chronovisor.core.page_mutation import decision_authority_lock
@@ -145,8 +145,6 @@ NONTERMINAL_FAILURE_PACKET_STATUSES = frozenset(
 
 def _now() -> datetime:
     return datetime.now().astimezone()
-
-
 
 
 def _parse_dt(value: object) -> datetime | None:
@@ -501,8 +499,6 @@ def _append_completion(row: dict[str, Any], path: Path | None = None) -> None:
             os.fsync(handle.fileno())
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
 
 
 def _raw_name(record: dict[str, Any]) -> str:
@@ -1242,13 +1238,26 @@ def _completed_replays(
     claims_file: Path | None = None,
     completions_file: Path | None = None,
 ) -> dict[str, str]:
+    completion_records = _read_jsonl(completions_file or COMPLETIONS_FILE)
     completed = {
         key: "replay_history"
         for key, state in _history_lifecycle_states(history_file).items()
         if state.get("status") in {"completed", "completed_partial"}
     }
-    for key, record in _completion_states(completions_file).items():
-        if record.get("status") in {"completed", "completed_partial"}:
+    for key, record in _completion_states(
+        completions_file,
+        records=completion_records,
+    ).items():
+        if record.get("status") not in {"completed", "completed_partial"}:
+            continue
+        raw = _raw_name(record)
+        if not raw:
+            continue
+        proof = validated_full_raw_completion(
+            raw,
+            records=completion_records,
+        )
+        if proof is not None:
             completed[key] = "replay_completion_journal"
     # Page claims are emitted before read-back and can survive a partial apply
     # or crash. Only a dedicated full-raw completion marker is exact-once
@@ -1271,9 +1280,14 @@ def _completed_replays(
     return completed
 
 
-def _completion_states(path: Path | None = None) -> dict[str, dict[str, Any]]:
+def _completion_states(
+    path: Path | None = None,
+    *,
+    records: Iterable[Mapping[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
     states: dict[str, dict[str, Any]] = {}
-    for record in _read_jsonl(path or COMPLETIONS_FILE):
+    source = records if records is not None else _read_jsonl(path or COMPLETIONS_FILE)
+    for record in source:
         raw = _raw_name(record)
         status = str(record.get("status") or "")
         if not raw or status not in {"completed", "completed_partial"}:
@@ -1285,6 +1299,94 @@ def _completion_states(path: Path | None = None) -> dict[str, dict[str, Any]]:
         ):
             states[key] = record
     return states
+
+
+def validated_full_raw_completion(
+    raw_name: str,
+    *,
+    path: Path | None = None,
+    completions_file: Path | None = None,
+    records: Iterable[Mapping[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Return the latest completion proof bound to the current raw bytes.
+
+    A replay marker is useful for recovery only when it proves a terminal,
+    whole-raw apply for this exact filename and current logical SHA.  The
+    newest marker wins, including an incomplete or partial marker; an older
+    success must never hide a later failed attempt.
+    """
+
+    name = Path(str(raw_name)).name
+    if not name:
+        return None
+    rows = list(records) if records is not None else _read_jsonl(
+        completions_file or COMPLETIONS_FILE
+    )
+    latest: Mapping[str, Any] | None = None
+    expected_key = stable_key(name)
+    for record in rows:
+        if not isinstance(record, Mapping):
+            continue
+        if (
+            record.get("key") == expected_key
+            or record.get("raw") == name
+            or record.get("source_raw") == f"replay:{name}"
+        ):
+            latest = record
+    if latest is None:
+        return None
+    source_path = path if path is not None else _resolve_raw_path(name)
+    if source_path is None or not source_path.is_file():
+        return None
+    try:
+        current_sha256 = hashlib.sha256(
+            _logical_raw_bytes(name, source_path)
+        ).hexdigest()
+    except (OSError, TypeError, ValueError):
+        return None
+    if (
+        latest.get("schema_version") != SCHEMA_VERSION
+        or latest.get("type") != FULL_REPLAY_CLAIM_TYPE
+        or latest.get("key") != expected_key
+        or latest.get("raw") != name
+        or latest.get("source_raw") != f"replay:{name}"
+        or not isinstance(latest.get("job_id"), str)
+        or not latest.get("job_id")
+        or latest.get("status") != "completed"
+        or latest.get("completion_scope") != "full_raw"
+        or latest.get("failure_reset_pending") is not False
+        or latest.get("failed_ops") != []
+        or latest.get("raw_sha256") != current_sha256
+    ):
+        return None
+    return dict(latest)
+
+
+def _completion_marker_matches_current_raw(
+    record: Mapping[str, Any],
+    row: Mapping[str, Any],
+) -> bool:
+    """Verify a pending cleanup marker against current immutable bytes."""
+
+    raw_name = _raw_name(dict(record))
+    path = _resolve_raw_path(raw_name, row.get("path"))
+    expected_sha256 = record.get("raw_sha256")
+    if (
+        not raw_name
+        or record.get("key") != stable_key(raw_name)
+        or record.get("raw") != raw_name
+        or record.get("source_raw") != f"replay:{raw_name}"
+        or not isinstance(expected_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+        or path is None
+    ):
+        return False
+    try:
+        return hashlib.sha256(_logical_raw_bytes(raw_name, path)).hexdigest() == (
+            expected_sha256
+        )
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def _queue_sort_key(row: dict[str, Any]) -> tuple[int, str, str]:
@@ -2463,6 +2565,7 @@ def _record_replay_completion(
     *,
     row: Mapping[str, Any],
     raw: str,
+    raw_path: Path,
     active_job_id: str,
     now: datetime,
     completions_file: Path,
@@ -2482,18 +2585,31 @@ def _record_replay_completion(
         if isinstance(callback_failed_ops, list) and callback_failed_ops
         else "completed"
     )
+    raw_name = Path(raw).name
+    try:
+        current_sha256 = hashlib.sha256(_logical_raw_bytes(raw_name, raw_path)).hexdigest()
+    except (OSError, TypeError, ValueError) as exc:
+        return False, False, None, None, f"raw completion source unreadable: {type(exc).__name__}"
+    if row.get("raw_sha256") != current_sha256:
+        return False, False, None, None, "raw completion source SHA changed before acknowledgement"
+    if completion_status == "completed":
+        from chronovisor.ingest.raw_completion_ack import publish_receipt
+
+        # Page apply and normal source retirement share the same durable ACK.
+        # Publication verifies source bytes and page postimages before readback.
+        publish_receipt([raw_path], finished_job)
     completion_record = {
         "ts": _iso(now),
         "schema_version": SCHEMA_VERSION,
         "type": FULL_REPLAY_CLAIM_TYPE,
         "key": row.get("key"),
-        "raw": raw,
-        "source_raw": f"replay:{raw}",
+        "raw": raw_name,
+        "source_raw": f"replay:{raw_name}",
         "status": completion_status,
         "completion_scope": "full_raw",
         "attempt_id": row.get("attempt_id"),
         "job_id": active_job_id,
-        "raw_sha256": row.get("raw_sha256"),
+        "raw_sha256": current_sha256,
         "failed_ops": callback_failed_ops or [],
         # Success is durable before supervisor cleanup starts.  A second
         # journal row acknowledges cleanup, making a crash or transient I/O
@@ -2626,6 +2742,61 @@ def _operational_deferred_candidate_result(
         "error": None,
         "operational_deferred": True,
         "defer_reason": "operational_failure_hold",
+    }
+
+
+def _normal_raw_completion_evidence(path: Path) -> str | None:
+    """Return canonical normal-ingest evidence for this exact source path."""
+
+    try:
+        path.resolve().relative_to(CHRONOVISOR_ROOT.resolve())
+    except ValueError:
+        return None
+    from chronovisor.ingest.raw_completion_ack import load_valid_receipt
+
+    receipt = load_valid_receipt([path])
+    return "raw_completion_ack" if receipt is not None else None
+
+
+def _normal_completion_candidate_result(
+    row: dict[str, Any],
+    *,
+    now: datetime,
+    evidence: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Retire a replay row after another ingest owner completed the raw."""
+
+    updated = dict(row)
+    updated["status"] = "completed"
+    updated["attempts"] = _nonnegative_int(row.get("attempts"))
+    updated["job_id"] = None
+    updated["next_retry_at"] = None
+    updated["last_error"] = None
+    updated["completed_at"] = _iso(now)
+    updated["completion_evidence"] = evidence
+    updated["recovery_kind"] = "normal_ingest_completion"
+    updated["updated_at"] = _iso(now)
+    for field in ("attempt_id", "started_at"):
+        updated.pop(field, None)
+    raw_bytes = _nonnegative_int(row.get("bytes"))
+    return updated, {
+        "ts": _iso(now),
+        "schema_version": SCHEMA_VERSION,
+        "key": updated.get("key"),
+        "raw": updated.get("raw"),
+        "path": updated.get("path"),
+        "status": "completed",
+        "attempts": updated["attempts"],
+        "job_id": None,
+        "job_status": JobStatus.COMPLETED.value,
+        "pages_created": [],
+        "pages_updated": [],
+        "failed_ops": [],
+        "bytes": raw_bytes,
+        "charged_bytes": 0,
+        "error": None,
+        "completion_evidence": evidence,
+        "recovery_kind": "normal_ingest_completion",
     }
 
 
@@ -3222,6 +3393,16 @@ def _reconcile_pending_failure_resets(
                 }
             )
             continue
+        if not _completion_marker_matches_current_raw(completion, row):
+            reconciled.append(
+                {
+                    "key": key,
+                    "raw": row.get("raw"),
+                    "status": "evidence_mismatch",
+                    "reason": "completion raw sha256 no longer matches current source",
+                }
+            )
+            continue
         budget_error = _semantic_defer_budget_error(
             budget=budget,
             charge_bytes=0,
@@ -3340,10 +3521,13 @@ def _run_candidate(
                 ) = _record_replay_completion(
                     row=row,
                     raw=raw,
+                    raw_path=path,
                     active_job_id=active_job_id,
                     now=now,
                     completions_file=completions_file,
                 )
+                if continuation_error is not None:
+                    raise RuntimeError(continuation_error)
 
             # Failure state can change after queue selection and even after the
             # durable running marker. This is the last instruction before
@@ -3553,6 +3737,87 @@ def _run_candidate(
             }
         )
     return updated, record
+
+
+@contextmanager
+def _replay_queue_lock(target: Path):
+    """Serialize all replay transitions with normal ingest before any write."""
+    from chronovisor.ingest.orchestrator import _cross_process_ingest_lease
+
+    with _cross_process_ingest_lease(root=RAW_DIR.parent) as (acquired, reason):
+        if not acquired:
+            yield reason or "another ingest process holds the cross-process lease"
+            return
+        with _queue_lock(target):
+            yield None
+
+
+def _run_selected_candidate(
+    selected_row: dict[str, Any],
+    *,
+    now: datetime,
+    retry_delay_seconds: int,
+    byte_limit: int,
+    completions_file: Path,
+    target: Path,
+    by_key: dict[str, dict[str, Any]],
+    requires_semantic_authorization: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Reserve and run one candidate while holding the shared ingest lease."""
+
+    candidate_path = _resolve_raw_path(
+        str(selected_row.get("raw") or ""), selected_row.get("path")
+    )
+    raw_bytes = _nonnegative_int(selected_row.get("bytes"))
+    if candidate_path is None or raw_bytes > byte_limit:
+        return _run_candidate(
+            selected_row,
+            now=now,
+            retry_delay_seconds=retry_delay_seconds,
+            max_bytes=byte_limit,
+            completions_file=completions_file,
+        )
+
+    normal_evidence = _normal_raw_completion_evidence(candidate_path)
+    if normal_evidence is not None:
+        return _normal_completion_candidate_result(
+            selected_row,
+            now=now,
+            evidence=normal_evidence,
+        )
+    raw_hash = hashlib.sha256(
+        _logical_raw_bytes(_raw_name(selected_row), candidate_path)
+    ).hexdigest()
+    job = job_store.create(processor="ollama")
+    candidate = dict(selected_row)
+    _clear_released_semantic_defer(candidate, now=now)
+    attempts = _nonnegative_int(candidate.get("attempts")) + 1
+    candidate.update(
+        {
+            "status": "running",
+            "attempts": attempts,
+            "last_attempt_at": _iso(now),
+            "started_at": _iso(now),
+            "updated_at": _iso(now),
+            "job_id": job.job_id,
+            "raw_sha256": raw_hash,
+            "attempt_id": f"{job.job_id}:{attempts}:{raw_hash[:16]}",
+            "next_retry_at": None,
+        }
+    )
+    if requires_semantic_authorization:
+        candidate["frontier_authorization_consumed_at"] = _iso(now)
+    by_key[str(candidate["key"])] = candidate
+    _atomic_write_queue(target, sorted(by_key.values(), key=_queue_sort_key))
+    return _run_candidate(
+        candidate,
+        now=now,
+        retry_delay_seconds=retry_delay_seconds,
+        max_bytes=byte_limit,
+        completions_file=completions_file,
+        job_id=job.job_id,
+        attempt_started=True,
+    )
 
 
 def run_pending_queue(
@@ -3768,7 +4033,13 @@ def run_pending_queue(
             "max_bytes": byte_limit,
         }
 
-    with _queue_lock(target):
+    with _replay_queue_lock(target) as lease_error:
+        if lease_error is not None:
+            return {
+                "status": "deferred", "reason": "shared_ingest_lease_busy",
+                "lease_reason": lease_error, "queue": str(target),
+                "count": 0, "runs": [], "bytes": 0,
+            }
         # Preserve legacy no-quorum error and attempt evidence until it has a
         # chance to become a terminal supervisor hold.  Cooldown reopening
         # clears that evidence, so it is intentionally delayed until after the
@@ -4097,51 +4368,15 @@ def run_pending_queue(
                 if operational_hold_is_active(selected_row):
                     continue
 
-                candidate = selected_row
-                candidate_path = _resolve_raw_path(
-                    str(selected_row.get("raw") or ""), selected_row.get("path")
-                )
-                active_job_id: str | None = None
-                attempt_started = False
-                if candidate_path is not None and raw_bytes <= byte_limit:
-                    raw_hash = _sha256_path(candidate_path)
-                    job = job_store.create(processor="ollama")
-                    active_job_id = job.job_id
-                    candidate = dict(selected_row)
-                    _clear_released_semantic_defer(candidate, now=current_time)
-                    attempts = _nonnegative_int(candidate.get("attempts")) + 1
-                    candidate.update(
-                        {
-                            "status": "running",
-                            "attempts": attempts,
-                            "last_attempt_at": _iso(current_time),
-                            "started_at": _iso(current_time),
-                            "updated_at": _iso(current_time),
-                            "job_id": active_job_id,
-                            "raw_sha256": raw_hash,
-                            "attempt_id": f"{active_job_id}:{attempts}:{raw_hash[:16]}",
-                            "next_retry_at": None,
-                        }
-                    )
-                    if requires_semantic_authorization:
-                        candidate["frontier_authorization_consumed_at"] = _iso(
-                            current_time
-                        )
-                    by_key[str(candidate["key"])] = candidate
-                    # This write is the at-most-once launch boundary. Ingest is
-                    # never called unless the running marker is durable first.
-                    _atomic_write_queue(
-                        target, sorted(by_key.values(), key=_queue_sort_key)
-                    )
-                    attempt_started = True
-                updated, record = _run_candidate(
-                    candidate,
+                updated, record = _run_selected_candidate(
+                    selected_row,
                     now=current_time,
                     retry_delay_seconds=retry_delay_seconds,
-                    max_bytes=byte_limit,
+                    byte_limit=byte_limit,
                     completions_file=completions_target,
-                    job_id=active_job_id,
-                    attempt_started=attempt_started,
+                    target=target,
+                    by_key=by_key,
+                    requires_semantic_authorization=requires_semantic_authorization,
                 )
                 if requires_semantic_authorization:
                     record["frontier_authorization_consumed_at"] = updated.get(

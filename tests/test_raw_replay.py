@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -31,8 +32,9 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def _isolate_paths(tmp_path: Path, monkeypatch) -> dict[str, Path]:
-    from chronovisor.ingest import failure_supervisor
+    from chronovisor.ingest import failure_supervisor, raw_completion_ack
 
+    monkeypatch.setattr(raw_completion_ack, "publish_receipt", lambda _paths, _job: None)
     for name in ("index.md", "log.md", "schema.md"):
         (tmp_path / name).write_text("legacy\n", encoding="utf-8")
     paths = {
@@ -66,6 +68,261 @@ def _isolate_paths(tmp_path: Path, monkeypatch) -> dict[str, Path]:
         failure_supervisor, "operational_deferred_raw_files", lambda _paths=None: {}
     )
     return paths
+
+
+def test_validated_full_raw_completion_is_bound_to_current_sha_and_terminal_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    raw = paths["raw"] / "20260714-sha-bound.md"
+    raw.write_bytes(b"source-a")
+    digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+    marker = {
+        "ts": "2026-07-14T00:01:00+00:00",
+        "schema_version": raw_replay.SCHEMA_VERSION,
+        "type": raw_replay.FULL_REPLAY_CLAIM_TYPE,
+        "key": raw_replay.stable_key(raw),
+        "raw": raw.name,
+        "source_raw": f"replay:{raw.name}",
+        "status": "completed",
+        "completion_scope": "full_raw",
+        "job_id": "replay-job-1",
+        "raw_sha256": digest,
+        "failed_ops": [],
+        "failure_reset_pending": False,
+    }
+    _write_jsonl(paths["completions"], [marker])
+
+    assert raw_replay.validated_full_raw_completion(
+        raw.name,
+        path=raw,
+        completions_file=paths["completions"],
+    ) == marker
+
+    raw.write_bytes(b"source-b")
+    assert (
+        raw_replay.validated_full_raw_completion(
+            raw.name,
+            path=raw,
+            completions_file=paths["completions"],
+        )
+        is None
+    )
+
+    raw.write_bytes(b"source-a")
+    _write_jsonl(
+        paths["completions"],
+        [
+            marker,
+            {
+                **marker,
+                "ts": "2026-07-14T00:02:00+00:00",
+                "status": "completed_partial",
+            },
+        ],
+    )
+    assert (
+        raw_replay.validated_full_raw_completion(
+            raw.name,
+            path=raw,
+            completions_file=paths["completions"],
+        )
+        is None
+    )
+
+    # A later malformed identity cannot revive an older success. Journal
+    # order remains authoritative even if the producer clock moved backwards.
+    _write_jsonl(paths["completions"], [
+        marker,
+        {**marker, "ts": "2026-07-13T23:59:00+00:00", "key": "invalid"},
+    ])
+    assert raw_replay.validated_full_raw_completion(
+        raw.name, path=raw, completions_file=paths["completions"]
+    ) is None
+
+
+def test_replay_lease_competition_defers_without_consuming_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    raw = paths["raw"] / "20260714-lease-race.md"
+    raw.write_bytes(b"lease-bound source")
+    key = raw_replay.stable_key(raw)
+    _write_jsonl(
+        paths["queue"],
+        [
+            {
+                "key": key,
+                "raw": raw.name,
+                "path": str(raw),
+                "status": "pending",
+                "attempts": 0,
+                "sources": ["ingest_failure"],
+                "bytes": raw.stat().st_size,
+            }
+        ],
+    )
+    store = _FakeJobStore(result_status=JobStatus.COMPLETED)
+    monkeypatch.setattr(raw_replay, "job_store", store)
+    monkeypatch.setattr(
+        "chronovisor.ingest.ingest.run_ingest",
+        lambda *_args, **_kwargs: pytest.fail("shared lease race reached ingest"),
+    )
+
+    from chronovisor.ingest import orchestrator
+
+    before = paths["queue"].read_bytes()
+    with orchestrator._cross_process_ingest_lease(root=tmp_path) as (acquired, _):
+        assert acquired
+        result = raw_replay.run_pending_queue(
+            path=paths["queue"],
+            history_file=paths["history"],
+            claims_file=paths["claims"],
+            completions_file=paths["completions"],
+            max_runs=1,
+            max_bytes=100,
+            now=datetime(2026, 7, 14, tzinfo=UTC),
+        )
+
+    assert paths["queue"].read_bytes() == before
+    assert not paths["history"].exists()
+    assert result["count"] == 0
+    assert result["reason"] == "shared_ingest_lease_busy"
+    assert result["runs"] == []
+    assert store.created == 0
+    [row] = _read_jsonl(paths["queue"])
+    assert row["status"] == "pending"
+    assert row["attempts"] == 0
+    assert row.get("job_id") is None
+
+
+def test_pending_failure_reset_rejects_changed_source_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.ingest import failure_supervisor
+
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    raw = paths["raw"] / "20260714-reset-sha-bound.md"
+    raw.write_bytes(b"source-a")
+    key = raw_replay.stable_key(raw)
+    digest = hashlib.sha256(raw.read_bytes()).hexdigest()
+    queue_row = {
+        "key": key,
+        "raw": raw.name,
+        "path": str(raw),
+        "status": "completed",
+        "attempts": 1,
+        "bytes": raw.stat().st_size,
+        "raw_sha256": digest,
+        "failure_reset_pending": True,
+    }
+    marker = {
+        "ts": "2026-07-14T00:01:00+00:00",
+        "schema_version": raw_replay.SCHEMA_VERSION,
+        "type": raw_replay.FULL_REPLAY_CLAIM_TYPE,
+        "key": key,
+        "raw": raw.name,
+        "source_raw": f"replay:{raw.name}",
+        "status": "completed",
+        "completion_scope": "full_raw",
+        "raw_sha256": digest,
+        "failure_reset_pending": True,
+    }
+    _write_jsonl(paths["queue"], [queue_row])
+    _write_jsonl(paths["completions"], [marker])
+    raw.write_bytes(b"source-b")
+    monkeypatch.setattr(
+        failure_supervisor,
+        "reset_raw_failure",
+        lambda _raw: pytest.fail("changed source must not reset failure"),
+    )
+
+    result = raw_replay.run_pending_queue(
+        path=paths["queue"],
+        history_file=paths["history"],
+        claims_file=paths["claims"],
+        completions_file=paths["completions"],
+        max_runs=1,
+        max_bytes=100,
+        now=datetime(2026, 7, 14, tzinfo=UTC),
+    )
+
+    assert result["failure_reset_reconciled"][0]["status"] == "evidence_mismatch"
+    [row] = _read_jsonl(paths["queue"])
+    assert row["failure_reset_pending"] is True
+
+
+def test_completion_lookup_does_not_read_unrelated_raw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        raw_replay, "_logical_raw_bytes",
+        lambda *_args: pytest.fail("unmatched raw must not be read"),
+    )
+    assert raw_replay.validated_full_raw_completion(
+        "unmatched.md", path=tmp_path / "unmatched.md", records=[]
+    ) is None
+
+
+@pytest.mark.parametrize("failure", [None, "ack_failure", "source_changed"])
+def test_replay_publishes_normal_ack_before_failure_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
+) -> None:
+    from chronovisor.core import store as wiki_store
+    from chronovisor.ingest import failure_supervisor, orchestrator, raw_completion_ack
+
+    real_publish = raw_completion_ack.publish_receipt
+    paths = _isolate_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(raw_replay, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(wiki_store, "CHRONOVISOR_ROOT", tmp_path)
+    monkeypatch.setattr(wiki_store, "PAGES_DIR", tmp_path / "pages")
+    monkeypatch.setattr(raw_completion_ack, "publish_receipt", real_publish)
+    wiki_store.PAGES_DIR.mkdir()
+    page = wiki_store.PAGES_DIR / "created-page.md"
+    raw = paths["raw"] / "ack-source.md"
+    raw.write_bytes(b"synthetic immutable source")
+    _write_jsonl(paths["queue"], [{
+        "key": raw_replay.stable_key(raw), "raw": raw.name, "path": str(raw),
+        "status": "pending", "attempts": 0, "sources": ["ingest_failure"],
+        "bytes": raw.stat().st_size,
+    }])
+    jobs = _FakeJobStore(result_status=JobStatus.COMPLETED)
+    monkeypatch.setattr(raw_replay, "job_store", jobs)
+    cleaned: list[str] = []
+
+    def reset(name: str) -> None:
+        assert raw_completion_ack.load_valid_receipt([raw]) is not None
+        cleaned.append(name)
+
+    def ingest(_content, job_id, *, on_complete, metadata):
+        assert orchestrator._INGEST_PROCESS_LEASE_ACTIVE
+        page.write_bytes(b"synthetic applied page")
+        jobs.finish(job_id)
+        jobs.update(job_id, completed_at=datetime.now(UTC).isoformat())
+        if failure == "source_changed":
+            raw.write_bytes(b"changed source")
+        on_complete()
+
+    def broken_publish(_paths, _job):
+        raise OSError("synthetic ACK publication failure")
+
+    monkeypatch.setattr(failure_supervisor, "reset_raw_failure", reset)
+    monkeypatch.setattr("chronovisor.ingest.ingest.run_ingest", ingest)
+    if failure == "ack_failure":
+        monkeypatch.setattr(raw_completion_ack, "publish_receipt", broken_publish)
+    result = raw_replay.run_pending_queue(max_runs=1, max_bytes=1000)
+    if failure:
+        assert cleaned == []
+        assert not paths["completions"].exists()
+        assert result["runs"][0]["status"] != "completed"
+    else:
+        receipt = raw_completion_ack.load_valid_receipt(
+            [raw], verify_current_postimages=True
+        )
+        assert receipt is not None
+        assert receipt["outcome"]["job_id"] == "job-1"
+        assert cleaned == [raw.name]
+        assert raw_replay.validated_full_raw_completion(raw.name) is not None
 
 
 def test_replay_source_keywords_matches_frontmatter_precedence(tmp_path: Path) -> None:

@@ -11,7 +11,7 @@ import hashlib
 import json
 import os
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9056,6 +9056,61 @@ class TestOrchestrator:
 
         assert result == {"triggered": False, "reason": "injected busy lease"}
         assert orchestrator.get_pending_raw_files() == [raw_path]
+
+    def test_replay_completion_suppression_requires_current_sha_and_no_newer_failure(
+        self, isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from chronovisor.ingest import failure_supervisor, orchestrator, raw_replay
+
+        raw_path = isolated_wiki / "raw" / "replay-bound.md"
+        raw_path.write_bytes(b"source-a")
+        completions = isolated_wiki / "runtime" / "raw-replay-completions.jsonl"
+        monkeypatch.setattr(raw_replay, "RAW_DIR", isolated_wiki / "raw")
+        monkeypatch.setattr(raw_replay, "COMPLETIONS_FILE", completions)
+        digest = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+        marker = {
+            "ts": "2026-07-14T00:01:00+00:00",
+            "schema_version": raw_replay.SCHEMA_VERSION,
+            "type": raw_replay.FULL_REPLAY_CLAIM_TYPE,
+            "key": raw_replay.stable_key(raw_path),
+            "raw": raw_path.name,
+            "source_raw": f"replay:{raw_path.name}",
+            "status": "completed",
+            "completion_scope": "full_raw",
+            "job_id": "replay-job-1",
+            "raw_sha256": digest,
+            "failed_ops": [],
+            "failure_reset_pending": False,
+        }
+        completions.parent.mkdir(parents=True, exist_ok=True)
+        completions.write_text(json.dumps(marker) + "\n", encoding="utf-8")
+
+        assert raw_path not in orchestrator.get_pending_raw_files()
+
+        raw_path.write_bytes(b"source-b")
+        assert raw_path in orchestrator.get_pending_raw_files()
+
+        raw_path.write_bytes(b"source-a")
+        completed_local = datetime.fromisoformat(marker["ts"]).astimezone().replace(
+            tzinfo=None
+        )
+        failure_supervisor._save_state(
+            {"failures": {raw_path.name: {
+                "last_seen_at": (completed_local - timedelta(seconds=1)).isoformat(),
+            }}}
+        )
+        assert raw_path not in orchestrator.get_pending_raw_files()
+
+        failure_supervisor._save_state(
+            {
+                "failures": {
+                    raw_path.name: {
+                        "last_seen_at": (completed_local + timedelta(seconds=1)).isoformat(),
+                    }
+                }
+            }
+        )
+        assert raw_path in orchestrator.get_pending_raw_files()
 
     def test_retracted_raw_is_not_pending_and_body_is_preserved(
         self, isolated_wiki: Path
