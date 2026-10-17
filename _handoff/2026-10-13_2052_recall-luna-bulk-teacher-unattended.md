@@ -66,11 +66,11 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] 2-1 過去の全 rally に当時時点の索引で候補を作り、Luna で relevance を判定する。native Luna worker を並列で、使えるだけ使う。凍結 snapshot・batch・resume cursor で再開できる形にする。10/9 の生成と同じ検査（ID、件数、hash、単一 writer、atomic 保存）を通す。
 - [ ] 2-2 blind repeat（順序を入れ替えた 2 回）と、時系列の train / validation / locked test を、既存の single-teacher gate が受け取れる形で揃える。
 - [x] 2-3 relevant / irrelevant の比を記録する。8 月の較正は正例が 93% で「常に想起」を学習した。同じ偏りが無いことを確かめる。偏っていたら、学習に使う前に対処を決めて記録する。
-- [ ] 2-4 数百件を別モデル（ローカル教師。可能ならもう一つ）にも判定させ、Luna との一致率を記録する。P1 の「判定モデルの種類で変わらないこと」の根拠にする。
+- [x] 2-4 数百件を別モデル（ローカル教師。可能ならもう一つ）にも判定させ、Luna との一致率を記録する。P1 の「判定モデルの種類で変わらないこと」の根拠にする。
 
 ### Phase 3：本線の再開と日次運転
 - [ ] 3-1 `recall.distillation.enabled = true` にして本線を再開する。R5 の残り（blind repeat、反実仮想、validation、locked test、壊した対照が通らないこと）を受入まで進める。反実仮想が下限に届かない間は、その理由を「データ待ち」として表示する。
-- [ ] 3-2 日々の増分をローカル教師で処理する経路を動かす。2-4 の一致率が低くてローカルに任せられないときは、日次も Luna で回し、その判断を記録する。
+- [x] 3-2 日々の増分をローカル教師で処理する経路を動かす。2-4 の一致率が低くてローカルに任せられないときは、日次も Luna で回し、その判断を記録する。
 - [x] 3-3 R6（student 候補）と R7（shadow → canary 5 / 25 / 100、自動ロールバック）を、本線の設計どおり無人で進むところまで実装して配備する。昇格するかどうかは既存のゲートだけで決める。
 
 ### Phase 4：止まったら知らせる
@@ -136,7 +136,7 @@ created_at: 2026-10-13T20:52:29+09:00
 
 ## ブロッカー（発生時のみ）
 - 品質受入待ち：A2の固定split identity・時系列・assignment・row integrityは実baselineで解消済み。残る固定blindの片側uncertain12組は現immutable契約下で再判定できず、自動解消日は未定。gate適格CFは0/100。正式run22の新規有効比較1件も、当時のsealed exposure候補と現在のcandidate snapshotのsource hash不一致で正規除外された。今後のcapture→snapshotと新規rallyのembargo/plan growthが無人で適格証跡へ進めるか追加監査中で、単なるデータ待ちとは断定しない（解消予定日未定）。過去の「ユーザー判断待ち」は今回の範囲では解除済みで、品質条件は維持する。
-- 7日無人継続と別モデル300件の独立比較は未完。既存09:15確認で追跡する。
+- 7日無人継続は未完。別モデルA300件の独立比較測定は完了し、一致率72.6667%のため日次Lunaを継続する。補助比較Bは同じsealed inputで継続中だが、Aの完了やモデル不変性の合格と混同しない。既存09:15確認で追跡する。
 
 ## 受け渡しメモ（次担当へ）
 - ユーザーは「前のも、作って結局動いていない。これを何回も繰り返している」と言っている。今回の成否は、実装とテストが通ることではなく、無人で回り続けることで決まる。
@@ -565,3 +565,6 @@ created_at: 2026-10-13T20:52:29+09:00
 
 - 2026-10-17 23:57 JST — B2のCLI履歴保存を追加。隔離CODEX_HOME終了前に実session transcript・stdout/stderr/outputをprivate 0700/0600領域へ保存し、manifest SHAをcanonical authority receiptへ結合する。正常・非zero・timeout・schema/provenance失敗も残し、保存失敗はauthority不成立とする。auth/config/credentialは複製しない。適用時は全保存fileのSHA/size、CLI-authored model/provider/effort、session IDのreceipt一致を再検証し、欠落・改変を拒否する。rootの関連159 tests＋architecture/refactor36 tests、Ruff/mypy/import contract/compileall/diff-checkが成功。実2件canaryは日次captureの自然終了待ち、配備前に結果を確認する。
 - 2026-10-17 23:57 JST — 日次400/432件処理の重複疑いを独立read-only監査。直近5 bundleのtask/input計2064件とrepeat pair1000組はbundle間重複0、rally＋candidate pair重複0。既存snapshotの未判定候補を順次消費しており、sealed probeの再判定ではない。共通split assignment16549件は変更0。capture完了時は新8 rally/1600 candidate pairs、remaining0を確認。skip件数一定はnormal選別とprobe選別で計数対象が異なるためで、dedupや凍結入力の修正は不要と判断。native枠の公平配分は別途運用設定で検証する。
+
+- 2026-10-18 00:07 JST — 2-4/3-2の完了状態を実態へ整合。sealed sample300件（SHA fe718f30aa7a18cdaafa83c766b5dcb89f0afd7f5a19b04401e36dcd9e7504d6）とnative Lunaのtask/candidate/rally/input SHAを再突合し、一意join300/300、入力不一致0、重複0、local A一致218/300=72.6667%を確認。行local A・列Lunaのirrelevant/relevant/uncertain混同行列は[[162,31,11],[33,56,5],[2,0,0]]。数百件の別モデル比較・一致率記録という測定手順は完了しており、任意の第2比較Bの未完をAの未測定として扱わない判断。Bは参考77/127=60.6299%、終端技術失敗5/未処理168で同じinput/modelを保持して継続する。現fixed certificationとは別cohortで、モデル不変性・local切替の合格とは扱わない。この一致率ではlocalへの委任を採用せず、実際に動いているnative Luna日次を継続する条件付き手順3-2も完了。直近5 bundleの新規identityとstrict import済138522件、enabled=true/capture=true/profile=native-luna-single-v1を確認し、P5/floor/品質holdは維持。7日確認は別条件として未完のまま。
+- 2026-10-18 00:07 JST — B2履歴保存版の実canaryが通常authority/schema/CAS経路で2件完了（approved1/rejected1）。全68241行のprivateコピーを保持し、canonical queue/golden/wiki/raw書込0。CLI-authored実session2件のmodel=gpt-5.6-luna/provider=openai/effort=max、保存5filesずつのSHA/size・0600とrun dir0700・credential非複製をreadback検証。owned maintenanceは23:58:28に解除済み。追加100件canaryは処理量の測定目的で自然境界待ち、最終package9f8c3babのSecurity/static/architectureは成功、2本のfull suite継続中。
