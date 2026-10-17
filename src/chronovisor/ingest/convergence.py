@@ -475,7 +475,9 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            # Encode once instead of issuing millions of tiny writes for the
+            # large state projection. Preserve the existing on-disk format.
+            handle.write(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())

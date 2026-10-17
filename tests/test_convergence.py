@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,37 @@ from chronovisor.ingest.convergence import (
 from tests.semantic_hold_support import semantic_authority, semantic_review
 
 NOW = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
+
+
+def test_atomic_state_write_preserves_streamed_json_bytes(tmp_path: Path) -> None:
+    payload = {
+        "schema_version": 1,
+        "items": {
+            "z": {"text": "日本語\n\"quoted\"\\path", "values": [None, True, 1.25]},
+            "a": {"nested": {"β": [], "α": {}}},
+        },
+    }
+    previous_encoder = StringIO()
+    json.dump(payload, previous_encoder, ensure_ascii=False, indent=2, sort_keys=True)
+    expected = (previous_encoder.getvalue() + "\n").encode("utf-8")
+    path = tmp_path / "state.json"
+
+    convergence._atomic_write_json(path, payload)
+
+    assert path.read_bytes() == expected
+    assert list(tmp_path.glob(".state.json.*.tmp")) == []
+
+
+def test_atomic_state_encoding_failure_preserves_previous_file(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    previous = b'{"schema_version":1,"items":{}}\n'
+    path.write_bytes(previous)
+
+    with pytest.raises(TypeError):
+        convergence._atomic_write_json(path, {"unsupported": object()})
+
+    assert path.read_bytes() == previous
+    assert list(tmp_path.glob(".state.json.*.tmp")) == []
 
 
 def test_human_required_api_is_reexported_from_frontier_guard() -> None:
