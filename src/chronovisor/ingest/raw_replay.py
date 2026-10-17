@@ -642,11 +642,15 @@ def replay_source_keywords(raw_name: str, path: Path, content: str) -> list[str]
 
     if not isinstance(content, str):
         raise TypeError("replay content must be text")
-    keywords = _native_source_keywords(raw_name, path)
-    if not keywords:
+    is_projection_child = _PROJECTION_CHILD_NAME_RE.fullmatch(raw_name) is not None
+    if is_projection_child:
         keywords = _frontmatter_source_keywords(content)
+    else:
+        keywords = _native_source_keywords(raw_name, path)
+        if not keywords:
+            keywords = _frontmatter_source_keywords(content)
 
-    if _PROJECTION_CHILD_NAME_RE.fullmatch(raw_name) is None:
+    if not is_projection_child:
         return keywords
     content_bytes = content.encode("utf-8")
     if not _projection_child_is_verified(raw_name, path, content_bytes):

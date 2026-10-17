@@ -262,7 +262,7 @@ def test_search_label_drain_wrapper_is_bounded_and_pin_guarded() -> None:
         'git -C "$CHRONOVISOR_REPO_ROOT" diff --quiet HEAD -- \\\n  src scripts pyproject.toml uv.lock'
         in source
     )
-    assert "ls-files --others --exclude-standard -- src scripts" in source
+    assert "ls-files --others -- src scripts" in source
     assert "repository_untracked_code" in source
     assert '"$EXPECTED_COMMIT:$input_path"' in source
     assert '"$HEAD:$input_path"' in source

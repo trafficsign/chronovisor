@@ -46,7 +46,7 @@ if ! git -C "$CHRONOVISOR_REPO_ROOT" diff --quiet HEAD -- \
   skip repository_tracked_drift
 fi
 UNTRACKED_CODE=$(git -C "$CHRONOVISOR_REPO_ROOT" \
-  ls-files --others --exclude-standard -- src scripts 2>/dev/null) \
+  ls-files --others -- src scripts 2>/dev/null) \
   || skip repository_status_unavailable
 [ -z "$UNTRACKED_CODE" ] || skip repository_untracked_code
 for input_path in src scripts pyproject.toml uv.lock; do
