@@ -62,7 +62,6 @@ from chronovisor.decision.semantic_hold import (
 )
 from chronovisor.ingest.convergence import (
     FRONTIER_STATUSES,
-    LOCAL_STATUSES,
     TERMINAL_STATUSES,
     ConvergenceStore,
     CycleBudget,
@@ -1359,7 +1358,7 @@ def _snapshot_row_class(
         if lease_expires is not None and lease_expires > now:
             return "leased"
         stage = "local" if status.startswith("local_") else "frontier"
-    elif status in LOCAL_STATUSES:
+    elif status in {"pending_local", "local_retry"}:
         stage = "local"
     elif status in FRONTIER_STATUSES:
         stage = "frontier"
