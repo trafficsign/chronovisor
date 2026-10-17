@@ -55,6 +55,8 @@ def _schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS materialization_dirty ON rows(dirty,rally_id);
         CREATE INDEX IF NOT EXISTS materialization_receipt ON rows(receipt_sha256);
         CREATE INDEX IF NOT EXISTS materialization_plan ON rows(label_plan);
+        CREATE INDEX IF NOT EXISTS materialization_present_plan ON rows(label_plan)
+            WHERE row_json IS NOT NULL;
         CREATE INDEX IF NOT EXISTS materialization_order ON rows(locked,epoch,rally_id,sequence)
             WHERE row_json IS NOT NULL;
         CREATE TABLE IF NOT EXISTS dependencies(
