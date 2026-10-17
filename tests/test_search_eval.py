@@ -892,6 +892,7 @@ def test_frontier_review_promotes_trusted_label_queue_rows(tmp_path) -> None:
     ]
     assert payload["promoted"] == 1
     assert queue_rows[0]["queue_status"] == "frontier_approved"
+    assert queue_rows[0]["last_attempt_lane"] == "frontier"
     assert queue_rows[0]["promoted_to_golden"] is True
     assert queue_rows[0]["reviewer"] == "frontier:test"
     assert golden_rows[0]["reviewed"] is True
@@ -972,6 +973,10 @@ def test_frontier_review_balances_frontier_and_pending_evaluation_rows(tmp_path)
         "frontier_approved",
         "pending_review",
     ]
+    assert stored[0]["last_attempt_lane"] == "frontier"
+    assert "last_attempt_lane" not in stored[1]
+    assert stored[2]["last_attempt_lane"] == "review"
+    assert "last_attempt_lane" not in stored[3]
 
 
 def test_frontier_review_budget_keeps_alternating_selection_order(tmp_path) -> None:
@@ -1036,6 +1041,14 @@ def test_frontier_review_budget_keeps_alternating_selection_order(tmp_path) -> N
         "frontier-1",
         "evaluation-1",
     ]
+    stored = search_eval.read_jsonl(queue_file)
+    assert [row["last_attempt_lane"] for row in stored[:4]] == [
+        "review",
+        "frontier",
+        "review",
+        "frontier",
+    ]
+    assert all("last_attempt_lane" not in row for row in stored[4:])
 
 
 def test_frontier_review_reopens_when_callback_appends_to_queue(
@@ -1353,6 +1366,7 @@ def test_frontier_review_revalidates_authority_inside_final_effect_lock(
     assert result["status_counts"] == {"frontier_retry": 1}
     assert not search_eval.read_jsonl(golden_file)
     assert stored["queue_status"] == "frontier_retry"
+    assert stored["last_attempt_lane"] == "frontier"
     assert "decision_artifact" not in stored
 
 
@@ -1394,7 +1408,45 @@ def test_frontier_review_does_not_use_confidence_as_promotion_gate(tmp_path) -> 
     assert payload["promoted"] == 1
     assert payload["status_counts"] == {"frontier_approved": 1}
     assert queue_rows[0]["queue_status"] == "frontier_approved"
+    assert queue_rows[0]["last_attempt_lane"] == "review"
     assert search_eval.read_jsonl(golden_file)[0]["expected_pages"] == ["target"]
+
+
+def test_frontier_review_failure_records_review_lane(tmp_path) -> None:
+    queue_file = tmp_path / "queue.jsonl"
+    golden_file = tmp_path / "golden.jsonl"
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "review-failure",
+                "expected_pages": ["target"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "queue_status": "pending_review",
+                "promoted_to_golden": False,
+            }
+        ],
+    )
+
+    result = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        reviewer=lambda _row: {
+            "decision": "approved",
+            "confidence": 1.0,
+            "expected_pages": ["invented"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "invalid candidate",
+            "notes": None,
+        },
+    )
+
+    stored = search_eval.read_jsonl(queue_file)[0]
+    assert result["status_counts"] == {"frontier_retry": 1}
+    assert stored["queue_status"] == "frontier_retry"
+    assert stored["last_attempt_lane"] == "review"
 
 
 def test_frontier_review_cannot_approve_invented_label_ids(tmp_path) -> None:
@@ -1605,6 +1657,7 @@ def test_frontier_tool_unavailable_retries_without_human_queue(tmp_path) -> None
     ]
     assert payload["promoted"] == 0
     assert queue_rows[0]["queue_status"] == "frontier_retry"
+    assert queue_rows[0]["last_attempt_lane"] == "frontier"
     assert queue_rows[0]["frontier_review"]["human_required"] is False
 
 

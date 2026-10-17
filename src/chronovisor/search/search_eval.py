@@ -1729,6 +1729,10 @@ def _queue_status_for_review(review: dict[str, Any], *, min_confidence: float) -
     return "frontier_uncertain"
 
 
+def _last_attempt_lane_for_status(status: str) -> str:
+    return "review" if status == "pending_review" else "frontier"
+
+
 def _select_label_review_indices(
     rows: list[dict[str, Any]],
     *,
@@ -1940,7 +1944,6 @@ def review_label_queue_with_frontier(
             if row["queue_status"] == "frontier_quarantined":
                 row["quarantined_at"] = reviewed_at
             row.pop("next_attempt_at", None)
-
     try:
         quarantine_retry_seconds = max(
             0,
@@ -1986,7 +1989,6 @@ def review_label_queue_with_frontier(
             int(row.get("quarantine_reopen_count") or 0) + 1
         )
         row.pop("next_attempt_at", None)
-
     stale_terminal_indices = [
         index
         for index, row in enumerate(rows)
@@ -2091,7 +2093,6 @@ def review_label_queue_with_frontier(
             }
         )
         recovered_queue += 1
-
     recovered_golden = 0
     for row_index, row in enumerate(rows):
         recovery = row.get("authority_recovery")
@@ -2177,7 +2178,6 @@ def review_label_queue_with_frontier(
                 "recovered": 0,
             }
         mutation_reserved = True
-
     def retry_due(row: dict[str, Any]) -> bool:
         raw = row.get("next_attempt_at")
         if not isinstance(raw, str) or not raw:
@@ -2210,7 +2210,6 @@ def review_label_queue_with_frontier(
         if dry_run:
             attempted += 1
             continue
-
         if budget is not None:
             frontier_allowed, _frontier_reason = budget.can_consume(
                 "frontier", max_votes
@@ -2228,6 +2227,11 @@ def review_label_queue_with_frontier(
                 budget.consume("mutation")
                 mutation_reserved = True
 
+        attempt_row = {
+            **row,
+            "last_attempt_at": reviewed_at,
+            "last_attempt_lane": _last_attempt_lane_for_status(status),
+        }
         with decision_authority_lock():
             authority, authority_error = decision_authority.current_semantic_authority(
                 SEARCH_LABEL_LANE,
@@ -2235,10 +2239,9 @@ def review_label_queue_with_frontier(
             )
         if authority_error is not None or authority is None:
             updated_rows[row_index] = authority_retry(
-                row, authority_error or "search label authority unavailable"
+                attempt_row, authority_error or "search label authority unavailable"
             )
             continue
-
         reviews: list[dict[str, Any]] = []
         semantic_review: dict[str, Any] | None = None
         try:
@@ -2300,14 +2303,14 @@ def review_label_queue_with_frontier(
             attempted += 1
             if hold is None:
                 updated_rows[row_index] = authority_retry(
-                    row,
+                    attempt_row,
                     hold_error or "search label semantic hold authority invalid",
                 )
                 status_counts["frontier_retry"] = (
                     status_counts.get("frontier_retry", 0) + 1
                 )
                 continue
-            updated = dict(row)
+            updated = dict(attempt_row)
             _restore_label_semantic_hold(
                 updated,
                 hold=hold,
@@ -2365,7 +2368,7 @@ def review_label_queue_with_frontier(
         if authority_error is not None or decision_artifact is None:
             attempted += 1
             updated_rows[row_index] = authority_retry(
-                row, authority_error or "search label verdict authority invalid"
+                attempt_row, authority_error or "search label verdict authority invalid"
             )
             status_counts["frontier_retry"] = status_counts.get("frontier_retry", 0) + 1
             continue
@@ -2378,9 +2381,8 @@ def review_label_queue_with_frontier(
             next_status = "frontier_quarantined"
         attempted += 1
         status_counts[next_status] = status_counts.get(next_status, 0) + 1
-
         updated = {
-            **row,
+            **attempt_row,
             "queue_status": next_status,
             "reviewer": combined.get("reviewer") or "frontier",
             "review_confidence": float(combined.get("confidence") or 0.0),
@@ -2394,7 +2396,6 @@ def review_label_queue_with_frontier(
             updated.pop("semantic_hold", None)
             updated.pop("semantic_hold_history", None)
             updated.pop("last_failure_class", None)
-
         if next_status in {"frontier_retry", "frontier_uncertain"}:
             delay = max(0, backoff_base_seconds) * (2 ** max(0, frontier_attempts - 1))
             updated["next_attempt_at"] = (
@@ -2476,7 +2477,7 @@ def review_label_queue_with_frontier(
                     if staged_index == row_index and not new_promotion
                 )
                 updated_rows[row_index] = authority_retry(
-                    original_rows[row_index], error
+                    updated_rows[row_index], error
                 )
                 status_counts["frontier_retry"] = (
                     status_counts.get("frontier_retry", 0) + 1
