@@ -1,11 +1,138 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 import pytest
 
 from chronovisor.recall import recall_distillation_store as store
+
+
+def _unique_payload(identity: str, binding: str) -> dict[str, str]:
+    return {"decision_id": identity, "idempotency_sha256": binding}
+
+
+def test_unique_append_retries_when_preparation_races_with_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A preparation CAS miss is part of the public append retry boundary."""
+
+    path = tmp_path / "receipts.jsonl"
+    store.append_chain(path, _unique_payload("seed", "seed-binding"))
+    original_read = store._read_pinned_ledger
+    calls = 0
+    calls_lock = threading.Lock()
+    competing_done = threading.Event()
+    competing_errors: list[BaseException] = []
+    competing_rows: list[dict[str, object]] = []
+    competing_thread: threading.Thread | None = None
+
+    def compete() -> None:
+        try:
+            competing_rows.append(
+                store.append_chain_unique(
+                    path,
+                    _unique_payload("competing", "competing-binding"),
+                    unique_field="decision_id",
+                    binding_field="idempotency_sha256",
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            competing_errors.append(exc)
+        finally:
+            competing_done.set()
+
+    def read_then_append(descriptor: int, source: Path, state: object, **kwargs: object) -> bytes:
+        nonlocal calls, competing_thread
+        with calls_lock:
+            calls += 1
+            trigger = calls == 2
+        data = original_read(descriptor, source, state, **kwargs)
+        if trigger:
+            competing_thread = threading.Thread(target=compete)
+            competing_thread.start()
+            assert competing_done.wait(10), "competing append did not finish"
+            competing_thread.join(10)
+            assert not competing_thread.is_alive(), "competing append is still running"
+            if competing_errors:
+                raise competing_errors[0]
+        return data
+
+    monkeypatch.setattr(store, "_read_pinned_ledger", read_then_append)
+    try:
+        appended = store.append_chain_unique(
+            path,
+            _unique_payload("main", "main-binding"),
+            unique_field="decision_id",
+            binding_field="idempotency_sha256",
+        )
+    finally:
+        if competing_thread is not None:
+            competing_thread.join(10)
+
+    assert appended["decision_id"] == "main"
+    assert len(competing_rows) == 1
+    assert (
+        store.append_chain_unique(
+            path,
+            _unique_payload("competing", "competing-binding"),
+            unique_field="decision_id",
+            binding_field="idempotency_sha256",
+        )
+        == competing_rows[0]
+    )
+    assert calls >= 3
+    assert store.verify_chain(path)["records"] == 3
+    assert {
+        row["decision_id"] for row in store.read_chain(path)
+    } == {"seed", "competing", "main"}
+
+
+def test_unique_append_retries_three_times_for_persistent_preparation_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "receipts.jsonl"
+    store.append_chain(path, _unique_payload("seed", "seed-binding"))
+    calls = 0
+
+    def always_busy(*_args: object, **_kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        raise store.DistillationStoreBusy("synthetic preparation race")
+
+    monkeypatch.setattr(store, "prepare_unique_index", always_busy)
+    with pytest.raises(store.DistillationStoreBusy, match="synthetic preparation race"):
+        store.append_chain_unique(
+            path,
+            _unique_payload("main", "main-binding"),
+            unique_field="decision_id",
+            binding_field="idempotency_sha256",
+        )
+    assert calls == 3
+
+
+def test_unique_append_does_not_retry_nonbusy_preparation_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "receipts.jsonl"
+    store.append_chain(path, _unique_payload("seed", "seed-binding"))
+    prepare_calls = 0
+
+    def invalid_prepare(*_args: object, **_kwargs: object) -> None:
+        nonlocal prepare_calls
+        prepare_calls += 1
+        raise store.DistillationStoreError("synthetic invalid identity")
+
+    monkeypatch.setattr(store, "prepare_unique_index", invalid_prepare)
+    with pytest.raises(store.DistillationStoreError, match="synthetic invalid identity"):
+        store.append_chain_unique(
+            path,
+            _unique_payload("main", "main-binding"),
+            unique_field="decision_id",
+            binding_field="idempotency_sha256",
+        )
+    assert prepare_calls == 1
 
 
 def test_pinned_immutable_write_never_follows_a_directory_swap(tmp_path: Path) -> None:

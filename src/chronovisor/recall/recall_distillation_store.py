@@ -1172,8 +1172,8 @@ def append_chain_unique(
     """Append once by a stable identity while holding the ledger lock."""
 
     for attempt in range(3):
-        prepare_unique_index(path, unique_field=unique_field, binding_field=binding_field)
         try:
+            prepare_unique_index(path, unique_field=unique_field, binding_field=binding_field)
             with _locked(path.with_suffix(path.suffix + ".lock")):
                 return append_chain_unique_locked(
                     path, payload, unique_field=unique_field, binding_field=binding_field,

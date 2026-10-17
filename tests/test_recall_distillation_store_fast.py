@@ -907,7 +907,7 @@ def test_unique_index_preparation_fails_closed_on_source_rewrite(
         return original_decode(data, **kwargs)
 
     monkeypatch.setattr(store, "_decode_chain_bytes", rewrite_once)
-    with pytest.raises(store.DistillationStoreBusy, match="changed during snapshot"):
+    with pytest.raises(store.DistillationStoreError, match="chain mismatch at row 0"):
         store.append_chain_unique(
             path,
             _unique_payload("decision-3", "binding-3"),
