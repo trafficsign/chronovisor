@@ -2081,12 +2081,45 @@ def _artifact_review_value(artifact: object) -> dict[str, Any] | None:
     return dict(review_value) if isinstance(review_value, Mapping) else None
 
 
+def _label_attempt_timestamp(value: object, *, now: datetime) -> datetime | None:
+    """Parse a real attempt timestamp and reject malformed or future values."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        comparable = datetime.fromisoformat(value).astimezone(UTC)
+        reference = now.astimezone(UTC)
+    except (ValueError, OverflowError, OSError):
+        return None
+    return comparable if comparable <= reference else None
+
+
+def _last_label_attempt_by_lane(
+    rows: list[dict[str, Any]], *, now: datetime
+) -> dict[str, datetime | None]:
+    """Find the newest valid attempt for each lane, including terminal rows."""
+    latest: dict[str, datetime | None] = {"frontier": None, "review": None}
+    historical_statuses = FRONTIER_PENDING_STATUSES | FRONTIER_TERMINAL_STATUSES
+    for row in rows:
+        if str(row.get("queue_status") or "") not in historical_statuses:
+            continue
+        lane = row.get("last_attempt_lane")
+        if not isinstance(lane, str) or lane not in latest:
+            continue
+        attempted_at = _label_attempt_timestamp(row.get("last_attempt_at"), now=now)
+        if attempted_at is not None and (
+            latest[lane] is None or attempted_at > latest[lane]
+        ):
+            latest[lane] = attempted_at
+    return latest
+
+
 def _select_label_review_indices(
     rows: list[dict[str, Any]],
     *,
     limit: int,
     review_order: str,
     retry_due: Callable[[dict[str, Any]], bool],
+    now: datetime | None = None,
 ) -> list[int]:
     """Select due rows while keeping both active review buckets moving.
 
@@ -2118,21 +2151,32 @@ def _select_label_review_indices(
     if review_order == "fifo":
         return sorted([*frontier_indices, *evaluation_indices])[:limit]
 
+    latest = _last_label_attempt_by_lane(rows, now=now or datetime.now(UTC))
+    review_first = (
+        latest["frontier"] is not None
+        and latest["review"] is None
+    ) or (
+        latest["frontier"] is not None
+        and latest["review"] is not None
+        and latest["review"] < latest["frontier"]
+    )
+    lane_order = ("review", "frontier") if review_first else ("frontier", "review")
+    positions = {"frontier": 0, "review": 0}
+    buckets = {"frontier": frontier_indices, "review": evaluation_indices}
     selected: list[int] = []
-    frontier_position = 0
-    evaluation_position = 0
     while len(selected) < limit and (
-        frontier_position < len(frontier_indices)
-        or evaluation_position < len(evaluation_indices)
+        positions["frontier"] < len(frontier_indices)
+        or positions["review"] < len(evaluation_indices)
     ):
-        if frontier_position < len(frontier_indices):
-            selected.append(frontier_indices[frontier_position])
-            frontier_position += 1
+        for lane in lane_order:
+            bucket = buckets[lane]
+            position = positions[lane]
+            if position >= len(bucket):
+                continue
+            selected.append(bucket[position])
+            positions[lane] = position + 1
             if len(selected) >= limit:
                 break
-        if evaluation_position < len(evaluation_indices):
-            selected.append(evaluation_indices[evaluation_position])
-            evaluation_position += 1
     return selected
 
 
@@ -2528,6 +2572,7 @@ def review_label_queue_with_frontier(
         limit=limit,
         review_order=review_order,
         retry_due=retry_due,
+        now=current_time,
     )
     # Keep the durable row positions stable while executing the selected
     # indices in the fairness order. Unselected rows remain byte-for-byte

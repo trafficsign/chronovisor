@@ -7,7 +7,7 @@ import multiprocessing
 import os
 import stat
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -1040,6 +1040,248 @@ def test_frontier_review_balances_frontier_and_pending_evaluation_rows(
     assert "last_attempt_lane" not in stored[1]
     assert stored[2]["last_attempt_lane"] == "review"
     assert "last_attempt_lane" not in stored[3]
+
+
+def test_balanced_single_item_cycles_start_with_lane_without_recent_attempt() -> None:
+    rows = [
+        {
+            "queue_status": "pending_frontier_review",
+            "promoted_to_golden": False,
+        },
+        {
+            "queue_status": "pending_review",
+            "promoted_to_golden": False,
+        },
+    ]
+    now = datetime(2026, 10, 17, 12, 0, 0)
+
+    def due(_row: dict[str, object]) -> bool:
+        return True
+
+    assert search_eval._select_label_review_indices(
+        rows, limit=1, review_order="balanced", retry_due=due, now=now
+    ) == [0]
+    rows[0].update(
+        last_attempt_lane="frontier",
+        last_attempt_at="2026-10-17T12:00:00",
+    )
+    assert search_eval._select_label_review_indices(
+        rows,
+        limit=1,
+        review_order="balanced",
+        retry_due=due,
+        now=now.replace(minute=1),
+    ) == [1]
+    rows[1].update(
+        last_attempt_lane="review",
+        last_attempt_at="2026-10-17T12:01:00",
+    )
+    assert search_eval._select_label_review_indices(
+        rows,
+        limit=1,
+        review_order="balanced",
+        retry_due=due,
+        now=now.replace(minute=2),
+    ) == [0]
+
+
+def test_balanced_selection_uses_terminal_attempts_and_keeps_retry_not_due_out() -> None:
+    now = datetime(2026, 10, 17, 12, 0, 0)
+    rows = [
+        {
+            "queue_status": "pending_frontier_review",
+            "promoted_to_golden": False,
+            "next_attempt_at": "2026-10-17T12:30:00",
+            "last_attempt_lane": "frontier",
+            "last_attempt_at": "2026-10-17T11:00:00",
+        },
+        {
+            "queue_status": "pending_review",
+            "promoted_to_golden": False,
+            "last_attempt_lane": "review",
+            "last_attempt_at": "2026-10-17T11:10:00",
+        },
+        {
+            "queue_status": "frontier_rejected",
+            "promoted_to_golden": False,
+            "last_attempt_lane": "frontier",
+            "last_attempt_at": "2026-10-17T11:30:00",
+        },
+        {
+            "queue_status": "source_stale",
+            "promoted_to_golden": False,
+            "last_attempt_lane": "frontier",
+            "last_attempt_at": "2026-10-17T11:40:00",
+        },
+    ]
+
+    def retry_due(row: dict[str, object]) -> bool:
+        raw = row.get("next_attempt_at")
+        return not isinstance(raw, str) or datetime.fromisoformat(raw) <= now
+
+    # The terminal frontier attempt is real progress, so the older review
+    # lane is selected even though the active frontier row is first in FIFO.
+    assert search_eval._select_label_review_indices(
+        rows, limit=1, review_order="balanced", retry_due=retry_due, now=now
+    ) == [1]
+
+    review_only = [rows[1]]
+    assert search_eval._select_label_review_indices(
+        review_only, limit=1, review_order="balanced", retry_due=lambda _row: True, now=now
+    ) == [0]
+    frontier_only = [
+        {"queue_status": "pending_frontier_review", "promoted_to_golden": False}
+    ]
+    assert search_eval._select_label_review_indices(
+        frontier_only, limit=1, review_order="balanced", retry_due=lambda _row: True, now=now
+    ) == [0]
+
+
+def test_balanced_selection_ignores_future_unknown_and_manual_progress_metadata() -> None:
+    now = datetime(2026, 10, 17, 12, 0, 0)
+    rows = [
+        {
+            "queue_status": "pending_frontier_review",
+            "promoted_to_golden": False,
+            "last_attempt_lane": "frontier",
+            "last_attempt_at": "2099-01-01T00:00:00",
+        },
+        {
+            "queue_status": "pending_review",
+            "promoted_to_golden": False,
+            "last_attempt_lane": "review",
+            "last_attempt_at": "2026-10-17T11:30:00",
+        },
+        {
+            "queue_status": "pending_frontier_review",
+            "promoted_to_golden": False,
+            "last_attempt_lane": "unknown",
+            "last_attempt_at": "2026-10-17T11:59:00",
+        },
+        {
+            "queue_status": "source_stale",
+            "promoted_to_golden": False,
+        },
+        {
+            "queue_status": "frontier_approved",
+            "promoted_to_golden": True,
+        },
+    ]
+
+    # Future, unknown-lane, source-stale, and promoted metadata do not make
+    # frontier progress look newer than the real review attempt.
+    assert search_eval._select_label_review_indices(
+        rows, limit=1, review_order="balanced", retry_due=lambda _row: True, now=now
+    ) == [0]
+
+
+def test_balanced_selection_normalizes_offset_timestamps_and_ignores_bad_lanes() -> None:
+    now = datetime(2026, 10, 17, 3, 0, tzinfo=UTC)
+    rows = [
+        {
+            "queue_status": "pending_frontier_review",
+            "promoted_to_golden": False,
+            "last_attempt_lane": "frontier",
+            "last_attempt_at": "2026-10-17T02:45:00+00:00",
+        },
+        {
+            "queue_status": "pending_review",
+            "promoted_to_golden": False,
+            "last_attempt_lane": "review",
+            "last_attempt_at": "2026-10-17T11:30:00+09:00",
+        },
+        {
+            "queue_status": "pending_review",
+            "promoted_to_golden": False,
+            "last_attempt_lane": ["review"],
+            "last_attempt_at": "2026-10-17T02:59:00+00:00",
+        },
+        {
+            "queue_status": "pending_review",
+            "promoted_to_golden": False,
+            "last_attempt_lane": {"lane": "review"},
+            "last_attempt_at": "2026-10-17T02:59:30+00:00",
+        },
+        {
+            "queue_status": "pending_frontier_review",
+            "promoted_to_golden": False,
+            "last_attempt_lane": "frontier",
+            "last_attempt_at": "2026-10-17T04:00:00+00:00",
+        },
+    ]
+
+    # 11:30 JST is 02:30 UTC, so the review attempt is older than the
+    # frontier attempt at 02:45 UTC. Bad lane values and future timestamps
+    # cannot change that ordering.
+    assert search_eval._select_label_review_indices(
+        rows, limit=1, review_order="balanced", retry_due=lambda _row: True, now=now
+    ) == [1]
+
+
+def test_balanced_public_api_counts_promoted_attempt_before_next_single_item_cycle(
+    tmp_path,
+) -> None:
+    queue_file = tmp_path / "label-queue.jsonl"
+    golden_file = tmp_path / "search-golden.jsonl"
+    write_jsonl(
+        queue_file,
+        [
+            {
+                "query": "frontier-1",
+                "expected_pages": ["target-1"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "queue_status": "pending_frontier_review",
+                "promoted_to_golden": False,
+            },
+            {
+                "query": "evaluation-1",
+                "expected_pages": ["target-2"],
+                "negative_pages": [],
+                "stale_pages": [],
+                "queue_status": "pending_review",
+                "promoted_to_golden": False,
+            },
+        ],
+    )
+    golden_file.write_text("", encoding="utf-8")
+    seen: list[str] = []
+
+    def reviewer(row):
+        seen.append(row["query"])
+        return {
+            "decision": "approved",
+            "confidence": 0.9,
+            "expected_pages": row["expected_pages"],
+            "negative_pages": [],
+            "stale_pages": [],
+            "summary": "trusted",
+            "notes": None,
+        }
+
+    first = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        limit=1,
+        reviewer=reviewer,
+        review_order="balanced",
+    )
+    second = search_eval.review_label_queue_with_frontier(
+        queue_file=queue_file,
+        golden_file=golden_file,
+        limit=1,
+        reviewer=reviewer,
+        review_order="balanced",
+    )
+
+    assert first["attempted"] == 1
+    assert second["attempted"] == 1
+    assert seen == ["frontier-1", "evaluation-1"]
+    stored = search_eval.read_jsonl(queue_file)
+    assert stored[0]["queue_status"] == "frontier_approved"
+    assert stored[0]["promoted_to_golden"] is True
+    assert stored[0]["last_attempt_lane"] == "frontier"
+    assert stored[1]["last_attempt_lane"] == "review"
 
 
 def test_stale_source_reconciliation_preserves_candidate_history_and_golden(
