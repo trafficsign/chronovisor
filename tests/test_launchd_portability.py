@@ -4,6 +4,7 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -47,6 +48,96 @@ def _executable(path: Path) -> Path:
     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     path.chmod(0o755)
     return path
+
+
+def _git(repo: Path, *arguments: str, capture_output: bool = False) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *arguments],
+        check=True,
+        capture_output=capture_output,
+        text=True,
+    )
+    return result.stdout.strip() if capture_output else ""
+
+
+def _git_commit(repo: Path, message: str) -> None:
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Chronovisor test",
+            "-c",
+            "user.email=chronovisor-test@example.invalid",
+            "commit",
+            "-m",
+            message,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _search_label_wrapper_fixture(tmp_path: Path) -> tuple[Path, Path, dict[str, str], Path]:
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    source = repo / "src" / "chronovisor"
+    scripts.mkdir(parents=True)
+    source.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts" / "chronovisor-runtime-env", scripts)
+    shutil.copy2(ROOT / "scripts" / "chronovisor-search-label-drain", scripts)
+    shutil.copy2(ROOT / "scripts" / "search_label_drain.py", scripts)
+    (source / "__init__.py").write_text("", encoding="utf-8")
+    (source / "core.py").write_text("fixture = True\n", encoding="utf-8")
+    (repo / "pyproject.toml").write_text("[project]\nname = 'fixture'\n", encoding="utf-8")
+    (repo / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "add", ".")
+    _git_commit(repo, "fixture base")
+    pin = _git(repo, "rev-parse", "HEAD", capture_output=True)
+
+    home = tmp_path / "home"
+    recall = home / ".chronovisor" / "recall"
+    recall.mkdir(parents=True)
+    (recall / "search-label-queue.jsonl").write_text("", encoding="utf-8")
+    (recall / "search-golden.jsonl").write_text("", encoding="utf-8")
+    marker = tmp_path / "uvx-called"
+    uvx = tmp_path / "uvx"
+    uvx.write_text(
+        "#!/bin/sh\n"
+        'printf \'called\' > "$UVX_MARKER"\n'
+        "printf '%s\\n' '{\"status\":\"stubbed\"}'\n",
+        encoding="utf-8",
+    )
+    uvx.chmod(0o755)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CHRONOVISOR_REPO_ROOT": str(repo),
+            "CHRONOVISOR_ROOT": str(home / ".chronovisor"),
+            "CHRONOVISOR_RUNTIME_SOURCE": f"git+file://{repo}@{pin}",
+            "CHRONOVISOR_PYTHON": sys.executable,
+            "CHRONOVISOR_UVX": str(uvx),
+            "HOME": str(home),
+            "UVX_MARKER": str(marker),
+        }
+    )
+    return repo, scripts / "chronovisor-search-label-drain", environment, marker
+
+
+def _run_search_label_wrapper(
+    wrapper: Path, environment: dict[str, str]
+) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
+    result = subprocess.run(
+        [str(wrapper)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    return result, json.loads(result.stdout)
 
 
 @pytest.mark.parametrize(("plist_name", "wrapper"), SERVICES.items())
@@ -167,9 +258,14 @@ def test_search_label_drain_wrapper_is_bounded_and_pin_guarded() -> None:
     source = (ROOT / "scripts" / "chronovisor-search-label-drain").read_text(
         encoding="utf-8"
     )
-    assert 'git -C "$CHRONOVISOR_REPO_ROOT" diff --quiet HEAD --' in source
+    assert (
+        'git -C "$CHRONOVISOR_REPO_ROOT" diff --quiet HEAD -- \\\n  src scripts pyproject.toml uv.lock'
+        in source
+    )
     assert "ls-files --others --exclude-standard -- src scripts" in source
     assert "repository_untracked_code" in source
+    assert '"$EXPECTED_COMMIT:$input_path"' in source
+    assert '"$HEAD:$input_path"' in source
     assert '"$EXPECTED_COMMIT:scripts/search_label_drain.py"' in source
     assert '"$SCRIPT_HASH" ] || skip drain_script_drift' in source
     assert '"--batch-size",\n    "20"' in source
@@ -185,6 +281,70 @@ def test_search_label_drain_wrapper_is_bounded_and_pin_guarded() -> None:
         source = (ROOT / "scripts" / name).read_text(encoding="utf-8")
         assert "chronovisor-render-launchd" in source
         assert "/Users/trafficsign" not in source
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_reason", "runs_uvx"),
+    [
+        ("pinned", None, True),
+        ("docs_commit", None, True),
+        ("handoff_untracked", None, True),
+        ("tracked_source_edit", "repository_tracked_drift", False),
+        ("scripts_commit", "source_input_drift", False),
+        ("pyproject_commit", "source_input_drift", False),
+        ("uv_lock_commit", "source_input_drift", False),
+        ("untracked_code", "repository_untracked_code", False),
+    ],
+)
+def test_search_label_drain_wrapper_source_pin_gate(
+    tmp_path: Path,
+    scenario: str,
+    expected_reason: str | None,
+    runs_uvx: bool,
+) -> None:
+    repo, wrapper, environment, marker = _search_label_wrapper_fixture(tmp_path)
+    if scenario == "docs_commit":
+        docs = repo / "docs"
+        docs.mkdir()
+        (docs / "daily.md").write_text("docs-only\n", encoding="utf-8")
+        _git(repo, "add", "docs/daily.md")
+        _git_commit(repo, "docs-only automation update")
+    elif scenario == "handoff_untracked":
+        handoff = repo / "_handoff"
+        handoff.mkdir()
+        (handoff / "evidence.md").write_text("metadata-only\n", encoding="utf-8")
+    elif scenario == "tracked_source_edit":
+        (repo / "src" / "chronovisor" / "core.py").write_text(
+            "fixture = False\n", encoding="utf-8"
+        )
+    elif scenario == "scripts_commit":
+        script = repo / "scripts" / "search_label_drain.py"
+        script.write_text(script.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
+        _git(repo, "add", "scripts/search_label_drain.py")
+        _git_commit(repo, "script change")
+    elif scenario == "pyproject_commit":
+        pyproject = repo / "pyproject.toml"
+        pyproject.write_text(
+            pyproject.read_text(encoding="utf-8") + "requires-python = '>=3.14'\n",
+            encoding="utf-8",
+        )
+        _git(repo, "add", "pyproject.toml")
+        _git_commit(repo, "package metadata change")
+    elif scenario == "uv_lock_commit":
+        lockfile = repo / "uv.lock"
+        lockfile.write_text(lockfile.read_text(encoding="utf-8") + "revision = 2\n", encoding="utf-8")
+        _git(repo, "add", "uv.lock")
+        _git_commit(repo, "lockfile change")
+    elif scenario == "untracked_code":
+        (repo / "src" / "untracked.py").write_text("untracked = True\n", encoding="utf-8")
+
+    result, payload = _run_search_label_wrapper(wrapper, environment)
+    assert result.returncode == 0
+    if expected_reason is None:
+        assert payload == {"status": "stubbed"}
+    else:
+        assert payload == {"reason": expected_reason, "status": "skipped"}
+    assert marker.exists() is runs_uvx
 
 
 @pytest.mark.parametrize(("service", "wrapper"), GENERIC_SERVICES.items())
