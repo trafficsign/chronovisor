@@ -160,7 +160,7 @@ def check() -> list[dict]:
                             "type": "stale",
                             "severity": "low",
                             "page": page_id,
-                            "detail": f"Last updated {updated_str} ({(date.today() - updated_date).days} days ago)",
+                            "detail": f"Last updated {updated_str}",
                             "auto_fixable": False,
                         }
                     )

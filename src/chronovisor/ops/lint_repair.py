@@ -1447,8 +1447,8 @@ def _preselect_rows(
     """Choose bounded, due work before repeatedly reparsing large state.
 
     The convergence state is loaded once.  Deterministic observations/routing
-    retain first priority, then due local/frontier work is round-robined so a
-    large retry backlog cannot starve pending items.  Future retries and
+    and due local/frontier work are round-robined so a large backlog in any
+    one lane cannot consume the whole cycle.  Future retries and
     already-terminal rows stay in the append-only queue for a later ordinary
     inventory pass.
     """
@@ -1511,16 +1511,10 @@ def _preselect_rows(
         bucket.append(row)
 
     selected: list[dict[str, Any]] = []
-    for bucket in (deterministic,):
-        take = min(max_items - len(selected), len(bucket))
-        selected.extend(bucket[:take])
-        if len(selected) >= max_items:
-            return selected
-
-    # Round-robin the model-backed lanes.  This is deliberately independent of
+    # Round-robin all due lanes.  This is deliberately independent of
     # model outcome and therefore cannot turn a reviewer result into a label.
-    buckets = [local, frontier, unknown, terminal]
-    indexes = [0, 0, 0, 0]
+    buckets = [deterministic, local, frontier, unknown]
+    indexes = [0] * len(buckets)
     while len(selected) < max_items:
         added = False
         for index, bucket in enumerate(buckets):
@@ -1533,6 +1527,9 @@ def _preselect_rows(
                 break
         if not added:
             break
+    # Inventory terminal history after the known due work.  It remains in the
+    # queue so a later pass can discover a changed page input.
+    selected.extend(terminal[:max_items - len(selected)])
     return selected
 
 

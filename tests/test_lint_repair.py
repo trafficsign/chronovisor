@@ -1212,6 +1212,58 @@ def test_new_detector_issues_progress_past_terminal_source_history(
     assert queue_path.read_bytes() == queue_before
 
 
+def test_new_monitor_backlog_does_not_starve_due_local_and_frontier(
+    tmp_path: Path, monkeypatch
+) -> None:
+    rows = [
+        _row(f"stale-{index}", lane="monitor", issue_type="stale")
+        for index in range(70)
+    ]
+    store = _store(tmp_path)
+    pages = {}
+    for page_id in ("local-due", "frontier-due"):
+        page = tmp_path / "pages" / f"{page_id}.md"
+        page_text = _page(page)
+        pages[page_id] = page
+        row = _row(page_id)
+        rows.append(row)
+        source_id, input_data = lint_repair._candidate_identity(row, page_text)
+        item = store.merge_item(
+            lane="lint_repair",
+            source_id=source_id,
+            input_data=input_data,
+            resolver_version=lint_repair.REPAIR_RESOLVER_VERSION,
+            metadata=row,
+            now=NOW,
+        )["item"]
+        if page_id == "frontier-due":
+            store.escalate(item["key"], reason="local review deferred", now=NOW)
+    monkeypatch.setattr(
+        lint_repair.chronovisor_store, "find_page", lambda page_id: pages.get(page_id)
+    )
+    queue = tmp_path / "review" / "lint-repair-queue.jsonl"
+    before_queue = _queue(queue, rows)
+    before_state = store.state_file.read_bytes()
+
+    result = lint_repair.run_lint_repair(
+        queue_file=queue,
+        store=store,
+        budget=_budget(),
+        max_items=3,
+        dry_run=True,
+        local_reviewer=_never,
+        frontier_reviewer=_never,
+        now=NOW,
+    )
+
+    assert result["preselected"] is True
+    assert [entry["page"] for entry in result["results"]] == [
+        "stale-0", "local-due", "frontier-due"
+    ]
+    assert store.state_file.read_bytes() == before_state
+    assert queue.read_bytes() == before_queue
+
+
 def test_large_queue_preselection_skips_future_retries_and_keeps_pending_due(
     tmp_path: Path, monkeypatch
 ) -> None:

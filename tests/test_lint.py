@@ -123,6 +123,38 @@ def _by_type(issues: list[dict], type_: str, page_id: str | None = None) -> list
     ]
 
 
+def test_stale_issue_identity_does_not_change_with_elapsed_days(
+    isolated_wiki: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import date
+
+    from chronovisor.ingest import lint
+
+    today = [date(2026, 4, 1)]
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return today[0]
+
+    monkeypatch.setattr(lint, "date", FixedDate)
+    _seed(
+        isolated_wiki,
+        "stale.md",
+        "---\ntitle: Stale\nupdated: 2026-01-01\n"
+        "tags: [d/tools-config, t/howto, s/evergreen]\n---\nPage.\n",
+    )
+    assert _by_type(lint.check(), "stale") == []  # The 90-day floor is unchanged.
+    today[0] = date(2026, 4, 2)
+    first = lint.repair_queue_records(_by_type(lint.check(), "stale"))
+    today[0] = date(2026, 4, 3)
+    second = lint.repair_queue_records(_by_type(lint.check(), "stale"))
+
+    assert len(first) == len(second) == 1
+    assert first == second
+    assert first[0]["detail"] == "Last updated 2026-01-01"
+
+
 def _frontier_decision(decision: str, summary: str = "reviewed exact proposal") -> dict:
     return {
         "decision": decision,
