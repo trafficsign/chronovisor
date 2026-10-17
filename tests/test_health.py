@@ -1885,6 +1885,14 @@ def test_queue_progress_rejects_other_lane_and_invalid_attempt_timestamps(
                 "last_attempt_at": future,
             }
         )
+        + "\n"
+        + json.dumps(
+            {
+                "queue_status": "completed",
+                "ts": old,
+                "reviewed_at": recent,
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
