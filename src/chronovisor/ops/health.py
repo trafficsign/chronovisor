@@ -2206,12 +2206,10 @@ def _queue_timestamp(value: object) -> datetime | None:
 def _search_lane_progress_at(
     rows: list[dict[str, Any]], lane: str
 ) -> Iterable[object]:
-    """Yield only lane-bound search attempts, with a legacy fallback."""
+    """Yield only explicitly lane-bound search attempts."""
 
     for row in rows:
-        if "last_attempt_lane" not in row:
-            yield row.get("reviewed_at")
-        elif row.get("last_attempt_lane") == lane:
+        if row.get("last_attempt_lane") == lane:
             yield row.get("last_attempt_at")
 
 
