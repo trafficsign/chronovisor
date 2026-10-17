@@ -441,6 +441,86 @@ def _classify_locked_rows(
     view.state = ledger.file_state(view.path)
 
 
+def _counterfactual_reservations(
+    view: Projection, limit: int
+) -> list[dict[str, Any]]:
+    """Reserve structurally valid CF rows before bounded band filling.
+
+    The training snapshot is bounded, while the generic locked and unlocked
+    bands can be much larger than that bound.  A counterfactual row is
+    reserved only after the same materialized-row integrity and exact-exposure
+    checks used by the gate; verdict is deliberately not consulted here. Each
+    row is validated against its own sealed source split plan so a compatible
+    historical test plan is not rewritten during selection.
+    """
+
+    from chronovisor.recall import recall_distillation as distill
+
+    try:
+        source_rows = view.connection.execute(
+            "SELECT row_json FROM rows WHERE row_json IS NOT NULL "
+            "AND json_extract(row_json, '$.source') = ? "
+            "ORDER BY epoch,rally_id,sequence",
+            ("counterfactual-label",),
+        )
+    except sqlite3.OperationalError:
+        # Older SQLite builds may not expose JSON1.  The row-level source
+        # check below remains authoritative in that case.
+        source_rows = view.connection.execute(
+            "SELECT row_json FROM rows WHERE row_json IS NOT NULL "
+            "ORDER BY epoch,rally_id,sequence"
+        )
+    plans: dict[str, Mapping[str, Any] | None] = {}
+    reserved: list[dict[str, Any]] = []
+    reserved_ids: set[str] = set()
+    for entry in source_rows:
+        try:
+            row = json.loads(entry[0])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(row, Mapping) or row.get("source") != "counterfactual-label":
+            continue
+        label_plan_id = str(row.get("label_split_plan_id") or "")
+        if label_plan_id not in plans:
+            try:
+                plans[label_plan_id] = distill._read_split_plan_artifact(
+                    view.root, label_plan_id
+                )
+            except (KeyError, distill.DistillationError, store.DistillationStoreError):
+                plans[label_plan_id] = None
+        plan = plans[label_plan_id]
+        if plan is None:
+            continue
+        rally_id = str(row.get("rally_id") or "")
+        split = plan.get("assignments", {}).get(rally_id)
+        if split != "test":
+            continue
+        candidate = {
+            **row,
+            "split": "test",
+            "split_plan_id": label_plan_id,
+            "locked_test_read_only": True,
+            "locked_test_evidence_ref": f"split-plan:{label_plan_id}",
+        }
+        try:
+            valid = distill._materialized_row_integrity(
+                candidate, root=view.root, split_plan=plan
+            )
+        except (KeyError, TypeError, ValueError, distill.DistillationError,
+                store.DistillationStoreError):
+            valid = False
+        if not valid:
+            continue
+        record = str(candidate.get("label_record_sha256") or "")
+        if not record or record in reserved_ids:
+            continue
+        reserved_ids.add(record)
+        reserved.append(candidate)
+        if len(reserved) >= limit:
+            break
+    return reserved
+
+
 def _selection(view: Projection, limit: int) -> list[dict[str, Any]]:
     from chronovisor.recall import recall_distillation as distill
 
@@ -457,6 +537,10 @@ def _selection(view: Projection, limit: int) -> list[dict[str, Any]]:
     count = int(view.connection.execute("SELECT COUNT(*) FROM rows WHERE row_json IS NOT NULL").fetchone()[0])
     if count <= limit:
         return [json.loads(row[0]) for row in view.connection.execute("SELECT row_json FROM rows WHERE row_json IS NOT NULL ORDER BY sequence")]
+    reserved = _counterfactual_reservations(view, limit)
+    reserved_ids = {
+        str(row.get("label_record_sha256") or "") for row in reserved
+    }
     unlocked = int(view.connection.execute("SELECT COUNT(*) FROM rows WHERE row_json IS NOT NULL AND locked=0").fetchone()[0])
     old_count = max(0, unlocked - max(1, unlocked // 3))
     bands = []
@@ -465,11 +549,19 @@ def _selection(view: Projection, limit: int) -> list[dict[str, Any]]:
             "SELECT row_json FROM rows WHERE row_json IS NOT NULL AND locked=? "
             "ORDER BY epoch,rally_id,sequence LIMIT ? OFFSET ?", (locked, take, offset),
         )))
-    selected: list[dict[str, Any]] = []
+    selected: list[dict[str, Any]] = list(reserved)
+    selected_ids = set(reserved_ids)
     while len(selected) < limit and any(bands):
         for band in bands:
-            if band and len(selected) < limit:
-                selected.append(band.popleft())
+            while band and len(selected) < limit:
+                candidate = band.popleft()
+                record = str(candidate.get("label_record_sha256") or "")
+                if record and record in selected_ids:
+                    continue
+                selected.append(candidate)
+                if record:
+                    selected_ids.add(record)
+                break
     return selected
 
 

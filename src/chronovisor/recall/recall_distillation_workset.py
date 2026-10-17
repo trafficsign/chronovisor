@@ -1730,13 +1730,46 @@ class DistillationWorkset:
         }
 
     def claim(
-        self, kind: str | None, limit: int, owner: str, lease_seconds: float
+        self,
+        kind: str | None,
+        limit: int,
+        owner: str,
+        lease_seconds: float,
+        *,
+        eligible_work_ids: Iterable[str] | None = None,
     ) -> tuple[WorkClaim, ...]:
         """Claim FIFO work of one kind, reclaiming expired leases atomically."""
 
         if kind is not None:
             kind = _identifier(kind, "kind")
         owner = _identifier(owner, "owner")
+        eligible_ids: tuple[str, ...] | None = None
+        if eligible_work_ids is not None:
+            if isinstance(eligible_work_ids, (str, bytes, bytearray, Mapping)):
+                raise DistillationWorksetError(
+                    "eligible_work_ids must be an iterable of identifiers"
+                )
+            normalized: list[str] = []
+            seen: set[str] = set()
+            try:
+                iterator = iter(eligible_work_ids)
+            except TypeError as exc:
+                raise DistillationWorksetError(
+                    "eligible_work_ids must be iterable"
+                ) from exc
+            for raw_work_id in iterator:
+                if len(normalized) >= _MAX_COMPLETION_LOOKUP_IDS:
+                    raise DistillationWorksetError(
+                        "eligible_work_ids exceeds bounded lookup limit"
+                    )
+                work_id = _identifier(raw_work_id, "eligible_work_id")
+                if work_id in seen:
+                    raise DistillationWorksetError(
+                        "eligible_work_ids contains duplicate work_id"
+                    )
+                seen.add(work_id)
+                normalized.append(work_id)
+            eligible_ids = tuple(normalized)
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise DistillationWorksetError("limit must be a positive integer")
         lease_seconds_float = _finite(lease_seconds, "lease_seconds")
@@ -1746,6 +1779,13 @@ class DistillationWorkset:
         expires_at = now + lease_seconds_float
         if not math.isfinite(expires_at):
             raise DistillationWorksetError("lease expiry must be finite")
+        if eligible_ids == ():
+            return ()
+        eligible_clause = ""
+        eligible_params: tuple[str, ...] = ()
+        if eligible_ids is not None:
+            eligible_clause = " AND work_id IN (" + ", ".join("?" for _ in eligible_ids) + ")"
+            eligible_params = eligible_ids
         claims: list[WorkClaim] = []
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1760,9 +1800,10 @@ class DistillationWorkset:
                     FROM work_items
                     WHERE state = 'leased' AND lease_expires_at <= ?
                       AND (? IS NULL OR kind = ?)
-                    ORDER BY sequence ASC
-                    """,
-                    (now, kind, kind),
+                    """
+                    + eligible_clause
+                    + " ORDER BY sequence ASC",
+                    (now, kind, kind, *eligible_params),
                 ).fetchall()
                 expired_selection_sha256 = _selection_sha256(
                     {
@@ -1784,8 +1825,9 @@ class DistillationWorkset:
                         lease_expires_at = NULL, updated_at = ?
                     WHERE state = 'leased' AND lease_expires_at <= ?
                       AND (? IS NULL OR kind = ?)
-                    """,
-                    (now, now, kind, kind),
+                    """
+                    + eligible_clause,
+                    (now, now, kind, kind, *eligible_params),
                 )
                 reclaimed = reclaim_result.rowcount
                 if reclaimed != len(expired_rows):
@@ -1813,8 +1855,9 @@ class DistillationWorkset:
                     oldest = connection.execute(
                         "SELECT kind, MIN(created_at) AS oldest FROM work_items "
                         "WHERE state = 'ready' AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
-                        "GROUP BY kind ORDER BY oldest ASC LIMIT 1",
-                        (now,),
+                        + eligible_clause
+                        + " GROUP BY kind ORDER BY oldest ASC LIMIT 1",
+                        (now, *eligible_params),
                     ).fetchone()
                     if (
                         oldest is not None
@@ -1828,10 +1871,10 @@ class DistillationWorkset:
                     FROM work_items
                     WHERE (? IS NULL OR kind = ?) AND state = 'ready'
                       AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-                    ORDER BY priority DESC, sequence ASC
-                    LIMIT ?
-                    """,
-                    (chosen_kind, chosen_kind, now, limit),
+                    """
+                    + eligible_clause
+                    + " ORDER BY priority DESC, sequence ASC LIMIT ?",
+                    (chosen_kind, chosen_kind, now, *eligible_params, limit),
                 ).fetchall()
                 for row in rows:
                     lease_id = uuid.uuid4().hex

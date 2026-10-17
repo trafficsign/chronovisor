@@ -492,6 +492,57 @@ def test_claim_obeys_priority_then_fifo_and_preserves_metadata(tmp_path: Path) -
     assert claims[1].attempt == 1
 
 
+def test_claim_with_eligible_work_ids_filters_ready_rows_atomically(
+    tmp_path: Path,
+) -> None:
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3")
+    workset.advance(
+        [
+            _item("target", priority=0),
+            _item("other", priority=100),
+        ],
+        1,
+    )
+
+    claims = workset.claim(
+        "label",
+        1,
+        "worker",
+        60,
+        eligible_work_ids=["target"],
+    )
+
+    assert [claim.work_id for claim in claims] == ["target"]
+    assert workset.status("label")["ready"] == 1
+    assert workset.status("label")["leased"] == 1
+
+
+def test_claim_with_no_eligible_work_does_not_claim_or_reclaim_other_rows(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    workset = DistillationWorkset(tmp_path / "workset.sqlite3", clock=lambda: now[0])
+    workset.advance([_item("other")], 1)
+    original = workset.claim("label", 1, "worker", 1)[0]
+    now[0] = 101.0
+
+    assert workset.claim(
+        "label",
+        1,
+        "worker-2",
+        60,
+        eligible_work_ids=["target"],
+    ) == ()
+    status = workset.status("label")
+    assert status["ready"] == 0
+    assert status["leased"] == 1
+    # The non-eligible lease remains untouched and can still be reclaimed by
+    # the ordinary queue path.
+    reclaimed = workset.claim("label", 1, "worker-3", 60)[0]
+    assert reclaimed.work_id == original.work_id
+    assert reclaimed.attempt == 2
+
+
 def test_expired_lease_is_reclaimed_and_attempt_increments(tmp_path: Path) -> None:
     now = [100.0]
     workset = DistillationWorkset(tmp_path / "workset.sqlite3", clock=lambda: now[0])

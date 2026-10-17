@@ -657,6 +657,53 @@ def test_selection_tie_breaks_by_rally_then_sequence(
     view.connection.close()
 
 
+def test_counterfactual_reservation_requires_structure_without_verdict_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = [
+        {
+            "record_sha256": "record-cf-uncertain",
+            "rally_id": "cf-uncertain",
+            "epoch": 1.0,
+            "profile": distill.NATIVE_LUNA_SINGLE_PROFILE,
+            "source": "counterfactual-label",
+            "label_record_sha256": "a" * 64,
+            "label_split_plan_id": "plan",
+            "verdict": "uncertain",
+            "structurally_valid": True,
+        },
+        {
+            "record_sha256": "record-cf-helpful",
+            "rally_id": "cf-helpful",
+            "epoch": 2.0,
+            "profile": distill.NATIVE_LUNA_SINGLE_PROFILE,
+            "source": "counterfactual-label",
+            "label_record_sha256": "b" * 64,
+            "label_split_plan_id": "plan",
+            "verdict": "helpful",
+            "structurally_valid": False,
+        },
+    ]
+    view = _selection_view(tmp_path, rows)
+    monkeypatch.setattr(
+        distill,
+        "_read_split_plan_artifact",
+        lambda _root, _plan_id: {"artifact_id": "plan", "assignments": {
+            "cf-uncertain": "test", "cf-helpful": "test"
+        }},
+    )
+    monkeypatch.setattr(
+        distill,
+        "_materialized_row_integrity",
+        lambda row, **_kwargs: bool(row.get("structurally_valid")),
+    )
+
+    reserved = materialization._counterfactual_reservations(view, limit=4)
+
+    assert [row["rally_id"] for row in reserved] == ["cf-uncertain"]
+    view.connection.close()
+
+
 def test_locked_classification_survives_restart_and_only_updates_new_labels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

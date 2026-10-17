@@ -208,6 +208,91 @@ def test_local_workset_reconciles_appended_label_without_repeat_call(
     assert teacher.calls == 2
 
 
+def test_counterfactual_scheduler_claims_sealed_remove_before_add(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class Counterfactual:
+        local = True
+
+        def compare(self, _payload: object) -> dict[str, object]:
+            return {
+                "verdict": "helpful",
+                "order_agreement": True,
+                "blind_orders": ["a0_first", "a1_first"],
+                "a0_sha256": "c" * 64,
+                "a1_sha256": "d" * 64,
+                "generator_route_identity": {
+                    "role": "generator",
+                    "provider": "test",
+                    "model": "generator",
+                    "location": "local",
+                },
+                "judge_route_identity": {
+                    "role": "judge",
+                    "provider": "test",
+                    "model": "judge",
+                    "location": "local",
+                },
+                "generator_model_digest": "a" * 64,
+                "judge_model_digest": "b" * 64,
+            }
+
+    monkeypatch.setattr(distill, "committed_raw_watermark", lambda _path: "raw-1")
+    exposure = _record_counterfactual_exposure(
+        tmp_path,
+        host="test-host",
+        session_id_sha256="s" * 64,
+        query_sha256="query",
+        candidate_ids=[7],
+    )
+    rally = {
+        "rally_id": "rally-1",
+        "host": "test-host",
+        "session_id_sha256": "s" * 64,
+        "session_cluster_id": "session-1",
+        "as_of": "2026-10-10T00:00:00Z",
+        "query_sha256": "query",
+        "context_refs": [],
+        "actual_answer_refs": [{"semantic_sha256": "answer"}],
+        "exposure_receipts": [exposure],
+    }
+    snapshots = {
+        "rally-1": {
+            "snapshot_sha256": "snapshot",
+            "candidates": [
+                {"candidate_id": 8, "text_sha256": "text-add"},
+                {"candidate_id": 7, "text_sha256": "text-remove"},
+            ],
+        }
+    }
+    label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+    result = distill._run_counterfactual_block(
+        execute=True,
+        root=tmp_path,
+        raw_dir=tmp_path / "raw",
+        config=distill.DistillationConfig(enabled=True, max_input_bytes=4_096),
+        counterfactual=Counterfactual(),
+        snapshots=snapshots,
+        rally_by_id={"rally-1": rally},
+        texts={
+            "query": "question",
+            "answer": "answer",
+            "text-add": "add",
+            "text-remove": "remove",
+        },
+        label_path=label_path,
+        label_rows=[],
+    )
+
+    assert result.written == 1
+    assert store.read_chain(label_path)[0]["candidate_id"] == 7
+    status = DistillationWorkset(
+        store.distillation_dir(tmp_path) / "local-workset.sqlite3"
+    ).status("local-counterfactual")
+    assert status["completed"] == 1
+    assert status["ready"] == 1
+
+
 def test_local_workset_rejects_same_count_head_rewrite() -> None:
     class Workset:
         def watermark(self) -> dict[str, object]:
