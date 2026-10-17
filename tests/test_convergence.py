@@ -229,6 +229,59 @@ def test_local_attempts_back_off_then_escalate(tmp_path: Path) -> None:
     assert escalated["item"]["next_attempt_at"] is None
 
 
+def test_stage_attempt_timestamps_survive_retries_and_terminal_completion(
+    tmp_path: Path,
+) -> None:
+    store = _store(
+        tmp_path,
+        policy=RetryPolicy(
+            max_local_attempts=1,
+            max_frontier_attempts=1,
+            local_base_delay_seconds=1,
+            frontier_base_delay_seconds=1,
+            lease_seconds=30,
+        ),
+    )
+    key = _merge(store)["key"]
+    local_time = NOW + timedelta(minutes=1)
+    local_claim = store.claim_attempt(key, "local", owner="local-worker", now=local_time)
+
+    assert local_claim["claimed"] is True
+    assert local_claim["item"]["last_local_attempt_at"] == local_time.isoformat()
+    assert "last_frontier_attempt_at" not in local_claim["item"]
+
+    escalated = store.fail_attempt(
+        key,
+        "local",
+        owner="local-worker",
+        error="local unavailable",
+        failure_class="local_transient",
+        now=local_time + timedelta(seconds=1),
+    )
+    assert escalated["item"]["status"] == "pending_frontier"
+    assert escalated["item"]["last_local_attempt_at"] == local_time.isoformat()
+
+    frontier_time = local_time + timedelta(minutes=1)
+    frontier_claim = store.claim_attempt(
+        key, "frontier", owner="frontier-worker", now=frontier_time
+    )
+    assert frontier_claim["claimed"] is True
+    assert frontier_claim["item"]["last_local_attempt_at"] == local_time.isoformat()
+    assert frontier_claim["item"]["last_frontier_attempt_at"] == frontier_time.isoformat()
+
+    completed = store.complete(
+        key,
+        "applied",
+        owner="frontier-worker",
+        now=frontier_time + timedelta(seconds=1),
+    )
+    assert completed["item"]["last_local_attempt_at"] == local_time.isoformat()
+    assert completed["item"]["last_frontier_attempt_at"] == frontier_time.isoformat()
+    persisted = store.get(key)
+    assert persisted["last_local_attempt_at"] == local_time.isoformat()
+    assert persisted["last_frontier_attempt_at"] == frontier_time.isoformat()
+
+
 def test_foreground_preemption_requeues_without_consuming_attempt(
     tmp_path: Path,
 ) -> None:

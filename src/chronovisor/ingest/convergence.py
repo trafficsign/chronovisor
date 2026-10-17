@@ -1406,6 +1406,8 @@ class ConvergenceStore:
                         "item": copy.deepcopy(persisted),
                         "budget": budget.snapshot(),
                     }
+            if claimed:
+                item[f"last_{stage}_attempt_at"] = _iso(current_time)
             if claimed or changed:
                 self._save_unlocked(state)
                 self._append_event_unlocked(
