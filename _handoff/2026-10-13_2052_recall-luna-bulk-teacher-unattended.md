@@ -1005,3 +1005,13 @@ created_at: 2026-10-13T20:52:29+09:00
 
 
 - 2026-10-19 04:11 JST — P2b質問候補のfixed bindingを点検し、新しいmodel_execution.local_reasoningがbindingに含まれず、effort変更後も旧frozen bundleを同条件として再開できることを回帰で再現した。設定されたlevel/num_predict/num_ctxを新bindingへ含め、変更時は既存manifest/source/candidatesのbytesを一切変えず、model呼出前に拒否する修正を追加。旧設定が未指定なら旧binding形状を保持し、既存凍結物を再封印しない。関連23 tests、architecture/migration/refactor81 tests、ruff成功。任意のscript単体mypyは既存と変更後の両方で同じ7件の未型付け診断となることを比較確認し、診断抑制や既存基準の緩和はしない。packageの必須CIを更新commitでも実行する。
+
+
+- 2026-10-19 04:33 JST — 配備候補b92658e2の必須quality/Python3.14/Securityがすべて成功。quality実JUnitは7350 tests・failure0・error0・skip4（7346 passed）。6 constraint cohortとLibrarianの事前取得は全て同commit/MCP1.30.0を確認した。前修正6fbccfdcも必須3CI成功（7345 passed）で、各receipt/archiveは別名保存。live checkout/runtime pinは未変更、配備は未実行。xhighの有効測定と、自然完了後の修正low/medium・batch補測を継続して水準選定を待つ。
+
+
+- 2026-10-19 04:45 JST — xhigh途中にinvalid_requestが22件連続した。実serverの同時刻admission logは必要約1.86〜2.08GBに対し利用可能約1.51〜2.03GBで、推論開始前のmemory refusalをHTTP400として返していた。全22件はattempt_count0で、同じ固定入力は先のthinking-off比較では処理済み。共有Converge processが約8.56GiB RSS、OSのswap使用約29.4GiBも観測したが、特定processだけを原因とは断定しない。自然に空きが回復するとxhigh処理も復帰した。supervisor・稼働shard・他アプリへsignalは送らず、memory admission・入力・prompt/schema・出力budgetは変更しない。
+
+- 2026-10-19 04:45 JST — 原因となる資源拒否を入力不正へ分類していたadapterを修正する。MLX-Serveの特定のpre-generation memory refusalだけをcapacity_unavailableへ正規化し、既存schedulerの未実行deferへ渡す。一般のHTTP400、schema不正、生成途中のSSE失敗は従来の失敗のままにし、メッセージ本文をerrorへ保存しない。4失敗を先に再現し、streaming/非streaming・部分出力後は未実行扱いしない回帰を加え、関連217 tests・ruff/mypy成功。即時HTTP再試行は増やさない。元22件の記録は保持し、private別成果物へ同一sealed inputの最初の実推論を補測する。進行中の元xhighは変更せず自然完了を待つ。待機controllerだけをchild0で置換し、補測→修正low/medium→batchを順に実行する判断。新測定は資源拒否を別集計し30秒待ち、待ち込み時間も保存する。
+
+- 同修正の既存worker/未実行資源待ち回帰13 testsも成功。capacity_unavailableは安全な分類名だけを共通runtimeで伝播し、モデル実行前の待ちに既存attemptを消費させない。出力を一度でも受信したSSE失敗は実行済みfailureを維持する。変更は配備前の新commitへまとめ、必須3CIを再確認する。

@@ -574,6 +574,75 @@ def test_generate_maps_http_errors_into_safe_categories() -> None:
     assert exc400.value.transient is False
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Prompt (2500 tokens) requires ~2058MB GPU memory but only ~1771MB "
+        "is available and the hot prefix cache holds ~0MB more, all of which "
+        "can be reclaimed (~0MB — the shortfall is elsewhere), which is not enough.",
+        "This prompt does not fit in GPU memory even after freeing the prefix "
+        "cache; it was refused before any work started.",
+    ],
+    ids=["admission", "prefill"],
+)
+def test_prefill_memory_refusal_is_unattempted_capacity_not_invalid_input(
+    message: str, streamed: bool,
+) -> None:
+    adapter = OMLXAdapter(transport=httpx.MockTransport(
+        lambda request: httpx.Response(
+            400, json={"error": {"type": "invalid_request_error", "message": message}},
+            request=request,
+        ),
+    ))
+    request = replace(
+        _minimal_message_request(),
+        progress_callback=(lambda _event: None) if streamed else None,
+    )
+    with pytest.raises(SafeBackendError) as exc:
+        adapter.generate(request, model="m")
+    assert exc.value.safe_category == "capacity_unavailable"
+    assert message not in str(exc.value)
+
+
+def test_memory_word_in_invalid_input_does_not_bypass_request_rejection() -> None:
+    adapter = OMLXAdapter(transport=httpx.MockTransport(
+        lambda request: httpx.Response(
+            400, json={"error": {"type": "invalid_request_error",
+                                 "message": "Invalid memory option in JSON schema"}},
+            request=request,
+        ),
+    ))
+    with pytest.raises(SafeBackendError) as exc:
+        adapter.generate(_minimal_message_request(), model="m")
+    assert exc.value.safe_category == "invalid_request"
+    assert exc.value.transient is False
+
+
+@pytest.mark.parametrize("partial_output", [False, True])
+def test_stream_capacity_refusal_is_unattempted_only_before_output(
+    partial_output: bool,
+) -> None:
+    frames = []
+    if partial_output:
+        frames.append({"choices": [{"delta": {"reasoning_content": "partial"}}]})
+    frames.append({"error": {"type": "invalid_request_error", "message":
+        "This prompt does not fit in GPU memory even after freeing the prefix "
+        "cache; it was refused before any work started."}})
+    wire = "".join("data: " + json.dumps(frame) + "\n\n" for frame in frames)
+    adapter = OMLXAdapter(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, content=wire, request=request),
+    ))
+    with pytest.raises(SafeBackendError) as exc:
+        adapter.generate(
+            replace(_minimal_message_request(), progress_callback=lambda _event: None),
+            model="m",
+        )
+    assert exc.value.safe_category == (
+        "http_5xx" if partial_output else "capacity_unavailable"
+    )
+
+
 def test_generate_maps_transport_to_transient_error() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)

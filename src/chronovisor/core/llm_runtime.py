@@ -22,6 +22,7 @@ SAFE_FAILURE_CATEGORIES = frozenset(
         "backend_contract_error",
         "request_invalid",
         "capability_unavailable",
+        "capacity_unavailable",
         "source_classification_required",
         "egress_denied",
         "vote_invalid",

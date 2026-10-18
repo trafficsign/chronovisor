@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
@@ -65,6 +66,29 @@ OMLX_MODEL_SETTINGS_PATH = Path(
     os.environ.get("OMLX_MODEL_SETTINGS_PATH", "~/.omlx/model_settings.json")
 ).expanduser()
 _OMLX_AUTH_HEADER = "x-api-key"
+
+
+def _memory_admission_refused(payload: object) -> bool:
+    """Recognize MLX-Serve's named pre-generation memory refusal only."""
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict) or error.get("type") != "invalid_request_error":
+        return False
+    message = error.get("message")
+    if not isinstance(message, str):
+        return False
+    return bool(
+        re.match(
+            r"Prompt \(\d+ tokens\) requires ~\d+MB GPU memory but only ~\d+MB is available",
+            message,
+        )
+        or (
+            re.match(
+                r"This prompt(?: \(\d+ tokens\))? does not fit in GPU memory "
+                r"even after freeing the prefix cache", message,
+            )
+            and "refused before any work started" in message
+        )
+    )
 
 
 class OMLXAdapter:
@@ -376,6 +400,8 @@ class OMLXAdapter:
                             "invalid_response", transient=False
                         ) from None
                     if "error" in event:
+                        if output_chunks == 0 and _memory_admission_refused(event):
+                            raise SafeBackendError("capacity_unavailable")
                         raise SafeBackendError("http_5xx", transient=True)
                     if "model" in event and event.get("model") != "keepalive":
                         event_model = safe_metadata_identifier(event.get("model"))
@@ -467,6 +493,15 @@ class OMLXAdapter:
     @staticmethod
     def _json_body(response: httpx.Response) -> dict[str, Any]:
         if response.status_code >= 300:
+            if response.status_code == 400:
+                try:
+                    error_body = response.json()
+                except ValueError:
+                    error_body = None
+                if _memory_admission_refused(error_body):
+                    # The scheduler defers this unattempted call. Avoid an
+                    # immediate HTTP retry while the shared memory is busy.
+                    raise SafeBackendError("capacity_unavailable")
             if response.status_code == 401:
                 category, transient = "http_401", False
             elif response.status_code == 429:
