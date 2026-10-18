@@ -108,6 +108,12 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] 残件B4：raw_replay replay の根因を直し、正規 drain または設計廃止を完了する。
 - [ ] 残件C：必須CI・安全配備・drift=false・無人運転・09:15 automation の整合を確認する。
 
+### 2026-10-18 4項目の仕上げ
+- [ ] 仕上げ1：凍結契約外であることを確認し、共有repair feedbackを既存1024-byte内に整形、回帰とlive修復turnを確認する。
+- [ ] 仕上げ2：CF適格性を正確なexposure sourceへ結合し、既存3組の再評価・live流入率・100組到達予測日を記録する。
+- [ ] 仕上げ3：正規CF品質rejectの件数・履歴を保持してhuman_waitを解除し、system errorのalertを維持する。
+- [ ] 仕上げ4：固定200組のuncertainを不一致として実認証経路で評価し、既存floorを満たす場合だけ保守的な認証規則へ変更する。
+
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
 - [x] 5-2 ingest：`apple-watch-band-material-tradeoffs/bandwork-leather-band-experience.md` が `missing_create_frontmatter` で失敗している（2026-10-13 19:45、1/3 回目）。再試行で直っていなければ原因を見る。
@@ -144,6 +150,8 @@ created_at: 2026-10-13T20:52:29+09:00
 - 報告は、件数・hash・検証結果・判断とその理由を、この Plan の実行ログに書く。
 
 ## 実行ログ
+
+- 2026-10-18 10:30 JST — 仕上げrunを開始。指定どおり10/17 18:00以降の履歴を先に確認し、今回明示された4項目だけを同一隔離worktreeで実装・検証して一度配備する。feedback整形とuncertainを不一致に数える認証規則は今回の個別承認を優先し、cap・教師prompt/schema・試行回数・各floorは保持する。判定結果に応じた再ラベル・cohort差替え・台帳/checkpoint/lockの手編集は行わない。共有feedback・health・blind規則は独立Luna担当、CF bindingと最終統合・配備はrootが担当。前回の変更禁止判断を現在の明示承認で更新する理由をここに記録する。
 - 2026-10-17 08:35 JST　Astraが通常300秒mainlineの性能修復へ着手。Plan全文と全実行ログ（10/16 automation記録を含む）を確認。08:33実測はlast_success_at=2026-10-13T21:52:30.040495+00:00、worker_failure_count34、last_failure_at=2026-10-16T23:02:54.983453+00:00、mainline／RecallWallClockTimeout。label ledger920,968,514 bytes、rally manifest708,683,578 bytes、candidate ledger3,561,141,613 bytes、native receipts594,914,870 bytes。shard2は通常ownerの再試行で完了し08:30に400件strict import済み、supervisor PID94128／PPID1、pending0、active_workers0で次の日次prepare継続中。別worktreeで開発し、コピー側も通常APIの再検証／repairだけを用いる。前回259.435秒／473.5526秒はCF拒否のdeferredであり正式成功ではないことを確認した。4品質hold、300秒期限、quota、教師契約／prompt/schema、凍結入力は維持。独立した共通storeの完全性／caller監査をnative Lunaへ委譲し、実装・配備判断はAstraが担当する。
 - 2026-10-13 20:52 JST　Plan 作成（Claude）。ユーザーの口頭の承認と指示にもとづき、状態を ready とした。
 - 2026-10-13 20:57 JST　Astra が着手。承認範囲・禁止事項・完了条件を全文確認。7 日の無人継続確認が終わるまで running を維持する。
@@ -810,3 +818,9 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-18 10:08 JST — 09:15正本を完了した2件のlint再開・CAS受入、実稼働controller、検索隔離の正規cooldown、CF実schema拒否と未実行capacity延期の区別へ更新。旧TOMLをexact backupしprompt/updated_at以外は不変、ACTIVE/日次09:15/既存threadをreadback確認。file SHAe20c3c30d1c3da222684d0f0ac473595f0dcf6b88ca58dd586c3d0f9311a6fed、prompt SHA88269cf6385e4b4eb7dc81907a4beb5b4ae0a7cc22ad8cd5c0d09f2b57506e2c、formal_acceptance_passedfalse。旧resumeの繰返しや稼働workerの二重起動をせず、current log/receipt/実processを照合して無人継続する手順を反映した。
 
 - 2026-10-18 10:08 JST — 01:06:54 UTCの直接state/queue読取でsearch active29347/due28877/全68241行、lint active322（local244/frontier63/frontier_retry14/running1）/旧quarantine133、人判断待ち0、raw_replay active0/completed5/旧indeterminate3保持を確認。HTTPのqueue件数はcache値なので直接snapshotと混同しない。supervisor37609/search46638/lint46639は期待commandで実稼働し、保守markerなし。新HTTP runtime actual=expected9ad/driftfalse、唯一のalertはCF実失敗保持、formal last_success16:15:55 UTC/failure_count2のまま。最新native baseline50a4aaf9のA2理由は消失済み、blind12/適格CF0/100が残る。private aggregate receipt SHA3f539f0dcd4e65877b4fd2ccaafaffbe73a1e4511e689e7b8ff97e3616d9aa5d。凍結1872files/保護3項目は変更0、現207bundle input hash不一致0、LIVE tracked/index clean・元untracked14の全bytes不変も再確認。必須CI3成功と全6archive配備は完了しているが、B2/B3 drain・正式成功・品質hold・7日確認は未完としてrunning/未チェックを維持する。残件は稼働controllerと09:15 automationで追跡し、履歴・preimage・private受入証跡は再利用のため保持する。
+
+- 2026-10-18 10:30 JST — 仕上げrunを開始。指定どおり10/17 18:00以降の履歴を先に確認し、今回明示された4項目だけを同一隔離worktreeで実装・検証して一度配備する。feedback整形とuncertainを不一致に数える認証規則は今回の個別承認を優先し、cap・教師prompt/schema・試行回数・各floorは保持する。判定結果に応じた再ラベル・cohort差替え・台帳/checkpoint/lockの手編集は行わない。共有feedback・health・blind規則は独立Luna担当、CF bindingと最終統合・配備はrootが担当。前回の変更禁止判断を現在の明示承認で更新する理由をここに記録する。
+
+- 2026-10-18 10:43 JST — 仕上げの実装と局所受入を完了。初回structured request/policyのhashにはrepair feedback本文・templateが含まれず、teacher prompt/schema/frozen provenanceの変更なしを確認して共有builderだけをcompact化した。7 uniqueItemsをpointer rangeと件数へまとめた合成出力はfeedback616 bytes、既存1024-byte cap内で実repair1回・full validation成功。CF sourceの全callerを追跡し、gate側も既存の厳密exposure source bindingへ統一（10/9 cutoff・selected receipt・feature digest・judge/order条件は維持）。CFの正常な品質却下には明示kindを付けて件数と履歴を保持し、binding/timeout/transport/crash/未知failureのhuman_waitは維持する。局所634件と追加CF/worker26件、Ruff・mypy97files・import/architecture・compile・whitespace検証が成功。必須CIとlive repair/health受入はまだ未完。
+
+- 2026-10-18 10:43 JST — 固定cohortの実2394行を既存native row_integrityで2394/2394確認し、変更前後の実認証関数を実行した。従来はcomplete171/incomplete12/stable161、Wilson下限0.89571126でblind_repeat_pair_incomplete。uncertainを含む29組（片側12・両側17）をすべてcompleteかつunstableとする今回の明示承認済み保守規則ではcomplete200/incomplete0/stable161/unstable39、Wilson下限0.74455956で認証成功。repeat>=100・Wilson>=0.60のfloorは変更なし、通常labels1867/relevant450/irrelevant1417も不変。probesのuncertain46行だけを正規materializationで保持し、通常uncertain127行は除外のまま。ラベル・registration・cohortは書き換えず、認証codeとprojectionが規則を実装する。

@@ -592,6 +592,58 @@ def test_repeated_mainline_failure_stage_is_allowlisted_and_sanitized(
         assert "private" not in json.dumps(payload)
 
 
+@pytest.mark.parametrize(
+    ("worker_error_kind", "worker_error_type", "expects_human_wait"),
+    [
+        ("counterfactual_data_reject", "CounterfactualInvalid", False),
+        ("counterfactual_data_reject", "CounterfactualTimeout", True),
+        ("counterfactual_system_error", "CounterfactualTimeout", True),
+        ("counterfactual_system_error", "CounterfactualBindingError", True),
+        ("counterfactual_system_error", "CounterfactualCrash", True),
+        ("", "CounterfactualInvalid", True),
+        ("unknown", "CounterfactualInvalid", True),
+    ],
+)
+def test_counterfactual_rejection_kind_controls_repeated_failure_alert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_error_kind: str,
+    worker_error_type: str,
+    expects_human_wait: bool,
+) -> None:
+    root_name = worker_error_kind.replace("/", "_") or "empty"
+    root = tmp_path / root_name
+    _enable_native_luna_health(root, monkeypatch)
+    now = datetime.now(UTC).isoformat()
+    _write_native_luna_supervisor_status(root, status="running")
+    monkeypatch.setattr(
+        health,
+        "_distillation_state",
+        lambda _root: {
+            "worker_failure_count": 2,
+            "error_code": "distillation_run_failed",
+            "worker_error_stage": "counterfactual",
+            "worker_error_type": worker_error_type,
+            "worker_error_kind": worker_error_kind,
+            "worker_error_sha256": "e" * 64,
+            "last_failure_at": now,
+        },
+    )
+
+    payload = health.recall_distillation_health(root)
+
+    failure = payload["distillation_mainline_failure"]
+    assert failure["worker_failure_count"] == 2
+    if worker_error_kind in {"counterfactual_data_reject", "counterfactual_system_error"}:
+        assert failure["worker_error_kind"] == worker_error_kind
+    else:
+        assert "worker_error_kind" not in failure
+    has_repeated_failure = "distillation_run_repeated_failure" in payload["reason_codes"]
+    assert has_repeated_failure is expects_human_wait
+    if not expects_human_wait:
+        assert all(item["category"] != "human_wait" for item in payload["alerts"])
+
+
 def test_native_luna_supervisor_disabled_is_human_wait_without_stall_alert(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

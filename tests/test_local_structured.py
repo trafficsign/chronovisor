@@ -1760,6 +1760,57 @@ def test_schema_repair_prompt_contains_exact_pointer_expected_and_received() -> 
     assert "re-evaluate that root action or decision" in feedback
 
 
+def test_many_schema_issues_are_grouped_so_the_repair_turn_runs() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["basis_atom_ids"],
+        "properties": {
+            "basis_atom_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "uniqueItems": True,
+            }
+        },
+    }
+    invalid = json.dumps({"basis_atom_ids": ["duplicate"] * 8})
+    transport = QueueTransport(
+        invalid,
+        '{"basis_atom_ids":["first","second"]}',
+    )
+
+    result = _session(transport, max_feedback_chars=1_024).run("decide", schema)
+
+    assert result.ok is True
+    assert result.repair_turns == 1
+    assert len(result.attempts[0].issues) == 7
+    feedback = transport.requests[1].messages[-1]["content"]
+    assert "uniqueItems" in feedback
+    assert "/basis_atom_ids/1-7" in feedback
+    assert "(7 issues)" in feedback
+    assert "more" not in feedback
+    assert len(feedback.encode("utf-8")) <= 1_024
+
+
+def test_compact_feedback_bounds_many_long_utf8_issues_with_omitted_count() -> None:
+    issues = [
+        ValidationIssue(
+            pointer=f"/対象/{index}",
+            keyword=f"keyword_{index}",
+            expected="あ" * 2_000,
+            received={"type": "string", "value": "い" * 2_000},
+            message="検証理由" * 2_000,
+        )
+        for index in range(100)
+    ]
+
+    feedback = local_structured._format_validation_feedback(issues)
+
+    assert len(feedback.encode("utf-8")) <= 384
+    assert "issues omitted" in feedback
+    assert "keyword_" in feedback
+
+
 def test_validator_handles_existing_schema_subset_strictly() -> None:
     schema = {
         "type": "object",

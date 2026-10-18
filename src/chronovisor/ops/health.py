@@ -92,6 +92,10 @@ _DISTILLATION_WORKER_FAILURE_CODES = {
     "distillation_run_timeout",
 }
 _DISTILLATION_WORKER_FAILURE_STAGES = {"counterfactual", "mainline"}
+_DISTILLATION_WORKER_FAILURE_KINDS = {
+    "counterfactual_data_reject",
+    "counterfactual_system_error",
+}
 _NATIVE_LUNA_WAITING_PROGRESS_REASONS = {
     "daily_capture_in_progress",
     "daily_run_in_progress",
@@ -657,6 +661,12 @@ def _distillation_worker_failure(value: object) -> dict[str, Any] | None:
     error_sha256 = _native_luna_sha256(value.get("worker_error_sha256"))
     if error_sha256 is not None:
         public["worker_error_sha256"] = error_sha256
+    worker_error_kind = value.get("worker_error_kind")
+    if (
+        isinstance(worker_error_kind, str)
+        and worker_error_kind in _DISTILLATION_WORKER_FAILURE_KINDS
+    ):
+        public["worker_error_kind"] = worker_error_kind
     failure_at = _parse_utc_timestamp(value.get("last_failure_at"))
     if failure_at is not None:
         public["last_failure_at"] = failure_at.isoformat()
@@ -971,6 +981,13 @@ def _distillation_alerts(
         enabled
         and mainline_failure is not None
         and mainline_failure["worker_failure_count"] >= 2
+        and not (
+            mainline_failure["worker_error_stage"] == "counterfactual"
+            and mainline_failure.get("worker_error_kind")
+            == "counterfactual_data_reject"
+            and mainline_failure.get("worker_error_type")
+            == "CounterfactualInvalid"
+        )
     ):
         failure_stage = mainline_failure["worker_error_stage"]
         add(

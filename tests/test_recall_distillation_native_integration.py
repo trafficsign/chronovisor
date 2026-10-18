@@ -27,7 +27,7 @@ def _native_config(bundle: Path = Path()) -> distill.DistillationConfig:
 
 
 def _native_fixture(
-    root: Path, *, count: int = 3
+    root: Path, *, count: int = 3, uncertain: bool = False, probe: bool = False
 ) -> tuple[
     distill.DistillationConfig,
     dict[str, Any],
@@ -36,6 +36,9 @@ def _native_fixture(
     LunaBulkBundle,
 ]:
     """Build a private synthetic native bundle and its canonical source views."""
+
+    if probe and count != 2:
+        raise ValueError("probe fixture requires one complete two-row repeat pair")
 
     config = _native_config(root / "bundle")
     contract = native.ensure_contract(root, config)
@@ -105,30 +108,57 @@ def _native_fixture(
     )
     source_rows: list[dict[str, Any]] = []
     for index, rally in enumerate(rallies):
-        rally_id = str(rally["rally_id"])
+        source_rally = rallies[0] if probe else rally
+        rally_id = str(source_rally["rally_id"])
         candidate = snapshots[rally_id]["candidates"][0]
+        repeat_pair_id = "native-repeat-0" if probe else ""
+        repeat_base_sha256 = "d" * 64 if probe else ""
+        fixed_repeat = probe
+        order_swap = probe
+        blind_order = ("a_first" if index == 0 else "b_first") if probe else ""
         source_rows.append(
             {
                 "rally_id": rally_id,
                 "candidate_id": candidate["candidate_id"],
-                "as_of": rally["as_of"],
-                "as_of_us": rally["as_of_us"],
+                "as_of": source_rally["as_of"],
+                "as_of_us": source_rally["as_of_us"],
                 "input": {"synthetic_ordinal": index},
                 "snapshot_sha256": snapshots[rally_id]["snapshot_sha256"],
-                "query_sha256": rally["query_sha256"],
+                "query_sha256": source_rally["query_sha256"],
                 "context_sha256": [
-                    ref["semantic_sha256"] for ref in rally["context_refs"]
+                    ref["semantic_sha256"] for ref in source_rally["context_refs"]
                 ],
                 "candidate_text_sha256": candidate["text_sha256"],
                 "split": plan["assignments"][rally_id],
-                "group_id": rally["session_cluster_id"],
+                "group_id": source_rally["session_cluster_id"],
+                **(
+                    {
+                        "repeat_pair_id": repeat_pair_id,
+                        "repeat_base_sha256": repeat_base_sha256,
+                        "fixed_repeat": fixed_repeat,
+                        "order_swap": order_swap,
+                        "blind_order": blind_order,
+                    }
+                    if probe
+                    else {}
+                ),
                 "features": dict(features),
                 "assignment": {
                     "revision": native.NATIVE_ASSIGNMENT_REVISION,
                     "profile": distill.NATIVE_LUNA_SINGLE_PROFILE,
                     "split": plan["assignments"][rally_id],
-                    "probe": False,
+                    "probe": probe,
                     "owner": "native-luna",
+                    **(
+                        {
+                            "repeat_pair_id": repeat_pair_id,
+                            "fixed_repeat": fixed_repeat,
+                            "order_swap": order_swap,
+                            "blind_order": blind_order,
+                        }
+                        if probe
+                        else {}
+                    ),
                 },
             }
         )
@@ -138,30 +168,47 @@ def _native_fixture(
         source_rows,
         cohort=native.NATIVE_COHORT,
         split_plan_id=plan["artifact_id"],
-        shard_count=1,
+        shard_count=2 if probe else 1,
         batch_size=count,
     )
-    request = bundle.next_batch(0)
-    labels: list[dict[str, Any]] = []
-    for index, source in enumerate(request["records"]):
-        label: dict[str, Any] = {
-            "task_id": source["task_id"],
-            "input_sha256": source["input_sha256"],
-            "teacher_profile": distill.NATIVE_LUNA_SINGLE_PROFILE,
-            "native_luna": True,
-            "verdict": "relevant" if index % 2 == 0 else "irrelevant",
-            "confidence": 0.9,
-            "reason_code": "synthetic_match" if index % 2 == 0 else "synthetic_miss",
-            "rationale": None,
-        }
-        label["native_receipt"] = {
-            "task_id": source["task_id"],
-            "output_sha256": native_output_sha256(label),
-            "assignment_id": f"synthetic-assignment-{index}",
-            "run_id": f"synthetic-run-{index}",
-        }
-        labels.append(label)
-    bundle.submit(0, cursor=0, records=labels)
+    label_index = 0
+    for shard_spec in bundle.manifest["shards"]:
+        shard = int(shard_spec["shard"])
+        request = bundle.next_batch(shard)
+        labels: list[dict[str, Any]] = []
+        for source in request["records"]:
+            index = label_index
+            label_index += 1
+            label: dict[str, Any] = {
+                "task_id": source["task_id"],
+                "input_sha256": source["input_sha256"],
+                "teacher_profile": distill.NATIVE_LUNA_SINGLE_PROFILE,
+                "native_luna": True,
+                "verdict": (
+                    "uncertain"
+                    if uncertain
+                    else "relevant"
+                    if index % 2 == 0
+                    else "irrelevant"
+                ),
+                "confidence": 0.9,
+                "reason_code": (
+                    "synthetic_uncertain"
+                    if uncertain
+                    else "synthetic_match"
+                    if index % 2 == 0
+                    else "synthetic_miss"
+                ),
+                "rationale": None,
+            }
+            label["native_receipt"] = {
+                "task_id": source["task_id"],
+                "output_sha256": native_output_sha256(label),
+                "assignment_id": f"synthetic-assignment-{index}",
+                "run_id": f"synthetic-run-{index}",
+            }
+            labels.append(label)
+        bundle.submit(shard, cursor=0, records=labels)
     bundle.finalize()
     return config, contract, rallies, snapshots, bundle
 
@@ -169,8 +216,14 @@ def _native_fixture(
 def _materialize_native_fixture(
     root: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    count: int = 3,
+    uncertain: bool = False,
+    probe: bool = False,
 ) -> tuple[distill.DistillationConfig, dict[str, Any], list[dict[str, Any]]]:
-    config, contract, rallies, snapshots, bundle = _native_fixture(root)
+    config, contract, rallies, snapshots, bundle = _native_fixture(
+        root, count=count, uncertain=uncertain, probe=probe
+    )
     native.import_bundle(root, bundle.root)
     rally_map = {str(rally["rally_id"]): rally for rally in rallies}
     monkeypatch.setattr(
@@ -210,6 +263,37 @@ def test_native_bundle_materializes_to_authoritative_rows_and_gate(
     assert "profile_contract_mismatch" not in gate["reasons"]
     assert "expiry_missing" not in gate["reasons"]
     assert "teacher_labels_below_floor" in gate["reasons"]
+
+
+def test_native_uncertain_probe_materializes_only_for_a_valid_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _config, _contract, probe_rows = _materialize_native_fixture(
+        tmp_path / "valid-probe",
+        monkeypatch,
+        count=2,
+        uncertain=True,
+        probe=True,
+    )
+
+    assert len(probe_rows) == 2
+    assert all(row["verdict"] == "uncertain" for row in probe_rows)
+    assert all(row["status"] == "abstained" for row in probe_rows)
+    assert all(row["probe"] is True for row in probe_rows)
+    assert all(row["error_class"] is None for row in probe_rows)
+    assert all(
+        native.row_integrity(row, root=tmp_path / "valid-probe")
+        for row in probe_rows
+    )
+
+    _config, _contract, nonprobe_rows = _materialize_native_fixture(
+        tmp_path / "nonprobe",
+        monkeypatch,
+        count=1,
+        uncertain=True,
+        probe=False,
+    )
+    assert nonprobe_rows == []
 
 
 def test_native_import_rejects_tampered_input_hash(tmp_path: Path) -> None:

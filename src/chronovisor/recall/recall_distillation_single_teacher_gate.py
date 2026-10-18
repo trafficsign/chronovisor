@@ -203,11 +203,23 @@ def _text(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
+_DECISIVE_VERDICTS = frozenset({"relevant", "irrelevant"})
+
+
 def _complete_row(row: Mapping[str, Any]) -> bool:
     return (
-        row.get("status") == "completed"
-        and row.get("error_class") in (None, "")
-        and row.get("verdict") in {"relevant", "irrelevant"}
+        row.get("error_class") in (None, "")
+        and (
+            (
+                row.get("status") == "completed"
+                and row.get("verdict") in _DECISIVE_VERDICTS
+            )
+            or (
+                row.get("status") == "abstained"
+                and row.get("verdict") == "uncertain"
+                and row.get("probe") is True
+            )
+        )
     )
 
 
@@ -336,8 +348,9 @@ def evaluate_single_teacher_gate(
 ) -> dict[str, Any]:
     """Evaluate sealed-like rows without granting them verified-truth authority.
 
-    A usable row has ``status='completed'``, no error, a relevance verdict, and
-    a canonical adapter-observed ``provider_receipt_sha256``.  It must carry
+    A usable row has ``status='completed'`` with a decisive relevance verdict,
+    or a probe with ``status='abstained'`` and an uncertain verdict, no error,
+    and a canonical adapter-observed ``provider_receipt_sha256``.  It must carry
     immutable ``profile``, ``cohort``, ``route``, ``model_digest``,
     ``prompt_sha256``, ``schema_sha256``, and ``profile_contract_id`` identities.
     The captured provider/model/location route must match exactly.  Completed
@@ -397,7 +410,12 @@ def evaluate_single_teacher_gate(
         row for row in certifying_completed if row.get("split") in required_splits
     ]
     excluded = len(rows) - len(eligible)
-    labels = [row for row in eligible if row.get("probe") is not True]
+    labels = [
+        row
+        for row in eligible
+        if row.get("probe") is not True
+        and row.get("verdict") in _DECISIVE_VERDICTS
+    ]
     probes = [row for row in eligible if row.get("probe") is True]
     if row_validator is not None and any(not row_validator(row) for row in eligible):
         reasons.append("row_authority_mismatch")
@@ -580,7 +598,10 @@ def evaluate_single_teacher_gate(
         else:
             incomplete_pairs += 1
     stable = sum(
-        pair[0].get("verdict") == pair[1].get("verdict") for pair in complete_pairs
+        pair[0].get("verdict") in _DECISIVE_VERDICTS
+        and pair[1].get("verdict") in _DECISIVE_VERDICTS
+        and pair[0].get("verdict") == pair[1].get("verdict")
+        for pair in complete_pairs
     )
     stability = _wilson_lower(stable, len(complete_pairs))
     if incomplete_pairs:
@@ -622,6 +643,7 @@ def evaluate_single_teacher_gate(
             "complete_pairs": len(complete_pairs),
             "incomplete_pairs": incomplete_pairs,
             "stable": stable,
+            "unstable": len(complete_pairs) - stable,
             "wilson_lower": round(stability, 8),
         },
     }

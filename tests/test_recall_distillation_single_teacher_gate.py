@@ -141,6 +141,97 @@ def _gate(rows: list[dict[str, object]]) -> dict[str, object]:
     )
 
 
+def test_uncertain_repeat_rows_are_complete_and_pessimistically_unstable() -> None:
+    rows = [row for row in _passing_rows() if row.get("probe") is not True]
+    for pair_id in range(200):
+        if pair_id < 161:
+            verdicts = (
+                ("relevant", "relevant")
+                if pair_id % 2
+                else ("irrelevant", "irrelevant")
+            )
+        elif pair_id < 171:
+            verdicts = ("relevant", "irrelevant")
+        elif pair_id < 183:
+            verdicts = ("uncertain", "relevant")
+        else:
+            verdicts = ("uncertain", "uncertain")
+        for order, verdict in zip(("a_first", "b_first"), verdicts, strict=True):
+            rows.append(
+                _row(
+                    f"fixed-{pair_id}-{order}",
+                    split="test",
+                    verdict=verdict,
+                    status="abstained" if verdict == "uncertain" else "completed",
+                    probe=True,
+                    group_id=f"fixed-repeat-{pair_id}",
+                    rally_id=f"fixed-rally-{pair_id}",
+                    candidate_id=f"fixed-candidate-{pair_id}",
+                    repeat_pair_id=f"fixed-pair-{pair_id}",
+                    fixed_repeat=True,
+                    order_swap=True,
+                    blind_order=order,
+                )
+            )
+
+    validated: list[dict[str, object]] = []
+
+    def validate(row: dict[str, object]) -> bool:
+        validated.append(row)
+        return True
+
+    gate = evaluate_single_teacher_gate(
+        rows,
+        profile=PROFILE,
+        cohort=COHORT,
+        profile_contract_id="e" * 64,
+        min_labels=4,
+        min_per_class=2,
+        min_repeat_pairs=100,
+        min_repeat_stability=0.60,
+        row_validator=validate,
+    )
+
+    assert gate["passed"] is True
+    assert gate["labels"] == {
+        "eligible": 4,
+        "relevant": 2,
+        "irrelevant": 2,
+        "excluded": 0,
+    }
+    assert gate["blind_repeat"] == {
+        "complete_pairs": 200,
+        "incomplete_pairs": 0,
+        "stable": 161,
+        "unstable": 39,
+        "wilson_lower": 0.74455956,
+    }
+    assert len(validated) == 404
+    assert sum(row["verdict"] == "uncertain" for row in validated) == 46
+
+
+def test_nonprobe_abstained_uncertain_row_remains_excluded() -> None:
+    rows = _passing_rows()
+    rows.append(
+        _row(
+            "nonprobe-uncertain",
+            split="train",
+            verdict="uncertain",
+            status="abstained",
+        )
+    )
+
+    gate = _gate(rows)
+
+    assert gate["passed"] is True
+    assert gate["labels"] == {
+        "eligible": 4,
+        "relevant": 2,
+        "irrelevant": 2,
+        "excluded": 1,
+    }
+
+
 def _native_luna_rows() -> list[dict[str, object]]:
     rows = _passing_rows()
     for row in rows:

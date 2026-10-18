@@ -2503,6 +2503,54 @@ def _fingerprint_issues(issues: Sequence[ValidationIssue]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+_COMPACT_VALIDATION_FEEDBACK_BYTES = 384
+_DETAILED_VALIDATION_FEEDBACK_BYTES = 451  # 573-byte template overhead leaves 1024.
+
+
+def _clip_feedback(value: str, limit: int = 48) -> str:
+    raw = value.encode("utf-8")
+    return value if len(raw) <= limit else raw[: limit - 3].decode("utf-8", "ignore") + "..."
+
+
+def _format_validation_feedback(issues: Sequence[ValidationIssue]) -> str:
+    """Keep small detail, then group larger validator feedback by keyword."""
+    detailed = json.dumps(
+        [issue.to_dict() for issue in issues], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    if len(issues) <= 3 and len(detailed.encode("utf-8")) <= _DETAILED_VALIDATION_FEEDBACK_BYTES:
+        return detailed
+    groups: dict[str, list[ValidationIssue]] = {}
+    for issue in issues:
+        groups.setdefault(issue.keyword, []).append(issue)
+    lines: list[str] = []
+    omitted = 0
+    grouped_items = list(groups.items())
+    for pos, (keyword, grouped) in enumerate(grouped_items):
+        pointers = [issue.pointer or "/" for issue in grouped]
+        pointer_text = ", ".join(_clip_feedback(pointer) for pointer in pointers[:4])
+        if len(pointers) > 4:
+            pointer_text += f", +{len(pointers) - 4} more"
+        matches = [re.fullmatch(r"(.*)/(\d+)", pointer) for pointer in pointers]
+        if len(matches) > 1 and all(match is not None for match in matches):
+            complete = [match for match in matches if match is not None]
+            indexes = [int(match.group(2)) for match in complete]
+            if (
+                len({match.group(1) for match in complete}) == 1
+                and indexes == list(range(indexes[0], indexes[-1] + 1))
+            ):
+                pointer_text = _clip_feedback(f"{complete[0].group(1)}/{indexes[0]}-{indexes[-1]}")
+        line = f"{_clip_feedback(keyword)}: {pointer_text} ({len(grouped)} issues)"
+        candidate = "\n".join([*lines, line])
+        reserve = 40 if omitted or pos < len(grouped_items) - 1 else 0
+        if len(candidate.encode("utf-8")) + reserve <= _COMPACT_VALIDATION_FEEDBACK_BYTES:
+            lines.append(line)
+        else:
+            omitted += len(grouped)
+    if omitted:
+        lines.append(f"... ({omitted} issues omitted)")
+    return "\n".join(lines)
+
+
 def _default_transport(
     request: ChatRequest,
     *,
@@ -3482,21 +3530,11 @@ class LocalStructuredSession:
                 if choice_values
                 else _PLAIN_TEXT_REPAIR_TEMPLATE.format(
                     contract=(plain_text_contract or "").strip(),
-                    errors=json.dumps(
-                        [issue.to_dict() for issue in issues],
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
+                    errors=_format_validation_feedback(issues),
                 )
                 if plain_text_decoder is not None
                 else _REPAIR_TEMPLATE.format(
-                    errors=json.dumps(
-                        [issue.to_dict() for issue in issues],
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
+                    errors=_format_validation_feedback(issues)
                 )
             )
             feedback_bytes = len(repair_prompt.encode("utf-8"))

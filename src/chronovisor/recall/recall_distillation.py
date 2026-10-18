@@ -312,6 +312,10 @@ class DistillationError(ValueError):
     """A distillation input violates a deterministic or safety contract."""
 
 
+class _CounterfactualDataRejected(DistillationError):
+    """A completed model attempt failed output or blind agreement validation."""
+
+
 class DistillationDeferred(RuntimeError):
     """A foreground-safe worker call was deferred and must remain resumable."""
 
@@ -574,6 +578,16 @@ def _worker_call(
                     "cancelled",
                 },
             )
+        if (
+            operation in {"answer", "utility"}
+            and route_identity == dict(expected_route)
+            and model_digest == expected_digest
+            and failure_class in {
+                "repair_exhausted", "repeated_output", "feedback_too_large",
+                "output_invalid", "output_truncated", "output_too_large",
+            }
+        ):
+            raise _CounterfactualDataRejected("distillation worker output is invalid")
         raise DistillationError("distillation worker output is invalid")
     if not isinstance(response.get("result"), dict):
         raise DistillationError("distillation worker response is invalid")
@@ -5622,6 +5636,16 @@ def _unsupported_materialization_profile(label: Mapping[str, Any]) -> bool:
     )
 
 
+def _native_uncertain_probe(label: Mapping[str, Any], probe: bool) -> bool:
+    return (
+        label.get("profile") == NATIVE_LUNA_SINGLE_PROFILE
+        and label.get("kind") == "teacher-label"
+        and probe
+        and label.get("status") == "abstained"
+        and label.get("error_class") in (None, "")
+    )
+
+
 def _materialization_label_row(
     label: Mapping[str, Any],
     root: Path,
@@ -5677,15 +5701,15 @@ def _materialization_label_row(
         return None
     verdict = str(label.get("verdict") or "")
     dimension = str(label.get("dimension") or "")
+    assignment = label.get("assignment")
+    probe = isinstance(assignment, Mapping) and assignment.get("probe") is True
     if (
         label.get("authority") != "teacher-only"
-        or verdict == "uncertain"
+        or (verdict == "uncertain" and not _native_uncertain_probe(label, probe))
         or verdict
         not in (UTILITY_LABELS if dimension == "answer_utility" else RELEVANCE_LABELS)
     ):
         return None
-    assignment = label.get("assignment")
-    probe = isinstance(assignment, Mapping) and assignment.get("probe") is True
     is_ox = (
         label.get("profile") == OX_SINGLE_PROFILE
         and label.get("kind") == "teacher-label"
@@ -6528,6 +6552,19 @@ def _sealed_counterfactual_exposure_binding(
         )
     ):
         return False
+    if label.get("kind") == "counterfactual-label" and _native_counterfactual_since_approval(rally):
+        from chronovisor.recall.recall_distillation_validation import (
+            SourceBindingError,
+            _exposure_source_claim,
+            _label_source_claim,
+        )
+
+        # The captured page exposure is the CF source, not its historical FTS
+        # snapshot.  Use the same strict binding as materialization.
+        try:
+            return _exposure_source_claim(root, rally, _label_source_claim(label))
+        except SourceBindingError:
+            return False
     refs = artifact.get("candidate_refs")
     if isinstance(refs, list):
         matching_refs = [
@@ -15259,8 +15296,7 @@ def _compare_and_commit_counterfactual(
             and dict(generator_route_identity) != dict(judge_route_identity)
         )
         if (
-            response.get("order_agreement") is not True
-            or re.fullmatch(r"[0-9a-f]{64}", str(response.get("a0_sha256") or ""))
+            re.fullmatch(r"[0-9a-f]{64}", str(response.get("a0_sha256") or ""))
             is None
             or re.fullmatch(r"[0-9a-f]{64}", str(response.get("a1_sha256") or ""))
             is None
@@ -15285,6 +15321,8 @@ def _compare_and_commit_counterfactual(
             )
         ):
             raise DistillationError("counterfactual response is invalid")
+        if response.get("order_agreement") is not True or verdict == "uncertain":
+            raise _CounterfactualDataRejected("counterfactual blind comparison rejected")
         label = adjudicate_label(
             verdict,
             closed_predicate=None,
@@ -15324,7 +15362,12 @@ def _compare_and_commit_counterfactual(
             ],
         )
         return _CounterfactualBlockResult(pending=True, deferred=True, failure_class="counterfactual_transport")
-    except TimeoutError, DistillationError:
+    except DistillationError as exc:
+        failure_class = (
+            "counterfactual_data_reject"
+            if isinstance(exc, _CounterfactualDataRejected)
+            else "counterfactual_invalid"
+        )
         workset.commit(
             [claim],
             [
@@ -15335,7 +15378,7 @@ def _compare_and_commit_counterfactual(
                 }
             ],
         )
-        return _CounterfactualBlockResult(pending=True, deferred=True, failure_class="counterfactual_invalid")
+        return _CounterfactualBlockResult(pending=True, deferred=True, failure_class=failure_class)
     candidate_id_raw = candidate["candidate_id"]
     candidate_id = str(candidate_id_raw)
     ox_contract_id = _current_profile_contract_id(root, config.teacher_profile)
@@ -15451,7 +15494,9 @@ def _run_counterfactual_claim(
                 # claim and its attempt budget so a later sealed exposure can
                 # resume it without creating any label or training row.
                 workset.release_unattempted([claim], retry_after_seconds=60)
-                return _CounterfactualBlockResult(pending=True, deferred=True)
+                return _CounterfactualBlockResult(
+                    pending=True, deferred=True, failure_class="counterfactual_binding",
+                )
             continue
         if exposure and set(original_evidence) != {
             str(candidate_id) for candidate_id in exposure["candidate_ids"]
@@ -15467,7 +15512,9 @@ def _run_counterfactual_claim(
                         }
                     ],
                 )
-                return _CounterfactualBlockResult(pending=True, deferred=True)
+                return _CounterfactualBlockResult(
+                    pending=True, deferred=True, failure_class="counterfactual_binding",
+                )
             continue
         candidates = _counterfactual_additions(
             snapshot=snapshot,
@@ -15487,7 +15534,9 @@ def _run_counterfactual_claim(
                     [claim],
                     [{"status": "quarantined", "error_class": "payload_missing"}],
                 )
-                return _CounterfactualBlockResult(pending=True)
+                return _CounterfactualBlockResult(
+                    pending=True, deferred=True, failure_class="counterfactual_binding",
+                )
             mode = "remove" if candidate_id in original_evidence else "add"
             context = [
                 texts.get(str(ref["semantic_sha256"]), "")
@@ -15552,7 +15601,9 @@ def _run_counterfactual_claim(
             }
         ],
     )
-    return _CounterfactualBlockResult(pending=True, deferred=True)
+    return _CounterfactualBlockResult(
+        pending=True, deferred=True, failure_class="counterfactual_binding",
+    )
 
 
 def _native_counterfactual_since_approval(rally: Mapping[str, Any]) -> bool:
@@ -16867,9 +16918,12 @@ def _counterfactual_failure_fields(
         "counterfactual_timeout": "CounterfactualTimeout",
         "counterfactual_transport": "CounterfactualTransport",
         "counterfactual_invalid": "CounterfactualInvalid",
+        "counterfactual_data_reject": "CounterfactualInvalid",
+        "counterfactual_binding": "CounterfactualBindingError",
     }
     if failure_class in error_types:
-        digest = hashlib.sha256(failure_class.encode()).hexdigest()
+        identity = "counterfactual_invalid" if failure_class == "counterfactual_data_reject" else failure_class
+        digest = hashlib.sha256(identity.encode()).hexdigest()
         same = (
             previous.get("worker_error_stage") == "counterfactual"
             and previous.get("worker_error_sha256") == digest
@@ -16878,6 +16932,10 @@ def _counterfactual_failure_fields(
             "error_code": "distillation_run_failed",
             "worker_error_stage": "counterfactual",
             "worker_error_type": error_types[failure_class],
+            "worker_error_kind": (
+                "counterfactual_data_reject" if failure_class == "counterfactual_data_reject"
+                else "counterfactual_system_error"
+            ),
             "worker_error_sha256": digest,
             "worker_failure_count": int(previous.get("worker_failure_count") or 0) + 1 if same else 1,
             "last_failure_at": datetime.now(UTC).isoformat(),
@@ -16885,11 +16943,11 @@ def _counterfactual_failure_fields(
     if previous.get("worker_error_stage") == "counterfactual" and not written:
         return {key: previous[key] for key in (
             "error_code", "worker_error_stage", "worker_error_type", "worker_error_sha256",
-            "worker_failure_count", "last_failure_at",
+            "worker_failure_count", "last_failure_at", "worker_error_kind",
         ) if key in previous}
     return {
         "worker_failure_count": 0, "worker_error_sha256": "",
-        "worker_error_type": "", "worker_error_stage": "",
+        "worker_error_type": "", "worker_error_stage": "", "worker_error_kind": "",
     }
 
 
@@ -16911,6 +16969,7 @@ def _record_worker_failure(root: Path, error: Exception, *, timeout: bool = Fals
             "error_code": code,
             "worker_error_stage": "mainline",
             "worker_error_type": type(error).__name__,
+            "worker_error_kind": "",
             "worker_error_sha256": digest,
             "worker_failure_count": int(previous.get("worker_failure_count") or 0) + 1 if same else 1,
             "last_failure_at": datetime.now(UTC).isoformat(),

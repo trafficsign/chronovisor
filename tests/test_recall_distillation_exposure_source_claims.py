@@ -451,3 +451,39 @@ def test_selected_only_counterfactual_gate_still_rejects_unselected_pool(
     assert distill._sealed_counterfactual_exposure_binding(
         tmp_path, row, label, rally
     ) is False
+
+
+@pytest.mark.parametrize("feature_mismatch", [False, True])
+def test_selected_gate_binds_same_exact_exposure_as_materialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, feature_mismatch: bool
+) -> None:
+    artifact_id, receipt, rally = _write_exposure(
+        tmp_path, mode="remove", candidate_id=_SELECTED_CANDIDATE
+    )
+    rally["as_of"] = "2026-10-12T00:00:00Z"
+    label = _label(
+        candidate_id=_SELECTED_CANDIDATE,
+        mode="remove",
+        exposure_artifact_id=artifact_id,
+        features=_features(coverage=0.25) if feature_mismatch else _features(),
+    )
+    assignment = {"revision": distill.ASSIGNMENT_REVISION, "kind": "counterfactual"}
+    label["assignment"] = assignment
+    row = {
+        "rally_id": _RALLY_ID,
+        "candidate_id": _SELECTED_CANDIDATE,
+        "counterfactual_ref": artifact_id,
+        "assignment_authority": distill._training_assignment_authority(assignment),
+    }
+    monkeypatch.setattr(
+        distill, "_exposure_map",
+        lambda _root: {(_HOST, _SESSION_ID_SHA256, _QUERY_SHA256): [receipt]},
+    )
+    monkeypatch.setattr(
+        distill, "_materialization_snapshots",
+        lambda *_args, **_kwargs: pytest.fail("CF must not rebind to historical FTS"),
+    )
+
+    assert distill._sealed_counterfactual_exposure_binding(
+        tmp_path, row, label, rally
+    ) is (not feature_mismatch)
