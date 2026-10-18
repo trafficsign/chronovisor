@@ -145,6 +145,34 @@ def test_worker_session_ceiling_includes_fixed_schema_overhead() -> None:
     assert preflight.ok
 
 
+def test_teacher_provenance_keeps_configured_effort_when_normal_repair_disables_thinking(monkeypatch) -> None:
+    monkeypatch.setattr(worker, "_resolve_local_route", lambda role: (_route(role), "a" * 64))
+
+    class Session:
+        local_reasoning = {"level": "xhigh", "num_predict": 16384, "num_ctx": 65536}
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                ok=True, think=False, repair_turns=1, num_predict=16384, effective_num_ctx=65536,
+                value={"labels": [{
+                    "candidate_id": "candidate-1", "verdict": "relevant", "confidence": 0.9,
+                    "rationale": "synthetic match", "minimal_atom_ids": ["atom-1"],
+                    "missing_slots": [], "changing_claim": "",
+                }]},
+            )
+
+    monkeypatch.setattr(worker, "LocalStructuredSession", Session)
+    result = worker.run(_payload())
+    assert result["ok"]
+    assert result["result"]["_teacher_reasoning"] == {
+        "level": "xhigh", "final_attempt_level": False, "repair_turns": 1,
+        "output_tokens": 16384, "context_tokens": 65536,
+    }
+
+
 def test_worker_rejects_overrides_and_returns_safe_failure() -> None:
     result = worker.run(_payload(model="remote:override"))
 

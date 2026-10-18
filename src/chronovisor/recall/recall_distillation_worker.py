@@ -396,21 +396,25 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
                 or ("output_invalid" if structured.ok else "structured_failure")
             ),
         )
+    result = dict(structured.value)
+    if operation == "teacher":
+        reasoning = {
+            "level": structured.think,
+            "output_tokens": structured.num_predict,
+            "context_tokens": structured.effective_num_ctx,
+        }
+        configured = getattr(session, "local_reasoning", None)
+        if isinstance(configured, Mapping):
+            # Normal format repair may disable thinking on its final attempt.
+            # Preserve both the configured policy and the actual final attempt.
+            reasoning.update(
+                level=configured["level"], final_attempt_level=structured.think,
+                repair_turns=structured.repair_turns,
+            )
+        result["_teacher_reasoning"] = reasoning
     return _envelope(
-        ok=True,
-        operation=operation,
-        role=role,
-        request_id=request_id,
-        route=route,
-        model_digest=digest,
-        result={
-            **structured.value,
-            "_teacher_reasoning": {
-                "level": structured.think,
-                "output_tokens": structured.num_predict,
-                "context_tokens": structured.effective_num_ctx,
-            },
-        } if operation == "teacher" else structured.value,
+        ok=True, operation=operation, role=role, request_id=request_id,
+        route=route, model_digest=digest, result=result,
     )
 
 

@@ -969,3 +969,13 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-19 01:01 JST — 最新のlocal policy/distillation/worker/supervisor回帰412 passed、architecture/module/refactor契約36 passed、ruff/mypyも成功。configured cohortの2つのimportにより厳密call-site件数は1582へ更新した。architecture例外は正規generatorのみで更新し、凍結baselineは変更しない。全体7331 passedと追加216 passedに加え、今回の新規変更を局所検証済み。GitHub固定packageでの配備が必要なので、この完成sourceをcommit/pushして必須3workflowを実行し、reasoning比較が完了するまでlive checkoutとruntimeは切り替えない。
 
 - 2026-10-19 01:01 JST — 連続process/receipt観測の初版は、今回ユーザーが明示開始したAstra作業自体のCodex親processを自動実行として誤検知した。親子関係をprivate証跡へ保存し、明示作業の既知ancestorだけを別欄に記録する第2版へ移行した。自動Chronovisor呼出は除外していない。00:42以降の第2版で自動cloud process0、native日次/authority execution/receiptの新規・変更・削除0、supervisor同PID/active0を継続確認している。search通常第3周期は340.902秒・local試行16・昇格8で進行し、旧postimage復旧によるbacklog減少は推論throughputに算入しない。
+
+
+- 2026-10-19 01:11 JST — sealed300のlow測定が完了。既存Lunaとの一致231/300=77.0%、uncertainを不一致とする悲観規則でも77.0%。3x3混同行列は行=local/列=Luna、順序irrelevant/relevant/uncertainで[[168,23,11],[29,63,5],[0,1,0]]。技術失敗0/300（length0・repair exhausted0・context0）、通常repair成功3件。共有資源待ち込み1件wall中央値18.607秒・p9038.858秒・平均22.663秒、総6798.951秒。未実行の資源deferは4回で再実行し、技術成功や一致へ加算しない。Luna自身のblind161/200=80.5%は参照であり真の正解率上限とは扱わない。残るmedium/xhighを同一入力・同一budgetで継続し、lowの結果だけでは選定しない。
+
+- 2026-10-19 01:11 JST — 完成source9ec45db1をGitHub mainへpushし、Securityは成功、quality/Python3.14は全体test実行中。6種類のdependency constraintを保持した配備packageの事前取得は全て9ec45db1/MCP1.30.0と照合できた。最終配備では常駐5サービスに加え、Converge/search-label-drain/Librarian-reviewの周期processも自然終了の境界で切り替える。Librarianは常駐ではなく5分周期のbounded jobであり、実行中にはsignalせずidleで既存登録を一時保留・復元する。履歴保全の比較用に、正本ledger5本の既存prefixと凍結bulk/契約/split等63134filesのhashをprivateへRO記録した。
+
+
+- 2026-10-19 01:31 JST — 9ec45db1の必須quality/Python3.14/Securityはすべて成功。qualityの実JUnitは7337 tests・failure0・error0・skip4（7333 passed）だった。稼働auditとの照合で、既存のformat repairが最終試行だけthinking=falseにする3件を検出した。新しい来歴writerが最終試行だけをlevelとして記録すると、選定したprimary effortが失われるため、失敗回帰を先に再現し、configured level・final_attempt_level・repair_turnsを併記する修正を追加する。teacher prompt/schema・repair手順・validatorは変更せず、既存の成功条件を維持する。配備前の修正として対象commitを更新し、必須CIを新commitでも確認する。
+
+- 2026-10-19 01:31 JST — JST日付更新後の直近7完了日（10/12〜18）を正本catalogのRO照会で更新した。rally1337・通常教師候補5346（平均763.7/日、最大2480/日）。10/16の遅延到着分を含む最新catalogを使い、旧測定と混同しない。collection-reviewの同期間最大は11726.2秒/日、10/18は11593.9秒/日。既存の研究用recall-distill測定を日次教師負荷へ二重加算しない。batch throughput補測はmodel未実行のresource deferを別カウンタにし、再試行待ちを含む総wall時間も保存するよう、実行前のprivate測定scriptを整えた。
