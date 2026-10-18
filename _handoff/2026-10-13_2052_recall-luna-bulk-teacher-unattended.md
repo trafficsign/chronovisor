@@ -908,3 +908,12 @@ created_at: 2026-10-13T20:52:29+09:00
 
 
 - 2026-10-18 20:38 JST — 20:36:55 JSTに先行search periodicが自然終了し、B2単独再開controllerがidle holdを取得してcycle1へ引き継いだ。native childやsupervisorへのsignalは行っていない。直近formalは51.834秒、dirty0→0、次候補でもutility12381bytesが既存12000bytes capにより拒否。B2継続処理中の正式成功2回目を待つ。監視負荷を抑えるためprivate observerの履歴集計を全1.35GB読取から末尾32MiBへ制限し、直近25件が完全に揃い、従来の全読取結果と全aggregate一致することをRO実測（0.124秒）した。正常pipeline・300秒・validatorや履歴filesは変更していない。
+
+
+- 2026-10-18 20:43 JST — B2再開後cycle1が通常終了し、100試行/40昇格/remaining23439、330.239秒を記録。controllerは次cycleへ継続し、正式観測との並行処理を確認した。正式runは12回まで完了、dirty全件戻りはなくCF既存input cap拒否が続き、正式成功2回目は未達。20:39:50〜20:41:50のlive maintenance pathを1秒ごとのRO監視で確認したが、marker再出現なし。未知の過去writerを断定せず証跡不足のまま記録し、正常controller・supervisor・固定inputsを維持して観測を続ける。
+
+- 2026-10-18 20:58 JST — B2単独再開後の正常300秒観測を20run完了。所要51.834〜152.839秒、中央値85.153秒、終了時dirtyは全20runで0。19runはutilityの既存12000-byte cap拒否、残る1runはmodel資源待ちで、last_success_atは19:23:14.205093 JSTの1回のみ。20:38:19完了runではdaily labels/receipts各464増を同期しdirty0→464（116rally）→64→0、既存clean162726行を保持して総163190行となった。catalog noop2.085秒/checkpoint valid、sync0.264秒、追加2batch1.938/0.151秒、materialize18.202秒。これは20:36:56開始の実B2連続cycleと重なる観測である。B2は3cycleで各100試行、40/47/41昇格、remaining23320まで進行。2成功の受入条件を緩めず、固定inputs/cap/試行上限/候補順を保持して次の最大20run単位を逐次実行する。CF同一入力群の通常3回隔離は進行しており、短い観測単位の終了だけを完了理由にしない。
+
+- 2026-10-18 20:59 JST — sealed baseline・対応training snapshot・completed workの実時刻でCF rateを再計算し、適格5/100・rolling24h5件/日・機械外挿11/06 JSTは同じ。一方、18:51:43の復帰以後2.123時間では適格増分0であり、19:23の正式成功と適格CF増を区別する。短時間の0件を持続的な0件/日とは断定しないが、復帰後の本線が5件/日を維持した証拠もないため、11/06を確約せず従来24h率が続く場合の条件付き参考値とする。2成功後に再集計し、適格増分がなければ確定的な新到達日を出さない判断。
+
+- 2026-10-18 21:04 JST — Lunaの軽量RO監査で先頭ready24件のutility入力下限を確認。先頭連続3件の所属群は全15中ready6/隔離9・通常残attempt17、下限11365〜11410bytes。続く連続12件は回答本文を空とした下限だけで12189〜12220bytesとなり、既存12000-byte capでは必ず拒否される固定入力群だった。次の連続9件は11716〜11743bytesで、実回答を含む成功は未保証。原文/識別子を保存せず件数・bytesのみprivate証跡へ保持し、モデル呼出/claim/queue変更なし。これを理由に入力・prompt/schema・cap・試行回数・順序を変えることは今回の禁止範囲に触れるため行わず、既存規則の通常進行を観測する。B2第4cycleまで各100試行、計163昇格、remaining23268、controller継続/markerなしを確認。正式成功2回目は引き続き未達で、完了扱いにはしない。
