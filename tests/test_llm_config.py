@@ -1023,7 +1023,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
     distillation = tomllib.loads(text)["recall"]["distillation"]
     assert distillation == {
         "enabled": False,
-        "teacher_profile": "local-single-v1",
+        "teacher_profile": "local-triad-v1",
+        "local_single_teacher": True,
         "native_luna_enabled": False,
         "chunk_size": 25,
         "max_input_bytes": 12000,
@@ -1039,6 +1040,11 @@ def test_repository_example_has_representative_local_role_map() -> None:
         "rollout_stages": [5, 25, 100],
         "canary_min_days": 7,
     }
+    from chronovisor.recall.recall_distillation import load_distillation_config
+
+    effective_distillation = load_distillation_config(example)
+    assert effective_distillation.teacher_profile == "local-single-v1"
+    assert effective_distillation.native_luna_enabled is False
     assert all(
         config.roles[role].model == qwen_model
         for role in ("research.planner", "research.challenge", "research.tie_break")

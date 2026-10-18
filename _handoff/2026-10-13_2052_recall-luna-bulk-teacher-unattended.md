@@ -988,3 +988,6 @@ created_at: 2026-10-13T20:52:29+09:00
 
 
 - 2026-10-19 02:29 JST — 互換flagの全読取箇所を照合し、health既存distillation欄にもeffective local-single profileを表示するよう統一した。設定移行validatorは新booleanを正式な任意設定として認識し、正しい既存local設定はnoopでbytesを保持、不整合は既存どおり拒否する。新flagのloader/health/migration回帰を含む490 tests、architecture/module/refactor36 tests、ruff/mypyが成功。凍結architecture ledger/baselineと品質条件は変更していない。配備前の追加修正としてcommit/必須CIの対象を更新する。
+
+
+- 2026-10-19 02:58 JST — c685733bのquality/Python3.14は同じ設定例テスト1件で失敗し、各7338 passed/4 skippedだった。互換設定へ変えたconfig.toml.exampleに対し、テストのraw TOML期待値だけがlocal-single直指定のまま残ったことが原因。局所で同じ失敗を再現し、raw値をlocal-triad+booleanの完全一致へ更新したうえ、実loaderのeffective local-single/native無効を追加assertした。既存floor/threshold/capの完全一致assertは全て保持し、関連79 tests・ruffが成功。production sourceに追加変更はなく、完成packageの必須CIをこの修正commitで取り直す。
