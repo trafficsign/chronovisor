@@ -219,3 +219,42 @@ def test_counterfactual_keeps_one_turn_for_both_answers_and_blind_orders(tmp_pat
     assert result["verdict"] == "neutral"
     assert calls == ["answer", "answer", "utility", "utility"]
     assert turns == ["enter", "exit"]
+
+
+def test_mainline_deadline_reaps_child_and_releases_reserved_turn(tmp_path, monkeypatch) -> None:
+    _isolate(tmp_path, monkeypatch)
+
+    class MainlineDeadline(BaseException):
+        pass
+
+    started = []
+    popen = subprocess.Popen
+
+    def record_child(*args, **kwargs):
+        child = popen(*args, **kwargs)
+        started.append(child)
+        return child
+
+    monkeypatch.setattr(research_scheduler.subprocess, "Popen", record_child)
+    with pytest.raises(MainlineDeadline):
+        with research_scheduler.research_lane(
+            "deadline", enabled=True, mode="sleep", purpose="sleep",
+            needs_model=True, wait_timeout_seconds=1, reserve_model_turn=True,
+        ) as lease:
+            checks = 0
+
+            def cancelled():
+                nonlocal checks
+                checks += 1
+                if checks == 2:
+                    raise MainlineDeadline()
+                return False
+
+            monkeypatch.setattr(lease, "cancelled", cancelled)
+            research_scheduler.run_cancellable_command(
+                [sys.executable, "-c", "import time; time.sleep(60)"], "", lease,
+                timeout_seconds=10, inherit_model_admission=True,
+            )
+    assert len(started) == 1 and started[0].poll() is not None
+    with ollama_lease.model_resource_lease(exclusive=True, timeout_ms=0):
+        pass

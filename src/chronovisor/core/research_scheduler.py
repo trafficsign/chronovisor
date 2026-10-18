@@ -581,6 +581,13 @@ def run_cancellable_command(
         status = "error"
         error = f"{exc.__class__.__name__}: {exc}"
     finally:
+        # A mainline wall-clock deadline is a BaseException. It must propagate,
+        # but its isolated child must not retain a model lease after the run.
+        if process.poll() is None:
+            with suppress(ProcessLookupError):
+                process.kill()
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=0.05)
         _set_model_phase(
             lease.admission.run_id,
             active=False,
