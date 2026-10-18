@@ -235,6 +235,12 @@ class OMLXAdapter:
                 payload["reasoning_effort"] = think
                 if model == "qwen3.8-flash-next-chat":
                     template_kwargs["reasoning_effort"] = think
+                    if format_value is not None:
+                        # MLX-Serve masks thinking when schema and a finite
+                        # reasoning budget coexist. Keep the schema active at
+                        # the final-answer boundary; max_tokens still bounds
+                        # the entire generation, including reasoning.
+                        payload["reasoning_budget_tokens"] = -1
         return payload
 
     def _post(

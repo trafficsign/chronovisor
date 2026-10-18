@@ -991,3 +991,11 @@ created_at: 2026-10-13T20:52:29+09:00
 
 
 - 2026-10-19 02:58 JST — c685733bのquality/Python3.14は同じ設定例テスト1件で失敗し、各7338 passed/4 skippedだった。互換設定へ変えたconfig.toml.exampleに対し、テストのraw TOML期待値だけがlocal-single直指定のまま残ったことが原因。局所で同じ失敗を再現し、raw値をlocal-triad+booleanの完全一致へ更新したうえ、実loaderのeffective local-single/native無効を追加assertした。既存floor/threshold/capの完全一致assertは全て保持し、関連79 tests・ruffが成功。production sourceに追加変更はなく、完成packageの必須CIをこの修正commitで取り直す。
+
+
+- 2026-10-19 03:23 JST — 配備候補adf5bec3のquality/Python3.14/Securityがすべて成功。qualityの実JUnitは7343 tests・failure0・error0・skip4（7339 passed）。6 constraint cohortの事前取得も全て同commit/MCP1.30.0と一致した。測定中の子processはLIVE sourceを読むため、全3水準とバッチ補測が終わるまでLIVE checkout/runtime pinは変更しない。旧supervisorは同PID・disabled、process/receiptの自動cloud0を継続観測中。
+
+
+- 2026-10-19 03:53 JST — medium300件が完了し、lowと全300件のlabel hash・混同行列が一致したため、実serverと公式v26.10.2 sourceを追加照合した。MLX-Serveはlow=2048/medium=8192の有限reasoning budgetとJSON schemaが共存するとthinkingをoffへ再描画する。実server logにも同じfallbackを確認したため、01:11のlow77.0%およびmedium77.0%はthinking-offの診断結果として保持し、reasoning比較・選定根拠から除外する。mediumのwall中央値24.862秒/p9060.344秒、技術失敗0/repair成功3も同じ扱い。元結果・ログは書換えない。xhighは既定budget=-1で実thinking=true・reasoning boundary後のschema適用を確認済みなので、進行中shardを止めず完走後にlow→mediumを再測定する。待機だけの所有batch controllerはchild0を確認して停止し、修正後の補測に差し替える判断。
+
+- 2026-10-19 03:53 JST — Qwenのstructured reasoning requestへreasoning_budget_tokens=-1を明示し、最終回答のschema/validator・固定input/prompt・通常repairを保持したままthinkingを有効にする。全生成のmax_tokens16384は維持し、独立の有限reasoning予算だけを外すruntime修正でありquality gateは変更しない。3水準のpayload回帰を先に失敗再現し、別モデル・通常非structured・repairのthinking=falseへ影響しないことも検査する。再測定はprivate別ディレクトリへ保存し、実responseのreasoning文字数・token数・finish reasonを本文なしで追加記録する。supervisor/model server/稼働shardへのsignalは行っていない。

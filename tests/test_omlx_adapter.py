@@ -47,6 +47,7 @@ def _mock_models_do_not_use_dflash(
                     "Muse-Glimmer-30B-4bit": {"dflash_enabled": False},
                     "Muse-Glimmer-30B-8bit": {"dflash_enabled": False},
                     "Ornith-1.5-9B-MLX-4bit": {"dflash_enabled": False},
+                    "qwen3.8-flash-next-chat": {"dflash_enabled": False},
                 }
             }
         )
@@ -163,6 +164,56 @@ def test_generate_maps_reasoning_level_to_omlx_controls() -> None:
     assert captured[0]["reasoning_effort"] == "low"
     assert captured[0]["chat_template_kwargs"] == {"enable_thinking": True}
     assert captured[0]["enable_thinking"] is True
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "xhigh"])
+def test_qwen_schema_keeps_reasoning_enabled_with_bounded_total_output(
+    effort: str,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured.append(_json(request))
+        return httpx.Response(200, json=_chat_json('{"ok":true}'), request=request)
+
+    OMLXAdapter(transport=httpx.MockTransport(handle)).generate(
+        replace(
+            _minimal_message_request(think=effort),
+            format=schema,
+            max_output_tokens=16_384,
+        ),
+        model="qwen3.8-flash-next-chat",
+    )
+
+    body = captured[0]
+    # MLX-Serve disables thinking with schema plus a finite reasoning budget.
+    assert body["reasoning_budget_tokens"] == -1
+    assert body["max_tokens"] == 16_384
+    assert body["reasoning_effort"] == effort
+    assert body["chat_template_kwargs"] == {
+        "enable_thinking": True, "reasoning_effort": effort,
+    }
+    assert body["response_format"]["json_schema"]["schema"] == schema
+
+
+@pytest.mark.parametrize(
+    ("model", "think", "format_value"),
+    [
+        ("qwen3.8-flash-next-chat", False, {"type": "object"}),
+        ("qwen3.8-flash-next-chat", "low", None),
+        ("m", "low", {"type": "object"}),
+    ],
+)
+def test_qwen_schema_budget_override_does_not_change_other_requests(
+    model: str, think: bool | str, format_value: dict[str, str] | None,
+) -> None:
+    adapter = OMLXAdapter()
+    body = adapter._request_payload(
+        replace(_minimal_message_request(think=think), format=format_value),
+        model=model,
+    )
+    assert "reasoning_budget_tokens" not in body
 
 
 @pytest.mark.parametrize(
