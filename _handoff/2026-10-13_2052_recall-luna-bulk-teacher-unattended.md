@@ -118,7 +118,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] 停滞1：稼働を止めず段階時間・run前後dirty数・source writerを実測し、反復runの増減を記録する。
 - [x] 停滞2：共有経路の根因を修正し、既存300秒・quota・全stage・validatorを維持して回帰と必須CIを通す。
 - [x] 停滞3：formal成功の長時間不在と継続deferを、品質data outcomeと独立したreal health alertへ出す。
-- [ ] 停滞4：安全境界で一度配備しdrift=false、B2継続下で正式成功時刻の2回更新を確認、CF率・予測日・09:15 automationを更新する。
+- [x] 停滞4：安全境界で一度配備しdrift=false、B2継続下で正式成功時刻の2回更新を確認、CF率・予測日・09:15 automationを更新する。
 
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
@@ -147,7 +147,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 品質受入待ち：2026-10-18 12:29 JSTの234b7e05による通常baselineでは、固定split・時系列・assignment・row integrityとblind repeatが全て通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100で、指定の既存3組を手編集なしで適格化し、新規1組も通常pipelineで採用した。post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。直近24時間の実生成完了は5組（今回の制御付きformal runを含む）で、同率5組/日が続く前提の100組到達予測は2026-11-06 JST。自動運転だけの保証率とは扱わず、09:15確認で通常運転の実績と予測日を更新する。uncertainを含む29組は固定cohortのまま不一致として数え、repeat200・stable161・Wilson下限0.74455956で既存floor100/0.60を満たした。
+- 品質受入待ち：2026-10-18 22:55 JSTの364811daによるsealed baselineと対応snapshotでは、固定split・時系列・assignment・row integrityとblind repeatが通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100、post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。適格workの実完了時刻によるrolling24hは4組/日（今回の通常formal観測を含む）へ減り、同率が続く場合の100組到達参考日は2026-11-11 JSTへ更新した。一方、18:51の復帰以後4.059時間の適格増分は0で、2回の正式成功も適格CF増とは一致しない。短時間の0件を持続的な0件/日とは断定せず、11/11も確定日・自動運転の保証率にはしない。09:15確認で実流入と条件付き予測を更新する。固定blind repeatは200組・stable161・unstable39・Wilson下限0.74455956で既存floor100/0.60を維持。
 - 7日無人継続は未完。別モデルA300件の独立比較測定は完了し、一致率72.6667%のため日次Lunaを継続する。補助比較Bも300件終端し、有効287件の一致165/287（57.4913%）、技術失敗13件を分母から除外した。モデル不変性の合格とは扱わず、日次Lunaを維持する。既存09:15確認で追跡する。
 
 ## 受け渡しメモ（次担当へ）
@@ -925,3 +925,12 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-18 21:35 JST — 正式mainlineとobserverの指定を独立RO照合。Convergeは有効化/cold_start_dueを条件にcold_start=True/max_elapsed_seconds=300を明示し、実Launchd wrapperも--no-sleep、observerと一致する。任意sleep laneの既定falseは別経路であり、観測側の指定は保持する。cold_startによる成功定義の差はなく、実payloadの固定12000bytes拒否がdefer原因であることをsource/receiptで確認した。追加の日次400行は21:15:24完了runでdirty0→400（100rally）→0、既存clean163190行を保持し総163590行となった。run136.929秒、catalog noop2.134秒/checkpoint valid、sync0.236秒、materialize19.043秒。B2第9cycleまで899試行/475昇格/remaining22926で継続しており、source差分持越しは維持される一方、正式成功の2回目はまだ未達。
 
 - 2026-10-18 21:58 JST — 2つ目の正常観測20runを完了し、74.344〜148.028秒・中央値104.570秒、終了時dirty全て0、固定input cap拒否19/未実行資源待ち1と集計。前単位と合わせ40runで終了時dirty0を維持したが、正式成功は19:23:14の1回だけで、停滞4は未チェック。B2は12cycle/1108試行/581昇格/remaining22781まで継続。usage待ち等でも受入観測を継続できるようprivate observerに--continue-batchesを追加し、20run単位の別名receiptを保ちながら実成功2回で停止、B2停止/観測errorでは停止するようにした。CLI parseを確認後、旧observer終了と残process0を確認して21:57:28に単一ownerで実起動した。正式API/全stage/300秒/候補順/通常attempt上限/30秒のrun間隔は不変、source追加変更・追加配備なし。09:15 promptの既存単一observer確認は同じscript名に適用され、重複起動を防止する。
+
+
+- 2026-10-18 22:54 JST — 正式成功2回の受入を達成。state.last_success_atは19:23:14.205093 JST、22:54:22.974731 JSTに実前進し、通常cold_start=True/max_elapsed_seconds=300の全stage実行は各116.573秒/143.801秒だった。後者はcatalog noop2.490秒・checkpoint valid before/after、CF block97.142秒（4呼出48.803/9.124/17.121/13.647秒）、materialize18.185秒、preflight11.509秒。通常CF1件作成でdirty0→1→0、既存clean164854行を保持し総164855行、failure_count0へ正常更新した。前者はB2 controllerと先行periodicが稼働、後者は実B2 continuous cycleが稼働し、記録済み19:40:39〜20:03:48の停止区間は受入から除外した。成功定義・inputs・候補順・全stage・cap・quotaは変更していない。単一observerは2回の実成功を検知してexit0、追加runを開始せず正常終了した。
+
+- 2026-10-18 22:55 JST — 最終観測単位19runは81.804〜148.047秒・中央値105.802秒、全run終了時dirty0。固定utility input cap拒否14、正常CF品質reject3、未実行resource defer1、正式成功1で、品質rejectとsystem errorの従来分類を保持した。直前2単位と合わせ59runすべて終了時dirty0で、日次とB2の実変更が継続しても過去全行のre-dirtyは再発なし。sealed CF再集計は適格5/100、rolling24h4件/日・残95・条件付き11/11 JSTへ更新。一方、復帰後4.059時間の適格増分は0なので確定到達日は出せず、正式成功をCF適格増へ読み替えない判断をブロッカーへ反映した。
+
+- 2026-10-18 23:00 JST — 最終HTTP/新MCP init/statusはactual=expected364811da・drift=false、成功後のhealthはcounterfactual_pairs_below_floor/data_waitのみで、新停滞alertと従来system alertは正常解除。sealed formal progressはattempt80/success2/連続defer0/last_outcome=succeeded。21:23の2時間超・連続defer2回以上での実発報と、その後の実成功での解除を両方確認した。実通常cadence50〜55分に対する約2回分と余裕を閾値2時間の根拠として保持する。全6archiveのdirect_urlを再読して364811da、常駐5serviceの実process pathを照合。Convergeは周期実行なので旧worker不在を障害扱いせず、現jobの登録・30分interval・直前exit0と、同archiveによる今回の実成功を確認した。supervisorは同process、B2は23cycle/2115試行/1169昇格/remaining22097で継続、markerなし。凍結旧1872files・保護3項目変更0、現239bundle input不一致0。必須3CIの成功、09:15 automationのACTIVE/毎日09:15と更新済みpromptのhash、GitHub main=364811daを再照合した。
+
+- 2026-10-18 23:00 JST — private deploy/final-live-runtime-receipt.json（SHAd587cdc50ad58c555c01c76cd1043dc66105b4fb532e40701134719eb9da88db）を別名新規保存し、operational_stall_acceptance_passed/formal_mainline_progress_accepted=trueとした。全品質gateのformal_acceptance_passed/promotion_allowedはCF floor未達のためfalseを維持し、運用受入と昇格を区別する。停滞4を完了へ更新し、今回の安全配備は18:47の一度だけ、追加source変更・追加配備なし。09:15 promptはfinal receipt優先と実2成功照合に既に対応しており追加変更不要と判断。残る固定CF utility input cap拒否は固定inputs/validatorを変えず通常規則で処理を継続する。19:08の一回のcatalog再構築のexact trigger、19:40の一時marker writerは当時の証跡不足で未特定のまま明記する。CF100・B2/B3全件drain・7日無人継続は今回の停滞受入と別の未完項目として、Plan全体はrunningを維持する。
