@@ -64,7 +64,7 @@ created_at: 2026-10-13T20:52:29+09:00
 
 ### Phase 2：過去分の一括ラベル付け
 - [x] 2-1 過去の全 rally に当時時点の索引で候補を作り、Luna で relevance を判定する。native Luna worker を並列で、使えるだけ使う。凍結 snapshot・batch・resume cursor で再開できる形にする。10/9 の生成と同じ検査（ID、件数、hash、単一 writer、atomic 保存）を通す。
-- [ ] 2-2 blind repeat（順序を入れ替えた 2 回）と、時系列の train / validation / locked test を、既存の single-teacher gate が受け取れる形で揃える。
+- [x] 2-2 blind repeat（順序を入れ替えた 2 回）と、時系列の train / validation / locked test を、既存の single-teacher gate が受け取れる形で揃える。
 - [x] 2-3 relevant / irrelevant の比を記録する。8 月の較正は正例が 93% で「常に想起」を学習した。同じ偏りが無いことを確かめる。偏っていたら、学習に使う前に対処を決めて記録する。
 - [x] 2-4 数百件を別モデル（ローカル教師。可能ならもう一つ）にも判定させ、Luna との一致率を記録する。P1 の「判定モデルの種類で変わらないこと」の根拠にする。
 
@@ -99,7 +99,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] 修復12：前後計測、残る品質hold、automation整合と後片付けを記録する。
 
 ### 2026-10-17 残件の自律解消
-- [ ] 残件A1：blind repeat の不足を正規の独立判定・import で解消する。
+- [x] 残件A1：固定cohortと独立判定を保持し、承認済みのuncertainを不一致とする保守的規則でblind repeatの認証を満たす。
 - [x] 残件A2：固定 split identity、時系列、割当、row integrity の producer と実証データを整える。
 - [ ] 残件A3：10/9 以降の記録から gate 適格 counterfactual を正規 pipeline で蓄積する。
 - [x] 残件B1：旧 capture 履歴を保持し、現在の障害と区別して health を修正する。
@@ -109,10 +109,10 @@ created_at: 2026-10-13T20:52:29+09:00
 - [ ] 残件C：必須CI・安全配備・drift=false・無人運転・09:15 automation の整合を確認する。
 
 ### 2026-10-18 4項目の仕上げ
-- [ ] 仕上げ1：凍結契約外であることを確認し、共有repair feedbackを既存1024-byte内に整形、回帰とlive修復turnを確認する。
-- [ ] 仕上げ2：CF適格性を正確なexposure sourceへ結合し、既存3組の再評価・live流入率・100組到達予測日を記録する。
-- [ ] 仕上げ3：正規CF品質rejectの件数・履歴を保持してhuman_waitを解除し、system errorのalertを維持する。
-- [ ] 仕上げ4：固定200組のuncertainを不一致として実認証経路で評価し、既存floorを満たす場合だけ保守的な認証規則へ変更する。
+- [x] 仕上げ1：凍結契約外であることを確認し、共有repair feedbackを既存1024-byte内に整形、回帰とlive修復turnを確認する。
+- [x] 仕上げ2：CF適格性を正確なexposure sourceへ結合し、既存3組の再評価・live流入率・100組到達予測日を記録する。
+- [x] 仕上げ3：正規CF品質rejectの件数・履歴を保持してhuman_waitを解除し、system errorのalertを維持する。
+- [x] 仕上げ4：固定200組のuncertainを不一致として実認証経路で評価し、既存floorを満たす場合だけ保守的な認証規則へ変更する。
 
 ### Phase 5：別件の修理
 - [x] 5-1 session_sweeper：2 セッションで `TypeError: Object of type bytes is not JSON serializable`。
@@ -141,7 +141,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - 配備後、runtime の drift が false であること。
 
 ## ブロッカー（発生時のみ）
-- 品質受入待ち：A2は競合修正9ad9599bの実配備後、09:28 JSTのnative baseline77868fb8で固定split identity・時系列・assignment・row authority/integrityの全理由が解消した。残る固定blindの片側uncertain12組は現immutable契約下で再判定できず、自動解消日は無い。gate適格CFは0/100。旧候補とsealed exposureのID/hash不一致、および新規rallyの永久embargoを直す新規source専用producerを9f8c3babとして配備済み。01:40 JSTまでに最初の通常daily exportが現在inventoryをanchorとして実scheduleを初期化し、generation1/rally登録0を確認した。既存記録を再bindせず、以後の独立group・closed source・正確な実露出を無人登録する。新規適格証跡の到着率が無い段階では充足日を算定できない。過去の「ユーザー判断待ち」は今回の範囲では解除済みで、品質条件は維持する。
+- 品質受入待ち：2026-10-18 12:29 JSTの234b7e05による通常baselineでは、固定split・時系列・assignment・row integrityとblind repeatが全て通過し、残るgate理由はcounterfactual_pairs_below_floorだけ。CFは5/100で、指定の既存3組を手編集なしで適格化し、新規1組も通常pipelineで採用した。post-cutoff・distinct judge・両順序一致・既存validator・selected-only条件は維持する。直近24時間の実生成完了は5組（今回の制御付きformal runを含む）で、同率5組/日が続く前提の100組到達予測は2026-11-06 JST。自動運転だけの保証率とは扱わず、09:15確認で通常運転の実績と予測日を更新する。uncertainを含む29組は固定cohortのまま不一致として数え、repeat200・stable161・Wilson下限0.74455956で既存floor100/0.60を満たした。
 - 7日無人継続は未完。別モデルA300件の独立比較測定は完了し、一致率72.6667%のため日次Lunaを継続する。補助比較Bも300件終端し、有効287件の一致165/287（57.4913%）、技術失敗13件を分母から除外した。モデル不変性の合格とは扱わず、日次Lunaを維持する。既存09:15確認で追跡する。
 
 ## 受け渡しメモ（次担当へ）
@@ -832,3 +832,23 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-18 11:07 JST — fixed cohortの実gate証跡SHA5e8611a0e6edcd125ed7385c3011c6b44179b36381842479adcc5fa301807e3cをrootが確認。凍結1872files/保護3件/現209bundle inputは変更0・不一致0（before証跡SHA09c3c042b182e406c7bbbfba3cdd15306f3d43ce06c4f3056a5ce8063b8f0b7a）。実repair metadata-only observerは新archive Pythonのno-model fixtureで戻り値・引数・例外identity保持を検証。配備helperのobserver依存欠落、B3新wrapper生成漏れ、maintenance guard欠落を本番実行前に訂正してAST/shell/hashを確認した。
 
 - 2026-10-18 11:10 JST — 初回quality CIは7283passed/6failed/4skipped/57deselected。6件は共有formatterが単一のsemantic errorまでcompact化し、ingestの既存4096-byte境界と詳細repair指示を変えていた互換性回帰。validatorやテスト期待を緩めず、単一errorは従来の完全JSON・既存cap fail-closedを保持し、今回問題の複数issueだけを集約するよう訂正した。同じworktreeでlocal structured・ingest schema・triage planの202件/Ruff/whitespaceが通過。初回packageは未配備のまま、修正commitに必須CIを再実行するため配備は一度の計画を維持する。
+
+- 2026-10-18 11:35 JST — 修正package234b7e05のquality・Python3.14 compatibility・Securityが全て成功。qualityの全体pytestは7289passed/4skipped/57deselected、Ruff/mypy/import/architecture/compile/semantic smoke/HNSWも成功した。GitHub mainと配備候補を照合し、所有maintenanceを作成して既存Converge/search-labelの自然終了を待機中。supervisorは同じPIDを維持し、実行中shardへのsignalや台帳・lockの手編集は行わない。今回の本番切替はまだ0回。
+
+- 2026-10-18 11:43 JST — safe boundary待ちの残りは既存Converge配下のcodex_record保存job。CPU約99%で処理中であり、source確認では背景jobの既存timeout1800秒が境界（11:59 JST頃）、maintenanceの900秒は子process停止timerではない。作業を短くするために記録保存を中断するより、既存の自然終了または既存timeoutを待つ判断。対象外の保存処理へ変更・signalを加えず、今回の4修正だけを一度配備する。最終234b7e05 archiveでもmetadata observerのno-model fixtureが通過した。
+
+- 2026-10-18 11:55 JST — 上記11:59頃は保存子job単体のtimeout境界で、Converge全体の終了時刻ではないと訂正。retry_dueは最大8jobを逐次実行し、その後にsession sweepと900秒maintenanceが続く。旧9ad9599bと配備候補の該当sourceは同一。ROの現queueはrunning1（保存）・queued1（content correction）で、後続処理を省略したりqueueを改変したりせず、全体の実idleを待つ。遅延は新修正のCI失敗や停止ではなく、既存保存jobを中断しないための配備待機である。
+
+- 2026-10-18 12:15 JST — Convergeが既存処理を終了し、idle periodic hold、supervisor worker0/child0、既存ingest/distillation OS leaseを確認して234b7e05へ今回一度の配備を実施。dashboard/LAN/ingest-drain/reranker/semanticの実archive/direct_urlが全て同commit、supervisorは再起動なし。Convergeは正式run後に同じpackageでscheduleを復帰する。最初の通常300秒runはcatalog advance213秒とmaterialization進捗を保存して281秒でbudget defer。2回目はcatalog advance2秒、CF1件を通常commitし、materializationの再評価を再開した。既存capやattemptは変更していない。
+
+- 2026-10-18 12:28 JST — 仕上げ1をliveで受入。3回目の通常formal runでutility初回出力のuniqueItems違反7件を観測し、既存1024-byte capのままrepair_turns1/attempts2まで到達した。修復後も5件の同違反が残り、full validatorはrepair_exhaustedとして正しく拒否した。入力・出力・labelは手修正せず、feedback_too_largeでrepairが到達不能だった不具合の解消と、修復後の既存validation維持を実証。synthetic7件の回帰では修復後validも確認済み。metadata-only child証跡はprivate live-finishing-3-result-counterfactual-child-observation.jsonl。配備後の凍結1872files・保護3件・212bundle入力は変更0/不一致0。
+
+- 2026-10-18 12:29 JST — 仕上げ2・4を通常baselineと対応training snapshotで受入。指定のrun22/run25/formal32は全てgate適格、新規remove1組を含め5/100となった。全行integrity/authority理由なし、固定blindはcomplete200/incomplete0/stable161/unstable39/Wilson下限0.74455956で、変更前171/12/161/0.89571126から保守的な分母へ移行した。固定cohort・labels・登録・floor100/0.60は不変。既存add3組をselected-only条件のまま除外し、eligibilityを広げない。CFのrolling24h実生成完了5組から、残95組/5組日=19日、予測日2026-11-06 JST。観測窓には制御付きlive formalも含むため、無人率の保証ではなく、通常運転の次回実績で更新する。
+
+- 2026-10-18 12:29 JST — 仕上げ3をHTTP healthで受入。今回の修復不能schema出力をworker_error_kind=counterfactual_data_reject、CounterfactualInvalid、failure_count3として保持しながら、distillation_run_repeated_failureはreason_codesから消えた。新規CF・拒否・retry/quarantineは通常workset処理で、履歴やstateを手変更していない。timeout/transport/binding/crashのalert維持は既存経路と回帰で確認済み。maintenance中のdaily capture/run stale警告は別原因として保持し、復帰後に再確認する。CF1件を作成したrunがmaterializationで延期し、次runが品質rejectとなったため、この時点のformal last_success_atは前進していないことを別に記録する。
+
+- 2026-10-18 12:38 JST — 復帰を確認。Convergeも234b7e05の実archiveへ戻り、全6 service一致、HTTPと新規MCPのactual/expectedが同commitでdrift=false、Semantic/Reranker ready、LAN TLS/auth401。所有ingest leaseを解放し、Converge/search periodicを復帰、所有maintenanceを撤去した。supervisorは同じprocessのままdaily captureを継続し、B2/B3は新pinとhashを照合した単一controllerがそれぞれ子処理を開始している。controller復帰helperのHTTP辞書比較が追加metadataまで一致を要求して一度停止したため、必須3項目（actual/expected/drift）の完全一致へ訂正して実行成功。変更前の停止はcanonical helper更新より前で、runtimeの不一致ではなかった。
+
+- 2026-10-18 12:38 JST — 通常Convergeも今回の制御付きrun後にCF品質rejectを処理し、failure_count4/counterfactual_data_rejectを保持、CFの反復失敗human_waitは発生していない。現worksetには従来上限3でquarantinedとなった候補、新規completed候補、attempt2でreadyへ戻った候補が存在し、上限やbackoffを変えずに進む。健康判定は一度CF件数のdata_waitだけとなった後、進行中のnative daily captureに伴うdaily run staleを別警告として再表示している。これをCF修正に紛れて抑止せず、既存09:15確認へ残す。formal last_success_atは未前進なので、従来の全formal成功条件はpartial receiptとして保持し、4項目の技術受入と混同しない。global PlanはCF100件・各drain・7日観測が未完のためrunningを維持する。
+
+- 2026-10-18 12:38 JST — canonical recall-p2b automationへstrict CASで新規則・分類・現package/receipt照合・CF実測予測を反映し、読み戻し成功。ACTIVE・毎日09:15・既存target thread等は保持。prompt SHAは95f1d567bef230d4a1b02fef91f3b8b1fd2cddc2d5971bbd7724309f66e002beで、旧bytesはprivate backupへ保持した。今回のsource変更は必須CI成功の234b7e05のみを一度配備し、後続変更はこのPlanの結果記録だけ。private受入証跡と検証用worktreeは再利用のため保持し、一時CASテストdirectoryは実行後に削除済み。
