@@ -68,7 +68,10 @@ live_egress_enabled = false
 enabled = false
 # Local labels have a separate provenance cohort. Existing independence and
 # promotion requirements still apply even when only one teacher is available.
-teacher_profile = "local-single-v1"
+teacher_profile = "local-triad-v1"
+# Older disabled supervisors can still read the parent profile. The effective
+# teacher identity and all new label provenance use local-single-v1.
+local_single_teacher = true
 native_luna_enabled = false
 chunk_size = 25
 max_input_bytes = 12000

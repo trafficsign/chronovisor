@@ -3031,6 +3031,13 @@ def load_distillation_config(config_path: Path | None = None) -> DistillationCon
     if not isinstance(capture, bool):
         raise DistillationError("recall.distillation.capture_enabled must be boolean")
     teacher_profile = table.get("teacher_profile", LOCAL_TRIAD_PROFILE)
+    local_single = table.get("local_single_teacher", False)
+    if not isinstance(local_single, bool):
+        raise DistillationError("local_single_teacher must be boolean")
+    if local_single:
+        if teacher_profile != LOCAL_TRIAD_PROFILE or table.get("native_luna_enabled", False) is not False:
+            raise DistillationError("local_single_teacher requires the local profile and disabled Luna")
+        teacher_profile = LOCAL_SINGLE_PROFILE
     if teacher_profile not in TEACHER_PROFILES:
         raise DistillationError("recall.distillation.teacher_profile is invalid")
     native_luna_enabled = table.get("native_luna_enabled", False)

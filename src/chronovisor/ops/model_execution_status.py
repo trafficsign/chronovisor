@@ -37,7 +37,14 @@ def model_execution_status(root: Path) -> dict[str, Any]:
         model = str(route.get("model") or "")
         reasoning = local_reasoning_settings(role, model, root=root)
         distillation = config.get("recall", {}).get("distillation", {})
-        profile = distillation.get("teacher_profile")
+        profile = distillation.get("teacher_profile", "local-triad-v1")
+        local_single = distillation.get("local_single_teacher", False)
+        if not isinstance(local_single, bool):
+            raise ValueError("invalid local teacher selector")
+        if local_single:
+            if profile != "local-triad-v1" or distillation.get("native_luna_enabled", False) is not False:
+                raise ValueError("inconsistent local teacher selector")
+            profile = "local-single-v1"
         return {
             "automatic_cloud_allowed": automatic_cloud_allowed(root),
             "teacher": {

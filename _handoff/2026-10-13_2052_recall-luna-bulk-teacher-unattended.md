@@ -982,3 +982,6 @@ created_at: 2026-10-13T20:52:29+09:00
 
 
 - 2026-10-19 01:59 JST — 25c1819aのPython3.14/Securityは成功したが、qualityは既存Dashboard WebSocketテスト1件だけで失敗（7333 passed/4 skipped）。HTTPヘッダの受信後、server threadのfinallyでstream semaphoreを返す前に2枠が空いたと検査する競合だった。private pytest probeでcleanupを50ms遅らせると同じ2回目のnonblocking acquire失敗を再現。テストclientを正常EOFまで読むよう修正し、同じ遅延注入で1 passed、既存LAN/WebSocket契約5 passedを確認した。認証・Origin・2枠の上限・HTTP statusの全assertとtimeout2秒は保持し、production Dashboardには変更しない。成功するまで単にrequeueする扱いにはせず、この修正をcommitして必須CIを再実行する。
+
+
+- 2026-10-19 02:19 JST — 切替直前の互換性確認で、稼働中の旧supervisorは新しいteacher_profile文字列を知らず、そのまま設定すると各pollでparse errorになることを確認した。supervisorを再起動せず正常disabledのまま維持するため、正本は既知のlocal-triad-v1とlocal_single_teacher=trueを組み合わせ、新packageだけがeffective profile=local-single-v1へ解決する。native_luna_enabled=falseは不変。不整合なflag/remote profileの組合せはfail-closedとし、実旧loaderはlocal-triad/native無効、新loaderはlocal-single/native無効になることをprivate prospective configで実証した。教師数・品質gate・label来歴は新local profileのまま。関連489 tests、architecture/module/refactor36 tests、ruff/mypyが成功し、既存architecture ledger/baselineの変更も不要だった。09:15 promptもこの互換設定へ訂正し、PAUSEDと履歴を保持した。

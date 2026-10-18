@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -125,6 +126,42 @@ def test_local_profile_preserves_prior_labels_and_requires_old_independence_gate
     gate = distill._offline_training_gate([], config, root=tmp_path)
     assert not gate["passed"]
     assert "teacher_models_not_distinct" in gate["reasons"]
+
+
+def test_local_single_selector_preserves_the_disabled_legacy_supervisor_contract(tmp_path):
+    from chronovisor.ops.model_execution_status import model_execution_status
+
+    path = tmp_path / "config.toml"
+    path.write_text('''[recall.distillation]
+enabled=true
+capture_enabled=true
+teacher_profile="local-triad-v1"
+local_single_teacher=true
+native_luna_enabled=false
+''')
+    config = distill.load_distillation_config(path)
+    assert config.enabled and not config.native_luna_enabled
+    assert config.teacher_profile == distill.LOCAL_SINGLE_PROFILE
+    assert model_execution_status(tmp_path)["teacher"]["profile"] == distill.LOCAL_SINGLE_PROFILE
+    gate = distill._offline_training_gate([], config, root=tmp_path)
+    assert not gate["passed"] and "teacher_models_not_distinct" in gate["reasons"]
+
+
+@pytest.mark.parametrize("table", [
+    {"local_single_teacher": "true"},
+    {"local_single_teacher": True, "native_luna_enabled": True},
+    {"local_single_teacher": True, "teacher_profile": "native-luna-single-v1"},
+])
+def test_local_single_selector_rejects_inconsistent_profiles(tmp_path, table):
+    from chronovisor.ops.model_execution_status import model_execution_status
+
+    path = tmp_path / "config.toml"
+    path.write_text("[recall.distillation]\n" + "\n".join(
+        f"{key}={json.dumps(value)}" for key, value in table.items()
+    ))
+    with pytest.raises(distill.DistillationError):
+        distill.load_distillation_config(path)
+    assert model_execution_status(tmp_path)["status"] == "config_unavailable"
 
 
 def test_drain_rate_excludes_luna_history_and_slow_progress_is_visible():
