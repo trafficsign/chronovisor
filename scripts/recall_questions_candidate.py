@@ -20,6 +20,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from chronovisor.core import model_execution
 from chronovisor.core import ollama as ollama_runtime
 from chronovisor.core.frontmatter import parse
 from chronovisor.core.index_store import canonical_document_paths
@@ -98,6 +99,9 @@ def _resolve_local_binding() -> dict[str, Any]:
         "revision": route.revision,
         "ingest_config": asdict(load_ingest_config()),
     }
+    reasoning = model_execution.local_reasoning_settings(_ROLE, route.model)
+    if reasoning is not None:
+        binding["local_reasoning"] = reasoning
     return {"binding": binding, "sha256": _sha256(_canonical_json(binding))}
 
 

@@ -7,6 +7,7 @@ import os
 import stat
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -461,6 +462,42 @@ def test_resume_rejects_binding_change_and_partial_tail(
     with pytest.raises(ValueError, match="incomplete tail"):
         CANDIDATE.generate_candidates(source, output, 2, max_pages=1, resume=True)
     assert calls == ["page-1"]
+
+
+def test_reasoning_change_cannot_resume_a_frozen_candidate_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chronovisor.core import model_execution
+
+    source = tmp_path / "pages"
+    source.mkdir()
+    _write_pages(source, 2)
+    output = tmp_path / "candidate"
+    calls: list[str] = []
+    resolver = CANDIDATE._resolve_local_binding
+    _install_generator(monkeypatch, calls)
+    monkeypatch.setattr(CANDIDATE, "_resolve_local_binding", resolver)
+    route = SimpleNamespace(
+        role=CANDIDATE._ROLE, provider="omlx", model="qwen3.8-flash-next-chat",
+        location="local", protocol="omlx-native", endpoint_sha256="a" * 64,
+        revision="fixed-revision",
+    )
+    monkeypatch.setattr(
+        CANDIDATE.ollama_runtime, "runtime_generation_routes", lambda _roles: (route,),
+    )
+    settings = {"level": "low", "num_predict": 16_384, "num_ctx": 65_536}
+    monkeypatch.setattr(
+        model_execution, "local_reasoning_settings", lambda _role, _model: dict(settings),
+    )
+    CANDIDATE.generate_candidates(source, output, 2, max_pages=1)
+    before = {p.name: p.read_bytes() for p in output.iterdir() if p.is_file()}
+
+    settings["level"] = "xhigh"
+    with pytest.raises(RuntimeError, match="does not match frozen manifest"):
+        CANDIDATE.generate_candidates(source, output, 2, max_pages=1, resume=True)
+
+    assert calls == ["page-1"]
+    assert {p.name: p.read_bytes() for p in output.iterdir() if p.is_file()} == before
 
 
 def test_max_pages_bounds_each_run_and_artifacts_start_private(

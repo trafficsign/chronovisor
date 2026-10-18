@@ -999,3 +999,9 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-19 03:53 JST — medium300件が完了し、lowと全300件のlabel hash・混同行列が一致したため、実serverと公式v26.10.2 sourceを追加照合した。MLX-Serveはlow=2048/medium=8192の有限reasoning budgetとJSON schemaが共存するとthinkingをoffへ再描画する。実server logにも同じfallbackを確認したため、01:11のlow77.0%およびmedium77.0%はthinking-offの診断結果として保持し、reasoning比較・選定根拠から除外する。mediumのwall中央値24.862秒/p9060.344秒、技術失敗0/repair成功3も同じ扱い。元結果・ログは書換えない。xhighは既定budget=-1で実thinking=true・reasoning boundary後のschema適用を確認済みなので、進行中shardを止めず完走後にlow→mediumを再測定する。待機だけの所有batch controllerはchild0を確認して停止し、修正後の補測に差し替える判断。
 
 - 2026-10-19 03:53 JST — Qwenのstructured reasoning requestへreasoning_budget_tokens=-1を明示し、最終回答のschema/validator・固定input/prompt・通常repairを保持したままthinkingを有効にする。全生成のmax_tokens16384は維持し、独立の有限reasoning予算だけを外すruntime修正でありquality gateは変更しない。3水準のpayload回帰を先に失敗再現し、別モデル・通常非structured・repairのthinking=falseへ影響しないことも検査する。再測定はprivate別ディレクトリへ保存し、実responseのreasoning文字数・token数・finish reasonを本文なしで追加記録する。supervisor/model server/稼働shardへのsignalは行っていない。
+
+
+- 2026-10-19 04:00 JST — 修正requestの実server probeでlow/medium/xhighすべてに非空のreasoning応答、finish_reason=stop、schema成功を確認した。同じ固定1入力で推論時間19.080/24.237/29.966秒、completion tokens389/424/582であり、これは設定反映の確認のみで水準の採用判断には使わない。関連165 tests、ruff/mypyは成功。修正6fbccfdcを配備用GitHub mainへpushし、6 constraint cohortとLibrarianのpackage事前取得は同commit/MCP1.30.0を確認、必須CIを実行中。稼働xhighの自然完了→修正low→medium→3水準batch補測の単一controllerを起動し、既存結果は保持する。通常local処理とcloud0 observerは継続、package配備・supervisor再起動はまだ行わない。
+
+
+- 2026-10-19 04:11 JST — P2b質問候補のfixed bindingを点検し、新しいmodel_execution.local_reasoningがbindingに含まれず、effort変更後も旧frozen bundleを同条件として再開できることを回帰で再現した。設定されたlevel/num_predict/num_ctxを新bindingへ含め、変更時は既存manifest/source/candidatesのbytesを一切変えず、model呼出前に拒否する修正を追加。旧設定が未指定なら旧binding形状を保持し、既存凍結物を再封印しない。関連23 tests、architecture/migration/refactor81 tests、ruff成功。任意のscript単体mypyは既存と変更後の両方で同じ7件の未型付け診断となることを比較確認し、診断抑制や既存基準の緩和はしない。packageの必須CIを更新commitでも実行する。
