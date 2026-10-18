@@ -178,6 +178,7 @@ def _distillation_config(root: Path) -> dict[str, Any]:
     """Read only the public distillation switches needed for health alerts."""
 
     from chronovisor.core import runtime_config
+    from chronovisor.ops.model_execution_status import configured_teacher_profile
 
     config_path = root / "config.toml"
     if not config_path.exists():
@@ -186,6 +187,13 @@ def _distillation_config(root: Path) -> dict[str, Any]:
     recall = data.get("recall") if isinstance(data, dict) else None
     table = recall.get("distillation") if isinstance(recall, dict) else None
     table = table if isinstance(table, dict) else {}
+    profile = str(table.get("teacher_profile") or "")
+    profile_error = ""
+    if "local_single_teacher" in table:
+        try:
+            profile = configured_teacher_profile(table)
+        except ValueError:
+            profile_error = "invalid_local_teacher_selector"
     enabled_value = table.get("enabled")
     enabled = enabled_value is True
     override = os.environ.get("CHRONOVISOR_RECALL_DISTILLATION")
@@ -199,7 +207,7 @@ def _distillation_config(root: Path) -> dict[str, Any]:
             return {
                 "enabled": enabled,
                 "capture_enabled": table.get("capture_enabled") is True,
-                "teacher_profile": str(table.get("teacher_profile") or ""),
+                "teacher_profile": profile,
                 "native_luna_enabled": table.get("native_luna_enabled") is True,
                 "ox_enabled": table.get("ox_enabled") is True,
                 "ox_expires_at": table.get("ox_expires_at"),
@@ -208,11 +216,11 @@ def _distillation_config(root: Path) -> dict[str, Any]:
     return {
         "enabled": enabled,
         "capture_enabled": table.get("capture_enabled") is True,
-        "teacher_profile": str(table.get("teacher_profile") or ""),
+        "teacher_profile": profile,
         "native_luna_enabled": table.get("native_luna_enabled") is True,
         "ox_enabled": table.get("ox_enabled") is True,
         "ox_expires_at": table.get("ox_expires_at"),
-        "config_error": "" if isinstance(enabled_value, (bool, type(None))) else "invalid_enabled",
+        "config_error": profile_error or ("" if isinstance(enabled_value, (bool, type(None))) else "invalid_enabled"),
     }
 
 

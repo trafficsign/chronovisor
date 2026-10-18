@@ -29,6 +29,20 @@ def _daily_status(root: Path) -> dict[str, Any]:
     ) if key in record}
 
 
+def configured_teacher_profile(table: Mapping[str, Any]) -> str:
+    profile = table.get("teacher_profile", "local-triad-v1")
+    if not isinstance(profile, str):
+        raise ValueError("invalid local teacher profile")
+    local_single = table.get("local_single_teacher", False)
+    if not isinstance(local_single, bool):
+        raise ValueError("invalid local teacher selector")
+    if local_single:
+        if profile != "local-triad-v1" or table.get("native_luna_enabled", False) is not False:
+            raise ValueError("inconsistent local teacher selector")
+        profile = "local-single-v1"
+    return profile
+
+
 def model_execution_status(root: Path) -> dict[str, Any]:
     try:
         config = tomllib.loads((root / "config.toml").read_text())
@@ -37,14 +51,7 @@ def model_execution_status(root: Path) -> dict[str, Any]:
         model = str(route.get("model") or "")
         reasoning = local_reasoning_settings(role, model, root=root)
         distillation = config.get("recall", {}).get("distillation", {})
-        profile = distillation.get("teacher_profile", "local-triad-v1")
-        local_single = distillation.get("local_single_teacher", False)
-        if not isinstance(local_single, bool):
-            raise ValueError("invalid local teacher selector")
-        if local_single:
-            if profile != "local-triad-v1" or distillation.get("native_luna_enabled", False) is not False:
-                raise ValueError("inconsistent local teacher selector")
-            profile = "local-single-v1"
+        profile = configured_teacher_profile(distillation)
         return {
             "automatic_cloud_allowed": automatic_cloud_allowed(root),
             "teacher": {

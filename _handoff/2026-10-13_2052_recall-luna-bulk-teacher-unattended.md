@@ -985,3 +985,6 @@ created_at: 2026-10-13T20:52:29+09:00
 
 
 - 2026-10-19 02:19 JST — 切替直前の互換性確認で、稼働中の旧supervisorは新しいteacher_profile文字列を知らず、そのまま設定すると各pollでparse errorになることを確認した。supervisorを再起動せず正常disabledのまま維持するため、正本は既知のlocal-triad-v1とlocal_single_teacher=trueを組み合わせ、新packageだけがeffective profile=local-single-v1へ解決する。native_luna_enabled=falseは不変。不整合なflag/remote profileの組合せはfail-closedとし、実旧loaderはlocal-triad/native無効、新loaderはlocal-single/native無効になることをprivate prospective configで実証した。教師数・品質gate・label来歴は新local profileのまま。関連489 tests、architecture/module/refactor36 tests、ruff/mypyが成功し、既存architecture ledger/baselineの変更も不要だった。09:15 promptもこの互換設定へ訂正し、PAUSEDと履歴を保持した。
+
+
+- 2026-10-19 02:29 JST — 互換flagの全読取箇所を照合し、health既存distillation欄にもeffective local-single profileを表示するよう統一した。設定移行validatorは新booleanを正式な任意設定として認識し、正しい既存local設定はnoopでbytesを保持、不整合は既存どおり拒否する。新flagのloader/health/migration回帰を含む490 tests、architecture/module/refactor36 tests、ruff/mypyが成功。凍結architecture ledger/baselineと品質条件は変更していない。配備前の追加修正としてcommit/必須CIの対象を更新する。

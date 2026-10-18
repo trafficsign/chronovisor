@@ -2960,6 +2960,7 @@ def _ox_event_projection(
 def _default_distillation_config() -> dict[str, Any]:
     defaults = dict(DistillationConfig().__dict__)
     defaults["rollout_stages"] = list(defaults["rollout_stages"])
+    defaults["local_single_teacher"] = False
     return defaults
 
 
@@ -2968,6 +2969,7 @@ _OPTIONAL_PROFILE_CONFIG = frozenset(
     {
         "capture_enabled",
         "teacher_profile",
+        "local_single_teacher",
         "teacher_max_inflight",
         "teacher_claim_limit",
         "ox_enabled",
@@ -3015,6 +3017,18 @@ def capture_enabled(config_path: Path | None = None) -> bool:
     return value
 
 
+def _configured_teacher_profile(table: Mapping[str, Any]) -> Any:
+    teacher_profile = table.get("teacher_profile", LOCAL_TRIAD_PROFILE)
+    local_single = table.get("local_single_teacher", False)
+    if not isinstance(local_single, bool):
+        raise DistillationError("local_single_teacher must be boolean")
+    if local_single:
+        if teacher_profile != LOCAL_TRIAD_PROFILE or table.get("native_luna_enabled", False) is not False:
+            raise DistillationError("local_single_teacher requires the local profile and disabled Luna")
+        teacher_profile = LOCAL_SINGLE_PROFILE
+    return teacher_profile
+
+
 def load_distillation_config(config_path: Path | None = None) -> DistillationConfig:
     table = _config_table(config_path)
 
@@ -3030,14 +3044,7 @@ def load_distillation_config(config_path: Path | None = None) -> DistillationCon
     capture = table.get("capture_enabled", False)
     if not isinstance(capture, bool):
         raise DistillationError("recall.distillation.capture_enabled must be boolean")
-    teacher_profile = table.get("teacher_profile", LOCAL_TRIAD_PROFILE)
-    local_single = table.get("local_single_teacher", False)
-    if not isinstance(local_single, bool):
-        raise DistillationError("local_single_teacher must be boolean")
-    if local_single:
-        if teacher_profile != LOCAL_TRIAD_PROFILE or table.get("native_luna_enabled", False) is not False:
-            raise DistillationError("local_single_teacher requires the local profile and disabled Luna")
-        teacher_profile = LOCAL_SINGLE_PROFILE
+    teacher_profile = _configured_teacher_profile(table)
     if teacher_profile not in TEACHER_PROFILES:
         raise DistillationError("recall.distillation.teacher_profile is invalid")
     native_luna_enabled = table.get("native_luna_enabled", False)
@@ -3129,7 +3136,7 @@ def _migration_additions(data: Mapping[str, Any]) -> tuple[str, ...]:
                 raise DistillationError(
                     "recall.distillation conflicts or is incomplete"
                 )
-        profile = distillation.get("teacher_profile", LOCAL_TRIAD_PROFILE)
+        profile = _configured_teacher_profile(distillation)
         max_inflight = distillation.get("teacher_max_inflight", 10)
         claim_limit = distillation.get("teacher_claim_limit", 500)
         ox_enabled = distillation.get("ox_enabled", False)

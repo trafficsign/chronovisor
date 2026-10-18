@@ -129,6 +129,7 @@ def test_local_profile_preserves_prior_labels_and_requires_old_independence_gate
 
 
 def test_local_single_selector_preserves_the_disabled_legacy_supervisor_contract(tmp_path):
+    from chronovisor.ops import health
     from chronovisor.ops.model_execution_status import model_execution_status
 
     path = tmp_path / "config.toml"
@@ -143,6 +144,7 @@ native_luna_enabled=false
     assert config.enabled and not config.native_luna_enabled
     assert config.teacher_profile == distill.LOCAL_SINGLE_PROFILE
     assert model_execution_status(tmp_path)["teacher"]["profile"] == distill.LOCAL_SINGLE_PROFILE
+    assert health._distillation_config(tmp_path)["teacher_profile"] == distill.LOCAL_SINGLE_PROFILE
     gate = distill._offline_training_gate([], config, root=tmp_path)
     assert not gate["passed"] and "teacher_models_not_distinct" in gate["reasons"]
 
@@ -153,6 +155,7 @@ native_luna_enabled=false
     {"local_single_teacher": True, "teacher_profile": "native-luna-single-v1"},
 ])
 def test_local_single_selector_rejects_inconsistent_profiles(tmp_path, table):
+    from chronovisor.ops import health
     from chronovisor.ops.model_execution_status import model_execution_status
 
     path = tmp_path / "config.toml"
@@ -162,6 +165,18 @@ def test_local_single_selector_rejects_inconsistent_profiles(tmp_path, table):
     with pytest.raises(distill.DistillationError):
         distill.load_distillation_config(path)
     assert model_execution_status(tmp_path)["status"] == "config_unavailable"
+    assert health._distillation_config(tmp_path)["config_error"] == "invalid_local_teacher_selector"
+
+
+def test_local_single_selector_survives_config_migration_without_rewriting_it(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("")
+    distill.migrate_distillation_config(path, apply=True)
+    raw = path.read_text().replace("local_single_teacher = false", "local_single_teacher = true")
+    path.write_text(raw)
+    assert distill.migrate_distillation_config(path, apply=True)["status"] == "noop"
+    assert path.read_text() == raw
+    assert distill.load_distillation_config(path).teacher_profile == distill.LOCAL_SINGLE_PROFILE
 
 
 def test_drain_rate_excludes_luna_history_and_slow_progress_is_visible():
