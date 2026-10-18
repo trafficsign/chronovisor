@@ -459,6 +459,7 @@ class LLMRuntime:
         remote_egress_opt_ins: Iterable[tuple[str, SourceDataClass]] = (),
         max_retries: int = 0,
         telemetry: Callable[[RuntimeFailureTelemetry], None] | None = None,
+        cloud_execution_allowed: Callable[[], bool] | None = None,
     ) -> None:
         if (
             isinstance(max_retries, bool)
@@ -473,6 +474,7 @@ class LLMRuntime:
         self._remote_egress_opt_ins = frozenset(remote_egress_opt_ins)
         self._max_retries = max_retries
         self._telemetry = telemetry
+        self._cloud_execution_allowed = cloud_execution_allowed
 
     def generate(self, role: str, request: GenerationInput) -> GenerationResult:
         route = _resolve(self._generation, role, "generation")
@@ -780,6 +782,12 @@ class LLMRuntime:
             raise RouteConfigurationError(role, capability)
         if location is RouteLocation.LOCAL:
             return location
+        if self._cloud_execution_allowed is not None and not self._cloud_execution_allowed():
+            self._emit_failure(
+                EgressDeniedError.category, role=role, capability=capability,
+                provider=provider, location=location,
+            )
+            raise EgressDeniedError(role, capability)
         default_allowed = (
             source.sensitivity is SourceSensitivity.NORMAL
             and source.data_class

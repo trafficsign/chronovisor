@@ -4994,7 +4994,8 @@ def test_preflight_automatically_aggregates_safe_runtime_metrics(
     assert overridden["metrics"]["latency_p95_ms"] == 300
 
 
-def test_p1_to_p4_teacher_backfill_runs_while_p5_is_held(tmp_path: Path) -> None:
+@pytest.mark.parametrize("profile", [distill.LOCAL_TRIAD_PROFILE, distill.LOCAL_SINGLE_PROFILE])
+def test_p1_to_p4_teacher_backfill_runs_while_p5_is_held(tmp_path: Path, profile: str) -> None:
     class FakeTeacher:
         local = True
 
@@ -5015,8 +5016,9 @@ def test_p1_to_p4_teacher_backfill_runs_while_p5_is_held(tmp_path: Path) -> None
             }
 
     raw_dir = _raw(tmp_path)
-    config = _config(tmp_path)
-    teachers = {role: FakeTeacher(role) for role in distill.TEACHER_ROLES}
+    config = _config(tmp_path, teacher_profile=profile)
+    roles = distill.TEACHER_ROLES[:1] if profile == distill.LOCAL_SINGLE_PROFILE else distill.TEACHER_ROLES
+    teachers = {role: FakeTeacher(role) for role in roles}
     result = distill.run_distillation_chunk(
         root=tmp_path,
         raw_dir=raw_dir,
@@ -5029,6 +5031,11 @@ def test_p1_to_p4_teacher_backfill_runs_while_p5_is_held(tmp_path: Path) -> None
     labels = store.read_chain(store.distillation_dir(tmp_path) / "label-ledger.jsonl")
     assert all(row["authority"] in {"teacher-only", "verified"} for row in labels)
     assert all("reason" not in row and "rationale" not in row for row in labels)
+    if profile == distill.LOCAL_SINGLE_PROFILE:
+        label_path = store.distillation_dir(tmp_path) / "label-ledger.jsonl"
+        assert all(row["profile"] == profile for row in labels)
+        assert distill._local_single_label_rows(label_path) == labels
+        assert distill._local_single_prior_pairs(label_path) == set()
 
 
 def test_counterfactual_turn_without_real_work_falls_back_to_teacher(
@@ -10858,11 +10865,11 @@ def test_chain_batch_replace_failure_preserves_old_head_and_retries(
 
 
 def _committed_local_r4_entries(
-    root: Path, count: int = 2
+    root: Path, count: int = 2, profile: str = distill.LOCAL_TRIAD_PROFILE,
 ) -> tuple[workset.DistillationWorkset, list[dict[str, Any]]]:
     distill.bootstrap_r4_distillation_root_authority(root)
     queue = workset.DistillationWorkset(
-        store.distillation_dir(root) / "local-workset.sqlite3"
+        distill._local_teacher_workset_path(root, profile)
     )
     prepared: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
     work_items: list[dict[str, Any]] = []
@@ -10870,11 +10877,17 @@ def _committed_local_r4_entries(
         rally_id = f"rally-{index}"
         candidate_id = f"candidate-{index}"
         assignment = distill.teacher_assignment(rally_id, candidate_id)
+        if profile == distill.LOCAL_SINGLE_PROFILE:
+            assignment = {
+                "revision": "local-single-assignment-v1", "owner": distill.TEACHER_ROLES[0],
+                "probe_revision": distill.PROBE_REVISION, "probe": False,
+                "routes": [distill.TEACHER_ROLES[0]],
+            }
         route = str(assignment["owner"])
         payload_digest = canonical_json.canonical_json_sha256_strict(
             {"rally_id": rally_id, "candidate_id": candidate_id, "route": route}
         )
-        work_id = distill._local_work_id(payload_digest, route)
+        work_id = distill._local_work_id(payload_digest, route, profile)
         task = {
             "rally": {"rally_id": rally_id},
             "candidate": {"candidate_id": candidate_id},
@@ -10910,7 +10923,7 @@ def _committed_local_r4_entries(
             {
                 "kind": "teacher-label",
                 "status": "completed",
-                "teacher_profile": distill.LOCAL_TRIAD_PROFILE,
+                "teacher_profile": profile,
                 "work_id": claim.work_id,
                 "attempt": claim.attempt,
                 "rally_id": task["rally"]["rally_id"],
@@ -10950,8 +10963,9 @@ def _committed_local_r4_entries(
     return queue, entries
 
 
+@pytest.mark.parametrize("profile", [distill.LOCAL_TRIAD_PROFILE, distill.LOCAL_SINGLE_PROFILE])
 def test_local_r4_receipts_are_batched_private_and_crash_repairable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str,
 ) -> None:
     source = {
         "source_commit": "a" * 40,
@@ -10966,8 +10980,14 @@ def test_local_r4_receipts_are_batched_private_and_crash_repairable(
         return dict(source)
 
     monkeypatch.setattr(distill, "ox_alpha_source_binding", source_binding)
-    queue, entries = _committed_local_r4_entries(tmp_path)
-    config = distill.DistillationConfig(teacher_max_inflight=10)
+    queue, entries = _committed_local_r4_entries(tmp_path, profile=profile)
+    config = distill.DistillationConfig(teacher_max_inflight=10, teacher_profile=profile)
+    entry = entries[0]
+    assert distill._local_r4_receipt_entry(**{
+        **entry, "label": {**entry["label"], "teacher_profile": (
+            distill.LOCAL_SINGLE_PROFILE if profile == distill.LOCAL_TRIAD_PROFILE else distill.LOCAL_TRIAD_PROFILE
+        )},
+    }) is None
 
     assert distill._write_r4_local_receipts(
         root=tmp_path, config=config, workset=queue, entries=entries

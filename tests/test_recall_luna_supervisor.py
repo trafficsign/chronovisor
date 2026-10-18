@@ -373,12 +373,12 @@ def test_supervisor_does_not_start_native_workers_after_explicit_disable(tmp_pat
     (tmp_path / "config.toml").write_text('[recall.distillation]\nenabled=false\n')
     monkeypatch.setattr(supervisor, "start_round", lambda *_: pytest.fail("disabled worker started"))
     args = argparse.Namespace(root=tmp_path, max_workers=10, once=True, poll_seconds=1)
-    assert supervisor.supervise(args) == 1
+    assert supervisor.supervise(args) == 0
     state = json.loads((tmp_path / "runtime/recall-luna-bulk/supervisor-status.json").read_text())
     assert state["status"] == "disabled"
 
 
-def test_disable_stops_active_rounds_without_advancing_progress_watermark(tmp_path: Path, monkeypatch) -> None:
+def test_disable_lets_active_round_finish_without_new_scheduling(tmp_path: Path, monkeypatch) -> None:
     private = tmp_path / "runtime/recall-luna-bulk"
     private.mkdir(parents=True)
     old_progress = "2026-10-14T00:00:00Z"
@@ -387,10 +387,10 @@ def test_disable_stops_active_rounds_without_advancing_progress_watermark(tmp_pa
         "last_progress_at": old_progress,
     }))
     row = fake_row(tmp_path / "bundle-A", 1)
-    child = FakeChild(None)
+    child = FakeChild(None, 0)
     starts = []
     stopped = []
-    configs = iter([
+    configs = [
         SimpleNamespace(
             enabled=True,
             native_luna_enabled=True,
@@ -401,26 +401,36 @@ def test_disable_stops_active_rounds_without_advancing_progress_watermark(tmp_pa
             native_luna_enabled=True,
             teacher_profile=supervisor.daily.DEFAULT_TEACHER_PROFILE,
         ),
-    ])
+    ]
+    config_calls = 0
+
+    def load_config(_path):
+        nonlocal config_calls
+        config_calls += 1
+        return configs[min(config_calls - 1, 1)]
 
     def start(args, bundle, shard):
         starts.append(shard)
-        return fake_round(bundle, shard, child)
+        job = fake_round(bundle, shard, child)
+        job.last_progress = time.monotonic()
+        return job
 
     monkeypatch.setattr(supervisor, "inventory", lambda _root: [row])
     monkeypatch.setattr(supervisor, "available_shards", lambda _row, _limit: [0])
     monkeypatch.setattr(supervisor, "start_round", start)
-    monkeypatch.setattr(supervisor, "stop_round", lambda job: stopped.append(job.shard))
-    monkeypatch.setattr(supervisor.daily.distill, "load_distillation_config", lambda _path: next(configs))
+    monkeypatch.setattr(supervisor, "stop_round", lambda job: stopped.append((job.shard, job.child.poll())))
+    monkeypatch.setattr(supervisor.daily.distill, "load_distillation_config", load_config)
     monkeypatch.setattr(supervisor.time, "sleep", lambda _seconds: None)
     args = argparse.Namespace(
         root=tmp_path, max_workers=1, records_per_round=100,
         codex_home=tmp_path, codex="synthetic", poll_seconds=1, once=True,
     )
 
-    assert supervisor.supervise(args) == 1
+    assert supervisor.supervise(args) == 0
     assert starts == [0]
-    assert stopped == [0]
+    assert stopped == [(0, 0)]
+    assert not child.terminated
+    assert config_calls == 3
     state = json.loads((private / "supervisor-status.json").read_text())
     assert state["status"] == "disabled"
     assert state["active_workers"] == 0
@@ -1716,3 +1726,11 @@ def test_idempotent_import_does_not_advance_label_watermark(
     assert state["last_imported_label_at"] == old
     assert state["last_import"]["labels_written"] == 0
     assert "last_label_at" not in state["last_import"]
+
+
+@pytest.fixture(autouse=True)
+def _explicit_legacy_cloud_opt_in(monkeypatch):
+    """Exercise the retained manual opt-in paths without live inference."""
+    from chronovisor.core import model_execution
+
+    monkeypatch.setattr(model_execution, "automatic_cloud_allowed", lambda *_args: True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -14,6 +15,35 @@ from chronovisor.core.llm_runtime import (
     RouteLocation,
 )
 from chronovisor.recall import recall_answer_adapters
+
+
+def test_local_effort_binds_sampler_identity_and_actual_runtime_budgets(monkeypatch):
+    settings = {"level": "xhigh", "num_ctx": 65536, "num_predict": 16384}
+    monkeypatch.setattr(recall_answer_adapters, "local_reasoning_settings", lambda *_args: settings)
+    monkeypatch.setattr(recall_answer_adapters, "load_decision_router_config", lambda: SimpleNamespace(
+        num_ctx=131072, num_predict=4096, read_timeout_ms=660000, max_output_chars=8000,
+    ))
+    captured = {}
+
+    def structured_chat(_messages, **kwargs):
+        captured.update(kwargs)
+        return ollama.ChatResponse(content='{"answer":"synthetic"}')
+
+    monkeypatch.setattr(ollama, "runtime_structured_chat", structured_chat)
+    identity = recall_answer_adapters._sampler_identity(recall_answer_adapters.RUNNER_RUNTIME_ROLE)
+    recall_answer_adapters._chat_json(
+        runtime_role=recall_answer_adapters.RUNNER_RUNTIME_ROLE, messages=[], schema={}, seed=7,
+    )
+    assert captured["think"] == "xhigh"
+    assert captured["num_ctx"] == 131072 and captured["num_predict"] == 16384
+    assert identity == recall_answer_adapters.canonical_sha256({
+        "temperature": 0, "seed": "pair_seed", "think": "xhigh",
+        "runtime_budgets": {"num_ctx": 131072, "num_predict": 16384},
+    })
+    settings["level"] = "low"
+    assert recall_answer_adapters._sampler_identity(recall_answer_adapters.RUNNER_RUNTIME_ROLE) != identity
+    monkeypatch.setattr(recall_answer_adapters, "local_reasoning_settings", lambda *_args: None)
+    assert recall_answer_adapters._sampler_identity(recall_answer_adapters.RUNNER_RUNTIME_ROLE) == recall_answer_adapters.SAMPLER_SHA256
 
 
 def _routes(*, location: str = "remote") -> tuple[ollama.RuntimeGenerationRoute, ...]:

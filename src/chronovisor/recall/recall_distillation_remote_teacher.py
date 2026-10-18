@@ -873,10 +873,14 @@ class OpenCodeOxAlphaTeacher:
         *,
         before_egress: Callable[[], None] | None = None,
     ) -> Mapping[str, Any]:
+        from chronovisor.core.model_execution import automatic_cloud_allowed
+
         if before_egress is not None and not callable(before_egress):
             raise ValueError("before_egress must be callable or None")
         if not self.enabled:
             return self._failure("remote_teacher_disabled")
+        if not automatic_cloud_allowed():
+            return self._failure("automatic_cloud_models_disabled")
         if not isinstance(payload, Mapping):
             return self._failure("remote_payload_rejected")
         prepared = _prepare_request(payload, max_input_bytes=self.max_input_bytes)

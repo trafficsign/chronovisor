@@ -671,3 +671,11 @@ def test_native_receipt_requires_canonical_private_copy(
     receipt = _receipt(review)
     review["native_luna_receipt"] = receipt
     assert native.validate_native_luna_review(review, _authority(), lane="search_label")
+
+
+@pytest.fixture(autouse=True)
+def _explicit_legacy_cloud_opt_in(monkeypatch):
+    """Exercise the retained manual opt-in paths without live inference."""
+    from chronovisor.core import model_execution
+
+    monkeypatch.setattr(model_execution, "automatic_cloud_allowed", lambda *_args: True)

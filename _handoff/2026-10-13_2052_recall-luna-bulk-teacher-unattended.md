@@ -4,9 +4,9 @@ created_at: 2026-10-13T20:52:29+09:00
 状態: running
 ---
 
-# Recall：過去分を Luna で一括ラベル付けし、無人で回り続ける状態にする
+# Recall：既存の Luna ラベルを保持し、ローカルで無人運転を続ける
 
-実行役：Astra（Codex）。判定の実行は Luna。
+実行役：Astra（Codex）。2026-10-18の決定4改訂以後、日常・無人の判定はローカル。既存のLuna判定・認証・履歴は保持する。
 
 ## 目的
 - recall の教師ラベルは 2026-08-29 から止まっている。過去の会話に Luna で一括ラベルを付けて蒸留の本線を再開し、ユーザーが何もしなくても学習と昇格が回り続ける状態にする。
@@ -122,7 +122,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - [x] 停滞4：安全境界で一度配備しdrift=false、B2継続下で正式成功時刻の2回更新を確認、CF率・予測日・09:15 automationを更新する。
 
 ### 2026-10-18 automatic cloud 廃止と local teacher 切替
-- [ ] local1：code/config/supervisor/LaunchAgents/periodic/09:15 の全自動cloud経路と日次流入量を棚卸しする。
+- [x] local1：code/config/supervisor/LaunchAgents/periodic/09:15 の全自動cloud経路と日次流入量を棚卸しする。
 - [ ] local2：既存sealed300を実serverが対応するreasoning水準で測定し、一致率・3x3行列・技術失敗・median/p90と共有資源余裕で最高の実用水準を選ぶ。
 - [ ] local3：全自動経路をlocalへ切替え、cloud fallbackを禁止、独立性・既存gate・履歴とlabel provenanceを保持する。
 - [ ] local4：health/initにactive teacher/reasoning/backlog drain rateを表示する。遅い正常drainをhuman_waitにしない。
@@ -145,7 +145,7 @@ created_at: 2026-10-13T20:52:29+09:00
 - R6 と R7 が無人で進む経路が配備されている。昇格したかどうかは問わない（ゲートが決める）。昇格していないときは、理由が「データ待ち」か「人の判断待ち」かで表示されている。
 - この Plan の状態と実態が一致している。
 
-7 日の確認は 1 回の作業では終わらない。既存の毎朝 09:15 の確認に載せ、結果を実行ログに追記する。7 日が満ちるまで `状態` は running のままにする。
+7 日の確認は 1 回の作業では終わらない。2026-10-18改訂によりcloudを使う旧09:15 heartbeatは停止し、local周期jobのsealed cycle履歴とhealth/initで日々の増分を追跡する。09:15 promptはlocal-onlyへ更新して保存し、後続の照合結果を実行ログへ追記する。7 日が満ちるまで `状態` は running のままにする。
 
 ## 検証手順
 - status の `recall_distillation.last_success_at` が毎日進み、教師ラベルの件数が増えていること。
@@ -944,3 +944,28 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-18 23:00 JST — private deploy/final-live-runtime-receipt.json（SHAd587cdc50ad58c555c01c76cd1043dc66105b4fb532e40701134719eb9da88db）を別名新規保存し、operational_stall_acceptance_passed/formal_mainline_progress_accepted=trueとした。全品質gateのformal_acceptance_passed/promotion_allowedはCF floor未達のためfalseを維持し、運用受入と昇格を区別する。停滞4を完了へ更新し、今回の安全配備は18:47の一度だけ、追加source変更・追加配備なし。09:15 promptはfinal receipt優先と実2成功照合に既に対応しており追加変更不要と判断。残る固定CF utility input cap拒否は固定inputs/validatorを変えず通常規則で処理を継続する。19:08の一回のcatalog再構築のexact trigger、19:40の一時marker writerは当時の証跡不足で未特定のまま明記する。CF100・B2/B3全件drain・7日無人継続は今回の停滞受入と別の未完項目として、Plan全体はrunningを維持する。
 
 - 2026-10-18 23:07 JST — 決定4の所有者改訂を受領し、指定のユーザー決定と10/18 10:30以降の全実行ログを先に確認。低一致率時の日次Luna継続・Luna authority許可を撤回し、local-onlyへの6項目を開始した。既存supervisorのdisabled分岐はactive roundを停止するため、稼働中にはnative_luna_enabledを変えず、既存maintenance分岐で新規scheduleだけを保留して自然終了を待つ判断。今回所有markerを別private receiptへ記録し、supervisor/shardへsignalは送らない。隔離worktreeで実装し、元のuntracked/indexと歴史を保持。code graphは10/14世代で変更metadataを検出したため、関係sourceを直接照合する。Lunaへの作業委譲・新しいcloud推論は行わない。
+
+- 2026-10-18 23:35 JST — 自動cloud経路のsource/config/稼働棚卸し。① native Luna日次教師はrecall_luna_supervisor→recall_luna_daily→native shard、KeepAlive LaunchAgentが正本。今回所有maintenanceで新規scheduleのみ停止し、全shard自然終了・実child0を確認後、最後の400 labelsを正規importして23:18:57にnative_luna_enabled=falseへ変更。supervisor PIDは維持しsignalなし。② search_label_review/B2はconfig authority=native_luna→native_luna_authorityのCLI実行であり、authority=localへ変更済み。既存B2連続controllerはmaintenance/config preflightにより終了し、通常periodicへ戻る。③ lint_repairのfrontier/reviewは名称と異なりroutine_review→DecisionRouter→classification.authorityで、実bindingはQwen local。proposalのlint.tag_repairもlocalで、選定effortを両方に適用する。④ system_code_repairはfrontier_reviewのcloud CLI起動が残っていたためconfigをoffへ変更。局所判断・証跡付きpatch実装を担う同等のlocal executorがないので、このlaneは退役扱いとしfallbackを置かない。⑤ recall_questionsは現行ingest.generationおよびcandidate/backfill scriptがlocal-only bindingを検証する。歴史上のnative生成物は保持し再生成しない。⑥ P2b arm bundleは固定比較物のprojection、Recall回答評価はlocal route。09:15 recall-p2bの旧promptに日次Luna/B2 authority継続指示が残るため最終更新対象とする。⑦ OX/DeepSeek teacherは既にdisabled。共通remote backend compositionとcached runtimeの実送信直前、native authorityとsupervisor起動点、frontier実spawnへdefault-denyを追加し、環境overrideでもownerのcloud禁止を迂回させない。旧code/identity/historyと明示再有効化の経路は保持する。
+
+- 2026-10-18 23:35 JST — local sweepは比較Aと同じsealed300・同じteacher prompt/schema/frozen inputを用い、low→medium→xhighを逐次実行中。実serverのmodel tokenizer templateが受理するeffortはこの3段階で、highは非対応。推論出力16384 tokens・context65536・通常repair/validator/input capを保持し、出力と本文はprivateに限定する。採点は既存Luna labelsの後付け照合であり入力へ与えない。Luna blind自己一致161/200=80.5%（悲観規則）を参考として保持する。実測日次volumeは直近7完了日でラリー6〜620/日、lint13〜1058/日、search新規0/日だが既存search backlogがある。平均のみで選ばずbatch実処理と共有local役割の待ちを含めて余裕を評価する。旧Luna教師済みpairは新local教師へ再投入せず、独立したlocal profile/worksetと教師identity・effort来歴を用いる設計。3教師独立性の既存条件は2モデルでは充足不能なので昇格をholdしたまま通常処理を続ける。
+
+- 2026-10-18 23:57 JST — 09:15 recall-p2b automationの正本をbackup/CAS付きで更新し、ACTIVE・毎日09:15と既存実行先を保持した。新promptは10/18 owner決定を優先し、Luna/cloud自動呼出・fallback・旧B2/B3 controller再始動を禁止し、通常local periodic、独立した回答生成/採点、private証跡、固定gate、実process/receiptでのcloud0照合を指示する。変更フィールドはname/prompt/updated_atだけとread-backで確認。P2b回答runnerとscorerの現状は同じQwenなので、独立性を満たすためrunner=Qwen・scorer=Ornithへ配備時に割り当てる判断。新reasoning設定はsampler identityに含め、凍結済み比較物は再束縛せず保持する。system_code_repairは同等のlocal executorがないためoffで退役、他のroutine laneはlocalで継続する。
+
+- 2026-10-18 23:59 JST — 09:15 automationの稼働方針を追加判断。promptだけをlocal化しても既存heartbeatはcloudのCodex会話を自動再開するため、ownerの「any other cloud model must not be called automatically」に含まれる。ローカルモデルを使う同等のCodex heartbeat経路は確認できず、ACTIVE保持の先行判断を撤回してPAUSEDへ変更した。新local-only prompt・09:15 cadence・過去履歴は保存し、変更はstatus/updated_atだけと正本read-backで確認。日次実処理は新local周期jobへ移し、通常search/lint periodicも継続する。人の判断待ちにせず、禁止対象のcloud orchestratorを退役扱いにする。アプリ本体のUIはComputer Use対象外で確認できないため、設定正本と後続のprocess/receiptで停止を検証する。
+
+- 2026-10-19 00:12 JST — native無効・search authority=local・system_code_repair=off・09:15 heartbeat=PAUSED、supervisor同PID/active0/実child0を再確認。自然終了待ちのために作った今回所有maintenance markerは役目を終えたため、所有者とhashを照合して解除した。長時間のsweep中までlocal search drainを止め続ける理由がなく、通常periodicを再開し共有負荷下で測る判断。配備時は改めて今回所有markerを作り、必要なidle boundaryだけを確保する。source/台帳/queueへ手編集せず、signalは送らない。
+
+- 2026-10-19 00:14 JST — local1完了。source・config・全対象LaunchAgent・periodic・crontab不在・唯一の対象Codex automationを照合した。configへglobal cloud denyも追加し、code配備前はnative停止とlocal role bindingで禁止を維持する。日次容量は10/11〜17 JSTのsealed既存候補をread-only集計し、1364 rallyから通常選定5444 teacher items（平均777.7/日、最大2480/日）と確認。大量のlint行の大半はdeterministicなので、総行数をmodel呼出数へ読み替えない。新search流入0/日でも既存backlogのdrainを必要量へ加える。既存local runtimeはQwenとOrnithの専用processがあり、同時常駐と同時推論は別と確認した。容量判断は保守的に共有推論1枠で計算し、2モデル並列の速度を加算しない。Ornithは数値effortを公開せず、独立judgeとして既存native設定を保持する。
+
+- 2026-10-19 00:36 JST — local-only実装の全体回帰は7331 passed/57 deselected、追加cloud退役回帰216 passed。新local profileは独立worksetを使い、正規writerの新ラベルにprofile・model digest・reasoningを記録する。最終reviewで索引のprofile列とteacher_profile来歴の差を検出し、新規local行だけに索引用profileを追加して旧Luna行との分離・台帳bytes不変・P1〜P4継続/P5 holdを検証した。cache済みOX教師にも実送信前denyを追加し、composition/runtime/native spawnと合わせて旧instance経由の自動cloud呼出を封じる。手動再有効化を検証する既存テストだけ明示opt-in fixtureを使い、production default-denyは新negative testで固定する。
+
+- 2026-10-19 00:36 JST — healthの排出速度は既存queueのnaive JSTと切替receiptのUTCを正しく比較するよう修正し、UTC/JST混在の回帰を追加。slow localをfrontierという名称だけでhuman_waitへ分類しないが、既存の実human-required・2時間停滞・quality failureは保持する。長いreasoningを旧120秒のmodel timeoutだけで打ち切らないよう、新local教師の呼出枠を300秒へ設定し、外側の全stage300秒制約・固定prompt/schema/input/repair capは維持。architecture inventoryは正規generatorで更新し44 edges/51 entrypointsの制約を保持、実call sites増加に対応する厳密fixture件数だけ1566→1580へ合わせる。
+
+- 2026-10-19 00:36 JST — search通常periodicのlocal authority切替後第1周期は1301.118秒、モデル試行0、budget_exhaustedで自然終了。RO profileでは旧approved行ごとのcurrent authority構築とnative証跡再検証が主要costであり、推論の遅さではない。旧goldenは保持され、既存のauthority retry→exact postimage recovery規則を適用する移行周期として、remaining33112への一時増加を新規流入や削除と誤認しない。検証を省略したりbudgetを緩和せず、次周期の正規復旧と定常local drainを別々に観測する判断。今回のnative/cloud新規実行は認めていない。
+
+
+- 2026-10-19 01:01 JST — 最終source reviewで新local cohortの初回ラベル前後にidentityが変わるケースを回帰で再現し、実route digestとreasoning設定から構成する固定cohortへ修正した。既存のLuna認証セット・split・台帳は再束縛しない。新しい日次入力は独立local profileで未信頼の教師証拠として収集し、既存splitがembargoならそのまま保持する。embargoをtrain/testへ移さず、tiny policy学習へ入らず、時系列/独立性の既存gateが不通過のままであることを確認した。既存triadのadmissionは変更せず、collection継続とpromotionを分ける判断。新local worksetだけを通常writerで管理し、旧教師済みpairの再ラベル付けは行わない。
+
+- 2026-10-19 01:01 JST — 最新のlocal policy/distillation/worker/supervisor回帰412 passed、architecture/module/refactor契約36 passed、ruff/mypyも成功。configured cohortの2つのimportにより厳密call-site件数は1582へ更新した。architecture例外は正規generatorのみで更新し、凍結baselineは変更しない。全体7331 passedと追加216 passedに加え、今回の新規変更を局所検証済み。GitHub固定packageでの配備が必要なので、この完成sourceをcommit/pushして必須3workflowを実行し、reasoning比較が完了するまでlive checkoutとruntimeは切り替えない。
+
+- 2026-10-19 01:01 JST — 連続process/receipt観測の初版は、今回ユーザーが明示開始したAstra作業自体のCodex親processを自動実行として誤検知した。親子関係をprivate証跡へ保存し、明示作業の既知ancestorだけを別欄に記録する第2版へ移行した。自動Chronovisor呼出は除外していない。00:42以降の第2版で自動cloud process0、native日次/authority execution/receiptの新規・変更・削除0、supervisor同PID/active0を継続確認している。search通常第3周期は340.902秒・local試行16・昇格8で進行し、旧postimage復旧によるbacklog減少は推論throughputに算入しない。

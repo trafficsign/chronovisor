@@ -1023,6 +1023,8 @@ def test_repository_example_has_representative_local_role_map() -> None:
     distillation = tomllib.loads(text)["recall"]["distillation"]
     assert distillation == {
         "enabled": False,
+        "teacher_profile": "local-single-v1",
+        "native_luna_enabled": False,
         "chunk_size": 25,
         "max_input_bytes": 12000,
         "max_candidates": 200,
@@ -1111,3 +1113,11 @@ def test_single_runtime_identity_accepts_current_and_rejects_stale_routes(
     )
 
     assert _single_runtime_route_identity_error(route) == expected
+
+
+@pytest.fixture(autouse=True)
+def _explicit_legacy_cloud_opt_in(monkeypatch):
+    """Exercise the retained manual opt-in paths without live inference."""
+    from chronovisor.core import model_execution
+
+    monkeypatch.setattr(model_execution, "automatic_cloud_allowed", lambda *_args: True)

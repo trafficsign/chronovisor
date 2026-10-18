@@ -2354,3 +2354,11 @@ def test_structured_review_forwards_optional_system_to_local_router(
 
     assert result["decision"] == "approved"
     assert captured["system"] == marker
+
+
+@pytest.fixture(autouse=True)
+def _explicit_legacy_cloud_opt_in(monkeypatch):
+    """Exercise the retained manual opt-in paths without live inference."""
+    from chronovisor.core import model_execution
+
+    monkeypatch.setattr(model_execution, "automatic_cloud_allowed", lambda *_args: True)

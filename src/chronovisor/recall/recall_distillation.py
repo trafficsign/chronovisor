@@ -86,6 +86,8 @@ TEACHER_ROLES = (
 )
 OX_TEACHER_ROLE = "recall.distill.teacher.deepseek-v4-flash"
 LOCAL_TRIAD_PROFILE = "local-triad-v1"
+LOCAL_SINGLE_PROFILE = "local-single-v1"
+LOCAL_TEACHER_PROFILES = frozenset({LOCAL_TRIAD_PROFILE, LOCAL_SINGLE_PROFILE})
 # ponytail: legacy OX symbol/file names stay until the completed R6 artifacts
 # no longer consume them; serialized provenance names the real teacher.
 OX_SINGLE_PROFILE = "deepseek-v4-flash-single-v1"
@@ -93,7 +95,7 @@ OX_SINGLE_COHORT = "deepseek-v4-flash-backfill-v1"
 OX_PROBE_REVISION = "deepseek-single-teacher-repeat-v1"
 OX_RAMP_REQUEST_REVISION = "json-schema-core-label-abstain-16k-600s-v8"
 SINGLE_TEACHER_PROFILES = frozenset({OX_SINGLE_PROFILE, NATIVE_LUNA_SINGLE_PROFILE})
-TEACHER_PROFILES = frozenset({LOCAL_TRIAD_PROFILE, *SINGLE_TEACHER_PROFILES})
+TEACHER_PROFILES = frozenset({*LOCAL_TEACHER_PROFILES, *SINGLE_TEACHER_PROFILES})
 NATIVE_LUNA_COHORT = "native-luna-backfill-v1"
 # Exact-exposure counterfactuals are authorized only from 2026-10-09 JST.
 NATIVE_COUNTERFACTUAL_NOT_BEFORE = datetime(2026, 10, 8, 15, tzinfo=UTC)
@@ -676,6 +678,25 @@ def _default_workers(
     teacher_deadline_ms: int = 60_000,
     counterfactual_deadline_ms: int = 60_000,
 ) -> tuple[dict[str, Teacher], CounterfactualGenerator | None]:
+    from chronovisor.core import ollama
+
+    if config.teacher_profile == LOCAL_SINGLE_PROFILE:
+        try:
+            route = ollama.runtime_generation_routes((TEACHER_ROLES[0],))[0]
+            digest = ollama.runtime_generation_route_fingerprints((route,))[route.role]
+            if route.location != "local" or not route.structured_output:
+                return {}, None
+            identity = {"role": route.role, "provider": route.provider,
+                        "model": route.model, "location": route.location}
+            # Long reasoning may use the normal cycle's full runtime budget;
+            # the existing outer 300-second deadline still bounds all stages.
+            teacher = _WorkerTeacher(route.role, config.max_input_bytes,
+                                     identity, digest, max(teacher_deadline_ms, 300_000))
+        except Exception:
+            return {}, None
+        return {route.role: teacher}, _default_counterfactual_worker(
+            config, counterfactual_deadline_ms
+        )
     if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE:
         return {}, (
             _default_counterfactual_worker(config, counterfactual_deadline_ms)
@@ -719,8 +740,6 @@ def _default_workers(
         return {teacher.role: teacher}, _default_counterfactual_worker(
             config, counterfactual_deadline_ms
         )
-
-    from chronovisor.core import ollama
 
     roles = (
         *TEACHER_ROLES,
@@ -956,7 +975,7 @@ def _current_ox_profile_contract_id(root: Path) -> str:
 def _profile_cohort(profile: str) -> str:
     if profile == NATIVE_LUNA_SINGLE_PROFILE:
         return NATIVE_LUNA_COHORT
-    return OX_SINGLE_COHORT if profile == OX_SINGLE_PROFILE else LOCAL_TRIAD_PROFILE
+    return OX_SINGLE_COHORT if profile == OX_SINGLE_PROFILE else profile
 
 
 def _current_profile_contract_id(root: Path, profile: str) -> str:
@@ -5839,6 +5858,7 @@ def _materialization_label_row(
         "route_identity": dict(label.get("route_identity") or {}),
         "teacher_role": str(label.get("teacher_role") or ""),
         "model_digest": str(label.get("model_digest") or ""),
+        **({"reasoning": dict(label["reasoning"])} if label.get("reasoning") else {}),
         "generator_model_digest": str(label.get("generator_model_digest") or ""),
         "judge_model_digest": str(label.get("judge_model_digest") or ""),
         "generator_route_identity": dict(label.get("generator_route_identity") or {}),
@@ -6665,17 +6685,24 @@ def _configured_local_route_binding(row: Mapping[str, Any]) -> bool:
         return False
     if source == "teacher-label":
         route = str(row.get("route") or "")
+        profile = row.get("profile")
+        if profile not in LOCAL_TEACHER_PROFILES:
+            return False
+        if profile == LOCAL_SINGLE_PROFILE and not _configured_local_reasoning_binding(
+            row, expected.get(route, {})
+        ):
+            return False
         authority = {
-            "profile": LOCAL_TRIAD_PROFILE,
-            "cohort": LOCAL_TRIAD_PROFILE,
+            "profile": profile,
+            "cohort": profile,
             "profile_contract_id": "",
             "expires_at": "",
             "identity_revision": "local-teacher-v1",
             "request_revision": "local-teacher-v1",
-            "assignment_revision": ASSIGNMENT_REVISION,
+            "assignment_revision": ("local-single-assignment-v1" if profile == LOCAL_SINGLE_PROFILE else ASSIGNMENT_REVISION),
         }
         return (
-            route in TEACHER_ROLES
+            route in (TEACHER_ROLES[:1] if profile == LOCAL_SINGLE_PROFILE else TEACHER_ROLES)
             and all(row.get(key) == value for key, value in authority.items())
             and row.get("route_identity") == expected[route]
             and row.get("model_digest") == digests[route]
@@ -6690,7 +6717,7 @@ def _configured_local_route_binding(row: Mapping[str, Any]) -> bool:
         and row.get("request_revision") == "local-blind-counterfactual-v1"
         and (
             (
-                row.get("profile") == LOCAL_TRIAD_PROFILE
+                row.get("profile") in LOCAL_TEACHER_PROFILES
                 and row.get("profile_contract_id") == ""
                 and row.get("expires_at") == ""
             )
@@ -6722,6 +6749,25 @@ def _configured_local_route_binding(row: Mapping[str, Any]) -> bool:
         and row.get("generator_model_digest") == digests[generator]
         and row.get("judge_model_digest") == digests[judge]
         and row.get("generator_model_digest") != row.get("judge_model_digest")
+    )
+
+
+def _configured_local_reasoning_binding(
+    row: Mapping[str, Any], identity: Mapping[str, Any]
+) -> bool:
+    from chronovisor.core.model_execution import local_reasoning_settings
+
+    try:
+        settings = local_reasoning_settings(str(identity.get("role") or ""), str(identity.get("model") or ""))
+    except (OSError, ValueError, TypeError):
+        return False
+    actual = row.get("reasoning")
+    return bool(
+        settings and isinstance(actual, Mapping)
+        and actual.get("level") == settings["level"]
+        and actual.get("output_tokens") == settings["num_predict"]
+        and type(actual.get("context_tokens")) is int
+        and 0 < actual["context_tokens"] <= settings["num_ctx"]
     )
 
 
@@ -6836,7 +6882,7 @@ def _materialized_row_integrity(
             and row.get("request_revision") == "local-blind-counterfactual-v1"
             and (
                 (
-                    row.get("profile") == LOCAL_TRIAD_PROFILE
+                    row.get("profile") in LOCAL_TEACHER_PROFILES
                     and row.get("profile_contract_id") == ""
                     and row.get("expires_at") == ""
                 )
@@ -6900,6 +6946,33 @@ def _materialized_row_integrity(
     )
 
 
+def _configured_local_single_cohort() -> dict[str, Any]:
+    """Keep a local cohort stable while its first labels and CFs arrive."""
+    from chronovisor.core import ollama
+    from chronovisor.core.model_execution import local_reasoning_settings
+
+    roles = (TEACHER_ROLES[0], "recall.distill.answer_generator", "recall.distill.utility_judge")
+    digests: dict[str, str] = {}
+    reasoning: dict[str, Any] | None = None
+    try:
+        routes = ollama.runtime_generation_routes(roles)
+        if tuple(route.role for route in routes) != roles or any(route.location != "local" for route in routes):
+            raise ValueError("local cohort routes unavailable")
+        digests = ollama.runtime_generation_route_fingerprints(routes)
+        if any(re.fullmatch(r"[0-9a-f]{64}", digests[role]) is None for role in roles):
+            raise ValueError("local cohort digests unavailable")
+        reasoning = local_reasoning_settings(roles[0], routes[0].model)
+    except Exception:
+        digests = {}
+    cohort = {
+        "revision": "configured-local-single-cohort-v1", "profile": LOCAL_SINGLE_PROFILE,
+        "teacher_model_digests": {role: digests.get(role, "") for role in TEACHER_ROLES},
+        "counterfactual_model_digests": [digests.get(role, "") for role in roles[1:]],
+        "reasoning": reasoning,
+    }
+    return {**cohort, "cohort_sha256": canonical_json.canonical_json_sha256_strict(cohort)}
+
+
 def _active_training_cohort(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -6908,6 +6981,17 @@ def _active_training_cohort(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Select the latest coherent local-model cohort and resplit only it."""
 
+    if teacher_profile == LOCAL_SINGLE_PROFILE:
+        cohort = _configured_local_single_cohort()
+        teacher = cohort["teacher_model_digests"][TEACHER_ROLES[0]]
+        pair = tuple(cohort["counterfactual_model_digests"])
+        selected = [dict(row) for row in rows if row.get("profile") == LOCAL_SINGLE_PROFILE and (
+            (row.get("source") == "teacher-label" and teacher
+             and row.get("route") == TEACHER_ROLES[0] and row.get("model_digest") == teacher)
+            or (row.get("source") == "counterfactual-label" and all(pair) and pair[0] != pair[1]
+                and (row.get("generator_model_digest"), row.get("judge_model_digest")) == pair)
+        )]
+        return selected, cohort
     if teacher_profile in SINGLE_TEACHER_PROFILES:
         single_rows = [
             dict(row)
@@ -7033,6 +7117,8 @@ def _offline_training_gate(
 ) -> dict[str, Any]:
     """Qualify untrusted local-model data without calling it verified truth."""
 
+    if config.teacher_profile == LOCAL_SINGLE_PROFILE:
+        rows = [row for row in rows if not isinstance(row, Mapping) or row.get("profile") == LOCAL_SINGLE_PROFILE]
     integrity_failed = any(
         isinstance(row, Mapping)
         and not _materialized_row_integrity(
@@ -7155,7 +7241,7 @@ def _offline_training_gate(
             "route_folds": {},
             "counterfactual_direction": {"denominator": 0, "wilson_lower": 0.0},
         }
-    rows, model_cohort = _active_training_cohort(rows)
+    rows, model_cohort = _active_training_cohort(rows, teacher_profile=config.teacher_profile)
 
     owner = [
         row
@@ -11738,17 +11824,24 @@ def _run_teacher_batch(
     )
 
 
-def _local_work_id(payload_digest: str, route: str) -> str:
+def _local_work_id(
+    payload_digest: str, route: str, profile: str = LOCAL_TRIAD_PROFILE
+) -> str:
     digest = canonical_json.canonical_json_sha256_strict(
         {
             "kind": "local-teacher",
-            "profile": LOCAL_TRIAD_PROFILE,
+            "profile": profile,
             "payload_digest": payload_digest,
             "route": route,
             "assignment_revision": ASSIGNMENT_REVISION,
         }
     )
     return f"local-teacher-{digest}"
+
+
+def _local_teacher_workset_path(root: Path, profile: str) -> Path:
+    filename = "local-single-workset.sqlite3" if profile == LOCAL_SINGLE_PROFILE else "local-workset.sqlite3"
+    return store.distillation_dir(root) / filename
 
 
 def _local_workset_watermark(
@@ -11825,6 +11918,24 @@ def _advance_local_workset(
     workset.advance(items, watermark, progress=_local_workset_progress(watermark))
 
 
+def _local_single_prior_pairs(label_path: Path) -> set[tuple[str, str]]:
+    from chronovisor.recall.recall_distillation_ledger import ledger_index
+
+    return {(str(row[0]), str(row[1])) for row in ledger_index(label_path).query(
+        "SELECT DISTINCT rally_id,candidate_id FROM rows "
+        "WHERE kind='teacher-label' AND profile!=?", (LOCAL_SINGLE_PROFILE,)
+    )}
+
+
+def _local_single_label_rows(label_path: Path) -> list[dict[str, Any]]:
+    from chronovisor.recall.recall_distillation_ledger import ledger_index
+
+    return [json.loads(row[0]) for row in ledger_index(label_path).query(
+        "SELECT row_json FROM rows WHERE kind='counterfactual-label' OR profile=? "
+        "ORDER BY sequence", (LOCAL_SINGLE_PROFILE,)
+    )]
+
+
 def _prepare_local_teacher_work(
     *,
     snapshots: Mapping[str, Mapping[str, Any]],
@@ -11832,6 +11943,9 @@ def _prepare_local_teacher_work(
     split_assignments: Mapping[str, Any],
     split_plan_id: str,
     age_bands: Mapping[str, str] | None = None,
+    profile: str = LOCAL_TRIAD_PROFILE,
+    prior_pairs: set[tuple[str, str]] | None = None,
+    reasoning: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     tasks: dict[str, dict[str, Any]] = {}
     work_items: list[dict[str, Any]] = []
@@ -11844,9 +11958,14 @@ def _prepare_local_teacher_work(
         key=lambda item: (_source_epoch(rally_by_id.get(item[0], {})), item[0]),
     ):
         rally = rally_by_id.get(rally_id)
+        # The new local lane may collect untrusted daily evidence in embargo.
+        # Its sealed split stays embargo; training and certification gates stay closed.
         if rally is None or (
             split_plan_id
-            and split_assignments.get(rally_id) not in {"train", "validation", "test"}
+            and split_assignments.get(rally_id) not in (
+                {"train", "validation", "test", "embargo"}
+                if profile == LOCAL_SINGLE_PROFILE else {"train", "validation", "test"}
+            )
         ):
             continue
         candidates = teacher_candidate_rows(snapshot)
@@ -11860,10 +11979,16 @@ def _prepare_local_teacher_work(
             candidate_id = str(candidate.get("candidate_id") or "")
             if not candidate_id:
                 continue
-            if candidate_id in selected_ids:
+            if (prior_pairs is not None and (rally_id, candidate_id) in prior_pairs) or candidate_id in selected_ids:
                 continue
             selected_ids.add(candidate_id)
-            assignment = teacher_assignment(rally_id, candidate_id)
+            assignment = (
+                {"revision": "local-single-assignment-v1", "owner": TEACHER_ROLES[0],
+                 "probe_revision": PROBE_REVISION, "probe": False,
+                 "routes": [TEACHER_ROLES[0]]}
+                if profile == LOCAL_SINGLE_PROFILE
+                else teacher_assignment(rally_id, candidate_id)
+            )
             for route in assignment["routes"]:
                 payload_digest = canonical_json.canonical_json_sha256_strict(
                     {
@@ -11878,10 +12003,11 @@ def _prepare_local_teacher_work(
                             if isinstance(ref, Mapping)
                         ],
                         "snapshot_sha256": str(snapshot.get("snapshot_sha256") or ""),
-                        "profile": LOCAL_TRIAD_PROFILE,
+                        "profile": profile,
+                        **({"reasoning": dict(reasoning or {})} if profile == LOCAL_SINGLE_PROFILE else {}),
                     }
                 )
-                work_id = _local_work_id(payload_digest, str(route))
+                work_id = _local_work_id(payload_digest, str(route), profile)
                 tasks[work_id] = {
                     "rally": rally,
                     "candidate": candidate,
@@ -11909,7 +12035,7 @@ def _prepare_local_teacher_work(
                             "split_plan_id": split_plan_id,
                         },
                         "provenance": {
-                            "assignment_revision": ASSIGNMENT_REVISION,
+                            "assignment_revision": assignment["revision"],
                             "probe_revision": PROBE_REVISION,
                             "route": str(route),
                         },
@@ -11943,7 +12069,11 @@ def _local_r4_receipt_entry(
         or not route_identity["model"]
         or label.get("kind") != "teacher-label"
         or label.get("status") != "completed"
-        or label.get("teacher_profile") != LOCAL_TRIAD_PROFILE
+        or label.get("teacher_profile") != (
+            LOCAL_SINGLE_PROFILE
+            if assignment.get("revision") == "local-single-assignment-v1"
+            else LOCAL_TRIAD_PROFILE
+        )
         or label.get("work_id") != work_id
         or label.get("attempt") != attempt
         or label.get("rally_id") != task["rally"].get("rally_id")
@@ -12990,7 +13120,7 @@ def _write_r4_local_failure_receipts(
             seen.add((work_id, attempt))
             attempt_payload = {
                 "kind": "local-r4-failure-attempt",
-                "profile": LOCAL_TRIAD_PROFILE,
+                "profile": config.teacher_profile,
                 "source_commit": source["source_commit"],
                 "source_tree_sha256": source["source_tree_sha256"],
                 "source_ox_identity_sha256": source["source_ox_identity_sha256"],
@@ -13039,7 +13169,7 @@ def _write_r4_local_failure_receipts(
             ):
                 return False
             receipt_identity = {
-                "profile": LOCAL_TRIAD_PROFILE,
+                "profile": config.teacher_profile,
                 "work_id": work_id,
                 "attempt": attempt,
                 "attempt_record_sha256": attempt_record_sha256,
@@ -13076,7 +13206,7 @@ def _write_r4_local_failure_receipts(
             payload: dict[str, Any] = {
                 "receipt_id": receipt_id,
                 "receipt_identity": receipt_identity,
-                "profile": LOCAL_TRIAD_PROFILE,
+                "profile": config.teacher_profile,
                 "source_commit": source["source_commit"],
                 "source_tree_sha256": source["source_tree_sha256"],
                 "captured_at": captured_at,
@@ -13295,7 +13425,7 @@ def _write_r4_local_receipts(
                 return False
             assignment = task["assignment"]
             receipt_identity = {
-                "profile": LOCAL_TRIAD_PROFILE,
+                "profile": config.teacher_profile,
                 "work_id": work_id,
                 "attempt": attempt,
                 "label_record_sha256": record,
@@ -13334,7 +13464,7 @@ def _write_r4_local_receipts(
             payload: dict[str, Any] = {
                 "receipt_id": receipt_id,
                 "receipt_identity": receipt_identity,
-                "profile": LOCAL_TRIAD_PROFILE,
+                "profile": config.teacher_profile,
                 "source_commit": source["source_commit"],
                 "source_tree_sha256": source["source_tree_sha256"],
                 "captured_at": captured_at,
@@ -13485,7 +13615,7 @@ def _repair_r4_local_receipts(
         if (
             label.get("kind") != "teacher-label"
             or label.get("source_commit") != commit
-            or label.get("teacher_profile") != LOCAL_TRIAD_PROFILE
+            or label.get("teacher_profile") != config.teacher_profile
         ):
             continue
         work_id = str(label.get("work_id") or "")
@@ -13600,7 +13730,7 @@ def _write_local_r4_pending_failure_marker(
     ):
         raise DistillationError("local R4 pending failure task binding is invalid")
     marker_identity = {
-        "profile": LOCAL_TRIAD_PROFILE,
+        "profile": config.teacher_profile,
         **source,
         "work_id": claim.work_id,
         "attempt": claim.attempt,
@@ -13753,6 +13883,7 @@ def _remove_local_r4_pending_failure_marker(
 def _local_r4_pending_receipt_is_sealed(
     *,
     root: Path,
+    profile: str = LOCAL_TRIAD_PROFILE,
     entry: Mapping[str, Any],
     source: Mapping[str, str],
     configured_max_inflight: int,
@@ -13785,7 +13916,7 @@ def _local_r4_pending_receipt_is_sealed(
     work_id, attempt = str(normalized["work_id"]), int(normalized["attempt"])
     attempt_payload = {
         "kind": "local-r4-failure-attempt",
-        "profile": LOCAL_TRIAD_PROFILE,
+        "profile": profile,
         **source,
         "work_id": work_id,
         "attempt": attempt,
@@ -13811,7 +13942,7 @@ def _local_r4_pending_receipt_is_sealed(
         }
     )
     receipt_identity = {
-        "profile": LOCAL_TRIAD_PROFILE,
+        "profile": profile,
         "work_id": work_id,
         "attempt": attempt,
         "attempt_record_sha256": attempt_record_sha256,
@@ -13888,7 +14019,7 @@ def _local_r4_pending_receipt_is_sealed(
     payload: dict[str, Any] = {
         "receipt_id": receipt_id,
         "receipt_identity": receipt_identity,
-        "profile": LOCAL_TRIAD_PROFILE,
+        "profile": profile,
         "source_commit": source["source_commit"],
         "source_tree_sha256": source["source_tree_sha256"],
         "captured_at": receipt_captured_at,
@@ -14004,7 +14135,7 @@ def _repair_local_r4_pending_failure_markers(
             set(marker) != expected_keys
             or marker.get("kind") != "local-r4-owned-failure-pending"
             or not isinstance(identity, Mapping)
-            or dict(identity).get("profile") != LOCAL_TRIAD_PROFILE
+            or dict(identity).get("profile") != config.teacher_profile
             or marker.get("artifact_id")
             != canonical_json.canonical_json_sha256_strict(identity)
             or not isinstance(claim_transition, Mapping)
@@ -14124,7 +14255,7 @@ def _repair_local_r4_pending_failure_markers(
             raise DistillationError("local R4 pending failure transition drifted")
         assert settle is not None
         if _local_r4_pending_receipt_is_sealed(
-            root=root,
+            root=root, profile=config.teacher_profile,
             entry=entry,
             source=source,
             configured_max_inflight=stored_cap,
@@ -14153,7 +14284,7 @@ def _repair_local_r4_pending_failure_markers(
         ):
             raise DistillationError("local R4 pending failure repair failed")
         if not _local_r4_pending_receipt_is_sealed(
-            root=root,
+            root=root, profile=config.teacher_profile,
             entry=entry,
             source=source,
             configured_max_inflight=stored_cap,
@@ -14796,16 +14927,18 @@ def _run_local_teacher_route(
                 "candidate_id": candidate["candidate_id"],
                 "route": route,
                 "teacher_profile": config.teacher_profile,
+                **({"profile": config.teacher_profile} if config.teacher_profile == LOCAL_SINGLE_PROFILE else {}),
                 "profile_contract_id": "",
                 "expires_at": "",
                 "identity_revision": "local-teacher-v1",
                 "request_revision": "local-teacher-v1",
-                "assignment_revision": ASSIGNMENT_REVISION,
+                "assignment_revision": task["assignment"]["revision"],
                 "captured_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "attempt": item["claim"].attempt,
                 "route_identity": response.get("_route_identity", {}),
                 "model_digest": response.get("_model_digest", ""),
                 "assignment": task["assignment"],
+                "reasoning": dict(response.get("_teacher_reasoning") or {}),
                 **(dict(source_binding) if source_binding is not None else {}),
                 **_teacher_label(
                     label_response,
@@ -14852,7 +14985,7 @@ def _run_local_teacher_batch(
     from chronovisor.recall.recall_distillation_workset import DistillationWorkset
 
     workset = DistillationWorkset(
-        store.distillation_dir(root) / "local-workset.sqlite3"
+        _local_teacher_workset_path(root, config.teacher_profile)
     )
     raw_dir = raw_dir or root / "raw"  # compatibility for direct test callers
     try:
@@ -14864,12 +14997,21 @@ def _run_local_teacher_batch(
         split_plan_id = ""
         split_assignments = {}
         age_bands = {}
+    from chronovisor.core.model_execution import local_reasoning_settings
+
+    teacher = teachers.get(TEACHER_ROLES[0])
+    reasoning = (
+        local_reasoning_settings(TEACHER_ROLES[0], str(teacher.expected_route["model"]), root=root)
+        if isinstance(teacher, _WorkerTeacher) else None
+    )
     tasks, work_items = _prepare_local_teacher_work(
         snapshots=snapshots,
         rally_by_id=rally_by_id,
         split_assignments=split_assignments,
         split_plan_id=split_plan_id,
         age_bands=age_bands if isinstance(age_bands, Mapping) else None,
+        profile=config.teacher_profile, reasoning=reasoning,
+        prior_pairs=_local_single_prior_pairs(label_path) if config.teacher_profile == LOCAL_SINGLE_PROFILE else None,
     )
     _advance_local_workset(
         workset,
@@ -15655,7 +15797,7 @@ def _run_counterfactual_block(
 ) -> _CounterfactualBlockResult:
     if counterfactual is None or not counterfactual.local:
         return _CounterfactualBlockResult()
-    if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE:
+    if config.teacher_profile in {NATIVE_LUNA_SINGLE_PROFILE, LOCAL_SINGLE_PROFILE}:
         rally_by_id = {
             key: rally
             for key, rally in rally_by_id.items()
@@ -15854,6 +15996,24 @@ def _age_band_priority(band: str) -> int:
     return {"locked-test": 30, "recent": 20, "old-history": 10}.get(band, 0)
 
 
+def _local_single_snapshot_ids(
+    root: Path, known: set[str], rallies: Sequence[Mapping[str, Any]],
+) -> set[str]:
+    """Resolve unlabelled work and existing CF sources without relabelling Luna."""
+    prior = _local_single_prior_pairs(store.distillation_dir(root) / "label-ledger.jsonl")
+    counts: dict[str, int] = defaultdict(int)
+    for rally_id, _ in prior:
+        counts[rally_id] += 1
+    selected = {key for key in known if counts[key] < 4}
+    from chronovisor.recall.recall_distillation_cf_schedule import read_schedule
+
+    selected.update((read_schedule(root) or {}).get("rally_plan_ids", {}))
+    selected.update(str(row["rally_id"]) for row in rallies if (
+        row.get("has_actual_answer") or row.get("actual_answer_refs")
+    ) and _native_counterfactual_since_approval(row))
+    return selected & known
+
+
 def _capture_candidate_snapshots(
     *,
     root: Path,
@@ -15872,7 +16032,7 @@ def _capture_candidate_snapshots(
 ) -> _CandidateCaptureResult:
     candidate_path = store.distillation_dir(root) / "candidate-ledger.jsonl"
     snapshots: dict[str, Mapping[str, Any]]
-    if config.teacher_profile in SINGLE_TEACHER_PROFILES:
+    if config.teacher_profile in {*SINGLE_TEACHER_PROFILES, LOCAL_SINGLE_PROFILE}:
         from chronovisor.recall import recall_distillation_catalog as catalog
 
         try:
@@ -15902,6 +16062,8 @@ def _capture_candidate_snapshots(
                     )
                     and _native_counterfactual_since_approval(rally)
                 )
+            if config.teacher_profile == LOCAL_SINGLE_PROFILE:
+                label_rally_ids = _local_single_snapshot_ids(root, known_rally_ids, rallies)
             snapshots = {
                 rally_id: snapshot
                 for rally_id, snapshot in catalog.read_candidate_snapshots(
@@ -15926,7 +16088,7 @@ def _capture_candidate_snapshots(
         # observed label rows. Materialize once, after the model phase.
         training_rows = (
             []
-            if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+            if config.teacher_profile in {NATIVE_LUNA_SINGLE_PROFILE, LOCAL_SINGLE_PROFILE}
             else materialize_training_rows(
                 root,
                 _rallies=rallies,
@@ -15980,7 +16142,7 @@ def _capture_candidate_snapshots(
             texts.get(str(rally["query_sha256"]), ""),
             limit=config.max_candidates,
             candidate_texts=texts,
-            root=root if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE else None,
+            root=root if config.teacher_profile in {NATIVE_LUNA_SINGLE_PROFILE, LOCAL_SINGLE_PROFILE} else None,
         )
         payloads.append(
             {
@@ -15996,7 +16158,7 @@ def _capture_candidate_snapshots(
         snapshots[str(rally["rally_id"])] = snapshot
         work.append(rally)
     store.append_chain_batch(candidate_path, payloads)
-    if config.teacher_profile in SINGLE_TEACHER_PROFILES and payloads:
+    if config.teacher_profile in {*SINGLE_TEACHER_PROFILES, LOCAL_SINGLE_PROFILE} and payloads:
         try:
             catalog.sync_candidate_index(root, candidate_path)
         except catalog.CatalogError as exc:
@@ -16118,7 +16280,7 @@ def _prepare_distillation_chunk(
                 if attempt == 2 or advanced.watermark == committed_raw_watermark(raw_dir):
                     raise
                 advanced = catalog.advance(raw_dir, root, config.max_input_bytes)
-    native_sources = config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+    native_sources = config.teacher_profile in {NATIVE_LUNA_SINGLE_PROFILE, LOCAL_SINGLE_PROFILE}
     rallies = (
         catalog.rally_summaries(root) if native_sources else catalog.rallies(root)
     )
@@ -16150,8 +16312,14 @@ def _prepare_distillation_chunk(
         and teachers is not None
         and teachers[OX_TEACHER_ROLE].local is False
     )
+    local_single_available = (
+        config.teacher_profile == LOCAL_SINGLE_PROFILE
+        and set(teachers or {}) == {TEACHER_ROLES[0]}
+        and bool(teachers and teachers[TEACHER_ROLES[0]].local)
+    )
     teachers_available = (
-        local_teachers
+        local_single_available
+        or local_teachers
         or ox_teacher_available
         or (
             config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
@@ -16182,6 +16350,7 @@ def _prepare_distillation_chunk(
     label_rows = (
         ledger_index(label_path).rows(kind="counterfactual-label")
         if config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+        else _local_single_label_rows(label_path) if config.teacher_profile == LOCAL_SINGLE_PROFILE
         else _read_chain(label_path)
     )
     capture = _capture_candidate_snapshots(
@@ -16230,6 +16399,7 @@ def _prepare_distillation_chunk(
                 rally_id: snapshot
                 for rally_id, snapshot in snapshots.items()
                 if assignments.get(rally_id) == "test" or rally_id in counterfactual_ids
+                or (config.teacher_profile == LOCAL_SINGLE_PROFILE and assignments.get(rally_id) == "embargo")
             }
     counterfactual_probe = _run_counterfactual_block(
         execute=False,
@@ -16317,11 +16487,11 @@ def _prepare_distillation_training(
     profile_contract_id: str,
     deadline: float | None = None,
 ) -> dict[str, Any]:
-    native_sources = config.teacher_profile == NATIVE_LUNA_SINGLE_PROFILE
+    native_sources = config.teacher_profile in {NATIVE_LUNA_SINGLE_PROFILE, LOCAL_SINGLE_PROFILE}
     current_labels = [] if native_sources else _read_chain(label_path)
     training_snapshots: Mapping[str, Mapping[str, Any]] = snapshots
     candidate_index_state: Mapping[str, Any] = {}
-    if config.teacher_profile in SINGLE_TEACHER_PROFILES:
+    if config.teacher_profile in {*SINGLE_TEACHER_PROFILES, LOCAL_SINGLE_PROFILE}:
         try:
             catalog.sync_candidate_index(root, candidate_path)
             candidate_index_state = catalog.candidate_index_state(root)
@@ -16767,11 +16937,11 @@ def _run_distillation_chunk_impl(
     model_deferred = model_deferred or teacher_result.deferred
     ox_workset = dict(teacher_result.workset_status or {})
     local_workset: dict[str, Any] = {}
-    if config.teacher_profile == LOCAL_TRIAD_PROFILE:
+    if config.teacher_profile in LOCAL_TEACHER_PROFILES:
         from chronovisor.recall.recall_distillation_workset import DistillationWorkset
 
         local_workset = DistillationWorkset(
-            store.distillation_dir(root) / "local-workset.sqlite3"
+            _local_teacher_workset_path(root, config.teacher_profile)
         ).status(include_timing=True)
         ox_workset = {}
     ox_ramp_fields: dict[str, Any] = {}
@@ -16846,11 +17016,11 @@ def _run_distillation_chunk_impl(
     model_deferred = model_deferred or (
         counterfactual_result.deferred and labels_written == 0
     )
-    if config.teacher_profile == LOCAL_TRIAD_PROFILE:
+    if config.teacher_profile in LOCAL_TEACHER_PROFILES:
         from chronovisor.recall.recall_distillation_workset import DistillationWorkset
 
         local_workset = DistillationWorkset(
-            store.distillation_dir(root) / "local-workset.sqlite3"
+            _local_teacher_workset_path(root, config.teacher_profile)
         ).status(include_timing=True)
     training = _prepare_distillation_training(
         root=root,
@@ -16912,9 +17082,12 @@ def _timeout_workset_statuses(root: Path) -> dict[str, dict[str, Any]]:
     from chronovisor.recall.recall_runtime import RecallWallClockTimeout
 
     statuses: dict[str, dict[str, Any]] = {}
+    local_filename = _local_teacher_workset_path(
+        root, load_distillation_config(root / "config.toml").teacher_profile
+    ).name
     for name, filename in (
         ("ox_workset", "ox-workset.sqlite3"),
-        ("local_workset", "local-workset.sqlite3"),
+        ("local_workset", local_filename),
     ):
         path = store.distillation_dir(root) / filename
         try:

@@ -57,6 +57,9 @@ def test_worker_resolves_fixed_local_route_and_hides_input(monkeypatch) -> None:
             captured["system"] = system
             return SimpleNamespace(
                 ok=True,
+                think="low",
+                num_predict=3_072,
+                effective_num_ctx=32_768,
                 value={
                     "labels": [
                         {
@@ -89,6 +92,11 @@ def test_worker_resolves_fixed_local_route_and_hides_input(monkeypatch) -> None:
         },
         "model_digest": "sha256:local",
         "result": {
+            "_teacher_reasoning": {
+                "level": "low",
+                "output_tokens": 3_072,
+                "context_tokens": 32_768,
+            },
             "labels": [
                 {
                     "candidate_id": "candidate-1",

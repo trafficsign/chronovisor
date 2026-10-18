@@ -42,6 +42,12 @@ CREDENTIAL_REF = CredentialRef.parse("env:REMOTE_TEACHER_API_KEY")
 ENDPOINT = OX_ALPHA_ENDPOINT
 
 
+@pytest.fixture(autouse=True)
+def explicit_manual_cloud_policy(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHRONOVISOR_ROOT", str(tmp_path))
+    (tmp_path / "config.toml").write_text("[model_execution]\nallow_automatic_cloud_models=true\n")
+
+
 class FakeSender:
     def __init__(
         self, response: httpx.Response, *, error: Exception | None = None
@@ -156,6 +162,15 @@ def test_current_single_teacher_route_is_deepseek_v4_flash() -> None:
         "model": "opencode-go/deepseek-v4-flash",
         "location": "remote",
     }
+
+
+def test_cached_teacher_rechecks_cloud_policy_before_egress(tmp_path):
+    sender = FakeSender(_response(_label_response()))
+    teacher = _teacher(tmp_path, sender)
+    (tmp_path / "config.toml").write_text("[model_execution]\nallow_automatic_cloud_models=false\n")
+    result = teacher.evaluate(_payload())
+    assert result["_failure"]["class"] == "automatic_cloud_models_disabled"
+    assert sender.calls == []
 
 
 def test_source_binding_requires_a_clean_installed_checkout(

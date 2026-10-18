@@ -154,6 +154,10 @@ def native_luna_authority_for_lane(
 
     if lane != NATIVE_LUNA_LANE:
         return LOCAL_AUTHORITY_VALUE
+    from chronovisor.core.model_execution import automatic_cloud_allowed
+
+    if not automatic_cloud_allowed(_runtime_root(root)):
+        return LOCAL_AUTHORITY_VALUE
     override = os.environ.get(NATIVE_LUNA_AUTHORITY_ENV)
     if override is not None:
         return _parse_authority_value(override, source="environment")
@@ -986,6 +990,10 @@ def _execute_native_luna_process(
     capacity: NativeLunaCapacityLease,
 ) -> dict[str, Any]:
     started = time.monotonic()
+    from chronovisor.core.model_execution import automatic_cloud_allowed
+
+    if not automatic_cloud_allowed(root):
+        raise NativeLunaIdentityError("automatic_cloud_models_disabled")
     record: dict[str, Any] = {
         "run_id": run_id,
         "returncode": None,

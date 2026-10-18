@@ -403,7 +403,14 @@ def run(payload: Mapping[str, Any]) -> dict[str, Any]:
         request_id=request_id,
         route=route,
         model_digest=digest,
-        result=structured.value,
+        result={
+            **structured.value,
+            "_teacher_reasoning": {
+                "level": structured.think,
+                "output_tokens": structured.num_predict,
+                "context_tokens": structured.effective_num_ctx,
+            },
+        } if operation == "teacher" else structured.value,
     )
 
 

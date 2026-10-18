@@ -2478,6 +2478,12 @@ def _queue_health_snapshot(root: Path) -> dict[str, Any]:
     visible as historical counters and never make the current health red.
     """
 
+    from chronovisor.ops.model_execution_status import (
+        model_execution_status,
+        observed_drain,
+    )
+
+    execution = model_execution_status(root)
     recall_root = root / "recall"
     review_root = root / "review"
     runtime_root = root / "runtime"
@@ -2509,12 +2515,15 @@ def _queue_health_snapshot(root: Path) -> dict[str, Any]:
         search_summary["lanes"][lane] = diagnostic
         if not diagnostic["stale"]:
             continue
-        # A frontier lane is explicitly delegated to authority review.  Keep
-        # that distinction visible even when an older row lacks the optional
-        # decision_authority_error marker.
-        authority_wait = lane == "frontier" or any(
+        # Local authority changes are retried by the normal worker. Preserve
+        # real provenance failures without calling a slow local drain human work.
+        authority_wait = (lane == "frontier" and execution["automatic_cloud_allowed"]) or any(
             isinstance(row.get("decision_authority_error"), str)
             and row.get("decision_authority_error")
+            and not (
+                not execution["automatic_cloud_allowed"]
+                and row["decision_authority_error"] == "decision authority changed before effect"
+            )
             for row in label_rows
             if str(row.get("queue_status") or "unknown") in statuses
         )
@@ -2599,7 +2608,7 @@ def _queue_health_snapshot(root: Path) -> dict[str, Any]:
         # explicitly report route provenance, uncertainty, or an expired lease
         # are also human-wait states; a plain pending_local row remains a
         # data-wait scheduler stall.
-        authority_wait = lane == "frontier" or any(
+        authority_wait = (lane == "frontier" and execution["automatic_cloud_allowed"]) or any(
             row.get("human_required") is True
             or any(
                 marker in str(row.get(field) or "").casefold()
@@ -2706,9 +2715,21 @@ def _queue_health_snapshot(root: Path) -> dict[str, Any]:
                 )
             )
 
+    search_summary["drain"] = observed_drain(
+        label_rows, status_field="queue_status",
+        terminal_statuses={"frontier_approved", "frontier_rejected", "frontier_quarantined", "source_stale"},
+        timestamp_fields=("reviewed_at", "quarantined_at", "last_attempt_at", "source_stale_metadata.checked_at"),
+        pending=search_summary["active"], switched_at=execution.get("switched_at"),
+    )
+    lint_summary["drain"] = observed_drain(
+        lint_rows, status_field="status", terminal_statuses={"applied", "rejected", "quarantined"},
+        timestamp_fields=("updated_at",), pending=lint_summary["active"],
+        switched_at=execution.get("switched_at"),
+    )
     return {
         "alert": bool(alerts),
         "alerts": alerts,
+        "model_execution": execution,
         "search_labels": search_summary,
         "lint_repair": lint_summary,
         "raw_replay": replay_summary,

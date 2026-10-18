@@ -233,6 +233,8 @@ class OMLXAdapter:
             payload["enable_thinking"] = think is not False
             if isinstance(think, str):
                 payload["reasoning_effort"] = think
+                if model == "qwen3.8-flash-next-chat":
+                    template_kwargs["reasoning_effort"] = think
         return payload
 
     def _post(

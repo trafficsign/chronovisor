@@ -586,7 +586,11 @@ class NativeRound:
 
 def start_round(args: argparse.Namespace, bundle: dict[str, Any], shard: int) -> NativeRound:
     """Give one shard a fresh, bounded native child, independently of its peers."""
+    from chronovisor.core.model_execution import automatic_cloud_allowed
     from chronovisor.decision import native_luna_authority
+
+    if not automatic_cloud_allowed(args.root):
+        raise RuntimeError("automatic_cloud_models_disabled")
 
     capacity_lease = native_luna_authority.native_luna_capacity_lease(
         args.root,
@@ -855,11 +859,16 @@ def supervise(args: argparse.Namespace) -> int:
                 rows = inventory(args.root)
                 poll_rounds(active, rows, failures, retry_after)
                 enabled = config.enabled and config.native_luna_enabled and config.teacher_profile == daily.DEFAULT_TEACHER_PROFILE
-                if not enabled:
-                    for job in active.values():
-                        stop_round(job)
-                    active.clear()
-                    publish("disabled", child_pid=0, active_workers=0, reason="native_profile_disabled")
+                from chronovisor.core.model_execution import automatic_cloud_allowed
+
+                if not enabled or not automatic_cloud_allowed(args.root):
+                    # Revocation stops scheduling; existing shards finish and
+                    # retain their normal checkpoint/import boundaries.
+                    publish("disabled", active_workers=len(active),
+                            child_pid=next((job.child.pid for job in active.values()), 0),
+                            reason="native_profile_disabled")
+                    if args.once and not active:
+                        return 0
                 elif maintenance.exists():
                     publish("running", active_workers=len(active), reason="maintenance")
                 else:

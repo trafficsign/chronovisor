@@ -14,6 +14,7 @@ UVX_WRAPPERS = (
     "chronovisor-ingest-drain",
     "chronovisor-library-evidence",
     "chronovisor-librarian-review",
+    "chronovisor-recall-local-daily",
     "chronovisor-reranker-service",
     "chronovisor-semantic-service",
 )
@@ -23,7 +24,7 @@ def _text(name: str) -> str:
     return (SCRIPTS / name).read_text(encoding="utf-8")
 
 
-def test_exactly_six_production_uvx_wrappers_use_shared_runtime_resolution() -> None:
+def test_registered_production_uvx_wrappers_use_shared_runtime_resolution() -> None:
     wrappers = {
         path.name
         for path in SCRIPTS.glob("chronovisor-*")

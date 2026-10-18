@@ -1962,8 +1962,9 @@ def test_lint_queue_kpi_counts_only_unresolved_issue_keys(tmp_path: Path) -> Non
     }
 
 
+@pytest.mark.parametrize("cloud_allowed", [False, True])
 def test_queue_health_alerts_only_stale_active_lanes_and_keeps_quarantine_history(
-    tmp_path: Path,
+    tmp_path: Path, cloud_allowed: bool,
 ) -> None:
     root = tmp_path / "wiki"
     label_path = root / "recall" / "search-label-queue.jsonl"
@@ -1983,6 +1984,7 @@ def test_queue_health_alerts_only_stale_active_lanes_and_keeps_quarantine_histor
                 {
                     "queue_status": "pending_frontier_review",
                     "preregistered_at": "2020-01-01T00:00:00Z",
+                    "decision_authority_error": "decision authority changed before effect",
                 },
                 {"queue_status": "completed", "ts": "2020-01-01T00:00:00Z"},
             )
@@ -2032,11 +2034,14 @@ def test_queue_health_alerts_only_stale_active_lanes_and_keeps_quarantine_histor
         encoding="utf-8",
     )
 
+    (root / "config.toml").write_text(
+        "[model_execution]\nallow_automatic_cloud_models=" + str(cloud_allowed).lower() + "\n"
+    )
     payload = health.queue_health_snapshot(root)
     reasons = {item["reason"] for item in payload["alerts"]}
 
     assert "search_labels_late_lane" in reasons
-    assert "search_labels_authority_wait" in reasons
+    assert ("search_labels_authority_wait" in reasons) is cloud_allowed
     assert "lint_repair_authority_wait" in reasons
     assert "raw_replay_late_lane" in reasons
     assert payload["lint_repair"]["quarantined"] == 1

@@ -537,6 +537,11 @@ def compose_remote_generation_backend(
 ) -> GenerationBackend:
     """Compose one remote generation adapter inside the provider seam."""
 
+    from chronovisor.core.model_execution import automatic_cloud_allowed
+
+    if not automatic_cloud_allowed():
+        raise LLMConfigError(LLMConfigFailureCategory.CAPABILITY_UNAVAILABLE)
+
     return cast(
         GenerationBackend,
         compose_anthropic_adapter(profile, resolver, sender=sender)
@@ -708,6 +713,8 @@ def build_llm_runtime(
             rerank[role_name] = RerankRoute(cast(RerankBackend, backend), role.model)
         if isinstance(backend, (OllamaAdapter, OMLXAdapter)):
             local_controls[role_name] = backend
+    from chronovisor.core.model_execution import automatic_cloud_allowed
+
     return LLMRuntime(
         generation=generation,
         embedding=embedding,
@@ -715,6 +722,7 @@ def build_llm_runtime(
         local_controls=local_controls,
         remote_egress_opt_ins=config.egress_opt_ins,
         telemetry=telemetry,
+        cloud_execution_allowed=automatic_cloud_allowed,
     )
 
 

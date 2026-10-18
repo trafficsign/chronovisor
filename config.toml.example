@@ -66,6 +66,10 @@ live_egress_enabled = false
 # Offline-only. Enabling this starts bounded dataset construction; it never
 # changes the live Recall policy by itself.
 enabled = false
+# Local labels have a separate provenance cohort. Existing independence and
+# promotion requirements still apply even when only one teacher is available.
+teacher_profile = "local-single-v1"
+native_luna_enabled = false
 chunk_size = 25
 max_input_bytes = 12000
 max_candidates = 200
@@ -81,6 +85,18 @@ hard_floor_counterfactual_pairs = 100
 ox_expires_at = ""
 rollout_stages = [5, 25, 100]
 canary_min_days = 7
+
+[model_execution]
+allow_automatic_cloud_models = false
+
+# Set the level after a sealed-input local throughput measurement. The deployed
+# Flash Next template accepts low, medium, and xhigh (not high).
+[model_execution.local_reasoning]
+model = "qwen3.8-flash-next-chat"
+roles = ["recall.distill.teacher.a", "classification.authority", "lint.tag_repair", "ingest.generation", "recall.answer.runner"]
+level = "low"
+num_predict = 16384
+num_ctx = 65536
 
 # Dedicated oMLX 0.6.4 service for auxiliary roles. Per-model residency/PLE/MTP/ANE
 # settings live in ~/.omlx/model_settings.json; this endpoint is loopback-only.

@@ -900,6 +900,11 @@ def _spawn_guarded_process(
 ) -> subprocess.CompletedProcess[str]:
     """Spawn first, then atomically charge the guard to the real child PID."""
 
+    from chronovisor.core.model_execution import automatic_cloud_allowed
+
+    if not automatic_cloud_allowed():
+        raise OSError("automatic_cloud_models_disabled")
+
     input_text = kwargs.pop("input", None)
     timeout = kwargs.pop("timeout", None)
     capture_output = bool(kwargs.pop("capture_output", False))
@@ -1749,6 +1754,7 @@ def run_frontier_review(
     :class:`RepairIncidentEvidence` capability.  Admission, single-flight,
     cooldown and the daily budget are durable across processes.
     """
+    from chronovisor.core.model_execution import automatic_cloud_allowed
     from chronovisor.decision.decision_policy import resolve_decision_policy
     from chronovisor.decision.frontier_guard import (
         EvidenceValidationError,
@@ -1757,6 +1763,15 @@ def run_frontier_review(
         PermitDenied,
         RepairIncidentEvidence,
     )
+
+    if not automatic_cloud_allowed():
+        failure = _frontier_failure(
+            "automatic_cloud_models_disabled",
+            "repair_deferred",
+            "automatic cloud code repair is retired by owner policy",
+            human_required=False,
+        )
+        return _failure_result(summary=failure.summary, failure=failure)
 
     repair_policy, repair_mode, repair_policy_error = resolve_decision_policy(
         "system_code_repair"

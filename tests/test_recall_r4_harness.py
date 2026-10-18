@@ -17,6 +17,12 @@ from typing import cast
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def explicit_manual_cloud_policy(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHRONOVISOR_ROOT", str(tmp_path))
+    (tmp_path / "config.toml").write_text("[model_execution]\nallow_automatic_cloud_models=true\n")
+
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "recall_r4_harness_test_module", ROOT / "scripts" / "recall_r4_harness.py"

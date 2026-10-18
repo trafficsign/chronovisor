@@ -8,6 +8,7 @@ from typing import Any
 
 from chronovisor.core import ollama
 from chronovisor.core.durable_state import canonical_sha256
+from chronovisor.core.model_execution import local_reasoning_settings
 from chronovisor.core.runtime_config import load_decision_router_config
 
 RUNNER_SYSTEM = (
@@ -47,6 +48,20 @@ SCORER_POLICY_SHA256 = canonical_sha256(
 SAMPLER_SHA256 = canonical_sha256(
     {"temperature": 0, "seed": "pair_seed", "think": False}
 )
+
+
+def _sampler_identity(role: str) -> str:
+    settings = local_reasoning_settings(role, "")
+    if settings is None:
+        return SAMPLER_SHA256
+    config = load_decision_router_config()
+    return canonical_sha256({
+        "temperature": 0, "seed": "pair_seed", "think": settings["level"],
+        "runtime_budgets": {
+            "num_ctx": max(config.num_ctx, settings["num_ctx"]),
+            "num_predict": max(config.num_predict, settings["num_predict"]),
+        },
+    })
 
 
 def builtin_answer_adapter_identities(
@@ -97,7 +112,7 @@ def builtin_answer_adapter_identities(
         "model": runner_route["model"],
         "model_digest": runner_route["model_digest"],
         "system_sha256": canonical_sha256(RUNNER_SYSTEM),
-        "sampler_sha256": SAMPLER_SHA256,
+        "sampler_sha256": _sampler_identity(RUNNER_RUNTIME_ROLE),
         "policy_sha256": RUNNER_POLICY_SHA256,
     }
     scorer = {
@@ -108,7 +123,7 @@ def builtin_answer_adapter_identities(
         "model": scorer_route["model"],
         "model_digest": scorer_route["model_digest"],
         "system_sha256": canonical_sha256(SCORER_SYSTEM),
-        "sampler_sha256": SAMPLER_SHA256,
+        "sampler_sha256": _sampler_identity(SCORER_RUNTIME_ROLE),
         "policy_sha256": SCORER_POLICY_SHA256,
         "rubric_sha256": rubric_sha256,
         "evidence_manifest_sha256": evidence_manifest_sha256,
@@ -127,20 +142,21 @@ def _chat_json(
     seed: int,
 ) -> dict[str, Any]:
     config = load_decision_router_config()
+    settings = local_reasoning_settings(runtime_role, "")
     response = ollama.runtime_structured_chat(
         messages,
         runtime_role=runtime_role,
         source_data_class="raw",
         source_sensitivity="high",
         format=dict(schema),
-        num_ctx=config.num_ctx,
-        num_predict=config.num_predict,
+        num_ctx=max(config.num_ctx, settings["num_ctx"]) if settings else config.num_ctx,
+        num_predict=max(config.num_predict, settings["num_predict"]) if settings else config.num_predict,
         keep_alive="0",
         read_timeout_ms=config.read_timeout_ms,
         max_output_chars=config.max_output_chars,
         temperature=0,
         seed=seed,
-        think=False,
+        think=settings["level"] if settings else False,
     )
     value = json.loads(response.content)
     if not isinstance(value, dict):

@@ -2859,6 +2859,15 @@ class LocalStructuredSession:
             )
         )
         self.audit_store = LocalConsensusAuditStore(audit_root)
+        from chronovisor.core.model_execution import local_reasoning_settings
+
+        self.local_reasoning = (
+            local_reasoning_settings(self.runtime_role, self.model)
+            if transport is None else None
+        )
+        if self.local_reasoning is not None:
+            num_ctx = max(num_ctx, self.local_reasoning["num_ctx"])
+            num_predict = max(num_predict, self.local_reasoning["num_predict"])
         self.num_ctx = num_ctx
         self.num_predict = num_predict
         self.keep_alive = keep_alive
@@ -2973,7 +2982,7 @@ class LocalStructuredSession:
         )
 
     def _output_reservation(self) -> int:
-        if self.reasoning_disabled:
+        if self.reasoning_disabled or self.local_reasoning is not None:
             return self.num_predict
         if (
             _production_reasoning_profile(
@@ -2992,6 +3001,8 @@ class LocalStructuredSession:
     ) -> tuple[bool | str, str]:
         if self.reasoning_disabled:
             return False, "caller_disabled_reasoning"
+        if self.local_reasoning is not None:
+            return self.local_reasoning["level"], "configured_local_reasoning"
         profile = _production_reasoning_profile(
             self.model, self.runtime_role, self.reasoning_authority
         )
@@ -3054,7 +3065,8 @@ class LocalStructuredSession:
             messages=(),
             schema=None if formatless_thinking else schema,
             num_ctx=effective_num_ctx,
-            num_predict=_reasoning_num_predict(selected_think, self.num_predict),
+            num_predict=(self.num_predict if self.local_reasoning is not None
+                         else _reasoning_num_predict(selected_think, self.num_predict)),
             keep_alive=self.keep_alive,
             read_timeout_ms=self.read_timeout_ms,
             max_output_chars=self.max_output_chars,
@@ -3062,7 +3074,7 @@ class LocalStructuredSession:
             seed=STRUCTURED_GENERATION_SEED,
             think=selected_think,
             ollama_think=(
-                transport_think
+                selected_think if self.local_reasoning is not None else transport_think
                 if formatless_thinking
                 or authority_profile is None
                 or authority_profile["renderer"] == "native_levels"

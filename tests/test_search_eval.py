@@ -28,6 +28,13 @@ from tests.semantic_hold_support import semantic_authority
 from tests.test_decision_authority import _vote_audit
 
 
+@pytest.fixture
+def manual_native_opt_in(monkeypatch):
+    from chronovisor.core import model_execution
+
+    monkeypatch.setattr(model_execution, "automatic_cloud_allowed", lambda *_args: True)
+
+
 @pytest.fixture(autouse=True)
 def _valid_okf_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "okf-root"
@@ -1146,7 +1153,7 @@ def test_native_precompute_waits_for_capacity_and_progresses_all_rows(
 
 
 def test_native_capacity_deadline_defers_without_attempt_or_backoff(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, manual_native_opt_in
 ) -> None:
     queue_file = tmp_path / "label-queue.jsonl"
     golden_file = tmp_path / "search-golden.jsonl"
@@ -1312,7 +1319,7 @@ def test_native_timeout_only_defers_when_cycle_shortened_the_call(
         assert failure["execution_failure_class"] == "native_luna_timeout"
 
 
-def test_native_cycle_timeout_preserves_queue_and_semantic_attempts(monkeypatch, tmp_path) -> None:
+def test_native_cycle_timeout_preserves_queue_and_semantic_attempts(monkeypatch, tmp_path, manual_native_opt_in) -> None:
     from chronovisor.decision import native_luna_authority as native
 
     queue_file, golden_file = tmp_path / "queue.jsonl", tmp_path / "golden.jsonl"
@@ -1341,7 +1348,7 @@ def test_native_cycle_timeout_preserves_queue_and_semantic_attempts(monkeypatch,
     assert golden_file.read_bytes() == b""
 
 
-def test_native_execution_failure_keeps_cause_without_authorizing_a_verdict(monkeypatch, tmp_path) -> None:
+def test_native_execution_failure_keeps_cause_without_authorizing_a_verdict(monkeypatch, tmp_path, manual_native_opt_in) -> None:
     from chronovisor.decision import native_luna_authority as native
 
     queue_file, golden_file = tmp_path / "queue.jsonl", tmp_path / "golden.jsonl"
@@ -1372,7 +1379,7 @@ def test_native_execution_failure_keeps_cause_without_authorizing_a_verdict(monk
 
 
 def test_native_precompute_reserves_frontier_budget_sequentially(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, manual_native_opt_in
 ) -> None:
     rows = [{"queue_status": "pending_frontier_review"} for _ in range(2)]
     monkeypatch.setenv("CHRONOVISOR_SEARCH_LABEL_AUTHORITY", "native_luna")
