@@ -899,3 +899,12 @@ created_at: 2026-10-13T20:52:29+09:00
 
 
 - 2026-10-18 20:04 JST — canonical B2の全preflight（source/pin/6archive/HTTP actual=expected364811da・drift=false/marker不存在）を通し、20:03:48 JSTにB2のみ正常controllerを再開した。旧controllerのfinish/hold両receiptでschedule復帰済みを照合し、supervisor/B3は同process、先行search periodicを止めず自然引継ぎを待つ。新private restart receiptとlogを別名で保存し旧証跡は保持。正式観測は19:40:39〜20:03:48のB2 gapと交差するrunを受入から除外し、通常300秒runを一度に1個・最大20回の有限観測単位で継続する。成功はstate.last_success_atの実前進だけ、2回成立した時点で停止し、cap拒否や単なるCF作成を成功へ読み替えない。
+
+
+- 2026-10-18 20:10 JST — 一時maintenance markerの調査を終了。今回所有markerは18:39:46作成・18:49:09撤去のreceiptがあり、19:40の再出現の作成者/撤去者を示すsession・launchd・pytest・process証跡は見つからず未特定。B2のholdはschedule用でlive marker作成ではない。deploy helperの再実行は現在HEADとBASEのguardで停止するため、後半のorphan経路だけで実原因とは断定しない。未知のownerを想定したmarker削除等は行わず、現markerなし・既存preflight通過でB2を復帰した判断を保持。09:15 promptへB2単独後続receiptとgap除外、B3継続時にjoint restartを使わない手順を追加し、exact backup/CAS/readback成功、ACTIVE・日次09:15・target等は不変。Plan中間記録をcommitして正本へfast-forward、sourceは配備364811daと同一、docsはpushせずGitHub pin/driftを保持する。
+
+
+- 2026-10-18 20:21 JST — 再度のRaw・日次増分で共有修正を実測。20:19:04完了runは93.075秒、catalogはcheckpoint valid before/after=trueのadvancedで2.169秒、candidate/revisionも正常差分として進行した。labels/receipts各400増に対してdirty0→400（100rally）→0、既存clean162326行を保持し総162726行へ。sync0.228秒、追加batch0.877秒、全materialize17.545秒。前回444行に続いてsource実変更下の差分持越しを確認し、catalog全repairや既存全行のre-dirtyは再発なし。B2再開後の通常4runは152.839/98.241/104.685/93.075秒、CF utility入力12666/12172bytesの既存cap拒否を保持。B2 controllerは生存し先行periodicの自然終了待ち、正式成功は19:23の1回のみで受入を継続する。
+
+
+- 2026-10-18 20:38 JST — 20:36:55 JSTに先行search periodicが自然終了し、B2単独再開controllerがidle holdを取得してcycle1へ引き継いだ。native childやsupervisorへのsignalは行っていない。直近formalは51.834秒、dirty0→0、次候補でもutility12381bytesが既存12000bytes capにより拒否。B2継続処理中の正式成功2回目を待つ。監視負荷を抑えるためprivate observerの履歴集計を全1.35GB読取から末尾32MiBへ制限し、直近25件が完全に揃い、従来の全読取結果と全aggregate一致することをRO実測（0.124秒）した。正常pipeline・300秒・validatorや履歴filesは変更していない。
