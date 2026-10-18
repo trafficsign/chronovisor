@@ -2517,7 +2517,11 @@ def _format_validation_feedback(issues: Sequence[ValidationIssue]) -> str:
     detailed = json.dumps(
         [issue.to_dict() for issue in issues], ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
-    if len(issues) <= 3 and len(detailed.encode("utf-8")) <= _DETAILED_VALIDATION_FEEDBACK_BYTES:
+    # Keep a single error's semantic repair instructions and exact cap behavior.
+    if len(issues) == 1 or (
+        len(issues) <= 3
+        and len(detailed.encode("utf-8")) <= _DETAILED_VALIDATION_FEEDBACK_BYTES
+    ):
         return detailed
     groups: dict[str, list[ValidationIssue]] = {}
     for issue in issues:
