@@ -116,8 +116,8 @@ created_at: 2026-10-13T20:52:29+09:00
 
 ### 2026-10-18 formal mainline の隠れた停滞修復
 - [x] 停滞1：稼働を止めず段階時間・run前後dirty数・source writerを実測し、反復runの増減を記録する。
-- [ ] 停滞2：共有経路の根因を修正し、既存300秒・quota・全stage・validatorを維持して回帰と必須CIを通す。
-- [ ] 停滞3：formal成功の長時間不在と継続deferを、品質data outcomeと独立したreal health alertへ出す。
+- [x] 停滞2：共有経路の根因を修正し、既存300秒・quota・全stage・validatorを維持して回帰と必須CIを通す。
+- [x] 停滞3：formal成功の長時間不在と継続deferを、品質data outcomeと独立したreal health alertへ出す。
 - [ ] 停滞4：安全境界で一度配備しdrift=false、B2継続下で正式成功時刻の2回更新を確認、CF率・予測日・09:15 automationを更新する。
 
 ### Phase 5：別件の修理
@@ -871,4 +871,31 @@ created_at: 2026-10-13T20:52:29+09:00
 
 - 2026-10-18 18:06 JST — 共有境界へ整理後、architecture checkは違反0、ruff/mypy/import contracts/compile/whitespace通過。資源順番とFD継承（4子呼出・実exclusive lease維持・foreground取消）、health/progress/既存deferの100件も通過。health reader共通化に伴う既存mockの引数不足11件はtest fixtureを新signatureへ合わせて再検証した。最初のfull pytestは変更前architecture違反を検出して中断し証跡を保持、最終sourceでfull suiteを再実行中。変更を対象commitへまとめ、GitHub固定packageの必須CIを動かすためのみpushする判断。runtimeは234b7e05のままで、切替はCI成功後の一度に限定する。09:15 automationは新formal receipt/stall分類/差分保持/最大60秒の正常admission待ちを含むCAS候補をprivateに作成し、schedule・ACTIVE・既存targetは同一であることを検証した（まだ未適用）。
 
-- 2026-10-18 18:14 JST — 最終レビューで、300秒deadlineがBaseExceptionとして研究worker待機を中断した場合に、既存finallyが子processを回収しないことを確認した。新しい正常admission待ちを加えても上限後に資源を占有しないよう、共有run_cancellable_commandのfinallyで生存中の自身のmodel子だけをkill/reapし、元のdeadline例外は伝播させる。通常Luna shard/supervisorは対象外。実子processを使うdeadline回帰と研究scheduler計25件、静的検証を通した。未配備9ac20394の後続修正としてcommit/pushし、最終commitで必須CIを再確認する。配備回数は引き続き0。配備前CFは5適格、rolling24h 5件/日、予測11/06、凍結1872files・保護3件・current230bundleは変更/不一致0。
+- 2026-10-18 18:14 JST — 最終レビューで、300秒deadlineがBaseExceptionとして研究worker待機を中断した場合に、既存finallyが子processを回収しないことを確認した。新しい正常admission待ちを加えても上限後に資源を占有しないよう、共有run_cancellable_commandのfinallyで生存中の自身のmodel子だけをkill/reapし、元のdeadline例外は伝播させる。通常Luna shard/supervisorは対象外。実子processを使うdeadline回帰と研究scheduler計21件、静的検証を通した。未配備9ac20394の後続修正としてcommit/pushし、最終commitで必須CIを再確認する。配備回数は引き続き0。配備前CFは5適格、rolling24h 5件/日、予測11/06、凍結1872files・保護3件・current230bundleは変更/不一致0。
+
+- 2026-10-18 18:23 JST — 配備前のB2停止を調査。55周期目は455.891秒/100attempt/72promotedで正常終了し、その後のfresh HTTP pin guardで自動停止した。停止操作は行っていない。health expected_commitは設定pinではなくlive checkoutのorigin/main参照なので、package CIのためのpushでexpectedだけが364811daへ進み、実runtime234b7e05とのdriftを検出したことをsourceとHTTPで確認。B2を旧pinで無理に再開せず、一度配備して新pin・fresh receiptをそろえて正常復帰する。supervisorは同process・native worker6を維持。受入runはB2復帰後に行い、このCI待機中をB2稼働中の成功実績には数えない。復帰helperはB2がpartial receiptを要求するため、marker撤去後のfresh HTTP/MCP検証→B2/B3起動→再検証の順とする。local全体は7303pass/1skip/既知mock11fail、修正済みfixtureで失敗11件を再実行し11pass。最終364811daのcloud全体suiteは継続中、Securityは成功。
+
+- 2026-10-18 18:53 JST — 最終364811daの必須quality/Python3.14/Securityが全て成功。cloud全体は両系統7312pass/4skip/57deselected、構造契約・static・Semanticも成功。旧B2のguard停止後、稼働中search periodicが既存writer lockを保持していたため、保守marker下でnative shard全完了とperiodic自然終了を待った。18:47に既存ingest/distillation lease・実child0を確認して今回一度だけ配備。全6実archive/direct_urlは364811da、5依存制約bytes/MCP1.30.0不変、元untracked/indexを保持。supervisorは同processで再起動なし。Converge/search scheduleを復帰し所有markerを撤去、fresh HTTP/MCP actual=expected364811da/drift=false、Semantic/Reranker ready、LAN TLS401を確認した。HTTP初回15秒probeは起動直後にtimeoutしたが、続く通常health検証で成功。B2/B3はpinとbackup/CASを照合して正常controllerを復帰し、既存periodicからの自然引継ぎ中。正式成功はまだ未前進で、復帰後の通常300秒観測2runを既存worker lock待ちで開始した。
+
+- 2026-10-18 19:08 JST — 配備後の反証を記録。通常300秒観測run1は282.448秒、catalog2.431秒、CF4呼出64.095/14.958/20.576/18.098秒（block131.458秒、品質data reject）、materialization130.933秒でdirty137787→82768、budget defer。モデル枠の飢餓はこのrunで解消し4呼出へ到達した。一方run2は295.867秒、catalog239.538秒、materialization17.117秒でdirty82768→161881全行へ戻り、正式成功は未前進。catalog revision16732→16742でRaw差分に伴うcatalog/candidate-state/manifest更新があり、cache_spill対策だけでは全invalidationsを解決できていない。239秒を全repairと断定せず、次の通常runでcatalog分岐、checkpoint valid before/after、materializationのlineage/contracts/candidate/receipt各predicateをmetadata-only observerへ追加して測定する。稼働packageは364811daのまま、追加配備やcheckpoint/lockの手修正はしない。初回観測の最大RSSは約1.51GiB、2run後は約3.24GiB。18:58 JSTのfresh HTTPで、連続defer2回・17時間超の未成功にdistillation_mainline_stalled/human_waitが実発報し、CF不足data_wait併存を確認した。正式成功2回とroot cause解消は未完のまま継続する。
+
+
+- 2026-10-18 19:20 JST — 強化観測の次2runは282.131秒/266.613秒、catalogはnoop2.651秒/0.657秒でcheckpoint valid before/after=true、materializationの全比較predicate一致。dirty161881→74191→0、materialize197.655秒（budget defer）/176.292秒（完了）で完了batchの持越しをlive確認した。CFは52.400秒cancelled/60.005秒resource_busy、いずれもattempted=falseで正式成功は未前進。09:57の再構築が継続する不具合か旧不整合の一度きりの回復かは未確定のため、次のRaw増分で再測定する。現catalogのSQLite整合backupを新private fixtureへ取得し、実_connect→BEGIN→rollback→closeでsize/mtime/ctime/dev/ino不変を確認。live checkpoint/台帳は操作していない。daily childは現checkout364811daのeditable srcを使い、旧234のwriter残存という仮説は否定した。B2 controllerはaliveだが既存search periodic自然終了待ちでcycle未開始、queue/goldenのmtime未前進なので実drain再開の受入には数えない。periodicはCPUを使いJSON処理中であり、停止せず調査を継続する。
+
+
+- 2026-10-18 19:25 JST — 配備後最初の正式成功を確認。19:23:14.205093 JSTにlast_success_atが前進し、通常run116.573秒、CF1件作成、dirty0→一時1→0、failure_count0。catalog noop1.090秒、CF block85.468秒、4子18.817/13.460/23.429/21.013秒、materialize6.538秒、preflight9.502秒で300秒内に完了。直前runは152.807秒、CF品質data rejectを従来分類で保持しdirty0→0。19:08以後4runでカタログのcheckpoint validと全sync predicate一致を確認し、全行再処理は再発していないが、次Raw増分の観測は継続する。52.4秒cancelledの原因は実foreground syncによる正常preemption、60秒resource_busyは同時ingestの共有model admission競合が最有力で、歴史時点のflock ownerまでは保存情報から断定しない。後続2runは両方モデル4呼出を完了しており、常時飢餓とは区別する。B2 periodicは約34分経過・CPU/I/O活動あり・controller自然引継ぎ未了、既存最大946秒を超えている。queue clone/authority再検証が候補だが根因は未確定、稼働処理を止めず、監視の追加メモリ負荷を避けるため重いRO snapshotを繰り返さない。
+
+
+- 2026-10-18 19:40 JST — B2は先行periodicの自然終了後に継続cycleへ引継ぎ、最初のcycleで100試行/39昇格、485.343秒、remaining23545を確認。先行periodicは2182.405秒/試行0/予算終了でありdrain進捗には数えない。queue/goldenの通常書込が19:31頃に前進し、その後の正式本線でもdirty0を維持している。日次captureは既存worker排他を約7分保持して自然終了、観測側は270.105秒待ってから300秒枠の通常runを開始し、run自体135.855秒/dirty0→0。CFの3呼出目が実行前DistillationErrorとなり既存counterfactual_system_error分類を保持、正式成功2回目は未達。先の2runも111.303/110.481秒、モデル枠60秒待ちの未実行deferで、全件再処理なし。凍結1872files/保護3件/現在232bundle inputsは変更/不一致0。09:15 automationは旧bytesのexact backupとstrict CAS/readbackを通して新formal receipt・2時間/連続defer2回の警告・差分持越し・2回の実成功確認へ更新済み。ACTIVE/毎日09:15/既存thread等は不変。source追加変更/追加配備は行わず、継続中B2と日次の通常境界で受入を継続する。
+
+
+- 2026-10-18 19:46 JST — 停滞3は18:58のlive alert受入と必須CI通過をcheckboxへ反映。09:15 automation更新も完了、停滞4は正式成功2回未達のため未チェックを維持する。19:40のsealed baselineと対応snapshotの再計算ではCF適格5、rolling24h5件/日、残95、予測11/06 JSTで変更なし。19:23に新規作成されたCFも既存eligibilityを広げず除外されており、正式成功とgate適格増分を混同しない。B2第2cycleも83試行/29昇格/344.643秒/remaining23498まで前進。既存ingest batchの自然境界で次の通常formalを開始し、追加source変更や再配備はしていない。観測helperのmaterialization checkpoint表示がJSONL用suffixを参照していたことを訂正し、後続計測はSQLite用pathに統一した。旧receiptのfalseは当該表示pathの不存在であり、checkpoint失効の証拠には使わない。dirty数・catalog checkpoint検証・正式成功時刻の計測には影響しない。
+
+
+- 2026-10-18 19:51 JST — 日次importによる実source差分で持越しを受入。86.414秒のrun中にlabels/receiptsが各444増え、dirty0→444（111rally）→0、既存clean161882行は保持され総162326行となった。次run81.173秒もdirty0→0。catalog noop5.620/0.653秒、全sync predicate一致、lineage/contract/candidate prefixは不変。B2の実書込と日次importを止めず、全stageと300秒を維持して必要な行だけ再処理できたため、回帰・必須CIと合わせ停滞2をチェックする。CF失敗2件はutility入力12232/12490bytesが既存12000bytesを超えたものと有限enum計測で確定、入力切詰め・cap変更・prompt/schema変更をせず既存attempt上限と隔離を維持。19:38の同系統失敗も含めfailure_count3の履歴を保持し、次candidateへ進む。19:08の一回のcatalog再構築についてexact invalidation triggerは当時の詳細観測不足で未確定のまま、後続観測では再発なしと区別する。正式成功の2回目は依然未達、停滞4は未チェック。
+
+
+- 2026-10-18 20:03 JST — B2継続確認を訂正。第2cycle後の19:40:39 JSTに既存guardが一時的なsupervisor maintenance markerを検出し、scheduleを正常復帰してcontrollerを終了していた。現markerは不存在、今回の配備helperやpytestの稼働なしをRO確認したが、marker作成元はまだ未特定。19:40以後のformal観測はB2継続下の受入に数えない。現source/pin/HTTPを既存preflightで再確認し、supervisor/B3/既存periodicを止めず、canonical B2 controllerだけを新しい独立receipt付きで再開する判断。日次444行のdirty差分持越し自体の観測は有効だが、当該runのB2同時稼働は主張しない。後続4runもdirty0を維持し、CF utilityの既存input cap拒否により正式成功は19:23の1回のみ。先頭CF候補群は同一query/contextを共有するため近い入力サイズが続くことを本文非保存の件数・bytes集計で確認し、入力や順序を手変更せず通常上限3回の隔離を維持する。
+
+
+- 2026-10-18 20:04 JST — canonical B2の全preflight（source/pin/6archive/HTTP actual=expected364811da・drift=false/marker不存在）を通し、20:03:48 JSTにB2のみ正常controllerを再開した。旧controllerのfinish/hold両receiptでschedule復帰済みを照合し、supervisor/B3は同process、先行search periodicを止めず自然引継ぎを待つ。新private restart receiptとlogを別名で保存し旧証跡は保持。正式観測は19:40:39〜20:03:48のB2 gapと交差するrunを受入から除外し、通常300秒runを一度に1個・最大20回の有限観測単位で継続する。成功はstate.last_success_atの実前進だけ、2回成立した時点で停止し、cap拒否や単なるCF作成を成功へ読み替えない。
