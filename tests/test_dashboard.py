@@ -4796,7 +4796,12 @@ def test_dashboard_lan_websocket_accepts_basic_only_on_exact_https_origin(
         ).encode("ascii")
         with socket.create_connection((host, port), timeout=2) as connection:
             connection.sendall(request)
-            return int(connection.recv(4096).split(b"\r\n", 1)[0].split()[1])
+            # A response header precedes the handler's stream-slot cleanup.
+            # The closing cursor makes EOF the request-completion boundary.
+            response = bytearray()
+            while chunk := connection.recv(4096):
+                response.extend(chunk)
+            return int(response.split(b"\r\n", 1)[0].split()[1])
 
     try:
         missing = websocket_status(origin=f"https://192.168.50.20:{port}", auth=None)

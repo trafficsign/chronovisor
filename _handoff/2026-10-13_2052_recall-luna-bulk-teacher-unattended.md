@@ -979,3 +979,6 @@ created_at: 2026-10-13T20:52:29+09:00
 - 2026-10-19 01:31 JST — 9ec45db1の必須quality/Python3.14/Securityはすべて成功。qualityの実JUnitは7337 tests・failure0・error0・skip4（7333 passed）だった。稼働auditとの照合で、既存のformat repairが最終試行だけthinking=falseにする3件を検出した。新しい来歴writerが最終試行だけをlevelとして記録すると、選定したprimary effortが失われるため、失敗回帰を先に再現し、configured level・final_attempt_level・repair_turnsを併記する修正を追加する。teacher prompt/schema・repair手順・validatorは変更せず、既存の成功条件を維持する。配備前の修正として対象commitを更新し、必須CIを新commitでも確認する。
 
 - 2026-10-19 01:31 JST — JST日付更新後の直近7完了日（10/12〜18）を正本catalogのRO照会で更新した。rally1337・通常教師候補5346（平均763.7/日、最大2480/日）。10/16の遅延到着分を含む最新catalogを使い、旧測定と混同しない。collection-reviewの同期間最大は11726.2秒/日、10/18は11593.9秒/日。既存の研究用recall-distill測定を日次教師負荷へ二重加算しない。batch throughput補測はmodel未実行のresource deferを別カウンタにし、再試行待ちを含む総wall時間も保存するよう、実行前のprivate測定scriptを整えた。
+
+
+- 2026-10-19 01:59 JST — 25c1819aのPython3.14/Securityは成功したが、qualityは既存Dashboard WebSocketテスト1件だけで失敗（7333 passed/4 skipped）。HTTPヘッダの受信後、server threadのfinallyでstream semaphoreを返す前に2枠が空いたと検査する競合だった。private pytest probeでcleanupを50ms遅らせると同じ2回目のnonblocking acquire失敗を再現。テストclientを正常EOFまで読むよう修正し、同じ遅延注入で1 passed、既存LAN/WebSocket契約5 passedを確認した。認証・Origin・2枠の上限・HTTP statusの全assertとtimeout2秒は保持し、production Dashboardには変更しない。成功するまで単にrequeueする扱いにはせず、この修正をcommitして必須CIを再実行する。
